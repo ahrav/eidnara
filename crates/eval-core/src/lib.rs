@@ -63,7 +63,7 @@ pub use failure_class::{
     FailureClass, Outcome, Slice, cells, classify, serialize_table, table_digest,
 };
 pub use generator::*;
-pub use governance::{ArmError, ArmRecord, GovernanceArms, HistoryPolicy};
+pub use governance::{ArmError, ArmRecord, GovernanceArms, HistoryPolicy, pair_set_digest};
 pub use identity::{
     BUILD_PROTOCOL, BinaryDigest, BuildRecord, IdentityError, RUN_ID_PROTOCOL, RunIdentity,
     eval_run_id, zero_bytes_sha256,

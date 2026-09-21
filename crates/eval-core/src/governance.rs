@@ -4,10 +4,23 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use context_core::canonical_json::{ContractError, protocol_digest};
 use serde::{Deserialize, Serialize};
 
 use crate::event::EventId;
 use crate::pairs::PairSet;
+
+const PAIR_SET_DIGEST_PROTOCOL: &str = "eval-pair-set-digest/v1";
+
+/// The digest that pins a governance record to one compiled pair set, whole:
+/// two sets can share every task and evidence ID and differ in everything
+/// else.
+pub fn pair_set_digest(set: &PairSet) -> Result<String, ContractError> {
+    protocol_digest(
+        PAIR_SET_DIGEST_PROTOCOL,
+        &serde_json::to_value(set).expect("serializes"),
+    )
+}
 
 /// A descriptor. The runner executes the production component it names;
 /// nothing here models what that component does to a history.
@@ -25,15 +38,18 @@ impl HistoryPolicy {
     pub const ALL: [Self; 3] = [Self::Raw, Self::Pruned, Self::Structured];
 
     /// The workspace path and symbol of the production component a
-    /// descriptor selects; a test holds both to the tree, so a renamed
-    /// component breaks the descriptor instead of the campaign.
+    /// descriptor selects: the orchestrator production runs (the cleanup
+    /// slice with its admission gate and budgets; the summarizer firing that
+    /// validates and publishes), not a primitive it drives. A test holds both
+    /// to the tree, so a renamed component breaks the descriptor instead of
+    /// the campaign.
     pub fn production_component(self) -> Option<(&'static str, &'static str)> {
         match self {
             Self::Raw => None,
-            Self::Pruned => Some(("crates/retrieval/src/message_cleanup.rs", "pub fn reclaim(")),
+            Self::Pruned => Some(("crates/daemon/src/message_cleanup.rs", "pub fn run_slice(")),
             Self::Structured => Some((
-                "crates/daemon/src/history_summarizer_producer.rs",
-                "HistorySummarizerProducer",
+                "crates/daemon/src/history_summarizer.rs",
+                "pub async fn run_history_summarizer_firing",
             )),
         }
     }
@@ -49,13 +65,15 @@ pub struct ArmRecord {
     pub absent_evidence: BTreeSet<EventId>,
 }
 
-/// Arms over one pair set and one fresh control. Task, evidence, and control
-/// identity are stated once, so an arm cannot disagree with another; only
-/// its policy version and its losses are its own.
+/// Arms over one pair set and one fresh control. The set is pinned whole by
+/// digest; task, evidence, and control identity are stated once so a
+/// mismatch is named, and an arm cannot disagree with another; only its
+/// policy version and its losses are its own.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GovernanceArms {
     pub control_run_id: String,
+    pub pair_set_digest: String,
     pub task_ids: BTreeSet<String>,
     pub evidence_ids: BTreeSet<EventId>,
     pub arms: BTreeMap<HistoryPolicy, ArmRecord>,
@@ -63,8 +81,10 @@ pub struct GovernanceArms {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ArmError {
+    NotCanonical(ContractError),
     EmptyControlRun,
-    /// The arms describe tasks or evidence the pair set does not have.
+    /// The arms describe another pair set, or tasks or evidence the pair set
+    /// does not have.
     PairSetMismatch {
         field: &'static str,
     },
@@ -93,6 +113,11 @@ impl GovernanceArms {
     pub fn validate(&self, set: &PairSet) -> Result<(), ArmError> {
         if self.control_run_id.is_empty() {
             return Err(ArmError::EmptyControlRun);
+        }
+        if self.pair_set_digest != pair_set_digest(set).map_err(ArmError::NotCanonical)? {
+            return Err(ArmError::PairSetMismatch {
+                field: "pair_set_digest",
+            });
         }
         let tasks: BTreeSet<String> = set.pairs.iter().map(|p| p.task.id.clone()).collect();
         if self.task_ids != tasks {

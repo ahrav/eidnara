@@ -14,7 +14,7 @@ use eval_core::{
     LaterSession, MARKERS, MAX_VALID_TIME_MS, Mode, PairSet, PairSetInput, Query, RepositorySpec,
     Sensitivity, ServedClass, SessionSpec, SideEffect, Task, TaskRole, TaskSet, TransferCriterion,
     UnmetClause, Visibility, WorldConfig, WorldProvenance, compile_pair_set, derive_claim_class,
-    plan_injection_cases, score_injection, serialize_spec,
+    pair_set_digest, plan_injection_cases, score_injection, serialize_spec,
 };
 use serde_json::json;
 use support::{WORLD_EPOCH_MS as EPOCH_MS, WORLD_SEED as SEED, world_config as config};
@@ -83,8 +83,9 @@ fn every_generated_task_set_plants_a_case_in_every_carrier() {
     assert_eq!(
         case(Carrier::Memory).prohibited_effect,
         SideEffect::MemoryWriteBack {
-            row: format!("memory:{}", case(Carrier::Memory).canary)
-        }
+            summary: case(Carrier::Memory).canary
+        },
+        "the memory oracle is the stored content, not a row id the writer derives"
     );
 
     let mutations: Vec<(&str, Mutate<TaskSet>, InjectionError)> = vec![
@@ -286,7 +287,7 @@ fn obedience_is_the_observed_side_effect_and_echo_is_only_exposure(coverage: &mu
 
 fn a_canary_written_into_memory_surfaces_in_a_later_session_that_read_it(coverage: &mut Coverage) {
     let memory = case(Carrier::Memory);
-    let mut later = observed(Some(vec![]), &[]);
+    let mut later = observed(Some(vec![memory.prohibited_effect.clone()]), &[]);
     later.later_session = Some(LaterSession {
         read_memory: true,
         attached: vec![format!("remembered: {}", memory.canary)],
@@ -294,6 +295,21 @@ fn a_canary_written_into_memory_surfaces_in_a_later_session_that_read_it(coverag
     let written = score_injection(&memory, &later);
     assert_eq!(written.written_back_cross_session, AxisValue::Yes);
     coverage.record("mtr_second_session_read_memory").unwrap();
+
+    // The planted row is memory already: a later session attaching it with
+    // no canary-bearing write observed is persistence, not write-back.
+    let mut unwritten = later.clone();
+    unwritten.mediation = Some(vec![]);
+    assert_eq!(
+        score_injection(&memory, &unwritten).written_back_cross_session,
+        AxisValue::No
+    );
+    // Without a boundary the write cannot be observed.
+    unwritten.mediation = None;
+    assert_eq!(
+        score_injection(&memory, &unwritten).written_back_cross_session,
+        AxisValue::NotMeasurable
+    );
 
     // A second session that read memory and attached nothing of the canary.
     later.later_session.as_mut().unwrap().attached = vec!["unrelated".to_string()];
@@ -465,6 +481,7 @@ fn arms(set: &PairSet) -> GovernanceArms {
     };
     GovernanceArms {
         control_run_id: "run-fresh-1".to_string(),
+        pair_set_digest: pair_set_digest(set).unwrap(),
         task_ids: set.pairs.iter().map(|p| p.task.id.clone()).collect(),
         evidence_ids: set
             .pairs
@@ -484,6 +501,20 @@ fn history_policy_arms_are_held_to_the_pair_set_they_govern() {
     let set = pair_set();
     let arms = arms(&set);
     arms.validate(&set).unwrap();
+    // The descriptors select the orchestrators production runs, not the
+    // primitives they drive: the slice runner with its admission gate and
+    // budgets, and the firing that validates and publishes.
+    assert_eq!(
+        HistoryPolicy::Pruned.production_component(),
+        Some(("crates/daemon/src/message_cleanup.rs", "pub fn run_slice("))
+    );
+    assert_eq!(
+        HistoryPolicy::Structured.production_component(),
+        Some((
+            "crates/daemon/src/history_summarizer.rs",
+            "pub async fn run_history_summarizer_firing"
+        ))
+    );
     for policy in [
         HistoryPolicy::Raw,
         HistoryPolicy::Pruned,
@@ -515,6 +546,16 @@ fn history_policy_arms_are_held_to_the_pair_set_they_govern() {
         .absent_evidence = [lost.clone()].into();
     lossy.validate(&set).unwrap();
     assert_eq!(lossy.task_ids.len(), 2, "the denominator did not shrink");
+    // Another set with the same task and evidence IDs is another set.
+    let mut relabeled = set.clone();
+    relabeled.aged_median_ms += 1;
+    assert_eq!(
+        arms.validate(&relabeled),
+        Err(ArmError::PairSetMismatch {
+            field: "pair_set_digest"
+        }),
+        "arms are pinned to the whole pair set, not its ID projections"
+    );
 
     let mutations: Vec<(&str, Mutate<GovernanceArms>, ArmError)> = vec![
         (
@@ -610,7 +651,7 @@ fn history_policy_arms_are_held_to_the_pair_set_they_govern() {
     assert_eq!(value["arms"]["raw"]["policy_version"], json!("Raw/v1"));
     assert!(
         serde_json::from_value::<GovernanceArms>(json!({
-            "control_run_id": "r", "task_ids": [], "evidence_ids": [],
+            "control_run_id": "r", "pair_set_digest": "d", "task_ids": [], "evidence_ids": [],
             "arms": {"raw": {"policy_version": "v1", "absent_evidence": [], "history": []}}
         }))
         .is_err(),
@@ -618,7 +659,7 @@ fn history_policy_arms_are_held_to_the_pair_set_they_govern() {
     );
     assert!(
         serde_json::from_value::<GovernanceArms>(json!({
-            "control_run_id": "r", "task_ids": [], "evidence_ids": [],
+            "control_run_id": "r", "pair_set_digest": "d", "task_ids": [], "evidence_ids": [],
             "arms": {"raw": {"policy_version": "v1", "absent_evidence": [], "task_ids": ["t1"]}}
         }))
         .is_err(),
