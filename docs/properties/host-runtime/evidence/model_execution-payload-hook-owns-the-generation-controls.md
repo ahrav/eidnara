@@ -2,7 +2,7 @@
 
 ## Discovery trigger
 
-`crates/host-runtime/src/model_execution/pi.rs:35` compiles `assets/pi-model_execution-extension.mjs`
+`crates/host-runtime/src/model_execution/pi.rs:38-39` compiles `assets/pi-model_execution-extension.mjs`
 into the runtime with `include_bytes!`, and the hook's own header
 (`pi-model_execution-extension.mjs:1-16`) states the contract: loaded last, it replaces the
 provider-native output-token and temperature fields with the values ModelExecution
@@ -26,12 +26,12 @@ model's native decoding policy, so the hook can receive a bound with no
 temperature.
 
 Delivery. `run_pi` writes `PI_MODEL_EXECUTION_EXTENSION_BYTES` to a 0600 file in the
-per-run 0700 directory through `PrivateDir::write_private` (`pi.rs:226`;
-`subprocess.rs:772-778`, `create_new` refuses an existing path or symlink), so
+per-run 0700 directory through `PrivateDir::write_private_async` (`pi.rs:335-337`;
+`subprocess.rs:1336-1342`, `create_new` refuses an existing path or symlink), so
 no installed hook can be swapped under the daemon. The argv disables
-extension discovery with `--no-approve --no-extensions` (`pi.rs:262-263`),
-pushes each trusted closure extension (`:296-297`), and pushes the hook last
-(`:300-301`). The admitted bound reaches the child as
+extension discovery with `--no-approve --no-extensions` (`pi.rs:402-403`),
+pushes each trusted closure extension (`:405-408`), and pushes the hook last
+(`:409-410`). The admitted bound reaches the child as
 `EIDNARA_MODEL_EXECUTION_MAX_OUTPUT_TOKENS` (`:424`); `EIDNARA_MODEL_EXECUTION_TEMPERATURE` is
 set only when the request admitted a temperature (`:427-431`).
 
@@ -105,7 +105,7 @@ array both assume.
 
 ### Q: Can a project-owned extension run after the hook?
 
-- Sources examined: `pi.rs:258-301`; `tests/model_execution_subprocess.rs:1566-1583`.
+- Sources examined: `pi.rs:401-410`; `tests/model_execution_subprocess.rs:1640-1675`.
 - Findings: `--no-extensions` disables discovery, only closure extensions and
   the hook are passed with `--extension`, and the hook is pushed last;
   `pi_project_pi_resources_ignored` asserts exactly one `--extension` ending in
