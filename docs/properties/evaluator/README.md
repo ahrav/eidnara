@@ -834,14 +834,16 @@ rust-only tier; `rid-ts-cassette-never-falls-through-to-scripted`,
   latched terminal, `turn` as the lookup count, nearest as the last entry once
   consumed): record mode forwards headers and body text and the produced frames
   (including an `abortAfterFrames` truncation) before serving; a recording
-  refusal is a 400 naming only the kind with nothing recorded; replay serves
+  refusal is a 400 naming only the kind with nothing recorded; a script bug (no
+  `usage` or `error`, or an error status `Response` cannot serve) is a 500
+  `mock_error` with nothing recorded; replay serves
   recorded SSE and provider-error frames byte for byte, answers a miss with a
   400 `cassette_miss` and repeats it after, never enters the scripted block,
   hands a malformed body to the oracle as text, and turns any oracle failure,
-  typed or not, into a 400 with no message text; a delayed record-mode
-  exchange is admitted by the cassette bound when it was captured, not by a
-  later binding, and a miss or refusal that completes after `reset()` is not
-  in the reset logs; `useCassette()` starts a new log generation; concurrent
+  typed or not, into a 400 with no message text; a request still in flight
+  across `reset()` (uploading, delayed, or awaiting the oracle) consumes,
+  counts, records, and logs in the run it began in, never in the next one;
+  `useCassette()` starts a new run the same way; concurrent
   identical requests are admitted in capture order regardless of scripted
   delays; a JSON body that is not an object is scripted as `{}` and
   reaches the oracle as text; `reset()` unbinds.
@@ -980,8 +982,9 @@ Statistics core (`crates/eval-core/tests/statistics.rs`):
   exercises through the real binary while the default `bun test` lane sees
   only the in-memory double. The `{kind, detail}` refusal contract is pinned
   in `eval-core` (`no_wire_detail_carries_request_content`), but the oracle's
-  other variants (`UnsafePath`, `AlreadyOpen`, `NoOpenCassette`) are exercised
-  only through that e2e suite.
+  other variants (`UnsafePath`, `AlreadyOpen`, `NoOpenCassette`) have no test:
+  the e2e suite opens each oracle once with an absolute temporary path and
+  issues no operation before `open` or after `close`.
 - No approved campaign profile exists: the margins, harm bound, floor,
   miss-asymmetry bound, and liveness bounds are maintainer inputs that the
   code refuses to default, so no empirical Suite B or D acceptance can be

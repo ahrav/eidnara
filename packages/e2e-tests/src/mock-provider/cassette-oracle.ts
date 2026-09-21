@@ -69,7 +69,7 @@ export interface OracleCommand {
     args: string[];
 }
 
-type Reply = { ok: Record<string, unknown> } | { error: { kind: string; detail: string } };
+type Reply = { ok: unknown } | { error: { kind: string; detail: string } };
 
 export function isRecord(value: unknown): value is Record<string, unknown> {
     return value !== null && typeof value === "object" && !Array.isArray(value);
@@ -102,6 +102,9 @@ const isTextOrNull = (value: unknown) => value === null || isText(value);
  */
 export class CassetteOracle {
     private readonly pending: Array<{
+        /** Checks the `ok` section; runs before the next line is read, so a malformed reply
+         * latches before a later queued call can settle. */
+        validate: (ok: Record<string, unknown>) => unknown;
         settle: (reply: Reply) => void;
         fail: (error: Error) => void;
     }> = [];
@@ -129,25 +132,28 @@ export class CassetteOracle {
     }
 
     async open(mode: CassetteMode, namespace: string, path: string): Promise<{ cases: number }> {
-        const ok = await this.call({ op: "open", mode, namespace, path });
-        return { cases: section(ok, "open", { cases: isCount }).cases as number };
+        const open = await this.call({ op: "open", mode, namespace, path }, (ok) =>
+            section(ok, "open", { cases: isCount }),
+        );
+        return { cases: open.cases as number };
     }
 
     async lookup(namespace: string, request: OracleRequest): Promise<LookupOutcome> {
-        const ok = await this.call({ op: "lookup", namespace, request });
-        if (isRecord(ok.hit)) {
-            const hit = section(ok, "hit", { request_digest: isText, response: isRecord });
-            // SAFETY: `section` threw unless every `CassetteHit` field passed its runtime check.
-            return { hit: hit as unknown as CassetteHit };
-        }
-        const miss = section(ok, "miss", {
-            turn: isCount,
-            class: (value) => value === "ModelRequestChanged" || value === "ToolResultDrift",
-            request_digest: isText,
-            nearest_recorded: isTextOrNull,
+        return this.call({ op: "lookup", namespace, request }, (ok): LookupOutcome => {
+            if (isRecord(ok.hit)) {
+                const hit = section(ok, "hit", { request_digest: isText, response: isRecord });
+                // SAFETY: `section` threw unless every `CassetteHit` field passed its runtime check.
+                return { hit: hit as unknown as CassetteHit };
+            }
+            const miss = section(ok, "miss", {
+                turn: isCount,
+                class: (value) => value === "ModelRequestChanged" || value === "ToolResultDrift",
+                request_digest: isText,
+                nearest_recorded: isTextOrNull,
+            });
+            // SAFETY: `section` threw unless every `CassetteMiss` field passed its runtime check.
+            return { miss: miss as unknown as CassetteMiss };
         });
-        // SAFETY: `section` threw unless every `CassetteMiss` field passed its runtime check.
-        return { miss: miss as unknown as CassetteMiss };
     }
 
     async record(
@@ -155,8 +161,9 @@ export class CassetteOracle {
         request: OracleRequest,
         response: RecordedResponse,
     ): Promise<{ request_digest: string }> {
-        const ok = await this.call({ op: "record", namespace, request, response });
-        const record = section(ok, "record", { request_digest: isText });
+        const record = await this.call({ op: "record", namespace, request, response }, (ok) =>
+            section(ok, "record", { request_digest: isText }),
+        );
         return { request_digest: record.request_digest as string };
     }
 
@@ -166,13 +173,14 @@ export class CassetteOracle {
      * A recording that refused an entry has no file and closes with that refusal.
      */
     async close(): Promise<CloseReport> {
-        const ok = await this.call({ op: "close" });
-        const close = section(ok, "close", {
-            cases: isCount,
-            misses: isCount,
-            unconsumed: isCount,
-            input_sha256: isTextOrNull,
-        });
+        const close = await this.call({ op: "close" }, (ok) =>
+            section(ok, "close", {
+                cases: isCount,
+                misses: isCount,
+                unconsumed: isCount,
+                input_sha256: isTextOrNull,
+            }),
+        );
         // SAFETY: `section` threw unless every `CloseReport` field passed its runtime check.
         return close as unknown as CloseReport;
     }
@@ -206,7 +214,16 @@ export class CassetteOracle {
         if (!next) {
             this.failAll(new Error("cassette oracle sent an unsolicited reply"));
         } else if (isRecord(parsed) && isRecord(parsed.ok)) {
-            next.settle({ ok: parsed.ok });
+            // A well-formed envelope with a malformed section comes from a process that does not
+            // speak this protocol; like an unreadable line, it fails every call from here on.
+            let value: unknown;
+            try {
+                value = next.validate(parsed.ok);
+            } catch (error) {
+                fail(error as Error);
+                return;
+            }
+            next.settle({ ok: value });
         } else if (isRecord(error) && isText(error.kind) && isText(error.detail)) {
             next.settle({ error: { kind: error.kind as string, detail: error.detail as string } });
         } else {
@@ -220,8 +237,11 @@ export class CassetteOracle {
         for (const pending of this.pending.splice(0)) pending.fail(error);
     }
 
-    private call(op: Record<string, unknown>): Promise<Record<string, unknown>> {
-        return new Promise((resolve, reject) => {
+    private call<T>(
+        op: Record<string, unknown>,
+        validate: (ok: Record<string, unknown>) => T,
+    ): Promise<T> {
+        return new Promise<T>((resolve, reject) => {
             if (this.failure) return reject(this.failure);
             const stdin = this.child.stdin;
             if (!stdin || this.child.exitCode !== null) {
@@ -231,12 +251,14 @@ export class CassetteOracle {
                 this.failAll(new Error(`cassette oracle call exceeded ${CALL_TIMEOUT_MS}ms`));
             }, CALL_TIMEOUT_MS);
             this.pending.push({
+                validate,
                 settle: (reply) => {
                     clearTimeout(timer);
                     if ("error" in reply) {
                         reject(new CassetteRefused(reply.error.kind, reply.error.detail));
                     } else {
-                        resolve(reply.ok);
+                        // SAFETY: `validate` produced this value for exactly this call's `T`.
+                        resolve(reply.ok as T);
                     }
                 },
                 fail: (error) => {

@@ -134,6 +134,102 @@ describe("MockProvider cassette mode", () => {
         expect(later.recorded).toHaveLength(0);
     });
 
+    test("a request whose body is still uploading stays with the cassette bound when it began", async () => {
+        const accepted = new FakeOracle([]);
+        const later = new FakeOracle([]);
+        const { mock, baseURL } = await started({
+            oracle: accepted,
+            mode: "record",
+            namespace: NAMESPACE,
+        });
+        mock.setDefault({ text: "ok", usage: USAGE });
+        const encoder = new TextEncoder();
+        const body = new ReadableStream({
+            async start(controller) {
+                controller.enqueue(encoder.encode('{"model":"mock-sonnet",'));
+                await Bun.sleep(80);
+                controller.enqueue(encoder.encode('"messages":[]}'));
+                controller.close();
+            },
+        });
+        const pending = fetch(`${baseURL}/messages`, {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body,
+            duplex: "half",
+        } as RequestInit);
+        await Bun.sleep(20);
+        mock.useCassette({ oracle: later, mode: "record", namespace: NAMESPACE });
+        expect((await pending).status).toBe(200);
+        expect(accepted.recorded).toHaveLength(1);
+        expect(later.recorded).toHaveLength(0);
+    });
+
+    test("a request still uploading across reset() consumes and records into the run it began in", async () => {
+        const { mock, baseURL } = await started();
+        mock.enqueue({ text: "old run", usage: USAGE });
+        const encoder = new TextEncoder();
+        const body = new ReadableStream({
+            async start(controller) {
+                controller.enqueue(encoder.encode('{"model":"mock-sonnet",'));
+                await Bun.sleep(80);
+                controller.enqueue(encoder.encode('"messages":[]}'));
+                controller.close();
+            },
+        });
+        const stale = fetch(`${baseURL}/messages`, {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body,
+            duplex: "half",
+        } as RequestInit);
+        await Bun.sleep(20);
+        mock.reset();
+        mock.enqueue({ text: "new run", usage: USAGE });
+        expect(await (await stale).text()).toContain("old run");
+        // The new run saw nothing of the stale request: no capture, no selection, its queue intact.
+        expect(mock.requests()).toHaveLength(0);
+        expect(mock.scriptedSelectionCount()).toBe(0);
+        const fresh = await post(baseURL, request, false);
+        expect(await fresh.text()).toContain("new run");
+    });
+
+    test("a request still uploading across useCassette() keeps the script of the run it began in", async () => {
+        const first = new FakeOracle([]);
+        const second = new FakeOracle([]);
+        const { mock, baseURL } = await started({
+            oracle: first,
+            mode: "record",
+            namespace: NAMESPACE,
+        });
+        mock.setDefault({ text: "first run", usage: USAGE });
+        const encoder = new TextEncoder();
+        const body = new ReadableStream({
+            async start(controller) {
+                controller.enqueue(encoder.encode('{"model":"mock-sonnet",'));
+                await Bun.sleep(80);
+                controller.enqueue(encoder.encode('"messages":[]}'));
+                controller.close();
+            },
+        });
+        const stale = fetch(`${baseURL}/messages`, {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body,
+            duplex: "half",
+        } as RequestInit);
+        await Bun.sleep(20);
+        // Rebinding without `reset()` and scripting the next run must not feed the stale request.
+        mock.useCassette({ oracle: second, mode: "record", namespace: NAMESPACE });
+        mock.enqueue({ text: "second run", usage: USAGE });
+        expect(await (await stale).text()).toContain("first run");
+        expect(first.recorded).toHaveLength(1);
+        expect(second.recorded).toHaveLength(0);
+        const fresh = await post(baseURL, request, false);
+        expect(await fresh.text()).toContain("second run");
+        expect(second.recorded).toHaveLength(1);
+    });
+
     test("a completion that lands after reset() writes no miss or refusal into the reset logs", async () => {
         const inner = new FakeOracle([]);
         const slow: CassetteSession["oracle"] = {
@@ -220,6 +316,17 @@ describe("MockProvider cassette mode", () => {
         expect(await response.json()).toEqual({
             type: "error",
             error: { type: "mock_error", message: "MockResponse requires `usage` or `error`" },
+        });
+        // An error status `Response` cannot serve is the same kind of script bug.
+        mock.setDefault({ error: { status: 600, type: "overloaded_error", message: "m" } });
+        const unservable = await post(baseURL, request);
+        expect(unservable.status).toBe(500);
+        expect(await unservable.json()).toEqual({
+            type: "error",
+            error: {
+                type: "mock_error",
+                message: "MockResponse.error.status must be an integer from 200 to 599",
+            },
         });
         expect(oracle.recorded).toHaveLength(0);
         expect(mock.cassetteRefusalLog()).toEqual([]);
