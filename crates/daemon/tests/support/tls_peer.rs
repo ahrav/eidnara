@@ -75,6 +75,8 @@ pub struct Peer {
     pub respond_after: Duration,
     /// Splits the response at a byte offset and pauses between the two halves, so a test can stall a body mid-transfer.
     pub stall: Option<(usize, Duration)>,
+    /// How long a scripted or keyed peer waits for each next connection before it reports the turns it served; a keyed replay whose reviewer calls are far apart raises it to the run's own deadline.
+    pub idle: Duration,
 }
 
 /// What the peer saw; every judgement is made by the test, not inside the peer task.
@@ -125,6 +127,7 @@ impl Peer {
             acceptor: TlsAcceptor::from(Arc::new(config)),
             respond_after: Duration::ZERO,
             stall: None,
+            idle: Duration::from_secs(5),
         }
     }
 
@@ -168,38 +171,11 @@ impl Peer {
             };
             observed.after_handshake = received.load(Ordering::SeqCst);
             before_read(&mut tls, received.clone()).await;
-            let mut raw = Vec::new();
-            let mut buffer = [0u8; 16 * 1024];
-            loop {
-                let Ok(read) = tls.read(&mut buffer).await else {
-                    return observed;
-                };
-                if read == 0 {
-                    return observed;
-                }
-                raw.extend_from_slice(&buffer[..read]);
-                if let Some(split) = raw.windows(4).position(|window| window == b"\r\n\r\n") {
-                    observed.head = String::from_utf8(raw[..split].to_vec()).unwrap();
-                    let length: usize = observed
-                        .head
-                        .lines()
-                        .find_map(|line| line.strip_prefix("content-length: "))
-                        .unwrap()
-                        .parse()
-                        .unwrap();
-                    while raw.len() < split + 4 + length {
-                        let Ok(read) = tls.read(&mut buffer).await else {
-                            return observed;
-                        };
-                        if read == 0 {
-                            return observed;
-                        }
-                        raw.extend_from_slice(&buffer[..read]);
-                    }
-                    observed.body = raw[split + 4..split + 4 + length].to_vec();
-                    break;
-                }
-            }
+            let Some(request) = read_request(&mut tls).await else {
+                return observed;
+            };
+            observed.head = request.head;
+            observed.body = request.body;
             observed.after_handoff = observed
                 .after_handoff
                 .or(Some(received.load(Ordering::SeqCst)));
@@ -265,15 +241,13 @@ impl Peer {
         let listener = self.listener.take().unwrap();
         let acceptor = self.acceptor.clone();
         let connections = self.connections.clone();
+        let idle = self.idle;
         tokio::spawn(async move {
             let mut observations = Vec::with_capacity(turns.len());
             for (index, turn) in turns.into_iter().enumerate() {
-                let Ok(Ok((tcp, _))) =
-                    tokio::time::timeout(Duration::from_secs(5), listener.accept()).await
-                else {
+                let Some(tcp) = accept(&listener, &connections, idle).await else {
                     return observations;
                 };
-                connections.fetch_add(1, Ordering::SeqCst);
                 let response = match turn {
                     Scripted::Respond(response) => response,
                     Scripted::Refuse => {
@@ -281,49 +255,9 @@ impl Peer {
                         continue;
                     }
                 };
-                let counting = Counting {
-                    inner: tcp,
-                    received: Arc::new(AtomicUsize::new(0)),
-                };
-                let Ok(mut tls) = acceptor.accept(counting).await else {
+                let Some((mut tls, observed)) = handshake_and_read(&acceptor, tcp).await else {
                     return observations;
                 };
-                let mut observed = Observed::default();
-                let mut raw = Vec::new();
-                let mut buffer = [0u8; 16 * 1024];
-                loop {
-                    let Ok(read) = tls.read(&mut buffer).await else {
-                        return observations;
-                    };
-                    if read == 0 {
-                        return observations;
-                    }
-                    raw.extend_from_slice(&buffer[..read]);
-                    if let Some(split) = raw.windows(4).position(|window| window == b"\r\n\r\n") {
-                        observed.head = String::from_utf8(raw[..split].to_vec()).unwrap();
-                        let length: usize = observed
-                            .head
-                            .to_ascii_lowercase()
-                            .lines()
-                            .find_map(|line| {
-                                line.strip_prefix("content-length: ").map(str::to_string)
-                            })
-                            .unwrap()
-                            .parse()
-                            .unwrap();
-                        while raw.len() < split + 4 + length {
-                            let Ok(read) = tls.read(&mut buffer).await else {
-                                return observations;
-                            };
-                            if read == 0 {
-                                return observations;
-                            }
-                            raw.extend_from_slice(&buffer[..read]);
-                        }
-                        observed.body = raw[split + 4..split + 4 + length].to_vec();
-                        break;
-                    }
-                }
                 before_respond(index).await;
                 let _ = tls.write_all(&response).await;
                 let _ = tls.shutdown().await;
@@ -331,6 +265,98 @@ impl Peer {
             }
             observations
         })
+    }
+
+    /// Serves `turns` connections, answering each request with `respond`
+    /// applied to what it carried; the response is chosen per request rather
+    /// than by connection order.
+    pub fn serve_each(
+        &mut self,
+        turns: usize,
+        mut respond: impl FnMut(&Observed) -> Vec<u8> + Send + 'static,
+    ) -> tokio::task::JoinHandle<Vec<Observed>> {
+        let listener = self.listener.take().unwrap();
+        let acceptor = self.acceptor.clone();
+        let connections = self.connections.clone();
+        let idle = self.idle;
+        tokio::spawn(async move {
+            let mut observations = Vec::with_capacity(turns);
+            for _ in 0..turns {
+                let Some(tcp) = accept(&listener, &connections, idle).await else {
+                    return observations;
+                };
+                let Some((mut tls, observed)) = handshake_and_read(&acceptor, tcp).await else {
+                    return observations;
+                };
+                let response = respond(&observed);
+                let _ = tls.write_all(&response).await;
+                let _ = tls.shutdown().await;
+                observations.push(observed);
+            }
+            observations
+        })
+    }
+}
+
+/// One accepted connection within the peer's `idle` window, counted.
+async fn accept(
+    listener: &TcpListener,
+    connections: &AtomicUsize,
+    idle: Duration,
+) -> Option<TcpStream> {
+    let (tcp, _) = tokio::time::timeout(idle, listener.accept())
+        .await
+        .ok()?
+        .ok()?;
+    connections.fetch_add(1, Ordering::SeqCst);
+    Some(tcp)
+}
+
+async fn handshake_and_read(
+    acceptor: &TlsAcceptor,
+    tcp: TcpStream,
+) -> Option<(tokio_rustls::server::TlsStream<Counting>, Observed)> {
+    let counting = Counting {
+        inner: tcp,
+        received: Arc::new(AtomicUsize::new(0)),
+    };
+    let mut tls = acceptor.accept(counting).await.ok()?;
+    let observed = read_request(&mut tls).await?;
+    Some((tls, observed))
+}
+
+/// Reads one HTTP/1 request (head, then `content-length` body bytes) from an
+/// accepted TLS stream; `None` when the client goes away first.
+async fn read_request<S: AsyncReadExt + Unpin>(tls: &mut S) -> Option<Observed> {
+    let mut observed = Observed::default();
+    let mut raw = Vec::new();
+    let mut buffer = [0u8; 16 * 1024];
+    loop {
+        let read = tls.read(&mut buffer).await.ok()?;
+        if read == 0 {
+            return None;
+        }
+        raw.extend_from_slice(&buffer[..read]);
+        if let Some(split) = raw.windows(4).position(|window| window == b"\r\n\r\n") {
+            observed.head = String::from_utf8(raw[..split].to_vec()).unwrap();
+            let length: usize = observed
+                .head
+                .to_ascii_lowercase()
+                .lines()
+                .find_map(|line| line.strip_prefix("content-length: ").map(str::to_string))
+                .unwrap()
+                .parse()
+                .unwrap();
+            while raw.len() < split + 4 + length {
+                let read = tls.read(&mut buffer).await.ok()?;
+                if read == 0 {
+                    return None;
+                }
+                raw.extend_from_slice(&buffer[..read]);
+            }
+            observed.body = raw[split + 4..split + 4 + length].to_vec();
+            return Some(observed);
+        }
     }
 }
 

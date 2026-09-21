@@ -11,11 +11,11 @@ use crate::census::{Construction, Reachability};
 use crate::identity::{IdentityError, RunIdentity, eval_run_id};
 use crate::residue::{ObservationSchema, RelativeDomains, ResidueEntry, ResidueError, Rule};
 
-pub const MANIFEST_SCHEMA: &str = "eval-manifest/v4";
-pub const MANIFEST_DIGEST_PROTOCOL: &str = "eval-manifest-digest/v4";
+pub const MANIFEST_SCHEMA: &str = "eval-manifest/v5";
+pub const MANIFEST_DIGEST_PROTOCOL: &str = "eval-manifest-digest/v5";
 
 /// Sorted; a field added to [`Manifest`] without a schema version bump fails the closure test.
-pub const REQUIRED_FIELDS: [&str; 27] = [
+pub const REQUIRED_FIELDS: [&str; 28] = [
     "arm_rates",
     "attestation",
     "claim_boundary",
@@ -30,6 +30,7 @@ pub const REQUIRED_FIELDS: [&str; 27] = [
     "execution_mode",
     "failure_class_table_digest",
     "ingestion",
+    "memory_reviewer_model_calls",
     "reachability",
     "residue",
     "result_digest",
@@ -82,6 +83,7 @@ pub struct Manifest {
     /// [`crate::FAILURE_CLASS_TABLE_DIGEST`].
     pub failure_class_table_digest: String,
     pub ingestion: Ingestion,
+    pub memory_reviewer_model_calls: MemoryReviewerModelCalls,
     pub reachability: Reachability,
     pub claim_boundary: ClaimBoundary,
     pub component_versions: ComponentVersions,
@@ -110,6 +112,17 @@ pub enum Ingestion {
     AdapterIngestedNoProductionCaller,
     #[serde(rename = "direct-database, non-aged")]
     DirectDatabaseNonAged,
+}
+
+/// MemoryReviewer model traffic bypasses `LlmExecutionBackend`, so a run
+/// either replays it through the keyed TLS peer or declares the reviewer
+/// excluded; a manifest without this declaration is refused as any missing
+/// field is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MemoryReviewerModelCalls {
+    Cassette,
+    Excluded,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

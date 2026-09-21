@@ -6,6 +6,8 @@ pub mod dense_projection;
 pub mod direct_host;
 pub mod embedding_fixtures;
 #[cfg(feature = "test-support")]
+pub mod eval_cassette;
+#[cfg(feature = "test-support")]
 pub mod eval_ledger;
 pub mod flock;
 pub mod git_repo;

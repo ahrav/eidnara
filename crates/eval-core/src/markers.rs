@@ -9,7 +9,7 @@ pub struct Marker {
 }
 
 /// Every marker the evaluator's suites may record, globally unique by name.
-pub const MARKERS: [Marker; 17] = [
+pub const MARKERS: [Marker; 21] = [
     Marker {
         name: "ing_four_seam_hold_correct_release_query",
         test: "crates/daemon/tests/eval_ingestion.rs::hold_embedding_commit_correction_release_query_makes_the_predecessor_obsolete",
@@ -77,6 +77,22 @@ pub const MARKERS: [Marker; 17] = [
     Marker {
         name: "sls_injection_attachment",
         test: "crates/daemon/tests/eval_surface_ledger.rs::a_native_array_without_the_tail_is_lost_at_attachment",
+    },
+    Marker {
+        name: "rid_capabilities_read_during_cassette_run",
+        test: "crates/daemon/tests/eval_cassette.rs::replay_preserves_the_transcript_and_the_declarations",
+    },
+    Marker {
+        name: "rid_rust_cassette_miss_constructed",
+        test: "crates/daemon/tests/eval_cassette.rs::one_byte_in_each_covered_field_misses_and_the_dropped_fields_do_not",
+    },
+    Marker {
+        name: "rid_cassette_namespace_refused",
+        test: "crates/daemon/tests/eval_cassette.rs::a_regenerated_frame_or_another_namespace_refuses_before_any_request",
+    },
+    Marker {
+        name: "rid_reviewer_cassette_miss_reached",
+        test: "crates/daemon/tests/eval_cassette.rs::memory_reviewer_replays_through_the_keyed_peer",
     },
 ];
 

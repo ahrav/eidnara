@@ -15,6 +15,7 @@ macro_rules! debug_display {
     )*};
 }
 
+mod cassette;
 mod census;
 mod decimal;
 mod eligibility;
@@ -31,6 +32,12 @@ mod render;
 mod residue;
 mod stream;
 
+pub use cassette::{
+    BACKEND_COVERED_FIELDS, BackendRecord, Boundary, CASSETTE_GENERATOR_VERSION, CASSETTE_SCHEMA,
+    COVERED_FIELDS_VERSION, Cassette, CassetteError, CassetteFile, CassetteMiss, Entry, Location,
+    Lookup, MissClass, OPENCODE_COVERED_FIELDS, OPENCODE_HEADER_ALLOWLIST, OpenCodeRequest,
+    canonical_decimal_f64, request_digest,
+};
 pub use census::{
     Construction, HintBounds, Reachability, SURFACE1_HINT_BOUNDS, SURFACE1_STAGES, Surface1Stage,
 };
@@ -53,8 +60,9 @@ pub use ledger::{
 pub use manifest::{
     ArmRates, Attestation, CLAIM_BOUNDARY_EXCLUSIONS, CLAIM_BOUNDARY_SCHEMA, ClaimBoundary,
     ComponentVersions, Cut, CutOutcome, CutReceipt, DROPPED_FIELDS, ExecutionMode, Ingestion,
-    MANIFEST_DIGEST_PROTOCOL, MANIFEST_SCHEMA, Manifest, ManifestError, REQUIRED_FIELDS,
-    ResourceLimits, RunStatus, TokenizerProfile, is_canonical_decimal, parse_manifest,
+    MANIFEST_DIGEST_PROTOCOL, MANIFEST_SCHEMA, Manifest, ManifestError, MemoryReviewerModelCalls,
+    REQUIRED_FIELDS, ResourceLimits, RunStatus, TokenizerProfile, is_canonical_decimal,
+    parse_manifest,
 };
 pub use markers::*;
 pub use occurrence::*;
