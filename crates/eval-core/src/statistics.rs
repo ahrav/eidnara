@@ -489,6 +489,51 @@ impl IccPilot {
     }
 }
 
+/// The effective N of the best table a plan permits: `pairs` over `worlds`
+/// nested in `families`, both allocations as even as whole units allow, with
+/// the larger worlds in the smaller families, deflated at each level by the
+/// pilot's ICC with the size-weighted mean cluster, the smaller kept.
+fn attainable_effective_n(
+    pairs: u32,
+    worlds: u32,
+    families: u32,
+    pilot: &IccPilot,
+) -> Result<Ratio, StatisticsError> {
+    let (pairs, worlds, families) = (i128::from(pairs), i128::from(worlds), i128::from(families));
+    // `remainder` worlds hold `quotient + 1` pairs, the rest `quotient`.
+    let (quotient, remainder) = (pairs / worlds, pairs % worlds);
+    // `extra` families hold `base + 1` worlds, the rest `base`; the smaller
+    // families come first so the larger worlds land in them.
+    let (base, extra) = (worlds / families, worlds % families);
+    let mut worlds_in: Vec<i128> = (0..families)
+        .map(|i| if i < families - extra { base } else { base + 1 })
+        .collect();
+    let mut large_in = vec![0i128; worlds_in.len()];
+    let mut remaining = remainder;
+    while remaining > 0 {
+        for (large, worlds) in large_in.iter_mut().zip(&worlds_in) {
+            if remaining > 0 && *large < *worlds {
+                *large += 1;
+                remaining -= 1;
+            }
+        }
+    }
+    let family_squares: i128 = worlds_in
+        .iter_mut()
+        .zip(&large_in)
+        .map(|(worlds, large)| (*worlds * quotient + *large).pow(2))
+        .sum();
+    let world_squares = remainder * (quotient + 1).pow(2) + (worlds - remainder) * quotient.pow(2);
+    let n = Ratio::try_new(pairs, 1)?;
+    let at_family = deflate(n, Ratio::try_new(family_squares, pairs)?, pilot.icc_family)?;
+    let at_world = deflate(
+        n,
+        Ratio::try_new(world_squares, pairs)?,
+        pilot.icc_world_seed,
+    )?;
+    Ok(at_family.min(at_world))
+}
+
 /// `items` deflated by the design effect `1 + (m - 1) ICC` of clusters of mean
 /// size `m`; the effect is never below one, so deflation only ever shrinks N.
 fn deflate(items: Ratio, mean_cluster: Ratio, icc: Ratio) -> Result<Ratio, StatisticsError> {
@@ -601,32 +646,27 @@ impl AnalysisFamily {
         if pairs == 0 {
             return Err(StatisticsError::NoPairs);
         }
-        // A completed table has at most one cluster per pair and at most
-        // `max_affordable_worlds` worlds, so the bootstrap's draws are bounded by
-        // replicates times the smaller.
-        let clusters = pairs.min(pilot.max_affordable_worlds);
-        let draws = u64::from(self.bootstrap_replicates) * u64::from(clusters);
+        // A completed table has at most one world per pair and at most
+        // `max_affordable_worlds` worlds; under the family unit the bootstrap
+        // collapses them to at most `n_families` clusters. Its draws are
+        // replicates times that cluster count.
+        let worlds = pairs.min(pilot.max_affordable_worlds);
+        let families = worlds.min(pilot.n_families);
+        let bootstrap_clusters = match pilot.clustering_unit {
+            ClusteringUnit::Family => families,
+            ClusteringUnit::WorldSeed => worlds,
+        };
+        let draws = u64::from(self.bootstrap_replicates) * u64::from(bootstrap_clusters);
         if draws > MAX_BOOTSTRAP_DRAWS {
             return Err(StatisticsError::TooManyDraws(draws));
         }
-        // The best table the plan permits spreads its pairs as evenly as whole
-        // pairs allow over the most clusters it can have at each level, and is
-        // deflated exactly as a completed table would be; if even that falls
-        // short of the required N, the plan can only ever block, so it is
-        // refused now.
-        let n = Ratio::try_new(i128::from(pairs), 1)?;
-        let mut attainable = n;
-        for (clusters, icc) in [
-            (clusters.min(pilot.n_families), pilot.icc_family),
-            (clusters, pilot.icc_world_seed),
-        ] {
-            let (pairs, clusters) = (i128::from(pairs), i128::from(clusters));
-            let (quotient, remainder) = (pairs / clusters, pairs % clusters);
-            let sum_of_squares =
-                remainder * (quotient + 1).pow(2) + (clusters - remainder) * quotient.pow(2);
-            let weighted_mean = Ratio::try_new(sum_of_squares, pairs)?;
-            attainable = attainable.min(deflate(n, weighted_mean, icc)?);
-        }
+        // The best table the plan permits: worlds spread as evenly as whole
+        // worlds allow over the families, pairs as evenly as whole pairs allow
+        // over the worlds, the larger worlds placed in the smaller families, and
+        // each level deflated exactly as a completed table would be. If even
+        // that falls short of the required N, the plan can only ever block, so
+        // it is refused now.
+        let attainable = attainable_effective_n(pairs, worlds, families, pilot)?;
         if attainable < Ratio::try_new(i128::from(pilot.required_n_for_margin), 1)? {
             return Err(StatisticsError::PlanBelowRequiredN {
                 attainable,

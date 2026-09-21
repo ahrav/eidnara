@@ -1130,6 +1130,39 @@ fn the_pair_table_and_the_pilot_must_match_the_frozen_plan() {
             required_n_for_margin: 150
         })
     );
+    // Worlds nest in families, so the bound is over one joint allocation: two
+    // families and three worlds put two worlds in one family, and a real pilot
+    // with family ICC 43/195 and world ICC 4/9 supports 1755/443 of six pairs,
+    // short of four, although each level balanced on its own would allow 54/13.
+    let nested_pilot = run_icc_pilot(
+        "p",
+        &[
+            observation("a", 0, "t", 0),
+            observation("a", 0, "u", 0),
+            observation("a", 1, "t", 1),
+            observation("a", 1, "u", 2),
+            observation("b", 0, "t", 1),
+            observation("b", 0, "u", 3),
+        ],
+        3,
+        4,
+    )
+    .unwrap();
+    assert_eq!(
+        (nested_pilot.icc_family, nested_pilot.icc_world_seed),
+        (ratio(43, 195), ratio(4, 9))
+    );
+    let mut nested_plan = family.clone();
+    nested_plan.families = vec!["a".into(), "b".into()];
+    nested_plan.icc_pilot = nested_pilot;
+    nested_plan.stopping_rule = StoppingRule::FixedN { pairs: 6 };
+    assert_eq!(
+        nested_plan.validate(),
+        Err(StatisticsError::PlanBelowRequiredN {
+            attainable: ratio(1755, 443),
+            required_n_for_margin: 4
+        })
+    );
     // Nor can 300 pairs over at most 150 worlds: the best table has two pairs per
     // world, and under a world ICC of 1/10 that is 3000/11 effective items.
     let mut crowded = family.clone();
@@ -1419,6 +1452,24 @@ fn the_pair_table_and_the_pilot_must_match_the_frozen_plan() {
         vast_plan.validate(),
         Err(StatisticsError::TooManyDraws(1_000_000_000))
     );
+    // Under the family unit the bootstrap has at most `n_families` clusters, so
+    // the same pairs and worlds over two families draw 20,000 and validate.
+    let mut by_family = vast_plan.clone();
+    by_family.families = vec!["a".into(), "b".into()];
+    by_family.icc_pilot = IccPilot {
+        families: vec!["a".into(), "b".into()],
+        n_items: 300,
+        n_families: 2,
+        n_worlds: 100,
+        icc_family: ratio(1, 10),
+        icc_world_seed: Ratio::ZERO,
+        clustering_unit: ClusteringUnit::Family,
+        max_affordable_worlds: 100_000,
+        effective_n_at_max: ratio(1_000_000, 50_003),
+        required_n_for_margin: 1,
+        ..by_family.icc_pilot.clone()
+    };
+    assert_eq!(by_family.validate(), Ok(()));
     let many_worlds: Vec<PairOutcome> = (0..501)
         .map(|i| {
             pair(

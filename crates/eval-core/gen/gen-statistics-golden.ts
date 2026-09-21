@@ -85,12 +85,13 @@ function icc(groups: readonly (readonly number[])[]): Ratio {
   const k = BigInt(groups.length);
   const values = groups.flat();
   const n = BigInt(values.length);
-  const mean = ratio(BigInt(values.reduce((s, v) => s + v, 0)), n);
+  // Sums run in BigInt: a total of safe integers can leave the safe range before conversion.
+  const mean = ratio(values.reduce((s, v) => s + BigInt(v), 0n), n);
   let ssb: Ratio = whole(0);
   let ssw: Ratio = whole(0);
   for (const group of groups) {
     const m = BigInt(group.length);
-    const groupMean = ratio(BigInt(group.reduce((s, v) => s + v, 0)), m);
+    const groupMean = ratio(group.reduce((s, v) => s + BigInt(v), 0n), m);
     const between = sub(groupMean, mean);
     ssb = add(ssb, mul(whole(m), mul(between, between)));
     for (const value of group) {

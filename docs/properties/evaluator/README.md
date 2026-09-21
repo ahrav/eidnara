@@ -948,7 +948,8 @@ Statistics core (`crates/eval-core/tests/statistics.rs`):
   internally constant worlds (family ICC `1/9`, world ICC one) project six
   effective items, the finer level, not nine; 10,000 replicates over 100,000
   pairs and worlds or 501 worlds is `TooManyDraws`, while the same
-  replicates over a 300-pair plan is 3,000,000 draws and validates; an `incomplete`, `refused`, or `blocked` manifest
+  replicates over a 300-pair plan is 3,000,000 draws and validates, as does a
+  two-family family-unit plan over 100,000 pairs (20,000 draws); an `incomplete`, `refused`, or `blocked` manifest
   is `RunNotCompleted`; a manifest with the wrong schema or a `sample_order`
   that is not a permutation is `InvalidManifest`; a two-family, two-world
   pilot recording different family and world ICCs is `PilotInconsistent`;
@@ -962,7 +963,10 @@ Statistics core (`crates/eval-core/tests/statistics.rs`):
   of 300 is `PlanBelowRequiredN` (attainable 299), as is one of 300 pairs
   over at most 150 worlds under a world ICC of `1/10` (attainable
   `3000/11`) and one of 301 pairs over 150 worlds under a world ICC of one
-  (attainable `90601/605`, the whole-pair allocation, not 150); a repeated pilot observation is
+  (attainable `90601/605`, the whole-pair allocation, not 150), and a
+  six-pair plan over two families and three worlds under a real pilot's
+  family ICC `43/195` and world ICC `4/9` (attainable `1755/443`, the joint
+  allocation, not `54/13`); a repeated pilot observation is
   `DuplicateObservation`; a miss or refusal rate of `2` is `RateOutOfRange`;
   hand-built counts with `b + c > n`, `b + aged_pass > n`, `c > aged_pass`,
   `aged_censored + aged_pass > n`, `fresh_censored + c > b + aged_pass`, a

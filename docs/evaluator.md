@@ -954,9 +954,10 @@ family-unit projection spreads items over exactly those families)
 (`PilotInconsistent`; a projection that leaves the safe range is reported as
 `RationalOverflow`), so a hand-written pilot cannot inflate its way past the
 block, and refuses a plan whose pair count is zero (`NoPairs`) or whose best
-attainable table (the pairs spread as evenly as whole pairs allow over the
-most clusters the plan permits at each level, deflated by that level's ICC
-with the same size-weighted mean a completed table gets) falls short of the
+attainable table (worlds spread as evenly as whole worlds allow over the
+families, pairs as evenly as whole pairs allow over the worlds, the larger
+worlds in the smaller families, each level deflated by its ICC with the same
+size-weighted mean a completed table gets, the smaller kept) falls short of the
 pilot's `required_n_for_margin` (`PlanBelowRequiredN {attainable, ..}`), since
 such a plan can only ever block after the campaign has run. `FrozenFamily::freeze` digests it
 (`eval-analysis-family-digest/v1`); the manifest records that digest as
@@ -1024,7 +1025,8 @@ as `TooFewReplicates` or `TooManyReplicates`, and more than
 `MAX_BOOTSTRAP_DRAWS` (5,000,000) draws in total, replicates times clusters,
 as `TooManyDraws`; `AnalysisFamily::validate` applies the same bounds, with
 the smaller of the pair count and `max_affordable_worlds` as the cluster
-count, so an oversized family is refused before any replicate runs. Below the threshold no interval of any method is emitted; the
+count (further capped by the family count under the family unit), so an
+oversized family is refused before any replicate runs. Below the threshold no interval of any method is emitted; the
 report carries `IntervalOutcome::Withheld {reason: item_count_below_threshold}`
 (or `fewer_than_two_clusters`) instead of a `computed` interval.
 
