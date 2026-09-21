@@ -67,6 +67,7 @@ fn family() -> AnalysisFamily {
         bootstrap_seed: 7,
         trials_k: 3,
         icc_pilot: pilot(ratio(400, 1), 385),
+        transfer_criterion: None,
     }
 }
 
@@ -356,6 +357,17 @@ fn the_family_is_frozen_before_outcomes_and_any_post_hoc_edit_refuses() {
         (
             "pilot",
             Box::new(|f| f.icc_pilot.required_n_for_margin += 1),
+        ),
+        (
+            "transfer_criterion",
+            Box::new(|f| {
+                f.transfer_criterion = Some(eval_core::TransferCriterion {
+                    approved_by: "maintainer".into(),
+                    approved_at_run_id: "ab".repeat(32),
+                    min_valid_tasks: 20,
+                    required_families: ["cargo".to_string()].into(),
+                })
+            }),
         ),
     ];
     for (label, edit) in edits {
@@ -769,4 +781,65 @@ fn no_judge_type_reaches_the_gates() {
     )
     .unwrap();
     assert!(!source.to_ascii_lowercase().contains("judge"));
+}
+
+#[test]
+fn the_frozen_family_owns_the_transfer_criterion() {
+    use eval_core::{
+        AnchorRole, AnchorSet, AnchorTask, AnchorVerdict, ClaimClass, TransferCriterion,
+        UnmetClause, WorldProvenance,
+    };
+    let anchors = AnchorSet {
+        role: AnchorRole::Transfer,
+        tasks: ["cargo", "tokio", "django"]
+            .into_iter()
+            .map(|family| AnchorTask {
+                id: format!("{family}-0"),
+                family: family.to_string(),
+                verdict: AnchorVerdict::Valid,
+            })
+            .collect(),
+    };
+    let family = family();
+    assert_eq!(
+        family
+            .claim_class(WorldProvenance::RealHistory, Some(&anchors))
+            .unmet,
+        vec![UnmetClause::NoTransferCriterion],
+        "a family without a criterion pins every report to phase 1"
+    );
+    let mut ruled = family.clone();
+    ruled.transfer_criterion = Some(TransferCriterion {
+        approved_by: "maintainer".into(),
+        approved_at_run_id: "ab".repeat(32),
+        min_valid_tasks: 3,
+        required_families: ["cargo", "tokio", "django"]
+            .into_iter()
+            .map(String::from)
+            .collect(),
+    });
+    ruled.validate().unwrap();
+    assert_eq!(
+        ruled
+            .claim_class(WorldProvenance::RealHistory, Some(&anchors))
+            .class,
+        ClaimClass::Transfer
+    );
+    let mut floorless = ruled.clone();
+    floorless
+        .transfer_criterion
+        .as_mut()
+        .unwrap()
+        .min_valid_tasks = 0;
+    assert_eq!(
+        floorless.validate(),
+        Err(StatisticsError::TransferCriterion(
+            UnmetClause::CriterionHasNoFloor
+        ))
+    );
+    assert_ne!(
+        family.digest().unwrap(),
+        ruled.digest().unwrap(),
+        "the criterion is part of what the family freezes"
+    );
 }

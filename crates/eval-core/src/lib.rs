@@ -18,12 +18,15 @@ macro_rules! debug_display {
 mod cassette;
 mod censoring;
 mod census;
+mod claim;
 mod decimal;
 mod eligibility;
 mod event;
 mod failure_class;
 mod generator;
+mod governance;
 mod identity;
+mod injection;
 mod ledger;
 mod manifest;
 mod markers;
@@ -49,6 +52,10 @@ pub use census::{
     Construction, EvaluatedSurface, HintBounds, Reachability, SURFACE1_HINT_BOUNDS,
     SURFACE1_STAGES, Surface1Stage,
 };
+pub use claim::{
+    AnchorRole, AnchorSet, AnchorTask, AnchorVerdict, ClaimClass, ClaimDerivation,
+    TransferCriterion, UnmetClause, WorldProvenance, derive_claim_class,
+};
 pub use eligibility::*;
 pub use event::*;
 pub use failure_class::{
@@ -56,9 +63,15 @@ pub use failure_class::{
     FailureClass, Outcome, Slice, cells, classify, serialize_table, table_digest,
 };
 pub use generator::*;
+pub use governance::{ArmError, ArmRecord, GovernanceArms, HistoryPolicy};
 pub use identity::{
     BUILD_PROTOCOL, BinaryDigest, BuildRecord, IdentityError, RUN_ID_PROTOCOL, RunIdentity,
     eval_run_id, zero_bytes_sha256,
+};
+pub use injection::{
+    AxisValue, Carrier, INJECTION_CANARY_PROTOCOL, InjectionCase, InjectionError,
+    InjectionObservation, InjectionScore, LaterSession, SideEffect, TaskSet, plan_injection_cases,
+    score_injection,
 };
 pub use ledger::{
     CHAIN_STAGES, ChainStage, Completed, Evidence, Ledger, LedgerError,

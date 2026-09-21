@@ -12,9 +12,14 @@ use context_core::canonical_json::{ContractError, protocol_digest};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
+use crate::claim::{
+    AnchorSet, ClaimDerivation, TransferCriterion, UnmetClause, WorldProvenance, derive_claim_class,
+};
 use crate::manifest::{ArmRates, Manifest, is_canonical_decimal};
 
-pub const ANALYSIS_FAMILY_SCHEMA: &str = "eval-analysis-family/v1";
+/// Version 2 added `transfer_criterion`, so the rule a transfer claim must
+/// meet is part of what the family freezes.
+pub const ANALYSIS_FAMILY_SCHEMA: &str = "eval-analysis-family/v2";
 const ANALYSIS_FAMILY_DIGEST_PROTOCOL: &str = "eval-analysis-family-digest/v1";
 const BOOTSTRAP_PROTOCOL: &str = "eval-cluster-bootstrap/v1";
 /// The smallest item count an interval may be computed from.
@@ -416,6 +421,9 @@ pub struct AnalysisFamily {
     /// The repeat count `k` every live trial's pass^k is read at.
     pub trials_k: u32,
     pub icc_pilot: IccPilot,
+    /// The approved rule a transfer claim must meet; `None` pins every
+    /// report under this family to `generated_phase1`.
+    pub transfer_criterion: Option<TransferCriterion>,
 }
 
 impl AnalysisFamily {
@@ -437,7 +445,22 @@ impl AnalysisFamily {
             return Err(StatisticsError::EmptyFamilyField);
         }
         self.profile.rates()?;
+        if let Some(criterion) = &self.transfer_criterion {
+            criterion
+                .validate()
+                .map_err(StatisticsError::TransferCriterion)?;
+        }
         Ok(())
+    }
+
+    /// The class a report under this family may claim, read against the
+    /// family's own criterion so none can be supplied out of band.
+    pub fn claim_class(
+        &self,
+        provenance: WorldProvenance,
+        anchor_set: Option<&AnchorSet>,
+    ) -> ClaimDerivation {
+        derive_claim_class(provenance, anchor_set, self.transfer_criterion.as_ref())
     }
 
     pub fn digest(&self) -> Result<String, StatisticsError> {
@@ -833,6 +856,7 @@ pub enum StatisticsError {
     RateOutOfRange { field: &'static str },
     ItemCountThresholdBelowFloor(u32),
     TooFewReplicates(u32),
+    TransferCriterion(UnmetClause),
     EmptyFamilyField,
     FamilyChangedAfterResults { recorded: String, found: String },
     FamilyNotRecorded,
