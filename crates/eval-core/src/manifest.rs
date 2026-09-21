@@ -7,15 +7,16 @@ use context_core::canonical_json::{
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::census::{Construction, Reachability};
+use crate::census::{Construction, EvaluatedSurface, Reachability};
 use crate::identity::{IdentityError, RunIdentity, eval_run_id};
+use crate::pairs::{RECENCY_BASELINE_VERSION, recency_bound};
 use crate::residue::{ObservationSchema, RelativeDomains, ResidueEntry, ResidueError, Rule};
 
-pub const MANIFEST_SCHEMA: &str = "eval-manifest/v6";
-pub const MANIFEST_DIGEST_PROTOCOL: &str = "eval-manifest-digest/v6";
+pub const MANIFEST_SCHEMA: &str = "eval-manifest/v7";
+pub const MANIFEST_DIGEST_PROTOCOL: &str = "eval-manifest-digest/v7";
 
 /// Sorted; a field added to [`Manifest`] without a schema version bump fails the closure test.
-pub const REQUIRED_FIELDS: [&str; 29] = [
+pub const REQUIRED_FIELDS: [&str; 30] = [
     "analysis_family_digest",
     "arm_rates",
     "attestation",
@@ -33,6 +34,7 @@ pub const REQUIRED_FIELDS: [&str; 29] = [
     "ingestion",
     "memory_reviewer_model_calls",
     "reachability",
+    "recency_baseline",
     "residue",
     "result_digest",
     "retry_lineage",
@@ -90,11 +92,25 @@ pub struct Manifest {
     pub ingestion: Ingestion,
     pub memory_reviewer_model_calls: MemoryReviewerModelCalls,
     pub reachability: Reachability,
+    /// The recency-only baseline a paired campaign's falsification pairs
+    /// were checked against, with its window per surface; `None` for a run
+    /// that compiled no pair set.
+    pub recency_baseline: Option<RecencyBaseline>,
     pub claim_boundary: ClaimBoundary,
     pub component_versions: ComponentVersions,
     pub envelope_bounds: ResourceLimits,
     pub envelope_peaks: ResourceLimits,
     pub arm_rates: BTreeMap<String, ArmRates>,
+}
+
+/// The control's version and the most-recent-k window it read on each surface,
+/// recorded so both clauses of stop condition (b) are judged against one
+/// declared baseline.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RecencyBaseline {
+    pub version: String,
+    pub bounds: BTreeMap<EvaluatedSurface, u32>,
 }
 
 /// How the world was driven: generated, replayed from a tape, or enumerated
@@ -236,20 +252,46 @@ pub enum ManifestError {
     NotAnObject,
     MissingField(String),
     UnknownField(String),
-    SchemaMismatch { found: String },
+    SchemaMismatch {
+        found: String,
+    },
     Shape(String),
-    RunIdMismatch { declared: String, derived: String },
+    RunIdMismatch {
+        declared: String,
+        derived: String,
+    },
     GeneratorVersionMismatch,
     ClaimBoundaryMismatch,
-    FailureClassTableMismatch { found: String },
+    FailureClassTableMismatch {
+        found: String,
+    },
     DirectDatabaseAged,
-    ResidueIncomplete { field: String },
-    ResidueContradiction { type_name: String, field: String },
+    ResidueIncomplete {
+        field: String,
+    },
+    ResidueContradiction {
+        type_name: String,
+        field: String,
+    },
     SampleOrderNotAPermutation,
-    MalformedDigest { field: String },
-    MalformedDecimal { field: String, value: String },
-    RateOutOfRange { field: String, value: String },
-    EmptyComponent { field: String },
+    MalformedDigest {
+        field: String,
+    },
+    MalformedDecimal {
+        field: String,
+        value: String,
+    },
+    RateOutOfRange {
+        field: String,
+        value: String,
+    },
+    EmptyComponent {
+        field: String,
+    },
+    /// The recorded recency baseline is not the one the compiler enforces.
+    RecencyBaselineMismatch {
+        field: &'static str,
+    },
     Identity(IdentityError),
     Residue(ResidueError),
     NotCanonical(ContractError),
@@ -451,6 +493,20 @@ impl Manifest {
                 return Err(ManifestError::EmptyComponent {
                     field: field.to_string(),
                 });
+            }
+        }
+        if let Some(baseline) = &self.recency_baseline {
+            if baseline.version != RECENCY_BASELINE_VERSION {
+                return Err(ManifestError::RecencyBaselineMismatch { field: "version" });
+            }
+            if baseline.bounds.is_empty() {
+                return Err(ManifestError::RecencyBaselineMismatch { field: "bounds" });
+            }
+            for (surface, bound) in &baseline.bounds {
+                let declared = std::num::NonZeroU32::new(*bound);
+                if recency_bound(*surface, declared) != Ok(*bound) {
+                    return Err(ManifestError::RecencyBaselineMismatch { field: "bounds" });
+                }
             }
         }
         Ok(())

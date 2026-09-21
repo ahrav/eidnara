@@ -28,6 +28,7 @@ mod ledger;
 mod manifest;
 mod markers;
 mod occurrence;
+mod pairs;
 mod reducer;
 mod render;
 mod residue;
@@ -45,7 +46,8 @@ pub use censoring::{
     Percentile, PercentileBound, pass_k,
 };
 pub use census::{
-    Construction, HintBounds, Reachability, SURFACE1_HINT_BOUNDS, SURFACE1_STAGES, Surface1Stage,
+    Construction, EvaluatedSurface, HintBounds, Reachability, SURFACE1_HINT_BOUNDS,
+    SURFACE1_STAGES, Surface1Stage,
 };
 pub use eligibility::*;
 pub use event::*;
@@ -67,11 +69,16 @@ pub use manifest::{
     ArmRates, Attestation, CLAIM_BOUNDARY_EXCLUSIONS, CLAIM_BOUNDARY_SCHEMA, ClaimBoundary,
     ComponentVersions, Cut, CutOutcome, CutReceipt, DROPPED_FIELDS, ExecutionMode, Ingestion,
     MANIFEST_DIGEST_PROTOCOL, MANIFEST_SCHEMA, Manifest, ManifestError, MemoryReviewerModelCalls,
-    REQUIRED_FIELDS, ResourceLimits, RunStatus, TokenizerProfile, is_canonical_decimal,
-    parse_manifest,
+    REQUIRED_FIELDS, RecencyBaseline, ResourceLimits, RunStatus, TokenizerProfile,
+    is_canonical_decimal, parse_manifest,
 };
 pub use markers::*;
 pub use occurrence::*;
+pub use pairs::{
+    ArmKind, BaselineContrast, BaselineFailure, BaselineVerdict, NATURAL_FRESH_ENTITY_TAG,
+    PAIRING_POLICY_VERSION, Pair, PairError, PairSet, PairSetInput, RECENCY_BASELINE_VERSION,
+    StopCondition, Suite, Task, TaskRole, check_recency_baseline, compile_pair_set, recency_bound,
+};
 pub use reducer::*;
 pub use render::*;
 pub use residue::{

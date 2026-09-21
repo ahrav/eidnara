@@ -49,6 +49,20 @@ impl Stage for Surface1Stage {
     }
 }
 
+/// The surfaces a paired campaign evaluates. Surfaces 1 and 3 are
+/// default-production; surface 2, the query route, and packing are activated
+/// components. Surface 1's recency bound is `SURFACE1_HINT_BOUNDS.candidates`;
+/// the others have no production constant and must declare theirs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EvaluatedSurface {
+    Surface1,
+    Surface2,
+    Surface3,
+    QueryRoute,
+    Packing,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct HintBounds {
     pub candidates: usize,

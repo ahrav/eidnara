@@ -9,7 +9,7 @@ pub struct Marker {
 }
 
 /// Every marker the evaluator's suites may record, globally unique by name.
-pub const MARKERS: [Marker; 21] = [
+pub const MARKERS: [Marker; 24] = [
     Marker {
         name: "ing_four_seam_hold_correct_release_query",
         test: "crates/daemon/tests/eval_ingestion.rs::hold_embedding_commit_correction_release_query_makes_the_predecessor_obsolete",
@@ -93,6 +93,18 @@ pub const MARKERS: [Marker; 21] = [
     Marker {
         name: "rid_reviewer_cassette_miss_reached",
         test: "crates/daemon/tests/eval_cassette.rs::memory_reviewer_replays_through_the_keyed_peer",
+    },
+    Marker {
+        name: "wm_pair_set_aged_history_spans_median",
+        test: "crates/eval-core/tests/pairs.rs::a_pair_set_carries_a_falsification_pair_and_a_natural_fresh_control",
+    },
+    Marker {
+        name: "wm_baseline_ran_on_falsification_pair",
+        test: "crates/eval-core/tests/pairs.rs::the_recency_baseline_misses_every_falsifier_or_blocks_suite_b",
+    },
+    Marker {
+        name: "wm_baseline_ran_on_positive_control_pair",
+        test: "crates/eval-core/tests/pairs.rs::the_recency_baseline_delivers_a_positive_control_or_is_vacuous",
     },
 ];
 

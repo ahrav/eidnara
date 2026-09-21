@@ -162,6 +162,7 @@ pub fn manifest_for(identity: RunIdentity, trace: &SemanticTrace) -> Manifest {
         ingestion: Ingestion::AdapterIngestedNoProductionCaller,
         memory_reviewer_model_calls: MemoryReviewerModelCalls::Excluded,
         analysis_family_digest: None,
+        recency_baseline: None,
         reachability: Reachability::DefaultProduction,
         claim_boundary: ClaimBoundary::pinned(),
         component_versions: ComponentVersions {

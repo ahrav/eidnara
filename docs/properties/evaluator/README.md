@@ -18,7 +18,7 @@ provide, so a reader can find them by test name.
 Manifest, identity, and residue (`crates/eval-core/tests/manifest.rs`):
 
 - `required_fields_are_sorted_and_equal_the_struct_field_set` pins
-  `eval-manifest/v6` to `REQUIRED_FIELDS`; a struct field added without a
+  `eval-manifest/v7` to `REQUIRED_FIELDS`; a struct field added without a
   version bump fails here. `fixture_digests_are_frozen` pins the fixture's
   `eval_run_id` and manifest digest so an encoding change is reviewed.
 - `every_missing_field_is_refused_by_name_before_digesting`,
@@ -898,6 +898,73 @@ Censoring (`crates/eval-core/tests/censoring.rs`):
   `pass@1 = 0` and censoring rate one; a zero `k`, no attempts, or `k` past the
   repeat count refuse with their counts; a binomial past the safe range refuses
   and one that reduces stays exact.
+
+## Phase 3 executed checks: paired worlds
+
+Pairs (`crates/eval-core/tests/pairs.rs`):
+
+- `a_pair_set_carries_a_falsification_pair_and_a_natural_fresh_control`
+  (`wm-pair-set-falsification-and-natural-fresh`): a thirty-four-event aged
+  world compiles three pairs; the fresh arm holds exactly the independent
+  history's units, none of them an aged ID, and the reducer requires at least
+  one of them under the pair's widened scope beside the truth; the ceiling for
+  the epoch commit is that commit alone and for a citing message is the
+  message, the commit, and the commit's parent; the window is the three most
+  recent eligible units, most recent first; the set round-trips through JSON
+  and validates. Records `wm_pair_set_aged_history_spans_median` after
+  asserting the earliest time precedes the median.
+- `the_window_breaks_equal_times_by_linearization_order`: four eligible units
+  at one valid time under a window of two yield the two latest in
+  linearization order; a task at another cut is `MixedCuts`.
+- `the_recency_baseline_misses_every_falsifier_or_blocks_suite_b`
+  (`wm-recency-baseline-fails-falsification`): with `k = 3` the contrast is
+  established (one falsifier missed, one control delivered, three distinct
+  IDs); on the same short world surface 1's window of 100 still holds the
+  epoch commit and the verdict is `Blocked {b, delivered_falsifier}`; every
+  stop condition suppresses B and D and neither A nor C. Records
+  `wm_baseline_ran_on_falsification_pair` after asserting a falsification pair
+  is present.
+- `the_recency_baseline_delivers_a_positive_control_or_is_vacuous`: a control
+  the versioned window covers passes; a control one unit behind a window of
+  one is `missed_positive_control` from compiler output alone; an always-empty
+  baseline is `vacuous` on a valid set, and vacuity is judged before the
+  positive controls; an `established` verdict with an extra field does not
+  parse. Records `wm_baseline_ran_on_positive_control_pair` after asserting the
+  control's window is non-empty.
+- `a_long_aged_history_pushes_the_falsifier_out_of_the_surface_1_window`: a
+  163-event world under surface 1's pinned 100 establishes the contrast with
+  a hundred distinct IDs delivered.
+- `pair_validation_refuses_what_would_make_the_controls_vacuous`: an empty
+  aged history, an empty natural-fresh history, a six-event truncation and a
+  relabelled five-event slice from the middle (each named by offset), a
+  falsifier the aged history corrects after the task's cut (named with the
+  correcting event), a truth on the median, a truth both late and corrected
+  (late is reported first), evidence the reducer judges superseded or never
+  saw, tasks at two cuts, no tasks, a set without a falsifier or a positive
+  control, a duplicate task, empty evidence, an aged history whose earliest
+  time is its median, a natural-fresh history moved a thousand seconds past
+  the cut, and a natural-fresh history naming an event it does not hold each
+  refuse by name.
+- `a_set_read_back_must_be_one_the_compiler_could_have_produced`: another
+  policy version, surface 1 under a bound of three, a zero bound, a window
+  wider than the bound, a relabelled positive control, and emptied evidence
+  each refuse from `PairSet::validate` and from `check_recency_baseline`
+  before any judgement.
+- `every_surface_resolves_its_recency_bound_or_refuses`: surface 1 pins 100
+  and refuses 50; the other four surfaces refuse an undeclared bound and
+  accept a declared one.
+- `an_independent_history_moves_onto_its_own_entities_with_every_reference`:
+  under three seeds the moved history equals the re-derivation on every ID,
+  edge, and payload target with content unchanged, validates alone and joined
+  with the original, and a tag holding `:` refuses.
+
+Manifest (`crates/eval-core/tests/manifest.rs`):
+
+- `a_recorded_recency_baseline_must_be_the_one_the_compiler_enforces`: a
+  record at the pinned version with surface 1 at 100 and the query route at 3
+  validates and parses; an empty or other version, no bounds, surface 1 at 7,
+  and a zero bound refuse as `RecencyBaselineMismatch` from both `validate`
+  and `parse_manifest`.
 
 ## Gaps recorded here
 

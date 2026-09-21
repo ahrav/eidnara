@@ -1,6 +1,6 @@
 mod support;
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use context_core::canonical_json::{ContractError, canonical_json_encode};
 use eval_core::{
@@ -17,7 +17,7 @@ use support::{OBSERVATION_TYPE, build, identity, manifest, observation, observat
 /// Frozen so a field-set or encoding change forces a reviewed schema bump.
 const FIXTURE_RUN_ID: &str = "e9f412ed2ad627c5801959c2c459bbb764bf45443a7774d02ac74a97f41832c9";
 const FIXTURE_MANIFEST_DIGEST: &str =
-    "b4d20a067921e0a4c953b78392fc03debcbac153ecc468d857c8daa64afa4b70";
+    "03e2111f6eab3a9766d42e2f68fa3d0ad68b48a492f096c555e4f2a1117ea144";
 
 #[test]
 fn required_fields_are_sorted_and_equal_the_struct_field_set() {
@@ -93,7 +93,7 @@ fn evaluator_document_agrees_with_the_manifest_constants() {
             .unwrap_or_else(|| panic!("`{literal}` names no version"));
         assert_eq!(stated, version, "stale manifest literal `{literal}`");
     }
-    row(&format!("version {version} added `analysis_family_digest`"));
+    row(&format!("version {version} added `recency_baseline`"));
 }
 
 #[test]
@@ -128,16 +128,16 @@ fn unknown_field_wrong_schema_and_non_object_are_refused() {
         parse_manifest(&extra),
         Err(ManifestError::UnknownField("extra".to_string()))
     );
-    let mut v6 = valid.clone();
-    v6["schema"] = json!("eval-manifest/v7");
+    let mut v7 = valid.clone();
+    v7["schema"] = json!("eval-manifest/v8");
     assert_eq!(
-        parse_manifest(&v6),
+        parse_manifest(&v7),
         Err(ManifestError::SchemaMismatch {
-            found: "eval-manifest/v7".to_string()
+            found: "eval-manifest/v8".to_string()
         })
     );
     assert_eq!(parse_manifest(&json!([])), Err(ManifestError::NotAnObject));
-    assert_eq!(MANIFEST_SCHEMA, "eval-manifest/v6");
+    assert_eq!(MANIFEST_SCHEMA, "eval-manifest/v7");
 }
 
 #[test]
@@ -205,6 +205,15 @@ fn every_kept_field_enters_the_digest_and_every_dropped_field_leaves_it() {
         (
             "analysis_family_digest",
             Box::new(|m| m.analysis_family_digest = Some("ab".repeat(32))),
+        ),
+        (
+            "recency_baseline",
+            Box::new(|m| {
+                m.recency_baseline = Some(eval_core::RecencyBaseline {
+                    version: eval_core::RECENCY_BASELINE_VERSION.to_string(),
+                    bounds: BTreeMap::from([(eval_core::EvaluatedSurface::Surface1, 100)]),
+                })
+            }),
         ),
         (
             "reachability",
@@ -647,11 +656,11 @@ fn residue_declarations_are_non_keep_and_one_rule_per_field() {
 #[test]
 fn validate_refuses_what_parse_and_digest_refuse() {
     let mut schema = manifest();
-    schema.schema = "eval-manifest/v7".to_string();
+    schema.schema = "eval-manifest/v8".to_string();
     assert_eq!(
         schema.validate(),
         Err(ManifestError::SchemaMismatch {
-            found: "eval-manifest/v7".to_string()
+            found: "eval-manifest/v8".to_string()
         })
     );
     let mut table = manifest();
@@ -678,6 +687,65 @@ fn validate_refuses_what_parse_and_digest_refuse() {
         parse_manifest(&stamp.to_value()),
         Err(ManifestError::NotCanonical(_))
     ));
+}
+
+#[test]
+fn a_recorded_recency_baseline_must_be_the_one_the_compiler_enforces() {
+    use eval_core::{EvaluatedSurface, RECENCY_BASELINE_VERSION, RecencyBaseline};
+    let record = |version: &str, bounds: &[(EvaluatedSurface, u32)]| {
+        let mut m = manifest();
+        m.recency_baseline = Some(RecencyBaseline {
+            version: version.to_string(),
+            bounds: bounds.iter().copied().collect(),
+        });
+        m
+    };
+    let good = record(
+        RECENCY_BASELINE_VERSION,
+        &[
+            (EvaluatedSurface::Surface1, 100),
+            (EvaluatedSurface::QueryRoute, 3),
+        ],
+    );
+    good.validate().unwrap();
+    parse_manifest(&good.to_value()).unwrap();
+    for (name, bad, field) in [
+        (
+            "an empty version",
+            record("", &[(EvaluatedSurface::Surface1, 100)]),
+            "version",
+        ),
+        (
+            "another version",
+            record(
+                "eval-recency-baseline/v0",
+                &[(EvaluatedSurface::Surface1, 100)],
+            ),
+            "version",
+        ),
+        ("no bounds", record(RECENCY_BASELINE_VERSION, &[]), "bounds"),
+        (
+            "surface 1 off its pin",
+            record(RECENCY_BASELINE_VERSION, &[(EvaluatedSurface::Surface1, 7)]),
+            "bounds",
+        ),
+        (
+            "a zero bound",
+            record(RECENCY_BASELINE_VERSION, &[(EvaluatedSurface::Surface2, 0)]),
+            "bounds",
+        ),
+    ] {
+        assert_eq!(
+            bad.validate(),
+            Err(ManifestError::RecencyBaselineMismatch { field }),
+            "{name}"
+        );
+        assert_eq!(
+            parse_manifest(&bad.to_value()),
+            Err(ManifestError::RecencyBaselineMismatch { field }),
+            "{name}"
+        );
+    }
 }
 
 #[test]
