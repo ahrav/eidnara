@@ -973,9 +973,10 @@ denominator, the group size when balanced; groups that are each internally const
 exactly one), and picks the highest level whose ICC exceeds `1/20`
 (`ICC_THRESHOLD`), with the world as the finest fallback. It carries the item
 count the maximum affordable world count would yield, deflated by the design
-effect `1 + (m - 1) ICC` of the selected unit, as `effective_n_at_max`; the
-effect is clamped at one, so deflation only ever shrinks N, and a zero
-affordable world count is refused. Under the family unit the projected
+effect `1 + (m - 1) ICC` at each nesting level with the smaller result kept,
+as `effective_n_at_max`, so a stronger correlation at the finer level is never
+discarded by selecting the coarser unit; the effect is clamped at one, so
+deflation only ever shrinks N, and a zero affordable world count is refused. Under the family unit the projected
 cluster count is the smaller of the pilot's family count and the affordable
 world count, since each affordable world lies in one family. Each `(world, task)` is one score, so a
 repeated observation is `DuplicateObservation` rather than another item. A
@@ -1015,9 +1016,11 @@ the cluster count, so the interval is a pure function of the seed on either
 runtime. The function itself never goes below `ITEM_COUNT_THRESHOLD` items,
 whatever a caller asks, and refuses a replicate count below
 `MIN_BOOTSTRAP_REPLICATES` (40) or above `MAX_BOOTSTRAP_REPLICATES` (10,000)
-as `TooFewReplicates` or `TooManyReplicates`; `AnalysisFamily::validate`
-applies the same bounds, so an oversized family is refused before any
-replicate runs. Below the threshold no interval of any method is emitted; the
+as `TooFewReplicates` or `TooManyReplicates`, and more than
+`MAX_BOOTSTRAP_DRAWS` (5,000,000) draws in total, replicates times clusters,
+as `TooManyDraws`; `AnalysisFamily::validate` applies the same bounds, with
+`max_affordable_worlds` as the cluster count, so an oversized family is
+refused before any replicate runs. Below the threshold no interval of any method is emitted; the
 report carries `IntervalOutcome::Withheld {reason: item_count_below_threshold}`
 (or `fewer_than_two_clusters`) instead of a `computed` interval.
 
@@ -1045,10 +1048,11 @@ canonical JSON's safe integer is `WorldSeedOutOfRange`, as it is from
 `cluster_bootstrap_interval`, which also refuses a repeated pair id and whose
 own draw seed is likewise `BootstrapSeedOutOfRange`), then the table's own
 power (the pair count deflated by the pilot's design effect at the clusters
-the table actually spans, with the size-weighted mean cluster
-`sum(m_i^2) / n` so unequal clusters are not read as equal ones, under the
-pilot's unit and ICC; short of `required_n_for_margin` it is `Blocked {reason:
-table_underpowered}` with the effective N and cluster count); only then does it build
+the table actually spans, at both nesting levels with the smaller kept, with
+the size-weighted mean cluster `sum(m_i^2) / n` so unequal clusters are not
+read as equal ones; short of `required_n_for_margin` it is `Blocked {reason:
+table_underpowered}` with the effective N and the cluster count at the
+selected unit); only then does it build
 `PairedReport {analysis_family_digest, counts, gates, interval, arm_rates}`.
 Per-arm miss and refusal rates travel with the report, so unsupported evidence
 is visible beside every gate.

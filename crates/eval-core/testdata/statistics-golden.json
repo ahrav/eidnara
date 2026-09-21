@@ -13083,8 +13083,8 @@
       "expected": {
         "clustering_unit": "family",
         "effective_n_at_max": {
-          "denominator": 37,
-          "numerator": 41
+          "denominator": 1,
+          "numerator": 1
         },
         "icc_family": {
           "denominator": 41,
@@ -21398,7 +21398,7 @@
   "provenance": {
     "generator": "crates/eval-core/gen/gen-statistics-golden.ts",
     "generator_version": "statistics-reference-ts-v1",
-    "input_sha256": "d2329935d99cd6f0841bd83d5223ab022163f00f2bffd8b105454bfe2f21e05f"
+    "input_sha256": "d54075c899118c97a9b33f6efdaf2dc49718a9e5f02b25f32d458ab150573681"
   },
   "schema": 1
 }

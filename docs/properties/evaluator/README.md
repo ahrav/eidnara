@@ -859,7 +859,8 @@ Statistics core (`crates/eval-core/tests/statistics.rs`):
   a failing noninferiority gate, and one at the margin; six ICC pilots with
   and without a family effect, with fewer affordable worlds than the pilot
   had (with and without a family effect, so the family-cluster cap is
-  exercised), unbalanced, and internally constant; three cluster bootstraps by family
+  exercised), unbalanced, and internally constant, where the world level
+  binds the effective N; three cluster bootstraps by family
   and by world over 300 pairs, one at the minimum 40 replicates where the
   `1/40` order statistic is the smallest replicate) equal the Rust counts, rates, gates, ICC,
   clustering unit, effective N, and interval bounds exactly; the golden's
@@ -942,7 +943,10 @@ Statistics core (`crates/eval-core/tests/statistics.rs`):
   `cluster_bootstrap_interval`, whose draw seed of `2^53` is
   `BootstrapSeedOutOfRange` and which refuses 300 copies of one pair over two
   worlds as `DuplicatePair`; a required N of zero is `PilotInconsistent`; a pilot whose projection
-  leaves the safe range is `RationalOverflow`; an `incomplete`, `refused`, or `blocked` manifest
+  leaves the safe range is `RationalOverflow`; three families of two
+  internally constant worlds (family ICC `1/9`, world ICC one) project six
+  effective items, the finer level, not nine; 10,000 replicates over 100,000
+  affordable worlds or 501 worlds is `TooManyDraws`; an `incomplete`, `refused`, or `blocked` manifest
   is `RunNotCompleted`; a manifest with the wrong schema or a `sample_order`
   that is not a permutation is `InvalidManifest`; a two-family, two-world
   pilot recording different family and world ICCs is `PilotInconsistent`;

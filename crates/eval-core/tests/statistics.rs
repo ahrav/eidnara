@@ -1346,6 +1346,61 @@ fn the_pair_table_and_the_pilot_must_match_the_frozen_plan() {
     };
     vast.stopping_rule = StoppingRule::FixedN { pairs: 1 };
     assert_eq!(vast.validate(), Err(StatisticsError::RationalOverflow));
+    // Effective N is the smaller of the two nesting levels' deflations: three
+    // families of two internally constant worlds have a family ICC of 1/9 and a
+    // world ICC of one, and six two-item worlds support six items, not nine.
+    let nested: Vec<PilotObservation> = [("a", [0, 0]), ("b", [0, 1]), ("c", [0, 1])]
+        .iter()
+        .flat_map(|(family, worlds)| {
+            worlds.iter().enumerate().flat_map(move |(seed, value)| {
+                ["t", "u"]
+                    .into_iter()
+                    .map(move |task| observation(family, seed as u64, task, *value))
+            })
+        })
+        .collect();
+    let two_level = run_icc_pilot("p", &nested, 6, 8).unwrap();
+    assert_eq!(
+        (
+            two_level.icc_family,
+            two_level.icc_world_seed,
+            two_level.clustering_unit
+        ),
+        (ratio(1, 9), Ratio::ONE, ClusteringUnit::Family)
+    );
+    assert_eq!(two_level.effective_n_at_max, ratio(6, 1));
+    // The bootstrap draws once per replicate per cluster; a plan or a table whose
+    // draws exceed the budget is refused instead of run without bound.
+    let mut vast_plan = family.clone();
+    vast_plan.icc_pilot.max_affordable_worlds = 100_000;
+    vast_plan.icc_pilot.effective_n_at_max = ratio(250_000, 1);
+    vast_plan.bootstrap_replicates = MAX_BOOTSTRAP_REPLICATES;
+    assert_eq!(
+        vast_plan.validate(),
+        Err(StatisticsError::TooManyDraws(1_000_000_000))
+    );
+    let many_worlds: Vec<PairOutcome> = (0..501)
+        .map(|i| {
+            pair(
+                &format!("w{i}"),
+                "cargo",
+                i,
+                ArmResult::Pass,
+                ArmResult::Pass,
+            )
+        })
+        .collect();
+    assert_eq!(
+        cluster_bootstrap_interval(
+            &many_worlds,
+            ClusteringUnit::WorldSeed,
+            300,
+            7,
+            MAX_BOOTSTRAP_REPLICATES
+        )
+        .err(),
+        Some(StatisticsError::TooManyDraws(5_010_000))
+    );
     // A required N of zero is no power target; the plan is refused before it freezes.
     let mut no_target = family.clone();
     no_target.icc_pilot.required_n_for_margin = 0;

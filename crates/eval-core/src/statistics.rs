@@ -29,6 +29,9 @@ pub const MIN_BOOTSTRAP_REPLICATES: u32 = 40;
 /// The most replicates a family may ask for; each costs one digest per
 /// cluster, so the bound keeps the resample work and its buffer finite.
 pub const MAX_BOOTSTRAP_REPLICATES: u32 = 10_000;
+/// The most draws (replicates times clusters) one bootstrap may perform, so a
+/// valid plan or table cannot make the analysis run without bound.
+pub const MAX_BOOTSTRAP_DRAWS: u64 = 5_000_000;
 /// The clustering level above which within-cluster correlation is treated as
 /// real, so the pilot picks the highest level whose ICC exceeds `1/20`.
 pub const ICC_THRESHOLD: Ratio = Ratio {
@@ -384,8 +387,8 @@ pub struct IccPilot {
     pub clustering_unit: ClusteringUnit,
     pub max_affordable_worlds: u32,
     /// Items at the affordable world count deflated by the design effect
-    /// `1 + (m - 1) ICC` of the selected unit; the effect is never below one,
-    /// so deflation only ever shrinks N.
+    /// `1 + (m - 1) ICC` at each nesting level, the smaller taken; the effect
+    /// is never below one, so deflation only ever shrinks N.
     pub effective_n_at_max: Ratio,
     pub required_n_for_margin: u32,
 }
@@ -450,29 +453,36 @@ pub fn run_icc_pilot(
 
 impl IccPilot {
     /// The unit and effective N the recorded counts and ICCs imply, so a
-    /// frozen pilot can be checked against its own evidence.
+    /// frozen pilot can be checked against its own evidence. The unit is the
+    /// highest level over the threshold; the effective N is the smaller of the
+    /// two levels' deflations, so a stronger correlation at the finer level is
+    /// never discarded by selecting the coarser one.
     fn projection(&self) -> Result<(ClusteringUnit, Ratio), StatisticsError> {
-        // Each affordable world lies in one family, so the campaign can realize
-        // at most that many family clusters, however many the pilot sampled.
-        let (clustering_unit, icc, clusters_at_max) = if self.icc_family > ICC_THRESHOLD {
-            (
-                ClusteringUnit::Family,
-                self.icc_family,
-                i128::from(self.n_families.min(self.max_affordable_worlds)),
-            )
+        let clustering_unit = if self.icc_family > ICC_THRESHOLD {
+            ClusteringUnit::Family
         } else {
-            (
-                ClusteringUnit::WorldSeed,
-                self.icc_world_seed,
-                i128::from(self.max_affordable_worlds),
-            )
+            ClusteringUnit::WorldSeed
         };
         let items_at_max = Ratio::try_new(
             i128::from(self.n_items) * i128::from(self.max_affordable_worlds),
             i128::from(self.n_worlds),
         )?;
-        let mean_cluster = items_at_max.checked_div(Ratio::try_new(clusters_at_max, 1)?)?;
-        Ok((clustering_unit, deflate(items_at_max, mean_cluster, icc)?))
+        // Each affordable world lies in one family, so the campaign can realize
+        // at most that many family clusters, however many the pilot sampled.
+        let levels = [
+            (
+                self.n_families.min(self.max_affordable_worlds),
+                self.icc_family,
+            ),
+            (self.max_affordable_worlds, self.icc_world_seed),
+        ];
+        let mut effective_n = items_at_max;
+        for (clusters, icc) in levels {
+            let mean_cluster =
+                items_at_max.checked_div(Ratio::try_new(i128::from(clusters), 1)?)?;
+            effective_n = effective_n.min(deflate(items_at_max, mean_cluster, icc)?);
+        }
+        Ok((clustering_unit, effective_n))
     }
 }
 
@@ -589,6 +599,12 @@ impl AnalysisFamily {
         let StoppingRule::FixedN { pairs } = self.stopping_rule;
         if pairs == 0 {
             return Err(StatisticsError::NoPairs);
+        }
+        // The bootstrap draws once per replicate per cluster, and a campaign has
+        // at most `max_affordable_worlds` clusters at either unit.
+        let draws = u64::from(self.bootstrap_replicates) * u64::from(pilot.max_affordable_worlds);
+        if draws > MAX_BOOTSTRAP_DRAWS {
+            return Err(StatisticsError::TooManyDraws(draws));
         }
         if pairs < pilot.required_n_for_margin {
             return Err(StatisticsError::PlanBelowRequiredN {
@@ -913,6 +929,10 @@ pub fn cluster_bootstrap_interval(
             reason: IntervalWithheld::FewerThanTwoClusters { n_clusters },
         });
     }
+    let draws = u64::from(replicates) * u64::from(n_clusters);
+    if draws > MAX_BOOTSTRAP_DRAWS {
+        return Err(StatisticsError::TooManyDraws(draws));
+    }
     let mut statistics = Vec::with_capacity(replicates as usize);
     for replicate in 0..replicates {
         let mut resample = PairCounts::default();
@@ -1093,25 +1113,31 @@ pub fn analyze(
         });
     }
     // The plan's power claim was a projection; the table that arrived may span
-    // fewer or unequal clusters, so its own deflated size is checked with the
-    // size-weighted mean cluster `sum(m_i^2) / n`.
-    let mut sizes: BTreeMap<ClusterKey, i128> = BTreeMap::new();
-    for pair in pairs {
-        *sizes
-            .entry(pair.cluster.at(pilot.clustering_unit))
-            .or_default() += 1;
-    }
-    let icc = match pilot.clustering_unit {
-        ClusteringUnit::Family => pilot.icc_family,
-        ClusteringUnit::WorldSeed => pilot.icc_world_seed,
-    };
+    // fewer or unequal clusters, so its own deflated size is checked at both
+    // nesting levels with the size-weighted mean cluster `sum(m_i^2) / n`, and
+    // the smaller of the two is what the table can support.
     let n = Ratio::try_new(pairs.len() as i128, 1)?;
-    let weighted_mean = Ratio::try_new(sizes.values().map(|m| m * m).sum(), pairs.len() as i128)?;
-    let effective_n = deflate(n, weighted_mean, icc)?;
+    let mut effective_n = n;
+    let mut n_clusters = 0;
+    for (unit, icc) in [
+        (ClusteringUnit::Family, pilot.icc_family),
+        (ClusteringUnit::WorldSeed, pilot.icc_world_seed),
+    ] {
+        let mut sizes: BTreeMap<ClusterKey, i128> = BTreeMap::new();
+        for pair in pairs {
+            *sizes.entry(pair.cluster.at(unit)).or_default() += 1;
+        }
+        let weighted_mean =
+            Ratio::try_new(sizes.values().map(|m| m * m).sum(), pairs.len() as i128)?;
+        effective_n = effective_n.min(deflate(n, weighted_mean, icc)?);
+        if unit == pilot.clustering_unit {
+            n_clusters = sizes.len() as u32;
+        }
+    }
     if effective_n < Ratio::try_new(i128::from(pilot.required_n_for_margin), 1)? {
         return Ok(Analysis::Blocked(BlockedReason::TableUnderpowered {
             effective_n,
-            n_clusters: sizes.len() as u32,
+            n_clusters,
             required_n_for_margin: pilot.required_n_for_margin,
         }));
     }
@@ -1159,6 +1185,7 @@ pub enum StatisticsError {
     ItemCountThresholdBelowFloor(u32),
     TooFewReplicates(u32),
     TooManyReplicates(u32),
+    TooManyDraws(u64),
     EmptyFamilyField,
     FamilyChangedAfterResults {
         recorded: String,
