@@ -605,7 +605,8 @@ async function startPiEidnaraRuntime(pi: ExtensionAPI): Promise<boolean> {
         const sessionId = ctx.sessionManager.getSessionId();
         if (!sessionId) return undefined;
         const deps = resolveCurrentProjectDeps(ctx);
-        if (!memoryAutoCaptureEnabled(deps.config)) return undefined;
+        // An empty identity is the home-directory opt-out; no memory surface writes without it.
+        if (!deps.projectIdentity || !memoryAutoCaptureEnabled(deps.config)) return undefined;
         return {
             sessionId,
             projectRoot: deps.projectDir,
@@ -615,6 +616,14 @@ async function startPiEidnaraRuntime(pi: ExtensionAPI): Promise<boolean> {
     // Session entries are immutable and append-only, so a branch that still ends in the last
     // stored leaf only has new entries after it. A branch switch that dropped that leaf rescans.
     const checkpointedLeafBySession = new Map<string, string>();
+    // A fork inherits the parent's branch under a new session id. The parent already offered
+    // those entries, possibly under another project, so the fork starts past the fork point.
+    pi.on("session_start", async (event, ctx) => {
+        if (event.reason !== "fork") return;
+        const sessionId = ctx.sessionManager.getSessionId();
+        const leaf = ctx.sessionManager.getBranch().at(-1);
+        if (sessionId && leaf) checkpointedLeafBySession.set(sessionId, leaf.id);
+    });
     function entriesAfterCheckpoint(sessionId: string, branch: readonly { id: string }[]) {
         const leaf = checkpointedLeafBySession.get(sessionId);
         if (leaf === undefined) return branch;

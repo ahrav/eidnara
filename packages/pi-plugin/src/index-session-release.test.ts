@@ -2,6 +2,10 @@ import { afterEach, describe, expect, it, mock, spyOn } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import {
+    __setProjectIdentityTestHooks,
+    resolveProjectRootDirectory,
+} from "@eidnara/opencode/features/context/project-identity";
 import { HostModuleTransport } from "@eidnara/opencode/hooks/context/module-transport";
 import { createCountingPi } from "./__tests__/test-utils";
 import eidnaraPiExtension, { __test } from "./index";
@@ -55,6 +59,7 @@ async function registeredHandlers() {
 
 afterEach(() => {
     restoreEnv();
+    __setProjectIdentityTestHooks({});
     __test.clearPiEidnaraActive();
     resetPiKernelClientsForTest();
     for (const root of tempRoots.splice(0)) rmSync(root, { recursive: true, force: true });
@@ -290,6 +295,39 @@ describe("Pi daemon transport across runtime teardown", () => {
         }
     });
 
+    it("offers a fork only the entries appended after the fork point", async () => {
+        const bodies: Array<{ messages: Array<{ id: string }> }> = [];
+        const call = spyOn(HostModuleTransport.prototype, "call").mockImplementation(
+            async (input) => {
+                if (input.method === "memory.capture")
+                    bodies.push(input.body as { messages: Array<{ id: string }> });
+                return { state: input.method === "memory.capture" ? "accepted" : "ready" };
+            },
+        );
+        const entry = (id: string) => ({
+            type: "message",
+            id,
+            message: { role: "user", content: `Fact ${id}.` },
+        });
+        try {
+            const { agentEnd, registrations } = await agentEndHandler();
+            const sessionStart = registrations.handlers.get("session_start") as SessionHandler;
+            // The fork inherits the parent's branch under a new session id; the parent already
+            // offered those entries, possibly under another project.
+            const branch = [entry("one"), entry("two")];
+            const ctx = captureContext({ model: { provider: "openai", id: "test" }, branch });
+            await sessionStart({ reason: "fork" }, ctx);
+            branch.push(entry("three"));
+            await agentEnd({}, ctx);
+            await __test.settleMemoryCapture();
+            expect(bodies.map((body) => body.messages.map((message) => message.id))).toEqual([
+                ["three"],
+            ]);
+        } finally {
+            call.mockRestore();
+        }
+    });
+
     it("offers the same entries again after a checkpoint the daemon did not accept", async () => {
         let accept = false;
         const bodies: Array<{ messages: Array<{ id: string }> }> = [];
@@ -370,6 +408,31 @@ describe("Pi daemon transport across runtime teardown", () => {
             await agentEnd({}, ctx);
             await __test.settleMemoryCapture();
             expect(methods).toEqual(["memory.capture", "memory.capture.next"]);
+        } finally {
+            call.mockRestore();
+        }
+    });
+
+    it("captures nothing from the home directory unless allow_home_project opts in", async () => {
+        // The session's checkout root is the user's home directory; the default config keeps it
+        // opted out.
+        const home = resolveProjectRootDirectory(process.cwd());
+        __setProjectIdentityTestHooks({ homeDirectory: () => home });
+        const methods: string[] = [];
+        const call = spyOn(HostModuleTransport.prototype, "call").mockImplementation(
+            async (input) => {
+                methods.push(input.method);
+                return { state: "accepted" };
+            },
+        );
+        try {
+            const { agentEnd } = await agentEndHandler();
+            const setStatus = mock(() => undefined);
+            const ctx = captureContext({ model: { provider: "openai", id: "test" }, setStatus });
+            await agentEnd({}, ctx);
+            await __test.settleMemoryCapture();
+            expect(methods).toEqual([]);
+            expect(setStatus).not.toHaveBeenCalled();
         } finally {
             call.mockRestore();
         }
