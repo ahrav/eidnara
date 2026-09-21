@@ -934,7 +934,8 @@ Statistics core (`crates/eval-core/tests/statistics.rs`):
   {table_underpowered}` at `3000/309` effective items, and a 299/1 split over
   two worlds at `450000/46051` (the size-weighted mean, not two clusters of
   150); a pair id outside the manifest's `sample_ids` is
-  `PairsNotManifestSamples`; 300 worlds over a 150-world plan is
+  `PairsNotManifestSamples`; the same ids with one re-scored row are
+  `PairsNotManifestResult` while a reordered table digests the same; 300 worlds over a 150-world plan is
   `WorldsExceedAffordable`; a world seed of `2^53 + 1` is
   `WorldSeedOutOfRange` from `analyze`, `run_icc_pilot`, and
   `cluster_bootstrap_interval`, whose draw seed of `2^53` is
@@ -944,8 +945,9 @@ Statistics core (`crates/eval-core/tests/statistics.rs`):
   pilot recording different family and world ICCs is `PilotInconsistent`;
   `Ratio::try_new(1, 0)` and `(i64::MAX, 1)` are typed refusals; an underpowered plan blocks before a bad seed in its
   table is read; a zero-pair
-  plan is `NoPairs`; the rate helpers return `RationalOverflow` for counts
-  past the safe range instead of panicking; a `holm` or `benjamini_hochberg` plan is
+  plan is `NoPairs`; the rate helpers validate their counts, so `n = 0` is `NoPairs` and
+  `b > n` or `n` past the safe range is `InconsistentCounts` instead of a
+  rate or a panic; a `holm` or `benjamini_hochberg` plan is
   `UnsupportedMultiplicity`
   while a computed pilot validates; a plan of 299 pairs against a required N
   of 300 is `PlanBelowRequiredN`; a repeated pilot observation is

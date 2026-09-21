@@ -9,7 +9,7 @@ use eval_core::{
     IntervalWithheld, LivenessBounds, MAX_BOOTSTRAP_REPLICATES, MIN_BOOTSTRAP_REPLICATES, Manifest,
     ManifestError, MultiplicityCorrection, PairCounts, PairOutcome, PilotObservation, Ratio,
     RunStatus, StatisticsError, StoppingRule, analyze, arm_miss_asymmetry,
-    cluster_bootstrap_interval, intraclass_correlation, parse_analysis_family,
+    cluster_bootstrap_interval, intraclass_correlation, pair_table_digest, parse_analysis_family,
     parse_campaign_profile, run_icc_pilot,
 };
 use serde_json::{Value, json};
@@ -126,6 +126,7 @@ fn recorded(
     manifest.arm_rates = rates;
     manifest.sample_ids = pairs.iter().map(|pair| pair.pair_id.clone()).collect();
     manifest.sample_order = manifest.sample_ids.clone();
+    manifest.result_digest = pair_table_digest(pairs).unwrap();
     manifest
 }
 
@@ -1188,6 +1189,47 @@ fn the_pair_table_and_the_pilot_must_match_the_frozen_plan() {
             first_unrecorded: Some("elsewhere".to_string())
         })
     );
+    // The same ids with re-scored or relabeled rows are not the recorded table:
+    // the manifest's `result_digest` is the table's digest, in any row order.
+    let mut flipped = pairs.clone();
+    flipped[0].fresh = ArmResult::Fail;
+    assert!(matches!(
+        analyze(&recorded(&frozen, rates.clone(), &pairs), &family, &flipped),
+        Err(StatisticsError::PairsNotManifestResult { .. })
+    ));
+    let mut shuffled = pairs.clone();
+    shuffled.reverse();
+    assert_eq!(pair_table_digest(&shuffled), pair_table_digest(&pairs));
+    assert!(matches!(
+        analyze(
+            &recorded(&frozen, rates.clone(), &pairs),
+            &family,
+            &shuffled
+        )
+        .unwrap(),
+        Analysis::Report(_)
+    ));
+    // The rate helpers validate the counts they divide: no total is not a rate.
+    assert_eq!(
+        PairCounts {
+            n: 0,
+            b: 1,
+            ..PairCounts::default()
+        }
+        .harm()
+        .err(),
+        Some(StatisticsError::NoPairs)
+    );
+    assert_eq!(
+        PairCounts {
+            n: 1,
+            b: 2,
+            ..PairCounts::default()
+        }
+        .harm()
+        .err(),
+        Some(StatisticsError::InconsistentCounts)
+    );
     // A table over more worlds than the plan could afford is not the registered campaign.
     let mut narrow = family.clone();
     narrow.icc_pilot.max_affordable_worlds = 150;
@@ -1215,7 +1257,7 @@ fn the_pair_table_and_the_pilot_must_match_the_frozen_plan() {
     wide[0].cluster.world_seed = 9_007_199_254_740_993;
     assert!(matches!(
         analyze(
-            &recorded(&underpowered_frozen, rates.clone(), &wide),
+            &recorded(&underpowered_frozen, rates.clone(), &pairs),
             &underpowered,
             &wide
         )
@@ -1224,7 +1266,7 @@ fn the_pair_table_and_the_pilot_must_match_the_frozen_plan() {
     ));
     // A world seed past canonical JSON's safe integer is refused at both entries.
     assert_eq!(
-        analyze(&recorded(&frozen, rates.clone(), &wide), &family, &wide).err(),
+        analyze(&recorded(&frozen, rates.clone(), &pairs), &family, &wide).err(),
         Some(StatisticsError::WorldSeedOutOfRange(9_007_199_254_740_993))
     );
     assert_eq!(
@@ -1292,7 +1334,7 @@ fn the_pair_table_and_the_pilot_must_match_the_frozen_plan() {
         }
         .harm()
         .err(),
-        Some(StatisticsError::RationalOverflow)
+        Some(StatisticsError::InconsistentCounts)
     );
     // One score per task per world: a repeated observation is not another item.
     let mut repeated = honest_observations.to_vec();

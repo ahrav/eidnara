@@ -19,6 +19,9 @@ pub const GATE_ENDPOINTS: [&str; 3] = ["quality_loss", "harm", "floor"];
 pub const PAIRED_ARMS: [&str; 2] = ["aged", "fresh"];
 const ANALYSIS_FAMILY_DIGEST_PROTOCOL: &str = "eval-analysis-family-digest/v1";
 const BOOTSTRAP_PROTOCOL: &str = "eval-cluster-bootstrap/v1";
+/// The digest a paired campaign's manifest records as `result_digest`: the
+/// completed pair table, ordered by pair id.
+pub const PAIR_TABLE_DIGEST_PROTOCOL: &str = "eval-pair-table/v1";
 /// The smallest item count an interval may be computed from.
 pub const ITEM_COUNT_THRESHOLD: u32 = 300;
 /// The fewest replicates whose `1/40` tails are distinct order statistics.
@@ -710,8 +713,40 @@ impl PairCounts {
         self.aged_censored += other.aged_censored;
     }
 
+    /// Counts a pair table can produce: at least one pair; `b` and `c` are
+    /// disjoint cells; `b` and every censored aged arm exclude an aged pass
+    /// while `c` requires one; every censored fresh arm lands in `b` or in an
+    /// aged pass that `c` cannot also occupy; every count is over `n`; and `n`
+    /// is within the safe range, so no rate can overflow.
+    pub fn validate(&self) -> Result<(), StatisticsError> {
+        let PairCounts {
+            n,
+            b,
+            c,
+            aged_pass,
+            fresh_censored,
+            aged_censored,
+        } = *self;
+        if n == 0 {
+            return Err(StatisticsError::NoPairs);
+        }
+        if u128::from(n) > MAX_SAFE
+            || b > n
+            || c > n - b
+            || aged_pass > n - b
+            || c > aged_pass
+            || aged_censored > n - aged_pass
+            || fresh_censored > n
+            || fresh_censored + c > b + aged_pass
+        {
+            return Err(StatisticsError::InconsistentCounts);
+        }
+        Ok(())
+    }
+
     fn over_n(&self, numerator: i128) -> Result<Ratio, StatisticsError> {
-        Ratio::try_new(numerator, i128::from(self.n.max(1)))
+        self.validate()?;
+        Ratio::try_new(numerator, i128::from(self.n))
     }
 
     /// `(b - c) / n`, signed: negative means the aged arm did better.
@@ -747,32 +782,7 @@ pub struct Gates {
 
 impl Gates {
     pub fn of(counts: &PairCounts, rates: &ProfileRates) -> Result<Self, StatisticsError> {
-        if counts.n == 0 {
-            return Err(StatisticsError::NoPairs);
-        }
-        // `b` and `c` are disjoint cells, `b` and every censored aged arm exclude
-        // an aged pass while `c` requires one, every censored fresh arm lands in
-        // `b` or in an aged pass that `c` cannot also occupy, and every count is
-        // over `n`; within the safe range the rate methods cannot overflow.
-        let PairCounts {
-            n,
-            b,
-            c,
-            aged_pass,
-            fresh_censored,
-            aged_censored,
-        } = *counts;
-        if u128::from(n) > MAX_SAFE
-            || b > n
-            || c > n - b
-            || aged_pass > n - b
-            || c > aged_pass
-            || aged_censored > n - aged_pass
-            || fresh_censored > n
-            || fresh_censored + c > b + aged_pass
-        {
-            return Err(StatisticsError::InconsistentCounts);
-        }
+        counts.validate()?;
         let (quality_loss, harm, floor) = (
             counts.quality_loss()?,
             counts.harm()?,
@@ -965,6 +975,18 @@ pub fn arm_miss_asymmetry(
     rates[0].max(rates[1]).checked_sub(rates[0].min(rates[1]))
 }
 
+/// The [`PAIR_TABLE_DIGEST_PROTOCOL`] digest of a pair table, ordered by pair
+/// id so the order of arrival does not enter it; the manifest records it as
+/// `result_digest` before the table is analyzed.
+pub fn pair_table_digest(pairs: &[PairOutcome]) -> Result<String, StatisticsError> {
+    let mut ordered: Vec<&PairOutcome> = pairs.iter().collect();
+    ordered.sort_by(|a, b| a.pair_id.cmp(&b.pair_id));
+    Ok(protocol_digest(
+        PAIR_TABLE_DIGEST_PROTOCOL,
+        &serde_json::to_value(ordered).expect("serializes"),
+    )?)
+}
+
 /// Analyzes a completed pair table under the family the manifest froze. The
 /// order is the contract: the run must have completed, then the freeze check, then the pilot's block, then the
 /// arm-miss asymmetry block over the manifest's own arm rates, then the
@@ -1032,6 +1054,15 @@ pub fn analyze(
                 .iter()
                 .find(|id| !samples.contains(id.as_str()))
                 .map(|id| id.to_string()),
+        });
+    }
+    // The manifest's `result_digest` is the digest of the completed table, so
+    // rows cannot be relabeled or re-scored behind the recorded ids.
+    let found = pair_table_digest(pairs)?;
+    if found != manifest.result_digest {
+        return Err(StatisticsError::PairsNotManifestResult {
+            recorded: manifest.result_digest.clone(),
+            found,
         });
     }
     // The plan's power claim was justified at `max_affordable_worlds`; a table
@@ -1147,6 +1178,10 @@ pub enum StatisticsError {
     WorldsExceedAffordable {
         worlds: usize,
         max_affordable_worlds: u32,
+    },
+    PairsNotManifestResult {
+        recorded: String,
+        found: String,
     },
     WorldSeedOutOfRange(u64),
     BootstrapSeedOutOfRange(u64),

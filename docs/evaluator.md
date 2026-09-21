@@ -67,7 +67,7 @@ The 29 required fields, sorted:
 | `memory_reviewer_model_calls` | `cassette` (replayed through the keyed TLS peer) or `excluded` (the reviewer worker is not spawned); MemoryReviewer traffic bypasses `LlmExecutionBackend`, so silence is refused as a missing field. |
 | `reachability` | `default-production`, `explicit-config-only`, or `test-only`. |
 | `residue` | Every non-`Keep` field with its rule, including the manifest's own. |
-| `result_digest`, `witness_digest` | Lowercase hex SHA-256. |
+| `result_digest`, `witness_digest` | Lowercase hex SHA-256. For a paired campaign `result_digest` is the `eval-pair-table/v1` digest of the completed pair table ordered by pair id (`pair_table_digest`), recorded before the table is analyzed. |
 | `retry_lineage` | Prior `eval_run_id` values of retried attempts; each is lowercase hex SHA-256. |
 | `run_identity` | The nine-component identity tuple, including the build sub-record, the eligibility-spec digest, and the linearization rule version. |
 | `sample_epoch`, `sample_ids`, `sample_order` | Stable sample identity and execution order; `sample_order` must be a permutation of `sample_ids`. |
@@ -977,7 +977,10 @@ family whose `effective_n_at_max` is
 below the maintainer's `required_n_for_margin` makes `analyze` return
 `Blocked {reason: insufficient_effective_n}` and no report object.
 
-**Three gates.** `PairCounts::of` counts `n`, `b` (fresh not failing, aged not
+**Three gates.** `PairCounts::validate` names the counts a pair table can
+produce (at least one pair, disjoint `b`/`c`, the cross-cell relations, and
+`n` in the safe range); the rate methods and `Gates::of` refuse anything else
+as `NoPairs` or `InconsistentCounts`. `PairCounts::of` counts `n`, `b` (fresh not failing, aged not
 passing), `c` (fresh fail, aged pass), `aged_pass`, and the censored arms. Each
 censored arm resolves to the verdict least favorable to the aged arm: a
 censored aged arm is not a pass (so it lands in `b` beside a fresh pass and
@@ -1028,7 +1031,9 @@ evidence that never passes) against `miss_asymmetry_bound`, which blocks as
 the plan (a size other than the frozen pair count is `PairCountMismatch`, a
 pair outside the frozen families is `PairOutsideFamilies`, a repeated pair id
 is `DuplicatePair`, a pair-id set other than the manifest's `sample_ids` is
-`PairsNotManifestSamples`, more distinct worlds than the pilot's
+`PairsNotManifestSamples`, a table whose `eval-pair-table/v1` digest is not
+the manifest's `result_digest` is `PairsNotManifestResult` (so rows cannot
+be relabeled or re-scored behind the recorded ids), more distinct worlds than the pilot's
 `max_affordable_worlds` is `WorldsExceedAffordable`, and a world seed past
 canonical JSON's safe integer is `WorldSeedOutOfRange`, as it is from
 `cluster_bootstrap_interval`, whose own draw seed is likewise
