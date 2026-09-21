@@ -35,7 +35,7 @@ use eval_core::{
 use memory_store::{MemoryStore, StoredHistorySegment};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use support::direct_host::{Backend, FixtureProcess, Launch, fixture_binary};
+use support::direct_host::{Backend, Launch, fixture_binary};
 use support::eval_surface::{
     EPOCH_MS, Knobs, SurfaceLedger, World, block_on, mid, observe_rendered, pass, seed_store,
     segment, text,
@@ -90,7 +90,7 @@ fn profile(
             store_bytes: 64 << 20,
             cassette_bytes: 1 << 20,
             artifact_bytes: 1 << 20,
-            temp_roots: 1,
+            temp_roots: 3,
             retained_artifacts: 1,
             processes: 1,
         },
@@ -204,11 +204,12 @@ struct Arm {
 /// Whether `served` carries `phrase` as whole words: `cursor 4` is not served
 /// by a fragment saying `cursor 47`.
 fn carries(served: &str, phrase: &str) -> bool {
+    assert!(!phrase.is_empty(), "a truth has words");
+    let in_word = |c: char| c.is_ascii_alphanumeric() || c == '_';
     served.match_indices(phrase).any(|(at, _)| {
         let before = served[..at].chars().next_back();
         let after = served[at + phrase.len()..].chars().next();
-        !before.is_some_and(|c| c.is_ascii_alphanumeric())
-            && !after.is_some_and(|c| c.is_ascii_alphanumeric())
+        !before.is_some_and(in_word) && !after.is_some_and(in_word)
     })
 }
 
@@ -311,11 +312,10 @@ const SUMMARIZER_USAGE: (u64, u64) = (39_000, 40_000);
 /// and asking for nothing a segment would serve.
 const BUILD_PROMPT: &str = "summarize the session so far";
 
-/// The user config tier the fixture's daemon reads the summarizer's model
-/// chain from; the keys live only in that tier.
-fn summarizer_config_home() -> tempfile::TempDir {
-    let home = tempfile::tempdir().unwrap();
-    let dir = home.path().join("eidnara");
+/// Writes the user config tier the fixture's daemon reads the summarizer's
+/// model chain from under `home`; the keys live only in that tier.
+fn write_summarizer_config(home: &Path) {
+    let dir = home.join("eidnara");
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(
         dir.join("eidnara.jsonc"),
@@ -328,34 +328,31 @@ fn summarizer_config_home() -> tempfile::TempDir {
         .unwrap(),
     )
     .unwrap();
-    home
 }
 
-/// The fields of a stored segment the two summarizer runs must agree on:
-/// everything but the clock the daemon stamped it with.
-fn segment_shape(segment: &StoredHistorySegment) -> (i64, i64, i64, &str, &str, &str, &str) {
-    (
-        segment.sequence,
-        segment.start_message,
-        segment.end_message,
-        &segment.start_message_id,
-        &segment.end_message_id,
-        &segment.title,
-        &segment.content,
-    )
+/// The stored segment with the clock the daemon stamped it with removed:
+/// everything else the two summarizer runs must agree on.
+fn timeless(segment: &StoredHistorySegment) -> StoredHistorySegment {
+    StoredHistorySegment {
+        created_at: 0,
+        ..segment.clone()
+    }
 }
 
 /// Runs the arm-building pass through one fixture whose model backend is
 /// `backend`, with the daemon inside it configured to summarize, and returns
-/// the history segments the daemon's own summarizer published to the store.
+/// the history segments the daemon's own summarizer published to the store
+/// and its diagnostics from the pass. A replay miss would surface here as a
+/// recorded failure and no segments, never as a served answer.
 fn summarize_in_host(
     world: &World,
-    backend: Backend,
+    backend: &Backend,
     envelope: &mut Envelope,
     held: &mut Held,
     started: Instant,
 ) -> (Vec<StoredHistorySegment>, Value) {
-    let home = summarizer_config_home();
+    let home = occupy(held, envelope);
+    write_summarizer_config(home.path());
     let root = occupy(held, envelope);
     let fixture = Launch::at(root.path().to_path_buf())
         .backend(backend.clone())
@@ -370,24 +367,29 @@ fn summarize_in_host(
         ..Knobs::default()
     };
     let pass = block_on(pass(&fixture, world, BUILD_PROMPT, &knobs));
-    let diagnostics = pass.response["history_summarizer"].clone();
+    let diagnostics = pass
+        .response
+        .get("history_summarizer")
+        .unwrap_or_else(|| panic!("the pass reports on the summarizer: {}", pass.response))
+        .clone();
     let counters = fixture.counters(11);
-    fixture.shutdown();
+    let output = fixture.shutdown();
     held.processes -= 1;
     let descriptor = daemon::managed_store_descriptor(root.path()).unwrap();
     let store = MemoryStore::open(&descriptor).unwrap();
     let segments = store.load_history_segments(&world.session).unwrap();
     drop(store);
-    vacate(root, held, envelope, started);
-    // The firing is the daemon's decision; when it fired, the fixture's backend
-    // answered it exactly once on record and never on replay.
     let fired = diagnostics["fired"] == json!(true);
     assert_eq!(
         diagnostics["last_failure"],
         Value::Null,
-        "the summarizer did not fail: {diagnostics}"
+        "the summarizer did not fail: {diagnostics}\n{}",
+        output.stderr
     );
-    let expected_calls = match (&backend, fired) {
+    // The firing is the daemon's decision; when it fired, the recording run's
+    // backend answered it exactly once, and a replaying fixture has no
+    // controlled backend to count.
+    let expected_calls = match (backend, fired) {
         (Backend::Record { .. }, true) => 1,
         _ => 0,
     };
@@ -396,28 +398,39 @@ fn summarize_in_host(
         json!(expected_calls),
         "backend calls under {backend:?} with fired={fired}: {counters}"
     );
-    assert_eq!(fired, !segments.is_empty(), "{diagnostics}");
+    if !fired {
+        assert!(segments.is_empty(), "{diagnostics}");
+    }
+    vacate(root, held, envelope, started);
+    vacate(home, held, envelope, started);
     (segments, diagnostics)
+}
+
+/// Whether the arm's history was folded by the summarizer anywhere.
+fn folded(arm: &Arm) -> bool {
+    arm.covered.values().any(|ids| ids.len() > 1)
 }
 
 /// The structured arm: the raw arm's history with its segments replaced by
 /// what the daemon's own summarizer published for it, produced through the
 /// fixture with its backend recorded into a cassette, then reproduced by a
 /// second fixture replaying that cassette strictly. Messages the summarizer
-/// left in the protected tail keep their raw segments. Returns the arm, the
-/// cassette file, and whether the summarizer fired at all: it leaves a short
-/// history untouched.
+/// left in the protected tail keep their raw segments. A history the
+/// summarizer leaves untouched is its raw history, and there is no frame to
+/// reproduce. Returns the arm and the cassette file.
 fn structured(
+    label: &str,
     raw: &Arm,
     cassettes: &Path,
     envelope: &mut Envelope,
     held: &mut Held,
     started: Instant,
-) -> (Arm, Value, bool) {
-    let file = cassettes.join(format!("{}.cassette.json", raw.world.session));
+) -> (Arm, Value) {
+    let file = cassettes.join(format!("{label}.cassette.json"));
+    assert!(!file.exists(), "one recording per arm: {}", file.display());
     let (recorded, _) = summarize_in_host(
         &raw.world,
-        Backend::Record {
+        &Backend::Record {
             file: file.clone(),
             namespace: SUMMARIZER_NAMESPACE.to_string(),
         },
@@ -426,31 +439,55 @@ fn structured(
         started,
     );
     let cassette: Value = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
-    let (replayed, diagnostics) = summarize_in_host(
-        &raw.world,
-        Backend::Replay {
-            file,
-            namespace: SUMMARIZER_NAMESPACE.to_string(),
-        },
-        envelope,
-        held,
-        started,
-    );
-    assert_eq!(
-        replayed.iter().map(segment_shape).collect::<Vec<_>>(),
-        recorded.iter().map(segment_shape).collect::<Vec<_>>(),
-        "the replay publishes what the recording did: {diagnostics}"
-    );
-    let fired = !replayed.is_empty();
-    let mut segments = replayed;
-    for segment in &segments {
+    let mut segments = if recorded.is_empty() {
+        assert_eq!(cassette["cases"], json!([]), "no firing, no frame");
+        Vec::new()
+    } else {
+        let (replayed, diagnostics) = summarize_in_host(
+            &raw.world,
+            &Backend::Replay {
+                file,
+                namespace: SUMMARIZER_NAMESPACE.to_string(),
+            },
+            envelope,
+            held,
+            started,
+        );
         assert_eq!(
-            segment.end_message - segment.start_message + 1,
-            CHUNK as i64,
-            "the fixture folds {CHUNK} presented lines into one segment: {segment:?}"
+            replayed.iter().map(timeless).collect::<Vec<_>>(),
+            recorded.iter().map(timeless).collect::<Vec<_>>(),
+            "the replay publishes what the recording did: {diagnostics}"
+        );
+        replayed
+    };
+    let messages = raw.world.messages.len() as i64;
+    let covered_through = segments.iter().map(|s| s.end_message).max().unwrap_or(0);
+    if !segments.is_empty() {
+        assert!(
+            covered_through < messages,
+            "the summarizer protects a raw tail: covered through {covered_through} of {messages}"
         );
     }
-    let covered_through = segments.iter().map(|s| s.end_message).max().unwrap_or(0);
+    // The fixture folds five presented lines into one segment, the last run
+    // possibly shorter, and every segment keeps the words of each message it
+    // covers.
+    for (index, segment) in segments.iter().enumerate() {
+        let span = segment.end_message - segment.start_message + 1;
+        let last = index + 1 == segments.len();
+        assert!(
+            span == CHUNK as i64 || (last && span < CHUNK as i64),
+            "{segment:?}"
+        );
+        for ordinal in segment.start_message..=segment.end_message {
+            let message = &raw.world.messages[usize::try_from(ordinal - 1).unwrap()];
+            assert!(
+                carries(&segment.content, &own_words(message)),
+                "segment {} keeps message {ordinal}'s words: {:?}",
+                segment.sequence,
+                segment.content
+            );
+        }
+    }
     let next_sequence = segments.iter().map(|s| s.sequence).max().unwrap_or(0) + 1;
     for (offset, raw_segment) in raw
         .segments
@@ -484,7 +521,6 @@ fn structured(
             truth: own_words,
         },
         cassette,
-        fired,
     )
 }
 
@@ -574,7 +610,11 @@ fn run_arm(
     let evidence = task.evidence.iter().next().unwrap();
     let root = occupy(held, envelope);
     seed_store(root.path(), &arm.world.session, &arm.segments);
-    let fixture = FixtureProcess::start_at(root.path().to_path_buf());
+    // The root holds no user config tier, so the arm runs under the daemon's
+    // defaults whatever this shell's own environment says.
+    let fixture = Launch::at(root.path().to_path_buf())
+        .config_home(root.path())
+        .start();
     held.processes += 1;
     envelope
         .observe(Resource::Processes, held.processes)
@@ -779,15 +819,19 @@ fn campaign(scale: Scale, aged_messages: u32, elapsed_ms: u64) -> SuiteBReport {
 
     let aged_arm = arm(&set.aged);
     assert_eq!(aged_arm.segments.len(), aged_messages as usize);
-    let cassettes = tempfile::tempdir().unwrap();
-    let (aged_structured, cassette, aged_fired) = structured(
+    let cassettes = occupy(&mut held, &mut envelope);
+    let (aged_structured, cassette) = structured(
+        "aged",
         &aged_arm,
         cassettes.path(),
         &mut envelope,
         &mut held,
         started,
     );
-    assert!(aged_fired, "the aged history is long enough to summarize");
+    assert!(
+        folded(&aged_structured),
+        "the aged history reaches past the tail the summarizer protects"
+    );
     let mut cassette_bytes = serde_json::to_vec(&cassette).unwrap().len() as u64;
     envelope
         .observe(Resource::CassetteBytes, cassette_bytes)
@@ -819,7 +863,8 @@ fn campaign(scale: Scale, aged_messages: u32, elapsed_ms: u64) -> SuiteBReport {
             &mut held,
             started,
         );
-        let (fresh_structured, fresh_cassette, fresh_fired) = structured(
+        let (fresh_structured, fresh_cassette) = structured(
+            &format!("fresh-{}", pair.task.id),
             &fresh_arm,
             cassettes.path(),
             &mut envelope,
@@ -828,7 +873,10 @@ fn campaign(scale: Scale, aged_messages: u32, elapsed_ms: u64) -> SuiteBReport {
         );
         // Twelve messages sit inside the tail the summarizer protects, so the
         // short control's structured arm is its raw history.
-        assert!(!fresh_fired, "the summarizer leaves the short control raw");
+        assert!(
+            !folded(&fresh_structured),
+            "the summarizer leaves the short control raw"
+        );
         cassette_bytes += serde_json::to_vec(&fresh_cassette).unwrap().len() as u64;
         envelope
             .observe(Resource::CassetteBytes, cassette_bytes)
@@ -987,9 +1035,37 @@ fn campaign(scale: Scale, aged_messages: u32, elapsed_ms: u64) -> SuiteBReport {
             "{name} structured"
         );
     }
-    // At S0 the early truth is inside the window and folded; a longer history
-    // pushes it out of the window first.
+    // The falsifier is the second message and folded at any scale; the
+    // positive control is the last message and always in the raw tail. At S0
+    // the folded falsifier is still inside the window and lost at the match
+    // filter; a longer history pushes it out of the window first.
+    let structured_covered = |name: &str| {
+        let evidence = set
+            .pairs
+            .iter()
+            .find(|p| p.task.id == name)
+            .unwrap()
+            .task
+            .evidence
+            .iter()
+            .next()
+            .unwrap();
+        aged_structured
+            .covered
+            .values()
+            .find(|ids| ids.contains(evidence))
+            .unwrap()
+            .len()
+    };
+    assert_eq!(structured_covered("early-message"), CHUNK);
+    assert_eq!(structured_covered("last-message"), 1);
+    assert_eq!(
+        structured_by_task["last-message"].aged,
+        ArmResult::Pass,
+        "the raw tail delivers the positive control"
+    );
     if aged_messages == AGED_MESSAGES {
+        assert_eq!(structured_covered("recent-message"), CHUNK);
         assert_eq!(
             verdicts[&("early-message", "aged/structured")],
             StageVerdict::FirstLoss(Surface1Stage::MatchFilter)
@@ -1038,9 +1114,9 @@ fn campaign(scale: Scale, aged_messages: u32, elapsed_ms: u64) -> SuiteBReport {
     assert_eq!((rates.samples, ledger.attempted()), (18, 12));
     assert_eq!(rates.unsupported, Ratio::new(1, 3));
     // Surface 1 made no model call on any arm (the fixture's counters), and
-    // every summarizer replay served its frame with no miss and no refusal,
-    // so both arms' miss and refusal rates are zero by observation; the
-    // strictness probe is a separate cassette instance and not an arm.
+    // the summarizer's replay served its frame with no miss and no refusal
+    // (a miss is a recorded failure and no segments), so both arms' miss and
+    // refusal rates are zero by observation.
     let zero = || ArmRates {
         miss_rate: "0".to_string(),
         refusal_rate: "0".to_string(),
@@ -1144,7 +1220,7 @@ fn campaign(scale: Scale, aged_messages: u32, elapsed_ms: u64) -> SuiteBReport {
         );
     }
     assert_eq!(peaks["processes"], 1);
-    assert_eq!(peaks["temp_roots"], 1);
+    assert_eq!(peaks["temp_roots"], 3);
     assert!(peaks["cassette_bytes"].as_u64().unwrap() > 0);
 
     // The manifest beside the report says how the world reached the store:

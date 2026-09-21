@@ -73,7 +73,7 @@ pub enum Backend {
 /// One fixture launch: the state root it serves, how its model backend is
 /// served, and the environment the daemon inside reads its user config tier
 /// from.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct Launch {
     root: PathBuf,
     backend: Option<Backend>,

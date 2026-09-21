@@ -1350,10 +1350,16 @@ read from the store once the fixture has exited. The build runs twice: once
 with the fixture's backend recorded into a cassette under the campaign
 namespace, written at shutdown, and once in a second fixture replaying that
 cassette strictly, whose backend counters stay at zero; the two runs must
-publish the same segments, and the replayed ones are the arm's. Messages the
-summarizer left in its protected tail keep their raw segments. The
-summarizer fires only when the history reaches past the tail it protects, so
-the twelve-message control's structured arm is its raw history. A selected
+publish the same segments (compared whole, less the clock the daemon stamped
+them with), and the replayed ones are the arm's; a replay miss would surface
+as a recorded failure and no segments, never as a served answer. Every
+published segment must keep the words of each message it covers, and a raw
+tail must remain. Messages the summarizer left in its protected tail keep
+their raw segments. The summarizer fires only when the history reaches past
+the tail it protects, so the twelve-message control's structured arm is its
+raw history, its cassette holds no frame, and nothing is replayed for it. The
+arm runs themselves start the fixture under an empty config tier, so they
+run on the daemon's defaults whatever the shell's own environment holds. A selected
 segment stands for every message it covers at every stage up to render; at
 render the served fragment must carry the message's truth as whole words
 (`carries`): the shell's marker on a raw segment, the message's own words on
@@ -1364,7 +1370,8 @@ wrote, so a folded truth shares one token with the hint and is refused at the
 match filter, while the truth still raw in the tail is delivered; at S1 the
 folded early truth is older than the window and lost there first. The three
 policies are recorded as `GovernanceArms` over the pair set. Every cassette's
-bytes are charged to the envelope, as are the build fixtures' roots,
+bytes are charged to the envelope, as are the build fixtures' roots (the
+state root, the config tier, and the cassette directory count as roots),
 processes, and store bytes.
 
 Beside the report the campaign publishes a manifest with the same

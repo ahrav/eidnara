@@ -1113,11 +1113,13 @@ Campaign (`crates/daemon/tests/eval_campaign.rs`, `--all-features`):
   at zero calls, the two publishing the same segments; the two folded truths
   are refused at the match filter, the raw tail truth is delivered; the
   control sits inside the protected tail, so its structured arm is its raw
-  history and delivers every truth; the three policies validate as
+  history with an empty cassette and delivers every truth; the three policies validate as
   `GovernanceArms` over the pair set; eighteen samples are accounted for and twelve attempted; the report validates, is published
   write-then-rename with the file and directory synced, and parses back
   equal; the published peaks show the stores, the elapsed time, the artifact,
-  one process, one root, and the summarizer cassette's bytes; a manifest is
+  one process, three roots (the fixture's state root, the config tier the
+  summarizer build runs under, and the cassette directory), and the
+  summarizer cassette's bytes; a manifest is
   published the same way, parses back to the same digest, names the checkout,
   toolchain, host triple, and fixture binary, carries every sample in run
   order, the frozen family's digest, and the recency baseline, says `bulk`
