@@ -953,9 +953,11 @@ registered population, so its ICCs describe the campaign's clusters and the
 family-unit projection spreads items over exactly those families)
 (`PilotInconsistent`; a projection that leaves the safe range is reported as
 `RationalOverflow`), so a hand-written pilot cannot inflate its way past the
-block, and refuses a plan whose pair count is zero (`NoPairs`) or below the
-pilot's `required_n_for_margin` (`PlanBelowRequiredN`), since deflation only
-shrinks N. `FrozenFamily::freeze` digests it
+block, and refuses a plan whose pair count is zero (`NoPairs`) or whose best
+attainable table (the pairs spread evenly over the most clusters the plan
+permits at each level, deflated by that level's ICC) falls short of the
+pilot's `required_n_for_margin` (`PlanBelowRequiredN {attainable, ..}`), since
+such a plan can only ever block after the campaign has run. `FrozenFamily::freeze` digests it
 (`eval-analysis-family-digest/v1`); the manifest records that digest as
 `analysis_family_digest` before the first outcome, and `FrozenFamily::check`
 refuses a family whose digest differs as
@@ -976,7 +978,8 @@ count the maximum affordable world count would yield, deflated by the design
 effect `1 + (m - 1) ICC` at each nesting level with the smaller result kept,
 as `effective_n_at_max`, so a stronger correlation at the finer level is never
 discarded by selecting the coarser unit; the effect is clamped at one, so
-deflation only ever shrinks N, and a zero affordable world count is refused. Under the family unit the projected
+deflation only ever shrinks N, and a zero affordable world count
+(`NoAffordableWorlds`) or a zero required N (`NoRequiredN`) is refused. Under the family unit the projected
 cluster count is the smaller of the pilot's family count and the affordable
 world count, since each affordable world lies in one family. Each `(world, task)` is one score, so a
 repeated observation is `DuplicateObservation` rather than another item. A
@@ -1019,8 +1022,8 @@ whatever a caller asks, and refuses a replicate count below
 as `TooFewReplicates` or `TooManyReplicates`, and more than
 `MAX_BOOTSTRAP_DRAWS` (5,000,000) draws in total, replicates times clusters,
 as `TooManyDraws`; `AnalysisFamily::validate` applies the same bounds, with
-`max_affordable_worlds` as the cluster count, so an oversized family is
-refused before any replicate runs. Below the threshold no interval of any method is emitted; the
+the smaller of the pair count and `max_affordable_worlds` as the cluster
+count, so an oversized family is refused before any replicate runs. Below the threshold no interval of any method is emitted; the
 report carries `IntervalOutcome::Withheld {reason: item_count_below_threshold}`
 (or `fewer_than_two_clusters`) instead of a `computed` interval.
 

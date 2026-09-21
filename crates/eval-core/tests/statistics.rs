@@ -530,6 +530,10 @@ fn the_pilot_picks_the_highest_level_over_the_threshold_and_blocks_when_underpow
         Some(StatisticsError::NoAffordableWorlds)
     );
     assert_eq!(
+        run_icc_pilot("p", &observations, 8, 0).err(),
+        Some(StatisticsError::NoRequiredN)
+    );
+    assert_eq!(
         run_icc_pilot("p", &observations[..2], 8, 20).err(),
         Some(StatisticsError::PilotTooSmall)
     );
@@ -564,9 +568,13 @@ fn the_pilot_picks_the_highest_level_over_the_threshold_and_blocks_when_underpow
         Some(StatisticsError::RationalOverflow)
     );
 
+    // A plan that could reach the required N with its own pairs, but whose pilot
+    // projects too few items at the affordable worlds, freezes and then blocks.
     let mut underpowered = family();
-    underpowered.families = vec!["a".into(), "b".into(), "c".into()];
-    underpowered.icc_pilot = pilot.clone();
+    underpowered.icc_pilot.icc_world_seed = Ratio::ZERO;
+    underpowered.icc_pilot.max_affordable_worlds = 8;
+    underpowered.icc_pilot.effective_n_at_max = ratio(24, 1);
+    underpowered.icc_pilot.required_n_for_margin = 100;
     let frozen = FrozenFamily::freeze(&underpowered).unwrap();
     assert_eq!(
         analyze(
@@ -576,8 +584,8 @@ fn the_pilot_picks_the_highest_level_over_the_threshold_and_blocks_when_underpow
         )
         .unwrap(),
         Analysis::Blocked(BlockedReason::InsufficientEffectiveN {
-            effective_n_at_max: pilot.effective_n_at_max,
-            required_n_for_margin: 20,
+            effective_n_at_max: ratio(24, 1),
+            required_n_for_margin: 100,
         })
     );
     // A hand-written pilot cannot slip past the block with a degenerate ratio.
@@ -1102,7 +1110,19 @@ fn the_pair_table_and_the_pilot_must_match_the_frozen_plan() {
     assert_eq!(
         short_plan.validate(),
         Err(StatisticsError::PlanBelowRequiredN {
-            pairs: 299,
+            attainable: ratio(299, 1),
+            required_n_for_margin: 300
+        })
+    );
+    // Nor can 300 pairs over at most 150 worlds: the best table has two pairs per
+    // world, and under a world ICC of 1/10 that is 3000/11 effective items.
+    let mut crowded = family.clone();
+    crowded.icc_pilot.max_affordable_worlds = 150;
+    crowded.icc_pilot.effective_n_at_max = ratio(375, 1);
+    assert_eq!(
+        crowded.validate(),
+        Err(StatisticsError::PlanBelowRequiredN {
+            attainable: ratio(3000, 11),
             required_n_for_margin: 300
         })
     );
@@ -1242,6 +1262,7 @@ fn the_pair_table_and_the_pilot_must_match_the_frozen_plan() {
     let mut narrow = family.clone();
     narrow.icc_pilot.max_affordable_worlds = 150;
     narrow.icc_pilot.effective_n_at_max = ratio(375, 1);
+    narrow.icc_pilot.required_n_for_margin = 250;
     let narrow_frozen = FrozenFamily::freeze(&narrow).unwrap();
     assert_eq!(
         analyze(
@@ -1259,7 +1280,7 @@ fn the_pair_table_and_the_pilot_must_match_the_frozen_plan() {
     // before a bad seed in the table could be refused.
     let mut underpowered = family.clone();
     underpowered.icc_pilot.required_n_for_margin = 751;
-    underpowered.stopping_rule = StoppingRule::FixedN { pairs: 751 };
+    underpowered.stopping_rule = StoppingRule::FixedN { pairs: 1000 };
     let underpowered_frozen = FrozenFamily::freeze(&underpowered).unwrap();
     let mut wide = pairs.clone();
     wide[0].cluster.world_seed = 9_007_199_254_740_993;
@@ -1375,6 +1396,9 @@ fn the_pair_table_and_the_pilot_must_match_the_frozen_plan() {
     vast_plan.icc_pilot.max_affordable_worlds = 100_000;
     vast_plan.icc_pilot.effective_n_at_max = ratio(250_000, 1);
     vast_plan.bootstrap_replicates = MAX_BOOTSTRAP_REPLICATES;
+    // A 300-pair table has at most 300 clusters, so this plan draws 3,000,000.
+    assert_eq!(vast_plan.validate(), Ok(()));
+    vast_plan.stopping_rule = StoppingRule::FixedN { pairs: 100_000 };
     assert_eq!(
         vast_plan.validate(),
         Err(StatisticsError::TooManyDraws(1_000_000_000))

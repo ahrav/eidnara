@@ -885,7 +885,8 @@ Statistics core (`crates/eval-core/tests/statistics.rs`):
 - `the_pilot_picks_the_highest_level_over_the_threshold_and_blocks_when_underpowered`
   (`mtr-world-clustered-intervals-after-icc-pilot`): a family effect selects
   the family unit; a flat pilot whose tasks agree within each world has world
-  ICC one and counts each world once; fewer affordable worlds shrink N, and
+  ICC one and counts each world once; a zero required N refuses
+  (`NoRequiredN`); fewer affordable worlds shrink N, and
   under the family unit two affordable worlds realize at most two family
   clusters so the projected items are deflated; zero
   affordable worlds, a two-observation pilot, a single group, and no variance
@@ -946,7 +947,8 @@ Statistics core (`crates/eval-core/tests/statistics.rs`):
   leaves the safe range is `RationalOverflow`; three families of two
   internally constant worlds (family ICC `1/9`, world ICC one) project six
   effective items, the finer level, not nine; 10,000 replicates over 100,000
-  affordable worlds or 501 worlds is `TooManyDraws`; an `incomplete`, `refused`, or `blocked` manifest
+  pairs and worlds or 501 worlds is `TooManyDraws`, while the same
+  replicates over a 300-pair plan is 3,000,000 draws and validates; an `incomplete`, `refused`, or `blocked` manifest
   is `RunNotCompleted`; a manifest with the wrong schema or a `sample_order`
   that is not a permutation is `InvalidManifest`; a two-family, two-world
   pilot recording different family and world ICCs is `PilotInconsistent`;
@@ -957,7 +959,9 @@ Statistics core (`crates/eval-core/tests/statistics.rs`):
   rate or a panic; a `holm` or `benjamini_hochberg` plan is
   `UnsupportedMultiplicity`
   while a computed pilot validates; a plan of 299 pairs against a required N
-  of 300 is `PlanBelowRequiredN`; a repeated pilot observation is
+  of 300 is `PlanBelowRequiredN` (attainable 299), as is one of 300 pairs
+  over at most 150 worlds under a world ICC of `1/10` (attainable
+  `3000/11`); a repeated pilot observation is
   `DuplicateObservation`; a miss or refusal rate of `2` is `RateOutOfRange`;
   hand-built counts with `b + c > n`, `b + aged_pass > n`, `c > aged_pass`,
   `aged_censored + aged_pass > n`, `fresh_censored + c > b + aged_pass`, a

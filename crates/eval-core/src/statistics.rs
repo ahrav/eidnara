@@ -416,6 +416,9 @@ pub fn run_icc_pilot(
     if max_affordable_worlds == 0 {
         return Err(StatisticsError::NoAffordableWorlds);
     }
+    if required_n_for_margin == 0 {
+        return Err(StatisticsError::NoRequiredN);
+    }
     check_seeds(observations.iter().map(|o| &o.cluster))?;
     let mut seen = BTreeSet::new();
     if let Some(repeat) = observations
@@ -594,21 +597,33 @@ impl AnalysisFamily {
                 self.multiplicity_correction,
             ));
         }
-        // Deflation only shrinks, so a table smaller than the required N cannot
-        // reach it whatever the affordable worlds could have held.
         let StoppingRule::FixedN { pairs } = self.stopping_rule;
         if pairs == 0 {
             return Err(StatisticsError::NoPairs);
         }
-        // The bootstrap draws once per replicate per cluster, and a campaign has
-        // at most `max_affordable_worlds` clusters at either unit.
-        let draws = u64::from(self.bootstrap_replicates) * u64::from(pilot.max_affordable_worlds);
+        // A completed table has at most one cluster per pair and at most
+        // `max_affordable_worlds` worlds, so the bootstrap's draws are bounded by
+        // replicates times the smaller.
+        let clusters = pairs.min(pilot.max_affordable_worlds);
+        let draws = u64::from(self.bootstrap_replicates) * u64::from(clusters);
         if draws > MAX_BOOTSTRAP_DRAWS {
             return Err(StatisticsError::TooManyDraws(draws));
         }
-        if pairs < pilot.required_n_for_margin {
+        // The best table the plan permits spreads its pairs evenly over the most
+        // clusters it can have at each level; if even that falls short of the
+        // required N, the plan can only ever block, so it is refused now.
+        let n = Ratio::try_new(i128::from(pairs), 1)?;
+        let mut attainable = n;
+        for (clusters, icc) in [
+            (clusters.min(pilot.n_families), pilot.icc_family),
+            (clusters, pilot.icc_world_seed),
+        ] {
+            let mean_cluster = n.checked_div(Ratio::try_new(i128::from(clusters), 1)?)?;
+            attainable = attainable.min(deflate(n, mean_cluster, icc)?);
+        }
+        if attainable < Ratio::try_new(i128::from(pilot.required_n_for_margin), 1)? {
             return Err(StatisticsError::PlanBelowRequiredN {
-                pairs,
+                attainable,
                 required_n_for_margin: pilot.required_n_for_margin,
             });
         }
@@ -1162,8 +1177,9 @@ pub fn analyze(
 /// is refused rather than wrapped; `PilotTooSmall` means a clustering level
 /// had fewer than two groups or no replication; `PilotInconsistent` means a
 /// frozen pilot's unit or effective N is not what its own counts and ICCs
-/// imply; `PlanBelowRequiredN` means the frozen pair count cannot reach the
-/// pilot's required N; `PairCountMismatch`, `PairOutsideFamilies`, and
+/// imply; `PlanBelowRequiredN` means no table of the frozen pair count, however
+/// well spread over the clusters the plan permits, can reach the pilot's
+/// required N; `PairCountMismatch`, `PairOutsideFamilies`, and
 /// `DuplicatePair` mean the pair table is not the one the plan froze;
 /// `InconsistentCounts` means a hand-built `PairCounts` violates `b + c <= n`
 /// or a count exceeds `n`; `UnsupportedEndpoints` means the frozen endpoint
@@ -1195,7 +1211,7 @@ pub enum StatisticsError {
     PilotTooSmall,
     PilotInconsistent,
     PlanBelowRequiredN {
-        pairs: u32,
+        attainable: Ratio,
         required_n_for_margin: u32,
     },
     DuplicateObservation {
@@ -1232,6 +1248,7 @@ pub enum StatisticsError {
     },
     InconsistentCounts,
     NoAffordableWorlds,
+    NoRequiredN,
     NoPairs,
     ArmsNotPaired {
         found: Vec<String>,
