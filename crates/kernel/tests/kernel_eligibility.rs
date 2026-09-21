@@ -428,14 +428,20 @@ fn a_production_opener_waits_for_the_held_test_window() {
     let candidates = [with_artifact(candidate("ok", 1), &normal.digest)];
     let window = store.hold_classification_change_for_test();
     let (done, finished) = std::sync::mpsc::channel();
+    let (ready, at_writer_lock) = std::sync::mpsc::sync_channel(0);
     thread::scope(|scope| {
         scope.spawn(|| {
-            // Tightening the stored classification opens a production window.
+            // Tightening the stored classification opens a production window;
+            // the hook runs right before the tightening takes the writer lock.
             store
-                .ingest_artifact(artifact("normal", b"public bytes", Sensitivity::Sensitive))
+                .ingest_artifact_with_temp_hook_for_test(
+                    artifact("normal", b"public bytes", Sensitivity::Sensitive),
+                    |_| ready.send(()).unwrap(),
+                )
                 .unwrap();
             let _ = done.send(());
         });
+        at_writer_lock.recv().unwrap();
         assert!(
             finished
                 .recv_timeout(std::time::Duration::from_secs(2))
