@@ -8,10 +8,10 @@ use std::num::NonZeroU32;
 use eval_core::{
     ArmKind, BaselineFailure, BaselineVerdict, Coverage, Destination, EvaluatedSurface, EventId,
     EventLog, LogError, MAX_VALID_TIME_MS, Mode, NATURAL_FRESH_ENTITY_TAG, PAIRING_POLICY_VERSION,
-    Pair, PairError, PairSet, PairSetInput, Query, RECENCY_BASELINE_VERSION, RepositorySpec,
-    Sensitivity, ServedClass, SessionSpec, StopCondition, Suite, Task, TaskRole, Verdict,
-    Visibility, WorldConfig, check_recency_baseline, compile_pair_set, recency_bound, reduce,
-    serialize_spec,
+    Pair, PairError, PairSet, PairSetInput, Payload, Query, RECENCY_BASELINE_VERSION,
+    RepositorySpec, Sensitivity, ServedClass, SessionSpec, StopCondition, Suite, Task, TaskRole,
+    Verdict, Visibility, WorldConfig, check_recency_baseline, compile_pair_set, recency_bound,
+    reduce, serialize_spec,
 };
 use serde_json::{Value, json};
 use support::{WORLD_EPOCH_MS as EPOCH_MS, WORLD_SEED as SEED, world_config as config};
@@ -534,6 +534,23 @@ fn pair_validation_refuses_what_would_make_the_controls_vacuous() {
             PairError::NaturalFreshCopiedFromAged { at: 0 },
         ),
         (
+            "a copy that changed only its harness message IDs",
+            Box::new(|| {
+                let mut renamed = EventLog {
+                    events: aged.events[..6].to_vec(),
+                    causal_edges: vec![],
+                    ..aged.clone()
+                };
+                for event in &mut renamed.events {
+                    if let Payload::Message { message_id, .. } = &mut event.payload {
+                        message_id.push_str("-copy");
+                    }
+                }
+                compile_with(EvaluatedSurface::QueryRoute, k(3), &aged, &renamed, &base)
+            }),
+            PairError::NaturalFreshCopiedFromAged { at: 0 },
+        ),
+        (
             "a relabelled slice from the middle posing as natural-fresh",
             Box::new(|| {
                 let slice = EventLog {
@@ -923,6 +940,31 @@ fn an_independent_history_moves_onto_its_own_entities_with_every_reference() {
                 other => panic!("{other:?}"),
             }
             assert_eq!(moved.payload.content(), original.payload.content());
+            match (&moved.payload, &original.payload) {
+                (
+                    Payload::Message { message_id: m, .. },
+                    Payload::Message { message_id: o, .. },
+                ) => assert_eq!(*m, format!("{o}~other"), "the harness message ID follows"),
+                (
+                    Payload::ToolSpan {
+                        message_id: m,
+                        call_id: c,
+                        ..
+                    },
+                    Payload::ToolSpan {
+                        message_id: om,
+                        call_id: oc,
+                        ..
+                    },
+                ) => {
+                    assert_eq!(*m, format!("{om}~other"));
+                    assert_eq!(*c, format!("{oc}~other"), "the call ID follows too");
+                }
+                (Payload::Commit { oid: m, .. }, Payload::Commit { oid: o, .. }) => {
+                    assert_eq!(m, o, "a commit's oid is content, not a harness ID")
+                }
+                _ => {}
+            }
         }
         assert!(references > 10, "{seed:#x} exercises cites and corrections");
         let mut events = aged.events.clone();

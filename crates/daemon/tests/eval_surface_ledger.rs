@@ -7,24 +7,23 @@
 mod support;
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::future::Future;
-use std::path::Path;
 
 use daemon::harness_sources::{Harness, SessionIdentity, opencode_units};
 use daemon::transform::{UserHintOutcome, UserHintPass, UserHintSkip};
 use eval_core::{
-    Cell, Coverage, CoverageError, Delivery, DurableState, FailureClass, Ledger, MARKERS, Mode,
-    Observation, Outcome, Presence, RenderConfig, RenderedMessage, Required, SURFACE1_STAGES,
-    SessionSpec, Slice, StageVerdict, Surface1Stage, WorldConfig, classify, generate_all, render,
+    Cell, Coverage, CoverageError, Delivery, DurableState, FailureClass, MARKERS, Mode, Outcome,
+    Presence, RenderConfig, Required, SURFACE1_STAGES, SessionSpec, Slice, StageVerdict,
+    Surface1Stage, WorldConfig, classify, generate_all, render,
 };
-use host_runtime::TargetKind;
-use memory_store::{MemoryStore, StoredHistorySegment};
-use serde_json::{Value, json};
-use support::direct_host::{FixtureProcess, request_json, wait_for_store};
+use memory_store::StoredHistorySegment;
+use support::direct_host::FixtureProcess;
+use support::eval_surface::{
+    EPOCH_MS, Knobs, Pass, SurfaceLedger, World, block_on, expected_id, identities, mid, observe,
+    pass, seed_store, segment,
+};
 
 const SUITE: &str = "crates/daemon/tests/eval_surface_ledger.rs::";
 const SEED: u64 = 0x5155_5FAC;
-const EPOCH_MS: i64 = 1_700_000_000_000;
 const PROJECT: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 const HINT_OPEN: &str = "<eidnara-search-hint>";
 const WINDOW: usize = 100;
@@ -32,24 +31,6 @@ const WINDOW: usize = 100;
 const PROMPT: &str = "quasar nebula survey cadence decision";
 const PHRASE: &str = "quasar nebula survey cadence decision: weekly";
 const FILLER: &str = "lunch and office plants chatter";
-
-type SurfaceLedger = Ledger<Surface1Stage>;
-
-fn block_on<F: Future>(future: F) -> F::Output {
-    tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(2)
-        .enable_all()
-        .build()
-        .unwrap()
-        .block_on(future)
-}
-
-/// One rendered session in valid-time order; every message is a native
-/// OpenCode message with the identity the renderer expects for it.
-struct World {
-    session: String,
-    messages: Vec<RenderedMessage>,
-}
 
 fn world(messages: u32) -> World {
     let config = WorldConfig {
@@ -82,38 +63,6 @@ fn world(messages: u32) -> World {
     }
 }
 
-fn mid(message: &RenderedMessage) -> &str {
-    message.message["info"]["id"].as_str().unwrap()
-}
-
-fn text(message: &RenderedMessage) -> &str {
-    message.message["parts"][0]["text"].as_str().unwrap()
-}
-
-/// The identity the renderer expects for the message's text unit.
-fn expected_id(message: &RenderedMessage) -> String {
-    message.expected[0].identity.occurrence_id.clone()
-}
-
-/// A history segment covering one message, with the phrase the test chooses
-/// as its summary; `end_message_id` is the message's native identity as the
-/// summarizer writes it.
-fn segment(sequence: i64, message: &RenderedMessage, phrase: &str) -> StoredHistorySegment {
-    StoredHistorySegment {
-        sequence,
-        start_message: sequence,
-        end_message: sequence,
-        start_message_id: format!("{}#0", mid(message)),
-        end_message_id: format!("{}#0", mid(message)),
-        title: format!("C{sequence}"),
-        content: phrase.to_string(),
-        p1: Some(phrase.to_string()),
-        importance: 50,
-        created_at: 0,
-        ..Default::default()
-    }
-}
-
 /// Segment `sequence` covers message `sequence - 1`; `phrase_of` picks each
 /// segment's summary.
 fn segments(world: &World, phrase_of: impl Fn(i64) -> &'static str) -> Vec<StoredHistorySegment> {
@@ -126,243 +75,6 @@ fn segments(world: &World, phrase_of: impl Fn(i64) -> &'static str) -> Vec<Store
             segment(sequence, message, phrase_of(sequence))
         })
         .collect()
-}
-
-fn seed_store(root: &Path, session: &str, segments: &[StoredHistorySegment]) {
-    let descriptor = daemon::managed_store_descriptor(root).unwrap();
-    let store = MemoryStore::open(&descriptor).unwrap();
-    store.replace_history_segments(session, segments).unwrap();
-}
-
-/// Segment sequence to the evaluator-expected occurrence id of the message it
-/// ends on, through the segment's stored native identity.
-fn identities(world: &World, segments: &[StoredHistorySegment]) -> BTreeMap<i64, String> {
-    segments
-        .iter()
-        .map(|segment| {
-            let (end_mid, _) = daemon::wire::split_block_id(&segment.end_message_id)
-                .expect("a seeded segment ends on a block id");
-            let message = world
-                .messages
-                .iter()
-                .find(|message| mid(message) == end_mid)
-                .expect("a segment ends on a rendered message");
-            (segment.sequence, expected_id(message))
-        })
-        .collect()
-}
-
-fn ingress(message: &RenderedMessage, ordinal: u64) -> Value {
-    json!({
-        "mid": mid(message),
-        "ordinal": ordinal,
-        "ck": {
-            "role": message.message["info"]["role"],
-            "content": [{"kind": {"type": "text", "text": text(message)}}],
-            "meta": {"harness_id": mid(message)}
-        }
-    })
-}
-
-fn tail(session: &str, prompt: &str, ordinal: u64) -> (Value, Value) {
-    let mid = format!("tail-{ordinal}");
-    (
-        json!({
-            "mid": mid,
-            "ordinal": ordinal,
-            "ck": {
-                "role": "user",
-                "content": [{"kind": {"type": "text", "text": prompt}}],
-                "meta": {"harness_id": mid}
-            }
-        }),
-        json!({
-            "info": {"id": mid, "sessionID": session, "role": "user", "time": {"created": EPOCH_MS + 10_000_000}},
-            "parts": [{"type": "text", "text": prompt}]
-        }),
-    )
-}
-
-struct Pass {
-    response: Value,
-    native: Vec<Value>,
-    /// The host's recorded pass, as the fixture's control socket returns it;
-    /// `None` when auto-search did not run.
-    outcome: Option<UserHintPass>,
-}
-
-struct Knobs {
-    threshold: f64,
-    min_prompt_chars: usize,
-    native_tail: bool,
-}
-
-impl Default for Knobs {
-    fn default() -> Self {
-        Self {
-            threshold: 0.6,
-            min_prompt_chars: 20,
-            native_tail: true,
-        }
-    }
-}
-
-/// Drives one native-serving transform pass through the fixture and reads the
-/// host's recorded auto-search outcome back over the control socket.
-async fn pass(fixture: &FixtureProcess, world: &World, prompt: &str, knobs: &Knobs) -> Pass {
-    let client = fixture.client().await;
-    let route = fixture
-        .open_route(&client, "context", TargetKind::ToolProvider, &world.session)
-        .await;
-    wait_for_store(&client, route, &world.session).await;
-    let mut messages: Vec<Value> = world
-        .messages
-        .iter()
-        .enumerate()
-        .map(|(index, message)| ingress(message, index as u64 + 1))
-        .collect();
-    let mut native: Vec<Value> = world.messages.iter().map(|m| m.message.clone()).collect();
-    let (tail_ingress, tail_native) = tail(&world.session, prompt, world.messages.len() as u64 + 1);
-    messages.push(tail_ingress);
-    if knobs.native_tail {
-        native.push(tail_native);
-    }
-    let response = request_json(
-        &client,
-        route,
-        json!({
-            "kind": "transform",
-            "base_revision": "surface-base-1",
-            "v": 2,
-            "session_id": world.session,
-            "serializer_profile": "opencode-aisdk",
-            "render_config": "surface-config",
-            "full_array_fingerprint": "surface-fingerprint",
-            "serve_native": true,
-            "native_messages": native,
-            "auto_search_enabled": true,
-            "auto_search_score_threshold": knobs.threshold,
-            "auto_search_min_prompt_chars": knobs.min_prompt_chars,
-            "messages": messages,
-        }),
-    )
-    .await;
-    assert_eq!(response["status"], "ok", "{response}");
-    assert!(
-        response.get("user_hint").is_none(),
-        "the outcome stays off the wire"
-    );
-    let control = fixture.control(41, "user-hint-outcome");
-    assert_eq!(control["ok"], true, "{control}");
-    let outcome = control["result"]["outcome"]
-        .as_object()
-        .map(|_| serde_json::from_value(control["result"]["outcome"].clone()).unwrap());
-    if let Some(UserHintPass::Decided(decided)) = &outcome {
-        assert_eq!(
-            decided.block_id,
-            format!("tail-{}#0", world.messages.len() + 1),
-            "the recorded pass is this request's tail"
-        );
-    }
-    client.close_route(route).await.expect("route closes");
-    Pass {
-        response,
-        native,
-        outcome,
-    }
-}
-
-fn ids(sequences: &[i64], identities: &BTreeMap<i64, String>) -> BTreeSet<String> {
-    sequences
-        .iter()
-        .map(|sequence| identities[sequence].clone())
-        .collect()
-}
-
-/// Maps the host's outcome onto the thirteen stages. A gate that passed kept
-/// every segment; a refusing gate kept none and the search stages never ran,
-/// while the empty decision was still frozen, deferred nowhere, and applied
-/// and attached nowhere.
-fn observe(
-    ledger: &mut SurfaceLedger,
-    pass: Option<&UserHintPass>,
-    identities: &BTreeMap<i64, String>,
-) {
-    let universe: BTreeSet<String> = identities.values().cloned().collect();
-    let record = |ledger: &mut SurfaceLedger, stage: Surface1Stage, kept: BTreeSet<String>| {
-        ledger.observe(Observation::new(stage, 0, None, kept).unwrap());
-    };
-    let outcome = match pass {
-        Some(UserHintPass::Decided(outcome)) => outcome,
-        // An earlier pass's decision still stands and may be served; this pass
-        // says nothing about it.
-        Some(UserHintPass::Skipped {
-            reason: UserHintSkip::AlreadyDecided | UserHintSkip::BehindFrontier,
-        }) => {
-            ledger.observe(Observation::unjoinable(
-                Surface1Stage::TailEligibility,
-                0,
-                None,
-            ));
-            return;
-        }
-        Some(UserHintPass::Skipped { .. }) => {
-            record(ledger, Surface1Stage::TailEligibility, BTreeSet::new());
-            return;
-        }
-        // Auto-search did not run, so no stage was reached.
-        None => return,
-    };
-    let trace = &outcome.trace;
-    record(ledger, Surface1Stage::TailEligibility, universe.clone());
-    let gates = [
-        (Surface1Stage::Suppression, trace.suppression),
-        (Surface1Stage::LengthGate, trace.length),
-        (Surface1Stage::TokenGate, trace.tokens),
-    ];
-    let mut open = true;
-    for (stage, passed) in gates {
-        if open {
-            let kept = if passed {
-                universe.clone()
-            } else {
-                BTreeSet::new()
-            };
-            record(ledger, stage, kept);
-        }
-        open &= passed;
-    }
-    let selected = ids(&trace.selected, identities);
-    if open {
-        record(
-            ledger,
-            Surface1Stage::CandidateWindow,
-            ids(&trace.window, identities),
-        );
-        let matched = ids(&trace.matched, identities);
-        record(ledger, Surface1Stage::MatchFilter, matched.clone());
-        let thresholded = if trace.threshold {
-            matched
-        } else {
-            BTreeSet::new()
-        };
-        record(ledger, Surface1Stage::Threshold, thresholded);
-        record(ledger, Surface1Stage::Cap, selected.clone());
-    }
-    let kept = |flag: bool| {
-        if flag && !outcome.hint_text.is_empty() {
-            selected.clone()
-        } else {
-            BTreeSet::new()
-        }
-    };
-    if open {
-        record(ledger, Surface1Stage::Render, kept(true));
-    }
-    record(ledger, Surface1Stage::DecisionFreeze, kept(true));
-    record(ledger, Surface1Stage::Deferral, kept(!outcome.deferred));
-    record(ledger, Surface1Stage::OverlayApply, kept(outcome.applied));
-    record(ledger, Surface1Stage::Attachment, kept(outcome.attached));
 }
 
 /// The rendered hint names every selected segment by title and counts them,

@@ -1089,6 +1089,31 @@ Report (`crates/eval-core/tests/report.rs`):
   bounds in an open report each refuse from `serialize` and `parse_report`; a
   run stopped by its envelope publishes its peaks as the suppression.
 
+## Phase 3 executed checks: campaign shell
+
+Campaign (`crates/daemon/tests/eval_campaign.rs`, `--all-features`):
+
+- `an_unapproved_profile_runs_no_campaign`: the S0 profile without an
+  approval refuses `approved` by name.
+- `an_s0_campaign_on_the_default_surface_publishes_one_gated_report`
+  (`mtr-runner-shell-example-gated-and-bounded`,
+  `xc-campaign-resource-envelope-declared-and-enforced`): a 130-message aged
+  history and a five-message control compile into three pairs whose baseline
+  contrast is established at the profile's surface-1 window; each of the six
+  arms runs through its own fixture process in its own root with the backend
+  counters at zero model calls; the falsifier is lost at the candidate window
+  on the aged arm and delivered on the control, the two in-window truths are
+  delivered on both; the analysis over three pairs reports `b = 1` and fails
+  the paired gates at the fixture's margins; six samples are accounted for;
+  the established claims follow from the verdicts; the report validates, is
+  published write-then-rename with the file and directory synced, and parses
+  back equal; the published peaks show the stores, the elapsed time, the
+  artifact, one process, one root, and no cassette bytes.
+- `an_s1_campaign_runs_only_under_its_budget` (ignored): a 400-message
+  history runs only under `EIDNARA_EVAL_S1_BUDGET_MS` and reports the same
+  shape inside the budget; without the variable the run is recorded as
+  `disabled {scale_not_budgeted}`, and a non-numeric budget refuses.
+
 ## Gaps recorded here
 
 - The OpenCode cassette is bound to the environment that recorded it: the
@@ -1123,13 +1148,18 @@ Report (`crates/eval-core/tests/report.rs`):
   the runner has normalized; that normalization is the runner's and is not
   written yet.
 - `HistoryPolicy` descriptors select `message_cleanup` and the
-  HistorySummarizer producer by path and symbol; no runner executes either
-  arm yet.
-- The Suite B report, run profile, sample ledger, and envelope are the
-  sans-I/O contract; no runner produces a report, holds an envelope from
-  launch, or publishes write-then-rename into disjoint roots yet, so the
-  envelope property is executed for the primitive and the serializer, not for
-  a live campaign.
+  HistorySummarizer producer by path and symbol; the campaign shell runs the
+  raw arm only, so no pruned or structured arm has been executed.
+- The campaign shell lives in the daemon test suite and drives the
+  direct-host fixture; the `eval_runner` example still serves the cassette
+  oracle only, and the campaign emits no manifest beside its report.
+- Surface 1 makes no model call, so the campaign's cassette holds no frame;
+  strict replay under a campaign has been exercised only by the cassette
+  suites.
+- The campaign runs its arms one after another in one process; parallel
+  campaigns on a shared checkout have not been run, so
+  `xc-parallel-campaigns-isolated-on-shared-checkout` is exercised only for
+  the per-arm disjoint roots.
 
 - Every ingestion entry point lacks a production caller. No world is labelled
   "validated real ingestion" until one exists; every manifest carries

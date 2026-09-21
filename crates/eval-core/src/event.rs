@@ -189,12 +189,33 @@ impl Payload {
         }
     }
 
-    /// The payload with every event reference erased, for comparing two
-    /// histories by what they say rather than by whom they name.
+    /// The identifiers a rendered message carries into the harness besides
+    /// its event ID: the message ID, and a tool span's call ID.
+    fn harness_ids_mut(&mut self) -> Vec<&mut String> {
+        match self {
+            Payload::Message { message_id, .. } => vec![message_id],
+            Payload::ToolSpan {
+                message_id,
+                call_id,
+                ..
+            } => vec![message_id, call_id],
+            Payload::Commit { .. }
+            | Payload::Rename { .. }
+            | Payload::Correction { .. }
+            | Payload::Invalidation { .. } => vec![],
+        }
+    }
+
+    /// The payload with every event reference and harness identifier erased,
+    /// for comparing two histories by what they say rather than by whom they
+    /// name.
     pub fn content(&self) -> Payload {
         let mut content = self.clone();
         if let Some(target) = content.reference_mut() {
             *target = EventId(String::new());
+        }
+        for id in content.harness_ids_mut() {
+            id.clear();
         }
         content
     }
@@ -233,11 +254,13 @@ impl EventLog {
         log
     }
 
-    /// Moves every event onto entities suffixed `~tag`, re-deriving each ID
-    /// and following every payload reference and causal edge, so a history
-    /// authored apart from another can share a log with it without an
-    /// identity collision. A reference to an event the log does not hold is
-    /// refused rather than left pointing into whatever log this one joins.
+    /// Moves every event onto entities suffixed `~tag`, re-deriving each ID,
+    /// suffixing the message and call IDs a rendered message carries into the
+    /// harness, and following every payload reference and causal edge, so a
+    /// history authored apart from another can share a log and a session with
+    /// it without an identity collision. A reference to an event the log does
+    /// not hold is refused rather than left pointing into whatever log this
+    /// one joins.
     pub fn on_distinct_entities(&self, tag: &str) -> Result<Self, LogError> {
         if tag.contains(':') {
             return Err(LogError::InvalidEntityTag {
@@ -261,6 +284,10 @@ impl EventLog {
             let mut moved = event.clone();
             moved.entity_id = format!("{}~{tag}", event.entity_id);
             moved.id = follow(&event.id).expect("every event renames itself");
+            for id in moved.payload.harness_ids_mut() {
+                id.push('~');
+                id.push_str(tag);
+            }
             if let Some(target) = moved.payload.reference_mut() {
                 *target = follow(target).ok_or_else(|| LogError::DanglingReference {
                     id: event.id.clone(),

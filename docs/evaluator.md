@@ -1036,10 +1036,12 @@ carries two more arms, named by `ArmKind`:
 - `fresh`: the natural-fresh control, the primary one. `PairSetInput` takes a
   short history authored apart from the aged one (the same generator under
   another seed and configuration); `EventLog::on_distinct_entities` moves it
-  onto entities tagged `~natural-fresh`, re-deriving every ID and following
-  every payload reference and causal edge (a reference to an event the history
-  does not hold is `DanglingReference`, never left pointing into the aged
-  world), and the compiler splices the truth's minimal closure into it. The
+  onto entities tagged `~natural-fresh`, re-deriving every ID, suffixing the
+  message and call IDs a rendered message carries into the harness, and
+  following every payload reference and causal edge (a reference to an event
+  the history does not hold is `DanglingReference`, never left pointing into
+  the aged world), and the compiler splices the truth's minimal closure into
+  it, so the two histories can share one OpenCode session. The
   pair's `fresh_query` is the task's query with the control's entities added
   to its scope, so the control competes on the fresh arm; a control with no
   eligible unit at the cut is `NaturalFreshInert`.
@@ -1277,6 +1279,64 @@ profile's ceilings, and `arm_miss_asymmetry` against the family's bound, each
 a `GateVerdict {statistic, bound, passed}` with `passed` when the statistic is
 at most the bound; a ledger with no attempted sample has no gates
 (`NoAttemptedSamples`), since every rate would be zero with nothing behind it.
+
+## Campaign shell
+
+`crates/daemon/tests/eval_campaign.rs` runs one Suite B campaign on surface 1
+through the direct-host fixture, composing the seams above and nothing new:
+the paired-world compiler, the recency baseline, the surface-1 pass and stage
+ledger (`tests/support/eval_surface.rs`, the helpers the surface-ledger suite
+uses), the paired statistics, the run profile, the sample ledger, the
+envelope, and the report serializer.
+
+The campaign refuses an unapproved profile before anything runs. Under an
+approved one it generates a one-session aged history (130 messages at S0) and
+a five-message natural-fresh history under another seed, compiles three
+tasks (an early message as the falsifier, the last message as the positive
+control, a message fifty from the end as the plain task) into a pair set at
+surface 1's pinned window of 100, and checks the baseline contrast first. Each
+arm of each pair becomes one OpenCode session: every rendered message under
+the task's session id in valid-time order (the natural-fresh messages carry
+their suffixed message ids, so nothing collides), and one history segment per
+message whose summary is the message's text, a fixed phrase, and a marker only
+that message's summary has, so the hint scorer's rarity rule never decides a
+task; the sequence-to-event map is read back from the segments' stored native
+identities and checked against the seeding order. The task's prompt is that
+summary. The arm is seeded into a store in a root of its own, one fixture
+process is started at that root, one native-serving transform pass runs, the
+fixture's backend counters are read to show no model call started, and the
+host's own recorded selection is read back: the task passes when its evidence
+is among the selected segments, and an attempt past a task budget is censored
+with that budget's reason. The pass is mapped onto the thirteen stages, so a
+loss names its stage.
+
+At S0 the aged arm loses the falsifier at the candidate window and delivers
+the two in-window truths; the short control delivers all three; `analyze`
+over the three pairs reports `b = 1`, fails the quality-loss and harm gates at
+the fixture's margins, and withholds the interval below 300 items. The six
+samples are accounted for in a `SampleLedger`, the run gates are computed
+from them, the established claims follow from the verdicts and outcomes, and
+one `SuiteBReport` is serialized, written to a staging path, synced, renamed
+into place in a root of its own with the directory synced, read back, and
+parsed equal. The envelope is observed from the start as live counts: elapsed
+time, each arm's root with its store, WAL, and shm, the one process and the
+one root held at a time, the report's bytes, and the one retained artifact,
+all charged before the envelope is copied into the report so the published
+peaks include the publication; the run finishes inside its bounds. Surface 1
+makes no model call, which the backend counters show, so the cassette holds no
+frame and the arm miss rates are zero by observation.
+
+`an_s1_campaign_runs_only_under_its_budget` is `#[ignore]`d and runs a
+400-message history only when `EIDNARA_EVAL_S1_BUDGET_MS` grants a budget;
+without one it records the `disabled {scale_not_budgeted}` terminal in a
+sample ledger and runs nothing, and a budget that is set but not a number is
+refused. S0 stays in the default shards.
+
+Not composed yet: the pruned (`message_cleanup`) and structured
+(HistorySummarizer) arms, so the campaign's only policy is `raw`; the
+`eval_runner` example still serves the cassette oracle only; the campaign
+emits no manifest; and the write-then-rename publisher is the test's own,
+since no shipped publisher exists.
 
 ## Coverage markers
 
