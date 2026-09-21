@@ -725,7 +725,13 @@ Cassette core (`crates/eval-core/tests/cassette.rs`):
   (`rid-cassette-strict-miss-typed-error`): the `BackendRecord` projection's
   field set equals `BACKEND_COVERED_FIELDS`; `0.7` and `0.70` digest equal,
   `0.8` differs; `NaN`, infinity, `-0.0`, a negative value, and a hand-written
-  `0.70` refuse. `every_error_names_its_wire_kind` pins fifteen distinct kinds.
+  `0.70` refuse. `every_error_names_its_wire_kind` pins sixteen distinct kinds,
+  and `no_wire_detail_carries_request_content` pins `CassetteError::detail`:
+  a request-shaped variant (`Shape`, `MalformedBody`, `UnknownRequestField`,
+  `TemperatureNotDecimal`, `NotCanonical`) built around a canary payload
+  renders an empty detail while its `Display` still carries the canary, and
+  every oracle-owned variant renders its version, namespace, digest, index, or
+  scanner outcome.
 
 Manifest (`crates/eval-core/tests/manifest.rs`,
 `sls-memory-reviewer-model-calls-cassette-or-excluded`): the
@@ -766,6 +772,11 @@ Daemon shell (`crates/daemon/tests/eval_cassette.rs`, `--all-features`):
   entry keyed to another host misses.
 - `every_cassette_marker_fires_across_the_scenarios` is the completeness
   proof over this suite's markers.
+- `every_host_finish_reason_error_class_and_terminal_round_trips`: both
+  `FinishReason` values, all four `ErrorClass` values under `Failed` and
+  `FailedUnresolved`, and an absent event finish reason each record and replay
+  as an equal transcript, so the wire mirror's decode side covers every host
+  variant, not only the two the marker scenarios produce.
 
 ## Gaps recorded here
 
@@ -782,8 +793,11 @@ Daemon shell (`crates/daemon/tests/eval_cassette.rs`, `--all-features`):
 - The keyed reviewer peer holds its entries in memory; reviewer traffic is not
   yet persisted in the cassette file, and `memory_reviewer_model_calls` is a
   manifest declaration no runner enforces yet.
-- The Rust oracle protocol has no Rust-side test; its consumer is the
-  TypeScript MockProvider cassette mode.
+- The Rust oracle's stdin protocol has no Rust-side test; its consumer is the
+  TypeScript MockProvider cassette mode. The `{kind, detail}` refusal contract
+  is pinned in `eval-core` (`no_wire_detail_carries_request_content`), but the
+  oracle's own variants (`UnsafePath`, `Io`, `Json`, `LineTooLong`,
+  `AlreadyOpen`, `NoOpenCassette`) are exercised only through that consumer.
 
 - Every ingestion entry point lacks a production caller. No world is labelled
   "validated real ingestion" until one exists; every manifest carries

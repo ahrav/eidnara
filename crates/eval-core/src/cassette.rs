@@ -183,6 +183,30 @@ impl CassetteError {
             Self::NotCanonical(_) => "NotCanonical",
         }
     }
+
+    /// The wire detail the oracle reports beside `kind`. Request-derived and
+    /// input-quoting serde payloads are withheld so `detail` never echoes
+    /// request content.
+    pub fn detail(&self) -> String {
+        match self {
+            Self::SchemaMismatch { .. }
+            | Self::GeneratorVersionMismatch { .. }
+            | Self::CoveredFieldsMismatch { .. }
+            | Self::NamespaceMismatch { .. }
+            | Self::WrongNamespace { .. }
+            | Self::ProvenanceMismatch { .. }
+            | Self::EntryDigestMismatch { .. }
+            | Self::RedactionRefused(..)
+            | Self::ScannerUnavailable(_)
+            | Self::RecordOnReplay
+            | Self::LookupOnRecord => self.to_string(),
+            Self::Shape(_)
+            | Self::MalformedBody
+            | Self::UnknownRequestField(_)
+            | Self::TemperatureNotDecimal(_)
+            | Self::NotCanonical(_) => String::new(),
+        }
+    }
 }
 
 impl From<ContractError> for CassetteError {
@@ -289,7 +313,7 @@ impl Cassette {
     /// schema, generator, covered-field, namespace, provenance, or entry-digest
     /// mismatch before any request is served.
     pub fn replay(value: &Value, namespace: &str) -> Result<Self, CassetteError> {
-        let file: CassetteFile = serde_json::from_value(value.clone())
+        let file = CassetteFile::deserialize(value)
             .map_err(|error| CassetteError::Shape(error.to_string()))?;
         if file.schema != CASSETTE_SCHEMA {
             return Err(CassetteError::SchemaMismatch { found: file.schema });

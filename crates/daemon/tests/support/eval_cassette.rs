@@ -167,8 +167,32 @@ impl From<&BackendTerminal> for WireTerminal {
     }
 }
 
+/// Every `FinishReason`; the `match` fails to compile when the host adds a
+/// variant, so the decode list cannot drift behind `as_wire_str`.
+fn finish_reasons() -> [FinishReason; 2] {
+    [FinishReason::Completed, FinishReason::Length].map(|reason| match reason {
+        FinishReason::Completed | FinishReason::Length => reason,
+    })
+}
+
+/// Every `ErrorClass`, guarded the same way as [`finish_reasons`].
+fn error_classes() -> [ErrorClass; 4] {
+    [
+        ErrorClass::Transient,
+        ErrorClass::Permanent,
+        ErrorClass::AuthRequired,
+        ErrorClass::ContextOverflow,
+    ]
+    .map(|class| match class {
+        ErrorClass::Transient
+        | ErrorClass::Permanent
+        | ErrorClass::AuthRequired
+        | ErrorClass::ContextOverflow => class,
+    })
+}
+
 fn finish_reason(text: &str) -> Option<FinishReason> {
-    [FinishReason::Completed, FinishReason::Length]
+    finish_reasons()
         .into_iter()
         .find(|reason| reason.as_wire_str() == text)
 }
@@ -199,15 +223,10 @@ impl TryFrom<WireError> for BackendError {
     type Error = String;
 
     fn try_from(error: WireError) -> Result<Self, String> {
-        let class = [
-            ErrorClass::Transient,
-            ErrorClass::Permanent,
-            ErrorClass::AuthRequired,
-            ErrorClass::ContextOverflow,
-        ]
-        .into_iter()
-        .find(|class| class.as_wire_str() == error.class)
-        .ok_or(error.class)?;
+        let class = error_classes()
+            .into_iter()
+            .find(|class| class.as_wire_str() == error.class)
+            .ok_or(error.class)?;
         Ok(Self {
             class,
             message: error.message,

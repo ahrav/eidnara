@@ -82,7 +82,7 @@ enum Reply {
 
 /// Every refusal the oracle reports. `kind` is the wire contract; `detail` is
 /// only ever the oracle's own values (paths, namespaces, digests, variant
-/// text), never request content, because a serde message can quote input.
+/// text), never request content; see `CassetteError::detail`.
 enum OracleError {
     NoOpenCassette,
     AlreadyOpen,
@@ -110,7 +110,7 @@ impl OracleError {
         match self {
             Self::UnsafePath(path) => path.display().to_string(),
             Self::Io(error) => error.kind().to_string(),
-            Self::Cassette(error) => error.to_string(),
+            Self::Cassette(error) => error.detail(),
             _ => String::new(),
         }
     }

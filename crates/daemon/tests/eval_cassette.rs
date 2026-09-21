@@ -500,3 +500,79 @@ fn every_cassette_marker_fires_across_the_scenarios() {
     }
     coverage.complete(SUITE).unwrap();
 }
+
+struct Fixed {
+    finish_reason: Option<FinishReason>,
+    terminal: BackendTerminal,
+}
+
+impl LlmExecutionBackend for Fixed {
+    fn execute(&self, _: BackendRequest, events: EventSink, _: CancellationToken) -> BackendFuture {
+        let finish_reason = self.finish_reason;
+        let terminal = self.terminal.clone();
+        Box::pin(async move {
+            events.emit(BackendEvent::AssistantText {
+                text: "fixed".to_string(),
+                finish_reason,
+            });
+            terminal
+        })
+    }
+
+    fn unavailable_reason(&self, _: Harness) -> Option<&'static str> {
+        None
+    }
+
+    fn context_capabilities(&self, _: Harness) -> ContextCapabilities {
+        ContextCapabilities::NONE
+    }
+}
+
+fn error_of(class: ErrorClass) -> BackendError {
+    BackendError {
+        class,
+        message: format!("{class:?}"),
+        retry_after_secs: Some(1),
+        provider_code: Some("code".to_string()),
+    }
+}
+
+#[test]
+fn every_host_finish_reason_error_class_and_terminal_round_trips() {
+    let reasons = [FinishReason::Completed, FinishReason::Length];
+    let classes = [
+        ErrorClass::Transient,
+        ErrorClass::Permanent,
+        ErrorClass::AuthRequired,
+        ErrorClass::ContextOverflow,
+    ];
+    let mut terminals: Vec<BackendTerminal> = reasons
+        .iter()
+        .map(|&finish_reason| BackendTerminal::Completed { finish_reason })
+        .collect();
+    for class in classes {
+        terminals.push(BackendTerminal::Failed(error_of(class)));
+        terminals.push(BackendTerminal::FailedUnresolved(error_of(class)));
+    }
+    let event_reasons = reasons.iter().copied().map(Some).chain([None]);
+    let fixtures: Vec<Fixed> = terminals
+        .into_iter()
+        .zip(event_reasons.cycle())
+        .map(|(terminal, finish_reason)| Fixed {
+            finish_reason,
+            terminal,
+        })
+        .collect();
+    let runtime = runtime();
+    for fixed in fixtures {
+        let label = format!("{:?} / {:?}", fixed.finish_reason, fixed.terminal);
+        let real: Arc<dyn LlmExecutionBackend> = Arc::new(fixed);
+        let recorder = CassetteBackend::recording(NAMESPACE, real);
+        let recording: Arc<dyn LlmExecutionBackend> = recorder.clone();
+        let recorded = runtime.block_on(run(&recording, request("hello")));
+        let replay: Arc<dyn LlmExecutionBackend> =
+            CassetteBackend::replaying(NAMESPACE, &recorder.file().unwrap()).unwrap();
+        let replayed = runtime.block_on(run(&replay, request("hello")));
+        assert_eq!(replayed, recorded, "{label}");
+    }
+}

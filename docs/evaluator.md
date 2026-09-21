@@ -802,8 +802,12 @@ it reaches the `eval-core` dev-dependency without a normal edge) serves
 `close`. Requests arrive as `{path, headers, body_text}`; Rust parses the body,
 so a malformed body is `MalformedBody` rather than a lookup of `{}`. Every
 digest is computed in Rust. Refusals are `{error: {kind, detail}}` where
-`kind` is the Rust error's wire name and `detail` carries only the oracle's own
-values (a path, a namespace, a digest), never request content. The path must
+`kind` is the Rust error's wire name and `detail` is `CassetteError::detail`:
+the oracle's own values (a path, a namespace, a digest, an entry index), never
+request content. A `Shape`, `MalformedBody`, `UnknownRequestField`,
+`TemperatureNotDecimal`, or `NotCanonical` refusal carries an empty `detail`,
+because its payload is a body field name, a temperature literal, a body
+number, or a serde message that can quote its input. The path must
 be absolute with no `..` component; a second `open` is `AlreadyOpen`; a line
 over 4 MiB is `LineTooLong`. `close` writes a recording write-then-rename
 through a freshly created owner-only `.json.tmp` sibling and writes nothing for
@@ -827,7 +831,11 @@ header's `declarations` carry what the real backend declared per harness
 answers all three trait methods from them, so `BackendDeclarations::new`
 latches the same capabilities from a cassette as from the real backend.
 `record_of` destructures `BackendRequest` exhaustively: a new field fails to
-compile until it is classified as covered or dropped.
+compile until it is classified as covered or dropped. The wire mirror's decode
+side is guarded the same way: `finish_reasons` and `error_classes` list every
+`FinishReason` and `ErrorClass` behind an exhaustive `match`, so a variant the
+host adds fails to compile rather than recording under its wire string and
+replaying as `cassette_refused`.
 
 MemoryReviewer sends through its own TLS sender, not the trait. `serve_keyed`
 on the test peer answers strictly from entries keyed by `ReviewerKey {body_digest,

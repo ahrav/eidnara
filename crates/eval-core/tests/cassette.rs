@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 
+use context_core::canonical_json::ContractError;
 use context_core::redaction::RedactionErrorKind;
 use eval_core::{
     BACKEND_COVERED_FIELDS, BackendRecord, Boundary, CASSETTE_GENERATOR_VERSION, CASSETTE_SCHEMA,
@@ -619,43 +620,108 @@ fn backend_records_cover_the_pinned_fields_with_exact_temperatures() {
     );
 }
 
+/// Stands in for request-derived content in an error payload.
+const CANARY: &str = "CANARY-request-content";
+
+fn request_shaped_errors() -> Vec<CassetteError> {
+    vec![
+        CassetteError::Shape(format!("invalid type: {CANARY}")),
+        CassetteError::MalformedBody,
+        CassetteError::UnknownRequestField(CANARY.to_string()),
+        CassetteError::TemperatureNotDecimal(CANARY.to_string()),
+        CassetteError::NotCanonical(ContractError::NotCanonical(format!(
+            "number {CANARY} is not a safe integer"
+        ))),
+    ]
+}
+
+/// Each error paired with the oracle-owned values its detail must show.
+fn oracle_owned_errors() -> Vec<(CassetteError, Vec<&'static str>)> {
+    vec![
+        (
+            CassetteError::SchemaMismatch {
+                found: "eval-cassette/v9".to_string(),
+            },
+            vec!["eval-cassette/v9"],
+        ),
+        (
+            CassetteError::GeneratorVersionMismatch {
+                found: "eval-cassette-ts-v1".to_string(),
+            },
+            vec!["eval-cassette-ts-v1"],
+        ),
+        (
+            CassetteError::CoveredFieldsMismatch {
+                found: "eval-cassette-covered/v0".to_string(),
+            },
+            vec!["eval-cassette-covered/v0"],
+        ),
+        (
+            CassetteError::NamespaceMismatch {
+                recorded: NAMESPACE.to_string(),
+                expected: OTHER_NAMESPACE.to_string(),
+            },
+            vec![NAMESPACE, OTHER_NAMESPACE],
+        ),
+        (
+            CassetteError::WrongNamespace {
+                recorded: NAMESPACE.to_string(),
+                offered: OTHER_NAMESPACE.to_string(),
+            },
+            vec![NAMESPACE, OTHER_NAMESPACE],
+        ),
+        (
+            CassetteError::ProvenanceMismatch {
+                recorded: "aa".repeat(32),
+                computed: FIXTURE_REQUEST_DIGEST.to_string(),
+            },
+            vec![FIXTURE_REQUEST_DIGEST],
+        ),
+        (CassetteError::EntryDigestMismatch { index: 7 }, vec!["7"]),
+        (
+            CassetteError::RedactionRefused(Location::Response, RedactionErrorKind::InputLimit),
+            vec!["Response", "InputLimit"],
+        ),
+        (
+            CassetteError::ScannerUnavailable(RedactionErrorKind::Construction),
+            vec!["Construction"],
+        ),
+        (CassetteError::RecordOnReplay, vec![]),
+        (CassetteError::LookupOnRecord, vec![]),
+    ]
+}
+
 #[test]
 fn every_error_names_its_wire_kind() {
-    let kinds: BTreeSet<&str> = [
-        CassetteError::SchemaMismatch {
-            found: String::new(),
-        },
-        CassetteError::GeneratorVersionMismatch {
-            found: String::new(),
-        },
-        CassetteError::CoveredFieldsMismatch {
-            found: String::new(),
-        },
-        CassetteError::NamespaceMismatch {
-            recorded: String::new(),
-            expected: String::new(),
-        },
-        CassetteError::WrongNamespace {
-            recorded: String::new(),
-            offered: String::new(),
-        },
-        CassetteError::ProvenanceMismatch {
-            recorded: String::new(),
-            computed: String::new(),
-        },
-        CassetteError::EntryDigestMismatch { index: 0 },
-        CassetteError::Shape(String::new()),
-        CassetteError::MalformedBody,
-        CassetteError::UnknownRequestField(String::new()),
-        CassetteError::TemperatureNotDecimal(String::new()),
-        CassetteError::RedactionRefused(Location::Request, RedactionErrorKind::SecretDetected),
-        CassetteError::ScannerUnavailable(RedactionErrorKind::Construction),
-        CassetteError::RecordOnReplay,
-        CassetteError::LookupOnRecord,
-    ]
-    .iter()
-    .map(CassetteError::kind)
-    .collect();
-    assert_eq!(kinds.len(), 15, "kinds are distinct");
+    let kinds: BTreeSet<&str> = request_shaped_errors()
+        .iter()
+        .chain(oracle_owned_errors().iter().map(|(error, _)| error))
+        .map(CassetteError::kind)
+        .collect();
+    assert_eq!(kinds.len(), 16, "kinds are distinct");
     assert!(kinds.contains("RedactionRefused"));
+    assert!(kinds.contains("NotCanonical"));
+}
+
+#[test]
+fn no_wire_detail_carries_request_content() {
+    for error in request_shaped_errors() {
+        assert_eq!(error.detail(), "", "{}: detail must be empty", error.kind());
+        assert!(
+            error.to_string().contains(CANARY) || error == CassetteError::MalformedBody,
+            "{}: the fixture carries the canary through Display",
+            error.kind()
+        );
+    }
+    for (error, visible) in oracle_owned_errors() {
+        let detail = error.detail();
+        assert!(!detail.contains(CANARY), "{}: {detail}", error.kind());
+        for value in visible {
+            assert!(
+                detail.contains(value),
+                "{}: detail {detail:?} lacks {value:?}",
+                error.kind()
+            );
+        }
+    }
 }
