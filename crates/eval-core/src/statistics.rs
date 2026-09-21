@@ -1,9 +1,7 @@
 //! Paired history effects with signed, separate gates and honest uncertainty.
-//! Every quantity is an exact rational over oracle verdicts, checked against
-//! overflow and the canonical-JSON integer range; censored arms never count as
-//! passes, and every convention that resolves censoring makes a gate harder to
-//! pass, never easier. Inference the evidence cannot support is withheld or
-//! `Blocked`, never emitted as a number.
+//! Every quantity is an exact `Ratio` over oracle verdicts.
+//! Censored arms resolve to the verdict least favorable to the aged arm.
+//! Inference the evidence cannot support is withheld or `Blocked`.
 
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
@@ -21,6 +19,9 @@ const BOOTSTRAP_PROTOCOL: &str = "eval-cluster-bootstrap/v1";
 pub const ITEM_COUNT_THRESHOLD: u32 = 300;
 /// The fewest replicates whose `1/40` tails are distinct order statistics.
 pub const MIN_BOOTSTRAP_REPLICATES: u32 = 40;
+/// The most replicates a family may ask for; each costs one digest per
+/// cluster, so the bound keeps the resample work and its buffer finite.
+pub const MAX_BOOTSTRAP_REPLICATES: u32 = 10_000;
 /// The clustering level above which within-cluster correlation is treated as
 /// real, so the pilot picks the highest level whose ICC exceeds `1/20`.
 pub const ICC_THRESHOLD: Ratio = Ratio {
@@ -127,13 +128,6 @@ impl Ratio {
     pub fn checked_div(self, other: Self) -> Result<Self, StatisticsError> {
         let ((a, b), (c, d)) = (self.parts(), other.parts());
         Self::try_new(a * d, b * c)
-    }
-
-    pub fn abs(self) -> Self {
-        Self {
-            numerator: self.numerator.abs(),
-            denominator: self.denominator,
-        }
     }
 }
 
@@ -431,6 +425,11 @@ impl AnalysisFamily {
         if self.bootstrap_replicates < MIN_BOOTSTRAP_REPLICATES {
             return Err(StatisticsError::TooFewReplicates(self.bootstrap_replicates));
         }
+        if self.bootstrap_replicates > MAX_BOOTSTRAP_REPLICATES {
+            return Err(StatisticsError::TooManyReplicates(
+                self.bootstrap_replicates,
+            ));
+        }
         if self.endpoints.is_empty() || self.families.is_empty() {
             return Err(StatisticsError::EmptyFamilyField);
         }
@@ -536,11 +535,8 @@ pub struct PairOutcome {
     pub aged: ArmResult,
 }
 
-/// The pair table's counts. `b` is fresh-pass with aged not passing (a
-/// censored aged arm counts as a loss), `c` is fresh-fail with aged-pass (a
-/// censored fresh arm counts as neither), and `aged_pass` counts definite
-/// passes only, so censoring can only make every gate harder. An empty table
-/// has every rate `0`.
+/// Censored arms count against the aged arm: `b` includes censored fresh
+/// arms; `c` and `aged_pass` exclude censored aged arms.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PairCounts {
@@ -560,10 +556,19 @@ impl PairCounts {
             counts.fresh_censored += u64::from(matches!(pair.fresh, ArmResult::Censored(_)));
             counts.aged_censored += u64::from(matches!(pair.aged, ArmResult::Censored(_)));
             counts.aged_pass += u64::from(pair.aged == ArmResult::Pass);
-            counts.b += u64::from(pair.fresh == ArmResult::Pass && pair.aged != ArmResult::Pass);
+            counts.b += u64::from(pair.fresh != ArmResult::Fail && pair.aged != ArmResult::Pass);
             counts.c += u64::from(pair.fresh == ArmResult::Fail && pair.aged == ArmResult::Pass);
         }
         counts
+    }
+
+    fn absorb(&mut self, other: Self) {
+        self.n += other.n;
+        self.b += other.b;
+        self.c += other.c;
+        self.aged_pass += other.aged_pass;
+        self.fresh_censored += other.fresh_censored;
+        self.aged_censored += other.aged_censored;
     }
 
     fn over_n(&self, numerator: i64) -> Ratio {
@@ -685,6 +690,9 @@ pub fn cluster_bootstrap_interval(
     if replicates < MIN_BOOTSTRAP_REPLICATES {
         return Err(StatisticsError::TooFewReplicates(replicates));
     }
+    if replicates > MAX_BOOTSTRAP_REPLICATES {
+        return Err(StatisticsError::TooManyReplicates(replicates));
+    }
     let n_items = pairs.len() as u32;
     if n_items < threshold {
         return Ok(IntervalOutcome::Withheld {
@@ -692,14 +700,14 @@ pub fn cluster_bootstrap_interval(
         });
     }
     // Clusters are ordered by key, so the draw index names one cluster across runtimes.
-    let mut cells: BTreeMap<ClusterKey, (i128, i128)> = BTreeMap::new();
+    let mut cells: BTreeMap<ClusterKey, PairCounts> = BTreeMap::new();
     for pair in pairs {
-        let one = PairCounts::of(std::slice::from_ref(pair));
-        let cell = cells.entry(pair.cluster.at(unit)).or_default();
-        cell.0 += 1;
-        cell.1 += i128::from(one.b) - i128::from(one.c);
+        cells
+            .entry(pair.cluster.at(unit))
+            .or_default()
+            .absorb(PairCounts::of(std::slice::from_ref(pair)));
     }
-    let cells: Vec<(i128, i128)> = cells.into_values().collect();
+    let cells: Vec<PairCounts> = cells.into_values().collect();
     let n_clusters = cells.len() as u32;
     if n_clusters < 2 {
         return Ok(IntervalOutcome::Withheld {
@@ -708,13 +716,11 @@ pub fn cluster_bootstrap_interval(
     }
     let mut statistics = Vec::with_capacity(replicates as usize);
     for replicate in 0..replicates {
-        let (mut n, mut diff) = (0i128, 0i128);
+        let mut resample = PairCounts::default();
         for draw in 0..n_clusters {
-            let (items, difference) = cells[bootstrap_draw(seed, replicate, draw, n_clusters)];
-            n += items;
-            diff += difference;
+            resample.absorb(cells[bootstrap_draw(seed, replicate, draw, n_clusters)]);
         }
-        statistics.push(Ratio::try_new(diff, n)?);
+        statistics.push(resample.quality_loss());
     }
     statistics.sort();
     let tail = (replicates / 40) as usize;
@@ -831,6 +837,7 @@ pub enum StatisticsError {
     RateOutOfRange { field: &'static str },
     ItemCountThresholdBelowFloor(u32),
     TooFewReplicates(u32),
+    TooManyReplicates(u32),
     EmptyFamilyField,
     FamilyChangedAfterResults { recorded: String, found: String },
     FamilyNotRecorded,

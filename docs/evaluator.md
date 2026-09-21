@@ -915,30 +915,39 @@ affordable world count is refused. A family whose `effective_n_at_max` is
 below the maintainer's `required_n_for_margin` makes `analyze` return
 `Blocked {reason: insufficient_effective_n}` and no report object.
 
-**Three gates.** `PairCounts::of` counts `n`, `b` (fresh pass, aged not pass),
-`c` (fresh fail, aged pass), `aged_pass`, and the censored arms. Censoring is
-resolved so it can only make a gate harder: a censored arm never counts as a
-pass, a censored aged arm counts as a loss in `b`, and a censored fresh arm
-counts as neither pass nor fail. `Gates::of` takes the profile's parsed
+**Three gates.** `PairCounts::of` counts `n`, `b` (fresh not failing, aged not
+passing), `c` (fresh fail, aged pass), `aged_pass`, and the censored arms. Each
+censored arm resolves to the verdict least favorable to the aged arm: a
+censored aged arm is not a pass (so it lands in `b` beside a fresh pass and
+never in `aged_pass`), and a censored fresh arm is a pass (so it lands in `b`
+beside an aged non-pass, and beside an aged pass it is a concordant pair, never
+`c`). For every cell with a censored arm, `quality_loss` and `harm` are no
+smaller and the aged pass rate no larger than under any definite resolution of
+that arm; `censoring_never_makes_a_gate_easier_than_any_definite_resolution`
+enumerates the five cells. `Gates::of` takes the profile's parsed
 `ProfileRates` and evaluates `quality_loss = (b - c) / n` against the
 noninferiority margin (signed: a negative value means the aged arm did better
 and passes), `harm = b / n` against the harm bound, and the aged pass rate
 against the floor, as three independent verdicts whose bounds come from the
 profile and never from the counts; the report has no collapsed effect field.
 
-**World-clustered interval.** `cluster_bootstrap_interval` sums `b - c` and
-`n` per cluster (the pilot's unit), resamples clusters with replacement
-`replicates` times, computes `quality_loss` as the ratio of resampled sums,
+**World-clustered interval.** `cluster_bootstrap_interval` folds each cluster
+(the pilot's unit) into one `PairCounts`, resamples clusters with replacement
+`replicates` times, folds each resample into one `PairCounts` whose
+`quality_loss` is the replicate statistic (the same definition the gate uses),
 and reports the `1/40` and `39/40` order statistics as `lower` and `upper`,
 with `unit`, `method`, `n_clusters`, `n_items`, and `replicates`. Clusters
 are ordered by key, and the draw is the first 64 bits of the
 `eval-cluster-bootstrap/v1` digest over `{seed, replicate, draw}` reduced by
 the cluster count, so the interval is a pure function of the seed on either
-runtime. The function itself never goes below `ITEM_COUNT_THRESHOLD` items or
-`MIN_BOOTSTRAP_REPLICATES` replicates, whatever a caller asks. Below the
-threshold no interval of any method is emitted; the report carries
-`IntervalOutcome::Withheld {reason: item_count_below_threshold}` (or
-`fewer_than_two_clusters`) instead of a `computed` interval.
+runtime. The function itself never goes below `ITEM_COUNT_THRESHOLD` items,
+whatever a caller asks, and refuses a replicate count below
+`MIN_BOOTSTRAP_REPLICATES` (40) or above `MAX_BOOTSTRAP_REPLICATES` (10,000)
+as `TooFewReplicates` or `TooManyReplicates`; `AnalysisFamily::validate`
+applies the same bounds, so an oversized family is refused before any
+replicate runs. Below the threshold no interval of any method is emitted; the
+report carries `IntervalOutcome::Withheld {reason: item_count_below_threshold}`
+(or `fewer_than_two_clusters`) instead of a `computed` interval.
 
 **Report.** `analyze(frozen, family, pairs, arm_rates)` checks the freeze
 (`FrozenFamily::from_manifest` reads the manifest's recorded digest; a

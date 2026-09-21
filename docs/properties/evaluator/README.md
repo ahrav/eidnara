@@ -829,8 +829,9 @@ Statistics core (`crates/eval-core/tests/statistics.rs`):
   unchanged family; an edit to any of nine components (endpoints, families,
   exclusions, multiplicity, margin, floor, threshold, seed, pilot) is
   `FamilyChangedAfterResults`, from `check` and from `analyze`; a threshold
-  below 300, fewer than 40 replicates, an empty endpoint list, and an unknown
-  field refuse; a manifest without a recorded digest is `FamilyNotRecorded`.
+  below 300, fewer than 40 or more than 10,000 replicates, an empty endpoint
+  list, and an unknown field refuse; a manifest without a recorded digest is
+  `FamilyNotRecorded`.
 - `the_pilot_picks_the_highest_level_over_the_threshold_and_blocks_when_underpowered`
   (`mtr-world-clustered-intervals-after-icc-pilot`): a family effect selects
   the family unit; a flat pilot whose tasks agree within each world has world
@@ -845,13 +846,22 @@ Statistics core (`crates/eval-core/tests/statistics.rs`):
   noninferiority with `-1/10` while failing harm at `3/20`; `b = c = 4` passes
   noninferiority at zero while failing harm and the floor; `1/4` fails
   noninferiority; exact-margin and exact-floor statistics pass; every bound
-  equals the profile's rate; censored arms count as described above.
+  equals the profile's rate; a censored aged arm beside a fresh pass and a
+  censored fresh arm beside an aged fail or a censored aged arm each count in
+  `b`, and a censored fresh arm beside an aged pass counts in neither `b` nor
+  `c`.
+- `censoring_never_makes_a_gate_easier_than_any_definite_resolution`
+  (`mtr-three-gates-signed-history-effect`): for each of the five cells with a
+  censored arm, against a fixed background of concordant passes, `quality_loss`
+  and `harm` are no smaller and the aged pass rate is no larger than under
+  every definite (pass or fail) resolution of the censored arm.
 - `intervals_name_their_unit_and_counts_and_are_withheld_below_the_floor`:
   the interval names unit, method, cluster count, item count, and replicates
   with pinned bounds; 299 items withhold it as `item_count_below_threshold`
-  and a caller cannot lower the threshold or the replicate count; one cluster
-  withholds it as `fewer_than_two_clusters`; the same seed reproduces the same
-  bounds and another seed moves them.
+  and a caller cannot lower the threshold or the replicate count; a replicate
+  count past the cap is `TooManyReplicates` before any replicate runs; one
+  cluster withholds it as `fewer_than_two_clusters`; the same seed reproduces
+  the same bounds and another seed moves them.
 - `arm_miss_asymmetry_past_the_bound_blocks_with_no_gates_and_rates_are_retained`:
   a miss-rate gap of `2/25` against a `1/20` bound is `Blocked
   {arm_miss_asymmetry}`; zero or one arm is `TooFewArms`; within the bound,
