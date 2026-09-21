@@ -307,13 +307,31 @@ impl<S: Stage> Ledger<S> {
         }
     }
 
+    /// The stage where `stale` first appeared, or `Indeterminate` when that
+    /// sighting is right behind an unjoinable stage it could have entered
+    /// through; a filter whose output lacks it closes the opacity before it.
     fn stale_ingress(&self, stale: &str, through: S) -> Result<Option<S>, Indeterminate> {
-        let entered = S::ALL
+        let mut opaque = false;
+        let mut entered = None;
+        for stage in S::ALL
             .iter()
             .copied()
             .take_while(|stage| stage.ordinal() <= through.ordinal())
-            .find(|stage| self.presence(*stage, stale) == Some(Presence::Reached));
+        {
+            match self.presence(stage, stale) {
+                None => opaque = true,
+                Some(Presence::Reached) => {
+                    entered = Some(stage);
+                    break;
+                }
+                Some(Presence::ReachedEvidenceAbsent) if stage.kind() == StageKind::Filter => {
+                    opaque = false;
+                }
+                Some(_) => {}
+            }
+        }
         match self.presence(through, stale) {
+            Some(Presence::Reached) if opaque => Err(Indeterminate),
             Some(Presence::Reached) => Ok(entered),
             None if entered.is_some() => Err(Indeterminate),
             _ => Ok(None),
@@ -339,7 +357,9 @@ impl<S: Stage> Ledger<S> {
     /// Judges the observations against `required` and `stale` with `through`
     /// as the terminal stage the run was meant to reach: the first loss of a
     /// required occurrence, the first ingress of a stale one delivered at
-    /// `through`, or, at equal ordinals, the loss.
+    /// `through`, or, at equal ordinals, the loss. `Clean` needs `through`'s
+    /// own output, so an empty required list certifies nothing about a run
+    /// that never reached it.
     pub fn verdict(
         &self,
         required: &[Required<S>],
@@ -357,7 +377,10 @@ impl<S: Stage> Ledger<S> {
             }
             (Ok(Some(loss)), Ok(_)) => StageVerdict::FirstLoss(loss),
             (Ok(None), Ok(Some(ingress))) => StageVerdict::StaleIngress(ingress),
-            (Ok(None), Ok(None)) => StageVerdict::Clean,
+            (Ok(None), Ok(None)) => match self.output(through) {
+                Some(Evidence::Candidates(_)) => StageVerdict::Clean,
+                _ => StageVerdict::Indeterminate,
+            },
             (Err(Indeterminate), _) | (_, Err(Indeterminate)) => StageVerdict::Indeterminate,
         }
     }

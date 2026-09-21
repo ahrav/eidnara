@@ -66,7 +66,7 @@ impl LaneView {
     pub fn of(admitted: &Admitted<'_>) -> Self {
         let rankings = Lane::ORDER.map(|lane| {
             admitted
-                .lanes
+                .lanes()
                 .lane(lane)
                 .map(|ranking| {
                     ranking
@@ -125,8 +125,13 @@ fn stage_of(lane: Lane) -> ChainStage {
     }
 }
 
-fn candidates(stage: ChainStage, ids: impl IntoIterator<Item = String>) -> Observation<ChainStage> {
-    Observation::new(stage, 0, None, ids.into_iter().collect()).unwrap()
+fn candidates(
+    stage: ChainStage,
+    incarnation: Option<u64>,
+    ids: impl IntoIterator<Item = String>,
+) -> Observation<ChainStage> {
+    Observation::new(stage, 0, incarnation, ids.into_iter().collect())
+        .unwrap_or_else(|_| Observation::unjoinable(stage, 0, incarnation))
 }
 
 /// Records the three lane stages and the eligibility stage. The exact stage is
@@ -144,12 +149,15 @@ pub fn observe_lanes(ledger: &mut ChainLedger, view: &LaneView, incarnations: &m
             }
             Lane::Exact => candidates(
                 stage,
+                None,
                 view.exact.rows.iter().map(|row| row.occurrence_id.clone()),
             ),
             Lane::Lexical | Lane::Dense if view.unavailable(lane) => {
                 Observation::unjoinable(stage, 0, None)
             }
-            Lane::Lexical | Lane::Dense => candidates(stage, view.ranking(lane).iter().cloned()),
+            Lane::Lexical | Lane::Dense => {
+                candidates(stage, None, view.ranking(lane).iter().cloned())
+            }
         };
         ledger.observe(observation);
     }
@@ -173,7 +181,7 @@ pub fn observe_lanes(ledger: &mut ChainLedger, view: &LaneView, incarnations: &m
         .collect();
     eligible.extend(view.ranking(Lane::Lexical).iter().cloned());
     eligible.extend(view.ranking(Lane::Dense).iter().cloned());
-    ledger.observe(Observation::new(ChainStage::Eligibility, 0, incarnation, eligible).unwrap());
+    ledger.observe(candidates(ChainStage::Eligibility, incarnation, eligible));
 }
 
 /// Records fusion (every entry revalidation judged) and selection (the
@@ -193,14 +201,14 @@ pub fn observe_outcome(
         .flat_map(|report| report.occurrences.iter())
         .map(|judged| judged.occurrence_id.clone())
         .collect();
-    ledger.observe(Observation::new(ChainStage::Fusion, 0, incarnation, fused).unwrap());
+    ledger.observe(candidates(ChainStage::Fusion, incarnation, fused));
     let selected: BTreeSet<String> = outcome.body["entries"]
         .as_array()
         .unwrap()
         .iter()
         .map(|entry| entry["occurrence_id"].as_str().unwrap().to_string())
         .collect();
-    ledger.observe(Observation::new(ChainStage::Selection, 0, incarnation, selected).unwrap());
+    ledger.observe(candidates(ChainStage::Selection, incarnation, selected));
 }
 
 /// A refusal after admission. The union bound is fusion ending the request
@@ -209,9 +217,9 @@ pub fn observe_outcome(
 /// cancellation) discards what fusion produced, so fusion is unjoinable.
 pub fn observe_refusal(ledger: &mut ChainLedger, failure: &QueryFailure) {
     let observation = match failure {
-        QueryFailure::Unavailable("fused_union") => candidates(ChainStage::Fusion, []),
+        QueryFailure::Unavailable("fused_union") => candidates(ChainStage::Fusion, None, []),
         QueryFailure::Unavailable("response_bytes" | "response_measure") => {
-            candidates(ChainStage::Selection, [])
+            candidates(ChainStage::Selection, None, [])
         }
         QueryFailure::Unavailable(_)
         | QueryFailure::Terminal(_)

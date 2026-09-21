@@ -35,7 +35,7 @@ fn every_evaluator_seam_is_reachable_under_all_features() {
     let _ = |admitted: &Admitted<'_>| {
         (
             admitted.statuses.len(),
-            admitted.lanes.rankings().count(),
+            admitted.lanes().rankings().count(),
             admitted.exact.rows.len(),
         )
     };

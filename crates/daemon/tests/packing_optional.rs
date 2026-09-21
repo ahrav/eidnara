@@ -534,6 +534,17 @@ fn optional_faults_are_excluded_with_a_reason_and_never_refuse_the_preparation()
         2,
         "the duplicate is read and loaded once"
     );
+    let read: Vec<_> = trace.read_occurrences().collect();
+    assert!(
+        !read.contains(&unknown.id()),
+        "a missing row was never read: {read:?}"
+    );
+    for present in [&live, &excluded, &moved, &tombstoned] {
+        assert!(
+            read.contains(&present.id()),
+            "a row excluded after its read still counts as read: {read:?}"
+        );
+    }
 }
 
 #[test]

@@ -15,8 +15,8 @@ use daemon::query_route::{
     QueryOutcome, QueryRouteLimits, admit_lanes, execute, select,
 };
 use eval_core::{
-    ChainStage, Completed, Coverage, CoverageError, LedgerError, MARKERS, Presence, Required,
-    StageVerdict,
+    ChainStage, Completed, Coverage, CoverageError, LedgerError, MARKERS,
+    MAX_CANDIDATES_PER_STAGE_OBSERVATION, Presence, Required, StageVerdict,
 };
 use kernel::ArtifactDestination;
 use kernel::applicability::EvalBudget;
@@ -880,6 +880,30 @@ fn run(name: &str) {
         coverage.fired().contains(marker.name),
         "{name} records its marker"
     );
+}
+
+#[test]
+fn over_bound_stage_returns_are_unjoinable_instead_of_panicking() {
+    block_on(async {
+        let fixture = Fixture::build().await;
+        let run = plain(&fixture, &limits(), QUERY);
+        let mut view = view(&run).clone();
+        let lexical = Lane::ORDER
+            .iter()
+            .position(|lane| *lane == Lane::Lexical)
+            .unwrap();
+        view.rankings[lexical] = (0..=MAX_CANDIDATES_PER_STAGE_OBSERVATION)
+            .map(|index| format!("over-bound-{index}"))
+            .collect();
+        let mut ledger = ChainLedger::default();
+        observe_lanes(&mut ledger, &view, &mut Incarnations::default());
+        assert_eq!(ledger.presence(ChainStage::Lexical, "over-bound-0"), None);
+        assert_eq!(
+            ledger.presence(ChainStage::Eligibility, "over-bound-0"),
+            None
+        );
+        fixture.daemon.shutdown().await;
+    });
 }
 
 #[test]

@@ -218,6 +218,34 @@ fn a_chain_that_never_reaches_the_terminal_stage_is_indeterminate_not_clean() {
         StageVerdict::Clean,
         "the same observations are clean through the stage they did reach"
     );
+    let nothing_required: Vec<Required<ChainStage>> = Vec::new();
+    assert_eq!(
+        ledger.verdict(&nothing_required, &BTreeSet::new(), THROUGH),
+        StageVerdict::Indeterminate,
+        "an unreached terminal is not clean when nothing is required either"
+    );
+    assert_eq!(
+        Ledger::<ChainStage>::default().verdict(&nothing_required, &BTreeSet::new(), THROUGH),
+        StageVerdict::Indeterminate,
+        "an empty ledger certifies nothing"
+    );
+    assert_eq!(
+        ledger.verdict(&nothing_required, &ids(&[STALE]), THROUGH),
+        StageVerdict::Indeterminate,
+        "a stale occurrence cannot be cleared through a terminal that was not reached"
+    );
+    let mut opaque_terminal = Ledger::default();
+    for observation in clean_run() {
+        opaque_terminal.observe(match observation.stage() {
+            ChainStage::Packing => Observation::unjoinable(ChainStage::Packing, 0, Some(1)),
+            _ => observation,
+        });
+    }
+    assert_eq!(
+        opaque_terminal.verdict(&nothing_required, &BTreeSet::new(), THROUGH),
+        StageVerdict::Indeterminate,
+        "an unjoinable terminal certifies nothing"
+    );
 }
 
 /// The shell may leave a filter unobserved when a refusal discards its output
@@ -481,6 +509,37 @@ fn a_delivered_stale_occurrence_names_the_stage_it_entered() {
         judge_stale(&ledger(opaque_terminal)),
         StageVerdict::Indeterminate,
         "a stale occurrence seen before an unjoinable terminal stage cannot be cleared"
+    );
+
+    let mut behind_opaque = clean_run();
+    behind_opaque[3] = Observation::unjoinable(ChainStage::Eligibility, 0, Some(1));
+    behind_opaque[4] = observe(ChainStage::Fusion, &[RULE, OTHER, STALE]);
+    behind_opaque[5] = observe(ChainStage::Selection, &[RULE, OTHER, STALE]);
+    behind_opaque[6] = observe(ChainStage::Packing, &[RULE, OTHER, STALE]);
+    assert_eq!(
+        judge_stale(&ledger(behind_opaque)),
+        StageVerdict::Indeterminate,
+        "a first sighting right behind an unjoinable stage could have entered there"
+    );
+
+    let mut absent_after_opaque = clean_run();
+    absent_after_opaque[0] = Observation::unjoinable(ChainStage::Exact, 0, Some(1));
+    absent_after_opaque[4] = observe(ChainStage::Fusion, &[RULE, OTHER, STALE]);
+    absent_after_opaque[5] = observe(ChainStage::Selection, &[RULE, OTHER, STALE]);
+    absent_after_opaque[6] = observe(ChainStage::Packing, &[RULE, OTHER, STALE]);
+    assert_eq!(
+        judge_stale(&ledger(absent_after_opaque)),
+        StageVerdict::StaleIngress(ChainStage::Fusion),
+        "a filter's output without the occurrence closes the opacity before it"
+    );
+
+    let mut dropped_behind_opaque = clean_run();
+    dropped_behind_opaque[3] = Observation::unjoinable(ChainStage::Eligibility, 0, Some(1));
+    dropped_behind_opaque[4] = observe(ChainStage::Fusion, &[RULE, OTHER, STALE]);
+    assert_eq!(
+        judge_stale(&ledger(dropped_behind_opaque)),
+        StageVerdict::Clean,
+        "stale evidence removed before the terminal stage is clean wherever it entered"
     );
 }
 

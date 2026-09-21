@@ -375,3 +375,30 @@ fn a_batch_never_mixes_snapshots_while_a_writer_flips_candidates_and_scopes() {
         "readers observed every legal state of a flipping candidate: {seen:?}"
     );
 }
+
+#[test]
+fn racing_test_holders_open_exactly_one_classification_window() {
+    let fixture = fixture();
+    let store = &fixture.store;
+    // Two holders that both pass the parity check would leave the generation
+    // even while both guards live, so a snapshot taken then would look reusable.
+    for _ in 0..2_000 {
+        let barrier = std::sync::Barrier::new(2);
+        let open = || {
+            barrier.wait();
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                store.hold_classification_change_for_test()
+            }))
+            .ok()
+        };
+        let (first, second) = thread::scope(|scope| {
+            let first = scope.spawn(open);
+            let second = scope.spawn(open);
+            (first.join().unwrap(), second.join().unwrap())
+        });
+        assert!(
+            first.is_some() ^ second.is_some(),
+            "exactly one racing holder opens the window"
+        );
+    }
+}

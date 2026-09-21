@@ -493,16 +493,18 @@ impl KernelStore {
     /// every eligibility snapshot taken meanwhile has no reusable generation.
     /// Production openers serialize through the writer lock; this hook does
     /// not, so it refuses to open while another window is live, where a second
-    /// increment would read as a closed window.
+    /// increment would read as a closed window. The check and the increment
+    /// are one atomic update, so two racing holders cannot both pass.
     #[cfg(feature = "test-support")]
     pub fn hold_classification_change_for_test(&self) -> ClassificationChange<'_> {
-        assert!(
-            self.classification_generation
-                .load(Ordering::SeqCst)
-                .is_multiple_of(2),
-            "a classification window is already open"
-        );
-        self.begin_classification_change()
+        self.classification_generation
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |generation| {
+                generation.is_multiple_of(2).then_some(generation + 1)
+            })
+            .expect("a classification window is already open");
+        ClassificationChange {
+            generation: &self.classification_generation,
+        }
     }
 
     /// Polls `candidates` from `start` until one is free or `limit` says stop,

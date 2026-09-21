@@ -498,8 +498,10 @@ number (the highest sequence is the stage's output), the shell's token for the
 carries none), and `Evidence`: the `Candidates` the stage kept, bounded by
 `MAX_CANDIDATES_PER_STAGE_OBSERVATION` (1024, the kernel batch, pinned equal
 to `kernel::MAX_ELIGIBILITY_CANDIDATES` by the seam probe) and refused above
-it, or `Unjoinable` when the return describes no reusable state. The fields are
-private, so the bound holds for every observation a ledger sees;
+it, or `Unjoinable` when the return describes no reusable state. The shell records an over-bound stage return as `Unjoinable` instead of
+aborting the evaluator; its verdict is therefore `Indeterminate` unless later
+filter evidence proves the occurrence passed it. The fields are private, so
+the bound holds for every observation a ledger sees;
 `Observation::at` relabels one for the self-test's misattribution control. The
 ledger keys observations by (ordinal, sequence), so the fold is the same in
 every arrival order; an identical repeat is a no-op and a different observation
@@ -518,12 +520,15 @@ path whose output lacks the occurrence; `StaleIngress(stage)` when a stale
 occurrence is present at `through`, naming the stage where it first appeared
 (stale evidence the chain removed before `through` is `Clean`); at equal
 ordinals the loss is named; `Clean` only when every required occurrence is
-present at `through`. A filter passes only what it received, so presence at a
-later filter proves presence at an unjoinable one before it; an absence right
-behind an unjoinable stage, an unjoinable stage with no later sighting, an
-entry or terminal that was never reached, a contradiction, and two incarnation
-tokens in one fold are all `Indeterminate`. A stage that ends the request
-reports an empty output and is a loss.
+present at `through` and `through` itself reported candidates, so an empty
+required list certifies nothing about a run that never reached it. A filter
+passes only what it received, so presence at a later filter proves presence at
+an unjoinable one before it, and a filter's output without a stale occurrence
+proves it did not enter earlier; an absence right behind an unjoinable stage,
+a stale sighting right behind one, an unjoinable stage with no later sighting,
+an entry or terminal that was never reached, a contradiction, and two
+incarnation tokens in one fold are all `Indeterminate`. A stage that ends the
+request reports an empty output and is a loss.
 
 `Completed` pairs a verdict with the store's persisted
 `database_incarnation_id`; `Completed::agrees_with` compares two folds'
@@ -536,14 +541,16 @@ The route returns richer values and nothing else changes: `execute` is
 `admit_lanes` then `select`, and the handler and the evaluator share that one
 path. `Admitted` carries the lane statuses, the `DeclaredLanes` rankings, an
 `ExactReport`, and the request context the lanes were judged under, so
-`select` cannot be handed another. `ExactReport` is the exact lane's live rows
+`select` cannot be handed another; the rankings are read through
+`Admitted::lanes`, never replaced. `ExactReport` is the exact lane's live rows
 before admission plus an `ExactAdmission`: `NotJudged` (the lane ended before
 admission or read nothing), `Judged` (every row under one reusable snapshot),
 `Moved` (a batch's state differed from the first batch's or described no
 reusable window; the report covers that batch alone), or `KernelError`.
 `QueryOutcome` carries the same `ExactReport` and the revalidation
 `EligibilityReport` over every fused entry. `PackingTrace::read_occurrences`
-names the occurrences either packer phase read.
+names the occurrences either packer phase read a row for; an optional request
+whose row is missing is excluded, not read.
 `KernelStore::hold_classification_change_for_test` (feature `test-support`)
 holds the classification window open so every eligibility snapshot taken
 meanwhile has no reusable generation; it refuses to open a second window,

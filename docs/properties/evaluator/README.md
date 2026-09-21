@@ -494,7 +494,9 @@ Ledger join (`crates/eval-core/tests/ledger.rs`):
   rule from one stage at a time under three entries and expects a loss only on
   the entry's path; `the_earliest_loss_wins_and_later_absences_are_not_a_second_verdict`,
   `an_unreached_entry_is_indeterminate_not_a_loss_downstream`,
-  `a_chain_that_never_reaches_the_terminal_stage_is_indeterminate_not_clean`,
+  `a_chain_that_never_reaches_the_terminal_stage_is_indeterminate_not_clean`
+  (also with nothing required: an unreached or unjoinable terminal, or an
+  empty ledger, is never `Clean`),
   `an_unobserved_filter_between_observed_stages_is_transparent`, and
   `a_stage_that_ends_the_request_reports_an_empty_output` fix the edges.
 - `an_unjoinable_stage_is_never_evidence_absence`: a rule present after an
@@ -514,9 +516,14 @@ Ledger join (`crates/eval-core/tests/ledger.rs`):
 - `a_delivered_stale_occurrence_names_the_stage_it_entered`: `StaleIngress`
   names the ingress stage only when the stale occurrence reaches the terminal
   stage; loss and ingress order by ordinal with the loss winning ties; a stale
-  occurrence seen before an unjoinable terminal is `Indeterminate`.
+  occurrence seen before an unjoinable terminal, or first seen right behind an
+  unjoinable stage, is `Indeterminate`, while a filter's output without it
+  closes that opacity and its removal before the terminal is `Clean`.
 - `a_stage_observation_over_the_kernel_batch_is_refused` pins
-  `MAX_CANDIDATES_PER_STAGE_OBSERVATION` at 1024 with a refusal at 1025.
+  `MAX_CANDIDATES_PER_STAGE_OBSERVATION` at 1024 with a refusal at 1025;
+  `over_bound_stage_returns_are_unjoinable_instead_of_panicking` pins the
+  daemon shell's mapping of that refusal to `Unjoinable` at the source and
+  combined eligibility stage.
 - `completed_folds_compare_only_within_one_persisted_store`: `agrees_with`
   answers within one `database_incarnation_id`, refuses `CrossStore`, and the
   fold round-trips through JSON.

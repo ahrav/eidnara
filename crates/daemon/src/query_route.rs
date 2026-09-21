@@ -990,15 +990,22 @@ struct Scanned {
 
 /// The lanes' admitted rankings before fusion assigns positions, with the
 /// request context they were judged under so [`select`] cannot be given another.
+/// The rankings are read-only: `terms` covers exactly their hits.
 pub struct Admitted<'a> {
     pub statuses: [LaneStatus; Lane::ORDER.len()],
-    pub lanes: DeclaredLanes,
+    lanes: DeclaredLanes,
     pub exact: ExactReport,
     terms: BTreeMap<OccurrenceId, OccurrenceCandidate>,
     kernel: &'a KernelStore,
     authority: Authority<'a>,
     limits: &'a QueryRouteLimits,
     budget: &'a SharedBudget,
+}
+
+impl Admitted<'_> {
+    pub fn lanes(&self) -> &DeclaredLanes {
+        &self.lanes
+    }
 }
 
 /// [`admit_lanes`] then [`select`]; the handler and the evaluator share this one path.
