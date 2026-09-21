@@ -7,8 +7,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::statistics::{ArmResult, CensorReason, ClusteringUnit, Ratio, StatisticsError, gcd};
 
-/// The smallest sample a p99 may be quoted from: the third-largest of 299
-/// observations sits at the 99th percentile rank.
+/// The smallest sample a p99 may be quoted from, the floor pre-registered in
+/// the plan (#758): with 299 runs the top percent holds about three
+/// observations, so the quoted rank has two above it rather than one.
 pub const P99_MIN_RUNS: usize = 299;
 
 /// One measured attempt. A censored attempt's `duration_ms` is its censoring

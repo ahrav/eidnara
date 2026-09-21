@@ -1053,7 +1053,8 @@ at which the run was cut off), and its true duration is at least that.
 **Latency.** `LatencySummary::of` sorts attempts by duration with a censored
 attempt after a completed one of equal duration, takes the nearest rank
 `ceil(p n / 100)` for p50 and p95, and adds p99 only from `P99_MIN_RUNS` (299)
-attempts, because the third-largest of 299 sits at the 99th percentile rank.
+attempts, the floor the plan pre-registers (#758): with 299 runs the top percent
+holds about three observations, so the quoted rank has two above it.
 Every `Percentile` names `p`, `value`, `n`, `censored`, and `bound`. Raising a
 censored attempt's true value can only raise an order statistic, and with every
 censored attempt pushed to infinity the order statistic is the rank-th completed
