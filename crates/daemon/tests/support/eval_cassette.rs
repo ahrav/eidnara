@@ -468,6 +468,11 @@ impl CassetteBackend {
                     );
                 }
             }
+            if cancel.is_cancelled() {
+                // Cancelled during emission without closing the sink: the
+                // run's outcome is the cancellation, not the recorded terminal.
+                return Self::refused("cassette_refused", "run cancelled during replay");
+            }
             match BackendTerminal::try_from(exchange.terminal) {
                 Ok(terminal) => terminal,
                 Err(unknown) => Self::refused("cassette_refused", unknown),

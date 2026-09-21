@@ -793,8 +793,8 @@ Daemon shell (`crates/daemon/tests/eval_cassette.rs`, `--all-features`):
   a run whose sink answers `Closed` each leave the recorder refusing
   `IncompleteExchange`, the last two with a `cassette_refused` terminal; a
   replay under a cancelled token is `cassette_refused` and consumes nothing,
-  and a replay whose sink closes mid-exchange is `cassette_refused` with the
-  served entry still consumed.
+  and a replay whose sink closes mid-exchange, or whose token is cancelled
+  during emission, is `cassette_refused` with the served entry still consumed.
 - `every_host_finish_reason_error_class_and_terminal_round_trips`: both
   `FinishReason` values, all four `ErrorClass` values under `Failed` and
   `FailedUnresolved`, and an absent event finish reason each record and replay

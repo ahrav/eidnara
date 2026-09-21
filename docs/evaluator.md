@@ -853,7 +853,8 @@ while an exchange is still in flight, and succeeds once it has been recorded;
 the in-flight count and the cassette live under one lock, so publication
 never pairs a count and a cassette state from different moments. On replay, a
 run whose token is already cancelled consumes no entry: the run recorded only
-its cancellation. A replay whose sink answers `Closed` mid-exchange returns a
+its cancellation. A replay whose sink answers `Closed` mid-exchange, or whose
+token is cancelled by the time its events have been emitted, returns a
 `cassette_refused` terminal instead of the recorded one, which the run never
 observed; the served entry stays consumed, because its bytes left the
 cassette. The cancellation check is the wrapper's snapshot at the
