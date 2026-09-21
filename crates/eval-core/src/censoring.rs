@@ -5,10 +5,11 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::statistics::{ArmResult, CensorReason, ClusteringUnit, Ratio, StatisticsError};
+use crate::statistics::{ArmResult, CensorReason, ClusteringUnit, Ratio, StatisticsError, gcd};
 
-/// The smallest sample a p99 may be quoted from: the third-largest of 299
-/// observations sits at the 99th percentile rank.
+/// The smallest sample a p99 may be quoted from, the floor pre-registered in
+/// the plan (#758): with 299 runs the top percent holds about three
+/// observations, so the quoted rank has two above it rather than one.
 pub const P99_MIN_RUNS: usize = 299;
 
 /// One measured attempt. A censored attempt's `duration_ms` is its censoring
@@ -42,8 +43,9 @@ pub struct Percentile {
 
 /// Censored attempts stay in the denominator, ordered by their censoring point
 /// and after a completed attempt of equal duration. Raising a censored value
-/// can only raise an order statistic, so a percentile is a point only when no
-/// censored attempt sorts at or below its rank; otherwise it is a lower bound.
+/// can only raise an order statistic, so a percentile is a point only when at
+/// least `rank` completed attempts sit at or below the picked value; otherwise
+/// it is a lower bound.
 /// `p99` needs [`P99_MIN_RUNS`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -62,15 +64,23 @@ impl LatencySummary {
         let percentile = |p: u8| {
             // Nearest rank: the smallest rank r with r/n >= p/100.
             let rank = (usize::from(p) * n).div_ceil(100);
+            let value = sorted[rank - 1].duration_ms;
+            // With every censored attempt pushed to infinity the order statistic is the
+            // rank-th completed duration, which is still `value` exactly when at least
+            // `rank` completions sit at or below it.
+            let settled = sorted
+                .iter()
+                .filter(|a| a.censored.is_none() && a.duration_ms <= value)
+                .count();
             Percentile {
                 p,
-                value: sorted[rank - 1].duration_ms,
+                value,
                 n: n as u32,
                 censored: censored as u32,
-                bound: if sorted[..rank].iter().any(|a| a.censored.is_some()) {
-                    PercentileBound::Lower
-                } else {
+                bound: if settled >= rank {
                     PercentileBound::Point
+                } else {
+                    PercentileBound::Lower
                 },
             }
         };
@@ -100,13 +110,13 @@ pub struct Counter {
     pub unit: ClusteringUnit,
 }
 
-/// A gate over a counter reads `upper_bound_95` where only a bound exists;
-/// `Observed` is the point estimate over `n` trials at `unit`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "evidence_kind", deny_unknown_fields)]
 pub enum FailureRate {
     Observed {
         rate: Ratio,
+        upper_bound_95: Ratio,
+        bound_method: BoundMethod,
         n: u64,
         unit: ClusteringUnit,
     },
@@ -120,10 +130,24 @@ pub enum FailureRate {
     },
 }
 
+impl FailureRate {
+    /// The one number a gate compares against its threshold.
+    pub fn upper_bound_95(&self) -> Ratio {
+        match self {
+            Self::Observed { upper_bound_95, .. } | Self::Bound { upper_bound_95, .. } => {
+                *upper_bound_95
+            }
+        }
+    }
+}
+
+/// `RuleOfThree` uses `3/n` when `failures` is zero; `PoissonEnvelope` uses
+/// `(2 * failures + 3) / n` otherwise.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BoundMethod {
     RuleOfThree,
+    PoissonEnvelope,
 }
 
 impl Counter {
@@ -134,16 +158,21 @@ impl Counter {
                 failures: self.failures,
             });
         }
+        let n = i128::from(self.n);
+        let failures = i128::from(self.failures);
+        let upper_bound_95 = Ratio::try_new(2 * failures + 3, n)?.min(Ratio::ONE);
         Ok(if self.failures == 0 {
             FailureRate::Bound {
-                upper_bound_95: Ratio::try_new(3, i128::from(self.n))?.min(Ratio::ONE),
+                upper_bound_95,
                 bound_method: BoundMethod::RuleOfThree,
                 n: self.n,
                 unit: self.unit,
             }
         } else {
             FailureRate::Observed {
-                rate: Ratio::try_new(i128::from(self.failures), i128::from(self.n))?,
+                rate: Ratio::try_new(failures, n)?,
+                upper_bound_95,
+                bound_method: BoundMethod::PoissonEnvelope,
                 n: self.n,
                 unit: self.unit,
             }
@@ -182,9 +211,15 @@ fn choose(n: u64, k: u64) -> Result<u128, StatisticsError> {
     if k > n {
         return Ok(0);
     }
+    // C(n, k) = C(n, n - k); the shorter walk stays clear of the central coefficients.
+    let k = k.min(n - k);
+    // C(n, i + 1) = C(n, i) * (n - i) / (i + 1). Dividing before multiplying keeps every
+    // intermediate at most the coefficient it produces: after g = gcd(C(n, i), i + 1) leaves
+    // the accumulator, the rest of i + 1 is coprime to it and so divides n - i.
     (0..k).try_fold(1u128, |acc, i| {
-        acc.checked_mul(u128::from(n - i))
-            .map(|product| product / u128::from(i + 1))
+        let g = gcd(acc, u128::from(i + 1));
+        (acc / g)
+            .checked_mul(u128::from(n - i) / (u128::from(i + 1) / g))
             .ok_or(StatisticsError::RationalOverflow)
     })
 }
@@ -197,6 +232,10 @@ fn pass_power_k(passes: u64, n: u64, k: u64) -> Result<Ratio, StatisticsError> {
     if denominator == 0 {
         return Ok(Ratio::ONE);
     }
+    // Reduce while still in u128: the coefficients may sit above i128::MAX when the ratio
+    // itself is small.
+    let divisor = gcd(numerator, denominator);
+    let (numerator, denominator) = (numerator / divisor, denominator / divisor);
     let fits = |value: u128| i128::try_from(value).map_err(|_| StatisticsError::RationalOverflow);
     Ratio::try_new(fits(numerator)?, fits(denominator)?)
 }

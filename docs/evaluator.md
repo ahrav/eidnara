@@ -68,7 +68,7 @@ The 30 required fields, sorted:
 | `reachability` | `default-production`, `explicit-config-only`, or `test-only`. |
 | `recency_baseline` | `{version, bounds}`: the recency-only baseline's version and its most-recent-k window per evaluated surface; `null` for a run that compiled no pair set. |
 | `residue` | Every non-`Keep` field with its rule, including the manifest's own. |
-| `result_digest`, `witness_digest` | Lowercase hex SHA-256. |
+| `result_digest`, `witness_digest` | Lowercase hex SHA-256. For a paired campaign `result_digest` is the `eval-pair-table/v1` digest of the completed pair table ordered by pair id (`pair_table_digest`), recorded before the table is analyzed. |
 | `retry_lineage` | Prior `eval_run_id` values of retried attempts; each is lowercase hex SHA-256. |
 | `run_identity` | The nine-component identity tuple, including the build sub-record, the eligibility-spec digest, and the linearization rule version. |
 | `sample_epoch`, `sample_ids`, `sample_order` | Stable sample identity and execution order; `sample_order` must be a permutation of `sample_ids`. |
@@ -736,13 +736,18 @@ lists, both pinned in `eval-core` and named together by
   today's date, and the user's instruction files, so a cassette is bound to the
   environment and day that recorded it.
 - The volatile rule removes, before digesting, every `cache_control` marker
-  (breakpoints move between turns) and rewrites each `cch=<nonce>;` billing
-  nonce whose nonce is a run of alphanumerics, `_`, or `-` to `cch=<NONCE>;`;
-  any other `cch=` text stays as written. OpenCode 1.18.31 emits no `cch=`
-  nonce; the rule stays pinned for the versions that do. A mock-side
-  `cache_control` move or nonce change replays; any other byte in a covered
-  field misses. A fractional `temperature` is projected through
-  `canonical_decimal_f64` to its exact decimal text, as the backend record is.
+  (breakpoints move between turns) and, in `body.system` text only, where the
+  provider's billing header lives, rewrites each `cch=<nonce>;` billing nonce
+  whose nonce is a run of alphanumerics, `_`, or `-` to `cch=<NONCE>;`; any
+  other `cch=` text, and the same text in a message or tool result, stays as
+  written. OpenCode 1.18.31 emits no `cch=` nonce; the rule stays pinned for
+  the versions that do. A mock-side `cache_control` move or nonce change
+  replays; any other byte in a covered field misses. A fractional
+  `temperature` is projected through `canonical_decimal_f64` to its exact
+  decimal text, as the backend record is, and a `temperature` that is not a
+  JSON number is `TemperatureNotDecimal`; any other fractional number in the
+  body (none is observed from OpenCode 1.18.31) is `NotCanonical`, refused at
+  record and replay alike rather than digested.
 - `OPENCODE_HEADER_ALLOWLIST` (`anthropic-beta`, `anthropic-version`) is the
   only header set a cassette retains; `x-api-key`, `authorization`,
   `user-agent`, `x-session-id`, `host`, and `content-length` never reach the
@@ -753,8 +758,10 @@ lists, both pinned in `eval-core` and named together by
   would miss on every replay) are dropped; a turn replayed under another
   session therefore hits, which the daemon suite pins. `temperature` travels as
   the exact decimal `f64::to_string` produces (`canonical_decimal_f64`, finite
-  and non-negative), so `0.7` and `0.70` share one digest and `0.7` and `0.8`
-  do not; a hand-written `0.70` is refused.
+  and non-negative), so the request values `0.7` and `0.70` (one `f64`) share
+  one digest and `0.7` and `0.8` do not. A `BackendRecord.temperature` string
+  written as `0.70` rather than produced by `canonical_decimal_f64` (a
+  hand-edited record, not a request) is refused by `covered()`.
 
 `request_digest` is `protocol_digest("eval-cassette-request/v1", projection)`
 over canonical JSON. The file is `{schema, namespace, covered_fields_version,
@@ -763,9 +770,10 @@ declarations, provenance {generator_version, input_sha256}, cases}`;
 `provenance`, including the declarations and every recorded frame, recomputed
 on read, so an edited frame or declaration is `ProvenanceMismatch`; each
 entry's stored digest is also recomputed from its stored request
-(`EntryDigestMismatch`). `Cassette::replay` refuses a schema, generator,
-covered-field-version, namespace, provenance, or entry-digest mismatch before
-any request is served; `lookup` and `record` under another namespace are
+(`EntryDigestMismatch`). `Cassette::replay` refuses a schema (checked on the raw
+value first, so a later schema's new fields report the version rather than a
+shape refusal), generator, covered-field-version, namespace, provenance, or
+entry-digest mismatch before any request is served; `lookup` and `record` under another namespace are
 `WrongNamespace`, so equal digests in another world variant never answer.
 Every `CassetteError` names its wire `kind()`.
 
@@ -796,8 +804,13 @@ can straddle a window edge, before the entry exists anywhere. A finding is
 `RedactionRefused(location, SecretDetected)`; text past the scanner's 512 KiB
 input cap is `RedactionRefused(location, InputLimit)`. A refused entry is never
 substituted with a placeholder and never persisted, and the refusal latches:
-`to_file` returns the refusal, so a recording that refused one exchange has no
-file form and a partial cassette can never pass for a complete one.
+`to_file` returns the first refusal, so a recording that refused one exchange
+has no file form and a partial cassette can never pass for a complete one.
+Every `record` failure latches the same way (a `WrongNamespace` offer, an
+undigestable request), and so does a request the boundary could not even
+project (`UnknownRequestField`, an unencodable number) or an exchange it lost
+(`IncompleteExchange`) through `Cassette::refuse`, because the exchange it
+stands for is missing from the cassette just as a refused entry is.
 
 ### Rust oracle and the TypeScript mock
 
@@ -808,28 +821,41 @@ it reaches the `eval-core` dev-dependency without a normal edge) serves
 `close`. Requests arrive as `{path, headers, body_text}`; Rust parses the body,
 so a malformed body is `MalformedBody` rather than a lookup of `{}`. Every
 digest is computed in Rust. Refusals are `{error: {kind, detail}}` where
-`kind` is the Rust error's wire name and `detail` carries only the oracle's own
-values (a path, a namespace, a digest), never request content. The path must
+`kind` is the Rust error's wire name and `detail` is `CassetteError::detail`:
+the oracle's own values (a path, a namespace, a digest, an entry index), never
+request content. A `Shape`, `MalformedBody`, `UnknownRequestField`,
+`TemperatureNotDecimal`, or `NotCanonical` refusal carries an empty `detail`,
+because its payload is a body field name, a temperature literal, a body
+number, or a serde message that can quote its input. The path must
 be absolute with no `..` component; a second `open` is `AlreadyOpen`; a line
 over 4 MiB is `LineTooLong`. `close` writes a recording write-then-rename
-through a freshly created owner-only `.json.tmp` sibling and writes nothing for
-a replay or a refused recording.
+through a freshly created owner-only `.json.tmp` sibling, removing that
+sibling again when a later write, sync, or rename step fails, and writes
+nothing for a refused recording: one whose `record` failed, or that saw a
+`LineTooLong` or `Json` line while open, since that line may have been a
+`record`. `close` reports the first such refusal, whichever kind it was, and
+writes nothing for a replay. `close` is terminal either way: a failed
+publication is reported once and the oracle accepts the next `open`.
 
 `packages/e2e-tests/src/mock-provider/cassette-oracle.ts` spawns the binary
 (built through `buildDaemonExample` in `src/rust-runner/hermetic-host.ts`, or
 taken from `EIDNARA_E2E_EVAL_RUNNER_BIN`), forwards over the same strict JSONL
 reader the Pi runner uses, validates each reply's shape, and computes no
-digest. A child exit, an unreadable reply, or a 30 s silence fails every
-pending call; the child's stderr is inherited, never captured into an error.
+digest. A child exit, an unreadable or malformed reply (checked as each line
+arrives, before the next queued call can settle), or a 30 s silence fails
+every pending call and every later one; the child's stderr is inherited,
+never captured into an error.
 
-`MockProvider.useCassette({oracle, mode, namespace})` binds the mock until
-`reset()`, which also clears the miss and refusal logs. In `replay` mode the
+`MockProvider.useCassette({oracle, mode, namespace})` starts a new run bound
+to the cassette until `reset()`; both start with an empty script and empty miss
+and refusal logs, and a request still in flight keeps the run it began in. In `replay` mode the
 handler hands the request to the oracle right after capture and answers with
 the recorded frames or an HTTP 400 `cassette_miss` body carrying the typed
 miss; the scripted-selection block is never entered, which
 `scriptedSelectionCount()` and `defaultHits()` show. In `record` mode the
 scripted block produces the response and the oracle admits it before a byte is
-served. Any oracle failure is an HTTP 400 naming only the refusal `kind`
+served and before any scripted delay, so equal-digest entries land in capture
+order. Any oracle failure is an HTTP 400 naming only the refusal `kind`
 (`redaction_refused` or `cassette_refused`; a dead or unreadable oracle is
 `OracleUnavailable`), logged in `cassetteRefusalLog()`; no message text is
 served, and the server's error handler returns a fixed body instead of Bun's
@@ -846,15 +872,38 @@ carry no serde because their `Debug` redacts); replay emits the recorded events
 until the sink closes and returns the recorded terminal, and a miss is
 `BackendTerminal::Failed` with `provider_code: "cassette_miss"` and a message
 naming the turn, class, and nearest digest. An unencodable request is
-`cassette_request`; a recording the scanner refuses is `redaction_refused` and
-leaves the backend with no file. `refusals()` counts every miss terminal
-served, including the repeats after the first miss latched. The cassette
+`cassette_request` and, while recording, latches so the backend has no file; a
+recording the scanner refuses is `redaction_refused` and leaves the backend
+with no file either. So does an exchange the recording cannot reproduce
+(`IncompleteExchange`, a `cassette_refused` terminal): a wrapped `execute` that
+panics or a future dropped before its terminal, a run whose cancellation token
+fired under the backend, or an event the run's sink answered `Closed` (the
+supervisor's cap, cancellation, or a prior terminal owns the run's outcome, and
+a refused event is not in the recording). `file()` refuses with the same error
+while an exchange is still in flight, and succeeds once it has been recorded;
+the in-flight count and the cassette live under one lock, so publication
+never pairs a count and a cassette state from different moments. On replay, a
+run whose token is already cancelled consumes no entry: the run recorded only
+its cancellation. A replay whose sink answers `Closed` mid-exchange, or whose
+token is cancelled by the time its events have been emitted, returns a
+`cassette_refused` terminal instead of the recorded one, which the run never
+observed; the served entry stays consumed, because its bytes left the
+cassette. The cancellation check is the wrapper's snapshot at the
+moment the wrapped future returns; a cancellation that lands between that
+return and the supervisor's terminal arbitration is outside what this
+boundary can observe, and is a recorded gap. `refusals()` counts every miss terminal
+served, including the repeats after the first miss latched, and `unconsumed()`
+reports the recorded entries the run never requested. The cassette
 header's `declarations` carry what the real backend declared per harness
 (`unavailable_reason`, `context_capabilities`), and the replaying backend
 answers all three trait methods from them, so `BackendDeclarations::new`
 latches the same capabilities from a cassette as from the real backend.
 `record_of` destructures `BackendRequest` exhaustively: a new field fails to
-compile until it is classified as covered or dropped.
+compile until it is classified as covered or dropped. The wire mirror's decode
+side is guarded the same way: `finish_reasons` and `error_classes` list every
+`FinishReason` and `ErrorClass` behind an exhaustive `match`, so a variant the
+host adds fails to compile rather than recording under its wire string and
+replaying as `cassette_refused`.
 
 MemoryReviewer sends through its own TLS sender, not the trait. `serve_keyed`
 on the test peer answers strictly from entries keyed by `ReviewerKey {body_digest,
@@ -862,7 +911,11 @@ provider, model, credential_id}`: the SHA-256 of the request body (what
 `prepare_body` puts in the attempt marker), the
 `{host}/v1/messages@{anthropic-version}` identity the production sender
 reports, the body's `model`, and the credential id the peer is configured with
-(the header carries only the secret). A key with no entry is an HTTP 409
+(the header carries only the secret). Each entry answers one request, and
+equal keys (independent jobs can send one body) answer in recorded order; the
+peer waits `Peer::idle` (five seconds by default) for each next call, which a
+run whose reviewer calls are far apart raises to its own deadline. A
+key with no unconsumed entry is an HTTP 409
 `cassette_miss` and a `SendError::Status(409)` at the sender, and every later
 request on that peer is refused too. A run that spawns no reviewer worker
 declares `memory_reviewer_model_calls: excluded` in its manifest instead.
@@ -870,7 +923,9 @@ declares `memory_reviewer_model_calls: excluded` in its manifest instead.
 ## Paired statistics
 
 `statistics.rs` computes the paired history effect over oracle verdicts as
-exact rationals: `Ratio {numerator, denominator}` in lowest terms with both
+exact rationals: `Ratio {numerator, denominator}` (constructed only through the fallible
+`Ratio::try_new`, so a zero denominator or an unsafe component is a typed
+refusal) in lowest terms with both
 components inside canonical JSON's safe integer range, so the two runtimes
 that implement it serialize the same bytes and no fraction is ever a float.
 Construction and deserialization normalize (a zero denominator or an
@@ -890,14 +945,50 @@ value from the outcomes it gates. The margins are experimental values, not
 product targets. The code and its refusal tests land without values; an
 empirical acceptance needs an approved profile.
 
+`parse_campaign_profile` also applies the canonical-JSON check, so a profile
+that parses can be embedded in a family and frozen; an integer past the safe
+range is `NotCanonical` at parse.
+
 **Analysis family.** `AnalysisFamily` (`eval-analysis-family/v2`; version 2
 added `transfer_criterion`) fixes
-everything a result depends on: endpoints, task families, exclusions, the
-stopping rule (`fixed_n`), the multiplicity correction (`none`, `holm`,
-`benjamini_hochberg`), the profile, the interval method (`cluster_bootstrap`),
+everything a result depends on: endpoints (exactly the three gates
+`quality_loss`, `harm`, `floor`, since the report always carries them; any
+other list is `UnsupportedEndpoints`), task families, exclusions (the
+pre-registered exclusion criteria as text; the freeze keeps them from changing
+after the fact, and the runner applies them when it assembles the table), the
+stopping rule (`fixed_n` with its pair count), the multiplicity correction
+(`none`, `holm`, `benjamini_hochberg` are declared; only `none` is accepted
+today, since the three gates are one all-must-pass conclusion over fixed
+bounds with no p-values to adjust, and a plan declaring another is
+`UnsupportedMultiplicity` rather than analyzed uncorrected), the profile, the
+interval method (`cluster_bootstrap`),
 the item-count threshold (at least 300), the bootstrap replicate count and
 seed, the live-trial repeat count `trials_k`, the ICC pilot, and the optional
-approved transfer criterion (see "Claim class"). `FrozenFamily::freeze` digests it
+approved transfer criterion (see "Claim class").
+`AnalysisFamily::validate` includes the digest's
+canonical-JSON check, so a family that validates can always be frozen (an
+integer outside the safe range is `NotCanonical` at parse). It also recomputes the
+pilot's clustering unit and `effective_n_at_max` from its recorded counts and
+ICCs and refuses a pilot that disagrees with its own evidence, whose
+counts the ICC could not have been estimated from (fewer than two families,
+fewer worlds than families, or no replication within worlds), whose ICCs
+differ when every family holds exactly one world (the two partitions then
+coincide), whose ICC at either level exceeds one, whose `required_n_for_margin`
+is zero (no power target), or whose recorded `families` (the distinct, sorted
+families it sampled) are not the registered families (the pilot sampled the
+registered population, so its ICCs describe the campaign's clusters and the
+family-unit projection spreads items over exactly those families)
+(`PilotInconsistent`; a projection that leaves the safe range is reported as
+`RationalOverflow`), so a hand-written pilot cannot inflate its way past the
+block, and refuses a plan whose pair count is zero (`NoPairs`) or whose pair
+count, with each level at its own best spread over the clusters the plan
+permits (the balanced size-weighted mean, deflated by that level's ICC, the
+smaller level kept), falls short of the pilot's `required_n_for_margin`
+(`PlanBelowRequiredN {attainable, ..}`), since such a plan can only ever block
+after the campaign has run. That bound is necessary, not sufficient: the two
+levels' optima need not be attainable in one table, so an admitted plan may
+still produce a table `analyze` blocks as `TableUnderpowered`; the plan check
+never refuses a plan some table could satisfy, and the table check is exact. `FrozenFamily::freeze` digests it
 (`eval-analysis-family-digest/v1`); the manifest records that digest as
 `analysis_family_digest` before the first outcome, and `FrozenFamily::check`
 refuses a family whose digest differs as
@@ -909,52 +1000,97 @@ component is a typed refusal rather than a quiet re-analysis.
 world itself (family and seed together), and the pilot and the bootstrap use
 the same partition. `run_icc_pilot` groups pilot observations (one paired
 score per task per world) at both levels, computes the one-way ANOVA
-intraclass correlation at each (`intraclass_correlation`, exact, with `m0` the
-arithmetic mean group size; groups that are each internally constant give
+intraclass correlation at each (`intraclass_correlation`, exact, with the
+unequal-group size correction `n0 = (N - sum(n_i^2) / N) / (k - 1)` in the
+denominator, the group size when balanced; groups that are each internally constant give
 exactly one), and picks the highest level whose ICC exceeds `1/20`
 (`ICC_THRESHOLD`), with the world as the finest fallback. It carries the item
 count the maximum affordable world count would yield, deflated by the design
-effect `1 + (m - 1) ICC` of the selected unit, as `effective_n_at_max`; the
-effect is clamped at one, so deflation only ever shrinks N, and a zero
-affordable world count is refused. A family whose `effective_n_at_max` is
+effect `1 + (m - 1) ICC` at each nesting level with the smaller result kept,
+as `effective_n_at_max`, so a stronger correlation at the finer level is never
+discarded by selecting the coarser unit; the effect is clamped at one, so
+deflation only ever shrinks N, and a zero affordable world count
+(`NoAffordableWorlds`) or a zero required N (`NoRequiredN`) is refused. Under the family unit the projected
+cluster count is the smaller of the pilot's family count and the affordable
+world count, since each affordable world lies in one family. Each `(world, task)` is one score, so a
+repeated observation is `DuplicateObservation` rather than another item. A
+family whose `effective_n_at_max` is
 below the maintainer's `required_n_for_margin` makes `analyze` return
 `Blocked {reason: insufficient_effective_n}` and no report object.
 
-**Three gates.** `PairCounts::of` counts `n`, `b` (fresh pass, aged not pass),
-`c` (fresh fail, aged pass), `aged_pass`, and the censored arms. Censoring is
-resolved so it can only make a gate harder: a censored arm never counts as a
-pass, a censored aged arm counts as a loss in `b`, and a censored fresh arm
-counts as neither pass nor fail. `Gates::of` takes the profile's parsed
+**Three gates.** `PairCounts::validate` names the counts a pair table can
+produce (at least one pair, disjoint `b`/`c`, the cross-cell relations, and
+`n` in the safe range); the rate methods and `Gates::of` refuse anything else
+as `NoPairs` or `InconsistentCounts`. `PairCounts::of` counts `n`, `b` (fresh not failing, aged not
+passing), `c` (fresh fail, aged pass), `aged_pass`, and the censored arms. Each
+censored arm resolves to the verdict least favorable to the aged arm: a
+censored aged arm is not a pass (so it lands in `b` beside a fresh pass and
+never in `aged_pass`), and a censored fresh arm is a pass (so it lands in `b`
+beside an aged non-pass, and beside an aged pass it is a concordant pair, never
+`c`). For every cell with a censored arm, `quality_loss` and `harm` are no
+smaller and the aged pass rate no larger than under any definite resolution of
+that arm; `censoring_never_makes_a_gate_easier_than_any_definite_resolution`
+enumerates the five cells. `Gates::of` takes the profile's parsed
 `ProfileRates` and evaluates `quality_loss = (b - c) / n` against the
 noninferiority margin (signed: a negative value means the aged arm did better
 and passes), `harm = b / n` against the harm bound, and the aged pass rate
 against the floor, as three independent verdicts whose bounds come from the
 profile and never from the counts; the report has no collapsed effect field.
 
-**World-clustered interval.** `cluster_bootstrap_interval` sums `b - c` and
-`n` per cluster (the pilot's unit), resamples clusters with replacement
-`replicates` times, computes `quality_loss` as the ratio of resampled sums,
-and reports the `1/40` and `39/40` order statistics as `lower` and `upper`,
+**World-clustered interval.** `cluster_bootstrap_interval` folds each cluster
+(the pilot's unit) into one `PairCounts`, resamples clusters with replacement
+`replicates` times, folds each resample into one `PairCounts` whose
+`quality_loss` is the replicate statistic (the same definition the gate uses),
+and reports the `1/40` and `39/40` order statistics (the `ceil(B/40)`-th and
+`ceil(39B/40)`-th smallest of `B` replicates) as `lower` and `upper`,
 with `unit`, `method`, `n_clusters`, `n_items`, and `replicates`. Clusters
 are ordered by key, and the draw is the first 64 bits of the
 `eval-cluster-bootstrap/v1` digest over `{seed, replicate, draw}` reduced by
 the cluster count, so the interval is a pure function of the seed on either
-runtime. The function itself never goes below `ITEM_COUNT_THRESHOLD` items or
-`MIN_BOOTSTRAP_REPLICATES` replicates, whatever a caller asks. Below the
-threshold no interval of any method is emitted; the report carries
-`IntervalOutcome::Withheld {reason: item_count_below_threshold}` (or
-`fewer_than_two_clusters`) instead of a `computed` interval.
+runtime. The function itself never goes below `ITEM_COUNT_THRESHOLD` items,
+whatever a caller asks, and refuses a replicate count below
+`MIN_BOOTSTRAP_REPLICATES` (40) or above `MAX_BOOTSTRAP_REPLICATES` (10,000)
+as `TooFewReplicates` or `TooManyReplicates`, and more than
+`MAX_BOOTSTRAP_DRAWS` (5,000,000) draws in total, replicates times clusters,
+as `TooManyDraws`; `AnalysisFamily::validate` applies the same bounds, with
+the smaller of the pair count and `max_affordable_worlds` as the cluster
+count (further capped by the family count under the family unit), so an
+oversized family is refused before any replicate runs. Below the threshold no interval of any method is emitted; the
+report carries `IntervalOutcome::Withheld {reason: item_count_below_threshold}`
+(or `fewer_than_two_clusters`) instead of a `computed` interval.
 
-**Report.** `analyze(frozen, family, pairs, arm_rates)` checks the freeze
-(`FrozenFamily::from_manifest` reads the manifest's recorded digest; a
-manifest `Manifest::validate` refuses is `Manifest(error)`, so a paired
-report cannot be authorized without the recency baseline its pairs were
-judged against, and a manifest without a digest is `FamilyNotRecorded`),
-then the pilot's block, then the
-per-arm cassette-miss asymmetry (the gap between the highest and lowest
-`arm_rates.*.miss_rate`; fewer than two arms is `TooFewArms`, missing evidence
-that never passes) against `miss_asymmetry_bound`, which blocks as
-`arm_miss_asymmetry` with no gates computed; only then does it build
+**Report.** `analyze(manifest, family, pairs)` reads the frozen digest and the
+arm rates from the same manifest, so neither can be substituted beside it. It
+requires the manifest to validate (`InvalidManifest` wraps the
+`ManifestError`) and the run to have completed (any other `status` is
+`RunNotCompleted`);
+the freeze check and the two pre-outcome blocks below read no pair. It
+checks the freeze (`FrozenFamily::from_manifest` validates the manifest itself
+and reads the recorded digest, so a paired report cannot be authorized
+without the recency baseline its pairs were judged against even on the
+in-memory path; a manifest without a digest is `FamilyNotRecorded`), then the
+pilot's block, then the
+per-arm cassette-miss asymmetry (the gap between the manifest's `aged` and
+`fresh` arms' `miss_rate`, the two arms every pair has; both rates of both arms are
+refused outside `[0, 1]`; any other arm set is `ArmsNotPaired`, missing
+evidence that never passes) against `miss_asymmetry_bound`, which blocks as
+`arm_miss_asymmetry` with no gates computed; then the table's conformance to
+the plan (a size other than the frozen pair count is `PairCountMismatch`, a
+pair outside the frozen families is `PairOutsideFamilies`, a repeated pair id
+is `DuplicatePair`, a pair-id set other than the manifest's `sample_ids` is
+`PairsNotManifestSamples`, a table whose `eval-pair-table/v1` digest is not
+the manifest's `result_digest` is `PairsNotManifestResult` (so rows cannot
+be relabeled or re-scored behind the recorded ids), more distinct worlds than the pilot's
+`max_affordable_worlds` is `WorldsExceedAffordable`, and a world seed past
+canonical JSON's safe integer is `WorldSeedOutOfRange`, as it is from
+`cluster_bootstrap_interval`, which also refuses a repeated pair id and whose
+own draw seed is likewise `BootstrapSeedOutOfRange`), then the table's own
+power (the pair count deflated by the pilot's design effect at the clusters
+the table actually spans, at both nesting levels with the smaller kept, with
+the size-weighted mean cluster `sum(m_i^2) / n` so unequal clusters are not
+read as equal ones; short of `required_n_for_margin` it is `Blocked {reason:
+table_underpowered}` with the effective N and the cluster count at the
+selected unit); only then does it build
 `PairedReport {analysis_family_digest, counts, gates, interval, arm_rates}`.
 Per-arm miss and refusal rates travel with the report, so unsupported evidence
 is visible beside every gate.
@@ -987,23 +1123,34 @@ at which the run was cut off), and its true duration is at least that.
 **Latency.** `LatencySummary::of` sorts attempts by duration with a censored
 attempt after a completed one of equal duration, takes the nearest rank
 `ceil(p n / 100)` for p50 and p95, and adds p99 only from `P99_MIN_RUNS` (299)
-attempts, because the third-largest of 299 sits at the 99th percentile rank.
+attempts, the floor the plan pre-registers (#758): with 299 runs the top percent
+holds about three observations, so the quoted rank has two above it.
 Every `Percentile` names `p`, `value`, `n`, `censored`, and `bound`. Raising a
-censored attempt's true value can only raise an order statistic, so a
-percentile is `point` only when no censored attempt sorts at or below its rank;
-otherwise it is `lower`, and the reported value is a lower bound on the truth
-even when the attempt at the rank itself completed. Nothing is dropped, so a
+censored attempt's true value can only raise an order statistic, and with every
+censored attempt pushed to infinity the order statistic is the rank-th completed
+duration, so a percentile is `point` exactly when at least `rank` completed
+attempts sit at or below the picked value; otherwise it is `lower`, and the
+reported value is a lower bound on the truth even when the attempt at the rank
+itself completed. A censored attempt below the rank does not by itself make a
+bound: p50 over one censored attempt and two completions tied at `2` is `2`
+however long the censored attempt really ran. Nothing is dropped, so a
 summary with `n = 105, censored = 15` reports its p95 as at least the deadline
 rather than a fast number over the 90 that finished.
 
 **Zero failures.** `Counter {n, failures, unit}` renders through
-`Counter::rate`: with failures it is `FailureRate::Observed {rate, n, unit}`;
-with none it is `FailureRate::Bound {upper_bound_95, bound_method:
-rule_of_three, n, unit}` where the bound is `3/n` capped at one, tagged
-`evidence_kind: bound`, so zero observed failures in `n` trials at the named
-cluster unit is a bound, never a proof. A gate over a counter reads the bound
-where only a bound exists; sixty stall-free schedules cannot rule out one stall
-in twenty.
+`Counter::rate` as `FailureRate`, tagged `evidence_kind`. Both variants carry
+`upper_bound_95 = min((2 failures + 3) / n, 1)` and `bound_method`, and
+`FailureRate::upper_bound_95` is the one number a gate compares, so the
+compared quantity rises with every failure. With no failures the variant is
+`bound` with `bound_method: rule_of_three` (the bound is `3/n`), so zero
+observed failures in `n` trials at the named cluster unit is a bound, never a
+proof; sixty stall-free schedules cannot rule out one stall in twenty. With
+failures it is `observed`, adding the point estimate `rate` and using
+`bound_method: poisson_envelope`: the one-sided 95 percent Poisson limit for `x`
+events is `chi2_0.95(2x + 2) / 2`, which is at most `2x + 3` for every `x` and
+sits above the exact binomial limit. A gate that read the point estimate after
+a failure but the bound after none would let one failure in sixty (`1/60`) pass
+a threshold that zero failures in sixty (`3/60`) fails.
 
 **Repeated live trials.** `pass_k(attempts, k)` reads the repeat count `k` from
 the frozen family (`trials_k`) and summarizes as `PassK`: `pass_at_1` (passes
@@ -1019,10 +1166,11 @@ is `RationalOverflow`.
 
 The TypeScript reference in `gen/gen-statistics-golden.ts` derives these
 independently where a second derivation exists: pass^k by exhaustive
-enumeration of every `k`-subset rather than binomials, and the rule of three
-checked against the exact one-sided bound `1 - 0.05^(1/n)` it approximates.
-`tests/censoring.rs` asserts equality on every latency, counter, and pass^k
-case in the golden.
+enumeration of every `k`-subset rather than binomials, and every counter's
+rational bound checked against the exact one-sided 95 percent binomial bound
+it envelopes (`1 - 0.05^(1/n)` at zero failures, bisection on the binomial CDF
+otherwise). `tests/censoring.rs` asserts equality on every latency, counter,
+and pass^k case in the golden.
 
 ## Paired worlds
 
