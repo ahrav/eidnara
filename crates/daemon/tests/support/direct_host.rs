@@ -32,7 +32,8 @@ pub fn fixture_binary() -> PathBuf {
 }
 
 /// Builds one of the daemon's examples under `features` and returns its
-/// binary; builds are serialized so concurrent tests share one cargo lock.
+/// binary. Builds within one test process are serialized here; across
+/// processes cargo's own directory lock serializes them.
 pub fn example_binary(example: &str, features: &str) -> PathBuf {
     let _guard = BUILD_LOCK
         .get_or_init(|| Mutex::new(()))

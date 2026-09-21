@@ -84,7 +84,8 @@ direct-host-fixture = []
 # `test-support`.
 eval-runner = ["test-support"]
 # Exposes the request dispatcher and kernel lifecycle probes to integration
-# tests in `tests/`; enabled only through the self dev-dependency below.
+# tests in `tests/`; enabled through the self dev-dependency below and by
+# `eval-runner`, never by a normal dependency.
 test-support = ["host-runtime/test-support"]
 
 [dev-dependencies]

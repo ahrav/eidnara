@@ -10,6 +10,8 @@
 
 #[cfg(unix)]
 mod campaign;
+/// The fixture and surface helpers are shared with the evaluator tests, which
+/// use more of them than the campaign does.
 #[cfg(unix)]
 #[allow(dead_code)]
 mod support;
@@ -296,64 +298,12 @@ fn serve(input: impl BufRead, mut output: impl Write) -> io::Result<()> {
     Ok(())
 }
 
-const USAGE: &str = "usage: eval_runner cassette-oracle | campaign --scale <s0|s1|s2> \
---aged-messages <n> --elapsed-bound-ms <n> --approved-by <name> \
---approval-run-id <hex64> --publish <dir>";
-
-/// `campaign`'s arguments, every one required: a campaign runs only under
-/// values someone wrote down.
-#[cfg(unix)]
-fn campaign_config(args: impl Iterator<Item = String>) -> io::Result<campaign::Config> {
-    let mut values: BTreeMap<String, String> = BTreeMap::new();
-    let mut args = args.peekable();
-    while let Some(flag) = args.next() {
-        let Some(name) = flag.strip_prefix("--") else {
-            return Err(io::Error::other(format!("{USAGE} (got {flag:?})")));
-        };
-        let value = args
-            .next()
-            .ok_or_else(|| io::Error::other(format!("--{name} needs a value")))?;
-        if values.insert(name.to_string(), value).is_some() {
-            return Err(io::Error::other(format!("--{name} given twice")));
-        }
-    }
-    let mut take = |name: &str| {
-        values
-            .remove(name)
-            .ok_or_else(|| io::Error::other(format!("--{name} is required; {USAGE}")))
-    };
-    let scale: eval_core::Scale = serde_json::from_value(Value::String(take("scale")?))
-        .map_err(|error| io::Error::other(format!("--scale: {error}")))?;
-    let number = |name: &str, text: String| {
-        text.parse::<u64>()
-            .map_err(|error| io::Error::other(format!("--{name}: {error}")))
-    };
-    let aged_messages = u32::try_from(number("aged-messages", take("aged-messages")?)?)
-        .map_err(|error| io::Error::other(format!("--aged-messages: {error}")))?;
-    let elapsed_bound_ms = number("elapsed-bound-ms", take("elapsed-bound-ms")?)?;
-    let approval = eval_core::Approval {
-        approved_by: take("approved-by")?,
-        approved_at_run_id: take("approval-run-id")?,
-    };
-    let publish = PathBuf::from(take("publish")?);
-    if let Some(unknown) = values.keys().next() {
-        return Err(io::Error::other(format!(
-            "unknown flag --{unknown}; {USAGE}"
-        )));
-    }
-    Ok(campaign::Config {
-        scale,
-        aged_messages,
-        elapsed_bound_ms,
-        approval,
-        publish,
-    })
-}
+const USAGE: &str = "usage: eval_runner cassette-oracle | eval_runner ";
 
 /// Runs the campaign and prints one JSON line naming what was published.
 #[cfg(unix)]
 fn run_campaign(args: impl Iterator<Item = String>) -> io::Result<()> {
-    let config = campaign_config(args)?;
+    let config = campaign::config_from_args(args).map_err(io::Error::other)?;
     let run = campaign::run(&config).map_err(|error| io::Error::other(format!("{error:?}")))?;
     let digest = |bytes: &[u8]| format!("{:x}", sha2::Sha256::digest(bytes));
     let summary = json!({
@@ -383,12 +333,29 @@ fn run_campaign(args: impl Iterator<Item = String>) -> io::Result<()> {
     Ok(())
 }
 
-fn main() -> io::Result<()> {
+fn main() {
     let mut args = std::env::args().skip(1);
-    match args.next().as_deref() {
+    let outcome = match args.next().as_deref() {
         Some("cassette-oracle") => serve(io::stdin().lock(), io::stdout().lock()),
         #[cfg(unix)]
         Some("campaign") => run_campaign(args),
-        other => Err(io::Error::other(format!("{USAGE} (got {other:?})"))),
+        other => Err(io::Error::other(format!(
+            "{USAGE}{} (got {other:?})",
+            campaign_usage()
+        ))),
+    };
+    if let Err(error) = outcome {
+        eprintln!("eval_runner: {error}");
+        std::process::exit(2);
     }
+}
+
+#[cfg(unix)]
+fn campaign_usage() -> &'static str {
+    campaign::USAGE
+}
+
+#[cfg(not(unix))]
+fn campaign_usage() -> &'static str {
+    "campaign (unix only)"
 }

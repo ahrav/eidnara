@@ -11,7 +11,7 @@ mod campaign;
 
 use std::collections::BTreeMap;
 
-use campaign::{Config, FRESH_MESSAGES, MANIFEST_FILE, REPORT_FILE, Run, profile};
+use campaign::{Config, MANIFEST_FILE, REPORT_FILE, Run, RunError, profile};
 use eval_core::{
     Analysis, Approval, ArmKind, ArmResult, Cut, DisabledReason, Established, HistoryPolicy,
     IntervalOutcome, ProfileError, Ratio, ReportOutcome, SampleLedger, SampleRecord, Scale,
@@ -41,7 +41,7 @@ fn campaign(scale: Scale, aged_messages: u32, elapsed_bound_ms: u64) -> Run {
         scale,
         aged_messages,
         elapsed_bound_ms,
-        approval: approval(),
+        approval: Some(approval()),
         publish: publish.path().to_path_buf(),
     })
     .unwrap();
@@ -70,6 +70,10 @@ fn campaign(scale: Scale, aged_messages: u32, elapsed_bound_ms: u64) -> Run {
     let read_back: serde_json::Value = serde_json::from_slice(&manifest_bytes).unwrap();
     let parsed = parse_manifest(&read_back).unwrap();
     assert_eq!(parsed, run.manifest);
+    assert_eq!(
+        parsed.eval_run_id, run.report.eval_run_id,
+        "the report and the manifest beside it carry one run identity"
+    );
     assert_eq!(parsed.digest().unwrap(), run.manifest.digest().unwrap());
     assert_eq!(read_back["construction"], "replay");
     assert_eq!(read_back["ingestion"], "transform-route, turn by turn");
@@ -104,12 +108,10 @@ fn campaign(scale: Scale, aged_messages: u32, elapsed_bound_ms: u64) -> Run {
         .values()
         .filter(|s| matches!(s.terminal, Terminal::Skipped(SkipReason::RedactionRefused)))
         .count();
-    assert_eq!(
-        (run.report.rates.samples, run.report.samples.attempted()),
-        (18, 12 - skipped)
-    );
+    assert_eq!(run.report.rates.samples, 18);
     assert_eq!(run.report.rates.unsupported, Ratio::new(1, 3));
     assert_eq!(skipped, if run.aged.refused { 3 } else { 0 });
+    assert_eq!(run.report.samples.attempted(), 12 - skipped);
 
     // Surface 1 serves history segments and nothing else, and only the
     // summarizer writes them: under raw history no arm has a unit for any
@@ -248,17 +250,46 @@ fn an_unapproved_profile_runs_no_campaign() {
         })
     );
     let publish = tempfile::tempdir().unwrap();
-    let refused = campaign::run(&Config {
+    let config = Config {
         scale: Scale::S0,
         aged_messages: AGED_MESSAGES,
         elapsed_bound_ms: S0_ELAPSED_BOUND_MS,
-        approval: Approval {
+        approval: None,
+        publish: publish.path().to_path_buf(),
+    };
+    assert_eq!(
+        campaign::run(&config).err(),
+        Some(RunError::Profile(ProfileError::NotApproved {
+            name: "s0-surface1-raw".to_string(),
+        }))
+    );
+    // An approval with no approver is not one either, and a history the
+    // window would swallow whole cannot hold a falsifier.
+    let no_approver = Config {
+        approval: Some(Approval {
             approved_by: String::new(),
             approved_at_run_id: "ab".repeat(32),
-        },
-        publish: publish.path().to_path_buf(),
-    });
-    assert!(refused.is_err(), "an approval without an approver is none");
+        }),
+        ..config.clone()
+    };
+    assert_eq!(
+        campaign::run(&no_approver).err(),
+        Some(RunError::Profile(ProfileError::Empty {
+            field: "approval.approved_by",
+        }))
+    );
+    let short = Config {
+        aged_messages: 100,
+        approval: Some(approval()),
+        ..config
+    };
+    assert_eq!(
+        campaign::run(&short).err(),
+        Some(RunError::AgedHistoryTooShort {
+            aged_messages: 100,
+            window: 100,
+        })
+    );
     assert_eq!(std::fs::read_dir(publish.path()).unwrap().count(), 0);
 }
 
@@ -284,23 +315,26 @@ fn an_s0_campaign_on_the_default_surface_publishes_one_gated_report() {
     // its segment.
     assert!(!run.aged.refused);
     assert_eq!((run.aged.firings, run.aged.covered.len()), (4, 20));
+    let plain = run
+        .set
+        .pairs
+        .iter()
+        .find(|p| p.task.id == "recent-message")
+        .unwrap()
+        .task
+        .evidence
+        .iter()
+        .next()
+        .unwrap();
     assert_eq!(
         run.aged
             .covered
             .values()
-            .find(|ids| {
-                let plain = run
-                    .set
-                    .pairs
-                    .iter()
-                    .find(|p| p.task.id == "recent-message")
-                    .unwrap();
-                ids.contains(plain.task.evidence.iter().next().unwrap())
-            })
-            .map(|ids| ids.len()),
-        Some(5)
+            .find(|ids| ids.contains(plain))
+            .map(|ids| ids.iter().position(|id| id == plain)),
+        Some(Some(0)),
+        "the plain task's message heads its segment"
     );
-    assert_eq!(FRESH_MESSAGES, 12);
 }
 
 /// The example's own command line runs the same shell: it publishes the S0
@@ -363,6 +397,7 @@ fn the_eval_runner_example_publishes_the_s0_campaign() {
         "{}",
         String::from_utf8_lossy(&refused.stderr)
     );
+    assert_eq!(refused.status.code(), Some(2));
 }
 
 /// Runs a longer history only when `EIDNARA_EVAL_S1_BUDGET_MS` grants a

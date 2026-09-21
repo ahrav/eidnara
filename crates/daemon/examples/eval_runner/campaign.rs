@@ -17,19 +17,19 @@ use eval_core::{
     ArmResult, Attestation, BaselineVerdict, BinaryDigest, BuildRecord, CampaignGates,
     CampaignProfile, ClaimBoundary, Claims, ClusterKey, ClusteringUnit, ComponentVersions,
     Construction, Cut, CutOutcome, CutReceipt, Destination, ELIGIBILITY_SPEC_DIGEST,
-    EVENT_SCHEMA_VERSION, Envelope, Established, EvaluatedSurface, EventId, EventLog,
-    ExecutionMode, FAILURE_CLASS_TABLE_DIGEST, FrozenFamily, GENERATOR_VERSION, GatedBlocks,
-    GovernanceArms, HistoryPolicy, IccPilot, Ingestion, IntervalMethod, LINEARIZATION_RULE_VERSION,
-    LivenessBounds, MANIFEST_SCHEMA, Manifest, MemoryReviewerModelCalls, Mode,
-    MultiplicityCorrection, PAIRING_POLICY_VERSION, Pair, PairOutcome, PairSet, PairSetInput,
-    ProfileError, Query, RANDOM_SCHEMA_VERSION, REDUCER_VERSION, RUN_PROFILE_SCHEMA, Ratio,
-    Reachability, RecencyBaseline, RenderConfig, RenderedMessage, ReportOutcome, RepositorySpec,
-    Required, Resource, ResourceLimits, RunIdentity, RunProfile, RunStatus, SUITE_B_REPORT_SCHEMA,
-    SampleLedger, SampleRecord, Scale, Sensitivity, ServedClass, SessionSpec, SkipReason,
-    StageVerdict, StoppingRule, SuiteBReport, Surface1Stage, Task, TaskBudgets, TaskRole,
-    TaskUsage, Terminal, TokenizerProfile, UnsupportedReason, Visibility, WorldConfig,
-    WorldProvenance, analyze, check_recency_baseline, compile_pair_set, eval_run_id, generate_all,
-    render, serialize_spec, text_decision,
+    EVENT_SCHEMA_VERSION, Envelope, EnvelopeExceeded, Established, EvaluatedSurface, EventId,
+    EventLog, ExecutionMode, FAILURE_CLASS_TABLE_DIGEST, FrozenFamily, GENERATOR_VERSION,
+    GatedBlocks, GovernanceArms, HistoryPolicy, IccPilot, Ingestion, IntervalMethod,
+    LINEARIZATION_RULE_VERSION, LivenessBounds, MANIFEST_SCHEMA, Manifest,
+    MemoryReviewerModelCalls, Mode, MultiplicityCorrection, PAIRING_POLICY_VERSION, Pair,
+    PairOutcome, PairSet, PairSetInput, ProfileError, Query, RANDOM_SCHEMA_VERSION,
+    REDUCER_VERSION, RUN_PROFILE_SCHEMA, Ratio, Reachability, RecencyBaseline, RenderConfig,
+    RenderedMessage, ReportOutcome, RepositorySpec, Required, Resource, ResourceLimits,
+    RunIdentity, RunProfile, RunStatus, SUITE_B_REPORT_SCHEMA, SampleLedger, SampleRecord, Scale,
+    Sensitivity, ServedClass, SessionSpec, SkipReason, StageVerdict, StoppingRule, SuiteBReport,
+    Surface1Stage, Task, TaskBudgets, TaskRole, TaskUsage, Terminal, TokenizerProfile,
+    UnsupportedReason, Visibility, WorldConfig, WorldProvenance, analyze, check_recency_baseline,
+    compile_pair_set, eval_run_id, generate_all, render, serialize_spec, text_decision,
 };
 use memory_store::{MemoryStore, StoredHistorySegment};
 use serde_json::{Value, json};
@@ -49,14 +49,39 @@ const SESSION: &str = "session-0";
 pub const FRESH_MESSAGES: u32 = 12;
 
 /// One campaign's inputs: the scale and its aged history's length, the
-/// elapsed bound the envelope enforces, the approval the profile carries, and
-/// the directory the report and manifest are published into.
+/// elapsed bound the envelope enforces, the approval the profile carries (or
+/// none, which the profile refuses), and the directory the report and
+/// manifest are published into.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Config {
     pub scale: Scale,
     pub aged_messages: u32,
     pub elapsed_bound_ms: u64,
-    pub approval: Approval,
+    pub approval: Option<Approval>,
     pub publish: PathBuf,
+}
+
+/// Why a campaign did not run to a report: the profile refused, the aged
+/// history is too short to hold a falsifier outside the window and a plain
+/// task inside it, or the envelope refused a reading. A fixture breaking its
+/// contract with the shell is a panic, not one of these.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RunError {
+    Profile(ProfileError),
+    AgedHistoryTooShort { aged_messages: u32, window: u32 },
+    Envelope(EnvelopeExceeded),
+}
+
+impl From<ProfileError> for RunError {
+    fn from(error: ProfileError) -> Self {
+        Self::Profile(error)
+    }
+}
+
+impl From<EnvelopeExceeded> for RunError {
+    fn from(error: EnvelopeExceeded) -> Self {
+        Self::Envelope(error)
+    }
 }
 
 /// What the aged world's recorded life established: how often the daemon's
@@ -353,22 +378,17 @@ fn live(
     world: &World,
     replacement: &Replacement,
     prompt: &str,
-    envelope: &mut Envelope,
-    held: &mut Held,
-    started: Instant,
-) -> Lived {
-    let home = occupy(held, envelope);
-    let root = occupy(held, envelope);
+    charges: &mut Charges,
+) -> Result<Lived, EnvelopeExceeded> {
+    let home = charges.occupy()?;
+    let root = charges.occupy()?;
     let mut launch = Launch::at(root.path().to_path_buf()).config_home(home.path());
     if let Replacement::Summarizer(backend) = replacement {
         write_summarizer_config(home.path());
         launch = launch.backend(backend.clone());
     }
     let fixture = launch.start();
-    held.processes += 1;
-    envelope
-        .observe(Resource::Processes, held.processes)
-        .unwrap();
+    charges.process_started()?;
     let knobs = Knobs {
         usage: usage(world.messages.len() + 1),
         ..Knobs::default()
@@ -410,7 +430,7 @@ fn live(
             );
         }
         Replacement::Raw | Replacement::Summarizer(Backend::Replay { .. }) => {
-            assert_eq!((backend_calls, refusals), (0, 0), "{counters}");
+            assert_eq!(backend_calls, 0, "{counters}");
         }
     }
     assert_eq!(
@@ -436,21 +456,21 @@ fn live(
             output.stderr
         );
     }
-    held.processes -= 1;
+    charges.process_ended();
     let descriptor = daemon::managed_store_descriptor(root.path()).unwrap();
     let store = MemoryStore::open(&descriptor).unwrap();
     let segments = store.load_history_segments(&world.session).unwrap();
     drop(store);
-    vacate(root, held, envelope, started);
-    vacate(home, held, envelope, started);
-    Lived {
+    charges.vacate(root)?;
+    charges.vacate(home)?;
+    Ok(Lived {
         segments,
         pass,
         counters,
         firings,
         refusals,
         stderr: output.stderr,
-    }
+    })
 }
 
 /// One world's summarizer traffic recorded: the cassette's backend for the
@@ -475,10 +495,8 @@ fn record(
     label: &str,
     world: &World,
     cassettes: &Path,
-    envelope: &mut Envelope,
-    held: &mut Held,
-    started: Instant,
-) -> Recording {
+    charges: &mut Charges,
+) -> Result<Recording, EnvelopeExceeded> {
     let file = cassettes.join(format!("{label}.cassette.json"));
     assert!(
         !file.exists(),
@@ -493,10 +511,18 @@ fn record(
         world,
         &Replacement::Summarizer(recording),
         BUILD_PROMPT,
-        envelope,
-        held,
-        started,
-    );
+        charges,
+    )?;
+    if lived.refusals > 0 {
+        assert!(!file.exists(), "a refused recording writes no cassette");
+        return Ok(Recording {
+            replay: None,
+            segments: lived.segments,
+            cassette_bytes: 0,
+            firings: lived.firings,
+            refusals: lived.refusals,
+        });
+    }
     // The fixture folds `CHUNK` presented lines into one segment, so every
     // segment but the newest spans exactly that many messages, from the first
     // message on, and no segment reaches the last message: the daemon
@@ -518,16 +544,6 @@ fn record(
             "{segment:?}"
         );
     }
-    if lived.refusals > 0 {
-        assert!(!file.exists(), "a refused recording writes no cassette");
-        return Recording {
-            replay: None,
-            segments: lived.segments,
-            cassette_bytes: 0,
-            firings: lived.firings,
-            refusals: lived.refusals,
-        };
-    }
     let cassette: Value = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
     let frames = cassette["cases"].as_array().unwrap().len();
     assert_eq!(
@@ -538,7 +554,7 @@ fn record(
     if frames == 0 {
         assert!(lived.segments.is_empty(), "no firing, no segments");
     }
-    Recording {
+    Ok(Recording {
         replay: Some(Backend::Replay {
             file: file.clone(),
             namespace: SUMMARIZER_NAMESPACE.to_string(),
@@ -547,7 +563,7 @@ fn record(
         cassette_bytes: std::fs::metadata(&file).unwrap().len(),
         firings: lived.firings,
         refusals: 0,
-    }
+    })
 }
 
 /// The task asks in the message's own words.
@@ -581,36 +597,60 @@ fn root_bytes(root: &Path) -> u64 {
     walk(root)
 }
 
-/// What the run holds at once, so the envelope reads a live count rather
-/// than each acquisition as one.
-#[derive(Default)]
-struct Held {
+/// The run's envelope with what it holds at once, so a reading is a live
+/// count rather than each acquisition as one, and the clock the elapsed bound
+/// is read against. Every charge is a reading the envelope may refuse.
+struct Charges {
+    envelope: Envelope,
     roots: u64,
     processes: u64,
+    started: Instant,
 }
 
-/// A root of its own for one fixture, charged to the envelope while held.
-fn occupy(held: &mut Held, envelope: &mut Envelope) -> tempfile::TempDir {
-    let root = tempfile::tempdir().unwrap();
-    held.roots += 1;
-    envelope.observe(Resource::TempRoots, held.roots).unwrap();
-    root
-}
+impl Charges {
+    fn new(bounds: ResourceLimits) -> Self {
+        Self {
+            envelope: Envelope::new(bounds),
+            roots: 0,
+            processes: 0,
+            started: Instant::now(),
+        }
+    }
 
-/// Releases a root after its fixture exited: the store's bytes are charged as
-/// they peaked, then the root goes, and the run's elapsed time is read.
-fn vacate(root: tempfile::TempDir, held: &mut Held, envelope: &mut Envelope, started: Instant) {
-    envelope
-        .observe(Resource::StoreBytes, root_bytes(root.path()))
-        .unwrap();
-    drop(root);
-    held.roots -= 1;
-    envelope
-        .observe(
-            Resource::ElapsedMs,
-            u64::try_from(started.elapsed().as_millis()).unwrap(),
-        )
-        .unwrap();
+    fn observe(&mut self, resource: Resource, observed: u64) -> Result<(), EnvelopeExceeded> {
+        self.envelope.observe(resource, observed)
+    }
+
+    /// A root of its own for one fixture, charged while held.
+    fn occupy(&mut self) -> Result<tempfile::TempDir, EnvelopeExceeded> {
+        let root = tempfile::tempdir().unwrap();
+        self.roots += 1;
+        self.observe(Resource::TempRoots, self.roots)?;
+        Ok(root)
+    }
+
+    /// Releases a root after its fixture exited: the store's bytes are charged
+    /// as they peaked, then the root goes, and the run's elapsed time is read.
+    fn vacate(&mut self, root: tempfile::TempDir) -> Result<(), EnvelopeExceeded> {
+        self.observe(Resource::StoreBytes, root_bytes(root.path()))?;
+        drop(root);
+        self.roots -= 1;
+        self.elapsed()
+    }
+
+    fn process_started(&mut self) -> Result<(), EnvelopeExceeded> {
+        self.processes += 1;
+        self.observe(Resource::Processes, self.processes)
+    }
+
+    fn process_ended(&mut self) {
+        self.processes -= 1;
+    }
+
+    fn elapsed(&mut self) -> Result<(), EnvelopeExceeded> {
+        let elapsed = u64::try_from(self.started.elapsed().as_millis()).unwrap();
+        self.observe(Resource::ElapsedMs, elapsed)
+    }
 }
 
 struct ArmRun {
@@ -634,10 +674,8 @@ fn run_arm(
     replacement: &Replacement,
     task: &Task,
     profile: &RunProfile,
-    envelope: &mut Envelope,
-    held: &mut Held,
-    started: Instant,
-) -> ArmRun {
+    charges: &mut Charges,
+) -> Result<ArmRun, EnvelopeExceeded> {
     assert_eq!(task.evidence.len(), 1, "one truth per task on surface 1");
     let evidence = task.evidence.iter().next().unwrap();
     let message = world
@@ -646,14 +684,7 @@ fn run_arm(
         .find(|m| m.event_id == *evidence)
         .expect("the evidence is a rendered message");
     let attempt = Instant::now();
-    let lived = live(
-        world,
-        replacement,
-        &prompt(message),
-        envelope,
-        held,
-        started,
-    );
+    let lived = live(world, replacement, &prompt(message), charges)?;
     let usage = TaskUsage {
         elapsed_ms: u64::try_from(attempt.elapsed().as_millis()).unwrap(),
         ..TaskUsage::default()
@@ -669,20 +700,7 @@ fn run_arm(
             "raw history has no segments to serve"
         );
     }
-    let covered: BTreeMap<i64, Vec<EventId>> = lived
-        .segments
-        .iter()
-        .map(|segment| {
-            let ids = (segment.start_message..=segment.end_message)
-                .map(|ordinal| {
-                    world.messages[usize::try_from(ordinal - 1).unwrap()]
-                        .event_id
-                        .clone()
-                })
-                .collect();
-            (segment.sequence, ids)
-        })
-        .collect();
+    let covered = covered(&lived.segments, world);
     let mut identities: BTreeMap<i64, String> = covered
         .iter()
         .map(|(sequence, ids)| {
@@ -749,11 +767,28 @@ fn run_arm(
         &BTreeSet::new(),
         Surface1Stage::Attachment,
     );
-    ArmRun {
+    Ok(ArmRun {
         result,
         verdict,
         segments: lived.segments,
-    }
+    })
+}
+
+/// The messages each segment covers, by sequence.
+fn covered(segments: &[StoredHistorySegment], world: &World) -> BTreeMap<i64, Vec<EventId>> {
+    segments
+        .iter()
+        .map(|segment| {
+            let ids = (segment.start_message..=segment.end_message)
+                .map(|ordinal| {
+                    world.messages[usize::try_from(ordinal - 1).unwrap()]
+                        .event_id
+                        .clone()
+                })
+                .collect();
+            (segment.sequence, ids)
+        })
+        .collect()
 }
 
 fn sample(pair: &Pair, arm: ArmKind, policy: HistoryPolicy, terminal: Terminal) -> SampleRecord {
@@ -815,29 +850,27 @@ fn terminal_of(result: ArmResult) -> Terminal {
 
 /// Stages the bytes beside the target, syncs them, renames into place, and
 /// syncs the directory, so a reader sees the whole report or none of it.
-fn write_then_rename(path: &Path, bytes: &[u8]) {
+pub fn write_then_rename(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::os::unix::fs::OpenOptionsExt;
     let staged = path.with_extension("json.staged");
-    let file = std::fs::File::create(&staged).unwrap();
-    std::io::Write::write_all(&mut &file, bytes).unwrap();
-    file.sync_all().unwrap();
-    std::fs::rename(&staged, path).unwrap();
-    std::fs::File::open(path.parent().unwrap())
-        .unwrap()
-        .sync_all()
-        .unwrap();
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&staged)?;
+    std::io::Write::write_all(&mut file, bytes)?;
+    file.sync_all()?;
+    std::fs::rename(&staged, path)?;
+    std::fs::File::open(path.parent().unwrap())?.sync_all()
 }
 
-/// One campaign at the given scale: compile, drive both arms of every pair
-/// through the fixture, analyze, gate, publish, and read the report back.
-/// `elapsed_ms` is the run's wall-clock bound; the envelope refuses the
-/// first reading past it rather than reporting an overrun afterwards.
 /// Runs one campaign under `config`: compiles the pairs, drives every arm of
 /// every pair through the fixture under both history policies, gates the
 /// report, and publishes the report and its manifest write-then-rename into
-/// `config.publish`. A fixture that breaks its contract with the shell ends
-/// the run with a panic; an unapproved profile is refused before anything
-/// runs.
-pub fn run(config: &Config) -> Result<Run, ProfileError> {
+/// `config.publish`. An unapproved profile and an aged history too short for
+/// its window are refused before anything runs; the envelope refuses the
+/// first reading past a bound rather than reporting an overrun afterwards.
+pub fn run(config: &Config) -> Result<Run, RunError> {
     let Config {
         scale,
         aged_messages,
@@ -846,7 +879,6 @@ pub fn run(config: &Config) -> Result<Run, ProfileError> {
         publish,
     } = config;
     let (scale, aged_messages, elapsed_ms) = (*scale, *aged_messages, *elapsed_bound_ms);
-    let started = Instant::now();
     let started_at_ms = i64::try_from(
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -855,16 +887,17 @@ pub fn run(config: &Config) -> Result<Run, ProfileError> {
     )
     .unwrap();
     let max_events_per_log = aged_messages.max(64) * 2;
-    let profile = profile(
-        scale,
-        max_events_per_log,
-        elapsed_ms,
-        Some(approval.clone()),
-    );
+    let profile = profile(scale, max_events_per_log, elapsed_ms, approval.clone());
     profile.approved()?;
-    let mut envelope = Envelope::new(profile.envelope.clone());
-    let mut held = Held::default();
     let window = profile.baseline_bounds[&EvaluatedSurface::Surface1];
+    // The falsifier must sit outside the window and the plain task inside it.
+    if aged_messages <= window {
+        return Err(RunError::AgedHistoryTooShort {
+            aged_messages,
+            window,
+        });
+    }
+    let mut charges = Charges::new(profile.envelope.clone());
 
     let aged = generate_all(
         SEED,
@@ -898,32 +931,17 @@ pub fn run(config: &Config) -> Result<Run, ProfileError> {
 
     let aged_world = world(&set.aged);
     assert_eq!(aged_world.messages.len(), aged_messages as usize);
-    let cassettes = occupy(&mut held, &mut envelope);
-    let aged_recording = record(
-        "aged",
-        &aged_world,
-        cassettes.path(),
-        &mut envelope,
-        &mut held,
-        started,
-    );
+    let cassettes = charges.occupy()?;
+    let aged_recording = record("aged", &aged_world, cassettes.path(), &mut charges)?;
     assert!(
         aged_recording.firings > 0,
         "the aged history reaches the pressure the summarizer fires at"
     );
     let mut cassette_bytes = aged_recording.cassette_bytes;
-    envelope
-        .observe(Resource::CassetteBytes, cassette_bytes)
-        .unwrap();
-    // Refusals over firings, per arm, as the lives observed them.
-    let mut fired: BTreeMap<&str, (u32, u32)> =
-        BTreeMap::from([("aged", (0, 0)), ("fresh", (0, 0))]);
-    let mut observe_rates = |arm: &'static str, recording: &Recording| {
-        let (firings, refusals) = fired.get_mut(arm).unwrap();
-        *firings += recording.firings;
-        *refusals += recording.refusals;
-    };
-    observe_rates("aged", &aged_recording);
+    charges.observe(Resource::CassetteBytes, cassette_bytes)?;
+    // Refusals over firings per arm, as the lives observed them.
+    let aged_fired = (aged_recording.firings, aged_recording.refusals);
+    let mut fresh_fired = (0, 0);
     let mut structured_outcomes: Vec<PairOutcome> = Vec::new();
     let mut outcomes = Vec::new();
     let mut samples = BTreeMap::new();
@@ -941,28 +959,23 @@ pub fn run(config: &Config) -> Result<Run, ProfileError> {
             &Replacement::Raw,
             &pair.task,
             &profile,
-            &mut envelope,
-            &mut held,
-            started,
-        );
+            &mut charges,
+        )?;
         let fresh_run = run_arm(
             &fresh_world,
             &Replacement::Raw,
             &pair.task,
             &profile,
-            &mut envelope,
-            &mut held,
-            started,
-        );
+            &mut charges,
+        )?;
         let fresh_recording = record(
             &format!("fresh-{}", pair.task.id),
             &fresh_world,
             cassettes.path(),
-            &mut envelope,
-            &mut held,
-            started,
-        );
-        observe_rates("fresh", &fresh_recording);
+            &mut charges,
+        )?;
+        fresh_fired.0 += fresh_recording.firings;
+        fresh_fired.1 += fresh_recording.refusals;
         // Twelve turns never reach the pressure the summarizer fires at, so
         // the short control's structured arm is its raw history.
         assert_eq!(
@@ -971,46 +984,44 @@ pub fn run(config: &Config) -> Result<Run, ProfileError> {
             "the summarizer leaves the short control raw"
         );
         cassette_bytes += fresh_recording.cassette_bytes;
-        envelope
-            .observe(Resource::CassetteBytes, cassette_bytes)
-            .unwrap();
+        charges.observe(Resource::CassetteBytes, cassette_bytes)?;
         // A structured arm runs only under a cassette; a refused recording
         // leaves none, and the arm's samples are skipped as refused.
-        let aged_structured_run = aged_recording.replay.as_ref().map(|replay| {
-            let run = run_arm(
-                &aged_world,
-                &Replacement::Summarizer(replay.clone()),
-                &pair.task,
-                &profile,
-                &mut envelope,
-                &mut held,
-                started,
-            );
-            // The replayed life publishes what the recorded one did, task
-            // after task: the segments are the daemon's, reproduced from the
-            // cassette.
-            assert_eq!(
-                run.segments.iter().map(timeless).collect::<Vec<_>>(),
-                aged_recording
-                    .segments
-                    .iter()
-                    .map(timeless)
-                    .collect::<Vec<_>>(),
-                "the replay publishes the recording's segments"
-            );
-            run
-        });
-        let fresh_structured_run = fresh_recording.replay.as_ref().map(|replay| {
-            run_arm(
+        let aged_structured_run = match aged_recording.replay.as_ref() {
+            None => None,
+            Some(replay) => {
+                let run = run_arm(
+                    &aged_world,
+                    &Replacement::Summarizer(replay.clone()),
+                    &pair.task,
+                    &profile,
+                    &mut charges,
+                )?;
+                // The replayed life publishes what the recorded one did, task
+                // after task: the segments are the daemon's, reproduced from the
+                // cassette.
+                assert_eq!(
+                    run.segments.iter().map(timeless).collect::<Vec<_>>(),
+                    aged_recording
+                        .segments
+                        .iter()
+                        .map(timeless)
+                        .collect::<Vec<_>>(),
+                    "the replay publishes the recording's segments"
+                );
+                Some(run)
+            }
+        };
+        let fresh_structured_run = match fresh_recording.replay.as_ref() {
+            None => None,
+            Some(replay) => Some(run_arm(
                 &fresh_world,
                 &Replacement::Summarizer(replay.clone()),
                 &pair.task,
                 &profile,
-                &mut envelope,
-                &mut held,
-                started,
-            )
-        });
+                &mut charges,
+            )?),
+        };
         // Samples in the order the arms ran: raw, then structured; the pruned
         // arms, never attempted, are declared last.
         for (kind, label, run) in [
@@ -1077,20 +1088,7 @@ pub fn run(config: &Config) -> Result<Run, ProfileError> {
     let refused_aged = aged_recording.replay.is_none();
     // The messages each of the recording's segments covers, by sequence; every
     // replayed arm published the same segments.
-    let aged_structured_covered: BTreeMap<i64, Vec<EventId>> = aged_recording
-        .segments
-        .iter()
-        .map(|segment| {
-            let ids = (segment.start_message..=segment.end_message)
-                .map(|ordinal| {
-                    aged_world.messages[usize::try_from(ordinal - 1).unwrap()]
-                        .event_id
-                        .clone()
-                })
-                .collect();
-            (segment.sequence, ids)
-        })
-        .collect();
+    let aged_structured_covered = covered(&aged_recording.segments, &aged_world);
     let arms = GovernanceArms {
         control_run_id: "ee".repeat(32),
         task_ids: set.pairs.iter().map(|p| p.task.id.clone()).collect(),
@@ -1136,14 +1134,14 @@ pub fn run(config: &Config) -> Result<Run, ProfileError> {
     // so the miss rates are zero by observation; the refusal rates are the
     // cassette's refusals over the summarizer's firings, as the lives saw
     // them.
-    let arm_rates: BTreeMap<String, ArmRates> = fired
-        .iter()
+    let arm_rates: BTreeMap<String, ArmRates> = [("aged", aged_fired), ("fresh", fresh_fired)]
+        .into_iter()
         .map(|(arm, (firings, refusals))| {
             (
                 arm.to_string(),
                 ArmRates {
                     miss_rate: "0".to_string(),
-                    refusal_rate: decimal_ceil(*refusals, *firings),
+                    refusal_rate: decimal_ceil(refusals, firings),
                 },
             )
         })
@@ -1171,9 +1169,10 @@ pub fn run(config: &Config) -> Result<Run, ProfileError> {
     {
         established.push(Established::TaskOraclePasses);
     }
+    let identity = identity(&profile, &set);
     let mut report = SuiteBReport {
         schema: SUITE_B_REPORT_SCHEMA.to_string(),
-        eval_run_id: "ee".repeat(32),
+        eval_run_id: eval_run_id(&identity).unwrap(),
         profile: profile.clone(),
         profile_digest: profile.digest().unwrap(),
         surface: EvaluatedSurface::Surface1,
@@ -1196,38 +1195,34 @@ pub fn run(config: &Config) -> Result<Run, ProfileError> {
         rates,
         arm_rates,
         injection: vec![],
-        envelope: envelope.clone(),
+        envelope: charges.envelope.clone(),
     };
     // The publish root, the artifact's bytes, and the retained artifact are
     // charged before the envelope is copied into the report, so the published
-    // peaks include the publication itself; the report's size is charged from
-    // this first serialization.
+    // peaks include the publication itself. The report's size is charged from
+    // a serialization before the envelope is copied in, then again from the
+    // bytes written, which carry the peaks and are the larger; the second
+    // reading is the one the envelope refuses on.
     std::fs::create_dir_all(publish).unwrap();
-    held.roots += 1;
-    envelope.observe(Resource::TempRoots, held.roots).unwrap();
+    charges.roots += 1;
+    charges.observe(Resource::TempRoots, charges.roots)?;
     let sized = serde_json::to_vec_pretty(&report.serialize().unwrap()).unwrap();
-    envelope
-        .observe(Resource::ArtifactBytes, sized.len() as u64)
-        .unwrap();
-    envelope.observe(Resource::RetainedArtifacts, 1).unwrap();
-    envelope
-        .observe(
-            Resource::ElapsedMs,
-            u64::try_from(started.elapsed().as_millis()).unwrap(),
-        )
-        .unwrap();
-    envelope.check().unwrap();
-    report.envelope = envelope.clone();
+    charges.observe(Resource::ArtifactBytes, sized.len() as u64)?;
+    charges.observe(Resource::RetainedArtifacts, 1)?;
+    charges.elapsed()?;
+    charges.envelope.check()?;
+    report.envelope = charges.envelope.clone();
     let bytes = serde_json::to_vec_pretty(&report.serialize().unwrap()).unwrap();
-    write_then_rename(&publish.join(REPORT_FILE), &bytes);
+    charges.observe(Resource::ArtifactBytes, bytes.len() as u64)?;
+    write_then_rename(&publish.join(REPORT_FILE), &bytes).unwrap();
 
     // The manifest beside the report says how the world reached the store:
     // every arm was lived through the daemon's own transform route one turn
     // at a time in one store incarnation, so the run is `replay` over
     // `transform-route, turn by turn`.
-    let manifest = manifest(&profile, &set, &report, &bytes, &frozen, started_at_ms);
+    let manifest = manifest(identity, &set, &report, &bytes, &frozen, started_at_ms);
     let manifest_bytes = serde_json::to_vec_pretty(&manifest.to_value()).unwrap();
-    write_then_rename(&publish.join(MANIFEST_FILE), &manifest_bytes);
+    write_then_rename(&publish.join(MANIFEST_FILE), &manifest_bytes).unwrap();
     Ok(Run {
         report,
         report_bytes: bytes,
@@ -1250,6 +1245,66 @@ pub const REPORT_FILE: &str = "suite-b-report.json";
 /// The manifest's file name under the publish directory.
 pub const MANIFEST_FILE: &str = "manifest.json";
 
+/// The `campaign` subcommand's flags, every one required: a campaign runs
+/// only under values someone wrote down.
+pub const USAGE: &str = "campaign --scale <s0|s1|s2> --aged-messages <n> \
+--elapsed-bound-ms <n> --approved-by <name> --approval-run-id <hex64> --publish <dir>";
+
+const FLAGS: [&str; 6] = [
+    "scale",
+    "aged-messages",
+    "elapsed-bound-ms",
+    "approved-by",
+    "approval-run-id",
+    "publish",
+];
+
+/// Reads a `Config` from the `campaign` subcommand's arguments. A flag that is
+/// unknown, repeated, missing, or missing its value is refused with the flag
+/// named, before any value is read.
+pub fn config_from_args(args: impl IntoIterator<Item = String>) -> Result<Config, String> {
+    let mut values: BTreeMap<String, String> = BTreeMap::new();
+    let mut args = args.into_iter();
+    while let Some(flag) = args.next() {
+        let Some(name) = flag.strip_prefix("--") else {
+            return Err(format!("unexpected argument {flag:?}; {USAGE}"));
+        };
+        if !FLAGS.contains(&name) {
+            return Err(format!("unknown flag --{name}; {USAGE}"));
+        }
+        let value = match args.next() {
+            Some(value) if !value.starts_with("--") => value,
+            _ => return Err(format!("--{name} needs a value")),
+        };
+        if values.insert(name.to_string(), value).is_some() {
+            return Err(format!("--{name} given twice"));
+        }
+    }
+    if let Some(missing) = FLAGS.iter().find(|flag| !values.contains_key(**flag)) {
+        return Err(format!("--{missing} is required; {USAGE}"));
+    }
+    let take = |name: &str| values[name].clone();
+    let scale: Scale = serde_json::from_value(Value::String(take("scale")))
+        .map_err(|error| format!("--scale: {error}"))?;
+    let number = |name: &str| {
+        take(name)
+            .parse::<u64>()
+            .map_err(|error| format!("--{name}: {error}"))
+    };
+    let aged_messages = u32::try_from(number("aged-messages")?)
+        .map_err(|error| format!("--aged-messages: {error}"))?;
+    Ok(Config {
+        scale,
+        aged_messages,
+        elapsed_bound_ms: number("elapsed-bound-ms")?,
+        approval: Some(Approval {
+            approved_by: take("approved-by"),
+            approved_at_run_id: take("approval-run-id"),
+        }),
+        publish: PathBuf::from(take("publish")),
+    })
+}
+
 fn sha256_hex(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
@@ -1268,24 +1323,35 @@ fn command(program: &str, args: &[&str]) -> String {
 /// profile and scenario the run was declared under, every sample in the order
 /// it ran, the report's digest as its result, the pair set's digest as its
 /// witness, and the envelope as bounded and as peaked.
-fn manifest(
-    profile: &RunProfile,
-    set: &PairSet,
-    report: &SuiteBReport,
-    report_bytes: &[u8],
-    frozen: &FrozenFamily,
-    started_at_ms: i64,
-) -> Manifest {
+/// The daemon features this shell was compiled under, as the build record
+/// names them: the example carries `eval-runner`, and both callers carry
+/// `test-support`.
+fn enabled_features() -> BTreeSet<String> {
+    let mut features = BTreeSet::from(["test-support".to_string()]);
+    if cfg!(feature = "eval-runner") {
+        features.insert("eval-runner".to_string());
+    }
+    if cfg!(feature = "direct-host-fixture") {
+        features.insert("direct-host-fixture".to_string());
+    }
+    features
+}
+
+/// The run's identity: this checkout and toolchain, the profile as its
+/// config, the surface and tasks as its scenario, and the generator's
+/// versions. It does not depend on what the run found, so the report is
+/// stamped with it before the manifest is.
+fn identity(profile: &RunProfile, set: &PairSet) -> RunIdentity {
     let dirty = !command("git", &["status", "--porcelain"]).is_empty();
     let lockfile =
         std::fs::read(super::support::direct_host::workspace_root().join("Cargo.lock")).unwrap();
-    let identity = RunIdentity {
+    RunIdentity {
         build: BuildRecord {
             code_sha: command("git", &["rev-parse", "HEAD"]),
             dirty,
             lockfile_digest: sha256_hex(&lockfile),
             rustc_version: command("rustc", &["--version"]),
-            features: BTreeSet::from(["test-support".to_string()]),
+            features: enabled_features(),
             target_triple: command("rustc", &["-vV"])
                 .lines()
                 .find_map(|line| line.strip_prefix("host: "))
@@ -1298,7 +1364,7 @@ fn manifest(
         simulator_version: "eval-campaign-shell/v1".to_string(),
         config: serde_json::to_value(profile).unwrap(),
         scenario: serde_json::json!({
-            "surface": report.surface,
+            "surface": EvaluatedSurface::Surface1,
             "tasks": set.pairs.iter().map(|p| p.task.id.clone()).collect::<Vec<_>>(),
             "aged_messages": set.aged.events.len(),
         }),
@@ -1307,11 +1373,21 @@ fn manifest(
         generator_version: GENERATOR_VERSION.to_string(),
         eligibility_spec_digest: ELIGIBILITY_SPEC_DIGEST.to_string(),
         linearization_rule_version: LINEARIZATION_RULE_VERSION.to_string(),
-    };
+    }
+}
+
+fn manifest(
+    identity: RunIdentity,
+    set: &PairSet,
+    report: &SuiteBReport,
+    report_bytes: &[u8],
+    frozen: &FrozenFamily,
+    started_at_ms: i64,
+) -> Manifest {
     let set_value = serde_json::to_value(set).unwrap();
     Manifest {
         schema: MANIFEST_SCHEMA.to_string(),
-        eval_run_id: eval_run_id(&identity).unwrap(),
+        eval_run_id: report.eval_run_id.clone(),
         run_identity: identity,
         start_ms: started_at_ms,
         end_ms: started_at_ms + i64::try_from(report.envelope.peaks.elapsed_ms).unwrap(),
@@ -1346,7 +1422,7 @@ fn manifest(
         analysis_family_digest: Some(frozen.analysis_family_digest.clone()),
         recency_baseline: Some(RecencyBaseline {
             version: eval_core::RECENCY_BASELINE_VERSION.to_string(),
-            bounds: profile.baseline_bounds.clone(),
+            bounds: report.profile.baseline_bounds.clone(),
         }),
         reachability: Reachability::DefaultProduction,
         claim_boundary: ClaimBoundary::pinned(),
@@ -1362,5 +1438,81 @@ fn manifest(
         envelope_bounds: report.envelope.bounds.clone(),
         envelope_peaks: report.envelope.peaks.clone(),
         arm_rates: report.arm_rates.clone(),
+    }
+}
+
+#[cfg(test)]
+mod config_tests {
+    use super::*;
+
+    fn args(list: &[&str]) -> Vec<String> {
+        list.iter().map(|s| s.to_string()).collect()
+    }
+
+    const FULL: [&str; 12] = [
+        "--scale",
+        "s0",
+        "--aged-messages",
+        "130",
+        "--elapsed-bound-ms",
+        "1200000",
+        "--approved-by",
+        "someone",
+        "--approval-run-id",
+        "ab",
+        "--publish",
+        "/tmp/out",
+    ];
+
+    #[test]
+    fn every_flag_given_once_is_a_config() {
+        let config = config_from_args(args(&FULL)).unwrap();
+        assert_eq!(
+            config,
+            Config {
+                scale: Scale::S0,
+                aged_messages: 130,
+                elapsed_bound_ms: 1_200_000,
+                approval: Some(Approval {
+                    approved_by: "someone".to_string(),
+                    approved_at_run_id: "ab".to_string(),
+                }),
+                publish: PathBuf::from("/tmp/out"),
+            }
+        );
+    }
+
+    #[test]
+    fn every_refusal_names_its_flag() {
+        let cases: [(&[&str], &str); 7] = [
+            (&["--scale", "s0"], "--aged-messages is required"),
+            (&["--aged_messages", "5"], "unknown flag --aged_messages"),
+            (
+                &["--scale", "--aged-messages", "5"],
+                "--scale needs a value",
+            ),
+            (&["--scale", "s0", "--scale", "s1"], "--scale given twice"),
+            (&["s0"], "unexpected argument \"s0\""),
+            (&["--publish"], "--publish needs a value"),
+            (&[], "--scale is required"),
+        ];
+        for (list, expected) in cases {
+            let error = config_from_args(args(list)).unwrap_err();
+            assert!(error.contains(expected), "{list:?}: {error}");
+        }
+        let mut bad_scale = args(&FULL);
+        bad_scale[1] = "s9".to_string();
+        assert!(
+            config_from_args(bad_scale)
+                .unwrap_err()
+                .starts_with("--scale:")
+        );
+        let mut bad_number = args(&FULL);
+        bad_number[3] = "many".to_string();
+        assert!(
+            config_from_args(bad_number)
+                .unwrap_err()
+                .starts_with("--aged-messages:")
+        );
     }
 }
