@@ -1338,17 +1338,24 @@ line per message) goes to a scripted provider that answers in the
 summarizer's output document, one `history_segment` per run of five messages
 whose text keeps every message's summary; the exchange is recorded into a
 Rust cassette under the campaign namespace, then replayed strictly for the
-arm (a one-byte change to the transcript is a latched miss, never an answer),
-and the replayed text is validated by `validate_history_summarizer_output`,
-the summarizer's own validator, over the chunk the producer would build. The
-validator keeps the newest segment out so the tail stays raw, as the producer
-does; those messages keep their raw segments. A selected segment stands for
-every message it covers. At S0 every structured arm delivers every truth:
-under the summarizer's segments the aged history is a fifth as many units,
-so surface 1's window reaches the early message the raw arm lost. The three
-policies are recorded as `GovernanceArms` over the pair set, the pruned arm's
-version naming why it was not attempted. The cassette's bytes are charged to
-the envelope.
+arm (a one-byte change to the transcript is a latched miss, never an answer;
+the replayed text equals the recorded one), and the replayed text is
+validated by `validate_history_summarizer_output`, the summarizer's own
+validator, over the chunk the producer would build; the validated segments
+become stored rows through the publication path's own mapping
+(`daemon::history_summarizer_evaluation`, `test-support` only). The validator
+keeps the newest segment out so the tail stays raw, as the producer does;
+the messages from `unprocessed_from` on keep their raw segments. A selected
+segment stands for every message it covers at every stage up to render; at
+render the served fragment must carry the message's own marker, or the
+segment reached render with the evidence absent
+(`observe_rendered`). At S0 the structured arms show what the raw arms
+cannot: the early truth is inside the window (a fifth as many units) and its
+segment is selected, but the served fragment is capped, so a truth folded past
+the cap of its segment is lost at render on both arms, while a truth at the
+head of its segment or left raw in the tail is delivered. The three policies
+are recorded as `GovernanceArms` over the pair set. Every cassette's bytes
+are charged to the envelope.
 
 Beside the report the campaign publishes a manifest with the same
 write-then-rename, parses it back, and checks its digest. Its identity is
@@ -1360,10 +1367,14 @@ the pair set, and it carries the frozen family's digest and the recency
 baseline's version and window. Its `construction` is `bulk` and its
 `ingestion` is `direct-database, non-aged`: the arms' history segments are
 written straight into each store, so by the manifest's own rules the aged arm
-is not a replay-built aged world. Every arm of the pruned policy is declared
+is not a replay-built aged world, and the same manifest relabelled `replay`
+is refused as `DirectDatabaseAged`. Every arm of the pruned policy is declared
 in the ledger and ends `unsupported {policy_not_on_surface}`, because
 `message_cleanup` reclaims projection rows and surface 1 reads history
-segments; eighteen samples are accounted for and twelve attempted.
+segments; eighteen samples are accounted for and twelve attempted, in the order the
+arms ran with the never-attempted pruned arms declared last. The paired
+analysis in the report is over the raw arms; the structured outcomes are in
+the ledger and the governance record.
 
 Not composed yet: the aged arm built by `step()` and lifecycle replay through
 ingestion rather than seeded segments, which is what would let the manifest
@@ -1372,8 +1383,9 @@ structured arm reaches the validator with a replayed answer, not
 `publish_validated_chunk` with its reservation state); the `eval_runner`
 example still serves the cassette oracle only; and the write-then-rename
 publisher is the test's own, since no shipped publisher exists. The
-`history_summarizer_validate` module is public under `test-support` so the
-structured arm can reach the validator without a second model of the policy.
+structured arm's chunk, transcript, and request are the test's own model of
+what the producer builds; only the validator and the stored-row mapping are
+production code.
 
 ## Coverage markers
 

@@ -225,6 +225,19 @@ pub fn observe(
     pass: Option<&UserHintPass>,
     identities: &BTreeMap<i64, String>,
 ) {
+    observe_rendered(ledger, pass, identities, |_| true);
+}
+
+/// `observe`, with `rendered` deciding whether a selected segment's served
+/// fragment carries the occurrence it stands for: a segment the cap kept but
+/// the fragment truncated past the evidence reaches render with the evidence
+/// absent, and every stage after it.
+pub fn observe_rendered(
+    ledger: &mut SurfaceLedger,
+    pass: Option<&UserHintPass>,
+    identities: &BTreeMap<i64, String>,
+    rendered: impl Fn(i64) -> bool,
+) {
     let universe: BTreeSet<String> = identities.values().cloned().collect();
     let record = |ledger: &mut SurfaceLedger, stage: Surface1Stage, kept: BTreeSet<String>| {
         ledger.observe(Observation::new(stage, 0, None, kept).unwrap());
@@ -286,9 +299,15 @@ pub fn observe(
         record(ledger, Surface1Stage::Threshold, thresholded);
         record(ledger, Surface1Stage::Cap, selected.clone());
     }
+    let served: BTreeSet<String> = trace
+        .selected
+        .iter()
+        .filter(|sequence| rendered(**sequence))
+        .map(|sequence| identities[sequence].clone())
+        .collect();
     let kept = |flag: bool| {
         if flag && !outcome.hint_text.is_empty() {
-            selected.clone()
+            served.clone()
         } else {
             BTreeSet::new()
         }

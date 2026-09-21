@@ -1108,17 +1108,19 @@ Campaign (`crates/daemon/tests/eval_campaign.rs`, `--all-features`):
   the established claims follow from the verdicts; every pruned arm is
   declared and ends `unsupported {policy_not_on_surface}`; every structured
   arm runs on the summarizer's segments, produced from a cassette replayed
-  strictly (an edited transcript is a latched miss) and validated by the
-  summarizer's own validator, and delivers every truth; the three policies
-  validate as `GovernanceArms` over the pair set; eighteen samples are
-  accounted for and twelve attempted; the report validates, is published
+  strictly (the replay equals the recording; an edited transcript is a
+  latched miss) and validated by the summarizer's own validator; the early
+  truth is folded past its segment's served fragment and lost at render on
+  both arms, the in-window truth at the head of its segment and the raw tail
+  truth are delivered; the three policies validate as `GovernanceArms` over
+  the pair set; eighteen samples are accounted for and twelve attempted; the report validates, is published
   write-then-rename with the file and directory synced, and parses back
   equal; the published peaks show the stores, the elapsed time, the artifact,
-  one process, one root, and no cassette bytes; a manifest is published the
-  same way, parses back to the same digest, names the checkout, toolchain,
-  and fixture binary, carries every sample in run order, the frozen family's
-  digest, and the recency baseline, and says `bulk` and `direct-database,
-  non-aged`.
+  one process, one root, and the summarizer cassettes' bytes; a manifest is
+  published the same way, parses back to the same digest, names the checkout,
+  toolchain, host triple, and fixture binary, carries every sample in run
+  order, the frozen family's digest, and the recency baseline, says `bulk`
+  and `direct-database, non-aged`, and is refused when relabelled `replay`.
 - `an_s1_campaign_runs_only_under_its_budget` (ignored): a 400-message
   history runs only under `EIDNARA_EVAL_S1_BUDGET_MS` and reports the same
   shape inside the budget; without the variable the run is recorded as
@@ -1171,9 +1173,10 @@ Campaign (`crates/daemon/tests/eval_campaign.rs`, `--all-features`):
 - The campaign shell lives in the daemon test suite and drives the
   direct-host fixture; the `eval_runner` example still serves the cassette
   oracle only.
-- Surface 1 makes no model call, so the campaign's cassette holds no frame;
-  strict replay under a campaign has been exercised only by the cassette
-  suites.
+- Surface 1 makes no model call (the fixture's counters read zero), so the
+  surface boundary's cassette holds no frame; the summarizer boundary's
+  cassette holds one recorded frame per arm, replayed strictly with one
+  probed miss, from a scripted provider rather than a live one.
 - The campaign runs its arms one after another in one process; parallel
   campaigns on a shared checkout have not been run, so
   `xc-parallel-campaigns-isolated-on-shared-checkout` is exercised only for

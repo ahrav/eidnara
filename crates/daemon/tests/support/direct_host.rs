@@ -27,7 +27,7 @@ pub fn workspace_root() -> PathBuf {
         .to_path_buf()
 }
 
-fn fixture_binary() -> PathBuf {
+pub fn fixture_binary() -> PathBuf {
     let _guard = BUILD_LOCK
         .get_or_init(|| Mutex::new(()))
         .lock()

@@ -13,8 +13,9 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Instant;
 
-use daemon::history_summarizer_validate::{
-    ChunkLine, HistorySummarizerChunk, ValidateOptions, validate_history_summarizer_output,
+use daemon::history_summarizer_evaluation::{
+    ChunkLine, HistorySummarizerChunk, ValidateOptions, stored_history_segment,
+    validate_history_summarizer_output,
 };
 use daemon::transform::UserHintPass;
 use eval_core::{
@@ -43,10 +44,11 @@ use host_runtime::model_execution::backend::{
 };
 use memory_store::StoredHistorySegment;
 use sha2::{Digest, Sha256};
-use support::direct_host::FixtureProcess;
+use support::direct_host::{FixtureProcess, fixture_binary};
 use support::eval_cassette::CassetteBackend;
 use support::eval_surface::{
-    EPOCH_MS, Knobs, SurfaceLedger, World, block_on, mid, observe, pass, seed_store, segment, text,
+    EPOCH_MS, Knobs, SurfaceLedger, World, block_on, mid, observe_rendered, pass, seed_store,
+    segment, text,
 };
 
 const SEED: u64 = 0x5EED_B000_0000_0002;
@@ -83,7 +85,7 @@ fn profile(scale: Scale, max_events_per_log: u32, approval: Option<Approval>) ->
             max_tool_calls: 1,
             max_tokens_in: 4_096,
             max_tokens_out: 1_024,
-            hard_deadline_ms: 60_000,
+            hard_deadline_ms: 600_000,
             max_no_progress_iterations: 1,
         },
         envelope: ResourceLimits {
@@ -198,9 +200,23 @@ struct Arm {
     covered: BTreeMap<i64, Vec<EventId>>,
 }
 
+/// The marker only this message's summary has: its native message id with
+/// every separator removed, one lexical token to the hint scorer.
+fn marker(message_id: &str) -> String {
+    message_id
+        .chars()
+        .filter(char::is_ascii_alphanumeric)
+        .collect()
+}
+
+/// The summary a segment carries for one message, whether the shell writes
+/// it as a raw segment or the scripted summarizer folds it into a chunk.
+fn summary_text(text: &str, message_id: &str) -> String {
+    format!("{text} decision recorded as note{}", marker(message_id))
+}
+
 fn summary(message: &RenderedMessage) -> String {
-    let marker = mid(message).rsplit('-').next().unwrap();
-    format!("{} decision recorded as note{marker}", text(message))
+    summary_text(text(message), mid(message))
 }
 
 fn arm(log: &EventLog) -> Arm {
@@ -244,6 +260,12 @@ fn arm(log: &EventLog) -> Arm {
     for (index, message) in messages.iter().enumerate() {
         assert_eq!(events[&(index as i64 + 1)], message.event_id);
     }
+    assert!(
+        segments
+            .iter()
+            .all(|s| s.sequence == s.start_message && s.sequence == s.end_message),
+        "a raw segment's sequence is its message's ordinal"
+    );
     Arm {
         world: World {
             session: SESSION.to_string(),
@@ -335,10 +357,7 @@ impl LlmExecutionBackend for ScriptedSummarizer {
                 let (end, _, _) = &group[group.len() - 1];
                 let summaries: Vec<String> = group
                     .iter()
-                    .map(|(_, mid, text)| {
-                        let marker = mid.rsplit('-').next().unwrap();
-                        format!("{text} decision recorded as note{marker}")
-                    })
+                    .map(|(_, mid, text)| summary_text(text, mid))
                     .collect();
                 let joined = summaries.join("; ");
                 body.push_str(&format!(
@@ -393,11 +412,12 @@ fn summarize_through(backend: &Arc<dyn LlmExecutionBackend>, request: BackendReq
 fn structured(raw: &Arm) -> (Arm, serde_json::Value) {
     let recording = CassetteBackend::recording(SUMMARIZER_NAMESPACE, Arc::new(ScriptedSummarizer));
     let recorded: Arc<dyn LlmExecutionBackend> = recording.clone();
-    summarize_through(&recorded, summarizer_request(&raw.world.messages));
+    let answer = summarize_through(&recorded, summarizer_request(&raw.world.messages));
     let file = recording.file().unwrap();
     let replaying = CassetteBackend::replaying(SUMMARIZER_NAMESPACE, &file).unwrap();
     let replayed: Arc<dyn LlmExecutionBackend> = replaying.clone();
     let output = summarize_through(&replayed, summarizer_request(&raw.world.messages));
+    assert_eq!(output, answer, "the replay serves the recorded frame");
     assert_eq!(replaying.terminal(), None, "the replay hit its one frame");
     // A one-byte change in the transcript is a strict miss, never an answer.
     let mut edited = summarizer_request(&raw.world.messages);
@@ -413,39 +433,32 @@ fn structured(raw: &Arm) -> (Arm, serde_json::Value) {
     assert!(strict.terminal().is_some(), "the miss latched");
 
     let chunk = chunk_of(&raw.world.messages);
-    let validated =
-        validate_history_summarizer_output(&output, &chunk, &[], ValidateOptions::default())
-            .unwrap_or_else(|error| panic!("the summarizer's own validator: {error:?}"));
-    let segments: Vec<StoredHistorySegment> = validated
+    let options = ValidateOptions {
+        sequence_offset: 1,
+        ..ValidateOptions::default()
+    };
+    let validated = validate_history_summarizer_output(&output, &chunk, &[], options)
+        .unwrap_or_else(|error| panic!("the summarizer's own validator: {error:?}"));
+    // The validator keeps the newest segment out so the tail stays raw, as the
+    // producer would leave it; the messages from `unprocessed_from` on keep
+    // their raw segments.
+    assert!(validated.discarded_last, "the newest segment is held back");
+    let covered_through = validated.unprocessed_from - 1;
+    let mut segments: Vec<StoredHistorySegment> = validated
         .history_segments
         .iter()
-        .map(|segment| StoredHistorySegment {
-            sequence: segment.sequence as i64,
-            start_message: segment.start_message as i64,
-            end_message: segment.end_message as i64,
-            start_message_id: segment.start_message_id.clone(),
-            end_message_id: segment.end_message_id.clone(),
-            title: segment.title.clone(),
-            content: segment.content.clone(),
-            p1: segment.p1.clone(),
-            p2: segment.p2.clone(),
-            p3: segment.p3.clone(),
-            p4: segment.p4.clone(),
-            importance: 50,
-            episode_type: segment.episode_type.clone(),
-            created_at: 0,
-            ..Default::default()
-        })
+        .map(|segment| stored_history_segment(segment, 0, &BTreeMap::new()))
         .collect();
-    // The validator drops the newest segment so the tail stays raw, as the
-    // producer would leave it; those messages keep their raw segments.
-    let covered_through = segments.last().map(|s| s.end_message).unwrap_or(0);
-    let mut segments = segments;
+    assert_eq!(segments.first().map(|s| s.sequence), Some(1));
+    assert_eq!(
+        segments.iter().map(|s| s.end_message).max(),
+        Some(covered_through as i64)
+    );
     let next_sequence = segments.iter().map(|s| s.sequence).max().unwrap_or(0) + 1;
     for (offset, raw_segment) in raw
         .segments
         .iter()
-        .filter(|s| s.end_message > covered_through)
+        .filter(|s| s.end_message > covered_through as i64)
         .enumerate()
     {
         segments.push(StoredHistorySegment {
@@ -453,10 +466,11 @@ fn structured(raw: &Arm) -> (Arm, serde_json::Value) {
             ..raw_segment.clone()
         });
     }
-    let summarized = raw.world.messages.len().div_ceil(CHUNK) - 1;
+    let messages = raw.world.messages.len();
     assert_eq!(
         segments.len(),
-        summarized + (raw.world.messages.len() - covered_through as usize)
+        messages.div_ceil(CHUNK) - 1 + (messages - covered_through as usize),
+        "every summarized run but the newest, then the raw tail"
     );
     // A segment covers every message from its start to its end.
     let events: BTreeMap<i64, Vec<EventId>> = segments
@@ -496,7 +510,9 @@ fn prompt(arm: &Arm, evidence: &EventId) -> String {
 /// shm, and the fixture's own files beside it; the control socket has no size.
 fn root_bytes(root: &Path) -> u64 {
     fn walk(path: &Path) -> u64 {
-        let kind = std::fs::symlink_metadata(path).unwrap();
+        let Ok(kind) = std::fs::symlink_metadata(path) else {
+            return 0;
+        };
         if kind.is_file() {
             return kind.len();
         }
@@ -560,10 +576,10 @@ fn run_arm(
     };
     let counters = fixture.counters(7);
     assert_eq!(counters["started"], 0, "surface 1 makes no model call");
+    fixture.shutdown();
     envelope
         .observe(Resource::StoreBytes, root_bytes(root.path()))
         .unwrap();
-    fixture.shutdown();
     held.processes -= 1;
     drop(root);
     held.roots -= 1;
@@ -573,8 +589,9 @@ fn run_arm(
             u64::try_from(started.elapsed().as_millis()).unwrap(),
         )
         .unwrap();
-    // The ledger is keyed on the evidence's own id; a segment covering it
-    // stands for it at every stage.
+    // A segment stands for the evidence at every stage while it covers it;
+    // the served fragment must still carry the evidence's own marker, or the
+    // segment reached render with the evidence absent.
     let identities: BTreeMap<i64, String> = arm
         .covered
         .iter()
@@ -583,14 +600,38 @@ fn run_arm(
             (*sequence, id.0.clone())
         })
         .collect();
+    let hint_text = match &pass.outcome {
+        Some(UserHintPass::Decided(outcome)) => outcome.hint_text.clone(),
+        _ => String::new(),
+    };
+    let served_marker = |id: &EventId| {
+        let message = arm
+            .world
+            .messages
+            .iter()
+            .find(|m| m.event_id == *id)
+            .expect("a covered message is rendered");
+        hint_text.contains(&format!("note{}", marker(mid(message))))
+    };
     let mut ledger = SurfaceLedger::default();
-    observe(&mut ledger, pass.outcome.as_ref(), &identities);
+    observe_rendered(
+        &mut ledger,
+        pass.outcome.as_ref(),
+        &identities,
+        |sequence| {
+            arm.covered[&sequence]
+                .iter()
+                .filter(|id| *id == evidence)
+                .all(served_marker)
+        },
+    );
     let delivered: BTreeSet<EventId> = match &pass.outcome {
         Some(UserHintPass::Decided(outcome)) => outcome
             .trace
             .selected
             .iter()
             .flat_map(|sequence| arm.covered[sequence].iter().cloned())
+            .filter(served_marker)
             .collect(),
         _ => BTreeSet::new(),
     };
@@ -668,6 +709,13 @@ fn an_unapproved_profile_runs_no_campaign() {
 /// through the fixture, analyze, gate, publish, and read the report back.
 fn campaign(scale: Scale, aged_messages: u32) -> SuiteBReport {
     let started = Instant::now();
+    let started_at_ms = i64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis(),
+    )
+    .unwrap();
     let max_events_per_log = aged_messages.max(64) * 2;
     let profile = profile(
         scale,
@@ -724,7 +772,7 @@ fn campaign(scale: Scale, aged_messages: u32) -> SuiteBReport {
     let aged_arm = arm(&set.aged);
     assert_eq!(aged_arm.segments.len(), aged_messages as usize);
     let (aged_structured, cassette) = structured(&aged_arm);
-    let cassette_bytes = serde_json::to_vec(&cassette).unwrap().len() as u64;
+    let mut cassette_bytes = serde_json::to_vec(&cassette).unwrap().len() as u64;
     envelope
         .observe(Resource::CassetteBytes, cassette_bytes)
         .unwrap();
@@ -755,7 +803,11 @@ fn campaign(scale: Scale, aged_messages: u32) -> SuiteBReport {
             &mut held,
             started,
         );
-        let (fresh_structured, _) = structured(&fresh_arm);
+        let (fresh_structured, fresh_cassette) = structured(&fresh_arm);
+        cassette_bytes += serde_json::to_vec(&fresh_cassette).unwrap().len() as u64;
+        envelope
+            .observe(Resource::CassetteBytes, cassette_bytes)
+            .unwrap();
         let aged_structured_run = run_arm(
             &aged_structured,
             &pair.task,
@@ -772,9 +824,20 @@ fn campaign(scale: Scale, aged_messages: u32) -> SuiteBReport {
             &mut held,
             started,
         );
-        for (kind, run) in [
-            (ArmKind::Aged, &aged_structured_run),
-            (ArmKind::Fresh, &fresh_structured_run),
+        // Samples in the order the arms ran: raw, then structured; the pruned
+        // arms, never attempted, are declared last.
+        for (kind, label, run) in [
+            (ArmKind::Aged, "aged", &aged_run),
+            (ArmKind::Fresh, "fresh", &fresh_run),
+        ] {
+            let record = sample(pair, kind, HistoryPolicy::Raw, terminal_of(run.result));
+            order.push(record.id.clone());
+            samples.insert(record.id.clone(), record);
+            verdicts.insert((pair.task.id.as_str(), label), run.verdict);
+        }
+        for (kind, label, run) in [
+            (ArmKind::Aged, "aged/structured", &aged_structured_run),
+            (ArmKind::Fresh, "fresh/structured", &fresh_structured_run),
         ] {
             let record = sample(
                 pair,
@@ -784,24 +847,9 @@ fn campaign(scale: Scale, aged_messages: u32) -> SuiteBReport {
             );
             order.push(record.id.clone());
             samples.insert(record.id.clone(), record);
-        }
-        structured_outcomes.push(PairOutcome {
-            pair_id: pair.task.id.clone(),
-            cluster: ClusterKey {
-                family: "generated".to_string(),
-                world_seed: SEED,
-            },
-            fresh: fresh_structured_run.result,
-            aged: aged_structured_run.result,
-        });
-        for (kind, label, run) in [
-            (ArmKind::Aged, "aged", &aged_run),
-            (ArmKind::Fresh, "fresh", &fresh_run),
-        ] {
-            let record = sample(pair, kind, HistoryPolicy::Raw, terminal_of(run.result));
-            order.push(record.id.clone());
-            samples.insert(record.id.clone(), record);
             verdicts.insert((pair.task.id.as_str(), label), run.verdict);
+        }
+        for kind in [ArmKind::Aged, ArmKind::Fresh] {
             // The pruned policy reclaims projection rows; surface 1 reads
             // history segments, so the arm is declared and not attempted.
             let pruned = sample(
@@ -816,6 +864,15 @@ fn campaign(scale: Scale, aged_messages: u32) -> SuiteBReport {
             order.push(pruned.id.clone());
             samples.insert(pruned.id.clone(), pruned);
         }
+        structured_outcomes.push(PairOutcome {
+            pair_id: pair.task.id.clone(),
+            cluster: ClusterKey {
+                family: "generated".to_string(),
+                world_seed: SEED,
+            },
+            fresh: fresh_structured_run.result,
+            aged: aged_structured_run.result,
+        });
         outcomes.push(PairOutcome {
             pair_id: pair.task.id.clone(),
             cluster: ClusterKey {
@@ -852,14 +909,44 @@ fn campaign(scale: Scale, aged_messages: u32) -> SuiteBReport {
     }
 
     // Under the summarizer's segments the aged history is a fifth as many
-    // units, so surface 1's window reaches the early truth: every structured
-    // arm delivers.
-    for outcome in &structured_outcomes {
-        assert_eq!(
-            (outcome.aged, outcome.fresh),
+    // units, so surface 1's window reaches the early message; but the served
+    // fragment is capped, so a truth folded past the cap of its segment is
+    // lost at render on both arms, while a truth at the head of its segment
+    // or left raw in the tail is delivered.
+    let structured_by_task: BTreeMap<&str, &PairOutcome> = structured_outcomes
+        .iter()
+        .map(|o| (o.pair_id.as_str(), o))
+        .collect();
+    let expected = [
+        (
+            "early-message",
+            (ArmResult::Fail, ArmResult::Fail),
+            StageVerdict::FirstLoss(Surface1Stage::Render),
+        ),
+        (
+            "recent-message",
             (ArmResult::Pass, ArmResult::Pass),
-            "{}",
-            outcome.pair_id
+            StageVerdict::Clean,
+        ),
+        (
+            "last-message",
+            (ArmResult::Pass, ArmResult::Pass),
+            StageVerdict::Clean,
+        ),
+    ];
+    for (name, results, aged_verdict) in expected {
+        assert_eq!(
+            (
+                structured_by_task[name].aged,
+                structured_by_task[name].fresh
+            ),
+            results,
+            "{name} structured"
+        );
+        assert_eq!(
+            verdicts[&(name, "aged/structured")],
+            aged_verdict,
+            "{name} structured"
         );
     }
     let arms = GovernanceArms {
@@ -881,14 +968,14 @@ fn campaign(scale: Scale, aged_messages: u32) -> SuiteBReport {
             (
                 HistoryPolicy::Pruned,
                 ArmRecord {
-                    policy_version: "message_cleanup/unsupported-on-surface-1".to_string(),
+                    policy_version: "message_cleanup/v1".to_string(),
                     absent_evidence: BTreeSet::new(),
                 },
             ),
             (
                 HistoryPolicy::Structured,
                 ArmRecord {
-                    policy_version: format!("history_summarizer/chunk-{CHUNK}"),
+                    policy_version: format!("history_summarizer_validate/chunk-{CHUNK}"),
                     absent_evidence: BTreeSet::new(),
                 },
             ),
@@ -904,8 +991,10 @@ fn campaign(scale: Scale, aged_messages: u32) -> SuiteBReport {
     let rates = ledger.rates().unwrap();
     assert_eq!((rates.samples, ledger.attempted()), (18, 12));
     assert_eq!(rates.unsupported, Ratio::new(1, 3));
-    // Every arm's backend counters read zero model calls, so both arms' miss
-    // and refusal rates are zero by observation.
+    // Surface 1 made no model call on any arm (the fixture's counters), and
+    // every summarizer replay served its frame with no miss and no refusal,
+    // so both arms' miss and refusal rates are zero by observation; the
+    // strictness probe is a separate cassette instance and not an arm.
     let zero = || ArmRates {
         miss_rate: "0".to_string(),
         refusal_rate: "0".to_string(),
@@ -1015,7 +1104,7 @@ fn campaign(scale: Scale, aged_messages: u32) -> SuiteBReport {
     // The manifest beside the report says how the world reached the store:
     // the segments were written straight into it, so the run is `bulk` and
     // `direct-database, non-aged`, never a replay-built aged world.
-    let manifest = manifest(&profile, &set, &report, &bytes, &frozen);
+    let manifest = manifest(&profile, &set, &report, &bytes, &frozen, started_at_ms);
     let manifest_bytes = serde_json::to_vec_pretty(&manifest.to_value()).unwrap();
     write_then_rename(&publish.path().join("manifest.json"), &manifest_bytes);
     let read_back: serde_json::Value =
@@ -1024,27 +1113,15 @@ fn campaign(scale: Scale, aged_messages: u32) -> SuiteBReport {
     let parsed = parse_manifest(&read_back).unwrap();
     assert_eq!(parsed, manifest);
     assert_eq!(parsed.digest().unwrap(), manifest.digest().unwrap());
-    assert_eq!(parsed.construction, Construction::Bulk);
-    assert_eq!(parsed.ingestion, Ingestion::DirectDatabaseNonAged);
-    assert_eq!(parsed.sample_order, report.samples.order);
+    // A seeded history may not call itself aged: the same manifest under a
+    // `replay` construction is refused.
+    let mut relabelled = read_back.clone();
+    relabelled["construction"] = serde_json::json!("replay");
     assert_eq!(
-        parsed.analysis_family_digest.as_deref(),
-        Some(frozen.analysis_family_digest.as_str())
-    );
-    assert_eq!(
-        parsed.recency_baseline.as_ref().unwrap().bounds,
-        profile.baseline_bounds
+        parse_manifest(&relabelled),
+        Err(eval_core::ManifestError::DirectDatabaseAged)
     );
     report
-}
-
-/// The execution image every arm ran through: the fixture the support module
-/// built for this run.
-fn fixture_binary() -> std::path::PathBuf {
-    let target = std::env::var_os("CARGO_TARGET_DIR")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| support::direct_host::workspace_root().join("target"));
-    target.join("debug/examples/direct_host_fixture")
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {
@@ -1071,6 +1148,7 @@ fn manifest(
     report: &SuiteBReport,
     report_bytes: &[u8],
     frozen: &FrozenFamily,
+    started_at_ms: i64,
 ) -> Manifest {
     let dirty = !command("git", &["status", "--porcelain"]).is_empty();
     let lockfile =
@@ -1082,11 +1160,11 @@ fn manifest(
             lockfile_digest: sha256_hex(&lockfile),
             rustc_version: command("rustc", &["--version"]),
             features: BTreeSet::from(["test-support".to_string()]),
-            target_triple: format!(
-                "{}-unknown-{}",
-                std::env::consts::ARCH,
-                std::env::consts::OS
-            ),
+            target_triple: command("rustc", &["-vV"])
+                .lines()
+                .find_map(|line| line.strip_prefix("host: "))
+                .expect("rustc names its host")
+                .to_string(),
             binary_digest: BinaryDigest::Present {
                 sha256: sha256_hex(&std::fs::read(fixture_binary()).unwrap()),
             },
@@ -1109,8 +1187,8 @@ fn manifest(
         schema: MANIFEST_SCHEMA.to_string(),
         eval_run_id: eval_run_id(&identity).unwrap(),
         run_identity: identity,
-        start_ms: EPOCH_MS,
-        end_ms: EPOCH_MS + i64::try_from(report.envelope.peaks.elapsed_ms).unwrap(),
+        start_ms: started_at_ms,
+        end_ms: started_at_ms + i64::try_from(report.envelope.peaks.elapsed_ms).unwrap(),
         status: RunStatus::Completed,
         error: None,
         sample_ids: report.samples.samples.keys().cloned().collect(),
@@ -1118,7 +1196,11 @@ fn manifest(
         sample_epoch: report.samples.epoch,
         retry_lineage: Vec::new(),
         result_digest: sha256_hex(report_bytes),
-        witness_digest: sha256_hex(&serde_json::to_vec(&set_value).unwrap()),
+        witness_digest: context_core::canonical_json::protocol_digest(
+            "eval-campaign-witness/v1",
+            &set_value,
+        )
+        .unwrap(),
         attestation: Attestation::None,
         tokenizer_profile: TokenizerProfile {
             name: "none".to_string(),

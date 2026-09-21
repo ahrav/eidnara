@@ -41,7 +41,7 @@ const CHAIN_EXHAUSTED_PERMANENT_PREFIX: &str = "chain-exhausted-permanent:";
 const AUTH_REQUIRED_PREFIX: &str = "auth-required:";
 const UNKNOWN_ERROR_CLASS_PREFIX: &str = "unknown-error-class:";
 
-fn to_stored_history_segment(
+pub(crate) fn to_stored_history_segment(
     c: &ValidatedHistorySegment,
     created_at_ms: i64,
     boundary_dates: &BTreeMap<String, String>,
