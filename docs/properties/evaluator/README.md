@@ -853,11 +853,12 @@ Statistics core (`crates/eval-core/tests/statistics.rs`):
 - `the_frozen_reference_agrees_on_every_golden_case`
   (`mtr-three-gates-signed-history-effect`,
   `mtr-world-clustered-intervals-after-icc-pilot`): the TypeScript reference's
-  twelve cases (five pair tables with gate verdicts, including censored arms,
+  thirteen cases (five pair tables with gate verdicts, including censored arms,
   a failing noninferiority gate, and one at the margin; five ICC pilots with
   and without a family effect, with fewer affordable worlds than the pilot
-  had, unbalanced, and internally constant; two cluster bootstraps by family
-  and by world over 300 pairs) equal the Rust counts, rates, gates, ICC,
+  had, unbalanced, and internally constant; three cluster bootstraps by family
+  and by world over 300 pairs, one at the minimum 40 replicates where the
+  `1/40` order statistic is the smallest replicate) equal the Rust counts, rates, gates, ICC,
   clustering unit, effective N, and interval bounds exactly; the golden's
   `input_sha256` is recomputed over the whole case array first.
 - `ratios_are_exact_normalized_and_refuse_overflow`: reduction, decimal
@@ -913,10 +914,14 @@ Statistics core (`crates/eval-core/tests/statistics.rs`):
 - `the_pair_table_and_the_pilot_must_match_the_frozen_plan`
   (`mtr-analysis-family-frozen-before-results`): a table of one or 299 pairs
   against a frozen count of 300 is `PairCountMismatch`; a pair from a family
-  the plan did not freeze is `PairOutsideFamilies`; a pilot whose effective N
-  exceeds `n_items * max_affordable_worlds / n_worlds`, or names zero worlds,
-  is `PilotInconsistent` while a computed pilot validates; a miss rate of `2`
-  is `RateOutOfRange`; `i128::MIN` as either ratio component is
+  the plan did not freeze is `PairOutsideFamilies`; 300 copies of one pair are
+  `DuplicatePair`; a pilot whose effective N or unit is not what its recorded
+  counts and ICCs imply, or that names zero worlds, is `PilotInconsistent`
+  while a computed pilot validates; a plan of 299 pairs against a required N
+  of 300 is `PlanBelowRequiredN`; a repeated pilot observation is
+  `DuplicateObservation`; a miss or refusal rate of `2` is `RateOutOfRange`;
+  hand-built counts with `b + c > n`, a count above `n`, or `n` past the safe
+  range are `InconsistentCounts`; `i128::MIN` as either ratio component is
   `RationalOverflow`, never a wrapped value.
 - `no_judge_type_reaches_the_gates`
   (`mtr-judge-output-never-feeds-control-or-floor`): the statistics source

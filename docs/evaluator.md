@@ -922,10 +922,13 @@ everything a result depends on: endpoints, task families, exclusions, the
 stopping rule (`fixed_n` with its pair count), the multiplicity correction (`none`, `holm`,
 `benjamini_hochberg`), the profile, the interval method (`cluster_bootstrap`),
 the item-count threshold (at least 300), the bootstrap replicate count and
-seed, and the ICC pilot. `AnalysisFamily::validate` also refuses a pilot whose
-`effective_n_at_max` exceeds `n_items * max_affordable_worlds / n_worlds`
-(`PilotInconsistent`), since deflation only shrinks N, so a hand-written pilot
-cannot inflate its way past the block. `FrozenFamily::freeze` digests it
+seed, and the ICC pilot. `AnalysisFamily::validate` also recomputes the
+pilot's clustering unit and `effective_n_at_max` from its recorded counts and
+ICCs and refuses a pilot that disagrees with its own evidence
+(`PilotInconsistent`), so a hand-written pilot cannot inflate its way past the
+block, and refuses a plan whose pair count is below the pilot's
+`required_n_for_margin` (`PlanBelowRequiredN`), since deflation only shrinks
+N. `FrozenFamily::freeze` digests it
 (`eval-analysis-family-digest/v1`); the manifest records that digest as
 `analysis_family_digest` before the first outcome, and `FrozenFamily::check`
 refuses a family whose digest differs as
@@ -944,7 +947,9 @@ exactly one), and picks the highest level whose ICC exceeds `1/20`
 count the maximum affordable world count would yield, deflated by the design
 effect `1 + (m - 1) ICC` of the selected unit, as `effective_n_at_max`; the
 effect is clamped at one, so deflation only ever shrinks N, and a zero
-affordable world count is refused. A family whose `effective_n_at_max` is
+affordable world count is refused. Each `(world, task)` is one score, so a
+repeated observation is `DuplicateObservation` rather than another item. A
+family whose `effective_n_at_max` is
 below the maintainer's `required_n_for_margin` makes `analyze` return
 `Blocked {reason: insufficient_effective_n}` and no report object.
 
@@ -968,7 +973,8 @@ profile and never from the counts; the report has no collapsed effect field.
 (the pilot's unit) into one `PairCounts`, resamples clusters with replacement
 `replicates` times, folds each resample into one `PairCounts` whose
 `quality_loss` is the replicate statistic (the same definition the gate uses),
-and reports the `1/40` and `39/40` order statistics as `lower` and `upper`,
+and reports the `1/40` and `39/40` order statistics (the `ceil(B/40)`-th and
+`ceil(39B/40)`-th smallest of `B` replicates) as `lower` and `upper`,
 with `unit`, `method`, `n_clusters`, `n_items`, and `replicates`. Clusters
 are ordered by key, and the draw is the first 64 bits of the
 `eval-cluster-bootstrap/v1` digest over `{seed, replicate, draw}` reduced by
@@ -986,12 +992,13 @@ report carries `IntervalOutcome::Withheld {reason: item_count_below_threshold}`
 (`FrozenFamily::from_manifest` reads the manifest's recorded digest; a
 manifest without one is `FamilyNotRecorded`), then the pilot's block, then the
 per-arm cassette-miss asymmetry (the gap between the highest and lowest
-`arm_rates.*.miss_rate`, each refused outside `[0, 1]`; fewer than two arms is
+`arm_rates.*.miss_rate`; both arm rates are refused outside `[0, 1]`; fewer than two arms is
 `TooFewArms`, missing evidence
 that never passes) against `miss_asymmetry_bound`, which blocks as
 `arm_miss_asymmetry` with no gates computed; then the table's conformance to
 the plan (a size other than the frozen pair count is `PairCountMismatch`, a
-pair outside the frozen families is `PairOutsideFamilies`); only then does it build
+pair outside the frozen families is `PairOutsideFamilies`, a repeated pair id
+is `DuplicatePair`); only then does it build
 `PairedReport {analysis_family_digest, counts, gates, interval, arm_rates}`.
 Per-arm miss and refusal rates travel with the report, so unsupported evidence
 is visible beside every gate.

@@ -38,17 +38,19 @@ fn profile() -> CampaignProfile {
     }
 }
 
-fn pilot(effective_n_at_max: Ratio, required: u32) -> IccPilot {
+/// A pilot whose recorded counts and ICCs imply the world unit and
+/// `450 * 5/6 = 375` effective items at 150 affordable worlds.
+fn pilot(required: u32) -> IccPilot {
     IccPilot {
         pilot_run_id: "ab".repeat(32),
         n_items: 360,
         n_families: 6,
         n_worlds: 120,
-        icc_family: ratio(1, 4),
-        icc_world_seed: ratio(0, 1),
-        clustering_unit: ClusteringUnit::Family,
+        icc_family: ratio(0, 1),
+        icc_world_seed: ratio(1, 10),
+        clustering_unit: ClusteringUnit::WorldSeed,
         max_affordable_worlds: 150,
-        effective_n_at_max,
+        effective_n_at_max: ratio(375, 1),
         required_n_for_margin: required,
     }
 }
@@ -66,7 +68,7 @@ fn family() -> AnalysisFamily {
         item_count_threshold: ITEM_COUNT_THRESHOLD,
         bootstrap_replicates: 400,
         bootstrap_seed: 7,
-        icc_pilot: pilot(ratio(400, 1), 385),
+        icc_pilot: pilot(300),
     }
 }
 
@@ -157,7 +159,7 @@ fn the_frozen_reference_agrees_on_every_golden_case() {
         json!(format!("{:x}", Sha256::digest(canonical.as_bytes())))
     );
     let cases = golden["cases"].as_array().unwrap();
-    assert_eq!(cases.len(), 12);
+    assert_eq!(cases.len(), 13);
     let rates = profile().rates().unwrap();
     for case in cases {
         let id = case["id"].as_str().unwrap();
@@ -356,7 +358,7 @@ fn the_family_is_frozen_before_outcomes_and_any_post_hoc_edit_refuses() {
         ("seed", Box::new(|f| f.bootstrap_seed += 1)),
         (
             "pilot",
-            Box::new(|f| f.icc_pilot.required_n_for_margin += 1),
+            Box::new(|f| f.icc_pilot.required_n_for_margin -= 1),
         ),
     ];
     for (label, edit) in edits {
@@ -829,10 +831,13 @@ fn arm_miss_asymmetry_past_the_bound_blocks_with_no_gates_and_rates_are_retained
         arm_rates("0.05", "0"),
         "miss and refusal rates travel"
     );
-    let IntervalOutcome::Computed(Interval { unit, .. }) = &report.interval else {
-        panic!("300 items over six families carry an interval");
+    let IntervalOutcome::Computed(Interval {
+        unit, n_clusters, ..
+    }) = &report.interval
+    else {
+        panic!("300 items over 300 worlds carry an interval");
     };
-    assert_eq!(*unit, ClusteringUnit::Family);
+    assert_eq!((*unit, *n_clusters), (ClusteringUnit::WorldSeed, 300));
     // The report serializes with the three gates as separate fields and no collapsed effect.
     let value = serde_json::to_value(&report).unwrap();
     for gate in ["quality_loss", "harm", "floor"] {
@@ -843,9 +848,10 @@ fn arm_miss_asymmetry_past_the_bound_blocks_with_no_gates_and_rates_are_retained
 }
 
 /// The pair table is read against the frozen plan: its size is the frozen
-/// pair count and every pair falls in a frozen task family; the pilot's
-/// effective N cannot exceed the items the affordable worlds hold; an arm miss
-/// rate outside `[0, 1]` is refused; and `i128::MIN` is a refusal, never a wrap.
+/// pair count, every pair falls in a frozen task family, and no pair repeats;
+/// the pilot's unit and effective N match its own counts and ICCs and the plan
+/// can reach its required N; a rate outside `[0, 1]` and counts no table
+/// produces are refused; and `i128::MIN` is a refusal, never a wrap.
 #[test]
 fn the_pair_table_and_the_pilot_must_match_the_frozen_plan() {
     let family = family();
@@ -882,48 +888,109 @@ fn the_pair_table_and_the_pilot_must_match_the_frozen_plan() {
             family: "rails".to_string()
         })
     );
-    // The pilot's effective N is bounded by the items the affordable worlds hold
-    // (`n_items * max_affordable_worlds / n_worlds`), since deflation only shrinks.
+    // Three hundred copies of one pair are not three hundred pairs.
+    let copies: Vec<PairOutcome> = std::iter::repeat_n(pairs[0].clone(), 300).collect();
+    assert_eq!(
+        analyze(&frozen, &family, &copies, &rates).err(),
+        Some(StatisticsError::DuplicatePair {
+            pair_id: "cargo-0".to_string()
+        })
+    );
+    // The pilot's unit and effective N are recomputed from its recorded counts and
+    // ICCs, so a hand-written value that disagrees with its own evidence is refused.
     let mut inflated = family.clone();
-    inflated.icc_pilot.n_items = 1;
-    inflated.icc_pilot.n_worlds = 1;
-    inflated.icc_pilot.max_affordable_worlds = 1;
-    inflated.icc_pilot.effective_n_at_max = ratio(1000, 1);
+    inflated.icc_pilot.effective_n_at_max = ratio(376, 1);
     assert_eq!(inflated.validate(), Err(StatisticsError::PilotInconsistent));
+    let mut wrong_unit = family.clone();
+    wrong_unit.icc_pilot.clustering_unit = ClusteringUnit::Family;
+    assert_eq!(
+        wrong_unit.validate(),
+        Err(StatisticsError::PilotInconsistent)
+    );
     let mut no_worlds = family.clone();
     no_worlds.icc_pilot.n_worlds = 0;
     assert_eq!(
         no_worlds.validate(),
         Err(StatisticsError::PilotInconsistent)
     );
-    let mut at_bound = family.clone();
-    at_bound.icc_pilot.effective_n_at_max = ratio(450, 1);
+    // A plan whose pair count is below its own required N cannot reach it.
+    let mut short_plan = family.clone();
+    short_plan.stopping_rule = StoppingRule::FixedN { pairs: 299 };
     assert_eq!(
-        at_bound.validate(),
-        Ok(()),
-        "an undeflated pilot is possible"
+        short_plan.validate(),
+        Err(StatisticsError::PlanBelowRequiredN {
+            pairs: 299,
+            required_n_for_margin: 300
+        })
     );
+    let honest_observations = [
+        observation("cargo", 0, "a", 1),
+        observation("cargo", 0, "b", 2),
+        observation("tokio", 1, "a", 8),
+        observation("tokio", 1, "b", 9),
+    ];
     let mut honest = family.clone();
-    honest.icc_pilot = run_icc_pilot(
-        "p",
-        &[
-            observation("cargo", 0, "a", 1),
-            observation("cargo", 0, "b", 2),
-            observation("tokio", 1, "a", 8),
-            observation("tokio", 1, "b", 9),
-        ],
-        4,
-        1,
-    )
-    .unwrap();
+    honest.icc_pilot = run_icc_pilot("p", &honest_observations, 4, 1).unwrap();
     assert_eq!(honest.validate(), Ok(()), "a computed pilot validates");
-    // An arm miss rate past one is not a rate.
+    // One score per task per world: a repeated observation is not another item.
+    let mut repeated = honest_observations.to_vec();
+    repeated.push(observation("tokio", 1, "b", 9));
+    assert_eq!(
+        run_icc_pilot("p", &repeated, 4, 1).err(),
+        Some(StatisticsError::DuplicateObservation {
+            cluster: key("tokio", 1),
+            task: "b".to_string()
+        })
+    );
+    // Arm rates past one are not rates, whichever field carries them.
     assert_eq!(
         arm_miss_asymmetry(&arm_rates("2", "2")).err(),
         Some(StatisticsError::RateOutOfRange {
             field: "arm_rates.miss_rate"
         })
     );
+    let mut refusing = arm_rates("0", "0");
+    refusing.get_mut("aged").unwrap().refusal_rate = "2".to_string();
+    assert_eq!(
+        analyze(&frozen, &family, &pairs, &refusing).err(),
+        Some(StatisticsError::RateOutOfRange {
+            field: "arm_rates.refusal_rate"
+        })
+    );
+    // Hand-built counts that no pair table produces are refused before any rate.
+    let profile_rates = profile().rates().unwrap();
+    for counts in [
+        PairCounts {
+            n: 1,
+            b: 2,
+            c: 0,
+            aged_pass: 2,
+            fresh_censored: 0,
+            aged_censored: 0,
+        },
+        PairCounts {
+            n: 4,
+            b: 2,
+            c: 3,
+            aged_pass: 0,
+            fresh_censored: 0,
+            aged_censored: 0,
+        },
+        PairCounts {
+            n: u64::MAX,
+            b: 0,
+            c: 0,
+            aged_pass: 0,
+            fresh_censored: 0,
+            aged_censored: 0,
+        },
+    ] {
+        assert_eq!(
+            Gates::of(&counts, &profile_rates).err(),
+            Some(StatisticsError::InconsistentCounts),
+            "{counts:?}"
+        );
+    }
     // The minimum i128 is refused rather than wrapped into a wrong ratio.
     assert_eq!(
         Ratio::try_new(i128::MIN, 1).err(),

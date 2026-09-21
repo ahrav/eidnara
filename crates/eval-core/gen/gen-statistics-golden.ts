@@ -180,12 +180,12 @@ function bootstrap(pairs: readonly Pair[], unit: "family" | "world_seed", seed: 
     statistics.push(ratio(BigInt(diff), BigInt(Math.max(n, 1))));
   }
   statistics.sort(cmp);
-  const tail = Math.floor(replicates / 40);
+  // The 1/40 and 39/40 order statistics: the ceil(B/40)-th and ceil(39B/40)-th smallest.
   return {
     n_clusters: ordered.length,
     n_items: pairs.length,
-    lower: emit(statistics[tail] ?? whole(0)),
-    upper: emit(statistics[replicates - tail - 1] ?? whole(0)),
+    lower: emit(statistics[Math.ceil(replicates / 40) - 1] ?? whole(0)),
+    upper: emit(statistics[replicates - Math.floor(replicates / 40) - 1] ?? whole(0)),
   };
 }
 
@@ -310,21 +310,33 @@ const cases = [
     input: { pairs: pairFixture, replicates: 400, seed: 7, unit: "world_seed" },
     expected: bootstrap(pairFixture, "world_seed", 7, 400),
   },
+  {
+    // At the minimum replicate count the 1/40 order statistic is the smallest replicate.
+    id: "bootstrap-world-seed-unit-minimum-replicates",
+    kind: "cluster_bootstrap",
+    input: { pairs: pairFixture, replicates: 40, seed: 7, unit: "world_seed" },
+    expected: bootstrap(pairFixture, "world_seed", 7, 40),
+  },
 ];
 
 // The Rust reader recomputes this hash over `serde_json::to_string_pretty` of the whole case
 // array, expectations included, whose maps sort keys; so keys are sorted here before hashing,
 // and a hand-edited expectation is caught.
-function sortKeys(value: unknown): unknown {
+type Json = null | boolean | number | string | Json[] | { [key: string]: Json };
+function sortKeys(value: unknown): Json {
   if (Array.isArray(value)) return value.map(sortKeys);
   if (value && typeof value === "object") {
+    const record = value as Record<string, unknown>;
     return Object.fromEntries(
-      Object.keys(value as Record<string, unknown>)
+      Object.keys(record)
         .sort()
-        .map((k) => [k, sortKeys((value as Record<string, unknown>)[k])]),
+        .map((k) => [k, sortKeys(record[k])]),
     );
   }
-  return value;
+  if (value === null || typeof value === "boolean" || typeof value === "number" || typeof value === "string") {
+    return value;
+  }
+  throw new Error(`not JSON: ${typeof value}`);
 }
 const canonical = (value: unknown): string => `${JSON.stringify(sortKeys(value), null, 2)}\n`;
 const inputHash = createHash("sha256").update(canonical(cases)).digest("hex");
