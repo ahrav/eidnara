@@ -288,6 +288,10 @@ export function createEidnaraHook(deps: EidnaraDeps) {
         deletedSessions.has(sessionId) ||
         subagentSessions.has(sessionId) ||
         internalChildSessions.has(sessionId);
+    /** A checkpoint already sending batches stops at the next one once its session is gone or
+     * capture has closed; a batch started after either would re-enqueue fenced text. */
+    const stopCheckpoint = (sessionId: string) => (): boolean =>
+        captureClosed || excludedFromCapture(sessionId);
     const checkpointUser = (sessionId: string, output: unknown): void => {
         if (captureClosed || captureDisabled()) return;
         try {
@@ -312,6 +316,7 @@ export function createEidnaraHook(deps: EidnaraDeps) {
                     projectRoot,
                     model: model ? `${model.providerID}/${model.modelID}` : undefined,
                     messages,
+                    stop: stopCheckpoint(sessionId),
                 });
             })();
             pendingUserCaptures.set(sessionId, pending);
@@ -379,8 +384,10 @@ export function createEidnaraHook(deps: EidnaraDeps) {
                 messages: openCodeCaptureMessages(sourceMessages, {
                     notBefore: Date.now() - CAPTURE_MAX_AGE_MS,
                 }),
+                stop: stopCheckpoint(sessionId),
             });
-            // A disabled daemon wrote nothing; those messages stay ahead of the watermark.
+            // A disabled daemon wrote nothing and a stopped checkpoint left batches unsent; those
+            // messages stay ahead of the watermark.
             if (accepted !== "accepted") return;
             const final = openCodeLastFinalMessageId(sourceMessages);
             if (final !== undefined) captureWatermark.set(sessionId, final);

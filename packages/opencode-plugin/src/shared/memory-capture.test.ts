@@ -82,6 +82,21 @@ describe("memory capture checkpoint", () => {
         await expect(capture({ ...scope, messages: [message] })).resolves.toBe("accepted");
         expect(calls).toHaveLength(2);
     });
+    it("stops before the next batch once the caller says to", async () => {
+        const calls: unknown[] = [];
+        const capture = createMemoryCaptureCheckpoint({
+            call: async (args) => {
+                calls.push(args.body);
+                return { state: "accepted" };
+            },
+        });
+        const large = { ...message, text: "abc\u{1F980}\n".repeat(20000) };
+        await expect(
+            capture({ ...scope, messages: [large], stop: () => calls.length >= 1 }),
+        ).resolves.toBe("stopped");
+        expect(calls).toHaveLength(1);
+    });
+
     it("stops batching after the first disabled reply", async () => {
         const calls: unknown[] = [];
         const capture = createMemoryCaptureCheckpoint({

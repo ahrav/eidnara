@@ -606,6 +606,32 @@ describe("eidnara hook", () => {
             expect(client.tui.showToast).not.toHaveBeenCalled();
         });
 
+        it("stops a multi-batch checkpoint once the session is deleted mid-way", async () => {
+            useTempDataHome("capture-deleted-mid-batch-");
+            const first = Promise.withResolvers<unknown>();
+            let checkpoints = 0;
+            const fake = createFakeModuleClient(({ method }) => {
+                if (method !== "memory.capture") return { state: "ready" };
+                checkpoints += 1;
+                return checkpoints === 1 ? first.promise : { state: "accepted" };
+            });
+            const { hook } = createCaptureHook(fake, [
+                assistantMessage("native-answer", [{ type: "text", text: "x".repeat(70_000) }]),
+            ]);
+            const idle = hook.event({
+                event: { type: "session.idle", properties: { sessionID: SESSION } },
+            });
+            for (let turn = 0; turn < 5; turn++) await Bun.sleep(0);
+            expect(checkpoints).toBe(1);
+            await hook.event({
+                event: { type: "session.deleted", properties: { info: { id: SESSION } } },
+            });
+            first.resolve({ state: "accepted" });
+            await idle;
+            await hook.memoryCaptureDrain.settle();
+            expect(fake.calls.map((call) => call.method)).toEqual(["memory.capture"]);
+        });
+
         it("neither checkpoints nor drains a session deleted during the transcript read", async () => {
             useTempDataHome("capture-deleted-mid-read-");
             const fake = createFakeModuleClient(({ method }) => ({

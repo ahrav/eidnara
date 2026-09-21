@@ -466,7 +466,9 @@ export function createMemoryCaptureDrain(
 
 /** The cache saves repeat uploads only. Daemon receipts, not this cache, own
  * durability and replay. Failures leave entries unacknowledged for next time.
- * `"disabled"` means the daemon wrote nothing; callers must not treat the input as offered. */
+ * `"disabled"` means the daemon wrote nothing; callers must not treat the input as offered.
+ * `"stopped"` means `stop()` answered true before a batch: the session was deleted or capture
+ * closed mid-checkpoint, and the remaining batches were never sent. */
 export function createMemoryCaptureCheckpoint(client: Pick<RustModeModuleClient, "call">) {
     const acknowledged = new Map<string, string>();
     return async (input: {
@@ -474,14 +476,24 @@ export function createMemoryCaptureCheckpoint(client: Pick<RustModeModuleClient,
         projectRoot: string;
         model?: string;
         messages: Iterable<CaptureMessage>;
-    }): Promise<"accepted" | "disabled"> => {
+        /** Consulted before every daemon call; a multi-batch checkpoint must not outlive its session. */
+        stop?: () => boolean;
+    }): Promise<"accepted" | "disabled" | "stopped"> => {
         let disabled = false;
+        let stopped = false;
         const prefix = `${input.projectRoot}\0${input.sessionId}\0`;
         let batch: CaptureMessage[] = [];
         let batchKeys: Array<[string, string]> = [];
         let bytes = 0;
         async function send(): Promise<void> {
             if (batch.length === 0) return;
+            if (input.stop?.()) {
+                stopped = true;
+                batch = [];
+                batchKeys = [];
+                bytes = 0;
+                return;
+            }
             const response = await client.call({
                 sessionId: input.sessionId,
                 projectRoot: input.projectRoot,
@@ -534,12 +546,13 @@ export function createMemoryCaptureCheckpoint(client: Pick<RustModeModuleClient,
                 if (batch.length >= BATCH_MESSAGES || bytes + size > BATCH_BYTES) await send();
                 // The daemon's `disabled` is terminal for this checkpoint; later batches would repeat it.
                 if (disabled) return "disabled";
+                if (stopped) return "stopped";
                 batch.push(fragment);
                 batchKeys.push([key, digest]);
                 bytes += size;
             }
         }
         await send();
-        return disabled ? "disabled" : "accepted";
+        return disabled ? "disabled" : stopped ? "stopped" : "accepted";
     };
 }
