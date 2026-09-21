@@ -871,8 +871,8 @@ Statistics core (`crates/eval-core/tests/statistics.rs`):
   a non-canonical decimal refuses.
 - `the_family_is_frozen_before_outcomes_and_any_post_hoc_edit_refuses`
   (`mtr-analysis-family-frozen-before-results`): the frozen digest accepts the
-  unchanged family; an edit to any of ten components (endpoints, families,
-  exclusions, stopping rule, multiplicity, margin, floor, threshold, seed, pilot) is
+  unchanged family; an edit to any of nine components (endpoints, families,
+  exclusions, stopping rule, margin, floor, threshold, seed, pilot) is
   `FamilyChangedAfterResults`, from `check` and from `analyze`; a threshold
   below 300, fewer than 40 or more than 10,000 replicates, an empty endpoint
   list, an endpoint list that is not exactly the three gates
@@ -921,11 +921,15 @@ Statistics core (`crates/eval-core/tests/statistics.rs`):
   against a frozen count of 300 is `PairCountMismatch`; a pair from a family
   the plan did not freeze is `PairOutsideFamilies`; 300 copies of one pair are
   `DuplicatePair`; a pilot whose effective N or unit is not what its recorded
-  counts and ICCs imply, or that names zero worlds, is `PilotInconsistent`
+  counts and ICCs imply, that names zero worlds, or whose counts (one
+  observation, or no replication within worlds) could not have estimated an
+  ICC, is `PilotInconsistent`; a `holm` or `benjamini_hochberg` plan is
+  `UnsupportedMultiplicity`
   while a computed pilot validates; a plan of 299 pairs against a required N
   of 300 is `PlanBelowRequiredN`; a repeated pilot observation is
   `DuplicateObservation`; a miss or refusal rate of `2` is `RateOutOfRange`;
-  hand-built counts with `b + c > n`, a count above `n`, or `n` past the safe
+  hand-built counts with `b + c > n`, `b + aged_pass > n`, `c > aged_pass`,
+  `aged_censored + aged_pass > n`, a count above `n`, or `n` past the safe
   range are `InconsistentCounts`; `i128::MIN` as either ratio component is
   `RationalOverflow`, never a wrapped value.
 - `no_judge_type_reaches_the_gates`
