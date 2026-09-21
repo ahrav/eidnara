@@ -9551,6 +9551,14 @@ impl HandlerCore {
         };
         let recipe = if request.serve_native {
             attach_native_messages(&mut response, request, 0, None);
+            // Auto-search does not run on a passthrough pass; the recorder must say so.
+            #[cfg(any(test, feature = "test-support", feature = "direct-host-fixture"))]
+            {
+                *self
+                    .last_user_hint
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+            }
             let values = response.native_messages.clone().unwrap_or_default();
             RecipeInputs::Native {
                 output_revision,
@@ -23472,6 +23480,31 @@ mod tests {
                 _ => panic!("transform must have a unary outcome"),
             }
         }
+    }
+
+    /// A native passthrough pass runs no auto-search, so the recorder must not keep
+    /// serving the previous pass's outcome as if it were this one's.
+    #[tokio::test(flavor = "current_thread")]
+    async fn native_passthrough_clears_recorded_user_hint() {
+        let (handler, _store, _dir, _project) =
+            handler_with_store(Arc::new(ProducerState::default()), default_test_config());
+        *handler.last_user_hint.lock().unwrap() = Some(transform::UserHintPass::Skipped {
+            reason: transform::UserHintSkip::NoEligibleTail,
+        });
+        let mut request = request(vec![ck("m1", 1, "hello")]);
+        request["session_id"] = json!(format!(
+            "{}child",
+            history_summarizer::HISTORY_SUMMARIZER_CHILD_SESSION_PREFIX
+        ));
+        request["serializer_profile"] = json!("opencode-aisdk");
+        request["serve_native"] = json!(true);
+        request["native_messages"] = json!([{
+            "info": {"id": "m1", "sessionID": "ses", "role": "user"},
+            "parts": [{"type": "text", "text": "hello"}]
+        }]);
+        let response = call_transform_request(&handler, request).await;
+        assert_eq!(response["status"], "ok", "{response}");
+        assert_eq!(handler.user_hint_outcome_for_test(), None);
     }
 
     #[test]
