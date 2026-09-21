@@ -1401,18 +1401,25 @@ fixture (the structured arm reaches the validator with a replayed answer, not
 example still serves the cassette oracle only; and the write-then-rename
 publisher is the test's own, since no shipped publisher exists.
 
-What the in-host summarizer path needs, as read from the code: the model
+What the in-host summarizer path needs, as established so far: the model
 chain (`/history_summarizer/model`) and `/history_summarizer/context_limit_tokens`
 are user-tier-only keys, read from `$XDG_CONFIG_HOME/eidnara/eidnara.jsonc`,
-so the fixture must be started with that variable pointing at a tier the
-test wrote. The trigger's budget floor is 5,000 tokens and the tail-size bar
-three times that, so a history must carry about 15,000 eligible tokens
-before `tail_size` fires without context-pressure numbers in the request;
-the chunk budget floor is 8,000 tokens. The presented input is one line per
-block, `[start-end] R: part / part`, with `«sN»` alias markers before cited
-parts, and the answer must be the summarizer's `<output>` document over
-those ordinals; a scripted summarizer in the fixture would have to speak
-that format for a recording to exist, since no live provider does. The
+so the fixture is started with that variable (`FixtureProcess::start_at_with_env`).
+Without context-pressure numbers the boundary protects the whole history and
+nothing is eligible; with `usage {current_total_input_tokens,
+context_limit_tokens}` on the transform request (`Knobs::usage`) near the
+limit, the trigger fires `force_band` over a 1,000-message session (14,817
+eligible tokens against a 15,000 bar; a session of 1,600 messages is refused
+as durable text past 512 KiB). The fixture now stands in for a summarizer
+provider: a prompt carrying `<new_messages>` with `[start-end] R: part / part`
+lines (alias markers `«sN»` stripped) is answered in the summarizer's
+`<output>` document, one segment per five lines, and
+`the_fixture_answers_a_summarizer_prompt_in_the_validators_document` proves
+the daemon's own validator accepts it. Still open: the fired firing did not
+reach the fixture's backend in a probe (counters at zero, no failure
+recorded, no publication), so the producer's connection from the daemon to
+the host's ModelExecution route inside the fixture process is the next thing
+to trace. The
 structured arm's chunk, transcript, and request are the test's own model of
 what the producer builds; only the validator and the stored-row mapping are
 production code.

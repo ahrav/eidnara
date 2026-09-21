@@ -1130,6 +1130,12 @@ Campaign (`crates/daemon/tests/eval_campaign.rs`, `--all-features`):
   replay mode answers it from the file with its controlled backend at zero
   calls; a prompt one byte off is a `cassette_miss` and the miss latches; the
   file under another namespace refuses to load.
+- `the_fixture_answers_a_summarizer_prompt_in_the_validators_document`
+  (`crates/daemon/tests/eval_fixture_cassette.rs`): a summarizer-shaped
+  prompt with twelve aliased lines through the real route is answered in the
+  summarizer's document; the daemon's validator accepts it as two segments of
+  five with the newest held back, `unprocessed_from` 11, the end message id
+  anchored, and no alias marker in the summary.
 - `an_s1_campaign_runs_only_under_its_budget` (ignored): a 400-message
   history runs only under `EIDNARA_EVAL_S1_BUDGET_MS` and reports the same
   shape inside the budget; without the variable the run is recorded as
