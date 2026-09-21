@@ -705,8 +705,10 @@ impl FrozenFamily {
     }
 
     /// The digest a manifest recorded; a manifest without one supports no
-    /// paired report.
+    /// paired report, and neither does one `Manifest::validate` refuses,
+    /// such as a paired report with no recency baseline beside it.
     pub fn from_manifest(manifest: &Manifest) -> Result<Self, StatisticsError> {
+        manifest.validate()?;
         manifest
             .analysis_family_digest
             .clone()

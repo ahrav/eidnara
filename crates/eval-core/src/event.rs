@@ -106,20 +106,108 @@ pub struct EventLog {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LogError {
-    SchemaMismatch { field: &'static str, found: String },
-    EventBound { events: usize, max: usize },
-    IdNotDerived { id: EventId },
-    DuplicateId { id: EventId },
-    NotLinearized { position: usize },
-    TimeOutOfDomain { id: EventId },
-    RevisionAhead { id: EventId },
-    DanglingEdge { edge: CausalEdge },
-    EdgeAgainstOrder { edge: CausalEdge },
-    EdgeAgainstDepth { edge: CausalEdge },
-    EdgesNotSorted { position: usize },
+    SchemaMismatch {
+        field: &'static str,
+        found: String,
+    },
+    EventBound {
+        events: usize,
+        max: usize,
+    },
+    IdNotDerived {
+        id: EventId,
+    },
+    DuplicateId {
+        id: EventId,
+    },
+    NotLinearized {
+        position: usize,
+    },
+    TimeOutOfDomain {
+        id: EventId,
+    },
+    RevisionAhead {
+        id: EventId,
+    },
+    DanglingEdge {
+        edge: CausalEdge,
+    },
+    EdgeAgainstOrder {
+        edge: CausalEdge,
+    },
+    EdgeAgainstDepth {
+        edge: CausalEdge,
+    },
+    EdgesNotSorted {
+        position: usize,
+    },
+    /// A payload names an event the log does not hold.
+    DanglingReference {
+        id: EventId,
+        target: EventId,
+    },
+    /// `:` separates the parts of a derived ID, so a tag holding one could
+    /// mint one ID for two entities.
+    InvalidEntityTag {
+        tag: String,
+    },
 }
 
 debug_display!(LogError);
+
+/// A correction supersedes its target; a retraction invalidates its target.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Supersession {
+    Correction,
+    Retraction,
+}
+
+impl Payload {
+    /// The event this payload points at: a cited message, a rename's
+    /// predecessor, or a correction's or retraction's target. Every variant
+    /// is listed so a new reference-bearing one cannot hide behind a wildcard.
+    pub fn reference(&self) -> Option<&EventId> {
+        match self {
+            Payload::Message { cites, .. } => cites.as_ref(),
+            Payload::Rename { previous, .. } => previous.as_ref(),
+            Payload::Correction { target, .. } | Payload::Invalidation { target } => Some(target),
+            Payload::ToolSpan { .. } | Payload::Commit { .. } => None,
+        }
+    }
+
+    pub fn reference_mut(&mut self) -> Option<&mut EventId> {
+        match self {
+            Payload::Message { cites, .. } => cites.as_mut(),
+            Payload::Rename { previous, .. } => previous.as_mut(),
+            Payload::Correction { target, .. } | Payload::Invalidation { target } => Some(target),
+            Payload::ToolSpan { .. } | Payload::Commit { .. } => None,
+        }
+    }
+
+    /// The event this payload makes non-current and how, if it is a
+    /// correction or a retraction. Every variant is listed so a new
+    /// superseding one cannot hide behind a wildcard.
+    pub fn supersedes(&self) -> Option<(Supersession, &EventId)> {
+        match self {
+            Payload::Correction { target, .. } => Some((Supersession::Correction, target)),
+            Payload::Invalidation { target } => Some((Supersession::Retraction, target)),
+            Payload::Message { .. }
+            | Payload::ToolSpan { .. }
+            | Payload::Commit { .. }
+            | Payload::Rename { .. } => None,
+        }
+    }
+
+    /// The payload with every event reference erased, for comparing two
+    /// histories by what they say rather than by whom they name.
+    pub fn content(&self) -> Payload {
+        let mut content = self.clone();
+        if let Some(target) = content.reference_mut() {
+            *target = EventId(String::new());
+        }
+        content
+    }
+}
 
 impl Event {
     pub fn key(&self) -> (i64, u32, &'static str, &str, u32) {
@@ -152,6 +240,57 @@ impl EventLog {
         log.causal_edges
             .retain(|edge| edge.from != *id && edge.to != *id);
         log
+    }
+
+    /// Moves every event onto entities suffixed `~tag`, re-deriving each ID
+    /// and following every payload reference and causal edge, so a history
+    /// authored apart from another can share a log with it without an
+    /// identity collision. A payload reference or a causal edge naming an
+    /// event the log does not hold is refused; left in place it would resolve
+    /// against the other history after the join.
+    pub fn on_distinct_entities(&self, tag: &str) -> Result<Self, LogError> {
+        if tag.contains(':') {
+            return Err(LogError::InvalidEntityTag {
+                tag: tag.to_string(),
+            });
+        }
+        let renamed: BTreeMap<&EventId, EventId> = self
+            .events
+            .iter()
+            .map(|event| {
+                let entity = format!("{}~{tag}", event.entity_id);
+                (
+                    &event.id,
+                    EventId::derive(event.stream, &entity, event.local_seq),
+                )
+            })
+            .collect();
+        let follow = |id: &EventId| renamed.get(id).cloned();
+        let mut events = Vec::with_capacity(self.events.len());
+        for event in &self.events {
+            let mut moved = event.clone();
+            moved.entity_id = format!("{}~{tag}", event.entity_id);
+            moved.id = follow(&event.id).expect("every event renames itself");
+            if let Some(target) = moved.payload.reference_mut() {
+                *target = follow(target).ok_or_else(|| LogError::DanglingReference {
+                    id: event.id.clone(),
+                    target: target.clone(),
+                })?;
+            }
+            events.push(moved);
+        }
+        let edges = self
+            .causal_edges
+            .iter()
+            .map(|edge| {
+                let dangling = || LogError::DanglingEdge { edge: edge.clone() };
+                Ok(CausalEdge {
+                    from: follow(&edge.from).ok_or_else(dangling)?,
+                    to: follow(&edge.to).ok_or_else(dangling)?,
+                })
+            })
+            .collect::<Result<Vec<_>, LogError>>()?;
+        Ok(Self::new(events, edges))
     }
 
     pub fn digest(&self) -> String {

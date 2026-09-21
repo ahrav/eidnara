@@ -4,13 +4,14 @@ use std::collections::BTreeMap;
 
 use eval_core::{
     ANALYSIS_FAMILY_SCHEMA, Analysis, AnalysisFamily, ArmRates, ArmResult, BlockedReason,
-    CampaignProfile, CensorReason, ClusterKey, ClusteringUnit, FrozenFamily, GATE_ENDPOINTS, Gates,
-    ICC_THRESHOLD, ITEM_COUNT_THRESHOLD, IccPilot, Interval, IntervalMethod, IntervalOutcome,
-    IntervalWithheld, LivenessBounds, MAX_BOOTSTRAP_REPLICATES, MIN_BOOTSTRAP_REPLICATES, Manifest,
-    ManifestError, MultiplicityCorrection, PairCounts, PairOutcome, PilotObservation, Ratio,
-    RunStatus, StatisticsError, StoppingRule, analyze, arm_miss_asymmetry,
-    cluster_bootstrap_interval, intraclass_correlation, pair_table_digest, parse_analysis_family,
-    parse_campaign_profile, run_icc_pilot,
+    CampaignProfile, CensorReason, ClusterKey, ClusteringUnit, EvaluatedSurface, FrozenFamily,
+    GATE_ENDPOINTS, Gates, ICC_THRESHOLD, ITEM_COUNT_THRESHOLD, IccPilot, Interval, IntervalMethod,
+    IntervalOutcome, IntervalWithheld, LivenessBounds, MAX_BOOTSTRAP_REPLICATES,
+    MIN_BOOTSTRAP_REPLICATES, Manifest, ManifestError, MultiplicityCorrection, PairCounts,
+    PairOutcome, PilotObservation, RECENCY_BASELINE_VERSION, Ratio, RecencyBaseline, RunStatus,
+    StatisticsError, StoppingRule, analyze, arm_miss_asymmetry, cluster_bootstrap_interval,
+    intraclass_correlation, pair_table_digest, parse_analysis_family, parse_campaign_profile,
+    run_icc_pilot,
 };
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -115,8 +116,17 @@ fn arm_rates(fresh_miss: &str, aged_miss: &str) -> BTreeMap<String, ArmRates> {
     ])
 }
 
+/// The baseline a paired campaign's manifest records beside its frozen family.
+fn baseline() -> RecencyBaseline {
+    RecencyBaseline {
+        version: RECENCY_BASELINE_VERSION.to_string(),
+        bounds: BTreeMap::from([(EvaluatedSurface::Surface1, 100)]),
+    }
+}
+
 /// A manifest that recorded `frozen` before its first outcome, carries `rates`,
-/// and names `pairs` as its samples.
+/// names `pairs` as its samples, and records the baseline its pairs were
+/// judged against.
 fn recorded(
     frozen: &FrozenFamily,
     rates: BTreeMap<String, ArmRates>,
@@ -124,6 +134,7 @@ fn recorded(
 ) -> Manifest {
     let mut manifest = support::manifest();
     manifest.analysis_family_digest = Some(frozen.analysis_family_digest.clone());
+    manifest.recency_baseline = Some(baseline());
     manifest.arm_rates = rates;
     manifest.sample_ids = pairs.iter().map(|pair| pair.pair_id.clone()).collect();
     manifest.sample_order = manifest.sample_ids.clone();
@@ -468,6 +479,17 @@ fn the_family_is_frozen_before_outcomes_and_any_post_hoc_edit_refuses() {
         Some(StatisticsError::FamilyNotRecorded)
     );
     manifest.analysis_family_digest = Some(frozen.analysis_family_digest.clone());
+    // A paired report without the baseline its pairs were judged against is
+    // a manifest `validate` refuses, and the freeze reads only validated ones.
+    assert_eq!(
+        FrozenFamily::from_manifest(&manifest).err(),
+        Some(StatisticsError::InvalidManifest(
+            ManifestError::RecencyBaselineMismatch {
+                field: "recency_baseline"
+            }
+        ))
+    );
+    manifest.recency_baseline = Some(baseline());
     assert_eq!(FrozenFamily::from_manifest(&manifest).unwrap(), frozen);
     // A family that validates can always be frozen: an integer outside the
     // canonical-JSON safe range is refused at parse, not first at freeze.
