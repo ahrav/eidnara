@@ -183,6 +183,30 @@ impl CassetteError {
             Self::NotCanonical(_) => "NotCanonical",
         }
     }
+
+    /// The wire detail the oracle reports beside `kind`. Request-derived and
+    /// input-quoting serde payloads are withheld so `detail` never echoes
+    /// request content.
+    pub fn detail(&self) -> String {
+        match self {
+            Self::SchemaMismatch { .. }
+            | Self::GeneratorVersionMismatch { .. }
+            | Self::CoveredFieldsMismatch { .. }
+            | Self::NamespaceMismatch { .. }
+            | Self::WrongNamespace { .. }
+            | Self::ProvenanceMismatch { .. }
+            | Self::EntryDigestMismatch { .. }
+            | Self::RedactionRefused(..)
+            | Self::ScannerUnavailable(_)
+            | Self::RecordOnReplay
+            | Self::LookupOnRecord => self.to_string(),
+            Self::Shape(_)
+            | Self::MalformedBody
+            | Self::UnknownRequestField(_)
+            | Self::TemperatureNotDecimal(_)
+            | Self::NotCanonical(_) => String::new(),
+        }
+    }
 }
 
 impl From<ContractError> for CassetteError {
@@ -289,11 +313,19 @@ impl Cassette {
     /// schema, generator, covered-field, namespace, provenance, or entry-digest
     /// mismatch before any request is served.
     pub fn replay(value: &Value, namespace: &str) -> Result<Self, CassetteError> {
-        let file: CassetteFile = serde_json::from_value(value.clone())
-            .map_err(|error| CassetteError::Shape(error.to_string()))?;
-        if file.schema != CASSETTE_SCHEMA {
-            return Err(CassetteError::SchemaMismatch { found: file.schema });
+        // Checked on the raw value first, so a later schema's new fields report
+        // the version, not a shape refusal from `deny_unknown_fields`.
+        let schema = value
+            .get("schema")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        if schema != CASSETTE_SCHEMA {
+            return Err(CassetteError::SchemaMismatch {
+                found: schema.to_string(),
+            });
         }
+        let file = CassetteFile::deserialize(value)
+            .map_err(|error| CassetteError::Shape(error.to_string()))?;
         if file.provenance.generator_version != CASSETTE_GENERATOR_VERSION {
             return Err(CassetteError::GeneratorVersionMismatch {
                 found: file.provenance.generator_version,
@@ -380,7 +412,10 @@ impl Cassette {
 
     /// Admits one exchange. The covered request projection and the response
     /// are scanned first; a finding or an unscannable text refuses the entry
-    /// before it exists anywhere and marks the cassette refused.
+    /// before it exists anywhere. Every failure here (a wrong namespace, a
+    /// finding, an undigestable request) marks the cassette refused, because
+    /// the exchange it stands for is in no file; the first refusal is the one
+    /// `to_file` reports.
     pub fn record(
         &mut self,
         namespace: &str,
@@ -388,26 +423,40 @@ impl Cassette {
         request: Value,
         response: Value,
     ) -> Result<&Entry, CassetteError> {
-        let redactor = self
-            .redactor
-            .as_ref()
-            .ok_or(CassetteError::RecordOnReplay)?;
-        self.check_namespace(namespace)?;
-        if let Err(error) = admit(redactor, Location::Request, &request)
-            .and_then(|()| admit(redactor, Location::Response, &response))
-        {
-            self.refused = Some(error.clone());
-            return Err(error);
-        }
+        let admitted = self.check_namespace(namespace).and_then(|()| {
+            let redactor = self
+                .redactor
+                .as_ref()
+                .ok_or(CassetteError::RecordOnReplay)?;
+            admit(redactor, Location::Request, &request)?;
+            admit(redactor, Location::Response, &response)?;
+            request_digest(&request)
+        });
+        let request_digest = match admitted {
+            Ok(digest) => digest,
+            Err(error) => return Err(self.refuse(error)),
+        };
         let entry = Entry {
             boundary,
-            request_digest: request_digest(&request)?,
+            request_digest,
             request,
             response,
         };
         self.cases.push(entry);
         self.consumed.push(true);
         Ok(self.cases.last().expect("pushed"))
+    }
+
+    /// Latches `error` as a recording's refusal: `record` calls it for every
+    /// failure, and a boundary calls it for a request it could not even
+    /// project (an unknown field, an unencodable number), so an exchange
+    /// missing from the cassette leaves it without a file form. An earlier
+    /// refusal stays; a replay is unchanged.
+    pub fn refuse(&mut self, error: CassetteError) -> CassetteError {
+        if self.redactor.is_some() {
+            self.refused.get_or_insert_with(|| error.clone());
+        }
+        error
     }
 
     /// Strict lookup: a hit consumes the first unconsumed entry of `boundary`
@@ -526,9 +575,14 @@ impl OpenCodeRequest {
             if !OPENCODE_COVERED_FIELDS.contains(&format!("body.{name}").as_str()) {
                 return Err(CassetteError::UnknownRequestField(name.clone()));
             }
-            let value = match (name.as_str(), value.as_f64()) {
-                ("temperature", Some(number)) => Value::String(canonical_decimal_f64(number)?),
-                _ => strip_volatile(value),
+            let value = match name.as_str() {
+                "temperature" => {
+                    let number = value
+                        .as_f64()
+                        .ok_or_else(|| CassetteError::TemperatureNotDecimal(value.to_string()))?;
+                    Value::String(canonical_decimal_f64(number)?)
+                }
+                _ => strip_volatile(value, name == "system"),
             };
             body.insert(name.clone(), value);
         }
@@ -551,19 +605,28 @@ impl BackendRecord {
     }
 }
 
-/// Removes every `cache_control` member and normalizes the `cch=<nonce>;`
-/// billing nonce in string values.
-fn strip_volatile(value: &Value) -> Value {
+/// Removes every `cache_control` member and, in the `system` blocks where the
+/// provider's billing header lives (`billing`), normalizes the `cch=<nonce>;`
+/// nonce in string values; the same text anywhere else is model-visible
+/// content and stays as written.
+fn strip_volatile(value: &Value, billing: bool) -> Value {
     match value {
         Value::Object(members) => Value::Object(
             members
                 .iter()
                 .filter(|(key, _)| key.as_str() != "cache_control")
-                .map(|(key, member)| (key.clone(), strip_volatile(member)))
+                .map(|(key, member)| (key.clone(), strip_volatile(member, billing)))
                 .collect(),
         ),
-        Value::Array(items) => Value::Array(items.iter().map(strip_volatile).collect()),
-        Value::String(text) if text.contains("cch=") => Value::String(normalize_nonce(text)),
+        Value::Array(items) => Value::Array(
+            items
+                .iter()
+                .map(|item| strip_volatile(item, billing))
+                .collect(),
+        ),
+        Value::String(text) if billing && text.contains("cch=") => {
+            Value::String(normalize_nonce(text))
+        }
         other => other.clone(),
     }
 }

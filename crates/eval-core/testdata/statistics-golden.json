@@ -15743,6 +15743,2753 @@
     },
     {
       "expected": {
+        "lower": {
+          "denominator": 20,
+          "numerator": 1
+        },
+        "n_clusters": 300,
+        "n_items": 300,
+        "upper": {
+          "denominator": 100,
+          "numerator": 13
+        }
+      },
+      "id": "bootstrap-world-seed-unit-minimum-replicates",
+      "input": {
+        "pairs": [
+          {
+            "aged": "fail",
+            "cluster": {
+              "family": "cargo",
+              "world_seed": 0
+            },
+            "fresh": "fail",
+            "pair_id": "cargo-0"
+          },
+          {
+            "aged": "pass",
+            "cluster": {
+              "family": "cargo",
+              "world_seed": 1
+            },
+            "fresh": "pass",
+            "pair_id": "cargo-1"
+          },
+          {
+            "aged": "pass",
+            "cluster": {
+              "family": "cargo",
+              "world_seed": 2
+            },
+            "fresh": "pass",
+            "pair_id": "cargo-2"
+          },
+          {
+            "aged": "pass",
+            "cluster": {
+              "family": "cargo",
+              "world_seed": 3
+            },
+            "fresh": "pass",
+            "pair_id": "cargo-3"
+          },
+          {
+            "aged": "fail",
+            "cluster": {
+              "family": "cargo",
+              "world_seed": 4
+            },
+            "fresh": "fail",
+            "pair_id": "cargo-4"
+          },
+          {
+            "aged": "pass",
+            "cluster": {
+              "family": "cargo",
+              "world_seed": 5
+            },
+            "fresh": "pass",
+            "pair_id": "cargo-5"
+          },
+          {
+            "aged": "pass",
+            "cluster": {
+              "family": "cargo",
+              "world_seed": 6
+            },
+            "fresh": "pass",
+            "pair_id": "cargo-6"
+          },
+          {
+            "aged": "pass",
+            "cluster": {
+              "family": "cargo",
+              "world_seed": 7
+            },
+            "fresh": "pass",
+            "pair_id": "cargo-7"
+          },
+          {
+            "aged": "pass",
+            "cluster": {
+              "family": "cargo",
+              "world_seed": 8
+            },
+            "fresh": "fail",
+            "pair_id": "cargo-8"
+          },
+          {
+            "aged": "pass",
+            "cluster": {
+              "family": "cargo",
+              "world_seed": 9
+            },
+            "fresh": "pass",
+            "pair_id": "cargo-9"
+          },
+          {
+            "aged": "pass",
+            "cluster": {
+              "family": "cargo",
+              "world_seed": 10
+            },
+            "fresh": "pass",
+            "pair_id": "cargo-10"
+          },
+          {
+            "aged": {
+              "censored": "timeout"
+            },
+            "cluster": {
+              "family": "cargo",
+              "world_seed": 11
+            },
+            "fresh": "pass",
+            "pair_id": "cargo-11"
+          },
+          {
+            "aged": "fail",
+            "cluster": {
+              "family": "cargo",
+              "world_seed": 12
+            },
+            "fresh": "fail",
+            "pair_id": "cargo-12"
+          },
+          {
+            "aged": "pass",
+            "cluster": {
+              "family": "cargo",
+              "world_seed": 13
+            },
+            "fresh": "pass",
+            "pair_id": "cargo-13"
+          },
+          {
+            "aged": "fail",
+            "cluster": {
+              "family": "cargo",
+              "world_seed": 14
+            },
+            "fresh": "pass",
+            "pair_id": "cargo-14"
+          },
+          {
+            "aged": "pass",
+            "cluster": {
+              "family": "cargo",
+              "world_seed": 15
+            },
+            "fresh": "pass",
+            "pair_id": "cargo-15"
+          },
+          {
+            "aged": "fail",
+            "cluster": {
+              "family": "cargo",
+              "world_seed": 16
+            },
+            "fresh": "fail",
+            "pair_id": "cargo-16"
+          },
+          {
+            "aged": "fail",
+            "cluster": {
+              "family": "cargo",
+              "world_seed": 17
+            },
+            "fresh": "pass",
+            "pair_id": "cargo-17"
+          },
+          {
+            "aged": "pass",
+            "cluster": {
+              "family": "cargo",
+              "world_seed": 18
+            },
+            "fresh": "pass",
+            "pair_id": "cargo-18"
+          },
+          {
+            "aged": "pass",
+            "cluster": {
+              "family": "cargo",
+              "world_seed": 19
+            },
+            "fresh": "pass",
+            "pair_id": "cargo-19"
+          },
+          {
+            "aged": "fail",
+            "cluster": {
+              "family": "cargo",
+              "world_seed": 20
+            },
+            "fresh": "fail",
+            "pair_id": "cargo-20"
+          },
+          {
+            "aged": "pass",
+            "cluster": {
+              "family": "cargo",
+              "world_seed": 21
+            },
+            "fresh": "pass",
+            "pair_id": "cargo-21"
+          },
+          {
+            "aged": "pass",
+            "cluster": {
+              "family": "cargo",
+              "world_seed": 22
+            },
+            "fresh": "pass",
+            "pair_id": "cargo-22"
+          },
+          {
+            "aged": "pass",
+            "cluster": {
+              "family": "cargo",
+              "world_seed": 23
+            },
+            "fresh": "pass",
+            "pair_id": "cargo-23"
+          },
+          {
+            "aged": "fail",
+            "cluster": {
+              "family": "cargo",
+              "world_seed": 24
+            },
+            "fresh": "fail",
+            "pair_id": "cargo-24"
+          },
+          {
+            "aged": "pass",
+            "cluster": {
+              "family": "cargo",
+              "world_seed": 25
+            },
+            "fresh": "pass",
+            "pair_id": "cargo-25"
+          },
+          {
+            "aged": "pass",
+            "cluster": {
+              "family": "cargo",
+              "world_seed": 26
+            },
+            "fresh": "pass",
+            "pair_id": "cargo-26"
+          },
+          {
+            "aged": "pass",
+            "cluster": {
+              "family": "cargo",
+              "world_seed": 27
+            },
+            "fresh": "pass",
+            "pair_id": "cargo-27"
+          },
+          {
+            "aged": "pass",
+            "cluster": {
+              "family": "cargo",
+              "world_seed": 28
+            },
+            "fresh": "fail",
+            "pair_id": "cargo-28"
+          },
+          {
+            "aged": "pass",
+            "cluster": {
+              "family": "cargo",
+              "world_seed": 29
+            },
+            "fresh": "pass",
+            "pair_id": "cargo-29"
+          },
+          {
+            "aged": "pass",
+            "cluster": {
+              "family": "cargo",
+              "world_seed": 30
+            },
+            "fresh": "pass",
+            "pair_id": "cargo-30"
+          },
+          {
+            "aged": {
+              "censored": "timeout"
+            },
+            "cluster": {
+              "family": "cargo",
+              "world_seed": 31
+            },
+            "fresh": "pass",
+            "pair_id": "cargo-31"
+          },
+          {
+            "aged": "fail",
+            "cluster": {
+              "family": "cargo",
+              "world_seed": 32
+            },
+            "fresh": "fail",
+            "pair_id": "cargo-32"
+          },
+          {
+            "aged": "pass",
+            "cluster": {
+              "family": "cargo",
+              "world_seed": 33
+            },
+            "fresh": "pass",
+            "pair_id": "cargo-33"
+          },
+          {
+            "aged": "fail",
+            "cluster": {
+              "family": "cargo",
+              "world_seed": 34
+            },
+            "fresh": "pass",
+            "pair_id": "cargo-34"
+          },
+          {
+            "aged": "pass",
+            "cluster": {
+              "family": "cargo",
+              "world_seed": 35
+            },
+            "fresh": "pass",
+            "pair_id": "cargo-35"
+          },
+          {
+            "aged": "fail",
+            "cluster": {
+              "family": "cargo",
+              "world_seed": 36
+            },
+            "fresh": "fail",
+            "pair_id": "cargo-36"
+          },
+          {
+            "aged": "fail",
+            "cluster": {
+              "family": "cargo",
+              "world_seed": 37
+            },
+            "fresh": "pass",
+            "pair_id": "cargo-37"
+          },
+          {
+            "aged": "pass",
+            "cluster": {
+              "family": "cargo",
+              "world_seed": 38
+            },
+            "fresh": "pass",
+            "pair_id": "cargo-38"
+          },
+          {
+            "aged": "pass",
+            "cluster": {
+              "family": "cargo",
+              "world_seed": 39
+            },
+            "fresh": "pass",
+            "pair_id": "cargo-39"
+          },
+          {
+            "aged": "fail",
+            "cluster": {
+              "family": "cargo",
+              "world_seed": 40
+            },
+            "fresh": "fail",
+            "pair_id": "cargo-40"
+          },
+          {
+            "aged": "pass",
+            "cluster": {
+              "family": "cargo",
+              "world_seed": 41
+            },
+            "fresh": "pass",
+            "pair_id": "cargo-41"
+          },
+          {
+            "aged": "pass",
+            "cluster": {
+              "family": "cargo",
+              "world_seed": 42
+            },
+            "fresh": "pass",
+            "pair_id": "cargo-42"
+          },
+          {
+            "aged": "pass",
+            "cluster": {
+              "family": "cargo",
+              "world_seed": 43
+            },
+            "fresh": "pass",
+            "pair_id": "cargo-43"
+          },
+          {
+            "aged": "fail",
+            "cluster": {
+              "family": "cargo",
+              "world_seed": 44
+            },
+            "fresh": "fail",
+            "pair_id": "cargo-44"
+          },
+          {
+            "aged": "pass",
+            "cluster": {
+              "family": "cargo",
+              "world_seed": 45
+            },
+            "fresh": "pass",
+            "pair_id": "cargo-45"
+          },
+          {
+            "aged": "pass",
+            "cluster": {
+              "family": "cargo",
+              "world_seed": 46
+            },
+            "fresh": "pass",
+            "pair_id": "cargo-46"
+          },
+          {
+            "aged": "pass",
+            "cluster": {
+              "family": "cargo",
+              "world_seed": 47
+            },
+            "fresh": "pass",
+            "pair_id": "cargo-47"
+          },
+          {
+            "aged": "pass",
+            "cluster": {
+              "family": "cargo",
+              "world_seed": 48
+            },
+            "fresh": "fail",
+            "pair_id": "cargo-48"
+          },
+          {
+            "aged": "pass",
+            "cluster": {
+              "family": "cargo",
+              "world_seed": 49
+            },
+            "fresh": "pass",
+            "pair_id": "cargo-49"
+          },
+          {
+            "aged": "pass",
+            "cluster": {
+              "family": "tokio",
+              "world_seed": 0
+            },
+            "fresh": "pass",
+            "pair_id": "tokio-0"
+          },
+          {
+            "aged": "fail",
+            "cluster": {
+              "family": "tokio",
+              "world_seed": 1
+            },
+            "fresh": "fail",
+            "pair_id": "tokio-1"
+          },
+          {
+            "aged": "pass",
+            "cluster": {
+              "family": "tokio",
+              "world_seed": 2
+            },
+            "fresh": "pass",
+            "pair_id": "tokio-2"
+          },
+          {
+            "aged": "pass",
+            "cluster": {
+              "family": "tokio",
+              "world_seed": 3
+            },
+            "fresh": "pass",
+            "pair_id": "tokio-3"
+          },
+          {
+            "aged": "pass",
+            "cluster": {
+              "family": "tokio",
+              "world_seed": 4
+            },
+            "fresh": "pass",
+            "pair_id": "tokio-4"
+          },
+          {
+            "aged": "fail",
+            "cluster": {
+              "family": "tokio",
+              "world_seed": 5
+            },
+            "fresh": "fail",
+            "pair_id": "tokio-5"
+          },
+          {
+            "aged": "pass",
+            "cluster": {
+              "family": "tokio",
+              "world_seed": 6
+            },
+            "fresh": "pass",
+            "pair_id": "tokio-6"
+          },
+          {
+            "aged": "pass",
+            "cluster": {
+              "family": "tokio",
+              "world_seed": 7
+            },
+            "fresh": "pass",
+            "pair_id": "tokio-7"
+          },
+          {
+            "aged": "pass",
+            "cluster": {
+              "family": "tokio",
+              "world_seed": 8
+            },
+            "fresh": "pass",
+            "pair_id": "tokio-8"
+          },
+          {
+            "aged": "pass",
+            "cluster": {
+              "family": "tokio",
+              "world_seed": 9
+            },
+            "fresh": "fail",
+            "pair_id": "tokio-9"
+          },
+          {
+            "aged": "pass",
+            "cluster": {
+              "family": "tokio",
+              "world_seed": 10
+            },
+            "fresh": "pass",
+            "pair_id": "tokio-10"
+          },
+          {
+            "aged": "pass",
+            "cluster": {
+              "family": "tokio",
+              "world_seed": 11
+            },
+            "fresh": "pass",
+            "pair_id": "tokio-11"
+          },
+          {
+            "aged": {
+              "censored": "timeout"
+            },
+            "cluster": {
+              "family": "tokio",
+              "world_seed": 12
+            },
+            "fresh": "pass",
+            "pair_id": "tokio-12"
+          },
+          {
+            "aged": "fail",
+            "cluster": {
+              "family": "tokio",
+              "world_seed": 13
+            },
+            "fresh": "fail",
+            "pair_id": "tokio-13"
+          },
+          {
+            "aged": "pass",
+            "cluster": {
+              "family": "tokio",
+              "world_seed": 14
+            },
+            "fresh": "pass",
+            "pair_id": "tokio-14"
+          },
+          {
+            "aged": "fail",
+            "cluster": {
+              "family": "tokio",
+              "world_seed": 15
+            },
+            "fresh": "pass",
+            "pair_id": "tokio-15"
+          },
+          {
+            "aged": "pass",
+            "cluster": {
+              "family": "tokio",
+              "world_seed": 16
+            },
+            "fresh": "pass",
+            "pair_id": "tokio-16"
+          },
+          {
+            "aged": "fail",
+            "cluster": {
+              "family": "tokio",
+              "world_seed": 17
+            },
+            "fresh": "fail",
+            "pair_id": "tokio-17"
+          },
+          {
+            "aged": "fail",
+            "cluster": {
+              "family": "tokio",
+              "world_seed": 18
+            },
+            "fresh": "pass",
+            "pair_id": "tokio-18"
+          },
+          {
+            "aged": "pass",
+            "cluster": {
+              "family": "tokio",
+              "world_seed": 19
+            },
+            "fresh": "pass",
+            "pair_id": "tokio-19"
+          },
+          {
+            "aged": "pass",
+            "cluster": {
+              "family": "tokio",
+              "world_seed": 20
+            },
+            "fresh": "pass",
+            "pair_id": "tokio-20"
+          },
+          {
+            "aged": "fail",
+            "cluster": {
+              "family": "tokio",
+              "world_seed": 21
+            },
+            "fresh": "fail",
+            "pair_id": "tokio-21"
+          },
+          {
+            "aged": "pass",
+            "cluster": {
+              "family": "tokio",
+              "world_seed": 22
+            },
+            "fresh": "pass",
+            "pair_id": "tokio-22"
+          },
+          {
+            "aged": "pass",
+            "cluster": {
+              "family": "tokio",
+              "world_seed": 23
+            },
+            "fresh": "pass",
+            "pair_id": "tokio-23"
+          },
+          {
+            "aged": "pass",
+            "cluster": {
+              "family": "tokio",
+              "world_seed": 24
+            },
+            "fresh": "pass",
+            "pair_id": "tokio-24"
+          },
+          {
+            "aged": "fail",
+            "cluster": {
+              "family": "tokio",
+              "world_seed": 25
+            },
+            "fresh": "fail",
+            "pair_id": "tokio-25"
+          },
+          {
+            "aged": "pass",
+            "cluster": {
+              "family": "tokio",
+              "world_seed": 26
+            },
+            "fresh": "pass",
+            "pair_id": "tokio-26"
+          },
+          {
+            "aged": "pass",
+            "cluster": {
+              "family": "tokio",
+              "world_seed": 27
+            },
+            "fresh": "pass",
+            "pair_id": "tokio-27"
+          },
+          {
+            "aged": "pass",
+            "cluster": {
+              "family": "tokio",
+              "world_seed": 28
+            },
+            "fresh": "pass",
+            "pair_id": "tokio-28"
+          },
+          {
+            "aged": "pass",
+            "cluster": {
+              "family": "tokio",
+              "world_seed": 29
+            },
+            "fresh": "fail",
+            "pair_id": "tokio-29"
+          },
+          {
+            "aged": "pass",
+            "cluster": {
+              "family": "tokio",
+              "world_seed": 30
+            },
+            "fresh": "pass",
+            "pair_id": "tokio-30"
+          },
+          {
+            "aged": "pass",
+            "cluster": {
+              "family": "tokio",
+              "world_seed": 31
+            },
+            "fresh": "pass",
+            "pair_id": "tokio-31"
+          },
+          {
+            "aged": {
+              "censored": "timeout"
+            },
+            "cluster": {
+              "family": "tokio",
+              "world_seed": 32
+            },
+            "fresh": "pass",
+            "pair_id": "tokio-32"
+          },
+          {
+            "aged": "fail",
+            "cluster": {
+              "family": "tokio",
+              "world_seed": 33
+            },
+            "fresh": "fail",
+            "pair_id": "tokio-33"
+          },
+          {
+            "aged": "pass",
+            "cluster": {
+              "family": "tokio",
+              "world_seed": 34
+            },
+            "fresh": "pass",
+            "pair_id": "tokio-34"
+          },
+          {
+            "aged": "fail",
+            "cluster": {
+              "family": "tokio",
+              "world_seed": 35
+            },
+            "fresh": "pass",
+            "pair_id": "tokio-35"
+          },
+          {
+            "aged": "pass",
+            "cluster": {
+              "family": "tokio",
+              "world_seed": 36
+            },
+            "fresh": "pass",
+            "pair_id": "tokio-36"
+          },
+          {
+            "aged": "fail",
+            "cluster": {
+              "family": "tokio",
+              "world_seed": 37
+            },
+            "fresh": "fail",
+            "pair_id": "tokio-37"
+          },
+          {
+            "aged": "fail",
+            "cluster": {
+              "family": "tokio",
+              "world_seed": 38
+            },
+            "fresh": "pass",
+            "pair_id": "tokio-38"
+          },
+          {
+            "aged": "pass",
+            "cluster": {
+              "family": "tokio",
+              "world_seed": 39
+            },
+            "fresh": "pass",
+            "pair_id": "tokio-39"
+          },
+          {
+            "aged": "pass",
+            "cluster": {
+              "family": "tokio",
+              "world_seed": 40
+            },
+            "fresh": "pass",
+            "pair_id": "tokio-40"
+          },
+          {
+            "aged": "fail",
+            "cluster": {
+              "family": "tokio",
+              "world_seed": 41
+            },
+            "fresh": "fail",
+            "pair_id": "tokio-41"
+          },
+          {
+            "aged": "pass",
+            "cluster": {
+              "family": "tokio",
+              "world_seed": 42
+            },
+            "fresh": "pass",
+            "pair_id": "tokio-42"
+          },
+          {
+            "aged": "pass",
+            "cluster": {
+              "family": "tokio",
+              "world_seed": 43
+            },
+            "fresh": "pass",
+            "pair_id": "tokio-43"
+          },
+          {
+            "aged": "pass",
+            "cluster": {
+              "family": "tokio",
+              "world_seed": 44
+            },
+            "fresh": "pass",
+            "pair_id": "tokio-44"
+          },
+          {
+            "aged": "fail",
+            "cluster": {
+              "family": "tokio",
+              "world_seed": 45
+            },
+            "fresh": "fail",
+            "pair_id": "tokio-45"
+          },
+          {
+            "aged": "pass",
+            "cluster": {
+              "family": "tokio",
+              "world_seed": 46
+            },
+            "fresh": "pass",
+            "pair_id": "tokio-46"
+          },
+          {
+            "aged": "pass",
+            "cluster": {
+              "family": "tokio",
+              "world_seed": 47
+            },
+            "fresh": "pass",
+            "pair_id": "tokio-47"
+          },
+          {
+            "aged": "pass",
+            "cluster": {
+              "family": "tokio",
+              "world_seed": 48
+            },
+            "fresh": "pass",
+            "pair_id": "tokio-48"
+          },
+          {
+            "aged": "pass",
+            "cluster": {
+              "family": "tokio",
+              "world_seed": 49
+            },
+            "fresh": "fail",
+            "pair_id": "tokio-49"
+          },
+          {
+            "aged": "pass",
+            "cluster": {
+              "family": "django",
+              "world_seed": 0
+            },
+            "fresh": "pass",
+            "pair_id": "django-0"
+          },
+          {
+            "aged": "pass",
+            "cluster": {
+              "family": "django",
+              "world_seed": 1
+            },
+            "fresh": "pass",
+            "pair_id": "django-1"
+          },
+          {
+            "aged": "fail",
+            "cluster": {
+              "family": "django",
+              "world_seed": 2
+            },
+            "fresh": "fail",
+            "pair_id": "django-2"
+          },
+          {
+            "aged": "pass",
+            "cluster": {
+              "family": "django",
+              "world_seed": 3
+            },
+            "fresh": "pass",
+            "pair_id": "django-3"
+          },
+          {
+            "aged": "pass",
+            "cluster": {
+              "family": "django",
+              "world_seed": 4
+            },
+            "fresh": "pass",
+            "pair_id": "django-4"
+          },
+          {
+            "aged": "pass",
+            "cluster": {
+              "family": "django",
+              "world_seed": 5
+            },
+            "fresh": "pass",
+            "pair_id": "django-5"
+          },
+          {
+            "aged": "fail",
+            "cluster": {
+              "family": "django",
+              "world_seed": 6
+            },
+            "fresh": "fail",
+            "pair_id": "django-6"
+          },
+          {
+            "aged": "pass",
+            "cluster": {
+              "family": "django",
+              "world_seed": 7
+            },
+            "fresh": "pass",
+            "pair_id": "django-7"
+          },
+          {
+            "aged": "pass",
+            "cluster": {
+              "family": "django",
+              "world_seed": 8
+            },
+            "fresh": "pass",
+            "pair_id": "django-8"
+          },
+          {
+            "aged": "pass",
+            "cluster": {
+              "family": "django",
+              "world_seed": 9
+            },
+            "fresh": "pass",
+            "pair_id": "django-9"
+          },
+          {
+            "aged": "pass",
+            "cluster": {
+              "family": "django",
+              "world_seed": 10
+            },
+            "fresh": "fail",
+            "pair_id": "django-10"
+          },
+          {
+            "aged": "pass",
+            "cluster": {
+              "family": "django",
+              "world_seed": 11
+            },
+            "fresh": "pass",
+            "pair_id": "django-11"
+          },
+          {
+            "aged": "pass",
+            "cluster": {
+              "family": "django",
+              "world_seed": 12
+            },
+            "fresh": "pass",
+            "pair_id": "django-12"
+          },
+          {
+            "aged": {
+              "censored": "timeout"
+            },
+            "cluster": {
+              "family": "django",
+              "world_seed": 13
+            },
+            "fresh": "pass",
+            "pair_id": "django-13"
+          },
+          {
+            "aged": "fail",
+            "cluster": {
+              "family": "django",
+              "world_seed": 14
+            },
+            "fresh": "fail",
+            "pair_id": "django-14"
+          },
+          {
+            "aged": "pass",
+            "cluster": {
+              "family": "django",
+              "world_seed": 15
+            },
+            "fresh": "pass",
+            "pair_id": "django-15"
+          },
+          {
+            "aged": "fail",
+            "cluster": {
+              "family": "django",
+              "world_seed": 16
+            },
+            "fresh": "pass",
+            "pair_id": "django-16"
+          },
+          {
+            "aged": "pass",
+            "cluster": {
+              "family": "django",
+              "world_seed": 17
+            },
+            "fresh": "pass",
+            "pair_id": "django-17"
+          },
+          {
+            "aged": "fail",
+            "cluster": {
+              "family": "django",
+              "world_seed": 18
+            },
+            "fresh": "fail",
+            "pair_id": "django-18"
+          },
+          {
+            "aged": "fail",
+            "cluster": {
+              "family": "django",
+              "world_seed": 19
+            },
+            "fresh": "pass",
+            "pair_id": "django-19"
+          },
+          {
+            "aged": "pass",
+            "cluster": {
+              "family": "django",
+              "world_seed": 20
+            },
+            "fresh": "pass",
+            "pair_id": "django-20"
+          },
+          {
+            "aged": "pass",
+            "cluster": {
+              "family": "django",
+              "world_seed": 21
+            },
+            "fresh": "pass",
+            "pair_id": "django-21"
+          },
+          {
+            "aged": "fail",
+            "cluster": {
+              "family": "django",
+              "world_seed": 22
+            },
+            "fresh": "fail",
+            "pair_id": "django-22"
+          },
+          {
+            "aged": "pass",
+            "cluster": {
+              "family": "django",
+              "world_seed": 23
+            },
+            "fresh": "pass",
+            "pair_id": "django-23"
+          },
+          {
+            "aged": "pass",
+            "cluster": {
+              "family": "django",
+              "world_seed": 24
+            },
+            "fresh": "pass",
+            "pair_id": "django-24"
+          },
+          {
+            "aged": "pass",
+            "cluster": {
+              "family": "django",
+              "world_seed": 25
+            },
+            "fresh": "pass",
+            "pair_id": "django-25"
+          },
+          {
+            "aged": "fail",
+            "cluster": {
+              "family": "django",
+              "world_seed": 26
+            },
+            "fresh": "fail",
+            "pair_id": "django-26"
+          },
+          {
+            "aged": "pass",
+            "cluster": {
+              "family": "django",
+              "world_seed": 27
+            },
+            "fresh": "pass",
+            "pair_id": "django-27"
+          },
+          {
+            "aged": "pass",
+            "cluster": {
+              "family": "django",
+              "world_seed": 28
+            },
+            "fresh": "pass",
+            "pair_id": "django-28"
+          },
+          {
+            "aged": "pass",
+            "cluster": {
+              "family": "django",
+              "world_seed": 29
+            },
+            "fresh": "pass",
+            "pair_id": "django-29"
+          },
+          {
+            "aged": "pass",
+            "cluster": {
+              "family": "django",
+              "world_seed": 30
+            },
+            "fresh": "fail",
+            "pair_id": "django-30"
+          },
+          {
+            "aged": "pass",
+            "cluster": {
+              "family": "django",
+              "world_seed": 31
+            },
+            "fresh": "pass",
+            "pair_id": "django-31"
+          },
+          {
+            "aged": "pass",
+            "cluster": {
+              "family": "django",
+              "world_seed": 32
+            },
+            "fresh": "pass",
+            "pair_id": "django-32"
+          },
+          {
+            "aged": {
+              "censored": "timeout"
+            },
+            "cluster": {
+              "family": "django",
+              "world_seed": 33
+            },
+            "fresh": "pass",
+            "pair_id": "django-33"
+          },
+          {
+            "aged": "fail",
+            "cluster": {
+              "family": "django",
+              "world_seed": 34
+            },
+            "fresh": "fail",
+            "pair_id": "django-34"
+          },
+          {
+            "aged": "pass",
+            "cluster": {
+              "family": "django",
+              "world_seed": 35
+            },
+            "fresh": "pass",
+            "pair_id": "django-35"
+          },
+          {
+            "aged": "fail",
+            "cluster": {
+              "family": "django",
+              "world_seed": 36
+            },
+            "fresh": "pass",
+            "pair_id": "django-36"
+          },
+          {
+            "aged": "pass",
+            "cluster": {
+              "family": "django",
+              "world_seed": 37
+            },
+            "fresh": "pass",
+            "pair_id": "django-37"
+          },
+          {
+            "aged": "fail",
+            "cluster": {
+              "family": "django",
+              "world_seed": 38
+            },
+            "fresh": "fail",
+            "pair_id": "django-38"
+          },
+          {
+            "aged": "fail",
+            "cluster": {
+              "family": "django",
+              "world_seed": 39
+            },
+            "fresh": "pass",
+            "pair_id": "django-39"
+          },
+          {
+            "aged": "pass",
+            "cluster": {
+              "family": "django",
+              "world_seed": 40
+            },
+            "fresh": "pass",
+            "pair_id": "django-40"
+          },
+          {
+            "aged": "pass",
+            "cluster": {
+              "family": "django",
+              "world_seed": 41
+            },
+            "fresh": "pass",
+            "pair_id": "django-41"
+          },
+          {
+            "aged": "fail",
+            "cluster": {
+              "family": "django",
+              "world_seed": 42
+            },
+            "fresh": "fail",
+            "pair_id": "django-42"
+          },
+          {
+            "aged": "pass",
+            "cluster": {
+              "family": "django",
+              "world_seed": 43
+            },
+            "fresh": "pass",
+            "pair_id": "django-43"
+          },
+          {
+            "aged": "pass",
+            "cluster": {
+              "family": "django",
+              "world_seed": 44
+            },
+            "fresh": "pass",
+            "pair_id": "django-44"
+          },
+          {
+            "aged": "pass",
+            "cluster": {
+              "family": "django",
+              "world_seed": 45
+            },
+            "fresh": "pass",
+            "pair_id": "django-45"
+          },
+          {
+            "aged": "fail",
+            "cluster": {
+              "family": "django",
+              "world_seed": 46
+            },
+            "fresh": "fail",
+            "pair_id": "django-46"
+          },
+          {
+            "aged": "pass",
+            "cluster": {
+              "family": "django",
+              "world_seed": 47
+            },
+            "fresh": "pass",
+            "pair_id": "django-47"
+          },
+          {
+            "aged": "pass",
+            "cluster": {
+              "family": "django",
+              "world_seed": 48
+            },
+            "fresh": "pass",
+            "pair_id": "django-48"
+          },
+          {
+            "aged": "pass",
+            "cluster": {
+              "family": "django",
+              "world_seed": 49
+            },
+            "fresh": "pass",
+            "pair_id": "django-49"
+          },
+          {
+            "aged": "fail",
+            "cluster": {
+              "family": "git",
+              "world_seed": 0
+            },
+            "fresh": "pass",
+            "pair_id": "git-0"
+          },
+          {
+            "aged": "pass",
+            "cluster": {
+              "family": "git",
+              "world_seed": 1
+            },
+            "fresh": "pass",
+            "pair_id": "git-1"
+          },
+          {
+            "aged": "pass",
+            "cluster": {
+              "family": "git",
+              "world_seed": 2
+            },
+            "fresh": "pass",
+            "pair_id": "git-2"
+          },
+          {
+            "aged": "fail",
+            "cluster": {
+              "family": "git",
+              "world_seed": 3
+            },
+            "fresh": "fail",
+            "pair_id": "git-3"
+          },
+          {
+            "aged": "pass",
+            "cluster": {
+              "family": "git",
+              "world_seed": 4
+            },
+            "fresh": "pass",
+            "pair_id": "git-4"
+          },
+          {
+            "aged": "pass",
+            "cluster": {
+              "family": "git",
+              "world_seed": 5
+            },
+            "fresh": "pass",
+            "pair_id": "git-5"
+          },
+          {
+            "aged": "pass",
+            "cluster": {
+              "family": "git",
+              "world_seed": 6
+            },
+            "fresh": "pass",
+            "pair_id": "git-6"
+          },
+          {
+            "aged": "fail",
+            "cluster": {
+              "family": "git",
+              "world_seed": 7
+            },
+            "fresh": "fail",
+            "pair_id": "git-7"
+          },
+          {
+            "aged": "pass",
+            "cluster": {
+              "family": "git",
+              "world_seed": 8
+            },
+            "fresh": "pass",
+            "pair_id": "git-8"
+          },
+          {
+            "aged": "pass",
+            "cluster": {
+              "family": "git",
+              "world_seed": 9
+            },
+            "fresh": "pass",
+            "pair_id": "git-9"
+          },
+          {
+            "aged": "pass",
+            "cluster": {
+              "family": "git",
+              "world_seed": 10
+            },
+            "fresh": "pass",
+            "pair_id": "git-10"
+          },
+          {
+            "aged": "pass",
+            "cluster": {
+              "family": "git",
+              "world_seed": 11
+            },
+            "fresh": "fail",
+            "pair_id": "git-11"
+          },
+          {
+            "aged": "pass",
+            "cluster": {
+              "family": "git",
+              "world_seed": 12
+            },
+            "fresh": "pass",
+            "pair_id": "git-12"
+          },
+          {
+            "aged": "pass",
+            "cluster": {
+              "family": "git",
+              "world_seed": 13
+            },
+            "fresh": "pass",
+            "pair_id": "git-13"
+          },
+          {
+            "aged": {
+              "censored": "timeout"
+            },
+            "cluster": {
+              "family": "git",
+              "world_seed": 14
+            },
+            "fresh": "pass",
+            "pair_id": "git-14"
+          },
+          {
+            "aged": "fail",
+            "cluster": {
+              "family": "git",
+              "world_seed": 15
+            },
+            "fresh": "fail",
+            "pair_id": "git-15"
+          },
+          {
+            "aged": "pass",
+            "cluster": {
+              "family": "git",
+              "world_seed": 16
+            },
+            "fresh": "pass",
+            "pair_id": "git-16"
+          },
+          {
+            "aged": "fail",
+            "cluster": {
+              "family": "git",
+              "world_seed": 17
+            },
+            "fresh": "pass",
+            "pair_id": "git-17"
+          },
+          {
+            "aged": "pass",
+            "cluster": {
+              "family": "git",
+              "world_seed": 18
+            },
+            "fresh": "pass",
+            "pair_id": "git-18"
+          },
+          {
+            "aged": "fail",
+            "cluster": {
+              "family": "git",
+              "world_seed": 19
+            },
+            "fresh": "fail",
+            "pair_id": "git-19"
+          },
+          {
+            "aged": "fail",
+            "cluster": {
+              "family": "git",
+              "world_seed": 20
+            },
+            "fresh": "pass",
+            "pair_id": "git-20"
+          },
+          {
+            "aged": "pass",
+            "cluster": {
+              "family": "git",
+              "world_seed": 21
+            },
+            "fresh": "pass",
+            "pair_id": "git-21"
+          },
+          {
+            "aged": "pass",
+            "cluster": {
+              "family": "git",
+              "world_seed": 22
+            },
+            "fresh": "pass",
+            "pair_id": "git-22"
+          },
+          {
+            "aged": "fail",
+            "cluster": {
+              "family": "git",
+              "world_seed": 23
+            },
+            "fresh": "fail",
+            "pair_id": "git-23"
+          },
+          {
+            "aged": "pass",
+            "cluster": {
+              "family": "git",
+              "world_seed": 24
+            },
+            "fresh": "pass",
+            "pair_id": "git-24"
+          },
+          {
+            "aged": "pass",
+            "cluster": {
+              "family": "git",
+              "world_seed": 25
+            },
+            "fresh": "pass",
+            "pair_id": "git-25"
+          },
+          {
+            "aged": "pass",
+            "cluster": {
+              "family": "git",
+              "world_seed": 26
+            },
+            "fresh": "pass",
+            "pair_id": "git-26"
+          },
+          {
+            "aged": "fail",
+            "cluster": {
+              "family": "git",
+              "world_seed": 27
+            },
+            "fresh": "fail",
+            "pair_id": "git-27"
+          },
+          {
+            "aged": "pass",
+            "cluster": {
+              "family": "git",
+              "world_seed": 28
+            },
+            "fresh": "pass",
+            "pair_id": "git-28"
+          },
+          {
+            "aged": "pass",
+            "cluster": {
+              "family": "git",
+              "world_seed": 29
+            },
+            "fresh": "pass",
+            "pair_id": "git-29"
+          },
+          {
+            "aged": "pass",
+            "cluster": {
+              "family": "git",
+              "world_seed": 30
+            },
+            "fresh": "pass",
+            "pair_id": "git-30"
+          },
+          {
+            "aged": "pass",
+            "cluster": {
+              "family": "git",
+              "world_seed": 31
+            },
+            "fresh": "fail",
+            "pair_id": "git-31"
+          },
+          {
+            "aged": "pass",
+            "cluster": {
+              "family": "git",
+              "world_seed": 32
+            },
+            "fresh": "pass",
+            "pair_id": "git-32"
+          },
+          {
+            "aged": "pass",
+            "cluster": {
+              "family": "git",
+              "world_seed": 33
+            },
+            "fresh": "pass",
+            "pair_id": "git-33"
+          },
+          {
+            "aged": {
+              "censored": "timeout"
+            },
+            "cluster": {
+              "family": "git",
+              "world_seed": 34
+            },
+            "fresh": "pass",
+            "pair_id": "git-34"
+          },
+          {
+            "aged": "fail",
+            "cluster": {
+              "family": "git",
+              "world_seed": 35
+            },
+            "fresh": "fail",
+            "pair_id": "git-35"
+          },
+          {
+            "aged": "pass",
+            "cluster": {
+              "family": "git",
+              "world_seed": 36
+            },
+            "fresh": "pass",
+            "pair_id": "git-36"
+          },
+          {
+            "aged": "fail",
+            "cluster": {
+              "family": "git",
+              "world_seed": 37
+            },
+            "fresh": "pass",
+            "pair_id": "git-37"
+          },
+          {
+            "aged": "pass",
+            "cluster": {
+              "family": "git",
+              "world_seed": 38
+            },
+            "fresh": "pass",
+            "pair_id": "git-38"
+          },
+          {
+            "aged": "fail",
+            "cluster": {
+              "family": "git",
+              "world_seed": 39
+            },
+            "fresh": "fail",
+            "pair_id": "git-39"
+          },
+          {
+            "aged": "fail",
+            "cluster": {
+              "family": "git",
+              "world_seed": 40
+            },
+            "fresh": "pass",
+            "pair_id": "git-40"
+          },
+          {
+            "aged": "pass",
+            "cluster": {
+              "family": "git",
+              "world_seed": 41
+            },
+            "fresh": "pass",
+            "pair_id": "git-41"
+          },
+          {
+            "aged": "pass",
+            "cluster": {
+              "family": "git",
+              "world_seed": 42
+            },
+            "fresh": "pass",
+            "pair_id": "git-42"
+          },
+          {
+            "aged": "fail",
+            "cluster": {
+              "family": "git",
+              "world_seed": 43
+            },
+            "fresh": "fail",
+            "pair_id": "git-43"
+          },
+          {
+            "aged": "pass",
+            "cluster": {
+              "family": "git",
+              "world_seed": 44
+            },
+            "fresh": "pass",
+            "pair_id": "git-44"
+          },
+          {
+            "aged": "pass",
+            "cluster": {
+              "family": "git",
+              "world_seed": 45
+            },
+            "fresh": "pass",
+            "pair_id": "git-45"
+          },
+          {
+            "aged": "pass",
+            "cluster": {
+              "family": "git",
+              "world_seed": 46
+            },
+            "fresh": "pass",
+            "pair_id": "git-46"
+          },
+          {
+            "aged": "fail",
+            "cluster": {
+              "family": "git",
+              "world_seed": 47
+            },
+            "fresh": "fail",
+            "pair_id": "git-47"
+          },
+          {
+            "aged": "pass",
+            "cluster": {
+              "family": "git",
+              "world_seed": 48
+            },
+            "fresh": "pass",
+            "pair_id": "git-48"
+          },
+          {
+            "aged": "pass",
+            "cluster": {
+              "family": "git",
+              "world_seed": 49
+            },
+            "fresh": "pass",
+            "pair_id": "git-49"
+          },
+          {
+            "aged": "fail",
+            "cluster": {
+              "family": "docs",
+              "world_seed": 0
+            },
+            "fresh": "fail",
+            "pair_id": "docs-0"
+          },
+          {
+            "aged": "fail",
+            "cluster": {
+              "family": "docs",
+              "world_seed": 1
+            },
+            "fresh": "pass",
+            "pair_id": "docs-1"
+          },
+          {
+            "aged": "pass",
+            "cluster": {
+              "family": "docs",
+              "world_seed": 2
+            },
+            "fresh": "pass",
+            "pair_id": "docs-2"
+          },
+          {
+            "aged": "pass",
+            "cluster": {
+              "family": "docs",
+              "world_seed": 3
+            },
+            "fresh": "pass",
+            "pair_id": "docs-3"
+          },
+          {
+            "aged": "fail",
+            "cluster": {
+              "family": "docs",
+              "world_seed": 4
+            },
+            "fresh": "fail",
+            "pair_id": "docs-4"
+          },
+          {
+            "aged": "pass",
+            "cluster": {
+              "family": "docs",
+              "world_seed": 5
+            },
+            "fresh": "pass",
+            "pair_id": "docs-5"
+          },
+          {
+            "aged": "pass",
+            "cluster": {
+              "family": "docs",
+              "world_seed": 6
+            },
+            "fresh": "pass",
+            "pair_id": "docs-6"
+          },
+          {
+            "aged": "pass",
+            "cluster": {
+              "family": "docs",
+              "world_seed": 7
+            },
+            "fresh": "pass",
+            "pair_id": "docs-7"
+          },
+          {
+            "aged": "fail",
+            "cluster": {
+              "family": "docs",
+              "world_seed": 8
+            },
+            "fresh": "fail",
+            "pair_id": "docs-8"
+          },
+          {
+            "aged": "pass",
+            "cluster": {
+              "family": "docs",
+              "world_seed": 9
+            },
+            "fresh": "pass",
+            "pair_id": "docs-9"
+          },
+          {
+            "aged": "pass",
+            "cluster": {
+              "family": "docs",
+              "world_seed": 10
+            },
+            "fresh": "pass",
+            "pair_id": "docs-10"
+          },
+          {
+            "aged": "pass",
+            "cluster": {
+              "family": "docs",
+              "world_seed": 11
+            },
+            "fresh": "pass",
+            "pair_id": "docs-11"
+          },
+          {
+            "aged": "pass",
+            "cluster": {
+              "family": "docs",
+              "world_seed": 12
+            },
+            "fresh": "fail",
+            "pair_id": "docs-12"
+          },
+          {
+            "aged": "pass",
+            "cluster": {
+              "family": "docs",
+              "world_seed": 13
+            },
+            "fresh": "pass",
+            "pair_id": "docs-13"
+          },
+          {
+            "aged": "pass",
+            "cluster": {
+              "family": "docs",
+              "world_seed": 14
+            },
+            "fresh": "pass",
+            "pair_id": "docs-14"
+          },
+          {
+            "aged": {
+              "censored": "timeout"
+            },
+            "cluster": {
+              "family": "docs",
+              "world_seed": 15
+            },
+            "fresh": "pass",
+            "pair_id": "docs-15"
+          },
+          {
+            "aged": "fail",
+            "cluster": {
+              "family": "docs",
+              "world_seed": 16
+            },
+            "fresh": "fail",
+            "pair_id": "docs-16"
+          },
+          {
+            "aged": "pass",
+            "cluster": {
+              "family": "docs",
+              "world_seed": 17
+            },
+            "fresh": "pass",
+            "pair_id": "docs-17"
+          },
+          {
+            "aged": "fail",
+            "cluster": {
+              "family": "docs",
+              "world_seed": 18
+            },
+            "fresh": "pass",
+            "pair_id": "docs-18"
+          },
+          {
+            "aged": "pass",
+            "cluster": {
+              "family": "docs",
+              "world_seed": 19
+            },
+            "fresh": "pass",
+            "pair_id": "docs-19"
+          },
+          {
+            "aged": "fail",
+            "cluster": {
+              "family": "docs",
+              "world_seed": 20
+            },
+            "fresh": "fail",
+            "pair_id": "docs-20"
+          },
+          {
+            "aged": "fail",
+            "cluster": {
+              "family": "docs",
+              "world_seed": 21
+            },
+            "fresh": "pass",
+            "pair_id": "docs-21"
+          },
+          {
+            "aged": "pass",
+            "cluster": {
+              "family": "docs",
+              "world_seed": 22
+            },
+            "fresh": "pass",
+            "pair_id": "docs-22"
+          },
+          {
+            "aged": "pass",
+            "cluster": {
+              "family": "docs",
+              "world_seed": 23
+            },
+            "fresh": "pass",
+            "pair_id": "docs-23"
+          },
+          {
+            "aged": "fail",
+            "cluster": {
+              "family": "docs",
+              "world_seed": 24
+            },
+            "fresh": "fail",
+            "pair_id": "docs-24"
+          },
+          {
+            "aged": "pass",
+            "cluster": {
+              "family": "docs",
+              "world_seed": 25
+            },
+            "fresh": "pass",
+            "pair_id": "docs-25"
+          },
+          {
+            "aged": "pass",
+            "cluster": {
+              "family": "docs",
+              "world_seed": 26
+            },
+            "fresh": "pass",
+            "pair_id": "docs-26"
+          },
+          {
+            "aged": "pass",
+            "cluster": {
+              "family": "docs",
+              "world_seed": 27
+            },
+            "fresh": "pass",
+            "pair_id": "docs-27"
+          },
+          {
+            "aged": "fail",
+            "cluster": {
+              "family": "docs",
+              "world_seed": 28
+            },
+            "fresh": "fail",
+            "pair_id": "docs-28"
+          },
+          {
+            "aged": "pass",
+            "cluster": {
+              "family": "docs",
+              "world_seed": 29
+            },
+            "fresh": "pass",
+            "pair_id": "docs-29"
+          },
+          {
+            "aged": "pass",
+            "cluster": {
+              "family": "docs",
+              "world_seed": 30
+            },
+            "fresh": "pass",
+            "pair_id": "docs-30"
+          },
+          {
+            "aged": "pass",
+            "cluster": {
+              "family": "docs",
+              "world_seed": 31
+            },
+            "fresh": "pass",
+            "pair_id": "docs-31"
+          },
+          {
+            "aged": "pass",
+            "cluster": {
+              "family": "docs",
+              "world_seed": 32
+            },
+            "fresh": "fail",
+            "pair_id": "docs-32"
+          },
+          {
+            "aged": "pass",
+            "cluster": {
+              "family": "docs",
+              "world_seed": 33
+            },
+            "fresh": "pass",
+            "pair_id": "docs-33"
+          },
+          {
+            "aged": "pass",
+            "cluster": {
+              "family": "docs",
+              "world_seed": 34
+            },
+            "fresh": "pass",
+            "pair_id": "docs-34"
+          },
+          {
+            "aged": {
+              "censored": "timeout"
+            },
+            "cluster": {
+              "family": "docs",
+              "world_seed": 35
+            },
+            "fresh": "pass",
+            "pair_id": "docs-35"
+          },
+          {
+            "aged": "fail",
+            "cluster": {
+              "family": "docs",
+              "world_seed": 36
+            },
+            "fresh": "fail",
+            "pair_id": "docs-36"
+          },
+          {
+            "aged": "pass",
+            "cluster": {
+              "family": "docs",
+              "world_seed": 37
+            },
+            "fresh": "pass",
+            "pair_id": "docs-37"
+          },
+          {
+            "aged": "fail",
+            "cluster": {
+              "family": "docs",
+              "world_seed": 38
+            },
+            "fresh": "pass",
+            "pair_id": "docs-38"
+          },
+          {
+            "aged": "pass",
+            "cluster": {
+              "family": "docs",
+              "world_seed": 39
+            },
+            "fresh": "pass",
+            "pair_id": "docs-39"
+          },
+          {
+            "aged": "fail",
+            "cluster": {
+              "family": "docs",
+              "world_seed": 40
+            },
+            "fresh": "fail",
+            "pair_id": "docs-40"
+          },
+          {
+            "aged": "fail",
+            "cluster": {
+              "family": "docs",
+              "world_seed": 41
+            },
+            "fresh": "pass",
+            "pair_id": "docs-41"
+          },
+          {
+            "aged": "pass",
+            "cluster": {
+              "family": "docs",
+              "world_seed": 42
+            },
+            "fresh": "pass",
+            "pair_id": "docs-42"
+          },
+          {
+            "aged": "pass",
+            "cluster": {
+              "family": "docs",
+              "world_seed": 43
+            },
+            "fresh": "pass",
+            "pair_id": "docs-43"
+          },
+          {
+            "aged": "fail",
+            "cluster": {
+              "family": "docs",
+              "world_seed": 44
+            },
+            "fresh": "fail",
+            "pair_id": "docs-44"
+          },
+          {
+            "aged": "pass",
+            "cluster": {
+              "family": "docs",
+              "world_seed": 45
+            },
+            "fresh": "pass",
+            "pair_id": "docs-45"
+          },
+          {
+            "aged": "pass",
+            "cluster": {
+              "family": "docs",
+              "world_seed": 46
+            },
+            "fresh": "pass",
+            "pair_id": "docs-46"
+          },
+          {
+            "aged": "pass",
+            "cluster": {
+              "family": "docs",
+              "world_seed": 47
+            },
+            "fresh": "pass",
+            "pair_id": "docs-47"
+          },
+          {
+            "aged": "fail",
+            "cluster": {
+              "family": "docs",
+              "world_seed": 48
+            },
+            "fresh": "fail",
+            "pair_id": "docs-48"
+          },
+          {
+            "aged": "pass",
+            "cluster": {
+              "family": "docs",
+              "world_seed": 49
+            },
+            "fresh": "pass",
+            "pair_id": "docs-49"
+          },
+          {
+            "aged": "pass",
+            "cluster": {
+              "family": "tests",
+              "world_seed": 0
+            },
+            "fresh": "pass",
+            "pair_id": "tests-0"
+          },
+          {
+            "aged": "fail",
+            "cluster": {
+              "family": "tests",
+              "world_seed": 1
+            },
+            "fresh": "fail",
+            "pair_id": "tests-1"
+          },
+          {
+            "aged": "fail",
+            "cluster": {
+              "family": "tests",
+              "world_seed": 2
+            },
+            "fresh": "pass",
+            "pair_id": "tests-2"
+          },
+          {
+            "aged": "pass",
+            "cluster": {
+              "family": "tests",
+              "world_seed": 3
+            },
+            "fresh": "pass",
+            "pair_id": "tests-3"
+          },
+          {
+            "aged": "pass",
+            "cluster": {
+              "family": "tests",
+              "world_seed": 4
+            },
+            "fresh": "pass",
+            "pair_id": "tests-4"
+          },
+          {
+            "aged": "fail",
+            "cluster": {
+              "family": "tests",
+              "world_seed": 5
+            },
+            "fresh": "fail",
+            "pair_id": "tests-5"
+          },
+          {
+            "aged": "pass",
+            "cluster": {
+              "family": "tests",
+              "world_seed": 6
+            },
+            "fresh": "pass",
+            "pair_id": "tests-6"
+          },
+          {
+            "aged": "pass",
+            "cluster": {
+              "family": "tests",
+              "world_seed": 7
+            },
+            "fresh": "pass",
+            "pair_id": "tests-7"
+          },
+          {
+            "aged": "pass",
+            "cluster": {
+              "family": "tests",
+              "world_seed": 8
+            },
+            "fresh": "pass",
+            "pair_id": "tests-8"
+          },
+          {
+            "aged": "fail",
+            "cluster": {
+              "family": "tests",
+              "world_seed": 9
+            },
+            "fresh": "fail",
+            "pair_id": "tests-9"
+          },
+          {
+            "aged": "pass",
+            "cluster": {
+              "family": "tests",
+              "world_seed": 10
+            },
+            "fresh": "pass",
+            "pair_id": "tests-10"
+          },
+          {
+            "aged": "pass",
+            "cluster": {
+              "family": "tests",
+              "world_seed": 11
+            },
+            "fresh": "pass",
+            "pair_id": "tests-11"
+          },
+          {
+            "aged": "pass",
+            "cluster": {
+              "family": "tests",
+              "world_seed": 12
+            },
+            "fresh": "pass",
+            "pair_id": "tests-12"
+          },
+          {
+            "aged": "pass",
+            "cluster": {
+              "family": "tests",
+              "world_seed": 13
+            },
+            "fresh": "fail",
+            "pair_id": "tests-13"
+          },
+          {
+            "aged": "pass",
+            "cluster": {
+              "family": "tests",
+              "world_seed": 14
+            },
+            "fresh": "pass",
+            "pair_id": "tests-14"
+          },
+          {
+            "aged": "pass",
+            "cluster": {
+              "family": "tests",
+              "world_seed": 15
+            },
+            "fresh": "pass",
+            "pair_id": "tests-15"
+          },
+          {
+            "aged": {
+              "censored": "timeout"
+            },
+            "cluster": {
+              "family": "tests",
+              "world_seed": 16
+            },
+            "fresh": "pass",
+            "pair_id": "tests-16"
+          },
+          {
+            "aged": "fail",
+            "cluster": {
+              "family": "tests",
+              "world_seed": 17
+            },
+            "fresh": "fail",
+            "pair_id": "tests-17"
+          },
+          {
+            "aged": "pass",
+            "cluster": {
+              "family": "tests",
+              "world_seed": 18
+            },
+            "fresh": "pass",
+            "pair_id": "tests-18"
+          },
+          {
+            "aged": "fail",
+            "cluster": {
+              "family": "tests",
+              "world_seed": 19
+            },
+            "fresh": "pass",
+            "pair_id": "tests-19"
+          },
+          {
+            "aged": "pass",
+            "cluster": {
+              "family": "tests",
+              "world_seed": 20
+            },
+            "fresh": "pass",
+            "pair_id": "tests-20"
+          },
+          {
+            "aged": "fail",
+            "cluster": {
+              "family": "tests",
+              "world_seed": 21
+            },
+            "fresh": "fail",
+            "pair_id": "tests-21"
+          },
+          {
+            "aged": "fail",
+            "cluster": {
+              "family": "tests",
+              "world_seed": 22
+            },
+            "fresh": "pass",
+            "pair_id": "tests-22"
+          },
+          {
+            "aged": "pass",
+            "cluster": {
+              "family": "tests",
+              "world_seed": 23
+            },
+            "fresh": "pass",
+            "pair_id": "tests-23"
+          },
+          {
+            "aged": "pass",
+            "cluster": {
+              "family": "tests",
+              "world_seed": 24
+            },
+            "fresh": "pass",
+            "pair_id": "tests-24"
+          },
+          {
+            "aged": "fail",
+            "cluster": {
+              "family": "tests",
+              "world_seed": 25
+            },
+            "fresh": "fail",
+            "pair_id": "tests-25"
+          },
+          {
+            "aged": "pass",
+            "cluster": {
+              "family": "tests",
+              "world_seed": 26
+            },
+            "fresh": "pass",
+            "pair_id": "tests-26"
+          },
+          {
+            "aged": "pass",
+            "cluster": {
+              "family": "tests",
+              "world_seed": 27
+            },
+            "fresh": "pass",
+            "pair_id": "tests-27"
+          },
+          {
+            "aged": "pass",
+            "cluster": {
+              "family": "tests",
+              "world_seed": 28
+            },
+            "fresh": "pass",
+            "pair_id": "tests-28"
+          },
+          {
+            "aged": "fail",
+            "cluster": {
+              "family": "tests",
+              "world_seed": 29
+            },
+            "fresh": "fail",
+            "pair_id": "tests-29"
+          },
+          {
+            "aged": "pass",
+            "cluster": {
+              "family": "tests",
+              "world_seed": 30
+            },
+            "fresh": "pass",
+            "pair_id": "tests-30"
+          },
+          {
+            "aged": "pass",
+            "cluster": {
+              "family": "tests",
+              "world_seed": 31
+            },
+            "fresh": "pass",
+            "pair_id": "tests-31"
+          },
+          {
+            "aged": "pass",
+            "cluster": {
+              "family": "tests",
+              "world_seed": 32
+            },
+            "fresh": "pass",
+            "pair_id": "tests-32"
+          },
+          {
+            "aged": "pass",
+            "cluster": {
+              "family": "tests",
+              "world_seed": 33
+            },
+            "fresh": "fail",
+            "pair_id": "tests-33"
+          },
+          {
+            "aged": "pass",
+            "cluster": {
+              "family": "tests",
+              "world_seed": 34
+            },
+            "fresh": "pass",
+            "pair_id": "tests-34"
+          },
+          {
+            "aged": "pass",
+            "cluster": {
+              "family": "tests",
+              "world_seed": 35
+            },
+            "fresh": "pass",
+            "pair_id": "tests-35"
+          },
+          {
+            "aged": {
+              "censored": "timeout"
+            },
+            "cluster": {
+              "family": "tests",
+              "world_seed": 36
+            },
+            "fresh": "pass",
+            "pair_id": "tests-36"
+          },
+          {
+            "aged": "fail",
+            "cluster": {
+              "family": "tests",
+              "world_seed": 37
+            },
+            "fresh": "fail",
+            "pair_id": "tests-37"
+          },
+          {
+            "aged": "pass",
+            "cluster": {
+              "family": "tests",
+              "world_seed": 38
+            },
+            "fresh": "pass",
+            "pair_id": "tests-38"
+          },
+          {
+            "aged": "fail",
+            "cluster": {
+              "family": "tests",
+              "world_seed": 39
+            },
+            "fresh": "pass",
+            "pair_id": "tests-39"
+          },
+          {
+            "aged": "pass",
+            "cluster": {
+              "family": "tests",
+              "world_seed": 40
+            },
+            "fresh": "pass",
+            "pair_id": "tests-40"
+          },
+          {
+            "aged": "fail",
+            "cluster": {
+              "family": "tests",
+              "world_seed": 41
+            },
+            "fresh": "fail",
+            "pair_id": "tests-41"
+          },
+          {
+            "aged": "fail",
+            "cluster": {
+              "family": "tests",
+              "world_seed": 42
+            },
+            "fresh": "pass",
+            "pair_id": "tests-42"
+          },
+          {
+            "aged": "pass",
+            "cluster": {
+              "family": "tests",
+              "world_seed": 43
+            },
+            "fresh": "pass",
+            "pair_id": "tests-43"
+          },
+          {
+            "aged": "pass",
+            "cluster": {
+              "family": "tests",
+              "world_seed": 44
+            },
+            "fresh": "pass",
+            "pair_id": "tests-44"
+          },
+          {
+            "aged": "fail",
+            "cluster": {
+              "family": "tests",
+              "world_seed": 45
+            },
+            "fresh": "fail",
+            "pair_id": "tests-45"
+          },
+          {
+            "aged": "pass",
+            "cluster": {
+              "family": "tests",
+              "world_seed": 46
+            },
+            "fresh": "pass",
+            "pair_id": "tests-46"
+          },
+          {
+            "aged": "pass",
+            "cluster": {
+              "family": "tests",
+              "world_seed": 47
+            },
+            "fresh": "pass",
+            "pair_id": "tests-47"
+          },
+          {
+            "aged": "pass",
+            "cluster": {
+              "family": "tests",
+              "world_seed": 48
+            },
+            "fresh": "pass",
+            "pair_id": "tests-48"
+          },
+          {
+            "aged": "fail",
+            "cluster": {
+              "family": "tests",
+              "world_seed": 49
+            },
+            "fresh": "fail",
+            "pair_id": "tests-49"
+          }
+        ],
+        "replicates": 40,
+        "seed": 7,
+        "unit": "world_seed"
+      },
+      "kind": "cluster_bootstrap"
+    },
+    {
+      "expected": {
         "censored": 5,
         "n": 105,
         "percentiles": [
@@ -17099,7 +19846,7 @@
   "provenance": {
     "generator": "crates/eval-core/gen/gen-statistics-golden.ts",
     "generator_version": "statistics-reference-ts-v1",
-    "input_sha256": "855fffc25165b1368a40981ccbf3f92de1802e658a15a3b3eb93f790444fb1cf"
+    "input_sha256": "7cf3e606c4b8d3469eff914939155ee4a5946c6e80ec13957444ca8111e6de67"
   },
   "schema": 1
 }

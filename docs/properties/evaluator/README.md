@@ -689,13 +689,15 @@ Cassette core (`crates/eval-core/tests/cassette.rs`):
   digest; the unchanged request is refused with the same terminal afterwards
   and `misses()` stays at one. `only_a_tool_result_change_is_tool_result_drift`
   names the other class. `a_fractional_temperature_digests_exactly` shows
-  `0.7` persisted as `"0.7"`, `0.70` replaying, and `0.8` differing.
+  `0.7` persisted as `"0.7"`, `0.70` replaying, `0.8` differing, and a
+  string, null, or array `temperature` refused as `TemperatureNotDecimal`.
 - `volatile_and_uncovered_changes_replay`: a moved `cache_control` marker and
   a changed or removed `x-api-key`, `user-agent`, `authorization`, or
   `x-session-id` header replay. `only_a_terminated_nonce_is_normalized` is the
-  nonce table: `cch=<nonce>;` forms digest equal across nonces; an
-  unterminated `cch=`, a URL query `cch=`, an empty nonce, and a changed tail
-  all digest differently, so normalization never drops text.
+  nonce table: `cch=<nonce>;` forms in system text digest equal across
+  nonces; an unterminated `cch=`, a URL query `cch=`, an empty nonce, a changed
+  tail, and the same form in a user message all digest differently, so
+  normalization never drops text and never reaches model-visible content.
 - `equal_digests_replay_in_recorded_order_and_distinct_ones_in_any_order`:
   the concurrency case, with `unconsumed()` reaching zero and a miss past the
   recording naming the last entry.
@@ -705,13 +707,15 @@ Cassette core (`crates/eval-core/tests/cassette.rs`):
 - `namespaces_bind_the_cassette_and_equal_digests_elsewhere_refuse`
   (`rid-cassette-world-namespaced-no-cross-replay`): replay under another
   namespace is `NamespaceMismatch` before any request; a lookup or record under
-  another namespace is `WrongNamespace`; recording into a replay is
-  `RecordOnReplay` and a lookup on a recording is `LookupOnRecord`.
+  another namespace is `WrongNamespace`, after which the recording has no
+  file form; recording into a replay is `RecordOnReplay` and a lookup on a
+  recording is `LookupOnRecord`.
 - `provenance_schema_and_version_pins_are_recomputed_on_read`
   (`rid-shared-cassette-schema-verified-provenance`): one edited frame or one
   edited declaration is `ProvenanceMismatch`; a re-signed declaration edit loads
-  and is visible; a re-signed request edit is `EntryDigestMismatch`; a schema,
-  generator, or covered-field version change and an unknown field each refuse.
+  and is visible; a re-signed request edit is `EntryDigestMismatch`; a schema
+  change (with a new field beside it) is `SchemaMismatch`, a generator or
+  covered-field version change and an unknown field each refuse.
 - `planted_secrets_and_unscannable_frames_are_refused_and_the_cassette_never_persists`
   (`xc-captured-provider-requests-redacted-before-persistence`): after one
   admitted entry, an `sk-ant-` token in a user message, an AWS key in a tool
@@ -719,13 +723,21 @@ Cassette core (`crates/eval-core/tests/cassette.rs`):
   SecretDetected)`, and a body one byte past `MAX_REDACTABLE_BYTES` is
   `RedactionRefused(Request, InputLimit)`; the refused entry never exists and
   `to_file` returns the refusal, so the one admitted entry is not persisted
-  either. `a_malformed_body_is_refused_rather_than_digested_as_empty` keeps
+  either, and a second refusal does not replace the first one reported. `a_request_the_boundary_could_not_project_refuses_the_file_too`
+  shows `Cassette::refuse` latching the same way for a request no entry was
+  built from. `a_malformed_body_is_refused_rather_than_digested_as_empty` keeps
   `{}` out of the digest.
 - `backend_records_cover_the_pinned_fields_with_exact_temperatures`
   (`rid-cassette-strict-miss-typed-error`): the `BackendRecord` projection's
   field set equals `BACKEND_COVERED_FIELDS`; `0.7` and `0.70` digest equal,
   `0.8` differs; `NaN`, infinity, `-0.0`, a negative value, and a hand-written
-  `0.70` refuse. `every_error_names_its_wire_kind` pins fifteen distinct kinds.
+  `0.70` refuse. `every_error_names_its_wire_kind` pins sixteen distinct kinds,
+  and `no_wire_detail_carries_request_content` pins `CassetteError::detail`:
+  a request-shaped variant (`Shape`, `MalformedBody`, `UnknownRequestField`,
+  `TemperatureNotDecimal`, `NotCanonical`) built around a canary payload
+  renders an empty detail while its `Display` still carries the canary, and
+  every oracle-owned variant renders its version, namespace, digest, index, or
+  scanner outcome.
 
 Manifest (`crates/eval-core/tests/manifest.rs`,
 `sls-memory-reviewer-model-calls-cassette-or-excluded`): the
@@ -738,7 +750,8 @@ Daemon shell (`crates/daemon/tests/eval_cassette.rs`, `--all-features`):
   (`rid-rust-cassette-backend-impl-preserves-declarations`, marker
   `rid_capabilities_read_during_cassette_run`): two recorded requests, one a
   provider error with a retry hint, replay with equal events and terminals
-  while the real backend is never called; `BackendDeclarations::new` reads the
+  while the real backend is never called and `unconsumed()` falls from two to
+  zero; `BackendDeclarations::new` reads the
   same declaration from the cassette as from the real backend for both
   harnesses; an edited header is `ProvenanceMismatch` until re-signed, and
   re-signed defaults latch differently.
@@ -754,18 +767,42 @@ Daemon shell (`crates/daemon/tests/eval_cassette.rs`, `--all-features`):
   (marker `rid_cassette_namespace_refused`): an edited recorded event is
   `ProvenanceMismatch`; another namespace is `NamespaceMismatch` at load; a
   `NaN` temperature is a `cassette_request` terminal and a canary prompt is a
-  `redaction_refused` terminal that leaves the recorder with no file.
+  `redaction_refused` terminal; each leaves the recorder with no file, and the
+  first refusal is the one it reports.
 - `memory_reviewer_replays_through_the_keyed_peer`
   (`sls-memory-reviewer-model-calls-cassette-or-excluded`, marker
   `rid_reviewer_cassette_miss_reached`): the key recovered from one recorded
   request equals the production sender's `provider_identity()` and credential
   id, the request's model, and the SHA-256 of `MessagesRequest::body`'s bytes;
-  the same body replays through `serve_keyed`; a changed body, model, or
+  the same body replays once through `serve_keyed` and misses when sent
+  again, each entry answering one request, and two entries under one key
+  answer in recorded order before the third request misses; a changed body,
+  model, or
   credential each miss with a 409 the sender reports as
   `SendError::Status(409)`, after which the recorded body is refused too; an
   entry keyed to another host misses.
 - `every_cassette_marker_fires_across_the_scenarios` is the completeness
   proof over this suite's markers.
+- `every_host_finish_reason_error_class_and_terminal_round_trips`: both
+  `FinishReason` values, all four `ErrorClass` values under `Failed` and
+  `FailedUnresolved`, and an absent event finish reason each record and replay
+  as an equal transcript, so the wire mirror's decode side covers every host
+  variant, not only the two the marker scenarios produce.
+
+Oracle (`crates/daemon/examples/eval_runner.rs`, `--features eval-runner`,
+tested as an example target):
+
+- `a_record_the_oracle_cannot_project_leaves_close_with_no_file`: a `record`
+  with a body field outside the covered list is `UnknownRequestField` with an
+  empty detail, and the following `close` reports the same refusal and writes
+  nothing.
+- `an_unreadable_line_while_recording_leaves_close_with_no_file`: a line over
+  4 MiB and a line that is not JSON, each between an admitted `record` and
+  `close`, are `LineTooLong` and `Json`, and `close` reports the same kind and
+  writes nothing.
+- `a_failed_publication_removes_the_temp_file_it_created`: with a directory at
+  the target path, `close` reports `Io` and the attempt's `.json.tmp` sibling
+  is gone.
 
 OpenCode process driver (`packages/e2e-tests/tests/cassette-replay.test.ts`,
 rust-only tier; `rid-ts-cassette-never-falls-through-to-scripted`,
@@ -801,7 +838,13 @@ rust-only tier; `rid-ts-cassette-never-falls-through-to-scripted`,
   recorded SSE and provider-error frames byte for byte, answers a miss with a
   400 `cassette_miss` and repeats it after, never enters the scripted block,
   hands a malformed body to the oracle as text, and turns any oracle failure,
-  typed or not, into a 400 with no message text; `reset()` unbinds.
+  typed or not, into a 400 with no message text; a delayed record-mode
+  exchange is admitted by the cassette bound when it was captured, not by a
+  later binding, and a miss or refusal that completes after `reset()` is not
+  in the reset logs; `useCassette()` starts a new log generation; concurrent
+  identical requests are admitted in capture order regardless of scripted
+  delays; a JSON body that is not an object is scripted as `{}` and
+  reaches the oracle as text; `reset()` unbinds.
 
 ## Phase 3 executed checks: frozen statistics
 
@@ -810,11 +853,12 @@ Statistics core (`crates/eval-core/tests/statistics.rs`):
 - `the_frozen_reference_agrees_on_every_golden_case`
   (`mtr-three-gates-signed-history-effect`,
   `mtr-world-clustered-intervals-after-icc-pilot`): the TypeScript reference's
-  twelve cases (five pair tables with gate verdicts, including censored arms,
+  thirteen cases (five pair tables with gate verdicts, including censored arms,
   a failing noninferiority gate, and one at the margin; five ICC pilots with
   and without a family effect, with fewer affordable worlds than the pilot
-  had, unbalanced, and internally constant; two cluster bootstraps by family
-  and by world over 300 pairs) equal the Rust counts, rates, gates, ICC,
+  had, unbalanced, and internally constant; three cluster bootstraps by family
+  and by world over 300 pairs, one at the minimum 40 replicates where the
+  `1/40` order statistic is the smallest replicate) equal the Rust counts, rates, gates, ICC,
   clustering unit, effective N, and interval bounds exactly; the golden's
   `input_sha256` is recomputed over the whole case array first.
 - `ratios_are_exact_normalized_and_refuse_overflow`: reduction, decimal
@@ -870,10 +914,14 @@ Statistics core (`crates/eval-core/tests/statistics.rs`):
 - `the_pair_table_and_the_pilot_must_match_the_frozen_plan`
   (`mtr-analysis-family-frozen-before-results`): a table of one or 299 pairs
   against a frozen count of 300 is `PairCountMismatch`; a pair from a family
-  the plan did not freeze is `PairOutsideFamilies`; a pilot whose effective N
-  exceeds `n_items * max_affordable_worlds / n_worlds`, or names zero worlds,
-  is `PilotInconsistent` while a computed pilot validates; a miss rate of `2`
-  is `RateOutOfRange`; `i128::MIN` as either ratio component is
+  the plan did not freeze is `PairOutsideFamilies`; 300 copies of one pair are
+  `DuplicatePair`; a pilot whose effective N or unit is not what its recorded
+  counts and ICCs imply, or that names zero worlds, is `PilotInconsistent`
+  while a computed pilot validates; a plan of 299 pairs against a required N
+  of 300 is `PlanBelowRequiredN`; a repeated pilot observation is
+  `DuplicateObservation`; a miss or refusal rate of `2` is `RateOutOfRange`;
+  hand-built counts with `b + c > n`, a count above `n`, or `n` past the safe
+  range are `InconsistentCounts`; `i128::MIN` as either ratio component is
   `RationalOverflow`, never a wrapped value.
 - `no_judge_type_reaches_the_gates`
   (`mtr-judge-output-never-feeds-control-or-floor`): the statistics source
@@ -933,12 +981,21 @@ Censoring (`crates/eval-core/tests/censoring.rs`):
 - Recording is against the mock's scripted responses; no recording against a
   live provider exists, so the redaction gate has been exercised on planted
   canaries only.
+- The `cch=<nonce>;` rule applies to every string under `body.system`, so an
+  instruction file that happens to contain that exact form would normalize
+  too; the billing fragment's surrounding text is unobserved (1.18.31 emits
+  none), so the rule is not narrowed to a guessed prefix.
 - The keyed reviewer peer holds its entries in memory; reviewer traffic is not
   yet persisted in the cassette file, and `memory_reviewer_model_calls` is a
   manifest declaration no runner enforces yet.
-- The Rust oracle protocol has no Rust-side test; the rust-only e2e suite
-  exercises it through the real binary, and the default `bun test` lane sees
-  only the in-memory double.
+- The Rust oracle's stdin protocol has three Rust-side tests (the projection
+  latch, the unreadable-line latch, and the failed publication); its consumer
+  is the TypeScript MockProvider cassette mode, which the rust-only e2e suite
+  exercises through the real binary while the default `bun test` lane sees
+  only the in-memory double. The `{kind, detail}` refusal contract is pinned
+  in `eval-core` (`no_wire_detail_carries_request_content`), but the oracle's
+  other variants (`UnsafePath`, `AlreadyOpen`, `NoOpenCassette`) are exercised
+  only through that e2e suite.
 - No approved campaign profile exists: the margins, harm bound, floor,
   miss-asymmetry bound, and liveness bounds are maintainer inputs that the
   code refuses to default, so no empirical Suite B or D acceptance can be

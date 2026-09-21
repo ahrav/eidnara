@@ -733,13 +733,18 @@ lists, both pinned in `eval-core` and named together by
   today's date, and the user's instruction files, so a cassette is bound to the
   environment and day that recorded it.
 - The volatile rule removes, before digesting, every `cache_control` marker
-  (breakpoints move between turns) and rewrites each `cch=<nonce>;` billing
-  nonce whose nonce is a run of alphanumerics, `_`, or `-` to `cch=<NONCE>;`;
-  any other `cch=` text stays as written. OpenCode 1.18.31 emits no `cch=`
-  nonce; the rule stays pinned for the versions that do. A mock-side
-  `cache_control` move or nonce change replays; any other byte in a covered
-  field misses. A fractional `temperature` is projected through
-  `canonical_decimal_f64` to its exact decimal text, as the backend record is.
+  (breakpoints move between turns) and, in `body.system` text only, where the
+  provider's billing header lives, rewrites each `cch=<nonce>;` billing nonce
+  whose nonce is a run of alphanumerics, `_`, or `-` to `cch=<NONCE>;`; any
+  other `cch=` text, and the same text in a message or tool result, stays as
+  written. OpenCode 1.18.31 emits no `cch=` nonce; the rule stays pinned for
+  the versions that do. A mock-side `cache_control` move or nonce change
+  replays; any other byte in a covered field misses. A fractional
+  `temperature` is projected through `canonical_decimal_f64` to its exact
+  decimal text, as the backend record is, and a `temperature` that is not a
+  JSON number is `TemperatureNotDecimal`; any other fractional number in the
+  body (none is observed from OpenCode 1.18.31) is `NotCanonical`, refused at
+  record and replay alike rather than digested.
 - `OPENCODE_HEADER_ALLOWLIST` (`anthropic-beta`, `anthropic-version`) is the
   only header set a cassette retains; `x-api-key`, `authorization`,
   `user-agent`, `x-session-id`, `host`, and `content-length` never reach the
@@ -760,9 +765,10 @@ declarations, provenance {generator_version, input_sha256}, cases}`;
 `provenance`, including the declarations and every recorded frame, recomputed
 on read, so an edited frame or declaration is `ProvenanceMismatch`; each
 entry's stored digest is also recomputed from its stored request
-(`EntryDigestMismatch`). `Cassette::replay` refuses a schema, generator,
-covered-field-version, namespace, provenance, or entry-digest mismatch before
-any request is served; `lookup` and `record` under another namespace are
+(`EntryDigestMismatch`). `Cassette::replay` refuses a schema (checked on the raw
+value first, so a later schema's new fields report the version rather than a
+shape refusal), generator, covered-field-version, namespace, provenance, or
+entry-digest mismatch before any request is served; `lookup` and `record` under another namespace are
 `WrongNamespace`, so equal digests in another world variant never answer.
 Every `CassetteError` names its wire `kind()`.
 
@@ -793,8 +799,13 @@ can straddle a window edge, before the entry exists anywhere. A finding is
 `RedactionRefused(location, SecretDetected)`; text past the scanner's 512 KiB
 input cap is `RedactionRefused(location, InputLimit)`. A refused entry is never
 substituted with a placeholder and never persisted, and the refusal latches:
-`to_file` returns the refusal, so a recording that refused one exchange has no
-file form and a partial cassette can never pass for a complete one.
+`to_file` returns the first refusal, so a recording that refused one exchange
+has no file form and a partial cassette can never pass for a complete one.
+Every `record` failure latches the same way (a `WrongNamespace` offer, an
+undigestable request), and so does a request the boundary could not even
+project (`UnknownRequestField`, an unencodable number) through
+`Cassette::refuse`, because the exchange it stands for is missing from the
+cassette just as a refused entry is.
 
 ### Rust oracle and the TypeScript mock
 
@@ -805,12 +816,21 @@ it reaches the `eval-core` dev-dependency without a normal edge) serves
 `close`. Requests arrive as `{path, headers, body_text}`; Rust parses the body,
 so a malformed body is `MalformedBody` rather than a lookup of `{}`. Every
 digest is computed in Rust. Refusals are `{error: {kind, detail}}` where
-`kind` is the Rust error's wire name and `detail` carries only the oracle's own
-values (a path, a namespace, a digest), never request content. The path must
+`kind` is the Rust error's wire name and `detail` is `CassetteError::detail`:
+the oracle's own values (a path, a namespace, a digest, an entry index), never
+request content. A `Shape`, `MalformedBody`, `UnknownRequestField`,
+`TemperatureNotDecimal`, or `NotCanonical` refusal carries an empty `detail`,
+because its payload is a body field name, a temperature literal, a body
+number, or a serde message that can quote its input. The path must
 be absolute with no `..` component; a second `open` is `AlreadyOpen`; a line
 over 4 MiB is `LineTooLong`. `close` writes a recording write-then-rename
-through a freshly created owner-only `.json.tmp` sibling and writes nothing for
-a replay or a refused recording.
+through a freshly created owner-only `.json.tmp` sibling, removing that
+sibling again when a later write, sync, or rename step fails, and writes
+nothing for a replay or a refused recording, including one whose `record`
+could not project a request or that saw a `LineTooLong` or `Json` line while
+open, since that line may have been a `record`; `close` then reports that
+refusal. `close` is terminal either way: a failed
+publication is reported once and the oracle accepts the next `open`.
 
 `packages/e2e-tests/src/mock-provider/cassette-oracle.ts` spawns the binary
 (built through `buildDaemonExample` in `src/rust-runner/hermetic-host.ts`, or
@@ -820,13 +840,15 @@ digest. A child exit, an unreadable reply, or a 30 s silence fails every
 pending call; the child's stderr is inherited, never captured into an error.
 
 `MockProvider.useCassette({oracle, mode, namespace})` binds the mock until
-`reset()`, which also clears the miss and refusal logs. In `replay` mode the
+`reset()`; each binding starts with empty miss and refusal logs, and `reset()`
+clears them too. In `replay` mode the
 handler hands the request to the oracle right after capture and answers with
 the recorded frames or an HTTP 400 `cassette_miss` body carrying the typed
 miss; the scripted-selection block is never entered, which
 `scriptedSelectionCount()` and `defaultHits()` show. In `record` mode the
 scripted block produces the response and the oracle admits it before a byte is
-served. Any oracle failure is an HTTP 400 naming only the refusal `kind`
+served and before any scripted delay, so equal-digest entries land in capture
+order. Any oracle failure is an HTTP 400 naming only the refusal `kind`
 (`redaction_refused` or `cassette_refused`; a dead or unreadable oracle is
 `OracleUnavailable`), logged in `cassetteRefusalLog()`; no message text is
 served, and the server's error handler returns a fixed body instead of Bun's
@@ -843,15 +865,21 @@ carry no serde because their `Debug` redacts); replay emits the recorded events
 until the sink closes and returns the recorded terminal, and a miss is
 `BackendTerminal::Failed` with `provider_code: "cassette_miss"` and a message
 naming the turn, class, and nearest digest. An unencodable request is
-`cassette_request`; a recording the scanner refuses is `redaction_refused` and
-leaves the backend with no file. `refusals()` counts every miss terminal
-served, including the repeats after the first miss latched. The cassette
+`cassette_request` and, while recording, latches so the backend has no file; a
+recording the scanner refuses is `redaction_refused` and leaves the backend
+with no file either. `refusals()` counts every miss terminal
+served, including the repeats after the first miss latched, and `unconsumed()`
+reports the recorded entries the run never requested. The cassette
 header's `declarations` carry what the real backend declared per harness
 (`unavailable_reason`, `context_capabilities`), and the replaying backend
 answers all three trait methods from them, so `BackendDeclarations::new`
 latches the same capabilities from a cassette as from the real backend.
 `record_of` destructures `BackendRequest` exhaustively: a new field fails to
-compile until it is classified as covered or dropped.
+compile until it is classified as covered or dropped. The wire mirror's decode
+side is guarded the same way: `finish_reasons` and `error_classes` list every
+`FinishReason` and `ErrorClass` behind an exhaustive `match`, so a variant the
+host adds fails to compile rather than recording under its wire string and
+replaying as `cassette_refused`.
 
 MemoryReviewer sends through its own TLS sender, not the trait. `serve_keyed`
 on the test peer answers strictly from entries keyed by `ReviewerKey {body_digest,
@@ -859,7 +887,9 @@ provider, model, credential_id}`: the SHA-256 of the request body (what
 `prepare_body` puts in the attempt marker), the
 `{host}/v1/messages@{anthropic-version}` identity the production sender
 reports, the body's `model`, and the credential id the peer is configured with
-(the header carries only the secret). A key with no entry is an HTTP 409
+(the header carries only the secret). Each entry answers one request, and
+equal keys (independent jobs can send one body) answer in recorded order. A
+key with no unconsumed entry is an HTTP 409
 `cassette_miss` and a `SendError::Status(409)` at the sender, and every later
 request on that peer is refused too. A run that spawns no reviewer worker
 declares `memory_reviewer_model_calls: excluded` in its manifest instead.
@@ -893,10 +923,13 @@ stopping rule (`fixed_n` with its pair count), the multiplicity correction (`non
 `benjamini_hochberg`), the profile, the interval method (`cluster_bootstrap`),
 the item-count threshold (at least 300), the bootstrap replicate count and
 seed, the live-trial repeat count `trials_k`, and the ICC pilot.
-`AnalysisFamily::validate` also refuses a pilot whose
-`effective_n_at_max` exceeds `n_items * max_affordable_worlds / n_worlds`
-(`PilotInconsistent`), since deflation only shrinks N, so a hand-written pilot
-cannot inflate its way past the block. `FrozenFamily::freeze` digests it
+`AnalysisFamily::validate` also recomputes the
+pilot's clustering unit and `effective_n_at_max` from its recorded counts and
+ICCs and refuses a pilot that disagrees with its own evidence
+(`PilotInconsistent`), so a hand-written pilot cannot inflate its way past the
+block, and refuses a plan whose pair count is below the pilot's
+`required_n_for_margin` (`PlanBelowRequiredN`), since deflation only shrinks
+N. `FrozenFamily::freeze` digests it
 (`eval-analysis-family-digest/v1`); the manifest records that digest as
 `analysis_family_digest` before the first outcome, and `FrozenFamily::check`
 refuses a family whose digest differs as
@@ -915,7 +948,9 @@ exactly one), and picks the highest level whose ICC exceeds `1/20`
 count the maximum affordable world count would yield, deflated by the design
 effect `1 + (m - 1) ICC` of the selected unit, as `effective_n_at_max`; the
 effect is clamped at one, so deflation only ever shrinks N, and a zero
-affordable world count is refused. A family whose `effective_n_at_max` is
+affordable world count is refused. Each `(world, task)` is one score, so a
+repeated observation is `DuplicateObservation` rather than another item. A
+family whose `effective_n_at_max` is
 below the maintainer's `required_n_for_margin` makes `analyze` return
 `Blocked {reason: insufficient_effective_n}` and no report object.
 
@@ -939,7 +974,8 @@ profile and never from the counts; the report has no collapsed effect field.
 (the pilot's unit) into one `PairCounts`, resamples clusters with replacement
 `replicates` times, folds each resample into one `PairCounts` whose
 `quality_loss` is the replicate statistic (the same definition the gate uses),
-and reports the `1/40` and `39/40` order statistics as `lower` and `upper`,
+and reports the `1/40` and `39/40` order statistics (the `ceil(B/40)`-th and
+`ceil(39B/40)`-th smallest of `B` replicates) as `lower` and `upper`,
 with `unit`, `method`, `n_clusters`, `n_items`, and `replicates`. Clusters
 are ordered by key, and the draw is the first 64 bits of the
 `eval-cluster-bootstrap/v1` digest over `{seed, replicate, draw}` reduced by
@@ -957,12 +993,13 @@ report carries `IntervalOutcome::Withheld {reason: item_count_below_threshold}`
 (`FrozenFamily::from_manifest` reads the manifest's recorded digest; a
 manifest without one is `FamilyNotRecorded`), then the pilot's block, then the
 per-arm cassette-miss asymmetry (the gap between the highest and lowest
-`arm_rates.*.miss_rate`, each refused outside `[0, 1]`; fewer than two arms is
+`arm_rates.*.miss_rate`; both arm rates are refused outside `[0, 1]`; fewer than two arms is
 `TooFewArms`, missing evidence
 that never passes) against `miss_asymmetry_bound`, which blocks as
 `arm_miss_asymmetry` with no gates computed; then the table's conformance to
 the plan (a size other than the frozen pair count is `PairCountMismatch`, a
-pair outside the frozen families is `PairOutsideFamilies`); only then does it build
+pair outside the frozen families is `PairOutsideFamilies`, a repeated pair id
+is `DuplicatePair`); only then does it build
 `PairedReport {analysis_family_digest, counts, gates, interval, arm_rates}`.
 Per-arm miss and refusal rates travel with the report, so unsupported evidence
 is visible beside every gate.
