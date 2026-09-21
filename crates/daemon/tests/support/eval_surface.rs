@@ -89,13 +89,35 @@ pub fn identities(world: &World, segments: &[StoredHistorySegment]) -> BTreeMap<
         .collect()
 }
 
+/// The message as the OpenCode plugin sends it to the daemon: a text part
+/// is a text block; a completed tool part is its call and its result, the
+/// result's output as text.
 pub fn ingress(message: &RenderedMessage, ordinal: u64) -> Value {
+    let mut content = Vec::new();
+    for part in message.message["parts"].as_array().unwrap() {
+        match part["type"].as_str() {
+            Some("text") => content.push(json!({"kind": {"type": "text", "text": part["text"]}})),
+            Some("tool") => {
+                let call_id = &part["callID"];
+                let tool = &part["tool"];
+                content.push(json!({"kind": {
+                    "type": "tool_call", "id": call_id, "name": tool,
+                    "input": part["state"]["input"],
+                }}));
+                content.push(json!({"kind": {
+                    "type": "tool_result", "id": call_id, "tool_name": tool,
+                    "output": {"kind": {"type": "text", "text": part["state"]["output"]}},
+                }}));
+            }
+            other => panic!("a rendered message carries text and tool parts, not {other:?}"),
+        }
+    }
     json!({
         "mid": mid(message),
         "ordinal": ordinal,
         "ck": {
             "role": message.message["info"]["role"],
-            "content": [{"kind": {"type": "text", "text": text(message)}}],
+            "content": content,
             "meta": {"harness_id": mid(message)}
         }
     })

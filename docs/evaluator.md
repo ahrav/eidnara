@@ -1430,9 +1430,10 @@ without that tier the summarizer has no model chain and never fires, so the
 structured policy is explicit-config-only evidence about a default-production
 surface, and the raw arm is that surface as shipped), and
 the same life is lived: the trigger fires by its own rules on the pressure
-the harness reports (at S0 four times over the aged life: once on projected
-headroom, then three times in the force band, the last inline in the
-emergency band), the producer, validator,
+the harness reports (at S0 eight times over the aged life: once on projected
+headroom, then in the force band, the last inline in the emergency band on
+the task's own turn, after which the pass reruns and the tail's hint decision
+from the first run stands), the producer, validator,
 and publication run inside the fixture process, and the fixture's model
 backend stands in for the summarizer provider: it answers a prompt carrying
 `<new_messages>` in the summarizer's `<output>` document, one
@@ -1447,7 +1448,7 @@ a recorded failure and no segments, never as a served answer. The twelve-turn
 control never reaches the pressure the summarizer fires at, so its structured
 arm is as empty as its raw one and its cassette holds no frame. On the
 structured aged arm at S0 the daemon folded the older history five messages
-to a segment (twenty segments) and left the newest in the protected tail: the
+to a segment (twenty-two segments) and left the newest in the protected tail: the
 plain task's message sits at the head of its segment and is served whole;
 the falsifier is folded third into the first segment, its segment is
 selected, and the served fragment is cut at the cap before its words, so it
@@ -1520,7 +1521,7 @@ durable text at the transform itself). S0 and S1 sit well under that.
 
 What the campaign found about the pair compiler on surface 1: its recency
 window counts messages, but surface 1's unit is the segment, so at S0 the
-twenty segments all sit inside a window of 100 and no truth is lost to
+twenty-two segments all sit inside a window of 100 and no truth is lost to
 recency there; a recency loss on surface 1 needs more than 500 messages,
 which the meta bound puts near the limit of what one firing can persist.
 The falsification pair's structural verdict is still the compiler's.

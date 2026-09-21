@@ -1138,9 +1138,9 @@ Campaign (`crates/daemon/tests/eval_campaign.rs`, `--all-features`):
   the verdicts and outcomes across both policies; every pruned arm is
   declared and ends `unsupported {policy_not_on_surface}`; the structured
   arms live the same life with the daemon configured to summarize, its
-  trigger firing by its own rules (four firings over the aged life: projected
-  headroom, then the force band), the firings recorded once per world into a
-  cassette of its own
+  trigger firing by its own rules (eight firings over the aged life:
+  projected headroom, then the force band, the last on the task's own turn),
+  the firings recorded once per world into a cassette of its own
   whose frames equal the backend calls, and every arm run replaying it
   strictly with no controlled backend and publishing the recording's segments
   whole; on the structured aged arm the plain task's message heads its
@@ -1259,7 +1259,7 @@ Campaign (`crates/daemon/tests/eval_campaign.rs`, `--all-features`):
   refusal and skips the arm rather than weakening the scanner or editing the
   corpus. Which chunks draw it depends on the session id and chunk start.
 - The pair compiler's recency window counts messages, but surface 1's unit is
-  the segment: at S0 the twenty segments sit inside a window of 100 and no
+  the segment: at S0 the twenty-two segments sit inside a window of 100 and no
   truth is lost to recency on that surface; the falsification pair's
   structural verdict is the compiler's.
 - The campaign shell is the `eval_runner` example's `campaign` module,
@@ -1268,7 +1268,7 @@ Campaign (`crates/daemon/tests/eval_campaign.rs`, `--all-features`):
   `tests/support/`, so they live in the test tree and the example alike.
 - Surface 1 makes no model call (the fixture's counters read zero), so the
   surface boundary's cassette holds no frame; the summarizer boundary's
-  cassette holds the four frames the aged life's firings recorded, replayed
+  cassette holds the eight frames the aged life's firings recorded, replayed
   strictly by every arm run with no controlled backend, from the fixture's
   scripted provider rather than a live one; the control never reaches the
   summarizer's pressure, so its cassette holds none.

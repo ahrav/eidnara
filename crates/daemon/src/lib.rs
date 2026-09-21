@@ -9345,9 +9345,32 @@ impl HandlerCore {
         env: &PassEnv,
         pass: &mut TransformedPass,
     ) -> Result<(), PreparedOutcome> {
+        let decided_before = pass.result.response.user_hint.take();
         pass.result = self
             .run_transform(env, PassState::Reload)
             .map_err(|error| Self::reject_transform(env, error))?;
+        // The first run decided this pass's hint for its tail and persisted
+        // it; the rerun finds that decision already made. The pass's decision
+        // is the first run's, and the rerun's served output is judged against
+        // it, so the skip does not stand in for the decision.
+        let tail = env
+            .parsed
+            .messages
+            .last()
+            .map(|message| message.mid.as_str());
+        let same_tail = |decided: &transform::UserHintOutcome| {
+            tail.is_some_and(|mid| decided.block_id.starts_with(&format!("{mid}#")))
+        };
+        if let (
+            Some(transform::UserHintPass::Decided(decided)),
+            Some(transform::UserHintPass::Skipped {
+                reason: transform::UserHintSkip::AlreadyDecided,
+            }),
+        ) = (&decided_before, &pass.result.response.user_hint)
+            && same_tail(decided)
+        {
+            pass.result.response.user_hint = decided_before;
+        }
         self.forget_guidance_pin_on_commit(env, &pass.result);
         Ok(())
     }
