@@ -383,6 +383,9 @@ impl CassetteBackend {
         let inner = inner.execute(request, tee, cancel.clone());
         Box::pin(async move {
             let terminal = inner.await;
+            // Emitters hold `seen` across the forward, so taking it first
+            // means every completed emission's `Closed` is visible below.
+            let seen = seen.lock().unwrap();
             let mut recording = recording.lock().unwrap();
             exchange.commit(&mut recording);
             if closed.load(Ordering::SeqCst) || cancel.is_cancelled() {
@@ -393,7 +396,7 @@ impl CassetteBackend {
                 return Self::refused("cassette_refused", error);
             }
             let exchange = WireExchange {
-                events: seen.lock().unwrap().clone(),
+                events: seen.clone(),
                 terminal: WireTerminal::from(&terminal),
             };
             let response = serde_json::to_value(exchange).unwrap();
