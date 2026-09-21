@@ -1106,7 +1106,8 @@ model of either policy lives here. `GovernanceArms {control_run_id,
 pair_set_digest, task_ids, evidence_ids, arms}` pins the pair set whole by
 digest (`eval-pair-set-digest/v1`; two sets can share every task and evidence
 ID and differ in everything else), states task, evidence, and control
-identity once so a mismatch is named, and keys
+identity once so a mismatch is named (the control is a 64-hex `eval-run-id`,
+`MalformedControlRun` otherwise), and keys
 the arms by policy, so no two arms can disagree and no policy appears twice;
 each `ArmRecord` owns only its `policy_version` and its `absent_evidence`, the
 evidence the policy removed, kept so the task stays in the arm and records a
@@ -1124,9 +1125,10 @@ separate axes. `Carrier` is where the text lives: `commit_message`,
 `issue_text`, `tool_output`, `summary`, or `memory`; `TaskSet::validate`
 refuses a task set missing any carrier (`CarrierMissing`), a duplicate case,
 canary, or oracle (`DuplicateEffect`), an oracle that does not carry its
-case's canary (`EffectWithoutCanary`), a case ID that does not name its own
-carrier (`CaseIdNamesAnotherCarrier`; a score carries only the ID, so two
-cases cannot trade them), an empty case ID or canary, or no
+case's canary (`EffectWithoutCanary`), a case ID that is not
+`injection-<its carrier>-<its canary's hex>` (`CaseIdNotDerived`; a score
+carries only the ID, so two cases cannot trade them and no set can name
+another's case), an empty case ID or canary, or no
 tasks. `plan_injection_cases(root_seed,
 task_ids)` derives one case per carrier from the seed, the task IDs, and the
 carrier under `eval-injection-canary/v1`: a canary `CANARY-<sixteen hex>`

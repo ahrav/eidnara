@@ -979,7 +979,7 @@ Injection, arms, and claims (`crates/eval-core/tests/injection.rs`):
   a pair whose 32-bit digest prefixes collide; a set
   without the memory carrier, two cases sharing a canary, an ID, or an
   oracle, an oracle that does not name its canary, two cases with their IDs
-  swapped, an empty
+  swapped, a same-carrier ID copied from another set, an empty
   canary, an empty case ID, and no tasks each refuse by name; a case without a
   `prohibited_effect` does not parse; each carrier's `label` equals its wire
   name, pinned to a literal.
@@ -1021,7 +1021,8 @@ Injection, arms, and claims (`crates/eval-core/tests/injection.rs`):
   workspace containing the named symbol; a pruned arm records a lost
   evidence ID without dropping the task; another set with the same task and
   evidence IDs is `PairSetMismatch {pair_set_digest}`; an added or dropped task, a changed
-  truth ID, an empty control run, an empty policy version, a missing raw or
+  truth ID, an empty control run or one that is not a 64-hex run id, an empty
+  policy version, a missing raw or
   pruned arm, a raw arm claiming a loss, and a loss outside the evidence each
   refuse by name; the arms are keyed by policy, and an arm carrying a history
   or tasks of its own does not parse.

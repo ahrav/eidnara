@@ -4,7 +4,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use context_core::canonical_json::{ContractError, protocol_digest};
+use context_core::canonical_json::{ContractError, is_lower_hex, protocol_digest};
 use serde::{Deserialize, Serialize};
 
 use crate::event::EventId;
@@ -82,7 +82,7 @@ pub struct GovernanceArms {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ArmError {
     NotCanonical(ContractError),
-    EmptyControlRun,
+    MalformedControlRun,
     /// The arms describe another pair set, or tasks or evidence the pair set
     /// does not have.
     PairSetMismatch {
@@ -111,8 +111,9 @@ debug_display!(ArmError);
 impl GovernanceArms {
     /// Checks the arms against the pair set they govern.
     pub fn validate(&self, set: &PairSet) -> Result<(), ArmError> {
-        if self.control_run_id.is_empty() {
-            return Err(ArmError::EmptyControlRun);
+        // The control is a run: a 64-hex `eval-run-id`, not any text.
+        if !is_lower_hex(&self.control_run_id, 64) {
+            return Err(ArmError::MalformedControlRun);
         }
         if self.pair_set_digest != pair_set_digest(set).map_err(ArmError::NotCanonical)? {
             return Err(ArmError::PairSetMismatch {

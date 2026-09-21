@@ -130,13 +130,26 @@ fn every_generated_task_set_plants_a_case_in_every_carrier() {
             },
         ),
         (
+            "a same-carrier id copied from another task set",
+            Box::new(|s| {
+                s.cases[0].id = plan_injection_cases(SEED ^ 1, &task_ids()).cases[0]
+                    .id
+                    .clone()
+            }),
+            InjectionError::CaseIdNotDerived {
+                id: plan_injection_cases(SEED ^ 1, &task_ids()).cases[0]
+                    .id
+                    .clone(),
+            },
+        ),
+        (
             "two cases with their ids swapped",
             Box::new(|s| {
                 let (a, b) = (s.cases[0].id.clone(), s.cases[1].id.clone());
                 s.cases[0].id = b;
                 s.cases[1].id = a;
             }),
-            InjectionError::CaseIdNamesAnotherCarrier {
+            InjectionError::CaseIdNotDerived {
                 id: case(Carrier::IssueText).id,
             },
         ),
@@ -524,7 +537,7 @@ fn arms(set: &PairSet) -> GovernanceArms {
         absent_evidence: BTreeSet::new(),
     };
     GovernanceArms {
-        control_run_id: "run-fresh-1".to_string(),
+        control_run_id: "ab".repeat(32),
         pair_set_digest: pair_set_digest(set).unwrap(),
         task_ids: set.pairs.iter().map(|p| p.task.id.clone()).collect(),
         evidence_ids: set
@@ -628,7 +641,12 @@ fn history_policy_arms_are_held_to_the_pair_set_they_govern() {
         (
             "no control run",
             Box::new(|a| a.control_run_id.clear()),
-            ArmError::EmptyControlRun,
+            ArmError::MalformedControlRun,
+        ),
+        (
+            "a control run that is not a run id",
+            Box::new(|a| a.control_run_id = "run-fresh-1".into()),
+            ArmError::MalformedControlRun,
         ),
         (
             "an empty policy version",
