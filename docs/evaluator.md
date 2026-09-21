@@ -947,7 +947,10 @@ threshold no interval of any method is emitted; the report carries
 
 **Report.** `analyze(frozen, family, pairs, arm_rates)` checks the freeze
 (`FrozenFamily::from_manifest` reads the manifest's recorded digest; a
-manifest without one is `FamilyNotRecorded`), then the pilot's block, then the
+manifest `Manifest::validate` refuses is `Manifest(error)`, so a paired
+report cannot be authorized without the recency baseline its pairs were
+judged against, and a manifest without a digest is `FamilyNotRecorded`),
+then the pilot's block, then the
 per-arm cassette-miss asymmetry (the gap between the highest and lowest
 `arm_rates.*.miss_rate`; fewer than two arms is `TooFewArms`, missing evidence
 that never passes) against `miss_asymmetry_bound`, which blocks as
@@ -1029,20 +1032,23 @@ its bitemporal `Query`, its AND-support `evidence` set of event IDs, and a
 upper-median valid time and never corrected or retracted, so a retriever that
 prefers recent units cannot pass by accident), `positive_control` (truth the
 baseline is expected to deliver), or `plain`. Every task in a set shares one
-cut (`MixedCuts` otherwise), because a control at a cut of its own could make
-its evidence recent by choice. The set holds the aged history once; each pair
+`Query` (`MixedQueries` otherwise): the cut, the scope, the serving class, the
+destination, and the registry sensitivity each decide which units are
+eligible, so a task with a query of its own could make its evidence eligible,
+or ineligible, by choice. The set holds the aged history once; each pair
 carries two more arms, named by `ArmKind`:
 
 - `fresh`: the natural-fresh control, the primary one. `PairSetInput` takes a
   short history authored apart from the aged one (the same generator under
   another seed and configuration); `EventLog::on_distinct_entities` moves it
   onto entities tagged `~natural-fresh`, re-deriving every ID and following
-  every payload reference and causal edge (a reference to an event the history
-  does not hold is `DanglingReference`, never left pointing into the aged
-  world), and the compiler splices the truth's minimal closure into it. The
-  pair's `fresh_query` is the task's query with the control's entities added
-  to its scope, so the control competes on the fresh arm; a control with no
-  eligible unit at the cut is `NaturalFreshInert`.
+  every payload reference and causal edge (a payload reference or a causal
+  edge naming an event the history does not hold is `DanglingReference` or
+  `DanglingEdge`, never left pointing into the aged world), and the compiler
+  splices the truth's minimal closure into it. The set's `fresh_query` is the
+  shared query with the control's entities added to its scope, so the control
+  competes on the fresh arm; a control with no eligible unit at the cut is
+  `NaturalFreshInert`.
 - `fresh_minimal`: the diagnostic ceiling. The evidence, every unit it
   descends from or refers to, and every correction or retraction aimed at any
   of those, closed under the same rule, so it judges shared units as the aged
@@ -1062,22 +1068,34 @@ falsifier at or past the median (`TruthNotEarly`, checked before) or with a
 correction or retraction aimed at it anywhere in the aged history
 (`SupersededFalsifier`, naming the event), a set without a falsification pair
 or a positive control, and a duplicate or evidence-less task. `PairSet` is
-public on the wire, so `PairSet::validate` re-checks a set read back: the
-policy version, the surface's bound, both control classes, non-empty evidence,
-and windows no wider than the bound (`Tampered {field}` otherwise);
-`check_recency_baseline` runs it first.
+public on the wire, so `PairSet::validate(fixture)` requires a set read back
+to be the one the compiler produces from the set's own parts: the policy
+version and the surface's bound are checked as recorded, then the compiler's
+assembly runs again over `aged`, the independent history common to every
+pair's fresh arm (its units and causal edges the aged history lacks;
+`Tampered {pairs}` when the pairs disagree), and the pairs' tasks under
+`fixture`. Every compile-time refusal applies again (`NaturalFreshCopiedFromAged`,
+`EmptyNaturalFresh`, `TruthNotEarly`, `NoPositiveControl`, and the rest), and
+`Tampered {field}` names `aged_median_ms`, `recency_window`, `fresh_query`,
+or `pairs` when the recorded value differs from the recomputation, so a
+fresh arm that gained a competitor, lost its evidence, or dropped an edge is
+refused as a whole. The natural-fresh history is validated as supplied,
+before `on_distinct_entities` sorts and re-derives it, so a shuffled slice
+of the aged history cannot pass the copy check and be normalized back into
+the copy. `check_recency_baseline` runs the validation first, so an edited
+window cannot manufacture an `Established` verdict.
 
 **Recency baseline.** `recency_bound` resolves the window: surface 1 pins the
 production hint candidate limit (100) and refuses any other declaration;
 surface 2, surface 3, the query route, and packing have no production
 constant, so an undeclared bound is `UnresolvedRecencyBound` rather than a
 borrowed analogue (a zero is unrepresentable, `NonZeroU32`). The compiler
-stores on each pair the versioned baseline's delivery at the task's cut: the
+stores on the set the versioned baseline's delivery at the shared cut: the
 `k` eligible (reducer-`Ok`) units of the aged arm with the largest valid time,
 most recent first, ties by linearization order. `check_recency_baseline(set,
-deliver)` is stop condition (b); `deliver` is the baseline under test, the
-stored window for the versioned one and an always-empty function for the
-negative control. Vacuity is decided first over both classes (zero distinct
+fixture, baseline)` is stop condition (b); `Baseline::Versioned` judges the
+stored window, so an `Established` contrast is always stamped with the window
+it was judged on, and `Baseline::AlwaysEmpty` is the negative control. Vacuity is decided first over both classes (zero distinct
 IDs delivered is `Vacuous`, never a pass); then the window must miss at least
 one evidence ID of every falsification pair (`DeliveredFalsifier` otherwise);
 then it must cover every positive control's evidence (`MissedPositiveControl`
@@ -1090,8 +1108,10 @@ or `Blocked {condition: b, failure}`. `StopCondition::suppresses` is true for
 Suite B and Suite D and false for A and C under every condition. The manifest
 records the baseline's version and per-surface window under
 `recency_baseline`, and `Manifest::validate` refuses a version other than
-`RECENCY_BASELINE_VERSION`, an empty bound map, or a bound `recency_bound`
-would not resolve (`RecencyBaselineMismatch {field}`).
+`RECENCY_BASELINE_VERSION`, an empty bound map, a bound `recency_bound`
+would not resolve, or a run that records `analysis_family_digest` and no
+baseline: paired statistics come from pairs, and pairs were judged against
+one (`RecencyBaselineMismatch {field}`).
 
 **History-policy arms.** `governance.rs` describes the raw, pruned, and
 structured arms of a governance experiment. `HistoryPolicy` is a descriptor:

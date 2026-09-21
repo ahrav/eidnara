@@ -15,7 +15,7 @@ use serde_json::{Value, json};
 use crate::claim::{
     AnchorSet, ClaimDerivation, TransferCriterion, UnmetClause, WorldProvenance, derive_claim_class,
 };
-use crate::manifest::{ArmRates, Manifest, is_canonical_decimal};
+use crate::manifest::{ArmRates, Manifest, ManifestError, is_canonical_decimal};
 
 /// Version 2 added `transfer_criterion`, so the rule a transfer claim must
 /// meet is part of what the family freezes.
@@ -510,8 +510,10 @@ impl FrozenFamily {
     }
 
     /// The digest a manifest recorded; a manifest without one supports no
-    /// paired report.
+    /// paired report, and neither does one `Manifest::validate` refuses,
+    /// such as a paired report with no recency baseline beside it.
     pub fn from_manifest(manifest: &Manifest) -> Result<Self, StatisticsError> {
+        manifest.validate().map_err(StatisticsError::Manifest)?;
         manifest
             .analysis_family_digest
             .clone()
@@ -858,21 +860,38 @@ pub fn analyze(
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StatisticsError {
     Shape(String),
-    SchemaMismatch { found: String },
-    MalformedDecimal { field: &'static str },
-    RateOutOfRange { field: &'static str },
+    SchemaMismatch {
+        found: String,
+    },
+    MalformedDecimal {
+        field: &'static str,
+    },
+    RateOutOfRange {
+        field: &'static str,
+    },
     ItemCountThresholdBelowFloor(u32),
     TooFewReplicates(u32),
     TransferCriterion(UnmetClause),
     EmptyFamilyField,
-    FamilyChangedAfterResults { recorded: String, found: String },
+    FamilyChangedAfterResults {
+        recorded: String,
+        found: String,
+    },
     FamilyNotRecorded,
+    /// The manifest that would authorize a paired report does not validate.
+    Manifest(ManifestError),
     PilotTooSmall,
     NoAffordableWorlds,
     NoPairs,
     TooFewArms(usize),
-    MalformedCounter { n: u64, failures: u64 },
-    MalformedTrials { k: u32, repeats: u32 },
+    MalformedCounter {
+        n: u64,
+        failures: u64,
+    },
+    MalformedTrials {
+        k: u32,
+        repeats: u32,
+    },
     ZeroDenominator,
     RationalOverflow,
     NotCanonical(ContractError),

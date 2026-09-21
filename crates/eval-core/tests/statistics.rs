@@ -4,10 +4,11 @@ use std::collections::BTreeMap;
 
 use eval_core::{
     ANALYSIS_FAMILY_SCHEMA, Analysis, AnalysisFamily, ArmRates, ArmResult, BlockedReason,
-    CampaignProfile, CensorReason, ClusterKey, ClusteringUnit, FrozenFamily, Gates, ICC_THRESHOLD,
-    ITEM_COUNT_THRESHOLD, IccPilot, Interval, IntervalMethod, IntervalOutcome, IntervalWithheld,
-    LivenessBounds, MIN_BOOTSTRAP_REPLICATES, MultiplicityCorrection, PairCounts, PairOutcome,
-    PilotObservation, Ratio, StatisticsError, StoppingRule, analyze, arm_miss_asymmetry,
+    CampaignProfile, CensorReason, ClusterKey, ClusteringUnit, EvaluatedSurface, FrozenFamily,
+    Gates, ICC_THRESHOLD, ITEM_COUNT_THRESHOLD, IccPilot, Interval, IntervalMethod,
+    IntervalOutcome, IntervalWithheld, LivenessBounds, MIN_BOOTSTRAP_REPLICATES, ManifestError,
+    MultiplicityCorrection, PairCounts, PairOutcome, PilotObservation, RECENCY_BASELINE_VERSION,
+    Ratio, RecencyBaseline, StatisticsError, StoppingRule, analyze, arm_miss_asymmetry,
     cluster_bootstrap_interval, intraclass_correlation, parse_analysis_family,
     parse_campaign_profile, run_icc_pilot,
 };
@@ -436,6 +437,20 @@ fn the_family_is_frozen_before_outcomes_and_any_post_hoc_edit_refuses() {
         Some(StatisticsError::FamilyNotRecorded)
     );
     manifest.analysis_family_digest = Some(frozen.analysis_family_digest.clone());
+    // A paired report without the baseline its pairs were judged against is
+    // a manifest `validate` refuses, and the freeze reads only validated ones.
+    assert_eq!(
+        FrozenFamily::from_manifest(&manifest).err(),
+        Some(StatisticsError::Manifest(
+            ManifestError::RecencyBaselineMismatch {
+                field: "recency_baseline"
+            }
+        ))
+    );
+    manifest.recency_baseline = Some(RecencyBaseline {
+        version: RECENCY_BASELINE_VERSION.to_string(),
+        bounds: BTreeMap::from([(EvaluatedSurface::Surface1, 100)]),
+    });
     assert_eq!(FrozenFamily::from_manifest(&manifest).unwrap(), frozen);
 }
 

@@ -88,9 +88,10 @@ pub use manifest::{
 pub use markers::*;
 pub use occurrence::*;
 pub use pairs::{
-    ArmKind, BaselineContrast, BaselineFailure, BaselineVerdict, NATURAL_FRESH_ENTITY_TAG,
-    PAIRING_POLICY_VERSION, Pair, PairError, PairSet, PairSetInput, RECENCY_BASELINE_VERSION,
-    StopCondition, Suite, Task, TaskRole, check_recency_baseline, compile_pair_set, recency_bound,
+    ArmKind, Baseline, BaselineContrast, BaselineFailure, BaselineVerdict,
+    NATURAL_FRESH_ENTITY_TAG, PAIRING_POLICY_VERSION, Pair, PairError, PairSet, PairSetInput,
+    RECENCY_BASELINE_VERSION, StopCondition, Suite, Task, TaskRole, check_recency_baseline,
+    compile_pair_set, recency_bound,
 };
 pub use reducer::*;
 pub use render::*;

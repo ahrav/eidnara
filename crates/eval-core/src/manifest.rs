@@ -288,7 +288,8 @@ pub enum ManifestError {
     EmptyComponent {
         field: String,
     },
-    /// The recorded recency baseline is not the one the compiler enforces.
+    /// The recorded recency baseline is not the one the compiler enforces,
+    /// or a run that reports paired statistics recorded none.
     RecencyBaselineMismatch {
         field: &'static str,
     },
@@ -494,6 +495,11 @@ impl Manifest {
                     field: field.to_string(),
                 });
             }
+        }
+        if self.analysis_family_digest.is_some() && self.recency_baseline.is_none() {
+            return Err(ManifestError::RecencyBaselineMismatch {
+                field: "recency_baseline",
+            });
         }
         if let Some(baseline) = &self.recency_baseline {
             if baseline.version != RECENCY_BASELINE_VERSION {
