@@ -14,14 +14,14 @@ use std::time::Instant;
 use daemon::transform::UserHintPass;
 use eval_core::{
     ANALYSIS_FAMILY_SCHEMA, Analysis, AnalysisFamily, Approval, ArmKind, ArmRates, ArmRecord,
-    ArmResult, Attestation, BaselineVerdict, BinaryDigest, BuildRecord, CampaignGates,
+    ArmResult, Attestation, AxisValue, BaselineVerdict, BinaryDigest, BuildRecord, CampaignGates,
     CampaignProfile, ClaimBoundary, Claims, ClusterKey, ClusteringUnit, ComponentVersions,
     Construction, Cut, CutOutcome, CutReceipt, Destination, ELIGIBILITY_SPEC_DIGEST,
     EVENT_SCHEMA_VERSION, Envelope, EnvelopeExceeded, Established, EvaluatedSurface, EventId,
     EventLog, ExecutionMode, FAILURE_CLASS_TABLE_DIGEST, FrozenFamily, GENERATOR_VERSION,
-    GatedBlocks, GovernanceArms, HistoryPolicy, IccPilot, Ingestion, IntervalMethod,
-    LINEARIZATION_RULE_VERSION, LivenessBounds, MANIFEST_SCHEMA, Manifest,
-    MemoryReviewerModelCalls, Mode, MultiplicityCorrection, PAIRING_POLICY_VERSION, Pair,
+    GatedBlocks, GovernanceArms, HistoryPolicy, IccPilot, Ingestion, InjectionObservation,
+    InjectionScore, IntervalMethod, LINEARIZATION_RULE_VERSION, LivenessBounds, MANIFEST_SCHEMA,
+    Manifest, MemoryReviewerModelCalls, Mode, MultiplicityCorrection, PAIRING_POLICY_VERSION, Pair,
     PairOutcome, PairSet, PairSetInput, ProfileError, Query, RANDOM_SCHEMA_VERSION,
     REDUCER_VERSION, RUN_PROFILE_SCHEMA, Ratio, Reachability, RecencyBaseline, RenderConfig,
     RenderedMessage, ReportOutcome, RepositorySpec, Required, Resource, ResourceLimits,
@@ -29,7 +29,8 @@ use eval_core::{
     Sensitivity, ServedClass, SessionSpec, SkipReason, StageVerdict, StoppingRule, SuiteBReport,
     Surface1Stage, Task, TaskBudgets, TaskRole, TaskUsage, Terminal, TokenizerProfile,
     UnsupportedReason, Visibility, WorldConfig, WorldProvenance, analyze, check_recency_baseline,
-    compile_pair_set, eval_run_id, generate_all, render, serialize_spec, text_decision,
+    compile_pair_set, eval_run_id, generate_all, plan_injection_cases, render, score_injection,
+    serialize_spec, text_decision,
 };
 use memory_store::{MemoryStore, StoredHistorySegment};
 use serde_json::{Value, json};
@@ -774,6 +775,31 @@ fn run_arm(
     })
 }
 
+/// The five injection cases planned for this task set, scored by what a
+/// surface-1 campaign observes of them: the generator plants no carrier in a
+/// world yet, so no case is ingested, retrieved, or packed; surface 1 has no
+/// model output to quote a canary and no mediation boundary to watch, so
+/// obedience is not measurable and exposure and write-back are not reached.
+/// The cases are still on the report, so a run that plants nothing says so
+/// case by case rather than by omission.
+fn injection_scores(set: &PairSet) -> Vec<InjectionScore> {
+    let task_ids: BTreeSet<String> = set.pairs.iter().map(|p| p.task.id.clone()).collect();
+    let planned = plan_injection_cases(SEED, &task_ids);
+    let unplanted = InjectionObservation {
+        ingested: AxisValue::NotReached,
+        retrieved: AxisValue::NotReached,
+        packed: AxisValue::NotReached,
+        mediation: None,
+        outputs: Vec::new(),
+        later_session: None,
+    };
+    planned
+        .cases
+        .iter()
+        .map(|case| score_injection(case, &unplanted))
+        .collect()
+}
+
 /// The messages each segment covers, by sequence.
 fn covered(segments: &[StoredHistorySegment], world: &World) -> BTreeMap<i64, Vec<EventId>> {
     segments
@@ -1194,7 +1220,7 @@ pub fn run(config: &Config) -> Result<Run, RunError> {
         samples: ledger,
         rates,
         arm_rates,
-        injection: vec![],
+        injection: injection_scores(&set),
         envelope: charges.envelope.clone(),
     };
     // The publish root, the artifact's bytes, and the retained artifact are

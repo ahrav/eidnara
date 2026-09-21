@@ -1447,7 +1447,10 @@ the falsifier is folded third into the first segment, its segment is
 selected, and the served fragment is cut at the cap before its words, so it
 reaches render with the evidence absent; the positive control is in the
 protected tail and has no unit at all. The three policies are recorded as
-`GovernanceArms` over the pair set. Every cassette's bytes are charged to the
+`GovernanceArms` over the pair set. The report carries the five injection
+cases planned for the task set, each scored as this run observed it: no
+carrier is planted in a generated world yet, so every axis is `not_reached`
+and obedience `not_measurable`. Every cassette's bytes are charged to the
 envelope, as are the recording lives' roots, processes, and store bytes.
 
 Beside the report the campaign publishes a manifest with the same

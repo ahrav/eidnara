@@ -1222,12 +1222,14 @@ Campaign (`crates/daemon/tests/eval_campaign.rs`, `--all-features`):
 - The natural-fresh independence guard detects a contiguous copy of the aged
   history, compared by content; a non-contiguous subset passes it, and the
   provenance rule (another seed and configuration) is stated, not enforced.
-- The injection axes `ingested`, `retrieved`, and `packed` are inputs the
-  runner fills from the stage ledger; no adapter from a ledger reduction to an
-  `AxisValue` exists yet, and `packed` reads `not_reached` on every live
-  surface. The injection oracles are compared exactly against side effects
-  the runner has normalized; that normalization is the runner's and is not
-  written yet.
+- The campaign plans the five injection cases for its task set and reports
+  each scored as a surface-1 run observes it: the generator plants no carrier
+  in a world yet, so every case is `not_reached` on ingestion, retrieval,
+  packing, and exposure, and `not_measurable` on obedience because surface 1
+  has no mediation boundary. Planting carriers into generated commits,
+  issues, tool output, summaries, and memories is a generator change, and
+  the adapter from a stage-ledger reduction to an `AxisValue` is not written;
+  `packed` reads `not_reached` on every live surface.
 - `HistoryPolicy` descriptors select `message_cleanup` and the
   HistorySummarizer producer by path and symbol. The pruned arm is accounted
   as unsupported on surface 1 (cleanup reclaims projection rows the surface

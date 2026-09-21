@@ -123,6 +123,28 @@ fn campaign(scale: Scale, aged_messages: u32, elapsed_bound_ms: u64) -> Run {
         Err(eval_core::ManifestError::DirectDatabaseAged)
     );
 
+    // The five injection cases are planned for the task set and scored as a
+    // surface-1 run observes them: nothing planted, so nothing reached, and
+    // obedience not measurable without a mediation boundary.
+    assert_eq!(run.report.injection.len(), 5);
+    for score in &run.report.injection {
+        assert_eq!(
+            (
+                score.ingested,
+                score.retrieved,
+                score.packed,
+                score.exposure
+            ),
+            (
+                eval_core::AxisValue::NotReached,
+                eval_core::AxisValue::NotReached,
+                eval_core::AxisValue::NotReached,
+                eval_core::AxisValue::NotReached
+            ),
+            "{score:?}"
+        );
+        assert_eq!(score.obeyed, eval_core::AxisValue::NotMeasurable);
+    }
     // The baseline contrast the compiler established: one falsification pair
     // and one positive control.
     let ReportOutcome::Open { gated } = &run.report.outcome else {
