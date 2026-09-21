@@ -15,6 +15,7 @@ macro_rules! debug_display {
     )*};
 }
 
+mod campaign;
 mod cassette;
 mod censoring;
 mod census;
@@ -34,10 +35,17 @@ mod occurrence;
 mod pairs;
 mod reducer;
 mod render;
+mod report;
 mod residue;
 mod statistics;
 mod stream;
 
+pub use campaign::{
+    Approval, Ceilings, DisabledReason, Envelope, EnvelopeExceeded, ProfileError,
+    RUN_PROFILE_DIGEST_PROTOCOL, RUN_PROFILE_SCHEMA, Resource, RunProfile, SampleError,
+    SampleLedger, SampleRecord, Scale, SkipReason, TaskBudgets, TaskUsage, Terminal, TerminalRates,
+    UnsupportedReason, parse_run_profile,
+};
 pub use cassette::{
     BACKEND_COVERED_FIELDS, BackendRecord, Boundary, CASSETTE_GENERATOR_VERSION, CASSETTE_SCHEMA,
     COVERED_FIELDS_VERSION, Cassette, CassetteError, CassetteFile, CassetteMiss, Entry, Location,
@@ -94,6 +102,10 @@ pub use pairs::{
 };
 pub use reducer::*;
 pub use render::*;
+pub use report::{
+    CampaignGates, Claims, Established, GatedBlocks, ReportError, ReportOutcome,
+    SUITE_B_REPORT_SCHEMA, SuiteBReport, Suppression, parse_report, reachability_of,
+};
 pub use residue::{
     CLOCK_FIELD_KEEP_ALLOWLIST, ObservationSchema, ResidueEntry, ResidueError, Rule, SemanticTrace,
     TRACE_DIGEST_PROTOCOL, is_clock_named, is_never_kept,
