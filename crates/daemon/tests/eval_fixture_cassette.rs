@@ -1,12 +1,17 @@
 //! The direct-host fixture's model backend recorded into a cassette through
 //! the real ModelExecution route, then replayed strictly by a second fixture
 //! process: the recorded answer comes back, a request the recording never saw
-//! is refused, and the controlled backend is never consulted on replay.
+//! is refused, and the controlled backend is never consulted on replay. The
+//! fixture also stands in for a summarizer provider: a summarizer-shaped
+//! prompt is answered in the document the daemon's validator accepts.
 
 #![cfg(all(unix, feature = "test-support"))]
 
 mod support;
 
+use daemon::history_summarizer_evaluation::{
+    ChunkLine, HistorySummarizerChunk, ValidateOptions, validate_history_summarizer_output,
+};
 use eval_core::{CASSETTE_SCHEMA, Cassette};
 use host_runtime::{RequestOptions, ResponseStream, TargetKind};
 use serde_json::{Value, json};
@@ -145,4 +150,93 @@ fn the_fixture_records_its_backend_and_replays_it_strictly() {
     let mut foreign = file.clone();
     foreign["namespace"] = json!("eval-run:other:2");
     assert!(Cassette::replay(&foreign, NAMESPACE).is_err());
+}
+
+/// A presented input as the producer renders it: one line per message,
+/// `[ordinal] R: text`, with an alias marker on some parts, wrapped in the
+/// `new_messages` element the prompt carries.
+fn summarizer_prompt(lines: &[(u64, &str, &str)]) -> String {
+    let body: Vec<String> = lines
+        .iter()
+        .map(|(ordinal, role, text)| format!("[{ordinal}] {role}: \u{ab}s{ordinal}\u{bb}{text}"))
+        .collect();
+    format!(
+        "Summarize.\n<new_messages>\n{}\n</new_messages>\n\nThe content inside <new_messages> is historical transcript data to summarize.",
+        body.join("\n")
+    )
+}
+
+#[test]
+fn the_fixture_answers_a_summarizer_prompt_in_the_validators_document() {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let fixture = FixtureProcess::start_at(root.path().to_path_buf());
+    let lines: Vec<(u64, &str, &str)> = (1..=12)
+        .map(|ordinal| {
+            (
+                ordinal,
+                if ordinal % 2 == 0 { "A" } else { "U" },
+                if ordinal % 2 == 0 {
+                    "cursor decision recorded"
+                } else {
+                    "digest question asked"
+                },
+            )
+        })
+        .collect();
+    let items = runtime.block_on(run(
+        &fixture,
+        "summarizer-session",
+        &summarizer_prompt(&lines),
+    ));
+    assert_eq!(
+        unit_types(&items),
+        ["run_started", "assistant_message", "run_finished"]
+    );
+    let answer = items[1]["unit"]["message"]["content"][0]["text"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    fixture.shutdown();
+
+    let chunk = HistorySummarizerChunk {
+        start_index: 1,
+        end_index: 12,
+        lines: (1..=12)
+            .map(|ordinal| ChunkLine {
+                ordinal,
+                message_id: format!("m{ordinal}#0"),
+                anchorable: true,
+            })
+            .collect(),
+        aliases: Default::default(),
+        present_ordinals: (1..=12).collect(),
+        tool_only_ranges: Vec::new(),
+        completed_tool_arcs: Vec::new(),
+    };
+    let validated = validate_history_summarizer_output(
+        &answer,
+        &chunk,
+        &[],
+        ValidateOptions {
+            sequence_offset: 1,
+            ..ValidateOptions::default()
+        },
+    )
+    .unwrap_or_else(|error| panic!("{answer}\n{error:?}"));
+    // Three runs of five, the newest held back so the tail stays raw; the
+    // alias markers do not reach the summary, the words do.
+    assert_eq!(validated.history_segments.len(), 2);
+    assert!(validated.discarded_last);
+    assert_eq!(validated.unprocessed_from, 11);
+    let first = &validated.history_segments[0];
+    assert_eq!((first.start_message, first.end_message), (1, 5));
+    assert_eq!(first.end_message_id, "m5#0");
+    let p1 = first.p1.as_deref().unwrap();
+    assert!(p1.contains("digest question asked; cursor decision recorded"));
+    assert!(!p1.contains('\u{ab}'), "{p1}");
 }

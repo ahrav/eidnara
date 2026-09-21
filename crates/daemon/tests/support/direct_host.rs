@@ -111,15 +111,31 @@ impl FixtureProcess {
         Self::start_at_inner(root, None, &args)
     }
 
+    /// Starts the fixture with `env` set in its environment, for the user
+    /// config tier the daemon reads from `XDG_CONFIG_HOME`.
+    pub fn start_at_with_env(root: PathBuf, env: &[(&str, &str)]) -> Self {
+        Self::start_at_inner_env(root, None, &[], env)
+    }
+
     fn start_at_inner(
         root: PathBuf,
         root_owner: Option<tempfile::TempDir>,
         extra: &[String],
     ) -> Self {
+        Self::start_at_inner_env(root, root_owner, extra, &[])
+    }
+
+    fn start_at_inner_env(
+        root: PathBuf,
+        root_owner: Option<tempfile::TempDir>,
+        extra: &[String],
+        env: &[(&str, &str)],
+    ) -> Self {
         let mut child = Command::new(fixture_binary())
             .arg("--state-root")
             .arg(&root)
             .args(extra)
+            .envs(env.iter().copied())
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())

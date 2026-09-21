@@ -132,6 +132,10 @@ pub struct Knobs {
     pub threshold: f64,
     pub min_prompt_chars: usize,
     pub native_tail: bool,
+    /// Context pressure the harness reports with the request, as
+    /// `(current_total_input_tokens, context_limit_tokens)`; without it the
+    /// boundary protects the whole history and the summarizer never fires.
+    pub usage: Option<(u64, u64)>,
 }
 
 impl Default for Knobs {
@@ -140,6 +144,7 @@ impl Default for Knobs {
             threshold: 0.6,
             min_prompt_chars: 20,
             native_tail: true,
+            usage: None,
         }
     }
 }
@@ -164,10 +169,7 @@ pub async fn pass(fixture: &FixtureProcess, world: &World, prompt: &str, knobs: 
     if knobs.native_tail {
         native.push(tail_native);
     }
-    let response = request_json(
-        &client,
-        route,
-        json!({
+    let mut request = json!({
             "kind": "transform",
             "base_revision": "surface-base-1",
             "v": 2,
@@ -181,9 +183,14 @@ pub async fn pass(fixture: &FixtureProcess, world: &World, prompt: &str, knobs: 
             "auto_search_score_threshold": knobs.threshold,
             "auto_search_min_prompt_chars": knobs.min_prompt_chars,
             "messages": messages,
-        }),
-    )
-    .await;
+    });
+    if let Some((current_total_input_tokens, context_limit_tokens)) = knobs.usage {
+        request["usage"] = json!({
+            "current_total_input_tokens": current_total_input_tokens,
+            "context_limit_tokens": context_limit_tokens,
+        });
+    }
+    let response = request_json(&client, route, request).await;
     assert_eq!(response["status"], "ok", "{response}");
     assert!(
         response.get("user_hint").is_none(),

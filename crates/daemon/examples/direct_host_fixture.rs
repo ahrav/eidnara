@@ -206,10 +206,69 @@ mod unix {
             .retain(|(queued, _)| *queued != id);
     }
 
+    /// Messages per segment in the scripted summarizer's answer.
+    const SUMMARY_CHUNK: usize = 5;
+
+    /// One presented line of the summarizer's input: `[a-b] R: part / part`,
+    /// with alias markers stripped from the parts.
+    fn presented_line(line: &str) -> Option<(u64, u64, String)> {
+        let rest = line.strip_prefix('[')?;
+        let (range, rest) = rest.split_once("] ")?;
+        let (start, end) = match range.split_once('-') {
+            Some((start, end)) => (start.parse().ok()?, end.parse().ok()?),
+            None => {
+                let ordinal = range.parse().ok()?;
+                (ordinal, ordinal)
+            }
+        };
+        let (_, parts) = rest.split_once(": ")?;
+        let text: String = parts
+            .split_whitespace()
+            .map(|token| match token.strip_prefix('\u{ab}') {
+                Some(marked) => marked.split_once('\u{bb}').map_or(token, |(_, rest)| rest),
+                None => token,
+            })
+            .filter(|token| !token.is_empty())
+            .collect::<Vec<_>>()
+            .join(" ");
+        Some((start, end, text))
+    }
+
+    /// The summarizer answer the fixture stands in for a provider with: one
+    /// `history_segment` per run of `SUMMARY_CHUNK` presented lines, its text
+    /// the lines' own words, in the output document the daemon's validator
+    /// reads. A recording of this is what the campaign's structured arm
+    /// replays.
+    fn scripted_summary(prompt: &str) -> Option<String> {
+        let (_, body) = prompt.split_once("<new_messages>")?;
+        let (body, _) = body.split_once("</new_messages>")?;
+        let lines: Vec<(u64, u64, String)> = body.lines().filter_map(presented_line).collect();
+        if lines.is_empty() {
+            return None;
+        }
+        let mut segments = String::new();
+        for group in lines.chunks(SUMMARY_CHUNK) {
+            let start = group[0].0;
+            let end = group[group.len() - 1].1;
+            let text = group
+                .iter()
+                .map(|(_, _, text)| text.as_str())
+                .collect::<Vec<_>>()
+                .join("; ");
+            segments.push_str(&format!(
+                r#"<history_segment start="{start}" end="{end}" title="messages {start} to {end}" episode_type="feature" importance="50"><p1>{text}</p1><p2>{text}</p2><p3>messages {start} to {end}</p3><p4 /></history_segment>"#
+            ));
+        }
+        let next = lines.last().map(|(_, end, _)| end + 1).unwrap_or(1);
+        Some(format!(
+            "<output><history_segments>{segments}</history_segments><meta><unprocessed_from>{next}</unprocessed_from></meta></output>"
+        ))
+    }
+
     impl LlmExecutionBackend for ControlledBackend {
         fn execute(
             &self,
-            _request: BackendRequest,
+            request: BackendRequest,
             events: EventSink,
             cancel: CancellationToken,
         ) -> BackendFuture {
@@ -218,6 +277,10 @@ mod unix {
                 &mut *self.next.lock().expect("fixture backend behavior mutex"),
                 NextBehavior::Success,
             );
+            // A summarizer prompt is answered in the summarizer's format
+            // whatever the scheduled behavior; the controls script transport
+            // outcomes, not what a summary says.
+            let summary = scripted_summary(&request.prompt);
             let blocked = Arc::clone(&self.blocked);
             let next_blocked_id = Arc::clone(&self.next_blocked_id);
             let shutdown = self.shutdown.clone();
@@ -226,7 +289,7 @@ mod unix {
                 match behavior {
                     NextBehavior::Success => {
                         events.emit(BackendEvent::AssistantText {
-                            text: "fixture-success".to_owned(),
+                            text: summary.unwrap_or_else(|| "fixture-success".to_owned()),
                             finish_reason: None,
                         });
                         counters.completed.fetch_add(1, Ordering::SeqCst);
