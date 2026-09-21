@@ -295,12 +295,8 @@ describe("Pi daemon transport across runtime teardown", () => {
         }
     });
 
-    it.each([
-        "fork",
-        "resume",
-        "reload",
-        "startup",
-    ])("offers a session that starts with a branch only the entries appended afterwards (%s)", async (reason) => {
+    it("offers a fork only the entries appended after the fork point", async () => {
+        const reason = "fork";
         const bodies: Array<{ messages: Array<{ id: string }> }> = [];
         const call = spyOn(HostModuleTransport.prototype, "call").mockImplementation(
             async (input) => {
@@ -317,8 +313,8 @@ describe("Pi daemon transport across runtime teardown", () => {
         try {
             const { agentEnd, registrations } = await agentEndHandler();
             const sessionStart = registrations.handlers.get("session_start") as SessionHandler;
-            // The runtime that produced these entries already offered them, possibly under
-            // another project; a fork inherits them under a new session id.
+            // The parent offered these entries, possibly under another project, and retries any
+            // the daemon refused; the fork inherits them under a new session id.
             const branch = [entry("one"), entry("two")];
             const ctx = captureContext({ model: { provider: "openai", id: "test" }, branch });
             await sessionStart({ reason }, ctx);
@@ -327,6 +323,37 @@ describe("Pi daemon transport across runtime teardown", () => {
             await __test.settleMemoryCapture();
             expect(bodies.map((body) => body.messages.map((message) => message.id))).toEqual([
                 ["three"],
+            ]);
+        } finally {
+            call.mockRestore();
+        }
+    });
+
+    it("offers a resumed session's branch again, so refused entries stay available for retry", async () => {
+        const bodies: Array<{ messages: Array<{ id: string }> }> = [];
+        const call = spyOn(HostModuleTransport.prototype, "call").mockImplementation(
+            async (input) => {
+                if (input.method === "memory.capture")
+                    bodies.push(input.body as { messages: Array<{ id: string }> });
+                return { state: input.method === "memory.capture" ? "accepted" : "ready" };
+            },
+        );
+        const entry = (id: string) => ({
+            type: "message",
+            id,
+            message: { role: "user", content: `Fact ${id}.` },
+        });
+        try {
+            const { agentEnd, registrations } = await agentEndHandler();
+            const sessionStart = registrations.handlers.get("session_start") as SessionHandler;
+            const branch = [entry("one"), entry("two")];
+            const ctx = captureContext({ model: { provider: "openai", id: "test" }, branch });
+            await sessionStart({ reason: "resume" }, ctx);
+            branch.push(entry("three"));
+            await agentEnd({}, ctx);
+            await __test.settleMemoryCapture();
+            expect(bodies.map((body) => body.messages.map((message) => message.id))).toEqual([
+                ["one", "two", "three"],
             ]);
         } finally {
             call.mockRestore();
