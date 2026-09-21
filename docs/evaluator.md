@@ -923,15 +923,21 @@ everything a result depends on: endpoints (exactly the three gates
 other list is `UnsupportedEndpoints`), task families, exclusions (the
 pre-registered exclusion criteria as text; the freeze keeps them from changing
 after the fact, and the runner applies them when it assembles the table), the
-stopping rule (`fixed_n` with its pair count), the multiplicity correction (`none`, `holm`,
-`benjamini_hochberg`), the profile, the interval method (`cluster_bootstrap`),
+stopping rule (`fixed_n` with its pair count), the multiplicity correction
+(`none`, `holm`, `benjamini_hochberg` are declared; only `none` is accepted
+today, since the three gates are one all-must-pass conclusion over fixed
+bounds with no p-values to adjust, and a plan declaring another is
+`UnsupportedMultiplicity` rather than analyzed uncorrected), the profile, the
+interval method (`cluster_bootstrap`),
 the item-count threshold (at least 300), the bootstrap replicate count and
 seed, the live-trial repeat count `trials_k`, and the ICC pilot.
 `AnalysisFamily::validate` includes the digest's
 canonical-JSON check, so a family that validates can always be frozen (an
 integer outside the safe range is `NotCanonical` at parse). It also recomputes the
 pilot's clustering unit and `effective_n_at_max` from its recorded counts and
-ICCs and refuses a pilot that disagrees with its own evidence
+ICCs and refuses a pilot that disagrees with its own evidence, or whose
+counts the ICC could not have been estimated from (fewer than two families,
+fewer worlds than families, or no replication within worlds)
 (`PilotInconsistent`), so a hand-written pilot cannot inflate its way past the
 block, and refuses a plan whose pair count is below the pilot's
 `required_n_for_margin` (`PlanBelowRequiredN`), since deflation only shrinks

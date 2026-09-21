@@ -182,13 +182,19 @@ pub struct LivenessBounds {
 }
 
 /// The profile's four rates parsed once. Canonical decimals carry no sign, so
-/// `[0, 1]` needs only the upper check.
+/// `[0, 1]` needs only the upper check. Only [`CampaignProfile::rates`]
+/// constructs one, so every bound a gate sees has passed that check:
+///
+/// ```compile_fail
+/// let one = eval_core::Ratio::new(1, 1);
+/// let _ = eval_core::ProfileRates { noninferiority_margin: one, harm_bound: one, floor_threshold: one, miss_asymmetry_bound: one };
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ProfileRates {
-    pub noninferiority_margin: Ratio,
-    pub harm_bound: Ratio,
-    pub floor_threshold: Ratio,
-    pub miss_asymmetry_bound: Ratio,
+    pub(crate) noninferiority_margin: Ratio,
+    pub(crate) harm_bound: Ratio,
+    pub(crate) floor_threshold: Ratio,
+    pub(crate) miss_asymmetry_bound: Ratio,
 }
 
 impl CampaignProfile {
@@ -234,6 +240,10 @@ pub enum IntervalMethod {
     ClusterBootstrap,
 }
 
+/// The correction declared for the frozen plan. The three gates are one
+/// all-must-pass conclusion over fixed bounds with no p-values, so `None` is
+/// the only correction the analyzer can honor today; a plan declaring another
+/// is refused rather than analyzed uncorrected.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MultiplicityCorrection {
@@ -487,12 +497,23 @@ impl AnalysisFamily {
         self.profile.rates()?;
         // The pilot's unit and effective N are functions of its recorded counts
         // and ICCs; a pilot whose recorded values disagree did not come from
-        // `run_icc_pilot`, so it cannot carry a gate.
+        // `run_icc_pilot`, so it cannot carry a gate. The counts must also be
+        // ones `intraclass_correlation` could have estimated both ICCs from: two
+        // or more families, at least as many worlds, and replication within
+        // worlds.
         let pilot = &self.icc_pilot;
         if pilot.max_affordable_worlds == 0
+            || pilot.n_families < 2
+            || pilot.n_worlds < pilot.n_families
+            || pilot.n_items <= pilot.n_worlds
             || pilot.projection().ok() != Some((pilot.clustering_unit, pilot.effective_n_at_max))
         {
             return Err(StatisticsError::PilotInconsistent);
+        }
+        if self.multiplicity_correction != MultiplicityCorrection::None {
+            return Err(StatisticsError::UnsupportedMultiplicity(
+                self.multiplicity_correction,
+            ));
         }
         // Deflation only shrinks, so a table smaller than the required N cannot
         // reach it whatever the affordable worlds could have held.
@@ -680,8 +701,9 @@ impl Gates {
         if counts.n == 0 {
             return Err(StatisticsError::NoPairs);
         }
-        // `b` and `c` are disjoint cells and every count is over `n`; within the
-        // safe range the rate methods cannot overflow.
+        // `b` and `c` are disjoint cells, `b` and every censored aged arm exclude
+        // an aged pass while `c` requires one, and every count is over `n`;
+        // within the safe range the rate methods cannot overflow.
         let PairCounts {
             n,
             b,
@@ -693,9 +715,10 @@ impl Gates {
         if u128::from(n) > MAX_SAFE
             || b > n
             || c > n - b
-            || aged_pass > n
+            || aged_pass > n - b
+            || c > aged_pass
+            || aged_censored > n - aged_pass
             || fresh_censored > n
-            || aged_censored > n
         {
             return Err(StatisticsError::InconsistentCounts);
         }
@@ -953,7 +976,8 @@ pub fn analyze(
 /// `InconsistentCounts` means a hand-built `PairCounts` violates `b + c <= n`
 /// or a count exceeds `n`; `UnsupportedEndpoints` means the frozen endpoint
 /// list is not the three gates; `ArmsNotPaired` means `arm_rates` does not
-/// carry exactly the aged and fresh arms.
+/// carry exactly the aged and fresh arms; `UnsupportedMultiplicity` means the
+/// plan declares a correction the analyzer does not yet apply.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StatisticsError {
     Shape(String),
@@ -1005,6 +1029,7 @@ pub enum StatisticsError {
     UnsupportedEndpoints {
         declared: Vec<String>,
     },
+    UnsupportedMultiplicity(MultiplicityCorrection),
     MalformedCounter {
         n: u64,
         failures: u64,

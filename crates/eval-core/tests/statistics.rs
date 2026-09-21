@@ -62,7 +62,7 @@ fn family() -> AnalysisFamily {
         families: FAMILIES.iter().map(|family| family.to_string()).collect(),
         exclusions: vec![],
         stopping_rule: StoppingRule::FixedN { pairs: 300 },
-        multiplicity_correction: MultiplicityCorrection::Holm,
+        multiplicity_correction: MultiplicityCorrection::None,
         profile: profile(),
         interval_method: IntervalMethod::ClusterBootstrap,
         item_count_threshold: ITEM_COUNT_THRESHOLD,
@@ -351,10 +351,6 @@ fn the_family_is_frozen_before_outcomes_and_any_post_hoc_edit_refuses() {
             Box::new(|f| f.stopping_rule = StoppingRule::FixedN { pairs: 301 }),
         ),
         (
-            "multiplicity",
-            Box::new(|f| f.multiplicity_correction = MultiplicityCorrection::None),
-        ),
-        (
             "margin",
             Box::new(|f| f.profile.noninferiority_margin = "0.03".into()),
         ),
@@ -602,9 +598,9 @@ fn the_three_gates_are_separate_signed_and_bound_by_the_profile() {
             gates.floor.bound
         ),
         (
-            rates.noninferiority_margin,
-            rates.harm_bound,
-            rates.floor_threshold
+            Ratio::from_decimal(&profile().noninferiority_margin).unwrap(),
+            Ratio::from_decimal(&profile().harm_bound).unwrap(),
+            Ratio::from_decimal(&profile().floor_threshold).unwrap()
         ),
         "bounds come from the profile, never the counts"
     );
@@ -982,6 +978,42 @@ fn the_pair_table_and_the_pilot_must_match_the_frozen_plan() {
         no_worlds.validate(),
         Err(StatisticsError::PilotInconsistent)
     );
+    // Recorded counts the ICC could not have been estimated from are refused too,
+    // however self-consistent the projection over them is.
+    let mut one_observation = family.clone();
+    one_observation.icc_pilot = IccPilot {
+        n_items: 1,
+        n_families: 1,
+        n_worlds: 1,
+        icc_family: Ratio::ZERO,
+        icc_world_seed: Ratio::ZERO,
+        max_affordable_worlds: 1000,
+        effective_n_at_max: ratio(1000, 1),
+        ..family.icc_pilot.clone()
+    };
+    assert_eq!(
+        one_observation.validate(),
+        Err(StatisticsError::PilotInconsistent)
+    );
+    let mut unreplicated = family.clone();
+    unreplicated.icc_pilot.n_items = unreplicated.icc_pilot.n_worlds;
+    assert_eq!(
+        unreplicated.validate(),
+        Err(StatisticsError::PilotInconsistent)
+    );
+    // The three gates are one all-must-pass conclusion over fixed bounds, so no
+    // correction applies; a plan declaring one is refused, not analyzed uncorrected.
+    for correction in [
+        MultiplicityCorrection::Holm,
+        MultiplicityCorrection::BenjaminiHochberg,
+    ] {
+        let mut corrected = family.clone();
+        corrected.multiplicity_correction = correction;
+        assert_eq!(
+            corrected.validate(),
+            Err(StatisticsError::UnsupportedMultiplicity(correction))
+        );
+    }
     // A plan whose pair count is below its own required N cannot reach it.
     let mut short_plan = family.clone();
     short_plan.stopping_rule = StoppingRule::FixedN { pairs: 299 };
@@ -1052,6 +1084,31 @@ fn the_pair_table_and_the_pilot_must_match_the_frozen_plan() {
             aged_pass: 0,
             fresh_censored: 0,
             aged_censored: 0,
+        },
+        // `b` excludes an aged pass; `c` requires one; a censored aged arm is not a pass.
+        PairCounts {
+            n: 1,
+            b: 1,
+            c: 0,
+            aged_pass: 1,
+            fresh_censored: 0,
+            aged_censored: 0,
+        },
+        PairCounts {
+            n: 2,
+            b: 0,
+            c: 1,
+            aged_pass: 0,
+            fresh_censored: 0,
+            aged_censored: 0,
+        },
+        PairCounts {
+            n: 2,
+            b: 0,
+            c: 0,
+            aged_pass: 2,
+            fresh_censored: 0,
+            aged_censored: 1,
         },
     ] {
         assert_eq!(
