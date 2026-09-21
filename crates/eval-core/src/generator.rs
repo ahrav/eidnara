@@ -9,9 +9,12 @@ use crate::event::{
 };
 use crate::stream::{ChoiceKind, Chooser, RANDOM_SCHEMA_VERSION, ReplayRefusal, Tape};
 
-/// Version 2 removed the zero time gap; the same seed and config draw a
-/// different world under each version.
-pub const GENERATOR_VERSION: &str = "eval-generator/v2";
+/// Version 2 removed the zero time gap; version 3 gave every text a word of
+/// its own and the world's own word beside the drawn word, so a surface that
+/// matches on words can tell one message from another and from another
+/// world's. The same seed and config produce a different world under each
+/// version.
+pub const GENERATOR_VERSION: &str = "eval-generator/v3";
 pub const TAPE_IDENTITY_PROTOCOL: &str = "eval-tape/v1";
 const OID_PROTOCOL: &str = "eval-git-oid/v1";
 
@@ -212,6 +215,8 @@ struct EntityState {
 
 pub struct Generator {
     config: WorldConfig,
+    /// The word every text in this world carries and no other world does.
+    vocabulary: String,
     chooser: Chooser,
     schedule: Vec<Slot>,
     cursor: usize,
@@ -236,6 +241,7 @@ impl Generator {
         };
         let entities = config.sessions.len() + config.repositories.len();
         let mut generator = Self {
+            vocabulary: format!("world{root_seed:016x}"),
             schedule: Vec::new(),
             cursor: 0,
             events: Vec::new(),
@@ -373,9 +379,16 @@ impl Generator {
             .map_err(WorldError::Replay)
     }
 
+    /// One drawn word, one word only this slot has, and the world's own
+    /// word: a lexical matcher needs two tokens of three characters or more,
+    /// one of them rare, to find a message by its own text, and a message
+    /// carried into another world must not read as one of that world's.
     fn text(&mut self, slot: &Slot) -> Result<String, WorldError> {
         let word = self.choose(ChoiceKind::TextWord, slot, &WORDS)?;
-        Ok(format!("{} {}", WORDS[word], slot.k))
+        Ok(format!(
+            "{} for slot{} in {}",
+            WORDS[word], slot.k, self.vocabulary
+        ))
     }
 
     fn emit(

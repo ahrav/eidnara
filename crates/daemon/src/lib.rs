@@ -13623,6 +13623,17 @@ impl HandlerCore {
             .clone()
     }
 
+    /// Whether a history_summarizer firing or reattach is live for any session:
+    /// a driver that must reach quiescence between mutations waits on this.
+    #[cfg(any(test, feature = "test-support", feature = "direct-host-fixture"))]
+    pub fn history_summarizer_live_for_test(&self) -> bool {
+        !self
+            .live_history_summarizer_sessions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_empty()
+    }
+
     /// The Kernel project digest a bound route stages and reads review inputs under.
     #[cfg(any(test, feature = "test-support"))]
     pub fn project_digest_for_test(&self, channel: RouteHandle) -> Option<String> {

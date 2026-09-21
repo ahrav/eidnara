@@ -18,7 +18,7 @@ provide, so a reader can find them by test name.
 Manifest, identity, and residue (`crates/eval-core/tests/manifest.rs`):
 
 - `required_fields_are_sorted_and_equal_the_struct_field_set` pins
-  `eval-manifest/v7` to `REQUIRED_FIELDS`; a struct field added without a
+  `eval-manifest/v8` to `REQUIRED_FIELDS`; a struct field added without a
   version bump fails here. `fixture_digests_are_frozen` pins the fixture's
   `eval_run_id` and manifest digest so an encoding change is reviewed.
 - `every_missing_field_is_refused_by_name_before_digesting`,
@@ -476,8 +476,9 @@ retrieval's `test-support` feature is enabled only under the daemon's
 
 Manifest (`crates/eval-core/tests/manifest.rs`): `ingestion` is a required
 field (`ing-adapter-path-no-production-caller-labelled`); its wire value is
-`adapter-ingested, production caller: none`, and `direct-database, non-aged`
-with a `replay` construction is refused as `DirectDatabaseAged`.
+`adapter-ingested, production caller: none`, `direct-database, non-aged`
+with a `replay` construction is refused as `DirectDatabaseAged`, and
+`transform-route, turn by turn` with a `replay` construction validates.
 
 ## Phase 2 executed checks: stage ledger on the activated chain
 
@@ -1099,31 +1100,37 @@ Campaign (`crates/daemon/tests/eval_campaign.rs`, `--all-features`):
   (`mtr-runner-shell-example-gated-and-bounded`,
   `xc-campaign-resource-envelope-declared-and-enforced`): a 130-message aged
   history and a twelve-message control compile into three pairs whose baseline
-  contrast is established at the profile's surface-1 window; each of the six
-  arms runs through its own fixture process in its own root with the backend
-  counters at zero model calls; the falsifier is lost at the candidate window
-  on the aged arm and delivered on the control, the two in-window truths are
-  delivered on both; the analysis over three pairs reports `b = 1` and fails
-  the paired gates at the fixture's margins; six samples are accounted for;
-  the established claims follow from the verdicts; every pruned arm is
+  contrast is established at the profile's surface-1 window; nothing is
+  seeded: each arm is lived through its own fixture process on its own root
+  one harness turn at a time with the harness's context pressure, every turn
+  drained to quiescence, in one store incarnation, and the task turn follows
+  with the backend counters at zero model calls; under raw history no arm has
+  a unit for any truth and every task is lost at the candidate window on both
+  arms, so the analysis over three pairs is concordant (`b = 0`), the paired
+  gates see no loss, and the floor fails; the established claims follow from
+  the verdicts and outcomes across both policies; every pruned arm is
   declared and ends `unsupported {policy_not_on_surface}`; the structured
-  aged arm runs on the segments the daemon's own summarizer published inside
-  the fixture under context pressure, built once with the fixture's backend
-  recorded and once under strict replay of that recording with the backend
-  at zero calls, the two publishing the same segments; the two folded truths
-  are refused at the match filter, the raw tail truth is delivered; the
-  control sits inside the protected tail, so its structured arm is its raw
-  history with an empty cassette and delivers every truth; the three policies validate as
-  `GovernanceArms` over the pair set; eighteen samples are accounted for and twelve attempted; the report validates, is published
+  arms live the same life with the daemon configured to summarize, its
+  trigger firing by its own rules (turn 114 behind the pass, turn 127
+  inline), the firing recorded once per world into a cassette of its own
+  whose frames equal the backend calls, and every arm run replaying it
+  strictly with no controlled backend and publishing the recording's segments
+  whole; on the structured aged arm the plain task's message heads its
+  segment and is served, the falsifier is folded third into the first
+  segment and reaches render with its words cut at the cap, and the positive
+  control is in the protected tail with no unit; the control never reaches
+  the summarizer's pressure and stays empty under both policies; the three
+  policies validate as `GovernanceArms` over the pair set; eighteen samples
+  are accounted for and twelve attempted; the report validates, is published
   write-then-rename with the file and directory synced, and parses back
   equal; the published peaks show the stores, the elapsed time, the artifact,
-  one process, three roots (the fixture's state root, the config tier the
-  summarizer build runs under, and the cassette directory), and the
-  summarizer cassette's bytes; a manifest is
-  published the same way, parses back to the same digest, names the checkout,
-  toolchain, host triple, and fixture binary, carries every sample in run
-  order, the frozen family's digest, and the recency baseline, says `bulk`
-  and `direct-database, non-aged`, and is refused when relabelled `replay`.
+  one process, three roots (the arm's state root, the config tier its daemon
+  reads, and the cassette directory), and the summarizer cassette's bytes; a
+  manifest is published the same way, parses back to the same digest, names
+  the checkout, toolchain, host triple, and fixture binary, carries every
+  sample in run order, the frozen family's digest, and the recency baseline,
+  says `replay` and `transform-route, turn by turn`, and is refused when
+  relabelled `direct-database, non-aged`.
 - `the_fixture_records_its_backend_and_replays_it_strictly`
   (`crates/daemon/tests/eval_fixture_cassette.rs`,
   `rid-cassette-strict-miss-typed-error`,
@@ -1140,9 +1147,14 @@ Campaign (`crates/daemon/tests/eval_campaign.rs`, `--all-features`):
   five with the newest held back, `unprocessed_from` 11, the end message id
   anchored, and no alias marker in the summary.
 - `an_s1_campaign_runs_only_under_its_budget` (ignored): a 400-message
-  history runs only under `EIDNARA_EVAL_S1_BUDGET_MS` and reports the same
-  shape inside the budget; without the variable the run is recorded as
-  `disabled {scale_not_budgeted}`, and a non-numeric budget refuses.
+  history runs only under `EIDNARA_EVAL_S1_BUDGET_MS` and reports inside the
+  budget; without the variable the run is recorded as
+  `disabled {scale_not_budgeted}`, and a non-numeric budget refuses. At this
+  scale one summarizer prompt carries a seed-corpus example the secret
+  scanner reads as a key, so the cassette refuses the frame, the recording
+  fixture writes no cassette, the aged structured arm's three samples end
+  `skipped {redaction_refused}`, the aged arm's refusal rate is nonzero on
+  the report, and the refusal gate fails at the ceiling of zero.
 
 ## Gaps recorded here
 
@@ -1185,20 +1197,31 @@ Campaign (`crates/daemon/tests/eval_campaign.rs`, `--all-features`):
   and `publish_validated_chunk`), against the fixture's backend standing in
   for a summarizer provider, recorded into a cassette and reproduced under
   strict replay; no live provider's summarizer traffic has been recorded.
-- The campaign's arms are seeded as history segments written straight into
-  each store, so its manifest says `bulk` and `direct-database, non-aged`;
-  an aged arm built by `step()` and lifecycle replay through ingestion does
-  not exist yet, and the S0 result is therefore default-surface evidence over
-  a seeded history, not over a replay-built aged world.
+- The campaign's arms are lived through the daemon's transform route one
+  harness turn at a time in one store incarnation, so the manifest says
+  `replay` and `transform-route, turn by turn`; the harness's context
+  pressure is the shell's model (a fixed token count per turn up to a fixed
+  limit), not a provider's accounting, and the generator's `step()` fold is
+  not the drive: the rendered world is sent turn by turn from its rendered
+  messages.
+- The daemon's summarizer seed corpus (`reference-seeds.json`) holds an
+  example the secret scanner reads as a key, so a summarizer frame that
+  draws it cannot be recorded into a cassette; the campaign reports the
+  refusal and skips the arm rather than weakening the scanner or editing the
+  corpus. Which chunks draw it depends on the session id and chunk start.
+- The pair compiler's recency window counts messages, but surface 1's unit is
+  the segment: at S0 the twenty segments sit inside a window of 100 and no
+  truth is lost to recency on that surface; the falsification pair's
+  structural verdict is the compiler's.
 - The campaign shell lives in the daemon test suite and drives the
   direct-host fixture; the `eval_runner` example still serves the cassette
   oracle only.
 - Surface 1 makes no model call (the fixture's counters read zero), so the
   surface boundary's cassette holds no frame; the summarizer boundary's
-  cassette holds the one frame the aged arm's firing recorded, replayed
-  strictly by a second fixture whose counters stay at zero, from the
-  fixture's scripted provider rather than a live one; the control's history
-  sits inside the tail the summarizer protects, so its cassette holds none.
+  cassette holds the two frames the aged life's firings recorded, replayed
+  strictly by every arm run with no controlled backend, from the fixture's
+  scripted provider rather than a live one; the control never reaches the
+  summarizer's pressure, so its cassette holds none.
 - The campaign runs its arms one after another in one process; parallel
   campaigns on a shared checkout have not been run, so
   `xc-parallel-campaigns-isolated-on-shared-checkout` is exercised only for
@@ -1256,10 +1279,10 @@ Campaign (`crates/daemon/tests/eval_campaign.rs`, `--all-features`):
   session; the shell asserts the recorded `block_id` names its own tail.
   `DurableState::Held` is asserted by the shell from what it seeded, not read
   back from the store.
-- The surface-1 suite hand-builds one history segment per rendered message
-  with a chosen summary phrase; the segment's native identity is real, its
-  text is not summarizer output. Replay-built segments arrive with the aged
-  worlds.
+- The surface-1 ledger suite (`eval_surface_ledger.rs`) hand-builds one
+  history segment per rendered message with a chosen summary phrase; the
+  segment's native identity is real, its text is not summarizer output. The
+  campaign's arms carry only what the daemon's own summarizer published.
 - Surface-1 observations carry no incarnation token: the hint scorer reads
   the memory store, which has no `CommitReadIncarnation`.
 - The deferral stage is observed but not injected; a deferred pass needs a

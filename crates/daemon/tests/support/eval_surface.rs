@@ -11,7 +11,7 @@ use host_runtime::TargetKind;
 use memory_store::{MemoryStore, StoredHistorySegment};
 use serde_json::{Value, json};
 
-use super::direct_host::{FixtureProcess, request_json, wait_for_store};
+use super::direct_host::{BUDGET, FixtureProcess, request_json, wait_for_store};
 
 pub const EPOCH_MS: i64 = 1_700_000_000_000;
 
@@ -149,25 +149,25 @@ impl Default for Knobs {
     }
 }
 
-/// Drives one native-serving transform pass through the fixture and reads the
-/// host's recorded auto-search outcome back over the control socket.
-pub async fn pass(fixture: &FixtureProcess, world: &World, prompt: &str, knobs: &Knobs) -> Pass {
-    let client = fixture.client().await;
-    let route = fixture
-        .open_route(&client, "context", TargetKind::ToolProvider, &world.session)
-        .await;
-    wait_for_store(&client, route, &world.session).await;
-    let mut messages: Vec<Value> = world
-        .messages
+/// The transform request one harness turn sends: the world's first `upto`
+/// messages as ingress and native arrays, `tail` as a new user message after
+/// them when given, and the pass's knobs.
+pub fn transform_request(world: &World, upto: usize, tail: Option<&str>, knobs: &Knobs) -> Value {
+    let mut messages: Vec<Value> = world.messages[..upto]
         .iter()
         .enumerate()
         .map(|(index, message)| ingress(message, index as u64 + 1))
         .collect();
-    let mut native: Vec<Value> = world.messages.iter().map(|m| m.message.clone()).collect();
-    let (tail_ingress, tail_native) = tail(&world.session, prompt, world.messages.len() as u64 + 1);
-    messages.push(tail_ingress);
-    if knobs.native_tail {
-        native.push(tail_native);
+    let mut native: Vec<Value> = world.messages[..upto]
+        .iter()
+        .map(|m| m.message.clone())
+        .collect();
+    if let Some(prompt) = tail {
+        let (tail_ingress, tail_native) = self::tail(&world.session, prompt, upto as u64 + 1);
+        messages.push(tail_ingress);
+        if knobs.native_tail {
+            native.push(tail_native);
+        }
     }
     let mut request = json!({
             "kind": "transform",
@@ -176,7 +176,7 @@ pub async fn pass(fixture: &FixtureProcess, world: &World, prompt: &str, knobs: 
             "session_id": world.session,
             "serializer_profile": "opencode-aisdk",
             "render_config": "surface-config",
-            "full_array_fingerprint": "surface-fingerprint",
+            "full_array_fingerprint": format!("surface-fingerprint-{upto}-{}", tail.is_some()),
             "serve_native": true,
             "native_messages": native,
             "auto_search_enabled": true,
@@ -190,6 +190,19 @@ pub async fn pass(fixture: &FixtureProcess, world: &World, prompt: &str, knobs: 
             "context_limit_tokens": context_limit_tokens,
         });
     }
+    request
+}
+
+/// Drives one native-serving transform pass through the fixture and reads the
+/// host's recorded auto-search outcome back over the control socket.
+pub async fn pass(fixture: &FixtureProcess, world: &World, prompt: &str, knobs: &Knobs) -> Pass {
+    let client = fixture.client().await;
+    let route = fixture
+        .open_route(&client, "context", TargetKind::ToolProvider, &world.session)
+        .await;
+    wait_for_store(&client, route, &world.session).await;
+    let request = transform_request(world, world.messages.len(), Some(prompt), knobs);
+    let native = request["native_messages"].as_array().unwrap().clone();
     let response = request_json(&client, route, request).await;
     assert_eq!(response["status"], "ok", "{response}");
     assert!(
@@ -214,6 +227,67 @@ pub async fn pass(fixture: &FixtureProcess, world: &World, prompt: &str, knobs: 
         native,
         outcome,
     }
+}
+
+/// One harness turn of a session's life: the transform response and the
+/// daemon's summarizer diagnostics for it.
+pub struct Turn {
+    pub messages: usize,
+    pub response: Value,
+}
+
+/// Whether a history_summarizer firing is still running inside the fixture.
+pub fn summarizer_live(fixture: &FixtureProcess) -> bool {
+    let control = fixture.control(43, "history-summarizer-live");
+    assert_eq!(control["ok"], true, "{control}");
+    control["result"]["live"] == json!(true)
+}
+
+/// Waits until no firing is live; a firing spawned behind a pass finishes
+/// before the next mutation, so every turn starts from quiescence.
+pub fn drain(fixture: &FixtureProcess) {
+    let deadline = std::time::Instant::now() + BUDGET;
+    while summarizer_live(fixture) {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the summarizer firing did not settle within the budget"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+}
+
+/// Lives the world through the fixture one harness turn at a time, as the
+/// harness would send it: turn `n` carries the first `n` messages, with the
+/// context pressure `usage(n)` reports for that turn, and the store moves
+/// through every turn in one incarnation. Each turn is mutate, then drain to
+/// quiescence.
+pub async fn lifecycle(
+    fixture: &FixtureProcess,
+    world: &World,
+    usage: impl Fn(usize) -> Option<(u64, u64)>,
+) -> Vec<Turn> {
+    let client = fixture.client().await;
+    let route = fixture
+        .open_route(&client, "context", TargetKind::ToolProvider, &world.session)
+        .await;
+    wait_for_store(&client, route, &world.session).await;
+    let mut turns = Vec::with_capacity(world.messages.len());
+    for upto in 1..=world.messages.len() {
+        let knobs = Knobs {
+            usage: usage(upto),
+            ..Knobs::default()
+        };
+        let request = transform_request(world, upto, None, &knobs);
+        let response = request_json(&client, route, request).await;
+        assert_eq!(response["status"], "ok", "turn {upto}: {response}");
+        drain(fixture);
+        turns.push(Turn {
+            messages: upto,
+            response,
+        });
+    }
+    client.close_route(route).await.expect("route closes");
+    turns
 }
 
 pub fn ids(sequences: &[i64], identities: &BTreeMap<i64, String>) -> BTreeSet<String> {

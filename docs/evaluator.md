@@ -27,7 +27,7 @@ sub-record.
   public so callers name a protocol string instead of restating the
   `<protocol>\n<canonical JSON>` framing.
 
-## Manifest `eval-manifest/v7`
+## Manifest `eval-manifest/v8`
 
 `parse_manifest` reads a JSON object, compares its key set against
 `REQUIRED_FIELDS`, checks the `schema` literal, and only then deserializes and
@@ -63,7 +63,7 @@ The 30 required fields, sorted:
 | `eval_run_id` | The run identity digest. |
 | `execution_mode` | `generate`, `replay_tape`, or `enumerate`: how the world was driven. |
 | `failure_class_table_digest` | The `eidnara-failure-class-table-v1` digest of the pinned truth table; refused unless it equals `FAILURE_CLASS_TABLE_DIGEST`. |
-| `ingestion` | `adapter-ingested, production caller: none` or `direct-database, non-aged`; the latter with a `replay` construction is refused (`DirectDatabaseAged`). |
+| `ingestion` | `adapter-ingested, production caller: none`, `direct-database, non-aged`, or `transform-route, turn by turn` (the harness's own path, one turn at a time through one store incarnation); `direct-database, non-aged` with a `replay` construction is refused (`DirectDatabaseAged`). |
 | `memory_reviewer_model_calls` | `cassette` (replayed through the keyed TLS peer) or `excluded` (the reviewer worker is not spawned); MemoryReviewer traffic bypasses `LlmExecutionBackend`, so silence is refused as a missing field. |
 | `reachability` | `default-production`, `explicit-config-only`, or `test-only`. |
 | `recency_baseline` | `{version, bounds}`: the recency-only baseline's version and its most-recent-k window per evaluated surface; `null` for a run that compiled no pair set. |
@@ -72,13 +72,13 @@ The 30 required fields, sorted:
 | `retry_lineage` | Prior `eval_run_id` values of retried attempts; each is lowercase hex SHA-256. |
 | `run_identity` | The nine-component identity tuple, including the build sub-record, the eligibility-spec digest, and the linearization rule version. |
 | `sample_epoch`, `sample_ids`, `sample_order` | Stable sample identity and execution order; `sample_order` must be a permutation of `sample_ids`. |
-| `schema` | `eval-manifest/v7`. |
+| `schema` | `eval-manifest/v8`. |
 | `status` | `completed`, `incomplete`, `refused`, or `blocked`. |
 | `tokenizer_profile` | Name, revision, digest. |
 
 `Manifest::digest` re-parses the manifest, applies the manifest's own residue
 rules (`start_ms`, `end_ms`, and `envelope_peaks` are `Drop`; everything else
-is `Keep`), and hashes with protocol `eval-manifest-digest/v7`. Version 2
+is `Keep`), and hashes with protocol `eval-manifest-digest/v8`. Version 2
 added `execution_mode` (the reducer differential runs under `enumerate`);
 version 3 added `ingestion`, because no ingestion entry point has a production
 caller and every manifest must say so; version 4 added `failure_class_table_digest`,
@@ -88,7 +88,10 @@ is either replayed or excluded, never silently live;
 version 6 added `analysis_family_digest`, so a paired report can prove it was
 read under the family frozen before its first outcome;
 version 7 added `recency_baseline`, so the recency-only control's version and
-per-surface window are on record beside the pairs it was judged on. The digest is a function
+per-surface window are on record beside the pairs it was judged on;
+version 8 added the `transform-route, turn by turn` ingestion, so an arm
+lived through the daemon's own transform route in one store incarnation can
+say so and call itself replay-built. The digest is a function
 of every kept field, not of the run identity alone: two processes that record the same
 identity and the same kept contents produce the same digest
 (`two_process_same_identity_yields_equal_manifest_and_trace_digests`), and two
@@ -197,8 +200,12 @@ are constants the shell copies into the run identity's `generator_version`,
 changes whenever a draw domain or the schedule changes, because the same seed
 and config then produce a different world: `eval-generator/v1` drew time gaps
 from `{0, 1, 2, 5}` ticks; `eval-generator/v2` draws from `{1, 2, 5}`, so a
-correction always advances its target's revision. A tape recorded under v1
-refuses under v2 as `TapeMismatch`.
+correction always advances its target's revision; `eval-generator/v3` writes
+each text as its drawn word, a word only that slot has, and the world's own
+word (`cursor for slot47 in world5eedb00000000002`), so a surface that
+matches on words can find one message by its own text and a message carried
+into another world does not read as one of that world's. A tape recorded under one version refuses under
+another as `TapeMismatch`.
 
 ### Keyed draws
 
@@ -1291,40 +1298,52 @@ envelope, and the report serializer.
 
 The campaign refuses an unapproved profile before anything runs. Under an
 approved one it generates a one-session aged history (130 messages at S0) and
-a five-message natural-fresh history under another seed, compiles three
+a twelve-message natural-fresh history under another seed, compiles three
 tasks (an early message as the falsifier, the last message as the positive
 control, a message fifty from the end as the plain task) into a pair set at
 surface 1's pinned window of 100, and checks the baseline contrast first. Each
 arm of each pair becomes one OpenCode session: every rendered message under
 the task's session id in valid-time order (the natural-fresh messages carry
-their suffixed message ids, so nothing collides), and one history segment per
-message whose summary is the message's text, a fixed phrase, and a marker only
-that message's summary has, so the hint scorer's rarity rule never decides a
-task; the sequence-to-event map is read back from the segments' stored native
-identities and checked against the seeding order. The task's prompt is that
-summary. The arm is seeded into a store in a root of its own, one fixture
-process is started at that root, one native-serving transform pass runs, the
+their suffixed message ids, so nothing collides). Nothing is seeded. The arm
+is lived through one fixture process on a root of its own, one harness turn
+at a time (`lifecycle`): turn `n` carries the first `n` messages as the
+harness would send them, with the context pressure the harness's model
+reports for that turn (`TOKENS_PER_TURN` of a `CONTEXT_LIMIT_TOKENS` limit,
+capped below it), and every turn is mutate, then drain to quiescence: the
+fixture's `history-summarizer-live` control answers whether a firing the
+daemon spawned behind the pass is still running, and the next turn waits for
+it. The store moves through every turn in one incarnation. The task's turn
+follows as one more: its prompt is the evidence message's own words, the
 fixture's backend counters are read to show no model call started, and the
-host's own recorded selection is read back: the task passes when its evidence
-is among the selected segments, and an attempt past a task budget is censored
-with that budget's reason. The pass is mapped onto the thirteen stages, so a
-loss names its stage.
+host's own recorded selection is read back: the task passes when its
+evidence is among the selected segments and the served fragment carries the
+message's decision (its words before the world's own word, `carries`, whole
+words), and an attempt past a task budget is censored with that budget's
+reason. The store is opened after the fixture exits and its history segments
+are read, so a selected sequence maps to the messages the daemon's own
+segment covers; a truth no segment holds enters the ledger as a unit the
+store never had, so the window is where the surface is seen to lack it. The
+pass is mapped onto the thirteen stages, so a loss names its stage.
 
-At S0 the aged arm loses the falsifier at the candidate window and delivers
-the two in-window truths; the short control delivers all three; `analyze`
-over the three pairs reports `b = 1`, fails the quality-loss and harm gates at
-the fixture's margins, and withholds the interval below 300 items. The six
-samples are accounted for in a `SampleLedger`, the run gates are computed
-from them, the established claims follow from the verdicts and outcomes, and
-one `SuiteBReport` is serialized, written to a staging path, synced, renamed
-into place in a root of its own with the directory synced, read back, and
-parsed equal. The envelope is observed from the start as live counts: elapsed
-time, each arm's root with its store, WAL, and shm, the one process and the
-one root held at a time, the report's bytes, and the one retained artifact,
-all charged before the envelope is copied into the report so the published
-peaks include the publication; the run finishes inside its bounds. Surface 1
-makes no model call, which the backend counters show, so the cassette holds no
-frame and the arm miss rates are zero by observation.
+What S0 shows on the real default surface: surface 1 serves history
+segments and nothing else, and only the summarizer writes them. Under raw
+history no arm has a unit for any truth, so every task is lost at the
+candidate window on both arms; the paired analysis over the raw arms is
+concordant (`b = 0`), the quality-loss and harm gates see no loss, and the
+floor, which asks the control to deliver at all, fails; the interval is
+withheld below 300 items. The eighteen samples are accounted for in a
+`SampleLedger` (twelve attempted), the run gates are computed from them, the
+established claims follow from the verdicts and outcomes across both
+policies, and one `SuiteBReport` is serialized, written to a staging path,
+synced, renamed into place in a root of its own with the directory synced,
+read back, and parsed equal. The envelope is observed from the start as live
+counts: elapsed time, each arm's root with its store, WAL, and shm, the one
+process, the three roots held at a time (the arm's state root, the config
+tier its daemon reads, and the cassette directory), the report's bytes, and
+the one retained artifact, all charged before the envelope is copied into the
+report so the published peaks include the publication; the run finishes
+inside its bounds. Surface 1's task turn makes no model call, which the
+backend counters show.
 
 `an_s1_campaign_runs_only_under_its_budget` is `#[ignore]`d and runs a
 400-message history only when `EIDNARA_EVAL_S1_BUDGET_MS` grants a budget,
@@ -1332,47 +1351,54 @@ which becomes the profile's elapsed bound so the envelope refuses the first
 reading past it;
 without one it records the `disabled {scale_not_budgeted}` terminal in a
 sample ledger and runs nothing, and a budget that is set but not a number is
-refused. S0 stays in the default shards.
+refused. S0 stays in the default shards. What S1 found: over 400 turns the
+daemon's summarizer fires more often, and one of its prompts draws a
+calibration example from the daemon's own seed corpus
+(`crates/daemon/testdata/reference-seeds.json`, the Stripe idempotency
+example with `key = event.id`) that the secret scanner reads as a key, so the
+cassette refuses the frame as `RedactionRefused(Request, SecretDetected)`,
+the firing fails as a permanent producer error, and the recording fixture
+writes no cassette and says so at exit (after cleaning up its socket and
+publication). The aged structured arm then has nothing to replay: its three
+samples end `skipped {redaction_refused}`, the aged arm's refusal rate on the
+report is the cassette's refusals over the summarizer's firings (counted once
+per failed run, since the daemon reports its last failure on every later
+turn), and the refusal gate fails at the profile's ceiling of zero. This is
+the scanner's typed refusal doing its job on a production prompt corpus; a
+summarizer frame that carries that example cannot be recorded until the
+corpus or the scanner changes, and the campaign reports it rather than
+hiding it.
 
-**Structured arm.** Each raw arm also runs as a structured arm whose
-segments are what the daemon's own HistorySummarizer published for it. The
-arm is built through the fixture: the daemon inside it is configured to
-summarize (`/history_summarizer/model` and `/history_summarizer/context_limit_tokens`
-in a user config tier the fixture is started under, `Launch::config_home`),
-the arm's messages go through one transform pass that reports context
-pressure inside the emergency band (`Knobs::usage`), and the daemon's trigger,
-producer, and publication path run inside the fixture process against the
-fixture's model backend, which stands in for a summarizer provider: it
-answers a prompt carrying `<new_messages>` in the summarizer's `<output>`
-document, one `history_segment` per run of five presented lines whose text is
-the lines' own words. The pass settles after the firing, so the segments are
-read from the store once the fixture has exited. The build runs twice: once
-with the fixture's backend recorded into a cassette under the campaign
-namespace, written at shutdown, and once in a second fixture replaying that
-cassette strictly, whose backend counters stay at zero; the two runs must
-publish the same segments (compared whole, less the clock the daemon stamped
-them with), and the replayed ones are the arm's; a replay miss would surface
-as a recorded failure and no segments, never as a served answer. Every
-published segment must keep the words of each message it covers, and a raw
-tail must remain. Messages the summarizer left in its protected tail keep
-their raw segments. The summarizer fires only when the history reaches past
-the tail it protects, so the twelve-message control's structured arm is its
-raw history, its cassette holds no frame, and nothing is replayed for it. The
-arm runs themselves start the fixture under an empty config tier, so they
-run on the daemon's defaults whatever the shell's own environment holds. A selected
-segment stands for every message it covers at every stage up to render; at
-render the served fragment must carry the message's truth as whole words
-(`carries`): the shell's marker on a raw segment, the message's own words on
-a summarized one. At S0 the structured aged arm shows what the summarizer
-does to the surface: its segments keep the messages' words and nothing else,
-the task is asked in the words of the raw segment whose marker only the shell
-wrote, so a folded truth shares one token with the hint and is refused at the
-match filter, while the truth still raw in the tail is delivered; at S1 the
-folded early truth is older than the window and lost there first. The three
-policies are recorded as `GovernanceArms` over the pair set. Every cassette's
-bytes are charged to the envelope, as are the build fixtures' roots (the
-state root, the config tier, and the cassette directory count as roots),
-processes, and store bytes.
+**Structured arm.** Each pair also runs both arms under the daemon's own
+HistorySummarizer. The arm's daemon is configured to summarize
+(`/history_summarizer/model` and `/history_summarizer/context_limit_tokens`
+in the user config tier the fixture is started under, `Launch::config_home`;
+without that tier the summarizer has no model chain and never fires), and
+the same life is lived: the trigger fires by its own rules on the pressure
+the harness reports (at S0, `force_band` on turn 114 behind the pass and
+again in the emergency band on turn 127, inline), the producer, validator,
+and publication run inside the fixture process, and the fixture's model
+backend stands in for the summarizer provider: it answers a prompt carrying
+`<new_messages>` in the summarizer's `<output>` document, one
+`history_segment` per run of five presented lines whose text is the lines'
+own words. Each world's life is first recorded once (`record`): the fixture's
+backend is written into a cassette of its own under the campaign namespace
+at shutdown, and the backend counters must equal the frames recorded. Every
+arm run then replays that cassette strictly in a fixture with no controlled
+backend, and the segments its daemon published must equal the recording's,
+whole, less the clock they were stamped with; a replay miss would surface as
+a recorded failure and no segments, never as a served answer. The twelve-turn
+control never reaches the pressure the summarizer fires at, so its structured
+arm is as empty as its raw one and its cassette holds no frame. On the
+structured aged arm at S0 the daemon folded the older history five messages
+to a segment (twenty segments) and left the newest in the protected tail: the
+plain task's message sits at the head of its segment and is served whole;
+the falsifier is folded third into the first segment, its segment is
+selected, and the served fragment is cut at the cap before its words, so it
+reaches render with the evidence absent; the positive control is in the
+protected tail and has no unit at all. The three policies are recorded as
+`GovernanceArms` over the pair set. Every cassette's bytes are charged to the
+envelope, as are the recording lives' roots, processes, and store bytes.
 
 Beside the report the campaign publishes a manifest with the same
 write-then-rename, parses it back, and checks its digest. Its identity is
@@ -1381,17 +1407,17 @@ lockfile digest, the rustc version, the fixture binary's digest), its config is
 the profile, its scenario the surface and tasks, its samples the ledger's in
 the order they ran, its result digest the report's bytes, its witness digest
 the pair set, and it carries the frozen family's digest and the recency
-baseline's version and window. Its `construction` is `bulk` and its
-`ingestion` is `direct-database, non-aged`: the arms' history segments are
-written straight into each store, so by the manifest's own rules the aged arm
-is not a replay-built aged world, and the same manifest relabelled `replay`
-is refused as `DirectDatabaseAged`. Every arm of the pruned policy is declared
-in the ledger and ends `unsupported {policy_not_on_surface}`, because
-`message_cleanup` reclaims projection rows and surface 1 reads history
-segments; eighteen samples are accounted for and twelve attempted, in the order the
-arms ran with the never-attempted pruned arms declared last. The paired
-analysis in the report is over the raw arms; the structured outcomes are in
-the ledger and the governance record.
+baseline's version and window. Its `construction` is `replay` and its
+`ingestion` is `transform-route, turn by turn`: every arm was lived through
+the daemon's own transform route in one store incarnation; the same manifest
+relabelled `direct-database, non-aged` is refused as `DirectDatabaseAged`.
+Every arm of the pruned policy is declared in the ledger and ends
+`unsupported {policy_not_on_surface}`, because `message_cleanup` reclaims
+projection rows and surface 1 reads history segments; eighteen samples are
+accounted for and twelve attempted, in the order the arms ran with the
+never-attempted pruned arms declared last. The paired analysis in the report
+is over the raw arms; the structured outcomes are in the ledger and the
+governance record.
 
 **Fixture cassette.** The direct-host fixture's model backend can be
 recorded or replayed: `--cassette-record <file> --cassette-namespace <ns>`
@@ -1411,20 +1437,24 @@ runs the summarizer's own firing under.
 
 What the in-host summarizer path needs, as established: without
 context-pressure numbers the boundary protects the whole history and nothing
-is eligible; with `usage` at 39,000 of 40,000 tokens the pass is in the
-emergency band, the trigger fires `force_band`, and the firing runs before the
-pass settles. The session's meta row is written whole on every commit and is
-bounded at 512 KiB of durable text; at 1,000 short messages the meta is about
-475 KiB before the firing and the fired state's selected identities push it
-past the bound, so the firing fails with `InputLimit` and publishes nothing
-(a 1,600-message session is refused as durable text at the transform itself).
-S0 and S1 sit well under that; a campaign at a larger scale on the structured
-arm would meet it.
+is eligible; the trigger fires `force_band` from 85 percent of the limit
+with the firing spawned behind the pass, and in the emergency band from 95
+percent inline, before the pass settles. The session's meta row is written
+whole on every commit and is bounded at 512 KiB of durable text; at 1,000
+short messages the meta is about 475 KiB before a firing and the fired
+state's selected identities push it past the bound, so the firing fails with
+`InputLimit` and publishes nothing (a 1,600-message session is refused as
+durable text at the transform itself). S0 and S1 sit well under that.
 
-Not composed yet: the aged arm built by `step()` and lifecycle replay through
-ingestion rather than seeded segments, which is what would let the manifest
-say `replay`; the `eval_runner` example still serves the cassette oracle
-only; and the write-then-rename publisher is the test's own, since no shipped
+What the campaign found about the pair compiler on surface 1: its recency
+window counts messages, but surface 1's unit is the segment, so at S0 the
+twenty segments all sit inside a window of 100 and no truth is lost to
+recency there; a recency loss on surface 1 needs more than 500 messages,
+which the meta bound puts near the limit of what one firing can persist.
+The falsification pair's structural verdict is still the compiler's.
+
+Not composed yet: the `eval_runner` example still serves the cassette oracle
+only, and the write-then-rename publisher is the test's own, since no shipped
 publisher exists.
 
 ## Coverage markers

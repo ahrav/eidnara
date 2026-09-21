@@ -425,6 +425,8 @@ mod unix {
         Counters,
         /// The newest native-serving pass's auto-search decision and its fate, as the host recorded it.
         UserHintOutcome,
+        /// Whether a history_summarizer firing is still running for any session.
+        HistorySummarizerLive,
         GracefulShutdown,
     }
 
@@ -451,6 +453,9 @@ mod unix {
             accepted: bool,
         },
         Counters(CounterSnapshot),
+        HistorySummarizer {
+            live: bool,
+        },
         UserHint {
             outcome: Option<daemon::transform::UserHintPass>,
         },
@@ -566,6 +571,12 @@ mod unix {
                             ControlCommand::UserHintOutcome => (
                                 ControlResult::UserHint {
                                     outcome: core.user_hint_outcome_for_test(),
+                                },
+                                false,
+                            ),
+                            ControlCommand::HistorySummarizerLive => (
+                                ControlResult::HistorySummarizer {
+                                    live: core.history_summarizer_live_for_test(),
                                 },
                                 false,
                             ),
@@ -924,12 +935,19 @@ mod unix {
 
         let host_result = host.await?;
         shutdown.cancel();
-        if let Some((recorder, path)) = recording {
-            let file = recorder
+        // A refused cassette is reported after the socket and publication are
+        // cleaned up, so a refusal leaves no stale control socket behind.
+        let cassette_written: Result<(), Box<dyn Error + Send + Sync>> = match recording {
+            Some((recorder, path)) => recorder
                 .file()
-                .map_err(|error| format!("cassette refused: {error:?}"))?;
-            write_then_rename(&path, &serde_json::to_vec_pretty(&file)?)?;
-        }
+                .map_err(|error| format!("cassette refused: {error:?}").into())
+                .and_then(|file| {
+                    let bytes = serde_json::to_vec_pretty(&file)?;
+                    write_then_rename(&path, &bytes)?;
+                    Ok(())
+                }),
+            None => Ok(()),
+        };
         signal_task.abort();
         let _ = signal_task.await;
         // The socket is unlinked while this listener is still bound, so a successor that connects in this window is accepted into the backlog and refuses to start rather than replacing the socket between the inode check and the unlink.
@@ -939,7 +957,7 @@ mod unix {
         unlinked?;
         host_result?;
         ready?;
-        Ok(())
+        cassette_written
     }
 }
 

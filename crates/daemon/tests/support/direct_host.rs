@@ -5,7 +5,7 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::{Arc, Mutex, OnceLock, mpsc};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -341,13 +341,37 @@ impl FixtureProcess {
         assert!(status.success(), "SIGTERM delivery failed");
     }
 
-    pub fn shutdown(mut self) -> CapturedOutput {
+    pub fn shutdown(self) -> CapturedOutput {
+        let (status, output) = self.shutdown_with_status();
+        assert!(
+            status.success(),
+            "fixture exited with {status}:\n{}",
+            output.stderr
+        );
+        output
+    }
+
+    /// Shuts the fixture down and returns how it exited with what it wrote,
+    /// for a caller that expects the fixture to refuse something at exit.
+    pub fn shutdown_with_status(mut self) -> (ExitStatus, CapturedOutput) {
         let response = self.control(9_999, "graceful-shutdown");
         assert_eq!(response["ok"], true);
-        self.wait_for_exit()
+        let status = self.wait_for_exit_status();
+        let output = self.captured_output();
+        (status, output)
     }
 
     pub fn wait_for_exit(&mut self) -> CapturedOutput {
+        let status = self.wait_for_exit_status();
+        assert!(
+            status.success(),
+            "fixture exited with {status}:\n{}",
+            self.stderr.lock().expect("fixture stderr mutex").join("\n")
+        );
+        self.captured_output()
+    }
+
+    fn wait_for_exit_status(&mut self) -> ExitStatus {
         let deadline = Instant::now() + BUDGET;
         let status = loop {
             if let Some(status) = self
@@ -362,8 +386,11 @@ impl FixtureProcess {
             assert!(Instant::now() < deadline, "fixture exceeded exit budget");
             std::thread::sleep(Duration::from_millis(10));
         };
-        assert!(status.success(), "fixture exited with {status}");
         self.child.take();
+        status
+    }
+
+    fn captured_output(&mut self) -> CapturedOutput {
         if let Some(thread) = self.stdout_thread.take() {
             thread.join().expect("stdout reader joins");
         }
