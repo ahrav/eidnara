@@ -1420,7 +1420,9 @@ hiding it.
 HistorySummarizer. The arm's daemon is configured to summarize
 (`/history_summarizer/model` and `/history_summarizer/context_limit_tokens`
 in the user config tier the fixture is started under, `Launch::config_home`;
-without that tier the summarizer has no model chain and never fires), and
+without that tier the summarizer has no model chain and never fires, so the
+structured policy is explicit-config-only evidence about a default-production
+surface, and the raw arm is that surface as shipped), and
 the same life is lived: the trigger fires by its own rules on the pressure
 the harness reports (at S0 four times over the aged life: once on projected
 headroom, then three times in the force band, the last inline in the
