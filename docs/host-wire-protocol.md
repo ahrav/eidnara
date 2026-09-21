@@ -872,10 +872,10 @@ search, not human approval or automatic-context eligibility. Session deletion
 fences publication and removes queued sources; committed memories remain
 project-owned. Lifecycle hooks store sources and return; the drain that runs
 model work continues after them until the harness shuts down. Shutdown closes
-the drain without another daemon call, so a lease held by in-flight work
-expires instead of being released. Pi's status line shows pending or unconfirmed
-capture; OpenCode warns only when a checkpoint or drain fails. Notification
-failure never discards the answer.
+the drain before disconnecting: the batch in flight is cancelled, its lease is
+released with `cancelled`, and no later batch is claimed. Pi's status line
+shows pending or unconfirmed capture; OpenCode warns only when a checkpoint or
+drain fails. Notification failure never discards the answer.
 
 ## 8. Host and handler lifecycle
 

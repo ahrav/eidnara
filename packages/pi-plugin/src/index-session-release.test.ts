@@ -295,7 +295,10 @@ describe("Pi daemon transport across runtime teardown", () => {
         const bodies: Array<{ messages: Array<{ id: string }> }> = [];
         const call = spyOn(HostModuleTransport.prototype, "call").mockImplementation(
             async (input) => {
-                if (input.method !== "memory.capture") return { state: "ready" };
+                // The drain now runs after a refused checkpoint too; a daemon whose store fails
+                // answers both calls that way.
+                if (input.method !== "memory.capture")
+                    return { state: accept ? "ready" : "store_failed" };
                 bodies.push(input.body as { messages: Array<{ id: string }> });
                 return { state: accept ? "accepted" : "store_failed" };
             },
@@ -316,6 +319,57 @@ describe("Pi daemon transport across runtime teardown", () => {
                 ["source-1"],
                 ["source-1"],
             ]);
+        } finally {
+            call.mockRestore();
+        }
+    });
+
+    it("offers the same entries again after a checkpoint the daemon reported disabled", async () => {
+        let enabled = false;
+        const bodies: Array<{ messages: Array<{ id: string }> }> = [];
+        const call = spyOn(HostModuleTransport.prototype, "call").mockImplementation(
+            async (input) => {
+                if (input.method !== "memory.capture") return { state: "ready" };
+                bodies.push(input.body as { messages: Array<{ id: string }> });
+                return { state: enabled ? "accepted" : "disabled" };
+            },
+        );
+        try {
+            const { agentEnd } = await agentEndHandler();
+            const setStatus = mock(() => undefined);
+            const ctx = captureContext({ model: { provider: "openai", id: "test" }, setStatus });
+            await agentEnd({}, ctx);
+            // A disabled daemon wrote nothing; that is not a failure to report.
+            expect(setStatus).not.toHaveBeenCalledWith(
+                "eidnara-capture",
+                "Memory capture: unconfirmed",
+            );
+            enabled = true;
+            await agentEnd({}, ctx);
+            await __test.settleMemoryCapture();
+            expect(bodies.map((body) => body.messages.map((message) => message.id))).toEqual([
+                ["source-1"],
+                ["source-1"],
+            ]);
+        } finally {
+            call.mockRestore();
+        }
+    });
+
+    it("drains after a checkpoint the daemon refused, so a full queue can make progress", async () => {
+        const methods: string[] = [];
+        const call = spyOn(HostModuleTransport.prototype, "call").mockImplementation(
+            async (input) => {
+                methods.push(input.method);
+                return { state: input.method === "memory.capture" ? "queue_full" : "ready" };
+            },
+        );
+        try {
+            const { agentEnd } = await agentEndHandler();
+            const ctx = captureContext({ model: { provider: "openai", id: "test" } });
+            await agentEnd({}, ctx);
+            await __test.settleMemoryCapture();
+            expect(methods).toEqual(["memory.capture", "memory.capture.next"]);
         } finally {
             call.mockRestore();
         }

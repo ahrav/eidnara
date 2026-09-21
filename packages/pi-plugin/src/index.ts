@@ -676,28 +676,31 @@ async function startPiEidnaraRuntime(pi: ExtensionAPI): Promise<boolean> {
             warn("memory capture drain not scheduled:", error);
         }
     }
-    /** Resolves after bounded daemon calls; returns the scope once the branch is stored. */
+    /** Resolves after bounded daemon calls. Returns the scope whenever capture applies, even when
+     * the daemon refused the checkpoint: draining is what frees a full queue. */
     async function checkpointMemory(
         ctx: ExtensionContext,
     ): Promise<MemoryCaptureScope | undefined> {
+        let scope: MemoryCaptureScope | undefined;
         try {
-            const scope = captureScope(ctx);
+            scope = captureScope(ctx);
             if (!scope) return undefined;
             const branch = ctx.sessionManager.getBranch();
-            await captureCheckpoint({
+            const accepted = await captureCheckpoint({
                 ...scope,
                 messages: piCaptureMessages(entriesAfterCheckpoint(scope.sessionId, branch), {
                     notBefore: Date.now() - CAPTURE_MAX_AGE_MS,
                 }),
             });
+            // A disabled daemon wrote nothing; those entries stay ahead of the stored leaf.
             const leaf = branch.at(-1);
-            if (leaf) checkpointedLeafBySession.set(scope.sessionId, leaf.id);
-            return scope;
+            if (accepted === "accepted" && leaf)
+                checkpointedLeafBySession.set(scope.sessionId, leaf.id);
         } catch (error) {
             warn("memory capture checkpoint pending:", error);
             setCaptureStatus(ctx, "Memory capture: unconfirmed");
-            return undefined;
         }
+        return scope;
     }
     async function checkpointAndDrainMemory(ctx: ExtensionContext): Promise<void> {
         const scope = await checkpointMemory(ctx);
