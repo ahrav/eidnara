@@ -1051,6 +1051,10 @@ Campaign (`crates/eval-core/tests/campaign.rs`):
   lineage entry that is not a run ID or is upper-case, and a repeated lineage
   entry each refuse from `validate` and `rates`; a lineage of one run ID
   validates; `attempted` counts the four attempted families.
+- `an_envelope_skip_must_name_a_breach`: a sample skipped `envelope_exceeded`
+  with a reading at or under its bound refuses from `validate` and `rates`
+  (`EnvelopeNotExceeded`); one past the bound validates; `is_breach` is false
+  at the bound.
 - `the_envelope_records_the_peak_that_crossed_it_and_refuses_from_that_reading`
   (`xc-campaign-resource-envelope-declared-and-enforced`, the in-memory
   primitive): peaks never fall; the reading that crosses a bound is refused
@@ -1063,31 +1067,53 @@ Report (`crates/eval-core/tests/report.rs`):
 
 - `a_report_carries_the_claim_boundary_verbatim_and_its_run_gates`
   (`xc-claim-boundary-excludes-scheduler-determinism`): a report built from
-  `analyze` over 320 pairs and 646 samples carries the four exclusions
-  verbatim, the derived `generated_phase1` class, two established claims, and
-  `default-production` for surface 1; it round-trips; the four run gates read
-  one-in-646 rates against one-percent ceilings and the arm asymmetry against
-  the family's bound; a tighter ceiling fails the indeterminate gate alone; a
-  ledger nobody attempted has no gates; every surface's reachability is
-  pinned.
+  `analyze` over 320 pairs and 646 samples under an approved profile carries
+  the four exclusions verbatim, the derived `generated_phase1` class, two
+  established claims, and `default-production` for surface 1; it round-trips;
+  the indeterminate and censoring gates read one in 642 attempted and the
+  refusal gate one in 646 declared, each against a one-percent ceiling, and
+  the arm asymmetry against the family's bound; a tighter ceiling fails the
+  indeterminate gate alone; a ledger nobody attempted has no gates; every
+  surface's reachability is pinned, the query route and packing as
+  `test-only`.
+- `run_gates_are_shares_of_attempted_samples_and_padding_does_not_move_them`:
+  twenty thousand disabled samples appended to the ledger leave the
+  indeterminate and censoring statistics at one in 642 and move only the
+  refusal share.
 - `a_suppression_removes_the_gates_and_the_claims_and_keeps_the_accounting`:
-  each of the five suppressions maps to its stop condition or none,
-  serializes with empty claims and every sample, rate, and envelope reading
-  intact, and round-trips; a suppressed report claiming anything and an open
-  one claiming nothing refuse; a suppressed report still validates its
-  family; gates beside a suppression have no wire form.
+  each of the five suppressions, set to what the report's own family, arm
+  rates, or envelope derive, maps to its stop condition or none, serializes
+  with empty claims and every sample, rate, and envelope reading intact, and
+  round-trips; a suppressed report claiming anything and an open one claiming
+  nothing refuse; a suppressed report still validates its family; gates
+  beside a suppression have no wire form.
 - `a_report_refuses_missing_blocks_forbidden_claims_and_what_it_did_not_derive`
   (`mtr-generated-world-claims-phase1-only`): every block is required and an
   extra one refuses; the five claim blocks are required; four excluded claims
   have no wire form; an extra key on a terminal is caught on the way back
-  out; another schema, an upper-case run ID, a malformed profile digest, a
+  out; another schema, an upper-case run ID, a profile digest that is not the
+  carried profile's, an unapproved profile, a ceiling relaxed after approval,
+  a ceiling over one, a profile whose margins are not the family's, a
   dropped, reworded, or reordered exclusion, a stored `transfer` over a
   generated world or with no anchor set, rates that do not follow from the
   samples, a dropped sample, an analysis read under another family, arm rates
-  that disagree with the analysis, more pairs than attempted samples, a gate
-  marked passed over a failing rate, an edited gate statistic, and peaks over
-  bounds in an open report each refuse from `serialize` and `parse_report`; a
-  run stopped by its envelope publishes its peaks as the suppression.
+  that disagree with the analysis, 320 pairs behind 639 attempted samples, a
+  gate marked passed over a failing rate, an edited gate statistic, and peaks
+  over bounds in an open report each refuse from `serialize` and
+  `parse_report`; a run stopped by its envelope publishes its peaks as the
+  suppression.
+- `a_report_refuses_what_its_own_evidence_refutes`: a paired gate statistic
+  or verdict edited beside its counts, an open report under a family whose
+  pilot blocks or whose arm rates are asymmetric over the bound, an envelope
+  suppression whose reading is no breach or that the peaks do not show, an
+  asymmetry or effective-N suppression the arm rates or pilot do not derive,
+  a tap-rejected suppression with peaks over the bounds, a baseline contrast
+  on another surface, under another version, off the profile's bound,
+  vacuous, or without a positive control, and a sample skipped for an
+  envelope bound the run did not hold or a reading the peaks never reached
+  each refuse by name from `serialize` and `parse_report`; a run its envelope
+  stopped, skipping the rest under the crossing reading and naming it as the
+  suppression, round-trips.
 
 ## Gaps recorded here
 

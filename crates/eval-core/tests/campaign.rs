@@ -667,3 +667,35 @@ fn the_envelope_records_the_peak_that_crossed_it_and_refuses_from_that_reading()
         json!({"resource": "temp_roots", "bound": 4, "observed": 5})
     );
 }
+
+#[test]
+fn an_envelope_skip_must_name_a_breach() {
+    let mut ledger = ledger(&[Terminal::Pass, Terminal::Pass]);
+    ledger.samples.get_mut("s1").unwrap().terminal =
+        Terminal::Skipped(SkipReason::EnvelopeExceeded(EnvelopeExceeded {
+            resource: Resource::StoreBytes,
+            bound: 100,
+            observed: 1,
+        }));
+    let expected = SampleError::EnvelopeNotExceeded {
+        sample: "s1".into(),
+    };
+    assert_eq!(ledger.validate(), Err(expected.clone()));
+    assert_eq!(ledger.rates(), Err(expected));
+    ledger.samples.get_mut("s1").unwrap().terminal =
+        Terminal::Skipped(SkipReason::EnvelopeExceeded(EnvelopeExceeded {
+            resource: Resource::StoreBytes,
+            bound: 100,
+            observed: 101,
+        }));
+    ledger.validate().unwrap();
+    assert!(
+        !EnvelopeExceeded {
+            resource: Resource::Processes,
+            bound: 6,
+            observed: 6,
+        }
+        .is_breach(),
+        "at the bound is within it"
+    );
+}

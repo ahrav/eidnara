@@ -4,42 +4,44 @@
 //! its samples, its profile, or its exclusions forbid.
 
 use std::collections::BTreeMap;
+use std::num::NonZeroU32;
 
 use context_core::canonical_json::is_lower_hex;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::campaign::{
-    Ceilings, Envelope, EnvelopeExceeded, SampleError, SampleLedger, SkipReason, Terminal,
-    TerminalRates,
+    Ceilings, Envelope, EnvelopeExceeded, ProfileError, RunProfile, SampleError, SampleLedger,
+    SkipReason, Terminal, TerminalRates,
 };
 use crate::census::{EvaluatedSurface, Reachability};
 use crate::claim::{AnchorSet, ClaimDerivation, WorldProvenance};
 use crate::injection::InjectionScore;
 use crate::manifest::{ArmRates, ClaimBoundary};
-use crate::pairs::{BaselineContrast, BaselineFailure, StopCondition};
+use crate::pairs::{
+    BaselineContrast, BaselineFailure, RECENCY_BASELINE_VERSION, StopCondition, recency_bound,
+};
 use crate::statistics::{
-    AnalysisFamily, BlockedReason, GateVerdict, PairedReport, Ratio, StatisticsError,
+    AnalysisFamily, BlockedReason, GateVerdict, Gates, PairedReport, Ratio, StatisticsError,
     arm_miss_asymmetry,
 };
 
 pub const SUITE_B_REPORT_SCHEMA: &str = "eval-suite-b-report/v1";
 
-/// Which evidence a surface's results are: surfaces 1 and 3 are shipped
-/// defaults; surface 2, the query route, and packing are activated
-/// components, evaluated only with an installed enabling object.
+/// The query route and the packer carry the label `ChainStage::REACHABILITY`
+/// gives them: no production caller.
 pub fn reachability_of(surface: EvaluatedSurface) -> Reachability {
     match surface {
         EvaluatedSurface::Surface1 | EvaluatedSurface::Surface3 => Reachability::DefaultProduction,
-        EvaluatedSurface::Surface2 | EvaluatedSurface::QueryRoute | EvaluatedSurface::Packing => {
-            Reachability::ExplicitConfigOnly
-        }
+        EvaluatedSurface::Surface2 => Reachability::ExplicitConfigOnly,
+        EvaluatedSurface::QueryRoute | EvaluatedSurface::Packing => Reachability::TestOnly,
     }
 }
 
-/// The run-level gates beside the three paired gates: each a rate held under
-/// the profile's ceiling or the family's bound, `passed` when the statistic
-/// is at most the bound.
+/// The run-level gates beside the three paired gates, `passed` when the
+/// statistic is at most the bound. The indeterminate and censoring statistics
+/// are shares of the attempted samples, so a never-attempted sample cannot
+/// dilute them; the refusal statistic is a share of every declared sample.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CampaignGates {
@@ -58,34 +60,38 @@ impl CampaignGates {
         family: &AnalysisFamily,
         arm_rates: &BTreeMap<String, ArmRates>,
     ) -> Result<Self, ReportError> {
-        if samples.attempted() == 0 {
+        samples.validate().map_err(ReportError::Samples)?;
+        let attempted = samples.attempted();
+        if attempted == 0 {
             return Err(ReportError::NoAttemptedSamples);
         }
-        let rates = samples.rates().map_err(ReportError::Samples)?;
+        let share = |hits: usize, over: usize| {
+            let to_i128 = |n: usize| {
+                i128::try_from(n).map_err(|_| ReportError::Samples(SampleError::Overflow))
+            };
+            Ratio::try_new(to_i128(hits)?, to_i128(over)?).map_err(ReportError::Statistics)
+        };
         let gate = |statistic: Ratio, bound: Ratio| GateVerdict {
             statistic,
             bound,
             passed: statistic <= bound,
         };
-        let refused = samples
-            .samples
-            .values()
-            .filter(|s| matches!(s.terminal, Terminal::Skipped(SkipReason::RedactionRefused)))
-            .count();
-        let refusal_rate = Ratio::try_new(
-            i128::try_from(refused).map_err(|_| ReportError::Samples(SampleError::Overflow))?,
-            i128::from(rates.samples),
-        )
-        .map_err(ReportError::Statistics)?;
+        let indeterminate = samples.count(|t| matches!(t, Terminal::Indeterminate));
+        let censored = samples.count(|t| matches!(t, Terminal::Censored { .. }));
+        let refused =
+            samples.count(|t| matches!(t, Terminal::Skipped(SkipReason::RedactionRefused)));
         let bound = family
             .profile
             .rates()
             .map_err(ReportError::Statistics)?
             .miss_asymmetry_bound;
         Ok(Self {
-            indeterminate: gate(rates.indeterminate, ceilings.indeterminate),
-            censoring: gate(rates.censored, ceilings.censoring),
-            redaction_refusals: gate(refusal_rate, ceilings.redaction_refusals),
+            indeterminate: gate(share(indeterminate, attempted)?, ceilings.indeterminate),
+            censoring: gate(share(censored, attempted)?, ceilings.censoring),
+            redaction_refusals: gate(
+                share(refused, samples.samples.len())?,
+                ceilings.redaction_refusals,
+            ),
             arm_miss_asymmetry: gate(
                 arm_miss_asymmetry(arm_rates).map_err(ReportError::Statistics)?,
                 bound,
@@ -168,11 +174,11 @@ pub enum ReportOutcome {
 pub struct SuiteBReport {
     pub schema: String,
     pub eval_run_id: String,
-    pub profile_name: String,
-    /// `RunProfile::digest` of the approved profile, so the ceilings below
-    /// are the ones it approved.
+    /// The approved profile the run was gated on, verbatim: the ceilings,
+    /// margins, and baseline bounds are read from it, never restated.
+    pub profile: RunProfile,
+    /// `RunProfile::digest` of `profile`, the identity the manifest names.
     pub profile_digest: String,
-    pub ceilings: Ceilings,
     pub surface: EvaluatedSurface,
     pub family: AnalysisFamily,
     pub claims: Claims,
@@ -193,6 +199,9 @@ pub enum ReportError {
     MalformedDigest {
         field: &'static str,
     },
+    ProfileDigestMismatch,
+    /// The profile's margins are not the family's.
+    ProfileDisagreesWithFamily,
     ClaimBoundaryMismatch,
     /// An open report claiming nothing, or a suppressed one claiming
     /// anything.
@@ -203,21 +212,41 @@ pub enum ReportError {
         derived: ClaimDerivation,
     },
     FamilyDigestMismatch,
-    /// The stored gates are not the ones the ceilings, family, samples, and
-    /// arm rates compute.
+    /// An open report whose family or arm rates block the analysis.
+    OpenWhileBlocked(BlockedReason),
+    /// The stored paired gates are not the ones the counts and margins
+    /// compute.
+    PairedGatesNotDerived,
+    /// The stored run gates are not the ones the ceilings, family, samples,
+    /// and arm rates compute.
     GatesNotDerived,
     NoAttemptedSamples,
-    /// More pairs in the analysis than samples were attempted.
+    /// More pairs in the analysis than the attempted samples can back at one
+    /// sample per arm.
     PairsExceedSamples {
         pairs: u64,
         attempted: u64,
     },
     ArmRatesDisagree,
     RatesDisagree,
-    /// An open report whose peaks are over its bounds.
+    /// A baseline contrast field this surface and profile do not produce, or
+    /// a zero count where a contrast was exercised.
+    BaselineDisagrees {
+        field: &'static str,
+    },
+    /// A suppression naming a block the report's own family, arm rates, or
+    /// envelope do not show.
+    SuppressionNotDerived,
+    /// Peaks over the bounds without an envelope suppression naming them.
     EnvelopeNotHonoured(EnvelopeExceeded),
+    /// A sample skipped for an envelope reading the run's envelope does not
+    /// show.
+    SampleEnvelopeDisagrees {
+        sample: String,
+    },
     /// The parsed value drops a field the input carried.
     Lossy,
+    Profile(ProfileError),
     Samples(SampleError),
     Statistics(StatisticsError),
 }
@@ -235,15 +264,20 @@ impl SuiteBReport {
                 found: self.schema.clone(),
             });
         }
-        for (field, digest) in [
-            ("eval_run_id", &self.eval_run_id),
-            ("profile_digest", &self.profile_digest),
-        ] {
-            if !is_lower_hex(digest, 64) {
-                return Err(ReportError::MalformedDigest { field });
-            }
+        if !is_lower_hex(&self.eval_run_id, 64) {
+            return Err(ReportError::MalformedDigest {
+                field: "eval_run_id",
+            });
         }
-        self.family.validate().map_err(ReportError::Statistics)
+        self.profile.approved().map_err(ReportError::Profile)?;
+        if self.profile.digest().map_err(ReportError::Profile)? != self.profile_digest {
+            return Err(ReportError::ProfileDigestMismatch);
+        }
+        self.family.validate().map_err(ReportError::Statistics)?;
+        if self.profile.statistics != self.family.profile {
+            return Err(ReportError::ProfileDisagreesWithFamily);
+        }
+        Ok(())
     }
 
     fn check_claims(&self) -> Result<(), ReportError> {
@@ -266,14 +300,92 @@ impl SuiteBReport {
         Ok(())
     }
 
-    fn check_accounting(&self) -> Result<(), ReportError> {
-        let rates = self.samples.rates().map_err(ReportError::Samples)?;
-        if rates != self.rates {
-            return Err(ReportError::RatesDisagree);
+    /// The block `analyze` returns for this family and these arm rates, in
+    /// its order: the pilot's block, then the arm-miss asymmetry.
+    fn derived_block(&self) -> Result<Option<BlockedReason>, ReportError> {
+        if let Some(blocked) = self.family.is_blocked() {
+            return Ok(Some(blocked));
         }
-        let ReportOutcome::Open { gated } = &self.outcome else {
-            return Ok(());
-        };
+        let bound = self
+            .family
+            .profile
+            .rates()
+            .map_err(ReportError::Statistics)?
+            .miss_asymmetry_bound;
+        let asymmetry = arm_miss_asymmetry(&self.arm_rates).map_err(ReportError::Statistics)?;
+        Ok((asymmetry > bound).then_some(BlockedReason::ArmMissAsymmetry { asymmetry, bound }))
+    }
+
+    fn check_baseline(&self, baseline: &BaselineContrast) -> Result<(), ReportError> {
+        let disagrees = |field| Err(ReportError::BaselineDisagrees { field });
+        if baseline.baseline_version != RECENCY_BASELINE_VERSION {
+            return disagrees("baseline_version");
+        }
+        if baseline.surface != self.surface {
+            return disagrees("surface");
+        }
+        let bound = self
+            .profile
+            .baseline_bounds
+            .get(&self.surface)
+            .copied()
+            .and_then(NonZeroU32::new)
+            .and_then(|declared| recency_bound(self.surface, Some(declared)).ok());
+        if bound != Some(baseline.recency_bound) {
+            return disagrees("recency_bound");
+        }
+        for (field, count) in [
+            ("delivered_ids", baseline.delivered_ids),
+            (
+                "falsification_pairs_failed",
+                baseline.falsification_pairs_failed,
+            ),
+            (
+                "positive_controls_passed",
+                baseline.positive_controls_passed,
+            ),
+        ] {
+            if count == 0 {
+                return disagrees(field);
+            }
+        }
+        Ok(())
+    }
+
+    /// A sample skipped for an envelope reading names this run's bound for
+    /// that resource and a reading the peaks reached.
+    fn check_sample_envelopes(&self) -> Result<(), ReportError> {
+        for (key, record) in &self.samples.samples {
+            let Terminal::Skipped(SkipReason::EnvelopeExceeded(exceeded)) = record.terminal else {
+                continue;
+            };
+            let bound = exceeded.resource.of(&self.envelope.bounds);
+            let peak = exceeded.resource.of(&self.envelope.peaks);
+            if exceeded.bound != bound || exceeded.observed > peak {
+                return Err(ReportError::SampleEnvelopeDisagrees {
+                    sample: key.clone(),
+                });
+            }
+        }
+        Ok(())
+    }
+
+    fn check_suppression(&self, by: &Suppression) -> Result<(), ReportError> {
+        match (by, self.envelope.check()) {
+            (Suppression::Envelope { exceeded }, Err(shown)) if *exceeded == shown => {}
+            (Suppression::Envelope { .. }, _) => return Err(ReportError::SuppressionNotDerived),
+            (_, Err(exceeded)) => return Err(ReportError::EnvelopeNotHonoured(exceeded)),
+            (_, Ok(())) => {}
+        }
+        if let Suppression::Analysis { reason } = by
+            && self.derived_block()?.as_ref() != Some(reason)
+        {
+            return Err(ReportError::SuppressionNotDerived);
+        }
+        Ok(())
+    }
+
+    fn check_gated(&self, gated: &GatedBlocks) -> Result<(), ReportError> {
         let digest = self.family.digest().map_err(ReportError::Statistics)?;
         if gated.analysis.analysis_family_digest != digest {
             return Err(ReportError::FamilyDigestMismatch);
@@ -281,21 +393,45 @@ impl SuiteBReport {
         if gated.analysis.arm_rates != self.arm_rates {
             return Err(ReportError::ArmRatesDisagree);
         }
-        let attempted = u64::try_from(self.samples.attempted()).expect("bounded");
-        if gated.analysis.counts.n > attempted {
-            return Err(ReportError::PairsExceedSamples {
-                pairs: gated.analysis.counts.n,
-                attempted,
-            });
+        if let Some(blocked) = self.derived_block()? {
+            return Err(ReportError::OpenWhileBlocked(blocked));
         }
-        let gates =
-            CampaignGates::of(&self.samples, &self.ceilings, &self.family, &self.arm_rates)?;
+        let margins = self
+            .family
+            .profile
+            .rates()
+            .map_err(ReportError::Statistics)?;
+        let paired =
+            Gates::of(&gated.analysis.counts, &margins).map_err(ReportError::Statistics)?;
+        if paired != gated.analysis.gates {
+            return Err(ReportError::PairedGatesNotDerived);
+        }
+        let attempted = u64::try_from(self.samples.attempted()).expect("bounded");
+        let pairs = gated.analysis.counts.n;
+        if pairs.checked_mul(2).is_none_or(|arms| arms > attempted) {
+            return Err(ReportError::PairsExceedSamples { pairs, attempted });
+        }
+        let ceilings = self.profile.ceilings().map_err(ReportError::Profile)?;
+        let gates = CampaignGates::of(&self.samples, &ceilings, &self.family, &self.arm_rates)?;
         if gates != gated.gates {
             return Err(ReportError::GatesNotDerived);
         }
+        self.check_baseline(&gated.baseline)?;
         self.envelope
             .check()
             .map_err(ReportError::EnvelopeNotHonoured)
+    }
+
+    fn check_accounting(&self) -> Result<(), ReportError> {
+        let rates = self.samples.rates().map_err(ReportError::Samples)?;
+        if rates != self.rates {
+            return Err(ReportError::RatesDisagree);
+        }
+        self.check_sample_envelopes()?;
+        match &self.outcome {
+            ReportOutcome::Open { gated } => self.check_gated(gated),
+            ReportOutcome::Suppressed { by } => self.check_suppression(by),
+        }
     }
 
     pub fn validate(&self) -> Result<(), ReportError> {
