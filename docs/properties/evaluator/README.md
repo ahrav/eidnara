@@ -834,7 +834,9 @@ rust-only tier; `rid-ts-cassette-never-falls-through-to-scripted`,
   latched terminal, `turn` as the lookup count, nearest as the last entry once
   consumed): record mode forwards headers and body text and the produced frames
   (including an `abortAfterFrames` truncation) before serving; a recording
-  refusal is a 400 naming only the kind with nothing recorded; replay serves
+  refusal is a 400 naming only the kind with nothing recorded; a script bug (no
+  `usage` or `error`, or an error status `Response` cannot serve) is a 500
+  `mock_error` with nothing recorded; replay serves
   recorded SSE and provider-error frames byte for byte, answers a miss with a
   400 `cassette_miss` and repeats it after, never enters the scripted block,
   hands a malformed body to the oracle as text, and turns any oracle failure,

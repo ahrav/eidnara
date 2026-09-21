@@ -304,6 +304,14 @@ export class MockProvider {
                     { status: 500, headers: JSON_HEADERS },
                 );
             }
+            if (scripted.error && !isServableStatus(scripted.error.status)) {
+                return new Response(
+                    errorBody("mock_error", {
+                        message: "MockResponse.error.status must be an integer from 200 to 599",
+                    }),
+                    { status: 500, headers: JSON_HEADERS },
+                );
+            }
 
             // Admission precedes the scripted delay, so equal-digest entries land in capture order
             // and replay hands the first-arrived request what the first-arrived request got.
@@ -379,6 +387,11 @@ type Producible =
 
 function isProducible(scripted: MockResponse): scripted is Producible {
     return scripted.error !== undefined || scripted.usage !== undefined;
+}
+
+/** The status range `Response` accepts; anything else would throw in `serve` after admission. */
+function isServableStatus(status: number): boolean {
+    return Number.isInteger(status) && status >= 200 && status <= 599;
 }
 
 /** Builds the exact response the script describes, as status, content type, and frames. */

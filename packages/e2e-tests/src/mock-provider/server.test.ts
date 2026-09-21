@@ -221,6 +221,17 @@ describe("MockProvider cassette mode", () => {
             type: "error",
             error: { type: "mock_error", message: "MockResponse requires `usage` or `error`" },
         });
+        // An error status `Response` cannot serve is the same kind of script bug.
+        mock.setDefault({ error: { status: 600, type: "overloaded_error", message: "m" } });
+        const unservable = await post(baseURL, request);
+        expect(unservable.status).toBe(500);
+        expect(await unservable.json()).toEqual({
+            type: "error",
+            error: {
+                type: "mock_error",
+                message: "MockResponse.error.status must be an integer from 200 to 599",
+            },
+        });
         expect(oracle.recorded).toHaveLength(0);
         expect(mock.cassetteRefusalLog()).toEqual([]);
     });
