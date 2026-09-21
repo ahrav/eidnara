@@ -157,15 +157,17 @@ fn packed_verdict(ledger: &ChainLedger, occurrence: &str) -> StageVerdict<ChainS
     )
 }
 
-/// The fused entries as optional packing requests, in fused order, with the
-/// revision the projection carries for each.
+/// The response entries as optional packing requests, in response order, with
+/// the revision the projection carries for each. Packing is the filter after
+/// selection, so it receives what the capped response carries, not the fused
+/// set the caps cut.
 fn requests(fixture: &Fixture, run: &Run) -> Vec<retrieval::packing::RequiredRequest> {
     let revisions: BTreeMap<String, i64> = fixture
         .live_candidates()
         .into_iter()
         .map(|candidate| (candidate.occurrence_id, candidate.candidate.source_revision))
         .collect();
-    fused_ids(run)
+    entry_ids(&outcome(run).body)
         .iter()
         .map(|id| request(id, revisions[id]))
         .collect()
@@ -881,6 +883,29 @@ fn run(name: &str) {
         coverage.fired().contains(marker.name),
         "{name} records its marker"
     );
+}
+
+#[test]
+fn packing_requests_are_the_entries_selection_kept() {
+    block_on(async {
+        let fixture = Fixture::build().await;
+        let mut bounded = limits();
+        bounded.result_rows = NonZeroUsize::MIN;
+        let run = plain(&fixture, &bounded, QUERY);
+        let outcome = outcome(&run);
+        assert!(outcome.truncated);
+        assert!(fused_ids(&run).len() > 1, "the cap cut the fused set");
+        let requested: Vec<String> = requests(&fixture, &run)
+            .iter()
+            .map(|request| request.occurrence.to_string())
+            .collect();
+        assert_eq!(
+            requested,
+            entry_ids(&outcome.body),
+            "packing receives only what selection kept"
+        );
+        fixture.daemon.shutdown().await;
+    });
 }
 
 #[test]
