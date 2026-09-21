@@ -6,9 +6,9 @@ use std::collections::BTreeSet;
 use std::num::NonZeroU32;
 
 use eval_core::{
-    ArmKind, BaselineFailure, BaselineVerdict, CausalEdge, Coverage, Destination, EvaluatedSurface,
-    EventId, EventLog, LogError, MAX_VALID_TIME_MS, Mode, NATURAL_FRESH_ENTITY_TAG,
-    PAIRING_POLICY_VERSION, Pair, PairError, PairSet, PairSetInput, Query,
+    ArmKind, Baseline, BaselineFailure, BaselineVerdict, CausalEdge, Coverage, Destination,
+    EvaluatedSurface, EventId, EventLog, LogError, MAX_VALID_TIME_MS, Mode,
+    NATURAL_FRESH_ENTITY_TAG, PAIRING_POLICY_VERSION, PairError, PairSet, PairSetInput, Query,
     RECENCY_BASELINE_VERSION, RepositorySpec, Sensitivity, ServedClass, SessionSpec, StopCondition,
     Suite, Task, TaskRole, Verdict, Visibility, WorldConfig, check_recency_baseline,
     compile_pair_set, recency_bound, reduce, serialize_spec,
@@ -141,11 +141,6 @@ fn compile(
 
 fn ids(log: &EventLog) -> Vec<&str> {
     log.events.iter().map(|e| e.id.0.as_str()).collect()
-}
-
-/// The versioned baseline: the set's stored window, whichever pair is asked.
-fn versioned(set: &PairSet) -> impl Fn(&Pair) -> Vec<EventId> + '_ {
-    move |_| set.recency_window.clone()
 }
 
 #[test]
@@ -285,7 +280,7 @@ fn the_window_breaks_equal_times_by_linearization_order() {
         vec![id("session:session-0:6"), id("repository:repository-0:8")]
     );
     assert!(matches!(
-        check_recency_baseline(&set, &fixture(), versioned(&set)).unwrap(),
+        check_recency_baseline(&set, &fixture(), Baseline::Versioned).unwrap(),
         BaselineVerdict::Established { .. }
     ));
 }
@@ -303,7 +298,7 @@ fn the_recency_baseline_misses_every_falsifier_or_blocks_suite_b() {
         .record("wm_baseline_ran_on_falsification_pair")
         .unwrap();
     let BaselineVerdict::Established { contrast } =
-        check_recency_baseline(&set, &fixture(), versioned(&set)).unwrap()
+        check_recency_baseline(&set, &fixture(), Baseline::Versioned).unwrap()
     else {
         panic!("contrast established");
     };
@@ -323,7 +318,7 @@ fn the_recency_baseline_misses_every_falsifier_or_blocks_suite_b() {
     let short = compile(EvaluatedSurface::Surface1, None, &tasks()).unwrap();
     assert_eq!(short.recency_bound, 100);
     assert_eq!(
-        check_recency_baseline(&short, &fixture(), versioned(&short)).unwrap(),
+        check_recency_baseline(&short, &fixture(), Baseline::Versioned).unwrap(),
         BaselineVerdict::Blocked {
             condition: StopCondition::B,
             failure: BaselineFailure::DeliveredFalsifier {
@@ -360,7 +355,7 @@ fn the_recency_baseline_delivers_a_positive_control_or_is_vacuous() {
         .record("wm_baseline_ran_on_positive_control_pair")
         .unwrap();
     assert!(matches!(
-        check_recency_baseline(&set, &fixture(), versioned(&set)).unwrap(),
+        check_recency_baseline(&set, &fixture(), Baseline::Versioned).unwrap(),
         BaselineVerdict::Established { .. }
     ));
 
@@ -368,7 +363,7 @@ fn the_recency_baseline_delivers_a_positive_control_or_is_vacuous() {
     // by the versioned baseline itself, from compiler output alone.
     let narrow = compile(EvaluatedSurface::QueryRoute, k(1), &tasks()).unwrap();
     assert!(matches!(
-        check_recency_baseline(&narrow, &fixture(), versioned(&narrow)).unwrap(),
+        check_recency_baseline(&narrow, &fixture(), Baseline::Versioned).unwrap(),
         BaselineVerdict::Established { .. }
     ));
     let mut tasks = tasks();
@@ -379,7 +374,7 @@ fn the_recency_baseline_delivers_a_positive_control_or_is_vacuous() {
     );
     let missed = compile(EvaluatedSurface::QueryRoute, k(1), &tasks).unwrap();
     assert_eq!(
-        check_recency_baseline(&missed, &fixture(), versioned(&missed)).unwrap(),
+        check_recency_baseline(&missed, &fixture(), Baseline::Versioned).unwrap(),
         BaselineVerdict::Blocked {
             condition: StopCondition::B,
             failure: BaselineFailure::MissedPositiveControl {
@@ -391,7 +386,7 @@ fn the_recency_baseline_delivers_a_positive_control_or_is_vacuous() {
     // The negative control: an always-empty baseline misses every falsifier
     // for free, and both classes empty is a refusal, never a pass.
     assert_eq!(
-        check_recency_baseline(&set, &fixture(), |_| vec![]).unwrap(),
+        check_recency_baseline(&set, &fixture(), Baseline::AlwaysEmpty).unwrap(),
         BaselineVerdict::Blocked {
             condition: StopCondition::B,
             failure: BaselineFailure::Vacuous,
@@ -399,7 +394,7 @@ fn the_recency_baseline_delivers_a_positive_control_or_is_vacuous() {
     );
     // Vacuity is judged before the falsifiers, so an empty baseline never
     // reads as "missed positive control" either.
-    let verdict = check_recency_baseline(&missed, &fixture(), |_| vec![]).unwrap();
+    let verdict = check_recency_baseline(&missed, &fixture(), Baseline::AlwaysEmpty).unwrap();
     assert_eq!(
         serde_json::to_value(&verdict).unwrap(),
         json!({"kind": "blocked", "condition": "b", "failure": {"kind": "vacuous"}})
@@ -464,7 +459,7 @@ fn a_long_aged_history_pushes_the_falsifier_out_of_the_surface_1_window() {
     .unwrap();
     assert_eq!(set.recency_window.len(), 100);
     let BaselineVerdict::Established { contrast } =
-        check_recency_baseline(&set, &fixture(), versioned(&set)).unwrap()
+        check_recency_baseline(&set, &fixture(), Baseline::Versioned).unwrap()
     else {
         panic!("the epoch commit is outside a hundred more recent units");
     };
@@ -778,6 +773,7 @@ fn pair_validation_refuses_what_would_make_the_controls_vacuous() {
                     from: fresh.events[0].id.clone(),
                     to: id("session:session-9:0"),
                 });
+                dangling.causal_edges.sort();
                 compile_with(EvaluatedSurface::QueryRoute, k(3), &aged, &dangling, &base)
             }),
             PairError::Log(LogError::DanglingEdge {
@@ -786,6 +782,35 @@ fn pair_validation_refuses_what_would_make_the_controls_vacuous() {
                     to: id("session:session-9:0"),
                 },
             }),
+        ),
+        (
+            "a natural-fresh history under another schema",
+            Box::new(|| {
+                let stale = EventLog {
+                    schema: "eval-event/v0".to_string(),
+                    ..fresh.clone()
+                };
+                compile_with(EvaluatedSurface::QueryRoute, k(3), &aged, &stale, &base)
+            }),
+            PairError::Log(LogError::SchemaMismatch {
+                field: "schema",
+                found: "eval-event/v0".to_string(),
+            }),
+        ),
+        (
+            "a shuffled slice of the aged history posing as natural-fresh",
+            Box::new(|| {
+                // Normalization would sort it back into the copy the
+                // independence check refuses, so it is validated as supplied.
+                let mut shuffled = EventLog {
+                    events: aged.events[6..11].to_vec(),
+                    causal_edges: vec![],
+                    ..aged.clone()
+                };
+                shuffled.events.reverse();
+                compile_with(EvaluatedSurface::QueryRoute, k(3), &aged, &shuffled, &base)
+            }),
+            PairError::Log(LogError::NotLinearized { position: 1 }),
         ),
         (
             "a control that narrows the scope to its own entity",
@@ -847,6 +872,20 @@ fn a_set_read_back_must_be_one_the_compiler_could_have_produced() {
             Box::new(|s| s.recency_window.push(id("repository:repository-0:8"))),
             PairError::Tampered {
                 field: "recency_window",
+            },
+        ),
+        (
+            "the widened query's scope cleared",
+            Box::new(|s| s.fresh_query.scope.clear()),
+            PairError::Tampered {
+                field: "fresh_query",
+            },
+        ),
+        (
+            "the widened query's cut moved",
+            Box::new(|s| s.fresh_query.valid_time_ms = EPOCH_MS),
+            PairError::Tampered {
+                field: "fresh_query",
             },
         ),
         (
@@ -934,7 +973,7 @@ fn a_set_read_back_must_be_one_the_compiler_could_have_produced() {
             "{name}"
         );
         assert_eq!(
-            check_recency_baseline(&tampered, &fixture(), versioned(&tampered)),
+            check_recency_baseline(&tampered, &fixture(), Baseline::Versioned),
             Err(expected),
             "{name}: the check refuses before judging"
         );
@@ -947,7 +986,7 @@ fn a_window_edited_on_the_wire_cannot_manufacture_an_established_contrast() {
     // aged history, the epoch commit included, so the verdict is blocked.
     let set = compile(EvaluatedSurface::Surface1, None, &tasks()).unwrap();
     assert!(matches!(
-        check_recency_baseline(&set, &fixture(), versioned(&set)).unwrap(),
+        check_recency_baseline(&set, &fixture(), Baseline::Versioned).unwrap(),
         BaselineVerdict::Blocked { .. }
     ));
     // A window without the epoch commit misses the falsifier and delivers the
@@ -957,7 +996,7 @@ fn a_window_edited_on_the_wire_cannot_manufacture_an_established_contrast() {
         .recency_window
         .retain(|i| *i != id("repository:repository-0:0"));
     assert_eq!(
-        check_recency_baseline(&edited, &fixture(), versioned(&edited)),
+        check_recency_baseline(&edited, &fixture(), Baseline::Versioned),
         Err(PairError::Tampered {
             field: "recency_window",
         })

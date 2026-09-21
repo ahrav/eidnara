@@ -1066,12 +1066,16 @@ or a positive control, and a duplicate or evidence-less task. `PairSet` is
 public on the wire, so `PairSet::validate(fixture)` re-checks a set read back
 against its own aged history: the policy version, the surface's bound, one
 query across the tasks, both control classes, evidence the reducer requires
-on the aged arm, early and unsuperseded falsification truths, and the median
-and the window recomputed from `aged` under `fixture` (`Tampered {field}`
-names `aged_median_ms` or `recency_window` when the recorded value differs).
-The fresh arms are the runner's inputs and are not re-derived.
-`check_recency_baseline` runs the validation first, so an edited window cannot
-manufacture an `Established` verdict.
+on the aged arm, early and unsuperseded falsification truths, the median
+and the window recomputed from `aged` under `fixture`, and the widened query
+recomputed from the fresh arms' units the aged history lacks (`Tampered
+{field}` names `aged_median_ms`, `recency_window`, or `fresh_query` when the
+recorded value differs). The fresh arms are the runner's inputs and are not
+re-derived. `check_recency_baseline` runs the validation first, so an edited
+window cannot manufacture an `Established` verdict. The natural-fresh history
+is validated as supplied, before `on_distinct_entities` sorts and re-derives
+it, so a shuffled slice of the aged history cannot pass the copy check and be
+normalized back into the copy.
 
 **Recency baseline.** `recency_bound` resolves the window: surface 1 pins the
 production hint candidate limit (100) and refuses any other declaration;
@@ -1081,9 +1085,9 @@ borrowed analogue (a zero is unrepresentable, `NonZeroU32`). The compiler
 stores on the set the versioned baseline's delivery at the shared cut: the
 `k` eligible (reducer-`Ok`) units of the aged arm with the largest valid time,
 most recent first, ties by linearization order. `check_recency_baseline(set,
-fixture, deliver)` is stop condition (b); `deliver` is the baseline under
-test, the stored window for the versioned one and an always-empty function
-for the negative control. Vacuity is decided first over both classes (zero distinct
+fixture, baseline)` is stop condition (b); `Baseline::Versioned` judges the
+stored window, so an `Established` contrast is always stamped with the window
+it was judged on, and `Baseline::AlwaysEmpty` is the negative control. Vacuity is decided first over both classes (zero distinct
 IDs delivered is `Vacuous`, never a pass); then the window must miss at least
 one evidence ID of every falsification pair (`DeliveredFalsifier` otherwise);
 then it must cover every positive control's evidence (`MissedPositiveControl`

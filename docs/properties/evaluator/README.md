@@ -945,17 +945,20 @@ Pairs (`crates/eval-core/tests/pairs.rs`):
   time is its median, a natural-fresh history moved a thousand seconds past
   the cut, a natural-fresh history whose payload names an event it does not
   hold, a natural-fresh history with a causal edge to an event it does not
-  hold (`DanglingEdge`, refused rather than aborting the compiler), and a
-  positive control that narrows the scope to its own entity (`MixedQueries`;
-  alone in its scope the control would be the whole window) each refuse by
-  name.
+  hold (`DanglingEdge`, refused rather than aborting the compiler), a
+  natural-fresh history under another schema, a shuffled slice of the aged
+  history (`NotLinearized`, validated before normalization would sort it back
+  into the copy), and a positive control that narrows the scope to its own
+  entity (`MixedQueries`; alone in its scope the control would be the whole
+  window) each refuse by name.
 - `a_set_read_back_must_be_one_the_compiler_could_have_produced`: another
   policy version, surface 1 under a bound of three, a zero bound, a window
   wider than the bound, a relabelled positive control, emptied evidence, a
   moved median, a duplicate task, a task at its own cut, evidence the aged
   history lacks, a falsifier's evidence moved late (`TruthNotEarly` from the
   wire), a window naming an event the aged history lacks, a window out of
-  order, and a narrowed window each refuse from `PairSet::validate` and from
+  order, a narrowed window, and a widened query with its scope cleared or its
+  cut moved each refuse from `PairSet::validate` and from
   `check_recency_baseline` before any judgement.
 - `a_window_edited_on_the_wire_cannot_manufacture_an_established_contrast`:
   a surface-1 set whose window delivers the falsifier is `Blocked`; the same

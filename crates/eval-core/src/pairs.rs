@@ -10,7 +10,7 @@ use serde_json::Value;
 
 use crate::census::{EvaluatedSurface, SURFACE1_HINT_BOUNDS};
 use crate::eligibility::Verdict;
-use crate::event::{EventId, EventLog, LogError, Payload};
+use crate::event::{Event, EventId, EventLog, LogError, Payload};
 use crate::reducer::{Query, ReduceError, Truth, reduce};
 
 pub const PAIRING_POLICY_VERSION: &str = "eval-pairing/v1";
@@ -189,8 +189,9 @@ pub enum PairError {
     },
     NoFalsificationPair,
     NoPositiveControl,
-    /// A deserialized set whose recorded version, bound, median, or window
-    /// disagrees with a recomputation from the set's own aged history.
+    /// A deserialized set whose recorded version, bound, median, window, or
+    /// widened query disagrees with a recomputation from the set's own
+    /// aged history and fresh arms.
     Tampered {
         field: &'static str,
     },
@@ -386,8 +387,12 @@ fn aged_arm(task: &Task, aged: &EventLog, truth: &Truth, median_ms: i64) -> Resu
     Ok(())
 }
 
-/// The bound, the two histories' independence, and the aged history's span.
-fn admit(input: &PairSetInput<'_>) -> Result<(u32, i64), PairError> {
+/// The bound, the natural-fresh history's validity, the two histories'
+/// independence, and the aged history's span. The natural-fresh history is
+/// validated as supplied: `on_distinct_entities` sorts and re-derives, so a
+/// shuffled slice of the aged history would otherwise pass the copy check
+/// and be normalized back into the copy.
+fn admit(input: &PairSetInput<'_>, max_events: u32) -> Result<(u32, i64), PairError> {
     let bound = recency_bound(input.surface, input.declared_bound)?;
     if input.aged.events.is_empty() {
         return Err(PairError::EmptyAged);
@@ -395,6 +400,10 @@ fn admit(input: &PairSetInput<'_>) -> Result<(u32, i64), PairError> {
     if input.natural_fresh.events.is_empty() {
         return Err(PairError::EmptyNaturalFresh);
     }
+    input
+        .natural_fresh
+        .validate(max_events as usize)
+        .map_err(PairError::Log)?;
     let (aged, fresh) = (content(input.aged), content(input.natural_fresh));
     if let Some(at) = aged
         .windows(fresh.len())
@@ -406,11 +415,11 @@ fn admit(input: &PairSetInput<'_>) -> Result<(u32, i64), PairError> {
 }
 
 /// The query with the independent history's entities added to its scope.
-fn widen(query: &Query, independent: &EventLog) -> Query {
+fn widen<'a>(query: &Query, independent: impl IntoIterator<Item = &'a Event>) -> Query {
     let mut fresh_query = query.clone();
     fresh_query
         .scope
-        .extend(independent.events.iter().map(|e| e.entity_id.clone()));
+        .extend(independent.into_iter().map(|e| e.entity_id.clone()));
     fresh_query
 }
 
@@ -459,14 +468,14 @@ fn compile_one(
 /// falsification claim the aged history contradicts, an arm that judges a
 /// shared unit differently, and a set missing either control class.
 pub fn compile_pair_set(input: PairSetInput<'_>) -> Result<PairSet, PairError> {
-    let (bound, aged_median_ms) = admit(&input)?;
     let query = shared_query(input.tasks)?;
+    let (bound, aged_median_ms) = admit(&input, query.max_events_per_log)?;
     let independent = input
         .natural_fresh
         .on_distinct_entities(NATURAL_FRESH_ENTITY_TAG)
         .map_err(PairError::Log)?;
     let aged_truth = reduce(input.aged, input.fixture, query).map_err(PairError::Reduce)?;
-    let fresh_query = widen(query, &independent);
+    let fresh_query = widen(query, &independent.events);
     let pairs = input
         .tasks
         .iter()
@@ -511,9 +520,10 @@ impl PairSet {
     /// have produced from its own aged history: the policy version, the
     /// surface's bound, one query across the tasks, both control classes,
     /// evidence the reducer requires on the aged arm, early and unsuperseded
-    /// falsification truths, and the median and window recomputed from
-    /// `aged` under `fixture`. The fresh arms are the runner's inputs and are
-    /// not re-derived here.
+    /// falsification truths, the median and window recomputed from `aged`
+    /// under `fixture`, and the widened query recomputed from the fresh
+    /// arms' units the aged history lacks. The fresh arms are the runner's
+    /// inputs and are not re-derived here.
     pub fn validate(&self, fixture: &Value) -> Result<(), PairError> {
         if self.pairing_policy_version != PAIRING_POLICY_VERSION {
             return Err(PairError::Tampered {
@@ -541,6 +551,17 @@ impl PairSet {
         if self.recency_window != recency_baseline(&self.aged, &truth, self.recency_bound) {
             return Err(PairError::Tampered {
                 field: "recency_window",
+            });
+        }
+        let aged_ids: BTreeSet<&EventId> = self.aged.events.iter().map(|e| &e.id).collect();
+        let independent = self
+            .pairs
+            .iter()
+            .flat_map(|pair| &pair.fresh.events)
+            .filter(|e| !aged_ids.contains(&e.id));
+        if self.fresh_query != widen(query, independent) {
+            return Err(PairError::Tampered {
+                field: "fresh_query",
             });
         }
         Ok(())
@@ -616,15 +637,23 @@ pub enum BaselineVerdict {
     },
 }
 
-/// Stop condition (b). `deliver` is the baseline under test, given each pair;
-/// the compiled `recency_window` is the versioned one, and a negative control
-/// substitutes an always-empty baseline. Vacuity is decided first over both
-/// classes, then every falsification pair must be missed, then every
-/// positive control must be delivered.
+/// The baseline under test. The versioned one is the set's compiled
+/// `recency_window`, so an `Established` contrast is always stamped with
+/// the window it was judged on; the negative control delivers nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Baseline {
+    Versioned,
+    AlwaysEmpty,
+}
+
+/// Stop condition (b). The window is shared across every pair because the
+/// tasks share one query. Vacuity is decided first over both classes, then
+/// every falsification pair must be missed, then every positive control must
+/// be delivered.
 pub fn check_recency_baseline(
     set: &PairSet,
     fixture: &Value,
-    deliver: impl Fn(&Pair) -> Vec<EventId>,
+    baseline: Baseline,
 ) -> Result<BaselineVerdict, PairError> {
     set.validate(fixture)?;
     let blocked = |failure| {
@@ -633,17 +662,14 @@ pub fn check_recency_baseline(
             failure,
         })
     };
-    let judged: Vec<(&Pair, BTreeSet<EventId>)> = set
-        .pairs
-        .iter()
-        .filter(|pair| pair.task.role != TaskRole::Plain)
-        .map(|pair| (pair, deliver(pair).into_iter().collect()))
-        .collect();
-    let delivered: BTreeSet<&EventId> = judged.iter().flat_map(|(_, ids)| ids).collect();
+    let delivered: BTreeSet<&EventId> = match baseline {
+        Baseline::Versioned => set.recency_window.iter().collect(),
+        Baseline::AlwaysEmpty => BTreeSet::new(),
+    };
     if delivered.is_empty() {
         return blocked(BaselineFailure::Vacuous);
     }
-    let superset = |pair: &Pair, ids: &BTreeSet<EventId>| pair.task.evidence.is_subset(ids);
+    let superset = |pair: &Pair| pair.task.evidence.iter().all(|id| delivered.contains(id));
     let mut contrast = BaselineContrast {
         baseline_version: RECENCY_BASELINE_VERSION.to_string(),
         surface: set.surface,
@@ -652,22 +678,17 @@ pub fn check_recency_baseline(
         positive_controls_passed: 0,
         delivered_ids: u32::try_from(delivered.len()).expect("bounded by the log"),
     };
-    for (pair, ids) in judged
-        .iter()
-        .filter(|(p, _)| p.task.role == TaskRole::Falsification)
-    {
-        if superset(pair, ids) {
+    let of = |role| set.pairs.iter().filter(move |p| p.task.role == role);
+    for pair in of(TaskRole::Falsification) {
+        if superset(pair) {
             return blocked(BaselineFailure::DeliveredFalsifier {
                 task: pair.task.id.clone(),
             });
         }
         contrast.falsification_pairs_failed += 1;
     }
-    for (pair, ids) in judged
-        .iter()
-        .filter(|(p, _)| p.task.role == TaskRole::PositiveControl)
-    {
-        if !superset(pair, ids) {
+    for pair in of(TaskRole::PositiveControl) {
+        if !superset(pair) {
             return blocked(BaselineFailure::MissedPositiveControl {
                 task: pair.task.id.clone(),
             });
