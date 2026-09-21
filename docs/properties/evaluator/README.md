@@ -1106,8 +1106,12 @@ Campaign (`crates/daemon/tests/eval_campaign.rs`, `--all-features`):
   delivered on both; the analysis over three pairs reports `b = 1` and fails
   the paired gates at the fixture's margins; six samples are accounted for;
   the established claims follow from the verdicts; every pruned arm is
-  declared and ends `unsupported {policy_not_on_surface}`, so twelve samples
-  are accounted for and six attempted; the report validates, is published
+  declared and ends `unsupported {policy_not_on_surface}`; every structured
+  arm runs on the summarizer's segments, produced from a cassette replayed
+  strictly (an edited transcript is a latched miss) and validated by the
+  summarizer's own validator, and delivers every truth; the three policies
+  validate as `GovernanceArms` over the pair set; eighteen samples are
+  accounted for and twelve attempted; the report validates, is published
   write-then-rename with the file and directory synced, and parses back
   equal; the published peaks show the stores, the elapsed time, the artifact,
   one process, one root, and no cassette bytes; a manifest is published the
@@ -1154,10 +1158,11 @@ Campaign (`crates/daemon/tests/eval_campaign.rs`, `--all-features`):
   the runner has normalized; that normalization is the runner's and is not
   written yet.
 - `HistoryPolicy` descriptors select `message_cleanup` and the
-  HistorySummarizer producer by path and symbol; the campaign shell attempts
-  the raw arm only. The pruned arm is accounted as unsupported on surface 1
-  (cleanup reclaims projection rows the surface never reads); the structured
-  arm is not composed at all.
+  HistorySummarizer producer by path and symbol. The pruned arm is accounted
+  as unsupported on surface 1 (cleanup reclaims projection rows the surface
+  never reads). The structured arm reaches the summarizer's validator with a
+  cassette-replayed answer from a scripted provider, not the producer and
+  `publish_validated_chunk`; no live summarizer traffic has been recorded.
 - The campaign's arms are seeded as history segments written straight into
   each store, so its manifest says `bulk` and `direct-database, non-aged`;
   an aged arm built by `step()` and lifecycle replay through ingestion does

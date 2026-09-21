@@ -31,6 +31,12 @@ pub mod history_summarizer_chunk;
 pub mod history_summarizer_citations;
 pub mod history_summarizer_producer;
 pub(crate) mod history_summarizer_prompt;
+/// The evaluator's structured history arm validates replayed summarizer output
+/// with the same code the producer uses, so no second model of the policy
+/// exists; the module is reachable only under `test-support`.
+#[cfg(feature = "test-support")]
+pub mod history_summarizer_validate;
+#[cfg(not(feature = "test-support"))]
 pub(crate) mod history_summarizer_validate;
 pub mod identity_sweep;
 pub mod injection;

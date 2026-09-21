@@ -1332,6 +1332,24 @@ without one it records the `disabled {scale_not_budgeted}` terminal in a
 sample ledger and runs nothing, and a budget that is set but not a number is
 refused. S0 stays in the default shards.
 
+**Structured arm.** Each raw arm also runs as a structured arm whose
+segments are the HistorySummarizer's. The summarizer request (one transcript
+line per message) goes to a scripted provider that answers in the
+summarizer's output document, one `history_segment` per run of five messages
+whose text keeps every message's summary; the exchange is recorded into a
+Rust cassette under the campaign namespace, then replayed strictly for the
+arm (a one-byte change to the transcript is a latched miss, never an answer),
+and the replayed text is validated by `validate_history_summarizer_output`,
+the summarizer's own validator, over the chunk the producer would build. The
+validator keeps the newest segment out so the tail stays raw, as the producer
+does; those messages keep their raw segments. A selected segment stands for
+every message it covers. At S0 every structured arm delivers every truth:
+under the summarizer's segments the aged history is a fifth as many units,
+so surface 1's window reaches the early message the raw arm lost. The three
+policies are recorded as `GovernanceArms` over the pair set, the pruned arm's
+version naming why it was not attempted. The cassette's bytes are charged to
+the envelope.
+
 Beside the report the campaign publishes a manifest with the same
 write-then-rename, parses it back, and checks its digest. Its identity is
 this checkout and toolchain (the commit, whether the tree is dirty, the
@@ -1345,13 +1363,17 @@ written straight into each store, so by the manifest's own rules the aged arm
 is not a replay-built aged world. Every arm of the pruned policy is declared
 in the ledger and ends `unsupported {policy_not_on_surface}`, because
 `message_cleanup` reclaims projection rows and surface 1 reads history
-segments; twelve samples are accounted for and six attempted.
+segments; eighteen samples are accounted for and twelve attempted.
 
-Not composed yet: the structured (HistorySummarizer) arm; the aged arm built by
-`step()` and lifecycle replay through ingestion rather than seeded segments,
-which is what would let the manifest say `replay`; the `eval_runner` example
-still serves the cassette oracle only; and the write-then-rename publisher is
-the test's own, since no shipped publisher exists.
+Not composed yet: the aged arm built by `step()` and lifecycle replay through
+ingestion rather than seeded segments, which is what would let the manifest
+say `replay`; the summarizer's own producer and publication path (the
+structured arm reaches the validator with a replayed answer, not
+`publish_validated_chunk` with its reservation state); the `eval_runner`
+example still serves the cassette oracle only; and the write-then-rename
+publisher is the test's own, since no shipped publisher exists. The
+`history_summarizer_validate` module is public under `test-support` so the
+structured arm can reach the validator without a second model of the policy.
 
 ## Coverage markers
 
