@@ -423,11 +423,45 @@ fn widen<'a>(query: &Query, independent: impl IntoIterator<Item = &'a Event>) ->
     fresh_query
 }
 
+fn ids_of(log: &EventLog) -> BTreeSet<&EventId> {
+    log.events.iter().map(|e| &e.id).collect()
+}
+
+/// Both fresh arms keep the task's evidence required and judge every unit
+/// they share with the aged arm as it does, and the control competes: some
+/// unit the aged history lacks is required on the fresh arm.
+fn fresh_arms(
+    pair: &Pair,
+    fixture: &Value,
+    fresh_query: &Query,
+    aged_truth: &Truth,
+    aged_ids: &BTreeSet<&EventId>,
+) -> Result<(), PairError> {
+    let task = &pair.task;
+    let minimal_truth =
+        reduce(&pair.fresh_minimal, fixture, &task.query).map_err(PairError::Reduce)?;
+    required_set(task, ArmKind::FreshMinimal, &minimal_truth, aged_truth)?;
+    let fresh_truth = reduce(&pair.fresh, fixture, fresh_query).map_err(PairError::Reduce)?;
+    required_set(task, ArmKind::Fresh, &fresh_truth, aged_truth)?;
+    if !pair
+        .fresh
+        .events
+        .iter()
+        .any(|e| !aged_ids.contains(&e.id) && fresh_truth.required.contains(&e.id))
+    {
+        return Err(PairError::NaturalFreshInert {
+            task: task.id.clone(),
+        });
+    }
+    Ok(())
+}
+
 fn compile_one(
     input: &PairSetInput<'_>,
     independent: &EventLog,
     fresh_query: &Query,
     aged_truth: &Truth,
+    aged_ids: &BTreeSet<&EventId>,
     task: &Task,
     median_ms: i64,
 ) -> Result<Pair, PairError> {
@@ -441,25 +475,13 @@ fn compile_one(
         ]
         .concat(),
     );
-    let minimal_truth =
-        reduce(&fresh_minimal, input.fixture, &task.query).map_err(PairError::Reduce)?;
-    required_set(task, ArmKind::FreshMinimal, &minimal_truth, aged_truth)?;
-    let fresh_truth = reduce(&fresh, input.fixture, fresh_query).map_err(PairError::Reduce)?;
-    required_set(task, ArmKind::Fresh, &fresh_truth, aged_truth)?;
-    if !independent
-        .events
-        .iter()
-        .any(|e| fresh_truth.required.contains(&e.id))
-    {
-        return Err(PairError::NaturalFreshInert {
-            task: task.id.clone(),
-        });
-    }
-    Ok(Pair {
+    let pair = Pair {
         task: task.clone(),
         fresh,
         fresh_minimal,
-    })
+    };
+    fresh_arms(&pair, input.fixture, fresh_query, aged_truth, aged_ids)?;
+    Ok(pair)
 }
 
 /// Compiles one pair per task. Refuses an empty or copied natural-fresh
@@ -475,6 +497,7 @@ pub fn compile_pair_set(input: PairSetInput<'_>) -> Result<PairSet, PairError> {
         .on_distinct_entities(NATURAL_FRESH_ENTITY_TAG)
         .map_err(PairError::Log)?;
     let aged_truth = reduce(input.aged, input.fixture, query).map_err(PairError::Reduce)?;
+    let aged_ids = ids_of(input.aged);
     let fresh_query = widen(query, &independent.events);
     let pairs = input
         .tasks
@@ -485,6 +508,7 @@ pub fn compile_pair_set(input: PairSetInput<'_>) -> Result<PairSet, PairError> {
                 &independent,
                 &fresh_query,
                 &aged_truth,
+                &aged_ids,
                 task,
                 aged_median_ms,
             )
@@ -521,9 +545,11 @@ impl PairSet {
     /// surface's bound, one query across the tasks, both control classes,
     /// evidence the reducer requires on the aged arm, early and unsuperseded
     /// falsification truths, the median and window recomputed from `aged`
-    /// under `fixture`, and the widened query recomputed from the fresh
-    /// arms' units the aged history lacks. The fresh arms are the runner's
-    /// inputs and are not re-derived here.
+    /// under `fixture`, the widened query recomputed from the fresh arms'
+    /// units the aged history lacks, and both fresh arms re-judged under the
+    /// reducer: evidence required, shared verdicts equal, control competing.
+    /// The fresh arms are the runner's inputs and are re-judged, not
+    /// re-derived.
     pub fn validate(&self, fixture: &Value) -> Result<(), PairError> {
         if self.pairing_policy_version != PAIRING_POLICY_VERSION {
             return Err(PairError::Tampered {
@@ -553,7 +579,7 @@ impl PairSet {
                 field: "recency_window",
             });
         }
-        let aged_ids: BTreeSet<&EventId> = self.aged.events.iter().map(|e| &e.id).collect();
+        let aged_ids = ids_of(&self.aged);
         let independent = self
             .pairs
             .iter()
@@ -563,6 +589,9 @@ impl PairSet {
             return Err(PairError::Tampered {
                 field: "fresh_query",
             });
+        }
+        for pair in &self.pairs {
+            fresh_arms(pair, fixture, &self.fresh_query, &truth, &aged_ids)?;
         }
         Ok(())
     }

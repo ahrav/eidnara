@@ -957,8 +957,10 @@ Pairs (`crates/eval-core/tests/pairs.rs`):
   moved median, a duplicate task, a task at its own cut, evidence the aged
   history lacks, a falsifier's evidence moved late (`TruthNotEarly` from the
   wire), a window naming an event the aged history lacks, a window out of
-  order, a narrowed window, and a widened query with its scope cleared or its
-  cut moved each refuse from `PairSet::validate` and from
+  order, a narrowed window, a widened query with its scope cleared or its
+  cut moved, a fresh arm or ceiling missing its evidence
+  (`EvidenceNotRequiredOnArm`), and a fresh arm with the control emptied out
+  (`NaturalFreshInert`) each refuse from `PairSet::validate` and from
   `check_recency_baseline` before any judgement.
 - `a_window_edited_on_the_wire_cannot_manufacture_an_established_contrast`:
   a surface-1 set whose window delivers the falsifier is `Blocked`; the same
@@ -979,7 +981,9 @@ Manifest (`crates/eval-core/tests/manifest.rs`):
   record at the pinned version with surface 1 at 100 and the query route at 3
   validates and parses; an empty or other version, no bounds, surface 1 at 7,
   and a zero bound refuse as `RecencyBaselineMismatch` from both `validate`
-  and `parse_manifest`.
+  and `parse_manifest`; a manifest recording `analysis_family_digest` with no
+  baseline refuses as `RecencyBaselineMismatch {recency_baseline}` and
+  validates once the baseline is recorded.
 
 ## Gaps recorded here
 

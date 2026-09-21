@@ -204,7 +204,14 @@ fn every_kept_field_enters_the_digest_and_every_dropped_field_leaves_it() {
         ),
         (
             "analysis_family_digest",
-            Box::new(|m| m.analysis_family_digest = Some("ab".repeat(32))),
+            Box::new(|m| {
+                // A paired report must also record its baseline.
+                m.analysis_family_digest = Some("ab".repeat(32));
+                m.recency_baseline = Some(eval_core::RecencyBaseline {
+                    version: eval_core::RECENCY_BASELINE_VERSION.to_string(),
+                    bounds: BTreeMap::from([(eval_core::EvaluatedSurface::Surface1, 100)]),
+                });
+            }),
         ),
         (
             "recency_baseline",
@@ -746,6 +753,20 @@ fn a_recorded_recency_baseline_must_be_the_one_the_compiler_enforces() {
             "{name}"
         );
     }
+    // A run that reports paired statistics compiled pairs, so it must say
+    // which baseline judged them; a baseline without paired statistics is a
+    // run stop condition (b) blocked.
+    let mut paired = manifest();
+    paired.analysis_family_digest = Some("ab".repeat(32));
+    assert_eq!(
+        paired.validate(),
+        Err(ManifestError::RecencyBaselineMismatch {
+            field: "recency_baseline"
+        })
+    );
+    paired.recency_baseline = good.recency_baseline.clone();
+    paired.validate().unwrap();
+    good.validate().unwrap();
 }
 
 #[test]

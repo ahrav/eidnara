@@ -889,6 +889,37 @@ fn a_set_read_back_must_be_one_the_compiler_could_have_produced() {
             },
         ),
         (
+            "the falsifier's evidence dropped from its fresh arm",
+            Box::new(|s| {
+                s.pairs[0].fresh = s.pairs[0].fresh.without(&id("repository:repository-0:0"))
+            }),
+            PairError::EvidenceNotRequiredOnArm {
+                task: "early-commit".to_string(),
+                arm: ArmKind::Fresh,
+                id: id("repository:repository-0:0"),
+            },
+        ),
+        (
+            "the control's evidence dropped from its ceiling",
+            Box::new(|s| {
+                s.pairs[1].fresh_minimal = s.pairs[1]
+                    .fresh_minimal
+                    .without(&id("repository:repository-0:11"))
+            }),
+            PairError::EvidenceNotRequiredOnArm {
+                task: "last-rename".to_string(),
+                arm: ArmKind::FreshMinimal,
+                id: id("repository:repository-0:11"),
+            },
+        ),
+        (
+            "the control emptied out of a fresh arm",
+            Box::new(|s| s.pairs[2].fresh = s.pairs[2].fresh_minimal.clone()),
+            PairError::NaturalFreshInert {
+                task: "mid-message".to_string(),
+            },
+        ),
+        (
             "the positive control relabelled",
             Box::new(|s| s.pairs[1].task.role = TaskRole::Plain),
             PairError::NoPositiveControl,

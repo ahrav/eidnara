@@ -1070,8 +1070,11 @@ on the aged arm, early and unsuperseded falsification truths, the median
 and the window recomputed from `aged` under `fixture`, and the widened query
 recomputed from the fresh arms' units the aged history lacks (`Tampered
 {field}` names `aged_median_ms`, `recency_window`, or `fresh_query` when the
-recorded value differs). The fresh arms are the runner's inputs and are not
-re-derived. `check_recency_baseline` runs the validation first, so an edited
+recorded value differs), and both fresh arms re-judged under the reducer:
+evidence required on each (`EvidenceNotRequiredOnArm`), shared verdicts
+equal (`SharedVerdictDisagreement`), and the control competing
+(`NaturalFreshInert`). The fresh arms are the runner's inputs and are
+re-judged, not re-derived. `check_recency_baseline` runs the validation first, so an edited
 window cannot manufacture an `Established` verdict. The natural-fresh history
 is validated as supplied, before `on_distinct_entities` sorts and re-derives
 it, so a shuffled slice of the aged history cannot pass the copy check and be
@@ -1100,8 +1103,10 @@ or `Blocked {condition: b, failure}`. `StopCondition::suppresses` is true for
 Suite B and Suite D and false for A and C under every condition. The manifest
 records the baseline's version and per-surface window under
 `recency_baseline`, and `Manifest::validate` refuses a version other than
-`RECENCY_BASELINE_VERSION`, an empty bound map, or a bound `recency_bound`
-would not resolve (`RecencyBaselineMismatch {field}`).
+`RECENCY_BASELINE_VERSION`, an empty bound map, a bound `recency_bound`
+would not resolve, or a run that records `analysis_family_digest` and no
+baseline: paired statistics come from pairs, and pairs were judged against
+one (`RecencyBaselineMismatch {field}`).
 
 Pairs compiled from generated worlds carry Phase-1 claims: a world the
 generator drew says nothing about real repositories, and no field here labels
