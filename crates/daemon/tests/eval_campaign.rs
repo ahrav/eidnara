@@ -55,6 +55,8 @@ const SEED: u64 = 0x5EED_B000_0000_0002;
 const PROJECT: &str = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
 const SESSION: &str = "session-0";
 const AGED_MESSAGES: u32 = 130;
+const S0_ELAPSED_BOUND_MS: u64 = 1_200_000;
+const S1_AGED_MESSAGES: u32 = 400;
 
 fn one_session(messages: u32, max_events_per_log: u32) -> WorldConfig {
     WorldConfig {
@@ -71,7 +73,12 @@ fn one_session(messages: u32, max_events_per_log: u32) -> WorldConfig {
     }
 }
 
-fn profile(scale: Scale, max_events_per_log: u32, approval: Option<Approval>) -> RunProfile {
+fn profile(
+    scale: Scale,
+    max_events_per_log: u32,
+    elapsed_ms: u64,
+    approval: Option<Approval>,
+) -> RunProfile {
     let label = serde_json::to_value(scale).unwrap();
     RunProfile {
         schema: RUN_PROFILE_SCHEMA.to_string(),
@@ -89,7 +96,7 @@ fn profile(scale: Scale, max_events_per_log: u32, approval: Option<Approval>) ->
             max_no_progress_iterations: 1,
         },
         envelope: ResourceLimits {
-            elapsed_ms: 1_200_000,
+            elapsed_ms,
             store_bytes: 64 << 20,
             cassette_bytes: 1 << 20,
             artifact_bytes: 1 << 20,
@@ -696,7 +703,7 @@ fn write_then_rename(path: &Path, bytes: &[u8]) {
 
 #[test]
 fn an_unapproved_profile_runs_no_campaign() {
-    let unapproved = profile(Scale::S0, 512, None);
+    let unapproved = profile(Scale::S0, 512, 1_200_000, None);
     assert_eq!(
         unapproved.approved(),
         Err(ProfileError::NotApproved {
@@ -707,7 +714,9 @@ fn an_unapproved_profile_runs_no_campaign() {
 
 /// One campaign at the given scale: compile, drive both arms of every pair
 /// through the fixture, analyze, gate, publish, and read the report back.
-fn campaign(scale: Scale, aged_messages: u32) -> SuiteBReport {
+/// `elapsed_ms` is the run's wall-clock bound; the envelope refuses the
+/// first reading past it rather than reporting an overrun afterwards.
+fn campaign(scale: Scale, aged_messages: u32, elapsed_ms: u64) -> SuiteBReport {
     let started = Instant::now();
     let started_at_ms = i64::try_from(
         std::time::SystemTime::now()
@@ -720,6 +729,7 @@ fn campaign(scale: Scale, aged_messages: u32) -> SuiteBReport {
     let profile = profile(
         scale,
         max_events_per_log,
+        elapsed_ms,
         Some(Approval {
             approved_by: "test-approval".to_string(),
             approved_at_run_id: "ab".repeat(32),
@@ -1241,7 +1251,7 @@ fn manifest(
 
 #[test]
 fn an_s0_campaign_on_the_default_surface_publishes_one_gated_report() {
-    let report = campaign(Scale::S0, AGED_MESSAGES);
+    let report = campaign(Scale::S0, AGED_MESSAGES, S0_ELAPSED_BOUND_MS);
     assert_eq!(report.profile_name, "s0-surface1-raw");
     assert_eq!(
         report.claims.established,
@@ -1287,11 +1297,9 @@ fn an_s1_campaign_runs_only_under_its_budget() {
             .parse::<u64>()
             .unwrap_or_else(|e| panic!("{variable}={text:?} is not a millisecond budget: {e}")),
     };
-    let started = Instant::now();
-    let report = campaign(Scale::S1, 400);
-    assert!(
-        u64::try_from(started.elapsed().as_millis()).unwrap() <= budget_ms,
-        "the S1 campaign stayed inside {variable}={budget_ms}"
-    );
+    // The budget is the profile's elapsed bound, so an overrun is refused by
+    // the envelope at the reading that crosses it.
+    let report = campaign(Scale::S1, S1_AGED_MESSAGES, budget_ms);
+    assert!(report.envelope.peaks.elapsed_ms <= budget_ms);
     assert_eq!(report.profile_name, "s1-surface1-raw");
 }

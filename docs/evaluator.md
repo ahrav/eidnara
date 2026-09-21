@@ -1327,7 +1327,9 @@ makes no model call, which the backend counters show, so the cassette holds no
 frame and the arm miss rates are zero by observation.
 
 `an_s1_campaign_runs_only_under_its_budget` is `#[ignore]`d and runs a
-400-message history only when `EIDNARA_EVAL_S1_BUDGET_MS` grants a budget;
+400-message history only when `EIDNARA_EVAL_S1_BUDGET_MS` grants a budget,
+which becomes the profile's elapsed bound so the envelope refuses the first
+reading past it;
 without one it records the `disabled {scale_not_budgeted}` terminal in a
 sample ledger and runs nothing, and a budget that is set but not a number is
 refused. S0 stays in the default shards.
