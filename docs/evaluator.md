@@ -853,7 +853,10 @@ while an exchange is still in flight, and succeeds once it has been recorded;
 the in-flight count and the cassette live under one lock, so publication
 never pairs a count and a cassette state from different moments. On replay, a
 run whose token is already cancelled consumes no entry: the run recorded only
-its cancellation. The cancellation check is the wrapper's snapshot at the
+its cancellation. A replay whose sink answers `Closed` mid-exchange returns a
+`cassette_refused` terminal instead of the recorded one, which the run never
+observed; the served entry stays consumed, because its bytes left the
+cassette. The cancellation check is the wrapper's snapshot at the
 moment the wrapped future returns; a cancellation that lands between that
 return and the supervisor's terminal arbitration is outside what this
 boundary can observe, and is a recorded gap. `refusals()` counts every miss terminal

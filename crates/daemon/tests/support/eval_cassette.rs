@@ -457,7 +457,12 @@ impl CassetteBackend {
                     Err(unknown) => return Self::refused("cassette_refused", unknown),
                 };
                 if events.emit(event) == SinkStatus::Closed {
-                    break;
+                    // The run ended under the supervisor mid-exchange; the
+                    // recorded terminal is not what it observed.
+                    return Self::refused(
+                        "cassette_refused",
+                        "the run's sink closed during replay",
+                    );
                 }
             }
             match BackendTerminal::try_from(exchange.terminal) {

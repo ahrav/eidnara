@@ -742,6 +742,22 @@ fn a_lost_or_unfinished_exchange_refuses_the_recording() {
         "a cancelled run neither consumes an entry nor counts as a miss"
     );
 
+    // A replay whose sink closes mid-exchange reports the truncation rather
+    // than the recorded terminal the run never observed.
+    let replayer = CassetteBackend::replaying(NAMESPACE, &file).unwrap();
+    let replay: Arc<dyn LlmExecutionBackend> = replayer.clone();
+    let closed = EventSink::new(Arc::new(|_| SinkStatus::Closed));
+    let terminal =
+        runtime.block_on(replay.execute(request("hello"), closed, CancellationToken::new()));
+    assert!(
+        matches!(
+            &terminal,
+            BackendTerminal::Failed(BackendError { provider_code: Some(code), .. }) if code == "cassette_refused"
+        ),
+        "{terminal:?}"
+    );
+    assert_eq!(replayer.unconsumed(), 1, "the served entry stays consumed");
+
     let (recorder, recording) = fresh_recorder();
     let closed = EventSink::new(Arc::new(|_| SinkStatus::Closed));
     let terminal =
