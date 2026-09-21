@@ -1213,7 +1213,7 @@ budget.
 `stop_condition {condition}`, `envelope_exceeded {resource, bound,
 observed}`, `cassette_miss`, `redaction_refused`), `unsupported`
 (`surface_not_activated {surface}`, `no_mediation_boundary`,
-`packing_has_no_caller`), or `disabled` (`scale_not_budgeted {scale}`,
+`packing_has_no_caller`, `policy_not_on_surface {policy, surface}`), or `disabled` (`scale_not_budgeted {scale}`,
 `feature_off`). The reasons are closed vocabularies; a reason outside them
 does not parse, and an extra key a tagged unit variant would swallow is
 caught by the report parser's round trip. A `SampleLedger {epoch, order,
@@ -1332,11 +1332,26 @@ without one it records the `disabled {scale_not_budgeted}` terminal in a
 sample ledger and runs nothing, and a budget that is set but not a number is
 refused. S0 stays in the default shards.
 
-Not composed yet: the pruned (`message_cleanup`) and structured
-(HistorySummarizer) arms, so the campaign's only policy is `raw`; the
-`eval_runner` example still serves the cassette oracle only; the campaign
-emits no manifest; and the write-then-rename publisher is the test's own,
-since no shipped publisher exists.
+Beside the report the campaign publishes a manifest with the same
+write-then-rename, parses it back, and checks its digest. Its identity is
+this checkout and toolchain (the commit, whether the tree is dirty, the
+lockfile digest, the rustc version, the fixture binary's digest), its config is
+the profile, its scenario the surface and tasks, its samples the ledger's in
+the order they ran, its result digest the report's bytes, its witness digest
+the pair set, and it carries the frozen family's digest and the recency
+baseline's version and window. Its `construction` is `bulk` and its
+`ingestion` is `direct-database, non-aged`: the arms' history segments are
+written straight into each store, so by the manifest's own rules the aged arm
+is not a replay-built aged world. Every arm of the pruned policy is declared
+in the ledger and ends `unsupported {policy_not_on_surface}`, because
+`message_cleanup` reclaims projection rows and surface 1 reads history
+segments; twelve samples are accounted for and six attempted.
+
+Not composed yet: the structured (HistorySummarizer) arm; the aged arm built by
+`step()` and lifecycle replay through ingestion rather than seeded segments,
+which is what would let the manifest say `replay`; the `eval_runner` example
+still serves the cassette oracle only; and the write-then-rename publisher is
+the test's own, since no shipped publisher exists.
 
 ## Coverage markers
 

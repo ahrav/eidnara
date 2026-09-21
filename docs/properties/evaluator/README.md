@@ -1105,10 +1105,16 @@ Campaign (`crates/daemon/tests/eval_campaign.rs`, `--all-features`):
   on the aged arm and delivered on the control, the two in-window truths are
   delivered on both; the analysis over three pairs reports `b = 1` and fails
   the paired gates at the fixture's margins; six samples are accounted for;
-  the established claims follow from the verdicts; the report validates, is
-  published write-then-rename with the file and directory synced, and parses
-  back equal; the published peaks show the stores, the elapsed time, the
-  artifact, one process, one root, and no cassette bytes.
+  the established claims follow from the verdicts; every pruned arm is
+  declared and ends `unsupported {policy_not_on_surface}`, so twelve samples
+  are accounted for and six attempted; the report validates, is published
+  write-then-rename with the file and directory synced, and parses back
+  equal; the published peaks show the stores, the elapsed time, the artifact,
+  one process, one root, and no cassette bytes; a manifest is published the
+  same way, parses back to the same digest, names the checkout, toolchain,
+  and fixture binary, carries every sample in run order, the frozen family's
+  digest, and the recency baseline, and says `bulk` and `direct-database,
+  non-aged`.
 - `an_s1_campaign_runs_only_under_its_budget` (ignored): a 400-message
   history runs only under `EIDNARA_EVAL_S1_BUDGET_MS` and reports the same
   shape inside the budget; without the variable the run is recorded as
@@ -1148,11 +1154,18 @@ Campaign (`crates/daemon/tests/eval_campaign.rs`, `--all-features`):
   the runner has normalized; that normalization is the runner's and is not
   written yet.
 - `HistoryPolicy` descriptors select `message_cleanup` and the
-  HistorySummarizer producer by path and symbol; the campaign shell runs the
-  raw arm only, so no pruned or structured arm has been executed.
+  HistorySummarizer producer by path and symbol; the campaign shell attempts
+  the raw arm only. The pruned arm is accounted as unsupported on surface 1
+  (cleanup reclaims projection rows the surface never reads); the structured
+  arm is not composed at all.
+- The campaign's arms are seeded as history segments written straight into
+  each store, so its manifest says `bulk` and `direct-database, non-aged`;
+  an aged arm built by `step()` and lifecycle replay through ingestion does
+  not exist yet, and the S0 result is therefore default-surface evidence over
+  a seeded history, not over a replay-built aged world.
 - The campaign shell lives in the daemon test suite and drives the
   direct-host fixture; the `eval_runner` example still serves the cassette
-  oracle only, and the campaign emits no manifest beside its report.
+  oracle only.
 - Surface 1 makes no model call, so the campaign's cassette holds no frame;
   strict replay under a campaign has been exercised only by the cassette
   suites.

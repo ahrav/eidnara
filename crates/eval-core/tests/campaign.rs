@@ -483,6 +483,13 @@ fn every_sample_ends_in_exactly_one_closed_vocabulary_terminal() {
             json!({"kind": "unsupported", "reason": "packing_has_no_caller"}),
         ),
         (
+            Terminal::Unsupported(UnsupportedReason::PolicyNotOnSurface {
+                policy: HistoryPolicy::Pruned,
+                surface: EvaluatedSurface::Surface1,
+            }),
+            json!({"kind": "unsupported", "reason": "policy_not_on_surface", "policy": "pruned", "surface": "surface1"}),
+        ),
+        (
             terminals[7],
             json!({"kind": "disabled", "reason": "scale_not_budgeted", "scale": "s1"}),
         ),

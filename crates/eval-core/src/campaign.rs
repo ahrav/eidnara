@@ -336,9 +336,17 @@ pub enum SkipReason {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "reason", rename_all = "snake_case", deny_unknown_fields)]
 pub enum UnsupportedReason {
-    SurfaceNotActivated { surface: EvaluatedSurface },
+    SurfaceNotActivated {
+        surface: EvaluatedSurface,
+    },
     NoMediationBoundary,
     PackingHasNoCaller,
+    /// The policy changes state this surface never reads: `pruned` reclaims
+    /// projection rows, and surface 1 reads history segments.
+    PolicyNotOnSurface {
+        policy: HistoryPolicy,
+        surface: EvaluatedSurface,
+    },
 }
 
 /// Why a sample was switched off for this run.

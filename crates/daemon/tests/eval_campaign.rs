@@ -15,18 +15,25 @@ use std::time::Instant;
 use daemon::transform::UserHintPass;
 use eval_core::{
     ANALYSIS_FAMILY_SCHEMA, Analysis, AnalysisFamily, Approval, ArmKind, ArmRates, ArmResult,
-    BaselineVerdict, CampaignGates, CampaignProfile, ClaimBoundary, Claims, ClusterKey,
-    ClusteringUnit, Cut, Destination, DisabledReason, Envelope, Established, EvaluatedSurface,
-    EventId, EventLog, FrozenFamily, GatedBlocks, HistoryPolicy, IccPilot, IntervalMethod,
-    IntervalOutcome, LivenessBounds, Mode, MultiplicityCorrection, Pair, PairOutcome, PairSet,
-    PairSetInput, ProfileError, Query, RUN_PROFILE_SCHEMA, Ratio, RenderConfig, RenderedMessage,
-    ReportOutcome, RepositorySpec, Required, Resource, ResourceLimits, RunProfile,
-    SUITE_B_REPORT_SCHEMA, SampleLedger, SampleRecord, Scale, Sensitivity, ServedClass,
-    SessionSpec, StageVerdict, StoppingRule, SuiteBReport, Surface1Stage, Task, TaskBudgets,
-    TaskRole, TaskUsage, Terminal, Visibility, WorldConfig, WorldProvenance, analyze,
-    check_recency_baseline, compile_pair_set, generate_all, parse_report, render, serialize_spec,
+    Attestation, BaselineVerdict, BinaryDigest, BuildRecord, CampaignGates, CampaignProfile,
+    ClaimBoundary, Claims, ClusterKey, ClusteringUnit, ComponentVersions, Construction, Cut,
+    CutOutcome, CutReceipt, Destination, DisabledReason, ELIGIBILITY_SPEC_DIGEST,
+    EVENT_SCHEMA_VERSION, Envelope, Established, EvaluatedSurface, EventId, EventLog,
+    ExecutionMode, FAILURE_CLASS_TABLE_DIGEST, FrozenFamily, GENERATOR_VERSION, GatedBlocks,
+    HistoryPolicy, IccPilot, Ingestion, IntervalMethod, IntervalOutcome,
+    LINEARIZATION_RULE_VERSION, LivenessBounds, MANIFEST_SCHEMA, Manifest,
+    MemoryReviewerModelCalls, Mode, MultiplicityCorrection, PAIRING_POLICY_VERSION, Pair,
+    PairOutcome, PairSet, PairSetInput, ProfileError, Query, RANDOM_SCHEMA_VERSION,
+    REDUCER_VERSION, RUN_PROFILE_SCHEMA, Ratio, Reachability, RecencyBaseline, RenderConfig,
+    RenderedMessage, ReportOutcome, RepositorySpec, Required, Resource, ResourceLimits,
+    RunIdentity, RunProfile, RunStatus, SUITE_B_REPORT_SCHEMA, SampleLedger, SampleRecord, Scale,
+    Sensitivity, ServedClass, SessionSpec, StageVerdict, StoppingRule, SuiteBReport, Surface1Stage,
+    Task, TaskBudgets, TaskRole, TaskUsage, Terminal, TokenizerProfile, UnsupportedReason,
+    Visibility, WorldConfig, WorldProvenance, analyze, check_recency_baseline, compile_pair_set,
+    eval_run_id, generate_all, parse_manifest, parse_report, render, serialize_spec,
 };
 use memory_store::StoredHistorySegment;
+use sha2::{Digest, Sha256};
 use support::direct_host::FixtureProcess;
 use support::eval_surface::{
     EPOCH_MS, Knobs, SurfaceLedger, World, block_on, mid, observe, pass, seed_store, segment, text,
@@ -361,19 +368,32 @@ fn run_arm(
     ArmRun { result, verdict }
 }
 
-fn sample(pair: &Pair, arm: ArmKind, label: &str, result: ArmResult) -> SampleRecord {
+fn sample(pair: &Pair, arm: ArmKind, policy: HistoryPolicy, terminal: Terminal) -> SampleRecord {
     SampleRecord {
-        id: format!("{}:{label}", pair.task.id),
+        id: format!("{}:{}:{}", pair.task.id, wire_name(arm), wire_name(policy)),
         task: pair.task.id.clone(),
         arm,
-        policy: HistoryPolicy::Raw,
+        policy,
         cut: Cut::EndOfRun,
         lineage: vec![],
-        terminal: match result {
-            ArmResult::Pass => Terminal::Pass,
-            ArmResult::Fail => Terminal::Fail,
-            ArmResult::Censored(reason) => Terminal::Censored { reason },
-        },
+        terminal,
+    }
+}
+
+/// The snake-case wire name of a unit variant, for sample ids.
+fn wire_name(value: impl serde::Serialize) -> String {
+    serde_json::to_value(value)
+        .unwrap()
+        .as_str()
+        .unwrap()
+        .to_string()
+}
+
+fn terminal_of(result: ArmResult) -> Terminal {
+    match result {
+        ArmResult::Pass => Terminal::Pass,
+        ArmResult::Fail => Terminal::Fail,
+        ArmResult::Censored(reason) => Terminal::Censored { reason },
     }
 }
 
@@ -489,10 +509,23 @@ fn campaign(scale: Scale, aged_messages: u32) -> SuiteBReport {
             (ArmKind::Aged, "aged", &aged_run),
             (ArmKind::Fresh, "fresh", &fresh_run),
         ] {
-            let record = sample(pair, kind, label, run.result);
+            let record = sample(pair, kind, HistoryPolicy::Raw, terminal_of(run.result));
             order.push(record.id.clone());
             samples.insert(record.id.clone(), record);
             verdicts.insert((pair.task.id.as_str(), label), run.verdict);
+            // The pruned policy reclaims projection rows; surface 1 reads
+            // history segments, so the arm is declared and not attempted.
+            let pruned = sample(
+                pair,
+                kind,
+                HistoryPolicy::Pruned,
+                Terminal::Unsupported(UnsupportedReason::PolicyNotOnSurface {
+                    policy: HistoryPolicy::Pruned,
+                    surface: EvaluatedSurface::Surface1,
+                }),
+            );
+            order.push(pruned.id.clone());
+            samples.insert(pruned.id.clone(), pruned);
         }
         outcomes.push(PairOutcome {
             pair_id: pair.task.id.clone(),
@@ -535,7 +568,8 @@ fn campaign(scale: Scale, aged_messages: u32) -> SuiteBReport {
         samples,
     };
     let rates = ledger.rates().unwrap();
-    assert_eq!((rates.samples, ledger.attempted()), (6, 6));
+    assert_eq!((rates.samples, ledger.attempted()), (12, 6));
+    assert_eq!(rates.unsupported, Ratio::new(1, 2));
     // Every arm's backend counters read zero model calls, so both arms' miss
     // and refusal rates are zero by observation.
     let zero = || ArmRates {
@@ -643,7 +677,150 @@ fn campaign(scale: Scale, aged_messages: u32) -> SuiteBReport {
     assert_eq!(peaks["processes"], 1);
     assert_eq!(peaks["temp_roots"], 1);
     assert_eq!(peaks["cassette_bytes"], 0);
+
+    // The manifest beside the report says how the world reached the store:
+    // the segments were written straight into it, so the run is `bulk` and
+    // `direct-database, non-aged`, never a replay-built aged world.
+    let manifest = manifest(&profile, &set, &report, &bytes, &frozen);
+    let manifest_bytes = serde_json::to_vec_pretty(&manifest.to_value()).unwrap();
+    write_then_rename(&publish.path().join("manifest.json"), &manifest_bytes);
+    let read_back: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(publish.path().join("manifest.json")).unwrap())
+            .unwrap();
+    let parsed = parse_manifest(&read_back).unwrap();
+    assert_eq!(parsed, manifest);
+    assert_eq!(parsed.digest().unwrap(), manifest.digest().unwrap());
+    assert_eq!(parsed.construction, Construction::Bulk);
+    assert_eq!(parsed.ingestion, Ingestion::DirectDatabaseNonAged);
+    assert_eq!(parsed.sample_order, report.samples.order);
+    assert_eq!(
+        parsed.analysis_family_digest.as_deref(),
+        Some(frozen.analysis_family_digest.as_str())
+    );
+    assert_eq!(
+        parsed.recency_baseline.as_ref().unwrap().bounds,
+        profile.baseline_bounds
+    );
     report
+}
+
+/// The execution image every arm ran through: the fixture the support module
+/// built for this run.
+fn fixture_binary() -> std::path::PathBuf {
+    let target = std::env::var_os("CARGO_TARGET_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| support::direct_host::workspace_root().join("target"));
+    target.join("debug/examples/direct_host_fixture")
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    format!("{:x}", Sha256::digest(bytes))
+}
+
+fn command(program: &str, args: &[&str]) -> String {
+    let output = std::process::Command::new(program)
+        .args(args)
+        .current_dir(support::direct_host::workspace_root())
+        .output()
+        .unwrap_or_else(|e| panic!("{program}: {e}"));
+    assert!(output.status.success(), "{program} {args:?}");
+    String::from_utf8(output.stdout).unwrap().trim().to_string()
+}
+
+/// The run's manifest: the identity of this checkout and toolchain, the
+/// profile and scenario the run was declared under, every sample in the order
+/// it ran, the report's digest as its result, the pair set's digest as its
+/// witness, and the envelope as bounded and as peaked.
+fn manifest(
+    profile: &RunProfile,
+    set: &PairSet,
+    report: &SuiteBReport,
+    report_bytes: &[u8],
+    frozen: &FrozenFamily,
+) -> Manifest {
+    let dirty = !command("git", &["status", "--porcelain"]).is_empty();
+    let lockfile =
+        std::fs::read(support::direct_host::workspace_root().join("Cargo.lock")).unwrap();
+    let identity = RunIdentity {
+        build: BuildRecord {
+            code_sha: command("git", &["rev-parse", "HEAD"]),
+            dirty,
+            lockfile_digest: sha256_hex(&lockfile),
+            rustc_version: command("rustc", &["--version"]),
+            features: BTreeSet::from(["test-support".to_string()]),
+            target_triple: format!(
+                "{}-unknown-{}",
+                std::env::consts::ARCH,
+                std::env::consts::OS
+            ),
+            binary_digest: BinaryDigest::Present {
+                sha256: sha256_hex(&std::fs::read(fixture_binary()).unwrap()),
+            },
+        },
+        simulator_version: "eval-campaign-shell/v1".to_string(),
+        config: serde_json::to_value(profile).unwrap(),
+        scenario: serde_json::json!({
+            "surface": report.surface,
+            "tasks": set.pairs.iter().map(|p| p.task.id.clone()).collect::<Vec<_>>(),
+            "aged_messages": set.aged.events.len(),
+        }),
+        root_seed: SEED,
+        random_schema_version: RANDOM_SCHEMA_VERSION.to_string(),
+        generator_version: GENERATOR_VERSION.to_string(),
+        eligibility_spec_digest: ELIGIBILITY_SPEC_DIGEST.to_string(),
+        linearization_rule_version: LINEARIZATION_RULE_VERSION.to_string(),
+    };
+    let set_value = serde_json::to_value(set).unwrap();
+    Manifest {
+        schema: MANIFEST_SCHEMA.to_string(),
+        eval_run_id: eval_run_id(&identity).unwrap(),
+        run_identity: identity,
+        start_ms: EPOCH_MS,
+        end_ms: EPOCH_MS + i64::try_from(report.envelope.peaks.elapsed_ms).unwrap(),
+        status: RunStatus::Completed,
+        error: None,
+        sample_ids: report.samples.samples.keys().cloned().collect(),
+        sample_order: report.samples.order.clone(),
+        sample_epoch: report.samples.epoch,
+        retry_lineage: Vec::new(),
+        result_digest: sha256_hex(report_bytes),
+        witness_digest: sha256_hex(&serde_json::to_vec(&set_value).unwrap()),
+        attestation: Attestation::None,
+        tokenizer_profile: TokenizerProfile {
+            name: "none".to_string(),
+            revision: "surface-1-hint-lexical".to_string(),
+            digest: sha256_hex(b"surface-1-hint-lexical"),
+        },
+        cut_receipts: vec![CutReceipt {
+            cut: Cut::EndOfRun,
+            outcome: CutOutcome::Reached,
+        }],
+        residue: Manifest::field_schema().residue().collect(),
+        construction: Construction::Bulk,
+        execution_mode: ExecutionMode::Generate,
+        failure_class_table_digest: FAILURE_CLASS_TABLE_DIGEST.to_string(),
+        ingestion: Ingestion::DirectDatabaseNonAged,
+        memory_reviewer_model_calls: MemoryReviewerModelCalls::Excluded,
+        analysis_family_digest: Some(frozen.analysis_family_digest.clone()),
+        recency_baseline: Some(RecencyBaseline {
+            version: eval_core::RECENCY_BASELINE_VERSION.to_string(),
+            bounds: profile.baseline_bounds.clone(),
+        }),
+        reachability: Reachability::DefaultProduction,
+        claim_boundary: ClaimBoundary::pinned(),
+        component_versions: ComponentVersions {
+            generator: GENERATOR_VERSION.to_string(),
+            event_schema: EVENT_SCHEMA_VERSION.to_string(),
+            reducer: REDUCER_VERSION.to_string(),
+            oracles: PAIRING_POLICY_VERSION.to_string(),
+            execution_image: "direct_host_fixture".to_string(),
+            task_corpus: format!("generated:{SEED:#x}"),
+            judge: "none".to_string(),
+        },
+        envelope_bounds: report.envelope.bounds.clone(),
+        envelope_peaks: report.envelope.peaks.clone(),
+        arm_rates: report.arm_rates.clone(),
+    }
 }
 
 #[test]
