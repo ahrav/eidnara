@@ -840,11 +840,10 @@ rust-only tier; `rid-ts-cassette-never-falls-through-to-scripted`,
   recorded SSE and provider-error frames byte for byte, answers a miss with a
   400 `cassette_miss` and repeats it after, never enters the scripted block,
   hands a malformed body to the oracle as text, and turns any oracle failure,
-  typed or not, into a 400 with no message text; a delayed or still-uploading
-  record-mode exchange is admitted by the cassette bound when handling began,
-  not by a later binding, and a miss or refusal that completes after `reset()`
-  is not
-  in the reset logs; `useCassette()` starts a new log generation; concurrent
+  typed or not, into a 400 with no message text; a request still in flight
+  across `reset()` (uploading, delayed, or awaiting the oracle) consumes,
+  counts, records, and logs in the run it began in, never in the next one;
+  `useCassette()` starts a new log generation; concurrent
   identical requests are admitted in capture order regardless of scripted
   delays; a JSON body that is not an object is scripted as `{}` and
   reaches the oracle as text; `reset()` unbinds.

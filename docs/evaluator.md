@@ -833,9 +833,10 @@ publication is reported once and the oracle accepts the next `open`.
 (built through `buildDaemonExample` in `src/rust-runner/hermetic-host.ts`, or
 taken from `EIDNARA_E2E_EVAL_RUNNER_BIN`), forwards over the same strict JSONL
 reader the Pi runner uses, validates each reply's shape, and computes no
-digest. A child exit, an unreadable or malformed reply, or a 30 s silence
-fails every pending call and every later one; the child's stderr is
-inherited, never captured into an error.
+digest. A child exit, an unreadable or malformed reply (checked as each line
+arrives, before the next queued call can settle), or a 30 s silence fails
+every pending call and every later one; the child's stderr is inherited,
+never captured into an error.
 
 `MockProvider.useCassette({oracle, mode, namespace})` binds the mock until
 `reset()`; each binding starts with empty miss and refusal logs, and `reset()`

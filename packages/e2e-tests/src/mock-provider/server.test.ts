@@ -165,6 +165,35 @@ describe("MockProvider cassette mode", () => {
         expect(later.recorded).toHaveLength(0);
     });
 
+    test("a request still uploading across reset() consumes and records into the run it began in", async () => {
+        const { mock, baseURL } = await started();
+        mock.enqueue({ text: "old run", usage: USAGE });
+        const encoder = new TextEncoder();
+        const body = new ReadableStream({
+            async start(controller) {
+                controller.enqueue(encoder.encode('{"model":"mock-sonnet",'));
+                await Bun.sleep(80);
+                controller.enqueue(encoder.encode('"messages":[]}'));
+                controller.close();
+            },
+        });
+        const stale = fetch(`${baseURL}/messages`, {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body,
+            duplex: "half",
+        } as RequestInit);
+        await Bun.sleep(20);
+        mock.reset();
+        mock.enqueue({ text: "new run", usage: USAGE });
+        expect(await (await stale).text()).toContain("old run");
+        // The new run saw nothing of the stale request: no capture, no selection, its queue intact.
+        expect(mock.requests()).toHaveLength(0);
+        expect(mock.scriptedSelectionCount()).toBe(0);
+        const fresh = await post(baseURL, request, false);
+        expect(await fresh.text()).toContain("new run");
+    });
+
     test("a completion that lands after reset() writes no miss or refusal into the reset logs", async () => {
         const inner = new FakeOracle([]);
         const slow: CassetteSession["oracle"] = {

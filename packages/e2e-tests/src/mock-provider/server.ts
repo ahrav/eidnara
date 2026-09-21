@@ -112,16 +112,9 @@ function errorBody(type: string, extra: Record<string, unknown>): string {
 
 export class MockProvider {
     private server: ReturnType<typeof Bun.serve> | null = null;
-    private responses: MockResponse[] = [];
-    private captured: CapturedRequest[] = [];
-    private defaultResponse: MockResponse | null = null;
-    private matchers: RequestMatcher[] = [];
-    private defaultHitCount = 0;
-    private cassette: CassetteSession | null = null;
-    /** Miss and refusal logs of the current binding; `reset()` replaces the object, so a completion
-     * from an earlier generation writes into the discarded one. */
-    private cassetteLogs: CassetteLogs = { misses: [], refusals: [] };
-    private scriptedSelections = 0;
+    /** Every per-run mutable: script, captures, counters, cassette binding, logs. `reset()` replaces
+     * the object, so a request that began under an earlier run keeps writing into that run. */
+    private run: Run = freshRun();
 
     async start(options: MockServerOptions = {}): Promise<{ port: number; baseURL: string }> {
         const port = options.port ?? 0; // 0 = pick any available port
@@ -147,15 +140,15 @@ export class MockProvider {
         }
     }
     script(responses: MockResponse[]): void {
-        this.responses = [...responses];
+        this.run.responses = [...responses];
     }
 
     /** Set a default response to return when the queue is empty. */
     setDefault(response: MockResponse): void {
-        this.defaultResponse = response;
+        this.run.defaultResponse = response;
     }
     enqueue(response: MockResponse): void {
-        this.responses.push(response);
+        this.run.responses.push(response);
     }
 
     /**
@@ -163,51 +156,45 @@ export class MockProvider {
      * If no matcher returns a response, the provider consults the main queue, then `defaultResponse`.
      */
     addMatcher(matcher: RequestMatcher): void {
-        this.matchers.push(matcher);
+        this.run.matchers.push(matcher);
     }
     requests(): CapturedRequest[] {
-        return [...this.captured];
+        return [...this.run.captured];
     }
     lastRequest(): CapturedRequest | null {
-        return this.captured[this.captured.length - 1] ?? null;
+        return this.run.captured[this.run.captured.length - 1] ?? null;
     }
-    /** Clears the script, the captures, the counters, and the cassette binding with its logs. */
+    /** Starts a new run: script, captures, counters, and the cassette binding with its logs are
+     * fresh, and a request still in flight keeps writing into the run it began in. */
     reset(): void {
-        this.responses = [];
-        this.captured = [];
-        this.defaultResponse = null;
-        this.matchers = [];
-        this.defaultHitCount = 0;
-        this.scriptedSelections = 0;
-        this.cassette = null;
-        this.cassetteLogs = { misses: [], refusals: [] };
+        this.run = freshRun();
     }
 
     /** Counts `/messages` requests that fell through matchers and the queue to `defaultResponse`. */
     defaultHits(): number {
-        return this.defaultHitCount;
+        return this.run.defaultHitCount;
     }
 
     /** Binds the cassette every later `/messages` request goes through until `reset()`; the miss and
      * refusal logs start over with the new binding. */
     useCassette(session: CassetteSession): void {
-        this.cassette = session;
-        this.cassetteLogs = { misses: [], refusals: [] };
+        this.run.cassette = session;
+        this.run.logs = { misses: [], refusals: [] };
     }
 
     /** Every typed miss the replay produced; strict replay makes this empty or one entry. */
     cassetteMissLog(): CassetteMiss[] {
-        return [...this.cassetteLogs.misses];
+        return [...this.run.logs.misses];
     }
 
     /** Every oracle refusal, recording or replay; a refused exchange was never persisted. */
     cassetteRefusalLog(): CassetteRefused[] {
-        return [...this.cassetteLogs.refusals];
+        return [...this.run.logs.refusals];
     }
 
     /** How many requests entered the scripted-selection block; a whole replay run leaves it at zero. */
     scriptedSelectionCount(): number {
-        return this.scriptedSelections;
+        return this.run.scriptedSelections;
     }
 
     private async handle(req: Request): Promise<Response> {
@@ -232,11 +219,12 @@ export class MockProvider {
         const isMessages = url.pathname === "/messages" || url.pathname === "/v1/messages";
 
         if (method === "POST" && isMessages) {
-            // The binding and its logs when handling begins own this exchange; a `reset()` or
-            // `useCassette()` during the body upload, a scripted delay, or a pending oracle call must
-            // not serve it unadmitted, record it into the next cassette, or log into the next run.
-            const session = this.cassette;
-            const logs = this.cassetteLogs;
+            // The run active when handling begins owns this exchange: a `reset()` or `useCassette()`
+            // during the body upload, a scripted delay, or a pending oracle call must not let it read
+            // the next run's script, count against it, or be served, recorded, or logged under it.
+            const run = this.run;
+            const session = run.cassette;
+            const logs = run.logs;
             const bodyText = await req.text();
             // Unparseable and non-object bodies script as `{}`; the oracle judges `bodyText` itself.
             let body: Record<string, unknown> = {};
@@ -259,7 +247,7 @@ export class MockProvider {
                 headers,
                 body,
             };
-            this.captured.push(captured);
+            run.captured.push(captured);
 
             const oracleRequest: OracleRequest = {
                 path: url.pathname,
@@ -270,24 +258,24 @@ export class MockProvider {
                 return this.replay(session, oracleRequest, captured, logs);
             }
 
-            this.scriptedSelections += 1;
+            run.scriptedSelections += 1;
             // First non-null matcher result determines the response.
             let matcherResponse: MockResponse | null = null;
-            for (const matcher of this.matchers) {
+            for (const matcher of run.matchers) {
                 const resp = matcher(body, headers);
                 if (resp !== null) {
                     matcherResponse = resp;
                     break;
                 }
             }
-            const fromQueue = matcherResponse === null ? this.responses.shift() : undefined;
-            const scripted = matcherResponse ?? fromQueue ?? this.defaultResponse;
+            const fromQueue = matcherResponse === null ? run.responses.shift() : undefined;
+            const scripted = matcherResponse ?? fromQueue ?? run.defaultResponse;
             if (
                 matcherResponse === null &&
                 fromQueue === undefined &&
-                this.defaultResponse !== null
+                run.defaultResponse !== null
             ) {
-                this.defaultHitCount += 1;
+                run.defaultHitCount += 1;
             }
             if (!scripted) {
                 return new Response(
@@ -363,6 +351,31 @@ export class MockProvider {
 interface CassetteLogs {
     misses: CassetteMiss[];
     refusals: CassetteRefused[];
+}
+
+/** One run's mutable state; see `MockProvider.run`. */
+interface Run {
+    responses: MockResponse[];
+    captured: CapturedRequest[];
+    defaultResponse: MockResponse | null;
+    matchers: RequestMatcher[];
+    defaultHitCount: number;
+    scriptedSelections: number;
+    cassette: CassetteSession | null;
+    logs: CassetteLogs;
+}
+
+function freshRun(): Run {
+    return {
+        responses: [],
+        captured: [],
+        defaultResponse: null,
+        matchers: [],
+        defaultHitCount: 0,
+        scriptedSelections: 0,
+        cassette: null,
+        logs: { misses: [], refusals: [] },
+    };
 }
 
 /**
