@@ -13627,11 +13627,17 @@ impl HandlerCore {
     /// a driver that must reach quiescence between mutations waits on this.
     #[cfg(any(test, feature = "test-support", feature = "direct-host-fixture"))]
     pub fn history_summarizer_live_for_test(&self) -> bool {
-        !self
+        let firing = !self
             .live_history_summarizer_sessions
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .is_empty()
+            .expect("live history_summarizer mutex")
+            .is_empty();
+        let reattaching = !self
+            .reattaching_sessions
+            .lock()
+            .expect("reattaching sessions mutex")
+            .is_empty();
+        firing || reattaching
     }
 
     /// The Kernel project digest a bound route stages and reads review inputs under.

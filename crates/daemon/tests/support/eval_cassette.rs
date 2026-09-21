@@ -241,6 +241,8 @@ pub struct CassetteBackend {
     /// trait's `&'static str` return needs no per-call allocation.
     reasons: [Option<&'static str>; 2],
     refusals: Arc<AtomicUsize>,
+    /// Frames the recording refused as carrying a secret-shaped span.
+    redaction_refusals: Arc<AtomicUsize>,
 }
 
 impl CassetteBackend {
@@ -280,12 +282,19 @@ impl CassetteBackend {
             declarations,
             reasons,
             refusals: Arc::new(AtomicUsize::new(0)),
+            redaction_refusals: Arc::new(AtomicUsize::new(0)),
         })
     }
 
     /// The persisted cassette after recording; a refused recording has none.
     pub fn file(&self) -> Result<Value, CassetteError> {
         Ok(serde_json::to_value(self.cassette.lock().unwrap().to_file()?).unwrap())
+    }
+
+    /// Frames a recording refused because the scanner found a secret-shaped
+    /// span in the request or the response.
+    pub fn redaction_refusals(&self) -> usize {
+        self.redaction_refusals.load(Ordering::SeqCst)
     }
 
     /// Requests answered with a `cassette_miss` terminal, including every one
@@ -329,6 +338,7 @@ impl CassetteBackend {
         let inner = inner.execute(request, tee, cancel);
         let cassette = self.cassette.clone();
         let namespace = self.namespace.clone();
+        let redaction_refusals = self.redaction_refusals.clone();
         Box::pin(async move {
             let terminal = inner.await;
             let exchange = WireExchange {
@@ -342,7 +352,10 @@ impl CassetteBackend {
                 .record(&namespace, Boundary::Backend, covered, response)
             {
                 Ok(_) => terminal,
-                Err(error) => Self::refused("redaction_refused", error),
+                Err(error) => {
+                    redaction_refusals.fetch_add(1, Ordering::SeqCst);
+                    Self::refused("redaction_refused", error)
+                }
             }
         })
     }

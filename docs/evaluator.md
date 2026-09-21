@@ -486,7 +486,7 @@ times:
   target and leaves both corrections required. No Phase 1 scenario compares
   `Truth` with store verdicts, so nothing observes that difference yet;
   closing it is a reducer version change, not a rendering rule.
-  The generator's time gaps are strictly positive (`eval-generator/v2`), each
+  The generator's time gaps are strictly positive (since `eval-generator/v2`), each
   slot emits at most one correction and one tool span, and its correction
   targets stay in the correcting entity, so generated worlds never meet these
   refusals.
@@ -1361,9 +1361,9 @@ the firing fails as a permanent producer error, and the recording fixture
 writes no cassette and says so at exit (after cleaning up its socket and
 publication). The aged structured arm then has nothing to replay: its three
 samples end `skipped {redaction_refused}`, the aged arm's refusal rate on the
-report is the cassette's refusals over the summarizer's firings (counted once
-per failed run, since the daemon reports its last failure on every later
-turn), and the refusal gate fails at the profile's ceiling of zero. This is
+report is the cassette's refusals over the summarizer's firings (the firings
+the recording fixture's backend never saw, since a refused frame never
+reaches it), and the refusal gate fails at the profile's ceiling of zero. This is
 the scanner's typed refusal doing its job on a production prompt corpus; a
 summarizer frame that carries that example cannot be recorded until the
 corpus or the scanner changes, and the campaign reports it rather than
@@ -1375,8 +1375,9 @@ HistorySummarizer. The arm's daemon is configured to summarize
 in the user config tier the fixture is started under, `Launch::config_home`;
 without that tier the summarizer has no model chain and never fires), and
 the same life is lived: the trigger fires by its own rules on the pressure
-the harness reports (at S0, `force_band` on turn 114 behind the pass and
-again in the emergency band on turn 127, inline), the producer, validator,
+the harness reports (at S0 four times over the aged life: once on projected
+headroom, then three times in the force band, the last inline in the
+emergency band), the producer, validator,
 and publication run inside the fixture process, and the fixture's model
 backend stands in for the summarizer provider: it answers a prompt carrying
 `<new_messages>` in the summarizer's `<output>` document, one

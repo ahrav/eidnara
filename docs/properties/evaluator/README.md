@@ -1111,8 +1111,9 @@ Campaign (`crates/daemon/tests/eval_campaign.rs`, `--all-features`):
   the verdicts and outcomes across both policies; every pruned arm is
   declared and ends `unsupported {policy_not_on_surface}`; the structured
   arms live the same life with the daemon configured to summarize, its
-  trigger firing by its own rules (turn 114 behind the pass, turn 127
-  inline), the firing recorded once per world into a cassette of its own
+  trigger firing by its own rules (four firings over the aged life: projected
+  headroom, then the force band), the firings recorded once per world into a
+  cassette of its own
   whose frames equal the backend calls, and every arm run replaying it
   strictly with no controlled backend and publishing the recording's segments
   whole; on the structured aged arm the plain task's message heads its
@@ -1218,7 +1219,7 @@ Campaign (`crates/daemon/tests/eval_campaign.rs`, `--all-features`):
   oracle only.
 - Surface 1 makes no model call (the fixture's counters read zero), so the
   surface boundary's cassette holds no frame; the summarizer boundary's
-  cassette holds the two frames the aged life's firings recorded, replayed
+  cassette holds the four frames the aged life's firings recorded, replayed
   strictly by every arm run with no controlled backend, from the fixture's
   scripted provider rather than a live one; the control never reaches the
   summarizer's pressure, so its cassette holds none.

@@ -16,6 +16,15 @@ use crate::stream::{ChoiceKind, Chooser, RANDOM_SCHEMA_VERSION, ReplayRefusal, T
 /// version.
 pub const GENERATOR_VERSION: &str = "eval-generator/v3";
 pub const TAPE_IDENTITY_PROTOCOL: &str = "eval-tape/v1";
+/// Separates what a generated text says from the world's own word after it.
+const WORLD_WORD_SEPARATOR: &str = " in ";
+
+/// The decision a generated text records: its words before the world's own
+/// word, which is provenance rather than content.
+pub fn text_decision(text: &str) -> &str {
+    text.rsplit_once(WORLD_WORD_SEPARATOR)
+        .map_or(text, |(decision, _)| decision)
+}
 const OID_PROTOCOL: &str = "eval-git-oid/v1";
 
 /// Strictly positive, so a correction always advances its target's revision.
@@ -386,7 +395,7 @@ impl Generator {
     fn text(&mut self, slot: &Slot) -> Result<String, WorldError> {
         let word = self.choose(ChoiceKind::TextWord, slot, &WORDS)?;
         Ok(format!(
-            "{} for slot{} in {}",
+            "{} for slot{}{WORLD_WORD_SEPARATOR}{}",
             WORDS[word], slot.k, self.vocabulary
         ))
     }

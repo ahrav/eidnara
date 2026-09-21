@@ -31,7 +31,7 @@ use eval_core::{
     Surface1Stage, Task, TaskBudgets, TaskRole, TaskUsage, Terminal, TokenizerProfile,
     UnsupportedReason, Visibility, WorldConfig, WorldProvenance, analyze, check_recency_baseline,
     compile_pair_set, eval_run_id, generate_all, parse_manifest, parse_report, render,
-    serialize_spec,
+    serialize_spec, text_decision,
 };
 use memory_store::{MemoryStore, StoredHistorySegment};
 use serde_json::{Value, json};
@@ -334,34 +334,55 @@ fn live(
     envelope
         .observe(Resource::Processes, held.processes)
         .unwrap();
-    let turns = block_on(lifecycle(&fixture, world, usage));
     let knobs = Knobs {
         usage: usage(world.messages.len() + 1),
         ..Knobs::default()
     };
-    let pass = block_on(pass(&fixture, world, prompt, &knobs));
-    let mut firings = 0;
-    // The daemon reports its last failure on every later turn until the next
-    // firing, so refusals are counted once per failed run.
-    let mut refusals = BTreeSet::new();
+    let (turns, pass) = block_on(async {
+        let turns = lifecycle(&fixture, world, usage).await;
+        let pass = pass(&fixture, world, prompt, &knobs).await;
+        (turns, pass)
+    });
+    let mut firings: u32 = 0;
+    let mut failures_seen = false;
     for diagnostics in turns
         .iter()
-        .map(|turn| &turn.response["history_summarizer"])
+        .map(|turn| &turn["history_summarizer"])
         .chain([&pass.response["history_summarizer"]])
     {
         if diagnostics["fired"] == json!(true) {
             firings += 1;
         }
-        // A refused frame is the cassette's typed refusal and is counted; any
-        // other failure of the daemon's own summarizer ends the campaign.
+        // A refused frame is the cassette's typed refusal; any other failure
+        // of the daemon's own summarizer ends the campaign.
         if refused(diagnostics) {
-            refusals.insert(diagnostics["last_failure"].as_str().unwrap().to_string());
+            failures_seen = true;
         } else {
             assert_eq!(diagnostics["last_failure"], Value::Null, "{diagnostics}");
         }
     }
-    let refusals = u32::try_from(refusals.len()).unwrap();
     let counters = fixture.counters(11);
+    // The recording cassette counts the frames it refused; every firing
+    // reached the fixture's backend once on a recording run, and a replaying
+    // fixture has no controlled backend to count.
+    let backend_calls = u32::try_from(counters["started"].as_u64().unwrap()).unwrap();
+    let refusals = u32::try_from(counters["cassette_refused"].as_u64().unwrap()).unwrap();
+    match replacement {
+        Replacement::Summarizer(Backend::Record { .. }) => {
+            assert_eq!(
+                backend_calls, firings,
+                "{counters} against {firings} firings"
+            );
+        }
+        Replacement::Raw | Replacement::Summarizer(Backend::Replay { .. }) => {
+            assert_eq!((backend_calls, refusals), (0, 0), "{counters}");
+        }
+    }
+    assert_eq!(
+        refusals > 0,
+        failures_seen,
+        "the daemon reports a failure exactly when the cassette refused a frame: {counters}"
+    );
     let (status, output) = fixture.shutdown_with_status();
     // A recording fixture refuses to write a cassette holding a refused
     // frame and says so at exit; every other exit is clean.
@@ -404,7 +425,8 @@ fn live(
 struct Recording {
     replay: Option<Backend>,
     segments: Vec<StoredHistorySegment>,
-    cassette: Value,
+    /// The cassette file's size on disk; zero when nothing was written.
+    cassette_bytes: u64,
     firings: u32,
     refusals: u32,
 }
@@ -440,12 +462,33 @@ fn record(
         held,
         started,
     );
+    // The fixture folds `CHUNK` presented lines into one segment, so every
+    // segment but the newest spans exactly that many messages, from the first
+    // message on, and no segment reaches the last message: the daemon
+    // protects a tail.
+    for (index, segment) in lived.segments.iter().enumerate() {
+        let span = segment.end_message - segment.start_message + 1;
+        let last = index + 1 == lived.segments.len();
+        assert!(
+            span == CHUNK as i64 || (last && span < CHUNK as i64),
+            "{segment:?}"
+        );
+        assert_eq!(
+            segment.start_message,
+            index as i64 * CHUNK as i64 + 1,
+            "{segment:?}"
+        );
+        assert!(
+            segment.end_message < world.messages.len() as i64,
+            "{segment:?}"
+        );
+    }
     if lived.refusals > 0 {
         assert!(!file.exists(), "a refused recording writes no cassette");
         return Recording {
             replay: None,
             segments: lived.segments,
-            cassette: Value::Null,
+            cassette_bytes: 0,
             firings: lived.firings,
             refusals: lived.refusals,
         };
@@ -453,10 +496,8 @@ fn record(
     let cassette: Value = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
     let frames = cassette["cases"].as_array().unwrap().len();
     assert_eq!(
-        (lived.counters["started"].as_u64().unwrap(), frames as u32),
-        (u64::from(lived.firings), lived.firings),
-        "every firing reached the backend once and was recorded: {}\n{}",
-        lived.counters,
+        frames as u32, lived.firings,
+        "every firing was recorded once: {}",
         lived.stderr
     );
     if frames == 0 {
@@ -464,11 +505,11 @@ fn record(
     }
     Recording {
         replay: Some(Backend::Replay {
-            file,
+            file: file.clone(),
             namespace: SUMMARIZER_NAMESPACE.to_string(),
         }),
         segments: lived.segments,
-        cassette,
+        cassette_bytes: std::fs::metadata(&file).unwrap().len(),
         firings: lived.firings,
         refusals: 0,
     }
@@ -479,10 +520,9 @@ fn prompt(message: &RenderedMessage) -> String {
     text(message).to_string()
 }
 
-/// The decision a message records: its words before the world's own word,
-/// which is provenance rather than content.
+/// The decision a message records, as the generator defines it.
 fn decision(message: &RenderedMessage) -> &str {
-    text(message).split(" in world").next().unwrap()
+    text_decision(text(message))
 }
 
 /// Every regular file under the arm's root: the kernel store with its WAL and
@@ -541,10 +581,8 @@ fn vacate(root: tempfile::TempDir, held: &mut Held, envelope: &mut Envelope, sta
 struct ArmRun {
     result: ArmResult,
     verdict: StageVerdict<Surface1Stage>,
-    /// The history segments the arm's daemon held when the task ran, and the
-    /// messages each covers.
+    /// The history segments the arm's daemon held when the task ran.
     segments: Vec<StoredHistorySegment>,
-    covered: BTreeMap<i64, Vec<EventId>>,
 }
 
 /// Lives the arm's world through one fixture process under its replacement
@@ -623,6 +661,12 @@ fn run_arm(
     if !covered.values().any(|ids| ids.contains(evidence)) {
         identities.insert(0, evidence.0.clone());
     }
+    if let Some(UserHintPass::Decided(outcome)) = &lived.pass.outcome {
+        assert!(
+            !outcome.trace.window.contains(&0) && !outcome.trace.selected.contains(&0),
+            "the store has no sequence zero"
+        );
+    }
     let hint_text = match &lived.pass.outcome {
         Some(UserHintPass::Decided(outcome)) => outcome.hint_text.clone(),
         _ => String::new(),
@@ -674,7 +718,6 @@ fn run_arm(
         result,
         verdict,
         segments: lived.segments,
-        covered,
     }
 }
 
@@ -693,13 +736,28 @@ fn sample(pair: &Pair, arm: ArmKind, policy: HistoryPolicy, terminal: Terminal) 
 /// `part / whole` as a canonical decimal to six places, rounded up so a rate
 /// is never understated; zero over zero is zero.
 fn decimal_ceil(part: u32, whole: u32) -> String {
+    assert!(part <= whole, "{part} of {whole}");
     if whole == 0 {
         return "0".to_string();
     }
     let scaled = (u64::from(part) * 1_000_000).div_ceil(u64::from(whole));
-    let text = format!("{}.{:06}", scaled / 1_000_000, scaled % 1_000_000);
-    let text = text.trim_end_matches('0');
-    text.strip_suffix('.').unwrap_or(text).to_string()
+    let fraction = format!("{:06}", scaled % 1_000_000);
+    let fraction = fraction.trim_end_matches('0');
+    if fraction.is_empty() {
+        (scaled / 1_000_000).to_string()
+    } else {
+        format!("{}.{fraction}", scaled / 1_000_000)
+    }
+}
+
+#[test]
+fn a_rate_is_a_canonical_decimal_rounded_up() {
+    assert_eq!(decimal_ceil(0, 0), "0");
+    assert_eq!(decimal_ceil(0, 3), "0");
+    assert_eq!(decimal_ceil(1, 2), "0.5");
+    assert_eq!(decimal_ceil(1, 3), "0.333334");
+    assert_eq!(decimal_ceil(3, 3), "1");
+    assert!(Ratio::from_decimal(&decimal_ceil(2, 7)).is_some());
 }
 
 /// The snake-case wire name of a unit variant, for sample ids.
@@ -826,7 +884,7 @@ fn campaign(scale: Scale, aged_messages: u32, elapsed_ms: u64) -> SuiteBReport {
         aged_recording.firings > 0,
         "the aged history reaches the pressure the summarizer fires at"
     );
-    let mut cassette_bytes = serde_json::to_vec(&aged_recording.cassette).unwrap().len() as u64;
+    let mut cassette_bytes = aged_recording.cassette_bytes;
     envelope
         .observe(Resource::CassetteBytes, cassette_bytes)
         .unwrap();
@@ -844,7 +902,6 @@ fn campaign(scale: Scale, aged_messages: u32, elapsed_ms: u64) -> SuiteBReport {
     let mut samples = BTreeMap::new();
     let mut order = Vec::new();
     let mut verdicts: BTreeMap<(&str, &str), StageVerdict<Surface1Stage>> = BTreeMap::new();
-    let mut aged_structured_covered = None;
     for pair in &set.pairs {
         let fresh_world = world(&pair.fresh);
         assert!(
@@ -885,7 +942,7 @@ fn campaign(scale: Scale, aged_messages: u32, elapsed_ms: u64) -> SuiteBReport {
             (0, 0),
             "the summarizer leaves the short control raw"
         );
-        cassette_bytes += serde_json::to_vec(&fresh_recording.cassette).unwrap().len() as u64;
+        cassette_bytes += fresh_recording.cassette_bytes;
         envelope
             .observe(Resource::CassetteBytes, cassette_bytes)
             .unwrap();
@@ -913,7 +970,6 @@ fn campaign(scale: Scale, aged_messages: u32, elapsed_ms: u64) -> SuiteBReport {
                     .collect::<Vec<_>>(),
                 "the replay publishes the recording's segments"
             );
-            aged_structured_covered = Some(run.covered.clone());
             run
         });
         let fresh_structured_run = fresh_recording.replay.as_ref().map(|replay| {
@@ -1012,6 +1068,9 @@ fn campaign(scale: Scale, aged_messages: u32, elapsed_ms: u64) -> SuiteBReport {
             (ArmResult::Fail, ArmResult::Fail),
             "{name} raw"
         );
+        // With no segment at all the window cannot hold the truth; this pins
+        // that the three hint gates passed and the store held no unit, not
+        // that the window itself selected anything.
         for label in ["aged", "fresh", "fresh/structured"] {
             assert_eq!(
                 verdicts[&(name, label)],
@@ -1021,6 +1080,22 @@ fn campaign(scale: Scale, aged_messages: u32, elapsed_ms: u64) -> SuiteBReport {
         }
     }
     let refused_aged = aged_recording.replay.is_none();
+    // The messages each of the recording's segments covers, by sequence; every
+    // replayed arm published the same segments.
+    let aged_structured_covered: BTreeMap<i64, Vec<EventId>> = aged_recording
+        .segments
+        .iter()
+        .map(|segment| {
+            let ids = (segment.start_message..=segment.end_message)
+                .map(|ordinal| {
+                    aged_world.messages[usize::try_from(ordinal - 1).unwrap()]
+                        .event_id
+                        .clone()
+                })
+                .collect();
+            (segment.sequence, ids)
+        })
+        .collect();
     assert_eq!(
         refused_aged,
         aged_recording.refusals > 0,
@@ -1033,7 +1108,6 @@ fn campaign(scale: Scale, aged_messages: u32, elapsed_ms: u64) -> SuiteBReport {
     );
     for pair in set.pairs.iter().filter(|_| !refused_aged) {
         let name = pair.task.id.as_str();
-        let aged_structured_covered = aged_structured_covered.as_ref().unwrap();
         assert_eq!(structured_by_task[name].fresh, ArmResult::Fail, "{name}");
         let evidence = pair.task.evidence.iter().next().unwrap();
         let covering = aged_structured_covered
@@ -1060,7 +1134,6 @@ fn campaign(scale: Scale, aged_messages: u32, elapsed_ms: u64) -> SuiteBReport {
         );
     }
     let folded = |name: &str| {
-        let aged_structured_covered = aged_structured_covered.as_ref().unwrap();
         let evidence = set
             .pairs
             .iter()
@@ -1085,6 +1158,11 @@ fn campaign(scale: Scale, aged_messages: u32, elapsed_ms: u64) -> SuiteBReport {
     }
     if aged_messages == AGED_MESSAGES {
         assert!(!refused_aged, "S0's firings carry no refused frame");
+        assert_eq!(
+            (aged_recording.firings, aged_recording.segments.len()),
+            (4, 20),
+            "the trigger fires four times over the life: projected headroom, then the force band"
+        );
         assert_eq!(folded("recent-message"), Some(0));
     }
     let arms = GovernanceArms {

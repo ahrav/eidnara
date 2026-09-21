@@ -229,22 +229,20 @@ pub async fn pass(fixture: &FixtureProcess, world: &World, prompt: &str, knobs: 
     }
 }
 
-/// One harness turn of a session's life: the transform response and the
-/// daemon's summarizer diagnostics for it.
-pub struct Turn {
-    pub messages: usize,
-    pub response: Value,
-}
-
-/// Whether a history_summarizer firing is still running inside the fixture.
+/// Whether a history_summarizer firing or reattach is still running inside
+/// the fixture.
 pub fn summarizer_live(fixture: &FixtureProcess) -> bool {
     let control = fixture.control(43, "history-summarizer-live");
     assert_eq!(control["ok"], true, "{control}");
-    control["result"]["live"] == json!(true)
+    control["result"]["live"]
+        .as_bool()
+        .unwrap_or_else(|| panic!("the control answers with a boolean: {control}"))
 }
 
 /// Waits until no firing is live; a firing spawned behind a pass finishes
-/// before the next mutation, so every turn starts from quiescence.
+/// before the next mutation, so every turn starts from quiescence. Blocks
+/// the calling thread on the control socket, so `lifecycle` is driven from
+/// `block_on` on the caller's thread and never spawned onto a worker.
 pub fn drain(fixture: &FixtureProcess) {
     let deadline = std::time::Instant::now() + BUDGET;
     while summarizer_live(fixture) {
@@ -260,12 +258,12 @@ pub fn drain(fixture: &FixtureProcess) {
 /// harness would send it: turn `n` carries the first `n` messages, with the
 /// context pressure `usage(n)` reports for that turn, and the store moves
 /// through every turn in one incarnation. Each turn is mutate, then drain to
-/// quiescence.
+/// quiescence. Returns each turn's transform response in order.
 pub async fn lifecycle(
     fixture: &FixtureProcess,
     world: &World,
     usage: impl Fn(usize) -> Option<(u64, u64)>,
-) -> Vec<Turn> {
+) -> Vec<Value> {
     let client = fixture.client().await;
     let route = fixture
         .open_route(&client, "context", TargetKind::ToolProvider, &world.session)
@@ -281,10 +279,7 @@ pub async fn lifecycle(
         let response = request_json(&client, route, request).await;
         assert_eq!(response["status"], "ok", "turn {upto}: {response}");
         drain(fixture);
-        turns.push(Turn {
-            messages: upto,
-            response,
-        });
+        turns.push(response);
     }
     client.close_route(route).await.expect("route closes");
     turns

@@ -83,6 +83,9 @@ mod unix {
         released: u64,
         failed: u64,
         cancelled: u64,
+        /// Frames a recording cassette refused as carrying a secret-shaped
+        /// span; zero without a recording.
+        cassette_refused: u64,
     }
 
     impl BackendCounters {
@@ -94,6 +97,7 @@ mod unix {
                 released: self.released.load(Ordering::SeqCst),
                 failed: self.failed.load(Ordering::SeqCst),
                 cancelled: self.cancelled.load(Ordering::SeqCst),
+                cassette_refused: 0,
             }
         }
     }
@@ -530,6 +534,7 @@ mod unix {
     async fn handle_control_connection(
         mut stream: UnixStream,
         backend: Arc<ControlledBackend>,
+        recorder: Option<Arc<CassetteBackend>>,
         core: Arc<daemon::HandlerCore>,
         shutdown: CancellationToken,
     ) -> io::Result<()> {
@@ -566,7 +571,11 @@ mod unix {
                                 (ControlResult::Ack { accepted: true }, false)
                             }
                             ControlCommand::Counters => {
-                                (ControlResult::Counters(backend.counters.snapshot()), false)
+                                let mut counters = backend.counters.snapshot();
+                                counters.cassette_refused = recorder
+                                    .as_ref()
+                                    .map_or(0, |recorder| recorder.redaction_refusals() as u64);
+                                (ControlResult::Counters(counters), false)
                             }
                             ControlCommand::UserHintOutcome => (
                                 ControlResult::UserHint {
@@ -620,6 +629,7 @@ mod unix {
     async fn run_control_server(
         listener: Arc<UnixListener>,
         backend: Arc<ControlledBackend>,
+        recorder: Option<Arc<CassetteBackend>>,
         core: Arc<daemon::HandlerCore>,
         shutdown: CancellationToken,
         accepting: tokio::sync::oneshot::Sender<()>,
@@ -640,10 +650,13 @@ mod unix {
                         }
                     };
                     let backend = Arc::clone(&backend);
+                    let recorder = recorder.clone();
                     let core = Arc::clone(&core);
                     let shutdown = shutdown.clone();
                     connections.spawn(async move {
-                        let _ = handle_control_connection(stream, backend, core, shutdown).await;
+                        let _ =
+                            handle_control_connection(stream, backend, recorder, core, shutdown)
+                                .await;
                     });
                 }
                 Some(_) = connections.join_next(), if !connections.is_empty() => {}
@@ -862,12 +875,14 @@ mod unix {
         let (accepting_tx, accepting_rx) = tokio::sync::oneshot::channel();
         let control_shutdown = shutdown.clone();
         let control_backend = Arc::clone(&backend);
+        let control_recorder = recording.as_ref().map(|(recorder, _)| Arc::clone(recorder));
         let control_core = handler.core_for_test();
         let control_listener = Arc::clone(&listener);
         let control_task = tokio::spawn(async move {
             run_control_server(
                 control_listener,
                 control_backend,
+                control_recorder,
                 control_core,
                 control_shutdown,
                 accepting_tx,

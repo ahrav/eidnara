@@ -363,12 +363,13 @@ impl FixtureProcess {
 
     pub fn wait_for_exit(&mut self) -> CapturedOutput {
         let status = self.wait_for_exit_status();
+        let output = self.captured_output();
         assert!(
             status.success(),
             "fixture exited with {status}:\n{}",
-            self.stderr.lock().expect("fixture stderr mutex").join("\n")
+            output.stderr
         );
-        self.captured_output()
+        output
     }
 
     fn wait_for_exit_status(&mut self) -> ExitStatus {
