@@ -937,9 +937,11 @@ pilot's clustering unit and `effective_n_at_max` from its recorded counts and
 ICCs and refuses a pilot that disagrees with its own evidence, whose
 counts the ICC could not have been estimated from (fewer than two families,
 fewer worlds than families, or no replication within worlds), whose ICC at
-either level exceeds one, or whose family count is not the registered family count (the pilot sampled the registered
-population, so the family-unit projection spreads items over exactly those
-families) (`PilotInconsistent`), so a hand-written pilot cannot inflate its way past the
+either level exceeds one, or whose recorded `families` (the distinct, sorted
+families it sampled) are not the registered families (the pilot sampled the
+registered population, so its ICCs describe the campaign's clusters and the
+family-unit projection spreads items over exactly those families)
+(`PilotInconsistent`), so a hand-written pilot cannot inflate its way past the
 block, and refuses a plan whose pair count is zero (`NoPairs`) or below the
 pilot's `required_n_for_margin` (`PlanBelowRequiredN`), since deflation only
 shrinks N. `FrozenFamily::freeze` digests it
@@ -1007,8 +1009,9 @@ report carries `IntervalOutcome::Withheld {reason: item_count_below_threshold}`
 
 **Report.** `analyze(manifest, family, pairs)` reads the frozen digest and the
 arm rates from the same manifest, so neither can be substituted beside it. It
-requires the run to have completed (any other `status` is `RunNotCompleted`),
-then checks the freeze (`FrozenFamily::from_manifest` reads the recorded digest; a
+requires the run to have completed (any other `status` is `RunNotCompleted`);
+the freeze check and the two pre-outcome blocks below read no pair. It
+checks the freeze (`FrozenFamily::from_manifest` reads the recorded digest; a
 manifest without one is `FamilyNotRecorded`), then the pilot's block, then the
 per-arm cassette-miss asymmetry (the gap between the manifest's `aged` and
 `fresh` arms' `miss_rate`, the two arms every pair has; both rates of both arms are

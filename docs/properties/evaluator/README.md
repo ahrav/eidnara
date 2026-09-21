@@ -925,7 +925,8 @@ Statistics core (`crates/eval-core/tests/statistics.rs`):
   `DuplicatePair`; a pilot whose effective N or unit is not what its recorded
   counts and ICCs imply, that names zero worlds, or whose counts (one
   observation, or no replication within worlds) could not have estimated an
-  ICC, whose family count is not the registered one, or whose ICC exceeds one,
+  ICC, whose sampled families are not the registered ones (by identity, not
+  count), or whose ICC exceeds one,
   is `PilotInconsistent`, while a negative ICC projects the same undeflated N
   as zero; 300 pairs in one world are `Blocked
   {table_underpowered}` at `3000/309` effective items, and a 299/1 split over
@@ -936,7 +937,8 @@ Statistics core (`crates/eval-core/tests/statistics.rs`):
   `WorldSeedOutOfRange` from `analyze`, `run_icc_pilot`, and
   `cluster_bootstrap_interval`, whose draw seed of `2^53` is
   `BootstrapSeedOutOfRange`; an `incomplete`, `refused`, or `blocked` manifest
-  is `RunNotCompleted`; a zero-pair
+  is `RunNotCompleted`; an underpowered plan blocks before a bad seed in its
+  table is read; a zero-pair
   plan is `NoPairs`; the rate helpers return `RationalOverflow` for counts
   past the safe range instead of panicking; a `holm` or `benjamini_hochberg` plan is
   `UnsupportedMultiplicity`

@@ -43,6 +43,12 @@ fn profile() -> CampaignProfile {
 fn pilot(required: u32) -> IccPilot {
     IccPilot {
         pilot_run_id: "ab".repeat(32),
+        families: FAMILIES
+            .iter()
+            .map(|family| family.to_string())
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect(),
         n_items: 360,
         n_families: 6,
         n_worlds: 120,
@@ -342,7 +348,7 @@ fn the_family_is_frozen_before_outcomes_and_any_post_hoc_edit_refuses() {
 
     let edits: Vec<Edit> = vec![
         ("endpoints", Box::new(|f| f.endpoints.reverse())),
-        ("families", Box::new(|f| f.families[0] = "rails".into())),
+        ("families", Box::new(|f| f.families.reverse())),
         (
             "exclusions",
             Box::new(|f| f.exclusions.push("drop timed-out fresh runs".into())),
@@ -1074,6 +1080,14 @@ fn the_pair_table_and_the_pilot_must_match_the_frozen_plan() {
     let mut narrowed = family.clone();
     narrowed.families = vec!["cargo".into()];
     assert_eq!(narrowed.validate(), Err(StatisticsError::PilotInconsistent));
+    // Nor can a pilot over other families of the same count: the identities match.
+    let mut elsewhere = honest.clone();
+    elsewhere.families = vec!["django".into(), "git".into()];
+    assert_eq!(
+        elsewhere.validate(),
+        Err(StatisticsError::PilotInconsistent)
+    );
+    assert_eq!(honest.icc_pilot.families, ["cargo", "tokio"]);
     let mut repeated_family = family.clone();
     repeated_family.families.push("cargo".into());
     assert_eq!(
@@ -1159,9 +1173,24 @@ fn the_pair_table_and_the_pilot_must_match_the_frozen_plan() {
             max_affordable_worlds: 150
         })
     );
-    // A world seed past canonical JSON's safe integer is refused at both entries.
+    // The pre-outcome blocks never read the table, so an underpowered plan blocks
+    // before a bad seed in the table could be refused.
+    let mut underpowered = family.clone();
+    underpowered.icc_pilot.required_n_for_margin = 751;
+    underpowered.stopping_rule = StoppingRule::FixedN { pairs: 751 };
+    let underpowered_frozen = FrozenFamily::freeze(&underpowered).unwrap();
     let mut wide = pairs.clone();
     wide[0].cluster.world_seed = 9_007_199_254_740_993;
+    assert!(matches!(
+        analyze(
+            &recorded(&underpowered_frozen, rates.clone(), &wide),
+            &underpowered,
+            &wide
+        )
+        .unwrap(),
+        Analysis::Blocked(BlockedReason::InsufficientEffectiveN { .. })
+    ));
+    // A world seed past canonical JSON's safe integer is refused at both entries.
     assert_eq!(
         analyze(&recorded(&frozen, rates.clone(), &wide), &family, &wide).err(),
         Some(StatisticsError::WorldSeedOutOfRange(9_007_199_254_740_993))

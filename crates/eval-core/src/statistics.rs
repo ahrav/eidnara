@@ -351,6 +351,9 @@ pub fn intraclass_correlation(groups: &[Vec<i64>]) -> Result<Ratio, StatisticsEr
 #[serde(deny_unknown_fields)]
 pub struct IccPilot {
     pub pilot_run_id: String,
+    /// The task families the pilot sampled, distinct and sorted; a plan
+    /// registering any other set cannot carry this pilot.
+    pub families: Vec<String>,
     pub n_items: u32,
     pub n_families: u32,
     pub n_worlds: u32,
@@ -405,6 +408,12 @@ pub fn run_icc_pilot(
         pilot_run_id: pilot_run_id.to_string(),
         n_items: observations.len() as u32,
         n_families: by_family.len() as u32,
+        families: observations
+            .iter()
+            .map(|o| o.cluster.family.clone())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect(),
         n_worlds: by_world.len() as u32,
         icc_family: intraclass_correlation(&by_family)?,
         icc_world_seed: intraclass_correlation(&by_world)?,
@@ -515,12 +524,14 @@ impl AnalysisFamily {
                 declared: self.endpoints.clone(),
             });
         }
-        // The pilot sampled the registered population: its family count is the
-        // registered family count, so the family-unit projection cannot spread
-        // items over families the campaign never runs.
+        // The pilot sampled the registered population: its families are the
+        // registered families, so its ICCs describe the campaign's clusters and
+        // the family-unit projection spreads items over exactly those.
         let registered: BTreeSet<&str> = self.families.iter().map(String::as_str).collect();
+        let sampled: Vec<&str> = self.icc_pilot.families.iter().map(String::as_str).collect();
         if registered.len() != self.families.len()
             || registered.len() != self.icc_pilot.n_families as usize
+            || sampled != registered.iter().copied().collect::<Vec<_>>()
         {
             return Err(StatisticsError::PilotInconsistent);
         }
@@ -968,7 +979,6 @@ pub fn analyze(
     }
     let frozen = FrozenFamily::from_manifest(manifest)?;
     frozen.check(family)?;
-    check_seeds(pairs.iter().map(|pair| &pair.cluster))?;
     if let Some(blocked) = family.is_blocked() {
         return Ok(Analysis::Blocked(blocked));
     }
@@ -981,6 +991,9 @@ pub fn analyze(
             bound: rates.miss_asymmetry_bound,
         }));
     }
+    // The pre-outcome blocks above never read the table; every check from here
+    // on does.
+    check_seeds(pairs.iter().map(|pair| &pair.cluster))?;
     let StoppingRule::FixedN { pairs: expected } = family.stopping_rule;
     if pairs.len() != expected as usize {
         return Err(StatisticsError::PairCountMismatch {

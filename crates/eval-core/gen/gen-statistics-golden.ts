@@ -122,10 +122,12 @@ function groupBy(observations: readonly Observation[], key: (o: Observation) => 
   return [...groups.keys()].sort(compareKeys).map((k) => groups.get(k) ?? []);
 }
 const clusterKey = (family: string, seed: number) => `${family}\u0000${seed}`;
+// Families compare by UTF-8 bytes, the order Rust's `String` uses; JS `<` compares UTF-16 code
+// units, which disagrees for supplementary characters against private-use ones.
 function compareKeys(left: string, right: string): number {
   const [lf, ls] = left.split("\u0000");
   const [rf, rs] = right.split("\u0000");
-  if (lf !== rf) return (lf ?? "") < (rf ?? "") ? -1 : 1;
+  if (lf !== rf) return Buffer.compare(Buffer.from(lf ?? "", "utf8"), Buffer.from(rf ?? "", "utf8"));
   return Number(ls ?? 0) - Number(rs ?? 0);
 }
 // The design effect is clamped at one, so deflation only ever shrinks N.
