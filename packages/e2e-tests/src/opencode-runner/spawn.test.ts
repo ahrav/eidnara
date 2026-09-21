@@ -86,6 +86,42 @@ describe("opencode child lifecycle", () => {
         }
     });
 
+    it("keeps auto_capture disabled when a caller supplies other memory settings", () => {
+        const root = mkdtempSync(join(tmpdir(), "opencode-memory-merge-"));
+        const env: IsolatedEnv = {
+            configDir: join(root, "config"),
+            dataDir: join(root, "data"),
+            cacheDir: join(root, "cache"),
+            workdir: join(root, "work"),
+        };
+        try {
+            for (const dir of Object.values(env)) mkdirSync(dir, { recursive: true });
+            __spawnOpencodeTest.writeConfigs(env, "http://127.0.0.1:4321", {
+                mockProviderURL: "http://127.0.0.1:4321",
+                eidnaraConfig: { memory: { auto_search: { enabled: false } } },
+            });
+            const written = JSON.parse(readFileSync(userEidnaraConfigPath(env), "utf8")) as {
+                memory: Record<string, unknown>;
+            };
+            expect(written.memory).toEqual({
+                auto_capture: false,
+                auto_search: { enabled: false },
+            });
+
+            // An explicit opt-in still wins.
+            __spawnOpencodeTest.writeConfigs(env, "http://127.0.0.1:4321", {
+                mockProviderURL: "http://127.0.0.1:4321",
+                eidnaraConfig: { memory: { auto_capture: true } },
+            });
+            const optedIn = JSON.parse(readFileSync(userEidnaraConfigPath(env), "utf8")) as {
+                memory: Record<string, unknown>;
+            };
+            expect(optedIn.memory).toEqual({ auto_capture: true });
+        } finally {
+            rmSync(root, { recursive: true, force: true });
+        }
+    });
+
     it("rejects inline credentials in contributed provider config before writing", () => {
         const root = mkdtempSync(join(tmpdir(), "opencode-provider-secret-"));
         const env: IsolatedEnv = {
