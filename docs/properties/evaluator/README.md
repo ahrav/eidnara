@@ -1048,8 +1048,11 @@ Injection, arms, and claims (`crates/eval-core/tests/injection.rs`):
   (`MessageCleanup::run_slice`, `run_history_summarizer_firing`), pinned to a
   literal, and is a file in the
   workspace containing the named symbol; a pruned arm records a lost
-  evidence ID without dropping the task; another set with the same task and
-  evidence IDs is `PairSetMismatch {pair_set_digest}`; an added or dropped task, a changed
+  evidence ID without dropping the task; arms built over a tampered set are
+  `PairSet(Tampered {pairing_policy_version})` before the arms are read;
+  another valid set with the same task and evidence IDs (an independent
+  history from another seed) is `PairSetMismatch {pair_set_digest}`; an added
+  or dropped task, a changed
   truth ID, an empty control run or one that is not a 64-hex run id, an empty
   policy version, a missing raw or
   pruned arm, a raw arm claiming a loss, and a loss outside the evidence each

@@ -6,9 +6,10 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use context_core::canonical_json::{ContractError, is_lower_hex, protocol_digest};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 use crate::event::EventId;
-use crate::pairs::PairSet;
+use crate::pairs::{PairError, PairSet};
 
 const PAIR_SET_DIGEST_PROTOCOL: &str = "eval-pair-set-digest/v1";
 
@@ -81,6 +82,8 @@ pub struct GovernanceArms {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ArmError {
+    /// The pair set itself is not one the compiler could have produced.
+    PairSet(PairError),
     NotCanonical(ContractError),
     MalformedControlRun,
     /// The arms describe another pair set, or tasks or evidence the pair set
@@ -109,8 +112,10 @@ pub enum ArmError {
 debug_display!(ArmError);
 
 impl GovernanceArms {
-    /// Checks the arms against the pair set they govern.
-    pub fn validate(&self, set: &PairSet) -> Result<(), ArmError> {
+    /// Checks the pair set under its reducer fixture, then the arms against
+    /// it.
+    pub fn validate(&self, set: &PairSet, fixture: &Value) -> Result<(), ArmError> {
+        set.validate(fixture).map_err(ArmError::PairSet)?;
         // The control is a run: a 64-hex `eval-run-id`, not any text.
         if !is_lower_hex(&self.control_run_id, 64) {
             return Err(ArmError::MalformedControlRun);

@@ -11,10 +11,10 @@ use eval_core::{
     AnchorRole, AnchorSet, AnchorTask, AnchorVerdict, ArmError, ArmRecord, AxisValue, Carrier,
     ClaimClass, Coverage, CoverageError, Destination, EvaluatedSurface, EventId, GovernanceArms,
     HistoryPolicy, InjectionCase, InjectionError, InjectionObservation, InjectionScore,
-    LaterSession, MARKERS, MAX_VALID_TIME_MS, Mode, PairSet, PairSetInput, Query, RepositorySpec,
-    Sensitivity, ServedClass, SessionSpec, SideEffect, Task, TaskRole, TaskSet, TransferCriterion,
-    UnmetClause, Visibility, WorldConfig, WorldProvenance, compile_pair_set, derive_claim_class,
-    pair_set_digest, plan_injection_cases, score_injection, serialize_spec,
+    LaterSession, MARKERS, MAX_VALID_TIME_MS, Mode, PairError, PairSet, PairSetInput, Query,
+    RepositorySpec, Sensitivity, ServedClass, SessionSpec, SideEffect, Task, TaskRole, TaskSet,
+    TransferCriterion, UnmetClause, Visibility, WorldConfig, WorldProvenance, compile_pair_set,
+    derive_claim_class, pair_set_digest, plan_injection_cases, score_injection, serialize_spec,
 };
 use serde_json::json;
 use support::{WORLD_EPOCH_MS as EPOCH_MS, WORLD_SEED as SEED, world_config as config};
@@ -443,6 +443,13 @@ fn every_injection_marker_fires_across_the_scenarios() {
 const END: i64 = MAX_VALID_TIME_MS;
 
 fn pair_set() -> PairSet {
+    pair_set_with_fresh(SEED ^ 0xABCD)
+}
+
+/// The same aged history and tasks over an independent history drawn from
+/// `fresh_seed`; two seeds give two valid sets with equal task and evidence
+/// IDs.
+fn pair_set_with_fresh(fresh_seed: u64) -> PairSet {
     let labeled = ServedClass {
         sensitivity: Sensitivity::Normal,
         visibility: Visibility::Labeled,
@@ -485,7 +492,7 @@ fn pair_set() -> PairSet {
         tick_ms: 1_000,
         max_events_per_log: 64,
     };
-    let natural_fresh = eval_core::generate_all(SEED ^ 0xABCD, &short, Mode::Generate)
+    let natural_fresh = eval_core::generate_all(fresh_seed, &short, Mode::Generate)
         .unwrap()
         .log;
     compile_pair_set(PairSetInput {
@@ -536,7 +543,7 @@ fn arms(set: &PairSet) -> GovernanceArms {
 fn history_policy_arms_are_held_to_the_pair_set_they_govern() {
     let set = pair_set();
     let arms = arms(&set);
-    arms.validate(&set).unwrap();
+    arms.validate(&set, &serialize_spec()).unwrap();
     // The descriptors select the orchestrators production runs, not the
     // primitives they drive: the slice runner with its admission gate and
     // budgets, and the firing that validates and publishes.
@@ -580,13 +587,27 @@ fn history_policy_arms_are_held_to_the_pair_set_they_govern() {
         .get_mut(&HistoryPolicy::Pruned)
         .unwrap()
         .absent_evidence = [lost.clone()].into();
-    lossy.validate(&set).unwrap();
+    lossy.validate(&set, &serialize_spec()).unwrap();
     assert_eq!(lossy.task_ids.len(), 2, "the denominator did not shrink");
-    // Another set with the same task and evidence IDs is another set.
-    let mut relabeled = set.clone();
-    relabeled.aged_median_ms += 1;
+    // The pair set is checked, under its fixture, before the arms are held
+    // to it: arms built over a tampered set are not a governance record.
+    let mut tampered = set.clone();
+    tampered.pairing_policy_version = "eval-pairing/v0".to_string();
+    let mut over_tampered = arms.clone();
+    over_tampered.pair_set_digest = pair_set_digest(&tampered).unwrap();
     assert_eq!(
-        arms.validate(&relabeled),
+        over_tampered.validate(&tampered, &serialize_spec()),
+        Err(ArmError::PairSet(PairError::Tampered {
+            field: "pairing_policy_version"
+        }))
+    );
+    // Another valid set with the same task and evidence IDs is another set.
+    let relabeled = pair_set_with_fresh(SEED ^ 0xDCBA);
+    relabeled.validate(&serialize_spec()).unwrap();
+    assert_eq!(relabeled.pairs.len(), set.pairs.len());
+    assert_ne!(relabeled, set);
+    assert_eq!(
+        arms.validate(&relabeled, &serialize_spec()),
         Err(ArmError::PairSetMismatch {
             field: "pair_set_digest"
         }),
@@ -685,7 +706,11 @@ fn history_policy_arms_are_held_to_the_pair_set_they_govern() {
     for (name, mutate, expected) in mutations {
         let mut mutated = arms.clone();
         mutate(&mut mutated);
-        assert_eq!(mutated.validate(&set), Err(expected), "{name}");
+        assert_eq!(
+            mutated.validate(&set, &serialize_spec()),
+            Err(expected),
+            "{name}"
+        );
     }
     // Two arms under one policy cannot be written down.
     let value = serde_json::to_value(&arms).unwrap();

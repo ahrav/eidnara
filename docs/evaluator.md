@@ -1131,7 +1131,9 @@ identity once so a mismatch is named (the control is a 64-hex `eval-run-id`,
 the arms by policy, so no two arms can disagree and no policy appears twice;
 each `ArmRecord` owns only its `policy_version` and its `absent_evidence`, the
 evidence the policy removed, kept so the task stays in the arm and records a
-loss instead of shrinking the denominator. `validate(&PairSet)` holds the
+loss instead of shrinking the denominator. `validate(&PairSet, fixture)` runs
+`PairSet::validate` under the reducer fixture first (`PairSet(PairError)`),
+then holds the
 record to the pair set it governs: the digest and the task and evidence sets
 must equal the set's (`PairSetMismatch {field}`), every policy must have an arm
 (`MissingArm`), the raw arm must claim no loss (`RawArmLostEvidence`), every
