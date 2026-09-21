@@ -41,6 +41,18 @@ function record(value: unknown): Record<string, unknown> | undefined {
 /** Source messages older than this are not offered for capture. */
 export const CAPTURE_MAX_AGE_MS = 48 * 60 * 60 * 1000;
 
+/** Absent flags enable capture; only an explicit `false` disables it. */
+export function memoryAutoCaptureEnabled(config: {
+    memory?: { enabled?: boolean; auto_promote?: boolean; auto_capture?: boolean };
+}): boolean {
+    const memory = config.memory;
+    return (
+        memory?.enabled !== false &&
+        memory?.auto_promote !== false &&
+        memory?.auto_capture !== false
+    );
+}
+
 export interface CaptureSourceOptions {
     /** Epoch milliseconds; messages created before this are skipped. Undated messages stay. */
     notBefore?: number;

@@ -19,6 +19,7 @@ import {
     createMemoryCaptureDrain,
     type MemoryCaptureDrain,
     type MemoryCaptureScope,
+    memoryAutoCaptureEnabled,
     openCodeCaptureMessages,
     openCodeLastFinalMessageId,
     openCodeMessagesSince,
@@ -274,9 +275,7 @@ export function createEidnaraHook(deps: EidnaraDeps) {
     /** Messages read back per later checkpoint before falling back to the whole transcript. */
     const CAPTURE_TAIL_MESSAGES = 32;
     const captureDisabled = (): boolean =>
-        deps.config.memory?.enabled === false ||
-        deps.config.memory?.auto_promote === false ||
-        deps.config.memory?.auto_capture === false ||
+        !memoryAutoCaptureEnabled(deps.config) ||
         // The private capture project is configured through its own `opencode.json`; without
         // project config layers the capture agent does not exist, so nothing is queued for it.
         projectConfigDisabled();

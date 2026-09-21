@@ -1,11 +1,12 @@
 import { afterEach, describe, expect, it } from "bun:test";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createCountingPi } from "./__tests__/test-utils";
 import eidnaraPiExtension, { __test } from "./index";
 import { EIDNARA_PI_SUBAGENT_ENV } from "./subagent-runner";
 
+const tempRoots: string[] = [];
 const originalEnv = {
     EIDNARA_PI_SUBAGENT: process.env.EIDNARA_PI_SUBAGENT,
     XDG_CONFIG_HOME: process.env.XDG_CONFIG_HOME,
@@ -21,6 +22,7 @@ function restoreEnv() {
 
 function isolateXdgEnv() {
     const root = mkdtempSync(join(tmpdir(), "eidnara-pi-index-test-"));
+    tempRoots.push(root);
     process.env.XDG_CONFIG_HOME = join(root, "config");
     process.env.XDG_DATA_HOME = join(root, "data");
 }
@@ -29,6 +31,7 @@ afterEach(() => {
     restoreEnv();
     // The test helper resets the global initialization latch between tests.
     __test.clearPiEidnaraActive();
+    for (const root of tempRoots.splice(0)) rmSync(root, { recursive: true, force: true });
 });
 
 describe("Pi full extension subagent env guard", () => {
