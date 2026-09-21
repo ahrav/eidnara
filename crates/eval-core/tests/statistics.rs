@@ -1210,6 +1210,35 @@ fn the_pair_table_and_the_pilot_must_match_the_frozen_plan() {
     uneven_plan.icc_pilot = uneven_pilot;
     uneven_plan.stopping_rule = StoppingRule::FixedN { pairs: 6 };
     assert_eq!(uneven_plan.validate(), Ok(()));
+    // The bound searches the family totals between the two levels' peaks: 12 pairs
+    // over three worlds and two families under family ICC 11/20 and world ICC
+    // 9/10 reach 240/77 with world sizes 5 | 3, 4 (family totals 5 and 7), where
+    // both the world-balanced and the family-balanced tables fall under three.
+    let mut between = family.clone();
+    between.families = vec!["a".into(), "b".into()];
+    between.icc_pilot = IccPilot {
+        families: vec!["a".into(), "b".into()],
+        n_items: 12,
+        n_families: 2,
+        n_worlds: 3,
+        icc_family: ratio(11, 20),
+        icc_world_seed: ratio(9, 10),
+        clustering_unit: ClusteringUnit::Family,
+        max_affordable_worlds: 3,
+        effective_n_at_max: ratio(16, 5),
+        required_n_for_margin: 3,
+        ..family.icc_pilot.clone()
+    };
+    between.stopping_rule = StoppingRule::FixedN { pairs: 12 };
+    assert_eq!(between.validate(), Ok(()));
+    between.icc_pilot.required_n_for_margin = 4;
+    assert_eq!(
+        between.validate(),
+        Err(StatisticsError::PlanBelowRequiredN {
+            attainable: ratio(240, 77),
+            required_n_for_margin: 4
+        })
+    );
     // The bound is closed form over the two family sizes, so a compact plan with
     // billions of pairs and worlds is judged without a loop over either; this
     // one's size-weighted family mean leaves the safe range and is refused.
