@@ -626,32 +626,80 @@ fn every_host_finish_reason_error_class_and_terminal_round_trips() {
     }
 }
 
-/// An exchange the recording cannot reproduce refuses it: a future dropped
-/// before its terminal (a panic or a cancelled task) and a sink that closed on
-/// an event both leave the recorder with no file.
-#[test]
-fn a_dropped_future_or_a_closed_sink_refuses_the_recording() {
+/// A backend whose `execute` panics before returning a future.
+struct PanicsOnExecute;
+
+impl LlmExecutionBackend for PanicsOnExecute {
+    fn execute(&self, _: BackendRequest, _: EventSink, _: CancellationToken) -> BackendFuture {
+        panic!("the wrapped backend panicked synchronously");
+    }
+}
+
+fn accepting() -> EventSink {
+    EventSink::new(Arc::new(|_| SinkStatus::Accepted))
+}
+
+fn fresh_recorder() -> (Arc<CassetteBackend>, Arc<dyn LlmExecutionBackend>) {
     let real = Arc::new(Scripted {
         calls: AtomicUsize::new(0),
     });
-    let recorder = CassetteBackend::recording(NAMESPACE, real.clone());
+    let recorder = CassetteBackend::recording(NAMESPACE, real);
     let recording: Arc<dyn LlmExecutionBackend> = recorder.clone();
+    (recorder, recording)
+}
+
+/// An exchange the recording cannot reproduce refuses it: a future dropped
+/// before its terminal, a backend that panics before returning one, a run
+/// cancelled under the backend, and a sink that closed on an event each leave
+/// the recorder with no file; an exchange still in flight has no file yet.
+#[test]
+fn a_lost_or_unfinished_exchange_refuses_the_recording() {
     let runtime = runtime();
+    let (recorder, recording) = fresh_recorder();
     runtime.block_on(run(&recording, request("hello")));
     assert!(recorder.file().is_ok());
-    let accepting = EventSink::new(Arc::new(|_| SinkStatus::Accepted));
-    drop(recording.execute(request("dropped"), accepting, CancellationToken::new()));
+    let in_flight = recording.execute(request("slow"), accepting(), CancellationToken::new());
+    assert_eq!(
+        recorder.file().err(),
+        Some(CassetteError::IncompleteExchange),
+        "an exchange in flight is in no file yet"
+    );
+    runtime.block_on(in_flight);
+    assert!(recorder.file().is_ok(), "and is once it completes");
+    drop(recording.execute(request("dropped"), accepting(), CancellationToken::new()));
     assert_eq!(
         recorder.file().err(),
         Some(CassetteError::IncompleteExchange),
         "an exchange without a terminal is in no file"
     );
 
-    let real = Arc::new(Scripted {
-        calls: AtomicUsize::new(0),
-    });
-    let recorder = CassetteBackend::recording(NAMESPACE, real);
+    let recorder = CassetteBackend::recording(NAMESPACE, Arc::new(PanicsOnExecute));
     let recording: Arc<dyn LlmExecutionBackend> = recorder.clone();
+    let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        recording.execute(request("hello"), accepting(), CancellationToken::new())
+    }));
+    assert!(panicked.is_err());
+    assert_eq!(
+        recorder.file().err(),
+        Some(CassetteError::IncompleteExchange),
+        "a backend that panics before returning a future is in no file"
+    );
+
+    let (recorder, recording) = fresh_recorder();
+    let cancel = CancellationToken::new();
+    cancel.cancel();
+    let terminal = runtime.block_on(recording.execute(request("hello"), accepting(), cancel));
+    assert!(matches!(
+        terminal,
+        BackendTerminal::Failed(BackendError { provider_code: Some(code), .. }) if code == "cassette_refused"
+    ));
+    assert_eq!(
+        recorder.file().err(),
+        Some(CassetteError::IncompleteExchange),
+        "a run cancelled under the backend is in no file"
+    );
+
+    let (recorder, recording) = fresh_recorder();
     let closed = EventSink::new(Arc::new(|_| SinkStatus::Closed));
     let terminal =
         runtime.block_on(recording.execute(request("hello"), closed, CancellationToken::new()));

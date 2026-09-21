@@ -783,10 +783,12 @@ Daemon shell (`crates/daemon/tests/eval_cassette.rs`, `--all-features`):
   entry keyed to another host misses.
 - `every_cassette_marker_fires_across_the_scenarios` is the completeness
   proof over this suite's markers.
-- `a_dropped_future_or_a_closed_sink_refuses_the_recording`: a backend future
-  dropped before its terminal, and a run whose sink answers `Closed`, each
-  leave the recorder refusing `IncompleteExchange`; the closed-sink call
-  returns a `cassette_refused` terminal.
+- `a_lost_or_unfinished_exchange_refuses_the_recording`: `file()` refuses
+  `IncompleteExchange` while an exchange is in flight and succeeds once it is
+  recorded; a future dropped before its terminal, an `execute` that panics
+  before returning one, a run whose token was cancelled under the backend, and
+  a run whose sink answers `Closed` each leave the recorder refusing
+  `IncompleteExchange`, the last two with a `cassette_refused` terminal.
 - `every_host_finish_reason_error_class_and_terminal_round_trips`: both
   `FinishReason` values, all four `ErrorClass` values under `Failed` and
   `FailedUnresolved`, and an absent event finish reason each record and replay

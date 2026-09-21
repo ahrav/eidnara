@@ -263,6 +263,9 @@ pub struct CassetteBackend {
     /// trait's `&'static str` return needs no per-call allocation.
     reasons: [Option<&'static str>; 2],
     refusals: Arc<AtomicUsize>,
+    /// Exchanges between `execute` and `record`; `file()` refuses while any
+    /// is outstanding.
+    in_flight: Arc<AtomicUsize>,
 }
 
 impl CassetteBackend {
@@ -302,12 +305,18 @@ impl CassetteBackend {
             declarations,
             reasons,
             refusals: Arc::new(AtomicUsize::new(0)),
+            in_flight: Arc::new(AtomicUsize::new(0)),
         })
     }
 
-    /// The persisted cassette after recording; a refused recording has none.
+    /// The persisted cassette after recording; a refused recording has none,
+    /// and a recording with an exchange still in flight has none yet.
     pub fn file(&self) -> Result<Value, CassetteError> {
-        Ok(serde_json::to_value(self.cassette.lock().unwrap().to_file()?).unwrap())
+        let cassette = self.cassette.lock().unwrap();
+        if self.in_flight.load(Ordering::SeqCst) > 0 {
+            return Err(CassetteError::IncompleteExchange);
+        }
+        Ok(serde_json::to_value(cassette.to_file()?).unwrap())
     }
 
     /// Requests answered with a `cassette_miss` terminal, including every one
@@ -356,19 +365,20 @@ impl CassetteBackend {
                 status
             }))
         };
-        let inner = inner.execute(request, tee, cancel);
         let cassette = self.cassette.clone();
         let namespace = self.namespace.clone();
-        // Armed here, not inside the future, so a future dropped unpolled
-        // still refuses the recording.
-        let mut uncommitted = Uncommitted(Some(cassette.clone()));
+        // Armed before the wrapped backend runs, so an `execute` that panics
+        // and a future dropped unpolled both refuse the recording.
+        let mut exchange = InFlight::new(cassette.clone(), self.in_flight.clone());
+        let inner = inner.execute(request, tee, cancel.clone());
         Box::pin(async move {
             let terminal = inner.await;
             let mut cassette = cassette.lock().unwrap();
-            uncommitted.disarm();
-            if closed.load(Ordering::SeqCst) {
-                // The run's terminal is the supervisor's, not this one, and
-                // the refused event is missing: the exchange cannot be replayed.
+            exchange.commit();
+            if closed.load(Ordering::SeqCst) || cancel.is_cancelled() {
+                // The run's terminal is the supervisor's (a refused event, a
+                // cancellation), not this one, and a refused event is missing:
+                // the exchange cannot replay the run.
                 let error = cassette.refuse(CassetteError::IncompleteExchange);
                 return Self::refused("cassette_refused", error);
             }
@@ -434,22 +444,40 @@ impl CassetteBackend {
     }
 }
 
-/// Refuses the recording when dropped still armed: an exchange whose future
-/// panicked or was dropped before `record` ran is in no file.
-struct Uncommitted(Option<Arc<Mutex<Cassette>>>);
+/// One exchange between `execute` and `record`, counted in `in_flight`.
+/// Dropped before `commit` (a panic, a dropped future), it refuses the
+/// recording: the exchange it stands for is in no file.
+struct InFlight {
+    cassette: Arc<Mutex<Cassette>>,
+    pending: Arc<AtomicUsize>,
+    committed: bool,
+}
 
-impl Uncommitted {
-    fn disarm(&mut self) {
-        self.0 = None;
+impl InFlight {
+    fn new(cassette: Arc<Mutex<Cassette>>, pending: Arc<AtomicUsize>) -> Self {
+        pending.fetch_add(1, Ordering::SeqCst);
+        Self {
+            cassette,
+            pending,
+            committed: false,
+        }
+    }
+
+    /// Called with the cassette lock held, so `file()` never sees the count
+    /// drop before the entry is recorded.
+    fn commit(&mut self) {
+        self.committed = true;
+        self.pending.fetch_sub(1, Ordering::SeqCst);
     }
 }
 
-impl Drop for Uncommitted {
+impl Drop for InFlight {
     fn drop(&mut self) {
-        if let Some(cassette) = self.0.take()
-            && let Ok(mut cassette) = cassette.lock()
-        {
-            cassette.refuse(CassetteError::IncompleteExchange);
+        if !self.committed {
+            self.pending.fetch_sub(1, Ordering::SeqCst);
+            if let Ok(mut cassette) = self.cassette.lock() {
+                cassette.refuse(CassetteError::IncompleteExchange);
+            }
         }
     }
 }
