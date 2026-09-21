@@ -689,7 +689,8 @@ Cassette core (`crates/eval-core/tests/cassette.rs`):
   digest; the unchanged request is refused with the same terminal afterwards
   and `misses()` stays at one. `only_a_tool_result_change_is_tool_result_drift`
   names the other class. `a_fractional_temperature_digests_exactly` shows
-  `0.7` persisted as `"0.7"`, `0.70` replaying, and `0.8` differing.
+  `0.7` persisted as `"0.7"`, `0.70` replaying, `0.8` differing, and a
+  string, null, or array `temperature` refused as `TemperatureNotDecimal`.
 - `volatile_and_uncovered_changes_replay`: a moved `cache_control` marker and
   a changed or removed `x-api-key`, `user-agent`, `authorization`, or
   `x-session-id` header replay. `only_a_terminated_nonce_is_normalized` is the
@@ -711,8 +712,9 @@ Cassette core (`crates/eval-core/tests/cassette.rs`):
 - `provenance_schema_and_version_pins_are_recomputed_on_read`
   (`rid-shared-cassette-schema-verified-provenance`): one edited frame or one
   edited declaration is `ProvenanceMismatch`; a re-signed declaration edit loads
-  and is visible; a re-signed request edit is `EntryDigestMismatch`; a schema,
-  generator, or covered-field version change and an unknown field each refuse.
+  and is visible; a re-signed request edit is `EntryDigestMismatch`; a schema
+  change (with a new field beside it) is `SchemaMismatch`, a generator or
+  covered-field version change and an unknown field each refuse.
 - `planted_secrets_and_unscannable_frames_are_refused_and_the_cassette_never_persists`
   (`xc-captured-provider-requests-redacted-before-persistence`): after one
   admitted entry, an `sk-ant-` token in a user message, an AWS key in a tool
@@ -720,7 +722,7 @@ Cassette core (`crates/eval-core/tests/cassette.rs`):
   SecretDetected)`, and a body one byte past `MAX_REDACTABLE_BYTES` is
   `RedactionRefused(Request, InputLimit)`; the refused entry never exists and
   `to_file` returns the refusal, so the one admitted entry is not persisted
-  either. `a_request_the_boundary_could_not_project_refuses_the_file_too`
+  either, and a second refusal does not replace the first one reported. `a_request_the_boundary_could_not_project_refuses_the_file_too`
   shows `Cassette::refuse` latching the same way for a request no entry was
   built from. `a_malformed_body_is_refused_rather_than_digested_as_empty` keeps
   `{}` out of the digest.
@@ -764,7 +766,8 @@ Daemon shell (`crates/daemon/tests/eval_cassette.rs`, `--all-features`):
   (marker `rid_cassette_namespace_refused`): an edited recorded event is
   `ProvenanceMismatch`; another namespace is `NamespaceMismatch` at load; a
   `NaN` temperature is a `cassette_request` terminal and a canary prompt is a
-  `redaction_refused` terminal; each leaves the recorder with no file.
+  `redaction_refused` terminal; each leaves the recorder with no file, and the
+  first refusal is the one it reports.
 - `memory_reviewer_replays_through_the_keyed_peer`
   (`sls-memory-reviewer-model-calls-cassette-or-excluded`, marker
   `rid_reviewer_cassette_miss_reached`): the key recovered from one recorded
@@ -783,6 +786,17 @@ Daemon shell (`crates/daemon/tests/eval_cassette.rs`, `--all-features`):
   as an equal transcript, so the wire mirror's decode side covers every host
   variant, not only the two the marker scenarios produce.
 
+Oracle (`crates/daemon/examples/eval_runner.rs`, `--features eval-runner`,
+tested as an example target):
+
+- `a_record_the_oracle_cannot_project_leaves_close_with_no_file`: a `record`
+  with a body field outside the covered list is `UnknownRequestField` with an
+  empty detail, and the following `close` reports the same refusal and writes
+  nothing.
+- `a_failed_publication_removes_the_temp_file_it_created`: with a directory at
+  the target path, `close` reports `Io` and the attempt's `.json.tmp` sibling
+  is gone.
+
 ## Gaps recorded here
 
 - The OpenCode cassette is bound to the environment that recorded it: the
@@ -798,11 +812,12 @@ Daemon shell (`crates/daemon/tests/eval_cassette.rs`, `--all-features`):
 - The keyed reviewer peer holds its entries in memory; reviewer traffic is not
   yet persisted in the cassette file, and `memory_reviewer_model_calls` is a
   manifest declaration no runner enforces yet.
-- The Rust oracle's stdin protocol has no Rust-side test; its consumer is the
-  TypeScript MockProvider cassette mode. The `{kind, detail}` refusal contract
-  is pinned in `eval-core` (`no_wire_detail_carries_request_content`), but the
-  oracle's own variants (`UnsafePath`, `Io`, `Json`, `LineTooLong`,
-  `AlreadyOpen`, `NoOpenCassette`) are exercised only through that consumer.
+- The Rust oracle's stdin protocol has two Rust-side tests (the projection
+  latch and the failed publication); its consumer is the TypeScript
+  MockProvider cassette mode. The `{kind, detail}` refusal contract is pinned
+  in `eval-core` (`no_wire_detail_carries_request_content`), but the oracle's
+  other variants (`UnsafePath`, `Json`, `LineTooLong`, `AlreadyOpen`,
+  `NoOpenCassette`) are exercised only through that consumer.
 
 - Every ingestion entry point lacks a production caller. No world is labelled
   "validated real ingestion" until one exists; every manifest carries

@@ -293,6 +293,15 @@ fn a_fractional_temperature_digests_exactly() {
         request_digest(&hotter.covered().unwrap()).unwrap(),
         request_digest(&warm.covered().unwrap()).unwrap()
     );
+    // A temperature that is not a JSON number is refused, not digested as text.
+    for written in [json!("0.7"), json!(null), json!([0.7])] {
+        let mut odd = opencode_request();
+        odd.body["temperature"] = written.clone();
+        assert!(
+            matches!(odd.covered(), Err(CassetteError::TemperatureNotDecimal(_))),
+            "{written}"
+        );
+    }
 }
 
 #[test]
@@ -487,10 +496,14 @@ fn provenance_schema_and_version_pins_are_recomputed_on_read() {
     );
     let mut schema = file.clone();
     schema["schema"] = json!("eval-cassette/v2");
-    assert!(matches!(
-        Cassette::replay(&schema, NAMESPACE),
-        Err(CassetteError::SchemaMismatch { .. })
-    ));
+    // A later schema's new field reports the version, not a shape refusal.
+    schema["later"] = json!(1);
+    assert_eq!(
+        Cassette::replay(&schema, NAMESPACE).err(),
+        Some(CassetteError::SchemaMismatch {
+            found: "eval-cassette/v2".to_string()
+        })
+    );
     let mut generator = file.clone();
     generator["provenance"]["generator_version"] = json!("eval-cassette-ts-v1");
     assert!(matches!(
@@ -532,7 +545,23 @@ fn planted_secrets_and_unscannable_frames_are_refused_and_the_cassette_never_per
             )
             .unwrap_err();
         assert_eq!(cassette.cases().len(), 1, "a refused entry never exists");
-        // One admitted entry does not make a partial cassette persistable.
+        // One admitted entry does not make a partial cassette persistable, and
+        // a later refusal does not replace the first one reported.
+        assert_eq!(cassette.to_file().err(), Some(error.clone()));
+        let mut oversized = opencode_request();
+        oversized.body["messages"][0]["content"][0]["text"] =
+            json!("x".repeat(context_core::redaction::MAX_REDACTABLE_BYTES + 1));
+        assert_eq!(
+            cassette
+                .record(
+                    NAMESPACE,
+                    Boundary::Opencode,
+                    oversized.covered().unwrap(),
+                    frames(),
+                )
+                .unwrap_err(),
+            CassetteError::RedactionRefused(Location::Request, RedactionErrorKind::InputLimit)
+        );
         assert_eq!(cassette.to_file().err(), Some(error.clone()));
         error
     };

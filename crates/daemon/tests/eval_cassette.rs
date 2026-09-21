@@ -329,6 +329,21 @@ fn a_regenerated_frame_or_another_namespace_refuses_before_any_request(coverage:
         terminal,
         BackendTerminal::Failed(BackendError { provider_code: Some(code), .. }) if code == "redaction_refused"
     ));
+    // The first refusal is the one the recorder reports.
+    assert!(matches!(
+        recorder.file().err(),
+        Some(CassetteError::TemperatureNotDecimal(_))
+    ));
+    let real = Arc::new(Scripted {
+        calls: AtomicUsize::new(0),
+    });
+    let recorder = CassetteBackend::recording(NAMESPACE, real);
+    let recording: Arc<dyn LlmExecutionBackend> = recorder.clone();
+    let (_, terminal) = runtime.block_on(run(&recording, request(CANARY)));
+    assert!(matches!(
+        terminal,
+        BackendTerminal::Failed(BackendError { provider_code: Some(code), .. }) if code == "redaction_refused"
+    ));
     assert!(matches!(
         recorder.file().err(),
         Some(CassetteError::RedactionRefused(..))

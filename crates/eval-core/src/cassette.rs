@@ -313,11 +313,19 @@ impl Cassette {
     /// schema, generator, covered-field, namespace, provenance, or entry-digest
     /// mismatch before any request is served.
     pub fn replay(value: &Value, namespace: &str) -> Result<Self, CassetteError> {
+        // Checked on the raw value first, so a later schema's new fields report
+        // the version, not a shape refusal from `deny_unknown_fields`.
+        let schema = value
+            .get("schema")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        if schema != CASSETTE_SCHEMA {
+            return Err(CassetteError::SchemaMismatch {
+                found: schema.to_string(),
+            });
+        }
         let file = CassetteFile::deserialize(value)
             .map_err(|error| CassetteError::Shape(error.to_string()))?;
-        if file.schema != CASSETTE_SCHEMA {
-            return Err(CassetteError::SchemaMismatch { found: file.schema });
-        }
         if file.provenance.generator_version != CASSETTE_GENERATOR_VERSION {
             return Err(CassetteError::GeneratorVersionMismatch {
                 found: file.provenance.generator_version,
@@ -404,7 +412,8 @@ impl Cassette {
 
     /// Admits one exchange. The covered request projection and the response
     /// are scanned first; a finding or an unscannable text refuses the entry
-    /// before it exists anywhere and marks the cassette refused.
+    /// before it exists anywhere and marks the cassette refused. The first
+    /// refusal is the one `to_file` reports; later ones do not replace it.
     pub fn record(
         &mut self,
         namespace: &str,
@@ -420,7 +429,7 @@ impl Cassette {
         if let Err(error) = admit(redactor, Location::Request, &request)
             .and_then(|()| admit(redactor, Location::Response, &response))
         {
-            self.refused = Some(error.clone());
+            self.refused.get_or_insert_with(|| error.clone());
             return Err(error);
         }
         let entry = Entry {
@@ -437,10 +446,11 @@ impl Cassette {
     /// Latches `error` as a recording's refusal for an exchange the boundary
     /// could not even project (an unknown field, an unencodable number), so
     /// the exchange missing from the cassette leaves it without a file form
-    /// exactly as a refused entry does. A replay is unchanged.
+    /// exactly as a refused entry does. An earlier refusal stays; a replay is
+    /// unchanged.
     pub fn refuse(&mut self, error: CassetteError) -> CassetteError {
         if self.redactor.is_some() {
-            self.refused = Some(error.clone());
+            self.refused.get_or_insert_with(|| error.clone());
         }
         error
     }
@@ -561,8 +571,13 @@ impl OpenCodeRequest {
             if !OPENCODE_COVERED_FIELDS.contains(&format!("body.{name}").as_str()) {
                 return Err(CassetteError::UnknownRequestField(name.clone()));
             }
-            let value = match (name.as_str(), value.as_f64()) {
-                ("temperature", Some(number)) => Value::String(canonical_decimal_f64(number)?),
+            let value = match name.as_str() {
+                "temperature" => {
+                    let number = value
+                        .as_f64()
+                        .ok_or_else(|| CassetteError::TemperatureNotDecimal(value.to_string()))?;
+                    Value::String(canonical_decimal_f64(number)?)
+                }
                 _ => strip_volatile(value, name == "system"),
             };
             body.insert(name.clone(), value);

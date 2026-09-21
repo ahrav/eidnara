@@ -738,7 +738,8 @@ lists, both pinned in `eval-core` and named together by
   the versions that do. A mock-side `cache_control` move or nonce change
   replays; any other byte in a covered field misses. A fractional
   `temperature` is projected through `canonical_decimal_f64` to its exact
-  decimal text, as the backend record is; any other fractional number in the
+  decimal text, as the backend record is, and a `temperature` that is not a
+  JSON number is `TemperatureNotDecimal`; any other fractional number in the
   body (none is observed from OpenCode 1.18.31) is `NotCanonical`, refused at
   record and replay alike rather than digested.
 - `OPENCODE_HEADER_ALLOWLIST` (`anthropic-beta`, `anthropic-version`) is the
@@ -761,9 +762,10 @@ declarations, provenance {generator_version, input_sha256}, cases}`;
 `provenance`, including the declarations and every recorded frame, recomputed
 on read, so an edited frame or declaration is `ProvenanceMismatch`; each
 entry's stored digest is also recomputed from its stored request
-(`EntryDigestMismatch`). `Cassette::replay` refuses a schema, generator,
-covered-field-version, namespace, provenance, or entry-digest mismatch before
-any request is served; `lookup` and `record` under another namespace are
+(`EntryDigestMismatch`). `Cassette::replay` refuses a schema (checked on the raw
+value first, so a later schema's new fields report the version rather than a
+shape refusal), generator, covered-field-version, namespace, provenance, or
+entry-digest mismatch before any request is served; `lookup` and `record` under another namespace are
 `WrongNamespace`, so equal digests in another world variant never answer.
 Every `CassetteError` names its wire `kind()`.
 
@@ -794,8 +796,8 @@ can straddle a window edge, before the entry exists anywhere. A finding is
 `RedactionRefused(location, SecretDetected)`; text past the scanner's 512 KiB
 input cap is `RedactionRefused(location, InputLimit)`. A refused entry is never
 substituted with a placeholder and never persisted, and the refusal latches:
-`to_file` returns the refusal, so a recording that refused one exchange has no
-file form and a partial cassette can never pass for a complete one. A request
+`to_file` returns the first refusal, so a recording that refused one exchange
+has no file form and a partial cassette can never pass for a complete one. A request
 the boundary could not even project (`UnknownRequestField`, an unencodable
 number) latches the same way through `Cassette::refuse`, because the exchange
 it stands for is missing from the cassette just as a refused entry is.
@@ -817,9 +819,11 @@ because its payload is a body field name, a temperature literal, a body
 number, or a serde message that can quote its input. The path must
 be absolute with no `..` component; a second `open` is `AlreadyOpen`; a line
 over 4 MiB is `LineTooLong`. `close` writes a recording write-then-rename
-through a freshly created owner-only `.json.tmp` sibling and writes nothing for
-a replay or a refused recording, including one whose `record` could not project
-a request.
+through a freshly created owner-only `.json.tmp` sibling, removing that
+sibling again when a later write, sync, or rename step fails, and writes
+nothing for a replay or a refused recording, including one whose `record`
+could not project a request. `close` is terminal either way: a failed
+publication is reported once and the oracle accepts the next `open`.
 
 ### `LlmExecutionBackend` and MemoryReviewer
 

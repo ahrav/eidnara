@@ -240,7 +240,8 @@ fn safe_path(path: PathBuf) -> Result<PathBuf, OracleError> {
 /// Publication is write-then-rename. Every entry was admitted before this
 /// point, so the temporary file never holds an unscanned byte; it is created
 /// fresh and owner-only, so a pre-existing sibling is an error rather than a
-/// followed link.
+/// followed link. A temporary file this attempt created is removed when a
+/// later step fails, so it cannot block the next recording to the same path.
 fn write_then_rename(path: &Path, text: &str) -> io::Result<()> {
     use std::os::unix::fs::OpenOptionsExt;
     let temp = path.with_extension("json.tmp");
@@ -249,9 +250,14 @@ fn write_then_rename(path: &Path, text: &str) -> io::Result<()> {
         .create_new(true)
         .mode(0o600)
         .open(&temp)?;
-    file.write_all(text.as_bytes())?;
-    file.sync_all()?;
-    fs::rename(&temp, path)
+    let published = file
+        .write_all(text.as_bytes())
+        .and_then(|()| file.sync_all())
+        .and_then(|()| fs::rename(&temp, path));
+    if published.is_err() {
+        let _ = fs::remove_file(&temp);
+    }
+    published
 }
 
 fn covered(request: RawRequest) -> Result<Value, CassetteError> {
@@ -293,5 +299,80 @@ fn main() -> io::Result<()> {
         other => Err(io::Error::other(format!(
             "usage: eval_runner cassette-oracle (got {other:?})"
         ))),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A fresh directory under the system temp dir; the file names inside are
+    /// absolute, as the oracle requires.
+    fn scratch(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("eval-runner-{}-{name}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// Runs `lines` through the oracle and returns one parsed reply per line.
+    fn oracle(lines: &[Value]) -> Vec<Value> {
+        let input: String = lines.iter().map(|line| format!("{line}\n")).collect();
+        let mut output = Vec::new();
+        serve(input.as_bytes(), &mut output).unwrap();
+        String::from_utf8(output)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect()
+    }
+
+    fn open(path: &Path) -> Value {
+        json!({"op": "open", "mode": "record", "namespace": "eval-run:fresh:0", "path": path})
+    }
+
+    fn record(body: Value) -> Value {
+        json!({"op": "record", "namespace": "eval-run:fresh:0",
+            "request": {"path": "/messages", "headers": {}, "body_text": body.to_string()},
+            "response": {"status": 200, "frames": []}})
+    }
+
+    #[test]
+    fn a_record_the_oracle_cannot_project_leaves_close_with_no_file() {
+        let dir = scratch("unprojectable");
+        let path = dir.join("cassette.json");
+        let replies = oracle(&[
+            open(&path),
+            record(json!({"model": "m"})),
+            record(json!({"model": "m", "metadata": {"user_id": "u1"}})),
+            json!({"op": "close"}),
+        ]);
+        assert_eq!(replies[0], json!({"ok": {"open": {"cases": 0}}}));
+        assert!(replies[1]["ok"]["record"]["request_digest"].is_string());
+        assert_eq!(replies[2]["error"]["kind"], json!("UnknownRequestField"));
+        assert_eq!(replies[2]["error"]["detail"], json!(""));
+        assert_eq!(replies[3]["error"]["kind"], json!("UnknownRequestField"));
+        assert!(!path.exists(), "a partial recording is never published");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_failed_publication_removes_the_temp_file_it_created() {
+        let dir = scratch("publication");
+        // A directory at the target path makes the rename fail after the
+        // temporary file exists.
+        let path = dir.join("cassette.json");
+        fs::create_dir(&path).unwrap();
+        let replies = oracle(&[
+            open(&path),
+            record(json!({"model": "m"})),
+            json!({"op": "close"}),
+        ]);
+        assert_eq!(replies[2]["error"]["kind"], json!("Io"));
+        assert!(
+            !dir.join("cassette.json.tmp").exists(),
+            "the attempt's temporary file is gone"
+        );
+        let _ = fs::remove_dir_all(&dir);
     }
 }
