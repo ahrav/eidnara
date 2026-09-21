@@ -5,15 +5,15 @@
 use std::collections::BTreeMap;
 
 use eval_core::{
-    ANALYSIS_FAMILY_SCHEMA, Analysis, AnalysisFamily, ArmKind, ArmRates, ArmResult,
+    ANALYSIS_FAMILY_SCHEMA, Analysis, AnalysisFamily, Approval, ArmKind, ArmRates, ArmResult,
     BaselineContrast, BaselineFailure, BlockedReason, CLAIM_BOUNDARY_SCHEMA, CampaignGates,
     CampaignProfile, Ceilings, CensorReason, ClaimBoundary, ClaimClass, Claims, ClusterKey,
     ClusteringUnit, Cut, Envelope, EnvelopeExceeded, Established, EvaluatedSurface, FrozenFamily,
     GatedBlocks, HistoryPolicy, IccPilot, IntervalMethod, LivenessBounds, MultiplicityCorrection,
-    PairOutcome, PairedReport, Ratio, Reachability, ReportError, ReportOutcome, Resource,
-    ResourceLimits, SUITE_B_REPORT_SCHEMA, SampleError, SampleLedger, SampleRecord, SkipReason,
-    StopCondition, StoppingRule, SuiteBReport, Suppression, Terminal, WorldProvenance, analyze,
-    parse_report, reachability_of,
+    PairOutcome, PairedReport, ProfileError, RUN_PROFILE_SCHEMA, Ratio, Reachability, ReportError,
+    ReportOutcome, Resource, ResourceLimits, RunProfile, SUITE_B_REPORT_SCHEMA, SampleError,
+    SampleLedger, SampleRecord, Scale, SkipReason, StopCondition, StoppingRule, SuiteBReport,
+    Suppression, TaskBudgets, Terminal, WorldProvenance, analyze, parse_report, reachability_of,
 };
 use serde_json::json;
 
@@ -153,6 +153,37 @@ fn ceilings() -> Ceilings {
     }
 }
 
+/// An approved profile whose margins are the family's and whose ceilings are
+/// one percent each.
+fn profile() -> RunProfile {
+    RunProfile {
+        schema: RUN_PROFILE_SCHEMA.to_string(),
+        name: "s0-default-surface".to_string(),
+        scale: Scale::S0,
+        worlds: 8,
+        tasks_per_world: 3,
+        max_events_per_log: 64,
+        budgets: TaskBudgets {
+            max_model_calls: 12,
+            max_tool_calls: 40,
+            max_tokens_in: 200_000,
+            max_tokens_out: 32_000,
+            hard_deadline_ms: 600_000,
+            max_no_progress_iterations: 3,
+        },
+        envelope: limits(),
+        indeterminate_ceiling: "0.01".to_string(),
+        censoring_ceiling: "0.01".to_string(),
+        redaction_refusal_ceiling: "0.01".to_string(),
+        baseline_bounds: RunProfile::grounded_baseline_bounds(),
+        statistics: family().profile,
+        approval: Some(Approval {
+            approved_by: "maintainer".to_string(),
+            approved_at_run_id: "ab".repeat(32),
+        }),
+    }
+}
+
 fn baseline() -> BaselineContrast {
     BaselineContrast {
         baseline_version: eval_core::RECENCY_BASELINE_VERSION.to_string(),
@@ -187,16 +218,17 @@ fn paired() -> PairedReport {
 
 fn open_report() -> SuiteBReport {
     let family = family();
+    let profile = profile();
     let samples = samples();
     let rates = samples.rates().unwrap();
+    assert_eq!(profile.ceilings().unwrap(), ceilings());
     let gates = CampaignGates::of(&samples, &ceilings(), &family, &arm_rates()).unwrap();
     let derivation = family.claim_class(WorldProvenance::Generated, None);
     SuiteBReport {
         schema: SUITE_B_REPORT_SCHEMA.to_string(),
         eval_run_id: "cd".repeat(32),
-        profile_name: "s0-default-surface".to_string(),
-        profile_digest: "ef".repeat(32),
-        ceilings: ceilings(),
+        profile_digest: profile.digest().unwrap(),
+        profile,
         surface: EvaluatedSurface::Surface1,
         family,
         claims: Claims {
@@ -274,14 +306,15 @@ fn a_report_carries_the_claim_boundary_verbatim_and_its_run_gates() {
         panic!("open")
     };
     let gates = gated.gates;
-    // One in 646 sits under a one-percent ceiling for each rate.
+    // One in 642 attempted, and one refusal in 646 declared, each sit under
+    // a one-percent ceiling.
     assert_eq!(
         (gates.indeterminate.statistic, gates.indeterminate.passed),
-        (ratio(1, 646), true)
+        (ratio(1, 642), true)
     );
     assert_eq!(
         (gates.censoring.statistic, gates.censoring.passed),
-        (ratio(1, 646), true)
+        (ratio(1, 642), true)
     );
     assert_eq!(
         (
@@ -321,11 +354,14 @@ fn a_report_carries_the_claim_boundary_verbatim_and_its_run_gates() {
         EvaluatedSurface::QueryRoute,
         EvaluatedSurface::Packing,
     ] {
+        // The query route and the packer have no production caller, the
+        // label the ledger's `ChainStage` already gives them.
         let expected = match surface {
             EvaluatedSurface::Surface1 | EvaluatedSurface::Surface3 => {
                 Reachability::DefaultProduction
             }
-            _ => Reachability::ExplicitConfigOnly,
+            EvaluatedSurface::Surface2 => Reachability::ExplicitConfigOnly,
+            EvaluatedSurface::QueryRoute | EvaluatedSurface::Packing => Reachability::TestOnly,
         };
         assert_eq!(reachability_of(surface), expected, "{surface:?}");
     }
@@ -372,7 +408,18 @@ fn a_suppression_removes_the_gates_and_the_claims_and_keeps_the_accounting() {
     ];
     for (by, condition) in suppressions {
         assert_eq!(by.condition(), condition, "{by:?}");
-        let report = suppressed_report(by.clone());
+        let mut report = suppressed_report(by.clone());
+        // Each suppression is what the report's own evidence derives.
+        match &by {
+            Suppression::Analysis {
+                reason: BlockedReason::InsufficientEffectiveN { .. },
+            } => report.family.icc_pilot.effective_n_at_max = ratio(100, 1),
+            Suppression::Analysis {
+                reason: BlockedReason::ArmMissAsymmetry { .. },
+            } => report.arm_rates.get_mut("fresh").unwrap().miss_rate = "0.11".into(),
+            Suppression::Envelope { .. } => report.envelope.peaks.elapsed_ms = 1_900_000,
+            Suppression::TapRejected | Suppression::Baseline { .. } => {}
+        }
         let value = report.serialize().unwrap();
         assert_eq!(value["outcome"]["kind"], json!("suppressed"));
         assert_eq!(value["claims"]["established"], json!([]));
@@ -488,11 +535,42 @@ fn a_report_refuses_missing_blocks_forbidden_claims_and_what_it_did_not_derive()
             },
         ),
         (
-            "a profile digest that is not one",
-            Box::new(|r| r.profile_digest = "s0".into()),
-            ReportError::MalformedDigest {
-                field: "profile_digest",
-            },
+            "a profile digest that is not the profile's",
+            Box::new(|r| r.profile_digest = "ef".repeat(32)),
+            ReportError::ProfileDigestMismatch,
+        ),
+        (
+            "a profile nobody approved",
+            Box::new(|r| {
+                r.profile.approval = None;
+                r.profile_digest = r.profile.digest().unwrap();
+            }),
+            ReportError::Profile(ProfileError::NotApproved {
+                name: "s0-default-surface".into(),
+            }),
+        ),
+        (
+            "a ceiling relaxed after approval",
+            Box::new(|r| r.profile.indeterminate_ceiling = "1".into()),
+            ReportError::ProfileDigestMismatch,
+        ),
+        (
+            "a ceiling over one",
+            Box::new(|r| {
+                r.profile.indeterminate_ceiling = "1.5".into();
+                gated(r).gates.indeterminate.bound = ratio(3, 2);
+            }),
+            ReportError::Profile(ProfileError::RateOutOfRange {
+                field: "indeterminate_ceiling",
+            }),
+        ),
+        (
+            "a profile whose margins are not the family's",
+            Box::new(|r| {
+                r.profile.statistics.harm_bound = "0.2".into();
+                r.profile_digest = r.profile.digest().unwrap();
+            }),
+            ReportError::ProfileDisagreesWithFamily,
         ),
         (
             "an exclusion dropped from the boundary",
@@ -567,24 +645,27 @@ fn a_report_refuses_missing_blocks_forbidden_claims_and_what_it_did_not_derive()
             ReportError::ArmRatesDisagree,
         ),
         (
-            "more pairs than attempted samples",
+            "more pairs than the attempted samples can back at one per arm",
             Box::new(|r| {
-                for record in r.samples.samples.values_mut().take(400) {
+                // 320 pairs need 640 attempted samples; 639 is one short.
+                for record in r.samples.samples.values_mut().take(3) {
                     record.terminal = Terminal::Skipped(SkipReason::CassetteMiss);
                 }
                 r.rates = r.samples.rates().unwrap();
+                let ceilings = r.profile.ceilings().unwrap();
                 gated(r).gates =
-                    CampaignGates::of(&r.samples, &r.ceilings, &r.family, &r.arm_rates).unwrap();
+                    CampaignGates::of(&r.samples, &ceilings, &r.family, &r.arm_rates).unwrap();
             }),
             ReportError::PairsExceedSamples {
                 pairs: 320,
-                attempted: 242,
+                attempted: 639,
             },
         ),
         (
             "a gate marked passed over a failing rate",
             Box::new(|r| {
-                r.ceilings.indeterminate = ratio(1, 1000);
+                r.profile.indeterminate_ceiling = "0.001".into();
+                r.profile_digest = r.profile.digest().unwrap();
             }),
             ReportError::GatesNotDerived,
         ),
@@ -620,4 +701,268 @@ fn a_report_refuses_missing_blocks_forbidden_claims_and_what_it_did_not_derive()
     });
     stopped.envelope.peaks.processes = 7;
     stopped.serialize().unwrap();
+}
+
+#[test]
+fn a_report_refuses_what_its_own_evidence_refutes() {
+    // Each mutation states something the report's own carried data
+    // contradicts; the serializer refuses every one of them by name.
+    let refuted: Vec<(&str, Mutate, ReportError)> = vec![
+        (
+            "a paired gate marked passed over a failing statistic",
+            Box::new(|r| {
+                let g = gated(r);
+                g.analysis.gates.quality_loss.statistic = ratio(9, 10);
+                g.analysis.counts.b = 300;
+                g.analysis.counts.c = 0;
+            }),
+            ReportError::PairedGatesNotDerived,
+        ),
+        (
+            "a paired gate verdict flipped",
+            Box::new(|r| gated(r).analysis.gates.harm.passed = false),
+            ReportError::PairedGatesNotDerived,
+        ),
+        (
+            "an open report under a family whose pilot blocks",
+            Box::new(|r| {
+                r.family.icc_pilot.effective_n_at_max = ratio(10, 1);
+                let digest = r.family.digest().unwrap();
+                gated(r).analysis.analysis_family_digest = digest;
+            }),
+            ReportError::OpenWhileBlocked(BlockedReason::InsufficientEffectiveN {
+                effective_n_at_max: ratio(10, 1),
+                required_n_for_margin: 385,
+            }),
+        ),
+        (
+            "an open report whose arm-miss asymmetry is over the bound",
+            Box::new(|r| {
+                r.arm_rates.get_mut("aged").unwrap().miss_rate = "0.5".into();
+                let arm_rates = r.arm_rates.clone();
+                let ceilings = r.profile.ceilings().unwrap();
+                let gates =
+                    CampaignGates::of(&r.samples, &ceilings, &r.family, &arm_rates).unwrap();
+                let g = gated(r);
+                g.analysis.arm_rates = arm_rates;
+                g.gates = gates;
+            }),
+            ReportError::OpenWhileBlocked(BlockedReason::ArmMissAsymmetry {
+                asymmetry: ratio(12, 25),
+                bound: ratio(1, 20),
+            }),
+        ),
+        (
+            "an envelope suppression whose reading is not a breach",
+            Box::new(|r| {
+                r.outcome = ReportOutcome::Suppressed {
+                    by: Suppression::Envelope {
+                        exceeded: EnvelopeExceeded {
+                            resource: Resource::Processes,
+                            bound: 6,
+                            observed: 3,
+                        },
+                    },
+                };
+                r.claims.established.clear();
+            }),
+            ReportError::SuppressionNotDerived,
+        ),
+        (
+            "an envelope suppression the peaks do not show",
+            Box::new(|r| {
+                r.outcome = ReportOutcome::Suppressed {
+                    by: Suppression::Envelope {
+                        exceeded: EnvelopeExceeded {
+                            resource: Resource::ElapsedMs,
+                            bound: 1_800_000,
+                            observed: 1_900_000,
+                        },
+                    },
+                };
+                r.claims.established.clear();
+            }),
+            ReportError::SuppressionNotDerived,
+        ),
+        (
+            "an asymmetry suppression the arm rates do not show",
+            Box::new(|r| {
+                r.outcome = ReportOutcome::Suppressed {
+                    by: Suppression::Analysis {
+                        reason: BlockedReason::ArmMissAsymmetry {
+                            asymmetry: ratio(1, 2),
+                            bound: ratio(1, 3),
+                        },
+                    },
+                };
+                r.claims.established.clear();
+            }),
+            ReportError::SuppressionNotDerived,
+        ),
+        (
+            "an effective-N suppression the pilot does not show",
+            Box::new(|r| {
+                r.outcome = ReportOutcome::Suppressed {
+                    by: Suppression::Analysis {
+                        reason: BlockedReason::InsufficientEffectiveN {
+                            effective_n_at_max: ratio(100, 1),
+                            required_n_for_margin: 385,
+                        },
+                    },
+                };
+                r.claims.established.clear();
+            }),
+            ReportError::SuppressionNotDerived,
+        ),
+        (
+            "a tap-rejected suppression with peaks over the bounds",
+            Box::new(|r| {
+                r.outcome = ReportOutcome::Suppressed {
+                    by: Suppression::TapRejected,
+                };
+                r.claims.established.clear();
+                r.envelope.peaks.processes = 99;
+            }),
+            ReportError::EnvelopeNotHonoured(EnvelopeExceeded {
+                resource: Resource::Processes,
+                bound: 6,
+                observed: 99,
+            }),
+        ),
+        (
+            "a baseline contrast on another surface",
+            Box::new(|r| gated(r).baseline.surface = EvaluatedSurface::Packing),
+            ReportError::BaselineDisagrees { field: "surface" },
+        ),
+        (
+            "a baseline contrast under another version",
+            Box::new(|r| gated(r).baseline.baseline_version = "not-a-baseline".into()),
+            ReportError::BaselineDisagrees {
+                field: "baseline_version",
+            },
+        ),
+        (
+            "a baseline contrast off the profile's bound",
+            Box::new(|r| gated(r).baseline.recency_bound = 7),
+            ReportError::BaselineDisagrees {
+                field: "recency_bound",
+            },
+        ),
+        (
+            "a vacuous baseline contrast",
+            Box::new(|r| {
+                let b = &mut gated(r).baseline;
+                b.delivered_ids = 0;
+                b.falsification_pairs_failed = 0;
+                b.positive_controls_passed = 0;
+            }),
+            ReportError::BaselineDisagrees {
+                field: "delivered_ids",
+            },
+        ),
+        (
+            "a baseline contrast with no positive control",
+            Box::new(|r| gated(r).baseline.positive_controls_passed = 0),
+            ReportError::BaselineDisagrees {
+                field: "positive_controls_passed",
+            },
+        ),
+        (
+            "a sample skipped for an envelope bound this run did not hold",
+            Box::new(|r| {
+                r.samples.samples.get_mut("s000").unwrap().terminal =
+                    Terminal::Skipped(SkipReason::EnvelopeExceeded(EnvelopeExceeded {
+                        resource: Resource::Processes,
+                        bound: 2,
+                        observed: 3,
+                    }));
+                r.rates = r.samples.rates().unwrap();
+            }),
+            ReportError::SampleEnvelopeDisagrees {
+                sample: "s000".into(),
+            },
+        ),
+        (
+            "a sample skipped for a reading the peaks never reached",
+            Box::new(|r| {
+                r.samples.samples.get_mut("s000").unwrap().terminal =
+                    Terminal::Skipped(SkipReason::EnvelopeExceeded(EnvelopeExceeded {
+                        resource: Resource::Processes,
+                        bound: 6,
+                        observed: 7,
+                    }));
+                r.rates = r.samples.rates().unwrap();
+            }),
+            ReportError::SampleEnvelopeDisagrees {
+                sample: "s000".into(),
+            },
+        ),
+    ];
+    for (name, mutate, expected) in refuted {
+        let mut mutated = open_report();
+        mutate(&mut mutated);
+        assert_eq!(mutated.serialize(), Err(expected.clone()), "{name}");
+        let value = serde_json::to_value(&mutated).unwrap();
+        assert_eq!(parse_report(&value), Err(expected), "{name}");
+    }
+    // A run its envelope stopped skips the rest under the reading that
+    // crossed the bound, and names that reading as its suppression.
+    let mut stopped = suppressed_report(Suppression::Envelope {
+        exceeded: EnvelopeExceeded {
+            resource: Resource::Processes,
+            bound: 6,
+            observed: 7,
+        },
+    });
+    stopped.envelope.peaks.processes = 7;
+    stopped.samples.samples.get_mut("s000").unwrap().terminal =
+        Terminal::Skipped(SkipReason::EnvelopeExceeded(EnvelopeExceeded {
+            resource: Resource::Processes,
+            bound: 6,
+            observed: 7,
+        }));
+    stopped.rates = stopped.samples.rates().unwrap();
+    assert_eq!(
+        parse_report(&stopped.serialize().unwrap()).unwrap(),
+        stopped
+    );
+}
+
+#[test]
+fn run_gates_are_shares_of_attempted_samples_and_padding_does_not_move_them() {
+    let report = open_report();
+    let padded = {
+        let mut ledger = report.samples.clone();
+        for i in 0..20_000 {
+            let id = format!("pad{i:05}");
+            ledger.order.push(id.clone());
+            ledger.samples.insert(
+                id.clone(),
+                SampleRecord {
+                    id,
+                    task: "pad".to_string(),
+                    arm: ArmKind::Aged,
+                    policy: HistoryPolicy::Raw,
+                    cut: Cut::EndOfRun,
+                    lineage: vec![],
+                    terminal: Terminal::Disabled(eval_core::DisabledReason::FeatureOff),
+                },
+            );
+        }
+        ledger
+    };
+    let before =
+        CampaignGates::of(&report.samples, &ceilings(), &report.family, &arm_rates()).unwrap();
+    let after = CampaignGates::of(&padded, &ceilings(), &report.family, &arm_rates()).unwrap();
+    // 642 attempted: one indeterminate and one censored among them.
+    assert_eq!(before.indeterminate.statistic, ratio(1, 642));
+    assert_eq!(before.censoring.statistic, ratio(1, 642));
+    assert_eq!(
+        after.indeterminate.statistic,
+        before.indeterminate.statistic
+    );
+    assert_eq!(after.censoring.statistic, before.censoring.statistic);
+    // A refusal is a skip, so its share is of every declared sample.
+    assert_eq!(before.redaction_refusals.statistic, ratio(1, 646));
+    assert_eq!(after.redaction_refusals.statistic, ratio(1, 20_646));
 }

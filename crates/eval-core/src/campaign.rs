@@ -410,6 +410,10 @@ pub enum SampleError {
         sample: String,
         entry: String,
     },
+    /// A sample skipped for an envelope reading that is not over its bound.
+    EnvelopeNotExceeded {
+        sample: String,
+    },
     Overflow,
 }
 
@@ -459,32 +463,40 @@ impl SampleLedger {
                     });
                 }
             }
+            if let Terminal::Skipped(SkipReason::EnvelopeExceeded(exceeded)) = record.terminal
+                && !exceeded.is_breach()
+            {
+                return Err(SampleError::EnvelopeNotExceeded {
+                    sample: key.clone(),
+                });
+            }
         }
         Ok(())
+    }
+
+    pub fn count(&self, pick: impl Fn(&Terminal) -> bool) -> usize {
+        self.samples.values().filter(|s| pick(&s.terminal)).count()
     }
 
     /// Samples that were attempted: a pass, a fail, a censored attempt, or an
     /// indeterminate one. Skipped, unsupported, and disabled samples were not.
     pub fn attempted(&self) -> usize {
-        self.samples
-            .values()
-            .filter(|s| {
-                matches!(
-                    s.terminal,
-                    Terminal::Pass
-                        | Terminal::Fail
-                        | Terminal::Censored { .. }
-                        | Terminal::Indeterminate
-                )
-            })
-            .count()
+        self.count(|t| {
+            matches!(
+                t,
+                Terminal::Pass
+                    | Terminal::Fail
+                    | Terminal::Censored { .. }
+                    | Terminal::Indeterminate
+            )
+        })
     }
 
     pub fn rates(&self) -> Result<TerminalRates, SampleError> {
         self.validate()?;
         let n = i128::try_from(self.samples.len()).map_err(|_| SampleError::Overflow)?;
         let count = |pick: fn(&Terminal) -> bool| {
-            let hits = self.samples.values().filter(|s| pick(&s.terminal)).count();
+            let hits = self.count(pick);
             if n == 0 {
                 Ok(Ratio::ZERO)
             } else {
@@ -565,6 +577,12 @@ pub struct EnvelopeExceeded {
 }
 
 debug_display!(EnvelopeExceeded);
+
+impl EnvelopeExceeded {
+    pub fn is_breach(&self) -> bool {
+        self.observed > self.bound
+    }
+}
 
 /// The bounds a run holds itself to and the peaks it has seen. `observe`
 /// records the peak first and refuses second, so the manifest's
