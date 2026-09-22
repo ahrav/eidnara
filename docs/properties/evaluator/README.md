@@ -1271,6 +1271,26 @@ Checkpoint contract (`crates/eval-core/tests/checkpoint.rs`,
   digest, and a manifest that claims it with a `bulk` construction is refused
   `BulkScaffoldPresentedAsAged`.
 
+Aging drive (`crates/daemon/tests/eval_aging.rs`, `--all-features`):
+
+- `the_aged_arm_is_built_by_replay_and_matches_the_bulk_scaffold_only_by_enumerated_deaths`
+  (`wm-aged-arm-replay-built-only`,
+  `ing-bulk-vs-replay-guard-digest-enumerated-divergences`,
+  `ing-window-contains-pre-snapshot-supersession`): a 40-message history with
+  corrections and invalidations is lived end to end through the kernel,
+  projection, and memory store on one root, every step drained to quiescence,
+  under one persisted incarnation; a bulk scaffold built at the final tip has
+  the same live digest and differs only by `tombstoned_before_snapshot`; the
+  window after the chosen checkpoint step holds a supersession and a
+  retirement of a descriptor created before it, and a death falls before it.
+- `two_lives_of_one_history_share_a_guard_digest_and_a_slipped_family_is_named`
+  (`flt-checkpoint-quiescent-copy-controlled-replay`): two full lives on two
+  roots carry different incarnations and equal `StateSnapshot`s and guard
+  digests, and their projections carry no divergence; a shorter life is
+  `CommitSeqDiffers` and a cleared memory history is `HistorySlipped { memory }`.
+- `a_history_too_short_to_straddle_a_death_is_refused`: two messages yield no
+  straddling step.
+
 ## Gaps recorded here
 
 - The OpenCode cassette is bound to the environment that recorded it: the

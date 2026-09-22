@@ -1656,6 +1656,16 @@ digest (which names one store's bytes), under
 `eval-suite-c-aging-report-result/v1`, so two runs of one identity on two
 stores agree on it.
 
+## Aging shell
+
+The bulk scaffold is compared against the aged arm: a projection built at the
+final tip from the kernel's snapshot export and embedded to quiescence has the
+aged arm's live digest and differs historically by every death in the history,
+each an enumerated `tombstoned_before_snapshot`. The window after the chosen
+checkpoint step straddles a supersession and a retirement of a descriptor
+created before it, and at least one death falls before it; a history with no
+such step is refused (`NoStraddlingStep`).
+
 ## Coverage markers
 
 `MARKERS` is the evaluator-owned registry: constant, globally unique names,

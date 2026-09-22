@@ -558,7 +558,10 @@ impl Corpus {
         snapshot: i64,
     ) -> SearchProjection {
         let projection = SearchProjection::open(data_home).unwrap();
-        let kernel_incarnation_id = kernel_incarnation_id(data_home);
+        let kernel_incarnation_id = self
+            .kernel
+            .database_incarnation_id_within_budget(&EvalBudget::unbounded())
+            .unwrap();
         projection
             .write(|conn| {
                 install_identity(conn, &identity(&kernel_incarnation_id), 1)?;
