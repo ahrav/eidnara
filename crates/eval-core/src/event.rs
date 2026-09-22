@@ -147,7 +147,9 @@ pub enum LogError {
         target: EventId,
     },
     /// `:` separates the parts of a derived ID, so a tag holding one could
-    /// mint one ID for two entities.
+    /// mint one ID for two entities; `#` separates a harness message ID from
+    /// its block index, so a tag holding one would make an ID the harness
+    /// refuses.
     InvalidEntityTag {
         tag: String,
     },
@@ -262,7 +264,7 @@ impl EventLog {
     /// not hold is refused rather than left pointing into whatever log this
     /// one joins.
     pub fn on_distinct_entities(&self, tag: &str) -> Result<Self, LogError> {
-        if tag.contains(':') {
+        if tag.contains([':', '#']) {
             return Err(LogError::InvalidEntityTag {
                 tag: tag.to_string(),
             });

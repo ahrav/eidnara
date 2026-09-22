@@ -982,10 +982,14 @@ fn an_independent_history_moves_onto_its_own_entities_with_every_reference() {
         };
         joined.validate(128).unwrap();
     }
-    assert_eq!(
-        aged().on_distinct_entities("a:b").unwrap_err(),
-        LogError::InvalidEntityTag {
-            tag: "a:b".to_string()
-        }
-    );
+    // `:` would mint one derived ID for two entities; `#` would put the
+    // block-index separator into a harness message ID.
+    for tag in ["a:b", "a#b"] {
+        assert_eq!(
+            aged().on_distinct_entities(tag).unwrap_err(),
+            LogError::InvalidEntityTag {
+                tag: tag.to_string()
+            }
+        );
+    }
 }

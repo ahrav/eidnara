@@ -518,9 +518,11 @@ impl SampleLedger {
     }
 }
 
-/// One dimension of the resource envelope. `StoreBytes` counts a store with
-/// its WAL and shm sidecars; `TempRoots` and `Processes` count what the run
-/// holds at once, the rest what it has accumulated.
+/// One dimension of the resource envelope, read as a peak. `StoreBytes`,
+/// `CassetteBytes`, and `ArtifactBytes` are the largest one store (with its
+/// WAL and shm sidecars), cassette, or artifact the run wrote; `TempRoots`
+/// and `Processes` count what the run holds at once; `ElapsedMs` and
+/// `RetainedArtifacts` accumulate over the run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Resource {

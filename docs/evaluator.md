@@ -1243,9 +1243,11 @@ each terminal family's share of every declared sample.
 value)` records the peak first and refuses second, so `envelope_peaks` shows
 the reading that crossed the bound as `EnvelopeExceeded {resource, bound,
 observed}`; `check` names the first resource over its bound in declared
-order. `Resource` is `elapsed_ms`, `store_bytes` (a store with its WAL and
-shm sidecars), `cassette_bytes`, `artifact_bytes`, `temp_roots`,
-`retained_artifacts`, or `processes`, one per `ResourceLimits` field.
+order. `Resource` is `elapsed_ms`, `store_bytes` (the largest one store with
+its WAL and shm sidecars), `cassette_bytes`, `artifact_bytes`, `temp_roots`,
+`retained_artifacts`, or `processes`, one per `ResourceLimits` field; the
+byte resources are the largest single store, cassette, or artifact, the roots
+and processes what is held at once.
 Publication (write-then-rename into roots, stores, and cassette namespaces
 disjoint per campaign, on OS-allocated ports) is the runner's and is not
 written yet.
