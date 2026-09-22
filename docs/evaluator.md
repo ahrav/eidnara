@@ -2018,16 +2018,23 @@ sample charges the envelope with the store total it saw, so a transient WAL
 peak is the pressure the envelope judges, not the closed size; a bound
 crossed stops the run with `EnvelopeExceeded { resource, bound, observed }`
 and nothing is published. `Campaign::finish` closes the stores, which
-truncates every WAL, and takes the final sample from the closed files, where
-the headroom is recomputed from the job rows. `Campaign::restore` is refused
+truncates every WAL, and takes the final sample from the closed files, with
+the headroom the memory store itself reports once reopened with no other
+holder. `Campaign::restore` is refused
 and counted under `never_restored`; under `restoring` it closes and reopens
 in place, and the ledger then gives no leak verdict.
 
 The report carries the quota constants as `memory_reviewer_jobs` declares them
-and the bounds scaled from the message count; `GrowthLedger::verdict` checks
-every sample's project bytes against those constants exactly, which the
-campaign passes at every step, and refuses a final sample with a temporary
-entry, WAL bytes, a stray root, or a process. R24 refusals are counted and
+and the bounds scaled from the message count (with a per-commit store-byte
+allowance); `GrowthLedger::verdict` checks every sample's project bytes
+against those constants exactly, which the campaign passes at every step, and
+refuses a final sample with a temporary entry, WAL bytes, a stray root, or a
+process, or store growth faster than the allowance. The leak-ledger and
+headroom markers are recorded only after those checks pass; the manifest's
+witness digest covers the samples, the mix, and the fault episodes' effects.
+A run may tighten its store-bytes bound below the profile's to show the breach
+path end to end: `EnvelopeExceeded` names the resource, bound, and the peak
+that crossed it, and nothing is published. R24 refusals are counted and
 reported, not planted: an S0 history never reaches the quota, and the report
 says zero. Two campaigns run from one checkout on two roots publish the same
 result digest as their serial runs; a fixture that shares a root is refused.

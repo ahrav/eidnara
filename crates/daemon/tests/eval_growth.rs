@@ -57,6 +57,7 @@ fn config(publish: PathBuf, elapsed_bound_ms: u64, mode: GrowthMode) -> Config {
         }),
         publish,
         mode,
+        store_bytes_bound: None,
     }
 }
 
@@ -141,7 +142,12 @@ fn a_never_restored_campaign_samples_every_quiescence_and_refuses_a_restore_scen
     let mut live = Campaign::open(root.path(), plan, GrowthMode::NeverRestored);
     live.step(&mut charges).unwrap();
     live.step(&mut charges).unwrap();
-    let tip = live.stores.tip();
+    let tip = live.tip();
+    assert_eq!(
+        charges.envelope.peaks.store_bytes,
+        live.ledger.peak_store_bytes(),
+        "only the samples charged the envelope, with the transient total each saw"
+    );
     let (live, refused) = live.restore(1_700_000_000_000);
     assert!(
         matches!(
@@ -151,7 +157,7 @@ fn a_never_restored_campaign_samples_every_quiescence_and_refuses_a_restore_scen
         "{refused:?}"
     );
     assert_eq!(live.ledger.restores_refused, 1);
-    assert_eq!(live.stores.tip(), tip);
+    assert_eq!(live.tip(), tip);
     assert_eq!(live.ledger.samples.len(), 2);
 }
 
@@ -260,7 +266,7 @@ fn a_restoring_campaign_cleans_a_stray_temporary_on_reopen_but_gives_no_leak_ver
         "KernelStore::open sweeps the temporary directory"
     );
     assert!(!tmp.exists());
-    let (ledger, _, _) = live.finish(&mut charges).unwrap();
+    let ledger = live.finish(&mut charges).unwrap().ledger;
     assert!(matches!(
         ledger.verdict(
             &growth::quota(),
@@ -270,11 +276,33 @@ fn a_restoring_campaign_cleans_a_stray_temporary_on_reopen_but_gives_no_leak_ver
     ));
 }
 
-#[test]
-fn a_deliberate_envelope_breach_names_the_resource_and_publishes_nothing() {
-    let mut coverage = Coverage::default();
+fn a_deliberate_envelope_breach_names_the_resource_and_publishes_nothing_scenario(
+    coverage: &mut Coverage,
+) {
     let publish = tempfile::tempdir().unwrap();
     let out = publish.path().join("out");
+    let mut config = config(out.clone(), 600_000, GrowthMode::NeverRestored);
+    config.store_bytes_bound = Some(64 << 10);
+    let error = growth::run(&config)
+        .err()
+        .expect("a 64 KiB store bound is crossed");
+    let RunError::Envelope(EnvelopeExceeded {
+        resource,
+        bound,
+        observed,
+    }) = error
+    else {
+        panic!("{error}");
+    };
+    assert_eq!(resource, Resource::StoreBytes);
+    assert_eq!(bound, 64 << 10);
+    assert!(observed > bound);
+    assert!(
+        !out.join(REPORT_FILE).exists() && !out.join(MANIFEST_FILE).exists(),
+        "nothing is published after a breach"
+    );
+
+    // Driven step by step, the peak that crossed the bound is the one recorded.
     let plan = aging::plan(MESSAGES).unwrap();
     let root = tempfile::tempdir().unwrap();
     let mut profile = growth::profile(Scale::S0, 128, 600_000, None);
@@ -292,20 +320,16 @@ fn a_deliberate_envelope_breach_names_the_resource_and_publishes_nothing() {
             Err(other) => panic!("{other}"),
         }
     }
-    let EnvelopeExceeded {
-        resource,
-        bound,
-        observed,
-    } = breach.expect("a 64 KiB store bound is crossed within eight steps");
-    assert_eq!(resource, Resource::StoreBytes);
-    assert_eq!(bound, 64 << 10);
-    assert!(observed > bound);
-    assert_eq!(
-        charges.envelope.peaks.store_bytes, observed,
-        "the peak that crossed the bound is the one recorded"
-    );
-    assert!(!out.exists(), "nothing is published after a breach");
+    let exceeded = breach.expect("the bound is crossed within eight steps");
+    assert_eq!(charges.envelope.peaks.store_bytes, exceeded.observed);
     coverage.record("xc_envelope_breach_stops_the_run").unwrap();
+}
+
+#[test]
+fn a_deliberate_envelope_breach_names_the_resource_and_publishes_nothing() {
+    a_deliberate_envelope_breach_names_the_resource_and_publishes_nothing_scenario(
+        &mut Coverage::default(),
+    );
 }
 
 #[test]
@@ -322,57 +346,75 @@ fn an_unapproved_profile_refuses_before_any_store_opens() {
     assert!(!out.exists());
 }
 
-#[test]
-#[ignore = "S0 runs under an explicit budget: set EIDNARA_EVAL_S0_BUDGET_MS and run with --ignored"]
-fn two_concurrent_campaigns_on_one_checkout_match_their_serial_digests() {
-    let budget_ms = budget_or_panic();
-    let mut coverage = Coverage::default();
-    let digest = |run: &Run| {
+/// The figures cross-talk between two campaigns would move.
+type Shape = (u64, u64, u64, std::collections::BTreeMap<Operation, u64>);
+
+/// One campaign's result digest, shape, and the resources it held.
+type Outcome = (String, Shape, eval_core::CampaignResources);
+
+fn shape(run: &Run) -> Shape {
+    let last = run.report.ledger.samples.last().unwrap();
+    (
+        last.commit_log_rows,
+        last.projection_rows,
+        last.artifact_objects,
+        run.report.mix.counts.clone(),
+    )
+}
+
+fn two_concurrent_campaigns_on_one_checkout_match_their_serial_digests_scenario(
+    budget_ms: u64,
+    coverage: &mut Coverage,
+) {
+    fn one(publish: &std::path::Path, budget_ms: u64) -> Outcome {
+        let run = growth::run(&config(
+            publish.join("out"),
+            budget_ms,
+            GrowthMode::NeverRestored,
+        ))
+        .unwrap();
         let value: serde_json::Value = serde_json::from_slice(&run.report_bytes).unwrap();
-        GrowthReport::result_digest(&value).unwrap()
-    };
-    let serial: Vec<(String, eval_core::CampaignResources)> = (0..2)
+        (
+            GrowthReport::result_digest(&value).unwrap(),
+            shape(&run),
+            run.resources,
+        )
+    }
+    let serial: Vec<_> = (0..2)
         .map(|_| {
             let publish = tempfile::tempdir().unwrap();
-            let run = growth::run(&config(
-                publish.path().join("out"),
-                budget_ms,
-                GrowthMode::NeverRestored,
-            ))
-            .unwrap();
-            (digest(&run), run.resources)
+            one(publish.path(), budget_ms)
         })
         .collect();
     let handles: Vec<_> = (0..2)
         .map(|_| {
             std::thread::spawn(move || {
                 let publish = tempfile::tempdir().unwrap();
-                let run = growth::run(&config(
-                    publish.path().join("out"),
-                    budget_ms,
-                    GrowthMode::NeverRestored,
-                ))
-                .unwrap();
-                (digest(&run), run.resources)
+                one(publish.path(), budget_ms)
             })
         })
         .collect();
     let concurrent: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
-    isolated(&concurrent[0].1, &concurrent[1].1).unwrap();
-    isolated(&serial[0].1, &serial[1].1).unwrap();
+    isolated(&concurrent[0].2, &concurrent[1].2).unwrap();
+    isolated(&serial[0].2, &serial[1].2).unwrap();
     digests_match_serial(
         &concurrent
             .iter()
-            .map(|(d, _)| d.clone())
+            .map(|(d, _, _)| d.clone())
             .collect::<Vec<_>>(),
-        &serial.iter().map(|(d, _)| d.clone()).collect::<Vec<_>>(),
+        &serial.iter().map(|(d, _, _)| d.clone()).collect::<Vec<_>>(),
     )
     .unwrap();
-    assert_eq!(serial[0].0, serial[1].0, "one identity, one digest");
-    let mut shared = concurrent[1].1.clone();
-    shared.roots = concurrent[0].1.roots.clone();
+    for (i, (_, concurrent_shape, _)) in concurrent.iter().enumerate() {
+        assert_eq!(
+            concurrent_shape, &serial[i].1,
+            "campaign {i}: rows, objects, and the mix are what the serial run produced"
+        );
+    }
+    let mut shared = concurrent[1].2.clone();
+    shared.roots = concurrent[0].2.roots.clone();
     assert!(matches!(
-        isolated(&concurrent[0].1, &shared),
+        isolated(&concurrent[0].2, &shared),
         Err(eval_core::IsolationRefused::SharedRoot { .. })
     ));
     coverage.record("xc_parallel_campaigns_isolated").unwrap();
@@ -380,13 +422,28 @@ fn two_concurrent_campaigns_on_one_checkout_match_their_serial_digests() {
 
 #[test]
 #[ignore = "S0 runs under an explicit budget: set EIDNARA_EVAL_S0_BUDGET_MS and run with --ignored"]
+fn two_concurrent_campaigns_on_one_checkout_match_their_serial_digests() {
+    let budget_ms = budget_or_panic();
+    two_concurrent_campaigns_on_one_checkout_match_their_serial_digests_scenario(
+        budget_ms,
+        &mut Coverage::default(),
+    );
+}
+
+#[test]
+#[ignore = "S0 runs under an explicit budget: set EIDNARA_EVAL_S0_BUDGET_MS and run with --ignored"]
 fn every_growth_marker_fires_across_the_scenarios() {
-    budget_or_panic();
+    let budget_ms = budget_or_panic();
     let mut coverage = Coverage::default();
     let published = campaign(GrowthMode::NeverRestored, &mut coverage);
     a_never_restored_campaign_samples_every_quiescence_and_refuses_a_restore_scenario(&published);
-    coverage.record("xc_envelope_breach_stops_the_run").unwrap();
-    coverage.record("xc_parallel_campaigns_isolated").unwrap();
+    reviewer_headroom_is_accounted_from_the_stores_own_constants_scenario(&published);
+    the_swarm_mix_exercises_every_operation_kind_scenario(&published);
+    a_deliberate_envelope_breach_names_the_resource_and_publishes_nothing_scenario(&mut coverage);
+    two_concurrent_campaigns_on_one_checkout_match_their_serial_digests_scenario(
+        budget_ms,
+        &mut coverage,
+    );
     let owned: BTreeSet<&str> = MARKERS
         .iter()
         .filter(|m| m.test.starts_with(SUITE))

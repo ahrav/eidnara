@@ -1374,14 +1374,16 @@ completeness proof run in the `eval-campaign` CI job under
   `KernelStore::open`, and the restoring ledger's verdict is `NotALeakVerdict`.
 - `a_deliberate_envelope_breach_names_the_resource_and_publishes_nothing`
   (`xc-campaign-resource-envelope-declared-and-enforced`; marker
-  `xc_envelope_breach_stops_the_run`): a 64 KiB store bound is crossed within
-  eight steps; `EnvelopeExceeded { store_bytes, bound, observed }` carries the
-  peak that crossed it and nothing is published.
+  `xc_envelope_breach_stops_the_run`): a run with a 64 KiB store bound stops
+  with `EnvelopeExceeded { store_bytes, bound, observed }` and publishes no
+  report or manifest; driven step by step, the peak recorded is the one that
+  crossed the bound.
 - `two_concurrent_campaigns_on_one_checkout_match_their_serial_digests`
   (`xc-parallel-campaigns-isolated-on-shared-checkout`; marker
   `xc_parallel_campaigns_isolated`): two campaigns on two threads use disjoint
   roots and publish directories and publish the result digests of their
-  serial runs; a fixture sharing a root is refused. This campaign opens no
+  serial runs, with the same commit-log rows, projection rows, artifact
+  objects, and mix counts; a fixture sharing a root is refused. This campaign opens no
   port and records no cassette, so those resource sets are empty.
 - `an_unapproved_profile_refuses_before_any_store_opens`: no approval, no
   campaign, nothing published.

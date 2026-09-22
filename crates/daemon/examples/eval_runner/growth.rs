@@ -5,11 +5,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use eval_core::{
-    Approval, CampaignResources, ClaimBoundary, Coverage, Cut, CutOutcome, CutReceipt,
-    EnvelopeExceeded, ExecutionMode, GROWTH_REPORT_SCHEMA, GrowthBounds, GrowthLedger, GrowthMode,
-    GrowthRefused, GrowthReport, GrowthReportError, HeadroomSample, Operation, ProfileError,
-    ResourceSample, ReviewerQuota, RunProfile, Scale, SearchEpisodeFault, StoreBytes, StoreFamily,
-    SwarmMix, eval_run_id,
+    Approval, CampaignResources, ClaimBoundary, Coverage, Cut, EnvelopeExceeded, ExecutionMode,
+    GROWTH_REPORT_SCHEMA, GrowthBounds, GrowthLedger, GrowthMode, GrowthRefused, GrowthReport,
+    GrowthReportError, HeadroomSample, Operation, ProfileError, ResourceSample, ReviewerQuota,
+    RunProfile, Scale, SearchEpisodeFault, StoreBytes, StoreFamily, SwarmMix, eval_run_id,
 };
 use memory_store::memory_reviewer_jobs::{
     MAX_MEMORY_REVIEWER_METADATA_BYTES_PER_HOST, MAX_MEMORY_REVIEWER_METADATA_BYTES_PER_PROJECT,
@@ -39,6 +38,8 @@ pub struct Config {
     pub approval: Option<Approval>,
     pub publish: PathBuf,
     pub mode: GrowthMode,
+    /// A tighter store-bytes bound than the profile's, for a run that must breach it.
+    pub store_bytes_bound: Option<u64>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -93,10 +94,20 @@ pub fn bounds(profile: &RunProfile, messages: u32) -> GrowthBounds {
     GrowthBounds {
         store_bytes: profile.envelope.store_bytes,
         artifact_objects: 64 + 8 * u64::from(messages),
+        artifact_bytes: 4 << 20,
         commit_log_rows: 64 + 16 * u64::from(messages),
         projection_rows: 16 * u64::from(messages),
         open_holds: 1,
+        store_bytes_per_commit: 64 << 10,
     }
+}
+
+/// What a finished campaign hands to the report.
+pub struct Finished {
+    pub ledger: GrowthLedger,
+    pub mix: SwarmMix,
+    pub witness: Witness,
+    pub checkpoints: BTreeMap<Cut, u64>,
 }
 
 pub struct Run {
@@ -162,7 +173,7 @@ pub struct Campaign {
     pub r24_refusals: u64,
     pub generation: u64,
     pub next_step: usize,
-    pub published_bytes: u64,
+    pub checkpoints: BTreeMap<Cut, u64>,
 }
 
 impl Campaign {
@@ -180,7 +191,7 @@ impl Campaign {
             r24_refusals: 0,
             generation,
             next_step: 0,
-            published_bytes: 0,
+            checkpoints: BTreeMap::new(),
         }
     }
 
@@ -280,7 +291,6 @@ impl Campaign {
             self.root(),
             step,
             self.stores.tip(),
-            self.published_bytes,
             charges,
             self.headroom(),
         )
@@ -309,7 +319,6 @@ fn sample_root(
     root: &Path,
     step: u32,
     commit_seq: i64,
-    published_bytes: u64,
     charges: &Charges,
     headroom: HeadroomSample,
 ) -> ResourceSample {
@@ -323,7 +332,6 @@ fn sample_root(
         artifact_tmp_entries: count_entries(&artifacts.join("tmp")),
         artifact_bytes,
         cassette_bytes: 0,
-        published_bytes,
         // The campaign's own root is occupied for the whole run; a leak is any root beyond it.
         temp_roots: charges.roots().saturating_sub(1),
         processes: charges.processes(),
@@ -337,25 +345,21 @@ fn sample_root(
     }
 }
 
-/// The headroom of a closed memory store, from its rows.
+/// The headroom of a closed memory store, as the store itself reports it
+/// once reopened with no other holder.
 fn closed_headroom(root: &Path, admitted_total: u64, r24_refusals: u64) -> HeadroomSample {
-    let memory = memory_file(root);
-    let project_metadata_bytes = count(
-        &memory,
-        "SELECT COALESCE(SUM(receipt_charge_bytes + CASE WHEN state<>'terminal' THEN allowance_bytes ELSE 0 END),0) FROM memory_reviewer_jobs",
-    );
+    let store = memory_store::MemoryStore::open(&daemon::store_descriptor_in(root)).unwrap();
+    let headroom = store.memory_reviewer_headroom(reviewer::PROJECT).unwrap();
+    drop(store);
     HeadroomSample {
-        pending_jobs: count(
-            &memory,
-            "SELECT COUNT(*) FROM memory_reviewer_jobs WHERE state<>'terminal'",
-        ),
+        pending_jobs: headroom.pending_jobs as u64,
         terminal_jobs: count(
-            &memory,
+            &memory_file(root),
             "SELECT COUNT(*) FROM memory_reviewer_jobs WHERE state='terminal'",
         ),
         page_bytes: 0,
-        project_metadata_bytes,
-        project_metadata_remaining: quota().project_metadata_bytes - project_metadata_bytes,
+        project_metadata_bytes: headroom.project_metadata_bytes,
+        project_metadata_remaining: headroom.project_metadata_remaining,
         admitted_total,
         r24_refusals,
     }
@@ -367,9 +371,15 @@ impl Campaign {
     pub fn sample(&mut self, step: u32, charges: &mut Charges) -> Result<(), RunError> {
         let sample = self.sample_at(step, charges);
         charges.observe(eval_core::Resource::StoreBytes, sample.store_total())?;
+        charges.observe(eval_core::Resource::ArtifactBytes, sample.artifact_bytes)?;
         charges.elapsed()?;
         self.ledger.record(sample)?;
+        *self.checkpoints.entry(Cut::AtQuiescence).or_insert(0) += 1;
         Ok(())
+    }
+
+    pub fn tip(&self) -> i64 {
+        self.stores.tip()
     }
 
     /// A restore request: refused under `never_restored` and counted, with
@@ -389,7 +399,7 @@ impl Campaign {
             r24_refusals,
             generation,
             next_step,
-            published_bytes,
+            checkpoints,
         } = self;
         let tip = stores.tip();
         let stores = stores.close().reopen(now);
@@ -405,7 +415,7 @@ impl Campaign {
                 r24_refusals,
                 generation,
                 next_step,
-                published_bytes,
+                checkpoints,
             },
             Ok(()),
         )
@@ -413,37 +423,37 @@ impl Campaign {
 
     /// Closes the stores, which truncates every WAL, and takes the final
     /// sample from the closed files: quiescent, with nothing transient left.
-    pub fn finish(
-        self,
-        charges: &mut Charges,
-    ) -> Result<(GrowthLedger, SwarmMix, Witness), RunError> {
+    pub fn finish(self, charges: &mut Charges) -> Result<Finished, RunError> {
         let Campaign {
-            plan,
             stores,
             mut ledger,
             mix,
             witness,
             admitted_total,
             r24_refusals,
-            published_bytes,
+            mut checkpoints,
             ..
         } = self;
         let step = ledger.samples.last().map_or(0, |s| s.step + 1);
         let root = stores.root().to_path_buf();
-        let _ = plan;
         let tip = stores.tip();
         drop(stores.close());
         let sample = sample_root(
             &root,
             step,
             tip,
-            published_bytes,
             charges,
             closed_headroom(&root, admitted_total, r24_refusals),
         );
         charges.observe(eval_core::Resource::StoreBytes, sample.store_total())?;
         ledger.record(sample)?;
-        Ok((ledger, mix, witness))
+        *checkpoints.entry(Cut::EndOfRun).or_insert(0) += 1;
+        Ok(Finished {
+            ledger,
+            mix,
+            witness,
+            checkpoints,
+        })
     }
 }
 
@@ -464,8 +474,12 @@ pub fn run(config: &Config) -> Result<Run, RunError> {
         config.approval.clone(),
     );
     profile.approved()?;
+    let mut envelope = profile.envelope.clone();
+    if let Some(bound) = config.store_bytes_bound {
+        envelope.store_bytes = bound;
+    }
     prepare_publish(&config.publish, &[REPORT_FILE, MANIFEST_FILE]).map_err(publish_refused)?;
-    let mut charges = Charges::new(profile.envelope.clone());
+    let mut charges = Charges::new(envelope);
     let bounds = bounds(&profile, config.messages);
     let root = charges.occupy()?;
     let root_path = root.path().display().to_string();
@@ -473,15 +487,28 @@ pub fn run(config: &Config) -> Result<Run, RunError> {
     while campaign.remaining() > 0 {
         campaign.step(&mut charges)?;
     }
-    let (ledger, mix, witness) = campaign.finish(&mut charges)?;
+    let Finished {
+        ledger,
+        mix,
+        witness,
+        checkpoints,
+    } = campaign.finish(&mut charges)?;
     charges.vacate(root)?;
     let mut coverage = witness.coverage;
-    coverage
-        .record("flt_leak_ledger_sampled_before_reopen")
-        .unwrap();
-    coverage
-        .record("flt_headroom_accounted_from_store_constants")
-        .unwrap();
+    let quota = quota();
+    if ledger.mode == GrowthMode::NeverRestored {
+        ledger.verdict(&quota, &bounds)?;
+        coverage
+            .record("flt_leak_ledger_sampled_before_reopen")
+            .unwrap();
+    }
+    if ledger.samples.iter().all(|sample| {
+        sample.headroom.project_metadata_bytes == quota.expected_project_bytes(&sample.headroom)
+    }) {
+        coverage
+            .record("flt_headroom_accounted_from_store_constants")
+            .unwrap();
+    }
     mix.complete().map_err(GrowthReportError::Mix)?;
     coverage.record("flt_swarm_mix_complete").unwrap();
     let identity = identity(
@@ -500,7 +527,7 @@ pub fn run(config: &Config) -> Result<Run, RunError> {
         eval_run_id: eval_run_id(&identity).unwrap(),
         profile_digest: profile.digest().unwrap(),
         claim_boundary: ClaimBoundary::pinned(),
-        quota: quota(),
+        quota,
         bounds,
         ledger,
         mix,
@@ -522,14 +549,15 @@ pub fn run(config: &Config) -> Result<Run, RunError> {
         eval_run_id: report.eval_run_id.clone(),
         sample: format!("growth:{steps}"),
         result_digest: GrowthReport::result_digest(&published)?,
-        witness_digest: GrowthReport::result_digest(&published)?,
-        cut_receipts: [Cut::AtQuiescence, Cut::EndOfRun]
-            .into_iter()
-            .map(|cut| CutReceipt {
-                cut,
-                outcome: CutOutcome::Reached,
-            })
-            .collect(),
+        witness_digest: super::campaign::sha256_hex(
+            &serde_json::to_vec(&json!({
+                "samples": report.ledger.samples,
+                "mix": report.mix,
+                "effects": witness.effects,
+            }))
+            .unwrap(),
+        ),
+        cut_receipts: eval_core::cut_receipts(&[Cut::AtQuiescence, Cut::EndOfRun], &checkpoints),
         execution_mode: ExecutionMode::Generate,
         envelope: report.envelope.clone(),
         started_at_ms,
@@ -574,5 +602,6 @@ pub fn config_from_args(args: impl IntoIterator<Item = String>) -> Result<Config
         approval: base.approval,
         publish: base.publish,
         mode,
+        store_bytes_bound: None,
     })
 }
