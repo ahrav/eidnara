@@ -19,7 +19,8 @@ use campaign::Charges;
 use eval_core::{
     AgingReport, Approval, CheckpointRefused, Construction, ConstructionKind, Coverage, Divergence,
     ExecutionMode, GuardComparison, MARKERS, PrefixRefused, ProfileError, RestoreRefused, Scale,
-    StateSnapshot, StoreFamily, WindowDeaths, WorkCounter, parse_aging_report, parse_manifest,
+    StateSnapshot, StoreFamily, WindowDeaths, WorkCounter, WorldError, parse_aging_report,
+    parse_manifest,
 };
 use memory_store::MemoryStore;
 use memory_store::memory_capture::CaptureSource;
@@ -404,6 +405,14 @@ fn a_wal_sidecar_whose_metadata_cannot_be_read_is_not_recorded_as_empty() {
         std::panic::catch_unwind(|| aging::sidecar_len(&file)).is_err(),
         "an unreadable sidecar must not be recorded as empty"
     );
+}
+
+#[test]
+fn a_history_the_generator_refuses_is_a_run_error_not_a_panic() {
+    assert!(matches!(
+        plan(0).err().unwrap(),
+        RunError::World(WorldError::InvalidField("entities"))
+    ));
 }
 
 #[test]

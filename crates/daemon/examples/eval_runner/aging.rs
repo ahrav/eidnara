@@ -20,7 +20,8 @@ use eval_core::{
     ProjectionRows, QuiescenceReceipt, REDUCER_VERSION, Reachability, RenderConfig, Rendering,
     Reopened, RestoreRefused, RunIdentity, RunProfile, RunStatus, Scale, Segment, SessionSpec,
     StateSnapshot, StoreFamily, StoreIntegrity, StoreQuiescence, TokenizerProfile, Unenumerated,
-    WalCheckpoint, WindowDeaths, WorkCounter, WorldConfig, eval_run_id, generate_all, render,
+    WalCheckpoint, WindowDeaths, WorkCounter, WorldConfig, WorldError, eval_run_id, generate_all,
+    render,
 };
 use kernel::{
     ArtifactDestination, CommitPageBounds, CurrentInputDescriptor, EligibilityBinding, KernelError,
@@ -75,6 +76,8 @@ pub enum RunError {
     Guard(#[from] Unenumerated),
     #[error("report refused: {0}")]
     Report(#[from] AgingReportError),
+    #[error("history refused: {0:?}")]
+    World(#[from] WorldError),
     #[error("no step straddles a supersession and a retirement")]
     NoStraddlingStep,
     #[error("publish {}: {kind}", path.display())]
@@ -1051,9 +1054,7 @@ pub struct Plan {
 }
 
 pub fn plan(messages: u32) -> Result<Plan, RunError> {
-    let log = generate_all(SEED, &world(messages), Mode::Generate)
-        .unwrap()
-        .log;
+    let log = generate_all(SEED, &world(messages), Mode::Generate)?.log;
     let rendering = render(
         &log,
         &RenderConfig {
