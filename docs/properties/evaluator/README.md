@@ -1345,8 +1345,11 @@ Report (`crates/eval-core/tests/report.rs`):
   underpowered-table suppression over a ledger that backs no table, over
   more family clusters than affordable worlds, under ICCs that deflate
   nothing, with an effective N its clusters do not deflate to, deflated below
-  what its recorded clusters allow or as if clusters split pairs, or on a
-  surface whose bound does not resolve, an interval outside the statistic's range, a baseline that delivered more ids than its window holds, whose
+  what its recorded clusters allow, as if clusters split pairs, or as if one
+  world spanned many families, or on a surface whose bound does not resolve,
+  an interval outside the statistic's range or over more clusters than the
+  approved profile's worlds, a baseline that delivered more ids than its
+  window holds, whose
   failed falsifications outnumber the table, or that was judged over more
   control pairs than the table has, a packing-only unsupported
   reason off the packing surface, an injection score with a blank case, with
