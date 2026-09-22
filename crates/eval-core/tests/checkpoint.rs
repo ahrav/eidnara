@@ -889,6 +889,18 @@ fn an_aging_report_refuses_what_its_claims_and_checkpoint_forbid() {
         })
     );
 
+    for checkpoint_step in [0, 12, 13] {
+        let mut outside = report.clone();
+        outside.checkpoint_step = checkpoint_step;
+        outside.receipt.step = checkpoint_step;
+        assert_eq!(
+            outside.validate(),
+            Err(AgingReportError::CheckpointStepOutOfRange {
+                checkpoint_step,
+                steps: 12,
+            })
+        );
+    }
     let mut still = report.clone();
     still.commit_seq_at_end = still.commit_seq_at_checkpoint;
     assert_eq!(

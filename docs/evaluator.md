@@ -1971,7 +1971,9 @@ refuses a report whose claim boundary is not the pinned one
 (`ClaimBoundaryMismatch`), whose `eval_run_id`, `profile_digest`,
 `checkpoint_digest`, or either guard digest is not 64 lowercase hex digits
 (`MalformedDigest { field }`), whose checkpoint step is not the receipt's
-(`CheckpointStepMismatch`), whose end tip is not past its checkpoint tip
+(`CheckpointStepMismatch`), whose checkpoint step leaves no prefix or no
+remainder (`CheckpointStepOutOfRange { checkpoint_step, steps }`: the step
+must satisfy `0 < step < steps`), whose end tip is not past its checkpoint tip
 (`CommitSeqNotMonotonic { at_checkpoint, at_end }`), whose window deaths are
 not both nonzero (`WindowDeathsIncomplete { supersessions, retirements }`), or
 whose receipt `QuiescenceReceipt::check`

@@ -1535,7 +1535,8 @@ Checkpoint contract (`crates/eval-core/tests/checkpoint.rs`,
   `ClaimBoundaryMismatch`; a short `eval_run_id`, `profile_digest`,
   `checkpoint_digest`, or guard digest is `MalformedDigest` naming the field;
   a checkpoint step the receipt does not carry is `CheckpointStepMismatch`;
-  an end tip not past the checkpoint tip is `CommitSeqNotMonotonic`; a window
+  a checkpoint at step zero or at or past the step count is
+  `CheckpointStepOutOfRange`; an end tip not past the checkpoint tip is `CommitSeqNotMonotonic`; a window
   without both a supersession and a retirement is `WindowDeathsIncomplete`;
   and a receipt with pending work or without the memory store's evidence is
   `Receipt(..)` from `validate`, `serialize`, and `parse_aging_report` alike.

@@ -636,6 +636,11 @@ pub enum AgingReportError {
         checkpoint_step: u32,
         receipt_step: u32,
     },
+    /// The checkpoint step must leave a prefix and a remainder: `0 < step < steps`.
+    CheckpointStepOutOfRange {
+        checkpoint_step: u32,
+        steps: u32,
+    },
     CommitSeqNotMonotonic {
         at_checkpoint: i64,
         at_end: i64,
@@ -697,6 +702,12 @@ impl AgingReport {
             return Err(AgingReportError::CheckpointStepMismatch {
                 checkpoint_step: self.checkpoint_step,
                 receipt_step: self.receipt.step,
+            });
+        }
+        if self.checkpoint_step == 0 || self.checkpoint_step >= self.steps {
+            return Err(AgingReportError::CheckpointStepOutOfRange {
+                checkpoint_step: self.checkpoint_step,
+                steps: self.steps,
             });
         }
         if self.commit_seq_at_end <= self.commit_seq_at_checkpoint {
