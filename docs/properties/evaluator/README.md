@@ -1338,8 +1338,8 @@ Report (`crates/eval-core/tests/report.rs`):
   or the pairs', a stop-condition skip in an open report, a lineage naming
   this run, a `profile_not_approved` skip under an approved profile, a sample
   unsupported on another surface or on a default-production one, for a policy
-  not its own, not on another surface, or for the raw arm, or disabled for
-  another scale,
+  not its own, not on another surface, for the raw arm, or for the structured
+  arm on surface 1, or disabled for another scale,
   a tap-rejected suppression over malformed arm rates, a baseline suppression
   on a surface whose bound does not resolve, an interval withheld over no
   clusters or over more than the plan has worlds, an analysis over fewer

@@ -501,14 +501,19 @@ impl SuiteBReport {
                     return Err(ReportError::SampleAxisDisagrees { sample: sample() });
                 }
                 // A policy not on this surface names this sample's policy and
-                // the run's surface; the raw arm changes nothing a surface
-                // reads, so it is on every surface.
+                // the run's surface. The raw arm changes nothing a surface
+                // reads, so it is on every surface, and surface 1 reads the
+                // history segments the structured arm writes, so that arm is
+                // on it; which other pairs are absent is the runner's to
+                // declare, not this check's to guess.
                 Terminal::Unsupported(UnsupportedReason::PolicyNotOnSurface {
                     policy,
                     surface,
                 }) if policy != record.policy
                     || surface != self.surface
-                    || policy == HistoryPolicy::Raw =>
+                    || policy == HistoryPolicy::Raw
+                    || (policy, surface)
+                        == (HistoryPolicy::Structured, EvaluatedSurface::Surface1) =>
                 {
                     return Err(ReportError::SampleAxisDisagrees { sample: sample() });
                 }

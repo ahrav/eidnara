@@ -1704,6 +1704,22 @@ fn a_report_refuses_what_its_own_evidence_refutes() {
             },
         ),
         (
+            "a structured sample unsupported on the surface that reads its segments",
+            Box::new(|r| {
+                let sample = r.samples.samples.get_mut("s605").unwrap();
+                sample.policy = HistoryPolicy::Structured;
+                sample.terminal =
+                    Terminal::Unsupported(eval_core::UnsupportedReason::PolicyNotOnSurface {
+                        policy: HistoryPolicy::Structured,
+                        surface: EvaluatedSurface::Surface1,
+                    });
+                r.rates = r.samples.rates().unwrap();
+            }),
+            ReportError::SampleAxisDisagrees {
+                sample: "s605".into(),
+            },
+        ),
+        (
             "a sample disabled for another scale",
             Box::new(|r| {
                 r.samples.samples.get_mut("s605").unwrap().terminal =

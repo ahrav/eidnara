@@ -1553,7 +1553,8 @@ carries rather than read from what it says:
   or disabled `scale_not_budgeted` names the report's surface or the profile's
   scale; a `default-production` surface is never unactivated, only the
   packing surface lacks a caller, and a policy not on this surface is the
-  sample's own policy on the report's surface and never the raw arm
+  sample's own policy on the report's surface, never the raw arm, and never
+  the structured arm on surface 1, which reads its segments
   (`SampleAxisDisagrees`); a sample skipped
   `envelope_exceeded` must name
   this run's bound for that resource and a reading the peaks reached
