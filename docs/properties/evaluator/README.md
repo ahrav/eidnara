@@ -1320,7 +1320,8 @@ Report (`crates/eval-core/tests/report.rs`):
   suppression whose reading is no breach or that the peaks do not show, an
   asymmetry or effective-N suppression the arm rates or pilot do not derive,
   an underpowered-table suppression against a floor the family does not set,
-  whose effective N meets the floor, or under a pilot that already blocks,
+  whose effective N meets the floor or is negative, over more clusters than
+  the plan has pairs, or under a pilot that already blocks,
   paired counts no table can produce, a tap-rejected suppression with peaks
   over the bounds, a baseline contrast
   on another surface, under another version, off the profile's bound,

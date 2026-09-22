@@ -1495,8 +1495,10 @@ carries rather than read from what it says:
   `table_underpowered` block is the completed table's own power, which only
   the pair table shows, so the report holds it to what the family fixes
   instead: no pre-table block derives, its `required_n_for_margin` is the
-  pilot's, it spans at least one cluster, and its `effective_n` is below the
-  floor (`SuppressionNotDerived`); the table itself is the manifest's
+  pilot's, it spans between one cluster and the plan's worlds or families at
+  the pilot's unit (never more than its pairs), and its `effective_n` is
+  positive, at most the pair count, and below the floor
+  (`SuppressionNotDerived`); the table itself is the manifest's
   `result_digest`. An
   `envelope {exceeded}` suppression must name the reading `envelope.check()`
   shows, and a `baseline {failure}` suppression needs a surface whose bound

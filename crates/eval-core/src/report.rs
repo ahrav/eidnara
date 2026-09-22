@@ -23,8 +23,9 @@ use crate::pairs::{
     recency_bound,
 };
 use crate::statistics::{
-    AnalysisFamily, BlockedReason, FrozenFamily, GateVerdict, Gates, IntervalOutcome,
-    IntervalWithheld, PairedReport, Ratio, StatisticsError, arm_miss_asymmetry,
+    AnalysisFamily, BlockedReason, ClusteringUnit, FrozenFamily, GateVerdict, Gates,
+    IntervalOutcome, IntervalWithheld, PairedReport, Ratio, StatisticsError, StoppingRule,
+    arm_miss_asymmetry,
 };
 
 pub const SUITE_B_REPORT_SCHEMA: &str = "eval-suite-b-report/v1";
@@ -495,13 +496,24 @@ impl SuiteBReport {
                     n_clusters,
                     required_n_for_margin,
                 } => {
-                    let required = self.family.icc_pilot.required_n_for_margin;
+                    let pilot = &self.family.icc_pilot;
+                    let StoppingRule::FixedN { pairs } = self.family.stopping_rule;
+                    // A positive pair count deflates to a positive effective N
+                    // of at most itself, over one cluster per pair at most and
+                    // no more than the plan's worlds or families at its unit.
+                    let clusters = match pilot.clustering_unit {
+                        ClusteringUnit::Family => pilot.n_families,
+                        ClusteringUnit::WorldSeed => pilot.max_affordable_worlds,
+                    }
+                    .min(pairs);
+                    let whole =
+                        |n: u32| Ratio::try_new(i128::from(n), 1).map_err(ReportError::Statistics);
                     if derived.is_some()
-                        || *required_n_for_margin != required
-                        || *n_clusters == 0
-                        || *effective_n
-                            >= Ratio::try_new(i128::from(required), 1)
-                                .map_err(ReportError::Statistics)?
+                        || *required_n_for_margin != pilot.required_n_for_margin
+                        || !(1..=clusters).contains(n_clusters)
+                        || *effective_n <= Ratio::ZERO
+                        || *effective_n > whole(pairs)?
+                        || *effective_n >= whole(pilot.required_n_for_margin)?
                     {
                         return Err(ReportError::SuppressionNotDerived);
                     }
