@@ -278,9 +278,9 @@ fn the_fixture_answers_a_summarizer_prompt_in_the_validators_document() {
                     // Ordinary source text is XML-sensitive; the scripted
                     // document carries it, escaped.
                     7 => "digest <T> & question asked",
-                    // A message over two lines: the second line has no
-                    // `[ordinal]` prefix and is part of the message.
-                    9 => "digest question\nasked on a second line",
+                    // A message over two lines, the second shaped like a
+                    // rendered header: it is the message's text, not a record.
+                    9 => "digest question\n[999] U: asked on a second line",
                     _ if ordinal % 2 == 0 => "cursor decision recorded",
                     _ => "digest question asked",
                 },

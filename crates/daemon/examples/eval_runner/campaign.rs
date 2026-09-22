@@ -548,10 +548,12 @@ fn live(
             assert_eq!(backend_calls, 0, "{counters}");
         }
     }
-    assert_eq!(
-        refusals > 0,
-        failures_seen,
-        "the daemon reports a failure exactly when the cassette refused a frame: {counters}"
+    // A turn's diagnostics describe the firings before it, so a refusal on
+    // the last firing is in the cassette's counter and in no snapshot; a
+    // failure the snapshots do show must be a refusal the counter has.
+    assert!(
+        !failures_seen || refusals > 0,
+        "the daemon reports a refused frame only when the cassette refused one: {counters}"
     );
     let (status, output) = fixture.shutdown_with_status();
     // A recording fixture refuses to write a cassette holding a refused

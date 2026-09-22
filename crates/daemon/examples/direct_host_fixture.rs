@@ -256,17 +256,22 @@ mod unix {
     fn scripted_summary(prompt: &str) -> Option<String> {
         let (_, body) = prompt.split_once("<new_messages>")?;
         let (body, _) = body.split_once("</new_messages>")?;
-        // A line without the `[ordinal]` prefix continues the message before
-        // it: a presented message keeps its newlines.
+        // The transcript renders its records in ordinal order, so a header
+        // starts a record only when it continues the sequence; every other
+        // line, including one shaped like a header, is the text of the message
+        // before it, which keeps its newlines.
         let mut lines: Vec<(u64, u64, String)> = Vec::new();
         for line in body.lines() {
+            let next = lines.last().map(|(_, end, _)| end + 1);
             match (presented_line(line), lines.last_mut()) {
-                (Some(presented), _) => lines.push(presented),
-                (None, Some((_, _, text))) if !line.trim().is_empty() => {
+                (Some(presented), _) if next.is_none_or(|next| presented.0 == next) => {
+                    lines.push(presented)
+                }
+                (_, Some((_, _, text))) if !line.trim().is_empty() => {
                     text.push(' ');
                     text.push_str(line.trim());
                 }
-                (None, _) => {}
+                _ => {}
             }
         }
         if lines.is_empty() {
