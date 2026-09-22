@@ -9,7 +9,7 @@ pub struct Marker {
 }
 
 /// Every marker the evaluator's suites may record, globally unique by name.
-pub const MARKERS: [Marker; 24] = [
+pub const MARKERS: [Marker; 27] = [
     Marker {
         name: "ing_four_seam_hold_correct_release_query",
         test: "crates/daemon/tests/eval_ingestion.rs::hold_embedding_commit_correction_release_query_makes_the_predecessor_obsolete",
@@ -105,6 +105,18 @@ pub const MARKERS: [Marker; 24] = [
     Marker {
         name: "wm_baseline_ran_on_positive_control_pair",
         test: "crates/eval-core/tests/pairs.rs::the_recency_baseline_delivers_a_positive_control_or_is_vacuous",
+    },
+    Marker {
+        name: "mtr_injection_mediation_boundary_observed",
+        test: "crates/eval-core/tests/injection.rs::obedience_is_the_observed_side_effect_and_echo_is_only_exposure",
+    },
+    Marker {
+        name: "mtr_injection_model_output_observed",
+        test: "crates/eval-core/tests/injection.rs::obedience_is_the_observed_side_effect_and_echo_is_only_exposure",
+    },
+    Marker {
+        name: "mtr_second_session_read_memory",
+        test: "crates/eval-core/tests/injection.rs::a_canary_written_into_memory_surfaces_in_a_later_session_that_read_it",
     },
 ];
 

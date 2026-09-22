@@ -10,9 +10,14 @@ use context_core::canonical_json::{ContractError, canonical_json_encode, protoco
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
+use crate::claim::{
+    AnchorSet, ClaimDerivation, TransferCriterion, UnmetClause, WorldProvenance, derive_claim_class,
+};
 use crate::manifest::{ArmRates, Manifest, ManifestError, RunStatus, is_canonical_decimal};
 
-pub const ANALYSIS_FAMILY_SCHEMA: &str = "eval-analysis-family/v1";
+/// Version 2 added `transfer_criterion`, so the rule a transfer claim must
+/// meet is part of what the family freezes.
+pub const ANALYSIS_FAMILY_SCHEMA: &str = "eval-analysis-family/v2";
 /// The gates a report carries; a frozen family declares exactly these.
 pub const GATE_ENDPOINTS: [&str; 3] = ["quality_loss", "harm", "floor"];
 /// The two arms of every pair, the keys `arm_rates` must carry.
@@ -555,6 +560,9 @@ pub struct AnalysisFamily {
     /// The repeat count `k` every live trial's pass^k is read at.
     pub trials_k: u32,
     pub icc_pilot: IccPilot,
+    /// The approved rule a transfer claim must meet; `None` pins every
+    /// report under this family to `generated_phase1`.
+    pub transfer_criterion: Option<TransferCriterion>,
 }
 
 impl AnalysisFamily {
@@ -662,7 +670,29 @@ impl AnalysisFamily {
                 required_n_for_margin: pilot.required_n_for_margin,
             });
         }
+        if let Some(criterion) = &self.transfer_criterion {
+            criterion
+                .validate()
+                .map_err(StatisticsError::TransferCriterion)?;
+        }
         Ok(())
+    }
+
+    /// The class a report under this family may claim, read against the
+    /// family's own criterion so none can be supplied out of band, and only
+    /// after the freeze check, so an edited family derives nothing.
+    pub fn claim_class(
+        &self,
+        frozen: &FrozenFamily,
+        provenance: WorldProvenance,
+        anchor_set: Option<&AnchorSet>,
+    ) -> Result<ClaimDerivation, StatisticsError> {
+        frozen.check(self)?;
+        Ok(derive_claim_class(
+            provenance,
+            anchor_set,
+            self.transfer_criterion.as_ref(),
+        ))
     }
 
     pub fn digest(&self) -> Result<String, StatisticsError> {
@@ -1240,6 +1270,7 @@ pub enum StatisticsError {
     TooFewReplicates(u32),
     TooManyReplicates(u32),
     TooManyDraws(u64),
+    TransferCriterion(UnmetClause),
     EmptyFamilyField,
     FamilyChangedAfterResults {
         recorded: String,
