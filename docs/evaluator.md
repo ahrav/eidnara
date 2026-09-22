@@ -1372,12 +1372,228 @@ required_families}` lives on the analysis family, so it is frozen and part of
 floorless one, and `AnalysisFamily::claim_class(frozen, provenance,
 anchor_set)` runs `FrozenFamily::check` first and then reads the class against
 the family's own criterion, so neither a criterion nor an edited family can be
-supplied out of band. A report derives its class from what is present, never from a stored
-label; the Suite B report is where a stored class would be compared with the
-derived one, and that report does not exist yet.
+supplied out of band. A report derives its class from what is present, never
+from a stored label; the Suite B report compares the stored class with the
+derived one and refuses a disagreement (`ClaimNotDerived`).
 
 Pairs compiled from generated worlds carry Phase-1 claims: a world the
 generator drew says nothing about real repositories.
+
+## Run profiles, sample accounting, and the envelope
+
+`campaign.rs` holds what a campaign pins before its first sample and how it
+accounts for every sample afterwards.
+
+**Run profile.** `RunProfile` (`eval-run-profile/v1`) names a `scale` (`s0`
+runs in the default test shards; `s1` and `s2` run only when
+`EIDNARA_EVAL_S1_BUDGET_MS` or `EIDNARA_EVAL_S2_BUDGET_MS` grants a budget and
+are ignored otherwise), the finite `worlds`, `tasks_per_world`, and
+`max_events_per_log`, the six per-task `TaskBudgets` (`max_model_calls`,
+`max_tool_calls`, `max_tokens_in`, `max_tokens_out`, `hard_deadline_ms`,
+`max_no_progress_iterations`), the resource `envelope` (`ResourceLimits`), three
+rate ceilings (`indeterminate_ceiling`, `censoring_ceiling`,
+`redaction_refusal_ceiling`, canonical decimals in `[0, 1]`), the per-surface
+`baseline_bounds`, the maintainer's `statistics` (`CampaignProfile`: margins
+and liveness bounds), and `approval` (`{approved_by, approved_at_run_id}` or
+`null`). Every setting is written down: `parse_run_profile` refuses a missing
+field by name and a value the type would drop on the way back out (`Lossy`,
+which is how an absent `approval` key is refused where a `null` is accepted);
+`validate` refuses a zero anywhere a zero would mean "unbounded", including
+the four liveness bounds (`Zero {field}`), a malformed or out-of-range
+ceiling, an empty bound map, a zero bound on any surface
+(`ZeroBaselineBound`, since the resolver would read it as "use the pin"), a
+bound `recency_bound` would not resolve, a margin nobody set, and an approval
+whose run ID is not lowercase hex or whose approver is blank. The one grounded
+default in the repository is surface 1's recency window
+(`grounded_baseline_bounds`); nothing else has a production constant to
+borrow. `approved` is what a campaign asks before it
+runs: code and refusal tests need no approval, an empirical result does
+(`NotApproved`). `digest` (`eval-run-profile-digest/v1`) is the identity a
+report names. `TaskBudgets::exhausted(usage)` names the first budget reached,
+in declared order, as the `CensorReason` the attempt is censored with;
+`CensorReason::Timeout` is the shell's own attempt timeout and belongs to no
+budget.
+
+**Terminals.** Every sample ends in exactly one `Terminal`: `pass`, `fail`,
+`censored {reason}`, `indeterminate`, `skipped` (`profile_not_approved`,
+`stop_condition {condition}`, `envelope_exceeded {resource, bound,
+observed}`, `cassette_miss`, `redaction_refused`), `unsupported`
+(`surface_not_activated {surface}`, `no_mediation_boundary`,
+`packing_has_no_caller`), or `disabled` (`scale_not_budgeted {scale}`,
+`feature_off`). The reasons are closed vocabularies; a reason outside them
+does not parse, and an extra key a tagged unit variant would swallow is
+caught by the report parser's round trip. A `SampleLedger {epoch, order,
+samples}` holds one `SampleRecord {id, task, arm, policy, cut, lineage,
+terminal}` per declared sample; `validate` refuses an order that is not a
+permutation of the samples, a record under another key, a blank `id` or
+`task` (`Blank {sample, field}`), a lineage entry that is not a lowercase
+`eval_run_id`, or one repeated, and an `envelope_exceeded`
+skip whose reading is not over its bound (`EnvelopeNotExceeded`); `attempted`
+counts the passed, failed, censored, and indeterminate samples; `rates` reports
+each terminal family's share of every declared sample.
+
+**Envelope.** `Envelope {bounds, peaks}` is held from launch. `observe(resource,
+value)` records the peak first and refuses second while any peak is over its
+bound, so `envelope_peaks` shows the reading that crossed the bound as
+`EnvelopeExceeded {resource, bound, observed}` and a breach stays refused
+however later readings fall and whichever resource they read; `check` names
+the first resource over its bound in declared order, and `observe` refuses
+with the same. `Resource` is `elapsed_ms`, `store_bytes` (a store with its WAL and
+shm sidecars), `cassette_bytes`, `artifact_bytes`, `temp_roots`,
+`retained_artifacts`, or `processes`, one per `ResourceLimits` field.
+Publication (write-then-rename into roots, stores, and cassette namespaces
+disjoint per campaign, on OS-allocated ports) is the runner's and is not
+written yet.
+
+## Suite B report
+
+`report.rs` is the one serializer every campaign publishes through.
+`SuiteBReport` (`eval-suite-b-report/v1`) carries the run, the approved
+`profile` verbatim and its `profile_digest`, the surface (whose `reachability`
+is a function of it: surfaces 1 and 3 are `default-production`, surface 2 is
+`explicit-config-only`, and the query route and packing are `test-only`, the
+label `ChainStage::REACHABILITY` gives them), the frozen `family`, `claims`,
+the `outcome`, the `samples` ledger and its `rates`, per-arm cassette
+`arm_rates`, the injection scores, and the envelope. The ceilings, margins,
+and baseline bounds a report is gated on are read from the profile it
+carries, never restated beside it. `serialize` and `parse_report` refuse
+before a byte moves, and every refusal below is derived from what the report
+carries rather than read from what it says:
+
+- Identity: the schema, a lowercase-hex `eval_run_id`, a profile that
+  validates and is approved (`Profile`), a `profile_digest` equal to
+  `profile.digest()` (`ProfileDigestMismatch`), a family that validates, and a
+  profile whose `statistics` equal the family's `profile`
+  (`ProfileDisagreesWithFamily`), an envelope whose bounds are the profile's
+  `envelope` (`EnvelopeDisagreesWithProfile`), and arm rates that parse
+  (`Statistics`), whatever the outcome, so a suppression that never reads the
+  rates still publishes valid ones.
+  Every integer must sit in the canonical safe range (`NotCanonical`), so a
+  Bun consumer reads the same value; `RunProfile::validate` holds the profile
+  to the same range (`NotCanonical`), so an unapproved-looking budget cannot
+  start a campaign before `digest` would refuse it.
+- Claims: `claims.boundary` must equal `ClaimBoundary::pinned()` as a
+  structure, order included (`ClaimBoundaryMismatch`); `established` is a
+  closed vocabulary (`required_evidence_present_at_every_live_stage`,
+  `task_oracle_passes`, `first_loss_stage_named`), so a claim inside an
+  exclusion has no wire form and never parses; it must be non-empty for an
+  open report and empty for a suppressed one (`ClaimsDisagreeWithOutcome`);
+  and `claims.derivation` must equal what `family.claim_class(frozen,
+  provenance, anchor_set)` derives under the family's own freeze
+  (`ClaimNotDerived {stored, derived}`), so a stored `transfer` over a
+  generated world, or with no anchor set, never parses.
+- Outcome: `open {gated: {analysis, baseline, gates}}` or `suppressed {by}`,
+  where `by` is `tap_rejected` (stop condition a), `baseline {failure}` (b),
+  `analysis {reason}` (c for `insufficient_effective_n`; an underpowered-table
+  or arm-miss asymmetry block has no stop condition, since (c) is the pilot's
+  projection, not the completed table), or `envelope {exceeded}`. Both at
+  once, or neither, has no wire form. A suppression removes the gates and the
+  claims and nothing else: the accounting, rates, samples, injection scores,
+  and envelope stay. The block `analyze` would return is derived from the
+  family and the arm rates in `analyze`'s order (the pilot's
+  `insufficient_effective_n`, then an arm-miss asymmetry over the family's
+  bound): an open report under a derived block refuses
+  (`OpenWhileBlocked {reason}`), and an `analysis {reason}` suppression must
+  name exactly the derived block (`SuppressionNotDerived`). A
+  `table_underpowered` block is the completed table's own power, which only
+  the pair table shows, so the report holds it to what the family fixes
+  instead: some ICC is positive, since nothing deflates otherwise and the
+  plan already meets its floor, the profile's worlds can hold the pairs at
+  its tasks per world, since no table completes otherwise, the surface's
+  bound resolves, since no pair
+  set compiles without one, no pre-table block derives, its
+  `required_n_for_margin` is the pilot's, it spans between one cluster, or
+  under the world unit the fewest worlds the profile's tasks per world can
+  hold the pairs in, and the worlds the plan affords and the profile runs
+  (under the family unit also its families, never more than its pairs), and
+  its `effective_n` is below the floor and
+  within what `deflate` can produce over exactly `n_clusters` at the selected
+  unit: at most the smaller of the pair count deflated as clusters as even as
+  whole pairs allow and, at the other level, as the most clusters
+  `n_clusters` leaves it (one family per world at most; every affordable
+  world under the family unit), at least the smaller of the pair count
+  deflated as clusters as lopsided as they can be, a world holding at most
+  the profile's tasks per world, and, at the other level, as the fewest
+  clusters `n_clusters` forces on it (one family; a world per family and
+  enough worlds for the pairs), just as lopsided (`SuppressionNotDerived`),
+  and the ledger backs the frozen pair count with
+  an arm result on each paired arm (`PairsExceedSamples`); the table itself
+  is the manifest's `result_digest`. An
+  `envelope {exceeded}` suppression must name the reading `envelope.check()`
+  shows, and a `baseline {failure}` suppression needs a surface whose bound
+  the profile resolves, since no baseline is judged without one, and a
+  failure that names a task names one that is not blank
+  (`SuppressionNotDerived`); under any other suppression the peaks must be
+  within the bounds (`EnvelopeNotHonoured`).
+- Accounting: `rates` must follow from `samples` (`RatesDisagree`, `Samples`);
+  no sample's lineage names this run (`LineageNamesThisRun`); a sample skipped
+  `stop_condition` must name the condition the outcome was suppressed under,
+  so an open report carries none (`StopConditionDisagrees`); no sample is
+  skipped `profile_not_approved`, since the report's profile is approved
+  (`SkipDisagreesWithProfile`); a sample unsupported `surface_not_activated`
+  or disabled `scale_not_budgeted` names the report's surface or the profile's
+  scale; a `default-production` surface is never unactivated, only the
+  packing surface lacks a caller, and `s0`, which runs in the default shards,
+  is never unbudgeted (`SampleAxisDisagrees`); a sample skipped `envelope_exceeded` must name
+  this run's bound for that resource and a reading the peaks reached
+  (`SampleEnvelopeDisagrees`); every injection score names a case that is not
+  blank, no case is scored twice, and each axis carries only what
+  `score_injection` produces (a stage axis is never `not_measurable`,
+  obedience never `not_reached`, write-back `not_measurable` or `not_reached`
+  without the boundary that obedience needs and never `not_measurable` with
+  it, exposure never `not_measurable`; `InjectionScoreDisagrees`), while
+  binding
+  the scores to the planned task set is the manifest's. In an open report the
+  paired analysis must count the pair table the plan froze
+  (`PairCountNotFrozen {frozen, found}`, as `analyze` refuses any other) and
+  carry the family's digest (`FamilyDigestMismatch`) and
+  the same `arm_rates` (`ArmRatesDisagree`); its `gates` must be the ones
+  `Gates::of` recomputes from its `counts` and the family's margins
+  (`PairedGatesNotDerived`); its `interval` must be the shape
+  `cluster_bootstrap_interval` derives from the family and the pair count
+  (the unit, method, replicate count, item count, a plan whose worlds can
+  hold the pairs at its tasks per world, between two clusters, or
+  under the world unit the fewest worlds the profile's tasks per world can
+  hold the pairs in, and the worlds the plan affords and the profile runs,
+  under the family unit also its families, when computed and exactly one
+  when withheld for too few, which one world holds only when the profile's
+  tasks per world can, endpoints ordered within `[-1, 1]`, the range of
+  `(b - c) / n`, never below zero without a `c` pair nor above it without a
+  `b` pair, and exactly one or minus one when every pair is a `b` or a `c`,
+  and whether it is computed or withheld; `IntervalNotDerived {field}`), while the
+  bounds themselves are bound to the pair table by the manifest's
+  `result_digest`; every paired marginal must be backed by samples on that
+  arm that ended the same way, a pass, a fail, or a censored attempt, since an
+  indeterminate attempt has no arm result (`aged_pass`, the aged fails
+  `n - aged_pass - aged_censored`, and `aged_censored` against the aged arm's
+  passes, fails, and censored attempts; `b`, a fresh arm that did not fail,
+  against fresh passes and censored attempts together, `c` against fresh
+  fails, `fresh_censored` against fresh censored attempts, and `n` against
+  the fresh arm's total; an arm with exactly one result per pair backs every
+  pair with it, so its directly counted marginals equal the ledger's;
+  `PairsExceedSamples {arm, terminal, pairs, samples}`); the run gates must
+  be the ones `CampaignGates::of` recomputes from the samples, the profile's
+  ceilings, the family, and the arm rates (`GatesNotDerived`); the baseline
+  contrast must carry `RECENCY_BASELINE_VERSION`, the report's surface, the
+  bound `recency_bound` resolves from the profile's `baseline_bounds`, a
+  non-zero `delivered_ids` of at most that bound (the window holds no more),
+  and non-zero `falsification_pairs_failed` and `positive_controls_passed`
+  that together fit within the analyzed pairs, since the roles are disjoint
+  pairs of a set the campaign ran (`BaselineDisagrees {field}`); a set the
+  compiler accepts has both control roles and a vacuous contrast is a
+  `baseline {vacuous}` suppression, never gated evidence; and the envelope's
+  peaks must be within its bounds (`EnvelopeNotHonoured`).
+- The parsed value must serialize back to the input (`Lossy`).
+
+`CampaignGates::of` computes the run-level gates beside the three paired ones:
+`indeterminate` and `censoring` as shares of the attempted samples, since
+only an attempted sample can end either way and a skipped, unsupported, or
+disabled sample must not dilute them; `redaction_refusals` as a share of every
+declared sample, since a refusal is a skip; each against the profile's
+ceiling; and `arm_miss_asymmetry` against the family's bound. Each is a
+`GateVerdict {statistic, bound, passed}` with `passed` when the statistic is
+at most the bound; a ledger with no attempted sample has no gates
+(`NoAttemptedSamples`), since every rate would be zero with nothing behind it.
 
 ## Coverage markers
 

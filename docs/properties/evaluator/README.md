@@ -1227,6 +1227,151 @@ Injection, arms, and claims (`crates/eval-core/tests/injection.rs`):
   meets it; a floorless criterion fails `validate`; the criterion moves the
   family digest.
 
+## Phase 3 executed checks: run profiles, accounting, envelope, report
+
+Campaign (`crates/eval-core/tests/campaign.rs`):
+
+- `a_profile_pins_every_number_and_runs_only_once_approved`: a full profile
+  validates and round-trips; its only default is surface 1's window of 100;
+  the three ceilings read as exact ratios; an unapproved profile refuses
+  `approved` by name and an approved one returns its approver and a digest
+  that differs from the unapproved one; an approval with an empty approver or
+  an upper-case run ID refuses; each scale names its budget variable or none.
+- `a_profile_refuses_every_absent_or_zero_setting_by_name`: every top-level
+  field and every nested budget, envelope, statistics, and liveness field is
+  required, the approval as an explicit `null` (an absent key is `Lossy`); an
+  unknown field refuses; a zero in each of the twenty settings a zero would
+  make unbounded (worlds, tasks, event limit, six budgets, seven envelope
+  dimensions, four liveness bounds) refuses naming its own path; another
+  schema, an empty or blank name, a malformed or over-one ceiling, an unset censoring or
+  over-one refusal ceiling, an empty bound map, surface 1 off its pin, a zero
+  bound on any surface, an unset margin, and a budget past the canonical
+  safe range each refuse by name; a declared bound on another surface is
+  accepted.
+- `each_budget_censors_with_its_own_reason_in_declared_order`: no usage
+  exhausts nothing; each budget at its limit censors with its own reason; one
+  short of every limit exhausts nothing; two reached at once report the
+  earlier declared one.
+- `every_sample_ends_in_exactly_one_closed_vocabulary_terminal`
+  (`mtr-skipped-cases-carry-closed-vocabulary-reason`): eight samples across
+  every terminal family produce exact rates and round-trip; all fourteen wire
+  forms are pinned both ways; an unknown or missing reason, a censored
+  terminal without a reason, an unknown kind, and an extra field on a struct
+  variant do not parse; an empty ledger has zero rates; a sample never
+  ordered, ordered twice, or without a record, a record under another key, a
+  blank sample id or task, a
+  lineage entry that is not a run ID or is upper-case, and a repeated lineage
+  entry each refuse from `validate` and `rates`; a lineage of one run ID
+  validates; `attempted` counts the four attempted families.
+- `an_envelope_skip_must_name_a_breach`: a sample skipped `envelope_exceeded`
+  with a reading at or under its bound refuses from `validate` and `rates`
+  (`EnvelopeNotExceeded`); one past the bound validates; `is_breach` is false
+  at the bound.
+- `the_envelope_records_the_peak_that_crossed_it_and_refuses_from_that_reading`
+  (`xc-campaign-resource-envelope-declared-and-enforced`, the in-memory
+  primitive): peaks never fall; the reading that crosses a bound is refused
+  and stays on record, and a later reading within the bound, of that resource
+  or another, is refused with that peak; `check` names the earliest declared resource over its
+  bound; the resource names equal the envelope's fields; every one of the
+  seven accepts its bound and refuses one past it; the wire form is
+  `{resource, bound, observed}`.
+
+Report (`crates/eval-core/tests/report.rs`):
+
+- `a_report_carries_the_claim_boundary_verbatim_and_its_run_gates`
+  (`xc-claim-boundary-excludes-scheduler-determinism`): a report built from
+  `analyze` over 300 pairs and 606 samples under an approved profile carries
+  the four exclusions verbatim, the derived `generated_phase1` class, two
+  established claims, and `default-production` for surface 1; it round-trips;
+  the indeterminate gate reads one in 602 attempted and the censoring gate
+  sixteen, the refusal gate one in 606 declared, each against its ceiling, and
+  the arm asymmetry against the family's bound; a table whose every fresh
+  arm is censored analyzes with `b` at 33 and round-trips, since a censored
+  fresh arm backs `b`; a tighter ceiling fails the
+  indeterminate gate alone; a ledger nobody attempted has no gates; every
+  surface's reachability is pinned, the query route and packing as
+  `test-only`.
+- `run_gates_are_shares_of_attempted_samples_and_padding_does_not_move_them`:
+  twenty thousand disabled samples appended to the ledger leave the
+  indeterminate and censoring statistics at one and sixteen in 602 and move
+  only the refusal share.
+- `a_suppression_removes_the_gates_and_the_claims_and_keeps_the_accounting`:
+  each of the six suppressions, set to what the report's own family, arm
+  rates, or envelope derive (the underpowered table to what the family fixes),
+  maps to its stop condition or none, serializes
+  with empty claims and every sample, rate, and envelope reading intact, and
+  round-trips; a suppressed report claiming anything and an open one claiming
+  nothing refuse; a suppressed report still validates its family; gates
+  beside a suppression have no wire form.
+- `a_report_refuses_missing_blocks_forbidden_claims_and_what_it_did_not_derive`
+  (`mtr-generated-world-claims-phase1-only`): every block is required and an
+  extra one refuses; the five claim blocks are required; four excluded claims
+  have no wire form; an extra key on a terminal is caught on the way back
+  out; another schema, an upper-case run ID, a profile digest that is not the
+  carried profile's, an unapproved profile, a ceiling relaxed after approval,
+  a ceiling over one, a profile whose margins are not the family's, a
+  dropped, reworded, or reordered exclusion, a stored `transfer` over a
+  generated world or with no anchor set, rates that do not follow from the
+  samples, a dropped sample, an analysis read under another family, arm rates
+  that disagree with the analysis, 267 aged passes behind 266 aged-arm
+  passes, a gate marked passed over a failing rate, an edited gate statistic, and peaks
+  over bounds in an open report each refuse from `serialize` and
+  `parse_report`; a run stopped by its envelope publishes its peaks as the
+  suppression.
+- `a_report_refuses_what_its_own_evidence_refutes`: a paired gate statistic
+  or verdict edited beside its counts, an open report under a family whose
+  pilot blocks or whose arm rates are asymmetric over the bound, an envelope
+  suppression whose reading is no breach or that the peaks do not show, an
+  asymmetry or effective-N suppression the arm rates or pilot do not derive,
+  an underpowered-table suppression against a floor the family does not set,
+  whose effective N meets the floor or is negative, over more clusters than
+  the plan has pairs, or under a pilot that already blocks,
+  paired counts no table can produce, a tap-rejected suppression with peaks
+  over the bounds, a baseline contrast
+  on another surface, under another version, off the profile's bound,
+  vacuous, or without a positive control, a sample skipped for an envelope
+  bound the run did not hold or a reading the peaks never reached, an
+  envelope bound raised above the approved profile's, attempted samples all
+  on one arm, a pair backed by an indeterminate sample, an aged pass the
+  ledger records as a fail, an interval whose replicate or item count is not the family's
+  or the pairs', a stop-condition skip in an open report, a lineage naming
+  this run, a `profile_not_approved` skip under an approved profile, a sample
+  unsupported on another surface or on a default-production one, or disabled
+  for another scale or for `s0`,
+  a tap-rejected suppression over malformed arm rates, a baseline suppression
+  on a surface whose bound does not resolve, an interval withheld over no
+  clusters or over more than the plan has worlds, an analysis over fewer
+  pairs than the plan froze, a baseline suppression naming a blank task, an
+  underpowered-table suppression over a ledger that backs no table, over
+  more family clusters than affordable worlds, under ICCs that deflate
+  nothing, with an effective N its clusters do not deflate to, deflated below
+  what its recorded clusters allow, as if clusters split pairs, as if one
+  world spanned many families, or as if many families shared one world, over
+  fewer worlds than the tasks per world allow, over six families where forty
+  worlds of one task cannot hold the pairs, or on a surface whose bound
+  does not resolve,
+  an interval outside the statistic's range or over more clusters than the
+  approved profile's worlds, over six families where forty worlds of one task
+  cannot hold the pairs, with width where every pair is concordant or
+  every pair favours the fresh arm, below zero where no pair favours the aged
+  arm, or withheld for one world where the tasks per world need three
+  hundred, a
+  censored fresh arm the table does not count, a baseline that delivered more
+  ids than its window holds, whose
+  failed falsifications outnumber the table, or that was judged over more
+  control pairs than the table has, a packing-only unsupported
+  reason off the packing surface, an injection score with a blank case, with
+  an axis its scorer cannot produce, or with a write-back its boundary could
+  not have observed, two injection scores for
+  one case or one with no case, and an epoch past the canonical safe range
+  each refuse by name
+  from `serialize` and `parse_report`; a run its envelope stopped, with a
+  sample skipped under the crossing reading and that reading named as the
+  suppression, round-trips, as does a tap-rejected run with a sample skipped
+  under condition (a), while a skip under (b) beside it refuses; whether any
+  sample may be attempted after such a skip is the runner's ordering
+  contract, not tested here.
+
 ## Gaps recorded here
 
 - The OpenCode cassette is bound to the environment that recorded it: the
@@ -1277,8 +1422,12 @@ Injection, arms, and claims (`crates/eval-core/tests/injection.rs`):
   written yet.
 - `HistoryPolicy` descriptors select the production orchestrators
   `MessageCleanup::run_slice` and `run_history_summarizer_firing` by path and
-  symbol; no runner executes either arm yet, and the Suite B report that would carry a derived claim class and
-  refuse a stored one does not exist yet.
+  symbol; no runner executes either arm yet.
+- The Suite B report, run profile, sample ledger, and envelope are the
+  sans-I/O contract; no runner produces a report, holds an envelope from
+  launch, or publishes write-then-rename into disjoint roots yet, so the
+  envelope property is executed for the primitive and the serializer, not for
+  a live campaign.
 
 - Every ingestion entry point lacks a production caller. No world is labelled
   "validated real ingestion" until one exists; every manifest carries

@@ -508,29 +508,63 @@ fn attainable_effective_n(
     families: u32,
     pilot: &IccPilot,
 ) -> Result<Ratio, StatisticsError> {
-    let (pairs, worlds, families) = (i128::from(pairs), i128::from(worlds), i128::from(families));
-    let n = Ratio::try_new(pairs, 1)?;
-    // `count` clusters over `pairs`: `more` of `each + 1`, the rest of `each`.
-    let balanced_squares = |count: i128| {
-        let (each, more) = (pairs / count, pairs % count);
-        more * (each + 1).pow(2) + (count - more) * each.pow(2)
-    };
-    let at_family = deflate(
-        n,
-        Ratio::try_new(balanced_squares(families), pairs)?,
-        pilot.icc_family,
-    )?;
+    let n = Ratio::try_new(i128::from(pairs), 1)?;
+    let at_family = deflate(n, balanced_mean_cluster(pairs, families)?, pilot.icc_family)?;
     let at_world = deflate(
         n,
-        Ratio::try_new(balanced_squares(worlds), pairs)?,
+        balanced_mean_cluster(pairs, worlds)?,
         pilot.icc_world_seed,
     )?;
     Ok(at_family.min(at_world))
 }
 
+/// The size-weighted mean cluster `sum(m_i^2) / n` of `count` clusters over
+/// `pairs` as evenly as whole pairs allow: `pairs % count` of them one larger
+/// than the rest. No partition into `count` clusters has a smaller mean.
+pub(crate) fn balanced_mean_cluster(pairs: u32, count: u32) -> Result<Ratio, StatisticsError> {
+    let (pairs, count) = (i128::from(pairs), i128::from(count));
+    let (each, more) = (pairs / count, pairs % count);
+    Ratio::try_new(
+        more * (each + 1).pow(2) + (count - more) * each.pow(2),
+        pairs,
+    )
+}
+
+/// The size-weighted mean cluster of `count` clusters over `pairs` as unevenly
+/// as clusters of at most `cap` pairs can be: as many clusters as possible
+/// filled to `cap`, one holding what is left over, the rest singletons. No
+/// partition into `count` clusters of at most `cap` has a larger mean; `None`
+/// when `count` clusters of at most `cap` cannot hold `pairs`.
+pub(crate) fn lopsided_mean_cluster(
+    pairs: u32,
+    count: u32,
+    cap: u32,
+) -> Result<Option<Ratio>, StatisticsError> {
+    let (pairs, count, cap) = (i128::from(pairs), i128::from(count), i128::from(cap));
+    if count < 1 || cap < 1 || pairs < count || pairs > count * cap {
+        return Ok(None);
+    }
+    // Every cluster starts as a singleton; the `extra` pairs fill clusters to
+    // `cap` one at a time, so `full` clusters take `cap - 1` extra each and one
+    // more takes the remainder.
+    let extra = pairs - count;
+    let (full, remainder) = if cap == 1 {
+        (0, 0)
+    } else {
+        (extra / (cap - 1), extra % (cap - 1))
+    };
+    let partial = i128::from(remainder > 0);
+    let squares = full * cap.pow(2) + partial * (1 + remainder).pow(2) + (count - full - partial);
+    Ok(Some(Ratio::try_new(squares, pairs)?))
+}
+
 /// `items` deflated by the design effect `1 + (m - 1) ICC` of clusters of mean
 /// size `m`; the effect is never below one, so deflation only ever shrinks N.
-fn deflate(items: Ratio, mean_cluster: Ratio, icc: Ratio) -> Result<Ratio, StatisticsError> {
+pub(crate) fn deflate(
+    items: Ratio,
+    mean_cluster: Ratio,
+    icc: Ratio,
+) -> Result<Ratio, StatisticsError> {
     let design_effect = Ratio::ONE
         .checked_add(
             mean_cluster
