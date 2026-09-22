@@ -426,6 +426,54 @@ fn a_report_carries_the_claim_boundary_verbatim_and_its_run_gates() {
         };
         assert_eq!(reachability_of(surface), expected, "{surface:?}");
     }
+    // A censored fresh arm beside an aged non-pass is counted in `b`, so the
+    // fresh arm's censored samples back `b` beside its passes: every fresh
+    // arm censored still analyzes and still serializes.
+    let mut censored_fresh = pairs();
+    for pair in &mut censored_fresh {
+        pair.fresh = ArmResult::Censored(CensorReason::Timeout);
+    }
+    let family = family();
+    let frozen = FrozenFamily::freeze(&family).unwrap();
+    let Analysis::Report(analysis) = analyze(
+        &recorded(&frozen, &censored_fresh),
+        &family,
+        &censored_fresh,
+    )
+    .unwrap() else {
+        panic!("report")
+    };
+    assert_eq!(
+        (analysis.counts.b, analysis.counts.fresh_censored),
+        (33, 300)
+    );
+    let mut censored = open_report();
+    for record in censored.samples.samples.values_mut() {
+        if record.arm == ArmKind::Fresh && record.terminal == Terminal::Pass {
+            record.terminal = Terminal::Censored {
+                reason: CensorReason::Timeout,
+            };
+        }
+    }
+    censored.rates = censored.samples.rates().unwrap();
+    let run_gates = CampaignGates::of(
+        &censored.samples,
+        &censored.profile.ceilings().unwrap(),
+        &censored.family,
+        &censored.arm_rates,
+    )
+    .unwrap();
+    censored.outcome = ReportOutcome::Open {
+        gated: Box::new(GatedBlocks {
+            analysis: *analysis,
+            baseline: baseline(),
+            gates: run_gates,
+        }),
+    };
+    assert_eq!(
+        parse_report(&censored.serialize().unwrap()).unwrap(),
+        censored
+    );
 }
 
 #[test]
@@ -1040,7 +1088,7 @@ fn a_report_refuses_what_its_own_evidence_refutes() {
             }),
             ReportError::PairsExceedSamples {
                 arm: ArmKind::Fresh,
-                terminal: "pass",
+                terminal: "pass_or_censored",
                 pairs: 33,
                 samples: 0,
             },

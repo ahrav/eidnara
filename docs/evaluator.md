@@ -1529,9 +1529,10 @@ carries rather than read from what it says:
   arm that ended the same way, a pass, a fail, or a censored attempt, since an
   indeterminate attempt has no arm result (`aged_pass`, the aged fails
   `n - aged_pass - aged_censored`, and `aged_censored` against the aged arm's
-  passes, fails, and censored attempts; `b` against fresh passes, `c` against
-  fresh fails, `fresh_censored` against fresh censored attempts, and `n`
-  against the fresh arm's total; `PairsExceedSamples {arm, terminal, pairs,
+  passes, fails, and censored attempts; `b`, a fresh arm that did not fail,
+  against fresh passes and censored attempts together, `c` against fresh
+  fails, `fresh_censored` against fresh censored attempts, and `n` against
+  the fresh arm's total; `PairsExceedSamples {arm, terminal, pairs,
   samples}`); the run gates must
   be the ones `CampaignGates::of` recomputes from the samples, the profile's
   ceilings, the family, and the arm rates (`GatesNotDerived`); the baseline

@@ -591,9 +591,10 @@ impl SuiteBReport {
     /// way: a pass, a fail, or a censored attempt (an indeterminate attempt has
     /// no arm result and backs no pair). The aged marginals are all counted, so
     /// each is bounded by its terminal; of the fresh arm the table counts only
-    /// `b` (a pass), `c` (a fail), and its censored arms, so the rest is
-    /// bounded by the arm's total. Marginals the counts cannot express are
-    /// left to `Gates::of`.
+    /// `b` (a fresh arm that did not fail, so a pass or a censored attempt),
+    /// `c` (a fail), and its censored arms, so the rest is bounded by the
+    /// arm's total. Marginals the counts cannot express are left to
+    /// `Gates::of`.
     fn check_pairs_backed(&self, analysis: &PairedReport) -> Result<(), ReportError> {
         let tally = |arm: ArmKind| {
             let mut ended = [0u64; 3];
@@ -623,7 +624,12 @@ impl SuiteBReport {
                 counts.aged_censored,
                 aged_censored,
             ),
-            (ArmKind::Fresh, "pass", counts.b, fresh_pass),
+            (
+                ArmKind::Fresh,
+                "pass_or_censored",
+                counts.b,
+                fresh_pass + fresh_censored,
+            ),
             (ArmKind::Fresh, "fail", counts.c, fresh_fail),
             (
                 ArmKind::Fresh,

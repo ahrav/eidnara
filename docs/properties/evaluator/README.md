@@ -1281,7 +1281,9 @@ Report (`crates/eval-core/tests/report.rs`):
   established claims, and `default-production` for surface 1; it round-trips;
   the indeterminate gate reads one in 602 attempted and the censoring gate
   sixteen, the refusal gate one in 606 declared, each against its ceiling, and
-  the arm asymmetry against the family's bound; a tighter ceiling fails the
+  the arm asymmetry against the family's bound; a table whose every fresh
+  arm is censored analyzes with `b` at 33 and round-trips, since a censored
+  fresh arm backs `b`; a tighter ceiling fails the
   indeterminate gate alone; a ledger nobody attempted has no gates; every
   surface's reachability is pinned, the query route and packing as
   `test-only`.
