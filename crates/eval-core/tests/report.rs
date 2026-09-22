@@ -1681,6 +1681,43 @@ fn a_report_refuses_what_its_own_evidence_refutes() {
             ReportError::IntervalNotDerived { field: "bounds" },
         ),
         (
+            "an interval with width where every pair is concordant",
+            Box::new(|r| {
+                // No discordant pair: every replicate's quality loss is zero.
+                let rates = r.family.profile.rates().unwrap();
+                let g = gated(r);
+                g.analysis.counts.b = 0;
+                g.analysis.gates = eval_core::Gates::of(&g.analysis.counts, &rates).unwrap();
+                let IntervalOutcome::Computed(interval) = &mut g.analysis.interval else {
+                    panic!("computed");
+                };
+                interval.lower = ratio(-1, 10);
+                interval.upper = ratio(1, 10);
+            }),
+            ReportError::IntervalNotDerived { field: "bounds" },
+        ),
+        (
+            "a censored fresh arm the table does not count",
+            Box::new(|r| {
+                // With exactly one fresh result per pair, every fresh result
+                // is a pair's, so the table's censored fresh arms are the
+                // ledger's exactly.
+                r.samples.samples.get_mut("s001").unwrap().terminal = Terminal::Censored {
+                    reason: CensorReason::Timeout,
+                };
+                r.rates = r.samples.rates().unwrap();
+                let ceilings = r.profile.ceilings().unwrap();
+                gated(r).gates =
+                    CampaignGates::of(&r.samples, &ceilings, &r.family, &r.arm_rates).unwrap();
+            }),
+            ReportError::PairsExceedSamples {
+                arm: ArmKind::Fresh,
+                terminal: "censored",
+                pairs: 0,
+                samples: 1,
+            },
+        ),
+        (
             "an interval withheld over no clusters",
             Box::new(|r| {
                 gated(r).analysis.interval = IntervalOutcome::Withheld {
@@ -1731,7 +1768,7 @@ fn a_report_refuses_what_its_own_evidence_refutes() {
         let value = serde_json::to_value(&mutated).unwrap();
         assert_eq!(parse_report(&value), Err(expected), "{name}");
     }
-    // A run its envelope stopped skips the rest under the reading that
+    // A run its envelope stopped records a skip under the reading that
     // crossed the bound, and names that reading as its suppression.
     let mut stopped = suppressed_report(Suppression::Envelope {
         exceeded: EnvelopeExceeded {
@@ -1752,7 +1789,7 @@ fn a_report_refuses_what_its_own_evidence_refutes() {
         parse_report(&stopped.serialize().unwrap()).unwrap(),
         stopped
     );
-    // A run a stop condition halted skips the rest under that condition, and
+    // A run a stop condition halted records skips under that condition, and
     // only that condition.
     let mut halted = suppressed_report(Suppression::TapRejected);
     halted.samples.samples.get_mut("s000").unwrap().terminal =

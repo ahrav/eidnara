@@ -712,13 +712,16 @@ impl SuiteBReport {
                     return disagrees("n_clusters");
                 }
                 // Every replicate is a `quality_loss`, `(b - c) / n`, in
-                // `[-1, 1]`.
+                // `[-1, 1]`; with no discordant pair every replicate is zero.
                 let minus_one = Ratio::ZERO
                     .checked_sub(Ratio::ONE)
                     .map_err(ReportError::Statistics)?;
+                let concordant = analysis.counts.b == 0 && analysis.counts.c == 0;
                 if interval.lower > interval.upper
                     || interval.lower < minus_one
                     || interval.upper > Ratio::ONE
+                    || (concordant
+                        && (interval.lower, interval.upper) != (Ratio::ZERO, Ratio::ZERO))
                 {
                     return disagrees("bounds");
                 }
@@ -772,36 +775,50 @@ impl SuiteBReport {
             .n
             .saturating_sub(counts.aged_pass)
             .saturating_sub(counts.aged_censored);
-        for (arm, terminal, pairs, samples) in [
-            (ArmKind::Aged, "pass", counts.aged_pass, aged_pass),
-            (ArmKind::Aged, "fail", aged_failed, aged_fail),
+        // An arm with exactly one result per pair backs every pair with it, so
+        // the marginals the table counts directly are those results exactly.
+        let aged_exact = aged_pass + aged_fail + aged_censored == counts.n;
+        let fresh_exact = fresh_pass + fresh_fail + fresh_censored == counts.n;
+        for (arm, terminal, pairs, samples, exact) in [
+            (
+                ArmKind::Aged,
+                "pass",
+                counts.aged_pass,
+                aged_pass,
+                aged_exact,
+            ),
+            (ArmKind::Aged, "fail", aged_failed, aged_fail, aged_exact),
             (
                 ArmKind::Aged,
                 "censored",
                 counts.aged_censored,
                 aged_censored,
+                aged_exact,
             ),
             (
                 ArmKind::Fresh,
                 "pass_or_censored",
                 counts.b,
                 fresh_pass + fresh_censored,
+                false,
             ),
-            (ArmKind::Fresh, "fail", counts.c, fresh_fail),
+            (ArmKind::Fresh, "fail", counts.c, fresh_fail, false),
             (
                 ArmKind::Fresh,
                 "censored",
                 counts.fresh_censored,
                 fresh_censored,
+                fresh_exact,
             ),
             (
                 ArmKind::Fresh,
                 "any",
                 counts.n,
                 fresh_pass + fresh_fail + fresh_censored,
+                false,
             ),
         ] {
-            if pairs > samples {
+            if pairs > samples || (exact && pairs != samples) {
                 return Err(ReportError::PairsExceedSamples {
                     arm,
                     terminal,
