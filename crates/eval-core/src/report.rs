@@ -6,7 +6,7 @@
 use std::collections::BTreeMap;
 use std::num::NonZeroU32;
 
-use context_core::canonical_json::is_lower_hex;
+use context_core::canonical_json::{ContractError, canonical_json_encode, is_lower_hex};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -19,11 +19,12 @@ use crate::claim::{AnchorSet, ClaimDerivation, WorldProvenance};
 use crate::injection::InjectionScore;
 use crate::manifest::{ArmRates, ClaimBoundary};
 use crate::pairs::{
-    BaselineContrast, BaselineFailure, RECENCY_BASELINE_VERSION, StopCondition, recency_bound,
+    ArmKind, BaselineContrast, BaselineFailure, RECENCY_BASELINE_VERSION, StopCondition,
+    recency_bound,
 };
 use crate::statistics::{
-    AnalysisFamily, BlockedReason, GateVerdict, Gates, PairedReport, Ratio, StatisticsError,
-    arm_miss_asymmetry,
+    AnalysisFamily, BlockedReason, GateVerdict, Gates, IntervalOutcome, IntervalWithheld,
+    PairedReport, Ratio, StatisticsError, arm_miss_asymmetry,
 };
 
 pub const SUITE_B_REPORT_SCHEMA: &str = "eval-suite-b-report/v1";
@@ -221,12 +222,29 @@ pub enum ReportError {
     /// and arm rates compute.
     GatesNotDerived,
     NoAttemptedSamples,
-    /// More pairs in the analysis than the attempted samples can back at one
-    /// sample per arm.
+    /// More pairs in the analysis than one arm's attempted samples can back
+    /// at one sample per pair.
     PairsExceedSamples {
         pairs: u64,
+        arm: ArmKind,
         attempted: u64,
     },
+    /// An interval field the family and the counts do not derive.
+    IntervalNotDerived {
+        field: &'static str,
+    },
+    /// The envelope's bounds are not the approved profile's.
+    EnvelopeDisagreesWithProfile,
+    /// A sample skipped under a stop condition the outcome does not name.
+    StopConditionDisagrees {
+        sample: String,
+    },
+    /// A sample whose lineage names this run as an earlier attempt.
+    LineageNamesThisRun {
+        sample: String,
+    },
+    /// An integer outside the canonical safe range.
+    NotCanonical(ContractError),
     ArmRatesDisagree,
     RatesDisagree,
     /// A baseline contrast field this surface and profile do not produce, or
@@ -276,6 +294,9 @@ impl SuiteBReport {
         self.family.validate().map_err(ReportError::Statistics)?;
         if self.profile.statistics != self.family.profile {
             return Err(ReportError::ProfileDisagreesWithFamily);
+        }
+        if self.envelope.bounds != self.profile.envelope {
+            return Err(ReportError::EnvelopeDisagreesWithProfile);
         }
         Ok(())
     }
@@ -352,19 +373,35 @@ impl SuiteBReport {
         Ok(())
     }
 
-    /// A sample skipped for an envelope reading names this run's bound for
-    /// that resource and a reading the peaks reached.
-    fn check_sample_envelopes(&self) -> Result<(), ReportError> {
+    /// What each sample says about the run it sits in: its lineage names
+    /// earlier runs, never this one; a stop-condition skip names the condition
+    /// the outcome was suppressed under, so an open report carries none; and
+    /// an envelope skip names this run's bound for that resource and a
+    /// reading the peaks reached.
+    fn check_samples(&self) -> Result<(), ReportError> {
+        let stopped = match &self.outcome {
+            ReportOutcome::Open { .. } => None,
+            ReportOutcome::Suppressed { by } => by.condition(),
+        };
         for (key, record) in &self.samples.samples {
-            let Terminal::Skipped(SkipReason::EnvelopeExceeded(exceeded)) = record.terminal else {
-                continue;
-            };
-            let bound = exceeded.resource.of(&self.envelope.bounds);
-            let peak = exceeded.resource.of(&self.envelope.peaks);
-            if exceeded.bound != bound || exceeded.observed > peak {
-                return Err(ReportError::SampleEnvelopeDisagrees {
-                    sample: key.clone(),
-                });
+            let sample = || key.clone();
+            if record.lineage.contains(&self.eval_run_id) {
+                return Err(ReportError::LineageNamesThisRun { sample: sample() });
+            }
+            match record.terminal {
+                Terminal::Skipped(SkipReason::StopCondition { condition })
+                    if Some(condition) != stopped =>
+                {
+                    return Err(ReportError::StopConditionDisagrees { sample: sample() });
+                }
+                Terminal::Skipped(SkipReason::EnvelopeExceeded(exceeded)) => {
+                    let bound = exceeded.resource.of(&self.envelope.bounds);
+                    let peak = exceeded.resource.of(&self.envelope.peaks);
+                    if exceeded.bound != bound || exceeded.observed > peak {
+                        return Err(ReportError::SampleEnvelopeDisagrees { sample: sample() });
+                    }
+                }
+                _ => {}
             }
         }
         Ok(())
@@ -381,6 +418,68 @@ impl SuiteBReport {
             && self.derived_block()?.as_ref() != Some(reason)
         {
             return Err(ReportError::SuppressionNotDerived);
+        }
+        Ok(())
+    }
+
+    /// What `cluster_bootstrap_interval` derives from the family and the pair
+    /// count: the unit, method, replicate count, item count, and whether an
+    /// interval is emitted at all. The bounds themselves need the pair table,
+    /// which the manifest's `result_digest` binds.
+    fn check_interval(&self, analysis: &PairedReport) -> Result<(), ReportError> {
+        let disagrees = |field| Err(ReportError::IntervalNotDerived { field });
+        let Ok(n_items) = u32::try_from(analysis.counts.n) else {
+            return disagrees("n_items");
+        };
+        let threshold = self.family.item_count_threshold;
+        match &analysis.interval {
+            IntervalOutcome::Computed(interval) => {
+                if interval.n_items != n_items {
+                    return disagrees("n_items");
+                }
+                if n_items < threshold {
+                    return disagrees("outcome");
+                }
+                if interval.unit != self.family.icc_pilot.clustering_unit {
+                    return disagrees("unit");
+                }
+                if interval.method != self.family.interval_method {
+                    return disagrees("method");
+                }
+                if interval.replicates != self.family.bootstrap_replicates {
+                    return disagrees("replicates");
+                }
+                if interval.n_clusters < 2 || interval.n_clusters > n_items {
+                    return disagrees("n_clusters");
+                }
+                if interval.lower > interval.upper {
+                    return disagrees("bounds");
+                }
+            }
+            IntervalOutcome::Withheld {
+                reason:
+                    IntervalWithheld::ItemCountBelowThreshold {
+                        n_items: withheld,
+                        threshold: at,
+                    },
+            } => {
+                if *withheld != n_items {
+                    return disagrees("n_items");
+                }
+                if *at != threshold {
+                    return disagrees("threshold");
+                }
+                if n_items >= threshold {
+                    return disagrees("outcome");
+                }
+            }
+            IntervalOutcome::Withheld {
+                reason: IntervalWithheld::FewerThanTwoClusters { n_clusters },
+            } => {
+                if *n_clusters >= 2 || n_items < threshold {
+                    return disagrees("outcome");
+                }
+            }
         }
         Ok(())
     }
@@ -406,10 +505,24 @@ impl SuiteBReport {
         if paired != gated.analysis.gates {
             return Err(ReportError::PairedGatesNotDerived);
         }
-        let attempted = u64::try_from(self.samples.attempted()).expect("bounded");
+        self.check_interval(&gated.analysis)?;
+        // A pair consumes one attempted sample on each paired arm.
         let pairs = gated.analysis.counts.n;
-        if pairs.checked_mul(2).is_none_or(|arms| arms > attempted) {
-            return Err(ReportError::PairsExceedSamples { pairs, attempted });
+        for arm in [ArmKind::Aged, ArmKind::Fresh] {
+            let attempted = self
+                .samples
+                .samples
+                .values()
+                .filter(|record| record.arm == arm && record.terminal.attempted())
+                .count();
+            let attempted = u64::try_from(attempted).expect("bounded");
+            if pairs > attempted {
+                return Err(ReportError::PairsExceedSamples {
+                    pairs,
+                    arm,
+                    attempted,
+                });
+            }
         }
         let ceilings = self.profile.ceilings().map_err(ReportError::Profile)?;
         let gates = CampaignGates::of(&self.samples, &ceilings, &self.family, &self.arm_rates)?;
@@ -427,7 +540,7 @@ impl SuiteBReport {
         if rates != self.rates {
             return Err(ReportError::RatesDisagree);
         }
-        self.check_sample_envelopes()?;
+        self.check_samples()?;
         match &self.outcome {
             ReportOutcome::Open { gated } => self.check_gated(gated),
             ReportOutcome::Suppressed { by } => self.check_suppression(by),
@@ -435,6 +548,9 @@ impl SuiteBReport {
     }
 
     pub fn validate(&self) -> Result<(), ReportError> {
+        // Digestible on both runtimes: no integer may leave the canonical safe range.
+        let value = serde_json::to_value(self).map_err(|e| ReportError::Shape(e.to_string()))?;
+        canonical_json_encode(&value).map_err(ReportError::NotCanonical)?;
         self.check_identity()?;
         self.check_claims()?;
         self.check_accounting()

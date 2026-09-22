@@ -4,6 +4,8 @@
 
 use std::collections::BTreeMap;
 
+use context_core::canonical_json::ContractError;
+use eval_core::IntervalOutcome;
 use eval_core::{
     ANALYSIS_FAMILY_SCHEMA, Analysis, AnalysisFamily, Approval, ArmKind, ArmRates, ArmResult,
     BaselineContrast, BaselineFailure, BlockedReason, CLAIM_BOUNDARY_SCHEMA, CampaignGates,
@@ -647,7 +649,8 @@ fn a_report_refuses_missing_blocks_forbidden_claims_and_what_it_did_not_derive()
         (
             "more pairs than the attempted samples can back at one per arm",
             Box::new(|r| {
-                // 320 pairs need 640 attempted samples; 639 is one short.
+                // 320 pairs need 320 attempted samples per arm; s000 and
+                // s002 are two of the aged arm's 321.
                 for record in r.samples.samples.values_mut().take(3) {
                     record.terminal = Terminal::Skipped(SkipReason::CassetteMiss);
                 }
@@ -658,7 +661,8 @@ fn a_report_refuses_missing_blocks_forbidden_claims_and_what_it_did_not_derive()
             }),
             ReportError::PairsExceedSamples {
                 pairs: 320,
-                attempted: 639,
+                arm: ArmKind::Aged,
+                attempted: 319,
             },
         ),
         (
@@ -897,6 +901,76 @@ fn a_report_refuses_what_its_own_evidence_refutes() {
                 sample: "s000".into(),
             },
         ),
+        (
+            "an envelope bound raised above the approved profile's",
+            Box::new(|r| r.envelope.bounds.processes = 7),
+            ReportError::EnvelopeDisagreesWithProfile,
+        ),
+        (
+            "attempted samples all on one arm",
+            Box::new(|r| {
+                for record in r.samples.samples.values_mut() {
+                    record.arm = ArmKind::Aged;
+                }
+            }),
+            ReportError::PairsExceedSamples {
+                pairs: 320,
+                arm: ArmKind::Fresh,
+                attempted: 0,
+            },
+        ),
+        (
+            "an interval whose replicate count is not the family's",
+            Box::new(|r| {
+                let IntervalOutcome::Computed(interval) = &mut gated(r).analysis.interval else {
+                    panic!("computed");
+                };
+                interval.replicates += 1;
+            }),
+            ReportError::IntervalNotDerived {
+                field: "replicates",
+            },
+        ),
+        (
+            "an interval over more items than the pairs",
+            Box::new(|r| {
+                let IntervalOutcome::Computed(interval) = &mut gated(r).analysis.interval else {
+                    panic!("computed");
+                };
+                interval.n_items += 1;
+            }),
+            ReportError::IntervalNotDerived { field: "n_items" },
+        ),
+        (
+            "an open report whose ledger records a stop condition",
+            Box::new(|r| {
+                r.samples.samples.get_mut("s640").unwrap().terminal =
+                    Terminal::Skipped(SkipReason::StopCondition {
+                        condition: StopCondition::A,
+                    });
+                r.rates = r.samples.rates().unwrap();
+            }),
+            ReportError::StopConditionDisagrees {
+                sample: "s640".into(),
+            },
+        ),
+        (
+            "a sample whose lineage names this run",
+            Box::new(|r| {
+                let id = r.eval_run_id.clone();
+                r.samples.samples.get_mut("s000").unwrap().lineage = vec![id];
+            }),
+            ReportError::LineageNamesThisRun {
+                sample: "s000".into(),
+            },
+        ),
+        (
+            "an epoch past the canonical safe range",
+            Box::new(|r| r.samples.epoch = 9_007_199_254_740_993),
+            ReportError::NotCanonical(ContractError::NotCanonical(
+                "number 9007199254740993 is not a safe integer".into(),
+            )),
+        ),
     ];
     for (name, mutate, expected) in refuted {
         let mut mutated = open_report();
@@ -925,6 +999,25 @@ fn a_report_refuses_what_its_own_evidence_refutes() {
     assert_eq!(
         parse_report(&stopped.serialize().unwrap()).unwrap(),
         stopped
+    );
+    // A run a stop condition halted skips the rest under that condition, and
+    // only that condition.
+    let mut halted = suppressed_report(Suppression::TapRejected);
+    halted.samples.samples.get_mut("s000").unwrap().terminal =
+        Terminal::Skipped(SkipReason::StopCondition {
+            condition: StopCondition::A,
+        });
+    halted.rates = halted.samples.rates().unwrap();
+    assert_eq!(parse_report(&halted.serialize().unwrap()).unwrap(), halted);
+    halted.samples.samples.get_mut("s000").unwrap().terminal =
+        Terminal::Skipped(SkipReason::StopCondition {
+            condition: StopCondition::B,
+        });
+    assert_eq!(
+        halted.serialize(),
+        Err(ReportError::StopConditionDisagrees {
+            sample: "s000".into(),
+        })
     );
 }
 

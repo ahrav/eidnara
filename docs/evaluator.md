@@ -1253,7 +1253,10 @@ carries rather than read from what it says:
   validates and is approved (`Profile`), a `profile_digest` equal to
   `profile.digest()` (`ProfileDigestMismatch`), a family that validates, and a
   profile whose `statistics` equal the family's `profile`
-  (`ProfileDisagreesWithFamily`), whatever the outcome.
+  (`ProfileDisagreesWithFamily`), and an envelope whose bounds are the
+  profile's `envelope` (`EnvelopeDisagreesWithProfile`), whatever the outcome.
+  Every integer must sit in the canonical safe range (`NotCanonical`), so a
+  Bun consumer reads the same value.
 - Claims: `claims.boundary` must equal `ClaimBoundary::pinned()` as a
   structure, order included (`ClaimBoundaryMismatch`); `established` is a
   closed vocabulary (`required_evidence_present_at_every_live_stage`,
@@ -1279,14 +1282,22 @@ carries rather than read from what it says:
   shows (`SuppressionNotDerived`); under any other suppression the peaks must
   be within the bounds (`EnvelopeNotHonoured`).
 - Accounting: `rates` must follow from `samples` (`RatesDisagree`, `Samples`);
-  a sample skipped `envelope_exceeded` must name this run's bound for that
-  resource and a reading the peaks reached (`SampleEnvelopeDisagrees`). In an
-  open report the paired analysis must carry the family's digest
-  (`FamilyDigestMismatch`) and the same `arm_rates` (`ArmRatesDisagree`); its
-  `gates` must be the ones `Gates::of` recomputes from its `counts` and the
-  family's margins (`PairedGatesNotDerived`); its pair count may not exceed
-  what the attempted samples back at one sample per arm
-  (`PairsExceedSamples`, refused when `2 * n > attempted`); the run gates must
+  no sample's lineage names this run (`LineageNamesThisRun`); a sample skipped
+  `stop_condition` must name the condition the outcome was suppressed under,
+  so an open report carries none (`StopConditionDisagrees`); a sample skipped
+  `envelope_exceeded` must name this run's bound for that resource and a
+  reading the peaks reached (`SampleEnvelopeDisagrees`). In an open report the
+  paired analysis must carry the family's digest (`FamilyDigestMismatch`) and
+  the same `arm_rates` (`ArmRatesDisagree`); its `gates` must be the ones
+  `Gates::of` recomputes from its `counts` and the family's margins
+  (`PairedGatesNotDerived`); its `interval` must be the shape
+  `cluster_bootstrap_interval` derives from the family and the pair count
+  (the unit, method, replicate count, item count, at least two clusters, and
+  whether it is computed or withheld; `IntervalNotDerived {field}`), while the
+  bounds themselves are bound to the pair table by the manifest's
+  `result_digest`; its pair count may not exceed either paired arm's attempted
+  samples (`PairsExceedSamples {pairs, arm, attempted}`, refused when
+  `n > attempted` on the aged or the fresh arm); the run gates must
   be the ones `CampaignGates::of` recomputes from the samples, the profile's
   ceilings, the family, and the arm rates (`GatesNotDerived`); the baseline
   contrast must carry `RECENCY_BASELINE_VERSION`, the report's surface, the

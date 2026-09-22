@@ -1097,8 +1097,8 @@ Report (`crates/eval-core/tests/report.rs`):
   dropped, reworded, or reordered exclusion, a stored `transfer` over a
   generated world or with no anchor set, rates that do not follow from the
   samples, a dropped sample, an analysis read under another family, arm rates
-  that disagree with the analysis, 320 pairs behind 639 attempted samples, a
-  gate marked passed over a failing rate, an edited gate statistic, and peaks
+  that disagree with the analysis, 320 pairs behind 319 attempted aged-arm
+  samples, a gate marked passed over a failing rate, an edited gate statistic, and peaks
   over bounds in an open report each refuse from `serialize` and
   `parse_report`; a run stopped by its envelope publishes its peaks as the
   suppression.
@@ -1109,11 +1109,16 @@ Report (`crates/eval-core/tests/report.rs`):
   asymmetry or effective-N suppression the arm rates or pilot do not derive,
   a tap-rejected suppression with peaks over the bounds, a baseline contrast
   on another surface, under another version, off the profile's bound,
-  vacuous, or without a positive control, and a sample skipped for an
-  envelope bound the run did not hold or a reading the peaks never reached
-  each refuse by name from `serialize` and `parse_report`; a run its envelope
-  stopped, skipping the rest under the crossing reading and naming it as the
-  suppression, round-trips.
+  vacuous, or without a positive control, a sample skipped for an envelope
+  bound the run did not hold or a reading the peaks never reached, an
+  envelope bound raised above the approved profile's, attempted samples all
+  on one arm, an interval whose replicate or item count is not the family's
+  or the pairs', a stop-condition skip in an open report, a lineage naming
+  this run, and an epoch past the canonical safe range each refuse by name
+  from `serialize` and `parse_report`; a run its envelope stopped, skipping
+  the rest under the crossing reading and naming it as the suppression,
+  round-trips, as does a tap-rejected run skipping the rest under condition
+  (a), while a skip under (b) beside it refuses.
 
 ## Gaps recorded here
 

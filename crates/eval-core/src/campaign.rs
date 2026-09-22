@@ -363,6 +363,17 @@ pub enum Terminal {
     Disabled(DisabledReason),
 }
 
+impl Terminal {
+    /// An attempted sample: a pass, a fail, a censored attempt, or an
+    /// indeterminate one. Skipped, unsupported, and disabled samples were not.
+    pub fn attempted(&self) -> bool {
+        matches!(
+            self,
+            Self::Pass | Self::Fail | Self::Censored { .. } | Self::Indeterminate
+        )
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SampleRecord {
@@ -470,18 +481,9 @@ impl SampleLedger {
         self.samples.values().filter(|s| pick(&s.terminal)).count()
     }
 
-    /// Samples that were attempted: a pass, a fail, a censored attempt, or an
-    /// indeterminate one. Skipped, unsupported, and disabled samples were not.
+    /// Samples that were attempted; see [`Terminal::attempted`].
     pub fn attempted(&self) -> usize {
-        self.count(|t| {
-            matches!(
-                t,
-                Terminal::Pass
-                    | Terminal::Fail
-                    | Terminal::Censored { .. }
-                    | Terminal::Indeterminate
-            )
-        })
+        self.count(Terminal::attempted)
     }
 
     pub fn rates(&self) -> Result<TerminalRates, SampleError> {
