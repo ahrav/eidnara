@@ -78,7 +78,7 @@ impl TransferCriterion {
         }
         if self.min_valid_tasks == 0
             || self.required_families.is_empty()
-            || self.required_families.contains("")
+            || self.required_families.iter().any(|f| f.trim().is_empty())
         {
             unmet.push(UnmetClause::CriterionHasNoFloor);
         }
@@ -99,7 +99,8 @@ pub enum UnmetClause {
     AnchorSetIsPilot,
     AnchorTaskNotValid,
     EmptyAnchorTaskId,
-    /// A task from no named family proves no family and is not a task.
+    /// A task from no named family (blank or whitespace) proves no family
+    /// and is not a task.
     EmptyAnchorTaskFamily,
     /// One ID listed twice is one task, whatever its verdicts.
     DuplicateAnchorTask {
@@ -152,7 +153,9 @@ pub fn derive_claim_class(
         valid
             .into_iter()
             .filter(|task| {
-                !task.id.is_empty() && !task.family.is_empty() && seen.insert(task.id.as_str())
+                !task.id.is_empty()
+                    && !task.family.trim().is_empty()
+                    && seen.insert(task.id.as_str())
             })
             .collect()
     };
@@ -168,7 +171,7 @@ pub fn derive_claim_class(
             if set.tasks.iter().any(|task| task.id.is_empty()) {
                 unmet.push(UnmetClause::EmptyAnchorTaskId);
             }
-            if set.tasks.iter().any(|task| task.family.is_empty()) {
+            if set.tasks.iter().any(|task| task.family.trim().is_empty()) {
                 unmet.push(UnmetClause::EmptyAnchorTaskFamily);
             }
             let mut ids = BTreeSet::new();

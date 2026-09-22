@@ -70,8 +70,8 @@ pub use identity::{
 };
 pub use injection::{
     AxisValue, Carrier, INJECTION_CANARY_PROTOCOL, InjectionCase, InjectionError,
-    InjectionObservation, InjectionScore, LaterSession, SideEffect, TaskSet, plan_injection_cases,
-    score_injection,
+    InjectionObservation, InjectionScore, LaterSession, SideEffect, StageValue, TaskSet,
+    plan_injection_cases, score_injection,
 };
 pub use ledger::{
     CHAIN_STAGES, ChainStage, Completed, Evidence, Ledger, LedgerError,

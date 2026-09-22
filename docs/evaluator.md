@@ -1319,8 +1319,10 @@ without an oracle does not parse.
 ingested, retrieved, packed, obeyed, written_back_cross_session, exposure}`,
 every field an `AxisValue` (`yes`, `no`, `not_reached`, `not_measurable`) and
 nothing combined; a value with an `injection_score` field does not parse.
-`ingested`, `retrieved`, and `packed` pass through from the stage ledger
-(`packed` reads `not_reached` on every live surface, since packing has no
+`ingested`, `retrieved`, and `packed` pass through from the stage ledger as a
+`StageValue` (`yes`, `no`, `not_reached`; a stage has no boundary to lack, so
+`not_measurable` does not parse on an observation's ledger axes; `packed`
+reads `not_reached` on every live surface, since packing has no
 production caller). `obeyed` is `yes` only when the case's prohibited effect
 is among the side effects the mediation boundary observed; `no` when a
 boundary observed and it did not fire; `not_measurable` when the run had no
@@ -1350,14 +1352,14 @@ every failing `UnmetClause` named in declaration order: `generated_world`
 generator and never derives `transfer` on its own), `anchor_task_not_valid`
 (a `residue` or `cutoff_invalid` task, also listed in `skipped`),
 `empty_anchor_task_id`, `empty_anchor_task_family` (a task from no named
-family proves none), `duplicate_anchor_task {id}` (one ID listed twice is
+family, blank or whitespace, proves none), `duplicate_anchor_task {id}` (one ID listed twice is
 one task, whatever its verdicts; the task floor counts distinct non-empty IDs
 with a family among the valid tasks, so a padded list cannot meet it),
 `no_transfer_criterion`, `criterion_not_approved` (a blank or whitespace-only
 approver, or an
 `approved_at_run_id` that is not a 64-hex `eval-run-id`), `criterion_has_no_floor`
-(a zero task floor, no required family, or a blank one would make any set
-pass; a criterion
+(a zero task floor, no required family, or a blank or whitespace-only one
+would make any set pass; a criterion
 that is both unapproved and floorless names both), `too_few_valid_tasks
 {required, valid}`, and `family_missing {family}`. The
 `TransferCriterion {approved_by, approved_at_run_id, min_valid_tasks,
