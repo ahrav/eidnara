@@ -1311,6 +1311,38 @@ Fault contract (`crates/eval-core/tests/fault.rs`,
   and changes with an effect outcome; a kill without a barrier, an unreceipted
   declared cut, zero safety checks while armed, and a premature success refuse.
 
+Growth contract (`crates/eval-core/tests/growth.rs`,
+`flt-never-restored-leak-campaign-separate`,
+`flt-memory-reviewer-quota-refusal-expected`,
+`xc-campaign-resource-envelope-declared-and-enforced`,
+`xc-parallel-campaigns-isolated-on-shared-checkout`):
+
+- `headroom_is_accounted_from_the_constants_read_not_a_slot_count`: expected
+  project bytes are the receipt charge per terminal job plus receipt and
+  allowance per pending job plus page bytes, from the constants the store
+  declares; admissions remaining is derived from those constants; a sample
+  whose bytes differ is `HeadroomMismatch`.
+- `a_never_restored_ledger_passes_only_when_the_final_sample_holds_nothing_transient`:
+  a final sample with WAL bytes, a temporary artifact entry, or a temp root
+  is a named `Leak`; a counter over its bound is `BoundExceeded`; an empty
+  ledger, a repeated step, or a receding commit sequence refuse; the peak store
+  total is the transient middle sample.
+- `a_restore_under_never_restored_is_refused_and_a_restoring_ledger_gives_no_leak_verdict`
+  (marker `flt_restore_under_never_restored_refused`): a restore is refused
+  and counted under `never_restored`; a `restoring` ledger's verdict is
+  `NotALeakVerdict` whatever its samples show.
+- `a_mix_missing_an_operation_is_not_sustainability_success` (marker
+  `flt_incomplete_mix_not_success`): a mix that never exercised a kind is
+  `MixIncomplete` naming the kinds, and the report refuses it.
+- `a_shared_root_namespace_or_port_is_refused` (marker
+  `xc_shared_fixture_refused`): a shared root, publish directory, cassette
+  namespace, or port is refused by value; a concurrent digest that differs
+  from its serial run is refused by campaign index.
+- `a_growth_report_round_trips_and_its_digest_ignores_measurements`: the
+  report parses back equal; its digest ignores samples and peaks and changes
+  with the quota constants; a restoring report with no samples, faults with no
+  safety check, and a leaked final sample refuse.
+
 Fault shell (`crates/daemon/tests/eval_fault.rs`, `--all-features`; the
 default shards run the campaign once with every scenario asserted over it,
 the named scenarios and the completeness proof run in the `eval-campaign` CI

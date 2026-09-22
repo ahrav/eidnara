@@ -1743,6 +1743,58 @@ takes the profile's bounds and runs every refusal above; `parse_fault_report`
 reads a report back losslessly; `result_digest` drops barrier pids and
 envelope peaks under `eval-suite-c-fault-report-result/v1`.
 
+## Growth ledger, reviewer headroom, swarm mix, and isolation
+
+`growth` holds the value-level contract of a sustainability campaign.
+`ReviewerQuota` carries the reviewer quota constants as the memory store
+declares them (`receipt_charge_bytes`, `job_allowance_bytes`, the project and
+host metadata quotas); the shell reads them from the store, and the report
+carries what it read, never a figure copied from a document.
+`expected_project_bytes(headroom)` is the receipt charge per terminal job plus
+the receipt charge and the pending allowance per open job plus frozen page
+charges; `admissions_remaining` divides the remaining bytes by one admission's
+charge as a report figure, not an acceptance count. Reaching the quota is R24,
+recorded as an expected refusal, and the report does not judge whether
+permanent exhaustion is intended.
+
+A `ResourceSample` is everything a campaign holds at one quiescent point: per
+store family the file, `-wal`, and `-shm` bytes; artifact objects, temporary
+entries, and bytes; cassette and published bytes; temp roots and processes;
+commit-log and projection rows; open holds; and a `HeadroomSample` (pending
+and terminal jobs, page bytes, project bytes and remaining, admissions, R24
+refusals). A `GrowthLedger` records samples under a `GrowthMode`
+(`never_restored` or `restoring`) with monotonic steps and commit sequence;
+`restore_attempted` under `never_restored` is `RestoreUnderNeverRestored` and
+counted. `verdict(quota, bounds)` is a leak verdict only for a never-restored
+ledger (`NotALeakVerdict` otherwise): every sample's project bytes must equal
+`expected_project_bytes` (`HeadroomMismatch`), the final sample must hold no
+temporary artifact entry, no WAL bytes, no temp root, and no process (`Leak {
+resource, step, observed }`), and its store total, artifact objects, commit
+and projection rows, and open holds must be within the declared
+`GrowthBounds` (`BoundExceeded`). `peak_store_bytes` is the largest total any
+sample saw, the transient pressure the envelope must also be charged with.
+
+`SwarmMix` counts the seven `Operation` kinds a growth campaign must exercise
+(`publish`, `correct`, `retire`, `query`, `fault_episode`, `quota_pressure`,
+`store_growth`); `complete` is `MixIncomplete { missing }` when any kind was
+never exercised, so a run that skipped a kind cannot report sustainability.
+
+`CampaignResources` names what two campaigns on one checkout must not share
+(roots, publish directories, cassette namespaces, ports); `isolated` refuses
+`SharedRoot`, `SharedPublishDir`, `SharedCassetteNamespace`, or `SharedPort`
+by the shared value, and `digests_match_serial` refuses
+`DigestDiffersFromSerial { campaign }` when a concurrent run's result digest
+differs from its serial one.
+
+`GrowthReport` (`eval-suite-c-growth-report/v1`) is what one campaign
+publishes: identity, profile digest, claim boundary, the quota read, the
+bounds, the ledger, the mix, expected refusals, fault-episode and
+safety-check counts (`SafetyNeverChecked` when faults ran unchecked),
+markers, and envelope. `validate` runs the mix and ledger refusals;
+`parse_growth_report` reads a report back losslessly; `result_digest` drops
+the samples and envelope peaks, which name one machine's bytes, under
+`eval-suite-c-growth-report-result/v1`.
+
 ## Aging shell
 
 `crates/daemon/examples/eval_runner/aging.rs` is the Suite C aging shell. It
@@ -1960,7 +2012,13 @@ the checkpoint and window markers (`flt_quiescence_receipt_all_zero`,
 `wm_bulk_scaffold_presented_as_aged` is recorded by the eval-core manifest
 suite, and the pure fault-contract markers (`flt_premature_success_fixture_refused`,
 `flt_incomplete_coverage_named_not_pass`, `flt_crash_model_label_refused`,
-`flt_liveness_unmet_named_at_bound`) by the eval-core fault suite; `eval_fault.rs`
+`flt_liveness_unmet_named_at_bound`) by the eval-core fault suite, the pure
+growth markers (`flt_restore_under_never_restored_refused`,
+`xc_shared_fixture_refused`, `flt_incomplete_mix_not_success`) by the eval-core
+growth suite, and `eval_growth.rs` owns the growth-campaign markers
+(`flt_leak_ledger_sampled_before_reopen`, `flt_headroom_accounted_from_store_constants`,
+`xc_envelope_breach_stops_the_run`, `xc_parallel_campaigns_isolated`,
+`flt_swarm_mix_complete`); `eval_fault.rs`
 owns the fault-campaign markers (`flt_lost_reply_unknown_until_readback`,
 `flt_every_declared_cut_receipted`, `flt_kill_barrier_read_before_kill`,
 `flt_r11_recorded_as_expected_refusal`, `flt_r24_recorded_as_expected_refusal`,

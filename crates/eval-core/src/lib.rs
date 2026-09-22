@@ -28,6 +28,7 @@ mod failure_class;
 mod fault;
 mod generator;
 mod governance;
+mod growth;
 mod identity;
 mod injection;
 mod ledger;
@@ -92,6 +93,12 @@ pub use fault::{
 };
 pub use generator::*;
 pub use governance::{ArmError, ArmRecord, GovernanceArms, HistoryPolicy};
+pub use growth::{
+    CampaignResources, GROWTH_REPORT_SCHEMA, GrowthBounds, GrowthLedger, GrowthMode, GrowthRefused,
+    GrowthReport, GrowthReportError, HeadroomSample, IsolationRefused, MixIncomplete, Operation,
+    ResourceSample, ReviewerQuota, StoreBytes, SwarmMix, digests_match_serial, isolated,
+    parse_growth_report,
+};
 pub use identity::{
     BUILD_PROTOCOL, BinaryDigest, BuildRecord, IdentityError, RUN_ID_PROTOCOL, RunIdentity,
     eval_run_id, zero_bytes_sha256,
