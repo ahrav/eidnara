@@ -920,6 +920,22 @@ fn a_report_refuses_what_its_own_evidence_refutes() {
             },
         ),
         (
+            "a pair backed by an indeterminate sample",
+            Box::new(|r| {
+                // s001 is a fresh-arm pass; indeterminate is no arm result.
+                r.samples.samples.get_mut("s001").unwrap().terminal = Terminal::Indeterminate;
+                r.rates = r.samples.rates().unwrap();
+                let ceilings = r.profile.ceilings().unwrap();
+                gated(r).gates =
+                    CampaignGates::of(&r.samples, &ceilings, &r.family, &r.arm_rates).unwrap();
+            }),
+            ReportError::PairsExceedSamples {
+                pairs: 320,
+                arm: ArmKind::Fresh,
+                attempted: 319,
+            },
+        ),
+        (
             "an interval whose replicate count is not the family's",
             Box::new(|r| {
                 let IntervalOutcome::Computed(interval) = &mut gated(r).analysis.interval else {

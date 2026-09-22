@@ -1301,9 +1301,11 @@ carries rather than read from what it says:
   (the unit, method, replicate count, item count, at least two clusters, and
   whether it is computed or withheld; `IntervalNotDerived {field}`), while the
   bounds themselves are bound to the pair table by the manifest's
-  `result_digest`; its pair count may not exceed either paired arm's attempted
-  samples (`PairsExceedSamples {pairs, arm, attempted}`, refused when
-  `n > attempted` on the aged or the fresh arm); the run gates must
+  `result_digest`; its pair count may not exceed either paired arm's samples
+  that ended as an arm result, a pass, a fail, or a censored attempt, since an
+  indeterminate attempt backs no pair (`PairsExceedSamples {pairs, arm,
+  attempted}`, refused when `n > attempted` on the aged or the fresh arm); the
+  run gates must
   be the ones `CampaignGates::of` recomputes from the samples, the profile's
   ceilings, the family, and the arm rates (`GatesNotDerived`); the baseline
   contrast must carry `RECENCY_BASELINE_VERSION`, the report's surface, the

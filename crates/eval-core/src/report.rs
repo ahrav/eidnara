@@ -534,14 +534,22 @@ impl SuiteBReport {
             return Err(ReportError::PairedGatesNotDerived);
         }
         self.check_interval(&gated.analysis)?;
-        // A pair consumes one attempted sample on each paired arm.
+        // A pair consumes one sample on each paired arm that ended as an
+        // `ArmResult`: a pass, a fail, or a censored attempt. An indeterminate
+        // attempt has no arm result and backs no pair.
         let pairs = gated.analysis.counts.n;
         for arm in [ArmKind::Aged, ArmKind::Fresh] {
             let attempted = self
                 .samples
                 .samples
                 .values()
-                .filter(|record| record.arm == arm && record.terminal.attempted())
+                .filter(|record| {
+                    record.arm == arm
+                        && matches!(
+                            record.terminal,
+                            Terminal::Pass | Terminal::Fail | Terminal::Censored { .. }
+                        )
+                })
                 .count();
             let attempted = u64::try_from(attempted).expect("bounded");
             if pairs > attempted {

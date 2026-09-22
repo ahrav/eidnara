@@ -1113,7 +1113,7 @@ Report (`crates/eval-core/tests/report.rs`):
   vacuous, or without a positive control, a sample skipped for an envelope
   bound the run did not hold or a reading the peaks never reached, an
   envelope bound raised above the approved profile's, attempted samples all
-  on one arm, an interval whose replicate or item count is not the family's
+  on one arm, a pair backed by an indeterminate sample, an interval whose replicate or item count is not the family's
   or the pairs', a stop-condition skip in an open report, a lineage naming
   this run, a `profile_not_approved` skip under an approved profile, two
   injection scores for one case or one with no case, and an epoch past the
