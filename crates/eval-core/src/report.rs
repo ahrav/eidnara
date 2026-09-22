@@ -17,6 +17,7 @@ use crate::campaign::{
 };
 use crate::census::{EvaluatedSurface, Reachability};
 use crate::claim::{AnchorSet, ClaimDerivation, WorldProvenance};
+use crate::governance::HistoryPolicy;
 use crate::injection::{AxisValue, InjectionScore};
 use crate::manifest::{ArmRates, ClaimBoundary};
 use crate::pairs::{
@@ -496,6 +497,18 @@ impl SuiteBReport {
                 // Only the packer lacks a caller.
                 Terminal::Unsupported(UnsupportedReason::PackingHasNoCaller)
                     if self.surface != EvaluatedSurface::Packing =>
+                {
+                    return Err(ReportError::SampleAxisDisagrees { sample: sample() });
+                }
+                // A policy not on this surface names this sample's policy and
+                // the run's surface; the raw arm changes nothing a surface
+                // reads, so it is on every surface.
+                Terminal::Unsupported(UnsupportedReason::PolicyNotOnSurface {
+                    policy,
+                    surface,
+                }) if policy != record.policy
+                    || surface != self.surface
+                    || policy == HistoryPolicy::Raw =>
                 {
                     return Err(ReportError::SampleAxisDisagrees { sample: sample() });
                 }

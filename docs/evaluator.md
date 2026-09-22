@@ -1551,8 +1551,10 @@ carries rather than read from what it says:
   skipped `profile_not_approved`, since the report's profile is approved
   (`SkipDisagreesWithProfile`); a sample unsupported `surface_not_activated`
   or disabled `scale_not_budgeted` names the report's surface or the profile's
-  scale; a `default-production` surface is never unactivated and only the
-  packing surface lacks a caller (`SampleAxisDisagrees`); a sample skipped
+  scale; a `default-production` surface is never unactivated, only the
+  packing surface lacks a caller, and a policy not on this surface is the
+  sample's own policy on the report's surface and never the raw arm
+  (`SampleAxisDisagrees`); a sample skipped
   `envelope_exceeded` must name
   this run's bound for that resource and a reading the peaks reached
   (`SampleEnvelopeDisagrees`); every injection score names a case that is not

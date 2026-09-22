@@ -256,7 +256,19 @@ mod unix {
     fn scripted_summary(prompt: &str) -> Option<String> {
         let (_, body) = prompt.split_once("<new_messages>")?;
         let (body, _) = body.split_once("</new_messages>")?;
-        let lines: Vec<(u64, u64, String)> = body.lines().filter_map(presented_line).collect();
+        // A line without the `[ordinal]` prefix continues the message before
+        // it: a presented message keeps its newlines.
+        let mut lines: Vec<(u64, u64, String)> = Vec::new();
+        for line in body.lines() {
+            match (presented_line(line), lines.last_mut()) {
+                (Some(presented), _) => lines.push(presented),
+                (None, Some((_, _, text))) if !line.trim().is_empty() => {
+                    text.push(' ');
+                    text.push_str(line.trim());
+                }
+                (None, _) => {}
+            }
+        }
         if lines.is_empty() {
             return None;
         }
@@ -849,16 +861,6 @@ mod unix {
     pub async fn run() -> Result<(), Box<dyn Error + Send + Sync>> {
         let Args { root, cassette } = parse_args()?;
         prepare_state_root(&root)?;
-        let control_path = root.join(CONTROL_FILE);
-        // The lifecycle transaction lock serializes the stale-check, unlink, and bind against another fixture starting on the same root, so two fixtures cannot both read a refused connection and replace each other's socket.
-        let (listener, own_socket) = {
-            let _transaction =
-                host_runtime::LifecycleTransactionLock::acquire_exclusive(Some(&root))?;
-            let listener = Arc::new(bind_control_socket(&control_path)?);
-            let own_socket = socket_identity(&control_path)?;
-            (listener, own_socket)
-        };
-
         let shutdown = CancellationToken::new();
         let backend = ControlledBackend::new(shutdown.clone());
         let mut recording: Option<(Arc<CassetteBackend>, PathBuf)> = None;
@@ -882,6 +884,17 @@ mod unix {
                 CassetteBackend::replaying(namespace, &file)
                     .map_err(|error| format!("cassette replay refused: {error:?}"))?
             }
+        };
+        // The cassette is checked and loaded above, before the socket is bound:
+        // a refused start returns before there is a socket to leave behind.
+        let control_path = root.join(CONTROL_FILE);
+        // The lifecycle transaction lock serializes the stale-check, unlink, and bind against another fixture starting on the same root, so two fixtures cannot both read a refused connection and replace each other's socket.
+        let (listener, own_socket) = {
+            let _transaction =
+                host_runtime::LifecycleTransactionLock::acquire_exclusive(Some(&root))?;
+            let listener = Arc::new(bind_control_socket(&control_path)?);
+            let own_socket = socket_identity(&control_path)?;
+            (listener, own_socket)
         };
         let publication =
             host_runtime::runtime_dir_path(Some(&root))?.join(host_runtime::CONNECTION_FILE_NAME);

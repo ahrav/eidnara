@@ -1689,6 +1689,21 @@ fn a_report_refuses_what_its_own_evidence_refutes() {
             },
         ),
         (
+            "an unsupported policy naming another policy or another surface",
+            Box::new(|r| {
+                // The fixture's samples ran the raw arm on surface 1.
+                r.samples.samples.get_mut("s605").unwrap().terminal =
+                    Terminal::Unsupported(eval_core::UnsupportedReason::PolicyNotOnSurface {
+                        policy: HistoryPolicy::Pruned,
+                        surface: EvaluatedSurface::Surface2,
+                    });
+                r.rates = r.samples.rates().unwrap();
+            }),
+            ReportError::SampleAxisDisagrees {
+                sample: "s605".into(),
+            },
+        ),
+        (
             "a sample disabled for another scale",
             Box::new(|r| {
                 r.samples.samples.get_mut("s605").unwrap().terminal =

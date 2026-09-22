@@ -19,7 +19,7 @@ use eval_core::{CASSETTE_SCHEMA, Cassette};
 use host_runtime::{RequestOptions, ResponseStream, TargetKind};
 use serde_json::{Value, json};
 use support::direct_host::{
-    BUDGET, Backend, FixtureProcess, Launch, fixture_binary, request_json, send_body,
+    BUDGET, Backend, CONTROL_FILE, FixtureProcess, Launch, fixture_binary, request_json, send_body,
 };
 use support::publish::staged_path;
 
@@ -193,6 +193,12 @@ fn the_fixture_records_its_backend_and_replays_it_strictly() {
     );
     assert_eq!(std::fs::read(&occupied).unwrap(), b"trusted");
     assert!(!staged_path(&occupied).exists());
+    // The refusal came before the control socket was bound, so the state root
+    // holds no stale socket for the next fixture to trip over.
+    assert!(
+        !occupied_root.path().join(CONTROL_FILE).exists(),
+        "a refused start leaves no control socket"
+    );
 
     // A file that appears at the destination while the recording runs is
     // never replaced either: the publisher links the staged bytes into place
@@ -272,6 +278,9 @@ fn the_fixture_answers_a_summarizer_prompt_in_the_validators_document() {
                     // Ordinary source text is XML-sensitive; the scripted
                     // document carries it, escaped.
                     7 => "digest <T> & question asked",
+                    // A message over two lines: the second line has no
+                    // `[ordinal]` prefix and is part of the message.
+                    9 => "digest question\nasked on a second line",
                     _ if ordinal % 2 == 0 => "cursor decision recorded",
                     _ => "digest question asked",
                 },
@@ -362,5 +371,9 @@ fn the_fixture_answers_a_summarizer_prompt_in_the_validators_document() {
     assert!(
         second.contains("digest <T> & question asked"),
         "the text reads back unescaped: {second}"
+    );
+    assert!(
+        second.contains("asked on a second line"),
+        "a continuation line stays in its message: {second}"
     );
 }
