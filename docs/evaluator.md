@@ -1249,9 +1249,10 @@ its WAL and shm sidecars), `cassette_bytes`, `artifact_bytes`, `temp_roots`,
 byte resource is the largest footprint held at once: one store, since a root
 is vacated before the next is occupied; every cassette the run has written,
 since they are kept together until it ends; the largest artifact written.
-Publication (write-then-rename into roots, stores, and cassette namespaces
-disjoint per campaign, on OS-allocated ports) is the runner's and is not
-written yet.
+Publication is the runner's: the campaign shell (below) publishes the report
+and manifest write-then-rename into the directory it is given, lives every arm
+on a root of its own on OS-allocated ports, and records each cassette under the
+campaign namespace.
 
 ## Suite B report
 
