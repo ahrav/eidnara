@@ -79,13 +79,24 @@ pub enum FaultAction {
 }
 
 impl FaultAction {
+    /// The heal each seam permits. A CAS storage failure that is not capacity
+    /// exhaustion latches artifact ingestion closed until the store reopens,
+    /// so every ingest fault and the EIO deletion faults heal by reopen.
     pub fn heal(&self) -> Heal {
         match self {
             Self::SearchEpisode { .. }
             | Self::EmbeddingPublication { .. }
-            | Self::ArtifactIngest { .. }
-            | Self::ArtifactDeletion { .. }
             | Self::ClaimEpisode { .. } => Heal::Consumed,
+            Self::ArtifactIngest { .. } => Heal::Reopen,
+            Self::ArtifactDeletion { fault } => match fault {
+                ArtifactDeletionFaultKind::IntentAppend | ArtifactDeletionFaultKind::Unlink => {
+                    Heal::Reopen
+                }
+                ArtifactDeletionFaultKind::IntentStorageExhausted
+                | ArtifactDeletionFaultKind::BeforeCommit
+                | ArtifactDeletionFaultKind::AfterCommit
+                | ArtifactDeletionFaultKind::UnlinkStorageExhausted => Heal::Consumed,
+            },
             Self::HeldPublication | Self::ExternalLockHolder => Heal::Released,
             Self::ProcessKill { .. } | Self::CorruptQuiescentFile => Heal::Reopen,
         }

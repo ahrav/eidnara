@@ -1,11 +1,11 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use eval_core::{
-    APPLICATION_CRASH, ArtifactIngestFaultKind, BarrierReceipt, BarrierRefused, ClaimBoundary,
-    Coverage, CoverageRefused, Cut, CutCoverage, CutOutcome, EffectLedger, EffectOutcome,
-    EffectRefused, EffectState, Envelope, EpisodeRefused, Expected, ExpectedRefusal,
-    FAULT_REPORT_SCHEMA, FaultAction, FaultEpisode, FaultReport, FaultReportError, FaultScope,
-    Heal, HealthyCore, KillLabel, Lane, LaneProgress, LivenessBounds, LivenessRefused,
+    APPLICATION_CRASH, ArtifactDeletionFaultKind, ArtifactIngestFaultKind, BarrierReceipt,
+    BarrierRefused, ClaimBoundary, Coverage, CoverageRefused, Cut, CutCoverage, CutOutcome,
+    EffectLedger, EffectOutcome, EffectRefused, EffectState, Envelope, EpisodeRefused, Expected,
+    ExpectedRefusal, FAULT_REPORT_SCHEMA, FaultAction, FaultEpisode, FaultReport, FaultReportError,
+    FaultScope, Heal, HealthyCore, KillLabel, Lane, LaneProgress, LivenessBounds, LivenessRefused,
     LivenessReport, PublicationFaultKind, RecordedRefusal, ResourceLimits, SearchEpisodeFault,
     StoreFamily, TEST_BINARY_CHILD, cut_receipts, parse_fault_report, validate_episodes,
 };
@@ -172,7 +172,23 @@ fn every_episode_is_a_named_action_with_the_heal_its_seam_permits() {
             fault: ArtifactIngestFaultKind::AfterDirectorySync
         }
         .heal(),
-        Heal::Consumed
+        Heal::Reopen,
+        "an EIO in the CAS latches ingestion closed until reopen"
+    );
+    assert_eq!(
+        FaultAction::ArtifactDeletion {
+            fault: ArtifactDeletionFaultKind::IntentStorageExhausted
+        }
+        .heal(),
+        Heal::Consumed,
+        "ENOSPC does not latch"
+    );
+    assert_eq!(
+        FaultAction::ArtifactDeletion {
+            fault: ArtifactDeletionFaultKind::Unlink
+        }
+        .heal(),
+        Heal::Reopen
     );
     let mut healed_wrong = ok.clone();
     healed_wrong.heal = Heal::Reopen;

@@ -208,7 +208,7 @@ pub const MARKERS: [Marker; 51] = [
     },
     Marker {
         name: "flt_artifact_fault_named_errno",
-        test: "crates/daemon/tests/eval_fault.rs::artifact_faults_fail_with_their_named_errno_and_heal_by_consumption",
+        test: "crates/daemon/tests/eval_fault.rs::artifact_faults_fail_with_their_named_errno_and_heal_by_reopen_or_consumption",
     },
     Marker {
         name: "sls_embedding_publication_held_then_released",
