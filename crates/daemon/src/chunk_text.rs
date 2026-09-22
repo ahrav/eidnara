@@ -95,7 +95,7 @@ fn extract_commit_hashes(text: &str) -> Vec<String> {
 ///
 /// `parts` retain input order and are separated by ` / `. The ordinal range is
 /// inclusive and is not reordered when `start_ordinal` exceeds `end_ordinal`.
-pub(crate) fn format_block_line(
+pub fn format_block_line(
     role: &str,
     start_ordinal: u64,
     end_ordinal: u64,

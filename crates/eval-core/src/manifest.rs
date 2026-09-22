@@ -12,8 +12,8 @@ use crate::identity::{IdentityError, RunIdentity, eval_run_id};
 use crate::pairs::{RECENCY_BASELINE_VERSION, recency_bound};
 use crate::residue::{ObservationSchema, RelativeDomains, ResidueEntry, ResidueError, Rule};
 
-pub const MANIFEST_SCHEMA: &str = "eval-manifest/v7";
-pub const MANIFEST_DIGEST_PROTOCOL: &str = "eval-manifest-digest/v7";
+pub const MANIFEST_SCHEMA: &str = "eval-manifest/v8";
+pub const MANIFEST_DIGEST_PROTOCOL: &str = "eval-manifest-digest/v8";
 
 /// Sorted; a field added to [`Manifest`] without a schema version bump fails the closure test.
 pub const REQUIRED_FIELDS: [&str; 30] = [
@@ -123,16 +123,20 @@ pub enum ExecutionMode {
     Enumerate,
 }
 
-/// How the world's units reached the store. No ingestion entry point has a
+/// How the world's units reached the store. No ingestion adapter has a
 /// production caller, so adapter ingestion is labelled as such and never as
 /// validated real ingestion; the direct-database path serves only non-aged
-/// fixtures.
+/// fixtures; the transform route is the harness's own path, one turn at a
+/// time through one store incarnation, the honest label for an arm the
+/// daemon built itself.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Ingestion {
     #[serde(rename = "adapter-ingested, production caller: none")]
     AdapterIngestedNoProductionCaller,
     #[serde(rename = "direct-database, non-aged")]
     DirectDatabaseNonAged,
+    #[serde(rename = "transform-route, turn by turn")]
+    TransformRouteTurnByTurn,
 }
 
 /// MemoryReviewer model traffic bypasses `LlmExecutionBackend`, so a run

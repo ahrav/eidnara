@@ -6,6 +6,19 @@
 
 #![forbid(unsafe_code)]
 
+/// The evaluator's cassette over `LlmExecutionBackend`, shared with the
+/// integration tests by path so both sides read one schema.
+#[cfg(unix)]
+#[path = "../tests/support/eval_cassette.rs"]
+#[allow(dead_code)]
+mod eval_cassette;
+/// The recorded cassette is published under the same contract as the
+/// campaign's report and manifest.
+#[cfg(unix)]
+#[path = "../tests/support/publish.rs"]
+#[allow(dead_code)]
+mod publish;
+
 #[cfg(unix)]
 mod unix {
     use std::collections::VecDeque;
@@ -18,6 +31,7 @@ mod unix {
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
+    use daemon::history_summarizer_chunk::{ALIAS_CLOSE, ALIAS_OPEN};
     use host_runtime::local_embeddings::embed_tokens::EmbedTokens;
     use host_runtime::local_embeddings::inference::InferenceError;
     use host_runtime::local_embeddings::{
@@ -34,6 +48,9 @@ mod unix {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::{UnixListener, UnixStream};
     use tokio::sync::oneshot;
+
+    use crate::eval_cassette::CassetteBackend;
+    use crate::publish::write_then_rename;
 
     const CONTROL_FILE: &str = "direct-host-control.sock";
     const MAX_CONTROL_LINE: usize = 64 * 1024;
@@ -74,6 +91,9 @@ mod unix {
         released: u64,
         failed: u64,
         cancelled: u64,
+        /// Frames a recording cassette refused as carrying a secret-shaped
+        /// span; zero without a recording.
+        cassette_refused: u64,
     }
 
     impl BackendCounters {
@@ -85,6 +105,7 @@ mod unix {
                 released: self.released.load(Ordering::SeqCst),
                 failed: self.failed.load(Ordering::SeqCst),
                 cancelled: self.cancelled.load(Ordering::SeqCst),
+                cassette_refused: 0,
             }
         }
     }
@@ -197,10 +218,93 @@ mod unix {
             .retain(|(queued, _)| *queued != id);
     }
 
+    /// Messages per segment in the scripted summarizer's answer.
+    const SUMMARY_CHUNK: usize = 5;
+
+    /// One presented line of the summarizer's input: `[a-b] R: part / part`,
+    /// with alias markers stripped from the parts.
+    fn presented_line(line: &str) -> Option<(u64, u64, String)> {
+        let rest = line.strip_prefix('[')?;
+        let (range, rest) = rest.split_once("] ")?;
+        let (start, end) = match range.split_once('-') {
+            Some((start, end)) => (start.parse().ok()?, end.parse().ok()?),
+            None => {
+                let ordinal = range.parse().ok()?;
+                (ordinal, ordinal)
+            }
+        };
+        let (_, parts) = rest.split_once(": ")?;
+        let text: String = parts
+            .split_whitespace()
+            .map(|token| match token.strip_prefix(ALIAS_OPEN) {
+                Some(marked) => marked
+                    .split_once(ALIAS_CLOSE)
+                    .map_or(token, |(_, rest)| rest),
+                None => token,
+            })
+            .filter(|token| !token.is_empty())
+            .collect::<Vec<_>>()
+            .join(" ");
+        Some((start, end, text))
+    }
+
+    /// The summarizer answer the fixture stands in for a provider with: one
+    /// `history_segment` per run of `SUMMARY_CHUNK` presented lines, its text
+    /// the lines' own words, in the output document the daemon's validator
+    /// reads. A recording of this is what the campaign's structured arm
+    /// replays.
+    fn scripted_summary(prompt: &str) -> Option<String> {
+        let (_, body) = prompt.split_once("<new_messages>")?;
+        let (body, _) = body.split_once("</new_messages>")?;
+        // The transcript renders its records in ordinal order, so a header
+        // starts a record only when it continues the sequence; every other
+        // line, including one shaped like a header, is the text of the message
+        // before it, which keeps its newlines.
+        let mut lines: Vec<(u64, u64, String)> = Vec::new();
+        for line in body.lines() {
+            let next = lines.last().map(|(_, end, _)| end + 1);
+            match (presented_line(line), lines.last_mut()) {
+                (Some(presented), _) if next.is_none_or(|next| presented.0 == next) => {
+                    lines.push(presented)
+                }
+                (_, Some((_, _, text))) if !line.trim().is_empty() => {
+                    text.push(' ');
+                    text.push_str(line.trim());
+                }
+                _ => {}
+            }
+        }
+        if lines.is_empty() {
+            return None;
+        }
+        let mut segments = String::new();
+        for group in lines.chunks(SUMMARY_CHUNK) {
+            let start = group[0].0;
+            let end = group[group.len() - 1].1;
+            // Escaped as element content, so a message saying `<T> & B`
+            // leaves the document well-formed; the validator unescapes it.
+            let text = group
+                .iter()
+                .map(|(_, _, text)| text.as_str())
+                .collect::<Vec<_>>()
+                .join("; ")
+                .replace('&', "&amp;")
+                .replace('<', "&lt;")
+                .replace('>', "&gt;");
+            segments.push_str(&format!(
+                r#"<history_segment start="{start}" end="{end}" title="messages {start} to {end}" episode_type="feature" importance="50"><p1>{text}</p1><p2>{text}</p2><p3>messages {start} to {end}</p3><p4 /></history_segment>"#
+            ));
+        }
+        let next = lines.last().map(|(_, end, _)| end + 1).unwrap_or(1);
+        Some(format!(
+            "<output><history_segments>{segments}</history_segments><meta><unprocessed_from>{next}</unprocessed_from></meta></output>"
+        ))
+    }
+
     impl LlmExecutionBackend for ControlledBackend {
         fn execute(
             &self,
-            _request: BackendRequest,
+            request: BackendRequest,
             events: EventSink,
             cancel: CancellationToken,
         ) -> BackendFuture {
@@ -209,6 +313,10 @@ mod unix {
                 &mut *self.next.lock().expect("fixture backend behavior mutex"),
                 NextBehavior::Success,
             );
+            // A summarizer prompt is answered in the summarizer's format
+            // whatever the scheduled behavior; the controls script transport
+            // outcomes, not what a summary says.
+            let summary = scripted_summary(&request.prompt);
             let blocked = Arc::clone(&self.blocked);
             let next_blocked_id = Arc::clone(&self.next_blocked_id);
             let shutdown = self.shutdown.clone();
@@ -217,7 +325,7 @@ mod unix {
                 match behavior {
                     NextBehavior::Success => {
                         events.emit(BackendEvent::AssistantText {
-                            text: "fixture-success".to_owned(),
+                            text: summary.unwrap_or_else(|| "fixture-success".to_owned()),
                             finish_reason: None,
                         });
                         counters.completed.fetch_add(1, Ordering::SeqCst);
@@ -266,7 +374,7 @@ mod unix {
                                 // the counters.
                                 let _ = ack.send(());
                                 events.emit(BackendEvent::AssistantText {
-                                    text: "fixture-released".to_owned(),
+                                    text: summary.unwrap_or_else(|| "fixture-released".to_owned()),
                                     finish_reason: None,
                                 });
                                 counters.completed.fetch_add(1, Ordering::SeqCst);
@@ -353,6 +461,8 @@ mod unix {
         Counters,
         /// The newest native-serving pass's auto-search decision and its fate, as the host recorded it.
         UserHintOutcome,
+        /// Whether a history_summarizer firing is still running for any session.
+        HistorySummarizerLive,
         GracefulShutdown,
     }
 
@@ -379,6 +489,9 @@ mod unix {
             accepted: bool,
         },
         Counters(CounterSnapshot),
+        HistorySummarizer {
+            live: bool,
+        },
         UserHint {
             outcome: Option<daemon::transform::UserHintPass>,
         },
@@ -453,6 +566,7 @@ mod unix {
     async fn handle_control_connection(
         mut stream: UnixStream,
         backend: Arc<ControlledBackend>,
+        recorder: Option<Arc<CassetteBackend>>,
         core: Arc<daemon::HandlerCore>,
         shutdown: CancellationToken,
     ) -> io::Result<()> {
@@ -489,11 +603,21 @@ mod unix {
                                 (ControlResult::Ack { accepted: true }, false)
                             }
                             ControlCommand::Counters => {
-                                (ControlResult::Counters(backend.counters.snapshot()), false)
+                                let mut counters = backend.counters.snapshot();
+                                counters.cassette_refused = recorder
+                                    .as_ref()
+                                    .map_or(0, |recorder| recorder.redaction_refusals() as u64);
+                                (ControlResult::Counters(counters), false)
                             }
                             ControlCommand::UserHintOutcome => (
                                 ControlResult::UserHint {
                                     outcome: core.user_hint_outcome_for_test(),
+                                },
+                                false,
+                            ),
+                            ControlCommand::HistorySummarizerLive => (
+                                ControlResult::HistorySummarizer {
+                                    live: core.history_summarizer_live_for_test(),
                                 },
                                 false,
                             ),
@@ -537,6 +661,7 @@ mod unix {
     async fn run_control_server(
         listener: Arc<UnixListener>,
         backend: Arc<ControlledBackend>,
+        recorder: Option<Arc<CassetteBackend>>,
         core: Arc<daemon::HandlerCore>,
         shutdown: CancellationToken,
         accepting: tokio::sync::oneshot::Sender<()>,
@@ -557,10 +682,13 @@ mod unix {
                         }
                     };
                     let backend = Arc::clone(&backend);
+                    let recorder = recorder.clone();
                     let core = Arc::clone(&core);
                     let shutdown = shutdown.clone();
                     connections.spawn(async move {
-                        let _ = handle_control_connection(stream, backend, core, shutdown).await;
+                        let _ =
+                            handle_control_connection(stream, backend, recorder, core, shutdown)
+                                .await;
                     });
                 }
                 Some(_) = connections.join_next(), if !connections.is_empty() => {}
@@ -692,17 +820,78 @@ mod unix {
         }
     }
 
-    fn state_root_arg() -> Result<PathBuf, Box<dyn Error + Send + Sync>> {
+    /// The model backend the fixture serves: its own controlled backend, that
+    /// backend recorded into a cassette written at shutdown, or a cassette
+    /// replayed strictly with the controlled backend never consulted.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    enum CassetteMode {
+        Off,
+        Record { path: PathBuf, namespace: String },
+        Replay { path: PathBuf, namespace: String },
+    }
+
+    struct Args {
+        root: PathBuf,
+        cassette: CassetteMode,
+    }
+
+    const USAGE: &str = "usage: direct_host_fixture --state-root <path> \
+        [--cassette-record <file> | --cassette-replay <file>] [--cassette-namespace <ns>]";
+
+    fn parse_args() -> Result<Args, Box<dyn Error + Send + Sync>> {
         let mut args = std::env::args_os().skip(1);
-        match (args.next(), args.next(), args.next()) {
-            (Some(flag), Some(path), None) if flag == "--state-root" => Ok(path.into()),
-            _ => Err("usage: direct_host_fixture --state-root <path>".into()),
+        let (mut root, mut record, mut replay, mut namespace) = (None, None, None, None);
+        while let Some(flag) = args.next() {
+            let value = args.next().ok_or(USAGE)?;
+            match flag.to_str().ok_or(USAGE)? {
+                "--state-root" => root = Some(PathBuf::from(&value)),
+                "--cassette-record" => record = Some(PathBuf::from(&value)),
+                "--cassette-replay" => replay = Some(PathBuf::from(&value)),
+                "--cassette-namespace" => {
+                    namespace = Some(value.to_str().ok_or(USAGE)?.to_string())
+                }
+                _ => return Err(USAGE.into()),
+            }
         }
+        let root = root.ok_or(USAGE)?;
+        let cassette = match (record, replay, namespace) {
+            (None, None, None) => CassetteMode::Off,
+            (Some(path), None, Some(namespace)) => CassetteMode::Record { path, namespace },
+            (None, Some(path), Some(namespace)) => CassetteMode::Replay { path, namespace },
+            _ => return Err(USAGE.into()),
+        };
+        Ok(Args { root, cassette })
     }
 
     pub async fn run() -> Result<(), Box<dyn Error + Send + Sync>> {
-        let root = state_root_arg()?;
+        let Args { root, cassette } = parse_args()?;
         prepare_state_root(&root)?;
+        let shutdown = CancellationToken::new();
+        let backend = ControlledBackend::new(shutdown.clone());
+        let mut recording: Option<(Arc<CassetteBackend>, PathBuf)> = None;
+        let model_backend: Arc<dyn LlmExecutionBackend> = match &cassette {
+            CassetteMode::Off => Arc::clone(&backend) as Arc<dyn LlmExecutionBackend>,
+            CassetteMode::Record { path, namespace } => {
+                // The recording is renamed into place at exit; a file already
+                // there is a cassette someone trusts, never replaced.
+                if path.symlink_metadata().is_ok() {
+                    return Err(format!("cassette destination exists: {}", path.display()).into());
+                }
+                let recorder = CassetteBackend::recording(
+                    namespace,
+                    Arc::clone(&backend) as Arc<dyn LlmExecutionBackend>,
+                );
+                recording = Some((Arc::clone(&recorder), path.clone()));
+                recorder
+            }
+            CassetteMode::Replay { path, namespace } => {
+                let file: serde_json::Value = serde_json::from_slice(&std::fs::read(path)?)?;
+                CassetteBackend::replaying(namespace, &file)
+                    .map_err(|error| format!("cassette replay refused: {error:?}"))?
+            }
+        };
+        // The cassette is checked and loaded above, before the socket is bound:
+        // a refused start returns before there is a socket to leave behind.
         let control_path = root.join(CONTROL_FILE);
         // The lifecycle transaction lock serializes the stale-check, unlink, and bind against another fixture starting on the same root, so two fixtures cannot both read a refused connection and replace each other's socket.
         let (listener, own_socket) = {
@@ -712,21 +901,20 @@ mod unix {
             let own_socket = socket_identity(&control_path)?;
             (listener, own_socket)
         };
-
-        let shutdown = CancellationToken::new();
-        let backend = ControlledBackend::new(shutdown.clone());
         let publication =
             host_runtime::runtime_dir_path(Some(&root))?.join(host_runtime::CONNECTION_FILE_NAME);
         let handler = daemon::Handler::new_with_connection_file(Some(publication.clone()));
         let (accepting_tx, accepting_rx) = tokio::sync::oneshot::channel();
         let control_shutdown = shutdown.clone();
         let control_backend = Arc::clone(&backend);
+        let control_recorder = recording.as_ref().map(|(recorder, _)| Arc::clone(recorder));
         let control_core = handler.core_for_test();
         let control_listener = Arc::clone(&listener);
         let control_task = tokio::spawn(async move {
             run_control_server(
                 control_listener,
                 control_backend,
+                control_recorder,
                 control_core,
                 control_shutdown,
                 accepting_tx,
@@ -742,7 +930,7 @@ mod unix {
             handler,
             local_embeddings,
             ModelExecutionComponent::new(
-                backend,
+                model_backend,
                 host_runtime::model_execution::subprocess::group_registry::StateRoot::resolve(
                     Some(&root),
                 )?,
@@ -794,6 +982,19 @@ mod unix {
 
         let host_result = host.await?;
         shutdown.cancel();
+        // A refused cassette is reported after the socket and publication are
+        // cleaned up, so a refusal leaves no stale control socket behind.
+        let cassette_written: Result<(), Box<dyn Error + Send + Sync>> = match recording {
+            Some((recorder, path)) => recorder
+                .file()
+                .map_err(|error| format!("cassette refused: {error:?}").into())
+                .and_then(|file| {
+                    let bytes = serde_json::to_vec_pretty(&file)?;
+                    write_then_rename(&path, &bytes)?;
+                    Ok(())
+                }),
+            None => Ok(()),
+        };
         signal_task.abort();
         let _ = signal_task.await;
         // The socket is unlinked while this listener is still bound, so a successor that connects in this window is accepted into the backlog and refuses to start rather than replacing the socket between the inode check and the unlink.
@@ -803,7 +1004,7 @@ mod unix {
         unlinked?;
         host_result?;
         ready?;
-        Ok(())
+        cassette_written
     }
 }
 

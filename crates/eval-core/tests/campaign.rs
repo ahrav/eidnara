@@ -134,9 +134,9 @@ fn a_profile_pins_every_number_and_runs_only_once_approved() {
             field: "approval.approved_at_run_id",
         })
     );
-    assert_eq!(Scale::S0.budget_env(), None);
-    assert_eq!(Scale::S1.budget_env(), Some("EIDNARA_EVAL_S1_BUDGET_MS"));
-    assert_eq!(Scale::S2.budget_env(), Some("EIDNARA_EVAL_S2_BUDGET_MS"));
+    assert_eq!(Scale::S0.budget_env(), "EIDNARA_EVAL_S0_BUDGET_MS");
+    assert_eq!(Scale::S1.budget_env(), "EIDNARA_EVAL_S1_BUDGET_MS");
+    assert_eq!(Scale::S2.budget_env(), "EIDNARA_EVAL_S2_BUDGET_MS");
     assert_eq!(serde_json::to_value(Scale::S2).unwrap(), json!("s2"));
 }
 
@@ -565,6 +565,13 @@ fn every_sample_ends_in_exactly_one_closed_vocabulary_terminal() {
         (
             Terminal::Unsupported(UnsupportedReason::PackingHasNoCaller),
             json!({"kind": "unsupported", "reason": "packing_has_no_caller"}),
+        ),
+        (
+            Terminal::Unsupported(UnsupportedReason::PolicyNotOnSurface {
+                policy: HistoryPolicy::Pruned,
+                surface: EvaluatedSurface::Surface1,
+            }),
+            json!({"kind": "unsupported", "reason": "policy_not_on_surface", "policy": "pruned", "surface": "surface1"}),
         ),
         (
             terminals[7],

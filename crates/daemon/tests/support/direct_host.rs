@@ -5,7 +5,7 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::{Arc, Mutex, OnceLock, mpsc};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -27,7 +27,14 @@ pub fn workspace_root() -> PathBuf {
         .to_path_buf()
 }
 
-fn fixture_binary() -> PathBuf {
+pub fn fixture_binary() -> PathBuf {
+    example_binary("direct_host_fixture", "direct-host-fixture")
+}
+
+/// Builds one of the daemon's examples under `features` and returns its
+/// binary. Builds within one test process are serialized here; across
+/// processes cargo's own directory lock serializes them.
+pub fn example_binary(example: &str, features: &str) -> PathBuf {
     let _guard = BUILD_LOCK
         .get_or_init(|| Mutex::new(()))
         .lock()
@@ -39,26 +46,94 @@ fn fixture_binary() -> PathBuf {
             "-p",
             "daemon",
             "--example",
-            "direct_host_fixture",
+            example,
             "--features",
-            "direct-host-fixture",
+            features,
             "--locked",
         ])
         .current_dir(&workspace)
         .output()
-        .expect("cargo builds direct host fixture");
+        .expect("cargo builds the example");
     assert!(
         output.status.success(),
-        "direct host fixture build failed:\nstdout:\n{}\nstderr:\n{}",
+        "{example} build failed:\nstdout:\n{}\nstderr:\n{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
     let target = std::env::var_os("CARGO_TARGET_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|| workspace.join("target"));
-    let binary = target.join("debug/examples/direct_host_fixture");
-    assert!(binary.is_file(), "missing fixture at {}", binary.display());
+    let binary = target.join("debug/examples").join(example);
+    assert!(binary.is_file(), "missing example at {}", binary.display());
     binary
+}
+
+/// How the fixture's model backend is served: its own controlled backend, that
+/// backend recorded into a cassette written at shutdown, or a cassette replayed
+/// strictly with the controlled backend never consulted.
+#[derive(Debug, Clone)]
+pub enum Backend {
+    Record { file: PathBuf, namespace: String },
+    Replay { file: PathBuf, namespace: String },
+}
+
+/// One fixture launch: the state root it serves, how its model backend is
+/// served, and the environment the daemon inside reads its user config tier
+/// from.
+#[derive(Debug)]
+pub struct Launch {
+    root: PathBuf,
+    backend: Option<Backend>,
+    env: Vec<(String, String)>,
+}
+
+impl Launch {
+    pub fn at(root: PathBuf) -> Self {
+        Self {
+            root,
+            backend: None,
+            env: Vec::new(),
+        }
+    }
+
+    pub fn backend(mut self, backend: Backend) -> Self {
+        self.backend = Some(backend);
+        self
+    }
+
+    /// The daemon reads `/history_summarizer/*` keys from the user tier under
+    /// `XDG_CONFIG_HOME`; this points that at `config_home`.
+    pub fn config_home(mut self, config_home: &Path) -> Self {
+        self.env.push((
+            "XDG_CONFIG_HOME".to_string(),
+            config_home.display().to_string(),
+        ));
+        self
+    }
+
+    pub fn start(self) -> FixtureProcess {
+        let args: Vec<String> = match &self.backend {
+            None => Vec::new(),
+            Some(Backend::Record { file, namespace }) => vec![
+                "--cassette-record".to_string(),
+                file.display().to_string(),
+                "--cassette-namespace".to_string(),
+                namespace.clone(),
+            ],
+            Some(Backend::Replay { file, namespace }) => vec![
+                "--cassette-replay".to_string(),
+                file.display().to_string(),
+                "--cassette-namespace".to_string(),
+                namespace.clone(),
+            ],
+        };
+        let env: Vec<(&str, &str)> = self
+            .env
+            .iter()
+            .map(|(key, value)| (key.as_str(), value.as_str()))
+            .collect();
+        FixtureProcess::start_at_inner_env(self.root, None, &args, &env)
+    }
 }
 
 /// `FixtureProcess` owns one direct-host fixture process and its captured output streams.
@@ -80,17 +155,32 @@ impl FixtureProcess {
 
     pub fn start_in(root: tempfile::TempDir) -> Self {
         let path = root.path().to_path_buf();
-        Self::start_at_inner(path, Some(root))
+        Self::start_at_inner(path, Some(root), &[])
     }
 
     pub fn start_at(root: PathBuf) -> Self {
-        Self::start_at_inner(root, None)
+        Launch::at(root).start()
     }
 
-    fn start_at_inner(root: PathBuf, root_owner: Option<tempfile::TempDir>) -> Self {
+    fn start_at_inner(
+        root: PathBuf,
+        root_owner: Option<tempfile::TempDir>,
+        extra: &[String],
+    ) -> Self {
+        Self::start_at_inner_env(root, root_owner, extra, &[])
+    }
+
+    fn start_at_inner_env(
+        root: PathBuf,
+        root_owner: Option<tempfile::TempDir>,
+        extra: &[String],
+        env: &[(&str, &str)],
+    ) -> Self {
         let mut child = Command::new(fixture_binary())
             .arg("--state-root")
             .arg(&root)
+            .args(extra)
+            .envs(env.iter().copied())
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -258,13 +348,38 @@ impl FixtureProcess {
         assert!(status.success(), "SIGTERM delivery failed");
     }
 
-    pub fn shutdown(mut self) -> CapturedOutput {
+    pub fn shutdown(self) -> CapturedOutput {
+        let (status, output) = self.shutdown_with_status();
+        assert!(
+            status.success(),
+            "fixture exited with {status}:\n{}",
+            output.stderr
+        );
+        output
+    }
+
+    /// Shuts the fixture down and returns how it exited with what it wrote,
+    /// for a caller that expects the fixture to refuse something at exit.
+    pub fn shutdown_with_status(mut self) -> (ExitStatus, CapturedOutput) {
         let response = self.control(9_999, "graceful-shutdown");
         assert_eq!(response["ok"], true);
-        self.wait_for_exit()
+        let status = self.wait_for_exit_status();
+        let output = self.captured_output();
+        (status, output)
     }
 
     pub fn wait_for_exit(&mut self) -> CapturedOutput {
+        let status = self.wait_for_exit_status();
+        let output = self.captured_output();
+        assert!(
+            status.success(),
+            "fixture exited with {status}:\n{}",
+            output.stderr
+        );
+        output
+    }
+
+    fn wait_for_exit_status(&mut self) -> ExitStatus {
         let deadline = Instant::now() + BUDGET;
         let status = loop {
             if let Some(status) = self
@@ -279,8 +394,11 @@ impl FixtureProcess {
             assert!(Instant::now() < deadline, "fixture exceeded exit budget");
             std::thread::sleep(Duration::from_millis(10));
         };
-        assert!(status.success(), "fixture exited with {status}");
         self.child.take();
+        status
+    }
+
+    fn captured_output(&mut self) -> CapturedOutput {
         if let Some(thread) = self.stdout_thread.take() {
             thread.join().expect("stdout reader joins");
         }

@@ -519,6 +519,7 @@ fn pair_set_with_fresh(fresh_seed: u64) -> PairSet {
         epoch_ms: EPOCH_MS,
         tick_ms: 1_000,
         max_events_per_log: 64,
+        planted: Vec::new(),
     };
     let natural_fresh = eval_core::generate_all(fresh_seed, &short, Mode::Generate)
         .unwrap()
@@ -1103,4 +1104,94 @@ fn generated_worlds_carry_phase_1_claims_and_the_pilot_never_derives_transfer() 
     let invalid = derive_claim_class(RealHistory, Some(&small), Some(&criterion()));
     assert_eq!(invalid.skipped, vec!["a"]);
     assert_eq!(invalid.class, ClaimClass::GeneratedPhase1);
+}
+
+/// A canary is planted into the text a carrier already emits, and nowhere
+/// else: a message's text for the summary carrier, a tool span's output for
+/// tool output, a commit's message for a commit; the world's other text is
+/// unchanged, the planting is part of the world's identity, and a carrier the
+/// generated world has no payload for, or a slot that has no such payload, is
+/// refused.
+#[test]
+fn a_canary_is_planted_only_into_the_text_its_carrier_emits() {
+    use eval_core::{Payload, Planted, WorldError, generate_all, tape_identity};
+    let plain = config();
+    let planted = |carrier: Carrier, entity: &str, slot: u32| Planted {
+        carrier,
+        entity: entity.to_string(),
+        slot,
+        canary: format!("CANARY-{}", carrier.label()),
+    };
+    let mut with_canaries = config();
+    with_canaries.planted = vec![
+        planted(Carrier::Summary, "session-0", 3),
+        planted(Carrier::ToolOutput, "session-0", 1),
+        planted(Carrier::CommitMessage, "repository-0", 1),
+    ];
+    assert_ne!(
+        tape_identity(SEED, &with_canaries),
+        tape_identity(SEED, &plain)
+    );
+    let world = generate_all(SEED, &with_canaries, Mode::Generate)
+        .unwrap()
+        .log;
+    let baseline = generate_all(SEED, &plain, Mode::Generate).unwrap().log;
+    assert_eq!(
+        world.events.len(),
+        baseline.events.len(),
+        "planting adds no event"
+    );
+    let mut carried = Vec::new();
+    for (event, base) in world.events.iter().zip(&baseline.events) {
+        let (text, base_text) = match (&event.payload, &base.payload) {
+            (Payload::Message { text, .. }, Payload::Message { text: b, .. }) => (text, b),
+            (Payload::ToolSpan { output, .. }, Payload::ToolSpan { output: b, .. }) => (output, b),
+            (Payload::Commit { message, .. }, Payload::Commit { message: b, .. }) => (message, b),
+            (Payload::Correction { text, .. }, Payload::Correction { text: b, .. }) => (text, b),
+            (_, _) => continue,
+        };
+        if text != base_text {
+            assert!(
+                text.starts_with(base_text.as_str()),
+                "{text} vs {base_text}"
+            );
+            carried.push((
+                event.payload.clone(),
+                text.rsplit(' ').next().unwrap().to_string(),
+            ));
+        }
+    }
+    assert_eq!(carried.len(), 3, "{carried:?}");
+    assert!(carried.iter().any(|(payload, canary)| {
+        matches!(payload, Payload::Message { message_id, .. } if message_id == "session-0-m3")
+            && canary == "CANARY-summary"
+    }));
+    assert!(carried.iter().any(|(payload, canary)| {
+        matches!(payload, Payload::ToolSpan { message_id, .. } if message_id == "session-0-m1")
+            && canary == "CANARY-tool_output"
+    }));
+    assert!(carried.iter().any(|(payload, canary)| {
+        matches!(payload, Payload::Commit { .. }) && canary == "CANARY-commit_message"
+    }));
+
+    for refused in [
+        planted(Carrier::IssueText, "session-0", 0),
+        planted(Carrier::Memory, "session-0", 0),
+        planted(Carrier::ToolOutput, "session-0", 2),
+        planted(Carrier::Summary, "session-0", 6),
+        planted(Carrier::Summary, "session-9", 0),
+        planted(Carrier::CommitMessage, "session-0", 0),
+        Planted {
+            canary: String::new(),
+            ..planted(Carrier::Summary, "session-0", 0)
+        },
+    ] {
+        let mut refusing = config();
+        refusing.planted = vec![refused.clone()];
+        assert_eq!(
+            refusing.validate(),
+            Err(WorldError::InvalidField("planted")),
+            "{refused:?}"
+        );
+    }
 }

@@ -3,8 +3,18 @@
 //! every request digest, admits every recorded exchange through the header
 //! allowlist and the secret scanner, and writes the cassette; TypeScript only
 //! forwards requests and compares the digest strings it gets back.
+//! `campaign` runs one Suite B campaign through the direct-host fixture under
+//! an approved profile and publishes its report and manifest.
 
 #![forbid(unsafe_code)]
+
+#[cfg(unix)]
+mod campaign;
+/// The fixture and surface helpers are shared with the evaluator tests, which
+/// use more of them than the campaign does.
+#[cfg(unix)]
+#[allow(dead_code)]
+mod support;
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -14,6 +24,8 @@ use std::path::{Component, Path, PathBuf};
 use eval_core::{Boundary, Cassette, CassetteError, Lookup, OpenCodeRequest};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+#[cfg(unix)]
+use sha2::Digest;
 
 /// The largest request line accepted; a provider body is a few hundred KiB at
 /// most and the redaction scanner refuses anything past 512 KiB anyway.
@@ -323,14 +335,66 @@ fn serve(input: impl BufRead, mut output: impl Write) -> io::Result<()> {
     Ok(())
 }
 
-fn main() -> io::Result<()> {
+const USAGE: &str = "usage: eval_runner cassette-oracle | eval_runner ";
+
+/// Runs the campaign and prints one JSON line naming what was published.
+#[cfg(unix)]
+fn run_campaign(args: impl Iterator<Item = String>) -> io::Result<()> {
+    let config = campaign::config_from_args(args).map_err(io::Error::other)?;
+    let run = campaign::run(&config).map_err(|error| io::Error::other(format!("{error:?}")))?;
+    let digest = |bytes: &[u8]| format!("{:x}", sha2::Sha256::digest(bytes));
+    let summary = json!({
+        "report": config.publish.join(campaign::REPORT_FILE),
+        "report_digest": digest(&run.report_bytes),
+        "manifest": config.publish.join(campaign::MANIFEST_FILE),
+        "manifest_digest": digest(&run.manifest_bytes),
+        "eval_run_id": run.manifest.eval_run_id,
+        "status": run.manifest.status,
+        "pairs": run.set.pairs.len(),
+        "samples": run.report.rates.samples,
+        "attempted": run.report.samples.attempted(),
+        "first_losses": run
+            .verdicts
+            .values()
+            .filter(|verdict| matches!(verdict, eval_core::StageVerdict::FirstLoss(_)))
+            .count(),
+        "raw_pairs": run.outcomes.len(),
+        "structured_pairs": run.structured_outcomes.len(),
+        "aged_summarizer": {
+            "firings": run.aged.firings,
+            "refused": run.aged.refused,
+            "segments": run.aged.covered.len(),
+        },
+    });
+    println!("{summary}");
+    Ok(())
+}
+
+fn main() {
     let mut args = std::env::args().skip(1);
-    match args.next().as_deref() {
+    let outcome = match args.next().as_deref() {
         Some("cassette-oracle") => serve(io::stdin().lock(), io::stdout().lock()),
+        #[cfg(unix)]
+        Some("campaign") => run_campaign(args),
         other => Err(io::Error::other(format!(
-            "usage: eval_runner cassette-oracle (got {other:?})"
+            "{USAGE}{} (got {other:?})",
+            campaign_usage()
         ))),
+    };
+    if let Err(error) = outcome {
+        eprintln!("eval_runner: {error}");
+        std::process::exit(2);
     }
+}
+
+#[cfg(unix)]
+fn campaign_usage() -> &'static str {
+    campaign::USAGE
+}
+
+#[cfg(not(unix))]
+fn campaign_usage() -> &'static str {
+    "campaign (unix only)"
 }
 
 #[cfg(test)]

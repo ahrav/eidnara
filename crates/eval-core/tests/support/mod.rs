@@ -40,6 +40,7 @@ pub fn world_config() -> WorldConfig {
         epoch_ms: WORLD_EPOCH_MS,
         tick_ms: 1_000,
         max_events_per_log: 64,
+        planted: Vec::new(),
     }
 }
 

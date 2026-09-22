@@ -1689,6 +1689,37 @@ fn a_report_refuses_what_its_own_evidence_refutes() {
             },
         ),
         (
+            "an unsupported policy naming another policy or another surface",
+            Box::new(|r| {
+                // The fixture's samples ran the raw arm on surface 1.
+                r.samples.samples.get_mut("s605").unwrap().terminal =
+                    Terminal::Unsupported(eval_core::UnsupportedReason::PolicyNotOnSurface {
+                        policy: HistoryPolicy::Pruned,
+                        surface: EvaluatedSurface::Surface2,
+                    });
+                r.rates = r.samples.rates().unwrap();
+            }),
+            ReportError::SampleAxisDisagrees {
+                sample: "s605".into(),
+            },
+        ),
+        (
+            "a structured sample unsupported on the surface that reads its segments",
+            Box::new(|r| {
+                let sample = r.samples.samples.get_mut("s605").unwrap();
+                sample.policy = HistoryPolicy::Structured;
+                sample.terminal =
+                    Terminal::Unsupported(eval_core::UnsupportedReason::PolicyNotOnSurface {
+                        policy: HistoryPolicy::Structured,
+                        surface: EvaluatedSurface::Surface1,
+                    });
+                r.rates = r.samples.rates().unwrap();
+            }),
+            ReportError::SampleAxisDisagrees {
+                sample: "s605".into(),
+            },
+        ),
+        (
             "a sample disabled for another scale",
             Box::new(|r| {
                 r.samples.samples.get_mut("s605").unwrap().terminal =
@@ -1725,18 +1756,6 @@ fn a_report_refuses_what_its_own_evidence_refutes() {
                 r.claims.established.clear();
             }),
             ReportError::SuppressionNotDerived,
-        ),
-        (
-            "a sample disabled for an unbudgeted s0",
-            Box::new(|r| {
-                r.samples.samples.get_mut("s605").unwrap().terminal =
-                    Terminal::Disabled(eval_core::DisabledReason::ScaleNotBudgeted {
-                        scale: Scale::S0,
-                    });
-            }),
-            ReportError::SampleAxisDisagrees {
-                sample: "s605".into(),
-            },
         ),
         (
             "an interval over more clusters than the plan has worlds",

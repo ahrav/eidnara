@@ -21,9 +21,10 @@ use crate::statistics::{CampaignProfile, CensorReason, Ratio, StatisticsError};
 pub const RUN_PROFILE_SCHEMA: &str = "eval-run-profile/v1";
 pub const RUN_PROFILE_DIGEST_PROTOCOL: &str = "eval-run-profile-digest/v1";
 
-/// `S0` runs in the default test shards; `S1` and `S2` run only when the
-/// named environment variable grants them a budget, and are ignored
-/// otherwise.
+/// Every scale runs only when the named environment variable grants it a
+/// budget, and is ignored otherwise: an S0 campaign driven through the
+/// daemon's lifecycle takes longer than the rest of the daemon's suite, so
+/// under the nextest regression policy it runs in its own budgeted job.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Scale {
@@ -33,11 +34,11 @@ pub enum Scale {
 }
 
 impl Scale {
-    pub fn budget_env(self) -> Option<&'static str> {
+    pub fn budget_env(self) -> &'static str {
         match self {
-            Self::S0 => None,
-            Self::S1 => Some("EIDNARA_EVAL_S1_BUDGET_MS"),
-            Self::S2 => Some("EIDNARA_EVAL_S2_BUDGET_MS"),
+            Self::S0 => "EIDNARA_EVAL_S0_BUDGET_MS",
+            Self::S1 => "EIDNARA_EVAL_S1_BUDGET_MS",
+            Self::S2 => "EIDNARA_EVAL_S2_BUDGET_MS",
         }
     }
 }
@@ -344,9 +345,17 @@ pub enum SkipReason {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "reason", rename_all = "snake_case", deny_unknown_fields)]
 pub enum UnsupportedReason {
-    SurfaceNotActivated { surface: EvaluatedSurface },
+    SurfaceNotActivated {
+        surface: EvaluatedSurface,
+    },
     NoMediationBoundary,
     PackingHasNoCaller,
+    /// The policy changes state this surface never reads: `pruned` reclaims
+    /// projection rows, and surface 1 reads history segments.
+    PolicyNotOnSurface {
+        policy: HistoryPolicy,
+        surface: EvaluatedSurface,
+    },
 }
 
 /// Why a sample was switched off for this run.
@@ -532,9 +541,13 @@ impl SampleLedger {
     }
 }
 
-/// One dimension of the resource envelope. `StoreBytes` counts a store with
-/// its WAL and shm sidecars; `TempRoots` and `Processes` count what the run
-/// holds at once, the rest what it has accumulated.
+/// One dimension of the resource envelope, read as a peak of what the run
+/// holds at once. `StoreBytes` is the largest one store (with its WAL and shm
+/// sidecars), since a root is vacated before the next is occupied;
+/// `CassetteBytes` is every cassette the run has written, since they are kept
+/// together until it ends; `ArtifactBytes` is the largest artifact written;
+/// `TempRoots` and `Processes` count what is held at once; `ElapsedMs` and
+/// `RetainedArtifacts` accumulate over the run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Resource {

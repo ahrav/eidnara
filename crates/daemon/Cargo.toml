@@ -16,7 +16,7 @@ required-features = ["direct-host-fixture"]
 
 [[example]]
 name = "eval_runner"
-path = "examples/eval_runner.rs"
+path = "examples/eval_runner/main.rs"
 required-features = ["eval-runner"]
 test = true
 
@@ -80,10 +80,13 @@ zeroize = { workspace = true }
 [features]
 direct-host-fixture = []
 # The evaluator's campaign driver; an example, so it reaches the eval-core
-# dev-dependency without adding a normal edge.
-eval-runner = []
+# dev-dependency without adding a normal edge. It drives the direct-host
+# fixture through the same seams the evaluator tests use, so it carries
+# `test-support`.
+eval-runner = ["test-support"]
 # Exposes the request dispatcher and kernel lifecycle probes to integration
-# tests in `tests/`; enabled only through the self dev-dependency below.
+# tests in `tests/`; enabled through the self dev-dependency below and by
+# `eval-runner`, never by a normal dependency.
 test-support = ["host-runtime/test-support"]
 
 [dev-dependencies]

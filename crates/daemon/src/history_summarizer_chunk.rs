@@ -1019,9 +1019,9 @@ pub fn presented_input(built: &mut HistorySummarizerBuiltChunk, token_budget: us
     truncated
 }
 
-/// Marker brackets: U+00AB and U+00BB, each a single vocabulary token, so a marker costs the alias plus two tokens. Native occurrences are escaped to [`ALIAS_ESCAPE`] before rendering.
-const ALIAS_OPEN: char = '\u{ab}';
-const ALIAS_CLOSE: char = '\u{bb}';
+/// Marker brackets: U+00AB and U+00BB, each a single vocabulary token, so a marker costs the alias plus two tokens. Native occurrences are escaped to `ALIAS_ESCAPE` before rendering.
+pub const ALIAS_OPEN: char = '\u{ab}';
+pub const ALIAS_CLOSE: char = '\u{bb}';
 /// What a native marker bracket becomes in presented text: a plain double quote, which cannot open a marker.
 const ALIAS_ESCAPE: &str = "\"";
 

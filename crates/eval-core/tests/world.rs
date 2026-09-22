@@ -90,8 +90,8 @@ fn generation_is_a_pure_function_of_seed_and_config() {
     );
     assert_eq!(base.tape.identity, tape_identity(SEED, &config()));
     assert_eq!(
-        GENERATOR_VERSION, "eval-generator/v2",
-        "a change to a draw domain or the schedule is a new generator"
+        GENERATOR_VERSION, "eval-generator/v3",
+        "a change to a draw domain, the schedule, or the text is a new generator"
     );
 
     // The generator constants are run-identity components: each one, the seed,
@@ -992,6 +992,7 @@ fn declared_events_equals_the_emitted_count_across_spec_shapes() {
                             epoch_ms: EPOCH_MS,
                             tick_ms: 250,
                             max_events_per_log: 64,
+                            planted: Vec::new(),
                         };
                         let world = generate_all(SEED, &config, Mode::Generate).unwrap();
                         assert_eq!(world.log.events.len() as u64, config.declared_events());

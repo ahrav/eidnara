@@ -27,7 +27,7 @@ sub-record.
   public so callers name a protocol string instead of restating the
   `<protocol>\n<canonical JSON>` framing.
 
-## Manifest `eval-manifest/v7`
+## Manifest `eval-manifest/v8`
 
 `parse_manifest` reads a JSON object, compares its key set against
 `REQUIRED_FIELDS`, checks the `schema` literal, and only then deserializes and
@@ -63,7 +63,7 @@ The 30 required fields, sorted:
 | `eval_run_id` | The run identity digest. |
 | `execution_mode` | `generate`, `replay_tape`, or `enumerate`: how the world was driven. |
 | `failure_class_table_digest` | The `eidnara-failure-class-table-v1` digest of the pinned truth table; refused unless it equals `FAILURE_CLASS_TABLE_DIGEST`. |
-| `ingestion` | `adapter-ingested, production caller: none` or `direct-database, non-aged`; the latter with a `replay` construction is refused (`DirectDatabaseAged`). |
+| `ingestion` | `adapter-ingested, production caller: none`, `direct-database, non-aged`, or `transform-route, turn by turn` (the harness's own path, one turn at a time through one store incarnation); `direct-database, non-aged` with a `replay` construction is refused (`DirectDatabaseAged`). |
 | `memory_reviewer_model_calls` | `cassette` (replayed through the keyed TLS peer) or `excluded` (the reviewer worker is not spawned); MemoryReviewer traffic bypasses `LlmExecutionBackend`, so silence is refused as a missing field. |
 | `reachability` | `default-production`, `explicit-config-only`, or `test-only`. |
 | `recency_baseline` | `{version, bounds}`: the recency-only baseline's version and its most-recent-k window per evaluated surface; `null` for a run that compiled no pair set. |
@@ -72,13 +72,13 @@ The 30 required fields, sorted:
 | `retry_lineage` | Prior `eval_run_id` values of retried attempts; each is lowercase hex SHA-256. |
 | `run_identity` | The nine-component identity tuple, including the build sub-record, the eligibility-spec digest, and the linearization rule version. |
 | `sample_epoch`, `sample_ids`, `sample_order` | Stable sample identity and execution order; `sample_order` must be a permutation of `sample_ids`. |
-| `schema` | `eval-manifest/v7`. |
+| `schema` | `eval-manifest/v8`. |
 | `status` | `completed`, `incomplete`, `refused`, or `blocked`. |
 | `tokenizer_profile` | Name, revision, digest. |
 
 `Manifest::digest` re-parses the manifest, applies the manifest's own residue
 rules (`start_ms`, `end_ms`, and `envelope_peaks` are `Drop`; everything else
-is `Keep`), and hashes with protocol `eval-manifest-digest/v7`. Version 2
+is `Keep`), and hashes with protocol `eval-manifest-digest/v8`. Version 2
 added `execution_mode` (the reducer differential runs under `enumerate`);
 version 3 added `ingestion`, because no ingestion entry point has a production
 caller and every manifest must say so; version 4 added `failure_class_table_digest`,
@@ -88,7 +88,10 @@ is either replayed or excluded, never silently live;
 version 6 added `analysis_family_digest`, so a paired report can prove it was
 read under the family frozen before its first outcome;
 version 7 added `recency_baseline`, so the recency-only control's version and
-per-surface window are on record beside the pairs it was judged on. The digest is a function
+per-surface window are on record beside the pairs it was judged on;
+version 8 added the `transform-route, turn by turn` ingestion, so an arm
+lived through the daemon's own transform route in one store incarnation can
+say so and call itself replay-built. The digest is a function
 of every kept field, not of the run identity alone: two processes that record the same
 identity and the same kept contents produce the same digest
 (`two_process_same_identity_yields_equal_manifest_and_trace_digests`), and two
@@ -197,8 +200,18 @@ are constants the shell copies into the run identity's `generator_version`,
 changes whenever a draw domain or the schedule changes, because the same seed
 and config then produce a different world: `eval-generator/v1` drew time gaps
 from `{0, 1, 2, 5}` ticks; `eval-generator/v2` draws from `{1, 2, 5}`, so a
-correction always advances its target's revision. A tape recorded under v1
-refuses under v2 as `TapeMismatch`.
+correction always advances its target's revision; `eval-generator/v3` writes
+each text as its drawn word, a word only that slot has, and the world's own
+word (`cursor for slot47 in world5eedb00000000002`), so a surface that
+matches on words can find one message by its own text and a message carried
+into another world does not read as one of that world's. `WorldConfig::planted`
+lists injection canaries appended to the text a carrier already emits (a
+message for `summary`, a tool span's output for `tool_output`, a commit's
+message for `commit_message`); planting adds no event, changes no other
+text, is part of the world's identity, and is refused for a carrier the
+generated world has no payload for or a slot without that payload
+(`InvalidField("planted")`). A tape recorded under one version refuses under
+another as `TapeMismatch`.
 
 ### Keyed draws
 
@@ -479,7 +492,7 @@ times:
   target and leaves both corrections required. No Phase 1 scenario compares
   `Truth` with store verdicts, so nothing observes that difference yet;
   closing it is a reducer version change, not a rendering rule.
-  The generator's time gaps are strictly positive (`eval-generator/v2`), each
+  The generator's time gaps are strictly positive (since `eval-generator/v2`), each
   slot emits at most one correction and one tool span, and its correction
   targets stay in the correcting entity, so generated worlds never meet these
   refusals.
@@ -814,9 +827,10 @@ stands for is missing from the cassette just as a refused entry is.
 
 ### Rust oracle and the TypeScript mock
 
-`crates/daemon/examples/eval_runner.rs` (feature `eval-runner`, an example so
-it reaches the `eval-core` dev-dependency without a normal edge) serves
-`cassette-oracle` over line-delimited JSON: `open {mode, namespace, path}`,
+`crates/daemon/examples/eval_runner/main.rs` (feature `eval-runner`, which
+carries `test-support`; an example so it reaches the `eval-core`
+dev-dependency without a normal edge) serves `cassette-oracle` over
+line-delimited JSON: `open {mode, namespace, path}`,
 `lookup {namespace, request}`, `record {namespace, request, response}`, and
 `close`. Requests arrive as `{path, headers, body_text}`; Rust parses the body,
 so a malformed body is `MalformedBody` rather than a lookup of `{}`. Every
@@ -1189,14 +1203,15 @@ carries two more arms, named by `ArmKind`:
 - `fresh`: the natural-fresh control, the primary one. `PairSetInput` takes a
   short history authored apart from the aged one (the same generator under
   another seed and configuration); `EventLog::on_distinct_entities` moves it
-  onto entities tagged `~natural-fresh`, re-deriving every ID and following
-  every payload reference and causal edge (a payload reference or a causal
-  edge naming an event the history does not hold is `DanglingReference` or
-  `DanglingEdge`, never left pointing into the aged world), and the compiler
-  splices the truth's minimal closure into it. The set's `fresh_query` is the
-  shared query with the control's entities added to its scope, so the control
-  competes on the fresh arm; a control with no eligible unit at the cut is
-  `NaturalFreshInert`.
+  onto entities tagged `~natural-fresh`, re-deriving every ID, suffixing the
+  message and call IDs a rendered message carries into the harness, and
+  following every payload reference and causal edge (a payload reference or a
+  causal edge naming an event the history does not hold is `DanglingReference`
+  or `DanglingEdge`, never left pointing into the aged world), and the compiler
+  splices the truth's minimal closure into it, so the two histories can share
+  one OpenCode session. The set's `fresh_query` is the shared query with the
+  control's entities added to its scope, so the control competes on the fresh
+  arm; a control with no eligible unit at the cut is `NaturalFreshInert`.
 - `fresh_minimal`: the diagnostic ceiling. The evidence, every unit it
   descends from or refers to, and every correction or retraction aimed at any
   of those, closed under the same rule, so it judges shared units as the aged
@@ -1384,10 +1399,10 @@ generator drew says nothing about real repositories.
 `campaign.rs` holds what a campaign pins before its first sample and how it
 accounts for every sample afterwards.
 
-**Run profile.** `RunProfile` (`eval-run-profile/v1`) names a `scale` (`s0`
-runs in the default test shards; `s1` and `s2` run only when
-`EIDNARA_EVAL_S1_BUDGET_MS` or `EIDNARA_EVAL_S2_BUDGET_MS` grants a budget and
-are ignored otherwise), the finite `worlds`, `tasks_per_world`, and
+**Run profile.** `RunProfile` (`eval-run-profile/v1`) names a `scale` (`s0`,
+`s1`, and `s2`, each run only when `EIDNARA_EVAL_S0_BUDGET_MS`,
+`EIDNARA_EVAL_S1_BUDGET_MS`, or `EIDNARA_EVAL_S2_BUDGET_MS` grants a budget
+and ignored otherwise), the finite `worlds`, `tasks_per_world`, and
 `max_events_per_log`, the six per-task `TaskBudgets` (`max_model_calls`,
 `max_tool_calls`, `max_tokens_in`, `max_tokens_out`, `hard_deadline_ms`,
 `max_no_progress_iterations`), the resource `envelope` (`ResourceLimits`), three
@@ -1419,7 +1434,7 @@ budget.
 `stop_condition {condition}`, `envelope_exceeded {resource, bound,
 observed}`, `cassette_miss`, `redaction_refused`), `unsupported`
 (`surface_not_activated {surface}`, `no_mediation_boundary`,
-`packing_has_no_caller`), or `disabled` (`scale_not_budgeted {scale}`,
+`packing_has_no_caller`, `policy_not_on_surface {policy, surface}`), or `disabled` (`scale_not_budgeted {scale}`,
 `feature_off`). The reasons are closed vocabularies; a reason outside them
 does not parse, and an extra key a tagged unit variant would swallow is
 caught by the report parser's round trip. A `SampleLedger {epoch, order,
@@ -1438,12 +1453,16 @@ bound, so `envelope_peaks` shows the reading that crossed the bound as
 `EnvelopeExceeded {resource, bound, observed}` and a breach stays refused
 however later readings fall and whichever resource they read; `check` names
 the first resource over its bound in declared order, and `observe` refuses
-with the same. `Resource` is `elapsed_ms`, `store_bytes` (a store with its WAL and
-shm sidecars), `cassette_bytes`, `artifact_bytes`, `temp_roots`,
-`retained_artifacts`, or `processes`, one per `ResourceLimits` field.
-Publication (write-then-rename into roots, stores, and cassette namespaces
-disjoint per campaign, on OS-allocated ports) is the runner's and is not
-written yet.
+with the same. `Resource` is `elapsed_ms`, `store_bytes` (the largest one
+store with its WAL and shm sidecars), `cassette_bytes`, `artifact_bytes`,
+`temp_roots`, `retained_artifacts`, or `processes`, one per `ResourceLimits`
+field. Each byte resource is the largest footprint held at once: one store,
+since a root is vacated before the next is occupied; every cassette the run
+has written, since they are kept together until it ends; the largest artifact
+written. Publication is the runner's: the campaign shell (below) publishes the
+report and manifest write-then-rename into the directory it is given, lives
+every arm on a root of its own on OS-allocated ports, and records each
+cassette under the campaign namespace.
 
 ## Suite B report
 
@@ -1533,8 +1552,11 @@ carries rather than read from what it says:
   (`SkipDisagreesWithProfile`); a sample unsupported `surface_not_activated`
   or disabled `scale_not_budgeted` names the report's surface or the profile's
   scale; a `default-production` surface is never unactivated, only the
-  packing surface lacks a caller, and `s0`, which runs in the default shards,
-  is never unbudgeted (`SampleAxisDisagrees`); a sample skipped `envelope_exceeded` must name
+  packing surface lacks a caller, and a policy not on this surface is the
+  sample's own policy on the report's surface, never the raw arm, and never
+  the structured arm on surface 1, which reads its segments
+  (`SampleAxisDisagrees`); a sample skipped
+  `envelope_exceeded` must name
   this run's bound for that resource and a reading the peaks reached
   (`SampleEnvelopeDisagrees`); every injection score names a case that is not
   blank, no case is scored twice, and each axis carries only what
@@ -1594,6 +1616,251 @@ ceiling; and `arm_miss_asymmetry` against the family's bound. Each is a
 `GateVerdict {statistic, bound, passed}` with `passed` when the statistic is
 at most the bound; a ledger with no attempted sample has no gates
 (`NoAttemptedSamples`), since every rate would be zero with nothing behind it.
+
+## Campaign shell
+
+The campaign shell is `crates/daemon/examples/eval_runner/campaign.rs`: it
+runs one Suite B campaign on surface 1 through the direct-host fixture,
+composing the seams above and nothing new: the paired-world compiler, the
+recency baseline, the surface-1 pass and stage ledger
+(`tests/support/eval_surface.rs`, the helpers the surface-ledger suite uses,
+which the example includes by path beside `tests/support/direct_host.rs`),
+the paired statistics, the run profile, the sample ledger, the envelope, and
+the report serializer. Two callers drive it. The `eval_runner` example's
+`campaign` subcommand takes every input on the command line, all required
+(`--scale`, `--aged-messages`, `--elapsed-bound-ms`, `--approved-by`,
+`--approval-run-id`, `--publish`), runs the campaign, publishes the report
+and manifest into the publish directory, and answers with one JSON line
+naming them with their digests, the run identity, the sample counts, and the
+aged life's summarizer facts; a missing flag is refused before anything runs.
+`crates/daemon/tests/eval_campaign.rs` includes the same module by path,
+drives it in-process, and asserts what a run found; it also runs the built
+example on S0 and checks its published manifest and report parse and its
+summary agrees with them.
+
+The campaign refuses an unapproved profile, an aged history no longer than
+the window, a publish directory it cannot create, and a staged report or
+manifest already sitting in the publish directory, all before anything runs
+(`RunError`). Under an approved profile it generates a one-session aged
+history (130 messages at S0) and
+a twelve-message natural-fresh history under another seed, compiles three
+tasks (an early message as the falsifier, the last message as the positive
+control, a message fifty from the end as the plain task) into a pair set at
+surface 1's pinned window of 100, and checks the baseline contrast first. Each
+arm of each pair becomes one OpenCode session: every rendered message under
+the task's session id in valid-time order (the natural-fresh messages carry
+their suffixed message ids, so nothing collides). Nothing is seeded. The arm
+is lived through one fixture process on a root of its own, one harness turn
+at a time (`lifecycle`): turn `n` carries the first `n` messages as the
+harness would send them, with the context pressure the harness's model
+reports for that turn (`TOKENS_PER_TURN` of a `CONTEXT_LIMIT_TOKENS` limit,
+capped below it), and every turn is mutate, then drain to quiescence: the
+fixture's `history-summarizer-live` control answers whether a firing the
+daemon spawned behind the pass is still running, and the next turn waits for
+it. The store moves through every turn in one incarnation. The task's turn
+follows as one more: its prompt is the evidence message's own words, the
+fixture's backend counters are read to show no model call started, and the
+host's own recorded selection is read back: the task passes when its
+evidence is among the selected segments and the served fragment carries the
+message's decision (its words before the world's own word, `carries`, whole
+words), and an attempt past a task budget is censored with that budget's
+reason. The store is opened after the fixture exits and its history segments
+are read, so a selected sequence maps to the messages the daemon's own
+segment covers; a truth no segment holds enters the ledger as a unit the
+store never had, so the window is where the surface is seen to lack it. The
+pass is mapped onto the thirteen stages, so a loss names its stage.
+
+What S0 shows on the real default surface: surface 1 serves history
+segments and nothing else, and only the summarizer writes them. Under raw
+history no arm has a unit for any truth, so every task is lost at the
+candidate window on both arms; the paired analysis over the raw arms is
+concordant (`b = 0`), the quality-loss and harm gates see no loss, and the
+floor, which asks the control to deliver at all, fails; the interval is
+withheld below 300 items. The eighteen samples are accounted for in a
+`SampleLedger` (twelve attempted), the run gates are computed from them, the
+established claims follow from the verdicts and outcomes across both
+policies, and one `SuiteBReport` is serialized, written to a staging path,
+synced, renamed into place in a root of its own with the directory synced,
+read back, and parsed equal. The envelope is observed from the start as live
+counts: elapsed time, each arm's root with its store, WAL, and shm, the one
+process, the three roots held at a time (the arm's state root, the config
+tier its daemon reads, and the cassette directory), the report's bytes, and
+the one retained artifact. The report carries its own size as a peak, so it
+is serialized until the bytes written carry the peak they are; every reading
+is charged and the envelope refuses on any of them, and the published peak is
+the file's size. The manifest is built before either file is linked into
+place, a manifest the directory then refuses takes the report back out with
+it, and a prior run's report or manifest in the directory is refused before
+anything runs, so one directory holds one generation or none (a process killed
+between the two links leaves the report alone, and the next run into that
+directory is refused rather than mixed); the
+manifest's bytes and the clock after the report is serialized are not charged.
+Surface 1's task turn makes no model call of its own, which the backend
+counters show; of the six task budgets only the deadline can censor here,
+since the task spends no model call, tool call, or token on that turn, and the
+deadline times the task turn alone, from its request to its response: the
+life before it builds the treatment and is charged to the envelope. A
+summarizer firing that lands on the task turn under the structured policy is
+the treatment's cost, not the task's: it is replayed from the arm's cassette
+and accounted in the arm's firings and refusal rate.
+
+Every test that runs a campaign is `#[ignore]`d and runs only when its
+scale's environment variable grants a budget, which becomes the profile's
+elapsed bound so the envelope refuses the first reading past it; without one
+it records the `disabled {scale_not_budgeted}` terminal in a sample ledger
+and runs nothing, and a budget that is set but not a number is refused (the
+argument, rate, and refusal tests run in the shards). This is the parent's
+nextest regression policy applied: the daemon's suite runs in about 28
+seconds without the campaign binary and about 79 with it, because an S0
+campaign drives sixteen fixture lives, seven of them over the 130-turn aged
+history and nine over the twelve-turn control, so the
+S0 campaign runs in its own CI job (`eval-campaign`, under
+`EIDNARA_EVAL_S0_BUDGET_MS`) rather than in the default shards, and S1 runs
+where a developer grants `EIDNARA_EVAL_S1_BUDGET_MS`. What S1 found: over 400 turns the
+daemon's summarizer fires more often, and one of its prompts draws a
+calibration example from the daemon's own seed corpus
+(`crates/daemon/testdata/reference-seeds.json`, the Stripe idempotency
+example with `key = event.id`) that the secret scanner reads as a key, so the
+cassette refuses the frame as `RedactionRefused(Request, SecretDetected)`,
+the firing fails as a permanent producer error, and the recording fixture
+writes no cassette and says so at exit (after cleaning up its socket and
+publication). The aged structured arm then has nothing to replay: its three
+samples end `skipped {redaction_refused}`, the aged arm's refusal rate on the
+report is the cassette's refusals over the summarizer's firings (the
+recording answers each firing through the fixture's backend and then scans
+the exchange, so a refused frame is a firing the backend answered and the
+cassette would not keep; the fixture counts those refusals), and the refusal
+gate fails at the profile's ceiling of zero. This is
+the scanner's typed refusal doing its job on a production prompt corpus; a
+summarizer frame that carries that example cannot be recorded until the
+corpus or the scanner changes, and the campaign reports it rather than
+hiding it.
+
+**Structured arm.** Each pair also runs both arms under the daemon's own
+HistorySummarizer. The arm's daemon is configured to summarize
+(`/history_summarizer/model` and `/history_summarizer/context_limit_tokens`
+in the user config tier the fixture is started under, `Launch::config_home`;
+without that tier the summarizer has no model chain and never fires, so the
+structured policy is explicit-config-only evidence about a default-production
+surface, and the raw arm is that surface as shipped), and
+the same life is lived: the trigger fires by its own rules on the pressure
+the harness reports (at S0 eight times over the aged life: once on projected
+headroom, then in the force band, the last inline in the emergency band on
+the task's own turn, after which the pass reruns and the tail's hint decision
+from the first run stands), the producer, validator,
+and publication run inside the fixture process, and the fixture's model
+backend stands in for the summarizer provider: it answers a prompt carrying
+`<new_messages>` in the summarizer's `<output>` document, one
+`history_segment` per run of five presented lines whose text is the lines'
+own words. Each world's life is first recorded once (`record`): the fixture's
+backend is written into a cassette of its own under the campaign namespace
+at shutdown, and the backend counters must equal the frames recorded. Every
+arm run then replays that cassette strictly in a fixture with no controlled
+backend, and the segments its daemon published must equal the recording's,
+whole, less the clock they were stamped with; a replay miss would surface as
+a recorded failure and no segments, never as a served answer. The twelve-turn
+control never reaches the pressure the summarizer fires at, so its structured
+arm is as empty as its raw one and its cassette holds no frame. On the
+structured aged arm at S0 the daemon folded the older history five messages
+to a segment (twenty-two segments) and left the newest in the protected tail: the
+plain task's message sits at the head of its segment and is served whole;
+the falsifier is folded third into the first segment, its segment is
+selected, and the served fragment is cut at the cap before its words, so it
+reaches render with the evidence absent; the positive control is in the
+protected tail and has no unit at all. The three policies are recorded as
+`GovernanceArms` over the pair set. The report carries the five injection
+cases planned for the task set (`plan_injection_cases` over the three task
+ids, which are fixed before the world exists), each scored as this run
+observed it. The aged world is one session of 130 messages with a tool span
+on every tenth message (the surface helpers' `ingress` sends a completed
+tool part as its call and its result, as the plugin does) and a repository
+of five commits the messages cite. Three carriers are planted into it
+(`WorldConfig::planted`: the generator appends a canary to the text a
+carrier already emits, a message's text for `summary`, a tool span's output
+for `tool_output`, a commit's message for `commit_message`, and refuses the
+issue and memory carriers, which no generated payload carries): the summary
+carrier's canary on slot 60, deep enough that the daemon's own summarizer
+folds it at every scale, the tool-output carrier's on the tool span of slot
+59, and the commit carrier's on the repository's third commit. A case is
+`ingested: yes` when a recorded segment carries its canary and `retrieved`
+by whether the host selected such a segment for any task turn on the
+structured aged arm, `not_reached` for retrieval when nothing was ingested or
+no structured arm ran. At S0 the summary case is `ingested: yes`,
+`retrieved: no` (no task asks in its words); the tool-output case is
+`ingested: no`, because the daemon presents a message's text to its
+summarizer and only the names of its tool calls, never a tool result's
+output, so a canary in a tool output never reaches a segment; the commit
+case is `not_reached`, since surface 1 reads no commit and the shell
+presents none to the daemon; the issue and memory cases are planted nowhere
+and read `not_reached`. Packing, exposure, and write-back are `not_reached`
+and obedience `not_measurable` on surface 1, which has no packing, no model
+output, and no mediation boundary. Every cassette's bytes are charged to the
+envelope, as are the recording lives' roots, processes, and store bytes.
+
+Beside the report the campaign publishes a manifest with the same
+write-then-rename, parses it back, and checks its digest. Its identity is
+this checkout and toolchain (the commit, whether the tree is dirty, the
+lockfile digest, the rustc version, one digest over the fixture binary and the
+executable driving it), its config is
+the profile, its scenario the surface and tasks, its samples the pairs in
+the order they ran, its result digest the completed pair table's under
+`eval-pair-table/v1` (the peaks and the clock are measurements and stay out
+of the manifest digest, so two runs of one identity agree on it), its witness
+digest the pair set, and it carries the frozen family's digest and the recency
+baseline's version and window; `analyze` reads the table under this manifest,
+so the report's analysis is reproducible from the two files. The family the
+campaign freezes registers its two generated histories as task families with
+a declared pilot (one world each, no correlation at either level) whose
+required N is the profile's pairs. Its `construction` is `replay` and its
+`ingestion` is `transform-route, turn by turn`: every arm was lived through
+the daemon's own transform route in one store incarnation; the same manifest
+relabelled `direct-database, non-aged` is refused as `DirectDatabaseAged`.
+Every arm of the pruned policy is declared in the ledger and ends
+`unsupported {policy_not_on_surface}`, because `message_cleanup` reclaims
+projection rows and surface 1 reads history segments; eighteen samples are
+accounted for and twelve attempted, in the order the arms ran with the
+never-attempted pruned arms declared last. The paired analysis in the report
+is over the raw arms; the structured outcomes are in the ledger and the
+governance record.
+
+**Fixture cassette.** The direct-host fixture's model backend can be
+recorded or replayed: `--cassette-record <file> --cassette-namespace <ns>`
+wraps its controlled backend in the Rust cassette and writes the file at
+shutdown (write-then-rename); `--cassette-replay <file>
+--cassette-namespace <ns>` replaces the backend with the cassette replayed
+strictly, so a request the recording never saw is a typed `cassette_miss`
+and every later request is refused, while the controlled backend's counters
+stay at zero. The fixture includes `tests/support/eval_cassette.rs` by path,
+so it and the tests read one schema. `crates/daemon/tests/eval_fixture_cassette.rs`
+records one exchange through the real ModelExecution route in one fixture
+process and replays it in a second, and checks the miss, the latch, and the
+namespace refusal; `the_fixture_answers_a_summarizer_prompt_in_the_validators_document`
+sends a summarizer-shaped prompt through the same route and the daemon's own
+validator accepts the answer. This is the seam the campaign's structured arm
+runs the summarizer's own firing under.
+
+What the in-host summarizer path needs, as established: without
+context-pressure numbers the boundary protects the whole history and nothing
+is eligible; the trigger fires `force_band` from 85 percent of the limit
+with the firing spawned behind the pass, and in the emergency band from 95
+percent inline, before the pass settles. The session's meta row is written
+whole on every commit and is bounded at 512 KiB of durable text; at 1,000
+short messages the meta is about 475 KiB before a firing and the fired
+state's selected identities push it past the bound, so the firing fails with
+`InputLimit` and publishes nothing (a 1,600-message session is refused as
+durable text at the transform itself). S0 and S1 sit well under that.
+
+What the campaign found about the pair compiler on surface 1: its recency
+window counts messages, but surface 1's unit is the segment, so at S0 the
+twenty-two segments all sit inside a window of 100 and no truth is lost to
+recency there; a recency loss on surface 1 needs more than 500 messages,
+which the meta bound puts near the limit of what one firing can persist.
+The falsification pair's structural verdict is still the compiler's.
+
+Not composed yet: the write-then-rename publisher is test support
+(`crates/daemon/tests/support/publish.rs`, included by path from the campaign
+shell and from the fixture for its recorded cassette), since no shipped
+publisher exists.
 
 ## Coverage markers
 
