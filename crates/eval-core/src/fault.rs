@@ -522,15 +522,18 @@ impl Lane {
 }
 
 /// Progress of one lane driven in its own unit up to its bound: the step at
-/// which the predicate first held, whether it still held at the bound, and the
-/// block that stopped it if it never did.
+/// which the predicate first held, the first step after that at which it did
+/// not, whether it held at the bound, how much fresh work the window fed the
+/// lane, and the block that stopped it if it never held.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LaneProgress {
     pub bound: u64,
     pub steps: u64,
     pub met_at: Option<u64>,
+    pub stalled_at: Option<u64>,
     pub holds_at_bound: bool,
+    pub fresh_commits: u64,
     pub blocked: Option<String>,
 }
 
@@ -608,7 +611,8 @@ impl LivenessReport {
             }
             let met = progress
                 .met_at
-                .is_some_and(|k| k <= progress.bound && progress.holds_at_bound);
+                .is_some_and(|k| k <= progress.bound && progress.holds_at_bound)
+                && progress.stalled_at.is_none();
             if !met || progress.steps < progress.bound {
                 return Err(LivenessRefused::LivenessUnmet {
                     lane: *lane,

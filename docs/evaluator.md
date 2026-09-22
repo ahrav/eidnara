@@ -1723,14 +1723,16 @@ report lists them apart from safety failures.
 when the bound was reached, and one `LaneProgress` per driven lane in that
 lane's own unit (`catch_up_episodes`, `embedding_passes`,
 `materialization_episodes`, `reviewer_coordinator_passes`): the bound, the
-steps driven, the step the predicate first held, whether it still held at the
-bound, and the block that stopped it. `verdict(bounds)` takes the approved
+steps driven, the step the predicate first held, the first step after that at
+which it did not, whether it held at the bound, the fresh commits the window
+fed the lane, and the block that stopped it. `verdict(bounds)` takes the approved
 profile's `LivenessBounds` and refuses `FaultHealed` for an outside-core
 episode not armed at the bound, `ArmedInsideCore`, `LaneNotDriven` for a core
 lane with no progress record, `BoundMismatch` when a lane's declared bound is
 not the profile's (a bound fitted to the observed progress is not a bound),
 and `LivenessUnmet { lane, progress_at_bound, blocked }` when the predicate
-never held, held only transiently, or the lane stopped before the bound.
+never held, held only transiently, stalled after it first held, or the lane
+stopped before the bound.
 
 `FaultReport` (`eval-suite-c-fault-report/v1`) is what one fault campaign
 publishes: identity, profile digest, claim boundary, the episodes, barrier

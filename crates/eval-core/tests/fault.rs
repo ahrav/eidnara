@@ -92,7 +92,9 @@ fn lane(bound: u64, met_at: Option<u64>, holds: bool) -> LaneProgress {
         bound,
         steps: bound,
         met_at,
+        stalled_at: None,
         holds_at_bound: holds,
+        fresh_commits: 4,
         blocked: None,
     }
 }
@@ -504,6 +506,22 @@ fn liveness_is_unmet_at_the_bound_or_when_a_fault_healed() {
             ..
         })
     ));
+    let mut stalled = ok.clone();
+    stalled
+        .lanes
+        .get_mut(&Lane::CatchUpEpisodes)
+        .unwrap()
+        .stalled_at = Some(40);
+    assert!(
+        matches!(
+            stalled.verdict(&bounds()),
+            Err(LivenessRefused::LivenessUnmet {
+                lane: Lane::CatchUpEpisodes,
+                ..
+            })
+        ),
+        "a predicate that held, failed, and held again at the bound is not sustained progress"
+    );
     let mut short = ok.clone();
     short.lanes.get_mut(&Lane::CatchUpEpisodes).unwrap().steps = 10;
     assert!(
