@@ -26,7 +26,7 @@ use crate::pairs::{
 use crate::statistics::{
     AnalysisFamily, BlockedReason, ClusteringUnit, FrozenFamily, GateVerdict, Gates,
     IntervalOutcome, IntervalWithheld, PairedReport, Ratio, StatisticsError, StoppingRule,
-    arm_miss_asymmetry, deflate,
+    arm_miss_asymmetry, balanced_mean_cluster, deflate,
 };
 
 pub const SUITE_B_REPORT_SCHEMA: &str = "eval-suite-b-report/v1";
@@ -574,7 +574,7 @@ impl SuiteBReport {
                         ClusteringUnit::WorldSeed => (pilot.icc_world_seed, pilot.icc_family),
                     };
                     let clusters = whole(*n_clusters)?;
-                    let balanced = n.checked_div(clusters).map_err(statistics)?;
+                    let balanced = balanced_mean_cluster(pairs, *n_clusters).map_err(statistics)?;
                     let largest = n
                         .checked_sub(clusters)
                         .map_err(statistics)?

@@ -1503,7 +1503,8 @@ carries rather than read from what it says:
   the plan's affordable worlds (under the family unit also its families,
   never more than its pairs), and its `effective_n` is below the floor and
   within what `deflate` can produce over exactly `n_clusters` at the selected
-  unit: at most the pair count deflated as balanced clusters, at least the
+  unit: at most the pair count deflated as clusters as even as whole pairs
+  allow, at least the
   smaller of the pair count deflated as one cluster holding all but
   `n_clusters - 1` singletons and, at the other level's ICC, as one cluster
   holding every pair

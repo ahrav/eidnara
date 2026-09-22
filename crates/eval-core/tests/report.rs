@@ -1114,6 +1114,26 @@ fn a_report_refuses_what_its_own_evidence_refutes() {
             ReportError::SuppressionNotDerived,
         ),
         (
+            "an underpowered-table suppression deflated as if clusters split pairs",
+            Box::new(|r| {
+                // Seven world clusters over 300 pairs are six of 43 and one of
+                // 42, whose mean 2143/50 deflates to 150000/2593; a fractional
+                // 300/7 per cluster would deflate to 7000/121, which no table
+                // reaches.
+                r.outcome = ReportOutcome::Suppressed {
+                    by: Suppression::Analysis {
+                        reason: BlockedReason::TableUnderpowered {
+                            effective_n: ratio(7000, 121),
+                            n_clusters: 7,
+                            required_n_for_margin: 300,
+                        },
+                    },
+                };
+                r.claims.established.clear();
+            }),
+            ReportError::SuppressionNotDerived,
+        ),
+        (
             "an underpowered-table suppression under a pilot that already blocks",
             Box::new(|r| {
                 underpowered_pilot(&mut r.family.icc_pilot);

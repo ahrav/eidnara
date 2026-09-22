@@ -508,24 +508,26 @@ fn attainable_effective_n(
     families: u32,
     pilot: &IccPilot,
 ) -> Result<Ratio, StatisticsError> {
-    let (pairs, worlds, families) = (i128::from(pairs), i128::from(worlds), i128::from(families));
-    let n = Ratio::try_new(pairs, 1)?;
-    // `count` clusters over `pairs`: `more` of `each + 1`, the rest of `each`.
-    let balanced_squares = |count: i128| {
-        let (each, more) = (pairs / count, pairs % count);
-        more * (each + 1).pow(2) + (count - more) * each.pow(2)
-    };
-    let at_family = deflate(
-        n,
-        Ratio::try_new(balanced_squares(families), pairs)?,
-        pilot.icc_family,
-    )?;
+    let n = Ratio::try_new(i128::from(pairs), 1)?;
+    let at_family = deflate(n, balanced_mean_cluster(pairs, families)?, pilot.icc_family)?;
     let at_world = deflate(
         n,
-        Ratio::try_new(balanced_squares(worlds), pairs)?,
+        balanced_mean_cluster(pairs, worlds)?,
         pilot.icc_world_seed,
     )?;
     Ok(at_family.min(at_world))
+}
+
+/// The size-weighted mean cluster `sum(m_i^2) / n` of `count` clusters over
+/// `pairs` as evenly as whole pairs allow: `pairs % count` of them one larger
+/// than the rest. No partition into `count` clusters has a smaller mean.
+pub(crate) fn balanced_mean_cluster(pairs: u32, count: u32) -> Result<Ratio, StatisticsError> {
+    let (pairs, count) = (i128::from(pairs), i128::from(count));
+    let (each, more) = (pairs / count, pairs % count);
+    Ratio::try_new(
+        more * (each + 1).pow(2) + (count - more) * each.pow(2),
+        pairs,
+    )
 }
 
 /// `items` deflated by the design effect `1 + (m - 1) ICC` of clusters of mean
