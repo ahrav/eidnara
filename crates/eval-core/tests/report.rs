@@ -214,7 +214,7 @@ fn profile() -> RunProfile {
         name: "s0-default-surface".to_string(),
         scale: Scale::S0,
         worlds: 300,
-        tasks_per_world: 1,
+        tasks_per_world: 300,
         max_events_per_log: 64,
         budgets: TaskBudgets {
             max_model_calls: 12,
@@ -1189,6 +1189,36 @@ fn a_report_refuses_what_its_own_evidence_refutes() {
                 r.claims.established.clear();
             }),
             ReportError::SuppressionNotDerived,
+        ),
+        (
+            "an underpowered-table suppression over fewer worlds than the tasks per world allow",
+            Box::new(|r| {
+                // One task per world: 300 pairs span 300 worlds, not one.
+                r.profile.tasks_per_world = 1;
+                r.profile_digest = r.profile.digest().unwrap();
+                r.outcome = ReportOutcome::Suppressed {
+                    by: Suppression::Analysis {
+                        reason: BlockedReason::TableUnderpowered {
+                            effective_n: ratio(3000, 309),
+                            n_clusters: 1,
+                            required_n_for_margin: 300,
+                        },
+                    },
+                };
+                r.claims.established.clear();
+            }),
+            ReportError::SuppressionNotDerived,
+        ),
+        (
+            "an interval below zero where no pair favours the aged arm",
+            Box::new(|r| {
+                // `c == 0`: no replicate's quality loss is negative.
+                let IntervalOutcome::Computed(interval) = &mut gated(r).analysis.interval else {
+                    panic!("computed");
+                };
+                interval.lower = ratio(-1, 1);
+            }),
+            ReportError::IntervalNotDerived { field: "bounds" },
         ),
         (
             "an underpowered-table suppression under a pilot that already blocks",

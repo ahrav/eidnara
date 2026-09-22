@@ -572,38 +572,49 @@ impl SuiteBReport {
                     // every affordable world), and each level is taken at its
                     // own extreme, so the range holds every realizable table.
                     let n = whole(pairs)?;
-                    let (icc_unit, icc_other, other_fewest, other_most) =
+                    // A world holds at most the profile's tasks; a family holds
+                    // any number of worlds.
+                    let per_world = self.profile.tasks_per_world.max(1);
+                    let (icc_unit, icc_other, unit_cap, other_fewest, other_most, other_cap) =
                         match pilot.clustering_unit {
                             ClusteringUnit::Family => (
                                 pilot.icc_family,
                                 pilot.icc_world_seed,
-                                *n_clusters,
+                                pairs,
+                                (*n_clusters).max(self.min_worlds()),
                                 self.max_worlds(),
+                                per_world,
                             ),
                             ClusteringUnit::WorldSeed => (
                                 pilot.icc_world_seed,
                                 pilot.icc_family,
+                                per_world,
                                 1,
                                 (*n_clusters).min(pilot.n_families),
+                                pairs,
                             ),
                         };
-                    let mean = |count: u32, even: bool| {
-                        if even {
-                            balanced_mean_cluster(pairs, count)
-                        } else {
-                            lopsided_mean_cluster(pairs, count)
-                        }
-                        .map_err(statistics)
+                    if pilot.clustering_unit == ClusteringUnit::WorldSeed
+                        && *n_clusters < self.min_worlds()
+                    {
+                        return Err(ReportError::SuppressionNotDerived);
+                    }
+                    let lopsided = |count: u32, cap: u32| {
+                        lopsided_mean_cluster(pairs, count, cap)
+                            .map_err(statistics)?
+                            .ok_or(ReportError::SuppressionNotDerived)
                     };
-                    let least = deflate(n, mean(*n_clusters, false)?, icc_unit)
+                    let balanced =
+                        |count: u32| balanced_mean_cluster(pairs, count).map_err(statistics);
+                    let least = deflate(n, lopsided(*n_clusters, unit_cap)?, icc_unit)
                         .map_err(statistics)?
                         .min(
-                            deflate(n, mean(other_fewest, false)?, icc_other)
+                            deflate(n, lopsided(other_fewest, other_cap)?, icc_other)
                                 .map_err(statistics)?,
                         );
-                    let most = deflate(n, mean(*n_clusters, true)?, icc_unit)
+                    let most = deflate(n, balanced(*n_clusters)?, icc_unit)
                         .map_err(statistics)?
-                        .min(deflate(n, mean(other_most, true)?, icc_other).map_err(statistics)?);
+                        .min(deflate(n, balanced(other_most)?, icc_other).map_err(statistics)?);
                     if *effective_n < least || *effective_n > most {
                         return Err(ReportError::SuppressionNotDerived);
                     }
@@ -652,6 +663,13 @@ impl SuiteBReport {
             .max_affordable_worlds
             .min(self.profile.worlds)
             .min(pairs)
+    }
+
+    /// The fewest worlds a table under this plan spans: a world runs at most
+    /// the profile's tasks, one pair each.
+    fn min_worlds(&self) -> u32 {
+        let StoppingRule::FixedN { pairs } = self.family.stopping_rule;
+        pairs.div_ceil(self.profile.tasks_per_world.max(1))
     }
 
     /// The most clusters a table under this plan spans at the pilot's unit:
@@ -708,7 +726,11 @@ impl SuiteBReport {
                 if interval.replicates != self.family.bootstrap_replicates {
                     return disagrees("replicates");
                 }
-                if !(2..=self.max_clusters().min(n_items)).contains(&interval.n_clusters) {
+                let fewest = match self.family.icc_pilot.clustering_unit {
+                    ClusteringUnit::WorldSeed => self.min_worlds().max(2),
+                    ClusteringUnit::Family => 2,
+                };
+                if !(fewest..=self.max_clusters().min(n_items)).contains(&interval.n_clusters) {
                     return disagrees("n_clusters");
                 }
                 // Every replicate is a `quality_loss`, `(b - c) / n`, in
@@ -716,12 +738,21 @@ impl SuiteBReport {
                 let minus_one = Ratio::ZERO
                     .checked_sub(Ratio::ONE)
                     .map_err(ReportError::Statistics)?;
-                let concordant = analysis.counts.b == 0 && analysis.counts.c == 0;
+                // With no `c` pair no replicate is negative; with no `b` pair
+                // none is positive.
+                let floor = if analysis.counts.c == 0 {
+                    Ratio::ZERO
+                } else {
+                    minus_one
+                };
+                let ceiling = if analysis.counts.b == 0 {
+                    Ratio::ZERO
+                } else {
+                    Ratio::ONE
+                };
                 if interval.lower > interval.upper
-                    || interval.lower < minus_one
-                    || interval.upper > Ratio::ONE
-                    || (concordant
-                        && (interval.lower, interval.upper) != (Ratio::ZERO, Ratio::ZERO))
+                    || interval.lower < floor
+                    || interval.upper > ceiling
                 {
                     return disagrees("bounds");
                 }

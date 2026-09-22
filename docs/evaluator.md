@@ -1499,18 +1499,20 @@ carries rather than read from what it says:
   instead: some ICC is positive, since nothing deflates otherwise and the
   plan already meets its floor, the surface's bound resolves, since no pair
   set compiles without one, no pre-table block derives, its
-  `required_n_for_margin` is the pilot's, it spans between one cluster and
-  the worlds the plan affords and the profile runs (under the family unit
-  also its families, never more than its pairs), and its `effective_n` is
-  below the floor and
+  `required_n_for_margin` is the pilot's, it spans between one cluster, or
+  under the world unit the fewest worlds the profile's tasks per world can
+  hold the pairs in, and the worlds the plan affords and the profile runs
+  (under the family unit also its families, never more than its pairs), and
+  its `effective_n` is below the floor and
   within what `deflate` can produce over exactly `n_clusters` at the selected
   unit: at most the smaller of the pair count deflated as clusters as even as
   whole pairs allow and, at the other level, as the most clusters
   `n_clusters` leaves it (one family per world at most; every affordable
   world under the family unit), at least the smaller of the pair count
-  deflated as one cluster holding all but `n_clusters - 1` singletons and, at
-  the other level, as the fewest clusters `n_clusters` forces on it (one
-  family; a world per family), just as lopsided (`SuppressionNotDerived`),
+  deflated as clusters as lopsided as they can be, a world holding at most
+  the profile's tasks per world, and, at the other level, as the fewest
+  clusters `n_clusters` forces on it (one family; a world per family and
+  enough worlds for the pairs), just as lopsided (`SuppressionNotDerived`),
   and the ledger backs the frozen pair count with
   an arm result on each paired arm (`PairsExceedSamples`); the table itself
   is the manifest's `result_digest`. An
@@ -1546,12 +1548,13 @@ carries rather than read from what it says:
   `Gates::of` recomputes from its `counts` and the family's margins
   (`PairedGatesNotDerived`); its `interval` must be the shape
   `cluster_bootstrap_interval` derives from the family and the pair count
-  (the unit, method, replicate count, item count, between two clusters and
-  the worlds the plan affords and the profile runs, under the family unit
-  also its families, when computed and exactly one when withheld for too
-  few, endpoints ordered within `[-1, 1]`, the range of `(b - c) / n`, and
-  exactly `[0, 0]` when no pair is discordant, and whether it is computed or
-  withheld; `IntervalNotDerived {field}`), while the
+  (the unit, method, replicate count, item count, between two clusters, or
+  under the world unit the fewest worlds the profile's tasks per world can
+  hold the pairs in, and the worlds the plan affords and the profile runs,
+  under the family unit also its families, when computed and exactly one
+  when withheld for too few, endpoints ordered within `[-1, 1]`, the range of
+  `(b - c) / n`, never below zero without a `c` pair nor above it without a
+  `b` pair, and whether it is computed or withheld; `IntervalNotDerived {field}`), while the
   bounds themselves are bound to the pair table by the manifest's
   `result_digest`; every paired marginal must be backed by samples on that
   arm that ended the same way, a pass, a fail, or a censored attempt, since an

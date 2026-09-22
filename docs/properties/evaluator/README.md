@@ -1346,9 +1346,12 @@ Report (`crates/eval-core/tests/report.rs`):
   more family clusters than affordable worlds, under ICCs that deflate
   nothing, with an effective N its clusters do not deflate to, deflated below
   what its recorded clusters allow, as if clusters split pairs, as if one
-  world spanned many families, or as if many families shared one world, or on a surface whose bound does not resolve,
+  world spanned many families, or as if many families shared one world, over
+  fewer worlds than the tasks per world allow, or on a surface whose bound
+  does not resolve,
   an interval outside the statistic's range or over more clusters than the
-  approved profile's worlds or with width where every pair is concordant, a
+  approved profile's worlds, with width where every pair is concordant, or
+  below zero where no pair favours the aged arm, a
   censored fresh arm the table does not count, a baseline that delivered more
   ids than its window holds, whose
   failed falsifications outnumber the table, or that was judged over more

@@ -531,12 +531,31 @@ pub(crate) fn balanced_mean_cluster(pairs: u32, count: u32) -> Result<Ratio, Sta
 }
 
 /// The size-weighted mean cluster of `count` clusters over `pairs` as unevenly
-/// as they can be: one holds every pair the other `count - 1` singletons do
-/// not. No partition into `count` clusters has a larger mean.
-pub(crate) fn lopsided_mean_cluster(pairs: u32, count: u32) -> Result<Ratio, StatisticsError> {
-    let (pairs, count) = (i128::from(pairs), i128::from(count));
-    let largest = pairs - count + 1;
-    Ratio::try_new(largest.pow(2) + (count - 1), pairs)
+/// as clusters of at most `cap` pairs can be: as many clusters as possible
+/// filled to `cap`, one holding what is left over, the rest singletons. No
+/// partition into `count` clusters of at most `cap` has a larger mean; `None`
+/// when `count` clusters of at most `cap` cannot hold `pairs`.
+pub(crate) fn lopsided_mean_cluster(
+    pairs: u32,
+    count: u32,
+    cap: u32,
+) -> Result<Option<Ratio>, StatisticsError> {
+    let (pairs, count, cap) = (i128::from(pairs), i128::from(count), i128::from(cap));
+    if count < 1 || cap < 1 || pairs < count || pairs > count * cap {
+        return Ok(None);
+    }
+    // Every cluster starts as a singleton; the `extra` pairs fill clusters to
+    // `cap` one at a time, so `full` clusters take `cap - 1` extra each and one
+    // more takes the remainder.
+    let extra = pairs - count;
+    let (full, remainder) = if cap == 1 {
+        (0, 0)
+    } else {
+        (extra / (cap - 1), extra % (cap - 1))
+    };
+    let partial = i128::from(remainder > 0);
+    let squares = full * cap.pow(2) + partial * (1 + remainder).pow(2) + (count - full - partial);
+    Ok(Some(Ratio::try_new(squares, pairs)?))
 }
 
 /// `items` deflated by the design effect `1 + (m - 1) ICC` of clusters of mean
