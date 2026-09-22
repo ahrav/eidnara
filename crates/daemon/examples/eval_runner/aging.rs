@@ -608,24 +608,21 @@ impl Closed {
     }
 
     pub fn copy(mut self, into: &Path) -> Result<(Checkpoint, Copied), CheckpointRefused> {
-        let held = match MemoryStore::open(&daemon::store_descriptor_in(&self.root)) {
-            Ok(probe) => {
-                drop(probe);
-                false
-            }
-            Err(MemoryStoreError::Store(StoreError::Lease(LeaseError::Held { .. }))) => true,
+        // Each probe stays held until the copy is done, as the projection's
+        // lease does, so no other holder can take the store while its bytes
+        // are read.
+        let memory_probe = match MemoryStore::open(&daemon::store_descriptor_in(&self.root)) {
+            Ok(probe) => Some(probe),
+            Err(MemoryStoreError::Store(StoreError::Lease(LeaseError::Held { .. }))) => None,
             Err(e) => panic!("memory store probe at {}: {e}", self.root.display()),
         };
-        self.seal_after_probe(StoreFamily::Memory, held);
-        let held = match KernelStore::open(kernel_file(&self.root).parent().unwrap()) {
-            Ok(probe) => {
-                drop(probe);
-                false
-            }
-            Err(KernelError::Held) => true,
+        self.seal_after_probe(StoreFamily::Memory, memory_probe.is_none());
+        let kernel_probe = match KernelStore::open(kernel_file(&self.root).parent().unwrap()) {
+            Ok(probe) => Some(probe),
+            Err(KernelError::Held) => None,
             Err(e) => panic!("kernel probe at {}: {e}", self.root.display()),
         };
-        self.seal_after_probe(StoreFamily::Kernel, held);
+        self.seal_after_probe(StoreFamily::Kernel, kernel_probe.is_none());
         let incarnation_id = kernel_incarnation_id(&self.root);
         Checkpoint::admit(&self.receipt, &incarnation_id)?;
         let mut files = BTreeMap::new();
@@ -633,6 +630,8 @@ impl Closed {
             copy_file(&self.root, into, &relative, &mut files);
         }
         drop(self.search_lease);
+        drop(memory_probe);
+        drop(kernel_probe);
         let checkpoint = Checkpoint::new(self.receipt, incarnation_id, files)?;
         Ok((
             checkpoint,
@@ -716,10 +715,17 @@ impl Copied {
                 Some((relative.clone(), sha256_hex(&bytes)))
             })
             .collect();
-        // A read-only open of an absent store file fails, so absent files are
-        // refused before the incarnation and integrity reads open any store.
-        if let Some(path) = checkpoint.files.keys().find(|p| !files.contains_key(*p)) {
-            return Err(RestoreRefused::FileMissing { path: path.clone() });
+        // A read-only open of an absent store file fails and a malformed one
+        // panics in its first query, so absent and changed files are refused
+        // before the incarnation and integrity reads open any store.
+        for (path, digest) in &checkpoint.files {
+            match files.get(path) {
+                None => return Err(RestoreRefused::FileMissing { path: path.clone() }),
+                Some(found) if found != digest => {
+                    return Err(RestoreRefused::FileDiffers { path: path.clone() });
+                }
+                Some(_) => {}
+            }
         }
         checkpoint.accept(&Reopened {
             incarnation_id: kernel_incarnation_id(&self.root),

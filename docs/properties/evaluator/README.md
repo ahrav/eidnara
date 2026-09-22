@@ -1343,11 +1343,15 @@ bound because it finishes inside the daemon suite's wall clock):
   written.
 - `a_foreign_incarnation_is_refused_at_reopen` (marker
   `flt_foreign_incarnation_refused_at_reopen`): a copy reopened against
-  another store's checkpoint is `ForeignIncarnation`; a copy missing one of
-  its kernel artifact objects is `FileMissing` naming it.
+  another store's checkpoint is `FileDiffers` naming `kernel/kernel.sqlite`,
+  the file that persists the incarnation id, before any store opens; a copy
+  missing one of its kernel artifact objects is `FileMissing` naming it.
 - `a_copy_missing_a_store_file_is_refused_at_reopen`: a copy missing
   `kernel/kernel.sqlite`, `memory.sqlite`, or `search/search.sqlite` is
   `FileMissing` naming it, before any store opens.
+- `a_copy_with_a_modified_store_file_is_refused_at_reopen`: a copy whose
+  `kernel/kernel.sqlite`, `memory.sqlite`, or `search/search.sqlite` holds
+  other bytes is `FileDiffers` naming it, before any store opens.
 - `an_unapproved_profile_refuses_before_any_store_opens`: no approval, no
   campaign, nothing published.
 - `the_example_publishes_the_same_digests_as_the_in_process_run`: the built

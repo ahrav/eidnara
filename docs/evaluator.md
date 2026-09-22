@@ -1694,7 +1694,8 @@ projection truncation that ran past its wait, is recorded as `busy: 1` with
 observed, and `admit` refuses it. The projection's file lease stays held until the
 copy is done, so nothing can open the projection in between. The kernel and
 memory store release their leases at close, so `Closed::copy` reopens each of
-them once to prove no other holder took its lease after the close; the probe
+them once to prove no other holder took its lease after the close, and holds
+each probe until the copy is done; the probe
 itself writes a fence, so on success that store's WAL is truncated and its
 sidecar read again before the receipt is admitted, and a held lease is
 recorded as an open handle. The copy admits the receipt and
@@ -1703,9 +1704,13 @@ only then copies
 `search/search.sqlite` into a fresh root with owner-only modes, building the
 `Checkpoint` from the copied bytes; a refused receipt copies nothing.
 `Copied::reopen` re-hashes every copied file and refuses an absent one as
-`FileMissing` before any store opens, reads each copy's integrity on its own
+`FileMissing` and a changed one as `FileDiffers` before any store opens (a
+malformed copy would otherwise fail its first query), reads each copy's
+integrity on its own
 connection, accepts them against the checkpoint, and reopens the kernel and
-the memory store as they were.
+the memory store as they were. A copy of another store therefore reads as
+`FileDiffers { kernel/kernel.sqlite }`, the file that persists the incarnation
+id; `accept`'s own `ForeignIncarnation` check stands behind it.
 
 The search projection is the repository correction Phase 4 records. Its
 catch-up runs under a source hold bound to the kernel's lease epoch, and the

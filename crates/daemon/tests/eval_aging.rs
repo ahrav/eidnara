@@ -241,13 +241,17 @@ fn a_foreign_incarnation_is_refused_at_reopen_scenario(coverage: &mut Coverage) 
     let (checkpoint, _) = first.close().copy(first_copy.path()).unwrap();
     let into = tempfile::tempdir().unwrap();
     let (_, copied) = second.close().copy(into.path()).unwrap();
-    assert!(matches!(
+    // The persisted incarnation id lives in the kernel file, so a foreign
+    // copy's bytes differ there before the identity check reads them.
+    assert_eq!(
         copied
             .reopen(&checkpoint, plan.steps[k].now_ms)
             .err()
             .unwrap(),
-        RestoreRefused::ForeignIncarnation { .. }
-    ));
+        RestoreRefused::FileDiffers {
+            path: "kernel/kernel.sqlite".to_string(),
+        }
+    );
     let (own, copied, _kept) = plan_copy(&plan, k);
     let object = own
         .files
@@ -314,6 +318,28 @@ fn a_copy_missing_a_store_file_is_refused_at_reopen() {
                 .err()
                 .unwrap(),
             RestoreRefused::FileMissing {
+                path: file.to_string(),
+            }
+        );
+    }
+}
+
+#[test]
+fn a_copy_with_a_modified_store_file_is_refused_at_reopen() {
+    let plan = plan(MESSAGES).unwrap();
+    for file in [
+        "kernel/kernel.sqlite",
+        "memory.sqlite",
+        "search/search.sqlite",
+    ] {
+        let (checkpoint, copied, _kept) = plan_copy(&plan, 3);
+        std::fs::write(copied.root().join(file), b"not a database").unwrap();
+        assert_eq!(
+            copied
+                .reopen(&checkpoint, plan.steps[3].now_ms)
+                .err()
+                .unwrap(),
+            RestoreRefused::FileDiffers {
                 path: file.to_string(),
             }
         );
