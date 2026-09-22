@@ -17,6 +17,10 @@
 mod aging;
 #[cfg(unix)]
 mod campaign;
+/// The fault shell is shared with the daemon's fault test the same way.
+#[cfg(unix)]
+#[allow(dead_code)]
+mod fault;
 /// The fixture and surface helpers are shared with the evaluator tests, which
 /// use more of them than the campaign does.
 #[cfg(unix)]
@@ -365,6 +369,30 @@ fn run_aging(args: impl Iterator<Item = String>) -> io::Result<()> {
     Ok(())
 }
 
+/// Runs the fault campaign and prints one JSON line naming what was published.
+#[cfg(unix)]
+fn run_fault(args: impl Iterator<Item = String>) -> io::Result<()> {
+    let config = fault::config_from_args(args).map_err(io::Error::other)?;
+    let run = fault::run(&config).map_err(io::Error::other)?;
+    let digest = |bytes: &[u8]| format!("{:x}", sha2::Sha256::digest(bytes));
+    let summary = json!({
+        "report": config.publish.join(fault::REPORT_FILE),
+        "report_digest": digest(&run.report_bytes),
+        "manifest": config.publish.join(fault::MANIFEST_FILE),
+        "manifest_digest": digest(&run.manifest_bytes),
+        "eval_run_id": run.manifest.eval_run_id,
+        "status": run.manifest.status,
+        "episodes": run.report.episodes.len(),
+        "cuts": run.report.cuts,
+        "unknown_effects": run.report.effects.unknown(),
+        "expected_refusals": run.report.expected_refusals.len(),
+        "safety_checks_while_armed": run.report.safety_checks_while_armed,
+        "markers": run.report.markers,
+    });
+    println!("{summary}");
+    Ok(())
+}
+
 fn main() {
     let mut args = std::env::args().skip(1);
     let outcome = match args.next().as_deref() {
@@ -373,6 +401,8 @@ fn main() {
         Some("campaign") => run_campaign(args),
         #[cfg(unix)]
         Some("aging") => run_aging(args),
+        #[cfg(unix)]
+        Some("fault") => run_fault(args),
         other => Err(io::Error::other(format!(
             "{USAGE}{} (got {other:?})",
             campaign_usage()
@@ -386,10 +416,15 @@ fn main() {
 
 #[cfg(unix)]
 fn campaign_usage() -> String {
-    format!("{} | eval_runner {}", campaign::USAGE, aging::USAGE)
+    format!(
+        "{} | eval_runner {} | eval_runner {}",
+        campaign::USAGE,
+        aging::USAGE,
+        fault::USAGE
+    )
 }
 
 #[cfg(not(unix))]
 fn campaign_usage() -> String {
-    "campaign | aging (unix only)".to_string()
+    "campaign | aging | fault (unix only)".to_string()
 }

@@ -1311,6 +1311,32 @@ Fault contract (`crates/eval-core/tests/fault.rs`,
   and changes with an effect outcome; a kill without a barrier, an unreceipted
   declared cut, zero safety checks while armed, and a premature success refuse.
 
+Fault shell (`crates/daemon/tests/eval_fault.rs`, `--all-features`; the
+default shards run the campaign once with every scenario asserted over it,
+the named scenarios and the completeness proof run in the `eval-campaign` CI
+job under `EIDNARA_EVAL_S0_BUDGET_MS`):
+
+- `the_fault_campaign_receipts_every_declared_cut`
+  (`flt-fault-episode-contract-faithful`,
+  `flt-every-declared-cut-reached-per-campaign`; marker
+  `flt_every_declared_cut_receipted`): every declared episode and observer
+  cut has a receipt, the four oracle checkpoints resolve to `reached`, every
+  episode's heal is the one its seam permits, no episode carries a kill label,
+  a safety check ran for every episode, the published report parses back
+  equal, and the manifest names it by result digest under `generate`.
+- `a_lost_reply_stays_unknown_until_readback_at_after_recovery`
+  (`flt-lost-ack-expected-is-admissible-set`; marker
+  `flt_lost_reply_unknown_until_readback`): a lost local-commit reply and a
+  lost acknowledgement reply are `unknown` until the closed files are read
+  back by identity before reopen; each reads back `applied`, since the
+  production reconciliation committed; every identity satisfies
+  `acknowledged <= observed <= attempted` with one attempt.
+- `an_external_lock_holder_blocks_then_releases` (marker
+  `flt_external_lock_holder_released`): `BEGIN IMMEDIATE` on the projection
+  blocks the local commit; release lets the next episode reach the target.
+- `an_unapproved_profile_refuses_before_any_store_opens`: no approval, no
+  campaign, nothing published.
+
 Aging drive (`crates/daemon/tests/eval_aging.rs`, `--all-features`):
 
 - `the_aged_arm_is_built_by_replay_and_matches_the_bulk_scaffold_only_by_enumerated_deaths`

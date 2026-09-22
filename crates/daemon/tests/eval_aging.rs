@@ -154,7 +154,7 @@ fn a_copy_with_pending_work_is_refused_by_the_counter_it_left_scenario(coverage:
     let mut stores = Stores::open(root.path(), plan.rendering.clone());
     live(&mut stores, &plan.steps[..3]);
     stores.apply(&plan.steps[3]);
-    let closed = stores.close();
+    let mut closed = stores.close();
     assert_eq!(closed.receipt.step, 4);
     assert!(
         closed.receipt.stores[&StoreFamily::Kernel].pending[&WorkCounter::OutboxUnpublished] > 0,
@@ -189,7 +189,7 @@ fn a_reader_holding_the_projection_leaves_the_checkpoint_busy_scenario(coverage:
     let _held: i64 = reader
         .query_row("SELECT COUNT(*) FROM occurrences", [], |row| row.get(0))
         .unwrap();
-    let closed = stores.close();
+    let mut closed = stores.close();
     let wal = closed.receipt.stores[&StoreFamily::SearchProjection].wal;
     assert_ne!(wal.busy, 0, "{wal:?}");
     coverage.record("flt_checkpoint_observed_busy").unwrap();
@@ -209,7 +209,7 @@ fn a_copy_beside_a_live_memory_store_handle_is_refused_scenario(coverage: &mut C
     let root = tempfile::tempdir().unwrap();
     let mut stores = Stores::open(root.path(), plan.rendering.clone());
     live(&mut stores, &plan.steps[..3]);
-    let closed = stores.close();
+    let mut closed = stores.close();
     let live_handle = MemoryStore::open(&daemon::store_descriptor_in(closed.root())).unwrap();
     coverage
         .record("sls_memstore_copy_refused_live_handle")
