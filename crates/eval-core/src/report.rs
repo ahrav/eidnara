@@ -416,18 +416,28 @@ impl SuiteBReport {
 
     /// One score per case, each naming its case and carrying only the axis
     /// values `score_injection` produces: a stage axis is a stage value, so
-    /// never `not_measurable`; obedience is `not_measurable` without a
-    /// boundary, never `not_reached`; exposure is `not_reached` without an
-    /// output, never `not_measurable`. Binding the scores to the planned
-    /// `TaskSet` needs the manifest the runner writes them beside.
+    /// never `not_measurable`; obedience is `not_measurable` exactly when no
+    /// boundary observed the run, never `not_reached`; write-back without
+    /// that boundary is `not_measurable` or `not_reached` and with it never
+    /// `not_measurable`; exposure is `not_reached` without an output, never
+    /// `not_measurable`. Binding the scores to the planned `TaskSet` needs
+    /// the manifest the runner writes them beside.
     fn check_injection(&self) -> Result<(), ReportError> {
         let mut cases = BTreeSet::new();
         for score in &self.injection {
             let stage = |axis: AxisValue| axis != AxisValue::NotMeasurable;
+            let written_back = match score.obeyed {
+                AxisValue::NotMeasurable => matches!(
+                    score.written_back_cross_session,
+                    AxisValue::NotMeasurable | AxisValue::NotReached
+                ),
+                _ => score.written_back_cross_session != AxisValue::NotMeasurable,
+            };
             let produced = stage(score.ingested)
                 && stage(score.retrieved)
                 && stage(score.packed)
                 && score.obeyed != AxisValue::NotReached
+                && written_back
                 && score.exposure != AxisValue::NotMeasurable;
             if blank(&score.case_id) || !produced || !cases.insert(score.case_id.as_str()) {
                 return Err(ReportError::InjectionScoreDisagrees {
@@ -470,6 +480,12 @@ impl SuiteBReport {
                 Terminal::Unsupported(UnsupportedReason::SurfaceNotActivated { surface })
                     if surface != self.surface
                         || reachability_of(surface) == Reachability::DefaultProduction =>
+                {
+                    return Err(ReportError::SampleAxisDisagrees { sample: sample() });
+                }
+                // Only the packer lacks a caller.
+                Terminal::Unsupported(UnsupportedReason::PackingHasNoCaller)
+                    if self.surface != EvaluatedSurface::Packing =>
                 {
                     return Err(ReportError::SampleAxisDisagrees { sample: sample() });
                 }
@@ -564,15 +580,17 @@ impl SuiteBReport {
     }
 
     /// The most clusters a table under this plan spans at the pilot's unit:
-    /// one per pair at most, and no more than the plan's families or worlds.
+    /// one per pair at most, no more than the plan's affordable worlds, and
+    /// under the family unit no more than its families, since each world lies
+    /// in one family.
     fn max_clusters(&self) -> u32 {
         let pilot = &self.family.icc_pilot;
         let StoppingRule::FixedN { pairs } = self.family.stopping_rule;
+        let worlds = pilot.max_affordable_worlds.min(pairs);
         match pilot.clustering_unit {
-            ClusteringUnit::Family => pilot.n_families,
-            ClusteringUnit::WorldSeed => pilot.max_affordable_worlds,
+            ClusteringUnit::Family => worlds.min(pilot.n_families),
+            ClusteringUnit::WorldSeed => worlds,
         }
-        .min(pairs)
     }
 
     /// Samples on `arm` that ended as an `ArmResult`: a pass, a fail, or a

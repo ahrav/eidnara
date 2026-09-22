@@ -1496,8 +1496,9 @@ carries rather than read from what it says:
   `table_underpowered` block is the completed table's own power, which only
   the pair table shows, so the report holds it to what the family fixes
   instead: no pre-table block derives, its `required_n_for_margin` is the
-  pilot's, it spans between one cluster and the plan's worlds or families at
-  the pilot's unit (never more than its pairs), and its `effective_n` is
+  pilot's, it spans between one cluster and the plan's affordable worlds
+  (under the family unit also its families, never more than its pairs), and
+  its `effective_n` is
   positive, at most the pair count, and below the floor
   (`SuppressionNotDerived`), and the ledger backs the frozen pair count with
   an arm result on each paired arm (`PairsExceedSamples`); the table itself
@@ -1515,14 +1516,17 @@ carries rather than read from what it says:
   skipped `profile_not_approved`, since the report's profile is approved
   (`SkipDisagreesWithProfile`); a sample unsupported `surface_not_activated`
   or disabled `scale_not_budgeted` names the report's surface or the profile's
-  scale; a `default-production` surface is never unactivated and `s0`, which
-  runs in the default shards, is never unbudgeted (`SampleAxisDisagrees`); a sample skipped `envelope_exceeded` must name
+  scale; a `default-production` surface is never unactivated, only the
+  packing surface lacks a caller, and `s0`, which runs in the default shards,
+  is never unbudgeted (`SampleAxisDisagrees`); a sample skipped `envelope_exceeded` must name
   this run's bound for that resource and a reading the peaks reached
   (`SampleEnvelopeDisagrees`); every injection score names a case that is not
   blank, no case is scored twice, and each axis carries only what
   `score_injection` produces (a stage axis is never `not_measurable`,
-  obedience never `not_reached`, exposure never `not_measurable`;
-  `InjectionScoreDisagrees`), while binding
+  obedience never `not_reached`, write-back `not_measurable` or `not_reached`
+  without the boundary that obedience needs and never `not_measurable` with
+  it, exposure never `not_measurable`; `InjectionScoreDisagrees`), while
+  binding
   the scores to the planned task set is the manifest's. In an open report the
   paired analysis must count the pair table the plan froze
   (`PairCountNotFrozen {frozen, found}`, as `analyze` refuses any other) and
@@ -1532,8 +1536,9 @@ carries rather than read from what it says:
   (`PairedGatesNotDerived`); its `interval` must be the shape
   `cluster_bootstrap_interval` derives from the family and the pair count
   (the unit, method, replicate count, item count, between two clusters and
-  the plan's worlds or families at the pilot's unit when computed and exactly
-  one when withheld for too few, and whether it is computed or withheld;
+  the plan's affordable worlds, under the family unit also its families, when
+  computed and exactly one when withheld for too few, and whether it is
+  computed or withheld;
   `IntervalNotDerived {field}`), while the
   bounds themselves are bound to the pair table by the manifest's
   `result_digest`; every paired marginal must be backed by samples on that

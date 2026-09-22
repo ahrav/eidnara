@@ -1339,9 +1339,11 @@ Report (`crates/eval-core/tests/report.rs`):
   on a surface whose bound does not resolve, an interval withheld over no
   clusters or over more than the plan has worlds, an analysis over fewer
   pairs than the plan froze, a baseline suppression naming a blank task, an
-  underpowered-table suppression over a ledger that backs no table, an
-  injection score with a blank case or with an axis its scorer cannot
-  produce, two injection scores for
+  underpowered-table suppression over a ledger that backs no table or over
+  more family clusters than affordable worlds, a packing-only unsupported
+  reason off the packing surface, an injection score with a blank case, with
+  an axis its scorer cannot produce, or with a write-back its boundary could
+  not have observed, two injection scores for
   one case or one with no case, and an epoch past the canonical safe range
   each refuse by name
   from `serialize` and `parse_report`; a run its envelope stopped, skipping
