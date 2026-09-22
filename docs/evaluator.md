@@ -1910,13 +1910,20 @@ drive publishes its rows `LocalOnly`.
 Liveness runs on a root of its own after the fault phase. The healthy core is
 the kernel, the projection, the catch-up driver, the dispatcher, and the
 claim materializer; outside it, an external `BEGIN IMMEDIATE` on the memory
-store and a CAS ingest latched by an EIO stay armed for the whole window and
-are probed again at the bound (a `BEGIN IMMEDIATE` probe fails, a plain
-ingest refuses). Each lane is driven to the approved profile's bound in its
-own unit with a logical `now`: `run_episode` until `acknowledged_through`
-reaches the tip, dispatcher `run_pass` until no embedding job is open,
-`ClaimMaterializer::run_episode` until it acknowledges the tip; the predicate
-must hold at some step and again at the bound. The reviewer coordinator lane
+store stays armed for the whole window and is probed again at the bound (a
+second `BEGIN IMMEDIATE` fails). Half the remaining history is the backlog
+the window opens with; the other half is fed in one commit per step as fresh
+kernel-only work (`Stores::apply_kernel_only`, which leaves the memory store
+untouched because it is outside the core), so every lane's predicate is
+re-established against new commits rather than held by idling. In one window
+loop each lane still inside its bound takes one unit of work with a logical
+`now`: `run_episode` until `acknowledged_through` reaches the current tip,
+dispatcher `run_pass` until no embedding job is open,
+`ClaimMaterializer::run_episode` until it acknowledges the tip; the lane
+records the step the predicate first held, the first stall after that, and
+whether it held at the bound, and a stalled lane is unmet. A CAS ingest fault
+cannot be the permanent outside-core fault here: its latch refuses the kernel
+ingestion the fresh publishes need, which would put the fault inside the core. The reviewer coordinator lane
 is outside this campaign's core (its scripted model peer is not in the drive),
 so the report declares three lanes and `verdict` judges those; the R11 stall
 is listed under `permanent_stalls`. The evaluator drives every lane directly

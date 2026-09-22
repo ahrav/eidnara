@@ -309,12 +309,12 @@ fn artifact_faults_fail_with_their_named_errno_and_heal_by_reopen_or_consumption
             )
         })
         .collect();
-    assert_eq!(artifact.len(), 8, "{artifact:?}");
+    assert_eq!(artifact.len(), 7, "{artifact:?}");
     assert_eq!(run.report.coverage.receipted["artifact_fault_named"], 6);
     let heals: Vec<Heal> = artifact.iter().map(|e| e.heal).collect();
     assert_eq!(
         heals.iter().filter(|h| **h == Heal::Reopen).count(),
-        6,
+        5,
         "every EIO latches CAS ingestion closed until reopen: {heals:?}"
     );
     assert_eq!(
@@ -377,7 +377,11 @@ fn liveness_bounds_are_met_with_outside_core_faults_armed_scenario(campaign: &Ca
     let run = &campaign.run;
     let liveness = run.report.liveness.as_ref().unwrap();
     liveness.verdict(&run.bounds).unwrap();
-    assert_eq!(liveness.outside_core.len(), 2);
+    assert_eq!(
+        liveness.outside_core.len(),
+        1,
+        "the memory-store lock holder is the permanent outside-core fault"
+    );
     assert_eq!(liveness.armed_at_bound, liveness.outside_core);
     assert_eq!(liveness.core.lanes.len(), 3);
     assert!(
@@ -398,7 +402,12 @@ fn liveness_bounds_are_met_with_outside_core_faults_armed_scenario(campaign: &Ca
             "{lane:?}: {progress:?}"
         );
         assert!(progress.holds_at_bound, "{lane:?}");
+        assert!(progress.stalled_at.is_none(), "{lane:?}: {progress:?}");
         assert!(progress.blocked.is_none(), "{lane:?}: {progress:?}");
+        assert!(
+            progress.fresh_commits >= 8,
+            "{lane:?} was fed fresh kernel work inside its window: {progress:?}"
+        );
     }
     assert_eq!(
         liveness.permanent_stalls.len(),

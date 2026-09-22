@@ -7,6 +7,7 @@
 mod support;
 
 #[path = "../examples/eval_runner/campaign.rs"]
+#[allow(dead_code)]
 mod campaign;
 
 use std::collections::BTreeMap;
