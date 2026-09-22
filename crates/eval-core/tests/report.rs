@@ -1167,6 +1167,33 @@ fn a_report_refuses_what_its_own_evidence_refutes() {
             },
         ),
         (
+            "an interval over six families where forty worlds of one task cannot hold the pairs",
+            Box::new(|r| {
+                // Six family clusters fit the family cap, but 300 pairs at one
+                // task per world need 300 worlds and the profile runs forty.
+                let pilot = &mut r.family.icc_pilot;
+                pilot.icc_family = ratio(1, 10);
+                pilot.icc_world_seed = ratio(1, 2);
+                pilot.clustering_unit = ClusteringUnit::Family;
+                pilot.effective_n_at_max = ratio(9000, 159);
+                pilot.required_n_for_margin = 20;
+                let digest = r.family.digest().unwrap();
+                r.profile.worlds = 40;
+                r.profile.tasks_per_world = 1;
+                r.profile_digest = r.profile.digest().unwrap();
+                let analysis = &mut gated(r).analysis;
+                analysis.analysis_family_digest = digest;
+                let IntervalOutcome::Computed(interval) = &mut analysis.interval else {
+                    panic!("computed");
+                };
+                interval.unit = ClusteringUnit::Family;
+                interval.n_clusters = 6;
+            }),
+            ReportError::IntervalNotDerived {
+                field: "n_clusters",
+            },
+        ),
+        (
             "an underpowered-table suppression deflated as if six families shared one world",
             Box::new(|r| {
                 // Six family clusters span at least six worlds, so a world ICC
@@ -1181,6 +1208,33 @@ fn a_report_refuses_what_its_own_evidence_refutes() {
                     by: Suppression::Analysis {
                         reason: BlockedReason::TableUnderpowered {
                             effective_n: ratio(2, 1),
+                            n_clusters: 6,
+                            required_n_for_margin: 20,
+                        },
+                    },
+                };
+                r.claims.established.clear();
+            }),
+            ReportError::SuppressionNotDerived,
+        ),
+        (
+            "an underpowered-table suppression over six families where forty worlds of one task cannot hold the pairs",
+            Box::new(|r| {
+                // The same plan as above, blocked at a table the profile's
+                // forty worlds of one task could not have completed.
+                let pilot = &mut r.family.icc_pilot;
+                pilot.icc_family = ratio(1, 10);
+                pilot.icc_world_seed = ratio(1, 2);
+                pilot.clustering_unit = ClusteringUnit::Family;
+                pilot.effective_n_at_max = ratio(9000, 159);
+                pilot.required_n_for_margin = 20;
+                r.profile.worlds = 40;
+                r.profile.tasks_per_world = 1;
+                r.profile_digest = r.profile.digest().unwrap();
+                r.outcome = ReportOutcome::Suppressed {
+                    by: Suppression::Analysis {
+                        reason: BlockedReason::TableUnderpowered {
+                            effective_n: ratio(15, 1),
                             n_clusters: 6,
                             required_n_for_margin: 20,
                         },

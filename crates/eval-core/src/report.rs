@@ -554,6 +554,7 @@ impl SuiteBReport {
                     // reached a table.
                     if derived.is_some()
                         || !deflates
+                        || !self.worlds_fit()
                         || self.resolved_recency_bound().is_none()
                         || *required_n_for_margin != pilot.required_n_for_margin
                         || !(1..=self.max_clusters()).contains(n_clusters)
@@ -672,6 +673,12 @@ impl SuiteBReport {
         pairs.div_ceil(self.profile.tasks_per_world.max(1))
     }
 
+    /// Whether the plan's worlds can hold the frozen table at all: the
+    /// fewest it needs within the most it runs.
+    fn worlds_fit(&self) -> bool {
+        self.min_worlds() <= self.max_worlds()
+    }
+
     /// The most clusters a table under this plan spans at the pilot's unit:
     /// its worlds, and under the family unit no more than its families, since
     /// each world lies in one family.
@@ -709,6 +716,10 @@ impl SuiteBReport {
             return disagrees("n_items");
         };
         let threshold = self.family.item_count_threshold;
+        // The table completed, so its pairs fit the plan's worlds.
+        if !self.worlds_fit() {
+            return disagrees("n_clusters");
+        }
         match &analysis.interval {
             IntervalOutcome::Computed(interval) => {
                 if interval.n_items != n_items {

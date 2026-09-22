@@ -1347,10 +1347,12 @@ Report (`crates/eval-core/tests/report.rs`):
   nothing, with an effective N its clusters do not deflate to, deflated below
   what its recorded clusters allow, as if clusters split pairs, as if one
   world spanned many families, or as if many families shared one world, over
-  fewer worlds than the tasks per world allow, or on a surface whose bound
+  fewer worlds than the tasks per world allow, over six families where forty
+  worlds of one task cannot hold the pairs, or on a surface whose bound
   does not resolve,
   an interval outside the statistic's range or over more clusters than the
-  approved profile's worlds, with width where every pair is concordant or
+  approved profile's worlds, over six families where forty worlds of one task
+  cannot hold the pairs, with width where every pair is concordant or
   every pair favours the fresh arm, below zero where no pair favours the aged
   arm, or withheld for one world where the tasks per world need three
   hundred, a

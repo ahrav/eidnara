@@ -1498,7 +1498,9 @@ carries rather than read from what it says:
   `table_underpowered` block is the completed table's own power, which only
   the pair table shows, so the report holds it to what the family fixes
   instead: some ICC is positive, since nothing deflates otherwise and the
-  plan already meets its floor, the surface's bound resolves, since no pair
+  plan already meets its floor, the profile's worlds can hold the pairs at
+  its tasks per world, since no table completes otherwise, the surface's
+  bound resolves, since no pair
   set compiles without one, no pre-table block derives, its
   `required_n_for_margin` is the pilot's, it spans between one cluster, or
   under the world unit the fewest worlds the profile's tasks per world can
@@ -1549,7 +1551,8 @@ carries rather than read from what it says:
   `Gates::of` recomputes from its `counts` and the family's margins
   (`PairedGatesNotDerived`); its `interval` must be the shape
   `cluster_bootstrap_interval` derives from the family and the pair count
-  (the unit, method, replicate count, item count, between two clusters, or
+  (the unit, method, replicate count, item count, a plan whose worlds can
+  hold the pairs at its tasks per world, between two clusters, or
   under the world unit the fewest worlds the profile's tasks per world can
   hold the pairs in, and the worlds the plan affords and the profile runs,
   under the family unit also its families, when computed and exactly one
