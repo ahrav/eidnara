@@ -1342,8 +1342,9 @@ Report (`crates/eval-core/tests/report.rs`):
   pairs than the plan froze, a baseline suppression naming a blank task, an
   underpowered-table suppression over a ledger that backs no table, over
   more family clusters than affordable worlds, or under ICCs that deflate
-  nothing, a baseline that delivered more ids than its window holds or was
-  judged over more control pairs than the table has, a packing-only unsupported
+  nothing, a baseline that delivered more ids than its window holds, whose
+  failed falsifications outnumber the table, or that was judged over more
+  control pairs than the table has, a packing-only unsupported
   reason off the packing surface, an injection score with a blank case, with
   an axis its scorer cannot produce, or with a write-back its boundary could
   not have observed, two injection scores for

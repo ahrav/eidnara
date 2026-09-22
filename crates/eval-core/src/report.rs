@@ -411,7 +411,11 @@ impl SuiteBReport {
                 u64::from(baseline.recency_bound),
             ),
             ("falsification_pairs_failed", failed, pairs),
-            ("positive_controls_passed", passed, pairs - failed),
+            (
+                "positive_controls_passed",
+                passed,
+                pairs.saturating_sub(failed),
+            ),
         ] {
             if count == 0 || count > most {
                 return disagrees(field);

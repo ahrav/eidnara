@@ -1100,6 +1100,13 @@ fn a_report_refuses_what_its_own_evidence_refutes() {
             },
         ),
         (
+            "a baseline whose failed falsifications outnumber the table",
+            Box::new(|r| gated(r).baseline.falsification_pairs_failed = 301),
+            ReportError::BaselineDisagrees {
+                field: "falsification_pairs_failed",
+            },
+        ),
+        (
             "a baseline judged over more control pairs than the table has",
             Box::new(|r| {
                 let g = gated(r);
