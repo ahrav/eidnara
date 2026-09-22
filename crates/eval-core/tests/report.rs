@@ -1061,6 +1061,24 @@ fn a_report_refuses_what_its_own_evidence_refutes() {
             ReportError::SuppressionNotDerived,
         ),
         (
+            "an underpowered-table suppression with an effective N its clusters do not deflate to",
+            Box::new(|r| {
+                // 300 pairs in one world under a world ICC of 1/10 deflate to
+                // exactly 3000/309, not to one.
+                r.outcome = ReportOutcome::Suppressed {
+                    by: Suppression::Analysis {
+                        reason: BlockedReason::TableUnderpowered {
+                            effective_n: ratio(1, 1),
+                            n_clusters: 1,
+                            required_n_for_margin: 300,
+                        },
+                    },
+                };
+                r.claims.established.clear();
+            }),
+            ReportError::SuppressionNotDerived,
+        ),
+        (
             "an underpowered-table suppression under a pilot that already blocks",
             Box::new(|r| {
                 underpowered_pilot(&mut r.family.icc_pilot);
@@ -1538,6 +1556,17 @@ fn a_report_refuses_what_its_own_evidence_refutes() {
                 pairs: 300,
                 samples: 0,
             },
+        ),
+        (
+            "an interval outside the statistic's range",
+            Box::new(|r| {
+                let IntervalOutcome::Computed(interval) = &mut gated(r).analysis.interval else {
+                    panic!("computed");
+                };
+                interval.lower = ratio(2, 1);
+                interval.upper = ratio(3, 1);
+            }),
+            ReportError::IntervalNotDerived { field: "bounds" },
         ),
         (
             "an interval withheld over no clusters",

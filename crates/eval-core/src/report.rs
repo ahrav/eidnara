@@ -26,7 +26,7 @@ use crate::pairs::{
 use crate::statistics::{
     AnalysisFamily, BlockedReason, ClusteringUnit, FrozenFamily, GateVerdict, Gates,
     IntervalOutcome, IntervalWithheld, PairedReport, Ratio, StatisticsError, StoppingRule,
-    arm_miss_asymmetry,
+    arm_miss_asymmetry, deflate,
 };
 
 pub const SUITE_B_REPORT_SCHEMA: &str = "eval-suite-b-report/v1";
@@ -540,11 +540,10 @@ impl SuiteBReport {
                 } => {
                     let pilot = &self.family.icc_pilot;
                     let StoppingRule::FixedN { pairs } = self.family.stopping_rule;
-                    // A positive pair count deflates to a positive effective N
-                    // of at most itself, over one cluster per pair at most and
-                    // no more than the plan's worlds or families at its unit.
-                    let whole =
-                        |n: u32| Ratio::try_new(i128::from(n), 1).map_err(ReportError::Statistics);
+                    // The table spans one cluster per pair at most and no more
+                    // than the plan's worlds or families at its unit.
+                    let statistics = ReportError::Statistics;
+                    let whole = |n: u32| Ratio::try_new(i128::from(n), 1).map_err(statistics);
                     // With no positive ICC nothing deflates: the table's
                     // effective N is its pair count, which the plan already
                     // holds to the floor, so no table blocks.
@@ -554,10 +553,26 @@ impl SuiteBReport {
                         || !deflates
                         || *required_n_for_margin != pilot.required_n_for_margin
                         || !(1..=self.max_clusters()).contains(n_clusters)
-                        || *effective_n <= Ratio::ZERO
-                        || *effective_n > whole(pairs)?
                         || *effective_n >= whole(pilot.required_n_for_margin)?
                     {
+                        return Err(ReportError::SuppressionNotDerived);
+                    }
+                    // `analyze` deflates the pair count at each level by the
+                    // size-weighted mean cluster and keeps the smaller. One
+                    // cluster holding every pair deflates the most at the
+                    // larger ICC; `n_clusters` balanced clusters at the
+                    // selected unit deflate the least, and the other level can
+                    // only lower it further.
+                    let n = whole(pairs)?;
+                    let icc_unit = match pilot.clustering_unit {
+                        ClusteringUnit::Family => pilot.icc_family,
+                        ClusteringUnit::WorldSeed => pilot.icc_world_seed,
+                    };
+                    let least = deflate(n, n, pilot.icc_family.max(pilot.icc_world_seed))
+                        .map_err(statistics)?;
+                    let balanced = n.checked_div(whole(*n_clusters)?).map_err(statistics)?;
+                    let most = deflate(n, balanced, icc_unit).map_err(statistics)?;
+                    if *effective_n < least || *effective_n > most {
                         return Err(ReportError::SuppressionNotDerived);
                     }
                     // The block follows a completed table of the frozen size,
@@ -655,7 +670,15 @@ impl SuiteBReport {
                 if !(2..=self.max_clusters().min(n_items)).contains(&interval.n_clusters) {
                     return disagrees("n_clusters");
                 }
-                if interval.lower > interval.upper {
+                // Every replicate is a `quality_loss`, `(b - c) / n`, in
+                // `[-1, 1]`.
+                let minus_one = Ratio::ZERO
+                    .checked_sub(Ratio::ONE)
+                    .map_err(ReportError::Statistics)?;
+                if interval.lower > interval.upper
+                    || interval.lower < minus_one
+                    || interval.upper > Ratio::ONE
+                {
                     return disagrees("bounds");
                 }
             }

@@ -530,7 +530,11 @@ fn attainable_effective_n(
 
 /// `items` deflated by the design effect `1 + (m - 1) ICC` of clusters of mean
 /// size `m`; the effect is never below one, so deflation only ever shrinks N.
-fn deflate(items: Ratio, mean_cluster: Ratio, icc: Ratio) -> Result<Ratio, StatisticsError> {
+pub(crate) fn deflate(
+    items: Ratio,
+    mean_cluster: Ratio,
+    icc: Ratio,
+) -> Result<Ratio, StatisticsError> {
     let design_effect = Ratio::ONE
         .checked_add(
             mean_cluster
