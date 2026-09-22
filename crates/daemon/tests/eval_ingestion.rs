@@ -862,7 +862,7 @@ fn coverage_markers_are_unique_and_each_names_a_scenario_here() {
         "marker names are globally unique"
     );
     let scenario_names: BTreeSet<&str> = scenarios().iter().map(|(n, _)| *n).collect();
-    for marker in MARKERS.iter().filter(|m| m.name.starts_with("ing_")) {
+    for marker in MARKERS.iter().filter(|m| m.test.starts_with(SUITE)) {
         let test = marker
             .test
             .strip_prefix(SUITE)

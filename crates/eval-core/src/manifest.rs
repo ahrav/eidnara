@@ -113,14 +113,16 @@ pub struct RecencyBaseline {
     pub bounds: BTreeMap<EvaluatedSurface, u32>,
 }
 
-/// How the world was driven: generated, replayed from a tape, or enumerated
-/// over fact tuples for the reducer differential.
+/// How the world was driven: generated, replayed from a tape, enumerated
+/// over fact tuples for the reducer differential, or generated from a
+/// quiescent checkpoint copy of a replayed prefix.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ExecutionMode {
     Generate,
     ReplayTape,
     Enumerate,
+    PrefixThenGenerate,
 }
 
 /// How the world's units reached the store. No ingestion adapter has a
@@ -270,6 +272,9 @@ pub enum ManifestError {
         found: String,
     },
     DirectDatabaseAged,
+    /// A run from a checkpoint copy of a replayed prefix cannot also claim a
+    /// bulk construction.
+    BulkScaffoldPresentedAsAged,
     ResidueIncomplete {
         field: String,
     },
@@ -396,6 +401,11 @@ impl Manifest {
             && self.construction == Construction::Replay
         {
             return Err(ManifestError::DirectDatabaseAged);
+        }
+        if self.execution_mode == ExecutionMode::PrefixThenGenerate
+            && self.construction == Construction::Bulk
+        {
+            return Err(ManifestError::BulkScaffoldPresentedAsAged);
         }
         for entry in Self::field_schema().residue() {
             if !self.residue.contains(&entry) {

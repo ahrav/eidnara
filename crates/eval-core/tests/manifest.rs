@@ -1054,9 +1054,44 @@ fn an_enumerate_run_records_its_mode_and_the_pinned_spec_digest() {
     for mode in [
         eval_core::ExecutionMode::Generate,
         eval_core::ExecutionMode::ReplayTape,
+        eval_core::ExecutionMode::PrefixThenGenerate,
     ] {
         let mut other = enumerate.clone();
         other.execution_mode = mode;
         assert_ne!(other.digest().unwrap(), enumerate.digest().unwrap());
     }
+}
+
+/// A run resumed from a quiescent checkpoint copy of a replayed prefix says so
+/// in its mode; a bulk construction under that mode is a contradiction.
+#[test]
+fn a_prefix_then_generate_run_cannot_claim_a_bulk_construction() {
+    let mut resumed = manifest();
+    resumed.execution_mode = eval_core::ExecutionMode::PrefixThenGenerate;
+    resumed.construction = eval_core::Construction::Replay;
+    assert_eq!(
+        resumed.to_value()["execution_mode"],
+        serde_json::json!("prefix_then_generate")
+    );
+    assert_eq!(
+        parse_manifest(&resumed.to_value()).unwrap().execution_mode,
+        eval_core::ExecutionMode::PrefixThenGenerate
+    );
+    let mut bulk = resumed.clone();
+    bulk.construction = eval_core::Construction::Bulk;
+    let mut coverage = eval_core::Coverage::default();
+    coverage
+        .record("wm_bulk_scaffold_presented_as_aged")
+        .unwrap();
+    assert_eq!(
+        bulk.validate(),
+        Err(ManifestError::BulkScaffoldPresentedAsAged)
+    );
+    coverage
+        .complete("crates/eval-core/tests/manifest.rs::")
+        .unwrap();
+    let mut generated_bulk = manifest();
+    generated_bulk.construction = eval_core::Construction::Bulk;
+    generated_bulk.execution_mode = eval_core::ExecutionMode::Generate;
+    assert!(generated_bulk.validate().is_ok());
 }

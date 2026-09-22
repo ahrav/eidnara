@@ -54,14 +54,14 @@ The 30 required fields, sorted:
 | `attestation` | Tagged: `{"kind": "none"}` or `{"kind": "signed", ...}`. |
 | `claim_boundary` | The `claim-boundary/v1` block with the four exclusions. |
 | `component_versions` | Seven versions: generator, event schema, reducer, oracles, execution image, task corpus, judge. |
-| `construction` | `replay`, `bulk`, or `hand_built`. |
+| `construction` | `replay`, `bulk`, or `hand_built`; `bulk` under the `prefix_then_generate` execution mode is refused (`BulkScaffoldPresentedAsAged`), because a run resumed from a checkpoint copy of a replayed prefix cannot also claim a bulk build. |
 | `cut_receipts` | Cuts from the closed set (`AfterAtomicTransition`, `AtQuiescence`, `AfterRecovery`, `AfterFaultPhase`, `EndOfRun`) with `reached` or `not_reached`. |
 | `end_ms`, `start_ms` | Wall-clock stamps from the shell. |
 | `envelope_bounds` | Declared resource bounds. |
 | `envelope_peaks` | Observed peaks; a measurement, so it leaves the digest. |
 | `error` | Typed error text or `null`. |
 | `eval_run_id` | The run identity digest. |
-| `execution_mode` | `generate`, `replay_tape`, or `enumerate`: how the world was driven. |
+| `execution_mode` | `generate`, `replay_tape`, `enumerate`, or `prefix_then_generate` (the remaining choices generated on a quiescent checkpoint copy of a replayed prefix): how the world was driven. |
 | `failure_class_table_digest` | The `eidnara-failure-class-table-v1` digest of the pinned truth table; refused unless it equals `FAILURE_CLASS_TABLE_DIGEST`. |
 | `ingestion` | `adapter-ingested, production caller: none`, `direct-database, non-aged`, or `transform-route, turn by turn` (the harness's own path, one turn at a time through one store incarnation); `direct-database, non-aged` with a `replay` construction is refused (`DirectDatabaseAged`). |
 | `memory_reviewer_model_calls` | `cassette` (replayed through the keyed TLS peer) or `excluded` (the reviewer worker is not spawned); MemoryReviewer traffic bypasses `LlmExecutionBackend`, so silence is refused as a missing field. |
@@ -1557,6 +1557,105 @@ Not composed yet: the write-then-rename publisher is test support
 shell and from the fixture for its recorded cassette), since no shipped
 publisher exists.
 
+## Checkpoints and guard digests
+
+`checkpoint` holds the value-level contract of a quiescent checkpoint and of
+the digests that compare two constructions of one history. The shell reads
+counters, truncates WALs, copies bytes, and reopens; the core decides what
+those readings permit.
+
+A `QuiescenceReceipt` names the drive step it was taken at and, for each of
+the three `StoreFamily` values (`kernel`, `memory`, `search_projection`), a
+`StoreQuiescence`: the family's work counters (`pending`, keyed by the closed
+`WorkCounter` set each family declares through `StoreFamily::counters`:
+`outbox_unpublished` for the kernel; `capture_jobs_pending` and
+`reviewer_jobs_open` for the memory store; `catch_up_lag` and `embedding_open`
+for the projection), the `WalCheckpoint` triple `PRAGMA
+wal_checkpoint(TRUNCATE)` returned (`busy`, `wal_frames`,
+`checkpointed_frames`; `is_truncated` is `busy == 0` with every frame
+checkpointed and a non-negative frame count, since SQLite reports `-1` for a
+database outside WAL mode), the bytes left in the `-wal` sidecar, and
+`handles_closed`. `Checkpoint::admit(receipt, incarnation_id)` judges the
+receipt before any byte is copied: every family present
+(`MissingStoreEvidence { family }`, so a memory store with no receipt of its
+own cannot borrow the kernel's), every declared counter present
+(`MissingCounter { family, counter }`: an empty map is not quiescence) and at
+zero (`PendingWork { family, counter, observed }`), every WAL truncated
+(`WalNotTruncated { family, wal }`) with no sidecar bytes left
+(`WalSidecarPresent { family, bytes }`), every handle closed (`HandleOpen`),
+and the kernel's persisted `database_incarnation_id` 32 lowercase hex digits
+(`MalformedIncarnation`). `Checkpoint::new(receipt, incarnation_id, files)`
+admits the receipt and requires at least one copied file (`NoFiles`); `files`
+maps each copied path, relative to the root, to its SHA-256, and
+`Checkpoint::digest` hashes the whole record under `eval-checkpoint/v1`, so
+two checkpoints of different stores never share a digest.
+`Checkpoint::accept(&Reopened)` accepts a reopened copy only when it reports
+the same incarnation (`ForeignIncarnation { expected, found }`; a cross-store
+copy is refused here), every family is present (`MissingStore`), each reports
+`PRAGMA integrity_check` as `ok` (`IntegrityCheck { family, reported }`) and
+zero `pragma_foreign_key_check` rows (`ForeignKeyViolations { family, count
+}`), and every copied file is still there with its digest (`FileMissing {
+path }`, `FileDiffers { path }`; an omitted artifact fails here). A new open
+nonce is not read: the identity a copy keeps is the persisted one.
+
+`ProjectionRows` is one search projection as read: the snapshot commit it was
+constructed at, its `LiveRows` (occurrences without a tombstone keyed to the
+SHA-256 of their payload bytes, the occurrences with a lexical row, and the
+occurrences with open embedding work; every `*_at` column dropped) and its
+`HistoricalRows` (every occurrence with the commit that created it, every
+tombstone as a `Death { invalidated_commit_seq, reason }` over the
+projection's closed `TombstoneReason` set, and the vector generation's
+`GenerationState`). `live_digest` hashes the live rows under
+`eval-guard-live/v1`; two constructions of one history must agree on it, and
+a changed payload, lexical row, or open job changes it. `historical_diff(earlier,
+later)` compares a construction that started at the earlier snapshot with one
+that started at the later, both caught up to the same tip, and returns only
+the differences the parent's divergence table enumerates:
+`TombstonedBeforeSnapshot { occurrence_id, death }` for an occurrence only
+the earlier construction holds, permitted exactly when its tombstone falls
+after the earlier snapshot and at or before the later one (the later
+construction never saw the descriptor alive), and `GenerationState { earlier,
+later }`. Every other difference is `Unenumerated`: `SnapshotOrder`,
+`OccurrenceOnlyInEarlier` (a death outside the window or no death at all),
+`OccurrenceOnlyInLater`, `TombstoneOnlyInEarlier`, `TombstoneOnlyInLater`,
+`TombstoneDiffers`, and `CreatedDiffers`. `GuardComparison::of((rows, kind),
+(rows, kind))` packages both constructions (`ProjectionConstruction { kind:
+catch_up | bulk, snapshot_commit_seq }`), whether their live digests are
+equal, and the enumerated divergences, refusing an unenumerated one.
+
+`StateSnapshot` is the three families at one quiescent point less every open
+nonce, lease epoch, incarnation id, and wall-clock stamp: the kernel tip, the
+kernel's source descriptors (`Descriptor`: revision, creating and invalidating
+commits, successor), the projection's live rows, and the memory store's
+history segments by sequence (`Segment`, less `created_at`). `guard_digest`
+hashes it under `eval-prefix-guard/v1`; `StateSnapshot::compare(full,
+resumed)` refuses `CommitSeqDiffers` first and then `HistorySlipped { family
+}` for the first family whose rows differ; `StateSnapshot::advanced(reopened,
+resumed)` refuses a tip that did not move (`CommitSeqNotMonotonic`) and a
+descriptor the resumed life holds but the reopened copy did not whose creating
+commit is at or before the checkpoint (`HistoryRewritten { object_id }`). The
+snapshot carries no incarnation id: a full replay and a resumed copy are two
+stores, and the claim between them is equal history, not equal identity.
+
+`WindowDeaths::count(descriptors, snapshot, through)` counts the descriptors
+created at or before `snapshot` and invalidated in `(snapshot, through]`,
+split by whether a successor superseded them. Both counts must be nonzero at
+least once per campaign; otherwise the guard passed without the situation it
+exists for.
+
+`AgingReport` (`eval-suite-c-aging-report/v1`) is what one aging campaign
+publishes: the run identity, the profile digest, the claim boundary, the step
+count and checkpoint step, the checkpoint's digest and receipt, both guard
+digests, the tips at the checkpoint and the end, the two `GuardComparison`
+records (the full life's projection against the resumed life's and against
+the bulk scaffold), the window deaths, the markers fired, and the envelope.
+`parse_aging_report` reads it back losslessly or refuses (`SchemaMismatch`,
+`Shape`, `Lossy`). `AgingReport::result_digest` hashes the published report
+less its measurements, the envelope peaks, the receipt, and the checkpoint
+digest (which names one store's bytes), under
+`eval-suite-c-aging-report-result/v1`, so two runs of one identity on two
+stores agree on it.
+
 ## Coverage markers
 
 `MARKERS` is the evaluator-owned registry: constant, globally unique names,
@@ -1566,14 +1665,22 @@ invariant; `record` refuses an unregistered name, and `Coverage::complete(suite)
 is `Incomplete { missing }` unless every registered marker whose test path
 starts with `suite` fired, and `EmptySuite` when the prefix selects no marker
 (an empty prefix names the whole registry). Each
-daemon suite owns the markers whose tests it holds: `eval_ingestion.rs` the
-`ing_` markers, `eval_ledger.rs` the `ldg_` markers, and
-`eval_surface_ledger.rs` the `sls_` markers, and `eval_cassette.rs` the `rid_`
-markers (the reviewer peer's marker is `rid_` too, because the suite owns the
-prefix even though the record is `sls-memory-reviewer-model-calls-cassette-or-excluded`). Each suite checks that
-every marker it owns names one of its scenarios and runs its completeness
-proof on every pass: all scenarios once, then `Coverage::complete` over its
-own prefix. A whole-registry proof would need one run to reach both suites'
+daemon suite owns the markers whose tests it holds, whatever their name
+prefix: `eval_ingestion.rs` the Phase 1 `ing_` markers, `eval_ledger.rs` the
+`ldg_` markers, `eval_surface_ledger.rs` the `sls_` markers, `eval_cassette.rs`
+the `rid_` markers (the reviewer peer's marker is `rid_` too, because the suite
+owns the prefix even though the record is
+`sls-memory-reviewer-model-calls-cassette-or-excluded`), and `eval_aging.rs`
+the checkpoint and window markers (`flt_quiescence_receipt_all_zero`,
+`flt_copy_attempted_mid_episode`, `flt_checkpoint_observed_busy`,
+`flt_prefix_history_slipped`, `flt_foreign_incarnation_refused_at_reopen`,
+`sls_memstore_copy_refused_live_handle`, `ing_aged_arm_restarted_between_sessions`,
+`ing_window_has_pre_snapshot_supersession`,
+`ing_window_has_pre_snapshot_retirement`); the manifest refusal marker
+`wm_bulk_scaffold_presented_as_aged` is recorded by the eval-core manifest
+suite. Each suite checks that every marker it owns names one of its scenarios
+and runs its completeness proof on every pass: all scenarios once, then
+`Coverage::complete` over its own prefix. A whole-registry proof would need one run to reach both suites'
 preconditions and does not exist yet.
 
 ## Ingestion shell
