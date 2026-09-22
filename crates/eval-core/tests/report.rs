@@ -16,7 +16,7 @@ use eval_core::{
     SampleLedger, SampleRecord, Scale, SkipReason, StopCondition, StoppingRule, SuiteBReport,
     Suppression, TaskBudgets, Terminal, WorldProvenance, analyze, parse_report, reachability_of,
 };
-use eval_core::{AxisValue, InjectionScore, IntervalOutcome};
+use eval_core::{AxisValue, InjectionScore, IntervalOutcome, StatisticsError};
 use serde_json::json;
 
 type Mutate = Box<dyn Fn(&mut SuiteBReport)>;
@@ -1025,6 +1025,43 @@ fn a_report_refuses_what_its_own_evidence_refutes() {
             ReportError::InjectionScoreDisagrees {
                 case_id: String::new(),
             },
+        ),
+        (
+            "a sample unsupported on another surface",
+            Box::new(|r| {
+                r.samples.samples.get_mut("s644").unwrap().terminal =
+                    Terminal::Unsupported(eval_core::UnsupportedReason::SurfaceNotActivated {
+                        surface: EvaluatedSurface::Surface2,
+                    });
+            }),
+            ReportError::SampleAxisDisagrees {
+                sample: "s644".into(),
+            },
+        ),
+        (
+            "a sample disabled for another scale",
+            Box::new(|r| {
+                r.samples.samples.get_mut("s645").unwrap().terminal =
+                    Terminal::Disabled(eval_core::DisabledReason::ScaleNotBudgeted {
+                        scale: Scale::S2,
+                    });
+            }),
+            ReportError::SampleAxisDisagrees {
+                sample: "s645".into(),
+            },
+        ),
+        (
+            "a tap-rejected suppression over malformed arm rates",
+            Box::new(|r| {
+                r.outcome = ReportOutcome::Suppressed {
+                    by: Suppression::TapRejected,
+                };
+                r.claims.established.clear();
+                r.arm_rates.get_mut("aged").unwrap().miss_rate = "garbage".into();
+            }),
+            ReportError::Statistics(StatisticsError::MalformedDecimal {
+                field: "arm_rates.miss_rate",
+            }),
         ),
         (
             "an epoch past the canonical safe range",

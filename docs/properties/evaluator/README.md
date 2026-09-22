@@ -1115,9 +1115,11 @@ Report (`crates/eval-core/tests/report.rs`):
   envelope bound raised above the approved profile's, attempted samples all
   on one arm, a pair backed by an indeterminate sample, an interval whose replicate or item count is not the family's
   or the pairs', a stop-condition skip in an open report, a lineage naming
-  this run, a `profile_not_approved` skip under an approved profile, two
-  injection scores for one case or one with no case, and an epoch past the
-  canonical safe range each refuse by name
+  this run, a `profile_not_approved` skip under an approved profile, a sample
+  unsupported on another surface or disabled for another scale, a
+  tap-rejected suppression over malformed arm rates, two injection scores for
+  one case or one with no case, and an epoch past the canonical safe range
+  each refuse by name
   from `serialize` and `parse_report`; a run its envelope stopped, skipping
   the rest under the crossing reading and naming it as the suppression,
   round-trips, as does a tap-rejected run skipping the rest under condition

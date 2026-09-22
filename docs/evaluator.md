@@ -1196,9 +1196,10 @@ the four liveness bounds (`Zero {field}`), a malformed or out-of-range
 ceiling, an empty bound map, a zero bound on any surface
 (`ZeroBaselineBound`, since the resolver would read it as "use the pin"), a
 bound `recency_bound` would not resolve, a margin nobody set, and an approval
-whose run ID is not lowercase hex. The one grounded default in the repository
-is surface 1's recency window (`grounded_baseline_bounds`); nothing else has a
-production constant to borrow. `approved` is what a campaign asks before it
+whose run ID is not lowercase hex or whose approver is blank. The one grounded
+default in the repository is surface 1's recency window
+(`grounded_baseline_bounds`); nothing else has a production constant to
+borrow. `approved` is what a campaign asks before it
 runs: code and refusal tests need no approval, an empirical result does
 (`NotApproved`). `digest` (`eval-run-profile-digest/v1`) is the identity a
 report names. `TaskBudgets::exhausted(usage)` names the first budget reached,
@@ -1253,8 +1254,10 @@ carries rather than read from what it says:
   validates and is approved (`Profile`), a `profile_digest` equal to
   `profile.digest()` (`ProfileDigestMismatch`), a family that validates, and a
   profile whose `statistics` equal the family's `profile`
-  (`ProfileDisagreesWithFamily`), and an envelope whose bounds are the
-  profile's `envelope` (`EnvelopeDisagreesWithProfile`), whatever the outcome.
+  (`ProfileDisagreesWithFamily`), an envelope whose bounds are the profile's
+  `envelope` (`EnvelopeDisagreesWithProfile`), and arm rates that parse
+  (`Statistics`), whatever the outcome, so a suppression that never reads the
+  rates still publishes valid ones.
   Every integer must sit in the canonical safe range (`NotCanonical`), so a
   Bun consumer reads the same value; `RunProfile::validate` holds the profile
   to the same range (`NotCanonical`), so an unapproved-looking budget cannot
@@ -1288,7 +1291,9 @@ carries rather than read from what it says:
   `stop_condition` must name the condition the outcome was suppressed under,
   so an open report carries none (`StopConditionDisagrees`); no sample is
   skipped `profile_not_approved`, since the report's profile is approved
-  (`SkipDisagreesWithProfile`); a sample skipped `envelope_exceeded` must name
+  (`SkipDisagreesWithProfile`); a sample unsupported `surface_not_activated`
+  or disabled `scale_not_budgeted` names the report's surface or the profile's
+  scale (`SampleAxisDisagrees`); a sample skipped `envelope_exceeded` must name
   this run's bound for that resource and a reading the peaks reached
   (`SampleEnvelopeDisagrees`); every injection score names a case and no case
   is scored twice (`InjectionScoreDisagrees`), while binding the scores to the

@@ -11,8 +11,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::campaign::{
-    Ceilings, Envelope, EnvelopeExceeded, ProfileError, RunProfile, SampleError, SampleLedger,
-    SkipReason, Terminal, TerminalRates,
+    Ceilings, DisabledReason, Envelope, EnvelopeExceeded, ProfileError, RunProfile, SampleError,
+    SampleLedger, SkipReason, Terminal, TerminalRates, UnsupportedReason,
 };
 use crate::census::{EvaluatedSurface, Reachability};
 use crate::claim::{AnchorSet, ClaimDerivation, WorldProvenance};
@@ -248,6 +248,11 @@ pub enum ReportError {
     SkipDisagreesWithProfile {
         sample: String,
     },
+    /// A sample unsupported on another surface or disabled for another scale
+    /// than the run's.
+    SampleAxisDisagrees {
+        sample: String,
+    },
     /// An injection score with no case, or a second score for one case.
     InjectionScoreDisagrees {
         case_id: String,
@@ -307,6 +312,9 @@ impl SuiteBReport {
         if self.envelope.bounds != self.profile.envelope {
             return Err(ReportError::EnvelopeDisagreesWithProfile);
         }
+        // The retained arm rates parse whatever the outcome; a suppression
+        // that never reads them still publishes them.
+        arm_miss_asymmetry(&self.arm_rates).map_err(ReportError::Statistics)?;
         Ok(())
     }
 
@@ -421,6 +429,18 @@ impl SuiteBReport {
                 // `check_identity` has already required the approval.
                 Terminal::Skipped(SkipReason::ProfileNotApproved) => {
                     return Err(ReportError::SkipDisagreesWithProfile { sample: sample() });
+                }
+                // A sample not run on this surface, or at this scale, names
+                // the run's own axis.
+                Terminal::Unsupported(UnsupportedReason::SurfaceNotActivated { surface })
+                    if surface != self.surface =>
+                {
+                    return Err(ReportError::SampleAxisDisagrees { sample: sample() });
+                }
+                Terminal::Disabled(DisabledReason::ScaleNotBudgeted { scale })
+                    if scale != self.profile.scale =>
+                {
+                    return Err(ReportError::SampleAxisDisagrees { sample: sample() });
                 }
                 Terminal::Skipped(SkipReason::EnvelopeExceeded(exceeded)) => {
                     let bound = exceeded.resource.of(&self.envelope.bounds);

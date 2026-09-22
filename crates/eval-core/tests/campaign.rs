@@ -110,13 +110,16 @@ fn a_profile_pins_every_number_and_runs_only_once_approved() {
     assert_eq!(approved.approved().unwrap().approved_by, "maintainer");
     assert_eq!(approved.digest().unwrap().len(), 64);
     assert_ne!(approved.digest().unwrap(), profile.digest().unwrap());
-    approved.approval.as_mut().unwrap().approved_by.clear();
-    assert_eq!(
-        approved.validate(),
-        Err(ProfileError::Empty {
-            field: "approval.approved_by",
-        })
-    );
+    for nobody in ["", " \t"] {
+        approved.approval.as_mut().unwrap().approved_by = nobody.to_string();
+        assert_eq!(
+            approved.validate(),
+            Err(ProfileError::Empty {
+                field: "approval.approved_by",
+            }),
+            "{nobody:?}"
+        );
+    }
     approved.approval = Some(Approval {
         approved_by: "maintainer".to_string(),
         approved_at_run_id: "AB".repeat(32),

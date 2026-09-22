@@ -279,7 +279,7 @@ impl RunProfile {
         }
         self.statistics.rates().map_err(ProfileError::Statistics)?;
         if let Some(approval) = &self.approval {
-            if approval.approved_by.is_empty() {
+            if approval.approved_by.trim().is_empty() {
                 return Err(ProfileError::Empty {
                     field: "approval.approved_by",
                 });
