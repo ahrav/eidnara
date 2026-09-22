@@ -1692,18 +1692,20 @@ left in each `-wal` sidecar. A handle that could not be proved closed, or a
 projection truncation that ran past its wait, is recorded as `busy: 1` with
 `-1` frames rather than touched again: the receipt reports what was
 observed, and `admit` refuses it. The projection's file lease stays held until the
-copy is done, so nothing can open the projection in between. `Closed::copy`
-reopens the memory store once to prove no other holder has its lease; the
-probe itself writes a fence, so on success the memory store's WAL is
-truncated and its sidecar read again before the receipt is admitted, and a
-held lease is recorded as an open handle. The copy admits the receipt and
+copy is done, so nothing can open the projection in between. The kernel and
+memory store release their leases at close, so `Closed::copy` reopens each of
+them once to prove no other holder took its lease after the close; the probe
+itself writes a fence, so on success that store's WAL is truncated and its
+sidecar read again before the receipt is admitted, and a held lease is
+recorded as an open handle. The copy admits the receipt and
 only then copies
 `kernel/kernel.sqlite`, the kernel's artifact objects, `memory.sqlite`, and
 `search/search.sqlite` into a fresh root with owner-only modes, building the
 `Checkpoint` from the copied bytes; a refused receipt copies nothing.
-`Copied::reopen` reads each copy's integrity on its own connection and
-re-hashes every copied file before any store opens, accepts them against the
-checkpoint, and reopens the kernel and the memory store as they were.
+`Copied::reopen` re-hashes every copied file and refuses an absent one as
+`FileMissing` before any store opens, reads each copy's integrity on its own
+connection, accepts them against the checkpoint, and reopens the kernel and
+the memory store as they were.
 
 The search projection is the repository correction Phase 4 records. Its
 catch-up runs under a source hold bound to the kernel's lease epoch, and the

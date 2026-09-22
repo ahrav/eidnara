@@ -23,8 +23,8 @@ use eval_core::{
     WalCheckpoint, WindowDeaths, WorkCounter, WorldConfig, eval_run_id, generate_all, render,
 };
 use kernel::{
-    ArtifactDestination, CommitPageBounds, CurrentInputDescriptor, EligibilityBinding,
-    ProjectScope, ProviderEgress, Sensitivity, SourceRow,
+    ArtifactDestination, CommitPageBounds, CurrentInputDescriptor, EligibilityBinding, KernelError,
+    KernelStore, ProjectScope, ProviderEgress, Sensitivity, SourceRow,
 };
 use lease::{HeldFileLease, LeaseError};
 use memory_store::{MemoryStore, MemoryStoreError, StoredHistorySegment};
@@ -608,19 +608,24 @@ impl Closed {
     }
 
     pub fn copy(mut self, into: &Path) -> Result<(Checkpoint, Copied), CheckpointRefused> {
-        let memory_file = memory_file(&self.root);
-        let memory = self.receipt.stores.get_mut(&StoreFamily::Memory).unwrap();
-        match MemoryStore::open(&daemon::store_descriptor_in(&self.root)) {
+        let held = match MemoryStore::open(&daemon::store_descriptor_in(&self.root)) {
             Ok(probe) => {
                 drop(probe);
-                memory.wal = truncate(&memory_file);
-                memory.wal_sidecar_bytes = sidecar_len(&memory_file);
+                false
             }
-            Err(MemoryStoreError::Store(StoreError::Lease(LeaseError::Held { .. }))) => {
-                memory.handles_closed = false;
-            }
+            Err(MemoryStoreError::Store(StoreError::Lease(LeaseError::Held { .. }))) => true,
             Err(e) => panic!("memory store probe at {}: {e}", self.root.display()),
-        }
+        };
+        self.seal_after_probe(StoreFamily::Memory, held);
+        let held = match KernelStore::open(kernel_file(&self.root).parent().unwrap()) {
+            Ok(probe) => {
+                drop(probe);
+                false
+            }
+            Err(KernelError::Held) => true,
+            Err(e) => panic!("kernel probe at {}: {e}", self.root.display()),
+        };
+        self.seal_after_probe(StoreFamily::Kernel, held);
         let incarnation_id = kernel_incarnation_id(&self.root);
         Checkpoint::admit(&self.receipt, &incarnation_id)?;
         let mut files = BTreeMap::new();
@@ -639,6 +644,19 @@ impl Closed {
                 applied: self.applied,
             },
         ))
+    }
+
+    /// Close-time evidence cannot see a handle opened after the close. A probe
+    /// refused by another holder's lease marks the family's handle open.
+    fn seal_after_probe(&mut self, family: StoreFamily, held: bool) {
+        let file = store_file(&self.root, family);
+        let store = self.receipt.stores.get_mut(&family).unwrap();
+        if held {
+            store.handles_closed = false;
+        } else {
+            store.wal = truncate(&file);
+            store.wal_sidecar_bytes = sidecar_len(&file);
+        }
     }
 }
 
@@ -690,7 +708,7 @@ impl Copied {
                 foreign_key_violations: u64::try_from(violations).unwrap(),
             }
         };
-        let files = checkpoint
+        let files: BTreeMap<String, String> = checkpoint
             .files
             .keys()
             .filter_map(|relative| {
@@ -698,6 +716,11 @@ impl Copied {
                 Some((relative.clone(), sha256_hex(&bytes)))
             })
             .collect();
+        // A read-only open of an absent store file fails, so absent files are
+        // refused before the incarnation and integrity reads open any store.
+        if let Some(path) = checkpoint.files.keys().find(|p| !files.contains_key(*p)) {
+            return Err(RestoreRefused::FileMissing { path: path.clone() });
+        }
         checkpoint.accept(&Reopened {
             incarnation_id: kernel_incarnation_id(&self.root),
             stores: StoreFamily::ALL

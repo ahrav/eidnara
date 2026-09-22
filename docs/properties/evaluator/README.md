@@ -1337,10 +1337,17 @@ bound because it finishes inside the daemon suite's wall clock):
   `sls_memstore_copy_refused_live_handle`): a memory store opened after the
   close holds the lease, so the copy's probe fails and the copy is
   `HandleOpen { memory }`.
+- `a_copy_beside_a_live_kernel_handle_is_refused`: the close proves the kernel
+  handle closed, a kernel opened after the close holds the lease, so the
+  copy's probe fails, the copy is `HandleOpen { kernel }`, and nothing is
+  written.
 - `a_foreign_incarnation_is_refused_at_reopen` (marker
   `flt_foreign_incarnation_refused_at_reopen`): a copy reopened against
   another store's checkpoint is `ForeignIncarnation`; a copy missing one of
   its kernel artifact objects is `FileMissing` naming it.
+- `a_copy_missing_a_store_file_is_refused_at_reopen`: a copy missing
+  `kernel/kernel.sqlite`, `memory.sqlite`, or `search/search.sqlite` is
+  `FileMissing` naming it, before any store opens.
 - `an_unapproved_profile_refuses_before_any_store_opens`: no approval, no
   campaign, nothing published.
 - `the_example_publishes_the_same_digests_as_the_in_process_run`: the built

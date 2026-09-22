@@ -275,6 +275,52 @@ fn plan_copy(
 }
 
 #[test]
+fn a_copy_beside_a_live_kernel_handle_is_refused() {
+    let plan = plan(MESSAGES).unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let mut stores = Stores::open(root.path(), plan.rendering.clone());
+    live(&mut stores, &plan.steps[..3]);
+    let closed = stores.close();
+    assert!(closed.receipt.stores[&StoreFamily::Kernel].handles_closed);
+    let live_handle = kernel::KernelStore::open(closed.root().join("kernel")).unwrap();
+    let into = tempfile::tempdir().unwrap();
+    assert_eq!(
+        closed.copy(into.path()).err().unwrap(),
+        CheckpointRefused::HandleOpen {
+            family: StoreFamily::Kernel,
+        }
+    );
+    assert!(
+        std::fs::read_dir(into.path()).unwrap().next().is_none(),
+        "a refused copy writes nothing"
+    );
+    drop(live_handle);
+}
+
+#[test]
+fn a_copy_missing_a_store_file_is_refused_at_reopen() {
+    let plan = plan(MESSAGES).unwrap();
+    for file in [
+        "kernel/kernel.sqlite",
+        "memory.sqlite",
+        "search/search.sqlite",
+    ] {
+        let (checkpoint, copied, _kept) = plan_copy(&plan, 3);
+        assert!(checkpoint.files.contains_key(file), "{file}");
+        std::fs::remove_file(copied.root().join(file)).unwrap();
+        assert_eq!(
+            copied
+                .reopen(&checkpoint, plan.steps[3].now_ms)
+                .err()
+                .unwrap(),
+            RestoreRefused::FileMissing {
+                path: file.to_string(),
+            }
+        );
+    }
+}
+
+#[test]
 fn an_unapproved_profile_refuses_before_any_store_opens() {
     let publish = tempfile::tempdir().unwrap();
     let mut config = config(publish.path().join("out"), 600_000);
