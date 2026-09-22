@@ -118,6 +118,14 @@ fn campaign(scale: Scale, aged_messages: u32, elapsed_bound_ms: u64) -> Run {
         "the report and the manifest beside it carry one run identity"
     );
     assert_eq!(parsed.digest().unwrap(), run.manifest.digest().unwrap());
+    assert_eq!(
+        (&parsed.envelope_peaks, parsed.end_ms - parsed.start_ms),
+        (
+            &run.report.envelope.peaks,
+            i64::try_from(run.report.envelope.peaks.elapsed_ms).unwrap()
+        ),
+        "the manifest carries the envelope the report was published under"
+    );
     assert_eq!(read_back["construction"], "replay");
     assert_eq!(read_back["ingestion"], "transform-route, turn by turn");
     // A seeded history may not call itself aged: the same manifest relabelled

@@ -1382,7 +1382,7 @@ pub fn run(config: &Config) -> Result<Run, RunError> {
     let identity = identity(&profile, &set);
     let eval_run_id = eval_run_id(&identity).unwrap();
     charges.elapsed()?;
-    let manifest = manifest(
+    let mut manifest = manifest(
         identity,
         &eval_run_id,
         &set,
@@ -1465,6 +1465,11 @@ pub fn run(config: &Config) -> Result<Run, RunError> {
             break bytes;
         }
     };
+    // The manifest carries the envelope the report was published under: the
+    // peaks and the clock are measurements outside its digest, so refreshing
+    // them changes nothing the analysis read it for.
+    manifest.envelope_peaks = charges.envelope.peaks.clone();
+    manifest.end_ms = started_at_ms + i64::try_from(charges.envelope.peaks.elapsed_ms).unwrap();
     // The manifest's bytes are ready before either file is linked into place,
     // so a report is never published without it, and a manifest the directory
     // then refuses to take (out of space, a file that arrived meanwhile)
