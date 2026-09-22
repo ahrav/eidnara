@@ -14,7 +14,7 @@ use std::time::Instant;
 use daemon::transform::UserHintPass;
 use eval_core::{
     ANALYSIS_FAMILY_SCHEMA, Analysis, AnalysisFamily, Approval, ArmKind, ArmRates, ArmRecord,
-    ArmResult, Attestation, AxisValue, BaselineVerdict, BinaryDigest, BuildRecord, CampaignGates,
+    ArmResult, Attestation, Baseline, BaselineVerdict, BinaryDigest, BuildRecord, CampaignGates,
     CampaignProfile, Carrier, ClaimBoundary, Claims, ClusterKey, ClusteringUnit, ComponentVersions,
     Construction, Cut, CutOutcome, CutReceipt, Destination, ELIGIBILITY_SPEC_DIGEST,
     EVENT_SCHEMA_VERSION, Envelope, EnvelopeExceeded, Established, EvaluatedSurface, EventId,
@@ -27,10 +27,11 @@ use eval_core::{
     Ratio, Reachability, RecencyBaseline, RenderConfig, RenderedMessage, ReportOutcome,
     RepositorySpec, Required, Resource, ResourceLimits, RunIdentity, RunProfile, RunStatus,
     SUITE_B_REPORT_SCHEMA, SampleLedger, SampleRecord, Scale, Sensitivity, ServedClass,
-    SessionSpec, SkipReason, StageVerdict, StoppingRule, SuiteBReport, Surface1Stage, Task,
-    TaskBudgets, TaskRole, TaskUsage, Terminal, TokenizerProfile, UnsupportedReason, Visibility,
-    WorldConfig, WorldProvenance, analyze, check_recency_baseline, compile_pair_set, eval_run_id,
-    generate_all, plan_injection_cases, render, score_injection, serialize_spec, text_decision,
+    SessionSpec, SkipReason, StageValue, StageVerdict, StoppingRule, SuiteBReport, Surface1Stage,
+    Task, TaskBudgets, TaskRole, TaskUsage, Terminal, TokenizerProfile, UnsupportedReason,
+    Visibility, WorldConfig, WorldProvenance, analyze, check_recency_baseline, compile_pair_set,
+    eval_run_id, generate_all, pair_table_digest, plan_injection_cases, render, score_injection,
+    serialize_spec, text_decision,
 };
 use memory_store::{MemoryStore, StoredHistorySegment};
 use serde_json::{Value, json};
@@ -44,6 +45,10 @@ use super::support::eval_surface::{
 use super::support::publish::{staged_path, write_then_rename};
 
 pub const SEED: u64 = 0x5EED_B000_0000_0002;
+/// The campaign's one world, as its pairs' cluster key names it: a canonical
+/// JSON number cannot carry the generator's 64-bit seed, so the world is
+/// named by ordinal, and the manifest carries the seed itself.
+const WORLD: u64 = 0;
 const PROJECT: &str = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
 const SESSION: &str = "session-0";
 /// Messages in the natural-fresh control: long enough that the hint scorer's
@@ -245,14 +250,33 @@ pub fn profile(
     }
 }
 
+/// The task families the analysis registers: the campaign's two generated
+/// histories, sorted as the family lists them. Every task is drawn from the
+/// aged one, so every pair lies in `TASK_FAMILY`; the fresh control is
+/// registered because a pilot samples at least two families.
+const TASK_FAMILIES: [&str; 2] = ["generated/aged", "generated/fresh"];
+const TASK_FAMILY: &str = TASK_FAMILIES[0];
+
+fn ratio(numerator: i128, denominator: i128) -> Ratio {
+    Ratio::try_new(numerator, denominator).unwrap()
+}
+
+/// The frozen family the campaign is read under: its table is the profile's
+/// tasks over its worlds, one pair each, and its pilot is declared, not run:
+/// the two histories' tasks, one world each, with no correlation at either
+/// level, so the affordable worlds' items are its effective N and the
+/// required N, which the plan meets exactly.
 fn family(profile: &RunProfile) -> AnalysisFamily {
+    let families: Vec<String> = TASK_FAMILIES.iter().map(|f| f.to_string()).collect();
+    let n_families = u32::try_from(TASK_FAMILIES.len()).unwrap();
+    let pairs = profile.worlds * profile.tasks_per_world;
     AnalysisFamily {
         schema: ANALYSIS_FAMILY_SCHEMA.to_string(),
         endpoints: vec!["quality_loss".into(), "harm".into(), "floor".into()],
-        families: vec!["generated".into()],
+        families: families.clone(),
         exclusions: vec![],
-        stopping_rule: StoppingRule::FixedN,
-        multiplicity_correction: MultiplicityCorrection::Holm,
+        stopping_rule: StoppingRule::FixedN { pairs },
+        multiplicity_correction: MultiplicityCorrection::None,
         profile: profile.statistics.clone(),
         interval_method: IntervalMethod::ClusterBootstrap,
         item_count_threshold: 300,
@@ -261,15 +285,19 @@ fn family(profile: &RunProfile) -> AnalysisFamily {
         trials_k: 3,
         icc_pilot: IccPilot {
             pilot_run_id: "ab".repeat(32),
-            n_items: 360,
-            n_families: 6,
-            n_worlds: 120,
-            icc_family: Ratio::new(1, 4),
-            icc_world_seed: Ratio::new(0, 1),
+            families,
+            n_items: n_families * profile.tasks_per_world,
+            n_families,
+            n_worlds: n_families,
+            icc_family: Ratio::ZERO,
+            icc_world_seed: Ratio::ZERO,
             clustering_unit: ClusteringUnit::WorldSeed,
-            max_affordable_worlds: 60,
-            effective_n_at_max: Ratio::new(400, 1),
-            required_n_for_margin: 385,
+            max_affordable_worlds: profile.worlds,
+            effective_n_at_max: ratio(
+                i128::from(n_families * profile.tasks_per_world * profile.worlds),
+                i128::from(n_families),
+            ),
+            required_n_for_margin: pairs,
         },
         transfer_criterion: None,
     }
@@ -892,24 +920,30 @@ fn injection_scores(
                             .filter(|segment| run.selected.contains(&segment.sequence))
                             .any(carries)
                     });
-                    let yes_no = |held: bool| if held { AxisValue::Yes } else { AxisValue::No };
+                    let yes_no = |held: bool| {
+                        if held {
+                            StageValue::Yes
+                        } else {
+                            StageValue::No
+                        }
+                    };
                     // Retrieval is judged only where a structured aged arm ran a
                     // task with the canary already in its store.
                     let retrieval = if ingested && !structured_aged.is_empty() {
                         yes_no(retrieved)
                     } else {
-                        AxisValue::NotReached
+                        StageValue::NotReached
                     };
                     (yes_no(ingested), retrieval)
                 }
-                _ => (AxisValue::NotReached, AxisValue::NotReached),
+                _ => (StageValue::NotReached, StageValue::NotReached),
             };
             score_injection(
                 case,
                 &InjectionObservation {
                     ingested,
                     retrieved,
-                    packed: AxisValue::NotReached,
+                    packed: StageValue::NotReached,
                     mediation: None,
                     outputs: Vec::new(),
                     later_session: None,
@@ -1100,7 +1134,7 @@ pub fn run(config: &Config) -> Result<Run, RunError> {
     })
     .unwrap();
     let BaselineVerdict::Established { contrast } =
-        check_recency_baseline(&set, |pair| pair.recency_window.clone()).unwrap()
+        check_recency_baseline(&set, &serialize_spec(), Baseline::Versioned).unwrap()
     else {
         panic!("{aged_messages} messages push the third one out of a window of {window}");
     };
@@ -1244,8 +1278,8 @@ pub fn run(config: &Config) -> Result<Run, RunError> {
             structured_outcomes.push(PairOutcome {
                 pair_id: pair.task.id.clone(),
                 cluster: ClusterKey {
-                    family: "generated".to_string(),
-                    world_seed: SEED,
+                    family: TASK_FAMILY.to_string(),
+                    world_seed: WORLD,
                 },
                 fresh: fresh.result,
                 aged: aged.result,
@@ -1257,8 +1291,8 @@ pub fn run(config: &Config) -> Result<Run, RunError> {
         outcomes.push(PairOutcome {
             pair_id: pair.task.id.clone(),
             cluster: ClusterKey {
-                family: "generated".to_string(),
-                world_seed: SEED,
+                family: TASK_FAMILY.to_string(),
+                world_seed: WORLD,
             },
             fresh: fresh_run.result,
             aged: aged_run.result,
@@ -1271,6 +1305,7 @@ pub fn run(config: &Config) -> Result<Run, RunError> {
     let aged_structured_covered = covered(&aged_recording.segments, &aged_world);
     let arms = GovernanceArms {
         control_run_id: "ee".repeat(32),
+        pair_set_digest: eval_core::pair_set_digest(&set).unwrap(),
         task_ids: set.pairs.iter().map(|p| p.task.id.clone()).collect(),
         evidence_ids: set
             .pairs
@@ -1301,7 +1336,7 @@ pub fn run(config: &Config) -> Result<Run, RunError> {
             ),
         ]),
     };
-    arms.validate(&set).unwrap();
+    arms.validate(&set, &serialize_spec()).unwrap();
 
     let ledger = SampleLedger {
         epoch: 1,
@@ -1330,8 +1365,27 @@ pub fn run(config: &Config) -> Result<Run, RunError> {
         .collect();
     let family = family(&profile);
     let frozen = FrozenFamily::freeze(&family).unwrap();
-    let Analysis::Report(analysis) = analyze(&frozen, &family, &outcomes, &arm_rates).unwrap()
-    else {
+    // The manifest is the run's record and the analysis reads the table under
+    // it: it names the pairs as its samples, binds the completed table by
+    // digest, carries the frozen family and the arm rates, and says how the
+    // world reached the store: every arm was lived through the daemon's own
+    // transform route one turn at a time in one store incarnation, so the run
+    // is `replay` over `transform-route, turn by turn`.
+    let identity = identity(&profile, &set);
+    let eval_run_id = eval_run_id(&identity).unwrap();
+    charges.elapsed()?;
+    let manifest = manifest(
+        identity,
+        &eval_run_id,
+        &set,
+        &profile,
+        &frozen,
+        &outcomes,
+        &arm_rates,
+        &charges.envelope,
+        started_at_ms,
+    );
+    let Analysis::Report(analysis) = analyze(&manifest, &family, &outcomes).unwrap() else {
         panic!("a pair set with pairs reports");
     };
     let ceilings = profile.ceilings().unwrap();
@@ -1351,10 +1405,9 @@ pub fn run(config: &Config) -> Result<Run, RunError> {
     {
         established.push(Established::TaskOraclePasses);
     }
-    let identity = identity(&profile, &set);
     let mut report = SuiteBReport {
         schema: SUITE_B_REPORT_SCHEMA.to_string(),
-        eval_run_id: eval_run_id(&identity).unwrap(),
+        eval_run_id,
         profile: profile.clone(),
         profile_digest: profile.digest().unwrap(),
         surface: EvaluatedSurface::Surface1,
@@ -1362,7 +1415,9 @@ pub fn run(config: &Config) -> Result<Run, RunError> {
         claims: Claims {
             boundary: ClaimBoundary::pinned(),
             established,
-            derivation: family.claim_class(WorldProvenance::Generated, None),
+            derivation: family
+                .claim_class(&frozen, WorldProvenance::Generated, None)
+                .unwrap(),
             provenance: WorldProvenance::Generated,
             anchor_set: None,
         },
@@ -1402,12 +1457,8 @@ pub fn run(config: &Config) -> Result<Run, RunError> {
             break bytes;
         }
     };
-    // The manifest beside the report says how the world reached the store:
-    // every arm was lived through the daemon's own transform route one turn
-    // at a time in one store incarnation, so the run is `replay` over
-    // `transform-route, turn by turn`. It is built before either file is
-    // renamed into place, so a report is never published without it.
-    let manifest = manifest(identity, &set, &report, &bytes, &frozen, started_at_ms);
+    // The manifest's bytes are ready before either file is renamed into place,
+    // so a report is never published without it.
     let manifest_bytes = serde_json::to_vec_pretty(&manifest.to_value()).unwrap();
     publish_file(&publish.join(REPORT_FILE), &bytes)?;
     publish_file(&publish.join(MANIFEST_FILE), &manifest_bytes)?;
@@ -1426,22 +1477,6 @@ pub fn run(config: &Config) -> Result<Run, RunError> {
             covered: aged_structured_covered,
         },
     })
-}
-
-/// The protocol the manifest's `result_digest` is taken under.
-pub const RESULT_DIGEST_PROTOCOL: &str = "eval-suite-b-report-result/v1";
-
-/// The digest the manifest names the report by: the published report with
-/// its envelope peaks removed, since the peaks are a measurement and a clock
-/// must not reach a digest. Two runs of one identity agree on it.
-pub fn result_digest(report_bytes: &[u8]) -> String {
-    let mut value: Value = serde_json::from_slice(report_bytes).expect("the report is JSON");
-    value["envelope"]
-        .as_object_mut()
-        .expect("the report carries its envelope")
-        .remove("peaks");
-    context_core::canonical_json::protocol_digest(RESULT_DIGEST_PROTOCOL, &value)
-        .expect("the report is canonical")
 }
 
 /// The report's file name under the publish directory.
@@ -1580,28 +1615,33 @@ fn identity(profile: &RunProfile, set: &PairSet) -> RunIdentity {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn manifest(
     identity: RunIdentity,
+    eval_run_id: &str,
     set: &PairSet,
-    report: &SuiteBReport,
-    report_bytes: &[u8],
+    profile: &RunProfile,
     frozen: &FrozenFamily,
+    outcomes: &[PairOutcome],
+    arm_rates: &BTreeMap<String, ArmRates>,
+    envelope: &Envelope,
     started_at_ms: i64,
 ) -> Manifest {
     let set_value = serde_json::to_value(set).unwrap();
+    let sample_order: Vec<String> = outcomes.iter().map(|pair| pair.pair_id.clone()).collect();
     Manifest {
         schema: MANIFEST_SCHEMA.to_string(),
-        eval_run_id: report.eval_run_id.clone(),
+        eval_run_id: eval_run_id.to_string(),
         run_identity: identity,
         start_ms: started_at_ms,
-        end_ms: started_at_ms + i64::try_from(report.envelope.peaks.elapsed_ms).unwrap(),
+        end_ms: started_at_ms + i64::try_from(envelope.peaks.elapsed_ms).unwrap(),
         status: RunStatus::Completed,
         error: None,
-        sample_ids: report.samples.samples.keys().cloned().collect(),
-        sample_order: report.samples.order.clone(),
-        sample_epoch: report.samples.epoch,
+        sample_ids: sample_order.clone(),
+        sample_order,
+        sample_epoch: 1,
         retry_lineage: Vec::new(),
-        result_digest: result_digest(report_bytes),
+        result_digest: pair_table_digest(outcomes).unwrap(),
         witness_digest: context_core::canonical_json::protocol_digest(
             "eval-campaign-witness/v1",
             &set_value,
@@ -1626,7 +1666,7 @@ fn manifest(
         analysis_family_digest: Some(frozen.analysis_family_digest.clone()),
         recency_baseline: Some(RecencyBaseline {
             version: eval_core::RECENCY_BASELINE_VERSION.to_string(),
-            bounds: report.profile.baseline_bounds.clone(),
+            bounds: profile.baseline_bounds.clone(),
         }),
         reachability: Reachability::DefaultProduction,
         claim_boundary: ClaimBoundary::pinned(),
@@ -1639,9 +1679,9 @@ fn manifest(
             task_corpus: format!("generated:{SEED:#x}"),
             judge: "none".to_string(),
         },
-        envelope_bounds: report.envelope.bounds.clone(),
-        envelope_peaks: report.envelope.peaks.clone(),
-        arm_rates: report.arm_rates.clone(),
+        envelope_bounds: envelope.bounds.clone(),
+        envelope_peaks: envelope.peaks.clone(),
+        arm_rates: arm_rates.clone(),
     }
 }
 

@@ -3,7 +3,7 @@
 //! by path so its model backend can record to, or replay from, the same
 //! cassette the tests read.
 
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use eval_core::{
@@ -163,8 +163,32 @@ impl From<&BackendTerminal> for WireTerminal {
     }
 }
 
+/// Every `FinishReason`; the `match` fails to compile when the host adds a
+/// variant, so the decode list cannot drift behind `as_wire_str`.
+pub fn finish_reasons() -> [FinishReason; 2] {
+    [FinishReason::Completed, FinishReason::Length].map(|reason| match reason {
+        FinishReason::Completed | FinishReason::Length => reason,
+    })
+}
+
+/// Every `ErrorClass`, guarded the same way as [`finish_reasons`].
+pub fn error_classes() -> [ErrorClass; 4] {
+    [
+        ErrorClass::Transient,
+        ErrorClass::Permanent,
+        ErrorClass::AuthRequired,
+        ErrorClass::ContextOverflow,
+    ]
+    .map(|class| match class {
+        ErrorClass::Transient
+        | ErrorClass::Permanent
+        | ErrorClass::AuthRequired
+        | ErrorClass::ContextOverflow => class,
+    })
+}
+
 fn finish_reason(text: &str) -> Option<FinishReason> {
-    [FinishReason::Completed, FinishReason::Length]
+    finish_reasons()
         .into_iter()
         .find(|reason| reason.as_wire_str() == text)
 }
@@ -195,15 +219,10 @@ impl TryFrom<WireError> for BackendError {
     type Error = String;
 
     fn try_from(error: WireError) -> Result<Self, String> {
-        let class = [
-            ErrorClass::Transient,
-            ErrorClass::Permanent,
-            ErrorClass::AuthRequired,
-            ErrorClass::ContextOverflow,
-        ]
-        .into_iter()
-        .find(|class| class.as_wire_str() == error.class)
-        .ok_or(error.class)?;
+        let class = error_classes()
+            .into_iter()
+            .find(|class| class.as_wire_str() == error.class)
+            .ok_or(error.class)?;
         Ok(Self {
             class,
             message: error.message,
@@ -234,7 +253,7 @@ impl TryFrom<WireTerminal> for BackendTerminal {
 /// capabilities from this backend reads what the real backend declared.
 pub struct CassetteBackend {
     namespace: String,
-    cassette: Arc<Mutex<Cassette>>,
+    recording: Arc<Mutex<Recording>>,
     inner: Option<Arc<dyn LlmExecutionBackend>>,
     declarations: Declarations,
     /// The declared reasons as `'static` strings, leaked once here so the
@@ -243,6 +262,14 @@ pub struct CassetteBackend {
     refusals: Arc<AtomicUsize>,
     /// Frames the recording refused as carrying a secret-shaped span.
     redaction_refusals: Arc<AtomicUsize>,
+}
+
+/// The cassette with its exchanges still between `execute` and `record`,
+/// under one lock so `file()` never observes a count and a cassette state
+/// from different moments.
+struct Recording {
+    cassette: Cassette,
+    in_flight: usize,
 }
 
 impl CassetteBackend {
@@ -277,7 +304,10 @@ impl CassetteBackend {
         ];
         Arc::new(Self {
             namespace: namespace.to_string(),
-            cassette: Arc::new(Mutex::new(cassette)),
+            recording: Arc::new(Mutex::new(Recording {
+                cassette,
+                in_flight: 0,
+            })),
             inner,
             declarations,
             reasons,
@@ -286,9 +316,14 @@ impl CassetteBackend {
         })
     }
 
-    /// The persisted cassette after recording; a refused recording has none.
+    /// The persisted cassette after recording; a refused recording has none,
+    /// and a recording with an exchange still in flight has none yet.
     pub fn file(&self) -> Result<Value, CassetteError> {
-        Ok(serde_json::to_value(self.cassette.lock().unwrap().to_file()?).unwrap())
+        let recording = self.recording.lock().unwrap();
+        if recording.in_flight > 0 {
+            return Err(CassetteError::IncompleteExchange);
+        }
+        Ok(serde_json::to_value(recording.cassette.to_file()?).unwrap())
     }
 
     /// Frames a recording refused because the scanner found a secret-shaped
@@ -304,7 +339,12 @@ impl CassetteBackend {
     }
 
     pub fn terminal(&self) -> Option<CassetteMiss> {
-        self.cassette.lock().unwrap().terminal().cloned()
+        self.recording.lock().unwrap().cassette.terminal().cloned()
+    }
+
+    /// Recorded entries no request has consumed; a faithful replay leaves none.
+    pub fn unconsumed(&self) -> usize {
+        self.recording.lock().unwrap().cassette.unconsumed()
     }
 
     fn refused(code: &str, detail: impl std::fmt::Display) -> BackendTerminal {
@@ -325,30 +365,50 @@ impl CassetteBackend {
         cancel: CancellationToken,
     ) -> BackendFuture {
         let seen = Arc::new(Mutex::new(Vec::new()));
+        let closed = Arc::new(AtomicBool::new(false));
         let tee = {
             let seen = seen.clone();
+            let closed = closed.clone();
             EventSink::new(Arc::new(move |event: BackendEvent| {
+                // Forward and record under one lock, so concurrent emitters
+                // record in the order the run's sink accepted.
+                let mut seen = seen.lock().unwrap();
                 let status = events.emit(event.clone());
-                if status == SinkStatus::Accepted {
-                    seen.lock().unwrap().push(WireEvent::from(&event));
+                match status {
+                    SinkStatus::Accepted => seen.push(WireEvent::from(&event)),
+                    SinkStatus::Closed => closed.store(true, Ordering::SeqCst),
                 }
                 status
             }))
         };
-        let inner = inner.execute(request, tee, cancel);
-        let cassette = self.cassette.clone();
+        let recording = self.recording.clone();
         let namespace = self.namespace.clone();
         let redaction_refusals = self.redaction_refusals.clone();
+        // Armed before the wrapped backend runs, so an `execute` that panics
+        // and a future dropped unpolled both refuse the recording.
+        let mut exchange = InFlight::new(recording.clone());
+        let inner = inner.execute(request, tee, cancel.clone());
         Box::pin(async move {
             let terminal = inner.await;
+            // Emitters hold `seen` across the forward, so taking it first
+            // means every completed emission's `Closed` is visible below.
+            let seen = seen.lock().unwrap();
+            let mut recording = recording.lock().unwrap();
+            exchange.commit(&mut recording);
+            if closed.load(Ordering::SeqCst) || cancel.is_cancelled() {
+                // The run's terminal is the supervisor's (a refused event, a
+                // cancellation), not this one, and a refused event is missing:
+                // the exchange cannot replay the run.
+                let error = recording.cassette.refuse(CassetteError::IncompleteExchange);
+                return Self::refused("cassette_refused", error);
+            }
             let exchange = WireExchange {
-                events: seen.lock().unwrap().clone(),
+                events: seen.clone(),
                 terminal: WireTerminal::from(&terminal),
             };
             let response = serde_json::to_value(exchange).unwrap();
-            match cassette
-                .lock()
-                .unwrap()
+            match recording
+                .cassette
                 .record(&namespace, Boundary::Backend, covered, response)
             {
                 Ok(_) => terminal,
@@ -360,14 +420,25 @@ impl CassetteBackend {
         })
     }
 
-    fn replay_from(&self, covered: Value, events: EventSink) -> BackendFuture {
-        let cassette = self.cassette.clone();
+    fn replay_from(
+        &self,
+        covered: Value,
+        events: EventSink,
+        cancel: CancellationToken,
+    ) -> BackendFuture {
+        let recording = self.recording.clone();
         let namespace = self.namespace.clone();
         let refusals = self.refusals.clone();
         Box::pin(async move {
-            let outcome = cassette
+            if cancel.is_cancelled() {
+                // The run recorded only its cancellation; no exchange was seen,
+                // so none is consumed.
+                return Self::refused("cassette_refused", "run cancelled before lookup");
+            }
+            let outcome = recording
                 .lock()
                 .unwrap()
+                .cassette
                 .lookup(&namespace, Boundary::Backend, &covered)
                 .map(|found| match found {
                     Lookup::Hit(entry) => Ok(entry.response.clone()),
@@ -399,14 +470,61 @@ impl CassetteBackend {
                     Err(unknown) => return Self::refused("cassette_refused", unknown),
                 };
                 if events.emit(event) == SinkStatus::Closed {
-                    break;
+                    // The run ended under the supervisor mid-exchange; the
+                    // recorded terminal is not what it observed.
+                    return Self::refused(
+                        "cassette_refused",
+                        "the run's sink closed during replay",
+                    );
                 }
+            }
+            if cancel.is_cancelled() {
+                // Cancelled during emission without closing the sink: the
+                // run's outcome is the cancellation, not the recorded terminal.
+                return Self::refused("cassette_refused", "run cancelled during replay");
             }
             match BackendTerminal::try_from(exchange.terminal) {
                 Ok(terminal) => terminal,
                 Err(unknown) => Self::refused("cassette_refused", unknown),
             }
         })
+    }
+}
+
+/// One exchange between `execute` and `record`, counted in
+/// `Recording::in_flight`. Dropped before `commit` (a panic, a dropped
+/// future), it refuses the recording: the exchange it stands for is in no
+/// file. Every count change happens under the recording's lock.
+struct InFlight {
+    recording: Arc<Mutex<Recording>>,
+    committed: bool,
+}
+
+impl InFlight {
+    fn new(recording: Arc<Mutex<Recording>>) -> Self {
+        recording.lock().unwrap().in_flight += 1;
+        Self {
+            recording,
+            committed: false,
+        }
+    }
+
+    /// Takes the caller's lock, so `file()` never sees the count drop before
+    /// the entry is recorded under the same lock.
+    fn commit(&mut self, recording: &mut Recording) {
+        self.committed = true;
+        recording.in_flight -= 1;
+    }
+}
+
+impl Drop for InFlight {
+    fn drop(&mut self) {
+        if !self.committed
+            && let Ok(mut recording) = self.recording.lock()
+        {
+            recording.in_flight -= 1;
+            recording.cassette.refuse(CassetteError::IncompleteExchange);
+        }
     }
 }
 
@@ -419,11 +537,15 @@ impl LlmExecutionBackend for CassetteBackend {
     ) -> BackendFuture {
         let covered = match record_of(&request).and_then(|record| record.covered()) {
             Ok(covered) => covered,
-            Err(error) => return Box::pin(async move { Self::refused("cassette_request", error) }),
+            Err(error) => {
+                // The exchange this request stands for can be in no file.
+                let error = self.recording.lock().unwrap().cassette.refuse(error);
+                return Box::pin(async move { Self::refused("cassette_request", error) });
+            }
         };
         match &self.inner {
             Some(inner) => self.record_through(inner, covered, request, events, cancel),
-            None => self.replay_from(covered, events),
+            None => self.replay_from(covered, events, cancel),
         }
     }
 

@@ -18,6 +18,7 @@ required-features = ["direct-host-fixture"]
 name = "eval_runner"
 path = "examples/eval_runner/main.rs"
 required-features = ["eval-runner"]
+test = true
 
 [[bin]]
 name = "eidnara-host"

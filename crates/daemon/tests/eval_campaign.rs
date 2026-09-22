@@ -194,7 +194,7 @@ fn campaign(scale: Scale, aged_messages: u32, elapsed_bound_ms: u64) -> Run {
         .filter(|s| matches!(s.terminal, Terminal::Skipped(SkipReason::RedactionRefused)))
         .count();
     assert_eq!(run.report.rates.samples, 18);
-    assert_eq!(run.report.rates.unsupported, Ratio::new(1, 3));
+    assert_eq!(run.report.rates.unsupported, Ratio::try_new(1, 3).unwrap());
     assert_eq!(skipped, if run.aged.refused { 3 } else { 0 });
     assert_eq!(run.report.samples.attempted(), 12 - skipped);
 
@@ -245,13 +245,32 @@ fn campaign(scale: Scale, aged_messages: u32, elapsed_bound_ms: u64) -> Run {
         analysis.interval,
         IntervalOutcome::Withheld { .. }
     ));
-    let Analysis::Report(_) = eval_core::analyze(
-        &eval_core::FrozenFamily::freeze(&run.report.family).unwrap(),
-        &run.report.family,
-        &run.outcomes,
-        &run.report.arm_rates,
-    )
-    .unwrap() else {
+    // The manifest froze the family, names the pairs as its samples, and
+    // binds the completed table, so the analysis is reproducible from it.
+    assert_eq!(
+        run.manifest.analysis_family_digest.as_deref(),
+        Some(
+            eval_core::FrozenFamily::freeze(&run.report.family)
+                .unwrap()
+                .analysis_family_digest
+                .as_str()
+        )
+    );
+    assert_eq!(
+        run.manifest.sample_order,
+        run.set
+            .pairs
+            .iter()
+            .map(|pair| pair.task.id.clone())
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        run.manifest.result_digest,
+        eval_core::pair_table_digest(&run.outcomes).unwrap()
+    );
+    let Analysis::Report(_) =
+        eval_core::analyze(&run.manifest, &run.report.family, &run.outcomes).unwrap()
+    else {
         panic!("the report's analysis is the family's over the raw outcomes");
     };
 
