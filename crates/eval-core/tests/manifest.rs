@@ -17,7 +17,7 @@ use support::{OBSERVATION_TYPE, build, identity, manifest, observation, observat
 /// Frozen so a field-set or encoding change forces a reviewed schema bump.
 const FIXTURE_RUN_ID: &str = "e9f412ed2ad627c5801959c2c459bbb764bf45443a7774d02ac74a97f41832c9";
 const FIXTURE_MANIFEST_DIGEST: &str =
-    "5564944aec17842946ffbf1050f56ba7d2158efe8629efc50423629c0044bd9c";
+    "e92583b1e50a10dce5ad6ebcdb0dbbeec96e01483dd5a9bd61dd186851117edd";
 
 #[test]
 fn required_fields_are_sorted_and_equal_the_struct_field_set() {
@@ -94,7 +94,7 @@ fn evaluator_document_agrees_with_the_manifest_constants() {
         assert_eq!(stated, version, "stale manifest literal `{literal}`");
     }
     row(&format!(
-        "version {version} added the `transform-route, turn by turn` ingestion"
+        "version {version} added the `prefix_then_generate`\nexecution mode"
     ));
 }
 
@@ -131,15 +131,15 @@ fn unknown_field_wrong_schema_and_non_object_are_refused() {
         Err(ManifestError::UnknownField("extra".to_string()))
     );
     let mut next = valid.clone();
-    next["schema"] = json!("eval-manifest/v9");
+    next["schema"] = json!("eval-manifest/v10");
     assert_eq!(
         parse_manifest(&next),
         Err(ManifestError::SchemaMismatch {
-            found: "eval-manifest/v9".to_string()
+            found: "eval-manifest/v10".to_string()
         })
     );
     assert_eq!(parse_manifest(&json!([])), Err(ManifestError::NotAnObject));
-    assert_eq!(MANIFEST_SCHEMA, "eval-manifest/v8");
+    assert_eq!(MANIFEST_SCHEMA, "eval-manifest/v9");
 }
 
 #[test]
@@ -673,11 +673,11 @@ fn residue_declarations_are_non_keep_and_one_rule_per_field() {
 #[test]
 fn validate_refuses_what_parse_and_digest_refuse() {
     let mut schema = manifest();
-    schema.schema = "eval-manifest/v9".to_string();
+    schema.schema = "eval-manifest/v10".to_string();
     assert_eq!(
         schema.validate(),
         Err(ManifestError::SchemaMismatch {
-            found: "eval-manifest/v9".to_string()
+            found: "eval-manifest/v10".to_string()
         })
     );
     let mut table = manifest();

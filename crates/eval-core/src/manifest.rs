@@ -12,8 +12,8 @@ use crate::identity::{IdentityError, RunIdentity, eval_run_id};
 use crate::pairs::{RECENCY_BASELINE_VERSION, recency_bound};
 use crate::residue::{ObservationSchema, RelativeDomains, ResidueEntry, ResidueError, Rule};
 
-pub const MANIFEST_SCHEMA: &str = "eval-manifest/v8";
-pub const MANIFEST_DIGEST_PROTOCOL: &str = "eval-manifest-digest/v8";
+pub const MANIFEST_SCHEMA: &str = "eval-manifest/v9";
+pub const MANIFEST_DIGEST_PROTOCOL: &str = "eval-manifest-digest/v9";
 
 /// Sorted; a field added to [`Manifest`] without a schema version bump fails the closure test.
 pub const REQUIRED_FIELDS: [&str; 30] = [

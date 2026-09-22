@@ -106,6 +106,10 @@ pub enum CheckpointRefused {
     },
     MalformedIncarnation(String),
     NoFiles,
+    /// An empty path or a digest that is not 64 lowercase hex digits.
+    MalformedFile {
+        path: String,
+    },
     Shape(String),
 }
 
@@ -234,6 +238,12 @@ impl Checkpoint {
         if files.is_empty() {
             return Err(CheckpointRefused::NoFiles);
         }
+        if let Some((path, _)) = files
+            .iter()
+            .find(|(path, digest)| path.is_empty() || !is_lower_hex(digest, 64))
+        {
+            return Err(CheckpointRefused::MalformedFile { path: path.clone() });
+        }
         Ok(Self {
             receipt,
             incarnation_id,
@@ -357,6 +367,7 @@ pub enum Unenumerated {
     TombstoneOnlyInLater { occurrence_id: String },
     TombstoneDiffers { occurrence_id: String },
     CreatedDiffers { occurrence_id: String },
+    OrphanTombstone { occurrence_id: String },
     Shape(String),
 }
 
@@ -376,6 +387,17 @@ pub fn historical_diff(
         });
     }
     let (a, b) = (&earlier.historical, &later.historical);
+    for rows in [a, b] {
+        if let Some(id) = rows
+            .tombstones
+            .keys()
+            .find(|id| !rows.occurrences.contains_key(*id))
+        {
+            return Err(Unenumerated::OrphanTombstone {
+                occurrence_id: id.clone(),
+            });
+        }
+    }
     let mut divergences = Vec::new();
     for (occurrence_id, created) in &a.occurrences {
         let occurrence_id = occurrence_id.clone();
@@ -512,8 +534,18 @@ impl StateSnapshot {
             });
         }
         for (object_id, descriptor) in &resumed.kernel {
-            let known = reopened.kernel.contains_key(object_id);
-            if !known && descriptor.created_commit_seq <= reopened.commit_seq {
+            // The kernel's append-only triggers refuse every other rewrite of a
+            // known row; a backdated creation or death is what they cannot see.
+            let backdated = match reopened.kernel.get(object_id) {
+                None => descriptor.created_commit_seq <= reopened.commit_seq,
+                Some(before) => {
+                    before.invalidated_commit_seq.is_none()
+                        && descriptor
+                            .invalidated_commit_seq
+                            .is_some_and(|at| at <= reopened.commit_seq)
+                }
+            };
+            if backdated {
                 return Err(PrefixRefused::HistoryRewritten {
                     object_id: object_id.clone(),
                 });
@@ -604,6 +636,15 @@ pub enum AgingReportError {
         checkpoint_step: u32,
         receipt_step: u32,
     },
+    CommitSeqNotMonotonic {
+        at_checkpoint: i64,
+        at_end: i64,
+    },
+    /// The guard passed without the situation it exists for.
+    WindowDeathsIncomplete {
+        supersessions: u64,
+        retirements: u64,
+    },
     Receipt(CheckpointRefused),
     Shape(String),
     Lossy,
@@ -656,6 +697,18 @@ impl AgingReport {
             return Err(AgingReportError::CheckpointStepMismatch {
                 checkpoint_step: self.checkpoint_step,
                 receipt_step: self.receipt.step,
+            });
+        }
+        if self.commit_seq_at_end <= self.commit_seq_at_checkpoint {
+            return Err(AgingReportError::CommitSeqNotMonotonic {
+                at_checkpoint: self.commit_seq_at_checkpoint,
+                at_end: self.commit_seq_at_end,
+            });
+        }
+        if self.window_deaths.supersessions == 0 || self.window_deaths.retirements == 0 {
+            return Err(AgingReportError::WindowDeathsIncomplete {
+                supersessions: self.window_deaths.supersessions,
+                retirements: self.window_deaths.retirements,
             });
         }
         self.receipt.check().map_err(AgingReportError::Receipt)

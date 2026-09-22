@@ -27,7 +27,7 @@ sub-record.
   public so callers name a protocol string instead of restating the
   `<protocol>\n<canonical JSON>` framing.
 
-## Manifest `eval-manifest/v8`
+## Manifest `eval-manifest/v9`
 
 `parse_manifest` reads a JSON object, compares its key set against
 `REQUIRED_FIELDS`, checks the `schema` literal, and only then deserializes and
@@ -72,13 +72,13 @@ The 30 required fields, sorted:
 | `retry_lineage` | Prior `eval_run_id` values of retried attempts; each is lowercase hex SHA-256. |
 | `run_identity` | The nine-component identity tuple, including the build sub-record, the eligibility-spec digest, and the linearization rule version. |
 | `sample_epoch`, `sample_ids`, `sample_order` | Stable sample identity and execution order; `sample_order` must be a permutation of `sample_ids`. |
-| `schema` | `eval-manifest/v8`. |
+| `schema` | `eval-manifest/v9`. |
 | `status` | `completed`, `incomplete`, `refused`, or `blocked`. |
 | `tokenizer_profile` | Name, revision, digest. |
 
 `Manifest::digest` re-parses the manifest, applies the manifest's own residue
 rules (`start_ms`, `end_ms`, and `envelope_peaks` are `Drop`; everything else
-is `Keep`), and hashes with protocol `eval-manifest-digest/v8`. Version 2
+is `Keep`), and hashes with protocol `eval-manifest-digest/v9`. Version 2
 added `execution_mode` (the reducer differential runs under `enumerate`);
 version 3 added `ingestion`, because no ingestion entry point has a production
 caller and every manifest must say so; version 4 added `failure_class_table_digest`,
@@ -91,7 +91,9 @@ version 7 added `recency_baseline`, so the recency-only control's version and
 per-surface window are on record beside the pairs it was judged on;
 version 8 added the `transform-route, turn by turn` ingestion, so an arm
 lived through the daemon's own transform route in one store incarnation can
-say so and call itself replay-built. The digest is a function
+say so and call itself replay-built; version 9 added the `prefix_then_generate`
+execution mode, so an arm generated from a quiescent checkpoint copy of a
+replayed prefix says so and is refused unless replay-built. The digest is a function
 of every kept field, not of the run identity alone: two processes that record the same
 identity and the same kept contents produce the same digest
 (`two_process_same_identity_yields_equal_manifest_and_trace_digests`), and two
@@ -1893,8 +1895,10 @@ value), every WAL truncated
 and the kernel's persisted `database_incarnation_id` 32 lowercase hex digits
 (`MalformedIncarnation`). `Checkpoint::new(receipt, incarnation_id, files)`
 admits the receipt and requires at least one copied file (`NoFiles`); `files`
-maps each copied path, relative to the root, to its SHA-256, and
-`Checkpoint::digest` hashes the whole record under `eval-checkpoint/v1`, so
+maps each copied path, relative to the root, to its SHA-256, and an empty
+path or a digest that is not 64 lowercase hex digits is refused
+(`MalformedFile { path }`), so `accept` never passes two blank digests as
+equal. `Checkpoint::digest` hashes the whole record under `eval-checkpoint/v1`, so
 two checkpoints of different stores never share a digest.
 `Checkpoint::accept(&Reopened)` accepts a reopened copy only when it reports
 the same incarnation (`ForeignIncarnation { expected, found }`; a cross-store
@@ -1925,7 +1929,9 @@ construction never saw the descriptor alive), and `GenerationState { earlier,
 later }`. Every other difference is `Unenumerated`: `SnapshotOrder`,
 `OccurrenceOnlyInEarlier` (a death outside the window or no death at all),
 `OccurrenceOnlyInLater`, `TombstoneOnlyInEarlier`, `TombstoneOnlyInLater`,
-`TombstoneDiffers`, and `CreatedDiffers`. `GuardComparison::of((rows, kind),
+`TombstoneDiffers`, `CreatedDiffers`, and `OrphanTombstone` (a tombstone with
+no occurrence row on its own side, which the projection's foreign keys forbid
+and a malformed read could still present). `GuardComparison::of((rows, kind),
 (rows, kind))` packages both constructions (`ProjectionConstruction { kind:
 catch_up | bulk, snapshot_commit_seq }`), whether their live digests are
 equal, and the enumerated divergences, refusing an unenumerated one.
@@ -1939,8 +1945,12 @@ hashes it under `eval-prefix-guard/v1`; `StateSnapshot::compare(full,
 resumed)` refuses `CommitSeqDiffers` first and then `HistorySlipped { family
 }` for the first family whose rows differ; `StateSnapshot::advanced(reopened,
 resumed)` refuses a tip that did not move (`CommitSeqNotMonotonic`) and a
-descriptor the resumed life holds but the reopened copy did not whose creating
-commit is at or before the checkpoint (`HistoryRewritten { object_id }`). The
+backdated event (`HistoryRewritten { object_id }`): a descriptor the resumed
+life holds but the reopened copy did not whose creating commit is at or before
+the checkpoint, or a descriptor live at the checkpoint whose death the resumed
+life places at or before it. Every other rewrite of a known row (its revision,
+creating commit, an existing death, or successor) the kernel's append-only
+triggers refuse at the store, and `compare` against the full replay sees. The
 snapshot carries no incarnation id: a full replay and a resumed copy are two
 stores, and the claim between them is equal history, not equal identity.
 
@@ -1961,7 +1971,10 @@ refuses a report whose claim boundary is not the pinned one
 (`ClaimBoundaryMismatch`), whose `eval_run_id`, `profile_digest`,
 `checkpoint_digest`, or either guard digest is not 64 lowercase hex digits
 (`MalformedDigest { field }`), whose checkpoint step is not the receipt's
-(`CheckpointStepMismatch`), or whose receipt `QuiescenceReceipt::check`
+(`CheckpointStepMismatch`), whose end tip is not past its checkpoint tip
+(`CommitSeqNotMonotonic { at_checkpoint, at_end }`), whose window deaths are
+not both nonzero (`WindowDeathsIncomplete { supersessions, retirements }`), or
+whose receipt `QuiescenceReceipt::check`
 refuses (`Receipt(..)`). `parse_aging_report` reads it back losslessly or
 refuses (`SchemaMismatch`, `Shape`, `Lossy`, and everything `validate`
 refuses). `AgingReport::result_digest` hashes the published report

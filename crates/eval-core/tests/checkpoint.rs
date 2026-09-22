@@ -243,6 +243,21 @@ fn an_open_handle_a_malformed_incarnation_and_no_files_refuse() {
         Checkpoint::new(receipt(), INCARNATION.to_string(), BTreeMap::new()),
         Err(CheckpointRefused::NoFiles)
     );
+    for (path, digest) in [
+        ("kernel/kernel.sqlite", String::new()),
+        ("kernel/kernel.sqlite", "A".repeat(64)),
+        ("kernel/kernel.sqlite", "a".repeat(63)),
+        ("", "a".repeat(64)),
+    ] {
+        let mut malformed = files();
+        malformed.insert(path.to_string(), digest);
+        assert_eq!(
+            Checkpoint::new(receipt(), INCARNATION.to_string(), malformed),
+            Err(CheckpointRefused::MalformedFile {
+                path: path.to_string(),
+            })
+        );
+    }
 }
 
 fn intact() -> StoreIntegrity {
@@ -559,6 +574,28 @@ fn every_other_historical_difference_is_unenumerated() {
             occurrence_id: "k2r1".to_string(),
         })
     );
+    let mut orphan_later = later.clone();
+    orphan_later
+        .historical
+        .tombstones
+        .insert("k1r1".to_string(), death(5, TombstoneReason::Superseded));
+    assert_eq!(
+        historical_diff(&earlier, &orphan_later),
+        Err(Unenumerated::OrphanTombstone {
+            occurrence_id: "k1r1".to_string(),
+        })
+    );
+    let mut orphan_earlier = earlier.clone();
+    orphan_earlier
+        .historical
+        .tombstones
+        .insert("k7r1".to_string(), death(6, TombstoneReason::Retired));
+    assert_eq!(
+        historical_diff(&orphan_earlier, &later),
+        Err(Unenumerated::OrphanTombstone {
+            occurrence_id: "k7r1".to_string(),
+        })
+    );
 }
 
 #[test]
@@ -694,6 +731,37 @@ fn a_resumed_life_advances_the_tip_and_creates_nothing_before_the_checkpoint() {
             object_id: "srcdesc:k2".to_string(),
         })
     );
+    let live = Descriptor {
+        source_revision: 1,
+        created_commit_seq: 3,
+        invalidated_commit_seq: None,
+        superseded_by: None,
+    };
+    let mut reopened = reopened;
+    reopened
+        .kernel
+        .insert("srcdesc:k3".to_string(), live.clone());
+    resumed.kernel.insert("srcdesc:k3".to_string(), live);
+    StateSnapshot::advanced(&reopened, &resumed).unwrap();
+    let mut died_later = resumed.clone();
+    died_later
+        .kernel
+        .get_mut("srcdesc:k3")
+        .unwrap()
+        .invalidated_commit_seq = Some(45);
+    StateSnapshot::advanced(&reopened, &died_later).unwrap();
+    let mut backdated = resumed.clone();
+    backdated
+        .kernel
+        .get_mut("srcdesc:k3")
+        .unwrap()
+        .invalidated_commit_seq = Some(41);
+    assert_eq!(
+        StateSnapshot::advanced(&reopened, &backdated),
+        Err(PrefixRefused::HistoryRewritten {
+            object_id: "srcdesc:k3".to_string(),
+        })
+    );
 }
 
 #[test]
@@ -818,6 +886,25 @@ fn an_aging_report_refuses_what_its_claims_and_checkpoint_forbid() {
         Err(AgingReportError::CheckpointStepMismatch {
             checkpoint_step: 8,
             receipt_step: 7,
+        })
+    );
+
+    let mut still = report.clone();
+    still.commit_seq_at_end = still.commit_seq_at_checkpoint;
+    assert_eq!(
+        still.validate(),
+        Err(AgingReportError::CommitSeqNotMonotonic {
+            at_checkpoint: 41,
+            at_end: 41,
+        })
+    );
+    let mut quiet = report.clone();
+    quiet.window_deaths.retirements = 0;
+    assert_eq!(
+        quiet.validate(),
+        Err(AgingReportError::WindowDeathsIncomplete {
+            supersessions: 1,
+            retirements: 0,
         })
     );
 
