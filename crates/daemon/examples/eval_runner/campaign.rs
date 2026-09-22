@@ -1465,11 +1465,19 @@ pub fn run(config: &Config) -> Result<Run, RunError> {
             break bytes;
         }
     };
-    // The manifest's bytes are ready before either file is renamed into place,
-    // so a report is never published without it.
+    // The manifest's bytes are ready before either file is linked into place,
+    // so a report is never published without it, and a manifest the directory
+    // then refuses to take (out of space, a file that arrived meanwhile)
+    // takes the report back out with it: a reader finds both files or none.
+    // A process killed between the two links still leaves the report alone;
+    // the next run into the directory is refused rather than mixed.
     let manifest_bytes = serde_json::to_vec_pretty(&manifest.to_value()).unwrap();
-    publish_file(&publish.join(REPORT_FILE), &bytes)?;
-    publish_file(&publish.join(MANIFEST_FILE), &manifest_bytes)?;
+    let report_path = publish.join(REPORT_FILE);
+    publish_file(&report_path, &bytes)?;
+    if let Err(error) = publish_file(&publish.join(MANIFEST_FILE), &manifest_bytes) {
+        let _ = std::fs::remove_file(&report_path);
+        return Err(error);
+    }
     Ok(Run {
         report,
         report_bytes: bytes,

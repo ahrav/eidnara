@@ -1687,9 +1687,12 @@ tier its daemon reads, and the cassette directory), the report's bytes, and
 the one retained artifact. The report carries its own size as a peak, so it
 is serialized until the bytes written carry the peak they are; every reading
 is charged and the envelope refuses on any of them, and the published peak is
-the file's size. The manifest is built before either file is renamed into
-place, and a prior run's report or manifest in the directory is refused
-before anything runs, so one directory holds one generation or none; the
+the file's size. The manifest is built before either file is linked into
+place, a manifest the directory then refuses takes the report back out with
+it, and a prior run's report or manifest in the directory is refused before
+anything runs, so one directory holds one generation or none (a process killed
+between the two links leaves the report alone, and the next run into that
+directory is refused rather than mixed); the
 manifest's bytes and the clock after the report is serialized are not charged.
 Surface 1's task turn makes no model call of its own, which the backend
 counters show; of the six task budgets only the deadline can censor here,
