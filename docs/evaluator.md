@@ -1499,10 +1499,11 @@ carries rather than read from what it says:
   instead: some ICC is positive, since nothing deflates otherwise and the
   plan already meets its floor, no pre-table block derives, its
   `required_n_for_margin` is the pilot's, it spans between one cluster and
-  the plan's affordable worlds
-  (under the family unit also its families, never more than its pairs), and
-  its `effective_n` is
-  positive, at most the pair count, and below the floor
+  the plan's affordable worlds (under the family unit also its families,
+  never more than its pairs), and its `effective_n` is below the floor and
+  within what `deflate` can produce, at least the pair count deflated as one
+  cluster at the larger ICC and at most the pair count deflated as
+  `n_clusters` balanced clusters at the selected unit's ICC
   (`SuppressionNotDerived`), and the ledger backs the frozen pair count with
   an arm result on each paired arm (`PairsExceedSamples`); the table itself
   is the manifest's `result_digest`. An
@@ -1540,8 +1541,9 @@ carries rather than read from what it says:
   `cluster_bootstrap_interval` derives from the family and the pair count
   (the unit, method, replicate count, item count, between two clusters and
   the plan's affordable worlds, under the family unit also its families, when
-  computed and exactly one when withheld for too few, and whether it is
-  computed or withheld;
+  computed and exactly one when withheld for too few, endpoints ordered
+  within `[-1, 1]`, the range of `(b - c) / n`, and whether it is computed
+  or withheld;
   `IntervalNotDerived {field}`), while the
   bounds themselves are bound to the pair table by the manifest's
   `result_digest`; every paired marginal must be backed by samples on that

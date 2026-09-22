@@ -1341,8 +1341,9 @@ Report (`crates/eval-core/tests/report.rs`):
   clusters or over more than the plan has worlds, an analysis over fewer
   pairs than the plan froze, a baseline suppression naming a blank task, an
   underpowered-table suppression over a ledger that backs no table, over
-  more family clusters than affordable worlds, or under ICCs that deflate
-  nothing, a baseline that delivered more ids than its window holds, whose
+  more family clusters than affordable worlds, under ICCs that deflate
+  nothing, or with an effective N its clusters do not deflate to, an interval
+  outside the statistic's range, a baseline that delivered more ids than its window holds, whose
   failed falsifications outnumber the table, or that was judged over more
   control pairs than the table has, a packing-only unsupported
   reason off the packing surface, an injection score with a blank case, with
