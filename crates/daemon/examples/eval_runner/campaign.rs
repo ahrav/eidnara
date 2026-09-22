@@ -686,6 +686,14 @@ pub struct Charges {
 }
 
 impl Charges {
+    pub fn roots(&self) -> u64 {
+        self.roots
+    }
+
+    pub fn processes(&self) -> u64 {
+        self.processes
+    }
+
     pub fn new(bounds: ResourceLimits) -> Self {
         Self {
             envelope: Envelope::new(bounds),

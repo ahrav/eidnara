@@ -7,5 +7,7 @@ pub mod direct_host;
 pub mod embedding_fixtures;
 #[path = "../../tests/support/eval_surface.rs"]
 pub mod eval_surface;
+#[path = "../../tests/support/memory_reviewer_publish.rs"]
+pub mod memory_reviewer_publish;
 #[path = "../../tests/support/publish.rs"]
 pub mod publish;

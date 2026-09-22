@@ -1344,6 +1344,48 @@ Growth contract (`crates/eval-core/tests/growth.rs`,
   with the quota constants; a restoring report with no samples, faults with no
   safety check, and a leaked final sample refuse.
 
+Growth shell (`crates/daemon/tests/eval_growth.rs`, `--all-features`; the
+default shards run the never-restored campaign once with every scenario
+asserted over it, the named scenarios, the concurrency proof, and the
+completeness proof run in the `eval-campaign` CI job under
+`EIDNARA_EVAL_S0_BUDGET_MS`):
+
+- `a_never_restored_campaign_samples_every_quiescence_and_refuses_a_restore`
+  (`flt-never-restored-leak-campaign-separate`; marker
+  `flt_leak_ledger_sampled_before_reopen`): one sample per quiescence and one
+  from the closed files; the final sample holds no temporary entry, no WAL
+  bytes, no stray root, no process; the transient peak exceeds the closed
+  size and the envelope was charged with it; the ledger's verdict passes; the
+  published report and manifest parse back; a restore request on a live
+  never-restored campaign is refused, counted, and moves nothing.
+- `reviewer_headroom_is_accounted_from_the_stores_own_constants`
+  (`flt-memory-reviewer-quota-refusal-expected`; marker
+  `flt_headroom_accounted_from_store_constants`): the report's constants are
+  the memory store's; every sample's project bytes equal receipt charges for
+  terminal jobs plus receipt and allowance for pending ones; pending and
+  terminal jobs both exist; R24 refusals are reported as zero at S0; the
+  admissions-remaining figure is derived, not 2,047.
+- `the_swarm_mix_exercises_every_operation_kind` (marker
+  `flt_swarm_mix_complete`): publish, correct, retire, query, fault episode,
+  quota pressure, and store growth each occur; every fault episode has a
+  safety check.
+- `a_restoring_campaign_cleans_a_stray_temporary_on_reopen_but_gives_no_leak_verdict`:
+  a stray `artifacts/tmp` entry is seen by the sampler, swept by the reopen's
+  `KernelStore::open`, and the restoring ledger's verdict is `NotALeakVerdict`.
+- `a_deliberate_envelope_breach_names_the_resource_and_publishes_nothing`
+  (`xc-campaign-resource-envelope-declared-and-enforced`; marker
+  `xc_envelope_breach_stops_the_run`): a 64 KiB store bound is crossed within
+  eight steps; `EnvelopeExceeded { store_bytes, bound, observed }` carries the
+  peak that crossed it and nothing is published.
+- `two_concurrent_campaigns_on_one_checkout_match_their_serial_digests`
+  (`xc-parallel-campaigns-isolated-on-shared-checkout`; marker
+  `xc_parallel_campaigns_isolated`): two campaigns on two threads use disjoint
+  roots and publish directories and publish the result digests of their
+  serial runs; a fixture sharing a root is refused. This campaign opens no
+  port and records no cassette, so those resource sets are empty.
+- `an_unapproved_profile_refuses_before_any_store_opens`: no approval, no
+  campaign, nothing published.
+
 Fault shell (`crates/daemon/tests/eval_fault.rs`, `--all-features`; the
 default shards run the campaign once with every scenario asserted over it,
 the named scenarios and the completeness proof run in the `eval-campaign` CI

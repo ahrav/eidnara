@@ -1991,6 +1991,52 @@ JSON line; `fault-child` is its kill child. The CI `eval-campaign` job runs
 the default shards run the campaign once with every scenario asserted over
 it.
 
+## Growth shell
+
+`crates/daemon/examples/eval_runner/growth.rs` is the Suite C growth
+campaign: the aging drive lived through its whole history on one root that is
+never restored, with a `ResourceSample` recorded at every quiescence and one
+more from the closed files. `Campaign::open` opens the stores, raises the
+route's project to MODULE memories authority, and commits the memory domain so
+the reviewer queue is real. `Campaign::step` applies the planned mutation
+(`publish`, `correct`, or `retire`, as `Stores::apply` reports it), reads the
+projection every third step (`query`), runs a lost-acknowledgement catch-up
+episode through the fault shell every fifth step (`fault_episode`, with its
+safety check), admits one reviewer job through the real reservation, staging,
+claim, and receipt path every fourth step and settles every other one by
+abstention (`quota_pressure`, so the ledger holds both pending allowances and
+permanent receipt charges), drains to quiescence, and samples. The reviewer
+queue's deadlines are wall-clock by design, so its admissions are stamped with
+the wall clock; every other time the drive passes is the event's own.
+
+A sample reads the files: per family the store, `-wal`, and `-shm` bytes; the
+kernel's artifact objects and `artifacts/tmp` entries; commit-log rows,
+projection occurrences, and open capture pins; the temp roots beyond the
+campaign's own and the processes charged; and the headroom
+`memory_reviewer_headroom` reports beside the terminal-job count. Every
+sample charges the envelope with the store total it saw, so a transient WAL
+peak is the pressure the envelope judges, not the closed size; a bound
+crossed stops the run with `EnvelopeExceeded { resource, bound, observed }`
+and nothing is published. `Campaign::finish` closes the stores, which
+truncates every WAL, and takes the final sample from the closed files, where
+the headroom is recomputed from the job rows. `Campaign::restore` is refused
+and counted under `never_restored`; under `restoring` it closes and reopens
+in place, and the ledger then gives no leak verdict.
+
+The report carries the quota constants as `memory_reviewer_jobs` declares them
+and the bounds scaled from the message count; `GrowthLedger::verdict` checks
+every sample's project bytes against those constants exactly, which the
+campaign passes at every step, and refuses a final sample with a temporary
+entry, WAL bytes, a stray root, or a process. R24 refusals are counted and
+reported, not planted: an S0 history never reaches the quota, and the report
+says zero. Two campaigns run from one checkout on two roots publish the same
+result digest as their serial runs; a fixture that shares a root is refused.
+The `growth` subcommand takes the `aging` flags plus `--mode
+<never_restored|restoring>`; the CI `eval-campaign` job runs `eval_growth`
+under `EIDNARA_EVAL_S0_BUDGET_MS` with the ignored scenarios, and the default
+shards run the never-restored campaign once with every scenario asserted over
+it. The S2 run is the same campaign under the S2 profile and budget.
+
 ## Coverage markers
 
 `MARKERS` is the evaluator-owned registry: constant, globally unique names,

@@ -633,7 +633,7 @@ jobs:
           EIDNARA_EVAL_S0_BUDGET_MS: "1800000"
         run: >
           cargo +1.98 nextest run --profile ci -p daemon --all-features --locked
-          --test eval_campaign --test eval_aging --test eval_fault --run-ignored all
+          --test eval_campaign --test eval_aging --test eval_fault --test eval_growth --run-ignored all
 
   stable:
     name: lint and test (stable)
