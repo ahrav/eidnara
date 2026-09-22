@@ -7,7 +7,7 @@
 
 mod support;
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -30,7 +30,7 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use tokio::time::Instant;
 
-use support::eval_cassette::{CassetteBackend, record_of};
+use support::eval_cassette::{CassetteBackend, error_classes, finish_reasons, record_of};
 use support::eval_reviewer_peer::{ReviewerKey, serve_keyed};
 use support::tls_peer::{Peer, no_wait, text_response};
 
@@ -158,12 +158,13 @@ fn resigned(mut file: Value) -> Value {
     file
 }
 
-fn replay_preserves_the_transcript_and_the_declarations(coverage: &mut Coverage) {
+fn replay_preserves_the_transcript_and_the_declarations_scenario(coverage: &mut Coverage) {
     let (real, file, transcripts) = record_two();
     assert_eq!(real.calls.load(Ordering::SeqCst), 2);
     assert_eq!(file["cases"].as_array().unwrap().len(), 2);
     let replayer = CassetteBackend::replaying(NAMESPACE, &file).unwrap();
     let replay: Arc<dyn LlmExecutionBackend> = replayer.clone();
+    assert_eq!(replayer.unconsumed(), 2);
     let replayed = runtime().block_on(async {
         vec![
             run(&replay, request("hello")).await,
@@ -176,7 +177,7 @@ fn replay_preserves_the_transcript_and_the_declarations(coverage: &mut Coverage)
         2,
         "replay never reaches the real backend"
     );
-    assert_eq!(replayer.refusals(), 0);
+    assert_eq!((replayer.refusals(), replayer.unconsumed()), (0, 0));
     let real_dyn: Arc<dyn LlmExecutionBackend> = real;
     assert_eq!(declared(&replay), declared(&real_dyn));
     coverage
@@ -207,7 +208,9 @@ fn miss(terminal: &BackendTerminal) -> &BackendError {
     }
 }
 
-fn one_byte_in_each_covered_field_misses_and_the_dropped_fields_do_not(coverage: &mut Coverage) {
+fn one_byte_in_each_covered_field_misses_and_the_dropped_fields_do_not_scenario(
+    coverage: &mut Coverage,
+) {
     let (_, file, _) = record_two();
     let mutations: Vec<Mutation> = vec![
         ("prompt", Box::new(|r| r.prompt.push('!'))),
@@ -288,7 +291,9 @@ fn one_byte_in_each_covered_field_misses_and_the_dropped_fields_do_not(coverage:
     }
 }
 
-fn a_regenerated_frame_or_another_namespace_refuses_before_any_request(coverage: &mut Coverage) {
+fn a_regenerated_frame_or_another_namespace_refuses_before_any_request_scenario(
+    coverage: &mut Coverage,
+) {
     let (_, file, _) = record_two();
     let mut regenerated = file.clone();
     regenerated["cases"][0]["response"]["events"][1]["assistant_text"]["text"] =
@@ -317,6 +322,26 @@ fn a_regenerated_frame_or_another_namespace_refuses_before_any_request(coverage:
         terminal,
         BackendTerminal::Failed(BackendError { provider_code: Some(code), .. }) if code == "cassette_request"
     ));
+    // The exchange that request stands for is in no file, so the recording has none.
+    assert!(matches!(
+        recorder.file().err(),
+        Some(CassetteError::TemperatureNotDecimal(_))
+    ));
+    let (_, terminal) = runtime.block_on(run(&recording, request(CANARY)));
+    assert!(matches!(
+        terminal,
+        BackendTerminal::Failed(BackendError { provider_code: Some(code), .. }) if code == "redaction_refused"
+    ));
+    // The first refusal is the one the recorder reports.
+    assert!(matches!(
+        recorder.file().err(),
+        Some(CassetteError::TemperatureNotDecimal(_))
+    ));
+    let real = Arc::new(Scripted {
+        calls: AtomicUsize::new(0),
+    });
+    let recorder = CassetteBackend::recording(NAMESPACE, real);
+    let recording: Arc<dyn LlmExecutionBackend> = recorder.clone();
     let (_, terminal) = runtime.block_on(run(&recording, request(CANARY)));
     assert!(matches!(
         terminal,
@@ -356,7 +381,7 @@ async fn send(sender: &Sender, request: &MessagesRequest) -> Result<String, Send
         .map(|answer| answer.text)
 }
 
-fn memory_reviewer_replays_through_the_keyed_peer(coverage: &mut Coverage) {
+fn memory_reviewer_replays_through_the_keyed_peer_scenario(coverage: &mut Coverage) {
     runtime().block_on(async {
         // Record: one scripted exchange yields the body the marker tuple is built from.
         let mut recording_peer = Peer::start().await;
@@ -375,13 +400,18 @@ fn memory_reviewer_replays_through_the_keyed_peer(coverage: &mut Coverage) {
             format!("{:x}", Sha256::digest(prompt.body().unwrap().as_bytes()))
         );
 
-        // Replay: the same body hits; each other key field alone misses.
-        let entries = BTreeMap::from([(key.clone(), text_response("cargo build"))]);
+        // Replay: the same body hits once; each entry answers one request, so
+        // the same body again is a miss; each other key field alone misses.
+        let entries = vec![(key.clone(), text_response("cargo build"))];
         let mut replay_peer = Peer::start().await;
         let sender = replay_peer.sender_with_credential("cred-7");
-        let served = serve_keyed(&mut replay_peer, 1, entries.clone(), "cred-7");
+        let served = serve_keyed(&mut replay_peer, 2, entries.clone(), "cred-7");
         assert_eq!(send(&sender, &prompt).await.unwrap(), "cargo build");
-        assert_eq!(served.await.unwrap().len(), 1);
+        assert!(matches!(
+            send(&sender, &prompt).await.unwrap_err(),
+            SendError::Status(409)
+        ));
+        assert_eq!(served.await.unwrap().len(), 2);
 
         let mut other_model = prompt.clone();
         other_model.model = "claude-other".to_string();
@@ -414,6 +444,53 @@ fn memory_reviewer_replays_through_the_keyed_peer(coverage: &mut Coverage) {
             assert_eq!(keys.len(), 2, "{label}");
             assert_ne!(keys[0], key, "{label}");
         }
+        // Equal keys replay in recorded order: independent jobs can send the
+        // same body, and each recorded occurrence answers once.
+        let mut peer = Peer::start().await;
+        let sender = peer.sender_with_credential("cred-7");
+        let served = serve_keyed(
+            &mut peer,
+            3,
+            [
+                (key.clone(), text_response("one")),
+                (key.clone(), text_response("two")),
+            ]
+            .into_iter()
+            .collect(),
+            "cred-7",
+        );
+        assert_eq!(send(&sender, &prompt).await.unwrap(), "one");
+        assert_eq!(send(&sender, &prompt).await.unwrap(), "two");
+        assert!(matches!(
+            send(&sender, &prompt).await.unwrap_err(),
+            SendError::Status(409)
+        ));
+        assert_eq!(served.await.unwrap().len(), 3);
+        // The peer waits `idle` for each next call, so reviewer calls spaced by
+        // a campaign's other work are served when the window is raised.
+        for (idle, served_count) in [(Duration::from_millis(50), 1), (Duration::from_secs(5), 2)] {
+            let mut peer = Peer::start().await;
+            peer.idle = idle;
+            let sender = peer.sender_with_credential("cred-7");
+            let served = serve_keyed(
+                &mut peer,
+                2,
+                vec![
+                    (key.clone(), text_response("one")),
+                    (key.clone(), text_response("two")),
+                ],
+                "cred-7",
+            );
+            assert_eq!(send(&sender, &prompt).await.unwrap(), "one");
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            let second = send(&sender, &prompt).await;
+            assert_eq!(
+                second.is_ok(),
+                served_count == 2,
+                "idle {idle:?}: {second:?}"
+            );
+            assert_eq!(served.await.unwrap().len(), served_count, "idle {idle:?}");
+        }
         // The provider identity is the dialled host, so another host misses too.
         let mut relocated = key.clone();
         relocated.provider = "api.anthropic.com/v1/messages@2023-06-01".to_string();
@@ -422,7 +499,7 @@ fn memory_reviewer_replays_through_the_keyed_peer(coverage: &mut Coverage) {
         let served = serve_keyed(
             &mut peer,
             1,
-            BTreeMap::from([(relocated, text_response("x"))]),
+            vec![(relocated, text_response("x"))],
             "cred-7",
         );
         assert!(matches!(
@@ -440,19 +517,19 @@ fn scenarios() -> [(&'static str, Scenario); 4] {
     [
         (
             "replay_preserves_the_transcript_and_the_declarations",
-            replay_preserves_the_transcript_and_the_declarations,
+            replay_preserves_the_transcript_and_the_declarations_scenario,
         ),
         (
             "one_byte_in_each_covered_field_misses_and_the_dropped_fields_do_not",
-            one_byte_in_each_covered_field_misses_and_the_dropped_fields_do_not,
+            one_byte_in_each_covered_field_misses_and_the_dropped_fields_do_not_scenario,
         ),
         (
             "a_regenerated_frame_or_another_namespace_refuses_before_any_request",
-            a_regenerated_frame_or_another_namespace_refuses_before_any_request,
+            a_regenerated_frame_or_another_namespace_refuses_before_any_request_scenario,
         ),
         (
             "memory_reviewer_replays_through_the_keyed_peer",
-            memory_reviewer_replays_through_the_keyed_peer,
+            memory_reviewer_replays_through_the_keyed_peer_scenario,
         ),
     ]
 }
@@ -472,22 +549,22 @@ fn run_scenario(name: &str) {
 }
 
 #[test]
-fn transcript_and_declarations() {
+fn replay_preserves_the_transcript_and_the_declarations() {
     run_scenario("replay_preserves_the_transcript_and_the_declarations");
 }
 
 #[test]
-fn covered_field_misses() {
+fn one_byte_in_each_covered_field_misses_and_the_dropped_fields_do_not() {
     run_scenario("one_byte_in_each_covered_field_misses_and_the_dropped_fields_do_not");
 }
 
 #[test]
-fn provenance_and_namespace() {
+fn a_regenerated_frame_or_another_namespace_refuses_before_any_request() {
     run_scenario("a_regenerated_frame_or_another_namespace_refuses_before_any_request");
 }
 
 #[test]
-fn keyed_reviewer_peer() {
+fn memory_reviewer_replays_through_the_keyed_peer() {
     run_scenario("memory_reviewer_replays_through_the_keyed_peer");
 }
 
@@ -500,4 +577,218 @@ fn every_cassette_marker_fires_across_the_scenarios() {
         scenario(&mut coverage);
     }
     coverage.complete(SUITE).unwrap();
+}
+
+struct Fixed {
+    finish_reason: Option<FinishReason>,
+    terminal: BackendTerminal,
+}
+
+impl LlmExecutionBackend for Fixed {
+    fn execute(&self, _: BackendRequest, events: EventSink, _: CancellationToken) -> BackendFuture {
+        let finish_reason = self.finish_reason;
+        let terminal = self.terminal.clone();
+        Box::pin(async move {
+            events.emit(BackendEvent::AssistantText {
+                text: "fixed".to_string(),
+                finish_reason,
+            });
+            terminal
+        })
+    }
+
+    fn unavailable_reason(&self, _: Harness) -> Option<&'static str> {
+        None
+    }
+
+    fn context_capabilities(&self, _: Harness) -> ContextCapabilities {
+        ContextCapabilities::NONE
+    }
+}
+
+fn error_of(class: ErrorClass) -> BackendError {
+    BackendError {
+        class,
+        message: format!("{class:?}"),
+        retry_after_secs: Some(1),
+        provider_code: Some("code".to_string()),
+    }
+}
+
+#[test]
+fn every_host_finish_reason_error_class_and_terminal_round_trips() {
+    let reasons = finish_reasons();
+    let classes = error_classes();
+    let mut terminals: Vec<BackendTerminal> = reasons
+        .iter()
+        .map(|&finish_reason| BackendTerminal::Completed { finish_reason })
+        .collect();
+    for class in classes {
+        terminals.push(BackendTerminal::Failed(error_of(class)));
+        terminals.push(BackendTerminal::FailedUnresolved(error_of(class)));
+    }
+    let event_reasons = reasons.iter().copied().map(Some).chain([None]);
+    let fixtures: Vec<Fixed> = terminals
+        .into_iter()
+        .zip(event_reasons.cycle())
+        .map(|(terminal, finish_reason)| Fixed {
+            finish_reason,
+            terminal,
+        })
+        .collect();
+    let runtime = runtime();
+    for fixed in fixtures {
+        let label = format!("{:?} / {:?}", fixed.finish_reason, fixed.terminal);
+        let real: Arc<dyn LlmExecutionBackend> = Arc::new(fixed);
+        let recorder = CassetteBackend::recording(NAMESPACE, real);
+        let recording: Arc<dyn LlmExecutionBackend> = recorder.clone();
+        let recorded = runtime.block_on(run(&recording, request("hello")));
+        let replay: Arc<dyn LlmExecutionBackend> =
+            CassetteBackend::replaying(NAMESPACE, &recorder.file().unwrap()).unwrap();
+        let replayed = runtime.block_on(run(&replay, request("hello")));
+        assert_eq!(replayed, recorded, "{label}");
+    }
+}
+
+/// A backend whose `execute` panics before returning a future.
+struct PanicsOnExecute;
+
+impl LlmExecutionBackend for PanicsOnExecute {
+    fn execute(&self, _: BackendRequest, _: EventSink, _: CancellationToken) -> BackendFuture {
+        panic!("the wrapped backend panicked synchronously");
+    }
+}
+
+fn accepting() -> EventSink {
+    EventSink::new(Arc::new(|_| SinkStatus::Accepted))
+}
+
+fn fresh_recorder() -> (Arc<CassetteBackend>, Arc<dyn LlmExecutionBackend>) {
+    let real = Arc::new(Scripted {
+        calls: AtomicUsize::new(0),
+    });
+    let recorder = CassetteBackend::recording(NAMESPACE, real);
+    let recording: Arc<dyn LlmExecutionBackend> = recorder.clone();
+    (recorder, recording)
+}
+
+/// An exchange the recording cannot reproduce refuses it: a future dropped
+/// before its terminal, a backend that panics before returning one, a run
+/// cancelled under the backend, and a sink that closed on an event each leave
+/// the recorder with no file; an exchange still in flight has no file yet.
+#[test]
+fn a_lost_or_unfinished_exchange_refuses_the_recording() {
+    let runtime = runtime();
+    let (recorder, recording) = fresh_recorder();
+    runtime.block_on(run(&recording, request("hello")));
+    assert!(recorder.file().is_ok());
+    let in_flight = recording.execute(request("slow"), accepting(), CancellationToken::new());
+    assert_eq!(
+        recorder.file().err(),
+        Some(CassetteError::IncompleteExchange),
+        "an exchange in flight is in no file yet"
+    );
+    runtime.block_on(in_flight);
+    assert!(recorder.file().is_ok(), "and is once it completes");
+    drop(recording.execute(request("dropped"), accepting(), CancellationToken::new()));
+    assert_eq!(
+        recorder.file().err(),
+        Some(CassetteError::IncompleteExchange),
+        "an exchange without a terminal is in no file"
+    );
+
+    let recorder = CassetteBackend::recording(NAMESPACE, Arc::new(PanicsOnExecute));
+    let recording: Arc<dyn LlmExecutionBackend> = recorder.clone();
+    let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        recording.execute(request("hello"), accepting(), CancellationToken::new())
+    }));
+    assert!(panicked.is_err());
+    assert_eq!(
+        recorder.file().err(),
+        Some(CassetteError::IncompleteExchange),
+        "a backend that panics before returning a future is in no file"
+    );
+
+    let (recorder, recording) = fresh_recorder();
+    let cancel = CancellationToken::new();
+    cancel.cancel();
+    let terminal = runtime.block_on(recording.execute(request("hello"), accepting(), cancel));
+    assert!(matches!(
+        terminal,
+        BackendTerminal::Failed(BackendError { provider_code: Some(code), .. }) if code == "cassette_refused"
+    ));
+    assert_eq!(
+        recorder.file().err(),
+        Some(CassetteError::IncompleteExchange),
+        "a run cancelled under the backend is in no file"
+    );
+
+    // A replay under a cancelled token consumes nothing: the run recorded only
+    // its cancellation, so no recorded exchange was seen.
+    let (_, file, _) = record_two();
+    let replayer = CassetteBackend::replaying(NAMESPACE, &file).unwrap();
+    let replay: Arc<dyn LlmExecutionBackend> = replayer.clone();
+    let cancel = CancellationToken::new();
+    cancel.cancel();
+    let terminal = runtime.block_on(replay.execute(request("hello"), accepting(), cancel));
+    assert!(matches!(
+        terminal,
+        BackendTerminal::Failed(BackendError { provider_code: Some(code), .. }) if code == "cassette_refused"
+    ));
+    assert_eq!(
+        (replayer.unconsumed(), replayer.refusals()),
+        (2, 0),
+        "a cancelled run neither consumes an entry nor counts as a miss"
+    );
+
+    // A replay whose sink closes mid-exchange reports the truncation rather
+    // than the recorded terminal the run never observed.
+    let replayer = CassetteBackend::replaying(NAMESPACE, &file).unwrap();
+    let replay: Arc<dyn LlmExecutionBackend> = replayer.clone();
+    let closed = EventSink::new(Arc::new(|_| SinkStatus::Closed));
+    let terminal =
+        runtime.block_on(replay.execute(request("hello"), closed, CancellationToken::new()));
+    assert!(
+        matches!(
+            &terminal,
+            BackendTerminal::Failed(BackendError { provider_code: Some(code), .. }) if code == "cassette_refused"
+        ),
+        "{terminal:?}"
+    );
+    assert_eq!(replayer.unconsumed(), 1, "the served entry stays consumed");
+
+    // A cancellation that lands during emission without closing the sink is
+    // still the run's outcome; the recorded terminal is not returned.
+    let replayer = CassetteBackend::replaying(NAMESPACE, &file).unwrap();
+    let replay: Arc<dyn LlmExecutionBackend> = replayer.clone();
+    let cancel = CancellationToken::new();
+    let cancelling = {
+        let cancel = cancel.clone();
+        EventSink::new(Arc::new(move |_| {
+            cancel.cancel();
+            SinkStatus::Accepted
+        }))
+    };
+    let terminal = runtime.block_on(replay.execute(request("hello"), cancelling, cancel));
+    assert!(
+        matches!(
+            &terminal,
+            BackendTerminal::Failed(BackendError { provider_code: Some(code), .. }) if code == "cassette_refused"
+        ),
+        "{terminal:?}"
+    );
+
+    let (recorder, recording) = fresh_recorder();
+    let closed = EventSink::new(Arc::new(|_| SinkStatus::Closed));
+    let terminal =
+        runtime.block_on(recording.execute(request("hello"), closed, CancellationToken::new()));
+    assert!(matches!(
+        terminal,
+        BackendTerminal::Failed(BackendError { provider_code: Some(code), .. }) if code == "cassette_refused"
+    ));
+    assert_eq!(
+        recorder.file().err(),
+        Some(CassetteError::IncompleteExchange),
+        "an event the sink refused is in no file"
+    );
 }
