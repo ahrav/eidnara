@@ -1413,7 +1413,8 @@ Campaign (`crates/daemon/tests/eval_campaign.rs`, `--all-features`):
   one process, three roots (the arm's state root, the config tier its daemon
   reads, and the cassette directory), and the summarizer cassette's bytes; a
   manifest is published the same way, parses back to the same digest, names
-  the checkout, toolchain, host triple, and fixture binary, names the pairs
+  the checkout, toolchain, host triple, fixture binary, and the executable
+  driving it, names the pairs
   as its samples in run order, carries the frozen family's digest and the
   recency baseline, says `replay` and `transform-route, turn by turn`, and is
   refused when relabelled `direct-database, non-aged`; the manifest's result

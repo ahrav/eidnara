@@ -194,6 +194,23 @@ fn the_fixture_records_its_backend_and_replays_it_strictly() {
     assert_eq!(std::fs::read(&occupied).unwrap(), b"trusted");
     assert!(!staged_path(&occupied).exists());
 
+    // A file that appears at the destination while the recording runs is
+    // never replaced either: the publisher links the staged bytes into place
+    // without replacing, so the late arrival is refused at exit and kept.
+    let raced_root = tempfile::tempdir().unwrap();
+    let raced = cassette_dir.path().join("raced.cassette.json");
+    let recorder = Launch::at(raced_root.path().to_path_buf())
+        .backend(Backend::Record {
+            file: raced.clone(),
+            namespace: NAMESPACE.to_string(),
+        })
+        .start();
+    runtime.block_on(run(&recorder, "raced-session", "what did we decide"));
+    std::fs::write(&raced, b"arrived first").unwrap();
+    let (status, output) = recorder.shutdown_with_status();
+    assert!(!status.success(), "{}", output.stderr);
+    assert_eq!(std::fs::read(&raced).unwrap(), b"arrived first");
+
     // A link planted where the recording stages its bytes is refused at exit,
     // not followed.
     let planted = cassette_dir.path().join("planted.cassette.json");

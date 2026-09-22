@@ -1792,7 +1792,8 @@ envelope, as are the recording lives' roots, processes, and store bytes.
 Beside the report the campaign publishes a manifest with the same
 write-then-rename, parses it back, and checks its digest. Its identity is
 this checkout and toolchain (the commit, whether the tree is dirty, the
-lockfile digest, the rustc version, the fixture binary's digest), its config is
+lockfile digest, the rustc version, one digest over the fixture binary and the
+executable driving it), its config is
 the profile, its scenario the surface and tasks, its samples the pairs in
 the order they ran, its result digest the completed pair table's under
 `eval-pair-table/v1` (the peaks and the clock are measurements and stay out

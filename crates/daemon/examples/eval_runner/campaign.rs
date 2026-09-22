@@ -509,6 +509,10 @@ fn live(
     // The task turn drains like every lifecycle turn: a firing it spawned
     // finishes before its diagnostics, the counters, and the store are read.
     drain(&fixture);
+    // The store is read while the fixture holds it: closing the last
+    // connection checkpoints the WAL away, so the root after shutdown is the
+    // smaller reading.
+    charges.observe(Resource::StoreBytes, root_bytes(root.path()))?;
     let mut firings: u32 = 0;
     let mut failures_seen = false;
     for diagnostics in turns
@@ -741,7 +745,8 @@ impl Charges {
     }
 
     /// Releases a root after its fixture exited: the store's bytes are charged
-    /// as they peaked, then the root goes, and the run's elapsed time is read.
+    /// once more as the checkpoint left them, then the root goes, and the
+    /// run's elapsed time is read.
     fn vacate(&mut self, root: tempfile::TempDir) -> Result<(), EnvelopeExceeded> {
         self.observe(Resource::StoreBytes, root_bytes(root.path()))?;
         drop(root);
@@ -1100,6 +1105,9 @@ pub fn run(config: &Config) -> Result<Run, RunError> {
         });
     }
     prepare_publish(publish)?;
+    // The fixture is built before the envelope is held: compiling it is the
+    // harness's work, and its processes and time are not the campaign's.
+    fixture_binary();
     let mut charges = Charges::new(profile.envelope.clone());
 
     let task_set = plan_injection_cases(SEED, &TASK_IDS.iter().map(|id| id.to_string()).collect());
@@ -1596,8 +1604,16 @@ fn identity(profile: &RunProfile, set: &PairSet) -> RunIdentity {
                 .find_map(|line| line.strip_prefix("host: "))
                 .expect("rustc names its host")
                 .to_string(),
+            // The fixture and the executable driving it: a dirty tree that
+            // changes only the shell changes this digest too.
             binary_digest: BinaryDigest::Present {
-                sha256: sha256_hex(&std::fs::read(fixture_binary()).unwrap()),
+                sha256: sha256_hex(
+                    &[
+                        std::fs::read(fixture_binary()).unwrap(),
+                        std::fs::read(std::env::current_exe().unwrap()).unwrap(),
+                    ]
+                    .concat(),
+                ),
             },
         },
         simulator_version: "eval-campaign-shell/v1".to_string(),
