@@ -578,11 +578,15 @@ fn truncate(file: &Path) -> WalCheckpoint {
     )
 }
 
-fn sidecar_len(file: &Path) -> u64 {
+pub fn sidecar_len(file: &Path) -> u64 {
     assert!(file.is_file(), "{} exists", file.display());
     let mut wal = file.as_os_str().to_owned();
     wal.push("-wal");
-    std::fs::metadata(wal).map(|m| m.len()).unwrap_or(0)
+    match std::fs::metadata(&wal) {
+        Ok(metadata) => metadata.len(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => 0,
+        Err(e) => panic!("{}: {e}", PathBuf::from(wal).display()),
+    }
 }
 
 fn count(file: &Path, sql: &str) -> u64 {

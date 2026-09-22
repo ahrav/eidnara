@@ -347,6 +347,22 @@ fn a_copy_with_a_modified_store_file_is_refused_at_reopen() {
 }
 
 #[test]
+fn a_wal_sidecar_whose_metadata_cannot_be_read_is_not_recorded_as_empty() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("store.sqlite");
+    std::fs::write(&file, b"").unwrap();
+    let wal = dir.path().join("store.sqlite-wal");
+    // A self-referential symlink makes `metadata` fail with ELOOP, an error
+    // that is not `NotFound`.
+    std::os::unix::fs::symlink(&wal, &wal).unwrap();
+    assert!(std::fs::metadata(&wal).is_err());
+    assert!(
+        std::panic::catch_unwind(|| aging::sidecar_len(&file)).is_err(),
+        "an unreadable sidecar must not be recorded as empty"
+    );
+}
+
+#[test]
 fn an_unapproved_profile_refuses_before_any_store_opens() {
     let publish = tempfile::tempdir().unwrap();
     let mut config = config(publish.path().join("out"), 600_000);

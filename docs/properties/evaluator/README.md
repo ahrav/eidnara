@@ -1352,6 +1352,9 @@ bound because it finishes inside the daemon suite's wall clock):
 - `a_copy_with_a_modified_store_file_is_refused_at_reopen`: a copy whose
   `kernel/kernel.sqlite`, `memory.sqlite`, or `search/search.sqlite` holds
   other bytes is `FileDiffers` naming it, before any store opens.
+- `a_wal_sidecar_whose_metadata_cannot_be_read_is_not_recorded_as_empty`: a
+  `-wal` sidecar whose metadata fails for any reason but absence panics by
+  path rather than reading as zero bytes.
 - `an_unapproved_profile_refuses_before_any_store_opens`: no approval, no
   campaign, nothing published.
 - `the_example_publishes_the_same_digests_as_the_in_process_run`: the built
