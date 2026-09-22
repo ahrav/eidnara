@@ -1270,8 +1270,8 @@ Campaign (`crates/eval-core/tests/campaign.rs`):
 - `the_envelope_records_the_peak_that_crossed_it_and_refuses_from_that_reading`
   (`xc-campaign-resource-envelope-declared-and-enforced`, the in-memory
   primitive): peaks never fall; the reading that crosses a bound is refused
-  and stays on record, and a later reading within the bound is refused with
-  that peak; `check` names the earliest declared resource over its
+  and stays on record, and a later reading within the bound, of that resource
+  or another, is refused with that peak; `check` names the earliest declared resource over its
   bound; the resource names equal the envelope's fields; every one of the
   seven accepts its bound and refuses one past it; the wire form is
   `{resource, bound, observed}`.
@@ -1350,8 +1350,10 @@ Report (`crates/eval-core/tests/report.rs`):
   fewer worlds than the tasks per world allow, or on a surface whose bound
   does not resolve,
   an interval outside the statistic's range or over more clusters than the
-  approved profile's worlds, with width where every pair is concordant, or
-  below zero where no pair favours the aged arm, a
+  approved profile's worlds, with width where every pair is concordant or
+  every pair favours the fresh arm, below zero where no pair favours the aged
+  arm, or withheld for one world where the tasks per world need three
+  hundred, a
   censored fresh arm the table does not count, a baseline that delivered more
   ids than its window holds, whose
   failed falsifications outnumber the table, or that was judged over more

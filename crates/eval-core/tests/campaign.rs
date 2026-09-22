@@ -733,6 +733,16 @@ fn the_envelope_records_the_peak_that_crossed_it_and_refuses_from_that_reading()
             observed: 7,
         })
     );
+    // A breach stays latched across resources: an in-bound reading elsewhere
+    // is refused with the breach still on record.
+    assert_eq!(
+        envelope.observe(Resource::StoreBytes, 10 << 20),
+        Err(EnvelopeExceeded {
+            resource: Resource::Processes,
+            bound: 6,
+            observed: 7,
+        })
+    );
     // Two resources over report the earlier declared one.
     envelope
         .observe(Resource::ElapsedMs, 2_000_000)

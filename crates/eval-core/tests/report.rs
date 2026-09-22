@@ -1210,6 +1210,44 @@ fn a_report_refuses_what_its_own_evidence_refutes() {
             ReportError::SuppressionNotDerived,
         ),
         (
+            "an interval withheld for one world where the tasks per world need three hundred",
+            Box::new(|r| {
+                r.profile.tasks_per_world = 1;
+                r.profile_digest = r.profile.digest().unwrap();
+                gated(r).analysis.interval = IntervalOutcome::Withheld {
+                    reason: IntervalWithheld::FewerThanTwoClusters { n_clusters: 1 },
+                };
+            }),
+            ReportError::IntervalNotDerived { field: "outcome" },
+        ),
+        (
+            "an interval with width where every pair favours the fresh arm",
+            Box::new(|r| {
+                // `b == n`: every replicate's quality loss is one.
+                let rates = r.family.profile.rates().unwrap();
+                let g = gated(r);
+                g.analysis.counts.b = 300;
+                g.analysis.counts.aged_pass = 0;
+                g.analysis.counts.aged_censored = 0;
+                g.analysis.gates = eval_core::Gates::of(&g.analysis.counts, &rates).unwrap();
+                let IntervalOutcome::Computed(interval) = &mut g.analysis.interval else {
+                    panic!("computed");
+                };
+                interval.lower = Ratio::ZERO;
+                interval.upper = Ratio::ONE;
+                for record in r.samples.samples.values_mut() {
+                    if record.arm == ArmKind::Aged && record.terminal.attempted() {
+                        record.terminal = Terminal::Fail;
+                    }
+                }
+                r.rates = r.samples.rates().unwrap();
+                let ceilings = r.profile.ceilings().unwrap();
+                gated(r).gates =
+                    CampaignGates::of(&r.samples, &ceilings, &r.family, &r.arm_rates).unwrap();
+            }),
+            ReportError::IntervalNotDerived { field: "bounds" },
+        ),
+        (
             "an interval below zero where no pair favours the aged arm",
             Box::new(|r| {
                 // `c == 0`: no replicate's quality loss is negative.

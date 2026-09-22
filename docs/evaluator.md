@@ -1433,11 +1433,12 @@ counts the passed, failed, censored, and indeterminate samples; `rates` reports
 each terminal family's share of every declared sample.
 
 **Envelope.** `Envelope {bounds, peaks}` is held from launch. `observe(resource,
-value)` records the peak first and refuses second while the peak is over its
+value)` records the peak first and refuses second while any peak is over its
 bound, so `envelope_peaks` shows the reading that crossed the bound as
 `EnvelopeExceeded {resource, bound, observed}` and a breach stays refused
-however later readings fall; `check` names the first resource over its bound
-in declared order. `Resource` is `elapsed_ms`, `store_bytes` (a store with its WAL and
+however later readings fall and whichever resource they read; `check` names
+the first resource over its bound in declared order, and `observe` refuses
+with the same. `Resource` is `elapsed_ms`, `store_bytes` (a store with its WAL and
 shm sidecars), `cassette_bytes`, `artifact_bytes`, `temp_roots`,
 `retained_artifacts`, or `processes`, one per `ResourceLimits` field.
 Publication (write-then-rename into roots, stores, and cassette namespaces
@@ -1552,9 +1553,11 @@ carries rather than read from what it says:
   under the world unit the fewest worlds the profile's tasks per world can
   hold the pairs in, and the worlds the plan affords and the profile runs,
   under the family unit also its families, when computed and exactly one
-  when withheld for too few, endpoints ordered within `[-1, 1]`, the range of
+  when withheld for too few, which one world holds only when the profile's
+  tasks per world can, endpoints ordered within `[-1, 1]`, the range of
   `(b - c) / n`, never below zero without a `c` pair nor above it without a
-  `b` pair, and whether it is computed or withheld; `IntervalNotDerived {field}`), while the
+  `b` pair, and exactly one or minus one when every pair is a `b` or a `c`,
+  and whether it is computed or withheld; `IntervalNotDerived {field}`), while the
   bounds themselves are bound to the pair table by the manifest's
   `result_digest`; every paired marginal must be backed by samples on that
   arm that ended the same way, a pass, a fail, or a censored attempt, since an

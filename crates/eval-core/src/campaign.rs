@@ -625,22 +625,14 @@ impl Envelope {
         }
     }
 
-    /// Records the reading into the peak, then refuses while the peak is over
-    /// the bound, so a breach stays refused however the later readings fall;
-    /// the refusal names the peak, the reading that crossed.
+    /// Records the reading into the peak, then refuses while any peak is over
+    /// its bound, so a breach stays refused however the later readings fall
+    /// and whichever resource they read; the refusal names the first breach in
+    /// declared order, at the peak that crossed.
     pub fn observe(&mut self, resource: Resource, observed: u64) -> Result<(), EnvelopeExceeded> {
         let peak = resource.of_mut(&mut self.peaks);
         *peak = (*peak).max(observed);
-        let observed = *peak;
-        let bound = resource.of(&self.bounds);
-        if observed > bound {
-            return Err(EnvelopeExceeded {
-                resource,
-                bound,
-                observed,
-            });
-        }
-        Ok(())
+        self.check()
     }
 
     /// The first resource whose peak is over its bound, in declaration order.

@@ -739,16 +739,18 @@ impl SuiteBReport {
                     .checked_sub(Ratio::ONE)
                     .map_err(ReportError::Statistics)?;
                 // With no `c` pair no replicate is negative; with no `b` pair
-                // none is positive.
-                let floor = if analysis.counts.c == 0 {
-                    Ratio::ZERO
-                } else {
-                    minus_one
+                // none is positive; with every pair a `b` every replicate is
+                // one, and with every pair a `c` every replicate is minus one.
+                let (b, c, n) = (analysis.counts.b, analysis.counts.c, analysis.counts.n);
+                let floor = match (c == 0, b == n) {
+                    (_, true) => Ratio::ONE,
+                    (true, false) => Ratio::ZERO,
+                    (false, false) => minus_one,
                 };
-                let ceiling = if analysis.counts.b == 0 {
-                    Ratio::ZERO
-                } else {
-                    Ratio::ONE
+                let ceiling = match (b == 0, c == n) {
+                    (_, true) => minus_one,
+                    (true, false) => Ratio::ZERO,
+                    (false, false) => Ratio::ONE,
                 };
                 if interval.lower > interval.upper
                     || interval.lower < floor
@@ -778,11 +780,16 @@ impl SuiteBReport {
                 reason: IntervalWithheld::FewerThanTwoClusters { n_clusters },
             } => {
                 // A non-empty table spans at least one cluster, so fewer than
-                // two is exactly one.
+                // two is exactly one, and one world holds the table only when
+                // the profile's tasks per world can.
                 if *n_clusters != 1 {
                     return disagrees("n_clusters");
                 }
-                if n_items < threshold {
+                let one_world_fits = match self.family.icc_pilot.clustering_unit {
+                    ClusteringUnit::WorldSeed => self.min_worlds() <= 1,
+                    ClusteringUnit::Family => true,
+                };
+                if n_items < threshold || !one_world_fits {
                     return disagrees("outcome");
                 }
             }
