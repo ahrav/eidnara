@@ -1284,8 +1284,10 @@ carries rather than read from what it says:
   (`OpenWhileBlocked {reason}`), and an `analysis {reason}` suppression must
   name exactly the derived block (`SuppressionNotDerived`). An
   `envelope {exceeded}` suppression must name the reading `envelope.check()`
-  shows (`SuppressionNotDerived`); under any other suppression the peaks must
-  be within the bounds (`EnvelopeNotHonoured`).
+  shows, and a `baseline {failure}` suppression needs a surface whose bound
+  the profile resolves, since no baseline is judged without one
+  (`SuppressionNotDerived`); under any other suppression the peaks must be
+  within the bounds (`EnvelopeNotHonoured`).
 - Accounting: `rates` must follow from `samples` (`RatesDisagree`, `Samples`);
   no sample's lineage names this run (`LineageNamesThisRun`); a sample skipped
   `stop_condition` must name the condition the outcome was suppressed under,
@@ -1293,7 +1295,8 @@ carries rather than read from what it says:
   skipped `profile_not_approved`, since the report's profile is approved
   (`SkipDisagreesWithProfile`); a sample unsupported `surface_not_activated`
   or disabled `scale_not_budgeted` names the report's surface or the profile's
-  scale (`SampleAxisDisagrees`); a sample skipped `envelope_exceeded` must name
+  scale, and `s0`, which runs in the default shards, is never unbudgeted
+  (`SampleAxisDisagrees`); a sample skipped `envelope_exceeded` must name
   this run's bound for that resource and a reading the peaks reached
   (`SampleEnvelopeDisagrees`); every injection score names a case and no case
   is scored twice (`InjectionScoreDisagrees`), while binding the scores to the
@@ -1303,8 +1306,9 @@ carries rather than read from what it says:
   `Gates::of` recomputes from its `counts` and the family's margins
   (`PairedGatesNotDerived`); its `interval` must be the shape
   `cluster_bootstrap_interval` derives from the family and the pair count
-  (the unit, method, replicate count, item count, at least two clusters, and
-  whether it is computed or withheld; `IntervalNotDerived {field}`), while the
+  (the unit, method, replicate count, item count, at least two clusters when
+  computed and exactly one when withheld for too few, and whether it is
+  computed or withheld; `IntervalNotDerived {field}`), while the
   bounds themselves are bound to the pair table by the manifest's
   `result_digest`; its pair count may not exceed either paired arm's samples
   that ended as an arm result, a pass, a fail, or a censored attempt, since an

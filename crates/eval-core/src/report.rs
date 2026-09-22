@@ -354,6 +354,17 @@ impl SuiteBReport {
         Ok((asymmetry > bound).then_some(BlockedReason::ArmMissAsymmetry { asymmetry, bound }))
     }
 
+    /// The recency bound the profile resolves for this surface; `None` means
+    /// no baseline could have been evaluated under this profile.
+    fn resolved_recency_bound(&self) -> Option<u32> {
+        self.profile
+            .baseline_bounds
+            .get(&self.surface)
+            .copied()
+            .and_then(NonZeroU32::new)
+            .and_then(|declared| recency_bound(self.surface, Some(declared)).ok())
+    }
+
     fn check_baseline(&self, baseline: &BaselineContrast) -> Result<(), ReportError> {
         let disagrees = |field| Err(ReportError::BaselineDisagrees { field });
         if baseline.baseline_version != RECENCY_BASELINE_VERSION {
@@ -362,14 +373,7 @@ impl SuiteBReport {
         if baseline.surface != self.surface {
             return disagrees("surface");
         }
-        let bound = self
-            .profile
-            .baseline_bounds
-            .get(&self.surface)
-            .copied()
-            .and_then(NonZeroU32::new)
-            .and_then(|declared| recency_bound(self.surface, Some(declared)).ok());
-        if bound != Some(baseline.recency_bound) {
+        if self.resolved_recency_bound() != Some(baseline.recency_bound) {
             return disagrees("recency_bound");
         }
         for (field, count) in [
@@ -437,8 +441,10 @@ impl SuiteBReport {
                 {
                     return Err(ReportError::SampleAxisDisagrees { sample: sample() });
                 }
+                // `s0` runs in the default shards; only a scale with a budget
+                // variable can be unbudgeted.
                 Terminal::Disabled(DisabledReason::ScaleNotBudgeted { scale })
-                    if scale != self.profile.scale =>
+                    if scale != self.profile.scale || scale.budget_env().is_none() =>
                 {
                     return Err(ReportError::SampleAxisDisagrees { sample: sample() });
                 }
@@ -465,6 +471,11 @@ impl SuiteBReport {
         if let Suppression::Analysis { reason } = by
             && self.derived_block()?.as_ref() != Some(reason)
         {
+            return Err(ReportError::SuppressionNotDerived);
+        }
+        // A baseline is judged under a bound; a surface this profile resolves
+        // none for was never judged.
+        if matches!(by, Suppression::Baseline { .. }) && self.resolved_recency_bound().is_none() {
             return Err(ReportError::SuppressionNotDerived);
         }
         Ok(())
@@ -524,7 +535,12 @@ impl SuiteBReport {
             IntervalOutcome::Withheld {
                 reason: IntervalWithheld::FewerThanTwoClusters { n_clusters },
             } => {
-                if *n_clusters >= 2 || n_items < threshold {
+                // A non-empty table spans at least one cluster, so fewer than
+                // two is exactly one.
+                if *n_clusters != 1 {
+                    return disagrees("n_clusters");
+                }
+                if n_items < threshold {
                     return disagrees("outcome");
                 }
             }

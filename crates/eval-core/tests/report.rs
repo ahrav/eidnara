@@ -16,7 +16,7 @@ use eval_core::{
     SampleLedger, SampleRecord, Scale, SkipReason, StopCondition, StoppingRule, SuiteBReport,
     Suppression, TaskBudgets, Terminal, WorldProvenance, analyze, parse_report, reachability_of,
 };
-use eval_core::{AxisValue, InjectionScore, IntervalOutcome, StatisticsError};
+use eval_core::{AxisValue, InjectionScore, IntervalOutcome, IntervalWithheld, StatisticsError};
 use serde_json::json;
 
 type Mutate = Box<dyn Fn(&mut SuiteBReport)>;
@@ -1062,6 +1062,42 @@ fn a_report_refuses_what_its_own_evidence_refutes() {
             ReportError::Statistics(StatisticsError::MalformedDecimal {
                 field: "arm_rates.miss_rate",
             }),
+        ),
+        (
+            "a baseline suppression on a surface whose bound does not resolve",
+            Box::new(|r| {
+                r.surface = EvaluatedSurface::Surface2;
+                r.outcome = ReportOutcome::Suppressed {
+                    by: Suppression::Baseline {
+                        failure: BaselineFailure::Vacuous,
+                    },
+                };
+                r.claims.established.clear();
+            }),
+            ReportError::SuppressionNotDerived,
+        ),
+        (
+            "a sample disabled for an unbudgeted s0",
+            Box::new(|r| {
+                r.samples.samples.get_mut("s645").unwrap().terminal =
+                    Terminal::Disabled(eval_core::DisabledReason::ScaleNotBudgeted {
+                        scale: Scale::S0,
+                    });
+            }),
+            ReportError::SampleAxisDisagrees {
+                sample: "s645".into(),
+            },
+        ),
+        (
+            "an interval withheld over no clusters",
+            Box::new(|r| {
+                gated(r).analysis.interval = IntervalOutcome::Withheld {
+                    reason: IntervalWithheld::FewerThanTwoClusters { n_clusters: 0 },
+                };
+            }),
+            ReportError::IntervalNotDerived {
+                field: "n_clusters",
+            },
         ),
         (
             "an epoch past the canonical safe range",

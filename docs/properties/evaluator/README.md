@@ -1116,8 +1116,10 @@ Report (`crates/eval-core/tests/report.rs`):
   on one arm, a pair backed by an indeterminate sample, an interval whose replicate or item count is not the family's
   or the pairs', a stop-condition skip in an open report, a lineage naming
   this run, a `profile_not_approved` skip under an approved profile, a sample
-  unsupported on another surface or disabled for another scale, a
-  tap-rejected suppression over malformed arm rates, two injection scores for
+  unsupported on another surface or disabled for another scale or for `s0`,
+  a tap-rejected suppression over malformed arm rates, a baseline suppression
+  on a surface whose bound does not resolve, an interval withheld over no
+  clusters, two injection scores for
   one case or one with no case, and an epoch past the canonical safe range
   each refuse by name
   from `serialize` and `parse_report`; a run its envelope stopped, skipping
