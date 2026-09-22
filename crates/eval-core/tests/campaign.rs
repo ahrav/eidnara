@@ -572,6 +572,27 @@ fn every_sample_ends_in_exactly_one_closed_vocabulary_terminal() {
             },
         ),
         (
+            "a blank sample id",
+            Box::new(|l| {
+                let mut record = l.samples.remove("s1").unwrap();
+                record.id = " ".into();
+                l.samples.insert(" ".into(), record);
+                l.order = l.samples.keys().cloned().collect();
+            }),
+            SampleError::Blank {
+                sample: " ".into(),
+                field: "id",
+            },
+        ),
+        (
+            "a blank task",
+            Box::new(|l| l.samples.get_mut("s1").unwrap().task = " \t".into()),
+            SampleError::Blank {
+                sample: "s1".into(),
+                field: "task",
+            },
+        ),
+        (
             "a lineage entry that is not a run id",
             Box::new(|l| l.samples.get_mut("s2").unwrap().lineage = vec!["retry-1".into()]),
             SampleError::MalformedLineage {

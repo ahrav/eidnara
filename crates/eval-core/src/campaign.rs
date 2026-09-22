@@ -11,6 +11,7 @@ use context_core::canonical_json::{
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::blank;
 use crate::census::EvaluatedSurface;
 use crate::governance::HistoryPolicy;
 use crate::manifest::{Cut, ResourceLimits};
@@ -411,6 +412,11 @@ pub enum SampleError {
         key: String,
         id: String,
     },
+    /// A sample whose `id` or `task` is empty or whitespace, naming nothing.
+    Blank {
+        sample: String,
+        field: &'static str,
+    },
     MalformedLineage {
         sample: String,
         entry: String,
@@ -457,6 +463,14 @@ impl SampleLedger {
                     key: key.clone(),
                     id: record.id.clone(),
                 });
+            }
+            for (field, text) in [("id", &record.id), ("task", &record.task)] {
+                if blank(text) {
+                    return Err(SampleError::Blank {
+                        sample: key.clone(),
+                        field,
+                    });
+                }
             }
             let mut seen = BTreeSet::new();
             for entry in &record.lineage {

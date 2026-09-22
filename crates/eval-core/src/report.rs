@@ -10,6 +10,7 @@ use context_core::canonical_json::{ContractError, canonical_json_encode, is_lowe
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::blank;
 use crate::campaign::{
     Ceilings, DisabledReason, Envelope, EnvelopeExceeded, ProfileError, RunProfile, SampleError,
     SampleLedger, SkipReason, Terminal, TerminalRates, UnsupportedReason,
@@ -216,6 +217,11 @@ pub enum ReportError {
         derived: ClaimDerivation,
     },
     FamilyDigestMismatch,
+    /// The analysis counts a pair table other than the size the plan froze.
+    PairCountNotFrozen {
+        frozen: u32,
+        found: u64,
+    },
     /// An open report whose family or arm rates block the analysis.
     OpenWhileBlocked(BlockedReason),
     /// The stored paired gates are not the ones the counts and margins
@@ -413,7 +419,7 @@ impl SuiteBReport {
     fn check_injection(&self) -> Result<(), ReportError> {
         let mut cases = BTreeSet::new();
         for score in &self.injection {
-            if score.case_id.is_empty() || !cases.insert(score.case_id.as_str()) {
+            if blank(&score.case_id) || !cases.insert(score.case_id.as_str()) {
                 return Err(ReportError::InjectionScoreDisagrees {
                     case_id: score.case_id.clone(),
                 });
@@ -675,6 +681,14 @@ impl SuiteBReport {
         }
         if gated.analysis.arm_rates != self.arm_rates {
             return Err(ReportError::ArmRatesDisagree);
+        }
+        // `analyze` refuses a table of any size but the frozen one.
+        let StoppingRule::FixedN { pairs: frozen } = self.family.stopping_rule;
+        if gated.analysis.counts.n != u64::from(frozen) {
+            return Err(ReportError::PairCountNotFrozen {
+                frozen,
+                found: gated.analysis.counts.n,
+            });
         }
         if let Some(blocked) = self.derived_block()? {
             return Err(ReportError::OpenWhileBlocked(blocked));

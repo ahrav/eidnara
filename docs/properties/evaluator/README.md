@@ -1257,6 +1257,7 @@ Campaign (`crates/eval-core/tests/campaign.rs`):
   terminal without a reason, an unknown kind, and an extra field on a struct
   variant do not parse; an empty ledger has zero rates; a sample never
   ordered, ordered twice, or without a record, a record under another key, a
+  blank sample id or task, a
   lineage entry that is not a run ID or is upper-case, and a repeated lineage
   entry each refuse from `validate` and `rates`; a lineage of one run ID
   validates; `attempted` counts the four attempted families.
@@ -1336,7 +1337,8 @@ Report (`crates/eval-core/tests/report.rs`):
   for another scale or for `s0`,
   a tap-rejected suppression over malformed arm rates, a baseline suppression
   on a surface whose bound does not resolve, an interval withheld over no
-  clusters, two injection scores for
+  clusters, an analysis over fewer pairs than the plan froze, an injection
+  score with a blank case, two injection scores for
   one case or one with no case, and an epoch past the canonical safe range
   each refuse by name
   from `serialize` and `parse_report`; a run its envelope stopped, skipping

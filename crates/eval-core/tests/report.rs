@@ -758,6 +758,14 @@ fn a_report_refuses_missing_blocks_forbidden_claims_and_what_it_did_not_derive()
             ReportError::Samples(SampleError::OrderNotAPermutation),
         ),
         (
+            "an analysis over fewer pairs than the plan froze",
+            Box::new(|r| gated(r).analysis.counts.n = 299),
+            ReportError::PairCountNotFrozen {
+                frozen: 300,
+                found: 299,
+            },
+        ),
+        (
             "an analysis read under another family",
             Box::new(|r| r.family.bootstrap_seed += 1),
             ReportError::FamilyDigestMismatch,
@@ -1214,6 +1222,23 @@ fn a_report_refuses_what_its_own_evidence_refutes() {
             }),
             ReportError::InjectionScoreDisagrees {
                 case_id: "c1".into(),
+            },
+        ),
+        (
+            "an injection score with a blank case",
+            Box::new(|r| {
+                r.injection = vec![InjectionScore {
+                    case_id: " ".into(),
+                    ingested: AxisValue::Yes,
+                    retrieved: AxisValue::No,
+                    packed: AxisValue::No,
+                    obeyed: AxisValue::NotMeasurable,
+                    written_back_cross_session: AxisValue::NotMeasurable,
+                    exposure: AxisValue::NotReached,
+                }];
+            }),
+            ReportError::InjectionScoreDisagrees {
+                case_id: " ".into(),
             },
         ),
         (

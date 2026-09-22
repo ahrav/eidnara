@@ -1425,8 +1425,9 @@ does not parse, and an extra key a tagged unit variant would swallow is
 caught by the report parser's round trip. A `SampleLedger {epoch, order,
 samples}` holds one `SampleRecord {id, task, arm, policy, cut, lineage,
 terminal}` per declared sample; `validate` refuses an order that is not a
-permutation of the samples, a record under another key, a lineage entry that
-is not a lowercase `eval_run_id`, or one repeated, and an `envelope_exceeded`
+permutation of the samples, a record under another key, a blank `id` or
+`task` (`Blank {sample, field}`), a lineage entry that is not a lowercase
+`eval_run_id`, or one repeated, and an `envelope_exceeded`
 skip whose reading is not over its bound (`EnvelopeNotExceeded`); `attempted`
 counts the passed, failed, censored, and indeterminate samples; `rates` reports
 each terminal family's share of every declared sample.
@@ -1515,10 +1516,12 @@ carries rather than read from what it says:
   scale; a `default-production` surface is never unactivated and `s0`, which
   runs in the default shards, is never unbudgeted (`SampleAxisDisagrees`); a sample skipped `envelope_exceeded` must name
   this run's bound for that resource and a reading the peaks reached
-  (`SampleEnvelopeDisagrees`); every injection score names a case and no case
-  is scored twice (`InjectionScoreDisagrees`), while binding the scores to the
-  planned task set is the manifest's. In an open report the
-  paired analysis must carry the family's digest (`FamilyDigestMismatch`) and
+  (`SampleEnvelopeDisagrees`); every injection score names a case that is not
+  blank and no case is scored twice (`InjectionScoreDisagrees`), while binding
+  the scores to the planned task set is the manifest's. In an open report the
+  paired analysis must count the pair table the plan froze
+  (`PairCountNotFrozen {frozen, found}`, as `analyze` refuses any other) and
+  carry the family's digest (`FamilyDigestMismatch`) and
   the same `arm_rates` (`ArmRatesDisagree`); its `gates` must be the ones
   `Gates::of` recomputes from its `counts` and the family's margins
   (`PairedGatesNotDerived`); its `interval` must be the shape
