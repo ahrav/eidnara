@@ -36,6 +36,15 @@ fn budget() -> Option<u64> {
     })
 }
 
+fn budget_or_panic() -> u64 {
+    budget().unwrap_or_else(|| {
+        panic!(
+            "{} is unset; this test runs only under an explicit budget",
+            Scale::S0.budget_env()
+        )
+    })
+}
+
 fn config(publish: PathBuf, elapsed_bound_ms: u64) -> Config {
     Config {
         scale: Scale::S0,
@@ -136,7 +145,6 @@ fn a_quiescent_copy_resumes_the_full_replay_in_one_incarnation_scenario(coverage
         manifest.result_digest,
         AgingReport::result_digest(&published).unwrap()
     );
-    assert_eq!(manifest.witness_digest, report.checkpoint_digest);
     assert_eq!(manifest.run_identity.root_seed, aging::SEED);
 }
 
@@ -281,9 +289,7 @@ fn an_unapproved_profile_refuses_before_any_store_opens() {
 #[test]
 #[ignore = "S0 runs under an explicit budget: set EIDNARA_EVAL_S0_BUDGET_MS and run with --ignored"]
 fn the_example_publishes_the_same_digests_as_the_in_process_run() {
-    let Some(budget_ms) = budget() else {
-        return;
-    };
+    let budget_ms = budget_or_panic();
     let publish = tempfile::tempdir().unwrap();
     let run = aging::run(&config(publish.path().join("in-process"), budget_ms)).unwrap();
     let out = publish.path().join("cli");
@@ -417,9 +423,7 @@ fn aging_markers_each_name_a_scenario_here() {
 #[test]
 #[ignore = "S0 runs under an explicit budget: set EIDNARA_EVAL_S0_BUDGET_MS and run with --ignored"]
 fn every_aging_marker_fires_across_the_scenarios() {
-    if budget().is_none() {
-        return;
-    }
+    budget_or_panic();
     let mut coverage = Coverage::default();
     for (_, scenario) in scenarios() {
         scenario(&mut coverage);

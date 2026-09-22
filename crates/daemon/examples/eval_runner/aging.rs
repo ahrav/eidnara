@@ -26,9 +26,11 @@ use kernel::{
     ArtifactDestination, CommitPageBounds, CurrentInputDescriptor, EligibilityBinding,
     ProjectScope, ProviderEgress, Sensitivity, SourceRow,
 };
-use memory_store::{MemoryStore, StoredHistorySegment};
+use lease::{HeldFileLease, LeaseError};
+use memory_store::{MemoryStore, MemoryStoreError, StoredHistorySegment};
 use rusqlite::{Connection, OpenFlags};
 use serde_json::{Value, json};
+use storage::StoreError;
 
 use super::campaign::{
     Charges, identity, parse_flags, prepare_publish, profile as suite_b, publish_file, sha256_hex,
@@ -255,7 +257,6 @@ pub struct Stores {
     corpus: Corpus,
     projection: SearchProjection,
     consumer: CatchUpConsumer,
-    pub projection_snapshot: i64,
     memory: MemoryStore,
     rendering: Rendering,
     chains: BTreeMap<String, Vec<String>>,
@@ -268,13 +269,12 @@ impl Stores {
         let corpus = Corpus::open(root);
         corpus.seed();
         let memory = MemoryStore::open(&daemon::store_descriptor_in(root)).unwrap();
-        let (projection, consumer, snapshot) = Self::bootstrap(&corpus, root, EPOCH_MS);
+        let (projection, consumer) = Self::bootstrap(&corpus, root, EPOCH_MS);
         Self {
             root: root.to_path_buf(),
             corpus,
             projection,
             consumer,
-            projection_snapshot: snapshot,
             memory,
             rendering,
             chains: BTreeMap::new(),
@@ -283,11 +283,7 @@ impl Stores {
         }
     }
 
-    fn bootstrap(
-        corpus: &Corpus,
-        root: &Path,
-        now: i64,
-    ) -> (SearchProjection, CatchUpConsumer, i64) {
+    fn bootstrap(corpus: &Corpus, root: &Path, now: i64) -> (SearchProjection, CatchUpConsumer) {
         let (projection, hold, _) = corpus.bootstrap_with_hold(root);
         let binding = corpus.binding();
         corpus
@@ -300,7 +296,7 @@ impl Stores {
             kernel_incarnation_id: kernel_incarnation_id(root),
             generation_id: Some(GENERATION.to_string()),
         };
-        (projection, consumer, hold.snapshot)
+        (projection, consumer)
     }
 
     pub fn projection_path(&self) -> PathBuf {
@@ -313,10 +309,6 @@ impl Stores {
 
     pub fn incarnation(&self) -> String {
         kernel_incarnation_id(&self.root)
-    }
-
-    pub fn applied(&self) -> u32 {
-        self.applied
     }
 
     pub fn apply(&mut self, planned: &Planned) {
@@ -506,14 +498,12 @@ impl Stores {
         let mut handles_closed = BTreeMap::new();
         wal.insert(
             StoreFamily::SearchProjection,
-            triple(
-                projection
-                    .checkpoint_truncate(Instant::now() + CHECKPOINT_WAIT)
-                    .unwrap(),
-            ),
+            projection
+                .checkpoint_truncate(Instant::now() + CHECKPOINT_WAIT)
+                .map(triple)
+                .unwrap_or(NOT_TRUNCATED),
         );
-        let (_, lease) = projection.close();
-        drop(lease);
+        let (_, search_lease) = projection.close();
         handles_closed.insert(StoreFamily::SearchProjection, true);
         drop(memory);
         handles_closed.insert(StoreFamily::Memory, true);
@@ -526,7 +516,14 @@ impl Stores {
             Err(_) => false,
         };
         handles_closed.insert(StoreFamily::Kernel, kernel_closed);
-        wal.insert(StoreFamily::Kernel, truncate(&kernel_file(&root)));
+        wal.insert(
+            StoreFamily::Kernel,
+            if kernel_closed {
+                truncate(&kernel_file(&root))
+            } else {
+                NOT_TRUNCATED
+            },
+        );
         let receipt = QuiescenceReceipt {
             step: applied,
             stores: StoreFamily::ALL
@@ -547,6 +544,7 @@ impl Stores {
         Closed {
             root,
             receipt,
+            search_lease,
             rendering,
             chains,
             dead,
@@ -554,6 +552,12 @@ impl Stores {
         }
     }
 }
+
+const NOT_TRUNCATED: WalCheckpoint = WalCheckpoint {
+    busy: 1,
+    wal_frames: -1,
+    checkpointed_frames: -1,
+};
 
 fn triple((busy, wal_frames, checkpointed_frames): (i64, i64, i64)) -> WalCheckpoint {
     WalCheckpoint {
@@ -591,6 +595,7 @@ fn count(file: &Path, sql: &str) -> u64 {
 pub struct Closed {
     root: PathBuf,
     pub receipt: QuiescenceReceipt,
+    search_lease: Option<HeldFileLease>,
     rendering: Rendering,
     chains: BTreeMap<String, Vec<String>>,
     dead: BTreeSet<String>,
@@ -603,17 +608,26 @@ impl Closed {
     }
 
     pub fn copy(mut self, into: &Path) -> Result<(Checkpoint, Copied), CheckpointRefused> {
-        let probe = MemoryStore::open(&daemon::store_descriptor_in(&self.root));
-        if let Some(memory) = self.receipt.stores.get_mut(&StoreFamily::Memory) {
-            memory.handles_closed &= probe.is_ok();
+        let memory_file = memory_file(&self.root);
+        let memory = self.receipt.stores.get_mut(&StoreFamily::Memory).unwrap();
+        match MemoryStore::open(&daemon::store_descriptor_in(&self.root)) {
+            Ok(probe) => {
+                drop(probe);
+                memory.wal = truncate(&memory_file);
+                memory.wal_sidecar_bytes = sidecar_len(&memory_file);
+            }
+            Err(MemoryStoreError::Store(StoreError::Lease(LeaseError::Held { .. }))) => {
+                memory.handles_closed = false;
+            }
+            Err(e) => panic!("memory store probe at {}: {e}", self.root.display()),
         }
-        drop(probe);
         let incarnation_id = kernel_incarnation_id(&self.root);
         Checkpoint::admit(&self.receipt, &incarnation_id)?;
         let mut files = BTreeMap::new();
         for relative in copied_paths(&self.root) {
             copy_file(&self.root, into, &relative, &mut files);
         }
+        drop(self.search_lease);
         let checkpoint = Checkpoint::new(self.receipt, incarnation_id, files)?;
         Ok((
             checkpoint,
@@ -699,14 +713,22 @@ impl Copied {
         let (path, lease) = copied.close();
         drop(lease);
         std::fs::remove_file(&path).unwrap();
-        let (projection, consumer, snapshot) = Stores::bootstrap(&corpus, &self.root, now);
+        for suffix in ["-wal", "-shm"] {
+            let mut sidecar = path.as_os_str().to_owned();
+            sidecar.push(suffix);
+            match std::fs::remove_file(&sidecar) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => panic!("{}: {e}", PathBuf::from(sidecar).display()),
+            }
+        }
+        let (projection, consumer) = Stores::bootstrap(&corpus, &self.root, now);
         embed_pending(&corpus, &projection, &self.root, now);
         Ok(Stores {
             root: self.root,
             corpus,
             projection,
             consumer,
-            projection_snapshot: snapshot,
             memory,
             rendering: self.rendering,
             chains: self.chains,

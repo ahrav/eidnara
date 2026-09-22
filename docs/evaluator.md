@@ -1684,11 +1684,20 @@ and at least one death falls before it; a history with no such step is
 refused (`NoStraddlingStep`). `Stores::close` reads every declared counter,
 truncates the projection's WAL through its own `checkpoint_truncate`, closes
 every handle (the kernel handle is proved sole by `Arc::try_unwrap`, and a
-second holder reads as `handles_closed: false`), truncates the kernel's and
-the memory store's WAL on the closed files (the storage layer denies the
-checkpoint pragma on its own connections), and records the bytes left in each
-`-wal` sidecar. `Closed::copy` reopens the memory store once to prove no
-other holder has its lease, admits the receipt, and only then copies
+second holder reads as `handles_closed: false`; the projection and memory
+handles are owned values, so dropping them is the proof), truncates the
+kernel's and the memory store's WAL on the closed files (the storage layer
+denies the checkpoint pragma on its own connections), and records the bytes
+left in each `-wal` sidecar. A handle that could not be proved closed, or a
+projection truncation that ran past its wait, is recorded as `busy: 1` with
+`-1` frames rather than touched again: the receipt reports what was
+observed, and `admit` refuses it. The projection's file lease stays held until the
+copy is done, so nothing can open the projection in between. `Closed::copy`
+reopens the memory store once to prove no other holder has its lease; the
+probe itself writes a fence, so on success the memory store's WAL is
+truncated and its sidecar read again before the receipt is admitted, and a
+held lease is recorded as an open handle. The copy admits the receipt and
+only then copies
 `kernel/kernel.sqlite`, the kernel's artifact objects, `memory.sqlite`, and
 `search/search.sqlite` into a fresh root with owner-only modes, building the
 `Checkpoint` from the copied bytes; a refused receipt copies nothing.
