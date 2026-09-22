@@ -1345,8 +1345,11 @@ drives it in-process, and asserts what a run found; it also runs the built
 example on S0 and checks its published manifest and report parse and its
 summary agrees with them.
 
-The campaign refuses an unapproved profile before anything runs. Under an
-approved one it generates a one-session aged history (130 messages at S0) and
+The campaign refuses an unapproved profile, an aged history no longer than
+the window, a publish directory it cannot create, and a staged report or
+manifest already sitting in the publish directory, all before anything runs
+(`RunError`). Under an approved profile it generates a one-session aged
+history (130 messages at S0) and
 a twelve-message natural-fresh history under another seed, compiles three
 tasks (an early message as the falsifier, the last message as the positive
 control, a message fifty from the end as the plain task) into a pair set at
@@ -1547,8 +1550,10 @@ recency there; a recency loss on surface 1 needs more than 500 messages,
 which the meta bound puts near the limit of what one firing can persist.
 The falsification pair's structural verdict is still the compiler's.
 
-Not composed yet: the write-then-rename publisher is the shell's own, since
-no shipped publisher exists.
+Not composed yet: the write-then-rename publisher is test support
+(`crates/daemon/tests/support/publish.rs`, included by path from the campaign
+shell and from the fixture for its recorded cassette), since no shipped
+publisher exists.
 
 ## Coverage markers
 

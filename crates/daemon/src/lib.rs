@@ -33,28 +33,15 @@ pub mod history_summarizer_producer;
 pub(crate) mod history_summarizer_prompt;
 pub(crate) mod history_summarizer_validate;
 
-/// The evaluator's structured history arm runs replayed summarizer output
-/// through the validator and store mapping the producer's publication path
-/// uses, so the arm's segments are the summarizer's own rather than a model
-/// of them; reachable only under `test-support`.
+/// Re-exports the publication path's presented-line renderer and
+/// summarizer-output validator for scripted-summary tests.
 #[cfg(feature = "test-support")]
 pub mod history_summarizer_evaluation {
-    use std::collections::BTreeMap;
-
+    pub use crate::chunk_text::format_block_line;
+    pub use crate::history_summarizer_chunk::alias_marker;
     pub use crate::history_summarizer_validate::{
-        ChunkLine, HistorySummarizerChunk, ValidateOptions, ValidatedChunk,
-        ValidatedHistorySegment, validate_history_summarizer_output,
+        ChunkLine, HistorySummarizerChunk, ValidateOptions, validate_history_summarizer_output,
     };
-
-    /// The publication path's mapping from a validated segment to the stored
-    /// row, with the boundary dates a publication would carry.
-    pub fn stored_history_segment(
-        segment: &ValidatedHistorySegment,
-        created_at_ms: i64,
-        boundary_dates: &BTreeMap<String, String>,
-    ) -> memory_store::StoredHistorySegment {
-        crate::history_summarizer::to_stored_history_segment(segment, created_at_ms, boundary_dates)
-    }
 }
 pub mod identity_sweep;
 pub mod injection;

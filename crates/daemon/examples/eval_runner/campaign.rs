@@ -40,6 +40,7 @@ use super::support::direct_host::{Backend, Launch, fixture_binary};
 use super::support::eval_surface::{
     EPOCH_MS, Knobs, Pass, SurfaceLedger, World, block_on, lifecycle, observe_rendered, pass, text,
 };
+use super::support::publish::{staged_path, write_then_rename};
 
 pub const SEED: u64 = 0x5EED_B000_0000_0002;
 const PROJECT: &str = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
@@ -69,7 +70,16 @@ pub struct Config {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RunError {
     Profile(ProfileError),
-    AgedHistoryTooShort { aged_messages: u32, window: u32 },
+    AgedHistoryTooShort {
+        aged_messages: u32,
+        window: u32,
+    },
+    /// The publish directory could not be created, or a staged file already
+    /// sits where the create-new publisher stages its own.
+    Publish {
+        path: PathBuf,
+        kind: std::io::ErrorKind,
+    },
     Envelope(EnvelopeExceeded),
 }
 
@@ -974,20 +984,29 @@ fn terminal_of(result: ArmResult) -> Terminal {
     }
 }
 
-/// Stages the bytes beside the target, syncs them, renames into place, and
-/// syncs the directory, so a reader sees the whole report or none of it.
-pub fn write_then_rename(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
-    use std::os::unix::fs::OpenOptionsExt;
-    let staged = path.with_extension("json.staged");
-    let mut file = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(&staged)?;
-    std::io::Write::write_all(&mut file, bytes)?;
-    file.sync_all()?;
-    std::fs::rename(&staged, path)?;
-    std::fs::File::open(path.parent().unwrap())?.sync_all()
+fn prepare_publish(publish: &Path) -> Result<(), RunError> {
+    let refused = |path: &Path, error: std::io::Error| RunError::Publish {
+        path: path.to_path_buf(),
+        kind: error.kind(),
+    };
+    std::fs::create_dir_all(publish).map_err(|error| refused(publish, error))?;
+    for file in [REPORT_FILE, MANIFEST_FILE] {
+        let staged = staged_path(&publish.join(file));
+        if staged.symlink_metadata().is_ok() {
+            return Err(refused(
+                &staged,
+                std::io::Error::from(std::io::ErrorKind::AlreadyExists),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn publish_file(path: &Path, bytes: &[u8]) -> Result<(), RunError> {
+    write_then_rename(path, bytes).map_err(|error| RunError::Publish {
+        path: path.to_path_buf(),
+        kind: error.kind(),
+    })
 }
 
 /// Runs one campaign under `config`: compiles the pairs, drives every arm of
@@ -1023,6 +1042,7 @@ pub fn run(config: &Config) -> Result<Run, RunError> {
             window,
         });
     }
+    prepare_publish(publish)?;
     let mut charges = Charges::new(profile.envelope.clone());
 
     let task_set = plan_injection_cases(SEED, &TASK_IDS.iter().map(|id| id.to_string()).collect());
@@ -1344,7 +1364,6 @@ pub fn run(config: &Config) -> Result<Run, RunError> {
     // a serialization before the envelope is copied in, then again from the
     // bytes written, which carry the peaks and are the larger; the second
     // reading is the one the envelope refuses on.
-    std::fs::create_dir_all(publish).unwrap();
     charges.roots += 1;
     charges.observe(Resource::TempRoots, charges.roots)?;
     let sized = serde_json::to_vec_pretty(&report.serialize().unwrap()).unwrap();
@@ -1355,7 +1374,7 @@ pub fn run(config: &Config) -> Result<Run, RunError> {
     report.envelope = charges.envelope.clone();
     let bytes = serde_json::to_vec_pretty(&report.serialize().unwrap()).unwrap();
     charges.observe(Resource::ArtifactBytes, bytes.len() as u64)?;
-    write_then_rename(&publish.join(REPORT_FILE), &bytes).unwrap();
+    publish_file(&publish.join(REPORT_FILE), &bytes)?;
 
     // The manifest beside the report says how the world reached the store:
     // every arm was lived through the daemon's own transform route one turn
@@ -1363,7 +1382,7 @@ pub fn run(config: &Config) -> Result<Run, RunError> {
     // `transform-route, turn by turn`.
     let manifest = manifest(identity, &set, &report, &bytes, &frozen, started_at_ms);
     let manifest_bytes = serde_json::to_vec_pretty(&manifest.to_value()).unwrap();
-    write_then_rename(&publish.join(MANIFEST_FILE), &manifest_bytes).unwrap();
+    publish_file(&publish.join(MANIFEST_FILE), &manifest_bytes)?;
     Ok(Run {
         report,
         report_bytes: bytes,

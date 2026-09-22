@@ -12,6 +12,12 @@
 #[path = "../tests/support/eval_cassette.rs"]
 #[allow(dead_code)]
 mod eval_cassette;
+/// The recorded cassette is published under the same contract as the
+/// campaign's report and manifest.
+#[cfg(unix)]
+#[path = "../tests/support/publish.rs"]
+#[allow(dead_code)]
+mod publish;
 
 #[cfg(unix)]
 mod unix {
@@ -25,6 +31,7 @@ mod unix {
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
+    use daemon::history_summarizer_chunk::{ALIAS_CLOSE, ALIAS_OPEN};
     use host_runtime::local_embeddings::embed_tokens::EmbedTokens;
     use host_runtime::local_embeddings::inference::InferenceError;
     use host_runtime::local_embeddings::{
@@ -43,6 +50,7 @@ mod unix {
     use tokio::sync::oneshot;
 
     use crate::eval_cassette::CassetteBackend;
+    use crate::publish::write_then_rename;
 
     const CONTROL_FILE: &str = "direct-host-control.sock";
     const MAX_CONTROL_LINE: usize = 64 * 1024;
@@ -228,8 +236,10 @@ mod unix {
         let (_, parts) = rest.split_once(": ")?;
         let text: String = parts
             .split_whitespace()
-            .map(|token| match token.strip_prefix('\u{ab}') {
-                Some(marked) => marked.split_once('\u{bb}').map_or(token, |(_, rest)| rest),
+            .map(|token| match token.strip_prefix(ALIAS_OPEN) {
+                Some(marked) => marked
+                    .split_once(ALIAS_CLOSE)
+                    .map_or(token, |(_, rest)| rest),
                 None => token,
             })
             .filter(|token| !token.is_empty())
@@ -829,12 +839,6 @@ mod unix {
             _ => return Err(USAGE.into()),
         };
         Ok(Args { root, cassette })
-    }
-
-    fn write_then_rename(path: &Path, bytes: &[u8]) -> io::Result<()> {
-        let staged = path.with_extension("staged");
-        std::fs::write(&staged, bytes)?;
-        std::fs::rename(&staged, path)
     }
 
     pub async fn run() -> Result<(), Box<dyn Error + Send + Sync>> {

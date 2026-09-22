@@ -18,6 +18,7 @@ use eval_core::{
     Scale, SkipReason, StageVerdict, Surface1Stage, Terminal, parse_manifest, parse_report,
 };
 use support::direct_host::example_binary;
+use support::publish::staged_path;
 
 const AGED_MESSAGES: u32 = 130;
 const S0_ELAPSED_BOUND_MS: u64 = 1_200_000;
@@ -83,7 +84,7 @@ fn campaign(scale: Scale, aged_messages: u32, elapsed_bound_ms: u64) -> Run {
     })
     .unwrap();
     let report_path = publish.path().join(REPORT_FILE);
-    assert!(!report_path.with_extension("json.staged").exists());
+    assert!(!staged_path(&report_path).exists());
     let report_bytes = std::fs::read(&report_path).unwrap();
     assert_eq!(
         report_bytes, run.report_bytes,
@@ -370,6 +371,46 @@ fn an_unapproved_profile_runs_no_campaign() {
         })
     );
     assert_eq!(std::fs::read_dir(publish.path()).unwrap().count(), 0);
+}
+
+#[test]
+fn a_publish_target_the_shell_cannot_write_is_refused_before_anything_runs() {
+    let root = tempfile::tempdir().unwrap();
+    let config = Config {
+        scale: Scale::S0,
+        aged_messages: AGED_MESSAGES,
+        elapsed_bound_ms: S0_ELAPSED_BOUND_MS,
+        approval: Some(approval()),
+        publish: root.path().join("report-file"),
+    };
+    std::fs::write(&config.publish, b"not a directory").unwrap();
+    let started = std::time::Instant::now();
+    match campaign::run(&config).err() {
+        Some(RunError::Publish { path, .. }) => assert_eq!(path, config.publish),
+        other => panic!("a file is not a publish directory: {other:?}"),
+    }
+
+    let publish = root.path().join("published");
+    std::fs::create_dir(&publish).unwrap();
+    let staged = staged_path(&publish.join(REPORT_FILE));
+    std::fs::write(&staged, b"{").unwrap();
+    let leftover = Config {
+        publish: publish.clone(),
+        ..config
+    };
+    assert_eq!(
+        campaign::run(&leftover).err(),
+        Some(RunError::Publish {
+            path: staged.clone(),
+            kind: std::io::ErrorKind::AlreadyExists,
+        })
+    );
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(10),
+        "both refusals came before a fixture was started"
+    );
+    assert_eq!(std::fs::read(&staged).unwrap(), b"{");
+    assert_eq!(std::fs::read_dir(&publish).unwrap().count(), 1);
 }
 
 /// An S0 campaign driven through the daemon's lifecycle takes longer than the

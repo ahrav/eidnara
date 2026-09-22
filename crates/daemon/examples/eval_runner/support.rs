@@ -5,3 +5,5 @@
 pub mod direct_host;
 #[path = "../../tests/support/eval_surface.rs"]
 pub mod eval_surface;
+#[path = "../../tests/support/publish.rs"]
+pub mod publish;

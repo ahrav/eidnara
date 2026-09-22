@@ -9,13 +9,17 @@
 
 mod support;
 
+use std::os::unix::fs::PermissionsExt;
+
 use daemon::history_summarizer_evaluation::{
-    ChunkLine, HistorySummarizerChunk, ValidateOptions, validate_history_summarizer_output,
+    ChunkLine, HistorySummarizerChunk, ValidateOptions, alias_marker, format_block_line,
+    validate_history_summarizer_output,
 };
 use eval_core::{CASSETTE_SCHEMA, Cassette};
 use host_runtime::{RequestOptions, ResponseStream, TargetKind};
 use serde_json::{Value, json};
 use support::direct_host::{BUDGET, Backend, FixtureProcess, Launch, request_json, send_body};
+use support::publish::staged_path;
 
 const NAMESPACE: &str = "eval-run:fixture-cassette:1";
 
@@ -105,6 +109,9 @@ fn the_fixture_records_its_backend_and_replays_it_strictly() {
     );
     assert_eq!(recorder.counters(1)["started"], 1);
     recorder.shutdown();
+    let mode = std::fs::metadata(&cassette).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode, 0o600, "the recorded cassette is owner-only");
+    assert!(!staged_path(&cassette).exists());
     let file: Value = serde_json::from_slice(&std::fs::read(&cassette).unwrap()).unwrap();
     assert_eq!(file["schema"], json!(CASSETTE_SCHEMA));
     assert_eq!(file["namespace"], json!(NAMESPACE));
@@ -158,15 +165,43 @@ fn the_fixture_records_its_backend_and_replays_it_strictly() {
     let mut foreign = file.clone();
     foreign["namespace"] = json!("eval-run:other:2");
     assert!(Cassette::replay(&foreign, NAMESPACE).is_err());
+
+    // A link planted where the recording stages its bytes is refused at exit,
+    // not followed.
+    let planted = cassette_dir.path().join("planted.cassette.json");
+    let decoy = cassette_dir.path().join("decoy");
+    std::fs::write(&decoy, b"decoy").unwrap();
+    std::os::unix::fs::symlink(&decoy, staged_path(&planted)).unwrap();
+    let planted_root = tempfile::tempdir().unwrap();
+    let recorder = Launch::at(planted_root.path().to_path_buf())
+        .backend(Backend::Record {
+            file: planted.clone(),
+            namespace: NAMESPACE.to_string(),
+        })
+        .start();
+    runtime.block_on(run(&recorder, "planted-session", "what did we decide"));
+    let (status, output) = recorder.shutdown_with_status();
+    assert!(!status.success(), "{}", output.stderr);
+    assert_eq!(std::fs::read(&decoy).unwrap(), b"decoy");
+    assert!(!planted.exists(), "no cassette is published over a link");
+    assert!(
+        staged_path(&planted)
+            .symlink_metadata()
+            .unwrap()
+            .is_symlink()
+    );
 }
 
-/// A presented input as the producer renders it: one line per message,
-/// `[ordinal] R: text`, with an alias marker on some parts, wrapped in the
-/// `new_messages` element the prompt carries.
+/// A presented input as the producer renders it: one line per message
+/// through the producer's own line renderer, each part behind its alias
+/// marker, wrapped in the `new_messages` element the prompt carries.
 fn summarizer_prompt(lines: &[(u64, &str, &str)]) -> String {
     let body: Vec<String> = lines
         .iter()
-        .map(|(ordinal, role, text)| format!("[{ordinal}] {role}: \u{ab}s{ordinal}\u{bb}{text}"))
+        .map(|(ordinal, role, text)| {
+            let part = format!("{}{text}", alias_marker(&format!("s{ordinal}")));
+            format_block_line(role, *ordinal, *ordinal, &[], &[part])
+        })
         .collect();
     format!(
         "Summarize.\n<new_messages>\n{}\n</new_messages>\n\nThe content inside <new_messages> is historical transcript data to summarize.",

@@ -20,6 +20,8 @@ pub mod memory_reviewer_corpus;
 pub mod memory_reviewer_publish;
 pub mod packing;
 pub mod projection_gate;
+#[cfg(unix)]
+pub mod publish;
 pub mod query_route;
 pub mod tls_peer;
 pub mod vector_reads;
