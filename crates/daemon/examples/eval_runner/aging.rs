@@ -691,6 +691,35 @@ impl Closed {
     }
 }
 
+impl Stores {
+    /// Reopens a root another process left behind, rebuilding the drive's
+    /// lineage bookkeeping from the kernel's own descriptors rather than
+    /// from memory it never had.
+    pub fn reconstruct(root: &Path, rendering: Rendering, applied: u32, now: i64) -> Stores {
+        let mut stores = reopen_stores(
+            root.to_path_buf(),
+            rendering,
+            BTreeMap::new(),
+            BTreeSet::new(),
+            applied,
+            now,
+        );
+        let mut rows = stores.corpus.export();
+        rows.sort_by_key(|row| row.created_commit_seq);
+        for row in rows {
+            if row.invalidated_commit_seq.is_some() && row.superseded_by.is_none() {
+                stores.dead.insert(row.object_id.clone());
+            }
+            stores
+                .chains
+                .entry(row.detail.lineage_id.clone())
+                .or_default()
+                .push(row.object_id);
+        }
+        stores
+    }
+}
+
 /// The kernel and the memory store reopen as they were; the projection is
 /// rebuilt at the kernel tip, since its catch-up hold died with the lease
 /// epoch, and embedded to quiescence.

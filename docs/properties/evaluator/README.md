@@ -1351,6 +1351,29 @@ job under `EIDNARA_EVAL_S0_BUDGET_MS`):
   purge-intent faults refuse by kind; every EIO latches CAS ingestion closed
   until reopen (five reopen heals), ENOSPC and the healed deletion are
   consumed.
+- `a_test_binary_child_killed_at_a_named_cut_recovers`
+  (`flt-process-kill-is-test-binary-child`; marker
+  `flt_kill_barrier_read_before_kill`): two kill episodes, one per named cut,
+  each labelled `application_crash` with the page cache intact and
+  `test_binary_child`, each with a barrier receipt whose line ends with the
+  cut and whose child died by signal 9; the killed step's effect reads back
+  `not_applied` and the reopened stores catch up.
+- `a_held_publication_admits_once_and_publishes_on_release`
+  (`sls-liveness-embedding-completion-bounded`; marker
+  `sls_embedding_publication_held_then_released`): a dispatcher pass behind
+  the fixture gate admits once and publishes nothing, a second pass re-admits
+  nothing, the release publishes.
+- `liveness_bounds_are_met_with_outside_core_faults_armed`
+  (`flt-liveness-mode-bounded-progress-permanent-faults`,
+  `sls-liveness-projection-catchup-bounded`,
+  `sls-liveness-embedding-completion-bounded`,
+  `sls-liveness-claim-materialization-bounded`; marker
+  `flt_liveness_bounds_met_with_faults_armed`): three core lanes each driven
+  to the approved profile's bound in their own unit, met at some step and
+  holding at the bound, with the memory-store lock and the CAS latch still
+  armed at the bound; the reviewer coordinator lane is declared outside the
+  core (`sls-liveness-memory-reviewer-work-bounded` is not exercised here);
+  R11 is listed as the permanent stall.
 - `an_unapproved_profile_refuses_before_any_store_opens`: no approval, no
   campaign, nothing published.
 
@@ -1435,6 +1458,10 @@ bound because it finishes inside the daemon suite's wall clock):
 
 ## Gaps recorded here
 
+- `sls-liveness-memory-reviewer-work-bounded`: the fault campaign's liveness
+  mode declares the reviewer coordinator outside its healthy core because the
+  drive has no scripted model peer; its bound is in the approved profile but
+  no campaign drives that lane yet.
 - The OpenCode cassette is bound to the environment that recorded it: the
   system prompt embeds the working directory, today's date, and the user's
   instruction files, so record and replay must share a checkout, a day, and a

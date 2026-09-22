@@ -1883,12 +1883,51 @@ after every episode while its fault is armed: the projection connection
 verifies, no descriptor claims a commit past the tip or an invalidation before
 its creation, and the projection never runs ahead of the kernel.
 
-Not in this shell: a process kill at a named cut, a held publication through
-the dispatcher gate, and the liveness mode; the run publishes `liveness:
-null`. The `fault` subcommand takes the same flags as `aging` and answers with
-one JSON line; the CI `eval-campaign` job runs `eval_fault` under
-`EIDNARA_EVAL_S0_BUDGET_MS` with the ignored scenarios, and the default shards
-run the campaign once with every scenario asserted over it.
+The process kill is a `TestBinaryChild`: for each named cut (`local_staged`,
+the batch staged with its transaction open; `acknowledgement_requested`, the
+local prefix committed and the kernel writer about to be taken) the campaign
+lives the prefix on a root of its own, closes it, and starts a child through
+the caller's `Spawn` (the test re-executes the test binary at
+`fault_child_entrypoint_reexecuted_by_the_parent` with the root, message
+count, applied step, and cut in its environment; the example re-executes
+itself as `fault-child`). The child reconstructs the drive from the kernel's
+own descriptors (`Stores::reconstruct`), applies the next step, runs one
+catch-up episode, prints `eval-fault-barrier <through> <cut>` when its
+observer reaches the cut, and parks. The parent reads the barrier, attempts
+the effect it names, sends `SIGKILL`, waits for the signal, and records the
+`BarrierReceipt`; the effect is `Unknown` until the closed files are read
+back, where it is `not_applied` for both cuts (the killed step never
+committed its effect), and the reopened stores catch up to the tip. The
+label is `application_crash` with the page cache intact and
+`test_binary_child`, which is all a kill of a parked child proves.
+
+The held publication runs a real dispatcher pass with inference held behind
+the embedding fixture's gate on a multi-thread Tokio runtime: the job is
+admitted and nothing is published, a second pass re-admits nothing, and the
+release publishes it. Eligibility names the local destination, because the
+drive publishes its rows `LocalOnly`.
+
+Liveness runs on a root of its own after the fault phase. The healthy core is
+the kernel, the projection, the catch-up driver, the dispatcher, and the
+claim materializer; outside it, an external `BEGIN IMMEDIATE` on the memory
+store and a CAS ingest latched by an EIO stay armed for the whole window and
+are probed again at the bound (a `BEGIN IMMEDIATE` probe fails, a plain
+ingest refuses). Each lane is driven to the approved profile's bound in its
+own unit with a logical `now`: `run_episode` until `acknowledged_through`
+reaches the tip, dispatcher `run_pass` until no embedding job is open,
+`ClaimMaterializer::run_episode` until it acknowledges the tip; the predicate
+must hold at some step and again at the bound. The reviewer coordinator lane
+is outside this campaign's core (its scripted model peer is not in the drive),
+so the report declares three lanes and `verdict` judges those; the R11 stall
+is listed under `permanent_stalls`. The evaluator drives every lane directly
+and the claim boundary says so: the lifecycle owner's wall-clock reads are
+outside the core.
+
+The `fault` subcommand takes the same flags as `aging` and answers with one
+JSON line; `fault-child` is its kill child. The CI `eval-campaign` job runs
+`eval_fault` under `EIDNARA_EVAL_S0_BUDGET_MS` with the ignored scenarios, and
+the default shards run the campaign once with every scenario asserted over
+it.
 
 ## Coverage markers
 

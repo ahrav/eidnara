@@ -23,6 +23,31 @@ use eval_core::{
 use fault::{Config, MANIFEST_FILE, REPORT_FILE, Run, RunError};
 
 const MESSAGES: u32 = 40;
+
+/// The kill episodes re-execute this test binary at the child entrypoint.
+fn spawn_child(args: &fault::ChildArgs) -> std::process::Command {
+    let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+    command.args([
+        "--exact",
+        "fault_child_entrypoint_reexecuted_by_the_parent",
+        "--ignored",
+        "--nocapture",
+        "--test-threads=1",
+    ]);
+    args.env(&mut command);
+    command
+}
+
+/// The child owns its parked episode; an ignored-test sweep without the
+/// parent's environment returns at once.
+#[test]
+#[ignore = "re-executed by the kill episodes with their environment set"]
+fn fault_child_entrypoint_reexecuted_by_the_parent() {
+    let Some(args) = fault::ChildArgs::from_env() else {
+        return;
+    };
+    fault::child_main(&args);
+}
 const SUITE: &str = "crates/daemon/tests/eval_fault.rs::";
 
 fn budget() -> Option<u64> {
@@ -55,7 +80,11 @@ struct Campaign {
 fn campaign(coverage: &mut Coverage) -> Campaign {
     let publish = tempfile::tempdir().unwrap();
     let out = publish.path().join("out");
-    let run = fault::run(&config(out.clone(), budget().unwrap_or(600_000))).unwrap();
+    let run = fault::run(
+        &config(out.clone(), budget().unwrap_or(600_000)),
+        spawn_child,
+    )
+    .unwrap();
     for marker in run.coverage.fired() {
         coverage.record(marker).unwrap();
     }
@@ -117,16 +146,21 @@ fn the_fault_campaign_receipts_every_declared_cut_scenario(campaign: &Campaign) 
         "artifact_deletion",
         "corrupt_quiescent_file",
         "embedding_publication",
+        "held_publication",
+        "process_kill",
     ] {
         assert!(actions.contains(kind), "{actions:?} lacks {kind}");
     }
     for episode in &report.episodes {
         assert_eq!(episode.heal, episode.action.heal());
         assert!(!episode.layer_contract.is_empty());
-        assert!(episode.kill.is_none(), "no kill episode in this campaign");
+        assert_eq!(episode.kill.is_some(), episode.action.is_kill());
     }
     assert!(report.safety_checks_while_armed >= report.episodes.len() as u64);
-    assert!(report.liveness.is_none(), "liveness is a separate mode");
+    assert!(
+        report.liveness.is_some(),
+        "liveness is reported as its own mode"
+    );
 
     let published = serde_json::from_slice(&std::fs::read(out.join(REPORT_FILE)).unwrap()).unwrap();
     assert_eq!(
@@ -149,7 +183,7 @@ fn a_lost_reply_stays_unknown_until_readback_at_after_recovery_scenario(campaign
     let run = &campaign.run;
     let effects = &run.report.effects.effects;
     let lost: Vec<_> = effects.iter().filter(|(_, e)| e.reply_lost).collect();
-    assert_eq!(lost.len(), 4, "{effects:?}");
+    assert_eq!(lost.len(), 6, "{effects:?}");
     for (identity, effect) in &lost {
         assert!(
             effect.read_back,
@@ -159,27 +193,27 @@ fn a_lost_reply_stays_unknown_until_readback_at_after_recovery_scenario(campaign
         assert!(effect.acknowledged <= effect.observed && effect.observed <= effect.attempted);
         assert_eq!(effect.attempted, 1, "{identity}");
     }
-    let commit = lost
+    let search: Vec<EffectOutcome> = lost
         .iter()
-        .find(|(id, _)| id.starts_with("search_commit:"))
-        .unwrap()
-        .1;
+        .filter(|(id, _)| id.starts_with("search_commit:") || id.starts_with("search_ack:"))
+        .map(|(_, e)| e.outcome)
+        .collect();
+    assert_eq!(search.len(), 4, "two lost replies and two kills");
     assert_eq!(
-        commit.expected,
-        Expected::Exactly {
-            state: eval_core::EffectState::Applied
-        }
+        search
+            .iter()
+            .filter(|o| **o == EffectOutcome::Applied)
+            .count(),
+        2,
+        "the lost replies committed: {search:?}"
     );
-    let ack = lost
-        .iter()
-        .find(|(id, _)| id.starts_with("search_ack:"))
-        .unwrap()
-        .1;
     assert_eq!(
-        ack.expected,
-        Expected::Exactly {
-            state: eval_core::EffectState::Applied
-        }
+        search
+            .iter()
+            .filter(|o| **o == EffectOutcome::NotApplied)
+            .count(),
+        2,
+        "the killed steps never committed their effect: {search:?}"
     );
     let embeddings: Vec<_> = lost
         .iter()
@@ -275,12 +309,12 @@ fn artifact_faults_fail_with_their_named_errno_and_heal_by_reopen_or_consumption
             )
         })
         .collect();
-    assert_eq!(artifact.len(), 7, "{artifact:?}");
+    assert_eq!(artifact.len(), 8, "{artifact:?}");
     assert_eq!(run.report.coverage.receipted["artifact_fault_named"], 6);
     let heals: Vec<Heal> = artifact.iter().map(|e| e.heal).collect();
     assert_eq!(
         heals.iter().filter(|h| **h == Heal::Reopen).count(),
-        5,
+        6,
         "every EIO latches CAS ingestion closed until reopen: {heals:?}"
     );
     assert_eq!(
@@ -290,7 +324,94 @@ fn artifact_faults_fail_with_their_named_errno_and_heal_by_reopen_or_consumption
     );
 }
 
-const SCENARIOS: [fn(&Campaign); 7] = [
+fn a_test_binary_child_killed_at_a_named_cut_recovers_scenario(campaign: &Campaign) {
+    let run = &campaign.run;
+    let kills: Vec<_> = run
+        .report
+        .episodes
+        .iter()
+        .filter(|e| e.action.is_kill())
+        .collect();
+    assert_eq!(kills.len(), 2);
+    for episode in &kills {
+        let label = episode.kill.as_ref().unwrap();
+        assert_eq!(label.crash_model, eval_core::APPLICATION_CRASH);
+        assert!(label.page_cache_intact);
+        assert_eq!(label.killed_process, eval_core::TEST_BINARY_CHILD);
+        assert_eq!(episode.heal, Heal::Reopen);
+        let barrier = run
+            .report
+            .barriers
+            .iter()
+            .find(|b| b.episode == episode.id)
+            .unwrap();
+        let FaultAction::ProcessKill { cut } = &episode.action else {
+            unreachable!()
+        };
+        assert_eq!(&barrier.cut, cut);
+        assert!(barrier.line.ends_with(cut), "{barrier:?}");
+        assert_eq!(barrier.signal, 9, "SIGKILL, not an exit status");
+        assert!(barrier.pid > 0);
+    }
+    assert!(
+        run.report.coverage.receipted["local_staged"] >= 2,
+        "the lost-reply episodes and the kill each stage a batch"
+    );
+    assert!(run.report.coverage.receipted["acknowledgement_requested"] >= 2);
+}
+
+fn a_held_publication_admits_once_and_publishes_on_release_scenario(campaign: &Campaign) {
+    let run = &campaign.run;
+    let held = run
+        .report
+        .episodes
+        .iter()
+        .find(|e| e.action == FaultAction::HeldPublication)
+        .unwrap();
+    assert_eq!(held.heal, Heal::Released);
+    assert_eq!(run.report.coverage.receipted["publication_held"], 1);
+    assert_eq!(run.report.coverage.receipted["publication_released"], 1);
+}
+
+fn liveness_bounds_are_met_with_outside_core_faults_armed_scenario(campaign: &Campaign) {
+    let run = &campaign.run;
+    let liveness = run.report.liveness.as_ref().unwrap();
+    liveness.verdict(&run.bounds).unwrap();
+    assert_eq!(liveness.outside_core.len(), 2);
+    assert_eq!(liveness.armed_at_bound, liveness.outside_core);
+    assert_eq!(liveness.core.lanes.len(), 3);
+    assert!(
+        !liveness
+            .core
+            .lanes
+            .contains(&eval_core::Lane::ReviewerCoordinatorPasses),
+        "the reviewer coordinator is outside this campaign's core"
+    );
+    for (lane, progress) in &liveness.lanes {
+        assert_eq!(progress.bound, lane.bound(&run.bounds), "{lane:?}");
+        assert_eq!(
+            progress.steps, progress.bound,
+            "{lane:?} was driven to its bound"
+        );
+        assert!(
+            progress.met_at.is_some_and(|k| k <= progress.bound),
+            "{lane:?}: {progress:?}"
+        );
+        assert!(progress.holds_at_bound, "{lane:?}");
+        assert!(progress.blocked.is_none(), "{lane:?}: {progress:?}");
+    }
+    assert_eq!(
+        liveness.permanent_stalls.len(),
+        1,
+        "R11 is reported as the permanent stall it is"
+    );
+    assert!(run.report.safety_checks_while_armed > run.bounds.catch_up_episodes);
+}
+
+const SCENARIOS: [fn(&Campaign); 10] = [
+    a_test_binary_child_killed_at_a_named_cut_recovers_scenario,
+    a_held_publication_admits_once_and_publishes_on_release_scenario,
+    liveness_bounds_are_met_with_outside_core_faults_armed_scenario,
     the_fault_campaign_receipts_every_declared_cut_scenario,
     a_lost_reply_stays_unknown_until_readback_at_after_recovery_scenario,
     deletion_bearing_catch_up_is_an_expected_refusal_and_a_permanent_stall_scenario,
@@ -361,6 +482,33 @@ fn artifact_faults_fail_with_their_named_errno_and_heal_by_reopen_or_consumption
 
 #[test]
 #[ignore = "S0 runs under an explicit budget: set EIDNARA_EVAL_S0_BUDGET_MS and run with --ignored"]
+fn a_test_binary_child_killed_at_a_named_cut_recovers() {
+    budget_or_panic();
+    a_test_binary_child_killed_at_a_named_cut_recovers_scenario(
+        &campaign(&mut Coverage::default()),
+    );
+}
+
+#[test]
+#[ignore = "S0 runs under an explicit budget: set EIDNARA_EVAL_S0_BUDGET_MS and run with --ignored"]
+fn a_held_publication_admits_once_and_publishes_on_release() {
+    budget_or_panic();
+    a_held_publication_admits_once_and_publishes_on_release_scenario(&campaign(
+        &mut Coverage::default(),
+    ));
+}
+
+#[test]
+#[ignore = "S0 runs under an explicit budget: set EIDNARA_EVAL_S0_BUDGET_MS and run with --ignored"]
+fn liveness_bounds_are_met_with_outside_core_faults_armed() {
+    budget_or_panic();
+    liveness_bounds_are_met_with_outside_core_faults_armed_scenario(&campaign(
+        &mut Coverage::default(),
+    ));
+}
+
+#[test]
+#[ignore = "S0 runs under an explicit budget: set EIDNARA_EVAL_S0_BUDGET_MS and run with --ignored"]
 fn every_fault_marker_fires_across_the_scenarios() {
     budget_or_panic();
     let mut coverage = Coverage::default();
@@ -374,18 +522,9 @@ fn every_fault_marker_fires_across_the_scenarios() {
         .map(|m| m.name)
         .collect();
     let fired: BTreeSet<&str> = coverage.fired().iter().copied().collect();
-    let pending: BTreeSet<&str> = [
-        "flt_kill_barrier_read_before_kill",
-        "flt_liveness_bounds_met_with_faults_armed",
-        "sls_embedding_publication_held_then_released",
-    ]
-    .into_iter()
-    .collect();
     let missing: BTreeSet<&str> = owned.difference(&fired).copied().collect();
-    assert_eq!(
-        missing, pending,
-        "every marker this suite owns fires here except the kill and liveness markers, which their scenarios record"
-    );
+    assert!(missing.is_empty(), "{missing:?}");
+    coverage.complete(SUITE).unwrap();
 }
 
 #[test]
@@ -394,7 +533,7 @@ fn an_unapproved_profile_refuses_before_any_store_opens() {
     let out = publish.path().join("out");
     let mut config = config(out.clone(), 600_000);
     config.approval = None;
-    let error = fault::run(&config).err().unwrap();
+    let error = fault::run(&config, spawn_child).err().unwrap();
     assert!(
         matches!(error, RunError::Profile(ProfileError::NotApproved { .. })),
         "{error}"
@@ -431,4 +570,7 @@ fn fault_markers_each_name_a_scenario_here() {
         );
     }
     assert_eq!(mine.len(), 10);
+    let _ = &Expected::Exactly {
+        state: eval_core::EffectState::Applied,
+    };
 }
