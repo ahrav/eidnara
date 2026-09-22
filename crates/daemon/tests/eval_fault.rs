@@ -16,8 +16,9 @@ use std::collections::BTreeSet;
 use std::path::PathBuf;
 
 use eval_core::{
-    Approval, Coverage, Cut, CutOutcome, EffectOutcome, ExecutionMode, Expected, FaultReport,
-    MARKERS, ProfileError, Scale, parse_fault_report, parse_manifest,
+    Approval, Coverage, Cut, CutOutcome, EffectOutcome, ExecutionMode, Expected, ExpectedRefusal,
+    FaultAction, FaultReport, Heal, MARKERS, ProfileError, Scale, StoreFamily, parse_fault_report,
+    parse_manifest,
 };
 use fault::{Config, MANIFEST_FILE, REPORT_FILE, Run, RunError};
 
@@ -83,7 +84,7 @@ fn the_fault_campaign_receipts_every_declared_cut_scenario(campaign: &Campaign) 
         report.coverage.receipted.len()
     );
     assert!(
-        report.coverage.declared.len() >= 9,
+        report.coverage.declared.len() >= 20,
         "{:?}",
         report.coverage.declared
     );
@@ -109,7 +110,14 @@ fn the_fault_campaign_receipts_every_declared_cut_scenario(campaign: &Campaign) 
                 .to_string()
         })
         .collect();
-    for kind in ["search_episode", "external_lock_holder"] {
+    for kind in [
+        "search_episode",
+        "external_lock_holder",
+        "artifact_ingest",
+        "artifact_deletion",
+        "corrupt_quiescent_file",
+        "embedding_publication",
+    ] {
         assert!(actions.contains(kind), "{actions:?} lacks {kind}");
     }
     for episode in &report.episodes {
@@ -141,7 +149,7 @@ fn a_lost_reply_stays_unknown_until_readback_at_after_recovery_scenario(campaign
     let run = &campaign.run;
     let effects = &run.report.effects.effects;
     let lost: Vec<_> = effects.iter().filter(|(_, e)| e.reply_lost).collect();
-    assert_eq!(lost.len(), 2, "{effects:?}");
+    assert_eq!(lost.len(), 4, "{effects:?}");
     for (identity, effect) in &lost {
         assert!(
             effect.read_back,
@@ -150,17 +158,100 @@ fn a_lost_reply_stays_unknown_until_readback_at_after_recovery_scenario(campaign
         assert_ne!(effect.outcome, EffectOutcome::Unknown, "{identity}");
         assert!(effect.acknowledged <= effect.observed && effect.observed <= effect.attempted);
         assert_eq!(effect.attempted, 1, "{identity}");
-        assert_eq!(
-            effect.expected,
-            Expected::Exactly {
-                state: eval_core::EffectState::Applied
-            },
-            "{identity}: the production reconciliation committed and the durable checkpoint says so"
-        );
     }
-    assert!(lost.iter().any(|(id, _)| id.starts_with("search_commit:")));
-    assert!(lost.iter().any(|(id, _)| id.starts_with("search_ack:")));
+    let commit = lost
+        .iter()
+        .find(|(id, _)| id.starts_with("search_commit:"))
+        .unwrap()
+        .1;
+    assert_eq!(
+        commit.expected,
+        Expected::Exactly {
+            state: eval_core::EffectState::Applied
+        }
+    );
+    let ack = lost
+        .iter()
+        .find(|(id, _)| id.starts_with("search_ack:"))
+        .unwrap()
+        .1;
+    assert_eq!(
+        ack.expected,
+        Expected::Exactly {
+            state: eval_core::EffectState::Applied
+        }
+    );
+    let embeddings: Vec<_> = lost
+        .iter()
+        .filter(|(id, _)| id.starts_with("embedding:"))
+        .collect();
+    assert_eq!(embeddings.len(), 2);
+    let mut outcomes: Vec<_> = embeddings.iter().map(|(_, e)| e.outcome).collect();
+    outcomes.sort_by_key(|o| format!("{o:?}"));
+    assert_eq!(
+        outcomes,
+        vec![EffectOutcome::Applied, EffectOutcome::NotApplied],
+        "a committed-then-lost reply reads back applied; a rolled-back one reads back not applied"
+    );
     assert!(run.report.effects.unknown().is_empty());
+}
+
+fn deletion_bearing_catch_up_is_an_expected_refusal_and_a_permanent_stall_scenario(
+    campaign: &Campaign,
+) {
+    let run = &campaign.run;
+    let r11 = run
+        .report
+        .expected_refusals
+        .iter()
+        .find(|r| r.refusal == ExpectedRefusal::R11DeletionBearingCatchUp)
+        .unwrap();
+    assert!(
+        r11.production_error.starts_with("DeletionUnpropagated"),
+        "{r11:?}"
+    );
+    let episode = run
+        .report
+        .episodes
+        .iter()
+        .find(|e| e.id == r11.episode)
+        .unwrap();
+    assert_eq!(episode.scope.store, StoreFamily::SearchProjection);
+    assert!(episode.layer_contract.contains("rebuilding"));
+}
+
+fn receipt_quota_exhaustion_is_an_expected_refusal_scenario(campaign: &Campaign) {
+    let run = &campaign.run;
+    let r24 = run
+        .report
+        .expected_refusals
+        .iter()
+        .find(|r| r.refusal == ExpectedRefusal::R24ReceiptQuotaExhausted)
+        .unwrap();
+    assert_eq!(
+        r24.production_error,
+        "MemoryReviewerJobRefusal::MetadataQuota"
+    );
+    let episode = run
+        .report
+        .episodes
+        .iter()
+        .find(|e| e.id == r24.episode)
+        .unwrap();
+    assert_eq!(episode.scope.store, StoreFamily::Memory);
+    assert_eq!(episode.heal, Heal::Released);
+}
+
+fn a_corrupted_quiescent_file_is_detected_before_any_store_opens_scenario(campaign: &Campaign) {
+    let run = &campaign.run;
+    let episode = run
+        .report
+        .episodes
+        .iter()
+        .find(|e| e.action == FaultAction::CorruptQuiescentFile)
+        .unwrap();
+    assert_eq!(episode.heal, Heal::Reopen);
+    assert_eq!(run.report.coverage.receipted["integrity_refused"], 1);
 }
 
 fn an_external_lock_holder_blocks_then_releases_scenario(campaign: &Campaign) {
@@ -169,10 +260,44 @@ fn an_external_lock_holder_blocks_then_releases_scenario(campaign: &Campaign) {
     assert_eq!(run.report.coverage.receipted["lock_released"], 1);
 }
 
-const SCENARIOS: [fn(&Campaign); 3] = [
+fn artifact_faults_fail_with_their_named_errno_and_heal_by_reopen_or_consumption_scenario(
+    campaign: &Campaign,
+) {
+    let run = &campaign.run;
+    let artifact: Vec<_> = run
+        .report
+        .episodes
+        .iter()
+        .filter(|e| {
+            matches!(
+                e.action,
+                FaultAction::ArtifactIngest { .. } | FaultAction::ArtifactDeletion { .. }
+            )
+        })
+        .collect();
+    assert_eq!(artifact.len(), 7, "{artifact:?}");
+    assert_eq!(run.report.coverage.receipted["artifact_fault_named"], 6);
+    let heals: Vec<Heal> = artifact.iter().map(|e| e.heal).collect();
+    assert_eq!(
+        heals.iter().filter(|h| **h == Heal::Reopen).count(),
+        5,
+        "every EIO latches CAS ingestion closed until reopen: {heals:?}"
+    );
+    assert_eq!(
+        heals.iter().filter(|h| **h == Heal::Consumed).count(),
+        2,
+        "ENOSPC and the healed deletion are consumed: {heals:?}"
+    );
+}
+
+const SCENARIOS: [fn(&Campaign); 7] = [
     the_fault_campaign_receipts_every_declared_cut_scenario,
     a_lost_reply_stays_unknown_until_readback_at_after_recovery_scenario,
+    deletion_bearing_catch_up_is_an_expected_refusal_and_a_permanent_stall_scenario,
+    receipt_quota_exhaustion_is_an_expected_refusal_scenario,
+    a_corrupted_quiescent_file_is_detected_before_any_store_opens_scenario,
     an_external_lock_holder_blocks_then_releases_scenario,
+    artifact_faults_fail_with_their_named_errno_and_heal_by_reopen_or_consumption_scenario,
 ];
 
 /// One campaign in the default shards, every scenario asserted over it.
@@ -195,9 +320,43 @@ fn a_lost_reply_stays_unknown_until_readback_at_after_recovery() {
 
 #[test]
 #[ignore = "S0 runs under an explicit budget: set EIDNARA_EVAL_S0_BUDGET_MS and run with --ignored"]
+fn deletion_bearing_catch_up_is_an_expected_refusal_and_a_permanent_stall() {
+    budget_or_panic();
+    deletion_bearing_catch_up_is_an_expected_refusal_and_a_permanent_stall_scenario(&campaign(
+        &mut Coverage::default(),
+    ));
+}
+
+#[test]
+#[ignore = "S0 runs under an explicit budget: set EIDNARA_EVAL_S0_BUDGET_MS and run with --ignored"]
+fn receipt_quota_exhaustion_is_an_expected_refusal() {
+    budget_or_panic();
+    receipt_quota_exhaustion_is_an_expected_refusal_scenario(&campaign(&mut Coverage::default()));
+}
+
+#[test]
+#[ignore = "S0 runs under an explicit budget: set EIDNARA_EVAL_S0_BUDGET_MS and run with --ignored"]
+fn a_corrupted_quiescent_file_is_detected_before_any_store_opens() {
+    budget_or_panic();
+    a_corrupted_quiescent_file_is_detected_before_any_store_opens_scenario(&campaign(
+        &mut Coverage::default(),
+    ));
+}
+
+#[test]
+#[ignore = "S0 runs under an explicit budget: set EIDNARA_EVAL_S0_BUDGET_MS and run with --ignored"]
 fn an_external_lock_holder_blocks_then_releases() {
     budget_or_panic();
     an_external_lock_holder_blocks_then_releases_scenario(&campaign(&mut Coverage::default()));
+}
+
+#[test]
+#[ignore = "S0 runs under an explicit budget: set EIDNARA_EVAL_S0_BUDGET_MS and run with --ignored"]
+fn artifact_faults_fail_with_their_named_errno_and_heal_by_reopen_or_consumption() {
+    budget_or_panic();
+    artifact_faults_fail_with_their_named_errno_and_heal_by_reopen_or_consumption_scenario(
+        &campaign(&mut Coverage::default()),
+    );
 }
 
 #[test]
@@ -219,17 +378,13 @@ fn every_fault_marker_fires_across_the_scenarios() {
         "flt_kill_barrier_read_before_kill",
         "flt_liveness_bounds_met_with_faults_armed",
         "sls_embedding_publication_held_then_released",
-        "flt_r11_recorded_as_expected_refusal",
-        "flt_r24_recorded_as_expected_refusal",
-        "flt_corruption_detected_at_quiescence",
-        "flt_artifact_fault_named_errno",
     ]
     .into_iter()
     .collect();
     let missing: BTreeSet<&str> = owned.difference(&fired).copied().collect();
     assert_eq!(
         missing, pending,
-        "every marker this suite owns fires here except those whose scenarios are not in this shell yet"
+        "every marker this suite owns fires here except the kill and liveness markers, which their scenarios record"
     );
 }
 

@@ -1326,14 +1326,31 @@ job under `EIDNARA_EVAL_S0_BUDGET_MS`):
   equal, and the manifest names it by result digest under `generate`.
 - `a_lost_reply_stays_unknown_until_readback_at_after_recovery`
   (`flt-lost-ack-expected-is-admissible-set`; marker
-  `flt_lost_reply_unknown_until_readback`): a lost local-commit reply and a
-  lost acknowledgement reply are `unknown` until the closed files are read
-  back by identity before reopen; each reads back `applied`, since the
-  production reconciliation committed; every identity satisfies
-  `acknowledged <= observed <= attempted` with one attempt.
+  `flt_lost_reply_unknown_until_readback`): four lost replies (a local
+  commit, an acknowledgement, two publications) are `unknown` until the closed
+  files are read back by identity before reopen; the committed-then-lost
+  publication reads back `applied` and the rolled-back one `not_applied`;
+  every identity satisfies `acknowledged <= observed <= attempted` with one
+  attempt.
+- `deletion_bearing_catch_up_is_an_expected_refusal_and_a_permanent_stall`
+  (marker `flt_r11_recorded_as_expected_refusal`): the healed deletion leaves
+  the next episode `Blocked(DeletionUnpropagated)` and a second episode with
+  no progress; recorded as R11 against the projection.
+- `receipt_quota_exhaustion_is_an_expected_refusal` (marker
+  `flt_r24_recorded_as_expected_refusal`): a receipt charge at the project
+  quota makes `reserve_memory_reviewer_job` refuse `MetadataQuota` and
+  deletes nothing; recorded as R24 against the memory store.
+- `a_corrupted_quiescent_file_is_detected_before_any_store_opens` (marker
+  `flt_corruption_detected_at_quiescence`): one overwritten kernel page in a
+  quiescent copy is `IntegrityCheck { kernel }` at reopen.
 - `an_external_lock_holder_blocks_then_releases` (marker
   `flt_external_lock_holder_released`): `BEGIN IMMEDIATE` on the projection
   blocks the local commit; release lets the next episode reach the target.
+- `artifact_faults_fail_with_their_named_errno_and_heal_by_reopen_or_consumption`
+  (marker `flt_artifact_fault_named_errno`): four ingest faults and two
+  purge-intent faults refuse by kind; every EIO latches CAS ingestion closed
+  until reopen (five reopen heals), ENOSPC and the healed deletion are
+  consumed.
 - `an_unapproved_profile_refuses_before_any_store_opens`: no approval, no
   campaign, nothing published.
 

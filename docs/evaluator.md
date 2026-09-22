@@ -1841,39 +1841,54 @@ judges. Every episode is declared before it runs, with the seam's own contract
 sentence, and receipted by what the runner observed, never by the fault it
 meant to inject.
 
-The fault phase on one root: a catch-up episode under `LoseLocalCommitReply`
-and one under `LoseAcknowledgementReply` (the effect `search_commit:<through>`
-or `search_ack:<through>` is attempted when the drive's observer sees
-`LocalStaged` or `AcknowledgementRequested` and left `Unknown` when the
-episode ends; the observer events `local_staged`, `local_released`,
-`acknowledgement_requested`, and `acknowledged` are the receipts), then an
-external `BEGIN IMMEDIATE` holder on the projection, whose episode ends
-`Blocked(LocalCommitUnresolved)` and whose release lets the next episode
-reach the target. The aging shell gained the seams this needs: `Stores`
-exposes its stores, `episode` (one catch-up episode, under one injected fault
-when asked), `catch_up` (outbox and episodes to the tip, the embedding lane
-left alone), and `Closed::reopen` (the stores reopened in place, as a restart
-would, with the projection rebuilt at the tip); `Closed::copy` borrows so a
-closed root can be copied and then reopened.
+The fault phase, in order, on one root: a catch-up episode under
+`LoseLocalCommitReply` and one under `LoseAcknowledgementReply` (the effect
+`search_commit:<through>` or `search_ack:<through>` is attempted when the
+drive's observer sees `LocalStaged` or `AcknowledgementRequested` and left
+`Unknown` when the episode ends; the observer events `local_staged`,
+`local_released`, `acknowledgement_requested`, and `acknowledged` are the
+receipts); an external `BEGIN IMMEDIATE` holder on the projection, whose
+episode ends `Blocked(LocalCommitUnresolved)` and whose release lets the next
+episode reach the target; a quiescent copy whose kernel file has one page
+overwritten, refused `IntegrityCheck { kernel }` by `Copied::reopen` before
+any store opens, after which the original reopens in place; the four CAS
+ingest faults (`write`, `file_sync`, `rename`, `after_directory_sync`), each
+refused `IngestionFailClosed` or `ReferenceCommit`, each proved to have
+latched ingestion closed (a plain ingest is refused until the store reopens),
+each healed by close and reopen and a fresh ingest; two purge-intent
+deletion faults, `intent_storage_exhausted` (`StorageExhausted`, consumed) and
+`intent_append` (`PurgeIntent`, latched, healed by reopen); two publication
+faults on a pending embedding job, `LoseLocalCommitReply` (the publisher
+returns `Embedded`) and `LoseLocalCommit` (`LocalCommitUnresolved`), each
+leaving `embedding:<occurrence>` `Unknown`; the receipt quota (R24) on a
+memory store of its own, a receipt charge planted at the project quota
+through the store's test-support connection so `reserve_memory_reviewer_job`
+refuses `MetadataQuota` and the headroom shows nothing deleted; and last the
+healed deletion of the ingested evidence, after which the next catch-up
+episode ends `Blocked(DeletionUnpropagated)` and a second episode makes no
+progress (R11), recorded as an expected refusal and a permanent stall.
 
 Recovery closes the stores, reads every lost reply back by its identity from
 the closed files (`projection_checkpoint.checkpoint_commit_seq` for a local
-commit, `outbox_consumers.checkpoint_commit_seq` for an acknowledgement), and
-only then reopens; the run refuses if an expectation the campaign fixed
-differs. The rest of the history then runs on the reopened stores.
-`AtQuiescence`, `AfterFaultPhase`, `AfterRecovery`, and `EndOfRun` are
-receipted where the runner reached them. A safety check runs after every
-episode while its fault is armed: the projection connection verifies, no
-descriptor claims a commit past the tip or an invalidation before its
-creation, and the projection never runs ahead of the kernel.
+commit, `outbox_consumers.checkpoint_commit_seq` for an acknowledgement,
+`embedding_jobs.state` for a publication), and only then reopens; the
+committed-then-lost publication reads back `applied` and the rolled-back one
+`not_applied`, and the run refuses if either expectation differs. The reopen
+rebuilds the projection at the kernel tip, which is also what clears the R11
+stall: the stall is production's refusal, the rebuild is production's heal,
+and the report records both. The rest of the history then runs on the
+reopened stores. `AtQuiescence`, `AfterFaultPhase`, `AfterRecovery`, and
+`EndOfRun` are receipted where the runner reached them. A safety check runs
+after every episode while its fault is armed: the projection connection
+verifies, no descriptor claims a commit past the tip or an invalidation before
+its creation, and the projection never runs ahead of the kernel.
 
-Not in this shell: the CAS artifact faults, the publication faults, quiescent
-corruption, R11, R24, a process kill at a named cut, a held publication
-through the dispatcher gate, and the liveness mode; the run publishes
-`liveness: null`. The `fault` subcommand takes the same flags as `aging` and
-answers with one JSON line; the CI `eval-campaign` job runs `eval_fault`
-under `EIDNARA_EVAL_S0_BUDGET_MS` with the ignored scenarios, and the default
-shards run the campaign once with every scenario asserted over it.
+Not in this shell: a process kill at a named cut, a held publication through
+the dispatcher gate, and the liveness mode; the run publishes `liveness:
+null`. The `fault` subcommand takes the same flags as `aging` and answers with
+one JSON line; the CI `eval-campaign` job runs `eval_fault` under
+`EIDNARA_EVAL_S0_BUDGET_MS` with the ignored scenarios, and the default shards
+run the campaign once with every scenario asserted over it.
 
 ## Coverage markers
 
