@@ -26,8 +26,10 @@ use memory_store::MemoryStore;
 use memory_store::memory_capture::CaptureSource;
 use rusqlite::{Connection, OpenFlags};
 use support::direct_host::example_binary;
+use support::embedding_fixtures::{batch_bounds, hold_admission};
 
 const MESSAGES: u32 = 40;
+const LONG_MESSAGES: u32 = 100;
 const SUITE: &str = "crates/daemon/tests/eval_aging.rs::";
 
 fn budget() -> Option<u64> {
@@ -153,7 +155,7 @@ fn a_quiescent_copy_resumes_the_full_replay_in_one_incarnation_scenario(coverage
 fn a_copy_with_pending_work_is_refused_by_the_counter_it_left_scenario(coverage: &mut Coverage) {
     let plan = plan(MESSAGES).unwrap();
     let root = tempfile::tempdir().unwrap();
-    let mut stores = Stores::open(root.path(), plan.rendering.clone());
+    let mut stores = Stores::open(root.path(), &plan);
     live(&mut stores, &plan.steps[..3]);
     stores.apply(&plan.steps[3]);
     let closed = stores.close();
@@ -182,7 +184,7 @@ fn a_copy_with_pending_work_is_refused_by_the_counter_it_left_scenario(coverage:
 fn a_reader_holding_the_projection_leaves_the_checkpoint_busy_scenario(coverage: &mut Coverage) {
     let plan = plan(MESSAGES).unwrap();
     let root = tempfile::tempdir().unwrap();
-    let mut stores = Stores::open(root.path(), plan.rendering.clone());
+    let mut stores = Stores::open(root.path(), &plan);
     live(&mut stores, &plan.steps[..3]);
     let reader =
         Connection::open_with_flags(stores.projection_path(), OpenFlags::SQLITE_OPEN_READ_ONLY)
@@ -209,7 +211,7 @@ fn a_reader_holding_the_projection_leaves_the_checkpoint_busy_scenario(coverage:
 fn a_copy_beside_a_live_memory_store_handle_is_refused_scenario(coverage: &mut Coverage) {
     let plan = plan(MESSAGES).unwrap();
     let root = tempfile::tempdir().unwrap();
-    let mut stores = Stores::open(root.path(), plan.rendering.clone());
+    let mut stores = Stores::open(root.path(), &plan);
     live(&mut stores, &plan.steps[..3]);
     let closed = stores.close();
     let live_handle = MemoryStore::open(&daemon::store_descriptor_in(closed.root())).unwrap();
@@ -230,10 +232,10 @@ fn a_foreign_incarnation_is_refused_at_reopen_scenario(coverage: &mut Coverage) 
     let plan = plan(MESSAGES).unwrap();
     let k = plan.checkpoint_step as usize;
     let one = tempfile::tempdir().unwrap();
-    let mut first = Stores::open(one.path(), plan.rendering.clone());
+    let mut first = Stores::open(one.path(), &plan);
     live(&mut first, &plan.steps[..k]);
     let other = tempfile::tempdir().unwrap();
-    let mut second = Stores::open(other.path(), plan.rendering.clone());
+    let mut second = Stores::open(other.path(), &plan);
     live(&mut second, &plan.steps[..k]);
     assert_ne!(first.incarnation(), second.incarnation());
     coverage
@@ -273,7 +275,7 @@ fn plan_copy(
     k: usize,
 ) -> (eval_core::Checkpoint, aging::Copied, tempfile::TempDir) {
     let root = tempfile::tempdir().unwrap();
-    let mut stores = Stores::open(root.path(), plan.rendering.clone());
+    let mut stores = Stores::open(root.path(), plan);
     live(&mut stores, &plan.steps[..k]);
     let into = tempfile::tempdir().unwrap();
     let (checkpoint, copied) = stores.close().copy(into.path()).unwrap();
@@ -284,7 +286,7 @@ fn plan_copy(
 fn a_copy_beside_a_live_kernel_handle_is_refused() {
     let plan = plan(MESSAGES).unwrap();
     let root = tempfile::tempdir().unwrap();
-    let mut stores = Stores::open(root.path(), plan.rendering.clone());
+    let mut stores = Stores::open(root.path(), &plan);
     live(&mut stores, &plan.steps[..3]);
     let closed = stores.close();
     assert!(closed.receipt.stores[&StoreFamily::Kernel].handles_closed);
@@ -307,7 +309,7 @@ fn a_copy_beside_a_live_kernel_handle_is_refused() {
 fn work_enqueued_between_the_close_and_the_copy_is_refused() {
     let plan = plan(MESSAGES).unwrap();
     let root = tempfile::tempdir().unwrap();
-    let mut stores = Stores::open(root.path(), plan.rendering.clone());
+    let mut stores = Stores::open(root.path(), &plan);
     live(&mut stores, &plan.steps[..3]);
     let closed = stores.close();
     assert_eq!(
@@ -599,6 +601,7 @@ fn the_aged_arm_is_built_by_replay_and_matches_the_bulk_scaffold_only_by_enumera
         full.against_bulk.earlier.snapshot_commit_seq < full.against_bulk.later.snapshot_commit_seq
     );
     assert!(full.against_bulk.live_digests_equal);
+    assert!(full.rows.live.pending_embedding.is_empty());
     assert!(
         full.against_bulk
             .divergences
@@ -606,7 +609,7 @@ fn the_aged_arm_is_built_by_replay_and_matches_the_bulk_scaffold_only_by_enumera
             .any(|d| matches!(d, Divergence::TombstonedBeforeSnapshot { .. }))
     );
     let root = tempfile::tempdir().unwrap();
-    let mut prefix = Stores::open(root.path(), plan.rendering.clone());
+    let mut prefix = Stores::open(root.path(), &plan);
     live(&mut prefix, &plan.steps[..plan.checkpoint_step as usize]);
     let checkpoint_tip = prefix.tip();
     assert!(checkpoint_tip < full.state.commit_seq);
@@ -640,7 +643,7 @@ fn two_lives_of_one_history_share_a_guard_digest_and_a_slipped_family_is_named()
     assert!(both.divergences.is_empty());
 
     let root = tempfile::tempdir().unwrap();
-    let mut short = Stores::open(root.path(), plan.rendering.clone());
+    let mut short = Stores::open(root.path(), &plan);
     live(&mut short, &plan.steps[..plan.checkpoint_step as usize]);
     let prefix = short.snapshot();
     assert_eq!(
@@ -658,6 +661,17 @@ fn two_lives_of_one_history_share_a_guard_digest_and_a_slipped_family_is_named()
             family: StoreFamily::Memory,
         })
     );
+}
+
+#[test]
+fn a_history_beyond_the_fixture_bounds_is_lived_and_matches_the_bulk_scaffold() {
+    let plan = plan(LONG_MESSAGES).unwrap();
+    assert!(plan.bounds.hold.admission.max_references > hold_admission().max_references);
+    let mut charges = charges();
+    let full = full_life(&plan, &mut charges).unwrap();
+    assert!(full.rows.live.occurrences.len() > batch_bounds().max_local_mutations.get());
+    assert!(full.against_bulk.live_digests_equal);
+    assert!(full.rows.live.pending_embedding.is_empty());
 }
 
 #[test]

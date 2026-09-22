@@ -2,6 +2,7 @@
 //! checkpoint.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::num::{NonZeroU64, NonZeroUsize};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -25,10 +26,13 @@ use eval_core::{
 };
 use kernel::{
     ArtifactDestination, CommitPageBounds, CurrentInputDescriptor, EligibilityBinding, KernelError,
-    KernelStore, ProjectScope, ProviderEgress, Sensitivity, SourceRow,
+    KernelStore, ProjectScope, ProviderEgress, Sensitivity, SourceHoldAdmission, SourceHoldBounds,
+    SourceRow,
 };
 use lease::{HeldFileLease, LeaseError};
 use memory_store::{MemoryStore, MemoryStoreError, StoredHistorySegment};
+use retrieval::PersistBounds;
+use retrieval::batch::BatchBounds;
 use rusqlite::{Connection, OpenFlags};
 use serde_json::{Value, json};
 use storage::StoreError;
@@ -37,8 +41,8 @@ use super::campaign::{
     Charges, identity, parse_flags, prepare_publish, profile as suite_b, publish_file, sha256_hex,
 };
 use super::support::embedding_fixtures::{
-    Corpus, GENERATION, PROJECT, SCOPE, TestEngine, batch_bounds, generation, hold_admission,
-    intent, kernel_incarnation_id, source_page_bounds,
+    Corpus, GENERATION, PROJECT, SCOPE, TestEngine, batch_bounds, generation, hold_bounds, intent,
+    kernel_incarnation_id, source_page_bounds,
 };
 
 pub const SEED: u64 = 0x5EED_C000_0000_0004;
@@ -223,18 +227,72 @@ fn straddling_step(log: &EventLog, steps: &[Planned]) -> Option<u32> {
     candidates.first().map(|k| *k as u32)
 }
 
-fn episode_bounds() -> EpisodeBounds {
+/// The hold admission limit counts total references, so it must cover every
+/// published unit.
+#[derive(Debug, Clone, Copy)]
+pub struct DriveBounds {
+    pub hold: SourceHoldBounds,
+    pub batch: BatchBounds,
+}
+
+impl DriveBounds {
+    fn admitting(rendering: &Rendering, steps: &[Planned]) -> Self {
+        let messages: BTreeMap<&EventId, &Value> = rendering
+            .messages
+            .iter()
+            .map(|m| (&m.event_id, &m.message))
+            .collect();
+        let (mut units, mut bytes) = (0usize, 0usize);
+        for planned in steps {
+            let Step::Publish(id) = &planned.step else {
+                continue;
+            };
+            for unit in opencode_units(&session(), messages[id]).unwrap() {
+                units += 1;
+                bytes += unit.text.len();
+            }
+        }
+        let raise = |floor: NonZeroUsize, demand: usize| {
+            floor.max(NonZeroUsize::new(demand).unwrap_or(floor))
+        };
+        let hold = hold_bounds();
+        let batch = batch_bounds();
+        let encoded = hold.admission.max_encoded_bytes;
+        Self {
+            hold: SourceHoldBounds {
+                max_descriptor_rows: raise(hold.max_descriptor_rows, units),
+                admission: SourceHoldAdmission {
+                    max_references: raise(hold.admission.max_references, units),
+                    max_encoded_bytes: encoded
+                        .max(NonZeroU64::new(bytes as u64).unwrap_or(encoded)),
+                },
+                ..hold
+            },
+            batch: BatchBounds {
+                persist: PersistBounds {
+                    max_records: raise(batch.persist.max_records, units),
+                    ..batch.persist
+                },
+                max_source_bytes: raise(batch.max_source_bytes, bytes),
+                max_local_mutations: raise(batch.max_local_mutations, units),
+                max_pending: raise(batch.max_pending, units),
+            },
+        }
+    }
+}
+
+fn episode_bounds(bounds: &DriveBounds) -> EpisodeBounds {
     EpisodeBounds {
         commits: CommitPageBounds {
             max_commits: 64.try_into().unwrap(),
             max_rows: 64.try_into().unwrap(),
             max_payload_bytes: (1u64 << 20).try_into().unwrap(),
         },
-        hold_admission: hold_admission(),
+        hold_admission: bounds.hold.admission,
         source_page: source_page_bounds(),
         max_source_pages: 8.try_into().unwrap(),
         max_source_encoded_bytes: (1u64 << 20).try_into().unwrap(),
-        batch: batch_bounds(),
+        batch: bounds.batch,
     }
 }
 
@@ -269,32 +327,39 @@ pub struct Stores {
     consumer: CatchUpConsumer,
     memory: MemoryStore,
     rendering: Rendering,
+    bounds: DriveBounds,
     chains: BTreeMap<String, Vec<String>>,
     dead: BTreeSet<String>,
     applied: u32,
 }
 
 impl Stores {
-    pub fn open(root: &Path, rendering: Rendering) -> Self {
+    pub fn open(root: &Path, plan: &Plan) -> Self {
         let corpus = Corpus::open(root);
         corpus.seed();
         let memory = MemoryStore::open(&daemon::store_descriptor_in(root)).unwrap();
-        let (projection, consumer) = Self::bootstrap(&corpus, root, EPOCH_MS);
+        let (projection, consumer) = Self::bootstrap(&corpus, root, &plan.bounds, EPOCH_MS);
         Self {
             root: root.to_path_buf(),
             corpus,
             projection,
             consumer,
             memory,
-            rendering,
+            rendering: plan.rendering.clone(),
+            bounds: plan.bounds,
             chains: BTreeMap::new(),
             dead: BTreeSet::new(),
             applied: 0,
         }
     }
 
-    fn bootstrap(corpus: &Corpus, root: &Path, now: i64) -> (SearchProjection, CatchUpConsumer) {
-        let (projection, hold, _) = corpus.bootstrap_with_hold(root);
+    fn bootstrap(
+        corpus: &Corpus,
+        root: &Path,
+        bounds: &DriveBounds,
+        now: i64,
+    ) -> (SearchProjection, CatchUpConsumer) {
+        let (projection, hold, _) = corpus.bootstrap_within(root, bounds.hold, bounds.batch);
         let binding = corpus.binding();
         corpus
             .kernel
@@ -420,10 +485,11 @@ impl Stores {
     pub fn drain(&mut self, now: i64) {
         self.publish_outbox();
         let tip = self.tip();
+        let bounds = episode_bounds(&self.bounds);
         let mut catch_up = SearchCatchUp::new(&self.corpus.kernel, &self.projection);
         for _ in 0..MAX_EPISODES_PER_DRAIN {
             let report = catch_up
-                .run_episode(&self.consumer, &episode_bounds(), now, &mut |_| {})
+                .run_episode(&self.consumer, &bounds, now, &mut |_| {})
                 .unwrap();
             assert_eq!(report.end, EpisodeEnd::ReachedTarget, "{report:?}");
             if report.acknowledged_through >= tip {
@@ -435,7 +501,18 @@ impl Stores {
             0,
             "the drain reaches the tip"
         );
-        embed_pending(&self.corpus, &self.projection, &self.root, now);
+        embed_pending(
+            &self.corpus,
+            &self.projection,
+            &self.root,
+            self.bounds.hold,
+            now,
+        );
+        assert_eq!(
+            self.pending(WorkCounter::EmbeddingOpen),
+            0,
+            "the drain embeds every open job"
+        );
     }
 
     fn pending(&self, counter: WorkCounter) -> u64 {
@@ -463,6 +540,7 @@ impl Stores {
             projection,
             memory,
             rendering,
+            bounds,
             chains,
             dead,
             applied,
@@ -520,6 +598,7 @@ impl Stores {
             receipt,
             search_lease,
             rendering,
+            bounds,
             chains,
             dead,
             applied,
@@ -620,6 +699,7 @@ pub struct Closed {
     pub receipt: QuiescenceReceipt,
     search_lease: Option<HeldFileLease>,
     rendering: Rendering,
+    bounds: DriveBounds,
     chains: BTreeMap<String, Vec<String>>,
     dead: BTreeSet<String>,
     applied: u32,
@@ -668,6 +748,7 @@ impl Closed {
             Copied {
                 root: into.to_path_buf(),
                 rendering: self.rendering,
+                bounds: self.bounds,
                 chains: self.chains,
                 dead: self.dead,
                 applied: self.applied,
@@ -711,6 +792,7 @@ fn copied_paths(root: &Path) -> Vec<PathBuf> {
 pub struct Copied {
     root: PathBuf,
     rendering: Rendering,
+    bounds: DriveBounds,
     chains: BTreeMap<String, Vec<String>>,
     dead: BTreeSet<String>,
     applied: u32,
@@ -781,8 +863,8 @@ impl Copied {
                 Err(e) => panic!("{}: {e}", PathBuf::from(sidecar).display()),
             }
         }
-        let (projection, consumer) = Stores::bootstrap(&corpus, &self.root, now);
-        embed_pending(&corpus, &projection, &self.root, now);
+        let (projection, consumer) = Stores::bootstrap(&corpus, &self.root, &self.bounds, now);
+        embed_pending(&corpus, &projection, &self.root, self.bounds.hold, now);
         Ok(Stores {
             root: self.root,
             corpus,
@@ -790,6 +872,7 @@ impl Copied {
             consumer,
             memory,
             rendering: self.rendering,
+            bounds: self.bounds,
             chains: self.chains,
             dead: self.dead,
             applied: self.applied,
@@ -969,7 +1052,13 @@ fn segments(memory: &MemoryStore) -> BTreeMap<i64, Segment> {
         .collect()
 }
 
-fn embed_pending(corpus: &Corpus, projection: &SearchProjection, root: &Path, now: i64) {
+fn embed_pending(
+    corpus: &Corpus,
+    projection: &SearchProjection,
+    root: &Path,
+    hold: SourceHoldBounds,
+    now: i64,
+) {
     let open: Vec<String> = read_only(&search_file(root))
         .prepare(
             "SELECT occurrence_id FROM embedding_jobs WHERE state IN ('pending','admitted') \
@@ -983,16 +1072,14 @@ fn embed_pending(corpus: &Corpus, projection: &SearchProjection, root: &Path, no
     if open.is_empty() {
         return;
     }
-    let rows: Vec<SourceRow> = corpus.export();
+    let rows: Vec<SourceRow> = corpus.export_within(hold);
     let project = ProjectScope::new(PROJECT).unwrap();
     let mut publisher = EmbeddingPublisher::new(&corpus.kernel, projection);
     for occurrence in open {
-        let Some(row) = rows
+        let row = rows
             .iter()
             .find(|row| row.detail.occurrence_id == occurrence)
-        else {
-            continue;
-        };
+            .expect("an open embedding job names an exported occurrence");
         let vector = TestEngine::vector_for(row.text.as_deref().unwrap_or_default());
         publisher
             .publish(
@@ -1022,10 +1109,14 @@ fn embed_pending(corpus: &Corpus, projection: &SearchProjection, root: &Path, no
     }
 }
 
-fn bulk_scaffold(corpus: &Corpus, home: &Path, now: i64) -> ProjectionRows {
-    let (projection, hold, _) = corpus.bootstrap_with_hold(home);
-    embed_pending(corpus, &projection, home, now);
+fn bulk_scaffold(corpus: &Corpus, home: &Path, bounds: &DriveBounds, now: i64) -> ProjectionRows {
+    let (projection, hold, _) = corpus.bootstrap_within(home, bounds.hold, bounds.batch);
+    embed_pending(corpus, &projection, home, bounds.hold, now);
     let rows = projection_rows(&search_file(home));
+    assert!(
+        rows.live.pending_embedding.is_empty(),
+        "the bulk scaffold embeds every open job"
+    );
     let (_, lease) = projection.close();
     drop(lease);
     corpus
@@ -1051,6 +1142,7 @@ pub struct Plan {
     pub rendering: Rendering,
     pub steps: Vec<Planned>,
     pub checkpoint_step: u32,
+    pub bounds: DriveBounds,
 }
 
 pub fn plan(messages: u32) -> Result<Plan, RunError> {
@@ -1069,10 +1161,12 @@ pub fn plan(messages: u32) -> Result<Plan, RunError> {
     }
     let steps = planned(&log);
     let checkpoint_step = straddling_step(&log, &steps).ok_or(RunError::NoStraddlingStep)?;
+    let bounds = DriveBounds::admitting(&rendering, &steps);
     Ok(Plan {
         rendering,
         steps,
         checkpoint_step,
+        bounds,
     })
 }
 
@@ -1092,13 +1186,13 @@ pub struct Full {
 
 pub fn full_life(plan: &Plan, charges: &mut Charges) -> Result<Full, RunError> {
     let root = charges.occupy()?;
-    let mut stores = Stores::open(root.path(), plan.rendering.clone());
+    let mut stores = Stores::open(root.path(), plan);
     live(&mut stores, &plan.steps);
     let state = stores.snapshot();
     let rows = stores.projection_rows();
     let last_now = plan.steps.last().unwrap().now_ms;
     let bulk_home = charges.occupy()?;
-    let bulk_rows = bulk_scaffold(&stores.corpus, bulk_home.path(), last_now);
+    let bulk_rows = bulk_scaffold(&stores.corpus, bulk_home.path(), &plan.bounds, last_now);
     let against_bulk = GuardComparison::of(
         (&rows, ConstructionKind::CatchUp),
         (&bulk_rows, ConstructionKind::Bulk),
@@ -1129,7 +1223,7 @@ fn resumed_life(
 ) -> Result<Resumed, RunError> {
     let k = plan.checkpoint_step as usize;
     let prefix_root = charges.occupy()?;
-    let mut prefix = Stores::open(prefix_root.path(), plan.rendering.clone());
+    let mut prefix = Stores::open(prefix_root.path(), plan);
     live(&mut prefix, &plan.steps[..k]);
     let prefix_state = prefix.snapshot();
     let closed = prefix.close();

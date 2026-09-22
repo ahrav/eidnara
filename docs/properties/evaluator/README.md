@@ -1280,14 +1280,20 @@ Aging drive (`crates/daemon/tests/eval_aging.rs`, `--all-features`):
   corrections and invalidations is lived end to end through the kernel,
   projection, and memory store on one root, every step drained to quiescence,
   under one persisted incarnation; a bulk scaffold built at the final tip has
-  the same live digest and differs only by `tombstoned_before_snapshot`; the
-  window after the chosen checkpoint step holds a supersession and a
-  retirement of a descriptor created before it, and a death falls before it.
+  the same live digest and differs only by `tombstoned_before_snapshot`, and
+  the aged arm ends with no open embedding job; the window after the chosen
+  checkpoint step holds a supersession and a retirement of a descriptor
+  created before it, and a death falls before it.
 - `two_lives_of_one_history_share_a_guard_digest_and_a_slipped_family_is_named`
   (`flt-checkpoint-quiescent-copy-controlled-replay`): two full lives on two
   roots carry different incarnations and equal `StateSnapshot`s and guard
   digests, and their projections carry no divergence; a shorter life is
   `CommitSeqDiffers` and a cleared memory history is `HistorySlipped { memory }`.
+- `a_history_beyond_the_fixture_bounds_is_lived_and_matches_the_bulk_scaffold`:
+  a 100-message history publishes more units than the fixture's 64-reference
+  hold admits and leaves more live rows than its 64-mutation batch admits; the
+  plan's `DriveBounds` cover both, the life completes, the bulk scaffold has
+  the same live digest, and no embedding job is left open.
 - `a_history_too_short_to_straddle_a_death_is_refused`: two messages yield no
   straddling step.
 Aging shell (`crates/daemon/tests/eval_aging.rs`, `--all-features`; the

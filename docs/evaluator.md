@@ -1754,6 +1754,14 @@ the built example to show that two OS processes agree on both guard digests
 and both comparisons while their checkpoint digests differ, because they
 copied two stores.
 
+Every drain ends with no catch-up lag and no open embedding job, and the bulk
+scaffold ends with no open embedding job; either failing stops the run. The
+aged arm keeps one source hold for its whole life, and each hold extension is
+admitted against every reference the hold carries, so the plan sizes the hold
+admission, the capture's descriptor rows, and the batch bounds to every unit
+it publishes (`DriveBounds`), never below the fixture defaults. The bulk
+scaffold applies its whole snapshot as one batch under the same bounds.
+
 ## Coverage markers
 
 `MARKERS` is the evaluator-owned registry: constant, globally unique names,
