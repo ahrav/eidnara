@@ -27,9 +27,17 @@ pub fn write_then_rename(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     file.write_all(bytes)?;
     file.sync_all()?;
     std::fs::hard_link(&staged, path)?;
-    std::fs::remove_file(&staged)?;
-    let directory = path
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty());
-    std::fs::File::open(directory.unwrap_or(Path::new(".")))?.sync_all()
+    // Once linked, the file is published; a failure to finish (unlinking the
+    // staged name, syncing the directory) takes it back out, so an `Err` never
+    // leaves a published file behind.
+    let finish = || -> std::io::Result<()> {
+        std::fs::remove_file(&staged)?;
+        let directory = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty());
+        std::fs::File::open(directory.unwrap_or(Path::new(".")))?.sync_all()
+    };
+    finish().inspect_err(|_| {
+        let _ = std::fs::remove_file(path);
+    })
 }

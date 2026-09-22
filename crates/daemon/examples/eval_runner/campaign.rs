@@ -1085,13 +1085,6 @@ pub fn run(config: &Config) -> Result<Run, RunError> {
         publish,
     } = config;
     let (scale, aged_messages, elapsed_ms) = (*scale, *aged_messages, *elapsed_bound_ms);
-    let started_at_ms = i64::try_from(
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_millis(),
-    )
-    .unwrap();
     let max_events_per_log = aged_messages
         .max(64)
         .checked_mul(2)
@@ -1110,6 +1103,14 @@ pub fn run(config: &Config) -> Result<Run, RunError> {
     // The fixture is built before the envelope is held: compiling it is the
     // harness's work, and its processes and time are not the campaign's.
     fixture_binary();
+    // The manifest's clock and the envelope's start together, after the build.
+    let started_at_ms = i64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis(),
+    )
+    .unwrap();
     let mut charges = Charges::new(profile.envelope.clone());
 
     let task_set = plan_injection_cases(SEED, &TASK_IDS.iter().map(|id| id.to_string()).collect());
@@ -1148,6 +1149,12 @@ pub fn run(config: &Config) -> Result<Run, RunError> {
     else {
         panic!("{aged_messages} messages push the third one out of a window of {window}");
     };
+
+    // The build identity is frozen before the first arm runs: the checkout,
+    // the lockfile, and the binaries the outcomes come from, not whatever the
+    // tree holds when the report is written.
+    let identity = identity(&profile, &set);
+    let eval_run_id = eval_run_id(&identity).unwrap();
 
     let aged_world = world(&set.aged);
     assert_eq!(aged_world.messages.len(), aged_messages as usize);
@@ -1381,8 +1388,6 @@ pub fn run(config: &Config) -> Result<Run, RunError> {
     // world reached the store: every arm was lived through the daemon's own
     // transform route one turn at a time in one store incarnation, so the run
     // is `replay` over `transform-route, turn by turn`.
-    let identity = identity(&profile, &set);
-    let eval_run_id = eval_run_id(&identity).unwrap();
     charges.elapsed()?;
     let mut manifest = manifest(
         identity,
