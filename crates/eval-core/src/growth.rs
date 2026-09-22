@@ -39,7 +39,9 @@ impl ReviewerQuota {
     /// How many more admissions the remaining bytes allow, as a report figure
     /// derived from the constants read; not an acceptance count.
     pub fn admissions_remaining(&self, remaining_bytes: u64) -> u64 {
-        remaining_bytes / (self.receipt_charge_bytes + self.job_allowance_bytes)
+        remaining_bytes
+            .checked_div(self.receipt_charge_bytes + self.job_allowance_bytes)
+            .unwrap_or(0)
     }
 }
 
@@ -74,7 +76,6 @@ pub struct ResourceSample {
     pub artifact_tmp_entries: u64,
     pub artifact_bytes: u64,
     pub cassette_bytes: u64,
-    pub published_bytes: u64,
     pub temp_roots: u64,
     pub processes: u64,
     pub commit_log_rows: u64,
@@ -104,9 +105,13 @@ pub enum GrowthMode {
 pub struct GrowthBounds {
     pub store_bytes: u64,
     pub artifact_objects: u64,
+    pub artifact_bytes: u64,
     pub commit_log_rows: u64,
     pub projection_rows: u64,
     pub open_holds: u64,
+    /// Store bytes the history may add per commit between the first and last
+    /// sample; growth faster than this is a leak proportional to the history.
+    pub store_bytes_per_commit: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -142,6 +147,11 @@ pub enum GrowthRefused {
         step: u32,
         bound: u64,
         observed: u64,
+    },
+    GrowthRateExceeded {
+        bytes_per_commit: u64,
+        observed_bytes: u64,
+        commits: u64,
     },
     NotALeakVerdict {
         mode: GrowthMode,
@@ -219,15 +229,26 @@ impl GrowthLedger {
                 observed: wal,
             });
         }
-        if last.temp_roots != 0 || last.processes != 0 {
-            return Err(GrowthRefused::Leak {
-                resource: if last.temp_roots != 0 {
-                    "temp_roots".to_string()
-                } else {
-                    "processes".to_string()
-                },
-                step: last.step,
-                observed: last.temp_roots.max(last.processes),
+        for (resource, observed) in [
+            ("temp_roots", last.temp_roots),
+            ("processes", last.processes),
+        ] {
+            if observed != 0 {
+                return Err(GrowthRefused::Leak {
+                    resource: resource.to_string(),
+                    step: last.step,
+                    observed,
+                });
+            }
+        }
+        let first = &self.samples[0];
+        let commits = u64::try_from(last.commit_seq - first.commit_seq).unwrap_or(0);
+        let grown = last.store_total().saturating_sub(first.store_total());
+        if grown > bounds.store_bytes_per_commit.saturating_mul(commits.max(1)) {
+            return Err(GrowthRefused::GrowthRateExceeded {
+                bytes_per_commit: bounds.store_bytes_per_commit,
+                observed_bytes: grown,
+                commits,
             });
         }
         let checks = [
@@ -237,6 +258,7 @@ impl GrowthLedger {
                 last.artifact_objects,
                 bounds.artifact_objects,
             ),
+            ("artifact_bytes", last.artifact_bytes, bounds.artifact_bytes),
             (
                 "commit_log_rows",
                 last.commit_log_rows,
@@ -374,6 +396,11 @@ pub fn digests_match_serial(
     concurrent: &[String],
     serial: &[String],
 ) -> Result<(), IsolationRefused> {
+    if concurrent.len() != serial.len() {
+        return Err(IsolationRefused::DigestDiffersFromSerial {
+            campaign: concurrent.len().min(serial.len()),
+        });
+    }
     for (i, (c, s)) in concurrent.iter().zip(serial).enumerate() {
         if c != s {
             return Err(IsolationRefused::DigestDiffersFromSerial { campaign: i });

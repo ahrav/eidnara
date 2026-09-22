@@ -1759,7 +1759,7 @@ permanent exhaustion is intended.
 
 A `ResourceSample` is everything a campaign holds at one quiescent point: per
 store family the file, `-wal`, and `-shm` bytes; artifact objects, temporary
-entries, and bytes; cassette and published bytes; temp roots and processes;
+entries, and bytes; cassette bytes; temp roots and processes;
 commit-log and projection rows; open holds; and a `HeadroomSample` (pending
 and terminal jobs, page bytes, project bytes and remaining, admissions, R24
 refusals). A `GrowthLedger` records samples under a `GrowthMode`
@@ -1769,9 +1769,12 @@ counted. `verdict(quota, bounds)` is a leak verdict only for a never-restored
 ledger (`NotALeakVerdict` otherwise): every sample's project bytes must equal
 `expected_project_bytes` (`HeadroomMismatch`), the final sample must hold no
 temporary artifact entry, no WAL bytes, no temp root, and no process (`Leak {
-resource, step, observed }`), and its store total, artifact objects, commit
+resource, step, observed }`), and its store total, artifact objects and bytes, commit
 and projection rows, and open holds must be within the declared
-`GrowthBounds` (`BoundExceeded`). `peak_store_bytes` is the largest total any
+`GrowthBounds` (`BoundExceeded`); the store bytes added between the first and
+the last sample must not exceed `store_bytes_per_commit` times the commits
+between them (`GrowthRateExceeded`), so a leak proportional to the history is
+refused even under the size bound. `peak_store_bytes` is the largest total any
 sample saw, the transient pressure the envelope must also be charged with.
 
 `SwarmMix` counts the seven `Operation` kinds a growth campaign must exercise

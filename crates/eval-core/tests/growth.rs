@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 
 use eval_core::{
     CampaignResources, ClaimBoundary, Coverage, Envelope, GROWTH_REPORT_SCHEMA, GrowthBounds,
@@ -22,9 +22,11 @@ fn bounds() -> GrowthBounds {
     GrowthBounds {
         store_bytes: 64 << 20,
         artifact_objects: 4096,
+        artifact_bytes: 16 << 20,
         commit_log_rows: 100_000,
         projection_rows: 100_000,
         open_holds: 1,
+        store_bytes_per_commit: 64 << 10,
     }
 }
 
@@ -76,7 +78,6 @@ fn sample(step: u32, commit_seq: i64, wal: u64, tmp: u64) -> ResourceSample {
         artifact_tmp_entries: tmp,
         artifact_bytes: 1024 * step as u64,
         cassette_bytes: 0,
-        published_bytes: 0,
         temp_roots: 0,
         processes: 0,
         commit_log_rows: commit_seq as u64,
@@ -199,6 +200,25 @@ fn a_never_restored_ledger_passes_only_when_the_final_sample_holds_nothing_trans
             observed: 200_000,
         })
     );
+    let mut rate = ledger.clone();
+    rate.samples[2]
+        .stores
+        .get_mut(&StoreFamily::Kernel)
+        .unwrap()
+        .file = 64 << 20;
+    assert!(
+        matches!(
+            rate.verdict(
+                &quota(),
+                &GrowthBounds {
+                    store_bytes: 128 << 20,
+                    ..bounds()
+                }
+            ),
+            Err(GrowthRefused::GrowthRateExceeded { commits: 6, .. })
+        ),
+        "growth faster than the per-commit allowance is a leak even under the size bound"
+    );
     let mut empty = GrowthLedger::new(GrowthMode::NeverRestored);
     assert_eq!(
         empty.verdict(&quota(), &bounds()),
@@ -315,6 +335,11 @@ fn a_shared_root_namespace_or_port_is_refused() {
     )
     .unwrap();
     assert_eq!(
+        digests_match_serial(&["x".to_string()], &["x".to_string(), "y".to_string()]),
+        Err(IsolationRefused::DigestDiffersFromSerial { campaign: 1 }),
+        "a concurrent run that produced fewer digests is not a match"
+    );
+    assert_eq!(
         digests_match_serial(
             &["x".to_string(), "z".to_string()],
             &["x".to_string(), "y".to_string()]
@@ -363,7 +388,6 @@ fn a_growth_report_round_trips_and_its_digest_ignores_measurements() {
         parse_growth_report(&extra),
         Err(GrowthReportError::Shape(_))
     ));
-    let _ = BTreeMap::<String, u64>::new();
 }
 
 #[test]
