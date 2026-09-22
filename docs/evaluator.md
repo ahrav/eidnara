@@ -1353,7 +1353,8 @@ generator and never derives `transfer` on its own), `anchor_task_not_valid`
 family proves none), `duplicate_anchor_task {id}` (one ID listed twice is
 one task, whatever its verdicts; the task floor counts distinct non-empty IDs
 with a family among the valid tasks, so a padded list cannot meet it),
-`no_transfer_criterion`, `criterion_not_approved` (no approver, or an
+`no_transfer_criterion`, `criterion_not_approved` (a blank or whitespace-only
+approver, or an
 `approved_at_run_id` that is not a 64-hex `eval-run-id`), `criterion_has_no_floor`
 (a zero task floor, no required family, or a blank one would make any set
 pass; a criterion

@@ -958,6 +958,9 @@ fn generated_worlds_carry_phase_1_claims_and_the_pilot_never_derives_transfer() 
     let mut unrun = criterion();
     unrun.approved_at_run_id = "x".into();
     assert_eq!(unrun.validate(), Err(CriterionNotApproved));
+    let mut nobody = criterion();
+    nobody.approved_by = " \t".into();
+    assert_eq!(nobody.validate(), Err(CriterionNotApproved));
     let mut blank_rule = criterion();
     blank_rule.min_valid_tasks = 1;
     blank_rule.required_families = [String::new()].into();

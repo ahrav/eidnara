@@ -1205,7 +1205,8 @@ Injection, arms, and claims (`crates/eval-core/tests/injection.rs`):
   history with a criterion and no anchor set is `generated_phase1`; the same
   tasks in the transfer role on real history under an approved criterion are
   `transfer`; an unmet family, count, or approval clause is named; a floorless
-  criterion refuses, an approval run id that is not 64 hex is unapproved, and
+  criterion refuses, an approval run id that is not 64 hex or a
+  whitespace-only approver is unapproved, and
   one both unapproved and floorless names both clauses;
   one task listed eighteen times with one of each other family is
   `duplicate_anchor_task` and three valid tasks, not twenty; a blank ID is

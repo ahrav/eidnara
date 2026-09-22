@@ -73,7 +73,7 @@ impl TransferCriterion {
     /// family is no family, so requiring one is no floor.
     pub fn unmet(&self) -> Vec<UnmetClause> {
         let mut unmet = Vec::new();
-        if self.approved_by.is_empty() || !is_lower_hex(&self.approved_at_run_id, 64) {
+        if self.approved_by.trim().is_empty() || !is_lower_hex(&self.approved_at_run_id, 64) {
             unmet.push(UnmetClause::CriterionNotApproved);
         }
         if self.min_valid_tasks == 0
