@@ -530,6 +530,15 @@ pub(crate) fn balanced_mean_cluster(pairs: u32, count: u32) -> Result<Ratio, Sta
     )
 }
 
+/// The size-weighted mean cluster of `count` clusters over `pairs` as unevenly
+/// as they can be: one holds every pair the other `count - 1` singletons do
+/// not. No partition into `count` clusters has a larger mean.
+pub(crate) fn lopsided_mean_cluster(pairs: u32, count: u32) -> Result<Ratio, StatisticsError> {
+    let (pairs, count) = (i128::from(pairs), i128::from(count));
+    let largest = pairs - count + 1;
+    Ratio::try_new(largest.pow(2) + (count - 1), pairs)
+}
+
 /// `items` deflated by the design effect `1 + (m - 1) ICC` of clusters of mean
 /// size `m`; the effect is never below one, so deflation only ever shrinks N.
 pub(crate) fn deflate(

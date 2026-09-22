@@ -26,7 +26,7 @@ use crate::pairs::{
 use crate::statistics::{
     AnalysisFamily, BlockedReason, ClusteringUnit, FrozenFamily, GateVerdict, Gates,
     IntervalOutcome, IntervalWithheld, PairedReport, Ratio, StatisticsError, StoppingRule,
-    arm_miss_asymmetry, balanced_mean_cluster, deflate,
+    arm_miss_asymmetry, balanced_mean_cluster, deflate, lopsided_mean_cluster,
 };
 
 pub const SUITE_B_REPORT_SCHEMA: &str = "eval-suite-b-report/v1";
@@ -566,43 +566,44 @@ impl SuiteBReport {
                     // smaller. At the selected unit the table spans exactly
                     // `n_clusters`: balanced clusters deflate the least, and
                     // one cluster holding all but `n_clusters - 1` singletons
-                    // deflates the most. The other level spans at most the
-                    // clusters `n_clusters` forces on it (one family per world
-                    // at most; every affordable world under the family unit),
-                    // balanced, and at least one cluster holding every pair.
+                    // deflates the most. The other level spans between the
+                    // fewest clusters `n_clusters` forces on it (one family; a
+                    // world per family) and the most (one family per world;
+                    // every affordable world), and each level is taken at its
+                    // own extreme, so the range holds every realizable table.
                     let n = whole(pairs)?;
-                    let (icc_unit, icc_other, other_clusters) = match pilot.clustering_unit {
-                        ClusteringUnit::Family => {
-                            (pilot.icc_family, pilot.icc_world_seed, self.max_worlds())
+                    let (icc_unit, icc_other, other_fewest, other_most) =
+                        match pilot.clustering_unit {
+                            ClusteringUnit::Family => (
+                                pilot.icc_family,
+                                pilot.icc_world_seed,
+                                *n_clusters,
+                                self.max_worlds(),
+                            ),
+                            ClusteringUnit::WorldSeed => (
+                                pilot.icc_world_seed,
+                                pilot.icc_family,
+                                1,
+                                (*n_clusters).min(pilot.n_families),
+                            ),
+                        };
+                    let mean = |count: u32, even: bool| {
+                        if even {
+                            balanced_mean_cluster(pairs, count)
+                        } else {
+                            lopsided_mean_cluster(pairs, count)
                         }
-                        ClusteringUnit::WorldSeed => (
-                            pilot.icc_world_seed,
-                            pilot.icc_family,
-                            (*n_clusters).min(pilot.n_families),
-                        ),
+                        .map_err(statistics)
                     };
-                    let clusters = whole(*n_clusters)?;
-                    let balanced = balanced_mean_cluster(pairs, *n_clusters).map_err(statistics)?;
-                    let other_balanced =
-                        balanced_mean_cluster(pairs, other_clusters).map_err(statistics)?;
-                    let largest = n
-                        .checked_sub(clusters)
+                    let least = deflate(n, mean(*n_clusters, false)?, icc_unit)
                         .map_err(statistics)?
-                        .checked_add(Ratio::ONE)
-                        .map_err(statistics)?;
-                    let lopsided = largest
-                        .checked_mul(largest)
+                        .min(
+                            deflate(n, mean(other_fewest, false)?, icc_other)
+                                .map_err(statistics)?,
+                        );
+                    let most = deflate(n, mean(*n_clusters, true)?, icc_unit)
                         .map_err(statistics)?
-                        .checked_add(clusters.checked_sub(Ratio::ONE).map_err(statistics)?)
-                        .map_err(statistics)?
-                        .checked_div(n)
-                        .map_err(statistics)?;
-                    let least = deflate(n, lopsided, icc_unit)
-                        .map_err(statistics)?
-                        .min(deflate(n, n, icc_other).map_err(statistics)?);
-                    let most = deflate(n, balanced, icc_unit)
-                        .map_err(statistics)?
-                        .min(deflate(n, other_balanced, icc_other).map_err(statistics)?);
+                        .min(deflate(n, mean(other_most, true)?, icc_other).map_err(statistics)?);
                     if *effective_n < least || *effective_n > most {
                         return Err(ReportError::SuppressionNotDerived);
                     }
