@@ -54,14 +54,6 @@ pub enum ArtifactDeletionFaultKind {
     UnlinkStorageExhausted,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ClaimEpisodeFault {
-    LoseAcknowledgementReply,
-    SkipAcknowledgement,
-    FailAcknowledgement,
-}
-
 /// One variant of a fault enum, hook, gate, lock holder, or kill that exists
 /// at HEAD. Nothing else is a fault a campaign may claim to have run.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -72,7 +64,6 @@ pub enum FaultAction {
     HeldPublication,
     ArtifactIngest { fault: ArtifactIngestFaultKind },
     ArtifactDeletion { fault: ArtifactDeletionFaultKind },
-    ClaimEpisode { fault: ClaimEpisodeFault },
     ExternalLockHolder,
     ProcessKill { cut: String },
     CorruptQuiescentFile,
@@ -84,9 +75,7 @@ impl FaultAction {
     /// so every ingest fault and the EIO deletion faults heal by reopen.
     pub fn heal(&self) -> Heal {
         match self {
-            Self::SearchEpisode { .. }
-            | Self::EmbeddingPublication { .. }
-            | Self::ClaimEpisode { .. } => Heal::Consumed,
+            Self::SearchEpisode { .. } | Self::EmbeddingPublication { .. } => Heal::Consumed,
             Self::ArtifactIngest { .. } => Heal::Reopen,
             Self::ArtifactDeletion { fault } => match fault {
                 ArtifactDeletionFaultKind::IntentAppend | ArtifactDeletionFaultKind::Unlink => {
@@ -377,9 +366,6 @@ pub enum EffectRefused {
     ExpectationCollapsedWithoutReadBack {
         identity: String,
     },
-    ReadBackContradictsCounts {
-        identity: String,
-    },
 }
 
 impl EffectLedger {
@@ -437,16 +423,16 @@ impl EffectLedger {
         Ok(())
     }
 
-    /// A durable read-back by identity collapses the admissible set.
+    /// A durable read-back by identity collapses the admissible set. A
+    /// read-back that finds the effect applied is an observation of it, the
+    /// only one a lost reply leaves.
     pub fn read_back(&mut self, identity: &str, state: EffectState) -> Result<(), EffectRefused> {
         let effect = self.effect(identity)?;
         effect.read_back = true;
         effect.expected = Expected::Exactly { state };
         effect.outcome = match state {
             EffectState::Applied => {
-                if effect.observed < effect.attempted {
-                    effect.observed += 1;
-                }
+                effect.observed = effect.observed.max(1).min(effect.attempted);
                 EffectOutcome::Applied
             }
             EffectState::NotApplied => EffectOutcome::NotApplied,
@@ -477,12 +463,6 @@ impl EffectLedger {
                         });
                     }
                 }
-            }
-            if effect.read_back
-                && effect.outcome == EffectOutcome::Applied
-                && effect.observed < effect.attempted
-            {
-                return Err(EffectRefused::ReadBackContradictsCounts { identity });
             }
         }
         Ok(())

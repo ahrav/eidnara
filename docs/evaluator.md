@@ -1671,9 +1671,9 @@ mirroring the fault enums and hooks that exist: `search_episode`
 (`search_catchup::EpisodeFault`), `embedding_publication`
 (`PublicationFault`), `held_publication` (the embedding fixture's gate),
 `artifact_ingest` and `artifact_deletion` (the kernel CAS enums, including
-`after_directory_sync`, the approved directory-fsync hook), `claim_episode`
-(`claim_sources::EpisodeFault`), `external_lock_holder` (an external
-`BEGIN IMMEDIATE`), `process_kill { cut }`, and `corrupt_quiescent_file`.
+`after_directory_sync`, the approved directory-fsync hook),
+`external_lock_holder` (an external `BEGIN IMMEDIATE`), `process_kill { cut }`,
+and `corrupt_quiescent_file`.
 `FaultAction::heal` is the heal each class permits: `consumed` for one-shot
 enums, `released` for gates and lock holders, `reopen` for kills and
 corruption; a declared heal that differs is `HealMismatch`. A kill carries a
@@ -1707,8 +1707,9 @@ and the matching outcome, adding the observation an applied read-back proves.
 `validate` refuses, per identity, `BoundsViolated` unless `acknowledged <=
 observed <= attempted`, `PrematureSuccess` for a lost reply whose outcome is
 not `unknown` without a read-back, `ExpectationCollapsedWithoutReadBack` for
-a lost reply expecting fewer than two states, and `ReadBackContradictsCounts`.
-Aggregate totals are never consulted: a fixture whose totals satisfy the
+a lost reply expecting fewer than two states. A read-back that finds the
+effect applied counts as its one observation, the only one a lost reply
+leaves. Aggregate totals are never consulted: a fixture whose totals satisfy the
 inequality while one identity violates it is refused.
 
 `ExpectedRefusal` names the two refusals production makes on purpose,
