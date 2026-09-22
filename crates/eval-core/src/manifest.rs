@@ -272,9 +272,10 @@ pub enum ManifestError {
         found: String,
     },
     DirectDatabaseAged,
-    /// A run from a checkpoint copy of a replayed prefix cannot also claim a
-    /// bulk construction.
-    BulkScaffoldPresentedAsAged,
+    /// Checkpoint copies of replayed prefixes must use `replay` construction.
+    AgedArmNotReplayBuilt {
+        construction: Construction,
+    },
     ResidueIncomplete {
         field: String,
     },
@@ -403,9 +404,11 @@ impl Manifest {
             return Err(ManifestError::DirectDatabaseAged);
         }
         if self.execution_mode == ExecutionMode::PrefixThenGenerate
-            && self.construction == Construction::Bulk
+            && self.construction != Construction::Replay
         {
-            return Err(ManifestError::BulkScaffoldPresentedAsAged);
+            return Err(ManifestError::AgedArmNotReplayBuilt {
+                construction: self.construction,
+            });
         }
         for entry in Self::field_schema().residue() {
             if !self.residue.contains(&entry) {

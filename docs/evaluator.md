@@ -54,7 +54,7 @@ The 30 required fields, sorted:
 | `attestation` | Tagged: `{"kind": "none"}` or `{"kind": "signed", ...}`. |
 | `claim_boundary` | The `claim-boundary/v1` block with the four exclusions. |
 | `component_versions` | Seven versions: generator, event schema, reducer, oracles, execution image, task corpus, judge. |
-| `construction` | `replay`, `bulk`, or `hand_built`; `bulk` under the `prefix_then_generate` execution mode is refused (`BulkScaffoldPresentedAsAged`), because a run resumed from a checkpoint copy of a replayed prefix cannot also claim a bulk build. |
+| `construction` | `replay`, `bulk`, or `hand_built`; anything but `replay` under the `prefix_then_generate` execution mode is refused (`AgedArmNotReplayBuilt { construction }`), because a run resumed from a checkpoint copy of a replayed prefix is replay-built. |
 | `cut_receipts` | Cuts from the closed set (`AfterAtomicTransition`, `AtQuiescence`, `AfterRecovery`, `AfterFaultPhase`, `EndOfRun`) with `reached` or `not_reached`. |
 | `end_ms`, `start_ms` | Wall-clock stamps from the shell. |
 | `envelope_bounds` | Declared resource bounds. |
@@ -1576,11 +1576,13 @@ wal_checkpoint(TRUNCATE)` returned (`busy`, `wal_frames`,
 checkpointed and a non-negative frame count, since SQLite reports `-1` for a
 database outside WAL mode), the bytes left in the `-wal` sidecar, and
 `handles_closed`. `Checkpoint::admit(receipt, incarnation_id)` judges the
-receipt before any byte is copied: every family present
-(`MissingStoreEvidence { family }`, so a memory store with no receipt of its
-own cannot borrow the kernel's), every declared counter present
+receipt before any byte is copied, through `QuiescenceReceipt::check`: every
+family present (`MissingStoreEvidence { family }`, so a memory store with no
+receipt of its own cannot borrow the kernel's), every declared counter present
 (`MissingCounter { family, counter }`: an empty map is not quiescence) and at
-zero (`PendingWork { family, counter, observed }`), every WAL truncated
+zero (`PendingWork { family, counter, observed }`), no counter outside the
+family's declared set (`UndeclaredCounter { family, counter }`, whatever its
+value), every WAL truncated
 (`WalNotTruncated { family, wal }`) with no sidecar bytes left
 (`WalSidecarPresent { family, bytes }`), every handle closed (`HandleOpen`),
 and the kernel's persisted `database_incarnation_id` 32 lowercase hex digits
@@ -1649,8 +1651,15 @@ count and checkpoint step, the checkpoint's digest and receipt, both guard
 digests, the tips at the checkpoint and the end, the two `GuardComparison`
 records (the full life's projection against the resumed life's and against
 the bulk scaffold), the window deaths, the markers fired, and the envelope.
-`parse_aging_report` reads it back losslessly or refuses (`SchemaMismatch`,
-`Shape`, `Lossy`). `AgingReport::result_digest` hashes the published report
+`AgingReport::validate`, which `serialize` and `parse_aging_report` both run,
+refuses a report whose claim boundary is not the pinned one
+(`ClaimBoundaryMismatch`), whose `eval_run_id`, `profile_digest`,
+`checkpoint_digest`, or either guard digest is not 64 lowercase hex digits
+(`MalformedDigest { field }`), whose checkpoint step is not the receipt's
+(`CheckpointStepMismatch`), or whose receipt `QuiescenceReceipt::check`
+refuses (`Receipt(..)`). `parse_aging_report` reads it back losslessly or
+refuses (`SchemaMismatch`, `Shape`, `Lossy`, and everything `validate`
+refuses). `AgingReport::result_digest` hashes the published report
 less its measurements, the envelope peaks, the receipt, and the checkpoint
 digest (which names one store's bytes), under
 `eval-suite-c-aging-report-result/v1`, so two runs of one identity on two

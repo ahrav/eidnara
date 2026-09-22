@@ -156,7 +156,7 @@ pub const MARKERS: [Marker; 37] = [
     },
     Marker {
         name: "wm_bulk_scaffold_presented_as_aged",
-        test: "crates/eval-core/tests/manifest.rs::a_prefix_then_generate_run_cannot_claim_a_bulk_construction",
+        test: "crates/eval-core/tests/manifest.rs::a_prefix_then_generate_run_is_replay_built_only",
     },
 ];
 

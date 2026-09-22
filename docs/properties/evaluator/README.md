@@ -1223,6 +1223,9 @@ Checkpoint contract (`crates/eval-core/tests/checkpoint.rs`,
   `MissingStoreEvidence { memory }`.
 - `a_receipt_missing_a_counter_is_not_quiescence`: a family missing one of its
   declared counters, or all of them, is `MissingCounter` naming it.
+- `a_counter_the_family_does_not_declare_is_refused`: a counter outside the
+  family's declared set is `UndeclaredCounter` naming the family and counter,
+  whether its reading is nonzero or zero.
 - `pending_work_refuses_by_family_and_counter`,
   `a_wal_that_is_busy_partial_or_absent_is_not_truncated`,
   `an_open_handle_a_malformed_incarnation_and_no_files_refuse`: a nonzero
@@ -1264,12 +1267,21 @@ Checkpoint contract (`crates/eval-core/tests/checkpoint.rs`,
   (`ing-window-contains-pre-snapshot-supersession`): only descriptors created
   at or before the snapshot and invalidated inside the window count, split by
   supersession and retirement.
-- `a_prefix_then_generate_run_cannot_claim_a_bulk_construction`
+- `an_aging_report_refuses_what_its_claims_and_checkpoint_forbid`: a valid
+  aging report serializes and parses back equal; a cleared claim boundary is
+  `ClaimBoundaryMismatch`; a short `eval_run_id`, `profile_digest`,
+  `checkpoint_digest`, or guard digest is `MalformedDigest` naming the field;
+  a checkpoint step the receipt does not carry is `CheckpointStepMismatch`;
+  and a receipt with pending work or without the memory store's evidence is
+  `Receipt(..)` from `validate`, `serialize`, and `parse_aging_report` alike.
+- `a_prefix_then_generate_run_is_replay_built_only`
   (`crates/eval-core/tests/manifest.rs`, `wm-aged-arm-replay-built-only`,
   marker `wm_bulk_scaffold_presented_as_aged`, the eval-core manifest suite's
-  completeness proof): the `prefix_then_generate` mode parses and enters the
-  digest, and a manifest that claims it with a `bulk` construction is refused
-  `BulkScaffoldPresentedAsAged`.
+  completeness proof): the `prefix_then_generate` mode parses, and a manifest
+  that claims it with a `bulk` or `hand_built` construction is refused
+  `AgedArmNotReplayBuilt` naming the construction.
+  `an_enumerate_run_records_its_mode_and_the_pinned_spec_digest` shows the mode
+  enters the digest between two replay-built manifests.
 
 ## Gaps recorded here
 

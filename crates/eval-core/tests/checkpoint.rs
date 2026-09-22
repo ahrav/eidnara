@@ -1,11 +1,12 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use eval_core::{
-    AGING_REPORT_SCHEMA, Checkpoint, CheckpointRefused, ConstructionKind, Death, Descriptor,
-    Divergence, GenerationState, GuardComparison, HistoricalRows, LiveRows, PrefixRefused,
-    ProjectionRows, QuiescenceReceipt, Reopened, RestoreRefused, Segment, StateSnapshot,
-    StoreFamily, StoreIntegrity, StoreQuiescence, TombstoneReason, Unenumerated, WalCheckpoint,
-    WindowDeaths, WorkCounter, historical_diff, live_digest,
+    AGING_REPORT_SCHEMA, AgingReport, AgingReportError, Checkpoint, CheckpointRefused,
+    ClaimBoundary, ConstructionKind, Death, Descriptor, Divergence, Envelope, GenerationState,
+    GuardComparison, HistoricalRows, LiveRows, PrefixRefused, ProjectionRows, QuiescenceReceipt,
+    Reopened, ResourceLimits, RestoreRefused, Segment, StateSnapshot, StoreFamily, StoreIntegrity,
+    StoreQuiescence, TombstoneReason, Unenumerated, WalCheckpoint, WindowDeaths, WorkCounter,
+    historical_diff, live_digest, parse_aging_report,
 };
 use serde_json::json;
 
@@ -125,6 +126,40 @@ fn pending_work_refuses_by_family_and_counter() {
             family: StoreFamily::SearchProjection,
             counter: WorkCounter::CatchUpLag,
             observed: 3,
+        })
+    );
+}
+
+/// A counter outside the family's declared set invalidates the receipt,
+/// whatever its value.
+#[test]
+fn a_counter_the_family_does_not_declare_is_refused() {
+    let mut stray = receipt();
+    stray
+        .stores
+        .get_mut(&StoreFamily::Kernel)
+        .unwrap()
+        .pending
+        .insert(WorkCounter::CatchUpLag, 5);
+    assert_eq!(
+        Checkpoint::admit(&stray, INCARNATION),
+        Err(CheckpointRefused::UndeclaredCounter {
+            family: StoreFamily::Kernel,
+            counter: WorkCounter::CatchUpLag,
+        })
+    );
+    let mut quiet_stray = receipt();
+    quiet_stray
+        .stores
+        .get_mut(&StoreFamily::Memory)
+        .unwrap()
+        .pending
+        .insert(WorkCounter::OutboxUnpublished, 0);
+    assert_eq!(
+        Checkpoint::admit(&quiet_stray, INCARNATION),
+        Err(CheckpointRefused::UndeclaredCounter {
+            family: StoreFamily::Memory,
+            counter: WorkCounter::OutboxUnpublished,
         })
     );
 }
@@ -693,4 +728,121 @@ fn window_deaths_count_descriptors_alive_at_the_snapshot_that_die_inside_the_win
 #[test]
 fn the_aging_report_schema_is_pinned() {
     assert_eq!(AGING_REPORT_SCHEMA, "eval-suite-c-aging-report/v1");
+}
+
+fn aging_report() -> AgingReport {
+    let checkpoint = checkpoint();
+    let earlier = projection(
+        1,
+        &[("k1r1", 2), ("k2r1", 3)],
+        &[("k1r1", 5, TombstoneReason::Superseded)],
+    );
+    let later = projection(7, &[("k2r1", 3)], &[]);
+    let comparison = GuardComparison::of(
+        (&earlier, ConstructionKind::CatchUp),
+        (&later, ConstructionKind::Bulk),
+    )
+    .unwrap();
+    let guard = snapshot().guard_digest().unwrap();
+    AgingReport {
+        schema: AGING_REPORT_SCHEMA.to_string(),
+        eval_run_id: "1".repeat(64),
+        profile_digest: "2".repeat(64),
+        claim_boundary: ClaimBoundary::pinned(),
+        steps: 12,
+        checkpoint_step: checkpoint.receipt.step,
+        checkpoint_digest: checkpoint.digest().unwrap(),
+        receipt: checkpoint.receipt.clone(),
+        full_guard_digest: guard.clone(),
+        resumed_guard_digest: guard,
+        commit_seq_at_checkpoint: 41,
+        commit_seq_at_end: 50,
+        against_resumed: comparison.clone(),
+        against_bulk: comparison,
+        window_deaths: WindowDeaths {
+            supersessions: 1,
+            retirements: 1,
+        },
+        markers: BTreeSet::from(["flt_quiescence_receipt_all_zero".to_string()]),
+        envelope: Envelope::new(ResourceLimits {
+            elapsed_ms: 60_000,
+            store_bytes: 1 << 20,
+            cassette_bytes: 1 << 20,
+            artifact_bytes: 1 << 20,
+            temp_roots: 4,
+            retained_artifacts: 4,
+            processes: 4,
+        }),
+    }
+}
+
+#[test]
+fn an_aging_report_refuses_what_its_claims_and_checkpoint_forbid() {
+    let report = aging_report();
+    let value = report.serialize().unwrap();
+    assert_eq!(parse_aging_report(&value).unwrap(), report);
+
+    let mut unbounded = report.clone();
+    unbounded.claim_boundary.exclusions.clear();
+    assert_eq!(
+        unbounded.validate(),
+        Err(AgingReportError::ClaimBoundaryMismatch)
+    );
+
+    for field in [
+        "eval_run_id",
+        "profile_digest",
+        "checkpoint_digest",
+        "full_guard_digest",
+        "resumed_guard_digest",
+    ] {
+        let mut malformed = report.clone();
+        let slot = match field {
+            "eval_run_id" => &mut malformed.eval_run_id,
+            "profile_digest" => &mut malformed.profile_digest,
+            "checkpoint_digest" => &mut malformed.checkpoint_digest,
+            "full_guard_digest" => &mut malformed.full_guard_digest,
+            _ => &mut malformed.resumed_guard_digest,
+        };
+        slot.pop();
+        assert_eq!(
+            malformed.validate(),
+            Err(AgingReportError::MalformedDigest { field })
+        );
+    }
+
+    let mut moved = report.clone();
+    moved.checkpoint_step += 1;
+    assert_eq!(
+        moved.validate(),
+        Err(AgingReportError::CheckpointStepMismatch {
+            checkpoint_step: 8,
+            receipt_step: 7,
+        })
+    );
+
+    let mut pending = report.clone();
+    pending
+        .receipt
+        .stores
+        .get_mut(&StoreFamily::Memory)
+        .unwrap()
+        .pending
+        .insert(WorkCounter::CaptureJobsPending, 1);
+    assert_eq!(
+        pending.validate(),
+        Err(AgingReportError::Receipt(CheckpointRefused::PendingWork {
+            family: StoreFamily::Memory,
+            counter: WorkCounter::CaptureJobsPending,
+            observed: 1,
+        }))
+    );
+    let mut borrowed = report.clone();
+    borrowed.receipt.stores.remove(&StoreFamily::Memory);
+    let borrowed_value = serde_json::to_value(&borrowed).unwrap();
+    let missing = AgingReportError::Receipt(CheckpointRefused::MissingStoreEvidence {
+        family: StoreFamily::Memory,
+    });
+    assert_eq!(borrowed.serialize(), Err(missing.clone()));
+    assert_eq!(parse_aging_report(&borrowed_value), Err(missing));
 }

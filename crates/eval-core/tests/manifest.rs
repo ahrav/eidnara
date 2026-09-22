@@ -1054,18 +1054,22 @@ fn an_enumerate_run_records_its_mode_and_the_pinned_spec_digest() {
     for mode in [
         eval_core::ExecutionMode::Generate,
         eval_core::ExecutionMode::ReplayTape,
-        eval_core::ExecutionMode::PrefixThenGenerate,
     ] {
         let mut other = enumerate.clone();
         other.execution_mode = mode;
         assert_ne!(other.digest().unwrap(), enumerate.digest().unwrap());
     }
+    let mut replayed = enumerate.clone();
+    replayed.construction = eval_core::Construction::Replay;
+    let mut resumed = replayed.clone();
+    resumed.execution_mode = eval_core::ExecutionMode::PrefixThenGenerate;
+    assert_ne!(resumed.digest().unwrap(), replayed.digest().unwrap());
 }
 
-/// A run resumed from a quiescent checkpoint copy of a replayed prefix says so
-/// in its mode; a bulk construction under that mode is a contradiction.
+/// A run resumed from a quiescent checkpoint copy of a replayed prefix must be
+/// constructed with `replay`.
 #[test]
-fn a_prefix_then_generate_run_cannot_claim_a_bulk_construction() {
+fn a_prefix_then_generate_run_is_replay_built_only() {
     let mut resumed = manifest();
     resumed.execution_mode = eval_core::ExecutionMode::PrefixThenGenerate;
     resumed.construction = eval_core::Construction::Replay;
@@ -1085,11 +1089,21 @@ fn a_prefix_then_generate_run_cannot_claim_a_bulk_construction() {
         .unwrap();
     assert_eq!(
         bulk.validate(),
-        Err(ManifestError::BulkScaffoldPresentedAsAged)
+        Err(ManifestError::AgedArmNotReplayBuilt {
+            construction: eval_core::Construction::Bulk,
+        })
     );
     coverage
         .complete("crates/eval-core/tests/manifest.rs::")
         .unwrap();
+    let mut hand_built = resumed.clone();
+    hand_built.construction = eval_core::Construction::HandBuilt;
+    assert_eq!(
+        hand_built.validate(),
+        Err(ManifestError::AgedArmNotReplayBuilt {
+            construction: eval_core::Construction::HandBuilt,
+        })
+    );
     let mut generated_bulk = manifest();
     generated_bulk.construction = eval_core::Construction::Bulk;
     generated_bulk.execution_mode = eval_core::ExecutionMode::Generate;
