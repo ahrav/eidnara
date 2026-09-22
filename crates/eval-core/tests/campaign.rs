@@ -3,6 +3,7 @@
 
 use std::collections::BTreeMap;
 
+use context_core::canonical_json::ContractError;
 use eval_core::{
     Approval, ArmKind, CampaignProfile, CensorReason, Cut, DisabledReason, Envelope,
     EnvelopeExceeded, EvaluatedSurface, HistoryPolicy, LivenessBounds, PairError, ProfileError,
@@ -294,6 +295,13 @@ fn a_profile_refuses_every_absent_or_zero_setting_by_name() {
             ProfileError::Statistics(StatisticsError::MalformedDecimal {
                 field: "noninferiority_margin",
             }),
+        ),
+        (
+            "a budget past the canonical safe range",
+            Box::new(|p| p.budgets.max_tokens_in = 9_007_199_254_740_993),
+            ProfileError::NotCanonical(ContractError::NotCanonical(
+                "number 9007199254740993 is not a safe integer".into(),
+            )),
         ),
     ];
     for (name, mutate, expected) in mutations {

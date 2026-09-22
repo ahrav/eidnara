@@ -3,7 +3,7 @@
 //! the gates and not the accounting, and no report claims what its class,
 //! its samples, its profile, or its exclusions forbid.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::num::NonZeroU32;
 
 use context_core::canonical_json::{ContractError, canonical_json_encode, is_lower_hex};
@@ -243,6 +243,15 @@ pub enum ReportError {
     LineageNamesThisRun {
         sample: String,
     },
+    /// A sample skipped for an unapproved profile in a report whose profile
+    /// is approved.
+    SkipDisagreesWithProfile {
+        sample: String,
+    },
+    /// An injection score with no case, or a second score for one case.
+    InjectionScoreDisagrees {
+        case_id: String,
+    },
     /// An integer outside the canonical safe range.
     NotCanonical(ContractError),
     ArmRatesDisagree,
@@ -373,11 +382,26 @@ impl SuiteBReport {
         Ok(())
     }
 
+    /// One score per case, each naming its case; binding the scores to the
+    /// planned `TaskSet` needs the manifest the runner writes them beside.
+    fn check_injection(&self) -> Result<(), ReportError> {
+        let mut cases = BTreeSet::new();
+        for score in &self.injection {
+            if score.case_id.is_empty() || !cases.insert(score.case_id.as_str()) {
+                return Err(ReportError::InjectionScoreDisagrees {
+                    case_id: score.case_id.clone(),
+                });
+            }
+        }
+        Ok(())
+    }
+
     /// What each sample says about the run it sits in: its lineage names
     /// earlier runs, never this one; a stop-condition skip names the condition
-    /// the outcome was suppressed under, so an open report carries none; and
-    /// an envelope skip names this run's bound for that resource and a
-    /// reading the peaks reached.
+    /// the outcome was suppressed under, so an open report carries none; an
+    /// approved profile was not skipped for want of approval; and an envelope
+    /// skip names this run's bound for that resource and a reading the peaks
+    /// reached.
     fn check_samples(&self) -> Result<(), ReportError> {
         let stopped = match &self.outcome {
             ReportOutcome::Open { .. } => None,
@@ -393,6 +417,10 @@ impl SuiteBReport {
                     if Some(condition) != stopped =>
                 {
                     return Err(ReportError::StopConditionDisagrees { sample: sample() });
+                }
+                // `check_identity` has already required the approval.
+                Terminal::Skipped(SkipReason::ProfileNotApproved) => {
+                    return Err(ReportError::SkipDisagreesWithProfile { sample: sample() });
                 }
                 Terminal::Skipped(SkipReason::EnvelopeExceeded(exceeded)) => {
                     let bound = exceeded.resource.of(&self.envelope.bounds);
@@ -541,6 +569,7 @@ impl SuiteBReport {
             return Err(ReportError::RatesDisagree);
         }
         self.check_samples()?;
+        self.check_injection()?;
         match &self.outcome {
             ReportOutcome::Open { gated } => self.check_gated(gated),
             ReportOutcome::Suppressed { by } => self.check_suppression(by),

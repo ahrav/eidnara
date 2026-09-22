@@ -5,7 +5,6 @@
 use std::collections::BTreeMap;
 
 use context_core::canonical_json::ContractError;
-use eval_core::IntervalOutcome;
 use eval_core::{
     ANALYSIS_FAMILY_SCHEMA, Analysis, AnalysisFamily, Approval, ArmKind, ArmRates, ArmResult,
     BaselineContrast, BaselineFailure, BlockedReason, CLAIM_BOUNDARY_SCHEMA, CampaignGates,
@@ -17,6 +16,7 @@ use eval_core::{
     SampleLedger, SampleRecord, Scale, SkipReason, StopCondition, StoppingRule, SuiteBReport,
     Suppression, TaskBudgets, Terminal, WorldProvenance, analyze, parse_report, reachability_of,
 };
+use eval_core::{AxisValue, InjectionScore, IntervalOutcome};
 use serde_json::json;
 
 type Mutate = Box<dyn Fn(&mut SuiteBReport)>;
@@ -962,6 +962,52 @@ fn a_report_refuses_what_its_own_evidence_refutes() {
             }),
             ReportError::LineageNamesThisRun {
                 sample: "s000".into(),
+            },
+        ),
+        (
+            "a sample skipped for an unapproved profile in an approved report",
+            Box::new(|r| {
+                r.samples.samples.get_mut("s643").unwrap().terminal =
+                    Terminal::Skipped(SkipReason::ProfileNotApproved);
+                r.rates = r.samples.rates().unwrap();
+            }),
+            ReportError::SkipDisagreesWithProfile {
+                sample: "s643".into(),
+            },
+        ),
+        (
+            "two injection scores for one case",
+            Box::new(|r| {
+                let score = InjectionScore {
+                    case_id: "c1".into(),
+                    ingested: AxisValue::Yes,
+                    retrieved: AxisValue::No,
+                    packed: AxisValue::No,
+                    obeyed: AxisValue::NotMeasurable,
+                    written_back_cross_session: AxisValue::NotMeasurable,
+                    exposure: AxisValue::NotReached,
+                };
+                r.injection = vec![score.clone(), score];
+            }),
+            ReportError::InjectionScoreDisagrees {
+                case_id: "c1".into(),
+            },
+        ),
+        (
+            "an injection score with no case",
+            Box::new(|r| {
+                r.injection = vec![InjectionScore {
+                    case_id: String::new(),
+                    ingested: AxisValue::Yes,
+                    retrieved: AxisValue::No,
+                    packed: AxisValue::No,
+                    obeyed: AxisValue::NotMeasurable,
+                    written_back_cross_session: AxisValue::NotMeasurable,
+                    exposure: AxisValue::NotReached,
+                }];
+            }),
+            ReportError::InjectionScoreDisagrees {
+                case_id: String::new(),
             },
         ),
         (

@@ -5,7 +5,9 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use context_core::canonical_json::{is_lower_hex, protocol_digest};
+use context_core::canonical_json::{
+    ContractError, canonical_json_encode, is_lower_hex, protocol_digest,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -175,6 +177,8 @@ pub enum ProfileError {
     },
     /// The parsed value drops a field the input carried.
     Lossy,
+    /// An integer outside the canonical safe range.
+    NotCanonical(ContractError),
     NotApproved {
         name: String,
     },
@@ -212,6 +216,9 @@ impl RunProfile {
                 found: self.schema.clone(),
             });
         }
+        // Digestible on both runtimes: no integer may leave the canonical safe range.
+        let value = serde_json::to_value(self).map_err(|e| ProfileError::Shape(e.to_string()))?;
+        canonical_json_encode(&value).map_err(ProfileError::NotCanonical)?;
         if self.name.is_empty() {
             return Err(ProfileError::Empty { field: "name" });
         }

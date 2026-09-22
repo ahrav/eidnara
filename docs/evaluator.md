@@ -1256,7 +1256,9 @@ carries rather than read from what it says:
   (`ProfileDisagreesWithFamily`), and an envelope whose bounds are the
   profile's `envelope` (`EnvelopeDisagreesWithProfile`), whatever the outcome.
   Every integer must sit in the canonical safe range (`NotCanonical`), so a
-  Bun consumer reads the same value.
+  Bun consumer reads the same value; `RunProfile::validate` holds the profile
+  to the same range (`NotCanonical`), so an unapproved-looking budget cannot
+  start a campaign before `digest` would refuse it.
 - Claims: `claims.boundary` must equal `ClaimBoundary::pinned()` as a
   structure, order included (`ClaimBoundaryMismatch`); `established` is a
   closed vocabulary (`required_evidence_present_at_every_live_stage`,
@@ -1284,9 +1286,13 @@ carries rather than read from what it says:
 - Accounting: `rates` must follow from `samples` (`RatesDisagree`, `Samples`);
   no sample's lineage names this run (`LineageNamesThisRun`); a sample skipped
   `stop_condition` must name the condition the outcome was suppressed under,
-  so an open report carries none (`StopConditionDisagrees`); a sample skipped
-  `envelope_exceeded` must name this run's bound for that resource and a
-  reading the peaks reached (`SampleEnvelopeDisagrees`). In an open report the
+  so an open report carries none (`StopConditionDisagrees`); no sample is
+  skipped `profile_not_approved`, since the report's profile is approved
+  (`SkipDisagreesWithProfile`); a sample skipped `envelope_exceeded` must name
+  this run's bound for that resource and a reading the peaks reached
+  (`SampleEnvelopeDisagrees`); every injection score names a case and no case
+  is scored twice (`InjectionScoreDisagrees`), while binding the scores to the
+  planned task set is the manifest's. In an open report the
   paired analysis must carry the family's digest (`FamilyDigestMismatch`) and
   the same `arm_rates` (`ArmRatesDisagree`); its `gates` must be the ones
   `Gates::of` recomputes from its `counts` and the family's margins

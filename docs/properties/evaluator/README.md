@@ -1035,8 +1035,9 @@ Campaign (`crates/eval-core/tests/campaign.rs`):
   worlds, tasks, event limit, three budgets, two envelope dimensions, and a
   liveness bound, a malformed or over-one ceiling, an unset censoring or
   over-one refusal ceiling, an empty bound map, surface 1 off its pin, a zero
-  bound on any surface, and an unset margin each refuse by name; a declared
-  bound on another surface is accepted.
+  bound on any surface, an unset margin, and a budget past the canonical
+  safe range each refuse by name; a declared bound on another surface is
+  accepted.
 - `each_budget_censors_with_its_own_reason_in_declared_order`: no usage
   exhausts nothing; each budget at its limit censors with its own reason; one
   short of every limit exhausts nothing; two reached at once report the
@@ -1114,7 +1115,9 @@ Report (`crates/eval-core/tests/report.rs`):
   envelope bound raised above the approved profile's, attempted samples all
   on one arm, an interval whose replicate or item count is not the family's
   or the pairs', a stop-condition skip in an open report, a lineage naming
-  this run, and an epoch past the canonical safe range each refuse by name
+  this run, a `profile_not_approved` skip under an approved profile, two
+  injection scores for one case or one with no case, and an epoch past the
+  canonical safe range each refuse by name
   from `serialize` and `parse_report`; a run its envelope stopped, skipping
   the rest under the crossing reading and naming it as the suppression,
   round-trips, as does a tap-rejected run skipping the rest under condition
