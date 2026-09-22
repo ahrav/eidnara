@@ -1666,6 +1666,14 @@ checkpoint step straddles a supersession and a retirement of a descriptor
 created before it, and at least one death falls before it; a history with no
 such step is refused (`NoStraddlingStep`).
 
+Every drain ends with no catch-up lag and no open embedding job, and the bulk
+scaffold ends with no open embedding job; either failing stops the run. The
+aged arm keeps one source hold for its whole life, and each hold extension is
+admitted against every reference the hold carries, so the plan sizes the hold
+admission, the capture's descriptor rows, and the batch bounds to every unit
+it publishes (`DriveBounds`), never below the fixture defaults. The bulk
+scaffold applies its whole snapshot as one batch under the same bounds.
+
 ## Coverage markers
 
 `MARKERS` is the evaluator-owned registry: constant, globally unique names,
