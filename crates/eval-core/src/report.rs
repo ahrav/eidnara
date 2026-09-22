@@ -23,8 +23,8 @@ use crate::pairs::{
     recency_bound,
 };
 use crate::statistics::{
-    AnalysisFamily, BlockedReason, GateVerdict, Gates, IntervalOutcome, IntervalWithheld,
-    PairedReport, Ratio, StatisticsError, arm_miss_asymmetry,
+    AnalysisFamily, BlockedReason, FrozenFamily, GateVerdict, Gates, IntervalOutcome,
+    IntervalWithheld, PairedReport, Ratio, StatisticsError, arm_miss_asymmetry,
 };
 
 pub const SUITE_B_REPORT_SCHEMA: &str = "eval-suite-b-report/v1";
@@ -134,8 +134,9 @@ pub struct GatedBlocks {
 }
 
 /// Why a report carries no gates. Stop conditions (a), (b), and (c) map to
-/// `condition`; an arm-miss asymmetry block and an envelope stop are blocks
-/// without a stop condition.
+/// `condition`; an underpowered-table block, an arm-miss asymmetry block, and
+/// an envelope stop are blocks without a stop condition: (c) is the pilot's
+/// projection, not the completed table.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Suppression {
@@ -154,7 +155,8 @@ impl Suppression {
                 reason: BlockedReason::InsufficientEffectiveN { .. },
             } => Some(StopCondition::C),
             Self::Analysis {
-                reason: BlockedReason::ArmMissAsymmetry { .. },
+                reason:
+                    BlockedReason::TableUnderpowered { .. } | BlockedReason::ArmMissAsymmetry { .. },
             }
             | Self::Envelope { .. } => None,
         }
@@ -328,9 +330,18 @@ impl SuiteBReport {
         if open == self.claims.established.is_empty() {
             return Err(ReportError::ClaimsDisagreeWithOutcome);
         }
+        // The report carries the family it derives under; an open report is
+        // held to the freeze its analysis recorded in `check_gated`
+        // (`FamilyDigestMismatch`), and a suppressed one records no freeze.
+        let frozen = FrozenFamily::freeze(&self.family).map_err(ReportError::Statistics)?;
         let derived = self
             .family
-            .claim_class(self.claims.provenance, self.claims.anchor_set.as_ref());
+            .claim_class(
+                &frozen,
+                self.claims.provenance,
+                self.claims.anchor_set.as_ref(),
+            )
+            .map_err(ReportError::Statistics)?;
         if derived != self.claims.derivation {
             return Err(ReportError::ClaimNotDerived {
                 stored: self.claims.derivation.clone(),
@@ -472,10 +483,34 @@ impl SuiteBReport {
             (_, Err(exceeded)) => return Err(ReportError::EnvelopeNotHonoured(exceeded)),
             (_, Ok(())) => {}
         }
-        if let Suppression::Analysis { reason } = by
-            && self.derived_block()?.as_ref() != Some(reason)
-        {
-            return Err(ReportError::SuppressionNotDerived);
+        if let Suppression::Analysis { reason } = by {
+            let derived = self.derived_block()?;
+            match reason {
+                // `analyze` reaches the table only after the pre-table blocks
+                // pass; the table's own power needs the pair table, which the
+                // manifest's `result_digest` binds, so the report holds the
+                // recorded block to what the family fixes.
+                BlockedReason::TableUnderpowered {
+                    effective_n,
+                    n_clusters,
+                    required_n_for_margin,
+                } => {
+                    let required = self.family.icc_pilot.required_n_for_margin;
+                    if derived.is_some()
+                        || *required_n_for_margin != required
+                        || *n_clusters == 0
+                        || *effective_n
+                            >= Ratio::try_new(i128::from(required), 1)
+                                .map_err(ReportError::Statistics)?
+                    {
+                        return Err(ReportError::SuppressionNotDerived);
+                    }
+                }
+                _ if derived.as_ref() != Some(reason) => {
+                    return Err(ReportError::SuppressionNotDerived);
+                }
+                _ => {}
+            }
         }
         // A baseline is judged under a bound; a surface this profile resolves
         // none for was never judged.

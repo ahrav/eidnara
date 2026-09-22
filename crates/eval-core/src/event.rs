@@ -155,6 +155,13 @@ pub enum LogError {
 
 debug_display!(LogError);
 
+/// A correction supersedes its target; a retraction invalidates its target.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Supersession {
+    Correction,
+    Retraction,
+}
+
 impl Payload {
     /// The event this payload points at: a cited message, a rename's
     /// predecessor, or a correction's or retraction's target. Every variant
@@ -177,11 +184,13 @@ impl Payload {
         }
     }
 
-    /// The event this payload makes non-current, if it is a correction or a
-    /// retraction.
-    pub fn supersedes(&self) -> Option<&EventId> {
+    /// The event this payload makes non-current and how, if it is a
+    /// correction or a retraction. Every variant is listed so a new
+    /// superseding one cannot hide behind a wildcard.
+    pub fn supersedes(&self) -> Option<(Supersession, &EventId)> {
         match self {
-            Payload::Correction { target, .. } | Payload::Invalidation { target } => Some(target),
+            Payload::Correction { target, .. } => Some((Supersession::Correction, target)),
+            Payload::Invalidation { target } => Some((Supersession::Retraction, target)),
             Payload::Message { .. }
             | Payload::ToolSpan { .. }
             | Payload::Commit { .. }
@@ -236,8 +245,9 @@ impl EventLog {
     /// Moves every event onto entities suffixed `~tag`, re-deriving each ID
     /// and following every payload reference and causal edge, so a history
     /// authored apart from another can share a log with it without an
-    /// identity collision. A reference to an event the log does not hold is
-    /// refused rather than left pointing into whatever log this one joins.
+    /// identity collision. A payload reference or a causal edge naming an
+    /// event the log does not hold is refused; left in place it would resolve
+    /// against the other history after the join.
     pub fn on_distinct_entities(&self, tag: &str) -> Result<Self, LogError> {
         if tag.contains(':') {
             return Err(LogError::InvalidEntityTag {
@@ -273,13 +283,13 @@ impl EventLog {
             .causal_edges
             .iter()
             .map(|edge| {
-                Some(CausalEdge {
-                    from: follow(&edge.from)?,
-                    to: follow(&edge.to)?,
+                let dangling = || LogError::DanglingEdge { edge: edge.clone() };
+                Ok(CausalEdge {
+                    from: follow(&edge.from).ok_or_else(dangling)?,
+                    to: follow(&edge.to).ok_or_else(dangling)?,
                 })
             })
-            .collect::<Option<Vec<_>>>()
-            .expect("validated edges name held events");
+            .collect::<Result<Vec<_>, LogError>>()?;
         Ok(Self::new(events, edges))
     }
 

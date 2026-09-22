@@ -14,7 +14,6 @@ import {
     readFileSync,
     realpathSync,
     rmSync,
-    statSync,
     writeFileSync,
 } from "node:fs";
 import { createConnection, type Socket } from "node:net";
@@ -27,6 +26,15 @@ import {
 } from "@eidnara/opencode/shared/host-lifecycle/paths";
 import { probeCapabilities } from "@eidnara/shm-native";
 import { waitForChildExit } from "../process-exit";
+import {
+    cargoBuildExampleArgs,
+    type DaemonExample,
+    DIRECT_HOST_FIXTURE,
+    invalidOverrideMessage,
+    missingExampleTargets,
+    prebuiltOverride,
+    workspaceExampleBinary,
+} from "./daemon-examples";
 
 const REPO_ROOT = resolve(import.meta.dir, "../../../..");
 const CONTROL_FILE = "direct-host-control.sock";
@@ -250,28 +258,11 @@ export function detectRustModePrereqs(): RustModePrereqs {
             skipReason: "cargo workspace does not resolve (missing path dependencies?)",
         };
     }
-    let fixtureAvailable = false;
-    try {
-        const parsed = JSON.parse(metadata.stdout) as {
-            packages?: Array<{
-                name?: string;
-                targets?: Array<{ name?: string; kind?: string[] }>;
-            }>;
-        };
-        fixtureAvailable =
-            parsed.packages
-                ?.find((pkg) => pkg.name === "daemon")
-                ?.targets?.some(
-                    (target) =>
-                        target.name === "direct_host_fixture" && target.kind?.includes("example"),
-                ) === true;
-    } catch {
-        fixtureAvailable = false;
-    }
-    if (!fixtureAvailable) {
+    const unavailable = missingExampleTargets(metadata.stdout);
+    if (unavailable.length > 0) {
         return {
             ok: false,
-            skipReason: "direct_host_fixture example is unavailable in this workspace",
+            skipReason: `${unavailable.map((example) => example.example).join(", ")} example is unavailable in this workspace`,
         };
     }
     // The plugin reaches the daemon only through the shared-memory channel, and OpenCode embeds the same Bun release this test runner uses, so a probe here predicts whether the plugin's channel can start inside OpenCode. A runtime that fails a gated mechanism skips the suite instead of reporting every pass as unchanged input; transfer prevention is reported by the probe, not gated.
@@ -304,38 +295,22 @@ const exampleBuilds = new Map<string, Promise<string>>();
 
 /**
  * Resolves a daemon example binary once per Bun process; Cargo caches builds across processes.
- * `prebuiltEnv` names an environment variable whose value must be an existing file when set.
- * A failed build is not cached, so a later call retries it.
+ * An `invalid` override throws; rejected builds are removed from the cache so later calls retry.
  */
-export function buildDaemonExample(args: {
-    example: string;
-    feature: string;
-    prebuiltEnv: string;
-}): Promise<string> {
-    const key = `${args.example}\0${args.feature}\0${args.prebuiltEnv}`;
+export function buildDaemonExample(example: DaemonExample): Promise<string> {
+    const key = example.prebuiltEnv;
     const cached = exampleBuilds.get(key);
     if (cached) return cached;
     const build = (async () => {
-        const configured = process.env[args.prebuiltEnv];
-        if (configured !== undefined && configured !== "") {
-            if (!existsSync(configured) || !statSync(configured).isFile()) {
-                throw new Error(`${args.prebuiltEnv}=${configured} is not a file`);
-            }
-            return configured;
+        const override = prebuiltOverride(process.env, example);
+        if (override.kind === "invalid") {
+            throw new Error(invalidOverrideMessage(example, override.path));
         }
-        const binary = join(REPO_ROOT, "target/debug/examples", args.example);
-        const result = await runCargo([
-            "build",
-            "-p",
-            "daemon",
-            "--example",
-            args.example,
-            "--features",
-            args.feature,
-            "--locked",
-        ]);
+        if (override.kind === "file") return override.path;
+        const binary = workspaceExampleBinary(REPO_ROOT, example);
+        const result = await runCargo(cargoBuildExampleArgs(example));
         if (!result.ok || !existsSync(binary)) {
-            throw new Error(`${args.example} example build failed\n${result.stderr}`);
+            throw new Error(`${example.example} example build failed\n${result.stderr}`);
         }
         return binary;
     })();
@@ -345,11 +320,7 @@ export function buildDaemonExample(args: {
 }
 
 export function buildDirectHostFixture(): Promise<string> {
-    return buildDaemonExample({
-        example: "direct_host_fixture",
-        feature: "direct-host-fixture",
-        prebuiltEnv: "EIDNARA_E2E_DIRECT_HOST_FIXTURE_BIN",
-    });
+    return buildDaemonExample(DIRECT_HOST_FIXTURE);
 }
 
 function exactKeys(value: Record<string, unknown>, expected: string[]): boolean {

@@ -13,6 +13,10 @@ use eval_core::{
 };
 use serde_json::{Value, json};
 
+fn ratio(numerator: i64, denominator: u64) -> Ratio {
+    Ratio::try_new(i128::from(numerator), i128::from(denominator)).unwrap()
+}
+
 type Mutate<T> = Box<dyn Fn(&mut T)>;
 
 fn statistics() -> CampaignProfile {
@@ -93,7 +97,7 @@ fn a_profile_pins_every_number_and_runs_only_once_approved() {
             ceilings.censoring,
             ceilings.redaction_refusals
         ),
-        (Ratio::new(1, 10), Ratio::new(1, 5), Ratio::ZERO)
+        (ratio(1, 10), ratio(1, 5), Ratio::ZERO)
     );
     assert_eq!(
         profile.approved(),
@@ -441,13 +445,13 @@ fn every_sample_ends_in_exactly_one_closed_vocabulary_terminal() {
     let ledger = ledger(&terminals);
     let rates = ledger.rates().unwrap();
     assert_eq!(rates.samples, 8);
-    assert_eq!(rates.passed, Ratio::new(1, 4));
-    assert_eq!(rates.failed, Ratio::new(1, 8));
-    assert_eq!(rates.censored, Ratio::new(1, 8));
-    assert_eq!(rates.indeterminate, Ratio::new(1, 8));
-    assert_eq!(rates.skipped, Ratio::new(1, 8));
-    assert_eq!(rates.unsupported, Ratio::new(1, 8));
-    assert_eq!(rates.disabled, Ratio::new(1, 8));
+    assert_eq!(rates.passed, ratio(1, 4));
+    assert_eq!(rates.failed, ratio(1, 8));
+    assert_eq!(rates.censored, ratio(1, 8));
+    assert_eq!(rates.indeterminate, ratio(1, 8));
+    assert_eq!(rates.skipped, ratio(1, 8));
+    assert_eq!(rates.unsupported, ratio(1, 8));
+    assert_eq!(rates.disabled, ratio(1, 8));
     let round: SampleLedger =
         serde_json::from_value(serde_json::to_value(&ledger).unwrap()).unwrap();
     assert_eq!(round, ledger);
