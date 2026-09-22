@@ -222,12 +222,14 @@ pub enum ReportError {
     /// and arm rates compute.
     GatesNotDerived,
     NoAttemptedSamples,
-    /// More pairs in the analysis than one arm's attempted samples can back
-    /// at one sample per pair.
+    /// A paired marginal larger than the ledger backs: more pairs with this
+    /// arm result (`pass`, `fail`, `censored`, or `any`) than samples on that
+    /// arm ended that way.
     PairsExceedSamples {
-        pairs: u64,
         arm: ArmKind,
-        attempted: u64,
+        terminal: &'static str,
+        pairs: u64,
+        samples: u64,
     },
     /// An interval field the family and the counts do not derive.
     IntervalNotDerived {
@@ -548,6 +550,69 @@ impl SuiteBReport {
         Ok(())
     }
 
+    /// Every pair's arm result is one sample on that arm that ended the same
+    /// way: a pass, a fail, or a censored attempt (an indeterminate attempt has
+    /// no arm result and backs no pair). The aged marginals are all counted, so
+    /// each is bounded by its terminal; of the fresh arm the table counts only
+    /// `b` (a pass), `c` (a fail), and its censored arms, so the rest is
+    /// bounded by the arm's total. Marginals the counts cannot express are
+    /// left to `Gates::of`.
+    fn check_pairs_backed(&self, analysis: &PairedReport) -> Result<(), ReportError> {
+        let tally = |arm: ArmKind| {
+            let mut ended = [0u64; 3];
+            for record in self.samples.samples.values().filter(|r| r.arm == arm) {
+                match record.terminal {
+                    Terminal::Pass => ended[0] += 1,
+                    Terminal::Fail => ended[1] += 1,
+                    Terminal::Censored { .. } => ended[2] += 1,
+                    _ => {}
+                }
+            }
+            ended
+        };
+        let counts = &analysis.counts;
+        let [aged_pass, aged_fail, aged_censored] = tally(ArmKind::Aged);
+        let [fresh_pass, fresh_fail, fresh_censored] = tally(ArmKind::Fresh);
+        let aged_failed = counts
+            .n
+            .saturating_sub(counts.aged_pass)
+            .saturating_sub(counts.aged_censored);
+        for (arm, terminal, pairs, samples) in [
+            (ArmKind::Aged, "pass", counts.aged_pass, aged_pass),
+            (ArmKind::Aged, "fail", aged_failed, aged_fail),
+            (
+                ArmKind::Aged,
+                "censored",
+                counts.aged_censored,
+                aged_censored,
+            ),
+            (ArmKind::Fresh, "pass", counts.b, fresh_pass),
+            (ArmKind::Fresh, "fail", counts.c, fresh_fail),
+            (
+                ArmKind::Fresh,
+                "censored",
+                counts.fresh_censored,
+                fresh_censored,
+            ),
+            (
+                ArmKind::Fresh,
+                "any",
+                counts.n,
+                fresh_pass + fresh_fail + fresh_censored,
+            ),
+        ] {
+            if pairs > samples {
+                return Err(ReportError::PairsExceedSamples {
+                    arm,
+                    terminal,
+                    pairs,
+                    samples,
+                });
+            }
+        }
+        Ok(())
+    }
+
     fn check_gated(&self, gated: &GatedBlocks) -> Result<(), ReportError> {
         let digest = self.family.digest().map_err(ReportError::Statistics)?;
         if gated.analysis.analysis_family_digest != digest {
@@ -570,32 +635,7 @@ impl SuiteBReport {
             return Err(ReportError::PairedGatesNotDerived);
         }
         self.check_interval(&gated.analysis)?;
-        // A pair consumes one sample on each paired arm that ended as an
-        // `ArmResult`: a pass, a fail, or a censored attempt. An indeterminate
-        // attempt has no arm result and backs no pair.
-        let pairs = gated.analysis.counts.n;
-        for arm in [ArmKind::Aged, ArmKind::Fresh] {
-            let attempted = self
-                .samples
-                .samples
-                .values()
-                .filter(|record| {
-                    record.arm == arm
-                        && matches!(
-                            record.terminal,
-                            Terminal::Pass | Terminal::Fail | Terminal::Censored { .. }
-                        )
-                })
-                .count();
-            let attempted = u64::try_from(attempted).expect("bounded");
-            if pairs > attempted {
-                return Err(ReportError::PairsExceedSamples {
-                    pairs,
-                    arm,
-                    attempted,
-                });
-            }
-        }
+        self.check_pairs_backed(&gated.analysis)?;
         let ceilings = self.profile.ceilings().map_err(ReportError::Profile)?;
         let gates = CampaignGates::of(&self.samples, &ceilings, &self.family, &self.arm_rates)?;
         if gates != gated.gates {

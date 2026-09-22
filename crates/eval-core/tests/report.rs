@@ -649,8 +649,8 @@ fn a_report_refuses_missing_blocks_forbidden_claims_and_what_it_did_not_derive()
         (
             "more pairs than the attempted samples can back at one per arm",
             Box::new(|r| {
-                // 320 pairs need 320 attempted samples per arm; s000 and
-                // s002 are two of the aged arm's 321.
+                // 313 aged passes in the table need 313 aged-arm passes in
+                // the ledger; s002 is one of them (s000 is an aged fail).
                 for record in r.samples.samples.values_mut().take(3) {
                     record.terminal = Terminal::Skipped(SkipReason::CassetteMiss);
                 }
@@ -660,9 +660,10 @@ fn a_report_refuses_missing_blocks_forbidden_claims_and_what_it_did_not_derive()
                     CampaignGates::of(&r.samples, &ceilings, &r.family, &r.arm_rates).unwrap();
             }),
             ReportError::PairsExceedSamples {
-                pairs: 320,
                 arm: ArmKind::Aged,
-                attempted: 319,
+                terminal: "pass",
+                pairs: 313,
+                samples: 312,
             },
         ),
         (
@@ -914,9 +915,10 @@ fn a_report_refuses_what_its_own_evidence_refutes() {
                 }
             }),
             ReportError::PairsExceedSamples {
-                pairs: 320,
                 arm: ArmKind::Fresh,
-                attempted: 0,
+                terminal: "pass",
+                pairs: 7,
+                samples: 0,
             },
         ),
         (
@@ -930,9 +932,10 @@ fn a_report_refuses_what_its_own_evidence_refutes() {
                     CampaignGates::of(&r.samples, &ceilings, &r.family, &r.arm_rates).unwrap();
             }),
             ReportError::PairsExceedSamples {
-                pairs: 320,
                 arm: ArmKind::Fresh,
-                attempted: 319,
+                terminal: "any",
+                pairs: 320,
+                samples: 319,
             },
         ),
         (
@@ -1097,6 +1100,19 @@ fn a_report_refuses_what_its_own_evidence_refutes() {
             }),
             ReportError::IntervalNotDerived {
                 field: "n_clusters",
+            },
+        ),
+        (
+            "an aged pass the ledger records as a fail",
+            Box::new(|r| {
+                r.samples.samples.get_mut("s002").unwrap().terminal = Terminal::Fail;
+                r.rates = r.samples.rates().unwrap();
+            }),
+            ReportError::PairsExceedSamples {
+                arm: ArmKind::Aged,
+                terminal: "pass",
+                pairs: 313,
+                samples: 312,
             },
         ),
         (

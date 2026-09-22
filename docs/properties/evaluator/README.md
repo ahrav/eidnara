@@ -1098,8 +1098,8 @@ Report (`crates/eval-core/tests/report.rs`):
   dropped, reworded, or reordered exclusion, a stored `transfer` over a
   generated world or with no anchor set, rates that do not follow from the
   samples, a dropped sample, an analysis read under another family, arm rates
-  that disagree with the analysis, 320 pairs behind 319 attempted aged-arm
-  samples, a gate marked passed over a failing rate, an edited gate statistic, and peaks
+  that disagree with the analysis, 313 aged passes behind 312 aged-arm
+  passes, a gate marked passed over a failing rate, an edited gate statistic, and peaks
   over bounds in an open report each refuse from `serialize` and
   `parse_report`; a run stopped by its envelope publishes its peaks as the
   suppression.
@@ -1113,7 +1113,8 @@ Report (`crates/eval-core/tests/report.rs`):
   vacuous, or without a positive control, a sample skipped for an envelope
   bound the run did not hold or a reading the peaks never reached, an
   envelope bound raised above the approved profile's, attempted samples all
-  on one arm, a pair backed by an indeterminate sample, an interval whose replicate or item count is not the family's
+  on one arm, a pair backed by an indeterminate sample, an aged pass the
+  ledger records as a fail, an interval whose replicate or item count is not the family's
   or the pairs', a stop-condition skip in an open report, a lineage naming
   this run, a `profile_not_approved` skip under an approved profile, a sample
   unsupported on another surface or disabled for another scale or for `s0`,
