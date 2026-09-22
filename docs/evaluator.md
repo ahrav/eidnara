@@ -1499,11 +1499,13 @@ carries rather than read from what it says:
   pilot's, it spans between one cluster and the plan's worlds or families at
   the pilot's unit (never more than its pairs), and its `effective_n` is
   positive, at most the pair count, and below the floor
-  (`SuppressionNotDerived`); the table itself is the manifest's
-  `result_digest`. An
+  (`SuppressionNotDerived`), and the ledger backs the frozen pair count with
+  an arm result on each paired arm (`PairsExceedSamples`); the table itself
+  is the manifest's `result_digest`. An
   `envelope {exceeded}` suppression must name the reading `envelope.check()`
   shows, and a `baseline {failure}` suppression needs a surface whose bound
-  the profile resolves, since no baseline is judged without one
+  the profile resolves, since no baseline is judged without one, and a
+  failure that names a task names one that is not blank
   (`SuppressionNotDerived`); under any other suppression the peaks must be
   within the bounds (`EnvelopeNotHonoured`).
 - Accounting: `rates` must follow from `samples` (`RatesDisagree`, `Samples`);
@@ -1517,7 +1519,10 @@ carries rather than read from what it says:
   runs in the default shards, is never unbudgeted (`SampleAxisDisagrees`); a sample skipped `envelope_exceeded` must name
   this run's bound for that resource and a reading the peaks reached
   (`SampleEnvelopeDisagrees`); every injection score names a case that is not
-  blank and no case is scored twice (`InjectionScoreDisagrees`), while binding
+  blank, no case is scored twice, and each axis carries only what
+  `score_injection` produces (a stage axis is never `not_measurable`,
+  obedience never `not_reached`, exposure never `not_measurable`;
+  `InjectionScoreDisagrees`), while binding
   the scores to the planned task set is the manifest's. In an open report the
   paired analysis must count the pair table the plan froze
   (`PairCountNotFrozen {frozen, found}`, as `analyze` refuses any other) and
@@ -1526,9 +1531,10 @@ carries rather than read from what it says:
   `Gates::of` recomputes from its `counts` and the family's margins
   (`PairedGatesNotDerived`); its `interval` must be the shape
   `cluster_bootstrap_interval` derives from the family and the pair count
-  (the unit, method, replicate count, item count, at least two clusters when
-  computed and exactly one when withheld for too few, and whether it is
-  computed or withheld; `IntervalNotDerived {field}`), while the
+  (the unit, method, replicate count, item count, between two clusters and
+  the plan's worlds or families at the pilot's unit when computed and exactly
+  one when withheld for too few, and whether it is computed or withheld;
+  `IntervalNotDerived {field}`), while the
   bounds themselves are bound to the pair table by the manifest's
   `result_digest`; every paired marginal must be backed by samples on that
   arm that ended the same way, a pass, a fail, or a censored attempt, since an

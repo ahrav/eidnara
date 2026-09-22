@@ -1242,6 +1242,57 @@ fn a_report_refuses_what_its_own_evidence_refutes() {
             },
         ),
         (
+            "an injection score with an axis its scorer cannot produce",
+            Box::new(|r| {
+                r.injection = vec![InjectionScore {
+                    case_id: "c1".into(),
+                    ingested: AxisValue::NotMeasurable,
+                    retrieved: AxisValue::No,
+                    packed: AxisValue::No,
+                    obeyed: AxisValue::NotMeasurable,
+                    written_back_cross_session: AxisValue::NotMeasurable,
+                    exposure: AxisValue::NotReached,
+                }];
+            }),
+            ReportError::InjectionScoreDisagrees {
+                case_id: "c1".into(),
+            },
+        ),
+        (
+            "an injection score whose obedience was never reached",
+            Box::new(|r| {
+                r.injection = vec![InjectionScore {
+                    case_id: "c1".into(),
+                    ingested: AxisValue::Yes,
+                    retrieved: AxisValue::No,
+                    packed: AxisValue::No,
+                    obeyed: AxisValue::NotReached,
+                    written_back_cross_session: AxisValue::NotMeasurable,
+                    exposure: AxisValue::NotReached,
+                }];
+            }),
+            ReportError::InjectionScoreDisagrees {
+                case_id: "c1".into(),
+            },
+        ),
+        (
+            "an injection score whose exposure was not measurable",
+            Box::new(|r| {
+                r.injection = vec![InjectionScore {
+                    case_id: "c1".into(),
+                    ingested: AxisValue::Yes,
+                    retrieved: AxisValue::No,
+                    packed: AxisValue::No,
+                    obeyed: AxisValue::No,
+                    written_back_cross_session: AxisValue::NotReached,
+                    exposure: AxisValue::NotMeasurable,
+                }];
+            }),
+            ReportError::InjectionScoreDisagrees {
+                case_id: "c1".into(),
+            },
+        ),
+        (
             "an injection score with no case",
             Box::new(|r| {
                 r.injection = vec![InjectionScore {
@@ -1318,6 +1369,59 @@ fn a_report_refuses_what_its_own_evidence_refutes() {
             }),
             ReportError::SampleAxisDisagrees {
                 sample: "s605".into(),
+            },
+        ),
+        (
+            "an interval over more clusters than the plan has worlds",
+            Box::new(|r| {
+                // Eight affordable worlds under a consistent pilot that still
+                // meets its floor; the fixture's interval spans fifty.
+                underpowered_pilot(&mut r.family.icc_pilot);
+                r.family.icc_pilot.required_n_for_margin = 20;
+                let digest = r.family.digest().unwrap();
+                gated(r).analysis.analysis_family_digest = digest;
+            }),
+            ReportError::IntervalNotDerived {
+                field: "n_clusters",
+            },
+        ),
+        (
+            "a baseline suppression naming a blank task",
+            Box::new(|r| {
+                r.outcome = ReportOutcome::Suppressed {
+                    by: Suppression::Baseline {
+                        failure: BaselineFailure::DeliveredFalsifier { task: " ".into() },
+                    },
+                };
+                r.claims.established.clear();
+            }),
+            ReportError::SuppressionNotDerived,
+        ),
+        (
+            "an underpowered-table suppression over a ledger that backs no table",
+            Box::new(|r| {
+                r.outcome = ReportOutcome::Suppressed {
+                    by: Suppression::Analysis {
+                        reason: BlockedReason::TableUnderpowered {
+                            effective_n: ratio(3000, 309),
+                            n_clusters: 1,
+                            required_n_for_margin: 300,
+                        },
+                    },
+                };
+                r.claims.established.clear();
+                for record in r.samples.samples.values_mut() {
+                    if record.arm == ArmKind::Fresh {
+                        record.terminal = Terminal::Skipped(SkipReason::CassetteMiss);
+                    }
+                }
+                r.rates = r.samples.rates().unwrap();
+            }),
+            ReportError::PairsExceedSamples {
+                arm: ArmKind::Fresh,
+                terminal: "any",
+                pairs: 300,
+                samples: 0,
             },
         ),
         (

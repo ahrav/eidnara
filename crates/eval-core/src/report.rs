@@ -17,7 +17,7 @@ use crate::campaign::{
 };
 use crate::census::{EvaluatedSurface, Reachability};
 use crate::claim::{AnchorSet, ClaimDerivation, WorldProvenance};
-use crate::injection::InjectionScore;
+use crate::injection::{AxisValue, InjectionScore};
 use crate::manifest::{ArmRates, ClaimBoundary};
 use crate::pairs::{
     ArmKind, BaselineContrast, BaselineFailure, RECENCY_BASELINE_VERSION, StopCondition,
@@ -414,12 +414,22 @@ impl SuiteBReport {
         Ok(())
     }
 
-    /// One score per case, each naming its case; binding the scores to the
-    /// planned `TaskSet` needs the manifest the runner writes them beside.
+    /// One score per case, each naming its case and carrying only the axis
+    /// values `score_injection` produces: a stage axis is a stage value, so
+    /// never `not_measurable`; obedience is `not_measurable` without a
+    /// boundary, never `not_reached`; exposure is `not_reached` without an
+    /// output, never `not_measurable`. Binding the scores to the planned
+    /// `TaskSet` needs the manifest the runner writes them beside.
     fn check_injection(&self) -> Result<(), ReportError> {
         let mut cases = BTreeSet::new();
         for score in &self.injection {
-            if blank(&score.case_id) || !cases.insert(score.case_id.as_str()) {
+            let stage = |axis: AxisValue| axis != AxisValue::NotMeasurable;
+            let produced = stage(score.ingested)
+                && stage(score.retrieved)
+                && stage(score.packed)
+                && score.obeyed != AxisValue::NotReached
+                && score.exposure != AxisValue::NotMeasurable;
+            if blank(&score.case_id) || !produced || !cases.insert(score.case_id.as_str()) {
                 return Err(ReportError::InjectionScoreDisagrees {
                     case_id: score.case_id.clone(),
                 });
@@ -507,21 +517,29 @@ impl SuiteBReport {
                     // A positive pair count deflates to a positive effective N
                     // of at most itself, over one cluster per pair at most and
                     // no more than the plan's worlds or families at its unit.
-                    let clusters = match pilot.clustering_unit {
-                        ClusteringUnit::Family => pilot.n_families,
-                        ClusteringUnit::WorldSeed => pilot.max_affordable_worlds,
-                    }
-                    .min(pairs);
                     let whole =
                         |n: u32| Ratio::try_new(i128::from(n), 1).map_err(ReportError::Statistics);
                     if derived.is_some()
                         || *required_n_for_margin != pilot.required_n_for_margin
-                        || !(1..=clusters).contains(n_clusters)
+                        || !(1..=self.max_clusters()).contains(n_clusters)
                         || *effective_n <= Ratio::ZERO
                         || *effective_n > whole(pairs)?
                         || *effective_n >= whole(pilot.required_n_for_margin)?
                     {
                         return Err(ReportError::SuppressionNotDerived);
+                    }
+                    // The block follows a completed table of the frozen size,
+                    // so the ledger backs one arm result per pair on each arm.
+                    for arm in [ArmKind::Aged, ArmKind::Fresh] {
+                        let samples = self.arm_results(arm).iter().sum::<u64>();
+                        if u64::from(pairs) > samples {
+                            return Err(ReportError::PairsExceedSamples {
+                                arm,
+                                terminal: "any",
+                                pairs: u64::from(pairs),
+                                samples,
+                            });
+                        }
                     }
                 }
                 _ if derived.as_ref() != Some(reason) => {
@@ -531,11 +549,46 @@ impl SuiteBReport {
             }
         }
         // A baseline is judged under a bound; a surface this profile resolves
-        // none for was never judged.
-        if matches!(by, Suppression::Baseline { .. }) && self.resolved_recency_bound().is_none() {
-            return Err(ReportError::SuppressionNotDerived);
+        // none for was never judged, and a failure names the task it judged.
+        if let Suppression::Baseline { failure } = by {
+            let task = match failure {
+                BaselineFailure::Vacuous => None,
+                BaselineFailure::DeliveredFalsifier { task }
+                | BaselineFailure::MissedPositiveControl { task } => Some(task),
+            };
+            if self.resolved_recency_bound().is_none() || task.is_some_and(|task| blank(task)) {
+                return Err(ReportError::SuppressionNotDerived);
+            }
         }
         Ok(())
+    }
+
+    /// The most clusters a table under this plan spans at the pilot's unit:
+    /// one per pair at most, and no more than the plan's families or worlds.
+    fn max_clusters(&self) -> u32 {
+        let pilot = &self.family.icc_pilot;
+        let StoppingRule::FixedN { pairs } = self.family.stopping_rule;
+        match pilot.clustering_unit {
+            ClusteringUnit::Family => pilot.n_families,
+            ClusteringUnit::WorldSeed => pilot.max_affordable_worlds,
+        }
+        .min(pairs)
+    }
+
+    /// Samples on `arm` that ended as an `ArmResult`: a pass, a fail, or a
+    /// censored attempt. An indeterminate attempt has no arm result and backs
+    /// no pair.
+    fn arm_results(&self, arm: ArmKind) -> [u64; 3] {
+        let mut ended = [0u64; 3];
+        for record in self.samples.samples.values().filter(|r| r.arm == arm) {
+            match record.terminal {
+                Terminal::Pass => ended[0] += 1,
+                Terminal::Fail => ended[1] += 1,
+                Terminal::Censored { .. } => ended[2] += 1,
+                _ => {}
+            }
+        }
+        ended
     }
 
     /// What `cluster_bootstrap_interval` derives from the family and the pair
@@ -565,7 +618,7 @@ impl SuiteBReport {
                 if interval.replicates != self.family.bootstrap_replicates {
                     return disagrees("replicates");
                 }
-                if interval.n_clusters < 2 || interval.n_clusters > n_items {
+                if !(2..=self.max_clusters().min(n_items)).contains(&interval.n_clusters) {
                     return disagrees("n_clusters");
                 }
                 if interval.lower > interval.upper {
@@ -614,21 +667,9 @@ impl SuiteBReport {
     /// arm's total. Marginals the counts cannot express are left to
     /// `Gates::of`.
     fn check_pairs_backed(&self, analysis: &PairedReport) -> Result<(), ReportError> {
-        let tally = |arm: ArmKind| {
-            let mut ended = [0u64; 3];
-            for record in self.samples.samples.values().filter(|r| r.arm == arm) {
-                match record.terminal {
-                    Terminal::Pass => ended[0] += 1,
-                    Terminal::Fail => ended[1] += 1,
-                    Terminal::Censored { .. } => ended[2] += 1,
-                    _ => {}
-                }
-            }
-            ended
-        };
         let counts = &analysis.counts;
-        let [aged_pass, aged_fail, aged_censored] = tally(ArmKind::Aged);
-        let [fresh_pass, fresh_fail, fresh_censored] = tally(ArmKind::Fresh);
+        let [aged_pass, aged_fail, aged_censored] = self.arm_results(ArmKind::Aged);
+        let [fresh_pass, fresh_fail, fresh_censored] = self.arm_results(ArmKind::Fresh);
         let aged_failed = counts
             .n
             .saturating_sub(counts.aged_pass)
