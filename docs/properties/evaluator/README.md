@@ -1117,7 +1117,8 @@ Report (`crates/eval-core/tests/report.rs`):
   ledger records as a fail, an interval whose replicate or item count is not the family's
   or the pairs', a stop-condition skip in an open report, a lineage naming
   this run, a `profile_not_approved` skip under an approved profile, a sample
-  unsupported on another surface or disabled for another scale or for `s0`,
+  unsupported on another surface or on a default-production one, or disabled
+  for another scale or for `s0`,
   a tap-rejected suppression over malformed arm rates, a baseline suppression
   on a surface whose bound does not resolve, an interval withheld over no
   clusters, two injection scores for

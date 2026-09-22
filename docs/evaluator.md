@@ -1295,8 +1295,8 @@ carries rather than read from what it says:
   skipped `profile_not_approved`, since the report's profile is approved
   (`SkipDisagreesWithProfile`); a sample unsupported `surface_not_activated`
   or disabled `scale_not_budgeted` names the report's surface or the profile's
-  scale, and `s0`, which runs in the default shards, is never unbudgeted
-  (`SampleAxisDisagrees`); a sample skipped `envelope_exceeded` must name
+  scale; a `default-production` surface is never unactivated and `s0`, which
+  runs in the default shards, is never unbudgeted (`SampleAxisDisagrees`); a sample skipped `envelope_exceeded` must name
   this run's bound for that resource and a reading the peaks reached
   (`SampleEnvelopeDisagrees`); every injection score names a case and no case
   is scored twice (`InjectionScoreDisagrees`), while binding the scores to the

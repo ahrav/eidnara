@@ -437,9 +437,11 @@ impl SuiteBReport {
                     return Err(ReportError::SkipDisagreesWithProfile { sample: sample() });
                 }
                 // A sample not run on this surface, or at this scale, names
-                // the run's own axis.
+                // the run's own axis; a default-production surface is always
+                // activated.
                 Terminal::Unsupported(UnsupportedReason::SurfaceNotActivated { surface })
-                    if surface != self.surface =>
+                    if surface != self.surface
+                        || reachability_of(surface) == Reachability::DefaultProduction =>
                 {
                     return Err(ReportError::SampleAxisDisagrees { sample: sample() });
                 }

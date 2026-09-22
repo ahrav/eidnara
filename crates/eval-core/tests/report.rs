@@ -1116,6 +1116,18 @@ fn a_report_refuses_what_its_own_evidence_refutes() {
             },
         ),
         (
+            "a sample not activated on a default-production surface",
+            Box::new(|r| {
+                r.samples.samples.get_mut("s644").unwrap().terminal =
+                    Terminal::Unsupported(eval_core::UnsupportedReason::SurfaceNotActivated {
+                        surface: EvaluatedSurface::Surface1,
+                    });
+            }),
+            ReportError::SampleAxisDisagrees {
+                sample: "s644".into(),
+            },
+        ),
+        (
             "an epoch past the canonical safe range",
             Box::new(|r| r.samples.epoch = 9_007_199_254_740_993),
             ReportError::NotCanonical(ContractError::NotCanonical(
