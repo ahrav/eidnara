@@ -186,7 +186,7 @@ pub struct CutReceipt {
     pub outcome: CutOutcome,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum Cut {
     AfterAtomicTransition,
     AtQuiescence,

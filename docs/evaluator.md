@@ -1656,6 +1656,90 @@ digest (which names one store's bytes), under
 `eval-suite-c-aging-report-result/v1`, so two runs of one identity on two
 stores agree on it.
 
+## Fault episodes, cuts, effects, and liveness
+
+`fault` holds the value-level contract of a Suite C fault campaign. The runner
+injects faults through the seams that exist at HEAD, reads barrier lines,
+counts effects, and drives episodes; the core decides what those observations
+prove and refuses by name what they do not.
+
+A `FaultEpisode` is a `(trigger, scope, action, heal)` record: the drive step
+it fires at, the `FaultScope` (one `StoreFamily`, one operation), a
+`FaultAction`, the `Heal` the action's seam permits, and the `layer_contract`
+sentence the seam's own documentation states. `FaultAction` is a closed set
+mirroring the fault enums and hooks that exist: `search_episode`
+(`search_catchup::EpisodeFault`), `embedding_publication`
+(`PublicationFault`), `held_publication` (the embedding fixture's gate),
+`artifact_ingest` and `artifact_deletion` (the kernel CAS enums, including
+`after_directory_sync`, the approved directory-fsync hook), `claim_episode`
+(`claim_sources::EpisodeFault`), `external_lock_holder` (an external
+`BEGIN IMMEDIATE`), `process_kill { cut }`, and `corrupt_quiescent_file`.
+`FaultAction::heal` is the heal each class permits: `consumed` for one-shot
+enums, `released` for gates and lock holders, `reopen` for kills and
+corruption; a declared heal that differs is `HealMismatch`. A kill carries a
+`KillLabel` whose `crash_model` must be `application_crash` with
+`page_cache_intact` and whose `killed_process` must be `test_binary_child`;
+`power_loss`, `torn_write`, `unsynced_reorder`, and `eidnara_host` are
+refused (`CrashModelNotProved`, `KilledProcessNotProved`), because a
+`SIGKILL` of a test-binary child proves application-crash recovery with the
+page cache intact and nothing else. A kill without a label, a label on a
+non-kill, an empty contract sentence, and a duplicate id refuse.
+
+A `BarrierReceipt` is the line a killed child printed at its cut, read before
+the kill: it must end with the cut's name (`LineDoesNotNameCut`) and the child
+must have died by signal (`ExitedWithStatus`). A report with a kill episode
+and no barrier for it is `KillWithoutBarrier`: a kill without a barrier is a
+kill at an unknown point.
+
+`CutCoverage` holds the cuts a campaign declares (barrier names, fault
+variants, gate release points) and how many receipts each earned; a receipt
+for an undeclared cut is `UndeclaredCut`, and the verdict is
+`IncompleteCoverage { missing }` whenever a declared cut has no receipt. The
+oracle checkpoints (`Cut`) resolve to runner receipts through `cut_receipts`:
+a checkpoint receipted at least once is `Reached`, every other declared one is
+`NotReached`.
+
+`EffectLedger` counts each effect identity's `attempted`, `observed`, and
+`acknowledged` and holds what the oracle may expect of it. `lose_reply` sets
+the expectation to `one_of {applied, not_applied}` and the outcome to
+`unknown`; `read_back(identity, state)` collapses it to `exactly { state }`
+and the matching outcome, adding the observation an applied read-back proves.
+`validate` refuses, per identity, `BoundsViolated` unless `acknowledged <=
+observed <= attempted`, `PrematureSuccess` for a lost reply whose outcome is
+not `unknown` without a read-back, `ExpectationCollapsedWithoutReadBack` for
+a lost reply expecting fewer than two states, and `ReadBackContradictsCounts`.
+Aggregate totals are never consulted: a fixture whose totals satisfy the
+inequality while one identity violates it is refused.
+
+`ExpectedRefusal` names the two refusals production makes on purpose,
+`R11DeletionBearingCatchUp` (`Blocked::DeletionUnpropagated`) and
+`R24ReceiptQuotaExhausted` (`MemoryReviewerJobRefusal::MetadataQuota`); a
+`RecordedRefusal` carries the episode and the production error text, and the
+report lists them apart from safety failures.
+
+`LivenessReport` is the separate liveness mode: a `HealthyCore` (families and
+`Lane`s that must progress), the outside-core episodes, the set still armed
+when the bound was reached, and one `LaneProgress` per driven lane in that
+lane's own unit (`catch_up_episodes`, `embedding_passes`,
+`materialization_episodes`, `reviewer_coordinator_passes`): the bound, the
+steps driven, the step the predicate first held, whether it still held at the
+bound, and the block that stopped it. `verdict(bounds)` takes the approved
+profile's `LivenessBounds` and refuses `FaultHealed` for an outside-core
+episode not armed at the bound, `ArmedInsideCore`, `LaneNotDriven` for a core
+lane with no progress record, `BoundMismatch` when a lane's declared bound is
+not the profile's (a bound fitted to the observed progress is not a bound),
+and `LivenessUnmet { lane, progress_at_bound, blocked }` when the predicate
+never held, held only transiently, or the lane stopped before the bound.
+
+`FaultReport` (`eval-suite-c-fault-report/v1`) is what one fault campaign
+publishes: identity, profile digest, claim boundary, the episodes, barrier
+receipts, cut receipts, cut coverage, the effect ledger, expected refusals,
+the count of safety checks made while faults were armed (`SafetyNeverChecked`
+at zero), the optional liveness report, markers, and envelope. `validate`
+takes the profile's bounds and runs every refusal above; `parse_fault_report`
+reads a report back losslessly; `result_digest` drops barrier pids and
+envelope peaks under `eval-suite-c-fault-report-result/v1`.
+
 ## Aging shell
 
 `crates/daemon/examples/eval_runner/aging.rs` is the Suite C aging shell. It
@@ -1765,7 +1849,15 @@ the checkpoint and window markers (`flt_quiescence_receipt_all_zero`,
 `ing_window_has_pre_snapshot_supersession`,
 `ing_window_has_pre_snapshot_retirement`); the manifest refusal marker
 `wm_bulk_scaffold_presented_as_aged` is recorded by the eval-core manifest
-suite. Each suite checks that every marker it owns names one of its scenarios
+suite, and the pure fault-contract markers (`flt_premature_success_fixture_refused`,
+`flt_incomplete_coverage_named_not_pass`, `flt_crash_model_label_refused`,
+`flt_liveness_unmet_named_at_bound`) by the eval-core fault suite; `eval_fault.rs`
+owns the fault-campaign markers (`flt_lost_reply_unknown_until_readback`,
+`flt_every_declared_cut_receipted`, `flt_kill_barrier_read_before_kill`,
+`flt_r11_recorded_as_expected_refusal`, `flt_r24_recorded_as_expected_refusal`,
+`flt_liveness_bounds_met_with_faults_armed`, `flt_corruption_detected_at_quiescence`,
+`flt_external_lock_holder_released`, `flt_artifact_fault_named_errno`,
+`sls_embedding_publication_held_then_released`). Each suite checks that every marker it owns names one of its scenarios
 and runs its completeness proof on every pass: all scenarios once, then
 `Coverage::complete` over its own prefix. A whole-registry proof would need one run to reach both suites'
 preconditions and does not exist yet.

@@ -1271,6 +1271,46 @@ Checkpoint contract (`crates/eval-core/tests/checkpoint.rs`,
   digest, and a manifest that claims it with a `bulk` construction is refused
   `BulkScaffoldPresentedAsAged`.
 
+Fault contract (`crates/eval-core/tests/fault.rs`,
+`flt-fault-episode-contract-faithful`, `flt-process-kill-is-test-binary-child`,
+`flt-lost-ack-expected-is-admissible-set`,
+`flt-every-declared-cut-reached-per-campaign`,
+`flt-liveness-mode-bounded-progress-permanent-faults`):
+
+- `every_episode_is_a_named_action_with_the_heal_its_seam_permits`: an
+  episode's action is one closed variant mirroring a fault enum, hook, gate,
+  lock holder, or kill at HEAD; one-shot enums heal by consumption, gates and
+  lock holders by release, kills and corruption by reopen; a wrong heal, an
+  empty layer contract, a kill label on a non-kill, and a duplicate id refuse;
+  the tagged JSON form round-trips.
+- `a_power_loss_label_and_a_host_kill_are_refused` (marker
+  `flt_crash_model_label_refused`): `power_loss`, `torn_write`,
+  `unsynced_reorder`, and an application crash without the page cache are
+  `CrashModelNotProved`; `eidnara_host` is `KilledProcessNotProved`; a kill
+  without a label refuses; a barrier receipt must end with its cut and come
+  from a signalled child.
+- `a_missing_receipt_is_incomplete_coverage_not_pass` (marker
+  `flt_incomplete_coverage_named_not_pass`): a declared cut with no receipt is
+  `IncompleteCoverage` naming it; a receipt for an undeclared cut refuses;
+  oracle checkpoints resolve to `Reached` or `NotReached` from runner receipts.
+- `a_lost_reply_is_unknown_over_an_admissible_set_until_a_read_back_names_one_state`:
+  a lost reply expects `one_of {applied, not_applied}` with outcome `unknown`;
+  a read-back collapses it to one state and the counts that state proves.
+- `a_premature_success_fixture_is_refused` (marker
+  `flt_premature_success_fixture_refused`): an applied outcome without a
+  read-back, an expectation collapsed without one, and an identity violating
+  `acknowledged <= observed <= attempted` each refuse, including when the
+  aggregate totals hide the violation.
+- `liveness_is_unmet_at_the_bound_or_when_a_fault_healed` (marker
+  `flt_liveness_unmet_named_at_bound`): a healed outside-core fault, a fault
+  armed inside the core, an undriven core lane, a bound that is not the
+  profile's, a predicate that never held, held only transiently, or a lane
+  stopped short of its bound each refuse by name.
+- `a_fault_report_round_trips_and_refuses_what_it_cannot_prove`: the report
+  parses back equal; its result digest ignores barrier pids and envelope peaks
+  and changes with an effect outcome; a kill without a barrier, an unreceipted
+  declared cut, zero safety checks while armed, and a premature success refuse.
+
 Aging drive (`crates/daemon/tests/eval_aging.rs`, `--all-features`):
 
 - `the_aged_arm_is_built_by_replay_and_matches_the_bulk_scaffold_only_by_enumerated_deaths`
