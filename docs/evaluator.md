@@ -1500,11 +1500,14 @@ carries rather than read from what it says:
   plan already meets its floor, the surface's bound resolves, since no pair
   set compiles without one, no pre-table block derives, its
   `required_n_for_margin` is the pilot's, it spans between one cluster and
-  the plan's affordable worlds (under the family unit also its families,
-  never more than its pairs), and its `effective_n` is below the floor and
+  the worlds the plan affords and the profile runs (under the family unit
+  also its families, never more than its pairs), and its `effective_n` is
+  below the floor and
   within what `deflate` can produce over exactly `n_clusters` at the selected
-  unit: at most the pair count deflated as clusters as even as whole pairs
-  allow, at least the
+  unit: at most the smaller of the pair count deflated as clusters as even as
+  whole pairs allow and, at the other level, as the most clusters
+  `n_clusters` leaves it (one family per world at most; every affordable
+  world under the family unit), at least the
   smaller of the pair count deflated as one cluster holding all but
   `n_clusters - 1` singletons and, at the other level's ICC, as one cluster
   holding every pair
@@ -1544,8 +1547,9 @@ carries rather than read from what it says:
   (`PairedGatesNotDerived`); its `interval` must be the shape
   `cluster_bootstrap_interval` derives from the family and the pair count
   (the unit, method, replicate count, item count, between two clusters and
-  the plan's affordable worlds, under the family unit also its families, when
-  computed and exactly one when withheld for too few, endpoints ordered
+  the worlds the plan affords and the profile runs, under the family unit
+  also its families, when computed and exactly one when withheld for too
+  few, endpoints ordered
   within `[-1, 1]`, the range of `(b - c) / n`, and whether it is computed
   or withheld;
   `IntervalNotDerived {field}`), while the
