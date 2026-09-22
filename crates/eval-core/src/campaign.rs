@@ -518,10 +518,12 @@ impl SampleLedger {
     }
 }
 
-/// One dimension of the resource envelope, read as a peak. `StoreBytes`,
-/// `CassetteBytes`, and `ArtifactBytes` are the largest one store (with its
-/// WAL and shm sidecars), cassette, or artifact the run wrote; `TempRoots`
-/// and `Processes` count what the run holds at once; `ElapsedMs` and
+/// One dimension of the resource envelope, read as a peak of what the run
+/// holds at once. `StoreBytes` is the largest one store (with its WAL and shm
+/// sidecars), since a root is vacated before the next is occupied;
+/// `CassetteBytes` is every cassette the run has written, since they are kept
+/// together until it ends; `ArtifactBytes` is the largest artifact written;
+/// `TempRoots` and `Processes` count what is held at once; `ElapsedMs` and
 /// `RetainedArtifacts` accumulate over the run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

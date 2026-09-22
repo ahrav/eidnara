@@ -1245,9 +1245,10 @@ the reading that crossed the bound as `EnvelopeExceeded {resource, bound,
 observed}`; `check` names the first resource over its bound in declared
 order. `Resource` is `elapsed_ms`, `store_bytes` (the largest one store with
 its WAL and shm sidecars), `cassette_bytes`, `artifact_bytes`, `temp_roots`,
-`retained_artifacts`, or `processes`, one per `ResourceLimits` field; the
-byte resources are the largest single store, cassette, or artifact, the roots
-and processes what is held at once.
+`retained_artifacts`, or `processes`, one per `ResourceLimits` field. Each
+byte resource is the largest footprint held at once: one store, since a root
+is vacated before the next is occupied; every cassette the run has written,
+since they are kept together until it ends; the largest artifact written.
 Publication (write-then-rename into roots, stores, and cassette namespaces
 disjoint per campaign, on OS-allocated ports) is the runner's and is not
 written yet.
@@ -1401,9 +1402,12 @@ the file's size. The manifest is built before either file is renamed into
 place, and a prior run's report or manifest in the directory is refused
 before anything runs, so one directory holds one generation or none; the
 manifest's bytes and the clock after the report is serialized are not charged.
-Surface 1's task turn makes no model call, which the backend counters show;
-of the six task budgets only the deadline can censor here, since no model
-call, tool call, or token is spent on that turn.
+Surface 1's task turn makes no model call of its own, which the backend
+counters show; of the six task budgets only the deadline can censor here,
+since the task spends no model call, tool call, or token on that turn. A
+summarizer firing that lands on the task turn under the structured policy is
+the treatment's cost, not the task's: it is replayed from the arm's cassette
+and accounted in the arm's firings and refusal rate.
 
 Every test that runs a campaign is `#[ignore]`d and runs only when its
 scale's environment variable grants a budget, which becomes the profile's

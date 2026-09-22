@@ -1004,6 +1004,12 @@ fn prepare_publish(publish: &Path) -> Result<(), RunError> {
             }
         }
     }
+    // The directory must take a staged file now, not after every life has
+    // run: a probe at the report's staged path is created and removed, so a
+    // permission publication would hit refuses before a fixture starts.
+    let probe = staged_path(&publish.join(REPORT_FILE));
+    std::fs::File::create_new(&probe).map_err(|error| refused(&probe, error))?;
+    std::fs::remove_file(&probe).map_err(|error| refused(&probe, error))?;
     Ok(())
 }
 

@@ -440,6 +440,31 @@ fn a_publish_target_the_shell_cannot_write_is_refused_before_anything_runs() {
         assert_eq!(std::fs::read(&prior).unwrap(), b"{}");
         assert_eq!(std::fs::read_dir(&publish).unwrap().count(), 1);
     }
+
+    // A directory the shell cannot write into is refused before a fixture
+    // starts, not after every life has run.
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let publish = root.path().join("read-only");
+        std::fs::create_dir(&publish).unwrap();
+        std::fs::set_permissions(&publish, std::fs::Permissions::from_mode(0o555)).unwrap();
+        let started = std::time::Instant::now();
+        let refused = campaign::run(&Config {
+            publish: publish.clone(),
+            ..config
+        })
+        .err();
+        std::fs::set_permissions(&publish, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(
+            refused,
+            Some(RunError::Publish {
+                path: staged_path(&publish.join(REPORT_FILE)),
+                kind: std::io::ErrorKind::PermissionDenied,
+            })
+        );
+        assert!(started.elapsed() < std::time::Duration::from_secs(10));
+        assert_eq!(std::fs::read_dir(&publish).unwrap().count(), 0);
+    }
 }
 
 /// An S0 campaign driven through the daemon's lifecycle takes longer than the
