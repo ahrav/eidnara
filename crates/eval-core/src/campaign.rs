@@ -219,7 +219,7 @@ impl RunProfile {
         // Digestible on both runtimes: no integer may leave the canonical safe range.
         let value = serde_json::to_value(self).map_err(|e| ProfileError::Shape(e.to_string()))?;
         canonical_json_encode(&value).map_err(ProfileError::NotCanonical)?;
-        if self.name.is_empty() {
+        if self.name.trim().is_empty() {
             return Err(ProfileError::Empty { field: "name" });
         }
         let b = &self.budgets;

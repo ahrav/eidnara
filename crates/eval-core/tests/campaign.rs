@@ -175,6 +175,11 @@ fn a_profile_refuses_every_absent_or_zero_setting_by_name() {
             ProfileError::Empty { field: "name" },
         ),
         (
+            "a blank name",
+            Box::new(|p| p.name = " \t".into()),
+            ProfileError::Empty { field: "name" },
+        ),
+        (
             "zero worlds",
             Box::new(|p| p.worlds = 0),
             ProfileError::Zero { field: "worlds" },

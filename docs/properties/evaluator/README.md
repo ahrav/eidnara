@@ -1031,7 +1031,7 @@ Campaign (`crates/eval-core/tests/campaign.rs`):
   an upper-case run ID refuses; each scale names its budget variable or none.
 - `a_profile_refuses_every_absent_or_zero_setting_by_name`: every field is
   required, the approval as an explicit `null` (an absent key is `Lossy`); an
-  unknown field refuses; another schema, an empty name, a zero in each of
+  unknown field refuses; another schema, an empty or blank name, a zero in each of
   worlds, tasks, event limit, three budgets, two envelope dimensions, and a
   liveness bound, a malformed or over-one ceiling, an unset censoring or
   over-one refusal ceiling, an empty bound map, surface 1 off its pin, a zero
