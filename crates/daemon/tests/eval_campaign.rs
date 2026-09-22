@@ -368,6 +368,16 @@ fn an_unapproved_profile_runs_no_campaign() {
         approval: Some(approval()),
         ..config
     };
+    let long = Config {
+        aged_messages: u32::MAX,
+        ..short.clone()
+    };
+    assert_eq!(
+        campaign::run(&long).err(),
+        Some(RunError::AgedHistoryTooLong {
+            aged_messages: u32::MAX,
+        })
+    );
     assert_eq!(
         campaign::run(&short).err(),
         Some(RunError::AgedHistoryTooShort {

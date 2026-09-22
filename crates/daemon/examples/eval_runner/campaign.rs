@@ -38,7 +38,8 @@ use sha2::{Digest, Sha256};
 
 use super::support::direct_host::{Backend, Launch, fixture_binary};
 use super::support::eval_surface::{
-    EPOCH_MS, Knobs, Pass, SurfaceLedger, World, block_on, lifecycle, observe_rendered, pass, text,
+    EPOCH_MS, Knobs, Pass, SurfaceLedger, World, block_on, drain, lifecycle, observe_rendered,
+    pass, text,
 };
 use super::support::publish::{staged_path, write_then_rename};
 
@@ -73,6 +74,11 @@ pub enum RunError {
     AgedHistoryTooShort {
         aged_messages: u32,
         window: u32,
+    },
+    /// Twice the message count, the event bound the profile declares, does
+    /// not fit a `u32`.
+    AgedHistoryTooLong {
+        aged_messages: u32,
     },
     /// The publish directory could not be created, or a staged file already
     /// sits where the create-new publisher stages its own.
@@ -472,6 +478,9 @@ fn live(
         let pass = pass(&fixture, world, prompt, &knobs).await;
         (turns, pass)
     });
+    // The task turn drains like every lifecycle turn: a firing it spawned
+    // finishes before its diagnostics, the counters, and the store are read.
+    drain(&fixture);
     let mut firings: u32 = 0;
     let mut failures_seen = false;
     for diagnostics in turns
@@ -1042,7 +1051,10 @@ pub fn run(config: &Config) -> Result<Run, RunError> {
             .as_millis(),
     )
     .unwrap();
-    let max_events_per_log = aged_messages.max(64) * 2;
+    let max_events_per_log = aged_messages
+        .max(64)
+        .checked_mul(2)
+        .ok_or(RunError::AgedHistoryTooLong { aged_messages })?;
     let profile = profile(scale, max_events_per_log, elapsed_ms, approval.clone());
     profile.approved()?;
     let window = profile.baseline_bounds[&EvaluatedSurface::Surface1];

@@ -264,11 +264,16 @@ mod unix {
         for group in lines.chunks(SUMMARY_CHUNK) {
             let start = group[0].0;
             let end = group[group.len() - 1].1;
+            // Escaped as element content, so a message saying `<T> & B`
+            // leaves the document well-formed; the validator unescapes it.
             let text = group
                 .iter()
                 .map(|(_, _, text)| text.as_str())
                 .collect::<Vec<_>>()
-                .join("; ");
+                .join("; ")
+                .replace('&', "&amp;")
+                .replace('<', "&lt;")
+                .replace('>', "&gt;");
             segments.push_str(&format!(
                 r#"<history_segment start="{start}" end="{end}" title="messages {start} to {end}" episode_type="feature" importance="50"><p1>{text}</p1><p2>{text}</p2><p3>messages {start} to {end}</p3><p4 /></history_segment>"#
             ));
@@ -352,7 +357,7 @@ mod unix {
                                 // the counters.
                                 let _ = ack.send(());
                                 events.emit(BackendEvent::AssistantText {
-                                    text: "fixture-released".to_owned(),
+                                    text: summary.unwrap_or_else(|| "fixture-released".to_owned()),
                                     finish_reason: None,
                                 });
                                 counters.completed.fetch_add(1, Ordering::SeqCst);
@@ -860,6 +865,11 @@ mod unix {
         let model_backend: Arc<dyn LlmExecutionBackend> = match &cassette {
             CassetteMode::Off => Arc::clone(&backend) as Arc<dyn LlmExecutionBackend>,
             CassetteMode::Record { path, namespace } => {
+                // The recording is renamed into place at exit; a file already
+                // there is a cassette someone trusts, never replaced.
+                if path.symlink_metadata().is_ok() {
+                    return Err(format!("cassette destination exists: {}", path.display()).into());
+                }
                 let recorder = CassetteBackend::recording(
                     namespace,
                     Arc::clone(&backend) as Arc<dyn LlmExecutionBackend>,
