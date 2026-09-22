@@ -1507,11 +1507,11 @@ carries rather than read from what it says:
   unit: at most the smaller of the pair count deflated as clusters as even as
   whole pairs allow and, at the other level, as the most clusters
   `n_clusters` leaves it (one family per world at most; every affordable
-  world under the family unit), at least the
-  smaller of the pair count deflated as one cluster holding all but
-  `n_clusters - 1` singletons and, at the other level's ICC, as one cluster
-  holding every pair
-  (`SuppressionNotDerived`), and the ledger backs the frozen pair count with
+  world under the family unit), at least the smaller of the pair count
+  deflated as one cluster holding all but `n_clusters - 1` singletons and, at
+  the other level, as the fewest clusters `n_clusters` forces on it (one
+  family; a world per family), just as lopsided (`SuppressionNotDerived`),
+  and the ledger backs the frozen pair count with
   an arm result on each paired arm (`PairsExceedSamples`); the table itself
   is the manifest's `result_digest`. An
   `envelope {exceeded}` suppression must name the reading `envelope.check()`
