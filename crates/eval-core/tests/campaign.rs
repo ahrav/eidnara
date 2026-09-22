@@ -651,6 +651,16 @@ fn the_envelope_records_the_peak_that_crossed_it_and_refuses_from_that_reading()
         envelope.peaks.processes, 7,
         "the crossing reading is on record"
     );
+    // A later reading within the bound does not unlatch the breach: the peak
+    // is what is over, and the peak is what the refusal names.
+    assert_eq!(
+        envelope.observe(Resource::Processes, 3),
+        Err(EnvelopeExceeded {
+            resource: Resource::Processes,
+            bound: 6,
+            observed: 7,
+        })
+    );
     assert_eq!(
         envelope.check(),
         Err(EnvelopeExceeded {

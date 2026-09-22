@@ -385,7 +385,11 @@ impl SuiteBReport {
             .and_then(|declared| recency_bound(self.surface, Some(declared)).ok())
     }
 
-    fn check_baseline(&self, baseline: &BaselineContrast) -> Result<(), ReportError> {
+    /// The contrast this surface and profile produce: `check_recency_baseline`
+    /// delivers at most the window's `recency_bound` ids and counts each
+    /// control role over disjoint pairs of a set the campaign ran, so the two
+    /// roles together are at most the analyzed pairs, and each is exercised.
+    fn check_baseline(&self, baseline: &BaselineContrast, pairs: u64) -> Result<(), ReportError> {
         let disagrees = |field| Err(ReportError::BaselineDisagrees { field });
         if baseline.baseline_version != RECENCY_BASELINE_VERSION {
             return disagrees("baseline_version");
@@ -396,18 +400,20 @@ impl SuiteBReport {
         if self.resolved_recency_bound() != Some(baseline.recency_bound) {
             return disagrees("recency_bound");
         }
-        for (field, count) in [
-            ("delivered_ids", baseline.delivered_ids),
+        let (failed, passed) = (
+            u64::from(baseline.falsification_pairs_failed),
+            u64::from(baseline.positive_controls_passed),
+        );
+        for (field, count, most) in [
             (
-                "falsification_pairs_failed",
-                baseline.falsification_pairs_failed,
+                "delivered_ids",
+                u64::from(baseline.delivered_ids),
+                u64::from(baseline.recency_bound),
             ),
-            (
-                "positive_controls_passed",
-                baseline.positive_controls_passed,
-            ),
+            ("falsification_pairs_failed", failed, pairs),
+            ("positive_controls_passed", passed, pairs - failed),
         ] {
-            if count == 0 {
+            if count == 0 || count > most {
                 return disagrees(field);
             }
         }
@@ -535,7 +541,13 @@ impl SuiteBReport {
                     // no more than the plan's worlds or families at its unit.
                     let whole =
                         |n: u32| Ratio::try_new(i128::from(n), 1).map_err(ReportError::Statistics);
+                    // With no positive ICC nothing deflates: the table's
+                    // effective N is its pair count, which the plan already
+                    // holds to the floor, so no table blocks.
+                    let deflates =
+                        pilot.icc_family > Ratio::ZERO || pilot.icc_world_seed > Ratio::ZERO;
                     if derived.is_some()
+                        || !deflates
                         || *required_n_for_margin != pilot.required_n_for_margin
                         || !(1..=self.max_clusters()).contains(n_clusters)
                         || *effective_n <= Ratio::ZERO
@@ -769,7 +781,7 @@ impl SuiteBReport {
         if gates != gated.gates {
             return Err(ReportError::GatesNotDerived);
         }
-        self.check_baseline(&gated.baseline)?;
+        self.check_baseline(&gated.baseline, gated.analysis.counts.n)?;
         self.envelope
             .check()
             .map_err(ReportError::EnvelopeNotHonoured)

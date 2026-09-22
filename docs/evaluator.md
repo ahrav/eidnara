@@ -1433,10 +1433,11 @@ counts the passed, failed, censored, and indeterminate samples; `rates` reports
 each terminal family's share of every declared sample.
 
 **Envelope.** `Envelope {bounds, peaks}` is held from launch. `observe(resource,
-value)` records the peak first and refuses second, so `envelope_peaks` shows
-the reading that crossed the bound as `EnvelopeExceeded {resource, bound,
-observed}`; `check` names the first resource over its bound in declared
-order. `Resource` is `elapsed_ms`, `store_bytes` (a store with its WAL and
+value)` records the peak first and refuses second while the peak is over its
+bound, so `envelope_peaks` shows the reading that crossed the bound as
+`EnvelopeExceeded {resource, bound, observed}` and a breach stays refused
+however later readings fall; `check` names the first resource over its bound
+in declared order. `Resource` is `elapsed_ms`, `store_bytes` (a store with its WAL and
 shm sidecars), `cassette_bytes`, `artifact_bytes`, `temp_roots`,
 `retained_artifacts`, or `processes`, one per `ResourceLimits` field.
 Publication (write-then-rename into roots, stores, and cassette namespaces
@@ -1495,8 +1496,10 @@ carries rather than read from what it says:
   name exactly the derived block (`SuppressionNotDerived`). A
   `table_underpowered` block is the completed table's own power, which only
   the pair table shows, so the report holds it to what the family fixes
-  instead: no pre-table block derives, its `required_n_for_margin` is the
-  pilot's, it spans between one cluster and the plan's affordable worlds
+  instead: some ICC is positive, since nothing deflates otherwise and the
+  plan already meets its floor, no pre-table block derives, its
+  `required_n_for_margin` is the pilot's, it spans between one cluster and
+  the plan's affordable worlds
   (under the family unit also its families, never more than its pairs), and
   its `effective_n` is
   positive, at most the pair count, and below the floor
@@ -1553,9 +1556,11 @@ carries rather than read from what it says:
   be the ones `CampaignGates::of` recomputes from the samples, the profile's
   ceilings, the family, and the arm rates (`GatesNotDerived`); the baseline
   contrast must carry `RECENCY_BASELINE_VERSION`, the report's surface, the
-  bound `recency_bound` resolves from the profile's `baseline_bounds`, and a
-  non-zero `delivered_ids`, `falsification_pairs_failed`, and
-  `positive_controls_passed` (`BaselineDisagrees {field}`), since a set the
+  bound `recency_bound` resolves from the profile's `baseline_bounds`, a
+  non-zero `delivered_ids` of at most that bound (the window holds no more),
+  and non-zero `falsification_pairs_failed` and `positive_controls_passed`
+  that together fit within the analyzed pairs, since the roles are disjoint
+  pairs of a set the campaign ran (`BaselineDisagrees {field}`); a set the
   compiler accepts has both control roles and a vacuous contrast is a
   `baseline {vacuous}` suppression, never gated evidence; and the envelope's
   peaks must be within its bounds (`EnvelopeNotHonoured`).

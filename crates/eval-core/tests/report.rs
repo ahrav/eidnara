@@ -1040,6 +1040,27 @@ fn a_report_refuses_what_its_own_evidence_refutes() {
             ReportError::SuppressionNotDerived,
         ),
         (
+            "an underpowered-table suppression under ICCs that deflate nothing",
+            Box::new(|r| {
+                // With both ICCs at zero the table's effective N is its pair
+                // count, which the plan already holds to the floor.
+                let pilot = &mut r.family.icc_pilot;
+                pilot.icc_world_seed = Ratio::ZERO;
+                pilot.effective_n_at_max = ratio(900, 1);
+                r.outcome = ReportOutcome::Suppressed {
+                    by: Suppression::Analysis {
+                        reason: BlockedReason::TableUnderpowered {
+                            effective_n: ratio(1, 1),
+                            n_clusters: 1,
+                            required_n_for_margin: 300,
+                        },
+                    },
+                };
+                r.claims.established.clear();
+            }),
+            ReportError::SuppressionNotDerived,
+        ),
+        (
             "an underpowered-table suppression under a pilot that already blocks",
             Box::new(|r| {
                 underpowered_pilot(&mut r.family.icc_pilot);
@@ -1070,6 +1091,24 @@ fn a_report_refuses_what_its_own_evidence_refutes() {
                 bound: 6,
                 observed: 99,
             }),
+        ),
+        (
+            "a baseline that delivered more ids than its window holds",
+            Box::new(|r| gated(r).baseline.delivered_ids = 101),
+            ReportError::BaselineDisagrees {
+                field: "delivered_ids",
+            },
+        ),
+        (
+            "a baseline judged over more control pairs than the table has",
+            Box::new(|r| {
+                let g = gated(r);
+                g.baseline.falsification_pairs_failed = 200;
+                g.baseline.positive_controls_passed = 101;
+            }),
+            ReportError::BaselineDisagrees {
+                field: "positive_controls_passed",
+            },
         ),
         (
             "a baseline contrast on another surface",
