@@ -622,16 +622,18 @@ jobs:
         with:
           tool: cargo-nextest@0.9.143
 
-      - name: S0 campaign
-        # The campaign drives every arm through the daemon's lifecycle and
-        # takes longer than the rest of the daemon's suite, so it is ignored in
-        # the shards and runs here under the budget that becomes its elapsed
-        # bound. S1 stays unbudgeted here and records itself disabled.
+      - name: S0 campaigns
+        # The Suite B campaign drives every arm through the daemon's lifecycle
+        # and the Suite C aging campaign lives one history three times, so
+        # both take longer than the rest of the daemon's suite; they are
+        # ignored in the shards and run here under the budget that becomes
+        # their elapsed bound. S1 stays unbudgeted here and records itself
+        # disabled.
         env:
           EIDNARA_EVAL_S0_BUDGET_MS: "1800000"
         run: >
           cargo +1.98 nextest run --profile ci -p daemon --all-features --locked
-          --test eval_campaign --run-ignored all
+          --test eval_campaign --test eval_aging --run-ignored all
 
   stable:
     name: lint and test (stable)

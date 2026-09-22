@@ -4,10 +4,17 @@
 //! allowlist and the secret scanner, and writes the cassette; TypeScript only
 //! forwards requests and compares the digest strings it gets back.
 //! `campaign` runs one Suite B campaign through the direct-host fixture under
-//! an approved profile and publishes its report and manifest.
+//! an approved profile and publishes its report and manifest. `aging` runs
+//! one Suite C aging campaign in-process and publishes its report and
+//! manifest.
 
 #![forbid(unsafe_code)]
 
+/// The aging shell is shared with the daemon's aging test, which drives its
+/// stores directly and uses more of it than the subcommand does.
+#[cfg(unix)]
+#[allow(dead_code)]
+mod aging;
 #[cfg(unix)]
 mod campaign;
 /// The fixture and surface helpers are shared with the evaluator tests, which
@@ -333,12 +340,39 @@ fn run_campaign(args: impl Iterator<Item = String>) -> io::Result<()> {
     Ok(())
 }
 
+/// Runs the aging campaign and prints one JSON line naming what was published.
+#[cfg(unix)]
+fn run_aging(args: impl Iterator<Item = String>) -> io::Result<()> {
+    let config = aging::config_from_args(args).map_err(io::Error::other)?;
+    let run = aging::run(&config).map_err(io::Error::other)?;
+    let digest = |bytes: &[u8]| format!("{:x}", sha2::Sha256::digest(bytes));
+    let summary = json!({
+        "report": config.publish.join(aging::REPORT_FILE),
+        "report_digest": digest(&run.report_bytes),
+        "manifest": config.publish.join(aging::MANIFEST_FILE),
+        "manifest_digest": digest(&run.manifest_bytes),
+        "eval_run_id": run.manifest.eval_run_id,
+        "status": run.manifest.status,
+        "steps": run.report.steps,
+        "checkpoint_step": run.report.checkpoint_step,
+        "live_digests_equal": run.report.against_resumed.live_digests_equal,
+        "resumed_projection": run.report.against_resumed.later,
+        "divergences": run.report.against_resumed.divergences.len(),
+        "bulk_divergences": run.report.against_bulk.divergences.len(),
+        "markers": run.report.markers,
+    });
+    println!("{summary}");
+    Ok(())
+}
+
 fn main() {
     let mut args = std::env::args().skip(1);
     let outcome = match args.next().as_deref() {
         Some("cassette-oracle") => serve(io::stdin().lock(), io::stdout().lock()),
         #[cfg(unix)]
         Some("campaign") => run_campaign(args),
+        #[cfg(unix)]
+        Some("aging") => run_aging(args),
         other => Err(io::Error::other(format!(
             "{USAGE}{} (got {other:?})",
             campaign_usage()
@@ -351,11 +385,11 @@ fn main() {
 }
 
 #[cfg(unix)]
-fn campaign_usage() -> &'static str {
-    campaign::USAGE
+fn campaign_usage() -> String {
+    format!("{} | eval_runner {}", campaign::USAGE, aging::USAGE)
 }
 
 #[cfg(not(unix))]
-fn campaign_usage() -> &'static str {
-    "campaign (unix only)"
+fn campaign_usage() -> String {
+    "campaign | aging (unix only)".to_string()
 }

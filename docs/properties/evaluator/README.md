@@ -10,8 +10,8 @@ they would distort reachability summaries.
 Records enter this directory when their checks are re-verified at the
 then-current HEAD, in the METHOD field order from [`../METHOD.md`](../METHOD.md).
 Until then, this file lists the executed checks the Phase 0 regression net,
-the Phase 1 world model, the Phase 2 stage ledger, and the Phase 3 cassette
-provide, so a reader can find them by test name.
+the Phase 1 world model, the Phase 2 stage ledger, the Phase 3 cassette, and
+the Phase 4 checkpoints provide, so a reader can find them by test name.
 
 ## Phase 0 executed checks
 
@@ -1290,6 +1290,65 @@ Aging drive (`crates/daemon/tests/eval_aging.rs`, `--all-features`):
   `CommitSeqDiffers` and a cleared memory history is `HistorySlipped { memory }`.
 - `a_history_too_short_to_straddle_a_death_is_refused`: two messages yield no
   straddling step.
+Aging shell (`crates/daemon/tests/eval_aging.rs`, `--all-features`; the
+completeness proof and the built-example test are ignored and run in the
+`eval-campaign` CI job under `EIDNARA_EVAL_S0_BUDGET_MS`, like the Suite B
+campaign; the in-process scenario runs in the default shards under a fixed
+bound because it finishes inside the daemon suite's wall clock):
+
+- `a_quiescent_copy_resumes_the_full_replay_in_one_incarnation`
+  (`ing-aged-arm-one-store-incarnation-replay-driven`,
+  `flt-checkpoint-quiescent-copy-controlled-replay`,
+  `sls-memory-store-checkpoint-quiescence-receipt`,
+  `ing-bulk-vs-replay-guard-digest-enumerated-divergences`,
+  `ing-window-contains-pre-snapshot-supersession`; markers
+  `flt_quiescence_receipt_all_zero`, `ing_aged_arm_restarted_between_sessions`,
+  `ing_window_has_pre_snapshot_supersession`,
+  `ing_window_has_pre_snapshot_retirement`, `flt_prefix_history_slipped`): a
+  40-message history with corrections and invalidations is lived end to end
+  through the kernel, projection, and memory store on one root, every step
+  drained to quiescence, and again as a prefix, a quiescent copy, and the
+  suffix on the copy; the copy's receipt carries every declared counter at
+  zero, every WAL truncated with a non-negative frame count, no sidecar bytes,
+  and every handle closed over all three families, and names the three store
+  files and the kernel's artifact objects; the copy reopens under the same
+  persisted incarnation with the prefix's snapshot; the resumed life advances
+  the tip without rewriting anything at or before it and ends with the full
+  life's `StateSnapshot`, so the guard digests agree while the two lives'
+  incarnations differ; the resumed projection is rebuilt at the checkpoint
+  commit because its hold died with the kernel lease, and its comparison
+  against the full life's projection, like the bulk scaffold's, shows equal
+  live digests and only `tombstoned_before_snapshot` divergences, of which the
+  bulk comparison has more; the window after the checkpoint holds at least one
+  supersession and one retirement of a descriptor created before it; a slipped
+  memory segment is `HistorySlipped { memory }`; the published report parses
+  back equal and the manifest says `prefix_then_generate` and `replay`, names
+  the report by its result digest and the checkpoint by the witness digest,
+  and carries the aging shell's own root seed.
+- `a_copy_with_pending_work_is_refused_by_the_counter_it_left` (marker
+  `flt_copy_attempted_mid_episode`): a root closed after a mutation with no
+  drain reports the unpublished outbox, the copy is
+  `PendingWork { kernel, outbox_unpublished }`, and nothing is written.
+- `a_reader_holding_the_projection_leaves_the_checkpoint_busy` (marker
+  `flt_checkpoint_observed_busy`): a read transaction held on the projection
+  leaves `checkpoint_truncate` busy, and the copy is
+  `WalNotTruncated { search_projection }`.
+- `a_copy_beside_a_live_memory_store_handle_is_refused` (marker
+  `sls_memstore_copy_refused_live_handle`): a memory store opened after the
+  close holds the lease, so the copy's probe fails and the copy is
+  `HandleOpen { memory }`.
+- `a_foreign_incarnation_is_refused_at_reopen` (marker
+  `flt_foreign_incarnation_refused_at_reopen`): a copy reopened against
+  another store's checkpoint is `ForeignIncarnation`; a copy missing one of
+  its kernel artifact objects is `FileMissing` naming it.
+- `an_unapproved_profile_refuses_before_any_store_opens`: no approval, no
+  campaign, nothing published.
+- `the_example_publishes_the_same_digests_as_the_in_process_run`: the built
+  `eval_runner` example runs the aging campaign from its command line, and
+  its published report carries the in-process run's full and resumed guard
+  digests, both comparisons, and window deaths, while its checkpoint digest
+  differs, since it copied another store; a missing flag is refused before
+  anything runs.
 
 ## Gaps recorded here
 
