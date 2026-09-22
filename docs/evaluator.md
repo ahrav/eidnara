@@ -1549,10 +1549,9 @@ carries rather than read from what it says:
   (the unit, method, replicate count, item count, between two clusters and
   the worlds the plan affords and the profile runs, under the family unit
   also its families, when computed and exactly one when withheld for too
-  few, endpoints ordered
-  within `[-1, 1]`, the range of `(b - c) / n`, and whether it is computed
-  or withheld;
-  `IntervalNotDerived {field}`), while the
+  few, endpoints ordered within `[-1, 1]`, the range of `(b - c) / n`, and
+  exactly `[0, 0]` when no pair is discordant, and whether it is computed or
+  withheld; `IntervalNotDerived {field}`), while the
   bounds themselves are bound to the pair table by the manifest's
   `result_digest`; every paired marginal must be backed by samples on that
   arm that ended the same way, a pass, a fail, or a censored attempt, since an
@@ -1561,8 +1560,9 @@ carries rather than read from what it says:
   passes, fails, and censored attempts; `b`, a fresh arm that did not fail,
   against fresh passes and censored attempts together, `c` against fresh
   fails, `fresh_censored` against fresh censored attempts, and `n` against
-  the fresh arm's total; `PairsExceedSamples {arm, terminal, pairs,
-  samples}`); the run gates must
+  the fresh arm's total; an arm with exactly one result per pair backs every
+  pair with it, so its directly counted marginals equal the ledger's;
+  `PairsExceedSamples {arm, terminal, pairs, samples}`); the run gates must
   be the ones `CampaignGates::of` recomputes from the samples, the profile's
   ceilings, the family, and the arm rates (`GatesNotDerived`); the baseline
   contrast must carry `RECENCY_BASELINE_VERSION`, the report's surface, the

@@ -1348,8 +1348,9 @@ Report (`crates/eval-core/tests/report.rs`):
   what its recorded clusters allow, as if clusters split pairs, as if one
   world spanned many families, or as if many families shared one world, or on a surface whose bound does not resolve,
   an interval outside the statistic's range or over more clusters than the
-  approved profile's worlds, a baseline that delivered more ids than its
-  window holds, whose
+  approved profile's worlds or with width where every pair is concordant, a
+  censored fresh arm the table does not count, a baseline that delivered more
+  ids than its window holds, whose
   failed falsifications outnumber the table, or that was judged over more
   control pairs than the table has, a packing-only unsupported
   reason off the packing surface, an injection score with a blank case, with
@@ -1357,10 +1358,12 @@ Report (`crates/eval-core/tests/report.rs`):
   not have observed, two injection scores for
   one case or one with no case, and an epoch past the canonical safe range
   each refuse by name
-  from `serialize` and `parse_report`; a run its envelope stopped, skipping
-  the rest under the crossing reading and naming it as the suppression,
-  round-trips, as does a tap-rejected run skipping the rest under condition
-  (a), while a skip under (b) beside it refuses.
+  from `serialize` and `parse_report`; a run its envelope stopped, with a
+  sample skipped under the crossing reading and that reading named as the
+  suppression, round-trips, as does a tap-rejected run with a sample skipped
+  under condition (a), while a skip under (b) beside it refuses; whether any
+  sample may be attempted after such a skip is the runner's ordering
+  contract, not tested here.
 
 ## Gaps recorded here
 
