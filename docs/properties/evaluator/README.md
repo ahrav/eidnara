@@ -1356,7 +1356,12 @@ bound because it finishes inside the daemon suite's wall clock):
   `-wal` sidecar whose metadata fails for any reason but absence panics by
   path rather than reading as zero bytes.
 - `an_unapproved_profile_refuses_before_any_store_opens`: no approval, no
+  plan (the message count is one no history could be generated for), no
   campaign, nothing published.
+- `work_enqueued_between_the_close_and_the_copy_is_refused`: a memory store
+  opened after the close that enqueues a capture job and lets go before the
+  copy's probe is `PendingWork { memory, capture_jobs_pending, 1 }`, and
+  nothing is written.
 - `the_example_publishes_the_same_digests_as_the_in_process_run`: the built
   `eval_runner` example runs the aging campaign from its command line, and
   its published report carries the in-process run's full and resumed guard

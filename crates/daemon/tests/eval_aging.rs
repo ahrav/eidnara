@@ -22,6 +22,7 @@ use eval_core::{
     StateSnapshot, StoreFamily, WindowDeaths, WorkCounter, parse_aging_report, parse_manifest,
 };
 use memory_store::MemoryStore;
+use memory_store::memory_capture::CaptureSource;
 use rusqlite::{Connection, OpenFlags};
 use support::direct_host::example_binary;
 
@@ -302,6 +303,49 @@ fn a_copy_beside_a_live_kernel_handle_is_refused() {
 }
 
 #[test]
+fn work_enqueued_between_the_close_and_the_copy_is_refused() {
+    let plan = plan(MESSAGES).unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let mut stores = Stores::open(root.path(), plan.rendering.clone());
+    live(&mut stores, &plan.steps[..3]);
+    let closed = stores.close();
+    assert_eq!(
+        closed.receipt.stores[&StoreFamily::Memory].pending[&WorkCounter::CaptureJobsPending],
+        0
+    );
+    // Another holder takes the released lease, leaves work, and lets go
+    // before the copy's probe runs.
+    let holder = MemoryStore::open(&daemon::store_descriptor_in(closed.root())).unwrap();
+    holder
+        .enqueue_memory_capture(
+            CaptureSource {
+                project: "project-0",
+                harness: "pi",
+                session_id: "session-0",
+                message_id: "message-0",
+                role: "user",
+                text: "left behind",
+            },
+            0,
+        )
+        .unwrap();
+    drop(holder);
+    let into = tempfile::tempdir().unwrap();
+    assert!(matches!(
+        closed.copy(into.path()).err().unwrap(),
+        CheckpointRefused::PendingWork {
+            family: StoreFamily::Memory,
+            counter: WorkCounter::CaptureJobsPending,
+            observed: 1,
+        }
+    ));
+    assert!(
+        std::fs::read_dir(into.path()).unwrap().next().is_none(),
+        "a refused copy writes nothing"
+    );
+}
+
+#[test]
 fn a_copy_missing_a_store_file_is_refused_at_reopen() {
     let plan = plan(MESSAGES).unwrap();
     for file in [
@@ -367,6 +411,8 @@ fn an_unapproved_profile_refuses_before_any_store_opens() {
     let publish = tempfile::tempdir().unwrap();
     let mut config = config(publish.path().join("out"), 600_000);
     config.approval = None;
+    // A history this long is never generated: the refusal comes first.
+    config.messages = u32::MAX;
     assert!(matches!(
         aging::run(&config).err().unwrap(),
         RunError::Profile(ProfileError::NotApproved { .. })

@@ -1697,7 +1697,9 @@ memory store release their leases at close, so `Closed::copy` reopens each of
 them once to prove no other holder took its lease after the close, and holds
 each probe until the copy is done; the probe
 itself writes a fence, so on success that store's WAL is truncated and its
-sidecar read again before the receipt is admitted, and a held lease is
+sidecar read again, and every counter is read again while both probes are
+held, so work left by a holder that took a lease between the close and the
+probe is counted before the receipt is admitted; a held lease is
 recorded as an open handle. The copy admits the receipt and
 only then copies
 `kernel/kernel.sqlite`, the kernel's artifact objects, `memory.sqlite`, and
@@ -1734,8 +1736,10 @@ agree. The bulk scaffold is compared separately: a projection built at the
 final tip from the snapshot export and embedded to quiescence has the full
 life's live digest and differs historically by every death in the history.
 
-The run refuses an unapproved profile before any store opens, charges the
-roots, store bytes, elapsed time, and artifact bytes to the envelope, and
+The run refuses an unapproved profile before the history is generated or any
+store opens (the profile's event bound is the generator's, `messages.max(64)
+* 2`, so it needs no plan), starts the envelope's clock before planning, charges
+the roots, store bytes, elapsed time, and artifact bytes to the envelope, and
 publishes `suite-c-aging-report.json` and `manifest.json` write-then-rename.
 The manifest carries the aging shell's own root seed and the running binary's
 digest in its identity, says `prefix_then_generate`, `replay`,

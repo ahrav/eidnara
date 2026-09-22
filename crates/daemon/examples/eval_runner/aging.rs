@@ -90,15 +90,22 @@ fn publish_refused((path, kind): (PathBuf, std::io::ErrorKind)) -> RunError {
 
 pub fn profile(
     scale: Scale,
-    steps: u32,
+    messages: u32,
     elapsed_ms: u64,
     approval: Option<Approval>,
 ) -> RunProfile {
-    let mut profile = suite_b(scale, steps.max(64) * 2, elapsed_ms, approval);
+    let mut profile = suite_b(scale, event_bound(messages), elapsed_ms, approval);
     profile.name = profile.name.replace("surface1-raw", "suite-c-aging");
     profile.tasks_per_world = 1;
     profile.envelope.temp_roots = 4;
     profile
+}
+
+/// The one event bound the generator enforces on the log and the profile
+/// declares, so the two cannot drift; saturating, so an absurd message count
+/// reaches the profile's refusal instead of overflowing here.
+fn event_bound(messages: u32) -> u32 {
+    messages.max(64).saturating_mul(2)
 }
 
 fn world(messages: u32) -> WorldConfig {
@@ -112,7 +119,7 @@ fn world(messages: u32) -> WorldConfig {
         repositories: Vec::new(),
         epoch_ms: EPOCH_MS,
         tick_ms: 1_000,
-        max_events_per_log: messages.max(64) * 2,
+        max_events_per_log: event_bound(messages),
         planted: Vec::new(),
     }
 }
@@ -429,33 +436,7 @@ impl Stores {
     }
 
     fn pending(&self, counter: WorkCounter) -> u64 {
-        match counter {
-            WorkCounter::OutboxUnpublished => {
-                self.corpus.kernel.pending_outbox(1024).unwrap().len() as u64
-            }
-            WorkCounter::CatchUpLag => {
-                let acknowledged: i64 = read_only(&search_file(&self.root))
-                    .query_row(
-                        "SELECT checkpoint_commit_seq FROM projection_checkpoint",
-                        [],
-                        |row| row.get(0),
-                    )
-                    .unwrap();
-                u64::try_from(self.tip() - acknowledged).unwrap()
-            }
-            WorkCounter::EmbeddingOpen => count(
-                &search_file(&self.root),
-                "SELECT COUNT(*) FROM embedding_jobs WHERE state IN ('pending','admitted')",
-            ),
-            WorkCounter::CaptureJobsPending => count(
-                &memory_file(&self.root),
-                "SELECT COUNT(*) FROM memory_capture_jobs WHERE commit_seq IS NULL AND abandoned_at_ms IS NULL",
-            ),
-            WorkCounter::ReviewerJobsOpen => count(
-                &memory_file(&self.root),
-                "SELECT COUNT(*) FROM memory_reviewer_jobs WHERE state<>'terminal'",
-            ),
-        }
+        pending(&self.root, &self.corpus.kernel, counter)
     }
 
     pub fn snapshot(&self) -> StateSnapshot {
@@ -472,17 +453,7 @@ impl Stores {
     }
 
     pub fn close(self) -> Closed {
-        let pending: BTreeMap<StoreFamily, BTreeMap<WorkCounter, u64>> = StoreFamily::ALL
-            .into_iter()
-            .map(|family| {
-                let counters = family
-                    .counters()
-                    .iter()
-                    .map(|counter| (*counter, self.pending(*counter)))
-                    .collect();
-                (family, counters)
-            })
-            .collect();
+        let pending = pending_counters(&self.root, &self.corpus.kernel);
         let Stores {
             root,
             corpus,
@@ -551,6 +522,51 @@ impl Stores {
             applied,
         }
     }
+}
+
+fn pending(root: &Path, kernel: &KernelStore, counter: WorkCounter) -> u64 {
+    match counter {
+        WorkCounter::OutboxUnpublished => kernel.pending_outbox(1024).unwrap().len() as u64,
+        WorkCounter::CatchUpLag => {
+            let acknowledged: i64 = read_only(&search_file(root))
+                .query_row(
+                    "SELECT checkpoint_commit_seq FROM projection_checkpoint",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            u64::try_from(kernel.tip().unwrap() - acknowledged).unwrap()
+        }
+        WorkCounter::EmbeddingOpen => count(
+            &search_file(root),
+            "SELECT COUNT(*) FROM embedding_jobs WHERE state IN ('pending','admitted')",
+        ),
+        WorkCounter::CaptureJobsPending => count(
+            &memory_file(root),
+            "SELECT COUNT(*) FROM memory_capture_jobs WHERE commit_seq IS NULL AND abandoned_at_ms IS NULL",
+        ),
+        WorkCounter::ReviewerJobsOpen => count(
+            &memory_file(root),
+            "SELECT COUNT(*) FROM memory_reviewer_jobs WHERE state<>'terminal'",
+        ),
+    }
+}
+
+fn pending_counters(
+    root: &Path,
+    kernel: &KernelStore,
+) -> BTreeMap<StoreFamily, BTreeMap<WorkCounter, u64>> {
+    StoreFamily::ALL
+        .into_iter()
+        .map(|family| {
+            let counters = family
+                .counters()
+                .iter()
+                .map(|counter| (*counter, pending(root, kernel, *counter)))
+                .collect();
+            (family, counters)
+        })
+        .collect()
 }
 
 const NOT_TRUNCATED: WalCheckpoint = WalCheckpoint {
@@ -627,6 +643,13 @@ impl Closed {
             Err(e) => panic!("kernel probe at {}: {e}", self.root.display()),
         };
         self.seal_after_probe(StoreFamily::Kernel, kernel_probe.is_none());
+        // Work left by a holder that took a lease between the close and its
+        // probe is counted here, while both probes are held.
+        if let Some(kernel) = &kernel_probe {
+            for (family, counters) in pending_counters(&self.root, kernel) {
+                self.receipt.stores.get_mut(&family).unwrap().pending = counters;
+            }
+        }
         let incarnation_id = kernel_incarnation_id(&self.root);
         Checkpoint::admit(&self.receipt, &incarnation_id)?;
         let mut files = BTreeMap::new();
@@ -1140,11 +1163,9 @@ pub fn run(config: &Config) -> Result<Run, RunError> {
             .as_millis(),
     )
     .unwrap();
-    let plan = plan(config.messages)?;
-    let steps = plan.steps.len() as u32;
     let profile = profile(
         config.scale,
-        steps,
+        config.messages,
         config.elapsed_bound_ms,
         config.approval.clone(),
     );
@@ -1152,6 +1173,9 @@ pub fn run(config: &Config) -> Result<Run, RunError> {
     prepare_publish(&config.publish, &[REPORT_FILE, MANIFEST_FILE]).map_err(publish_refused)?;
     let mut charges = Charges::new(profile.envelope.clone());
     let mut coverage = Coverage::default();
+    // Planning runs under the clock: the elapsed bound covers the whole run.
+    let plan = plan(config.messages)?;
+    let steps = plan.steps.len() as u32;
 
     let full = full_life(&plan, &mut charges)?;
     let resumed = resumed_life(&plan, &mut charges, &mut coverage)?;
