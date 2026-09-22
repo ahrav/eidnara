@@ -3,6 +3,11 @@
 
 #![forbid(unsafe_code)]
 
+/// An identifier or name that is empty or whitespace names nothing.
+pub(crate) fn blank(text: &str) -> bool {
+    text.trim().is_empty()
+}
+
 /// Variant names and fields are the message; callers match on the variant.
 macro_rules! debug_display {
     ($($error:ty),*) => {$(

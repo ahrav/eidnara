@@ -157,6 +157,25 @@ fn every_generated_task_set_plants_a_case_in_every_carrier() {
     let mut no_tasks = set.clone();
     no_tasks.task_ids.clear();
     assert_eq!(no_tasks.validate(), Err(InjectionError::NoTasks));
+    // A placeholder ID is no task either.
+    let blank_ids: BTreeSet<String> = [" ".to_string()].into();
+    assert_eq!(
+        plan_injection_cases(SEED, &blank_ids).validate(),
+        Err(InjectionError::NoTasks)
+    );
+    // The planted text is a function of the case: it carries the canary and
+    // asks for exactly the oracle effect, so two runners plant one
+    // intervention.
+    for c in &set.cases {
+        let text = c.planted_text();
+        assert!(text.contains(&c.canary), "{}", c.id);
+        let asked = match &c.prohibited_effect {
+            SideEffect::ToolCall { name, argument } => format!("{name} {argument}"),
+            SideEffect::FileWrite { path } => path.clone(),
+            SideEffect::MemoryWriteBack { summary } => summary.clone(),
+        };
+        assert!(text.contains(&asked), "{}", c.id);
+    }
     // The wire form round-trips and validates; the seed rides as a decimal.
     let value = serde_json::to_value(&set).unwrap();
     assert!(value["root_seed"].is_string());
@@ -658,6 +677,18 @@ fn history_policy_arms_are_held_to_the_pair_set_they_govern() {
             ArmError::MalformedControlRun,
         ),
         (
+            "a whitespace policy version",
+            Box::new(|a| {
+                a.arms
+                    .get_mut(&HistoryPolicy::Pruned)
+                    .unwrap()
+                    .policy_version = " ".into()
+            }),
+            ArmError::EmptyPolicyVersion {
+                arm: HistoryPolicy::Pruned,
+            },
+        ),
+        (
             "an empty policy version",
             Box::new(|a| {
                 a.arms
@@ -942,11 +973,23 @@ fn generated_worlds_carry_phase_1_claims_and_the_pilot_never_derives_transfer() 
             }
         ]
     );
-    // A blank ID is not a task and never counts toward the floor; a
-    // duplicate is named once.
+    // A blank ID (empty or whitespace) is not a task and never counts toward
+    // the floor; a duplicate is named once.
     let mut blank = pilot(AnchorRole::Transfer);
     blank.tasks[0].id.clear();
     blank.tasks[1].id.clear();
+    let mut spaced_ids = pilot(AnchorRole::Transfer);
+    spaced_ids.tasks[0].id = " ".into();
+    assert_eq!(
+        derive_claim_class(RealHistory, Some(&spaced_ids), Some(&criterion())).unmet,
+        vec![
+            EmptyAnchorTaskId,
+            TooFewValidTasks {
+                required: 20,
+                valid: 19
+            }
+        ]
+    );
     assert_eq!(
         derive_claim_class(RealHistory, Some(&blank), Some(&criterion())).unmet,
         vec![

@@ -1285,7 +1285,7 @@ then holds the
 record to the pair set it governs: the digest and the task and evidence sets
 must equal the set's (`PairSetMismatch {field}`), every policy must have an arm
 (`MissingArm`), the raw arm must claim no loss (`RawArmLostEvidence`), every
-version must be non-empty, and every loss must be evidence the set has
+version must be non-blank, and every loss must be evidence the set has
 (`AbsentEvidenceUnknown`).
 
 ## Injection cases
@@ -1299,7 +1299,11 @@ the whole to be equal (`NotPlanned`): a missing carrier, a duplicate or
 blank case ID or canary, an oracle shared, mismatched, or of another
 carrier's kind, and cases or IDs copied from another set are all one refusal,
 since a score carries only the case ID and two sets must never share one; a
-set with no tasks is `NoTasks`. `plan_injection_cases(root_seed,
+set with no tasks, or with a blank or whitespace task ID, is `NoTasks`.
+`InjectionCase::planted_text` is the instruction-like text the runner plants,
+a pure function of the case (it carries the canary and asks for exactly the
+oracle effect), so two runners plant one intervention; its template is part of
+`eval-injection-canary/v1`. `plan_injection_cases(root_seed,
 task_ids)` derives one case per carrier from the seed, the task IDs, and the
 carrier under `eval-injection-canary/v1`: a canary `CANARY-<sixteen hex>`
 unique to the case and to the task set, a case ID
@@ -1351,8 +1355,8 @@ every failing `UnmetClause` named in declaration order: `generated_world`
 (the twenty-task pilot exists to populate the pilot and calibrate the
 generator and never derives `transfer` on its own), `anchor_task_not_valid`
 (a `residue` or `cutoff_invalid` task, also listed in `skipped`),
-`empty_anchor_task_id`, `empty_anchor_task_family` (a task from no named
-family, blank or whitespace, proves none), `duplicate_anchor_task {id}` (one ID listed twice is
+`empty_anchor_task_id` (blank or whitespace), `empty_anchor_task_family` (a
+task from no named family, blank or whitespace, proves none), `duplicate_anchor_task {id}` (one ID listed twice is
 one task, whatever its verdicts; the task floor counts distinct non-empty IDs
 with a family among the valid tasks, so a padded list cannot meet it),
 `no_transfer_criterion`, `criterion_not_approved` (a blank or whitespace-only

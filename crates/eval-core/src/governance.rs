@@ -8,6 +8,7 @@ use context_core::canonical_json::{ContractError, is_lower_hex, protocol_digest}
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::blank;
 use crate::event::EventId;
 use crate::pairs::{PairError, PairSet};
 
@@ -148,7 +149,7 @@ impl GovernanceArms {
             return Err(ArmError::RawArmLostEvidence { id: id.clone() });
         }
         for (policy, arm) in &self.arms {
-            if arm.policy_version.is_empty() {
+            if blank(&arm.policy_version) {
                 return Err(ArmError::EmptyPolicyVersion { arm: *policy });
             }
             if let Some(id) = arm.absent_evidence.difference(&self.evidence_ids).next() {

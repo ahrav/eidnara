@@ -7,6 +7,8 @@ use std::collections::BTreeSet;
 use context_core::canonical_json::is_lower_hex;
 use serde::{Deserialize, Serialize};
 
+use crate::blank;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ClaimClass {
@@ -73,12 +75,12 @@ impl TransferCriterion {
     /// family is no family, so requiring one is no floor.
     pub fn unmet(&self) -> Vec<UnmetClause> {
         let mut unmet = Vec::new();
-        if self.approved_by.trim().is_empty() || !is_lower_hex(&self.approved_at_run_id, 64) {
+        if blank(&self.approved_by) || !is_lower_hex(&self.approved_at_run_id, 64) {
             unmet.push(UnmetClause::CriterionNotApproved);
         }
         if self.min_valid_tasks == 0
             || self.required_families.is_empty()
-            || self.required_families.iter().any(|f| f.trim().is_empty())
+            || self.required_families.iter().any(|f| blank(f))
         {
             unmet.push(UnmetClause::CriterionHasNoFloor);
         }
@@ -153,9 +155,7 @@ pub fn derive_claim_class(
         valid
             .into_iter()
             .filter(|task| {
-                !task.id.is_empty()
-                    && !task.family.trim().is_empty()
-                    && seen.insert(task.id.as_str())
+                !blank(&task.id) && !blank(&task.family) && seen.insert(task.id.as_str())
             })
             .collect()
     };
@@ -168,10 +168,10 @@ pub fn derive_claim_class(
             if !skipped.is_empty() {
                 unmet.push(UnmetClause::AnchorTaskNotValid);
             }
-            if set.tasks.iter().any(|task| task.id.is_empty()) {
+            if set.tasks.iter().any(|task| blank(&task.id)) {
                 unmet.push(UnmetClause::EmptyAnchorTaskId);
             }
-            if set.tasks.iter().any(|task| task.family.trim().is_empty()) {
+            if set.tasks.iter().any(|task| blank(&task.family)) {
                 unmet.push(UnmetClause::EmptyAnchorTaskFamily);
             }
             let mut ids = BTreeSet::new();

@@ -1146,8 +1146,9 @@ Injection, arms, and claims (`crates/eval-core/tests/injection.rs`):
   oracle that does not name its canary or is of another carrier's kind, two
   cases with their IDs swapped, an ID or a whole case list copied from another
   set, another seed, an empty canary, and an empty case ID are each
-  `NotPlanned`, no tasks is `NoTasks`, and the wire form round-trips with the
-  seed as a decimal; a case without a
+  `NotPlanned`, no tasks or a whitespace task ID is `NoTasks`, the wire form
+  round-trips with the seed as a decimal, and each case's `planted_text`
+  carries its canary and names its oracle effect; a case without a
   `prohibited_effect` does not parse; each carrier's `label` equals its wire
   name, pinned to a literal.
 - `obedience_is_the_observed_side_effect_and_echo_is_only_exposure` (the
@@ -1196,7 +1197,7 @@ Injection, arms, and claims (`crates/eval-core/tests/injection.rs`):
   history from another seed) is `PairSetMismatch {pair_set_digest}`; an added
   or dropped task, a changed
   truth ID, an empty control run or one that is not a 64-hex run id, an empty
-  policy version, a missing raw or
+  or whitespace policy version, a missing raw or
   pruned arm, a raw arm claiming a loss, and a loss outside the evidence each
   refuse by name; the arms are keyed by policy, and an arm carrying a history
   or tasks of its own does not parse.
@@ -1213,8 +1214,8 @@ Injection, arms, and claims (`crates/eval-core/tests/injection.rs`):
   is no floor and a whitespace-only task family never counts, and
   one both unapproved and floorless names both clauses;
   one task listed eighteen times with one of each other family is
-  `duplicate_anchor_task` and three valid tasks, not twenty; a blank ID is
-  `empty_anchor_task_id` and never counts; a blank required family is no
+  `duplicate_anchor_task` and three valid tasks, not twenty; a blank or
+  whitespace ID is `empty_anchor_task_id` and never counts; a blank required family is no
   floor, and a blank task family is `empty_anchor_task_family` and never
   counts; a duplicate among skipped tasks is
   still named; a residue task is skipped and fails the set; a pilot with a
