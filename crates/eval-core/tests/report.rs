@@ -1079,6 +1079,41 @@ fn a_report_refuses_what_its_own_evidence_refutes() {
             ReportError::SuppressionNotDerived,
         ),
         (
+            "an underpowered-table suppression deflated below what its clusters allow",
+            Box::new(|r| {
+                // Three hundred pairs in three hundred worlds are three hundred
+                // singleton clusters: nothing deflates, whatever the world ICC.
+                r.outcome = ReportOutcome::Suppressed {
+                    by: Suppression::Analysis {
+                        reason: BlockedReason::TableUnderpowered {
+                            effective_n: ratio(10, 1),
+                            n_clusters: 300,
+                            required_n_for_margin: 300,
+                        },
+                    },
+                };
+                r.claims.established.clear();
+            }),
+            ReportError::SuppressionNotDerived,
+        ),
+        (
+            "an underpowered-table suppression on a surface whose bound does not resolve",
+            Box::new(|r| {
+                r.surface = EvaluatedSurface::Surface2;
+                r.outcome = ReportOutcome::Suppressed {
+                    by: Suppression::Analysis {
+                        reason: BlockedReason::TableUnderpowered {
+                            effective_n: ratio(3000, 309),
+                            n_clusters: 1,
+                            required_n_for_margin: 300,
+                        },
+                    },
+                };
+                r.claims.established.clear();
+            }),
+            ReportError::SuppressionNotDerived,
+        ),
+        (
             "an underpowered-table suppression under a pilot that already blocks",
             Box::new(|r| {
                 underpowered_pilot(&mut r.family.icc_pilot);

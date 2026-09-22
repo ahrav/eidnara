@@ -549,8 +549,12 @@ impl SuiteBReport {
                     // holds to the floor, so no table blocks.
                     let deflates =
                         pilot.icc_family > Ratio::ZERO || pilot.icc_world_seed > Ratio::ZERO;
+                    // The table was compiled under this surface's recency
+                    // bound, so a surface the profile resolves none for never
+                    // reached a table.
                     if derived.is_some()
                         || !deflates
+                        || self.resolved_recency_bound().is_none()
                         || *required_n_for_margin != pilot.required_n_for_margin
                         || !(1..=self.max_clusters()).contains(n_clusters)
                         || *effective_n >= whole(pilot.required_n_for_margin)?
@@ -558,19 +562,34 @@ impl SuiteBReport {
                         return Err(ReportError::SuppressionNotDerived);
                     }
                     // `analyze` deflates the pair count at each level by the
-                    // size-weighted mean cluster and keeps the smaller. One
-                    // cluster holding every pair deflates the most at the
-                    // larger ICC; `n_clusters` balanced clusters at the
-                    // selected unit deflate the least, and the other level can
-                    // only lower it further.
+                    // size-weighted mean cluster `sum(m_i^2) / n` and keeps the
+                    // smaller. At the selected unit the table spans exactly
+                    // `n_clusters`: balanced clusters deflate the least, and
+                    // one cluster holding all but `n_clusters - 1` singletons
+                    // deflates the most; the other level can lower the result
+                    // as far as one cluster holding every pair.
                     let n = whole(pairs)?;
-                    let icc_unit = match pilot.clustering_unit {
-                        ClusteringUnit::Family => pilot.icc_family,
-                        ClusteringUnit::WorldSeed => pilot.icc_world_seed,
+                    let (icc_unit, icc_other) = match pilot.clustering_unit {
+                        ClusteringUnit::Family => (pilot.icc_family, pilot.icc_world_seed),
+                        ClusteringUnit::WorldSeed => (pilot.icc_world_seed, pilot.icc_family),
                     };
-                    let least = deflate(n, n, pilot.icc_family.max(pilot.icc_world_seed))
+                    let clusters = whole(*n_clusters)?;
+                    let balanced = n.checked_div(clusters).map_err(statistics)?;
+                    let largest = n
+                        .checked_sub(clusters)
+                        .map_err(statistics)?
+                        .checked_add(Ratio::ONE)
                         .map_err(statistics)?;
-                    let balanced = n.checked_div(whole(*n_clusters)?).map_err(statistics)?;
+                    let lopsided = largest
+                        .checked_mul(largest)
+                        .map_err(statistics)?
+                        .checked_add(clusters.checked_sub(Ratio::ONE).map_err(statistics)?)
+                        .map_err(statistics)?
+                        .checked_div(n)
+                        .map_err(statistics)?;
+                    let least = deflate(n, lopsided, icc_unit)
+                        .map_err(statistics)?
+                        .min(deflate(n, n, icc_other).map_err(statistics)?);
                     let most = deflate(n, balanced, icc_unit).map_err(statistics)?;
                     if *effective_n < least || *effective_n > most {
                         return Err(ReportError::SuppressionNotDerived);

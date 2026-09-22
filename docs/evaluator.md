@@ -1497,13 +1497,16 @@ carries rather than read from what it says:
   `table_underpowered` block is the completed table's own power, which only
   the pair table shows, so the report holds it to what the family fixes
   instead: some ICC is positive, since nothing deflates otherwise and the
-  plan already meets its floor, no pre-table block derives, its
+  plan already meets its floor, the surface's bound resolves, since no pair
+  set compiles without one, no pre-table block derives, its
   `required_n_for_margin` is the pilot's, it spans between one cluster and
   the plan's affordable worlds (under the family unit also its families,
   never more than its pairs), and its `effective_n` is below the floor and
-  within what `deflate` can produce, at least the pair count deflated as one
-  cluster at the larger ICC and at most the pair count deflated as
-  `n_clusters` balanced clusters at the selected unit's ICC
+  within what `deflate` can produce over exactly `n_clusters` at the selected
+  unit: at most the pair count deflated as balanced clusters, at least the
+  smaller of the pair count deflated as one cluster holding all but
+  `n_clusters - 1` singletons and, at the other level's ICC, as one cluster
+  holding every pair
   (`SuppressionNotDerived`), and the ledger backs the frozen pair count with
   an arm result on each paired arm (`PairsExceedSamples`); the table itself
   is the manifest's `result_digest`. An

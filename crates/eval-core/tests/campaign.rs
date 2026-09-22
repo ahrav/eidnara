@@ -164,6 +164,70 @@ fn a_profile_refuses_every_absent_or_zero_setting_by_name() {
         parse_run_profile(&extra),
         Err(ProfileError::Shape(_))
     ));
+    // Every nested setting is required too, and every zero names its field
+    // at its own nesting: the twenty settings a zero would make "unbounded".
+    for parent in [
+        "budgets",
+        "envelope",
+        "statistics",
+        "statistics.liveness_bounds",
+    ] {
+        let keys: Vec<String> = full
+            .pointer(&format!("/{}", parent.replace('.', "/")))
+            .unwrap()
+            .as_object()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect();
+        for key in keys {
+            let mut missing = full.clone();
+            missing
+                .pointer_mut(&format!("/{}", parent.replace('.', "/")))
+                .unwrap()
+                .as_object_mut()
+                .unwrap()
+                .remove(&key);
+            assert!(
+                matches!(parse_run_profile(&missing), Err(ProfileError::Shape(_))),
+                "{parent}.{key} is required"
+            );
+        }
+    }
+    let zeros = [
+        "worlds",
+        "tasks_per_world",
+        "max_events_per_log",
+        "budgets.max_model_calls",
+        "budgets.max_tool_calls",
+        "budgets.max_tokens_in",
+        "budgets.max_tokens_out",
+        "budgets.hard_deadline_ms",
+        "budgets.max_no_progress_iterations",
+        "envelope.elapsed_ms",
+        "envelope.store_bytes",
+        "envelope.cassette_bytes",
+        "envelope.artifact_bytes",
+        "envelope.temp_roots",
+        "envelope.retained_artifacts",
+        "envelope.processes",
+        "statistics.liveness_bounds.catch_up_episodes",
+        "statistics.liveness_bounds.embedding_passes",
+        "statistics.liveness_bounds.materialization_episodes",
+        "statistics.liveness_bounds.reviewer_coordinator_passes",
+    ];
+    assert_eq!(zeros.len(), 20);
+    for field in zeros {
+        let mut zeroed = full.clone();
+        *zeroed
+            .pointer_mut(&format!("/{}", field.replace('.', "/")))
+            .unwrap() = json!(0);
+        assert_eq!(
+            parse_run_profile(&zeroed),
+            Err(ProfileError::Zero { field }),
+            "{field}"
+        );
+    }
 
     let mutations: Vec<(&str, Mutate<RunProfile>, ProfileError)> = vec![
         (

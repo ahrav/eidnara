@@ -1237,11 +1237,13 @@ Campaign (`crates/eval-core/tests/campaign.rs`):
   `approved` by name and an approved one returns its approver and a digest
   that differs from the unapproved one; an approval with an empty approver or
   an upper-case run ID refuses; each scale names its budget variable or none.
-- `a_profile_refuses_every_absent_or_zero_setting_by_name`: every field is
+- `a_profile_refuses_every_absent_or_zero_setting_by_name`: every top-level
+  field and every nested budget, envelope, statistics, and liveness field is
   required, the approval as an explicit `null` (an absent key is `Lossy`); an
-  unknown field refuses; another schema, an empty or blank name, a zero in each of
-  worlds, tasks, event limit, three budgets, two envelope dimensions, and a
-  liveness bound, a malformed or over-one ceiling, an unset censoring or
+  unknown field refuses; a zero in each of the twenty settings a zero would
+  make unbounded (worlds, tasks, event limit, six budgets, seven envelope
+  dimensions, four liveness bounds) refuses naming its own path; another
+  schema, an empty or blank name, a malformed or over-one ceiling, an unset censoring or
   over-one refusal ceiling, an empty bound map, surface 1 off its pin, a zero
   bound on any surface, an unset margin, and a budget past the canonical
   safe range each refuse by name; a declared bound on another surface is
@@ -1342,8 +1344,9 @@ Report (`crates/eval-core/tests/report.rs`):
   pairs than the plan froze, a baseline suppression naming a blank task, an
   underpowered-table suppression over a ledger that backs no table, over
   more family clusters than affordable worlds, under ICCs that deflate
-  nothing, or with an effective N its clusters do not deflate to, an interval
-  outside the statistic's range, a baseline that delivered more ids than its window holds, whose
+  nothing, with an effective N its clusters do not deflate to, deflated below
+  what its recorded clusters allow, or on a surface whose bound does not
+  resolve, an interval outside the statistic's range, a baseline that delivered more ids than its window holds, whose
   failed falsifications outnumber the table, or that was judged over more
   control pairs than the table has, a packing-only unsupported
   reason off the packing surface, an injection score with a blank case, with
