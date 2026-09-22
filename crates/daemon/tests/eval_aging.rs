@@ -349,6 +349,27 @@ fn work_enqueued_between_the_close_and_the_copy_is_refused() {
 }
 
 #[test]
+fn a_copy_into_a_root_that_is_not_empty_is_refused_before_any_byte_is_copied() {
+    let plan = plan(MESSAGES).unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let mut stores = Stores::open(root.path(), &plan);
+    live(&mut stores, &plan.steps[..3]);
+    let closed = stores.close();
+    let into = tempfile::tempdir().unwrap();
+    // An unlisted sidecar would be read by SQLite beside the verified copy.
+    std::fs::write(into.path().join("memory.sqlite-wal"), b"").unwrap();
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        closed.copy(into.path()).is_ok()
+    }));
+    assert!(outcome.is_err(), "a copy into a non-empty root is refused");
+    assert_eq!(
+        std::fs::read_dir(into.path()).unwrap().count(),
+        1,
+        "nothing was copied beside the stray file"
+    );
+}
+
+#[test]
 fn a_copy_missing_a_store_file_is_refused_at_reopen() {
     let plan = plan(MESSAGES).unwrap();
     for file in [

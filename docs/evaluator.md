@@ -1704,13 +1704,18 @@ recorded as an open handle. The copy admits the receipt and
 only then copies
 `kernel/kernel.sqlite`, the kernel's artifact objects, `memory.sqlite`, and
 `search/search.sqlite` into a fresh root with owner-only modes, building the
-`Checkpoint` from the copied bytes; a refused receipt copies nothing.
+`Checkpoint` from the copied bytes; a refused receipt copies nothing, and a
+destination that already holds anything (SQLite would read a stray sidecar
+beside the verified copy) is a programming error the copy panics on.
 `Copied::reopen` re-hashes every copied file and refuses an absent one as
 `FileMissing` and a changed one as `FileDiffers` before any store opens (a
 malformed copy would otherwise fail its first query), reads each copy's
 integrity on its own
 connection, accepts them against the checkpoint, and reopens the kernel and
-the memory store as they were. A copy of another store therefore reads as
+the memory store as they were. The resumed driver's lineage state (each
+lineage's published objects in commit order, and the objects retired outright)
+is rebuilt from the copied kernel's `object_registry`, not inherited from the
+prefix driver, as a fresh process would have to rebuild it. A copy of another store therefore reads as
 `FileDiffers { kernel/kernel.sqlite }`, the file that persists the incarnation
 id; `accept`'s own `ForeignIncarnation` check stands behind it.
 
@@ -1742,7 +1747,11 @@ store opens (the profile's event bound is the generator's, `messages.max(64)
 the roots, store bytes, elapsed time, and artifact bytes to the envelope, and
 publishes `suite-c-aging-report.json` and `manifest.json` write-then-rename.
 The manifest carries the aging shell's own root seed and the running binary's
-digest in its identity, says `prefix_then_generate`, `replay`,
+digest in its identity, says `prefix_then_generate` (the whole history is
+drawn by the seeded generator before the run, so the checkpoint step can be
+chosen to straddle deaths; the generator never reads a store, so the suffix
+drawn before the copy is the suffix that would have been drawn after it, and
+the choices after the checkpoint land only on the reopened copy), `replay`,
 `adapter-ingested, production caller: none`, `test-only`, reaches
 `AtQuiescence`, `AfterRecovery`, and `EndOfRun`, names the report by its
 result digest and the checkpoint digest as its witness. The `aging`

@@ -541,8 +541,6 @@ impl Stores {
             memory,
             rendering,
             bounds,
-            chains,
-            dead,
             applied,
             ..
         } = self;
@@ -599,8 +597,6 @@ impl Stores {
             search_lease,
             rendering,
             bounds,
-            chains,
-            dead,
             applied,
         }
     }
@@ -700,8 +696,6 @@ pub struct Closed {
     search_lease: Option<HeldFileLease>,
     rendering: Rendering,
     bounds: DriveBounds,
-    chains: BTreeMap<String, Vec<String>>,
-    dead: BTreeSet<String>,
     applied: u32,
 }
 
@@ -711,6 +705,18 @@ impl Closed {
     }
 
     pub fn copy(mut self, into: &Path) -> Result<(Checkpoint, Copied), CheckpointRefused> {
+        // The destination is a root this run owns and nothing else has
+        // written: SQLite would read a sidecar left there beside the verified
+        // copy, so anything already present is a programming error.
+        match std::fs::read_dir(into) {
+            Ok(mut entries) => assert!(
+                entries.next().is_none(),
+                "{} is empty before the copy",
+                into.display()
+            ),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => panic!("{}: {e}", into.display()),
+        }
         // Each probe stays held until the copy is done, as the projection's
         // lease does, so no other holder can take the store while its bytes
         // are read.
@@ -749,8 +755,6 @@ impl Closed {
                 root: into.to_path_buf(),
                 rendering: self.rendering,
                 bounds: self.bounds,
-                chains: self.chains,
-                dead: self.dead,
                 applied: self.applied,
             },
         ))
@@ -793,8 +797,6 @@ pub struct Copied {
     root: PathBuf,
     rendering: Rendering,
     bounds: DriveBounds,
-    chains: BTreeMap<String, Vec<String>>,
-    dead: BTreeSet<String>,
     applied: u32,
 }
 
@@ -865,6 +867,7 @@ impl Copied {
         }
         let (projection, consumer) = Stores::bootstrap(&corpus, &self.root, &self.bounds, now);
         embed_pending(&corpus, &projection, &self.root, self.bounds.hold, now);
+        let (chains, dead) = mutation_state(&kernel_file(&self.root));
         Ok(Stores {
             root: self.root,
             corpus,
@@ -873,8 +876,8 @@ impl Copied {
             memory,
             rendering: self.rendering,
             bounds: self.bounds,
-            chains: self.chains,
-            dead: self.dead,
+            chains,
+            dead,
             applied: self.applied,
         })
     }
@@ -913,6 +916,39 @@ fn copy_file(from: &Path, into: &Path, relative: &Path, files: &mut BTreeMap<Str
         .and_then(|mut file| std::io::Write::write_all(&mut file, &bytes))
         .unwrap();
     files.insert(relative.to_string_lossy().into_owned(), sha256_hex(&bytes));
+}
+
+/// The driver's view of the kernel's descriptor lineages: every published
+/// object per lineage in commit order, and the objects retired outright. A
+/// resumed driver rebuilds it from the copied kernel rather than inheriting
+/// the prefix driver's memory, as a fresh process would have to.
+fn mutation_state(kernel: &Path) -> (BTreeMap<String, Vec<String>>, BTreeSet<String>) {
+    let conn = read_only(kernel);
+    let mut statement = conn
+        .prepare(
+            "SELECT object_id,source_id,invalidated_commit_seq IS NOT NULL AND superseded_by IS NULL \
+             FROM object_registry WHERE object_id GLOB 'srcdesc:*' ORDER BY created_commit_seq",
+        )
+        .unwrap();
+    let mut chains: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    let mut dead = BTreeSet::new();
+    for row in statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, bool>(2)?,
+            ))
+        })
+        .unwrap()
+    {
+        let (object, lineage, retired) = row.unwrap();
+        if retired {
+            dead.insert(object.clone());
+        }
+        chains.entry(lineage).or_default().push(object);
+    }
+    (chains, dead)
 }
 
 fn descriptors(kernel: &Path) -> BTreeMap<String, Descriptor> {

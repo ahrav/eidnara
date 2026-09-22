@@ -1352,6 +1352,9 @@ bound because it finishes inside the daemon suite's wall clock):
   another store's checkpoint is `FileDiffers` naming `kernel/kernel.sqlite`,
   the file that persists the incarnation id, before any store opens; a copy
   missing one of its kernel artifact objects is `FileMissing` naming it.
+- `a_copy_into_a_root_that_is_not_empty_is_refused_before_any_byte_is_copied`:
+  a destination holding a stray `memory.sqlite-wal` panics before any byte is
+  copied, and the stray file is all the root holds afterwards.
 - `a_copy_missing_a_store_file_is_refused_at_reopen`: a copy missing
   `kernel/kernel.sqlite`, `memory.sqlite`, or `search/search.sqlite` is
   `FileMissing` naming it, before any store opens.
