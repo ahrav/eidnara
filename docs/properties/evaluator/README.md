@@ -18,7 +18,7 @@ provide, so a reader can find them by test name.
 Manifest, identity, and residue (`crates/eval-core/tests/manifest.rs`):
 
 - `required_fields_are_sorted_and_equal_the_struct_field_set` pins
-  `eval-manifest/v8` to `REQUIRED_FIELDS`; a struct field added without a
+  `eval-manifest/v9` to `REQUIRED_FIELDS`; a struct field added without a
   version bump fails here. `fixture_digests_are_frozen` pins the fixture's
   `eval_run_id` and manifest digest so an encoding change is reviewed.
 - `every_missing_field_is_refused_by_name_before_digesting`,
@@ -1467,6 +1467,88 @@ Campaign (`crates/daemon/tests/eval_campaign.rs`, `--all-features`):
   `skipped {redaction_refused}`, the aged arm's refusal rate is nonzero on
   the report, and the refusal gate fails at the ceiling of zero.
 
+## Phase 4 executed checks: quiescent checkpoints and experienced aging
+
+Checkpoint contract (`crates/eval-core/tests/checkpoint.rs`,
+`flt-checkpoint-quiescent-copy-controlled-replay`,
+`sls-memory-store-checkpoint-quiescence-receipt`):
+
+- `an_all_zero_receipt_over_every_family_permits_the_copy`: a receipt with
+  every declared counter at zero, every WAL truncated, no sidecar bytes, and
+  every handle closed over all three families builds a checkpoint whose
+  digest is stable and changes with the step it was taken at; counters
+  serialize under their closed names.
+- `a_receipt_missing_a_family_refuses_rather_than_borrowing_the_kernels`: a
+  receipt without the memory store's evidence is
+  `MissingStoreEvidence { memory }`.
+- `a_receipt_missing_a_counter_is_not_quiescence`: a family missing one of its
+  declared counters, or all of them, is `MissingCounter` naming it.
+- `a_counter_the_family_does_not_declare_is_refused`: a counter outside the
+  family's declared set is `UndeclaredCounter` naming the family and counter,
+  whether its reading is nonzero or zero.
+- `pending_work_refuses_by_family_and_counter`,
+  `a_wal_that_is_busy_partial_or_absent_is_not_truncated`,
+  `an_open_handle_a_malformed_incarnation_and_no_files_refuse`: a nonzero
+  counter is `PendingWork` with the reading; a busy, partial, or
+  not-in-WAL-mode (`-1` frames) checkpoint is `WalNotTruncated`; bytes left
+  in the sidecar are `WalSidecarPresent`; an open handle is `HandleOpen`; a
+  wrong-length, uppercase, or short incarnation, an empty file set, and a file
+  entry with an empty path or a digest that is not 64 lowercase hex digits are
+  refused.
+- `a_reopened_copy_is_accepted_only_as_the_same_intact_store`: a reopened
+  copy is accepted with the checkpoint's incarnation, every family reporting
+  `ok` integrity with no foreign-key violations, and every copied file
+  present with its digest; a foreign incarnation, a missing family, a failed
+  integrity check, dangling references, a missing file, and a changed file
+  each refuse by name.
+- `the_live_digest_sees_every_live_row`: the live digest is stable and
+  changes with a payload, a lexical row, or an open embedding job.
+- `the_enumerated_divergence_is_a_death_between_the_two_snapshots`,
+  `the_death_window_is_open_at_the_earlier_snapshot_and_closed_at_the_later`
+  (`ing-bulk-vs-replay-guard-digest-enumerated-divergences`): two
+  constructions with equal live rows differ historically only by
+  `tombstoned_before_snapshot` for the occurrences that died after the
+  earlier snapshot and at or before the later one, and by the generation
+  state; a death both constructions saw is no divergence; a death at the
+  earlier snapshot or past the later one is unenumerated.
+- `every_other_historical_difference_is_unenumerated`: a construction order
+  reversed, a death absent, an occurrence or tombstone only one side holds, a
+  tombstone that differs, a creating commit that differs, and a tombstone with
+  no occurrence row on its own side are each refused by name.
+- `a_resumed_life_matches_the_full_replay_or_names_the_family_that_slipped`
+  (`flt-checkpoint-quiescent-copy-controlled-replay`): equal snapshots share a
+  frozen guard digest; a moved tip is `CommitSeqDiffers`; a changed kernel
+  descriptor, memory segment, or projection row is `HistorySlipped` naming the
+  family and changes the digest.
+- `a_resumed_life_advances_the_tip_and_creates_nothing_before_the_checkpoint`
+  (`ing-aged-arm-one-store-incarnation-replay-driven`): a resumed life whose
+  tip did not move is `CommitSeqNotMonotonic`; a new descriptor claiming a
+  commit at or before the checkpoint, and a descriptor live at the checkpoint
+  whose death the resumed life places at or before it, are `HistoryRewritten`;
+  a death after the checkpoint is not.
+- `window_deaths_count_descriptors_alive_at_the_snapshot_that_die_inside_the_window`
+  (`ing-window-contains-pre-snapshot-supersession`): only descriptors created
+  at or before the snapshot and invalidated inside the window count, split by
+  supersession and retirement.
+- `an_aging_report_refuses_what_its_claims_and_checkpoint_forbid`: a valid
+  aging report serializes and parses back equal; a cleared claim boundary is
+  `ClaimBoundaryMismatch`; a short `eval_run_id`, `profile_digest`,
+  `checkpoint_digest`, or guard digest is `MalformedDigest` naming the field;
+  a checkpoint step the receipt does not carry is `CheckpointStepMismatch`;
+  a checkpoint at step zero or at or past the step count is
+  `CheckpointStepOutOfRange`; an end tip not past the checkpoint tip is `CommitSeqNotMonotonic`; a window
+  without both a supersession and a retirement is `WindowDeathsIncomplete`;
+  and a receipt with pending work or without the memory store's evidence is
+  `Receipt(..)` from `validate`, `serialize`, and `parse_aging_report` alike.
+- `a_prefix_then_generate_run_is_replay_built_only`
+  (`crates/eval-core/tests/manifest.rs`, `wm-aged-arm-replay-built-only`,
+  marker `wm_bulk_scaffold_presented_as_aged`, the eval-core manifest suite's
+  completeness proof): the `prefix_then_generate` mode parses, and a manifest
+  that claims it with a `bulk` or `hand_built` construction is refused
+  `AgedArmNotReplayBuilt` naming the construction.
+  `an_enumerate_run_records_its_mode_and_the_pinned_spec_digest` shows the mode
+  enters the digest between two replay-built manifests.
+
 ## Gaps recorded here
 
 - The OpenCode cassette is bound to the environment that recorded it: the
@@ -1501,6 +1583,19 @@ Campaign (`crates/daemon/tests/eval_campaign.rs`, `--all-features`):
   other variants (`UnsafePath`, `AlreadyOpen`, `NoOpenCassette`) have no test:
   the e2e suite opens each oracle once with an absolute temporary path and
   issues no operation before `open` or after `close`.
+- A search projection cannot resume catch-up across a kernel restart: its
+  source hold is bound to the kernel's lease epoch, which advances on every
+  open, so the daemon's lifecycle owner rebuilds after a restart. The plan
+  assumed a restored checkpoint could continue the projection incrementally;
+  the aging shell records the repository's behavior instead, rebuilding the
+  resumed projection at the checkpoint commit and reporting the construction
+  as `bulk` there, and the guard's enumerated divergences describe exactly
+  that rebuild. The kernel and memory store resume in place.
+- The aging shell writes history segments through the memory store's
+  `append_history_segments`, the seam the summarizer publishes through, not
+  through the summarizer; and the memory store's quiescence counters read
+  zero because no capture or reviewer work exists in that drive. The receipt
+  and copy of the memory family are exercised; its work is not.
 - No approved campaign profile exists: the margins, harm bound, floor,
   miss-asymmetry bound, and liveness bounds are maintainer inputs that the
   code refuses to default, so no empirical Suite B or D acceptance can be

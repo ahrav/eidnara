@@ -9,7 +9,7 @@ pub struct Marker {
 }
 
 /// Every marker the evaluator's suites may record, globally unique by name.
-pub const MARKERS: [Marker; 27] = [
+pub const MARKERS: [Marker; 37] = [
     Marker {
         name: "ing_four_seam_hold_correct_release_query",
         test: "crates/daemon/tests/eval_ingestion.rs::hold_embedding_commit_correction_release_query_makes_the_predecessor_obsolete",
@@ -117,6 +117,46 @@ pub const MARKERS: [Marker; 27] = [
     Marker {
         name: "mtr_second_session_read_memory",
         test: "crates/eval-core/tests/injection.rs::a_canary_written_into_memory_surfaces_in_a_later_session_that_read_it",
+    },
+    Marker {
+        name: "flt_quiescence_receipt_all_zero",
+        test: "crates/daemon/tests/eval_aging.rs::a_quiescent_copy_resumes_the_full_replay_in_one_incarnation",
+    },
+    Marker {
+        name: "ing_aged_arm_restarted_between_sessions",
+        test: "crates/daemon/tests/eval_aging.rs::a_quiescent_copy_resumes_the_full_replay_in_one_incarnation",
+    },
+    Marker {
+        name: "ing_window_has_pre_snapshot_supersession",
+        test: "crates/daemon/tests/eval_aging.rs::a_quiescent_copy_resumes_the_full_replay_in_one_incarnation",
+    },
+    Marker {
+        name: "ing_window_has_pre_snapshot_retirement",
+        test: "crates/daemon/tests/eval_aging.rs::a_quiescent_copy_resumes_the_full_replay_in_one_incarnation",
+    },
+    Marker {
+        name: "flt_copy_attempted_mid_episode",
+        test: "crates/daemon/tests/eval_aging.rs::a_copy_with_pending_work_is_refused_by_the_counter_it_left",
+    },
+    Marker {
+        name: "flt_checkpoint_observed_busy",
+        test: "crates/daemon/tests/eval_aging.rs::a_reader_holding_the_projection_leaves_the_checkpoint_busy",
+    },
+    Marker {
+        name: "sls_memstore_copy_refused_live_handle",
+        test: "crates/daemon/tests/eval_aging.rs::a_copy_beside_a_live_memory_store_handle_is_refused",
+    },
+    Marker {
+        name: "flt_prefix_history_slipped",
+        test: "crates/daemon/tests/eval_aging.rs::a_quiescent_copy_resumes_the_full_replay_in_one_incarnation",
+    },
+    Marker {
+        name: "flt_foreign_incarnation_refused_at_reopen",
+        test: "crates/daemon/tests/eval_aging.rs::a_foreign_incarnation_is_refused_at_reopen",
+    },
+    Marker {
+        name: "wm_bulk_scaffold_presented_as_aged",
+        test: "crates/eval-core/tests/manifest.rs::a_prefix_then_generate_run_is_replay_built_only",
     },
 ];
 

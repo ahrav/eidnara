@@ -12,8 +12,8 @@ use crate::identity::{IdentityError, RunIdentity, eval_run_id};
 use crate::pairs::{RECENCY_BASELINE_VERSION, recency_bound};
 use crate::residue::{ObservationSchema, RelativeDomains, ResidueEntry, ResidueError, Rule};
 
-pub const MANIFEST_SCHEMA: &str = "eval-manifest/v8";
-pub const MANIFEST_DIGEST_PROTOCOL: &str = "eval-manifest-digest/v8";
+pub const MANIFEST_SCHEMA: &str = "eval-manifest/v9";
+pub const MANIFEST_DIGEST_PROTOCOL: &str = "eval-manifest-digest/v9";
 
 /// Sorted; a field added to [`Manifest`] without a schema version bump fails the closure test.
 pub const REQUIRED_FIELDS: [&str; 30] = [
@@ -113,14 +113,16 @@ pub struct RecencyBaseline {
     pub bounds: BTreeMap<EvaluatedSurface, u32>,
 }
 
-/// How the world was driven: generated, replayed from a tape, or enumerated
-/// over fact tuples for the reducer differential.
+/// How the world was driven: generated, replayed from a tape, enumerated
+/// over fact tuples for the reducer differential, or generated from a
+/// quiescent checkpoint copy of a replayed prefix.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ExecutionMode {
     Generate,
     ReplayTape,
     Enumerate,
+    PrefixThenGenerate,
 }
 
 /// How the world's units reached the store. No ingestion adapter has a
@@ -270,6 +272,10 @@ pub enum ManifestError {
         found: String,
     },
     DirectDatabaseAged,
+    /// Checkpoint copies of replayed prefixes must use `replay` construction.
+    AgedArmNotReplayBuilt {
+        construction: Construction,
+    },
     ResidueIncomplete {
         field: String,
     },
@@ -397,6 +403,13 @@ impl Manifest {
             && self.construction == Construction::Replay
         {
             return Err(ManifestError::DirectDatabaseAged);
+        }
+        if self.execution_mode == ExecutionMode::PrefixThenGenerate
+            && self.construction != Construction::Replay
+        {
+            return Err(ManifestError::AgedArmNotReplayBuilt {
+                construction: self.construction,
+            });
         }
         for entry in Self::field_schema().residue() {
             if !self.residue.contains(&entry) {

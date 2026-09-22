@@ -533,12 +533,8 @@ fn surface_markers_each_name_a_scenario_here() {
     let scenario_names: BTreeSet<&str> = scenarios().iter().map(|(n, _)| *n).collect();
     let owned: Vec<&str> = MARKERS
         .iter()
-        .filter(|m| m.name.starts_with("sls_"))
-        .map(|m| {
-            m.test
-                .strip_prefix(SUITE)
-                .unwrap_or_else(|| panic!("{}", m.test))
-        })
+        .filter(|m| m.test.starts_with(SUITE))
+        .map(|m| m.test.strip_prefix(SUITE).unwrap())
         .collect();
     assert_eq!(owned.len(), scenario_names.len());
     for test in owned {

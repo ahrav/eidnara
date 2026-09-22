@@ -24,6 +24,7 @@ mod campaign;
 mod cassette;
 mod censoring;
 mod census;
+mod checkpoint;
 mod claim;
 mod decimal;
 mod eligibility;
@@ -64,6 +65,15 @@ pub use censoring::{
 pub use census::{
     Construction, EvaluatedSurface, HintBounds, Reachability, SURFACE1_HINT_BOUNDS,
     SURFACE1_STAGES, Surface1Stage,
+};
+pub use checkpoint::{
+    AGING_REPORT_SCHEMA, AGING_RESULT_DIGEST_PROTOCOL, AgingReport, AgingReportError,
+    CHECKPOINT_DIGEST_PROTOCOL, Checkpoint, CheckpointRefused, ConstructionKind, Death, Descriptor,
+    Divergence, GUARD_DIGEST_PROTOCOL, GenerationState, GuardComparison, HistoricalRows,
+    LIVE_DIGEST_PROTOCOL, LiveRows, PrefixRefused, ProjectionConstruction, ProjectionRows,
+    QuiescenceReceipt, Reopened, RestoreRefused, Segment, StateSnapshot, StoreFamily,
+    StoreIntegrity, StoreQuiescence, TombstoneReason, Unenumerated, WalCheckpoint, WindowDeaths,
+    WorkCounter, historical_diff, live_digest, parse_aging_report,
 };
 pub use claim::{
     AnchorRole, AnchorSet, AnchorTask, AnchorVerdict, ClaimClass, ClaimDerivation,
