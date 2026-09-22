@@ -102,6 +102,11 @@ fn campaign(scale: Scale, aged_messages: u32, elapsed_bound_ms: u64) -> Run {
     assert_eq!(peaks["processes"], 1);
     assert_eq!(peaks["temp_roots"], 3);
     assert!(peaks["cassette_bytes"].as_u64().unwrap() > 0);
+    assert_eq!(
+        peaks["artifact_bytes"].as_u64().unwrap(),
+        report_bytes.len() as u64,
+        "the published peak is the published file's size"
+    );
 
     let manifest_bytes = std::fs::read(publish.path().join(MANIFEST_FILE)).unwrap();
     assert_eq!(manifest_bytes, run.manifest_bytes);
@@ -396,7 +401,7 @@ fn a_publish_target_the_shell_cannot_write_is_refused_before_anything_runs() {
     std::fs::write(&staged, b"{").unwrap();
     let leftover = Config {
         publish: publish.clone(),
-        ..config
+        ..config.clone()
     };
     assert_eq!(
         campaign::run(&leftover).err(),
@@ -411,6 +416,30 @@ fn a_publish_target_the_shell_cannot_write_is_refused_before_anything_runs() {
     );
     assert_eq!(std::fs::read(&staged).unwrap(), b"{");
     assert_eq!(std::fs::read_dir(&publish).unwrap().count(), 1);
+
+    // A prior run's report or manifest is refused too: a rename over it
+    // would pair one generation's report with another's manifest.
+    for file in [REPORT_FILE, MANIFEST_FILE] {
+        let publish = root.path().join(format!("published-{file}"));
+        std::fs::create_dir(&publish).unwrap();
+        let prior = publish.join(file);
+        std::fs::write(&prior, b"{}").unwrap();
+        let started = std::time::Instant::now();
+        assert_eq!(
+            campaign::run(&Config {
+                publish: publish.clone(),
+                ..config.clone()
+            })
+            .err(),
+            Some(RunError::Publish {
+                path: prior.clone(),
+                kind: std::io::ErrorKind::AlreadyExists,
+            })
+        );
+        assert!(started.elapsed() < std::time::Duration::from_secs(10));
+        assert_eq!(std::fs::read(&prior).unwrap(), b"{}");
+        assert_eq!(std::fs::read_dir(&publish).unwrap().count(), 1);
+    }
 }
 
 /// An S0 campaign driven through the daemon's lifecycle takes longer than the

@@ -1392,11 +1392,13 @@ read back, and parsed equal. The envelope is observed from the start as live
 counts: elapsed time, each arm's root with its store, WAL, and shm, the one
 process, the three roots held at a time (the arm's state root, the config
 tier its daemon reads, and the cassette directory), the report's bytes, and
-the one retained artifact. The report's size is charged from a serialization
-made before the envelope is copied into the report, so the published peaks
-include the publication, and once more from the bytes written, which carry
-the peaks and are the larger; the envelope refuses on either reading. The
-manifest's bytes and the clock after the report is written are not charged.
+the one retained artifact. The report carries its own size as a peak, so it
+is serialized until the bytes written carry the peak they are; every reading
+is charged and the envelope refuses on any of them, and the published peak is
+the file's size. The manifest is built before either file is renamed into
+place, and a prior run's report or manifest in the directory is refused
+before anything runs, so one directory holds one generation or none; the
+manifest's bytes and the clock after the report is serialized are not charged.
 Surface 1's task turn makes no model call, which the backend counters show;
 of the six task budgets only the deadline can censor here, since no model
 call, tool call, or token is spent on that turn.

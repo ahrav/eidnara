@@ -990,13 +990,18 @@ fn prepare_publish(publish: &Path) -> Result<(), RunError> {
         kind: error.kind(),
     };
     std::fs::create_dir_all(publish).map_err(|error| refused(publish, error))?;
+    // A leftover staged file or a prior run's final file is refused: the
+    // publisher never renames over either, so one directory holds one
+    // generation's report and manifest or none.
     for file in [REPORT_FILE, MANIFEST_FILE] {
-        let staged = staged_path(&publish.join(file));
-        if staged.symlink_metadata().is_ok() {
-            return Err(refused(
-                &staged,
-                std::io::Error::from(std::io::ErrorKind::AlreadyExists),
-            ));
+        let path = publish.join(file);
+        for path in [staged_path(&path), path] {
+            if path.symlink_metadata().is_ok() {
+                return Err(refused(
+                    &path,
+                    std::io::Error::from(std::io::ErrorKind::AlreadyExists),
+                ));
+            }
         }
     }
     Ok(())
@@ -1286,9 +1291,11 @@ pub fn run(config: &Config) -> Result<Run, RunError> {
         samples,
     };
     let rates = ledger.rates().unwrap();
-    // Surface 1 made no model call on any arm (the fixture's counters) and a
-    // replayed frame that missed would be a recorded failure and no segments,
-    // so the miss rates are zero by observation; the refusal rates are the
+    // Surface 1 made no model call on any arm (the fixture's counters), and a
+    // replayed frame that missed would fail the life's assertion and end the
+    // campaign before any report (a world replaying its own recording in one
+    // process misses only through a determinism fault), so a published
+    // report's miss rates are zero by observation; the refusal rates are the
     // cassette's refusals over the summarizer's firings, as the lives saw
     // them.
     let arm_rates: BTreeMap<String, ArmRates> = [("aged", aged_fired), ("fresh", fresh_fired)]
@@ -1360,28 +1367,31 @@ pub fn run(config: &Config) -> Result<Run, RunError> {
     };
     // The publish root, the artifact's bytes, and the retained artifact are
     // charged before the envelope is copied into the report, so the published
-    // peaks include the publication itself. The report's size is charged from
-    // a serialization before the envelope is copied in, then again from the
-    // bytes written, which carry the peaks and are the larger; the second
-    // reading is the one the envelope refuses on.
+    // peaks include the publication. The report carries its own size as a
+    // peak, so it is serialized until the bytes written carry the peak they
+    // are: each reading is charged, and the envelope refuses on any of them.
     charges.roots += 1;
     charges.observe(Resource::TempRoots, charges.roots)?;
-    let sized = serde_json::to_vec_pretty(&report.serialize().unwrap()).unwrap();
-    charges.observe(Resource::ArtifactBytes, sized.len() as u64)?;
     charges.observe(Resource::RetainedArtifacts, 1)?;
     charges.elapsed()?;
     charges.envelope.check()?;
-    report.envelope = charges.envelope.clone();
-    let bytes = serde_json::to_vec_pretty(&report.serialize().unwrap()).unwrap();
-    charges.observe(Resource::ArtifactBytes, bytes.len() as u64)?;
-    publish_file(&publish.join(REPORT_FILE), &bytes)?;
-
+    let bytes = loop {
+        report.envelope = charges.envelope.clone();
+        let bytes = serde_json::to_vec_pretty(&report.serialize().unwrap()).unwrap();
+        let peak = charges.envelope.peaks.artifact_bytes;
+        charges.observe(Resource::ArtifactBytes, bytes.len() as u64)?;
+        if charges.envelope.peaks.artifact_bytes == peak {
+            break bytes;
+        }
+    };
     // The manifest beside the report says how the world reached the store:
     // every arm was lived through the daemon's own transform route one turn
     // at a time in one store incarnation, so the run is `replay` over
-    // `transform-route, turn by turn`.
+    // `transform-route, turn by turn`. It is built before either file is
+    // renamed into place, so a report is never published without it.
     let manifest = manifest(identity, &set, &report, &bytes, &frozen, started_at_ms);
     let manifest_bytes = serde_json::to_vec_pretty(&manifest.to_value()).unwrap();
+    publish_file(&publish.join(REPORT_FILE), &bytes)?;
     publish_file(&publish.join(MANIFEST_FILE), &manifest_bytes)?;
     Ok(Run {
         report,
