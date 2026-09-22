@@ -566,15 +566,25 @@ impl SuiteBReport {
                     // smaller. At the selected unit the table spans exactly
                     // `n_clusters`: balanced clusters deflate the least, and
                     // one cluster holding all but `n_clusters - 1` singletons
-                    // deflates the most; the other level can lower the result
-                    // as far as one cluster holding every pair.
+                    // deflates the most. The other level spans at most the
+                    // clusters `n_clusters` forces on it (one family per world
+                    // at most; every affordable world under the family unit),
+                    // balanced, and at least one cluster holding every pair.
                     let n = whole(pairs)?;
-                    let (icc_unit, icc_other) = match pilot.clustering_unit {
-                        ClusteringUnit::Family => (pilot.icc_family, pilot.icc_world_seed),
-                        ClusteringUnit::WorldSeed => (pilot.icc_world_seed, pilot.icc_family),
+                    let (icc_unit, icc_other, other_clusters) = match pilot.clustering_unit {
+                        ClusteringUnit::Family => {
+                            (pilot.icc_family, pilot.icc_world_seed, self.max_worlds())
+                        }
+                        ClusteringUnit::WorldSeed => (
+                            pilot.icc_world_seed,
+                            pilot.icc_family,
+                            (*n_clusters).min(pilot.n_families),
+                        ),
                     };
                     let clusters = whole(*n_clusters)?;
                     let balanced = balanced_mean_cluster(pairs, *n_clusters).map_err(statistics)?;
+                    let other_balanced =
+                        balanced_mean_cluster(pairs, other_clusters).map_err(statistics)?;
                     let largest = n
                         .checked_sub(clusters)
                         .map_err(statistics)?
@@ -590,7 +600,9 @@ impl SuiteBReport {
                     let least = deflate(n, lopsided, icc_unit)
                         .map_err(statistics)?
                         .min(deflate(n, n, icc_other).map_err(statistics)?);
-                    let most = deflate(n, balanced, icc_unit).map_err(statistics)?;
+                    let most = deflate(n, balanced, icc_unit)
+                        .map_err(statistics)?
+                        .min(deflate(n, other_balanced, icc_other).map_err(statistics)?);
                     if *effective_n < least || *effective_n > most {
                         return Err(ReportError::SuppressionNotDerived);
                     }
@@ -629,17 +641,26 @@ impl SuiteBReport {
         Ok(())
     }
 
+    /// The most worlds a table under this plan spans: one per pair at most,
+    /// no more than the plan's affordable worlds, and no more than the
+    /// approved profile runs.
+    fn max_worlds(&self) -> u32 {
+        let StoppingRule::FixedN { pairs } = self.family.stopping_rule;
+        self.family
+            .icc_pilot
+            .max_affordable_worlds
+            .min(self.profile.worlds)
+            .min(pairs)
+    }
+
     /// The most clusters a table under this plan spans at the pilot's unit:
-    /// one per pair at most, no more than the plan's affordable worlds, and
-    /// under the family unit no more than its families, since each world lies
-    /// in one family.
+    /// its worlds, and under the family unit no more than its families, since
+    /// each world lies in one family.
     fn max_clusters(&self) -> u32 {
         let pilot = &self.family.icc_pilot;
-        let StoppingRule::FixedN { pairs } = self.family.stopping_rule;
-        let worlds = pilot.max_affordable_worlds.min(pairs);
         match pilot.clustering_unit {
-            ClusteringUnit::Family => worlds.min(pilot.n_families),
-            ClusteringUnit::WorldSeed => worlds,
+            ClusteringUnit::Family => self.max_worlds().min(pilot.n_families),
+            ClusteringUnit::WorldSeed => self.max_worlds(),
         }
     }
 

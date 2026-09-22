@@ -213,8 +213,8 @@ fn profile() -> RunProfile {
         schema: RUN_PROFILE_SCHEMA.to_string(),
         name: "s0-default-surface".to_string(),
         scale: Scale::S0,
-        worlds: 8,
-        tasks_per_world: 3,
+        worlds: 300,
+        tasks_per_world: 1,
         max_events_per_log: 64,
         budgets: TaskBudgets {
             max_model_calls: 12,
@@ -1132,6 +1132,39 @@ fn a_report_refuses_what_its_own_evidence_refutes() {
                 r.claims.established.clear();
             }),
             ReportError::SuppressionNotDerived,
+        ),
+        (
+            "an underpowered-table suppression deflated as if one world spanned many families",
+            Box::new(|r| {
+                // One world lies in one family, so a family ICC of 1/20 deflates
+                // 300 pairs in one world to 6000/319 whatever the world ICC.
+                let pilot = &mut r.family.icc_pilot;
+                pilot.icc_family = ratio(1, 20);
+                pilot.icc_world_seed = Ratio::ZERO;
+                pilot.effective_n_at_max = ratio(18_000, 169);
+                pilot.required_n_for_margin = 80;
+                r.outcome = ReportOutcome::Suppressed {
+                    by: Suppression::Analysis {
+                        reason: BlockedReason::TableUnderpowered {
+                            effective_n: ratio(50, 1),
+                            n_clusters: 1,
+                            required_n_for_margin: 80,
+                        },
+                    },
+                };
+                r.claims.established.clear();
+            }),
+            ReportError::SuppressionNotDerived,
+        ),
+        (
+            "an interval over more clusters than the approved profile's worlds",
+            Box::new(|r| {
+                r.profile.worlds = 40;
+                r.profile_digest = r.profile.digest().unwrap();
+            }),
+            ReportError::IntervalNotDerived {
+                field: "n_clusters",
+            },
         ),
         (
             "an underpowered-table suppression under a pilot that already blocks",
