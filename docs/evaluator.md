@@ -1697,7 +1697,9 @@ directory is refused rather than mixed); the
 manifest's bytes and the clock after the report is serialized are not charged.
 Surface 1's task turn makes no model call of its own, which the backend
 counters show; of the six task budgets only the deadline can censor here,
-since the task spends no model call, tool call, or token on that turn. A
+since the task spends no model call, tool call, or token on that turn, and the
+deadline times the task turn alone, from its request to its response: the
+life before it builds the treatment and is charged to the envelope. A
 summarizer firing that lands on the task turn under the structured policy is
 the treatment's cost, not the task's: it is replayed from the arm's cassette
 and accounted in the arm's firings and refusal rate.

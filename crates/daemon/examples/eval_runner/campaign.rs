@@ -189,11 +189,14 @@ fn planted(cases: &[InjectionCase]) -> Vec<Planted> {
                 Carrier::CommitMessage => ("repository-0", PLANTED_COMMIT_SLOT),
                 Carrier::IssueText | Carrier::Memory => return None,
             };
+            // The whole intervention is planted, instruction and canary, as
+            // the case defines it; the canary alone is what the scorer looks
+            // for.
             Some(Planted {
                 carrier: case.carrier,
                 entity: entity.to_string(),
                 slot,
-                canary: case.canary.clone(),
+                canary: case.planted_text(),
             })
         })
         .collect()
@@ -463,6 +466,9 @@ enum Replacement {
 struct Lived {
     segments: Vec<StoredHistorySegment>,
     pass: Pass,
+    /// The task turn's own duration, from its request to its response: the
+    /// life before it builds the treatment and is not the task's spend.
+    task_ms: u64,
     counters: Value,
     firings: u32,
     refusals: u32,
@@ -501,10 +507,12 @@ fn live(
         usage: usage(world.messages.len() + 1),
         ..Knobs::default()
     };
-    let (turns, pass) = block_on(async {
+    let (turns, pass, task_ms) = block_on(async {
         let turns = lifecycle(&fixture, world, usage).await;
+        let attempt = Instant::now();
         let pass = pass(&fixture, world, prompt, &knobs).await;
-        (turns, pass)
+        let task_ms = u64::try_from(attempt.elapsed().as_millis()).unwrap();
+        (turns, pass, task_ms)
     });
     // The task turn drains like every lifecycle turn: a firing it spawned
     // finishes before its diagnostics, the counters, and the store are read.
@@ -583,6 +591,7 @@ fn live(
     Ok(Lived {
         segments,
         pass,
+        task_ms,
         counters,
         firings,
         refusals,
@@ -782,8 +791,9 @@ struct ArmRun {
 
 /// Lives the arm's world through one fixture process under its replacement
 /// and reads delivered evidence from the host's own selection on the task's
-/// turn. The attempt is timed against the task budgets; the roots, the
-/// process, and the store's bytes are charged to the envelope as they peak;
+/// turn. The task turn alone is timed against the task budgets; the roots,
+/// the process, and the store's bytes are charged to the envelope as they
+/// peak;
 /// the fixture's backend counters prove the task's turn made no model call
 /// and a replayed summarizer never reached the controlled backend. A segment
 /// stands for every message it covers at every stage up to render; at render
@@ -803,10 +813,11 @@ fn run_arm(
         .iter()
         .find(|m| m.event_id == *evidence)
         .expect("the evidence is a rendered message");
-    let attempt = Instant::now();
     let lived = live(world, replacement, &prompt(message), charges)?;
+    // The attempt timed against the deadline is the task turn; the life
+    // before it is the treatment's, charged to the envelope, not the task.
     let usage = TaskUsage {
-        elapsed_ms: u64::try_from(attempt.elapsed().as_millis()).unwrap(),
+        elapsed_ms: lived.task_ms,
         ..TaskUsage::default()
     };
     assert_eq!(
