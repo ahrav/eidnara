@@ -524,7 +524,7 @@ fn live(
     // The store is read while the fixture holds it: closing the last
     // connection checkpoints the WAL away, so the root after shutdown is the
     // smaller reading.
-    charges.observe(Resource::StoreBytes, root_bytes(root.path()))?;
+    charges.store_bytes(root.path())?;
     let mut firings: u32 = 0;
     let mut failures_seen = false;
     for diagnostics in turns
@@ -708,7 +708,7 @@ fn decision(message: &RenderedMessage) -> &str {
 
 /// Every regular file under the arm's root: the kernel store with its WAL and
 /// shm, and the fixture's own files beside it; the control socket has no size.
-fn root_bytes(root: &Path) -> u64 {
+pub fn root_bytes(root: &Path) -> u64 {
     fn walk(path: &Path) -> u64 {
         let Ok(kind) = std::fs::symlink_metadata(path) else {
             return 0;
@@ -759,11 +759,17 @@ impl Charges {
         Ok(root)
     }
 
+    /// Charges the store's bytes under `root` as they stand now: read while
+    /// the store is open, since closing it checkpoints the WAL away.
+    pub fn store_bytes(&mut self, root: &Path) -> Result<(), EnvelopeExceeded> {
+        self.observe(Resource::StoreBytes, root_bytes(root))
+    }
+
     /// Releases a root after its fixture exited: the store's bytes are charged
     /// once more as the checkpoint left them, then the root goes, and the
     /// run's elapsed time is read.
     pub fn vacate(&mut self, root: tempfile::TempDir) -> Result<(), EnvelopeExceeded> {
-        self.observe(Resource::StoreBytes, root_bytes(root.path()))?;
+        self.store_bytes(root.path())?;
         drop(root);
         self.roots -= 1;
         self.elapsed()

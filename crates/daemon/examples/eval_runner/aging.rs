@@ -689,7 +689,13 @@ fn embed_pending(
     }
 }
 
-fn bulk_scaffold(corpus: &Corpus, home: &Path, bounds: &DriveBounds, now: i64) -> ProjectionRows {
+fn bulk_scaffold(
+    corpus: &Corpus,
+    home: &Path,
+    bounds: &DriveBounds,
+    now: i64,
+    charges: &mut Charges,
+) -> Result<ProjectionRows, EnvelopeExceeded> {
     let (projection, hold, _) = corpus.bootstrap_within(home, bounds.hold, bounds.batch);
     embed_pending(corpus, &projection, home, bounds.hold, now);
     let rows = projection_rows(&search_file(home));
@@ -697,13 +703,16 @@ fn bulk_scaffold(corpus: &Corpus, home: &Path, bounds: &DriveBounds, now: i64) -
         rows.live.pending_embedding.is_empty(),
         "the bulk scaffold embeds every open job"
     );
+    // The projection's bytes are charged while it is open; closing it
+    // checkpoints the WAL away.
+    charges.store_bytes(home)?;
     let (_, lease) = projection.close();
     drop(lease);
     corpus
         .kernel
         .release_source_hold(&corpus.binding(), &hold.hold_id, hold.captured_at)
         .unwrap();
-    rows
+    Ok(rows)
 }
 
 pub struct Plan {
@@ -769,12 +778,21 @@ pub fn full_life(plan: &Plan, charges: &mut Charges) -> Result<Full, RunError> {
     let rows = stores.projection_rows();
     let last_now = plan.steps.last().unwrap().now_ms;
     let bulk_home = charges.occupy()?;
-    let bulk_rows = bulk_scaffold(&stores.corpus, bulk_home.path(), &plan.bounds, last_now);
+    let bulk_rows = bulk_scaffold(
+        &stores.corpus,
+        bulk_home.path(),
+        &plan.bounds,
+        last_now,
+        charges,
+    )?;
     let against_bulk = GuardComparison::of(
         (&rows, ConstructionKind::CatchUp),
         (&bulk_rows, ConstructionKind::Bulk),
     )?;
     let incarnation_id = stores.incarnation();
+    // The stores' bytes are charged while they are open; dropping them
+    // checkpoints the WAL away.
+    charges.store_bytes(root.path())?;
     drop(stores);
     charges.vacate(bulk_home)?;
     charges.vacate(root)?;
