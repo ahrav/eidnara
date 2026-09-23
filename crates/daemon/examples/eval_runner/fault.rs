@@ -101,6 +101,8 @@ pub struct Run {
     pub manifest: eval_core::Manifest,
     pub manifest_bytes: Vec<u8>,
     pub bounds: LivenessBounds,
+    /// The approved profile's limits the report was validated against.
+    pub limits: eval_core::ResourceLimits,
     pub coverage: Coverage,
 }
 
@@ -663,7 +665,8 @@ pub fn run(config: &Config) -> Result<Run, RunError> {
     charges.retain_publish_root()?;
     let bytes = loop {
         report.envelope = charges.envelope.clone();
-        let bytes = serde_json::to_vec_pretty(&report.serialize(&bounds)?).unwrap();
+        let bytes =
+            serde_json::to_vec_pretty(&report.serialize(&bounds, &profile.envelope)?).unwrap();
         let peak = charges.envelope.peaks.artifact_bytes;
         charges.observe(eval_core::Resource::ArtifactBytes, bytes.len() as u64)?;
         if charges.envelope.peaks.artifact_bytes == peak {
@@ -697,6 +700,7 @@ pub fn run(config: &Config) -> Result<Run, RunError> {
         manifest,
         manifest_bytes,
         bounds,
+        limits: profile.envelope,
         coverage: witness.coverage,
     })
 }

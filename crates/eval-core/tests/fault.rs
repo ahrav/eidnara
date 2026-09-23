@@ -688,8 +688,11 @@ fn liveness_is_unmet_at_the_bound_or_when_a_fault_healed() {
 #[test]
 fn a_fault_report_round_trips_and_refuses_what_it_cannot_prove() {
     let report = report();
-    let value = report.serialize(&bounds()).unwrap();
-    assert_eq!(parse_fault_report(&value, &bounds()).unwrap(), report);
+    let value = report.serialize(&bounds(), &limits()).unwrap();
+    assert_eq!(
+        parse_fault_report(&value, &bounds(), &limits()).unwrap(),
+        report
+    );
     let digest = FaultReport::result_digest(&value).unwrap();
     let mut other_pid = value.clone();
     other_pid["barriers"][0]["pid"] = serde_json::json!(1);
@@ -702,13 +705,13 @@ fn a_fault_report_round_trips_and_refuses_what_it_cannot_prove() {
     let mut wrong_schema = report.clone();
     wrong_schema.schema = "eval-suite-c-fault-report/v0".to_string();
     assert!(matches!(
-        wrong_schema.validate(&bounds()),
+        wrong_schema.validate(&bounds(), &limits()),
         Err(FaultReportError::SchemaMismatch { .. })
     ));
     let mut no_barrier = report.clone();
     no_barrier.barriers.clear();
     assert_eq!(
-        no_barrier.validate(&bounds()),
+        no_barrier.validate(&bounds(), &limits()),
         Err(FaultReportError::KillWithoutBarrier {
             episode: "kill".to_string(),
             cut: "acknowledged".to_string(),
@@ -721,7 +724,7 @@ fn a_fault_report_round_trips_and_refuses_what_it_cannot_prove() {
         ..barrier("kill")
     }];
     assert_eq!(
-        wrong_cut.validate(&bounds()),
+        wrong_cut.validate(&bounds(), &limits()),
         Err(FaultReportError::KillWithoutBarrier {
             episode: "kill".to_string(),
             cut: "acknowledged".to_string(),
@@ -733,7 +736,7 @@ fn a_fault_report_round_trips_and_refuses_what_it_cannot_prove() {
     live.outside_core.insert("ghost".to_string());
     live.armed_at_bound.insert("ghost".to_string());
     assert_eq!(
-        ghost.validate(&bounds()),
+        ghost.validate(&bounds(), &limits()),
         Err(FaultReportError::UnknownEpisode {
             episode: "ghost".to_string()
         }),
@@ -742,7 +745,7 @@ fn a_fault_report_round_trips_and_refuses_what_it_cannot_prove() {
     let mut unreceipted = report.clone();
     unreceipted.coverage.declare("unlink");
     assert!(matches!(
-        unreceipted.validate(&bounds()),
+        unreceipted.validate(&bounds(), &limits()),
         Err(FaultReportError::Coverage(
             CoverageRefused::IncompleteCoverage { .. }
         ))
@@ -750,7 +753,7 @@ fn a_fault_report_round_trips_and_refuses_what_it_cannot_prove() {
     let mut unsafe_run = report.clone();
     unsafe_run.safety_checks_while_armed = 0;
     assert_eq!(
-        unsafe_run.validate(&bounds()),
+        unsafe_run.validate(&bounds(), &limits()),
         Err(FaultReportError::SafetyNeverChecked)
     );
     let mut premature = report.clone();
@@ -758,7 +761,7 @@ fn a_fault_report_round_trips_and_refuses_what_it_cannot_prove() {
     premature.effects.lose_reply("ack:9").unwrap();
     premature.effects.effects.get_mut("ack:9").unwrap().outcome = EffectOutcome::Applied;
     assert!(matches!(
-        premature.validate(&bounds()),
+        premature.validate(&bounds(), &limits()),
         Err(FaultReportError::Effect(
             EffectRefused::PrematureSuccess { .. }
         ))
@@ -766,12 +769,12 @@ fn a_fault_report_round_trips_and_refuses_what_it_cannot_prove() {
     let mut extra = value.clone();
     extra["surprise"] = serde_json::json!(1);
     assert!(matches!(
-        parse_fault_report(&extra, &bounds()),
+        parse_fault_report(&extra, &bounds(), &limits()),
         Err(FaultReportError::Shape(_))
     ));
     let mut liveness_less = report;
     liveness_less.liveness = None;
-    liveness_less.validate(&bounds()).unwrap();
+    liveness_less.validate(&bounds(), &limits()).unwrap();
     let _ = (
         PublicationFaultKind::LoseLocalCommit,
         BTreeMap::<String, u64>::new(),
@@ -786,13 +789,13 @@ fn a_parsed_report_cannot_claim_what_no_run_recorded() {
     let mut boundary = ok.clone();
     boundary.claim_boundary.exclusions.clear();
     assert_eq!(
-        boundary.validate(&b),
+        boundary.validate(&b, &limits()),
         Err(FaultReportError::ClaimBoundaryMismatch)
     );
     let mut over = ok.clone();
     over.envelope.peaks.processes = limits().processes + 1;
     assert!(matches!(
-        over.validate(&b),
+        over.validate(&b, &limits()),
         Err(FaultReportError::EnvelopeExceeded(_))
     ));
     let mut no_fault = ok.clone();
@@ -801,14 +804,14 @@ fn a_parsed_report_cannot_claim_what_no_run_recorded() {
     no_fault.coverage = CutCoverage::default();
     no_fault.liveness = None;
     assert_eq!(
-        no_fault.validate(&b),
+        no_fault.validate(&b, &limits()),
         Err(FaultReportError::NoEpisode),
         "nothing was armed, so no safety check ran while a fault was"
     );
     let mut invented = ok.clone();
     invented.markers.insert("flt_never_registered".to_string());
     assert_eq!(
-        invented.validate(&b),
+        invented.validate(&b, &limits()),
         Err(FaultReportError::UnregisteredMarker {
             marker: "flt_never_registered".to_string()
         })
@@ -818,7 +821,7 @@ fn a_parsed_report_cannot_claim_what_no_run_recorded() {
     in_core.episodes[2].heal = Heal::Released;
     in_core.episodes[2].scope.store = StoreFamily::SearchProjection;
     assert_eq!(
-        in_core.validate(&b),
+        in_core.validate(&b, &limits()),
         Err(FaultReportError::CoreFamilyFaulted {
             episode: "ingest-write".to_string(),
             store: StoreFamily::SearchProjection,
@@ -831,7 +834,7 @@ fn a_parsed_report_cannot_claim_what_no_run_recorded() {
     };
     consumed.episodes[2].heal = Heal::Consumed;
     assert_eq!(
-        consumed.validate(&b),
+        consumed.validate(&b, &limits()),
         Err(FaultReportError::ConsumedFaultArmed {
             episode: "ingest-write".to_string()
         }),
@@ -866,6 +869,7 @@ fn a_parsed_report_cannot_claim_what_no_run_recorded() {
 
     let mut claimed = ok.effects.clone();
     let effect = claimed.effects.get_mut("ack:1").unwrap();
+    effect.observed = 0;
     effect.reply_lost = false;
     effect.read_back = false;
     effect.expected = Expected::Exactly {
@@ -880,7 +884,11 @@ fn a_parsed_report_cannot_claim_what_no_run_recorded() {
         "a reply that was not lost derives applied; nothing else was observed"
     );
     let mut contradicted = ok.effects.clone();
-    contradicted.effects.get_mut("ack:1").unwrap().outcome = EffectOutcome::NotApplied;
+    let effect = contradicted.effects.get_mut("ack:1").unwrap();
+    effect.observed = 0;
+    effect.expected = Expected::Exactly {
+        state: EffectState::NotApplied,
+    };
     assert_eq!(
         contradicted.validate(),
         Err(EffectRefused::OutcomeNotDerived {
@@ -925,7 +933,7 @@ fn a_parsed_report_cannot_claim_what_no_run_recorded() {
     let mut no_run = ok.clone();
     no_run.eval_run_id = String::new();
     assert_eq!(
-        no_run.validate(&b),
+        no_run.validate(&b, &limits()),
         Err(FaultReportError::MalformedDigest {
             field: "eval_run_id"
         })
@@ -933,7 +941,7 @@ fn a_parsed_report_cannot_claim_what_no_run_recorded() {
     let mut no_profile = ok.clone();
     no_profile.profile_digest = "ZZ".repeat(32);
     assert_eq!(
-        no_profile.validate(&b),
+        no_profile.validate(&b, &limits()),
         Err(FaultReportError::MalformedDigest {
             field: "profile_digest"
         })
@@ -977,7 +985,7 @@ fn a_parsed_report_cannot_claim_what_no_run_recorded() {
     let mut ghost_refusal = ok.clone();
     ghost_refusal.expected_refusals[0].episode = "ghost".to_string();
     assert_eq!(
-        ghost_refusal.validate(&b),
+        ghost_refusal.validate(&b, &limits()),
         Err(FaultReportError::UnknownEpisode {
             episode: "ghost".to_string()
         })
@@ -985,7 +993,7 @@ fn a_parsed_report_cannot_claim_what_no_run_recorded() {
     let mut unevidenced = ok.clone();
     unevidenced.expected_refusals[0].production_error = String::new();
     assert_eq!(
-        unevidenced.validate(&b),
+        unevidenced.validate(&b, &limits()),
         Err(FaultReportError::RefusalNotEvidenced {
             episode: "lost-ack".to_string(),
             refusal: ExpectedRefusal::R11DeletionBearingCatchUp,
@@ -1003,7 +1011,7 @@ fn a_parsed_report_cannot_claim_what_no_run_recorded() {
             production_error: "MetadataQuota".to_string(),
         });
     assert_eq!(
-        stalled_ghost.validate(&b),
+        stalled_ghost.validate(&b, &limits()),
         Err(FaultReportError::UnknownEpisode {
             episode: "ghost".to_string()
         }),
@@ -1013,7 +1021,7 @@ fn a_parsed_report_cannot_claim_what_no_run_recorded() {
     let mut orphan_barrier = ok.clone();
     orphan_barrier.barriers.push(barrier("ingest-write"));
     assert_eq!(
-        orphan_barrier.validate(&b),
+        orphan_barrier.validate(&b, &limits()),
         Err(FaultReportError::BarrierWithoutKill {
             episode: "ingest-write".to_string(),
             cut: "acknowledged".to_string(),
@@ -1027,7 +1035,7 @@ fn a_parsed_report_cannot_claim_what_no_run_recorded() {
         ..barrier("kill")
     });
     assert_eq!(
-        other_cut.validate(&b),
+        other_cut.validate(&b, &limits()),
         Err(FaultReportError::BarrierWithoutKill {
             episode: "kill".to_string(),
             cut: "staged".to_string(),
@@ -1039,7 +1047,7 @@ fn a_parsed_report_cannot_claim_what_no_run_recorded() {
         outcome: CutOutcome::NotReached,
     });
     assert_eq!(
-        twice.validate(&b),
+        twice.validate(&b, &limits()),
         Err(FaultReportError::DuplicateCut {
             cut: Cut::AtQuiescence
         }),
@@ -1061,15 +1069,15 @@ fn a_parsed_report_cannot_claim_what_no_run_recorded() {
     unsafe_int.safety_checks_while_armed = 9_007_199_254_740_992;
     assert!(
         matches!(
-            unsafe_int.serialize(&b),
+            unsafe_int.serialize(&b, &limits()),
             Err(FaultReportError::NotCanonical(_))
         ),
         "a report the result digest refuses is not serialized as valid"
     );
-    let mut unsafe_value = ok.serialize(&b).unwrap();
+    let mut unsafe_value = ok.serialize(&b, &limits()).unwrap();
     unsafe_value["safety_checks_while_armed"] = serde_json::json!(9_007_199_254_740_992u64);
     assert!(matches!(
-        parse_fault_report(&unsafe_value, &b),
+        parse_fault_report(&unsafe_value, &b, &limits()),
         Err(FaultReportError::NotCanonical(_))
     ));
     let mut met_but_blocked = liveness();
@@ -1088,6 +1096,60 @@ fn a_parsed_report_cannot_claim_what_no_run_recorded() {
             })
         ),
         "a lane that records the block that stopped it did not meet its bound"
+    );
+
+    let mut raised = ok.clone();
+    raised.envelope.peaks.processes = limits().processes + 1;
+    raised.envelope.bounds.processes = limits().processes + 2;
+    assert_eq!(
+        raised.validate(&b, &limits()),
+        Err(FaultReportError::EnvelopeDisagreesWithProfile),
+        "a report may not widen the envelope its profile approved"
+    );
+    let mut seen_yet_absent = ok.effects.clone();
+    let effect = seen_yet_absent.effects.get_mut("ack:1").unwrap();
+    effect.expected = Expected::Exactly {
+        state: EffectState::NotApplied,
+    };
+    effect.outcome = EffectOutcome::NotApplied;
+    assert_eq!(
+        seen_yet_absent.validate(),
+        Err(EffectRefused::ReadBackNotAdmissible {
+            identity: "ack:1".to_string(),
+            state: EffectState::NotApplied,
+        }),
+        "an observed effect was applied, whatever a read-back says"
+    );
+    let mut observed = EffectLedger::default();
+    observed.attempt("seen");
+    observed.observe("seen").unwrap();
+    observed.lose_reply("seen").unwrap();
+    assert!(matches!(
+        observed.read_back("seen", EffectState::NotApplied),
+        Err(EffectRefused::ReadBackNotAdmissible { .. })
+    ));
+    let mut unledgered = ok.clone();
+    unledgered.effects = EffectLedger::default();
+    assert_eq!(
+        unledgered.validate(&b, &limits()),
+        Err(FaultReportError::LostReplyUnrecorded {
+            episodes: 1,
+            recorded: 0,
+        }),
+        "a lost reply nobody ledgered left no evidence of what it did"
+    );
+    assert!(
+        FaultAction::ClaimMaterialization {
+            fault: MaterializationFaultKind::FailAcknowledgement
+        }
+        .loses_reply()
+    );
+    assert!(
+        !FaultAction::EmbeddingPublication {
+            fault: PublicationFaultKind::LoseLocalCommit
+        }
+        .loses_reply(),
+        "a rolled-back commit whose reply says so is known, not lost"
     );
 }
 

@@ -1578,8 +1578,8 @@ Fault contract (`crates/eval-core/tests/fault.rs`,
   a lost reply expects `one_of {applied, not_applied}` with outcome `unknown`;
   a read-back collapses it to one state and the counts that state proves; a
   read-back outside the admissible set, or `not_applied` for an acknowledged
-  effect (even after a lost reply), is `ReadBackNotAdmissible` and changes
-  nothing.
+  or otherwise observed effect (even after a lost reply), is
+  `ReadBackNotAdmissible` and changes nothing.
 - `a_premature_success_fixture_is_refused` (marker
   `flt_premature_success_fixture_refused`): an applied outcome without a
   read-back, an expectation collapsed without one, an acknowledged effect
@@ -1619,7 +1619,12 @@ Fault contract (`crates/eval-core/tests/fault.rs`,
   cut is `BarrierWithoutKill`; a `Cut` receipted twice is `DuplicateCut`; an
   effect entry with zero attempts is `NeverAttempted`; an integer outside the
   canonical safe range is `NotCanonical` at `serialize` and at parse; a lane
-  that met its bound yet records a `blocked` stop is `LivenessUnmet`.
+  that met its bound yet records a `blocked` stop is `LivenessUnmet`; envelope
+  bounds other than the profile's limits are `EnvelopeDisagreesWithProfile`;
+  an observed effect read back or parsed as `not_applied` is
+  `ReadBackNotAdmissible`; a report whose lost-reply episodes outnumber the
+  ledger's lost replies is `LostReplyUnrecorded`, and `loses_reply` names
+  which actions count.
 
 Fault shell (`crates/daemon/tests/eval_fault.rs`, `--all-features`; the
 default shards run the campaign once with every scenario asserted over it,
