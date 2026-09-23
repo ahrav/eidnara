@@ -7,7 +7,7 @@ use crate::eligibility::{
     Destination, FactTuple, Sensitivity, ServedClass, SpecError, StateFacts, Verdict, check_spec,
     judge_with,
 };
-use crate::event::{EventId, EventLog, LogError, MAX_VALID_TIME_MS, Payload};
+use crate::event::{EventId, EventLog, LogError, MAX_VALID_TIME_MS, Payload, Supersession};
 
 pub const REDUCER_VERSION: &str = "eval-reducer/v1";
 
@@ -94,14 +94,14 @@ pub fn reduce(log: &EventLog, fixture: &Value, query: &Query) -> Result<Truth, R
     let mut corrected = BTreeSet::new();
     let mut retracted = BTreeSet::new();
     for event in log.events.iter().filter(|event| in_cut(event)) {
-        match &event.payload {
-            Payload::Correction { target, .. } => {
+        match event.payload.supersedes() {
+            Some((Supersession::Correction, target)) => {
                 corrected.insert(target.clone());
             }
-            Payload::Invalidation { target } => {
+            Some((Supersession::Retraction, target)) => {
                 retracted.insert(target.clone());
             }
-            _ => {}
+            None => {}
         }
     }
     let mut units = BTreeMap::new();
