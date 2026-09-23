@@ -1,14 +1,15 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use eval_core::{
-    APPLICATION_CRASH, ArtifactDeletionFaultKind, ArtifactGcFaultKind, ArtifactIngestFaultKind,
-    BarrierReceipt, BarrierRefused, BatchFaultKind, ClaimBoundary, Coverage, CoverageRefused, Cut,
-    CutCoverage, CutOutcome, DispatchFaultKind, EffectLedger, EffectOutcome, EffectRefused,
-    EffectState, Envelope, EpisodeRefused, Expected, ExpectedRefusal, FAULT_REPORT_SCHEMA,
-    FaultAction, FaultEpisode, FaultProfile, FaultReport, FaultReportError, FaultScope, Heal,
-    HealthyCore, KillLabel, Lane, LaneProgress, LivenessBounds, LivenessRefused, LivenessReport,
-    MaterializationFaultKind, PublicationFaultKind, RecordedRefusal, ResourceLimits,
-    RestoreFaultKind, SIGKILL, SearchEpisodeFault, StoreFamily, TEST_BINARY_CHILD, cut_receipts,
+    APPLICATION_CRASH, Approval, ArtifactDeletionFaultKind, ArtifactGcFaultKind,
+    ArtifactIngestFaultKind, BarrierReceipt, BarrierRefused, BatchFaultKind, CampaignProfile,
+    ClaimBoundary, Coverage, CoverageRefused, Cut, CutCoverage, CutOutcome, DispatchFaultKind,
+    EffectLedger, EffectOutcome, EffectRefused, EffectState, Envelope, EpisodeRefused, Expected,
+    ExpectedRefusal, FAULT_REPORT_SCHEMA, FaultAction, FaultEpisode, FaultProfile, FaultReport,
+    FaultReportError, FaultScope, Heal, HealthyCore, KillLabel, Lane, LaneProgress, LivenessBounds,
+    LivenessRefused, LivenessReport, MaterializationFaultKind, PublicationFaultKind,
+    RUN_PROFILE_SCHEMA, RecordedRefusal, ResourceLimits, RestoreFaultKind, RunProfile, SIGKILL,
+    Scale, SearchEpisodeFault, StoreFamily, TEST_BINARY_CHILD, TaskBudgets, cut_receipts,
     parse_fault_report, validate_episodes,
 };
 
@@ -23,12 +24,45 @@ fn bounds() -> LivenessBounds {
     }
 }
 
-fn profile() -> FaultProfile {
-    FaultProfile {
-        digest: "cd".repeat(32),
-        liveness: bounds(),
+/// An approved run profile whose liveness bounds are `bounds()` and whose
+/// envelope is `limits()`; the only way to hold a `FaultProfile`.
+fn run_profile() -> RunProfile {
+    RunProfile {
+        schema: RUN_PROFILE_SCHEMA.to_string(),
+        name: "s0-fault-campaign".to_string(),
+        scale: Scale::S0,
+        worlds: 4,
+        tasks_per_world: 3,
+        max_events_per_log: 64,
+        budgets: TaskBudgets {
+            max_model_calls: 12,
+            max_tool_calls: 40,
+            max_tokens_in: 200_000,
+            max_tokens_out: 32_000,
+            hard_deadline_ms: 600_000,
+            max_no_progress_iterations: 3,
+        },
         envelope: limits(),
+        indeterminate_ceiling: "0.1".to_string(),
+        censoring_ceiling: "0.2".to_string(),
+        redaction_refusal_ceiling: "0".to_string(),
+        baseline_bounds: RunProfile::grounded_baseline_bounds(),
+        statistics: CampaignProfile {
+            noninferiority_margin: "0.02".to_string(),
+            harm_bound: "0.1".to_string(),
+            floor_threshold: "0.7".to_string(),
+            miss_asymmetry_bound: "0.05".to_string(),
+            liveness_bounds: bounds(),
+        },
+        approval: Some(Approval {
+            approved_by: "maintainer".to_string(),
+            approved_at_run_id: "ab".repeat(32),
+        }),
     }
+}
+
+fn profile() -> FaultProfile {
+    run_profile().fault_profile().unwrap()
 }
 
 fn limits() -> ResourceLimits {
@@ -139,7 +173,7 @@ fn report() -> FaultReport {
     FaultReport {
         schema: FAULT_REPORT_SCHEMA.to_string(),
         eval_run_id: "ab".repeat(32),
-        profile_digest: "cd".repeat(32),
+        profile_digest: profile().digest().to_string(),
         claim_boundary: ClaimBoundary::pinned(),
         episodes: vec![
             episode("lost-ack", lost_ack()),
@@ -1520,6 +1554,27 @@ fn a_parsed_report_cannot_claim_what_no_run_recorded() {
     reopened.acknowledge("re").unwrap();
     assert_eq!(reopened.effects["re"].outcome, EffectOutcome::Applied);
     reopened.validate().unwrap();
+
+    let mut lost_after_ack = EffectLedger::default();
+    lost_after_ack.attempt("done");
+    lost_after_ack.acknowledge("done").unwrap();
+    lost_after_ack.attempt("done");
+    lost_after_ack.lose_reply("done", "lost-ack").unwrap();
+    let e = &lost_after_ack.effects["done"];
+    assert_eq!(e.outcome, EffectOutcome::Applied);
+    assert_eq!(e.lost_by, ["lost-ack".to_string()].into_iter().collect());
+    lost_after_ack.validate().expect(
+        "an acknowledged identity stays applied; a later lost retry is recorded, not doubted",
+    );
+    let mut unapproved = run_profile();
+    unapproved.approval = None;
+    assert!(
+        matches!(
+            unapproved.fault_profile(),
+            Err(eval_core::ProfileError::NotApproved { .. })
+        ),
+        "the only constructor of a FaultProfile refuses an unapproved profile"
+    );
 }
 
 #[test]

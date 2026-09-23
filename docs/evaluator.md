@@ -2090,7 +2090,9 @@ a checkpoint receipted at least once is `Reached`, every other declared one is
 `lose_reply(identity, episode)` adds the episode whose fault lost the reply
 to `lost_by` (a retried identity can lose one reply per attempt), sets
 the expectation to `one_of {applied, not_applied}` and the outcome to
-`unknown`; `read_back(identity, state)` collapses it to `exactly { state }`
+`unknown` (unless the identity was already observed, in which case the loss
+is recorded and the applied state stands: a later retry's lost reply cannot
+undo evidence); `read_back(identity, state)` collapses it to `exactly { state }`
 and the matching outcome, adding the observation an applied read-back proves.
 An observation (`observe`, `acknowledge`) resolves an identity whose last word
 was `not_applied` or `unknown`: the effect is there, so the identity moves to
@@ -2163,8 +2165,9 @@ receipts, cut receipts, cut coverage, the effect ledger, expected refusals,
 the count of safety checks made while faults were armed (`SafetyNeverChecked`
 at zero), the optional liveness report, markers, and envelope. `validate`
 takes a `FaultProfile`, the approved profile's digest, liveness bounds, and
-resource limits (`RunProfile::fault_profile` builds one and refuses an
-unapproved profile), and runs every
+resource limits; its fields are private and `RunProfile::fault_profile` is
+its only constructor, refusing an unapproved profile, so holding one is
+holding an approved profile's word. `validate` runs every
 refusal above, and also refuses
 `ClaimBoundaryMismatch`, `MalformedDigest` for an `eval_run_id` or
 `profile_digest` that is not 64 lowercase hex digits, `ProfileDigestMismatch`

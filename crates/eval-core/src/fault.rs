@@ -735,6 +735,11 @@ impl EffectLedger {
     pub fn lose_reply(&mut self, identity: &str, episode: &str) -> Result<(), EffectRefused> {
         let effect = self.effect(identity)?;
         effect.lost_by.insert(episode.to_string());
+        // An identity already observed is applied whatever a later retry's
+        // reply did; the loss is recorded, the evidence stands.
+        if effect.observed > 0 {
+            return Ok(());
+        }
         effect.read_back = false;
         effect.expected = Expected::OneOf {
             states: [EffectState::Applied, EffectState::NotApplied]
@@ -1025,12 +1030,28 @@ impl LivenessReport {
 }
 
 /// What the approved profile fixes for a fault campaign: the digest a report
-/// must name, the liveness bounds, and the resource envelope.
+/// must name, the liveness bounds, and the resource envelope. Only
+/// `RunProfile::fault_profile` builds one, so holding a `FaultProfile` is
+/// holding an approved profile's word.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FaultProfile {
-    pub digest: String,
-    pub liveness: LivenessBounds,
-    pub envelope: ResourceLimits,
+    digest: String,
+    liveness: LivenessBounds,
+    envelope: ResourceLimits,
+}
+
+impl FaultProfile {
+    pub fn digest(&self) -> &str {
+        &self.digest
+    }
+
+    pub fn liveness(&self) -> &LivenessBounds {
+        &self.liveness
+    }
+
+    pub fn envelope(&self) -> &ResourceLimits {
+        &self.envelope
+    }
 }
 
 impl RunProfile {

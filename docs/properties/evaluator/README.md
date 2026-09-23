@@ -1653,7 +1653,10 @@ Fault contract (`crates/eval-core/tests/fault.rs`,
   `lost_by` may not name more episodes than unacknowledged attempts; `attempt`
   after a `not_applied` read-back reopens the identity as `unknown` (a valid
   pending state) and an observation or acknowledgement then resolves it to
-  applied.
+  applied; a lost reply on a retry of an already-observed identity is recorded
+  without doubting the applied state; `FaultProfile` has private fields and
+  `RunProfile::fault_profile` as its only constructor, so the fixture holds an
+  approved `RunProfile` and derives the report's `profile_digest` from it.
 
 Aging drive (`crates/daemon/tests/eval_aging.rs`, `--all-features`):
 
