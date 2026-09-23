@@ -2308,7 +2308,9 @@ canaries and the hidden-test adequacy run are recorded as the self-tests, and
 `SuiteDAdmission::admit` refuses at the end if any is missing.
 
 Containment is `unshare --user --map-root-user --mount --pid --net --fork
---kill-child`. The script run inside before the agent covers the runner's
+--kill-child --mount-proc`, so `/proc` inside lists the namespace's own
+processes, not the host's; the canary refuses a run whose `/proc/self` names
+a PID other than its own. The script run inside before the agent covers the runner's
 private directory with an empty read-only tmpfs, binds the workspace
 writable, then remounts every other mount in the namespace read-only (one
 that refuses, such as a locked autofs, is covered by an empty read-only tmpfs
@@ -2320,7 +2322,9 @@ mount underneath every read-only remount) and drops the mapped root's
 capabilities with `setpriv` (bounding, inheritable, and ambient sets cleared,
 `no_new_privs` set), so the agent can neither unmount the tmpfs nor remount
 anything writable. Any mount that fails exits 97 and the run is refused. `--kill-child` kills the
-namespace init and with it everything the agent started. `Host::namespaces`
+namespace init and with it everything the agent started. A bounded child's
+stdout is read under a cap and its stderr is discarded, so nothing it prints
+reaches the runner's own log. `Host::namespaces`
 says whether the host can create the four namespaces; when it cannot, the
 run records `Containment::Skipped { no_containment }`, every task terminal is
 `Skipped(NoContainment)`, no agent process is spawned, every injection case

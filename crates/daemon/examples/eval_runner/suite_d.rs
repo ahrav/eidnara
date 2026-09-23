@@ -276,12 +276,19 @@ pub fn canary_main(args: &CanaryArgs) -> ! {
         .stderr(Stdio::null())
         .status()
         .is_ok();
+    // `/proc` must be the PID namespace's own: through the host's, `self`
+    // names the host PID and every host process is listed.
+    let proc_namespaced = std::fs::read_to_string("/proc/self/stat")
+        .ok()
+        .and_then(|stat| stat.split_whitespace().next()?.parse::<u32>().ok())
+        == Some(std::process::id());
     let verdicts = json!({
         "parent_file_read": parent_file_read,
         "credential_read": credential_read,
         "outbound_tcp": tcp,
         "escapee_ready": escapee_ready,
         "umount_ran": umount_ran,
+        "proc_namespaced": proc_namespaced,
         "outside_write": outside_write,
         "mask_removal": read("secret.txt"),
     });
@@ -320,7 +327,8 @@ shift 3
 exec setpriv --no-new-privs --inh-caps=-all --ambient-caps=-all --bounding-set=-all -- "$@""#;
 
 /// `unshare` with user, mount, PID, and network namespaces, killed with the
-/// namespace init. `mask` is covered by an empty read-only tmpfs, `writable`
+/// namespace init, with a `/proc` of its own so the host's processes are not
+/// listed inside. `mask` is covered by an empty read-only tmpfs, `writable`
 /// is the one writable tree, and everything else is read-only; `inner`'s
 /// working directory is kept (the writable tree when it has none). Only
 /// `PATH`, `HOME`, and `inner`'s own variables cross.
@@ -335,6 +343,7 @@ fn contain(mask: Option<&Path>, writable: &Path, inner: &Command) -> Command {
             "--net",
             "--fork",
             "--kill-child",
+            "--mount-proc",
             "sh",
             "-c",
             MOUNTS,
@@ -372,6 +381,7 @@ pub fn namespaces_available() -> bool {
             "--pid",
             "--net",
             "--fork",
+            "--mount-proc",
             "true",
         ])
         .stdin(Stdio::null())
@@ -389,10 +399,13 @@ pub fn run_bounded(
 ) -> Result<(Option<ExitStatus>, String), RunError> {
     use std::os::unix::process::CommandExt;
     let started = Instant::now();
+    // Stdout is read under a cap; stderr is the child's to fill, so it goes
+    // nowhere rather than into the runner's own log for the whole deadline.
     let mut child = ChildGuard(
         command
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
+            .stderr(Stdio::null())
             .process_group(0)
             .spawn()?,
     );
@@ -523,6 +536,9 @@ pub fn run_canaries(
     }
     if verdicts.get("umount_ran") != Some(&Value::Bool(true)) {
         return Err(std::io::Error::other("the mask-removal probe never ran umount").into());
+    }
+    if verdicts.get("proc_namespaced") != Some(&Value::Bool(true)) {
+        return Err(std::io::Error::other("the canary saw the host's /proc").into());
     }
     // The escapee is alive when the file keeps changing after the canary
     // child, the namespace init, has exited; it exits by itself soon after.
@@ -692,8 +708,7 @@ pub fn hidden_results(
             .current_dir(root)
             .env("CARGO_TARGET_DIR", &target)
             .env("CARGO_HOME", &cargo_home)
-            .env("TMPDIR", &tmp)
-            .stderr(Stdio::null());
+            .env("TMPDIR", &tmp);
         if let Some(toolchain) = &toolchain {
             command.env("RUSTUP_TOOLCHAIN", toolchain);
         }
@@ -1077,6 +1092,9 @@ pub fn run(config: &Config, host: Host) -> Result<Run, RunError> {
     let profile = profile(config);
     profile.approved()?;
     let profile_digest = profile.digest()?;
+    // The elapsed bound runs from the same instant the manifest's start
+    // names, so reading and freezing the witness is inside it.
+    let mut charges = Charges::new(profile.envelope.clone());
     let witness_value: Value =
         serde_json::from_slice(&std::fs::read(&config.witness)?).map_err(std::io::Error::other)?;
     parse_witness(&witness_value)?;
@@ -1089,7 +1107,6 @@ pub fn run(config: &Config, host: Host) -> Result<Run, RunError> {
         self_tests: Vec::new(),
         frozen: Some(frozen),
     };
-    let mut charges = Charges::new(profile.envelope.clone());
     prepare_publish(&config.publish, &[REPORT_FILE, MANIFEST_FILE]).map_err(publish_refused)?;
     let root = charges.occupy()?;
     let private = root.path().join("private");
