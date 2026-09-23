@@ -1232,3 +1232,47 @@ fn the_time_study_measures_the_pilot_and_nothing_else() {
         })
     );
 }
+
+#[test]
+fn a_clone_url_carries_no_query_or_fragment() {
+    for repository in [
+        "https://example.invalid/cargo/repo.git?mirror=1",
+        "https://example.invalid/cargo/repo.git#main",
+    ] {
+        let mut entry = entry("cargo-0", Family::Cargo, 0x10);
+        entry.repository = repository.to_string();
+        assert!(entry.validate().is_err(), "{repository}");
+    }
+}
+
+#[test]
+fn the_time_study_validates_the_corpus_it_measures() {
+    let mut corpus = pilot();
+    corpus.schema = "eval-anchor-corpus/v0".to_string();
+    let measured: Vec<Preparation> = corpus.entries[..TIME_STUDY_TASKS]
+        .iter()
+        .map(|e| Preparation {
+            task: e.id.clone(),
+            prepare_ms: 1,
+        })
+        .collect();
+    assert!(time_study(&corpus, &measured, u64::MAX).is_err());
+}
+
+#[test]
+fn a_criterion_approved_by_whitespace_is_unapproved() {
+    let blank = TransferCriterion {
+        approved_by: " ".to_string(),
+        approved_at_run_id: "ab".repeat(32),
+        min_valid_tasks: 1,
+        required_families: BTreeSet::from(["cargo".to_string()]),
+    };
+    assert!(blank.validate().is_err());
+    let settings = RealHistorySettings {
+        providers: vec![provider()],
+        execution_image: "image-1".to_string(),
+        preparation_bound_ms: Some(1),
+        transfer_criterion: Some(blank),
+    };
+    assert!(settings.validate().is_err());
+}

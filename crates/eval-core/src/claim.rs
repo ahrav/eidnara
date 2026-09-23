@@ -69,7 +69,7 @@ impl TransferCriterion {
     /// A criterion nobody approved, or one every anchor set would meet, is
     /// not a criterion.
     pub fn validate(&self) -> Result<(), UnmetClause> {
-        if self.approved_by.is_empty() || self.approved_at_run_id.is_empty() {
+        if self.approved_by.trim().is_empty() || self.approved_at_run_id.trim().is_empty() {
             return Err(UnmetClause::CriterionNotApproved);
         }
         if self.min_valid_tasks == 0 || self.required_families.is_empty() {

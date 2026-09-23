@@ -2438,8 +2438,9 @@ is not here; this module only judges the evidence it records.
 `pull_request`, and `cutoff_ms`. The issue and pull-request text is fetched
 at run time and never written into a corpus, report, or witness; `validate`
 refuses an empty field, an `id` with whitespace, a `repository` that is not
-an `https://` URL with a bare host (so `git@host:path`, `ssh://`, `file://`,
-a user, a port, or an empty host refuses, and the `/pull/` URLs
+an `https://` URL of a bare host and path in unreserved characters (so
+`git@host:path`, `ssh://`, `file://`, a user, a port, a query, a fragment,
+or an empty host refuses, and the `/pull/` URLs
 `future_answers` matches derive
 from the URL itself), a `license` that is not an SPDX expression by shape (identifiers of
 SPDX characters joined by `AND`, `OR`, or `WITH`; not checked against the
@@ -2455,8 +2456,9 @@ exactly `PILOT_COMPOSITION`: eight Cargo, eight Tokio, four Django.
 
 **Time study.** `time_study(corpus, measured, bound_ms)` projects the pilot's
 preparation cost from exactly `TIME_STUDY_TASKS` (five) measured
-`Preparation {task, prepare_ms}` rows of distinct tasks of the pilot corpus
-(any other composition refuses `NotThePilot`), scaled in
+`Preparation {task, prepare_ms}` rows of distinct tasks of a valid pilot
+corpus (an invalid corpus refuses `Corpus(..)`, any other composition
+`NotThePilot`), scaled in
 128-bit arithmetic and clamped at `u64::MAX` to the
 twenty-task pilot: `Affordable {projected_ms}` within the bound, else
 `StopForApproval {projected_ms, bound_ms}`, which stops for the maintainer

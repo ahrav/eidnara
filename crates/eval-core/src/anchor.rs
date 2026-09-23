@@ -150,17 +150,20 @@ fn is_token(text: &str) -> bool {
     !text.contains(char::is_whitespace)
 }
 
-/// An `https://` clone URL with a bare host: no user or port in the
-/// authority, so the web path `repository_web_path` derives is the URL
-/// itself and the repository's `/pull/` URLs are recognizable from the row
-/// alone. `git@host:path`, `ssh://git@host:22/path`, `https:///path`, and
-/// `file:///path` are not accepted.
+/// An `https://` clone URL of a bare host and path, in unreserved URL
+/// characters only: no user, port, query, or fragment, so the web path
+/// `repository_web_path` derives is the URL itself and the repository's
+/// `/pull/` URLs are recognizable from the row alone. `git@host:path`,
+/// `ssh://git@host:22/path`, `https:///path`, `file:///path`, and
+/// `https://host/path?x` are not accepted.
 fn is_url(text: &str) -> bool {
-    is_token(text)
-        && text.strip_prefix("https://").is_some_and(|rest| {
-            let authority = rest.split('/').next().unwrap_or(rest);
-            !authority.is_empty() && !authority.contains('@') && !authority.contains(':')
-        })
+    text.strip_prefix("https://").is_some_and(|rest| {
+        let host = rest.split('/').next().unwrap_or(rest);
+        !host.is_empty()
+            && rest
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || "-._~/".contains(c))
+    })
 }
 
 /// An SPDX expression: identifiers of SPDX characters joined by `AND`,
@@ -276,6 +279,8 @@ pub enum Affordability {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TimeStudyRefused {
+    /// The corpus itself refuses; its measurements say nothing.
+    Corpus(AnchorError),
     /// The study projects the pilot's cost from the pilot's own tasks.
     NotThePilot {
         found: BTreeMap<Family, u32>,
@@ -301,6 +306,7 @@ pub fn time_study(
     measured: &[Preparation],
     bound_ms: u64,
 ) -> Result<Affordability, TimeStudyRefused> {
+    corpus.validate().map_err(TimeStudyRefused::Corpus)?;
     if let Err(AnchorError::NotPilotComposition { found }) = corpus.is_pilot() {
         return Err(TimeStudyRefused::NotThePilot { found });
     }
