@@ -1,14 +1,15 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use eval_core::{
-    APPLICATION_CRASH, ArtifactDeletionFaultKind, ArtifactGcFaultKind, ArtifactIngestFaultKind,
-    BarrierReceipt, BarrierRefused, BatchFaultKind, ClaimBoundary, Coverage, CoverageRefused, Cut,
-    CutCoverage, CutOutcome, DispatchFaultKind, EffectLedger, EffectOutcome, EffectRefused,
-    EffectState, Envelope, EpisodeRefused, Expected, ExpectedRefusal, FAULT_REPORT_SCHEMA,
-    FaultAction, FaultEpisode, FaultProfile, FaultReport, FaultReportError, FaultScope, Heal,
-    HealthyCore, KillLabel, Lane, LaneProgress, LivenessBounds, LivenessRefused, LivenessReport,
-    MaterializationFaultKind, PublicationFaultKind, RecordedRefusal, ResourceLimits,
-    RestoreFaultKind, SIGKILL, SearchEpisodeFault, StoreFamily, TEST_BINARY_CHILD, cut_receipts,
+    APPLICATION_CRASH, Approval, ArtifactDeletionFaultKind, ArtifactGcFaultKind,
+    ArtifactIngestFaultKind, BarrierReceipt, BarrierRefused, BatchFaultKind, CampaignProfile,
+    ClaimBoundary, Coverage, CoverageRefused, Cut, CutCoverage, CutOutcome, DispatchFaultKind,
+    EffectLedger, EffectOutcome, EffectRefused, EffectState, Envelope, EpisodeRefused, Expected,
+    ExpectedRefusal, FAULT_REPORT_SCHEMA, FaultAction, FaultEpisode, FaultProfile, FaultReport,
+    FaultReportError, FaultScope, Heal, HealthyCore, KillLabel, Lane, LaneProgress, LivenessBounds,
+    LivenessRefused, LivenessReport, MaterializationFaultKind, PublicationFaultKind,
+    RUN_PROFILE_SCHEMA, RecordedRefusal, ResourceLimits, RestoreFaultKind, RunProfile, SIGKILL,
+    Scale, SearchEpisodeFault, StoreFamily, TEST_BINARY_CHILD, TaskBudgets, cut_receipts,
     parse_fault_report, validate_episodes,
 };
 
@@ -23,12 +24,45 @@ fn bounds() -> LivenessBounds {
     }
 }
 
-fn profile() -> FaultProfile {
-    FaultProfile {
-        digest: "cd".repeat(32),
-        liveness: bounds(),
+/// An approved run profile whose liveness bounds are `bounds()` and whose
+/// envelope is `limits()`; the only way to hold a `FaultProfile`.
+fn run_profile() -> RunProfile {
+    RunProfile {
+        schema: RUN_PROFILE_SCHEMA.to_string(),
+        name: "s0-fault-campaign".to_string(),
+        scale: Scale::S0,
+        worlds: 4,
+        tasks_per_world: 3,
+        max_events_per_log: 64,
+        budgets: TaskBudgets {
+            max_model_calls: 12,
+            max_tool_calls: 40,
+            max_tokens_in: 200_000,
+            max_tokens_out: 32_000,
+            hard_deadline_ms: 600_000,
+            max_no_progress_iterations: 3,
+        },
         envelope: limits(),
+        indeterminate_ceiling: "0.1".to_string(),
+        censoring_ceiling: "0.2".to_string(),
+        redaction_refusal_ceiling: "0".to_string(),
+        baseline_bounds: RunProfile::grounded_baseline_bounds(),
+        statistics: CampaignProfile {
+            noninferiority_margin: "0.02".to_string(),
+            harm_bound: "0.1".to_string(),
+            floor_threshold: "0.7".to_string(),
+            miss_asymmetry_bound: "0.05".to_string(),
+            liveness_bounds: bounds(),
+        },
+        approval: Some(Approval {
+            approved_by: "maintainer".to_string(),
+            approved_at_run_id: "ab".repeat(32),
+        }),
     }
+}
+
+fn profile() -> FaultProfile {
+    run_profile().fault_profile().unwrap()
 }
 
 fn limits() -> ResourceLimits {
@@ -139,7 +173,7 @@ fn report() -> FaultReport {
     FaultReport {
         schema: FAULT_REPORT_SCHEMA.to_string(),
         eval_run_id: "ab".repeat(32),
-        profile_digest: "cd".repeat(32),
+        profile_digest: profile().digest().to_string(),
         claim_boundary: ClaimBoundary::pinned(),
         episodes: vec![
             episode("lost-ack", lost_ack()),
@@ -1192,11 +1226,23 @@ fn a_parsed_report_cannot_claim_what_no_run_recorded() {
     seen_pending.lose_reply("x", "lost-ack").unwrap();
     seen_pending.observe("x").unwrap();
     assert_eq!(
+        seen_pending.effects["x"].outcome,
+        EffectOutcome::Applied,
+        "an observed lost reply is known applied; the observation resolves it"
+    );
+    seen_pending.validate().unwrap();
+    seen_pending.effects.get_mut("x").unwrap().outcome = EffectOutcome::Unknown;
+    seen_pending.effects.get_mut("x").unwrap().expected = Expected::OneOf {
+        states: [EffectState::Applied, EffectState::NotApplied]
+            .into_iter()
+            .collect(),
+    };
+    assert_eq!(
         seen_pending.validate(),
         Err(EffectRefused::ObservedWithoutReadBack {
             identity: "x".to_string()
         }),
-        "an observed lost reply is known applied; the ledger must say so through a read-back"
+        "a parsed entry observed yet still unknown claims an ambiguity the observation removed"
     );
     let mut no_pid = barrier("kill");
     no_pid.pid = 0;
@@ -1477,6 +1523,142 @@ fn a_parsed_report_cannot_claim_what_no_run_recorded() {
         uncounted.validate(&p),
         Err(FaultReportError::KilledChildNotCounted),
         "the killed child was a process the envelope must have seen"
+    );
+
+    let mut double_loss = EffectLedger::default();
+    double_loss.attempt("once");
+    double_loss.lose_reply("once", "first").unwrap();
+    double_loss.lose_reply("once", "second").unwrap();
+    assert_eq!(
+        double_loss.validate(),
+        Err(EffectRefused::LostReplyAcknowledged {
+            identity: "once".to_string()
+        }),
+        "one unacknowledged attempt loses one reply, not two"
+    );
+    let mut reopened = EffectLedger::default();
+    reopened.attempt("re");
+    reopened.lose_reply("re", "lost-ack").unwrap();
+    reopened.read_back("re", EffectState::NotApplied).unwrap();
+    reopened.attempt("re");
+    let e = &reopened.effects["re"];
+    assert_eq!(e.outcome, EffectOutcome::Unknown);
+    assert!(
+        !e.read_back,
+        "the old read-back spoke for the attempt before this one"
+    );
+    reopened.validate().expect(
+        "a retry is unresolved until something resolves it, and unresolved is a valid state",
+    );
+    assert_eq!(reopened.unknown(), ["re".to_string()].into_iter().collect());
+    reopened.acknowledge("re").unwrap();
+    assert_eq!(reopened.effects["re"].outcome, EffectOutcome::Applied);
+    reopened.validate().unwrap();
+
+    let mut lost_after_ack = EffectLedger::default();
+    lost_after_ack.attempt("done");
+    lost_after_ack.acknowledge("done").unwrap();
+    lost_after_ack.attempt("done");
+    lost_after_ack.lose_reply("done", "lost-ack").unwrap();
+    let e = &lost_after_ack.effects["done"];
+    assert_eq!(e.outcome, EffectOutcome::Applied);
+    assert_eq!(e.lost_by, ["lost-ack".to_string()].into_iter().collect());
+    lost_after_ack.validate().expect(
+        "an acknowledged identity stays applied; a later lost retry is recorded, not doubted",
+    );
+    let mut unapproved = run_profile();
+    unapproved.approval = None;
+    assert!(
+        matches!(
+            unapproved.fault_profile(),
+            Err(eval_core::ProfileError::NotApproved { .. })
+        ),
+        "the only constructor of a FaultProfile refuses an unapproved profile"
+    );
+
+    for (action, family, loses) in [
+        (
+            FaultAction::KernelCommitFailAfterEvents,
+            StoreFamily::Kernel,
+            false,
+        ),
+        (
+            FaultAction::MessageCleanupLoseWriteReply,
+            StoreFamily::SearchProjection,
+            true,
+        ),
+        (
+            FaultAction::IdentitySweepLoseReclaimReply,
+            StoreFamily::SearchProjection,
+            true,
+        ),
+    ] {
+        assert_eq!(action.heal(), Heal::Consumed, "{action:?}");
+        assert_eq!(action.family(), Some(family), "{action:?}");
+        assert_eq!(action.loses_reply(), loses, "{action:?}");
+        let value = serde_json::to_value(&action).unwrap();
+        assert_eq!(
+            serde_json::from_value::<FaultAction>(value).unwrap(),
+            action
+        );
+    }
+    let mut read_back_yet_unknown = EffectLedger::default();
+    read_back_yet_unknown.attempt("rb");
+    read_back_yet_unknown.lose_reply("rb", "lost-ack").unwrap();
+    read_back_yet_unknown
+        .effects
+        .get_mut("rb")
+        .unwrap()
+        .read_back = true;
+    assert_eq!(
+        read_back_yet_unknown.validate(),
+        Err(EffectRefused::OutcomeNotDerived {
+            identity: "rb".to_string()
+        }),
+        "a read-back names one state; unknown after one is no read-back"
+    );
+
+    for (text, evidences) in [
+        ("DeletionUnpropagated { commit_seq: 7 }", true),
+        ("DeletionUnpropagated", true),
+        ("DeletionUnpropagated(7)", true),
+        ("NotDeletionUnpropagated", false),
+        ("a message mentioning DeletionUnpropagated", false),
+        ("DeletionUnpropagatedX", false),
+        ("", false),
+    ] {
+        assert_eq!(
+            ExpectedRefusal::R11DeletionBearingCatchUp.evidences(text),
+            evidences,
+            "{text:?}"
+        );
+    }
+    let mut word_inside = ok.clone();
+    word_inside.expected_refusals[0].production_error = "NotDeletionUnpropagated".to_string();
+    assert_eq!(
+        word_inside.validate(&p),
+        Err(FaultReportError::RefusalNotEvidenced {
+            episode: "lost-ack".to_string(),
+            refusal: ExpectedRefusal::R11DeletionBearingCatchUp,
+        }),
+        "the variant is evidenced by production's own text, not by a word containing it"
+    );
+    let mut claimed_twice = ok.clone();
+    claimed_twice.effects.attempt("ack:2");
+    claimed_twice
+        .effects
+        .lose_reply("ack:2", "lost-ack")
+        .unwrap();
+    claimed_twice
+        .effects
+        .read_back("ack:2", EffectState::Applied)
+        .unwrap();
+    assert_eq!(
+        claimed_twice.validate(&p),
+        Err(FaultReportError::LostReplyClaimedTwice {
+            episode: "lost-ack".to_string()
+        }),
+        "one episode fires once and loses one reply"
     );
 }
 

@@ -121,9 +121,12 @@ fn a_profile_pins_every_number_and_runs_only_once_approved() {
         "a fault campaign runs only under an approved profile"
     );
     let fault_profile = approved.fault_profile().unwrap();
-    assert_eq!(fault_profile.digest, approved.digest().unwrap());
-    assert_eq!(fault_profile.liveness, approved.statistics.liveness_bounds);
-    assert_eq!(fault_profile.envelope, approved.envelope);
+    assert_eq!(fault_profile.digest(), approved.digest().unwrap());
+    assert_eq!(
+        *fault_profile.liveness(),
+        approved.statistics.liveness_bounds
+    );
+    assert_eq!(*fault_profile.envelope(), approved.envelope);
     assert_ne!(approved.digest().unwrap(), profile.digest().unwrap());
     for nobody in ["", " \t"] {
         approved.approval.as_mut().unwrap().approved_by = nobody.to_string();

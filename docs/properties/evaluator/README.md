@@ -1624,12 +1624,13 @@ Fault contract (`crates/eval-core/tests/fault.rs`,
   that met its bound yet records a `blocked` stop is `LivenessUnmet`; envelope
   bounds other than the profile's limits are `EnvelopeDisagreesWithProfile`;
   an observed effect read back or parsed as `not_applied` is
-  `ReadBackNotAdmissible`; each effect's `lost_by` names the episode that
-  lost its reply: a reply-losing episode (`loses_reply` names which) with no
+  `ReadBackNotAdmissible`; each effect's `lost_by` names the episodes that
+  lost its replies: a reply-losing episode (`loses_reply` names which) with no
   effect naming it is `LostReplyUnrecorded`, an effect naming an episode that
   loses none is `LostByNonLosingEpisode`, and one naming an episode the
-  report lacks is `UnknownEpisode`; a lost reply observed without a read-back
-  is `ObservedWithoutReadBack`; a barrier with pid 0 is `NoPid`; a second
+  report lacks is `UnknownEpisode`; an observation resolves a lost reply to
+  applied, and a parsed entry observed yet still `unknown` is
+  `ObservedWithoutReadBack`; a barrier with pid 0 is `NoPid`; a second
   barrier for one kill is `DuplicateBarrier`; a kill at a cut the coverage
   never declared is `UndeclaredCut`; `embedding_dispatch`, `artifact_gc`, and
   `kernel_restore` encode the remaining seams at HEAD with their heal, family,
@@ -1648,7 +1649,20 @@ Fault contract (`crates/eval-core/tests/fault.rs`,
   no reply; a GC fault that raises the writer fence heals by reopen; `lost_by`
   is a set, so a retried identity keeps every losing episode; every oracle
   checkpoint needs a receipt (`MissingCut`); a lane driven past its bound is
-  `LivenessUnmet`; a kill with a zero process peak is `KilledChildNotCounted`.
+  `LivenessUnmet`; a kill with a zero process peak is `KilledChildNotCounted`;
+  `lost_by` may not name more episodes than unacknowledged attempts; `attempt`
+  after a `not_applied` read-back reopens the identity as `unknown` (a valid
+  pending state) and an observation or acknowledgement then resolves it to
+  applied; a lost reply on a retry of an already-observed identity is recorded
+  without doubting the applied state; `FaultProfile` has private fields and
+  `RunProfile::fault_profile` as its only constructor, so the fixture holds an
+  approved `RunProfile` and derives the report's `profile_digest` from it;
+  `kernel_commit_fail_after_events`, `message_cleanup_lose_write_reply`, and
+  `identity_sweep_lose_reclaim_reply` encode the last reply-loss and
+  transaction seams; `unknown` after a read-back is `OutcomeNotDerived`; a
+  refusal's error text must be the production variant as printed, not a word
+  containing it; one losing episode named by two effects is
+  `LostReplyClaimedTwice`.
 
 Fault shell (`crates/daemon/tests/eval_fault.rs`, `--all-features`; the
 default shards run the campaign once with every scenario asserted over it,
@@ -1778,6 +1792,9 @@ bound because it finishes inside the daemon suite's wall clock):
 - `a_copied_root_holding_a_file_the_checkpoint_does_not_list_is_refused_at_reopen`:
   a stray `memory.sqlite-wal` in the copied root panics before any store
   opens.
+- `a_reopened_copy_holds_one_live_source_hold_for_the_projection`: after the
+  reopen the copied kernel holds one live `source_hold` pin, the rebuilt
+  projection's; the prefix projection's stale hold was released.
 - `a_copy_missing_a_store_file_is_refused_at_reopen`: a copy missing
   `kernel/kernel.sqlite`, `memory.sqlite`, or `search/search.sqlite` is
   `FileMissing` naming it, before any store opens.
