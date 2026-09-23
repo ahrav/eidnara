@@ -3,8 +3,6 @@
 //! identity, model, credential id), so a request the recording never saw is a
 //! typed miss and every later request is refused too.
 
-use std::collections::BTreeMap;
-
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
@@ -53,22 +51,25 @@ impl ReviewerKey {
     }
 }
 
-/// Serves `turns` reviewer connections strictly from `entries`. A request
-/// whose key has no entry is answered with a typed `cassette_miss` refusal,
-/// and every later request is refused too, so the run stops at the first miss
-/// as it does at the other two boundaries.
+/// Serves `turns` reviewer connections strictly from `entries`, each entry
+/// answering one request; equal keys answer in recorded order, as equal
+/// digests do in the core. A request whose key has no unconsumed entry is
+/// answered with a typed `cassette_miss` refusal, and every later request is
+/// refused too, so the run stops at the first miss as it does at the other two
+/// boundaries.
 pub fn serve_keyed(
     peer: &mut Peer,
     turns: usize,
-    entries: BTreeMap<ReviewerKey, Vec<u8>>,
+    mut entries: Vec<(ReviewerKey, Vec<u8>)>,
     credential_id: &str,
 ) -> tokio::task::JoinHandle<Vec<Observed>> {
     let credential_id = credential_id.to_string();
     let mut missed = false;
     peer.serve_each(turns, move |request| {
         let key = ReviewerKey::of(request, &credential_id);
-        match entries.get(&key) {
-            Some(response) if !missed => response.clone(),
+        let recorded = entries.iter().position(|(recorded, _)| *recorded == key);
+        match recorded {
+            Some(index) if !missed => entries.remove(index).1,
             _ => {
                 missed = true;
                 let body = json!({"type": "error", "error": {"type": "cassette_miss", "body_digest": key.body_digest}});

@@ -5,10 +5,13 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use context_core::canonical_json::{is_lower_hex, protocol_digest};
+use context_core::canonical_json::{
+    ContractError, canonical_json_encode, is_lower_hex, protocol_digest,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::blank;
 use crate::census::EvaluatedSurface;
 use crate::governance::HistoryPolicy;
 use crate::manifest::{Cut, ResourceLimits};
@@ -176,6 +179,8 @@ pub enum ProfileError {
     },
     /// The parsed value drops a field the input carried.
     Lossy,
+    /// An integer outside the canonical safe range.
+    NotCanonical(ContractError),
     NotApproved {
         name: String,
     },
@@ -213,7 +218,10 @@ impl RunProfile {
                 found: self.schema.clone(),
             });
         }
-        if self.name.is_empty() {
+        // Digestible on both runtimes: no integer may leave the canonical safe range.
+        let value = serde_json::to_value(self).map_err(|e| ProfileError::Shape(e.to_string()))?;
+        canonical_json_encode(&value).map_err(ProfileError::NotCanonical)?;
+        if self.name.trim().is_empty() {
             return Err(ProfileError::Empty { field: "name" });
         }
         let b = &self.budgets;
@@ -273,7 +281,7 @@ impl RunProfile {
         }
         self.statistics.rates().map_err(ProfileError::Statistics)?;
         if let Some(approval) = &self.approval {
-            if approval.approved_by.is_empty() {
+            if approval.approved_by.trim().is_empty() {
                 return Err(ProfileError::Empty {
                     field: "approval.approved_by",
                 });
@@ -372,6 +380,17 @@ pub enum Terminal {
     Disabled(DisabledReason),
 }
 
+impl Terminal {
+    /// An attempted sample: a pass, a fail, a censored attempt, or an
+    /// indeterminate one. Skipped, unsupported, and disabled samples were not.
+    pub fn attempted(&self) -> bool {
+        matches!(
+            self,
+            Self::Pass | Self::Fail | Self::Censored { .. } | Self::Indeterminate
+        )
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SampleRecord {
@@ -401,6 +420,11 @@ pub enum SampleError {
     IdMismatch {
         key: String,
         id: String,
+    },
+    /// A sample whose `id` or `task` is empty or whitespace, naming nothing.
+    Blank {
+        sample: String,
+        field: &'static str,
     },
     MalformedLineage {
         sample: String,
@@ -449,6 +473,14 @@ impl SampleLedger {
                     id: record.id.clone(),
                 });
             }
+            for (field, text) in [("id", &record.id), ("task", &record.task)] {
+                if blank(text) {
+                    return Err(SampleError::Blank {
+                        sample: key.clone(),
+                        field,
+                    });
+                }
+            }
             let mut seen = BTreeSet::new();
             for entry in &record.lineage {
                 if !is_lower_hex(entry, 64) {
@@ -479,18 +511,9 @@ impl SampleLedger {
         self.samples.values().filter(|s| pick(&s.terminal)).count()
     }
 
-    /// Samples that were attempted: a pass, a fail, a censored attempt, or an
-    /// indeterminate one. Skipped, unsupported, and disabled samples were not.
+    /// Samples that were attempted; see [`Terminal::attempted`].
     pub fn attempted(&self) -> usize {
-        self.count(|t| {
-            matches!(
-                t,
-                Terminal::Pass
-                    | Terminal::Fail
-                    | Terminal::Censored { .. }
-                    | Terminal::Indeterminate
-            )
-        })
+        self.count(Terminal::attempted)
     }
 
     pub fn rates(&self) -> Result<TerminalRates, SampleError> {
@@ -518,9 +541,13 @@ impl SampleLedger {
     }
 }
 
-/// One dimension of the resource envelope. `StoreBytes` counts a store with
-/// its WAL and shm sidecars; `TempRoots` and `Processes` count what the run
-/// holds at once, the rest what it has accumulated.
+/// One dimension of the resource envelope, read as a peak of what the run
+/// holds at once. `StoreBytes` is the largest one store (with its WAL and shm
+/// sidecars), since a root is vacated before the next is occupied;
+/// `CassetteBytes` is every cassette the run has written, since they are kept
+/// together until it ends; `ArtifactBytes` is the largest artifact written;
+/// `TempRoots` and `Processes` count what is held at once; `ElapsedMs` and
+/// `RetainedArtifacts` accumulate over the run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Resource {
@@ -611,18 +638,14 @@ impl Envelope {
         }
     }
 
+    /// Records the reading into the peak, then refuses while any peak is over
+    /// its bound, so a breach stays refused however the later readings fall
+    /// and whichever resource they read; the refusal names the first breach in
+    /// declared order, at the peak that crossed.
     pub fn observe(&mut self, resource: Resource, observed: u64) -> Result<(), EnvelopeExceeded> {
         let peak = resource.of_mut(&mut self.peaks);
         *peak = (*peak).max(observed);
-        let bound = resource.of(&self.bounds);
-        if observed > bound {
-            return Err(EnvelopeExceeded {
-                resource,
-                bound,
-                observed,
-            });
-        }
-        Ok(())
+        self.check()
     }
 
     /// The first resource whose peak is over its bound, in declaration order.
