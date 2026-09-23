@@ -76,17 +76,18 @@ A scripted agent that plants a hidden test, and a budget the script exceeds.
 - Missing evidence: none.
 - Conclusion: resolved with answer.
 ### Q: Does grading run candidate code with the runner's authority?
-- Sources examined: `hidden_results` in the shell (`suite_d.rs`), which runs
-  `cargo test --offline --test hidden_<name>` over the grade tree "under the
-  runner's own authority, outside any containment"; the module doc at
-  `suite_d.rs:3`.
-- Findings: yes. The grade tree is the runner's (the corpus's oracle paths,
-  the candidate's regular files), but the candidate's `src/` and any build
-  script it carries compile and run outside the namespaces as the runner.
-- Missing evidence: a maintainer decision on grading inside its own
-  restricted worker, and what that worker may keep (the target directory,
-  the network).
-- Conclusion: unresolved, needs human input.
+- Sources examined: `hidden_results` in the shell (`suite_d.rs`), its
+  `contained` argument and the `contain(None, &target, &command)` wrapper
+  around each candidate `cargo test`; the task loop that sets `contained`
+  from `host.namespaces` and skips every agent when they are unavailable.
+- Findings: no, on a host with namespaces. Each candidate's `cargo test`
+  runs inside the same namespaces as the agent, with the build cache the
+  only writable tree and the grade tree read-only. Without namespaces the
+  grade runs uncontained, but on such a host no agent ever ran, so only
+  corpus code reaches that build.
+- Missing evidence: none.
+- Conclusion: resolved with answer; an earlier revision of this entry
+  described the uncontained grading of a prior shell.
 
 ### Q: Does a file the agent deleted reach the grade?
 - Sources examined: `hidden_results`, `AgentTrace::written`.

@@ -232,6 +232,7 @@ fn is_spdx_expression(text: &str) -> bool {
                     && (*token != "WITH"
                         || (!tokens[i - 1].ends_with(')')
                             && !tokens[i + 1].starts_with('(')
+                            && !tokens[i + 1].trim_end_matches(')').ends_with('+')
                             && tokens.get(i + 2) != Some(&"WITH")))
             } else {
                 let core = token.trim_start_matches('(').trim_end_matches(')');

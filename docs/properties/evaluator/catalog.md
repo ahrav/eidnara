@@ -567,9 +567,6 @@ Existing check: `crates/eval-core/src/task.rs` `task_terminal`,
 Impact: An agent could pass by writing its own test, or a censored run could be
   reported as a pass.
 Open questions:
-- The hidden tests run candidate code with the runner's own authority; a
-  build script or a test body can reach the host. Grading in its own
-  restricted worker is not done. (needs human input)
 - A file the agent deleted is present in the grade with its original contents,
   since `AgentTrace::written` records contents, not deletions. None of the
   corpus's fixes delete a file. (needs human input on whether the trace should

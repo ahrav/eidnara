@@ -1667,3 +1667,12 @@ fn a_plus_is_one_trailing_suffix() {
     entry.license = "GPL-2.0+".to_string();
     entry.validate().unwrap();
 }
+
+#[test]
+fn an_exception_takes_no_plus() {
+    let mut entry = entry("cargo-0", Family::Cargo, 0x10);
+    entry.license = "MIT WITH LLVM-exception+".to_string();
+    assert!(entry.validate().is_err());
+    entry.license = "GPL-2.0+ WITH Classpath-exception-2.0".to_string();
+    entry.validate().unwrap();
+}

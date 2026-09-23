@@ -2486,7 +2486,7 @@ from the URL itself), a `license` that is not an SPDX expression by shape (ident
 characters, each holding a letter or digit, joined by `AND`, `OR`, or
 `WITH`, with at most one trailing `+` per identifier, balanced parentheses
 at operand edges only, no operator in parentheses, and `WITH` joining one simple license to one exception, never
-a group or a second `WITH`; not checked against the SPDX list)
+a group, a second `WITH`, or an exception with a `+`; not checked against the SPDX list)
 (`TextPersisted`), a
 malformed or all-zero SHA, a fix commit that is the base commit
 (`FixIsBase`), an
