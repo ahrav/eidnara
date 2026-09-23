@@ -1697,3 +1697,21 @@ fn a_pull_request_number_is_not_the_prefix_of_a_word() {
         vec!["pull_request:2016"]
     );
 }
+
+#[test]
+fn the_repair_is_public_no_later_than_its_fix_commit() {
+    let mut impossible = audit("cargo-0");
+    impossible.repair_public_ms = impossible.fix_committed_ms + 1;
+    assert!(impossible.validate().is_err());
+}
+
+#[test]
+fn an_abbreviated_fix_sha_is_a_whole_word() {
+    let mut entry = entry("cargo-0", Family::Cargo, 0x10);
+    entry.fix_sha = "0123456789abcdef0123456789abcdef01234567".to_string();
+    assert!(future_answers(&entry, "see g0123456 there").is_empty());
+    assert_eq!(
+        future_answers(&entry, "(0123456)"),
+        vec![format!("fix_sha:{}", entry.fix_sha)]
+    );
+}

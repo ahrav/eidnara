@@ -2530,7 +2530,8 @@ creation when never edited), `snapshot_digest`, `base_tree_digest`,
 `validate` refuses, in order, a missing snapshot digest,
 a tree digest that is neither forty nor sixty-four lowercase hex, is all
 zeroes, or differs in format from the snapshot digest (`MalformedDigest`), a base committed after the cutoff, a fix not strictly after it, a repair
-public at or before it (`RepairPublicBeforeCutoff`), an issue
+public at or before it (`RepairPublicBeforeCutoff`) or dated after the fix
+commit it covers (`RepairPublicAfterFix`), an issue
 filed after it, issue text edited after it or dated before the issue
 (`IssueTextBeforeIssue`), a snapshot whose digest is not
 the base commit's tree (which alone keeps every fix-side change out of the
@@ -2573,8 +2574,9 @@ the control's terminal is not `pass`, `fail`, or `censored`, and
 `Excluded` as `repository_access`, `future_answer`, or `memorized` (the
 control passed from the statement alone), else `Eligible`; a censored
 control is eligible. `future_answers(entry, output)` names the fix commit
-when any run of hex digits of seven or more, in either case, is a prefix of
-`fix_sha` (the run is taken whole, so `a0123456` does not name
+when any whole word of hex digits of seven or more, in either case, is a
+prefix of `fix_sha` (the word is taken whole between non-alphanumerics, so
+neither `a0123456` nor `g0123456` names
 `0123456…`), and the pull request as `#<n>`, `GH-<n>`, or the repository's
 `/pull/<n>` URL, or the words `PR <n>`, `pull request <n>`, or
 `pull-request <n>`, as a whole number (a URL, `GH-`, or a word form not

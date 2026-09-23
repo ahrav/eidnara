@@ -464,6 +464,9 @@ pub enum CutoffRefused {
     /// The repair (its pull request or its commits) was public at or before
     /// the cutoff, whatever the fix commit's own time.
     RepairPublicBeforeCutoff,
+    /// The repair is dated after the fix commit, which is one of the things
+    /// it covers; the audit is not internally possible.
+    RepairPublicAfterFix,
     /// The issue was filed after the cutoff, so its text is future knowledge.
     IssueAfterCutoff,
     /// The issue text was edited after the cutoff; the edit can describe the
@@ -538,6 +541,9 @@ impl CutoffAudit {
         }
         if self.repair_public_ms <= self.cutoff_ms {
             return Err(CutoffRefused::RepairPublicBeforeCutoff);
+        }
+        if self.repair_public_ms > self.fix_committed_ms {
+            return Err(CutoffRefused::RepairPublicAfterFix);
         }
         if self.issue_created_ms > self.cutoff_ms {
             return Err(CutoffRefused::IssueAfterCutoff);
@@ -794,9 +800,10 @@ pub fn classify_control(
 const SHA_ABBREV: usize = 7;
 
 /// Names the fix commit and pull request a control's output must not know.
-/// The fix commit counts as any run of hexadecimal digits, in either case,
-/// that is at least `SHA_ABBREV` long and a prefix of it; the run is taken
-/// whole, so `a0123456` does not name `0123456...`. A pull request counts as
+/// The fix commit counts as any whole word of hexadecimal digits, in either
+/// case, that is at least `SHA_ABBREV` long and a prefix of it; the word is
+/// taken whole between non-alphanumerics, so neither `a0123456` nor
+/// `g0123456` names `0123456...`. A pull request counts as
 /// `#<n>`, GitHub's `GH-<n>`, `PR <n>`, `pull request <n>`, or the
 /// repository's `/pull/<n>` URL in any letter case, each as a whole number,
 /// so `#20` is not found inside `#2016`.
@@ -805,8 +812,12 @@ pub fn future_answers(entry: &AnchorEntry, output: &str) -> Vec<String> {
     let mut found = Vec::new();
     if is_lower_hex(&entry.fix_sha, 40)
         && output
-            .split(|c: char| !c.is_ascii_hexdigit())
-            .any(|run| run.len() >= SHA_ABBREV && entry.fix_sha.starts_with(run))
+            .split(|c: char| !c.is_ascii_alphanumeric())
+            .any(|word| {
+                word.len() >= SHA_ABBREV
+                    && word.bytes().all(|b| b.is_ascii_hexdigit())
+                    && entry.fix_sha.starts_with(word)
+            })
     {
         found.push(format!("fix_sha:{}", entry.fix_sha));
     }
