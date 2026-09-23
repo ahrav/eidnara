@@ -360,7 +360,7 @@ fn a_never_restored_ledger_passes_only_when_the_final_sample_holds_nothing_trans
     receding_r24.samples[1].headroom.r24_refusals = 2;
     assert_eq!(
         receding_r24.verdict(&quota(), &bounds()),
-        Err(GrowthRefused::HeadroomNotMonotonic {
+        Err(GrowthRefused::CountNotMonotonic {
             step: 3,
             field: "r24_refusals",
         })
@@ -372,7 +372,7 @@ fn a_never_restored_ledger_passes_only_when_the_final_sample_holds_nothing_trans
     forgotten.samples[2].headroom.project_metadata_remaining = (64 << 20) - (96 << 10);
     assert_eq!(
         forgotten.verdict(&quota(), &bounds()),
-        Err(GrowthRefused::HeadroomNotMonotonic {
+        Err(GrowthRefused::CountNotMonotonic {
             step: 3,
             field: "terminal_jobs",
         }),
@@ -387,6 +387,39 @@ fn a_never_restored_ledger_passes_only_when_the_final_sample_holds_nothing_trans
             expected: 3,
             observed: 4,
         })
+    );
+    let mut pruned = GrowthLedger::new(GrowthMode::NeverRestored);
+    pruned.record(sample(1, 3, 0, 0)).unwrap();
+    let mut idle_final = sample(2, 3, 0, 0);
+    idle_final.stores = pruned.samples[0].stores.clone();
+    idle_final.commit_log_rows = 2;
+    assert_eq!(
+        pruned.record(idle_final.clone()),
+        Err(GrowthRefused::CountNotMonotonic {
+            step: 2,
+            field: "commit_log_rows",
+        })
+    );
+    pruned.samples.push(idle_final);
+    assert_eq!(
+        pruned.verdict(&quota(), &bounds()),
+        Err(GrowthRefused::CountNotMonotonic {
+            step: 2,
+            field: "commit_log_rows",
+        }),
+        "the commit log is append-only; fewer rows than before is not retention"
+    );
+    let mut thawed = ledger.clone();
+    thawed.samples[1].headroom.frozen_pages = 1;
+    thawed.samples[1].headroom.project_metadata_bytes += 4096 + (64 << 10);
+    thawed.samples[1].headroom.project_metadata_remaining -= 4096 + (64 << 10);
+    assert_eq!(
+        thawed.verdict(&quota(), &bounds()),
+        Err(GrowthRefused::CountNotMonotonic {
+            step: 3,
+            field: "pages",
+        }),
+        "a page that stops being frozen becomes terminal; it does not vanish"
     );
     let mut rowless = ledger.clone();
     rowless.samples[2].commit_seq = 12;
@@ -659,6 +692,17 @@ fn a_growth_report_round_trips_and_its_digest_ignores_measurements() {
     let mut restoring = report.clone();
     restoring.ledger.mode = GrowthMode::Restoring;
     restoring.validate(&contract()).unwrap();
+    let mut refused_while_restoring = restoring.clone();
+    refused_while_restoring.ledger.restores_refused = 1;
+    assert_eq!(
+        refused_while_restoring.validate(&contract()),
+        Err(GrowthReportError::Growth(
+            GrowthRefused::RestoresRefusedUnderRestoring {
+                restores_refused: 1
+            }
+        )),
+        "a restoring ledger permits every restore, so it refused none"
+    );
     let mut restoring_headroom = restoring.clone();
     restoring_headroom.ledger.samples[1]
         .headroom

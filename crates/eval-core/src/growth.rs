@@ -179,10 +179,11 @@ pub enum GrowthRefused {
     CommitSeqNotMonotonic {
         step: u32,
     },
-    /// A cumulative headroom count (`terminal_jobs`, `terminal_pages`,
-    /// `admitted_total`, `r24_refusals`) went down; rows are permanent
-    /// receipts, so these never recede.
-    HeadroomNotMonotonic {
+    /// A cumulative count (`commit_log_rows`, `terminal_jobs`, `admitted_total`,
+    /// `r24_refusals`, or frozen plus terminal pages) went down; the commit
+    /// log is append-only and job and page rows are permanent receipts, so
+    /// these never recede.
+    CountNotMonotonic {
         step: u32,
         field: &'static str,
     },
@@ -249,6 +250,11 @@ pub enum GrowthRefused {
     },
     NotALeakVerdict {
         mode: GrowthMode,
+    },
+    /// `restore_attempted` counts a refusal only under `never_restored`; a
+    /// restoring ledger with a nonzero count could not have come from the API.
+    RestoresRefusedUnderRestoring {
+        restores_refused: u64,
     },
 }
 
@@ -395,7 +401,7 @@ impl GrowthLedger {
         }
         let first = &self.samples[0];
         let commits = u64::try_from(last.commit_seq - first.commit_seq).unwrap_or(0);
-        let rows = last.commit_log_rows.saturating_sub(first.commit_log_rows);
+        let rows = last.commit_log_rows - first.commit_log_rows;
         if rows != commits {
             return Err(GrowthRefused::CommitRowsDisagree { commits, rows });
         }
@@ -462,13 +468,23 @@ fn in_order(prev: &ResourceSample, next: &ResourceSample) -> Result<(), GrowthRe
     }
     let (p, n) = (&prev.headroom, &next.headroom);
     for (field, before, after) in [
+        (
+            "commit_log_rows",
+            prev.commit_log_rows,
+            next.commit_log_rows,
+        ),
         ("terminal_jobs", p.terminal_jobs, n.terminal_jobs),
         ("terminal_pages", p.terminal_pages, n.terminal_pages),
+        (
+            "pages",
+            p.frozen_pages.saturating_add(p.terminal_pages),
+            n.frozen_pages.saturating_add(n.terminal_pages),
+        ),
         ("admitted_total", p.admitted_total, n.admitted_total),
         ("r24_refusals", p.r24_refusals, n.r24_refusals),
     ] {
         if after < before {
-            return Err(GrowthRefused::HeadroomNotMonotonic {
+            return Err(GrowthRefused::CountNotMonotonic {
                 step: next.step,
                 field,
             });
@@ -823,10 +839,18 @@ impl GrowthReport {
                 .ledger
                 .verdict(&self.quota, &self.bounds)
                 .map_err(GrowthReportError::Growth)?,
-            GrowthMode::Restoring => self
-                .ledger
-                .check_samples(&self.quota)
-                .map_err(GrowthReportError::Growth)?,
+            GrowthMode::Restoring => {
+                if self.ledger.restores_refused != 0 {
+                    return Err(GrowthReportError::Growth(
+                        GrowthRefused::RestoresRefusedUnderRestoring {
+                            restores_refused: self.ledger.restores_refused,
+                        },
+                    ));
+                }
+                self.ledger
+                    .check_samples(&self.quota)
+                    .map_err(GrowthReportError::Growth)?;
+            }
         }
         Ok(())
     }

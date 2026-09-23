@@ -2185,9 +2185,10 @@ history is refused even under the size bound. The rate excludes `-wal` and
 `-shm` bytes, so a WAL-heavy first sample cannot cancel the file bytes the
 history retained; byte totals saturate, so a reading past `u64` is a refusal,
 not a panic. `verdict` and `validate` re-check the step, commit, and R24
-ordering over the whole ledger, with every cumulative headroom count
-(`terminal_jobs`, `terminal_pages`, `admitted_total`, `r24_refusals`) never
-receding (`HeadroomNotMonotonic { step, field }`, rows being permanent
+ordering over the whole ledger, with every cumulative count
+(`commit_log_rows`, `terminal_jobs`, `admitted_total`, `r24_refusals`, and
+frozen plus terminal pages) never receding (`CountNotMonotonic { step,
+field }`, the commit log being append-only and job and page rows permanent
 receipts) and `admitted_total` equal to pending plus terminal jobs
 (`AdmittedMismatch`), and refuse a negative
 commit sequence (`CommitSeqNegative`, since a negative baseline would buy
@@ -2232,7 +2233,8 @@ report takes its liveness bounds, so a producer cannot widen what it is
 judged by, and refuses a claim boundary other than the pinned one
 (`ClaimBoundaryMismatch`), as the manifest does; it runs the mix and ledger
 refusals (a `restoring` ledger keeps `check_samples`, the order, store, and
-headroom evidence, and drops only the leak verdict), refuses
+headroom evidence, drops only the leak verdict, and must have refused no
+restore, `RestoresRefusedUnderRestoring`), refuses
 an envelope whose peaks crossed a bound (`EnvelopeNotHonoured`) or that a
 sample's store total, cassette bytes, temp roots, or processes
 exceed (`EnvelopeNotCharged { resource, step, peak, observed }`; the

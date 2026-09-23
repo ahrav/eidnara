@@ -1651,7 +1651,8 @@ Growth contract (`crates/eval-core/tests/growth.rs`,
   `StoreMissing`; a single sample is `NoBaseline`; a negative commit sequence
   is `CommitSeqNegative`; store bytes past `u64` saturate, never a panic; an
   empty ledger, a repeated step, a receding
-  commit sequence, a receding terminal-job or R24 count, an `admitted_total`
+  commit sequence, a receding commit-log row, terminal-job, page, or R24
+  count, an `admitted_total`
   that is not pending plus terminal, or a sequence advance the commit log did
   not retain (`CommitRowsDisagree`) refuse, including in a ledger
   assembled without `record`;
@@ -1675,8 +1676,8 @@ Growth contract (`crates/eval-core/tests/growth.rs`,
   report parses back equal; its digest ignores per-sample byte measurements
   and envelope peaks, and changes with the quota constants, the commit
   sequence and row counts, and the headroom; a restoring report with no
-  samples, out-of-order samples, or a headroom that does not follow from the
-  constants, faults with no safety check (whether the
+  samples, out-of-order samples, a headroom that does not follow from the
+  constants, or a nonzero refused-restore count, faults with no safety check (whether the
   episode count or the mix records them), a fault-episode count that differs
   from the mix (`FaultEpisodesDisagree`), a frozen page the constants do not
   account for, a reordered report read back, a
