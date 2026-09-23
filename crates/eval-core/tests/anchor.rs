@@ -768,7 +768,6 @@ fn settings_refuse_before_execution_and_reasons_are_typed() {
         providers: vec![provider()],
         execution_image: "image-1".to_string(),
         preparation_bound_ms: Some(1),
-        transfer_criterion: None,
     };
     settings.validate().unwrap();
     let mut no_providers = settings.clone();
@@ -870,14 +869,13 @@ fn future_answers_names_an_abbreviated_fix_sha() {
 }
 
 #[test]
-fn settings_refuse_an_incomplete_provider_and_an_unmet_criterion() {
+fn settings_refuse_an_incomplete_provider() {
     let settings = RealHistorySettings {
         providers: vec![provider()],
         execution_image: "image-1".to_string(),
         preparation_bound_ms: Some(1),
-        transfer_criterion: None,
     };
-    let mut blank_model = settings.clone();
+    let mut blank_model = settings;
     blank_model.providers[0].model = " ".to_string();
     assert!(
         blank_model.validate().is_err(),
@@ -886,23 +884,6 @@ fn settings_refuse_an_incomplete_provider_and_an_unmet_criterion() {
     assert_eq!(
         blank_model.validate(),
         Err(SettingsRefused::EmptyProviderField { field: "model" })
-    );
-    let mut floorless = settings;
-    floorless.transfer_criterion = Some(TransferCriterion {
-        approved_by: "maintainer".to_string(),
-        approved_at_run_id: "ab".repeat(32),
-        min_valid_tasks: 0,
-        required_families: BTreeSet::new(),
-    });
-    assert!(
-        floorless.validate().is_err(),
-        "a criterion the claim will refuse is refused before execution"
-    );
-    assert_eq!(
-        floorless.validate(),
-        Err(SettingsRefused::TransferCriterion(
-            UnmetClause::CriterionHasNoFloor
-        ))
     );
 }
 
@@ -1279,13 +1260,7 @@ fn a_criterion_approved_by_whitespace_is_unapproved() {
         required_families: BTreeSet::from(["cargo".to_string()]),
     };
     assert!(blank.validate().is_err());
-    let settings = RealHistorySettings {
-        providers: vec![provider()],
-        execution_image: "image-1".to_string(),
-        preparation_bound_ms: Some(1),
-        transfer_criterion: Some(blank),
-    };
-    assert!(settings.validate().is_err());
+    assert_eq!(blank.validate(), Err(UnmetClause::CriterionNotApproved));
 }
 
 #[test]
@@ -1508,4 +1483,38 @@ fn the_null_object_id_names_no_commit() {
     let mut entry = entry("cargo-0", Family::Cargo, 0x10);
     entry.base_sha = "0".repeat(40);
     assert!(entry.validate().is_err());
+}
+
+#[test]
+fn a_clone_suffix_in_any_case_is_the_same_repository() {
+    let mut corpus = pilot();
+    let mut alias = corpus.entries[0].clone();
+    alias.id = "cargo-0-again".to_string();
+    alias.repository = alias.repository.replace(".git", ".GIT");
+    corpus.entries.push(alias);
+    assert!(corpus.validate().is_err());
+    let mut entry = entry("cargo-0", Family::Cargo, 0x10);
+    entry.repository = entry.repository.replace(".git", ".GIT");
+    entry.pull_request = Some(2016);
+    assert_eq!(
+        future_answers(&entry, "https://example.invalid/cargo/repo/pull/2016"),
+        vec!["pull_request:2016"]
+    );
+}
+
+#[test]
+fn the_null_object_id_names_no_tree() {
+    let mut null_tree = audit("cargo-0");
+    null_tree.snapshot_digest = "0".repeat(40);
+    null_tree.base_tree_digest = "0".repeat(40);
+    assert!(null_tree.validate().is_err());
+}
+
+#[test]
+fn spdx_parentheses_group_operands_only() {
+    for license in ["MIT()", "(MIT)(Apache-2.0)", "M(IT)"] {
+        let mut entry = entry("cargo-0", Family::Cargo, 0x10);
+        entry.license = license.to_string();
+        assert!(entry.validate().is_err(), "{license}");
+    }
 }

@@ -2449,14 +2449,14 @@ the `/pull/` URLs
 `future_answers` matches derive
 from the URL itself), a `license` that is not an SPDX expression by shape (identifiers of SPDX
 characters, each holding a letter or digit, joined by `AND`, `OR`, or
-`WITH`, with balanced parentheses; not checked against the SPDX list)
-(`TextPersisted`), a
+`WITH`, with balanced parentheses at operand edges only; not checked
+against the SPDX list) (`TextPersisted`), a
 malformed or all-zero SHA, a fix commit that is the base commit
 (`FixIsBase`), an
 `issue` or `pull_request` of zero (`ZeroNumber`), a duplicate id, and one
 fix commit or one issue of one repository (by lowercased web path, so
-`repo`, `repo.git`, and `Repo` are one repository) under two ids
-(`DuplicateTask`). `digest` validates first and refuses a
+`repo`, `repo.git`, `repo.GIT`, and `Repo` are one repository) under two
+ids (`DuplicateTask`). `digest` validates first and refuses a
 row JSON cannot carry exactly (`NotCanonical`) instead of panicking.
 `AnchorEntry::digest` (`eval-anchor-entry-digest/v1`) is the identity every
 piece of evidence names: an audit, a proof, or a control produced for one
@@ -2486,8 +2486,8 @@ from the repository's own commit times and the issue: `task`,
 creation when never edited), `snapshot_digest`, `base_tree_digest`, and
 `fix_paths_present`, and `fix_descends_from_base`. `validate` refuses, in
 order, a missing snapshot digest,
-a tree digest that is neither forty nor sixty-four lowercase hex
-(`MalformedDigest`), a base committed after the cutoff, a fix not strictly after it, an issue
+a tree digest that is neither forty nor sixty-four lowercase hex or is
+all zeroes (`MalformedDigest`), a base committed after the cutoff, a fix not strictly after it, an issue
 filed after it, issue text edited after it or dated before the issue
 (`IssueTextBeforeIssue`), a snapshot whose digest is not
 the base commit's tree, a fix-added path in the snapshot, and a fix that
@@ -2552,11 +2552,12 @@ contamination), `cutoff_missing`, `cutoff_invalid`, `insufficiency_missing`,
 transfer evidence without leaving the report.
 
 **Settings and terminals.** `RealHistorySettings {providers,
-execution_image, preparation_bound_ms, transfer_criterion}` refuses before
-execution: no providers, a provider profile with a blank field, no execution
-image, no preparation bound, or a criterion `TransferCriterion::validate`
-would refuse (`SettingsRefused::TransferCriterion(clause)`); the criterion
-may be absent, in which case every claim derives as `generated_phase1`. The
+execution_image, preparation_bound_ms}` refuses before execution: no
+providers, a provider profile with a blank field, no execution image, or no
+preparation bound. The transfer criterion is not a setting: it lives on the
+frozen analysis family (see "Claim class"), the one place
+`AnalysisFamily::claim_class` reads it from, so none can be supplied out of
+band. The
 terminals a real-history task can end in add `skipped (missing_cutoff_evidence)`,
 `unsupported (source_unavailable)`, and `unsupported (unsupported_runtime
 {family})` to the closed vocabulary; budget exhaustion stays censored.

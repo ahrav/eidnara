@@ -10,9 +10,7 @@ use context_core::canonical_json::{is_lower_hex, protocol_digest};
 use serde::{Deserialize, Serialize};
 
 use crate::campaign::Terminal;
-use crate::claim::{
-    AnchorRole, AnchorSet, AnchorTask, AnchorVerdict, TransferCriterion, UnmetClause,
-};
+use crate::claim::{AnchorRole, AnchorSet, AnchorTask, AnchorVerdict};
 use crate::task::{HiddenOutcome, HiddenResults};
 
 pub const ANCHOR_CORPUS_SCHEMA: &str = "eval-anchor-corpus/v1";
@@ -230,11 +228,12 @@ fn is_spdx_expression(text: &str) -> bool {
             if i % 2 == 1 {
                 OPERATORS.contains(token)
             } else {
+                let core = token.trim_start_matches('(').trim_end_matches(')');
                 !OPERATORS.contains(token)
-                    && token.chars().any(|c| c.is_ascii_alphanumeric())
-                    && token
+                    && core.chars().any(|c| c.is_ascii_alphanumeric())
+                    && core
                         .chars()
-                        .all(|c| c.is_ascii_alphanumeric() || "-.+()".contains(c))
+                        .all(|c| c.is_ascii_alphanumeric() || "-.+".contains(c))
             }
         })
 }
@@ -263,7 +262,7 @@ impl AnchorCorpus {
                     id: entry.id.clone(),
                 });
             }
-            let repository = repository_web_path(&entry.repository).to_ascii_lowercase();
+            let repository = repository_web_path(&entry.repository);
             let by_fix = fixes.insert((repository.clone(), entry.fix_sha.as_str()), &entry.id);
             let by_issue = issues.insert((repository, entry.issue), &entry.id);
             if let Some(of) = by_fix.or(by_issue) {
@@ -496,7 +495,9 @@ impl CutoffAudit {
             return Err(CutoffRefused::SnapshotDigestMissing);
         }
         for digest in [&self.snapshot_digest, &self.base_tree_digest] {
-            if !is_lower_hex(digest, 40) && !is_lower_hex(digest, 64) {
+            if (!is_lower_hex(digest, 40) && !is_lower_hex(digest, 64))
+                || digest.bytes().all(|b| b == b'0')
+            {
                 return Err(CutoffRefused::MalformedDigest);
             }
         }
@@ -773,10 +774,7 @@ pub fn future_answers(entry: &AnchorEntry, output: &str) -> Vec<String> {
         names_whole_number(&output, &format!("#{pr}"))
             || names_whole_number(
                 &output,
-                &format!(
-                    "{}/pull/{pr}",
-                    repository_web_path(&entry.repository).to_ascii_lowercase()
-                ),
+                &format!("{}/pull/{pr}", repository_web_path(&entry.repository)),
             )
     }) {
         found.push(format!("pull_request:{pr}"));
@@ -793,15 +791,16 @@ fn names_whole_number(output: &str, needle: &str) -> bool {
     })
 }
 
-/// The clone URL without its scheme, trailing slash, or `.git` suffix,
-/// which prefixes pull-request URLs for the repository; `is_url` admits no
-/// user or port for it to strip.
-fn repository_web_path(repository: &str) -> &str {
-    let path = repository
+/// The clone URL lowercased and without its scheme, trailing slash, or
+/// `.git` suffix: the web path that prefixes pull-request URLs for the
+/// repository and keys it. `is_url` admits no user or port for it to strip.
+fn repository_web_path(repository: &str) -> String {
+    let lower = repository.to_ascii_lowercase();
+    let path = lower
         .split_once("://")
-        .map_or(repository, |(_, rest)| rest)
+        .map_or(lower.as_str(), |(_, rest)| rest)
         .trim_end_matches('/');
-    path.strip_suffix(".git").unwrap_or(path)
+    path.strip_suffix(".git").unwrap_or(path).to_string()
 }
 
 /// One provider pair's anchor accounting: every task keeps its row and its
@@ -901,14 +900,14 @@ pub fn anchor_set(
 }
 
 /// The settings a real-history campaign must hold before it executes; none
-/// defaults, and a pilot corpus is never a transfer set.
+/// defaults, and a pilot corpus is never a transfer set. The transfer
+/// criterion is the analysis family's, not a setting.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RealHistorySettings {
     pub providers: Vec<ProviderProfile>,
     pub execution_image: String,
     pub preparation_bound_ms: Option<u64>,
-    pub transfer_criterion: Option<TransferCriterion>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -920,15 +919,14 @@ pub enum SettingsRefused {
     },
     NoExecutionImage,
     NoPreparationBound,
-    /// The criterion is one the claim would refuse.
-    TransferCriterion(UnmetClause),
 }
 
 debug_display!(SettingsRefused);
 
 impl RealHistorySettings {
-    /// Refuses before execution; the transfer criterion may be absent, in
-    /// which case every claim derives as `generated_phase1`.
+    /// Refuses before execution. The transfer criterion is not a setting:
+    /// it lives on the frozen analysis family, the one place
+    /// `AnalysisFamily::claim_class` reads it from.
     pub fn validate(&self) -> Result<(), SettingsRefused> {
         if self.providers.is_empty() {
             return Err(SettingsRefused::NoProviders);
@@ -949,11 +947,6 @@ impl RealHistorySettings {
         }
         if self.preparation_bound_ms.is_none() {
             return Err(SettingsRefused::NoPreparationBound);
-        }
-        if let Some(criterion) = &self.transfer_criterion {
-            criterion
-                .validate()
-                .map_err(SettingsRefused::TransferCriterion)?;
         }
         Ok(())
     }
