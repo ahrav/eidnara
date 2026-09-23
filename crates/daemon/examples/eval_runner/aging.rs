@@ -1338,6 +1338,20 @@ pub fn run(config: &Config) -> Result<Run, RunError> {
     // Planning runs under the clock: the elapsed bound covers the whole run.
     let plan = plan(config.messages)?;
     let steps = plan.steps.len() as u32;
+    // The build identity is frozen before the first life runs: the checkout,
+    // the lockfile, and the executable the outcomes come from, not whatever
+    // the tree holds when the report is written.
+    let identity = identity(
+        &profile,
+        SIMULATOR_VERSION,
+        SEED,
+        json!({
+            "steps": steps,
+            "checkpoint_step": plan.checkpoint_step,
+            "messages": config.messages,
+        }),
+        &[std::env::current_exe().unwrap()],
+    );
 
     let full = full_life(&plan, &mut charges)?;
     let resumed = resumed_life(&plan, &mut charges, &mut coverage)?;
@@ -1363,17 +1377,6 @@ pub fn run(config: &Config) -> Result<Run, RunError> {
             .unwrap();
     }
 
-    let identity = identity(
-        &profile,
-        SIMULATOR_VERSION,
-        SEED,
-        json!({
-            "steps": steps,
-            "checkpoint_step": plan.checkpoint_step,
-            "messages": config.messages,
-        }),
-        &[std::env::current_exe().unwrap()],
-    );
     let mut report = AgingReport {
         schema: AGING_REPORT_SCHEMA.to_string(),
         eval_run_id: eval_run_id(&identity).unwrap(),
@@ -1411,8 +1414,14 @@ pub fn run(config: &Config) -> Result<Run, RunError> {
         started_at_ms,
     )?;
     let manifest_bytes = serde_json::to_vec_pretty(&manifest.to_value()).unwrap();
-    publish_file(&config.publish.join(REPORT_FILE), &bytes).map_err(publish_refused)?;
-    publish_file(&config.publish.join(MANIFEST_FILE), &manifest_bytes).map_err(publish_refused)?;
+    // A manifest the directory then refuses to take takes the report back out
+    // with it, as Suite B does: a reader finds both files or none.
+    let report_path = config.publish.join(REPORT_FILE);
+    publish_file(&report_path, &bytes).map_err(publish_refused)?;
+    if let Err(error) = publish_file(&config.publish.join(MANIFEST_FILE), &manifest_bytes) {
+        let _ = std::fs::remove_file(&report_path);
+        return Err(publish_refused(error));
+    }
     Ok(Run {
         report,
         report_bytes: bytes,

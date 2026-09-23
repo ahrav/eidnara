@@ -2077,7 +2077,10 @@ The run refuses an unapproved profile before the history is generated or any
 store opens (the profile's event bound is the generator's, `messages.max(64)
 * 2`, so it needs no plan), starts the envelope's clock before planning, charges
 the roots, store bytes, elapsed time, and artifact bytes to the envelope, and
-publishes `suite-c-aging-report.json` and `manifest.json` write-then-rename.
+publishes `suite-c-aging-report.json` and `manifest.json` write-then-rename;
+a manifest the directory refuses takes the report back out with it, so a
+reader finds both files or none, as in Suite B. The build identity is frozen
+after planning and before the first life runs.
 The manifest carries the aging shell's own root seed and the running binary's
 digest in its identity, says `prefix_then_generate` (the whole history is
 drawn by the seeded generator before the run, so the checkpoint step can be
