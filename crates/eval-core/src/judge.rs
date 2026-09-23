@@ -555,17 +555,24 @@ pub enum ResidualRefused {
 debug_display!(ResidualRefused);
 
 impl ResidualReport {
-    fn check_schema(&self) -> Result<(), ResidualRefused> {
+    /// What a report must satisfy on its own, before any calibration set or
+    /// other report is consulted.
+    fn check_form(&self) -> Result<(), ResidualRefused> {
         if self.schema != RESIDUAL_REPORT_SCHEMA {
             return Err(ResidualRefused::SchemaMismatch {
                 found: self.schema.clone(),
             });
         }
+        if let Some(field) = self.judge.malformed_digest() {
+            return Err(ResidualRefused::Calibration(
+                CalibrationRefused::MalformedDigest { field },
+            ));
+        }
         Ok(())
     }
 
     pub fn validate(&self, calibration: &CalibrationSet) -> Result<(), ResidualRefused> {
-        self.check_schema()?;
+        self.check_form()?;
         self.sampling
             .validate()
             .map_err(ResidualRefused::Calibration)?;
@@ -604,12 +611,12 @@ impl ResidualReport {
         Ok(())
     }
 
-    /// Two runs' `residual.*` metrics compare only under this contract and
-    /// the same judge, live provider, tokenizer accounting profile, and
-    /// calibration digest.
+    /// Two runs' `residual.*` metrics compare only under this contract, with
+    /// well-formed judge identities, and the same judge, live provider,
+    /// tokenizer accounting profile, and calibration digest.
     pub fn comparable(&self, other: &ResidualReport) -> Result<(), ResidualRefused> {
-        self.check_schema()?;
-        other.check_schema()?;
+        self.check_form()?;
+        other.check_form()?;
         for (field, same) in [
             ("judge", self.judge == other.judge),
             ("live_provider", self.live_provider == other.live_provider),

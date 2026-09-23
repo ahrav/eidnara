@@ -332,6 +332,19 @@ fn a_changed_judge_provider_or_tokenizer_refuses_cross_run_residual_comparison()
         "a report under another contract compares with nothing"
     );
     assert_eq!(foreign.comparable(&base), foreign_schema);
+    let mut unbound = base.clone();
+    unbound.judge.rubric_digest = "not-a-digest".to_string();
+    let malformed = Err(ResidualRefused::Calibration(
+        CalibrationRefused::MalformedDigest {
+            field: "rubric_digest",
+        },
+    ));
+    assert_eq!(
+        unbound.comparable(&unbound),
+        malformed,
+        "two reports sharing a malformed digest share no judge"
+    );
+    assert_eq!(base.comparable(&unbound), malformed);
     let mut leaked = base.clone();
     leaked.permutation.correct = 40;
     assert!(matches!(

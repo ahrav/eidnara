@@ -845,8 +845,9 @@ Guarantee: Every residual report records the judge identity, the live provider
   two runs' `residual.*` metrics compare only when all three are equal, and a
   live slice is constructed and validated only against the settings that
   approved its provider profile and repeat count.
-Check: `always` - `ResidualReport::comparable` refuses `SchemaMismatch` on
-  either report and returns `ReanchorRequired` naming `judge`,
+Check: `always` - `ResidualReport::comparable` refuses `SchemaMismatch` or a
+  `MalformedDigest` on either report and returns `ReanchorRequired` naming
+  `judge`,
   `live_provider`, or `calibration_digest` on the first inequality, with `tokenizer_profile` part of `ProviderProfile` equality;
   `ResidualReport::validate` refuses `CalibrationJudgeDiffers` and
   `DigestMismatch`; `live_slice` and `LiveSliceReport::validate` refuse

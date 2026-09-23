@@ -2470,7 +2470,8 @@ name alone: the judge, the calibration digest, the live provider, the plan,
 the permutation check, and the judgments. `validate` reconciles the plan, the
 permutation check, and the calibration set (same judge, same digest) and
 refuses duplicated or miscounted judgments. `comparable` refuses a report
-under another schema and refuses cross-run `residual.*` comparison
+under another schema or with a malformed judge digest, and refuses cross-run
+`residual.*` comparison
 (`ReanchorRequired`) until the anchor set is re-scored when the judge, the
 live provider or its tokenizer profile, or the calibration digest changes. The gates take only oracle inputs: `analyze`'s
 signature is pinned in the tests, and the residual report carries no gate
