@@ -352,6 +352,30 @@ fn a_task_refuses_a_missing_or_visible_oracle_and_a_text_only_fix() {
         }),
         "rewriting a source file with its own contents is a no-op"
     );
+    let mut blank_fix = task.clone();
+    blank_fix.wrong_fixes[0].id = " ".to_string();
+    assert_eq!(blank_fix.validate(), Err(TaskError::BlankWrongFix));
+    // A key and its ancestor cannot both be files, in the base or under a fix.
+    let mut ancestor_in_base = task.clone();
+    ancestor_in_base
+        .files
+        .insert("src".to_string(), "not a directory".to_string());
+    assert_eq!(
+        ancestor_in_base.validate(),
+        Err(TaskError::PathCollision {
+            path: "src/lib.rs".to_string()
+        })
+    );
+    let mut ancestor_in_fix = task.clone();
+    ancestor_in_fix.wrong_fixes[0]
+        .patch
+        .insert("src".to_string(), "not a directory".to_string());
+    assert_eq!(
+        ancestor_in_fix.validate(),
+        Err(TaskError::PathCollision {
+            path: "src/lib.rs".to_string()
+        })
+    );
     let mut duplicate_fix = task.clone();
     duplicate_fix.wrong_fixes[1].id = duplicate_fix.wrong_fixes[0].id.clone();
     assert_eq!(

@@ -2998,8 +2998,10 @@ correct fix, or a wrong fix that is not workspace-relative (`InvalidPath`:
 joins it to the workspace stays inside), a hidden test name that is not
 one `[A-Za-z0-9_]+` path component (`InvalidHiddenTestName`, so the path
 cannot leave `tests/`), a duplicate hidden test, a
-duplicate wrong-fix id (`DuplicateWrongFix`, since adequacy evidence is keyed
-by fix id), a fix naming an unknown hidden test, a base `Cargo.toml` that is not
+duplicate or blank wrong-fix id (`DuplicateWrongFix`, `BlankWrongFix`, since
+adequacy evidence is keyed by fix id), a file key whose ancestor is also a
+file key in the visible files or in the files with a fix applied
+(`PathCollision`, since no filesystem can hold both), a fix naming an unknown hidden test, a base `Cargo.toml` that is not
 the one pinned `TASK_MANIFEST` (exact match, since any other manifest can
 redefine test targets, the build script, or dependencies), any path in the
 visible files or a fix that `oracle_tamper` would record (`SelectsOracle`

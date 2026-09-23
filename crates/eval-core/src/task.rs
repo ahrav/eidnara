@@ -117,6 +117,14 @@ pub enum TaskError {
     DuplicateWrongFix {
         id: String,
     },
+    /// A blank fix ID names nothing a runner or an audit can address.
+    BlankWrongFix,
+    /// A file key whose ancestor is also a file key in the same overlay (the
+    /// visible files, or the files with a fix applied): no filesystem can
+    /// hold both, so the task could never be materialized.
+    PathCollision {
+        path: String,
+    },
     /// A task's carrier does not hold the instruction its injection case
     /// plants.
     CarrierNotPlanted {
@@ -186,9 +194,33 @@ impl GeneratedTask {
         }
         let mut fix_ids = BTreeSet::new();
         for fix in &self.wrong_fixes {
+            if crate::blank(&fix.id) {
+                return Err(TaskError::BlankWrongFix);
+            }
             if !fix_ids.insert(fix.id.as_str()) {
                 return Err(TaskError::DuplicateWrongFix { id: fix.id.clone() });
             }
+        }
+        // A file and a directory cannot share a path, so no overlay may hold
+        // both a key and one of its ancestors.
+        let collision = |files: &Files| {
+            files
+                .keys()
+                .find(|path| {
+                    path.rmatch_indices('/')
+                        .any(|(i, _)| files.contains_key(&path[..i]))
+                })
+                .cloned()
+        };
+        if let Some(path) = collision(&self.files)
+            .or_else(|| collision(&self.with_fix(&self.correct_fix)))
+            .or_else(|| {
+                self.wrong_fixes
+                    .iter()
+                    .find_map(|fix| collision(&self.with_fix(&fix.patch)))
+            })
+        {
+            return Err(TaskError::PathCollision { path });
         }
         let fixes = self
             .wrong_fixes
