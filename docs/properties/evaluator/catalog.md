@@ -573,10 +573,12 @@ Check: `always` - `task_terminal` is `Censored` when `TaskBudgets::exhausted`
   paths, and the oracle paths it replaced with symlinks, in `oracle_tamper`;
   a planted hidden test leaves the terminal what the corpus's test says; a
   grading `cargo` past its deadline is killed with its process group; a
-  `build.rs` the agent adds runs inside the grading containment and can write
+  `build.rs` the agent adds is recorded and never written to the grade tree
+  (only the agent's `src/` writes are), and the candidate code that does
+  compile there runs inside the grading containment, where it can write
   neither outside the build cache (every other mount, `/run/user` included,
-  is read-only) nor over the hidden tests it is compiled beside, and a
-  `config.toml` it plants in Cargo's home or under the cache is not read by
+  is read-only) nor over the hidden tests beside it, and where a
+  `config.toml` planted in Cargo's home or under the cache is not read by
   the next invocation; the grading `cargo` runs the checkout's toolchain; a
   path that
   collides with a task file (`Cargo.toml/x`) is dropped from the grade and

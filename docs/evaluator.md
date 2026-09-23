@@ -3218,8 +3218,9 @@ unfixed, under the correct fix, and under every wrong fix, and runs
 `cargo test --offline --locked --test hidden_<name>` for each under its own
 authority and, where the host has namespaces, inside the same containment the
 agent gets, with the build cache the only writable tree and the grade tree
-itself read-only, so a `build.rs` or test the candidate wrote can neither
-reach the host nor rewrite a hidden test before it compiles; Cargo's home and
+itself read-only, so code the candidate wrote under `src/` (the only agent
+writes the oracle workspace carries; a `build.rs` is recorded and never
+built) can neither reach the host nor rewrite a hidden test; Cargo's home and
 its working directory are read-only paths under the private directory, so
 no `.cargo/config.toml` a build script plants is read by the next
 invocation, and `RUSTUP_TOOLCHAIN` names the checkout's toolchain because
