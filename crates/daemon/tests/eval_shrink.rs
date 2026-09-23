@@ -181,12 +181,12 @@ fn shrink_child_reports_a_foreign_predicate() {
 /// Every child evaluates the original scenario, whatever candidate it was
 /// sent: a structurally valid answer for the wrong scenario.
 fn spawn_answering_for_the_original(_: &ChildArgs) -> Command {
-    reexec("shrink_child_answers_for_the_original")
+    reexec("shrink_child_answers_about_the_original_scenario")
 }
 
 #[test]
 #[ignore = "re-executed by the misdirected-child test"]
-fn shrink_child_answers_for_the_original() {
+fn shrink_child_answers_about_the_original_scenario() {
     let Some(args) = ChildArgs::from_env() else {
         return;
     };
