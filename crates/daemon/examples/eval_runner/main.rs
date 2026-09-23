@@ -29,6 +29,10 @@ mod growth;
 #[cfg(unix)]
 #[allow(dead_code)]
 mod shrink;
+/// The Suite D shell is shared with the daemon's Suite D test the same way.
+#[cfg(unix)]
+#[allow(dead_code)]
+mod suite_d;
 /// The fixture and surface helpers are shared with the evaluator tests, which
 /// use more of them than the campaign does.
 #[cfg(unix)]
@@ -476,6 +480,44 @@ fn run_shrink(args: impl Iterator<Item = String>) -> io::Result<()> {
     Ok(())
 }
 
+/// The Suite D canaries re-execute this binary as `suite-d-canary`.
+#[cfg(unix)]
+fn spawn_suite_d_canary(_: &suite_d::CanaryArgs) -> std::process::Command {
+    let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+    command.arg("suite-d-canary");
+    command
+}
+
+/// Runs the Suite D campaign and prints one JSON line naming what was published.
+#[cfg(unix)]
+fn run_suite_d(args: impl Iterator<Item = String>) -> io::Result<()> {
+    let config = suite_d::config_from_args(args).map_err(io::Error::other)?;
+    let host = suite_d::Host {
+        spawn: spawn_suite_d_canary,
+        escapee: || {
+            vec![
+                std::env::current_exe()
+                    .unwrap()
+                    .to_string_lossy()
+                    .to_string(),
+                "suite-d-escapee".to_string(),
+            ]
+        },
+        namespaces: suite_d::namespaces_available,
+    };
+    let run = suite_d::run(&config, host).map_err(io::Error::other)?;
+    let summary = json!({
+        "report": config.publish.join(suite_d::REPORT_FILE),
+        "manifest": config.publish.join(suite_d::MANIFEST_FILE),
+        "eval_run_id": run.manifest.eval_run_id,
+        "containment": run.report.containment,
+        "terminals": run.report.tasks.iter().map(|t| t.terminal).collect::<Vec<_>>(),
+        "markers": run.coverage.fired(),
+    });
+    println!("{summary}");
+    Ok(())
+}
+
 fn main() {
     let mut args = std::env::args().skip(1);
     let outcome = match args.next().as_deref() {
@@ -494,6 +536,15 @@ fn main() {
         Some("shrink") => run_shrink(args),
         #[cfg(unix)]
         Some("shrink-child") => run_shrink_child(),
+        #[cfg(unix)]
+        Some("suite-d") => run_suite_d(args),
+        #[cfg(unix)]
+        Some("suite-d-canary") => match suite_d::CanaryArgs::from_env() {
+            Some(args) => suite_d::canary_main(&args),
+            None => Err(io::Error::other("suite-d-canary needs its environment")),
+        },
+        #[cfg(unix)]
+        Some("suite-d-escapee") => suite_d::escapee_main(),
         other => Err(io::Error::other(format!(
             "{USAGE}{} (got {other:?})",
             campaign_usage()
@@ -508,16 +559,17 @@ fn main() {
 #[cfg(unix)]
 fn campaign_usage() -> String {
     format!(
-        "{} | eval_runner {} | eval_runner {} | eval_runner {} | eval_runner {}",
+        "{} | eval_runner {} | eval_runner {} | eval_runner {} | eval_runner {} | eval_runner {}",
         campaign::USAGE,
         aging::USAGE,
         fault::USAGE,
         growth::USAGE,
-        shrink::USAGE
+        shrink::USAGE,
+        suite_d::USAGE
     )
 }
 
 #[cfg(not(unix))]
 fn campaign_usage() -> String {
-    "campaign | aging | fault | growth | shrink (unix only)".to_string()
+    "campaign | aging | fault | growth | shrink | suite-d (unix only)".to_string()
 }

@@ -9,7 +9,7 @@ pub struct Marker {
 }
 
 /// Every marker the evaluator's suites may record, globally unique by name.
-pub const MARKERS: [Marker; 62] = [
+pub const MARKERS: [Marker; 66] = [
     Marker {
         name: "ing_four_seam_hold_correct_release_query",
         test: "crates/daemon/tests/eval_ingestion.rs::hold_embedding_commit_correction_release_query_makes_the_predecessor_obsolete",
@@ -257,6 +257,22 @@ pub const MARKERS: [Marker; 62] = [
     Marker {
         name: "flt_shrink_unknown_effect_preserved",
         test: "crates/daemon/tests/eval_shrink.rs::a_child_that_dies_before_its_barrier_is_retried_then_unknown_and_kept",
+    },
+    Marker {
+        name: "xc_suite_d_task_outcome_from_hidden_test",
+        test: "crates/daemon/tests/eval_suite_d.rs::a_contained_task_is_judged_by_hidden_tests_the_agent_never_sees",
+    },
+    Marker {
+        name: "mtr_hidden_test_adequacy_kills_wrong_fix",
+        test: "crates/daemon/tests/eval_suite_d.rs::a_contained_task_is_judged_by_hidden_tests_the_agent_never_sees",
+    },
+    Marker {
+        name: "mtr_suite_d_canaries_denied_before_generated_code",
+        test: "crates/daemon/tests/eval_suite_d.rs::a_contained_task_is_judged_by_hidden_tests_the_agent_never_sees",
+    },
+    Marker {
+        name: "mtr_suite_d_no_containment_skips",
+        test: "crates/daemon/tests/eval_suite_d.rs::a_host_without_namespaces_skips_every_task_with_no_containment",
     },
 ];
 

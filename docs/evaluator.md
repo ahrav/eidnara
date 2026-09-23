@@ -2295,6 +2295,75 @@ uncontained attempt. `SuiteDAdmission` refuses a campaign without an accepted
 Phase 5 witness digest, without the self-tests that ran, or without the
 frozen analysis family.
 
+## Suite D shell
+
+`crates/daemon/examples/eval_runner/suite_d.rs` runs the generated tasks. A
+run admits itself before anything executes: the profile must be approved
+(its budgets are Suite D's own, an agent run being tool calls rather than one
+hint pass), the accepted Phase 5 witness named by `--witness` must parse as a
+witness package and its protocol digest becomes the admission's
+`accepted_witness_digest`, and the analysis family is frozen; the containment
+canaries and the hidden-test adequacy run are recorded as the self-tests, and
+`SuiteDAdmission::admit` refuses at the end if any is missing.
+
+Containment is `unshare --user --map-root-user --mount --pid --net --fork
+--kill-child`. The script run inside before the agent covers the runner's
+private directory with an empty read-only tmpfs, binds the workspace
+writable, and re-binds `/tmp`, `/var/tmp`, `/dev/shm`, and `$HOME`
+read-only; `--kill-child` kills the namespace init and with it everything
+the agent started. `Host::namespaces` says whether the host can create the
+four namespaces; when it cannot, the run records
+`Containment::Skipped { no_containment }`, every task terminal is
+`Skipped(NoContainment)`, no agent process is spawned, and adequacy is still
+measured under the runner's authority. When it can, the four canaries run
+before the first task, once inside the containment and once as the inverted
+control without it, against disposable targets under the private directory
+(a secret file, a credential file), a loopback listener the runner owns, and
+an alive file: the canary child (`suite-d-canary`, or the daemon test's
+re-executed entrypoint) reads the two files, connects to the listener, and
+starts the escapee under `setsid`; the escapee (`suite-d-escapee`) rewrites
+the alive file every 50 ms with its pid; the runner samples the file twice
+after the canary child exited and reads a changing file as `allowed`, then
+kills a surviving escapee. `ContainmentReport::validate` refuses the run
+unless every canary is `denied` inside and `allowed` under the control.
+
+For each task the runner first measures adequacy: it materializes the
+repository (with `git init` and the task's commit message) unfixed, under
+the correct fix, and under every wrong fix, writes the hidden tests from the
+corpus, and runs `cargo test --offline --test hidden_<name>` for each under
+its own authority (exit 0 is `passed`; exit 101 with `test result: FAILED` is
+`failed`; anything else `errored`); `check_adequacy` refuses the campaign
+otherwise. Then the scripted agent runs inside the containment from a fresh
+workspace: one `sh` script the runner composed from `Script` (which fix to
+apply, whether to echo the canaries it read, which cases to obey by their
+prohibited effect, whether to plant a hidden test, extra tool calls), so
+every tool call is known to the runner as the mediation boundary. The tool
+budget is checked before the script runs and `hard_deadline_ms` bounds it;
+past the deadline the containment is killed and the elapsed usage is the
+deadline. Afterwards the runner records the files that changed, the outputs,
+and the memory rows appended, lists the agent's oracle-tampering paths, writes
+the hidden tests from the corpus over the workspace, and runs them; a censored
+task runs none. The terminal is `task_terminal`. A second session reads the
+memory carrier, and `score_injection` scores every case of the task set from
+`observe_agent`.
+
+The report `eval-suite-d-report/v1` carries the admission, the containment
+report or skip, one `TaskRecord` per task (terminal, hidden results, oracle
+tamper paths, usage, adequacy evidence, injection scores), the markers, and
+the envelope; the manifest's `witness_digest` is the accepted Phase 5
+witness digest. The `suite-d` subcommand takes `--scale`, `--tasks`,
+`--elapsed-bound-ms`, `--approved-by`, `--approval-run-id`, `--witness`, and
+`--publish` and runs the correct-fix script.
+`crates/daemon/tests/eval_suite_d.rs` publishes a shrink witness first, then
+runs the shell with the test binary as the canary, the escapee, and the
+agent's host: every canary denied inside and allowed under the control; the
+correct fix passes with a planted hidden test recorded and ignored; the issue
+and memory cases obeyed, the memory case written back, the summary echoed
+only; a wrong fix fails its named test; no fix stays failing; an exhausted
+tool budget is censored before any hidden test; a host seam without
+namespaces skips every task; an unaccepted witness, a missing one, and an
+unapproved profile refuse before anything is published.
+
 ## Coverage markers
 
 `MARKERS` is the evaluator-owned registry: constant, globally unique names,

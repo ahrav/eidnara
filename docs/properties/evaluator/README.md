@@ -1563,6 +1563,13 @@ The METHOD-ordered records for these checks are in [`catalog.md`](catalog.md).
 - `a_fresh_process_reproduces_the_predicate_and_the_minimized_witness_is_published`, `a_child_that_dies_before_its_barrier_is_retried_then_unknown_and_kept`, `a_child_that_never_answers_is_cancelled_and_unknown`, `a_child_whose_residue_drifted_refuses_the_run`, `an_original_that_does_not_fail_or_an_unapproved_profile_is_refused`, `the_shrink_flags_are_parsed_and_the_child_needs_its_environment` (`crates/daemon/tests/eval_shrink.rs`; `rid-replay-equality-semantic-trace-digest`, `wit-residue-drift-refuses`, `flt-coverage-witnesses-fire-only-on-observed-behaviour`). Every candidate replays in a fresh process at the pinned cut; two fresh processes agree on outcome and trace digest; the published `witness.json` parses back and its digest is in the manifest; a dying child is retried once under its key then `Unknown`; a hung child is cancelled; a child reporting a drifted residue refuses the run; each run asserts the markers that fired and the one that did not.
 - `every_evaluator_record_is_method_ordered_and_cites_an_executed_check` (`crates/eval-core/tests/method_records.rs`; `mtr-method-records-cite-executed-check`).
 
+## Phase 6 executed checks: Suite D contained tasks
+
+The METHOD-ordered records are in [`catalog.md`](catalog.md).
+
+- `the_corpus_is_deterministic_valid_and_carries_every_carrier`, `a_task_refuses_a_missing_or_visible_oracle_and_a_text_only_fix`, `adequacy_needs_fail_to_pass_and_every_wrong_fix_killed_by_its_named_test`, `the_terminal_comes_from_the_hidden_tests_after_the_budget`, `an_agent_cannot_select_modify_or_replace_the_oracle`, `injection_effects_are_observed_independently_and_echo_alone_is_exposure`, `every_canary_must_be_denied_inside_and_allowed_under_the_inverted_control`, `admission_refuses_until_witness_self_tests_and_frozen_family_are_present`, `wire_names_are_pinned` (`crates/eval-core/tests/task.rs`).
+- `a_contained_task_is_judged_by_hidden_tests_the_agent_never_sees`, `a_wrong_fix_fails_a_no_fix_stays_failed_and_an_exhausted_budget_is_censored`, `a_host_without_namespaces_skips_every_task_with_no_containment`, `admission_refuses_without_an_accepted_witness_or_an_approved_profile`, `the_suite_d_flags_are_parsed` (`crates/daemon/tests/eval_suite_d.rs`; `xc-suite-d-task-outcome-from-hidden-test`, `mtr-hidden-test-adequacy-kills-wrong-fix`, `mtr-suite-d-canaries-denied-before-generated-code`, `mtr-injection-cases-present-and-scored-per-stage`). Real namespaces where the host has them, real `cargo test` for the hidden tests; markers `xc_suite_d_task_outcome_from_hidden_test`, `mtr_hidden_test_adequacy_kills_wrong_fix`, `mtr_suite_d_canaries_denied_before_generated_code`, `mtr_suite_d_no_containment_skips`.
+
 ## Gaps recorded here
 
 - `sls-liveness-memory-reviewer-work-bounded`: the fault campaign's liveness
@@ -1670,6 +1677,12 @@ The METHOD-ordered records for these checks are in [`catalog.md`](catalog.md).
   (`ing-adapter-ingested-no-production-caller` in `catalog.md`). The Pi
   adapter (`pi_units`) has no evaluator arm at all
   (`ing-pi-adapter-unexercised-by-evaluator`).
+- Suite D's agent is scripted by the runner; no live model or OpenCode
+  session runs a generated task yet, so `retrieved` and `packed` are
+  `not_measurable` and the empirical Suite D acceptance waits on a live
+  agent and an approved profile. The read-only rebinds inside the containment
+  cover the temp directories and the home directory, not every writable path
+  a host may have.
 - The shrink shell's only oracle is the evaluator's planted `RequiredCommits`
   defect over the reduced aged truth; a Suite B surface-1 failure is not yet
   wired as a shrink replay, so no campaign failure has been minimized end to

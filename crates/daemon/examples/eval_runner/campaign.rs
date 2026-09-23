@@ -243,7 +243,7 @@ pub fn profile(
     }
 }
 
-fn family(profile: &RunProfile) -> AnalysisFamily {
+pub fn family(profile: &RunProfile) -> AnalysisFamily {
     AnalysisFamily {
         schema: ANALYSIS_FAMILY_SCHEMA.to_string(),
         endpoints: vec!["quality_loss".into(), "harm".into(), "floor".into()],
