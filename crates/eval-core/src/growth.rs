@@ -4,6 +4,7 @@
 //! the isolation two concurrent campaigns must keep.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::path::Path;
 
 use context_core::canonical_json::protocol_digest;
 use serde::{Deserialize, Serialize};
@@ -46,8 +47,9 @@ impl ReviewerQuota {
     /// How many more admissions the remaining bytes allow, as a report figure
     /// derived from the constants read; not an acceptance count.
     pub fn admissions_remaining(&self, remaining_bytes: u64) -> u64 {
-        remaining_bytes
-            .checked_div(self.receipt_charge_bytes + self.job_allowance_bytes)
+        self.receipt_charge_bytes
+            .checked_add(self.job_allowance_bytes)
+            .and_then(|charge| remaining_bytes.checked_div(charge))
             .unwrap_or(0)
     }
 }
@@ -229,32 +231,12 @@ impl GrowthLedger {
             .try_for_each(|pair| in_order(&pair[0], &pair[1]))
     }
 
-    /// A restore attempted under `never_restored` is refused and counted;
-    /// under `restoring` it is permitted and the ledger stays out of the leak verdict.
-    pub fn restore_attempted(&mut self) -> Result<(), GrowthRefused> {
-        match self.mode {
-            GrowthMode::NeverRestored => {
-                self.restores_refused += 1;
-                Err(GrowthRefused::RestoreUnderNeverRestored)
-            }
-            GrowthMode::Restoring => Ok(()),
-        }
-    }
-
-    /// Every sample's headroom matches the constants, and the final sample
-    /// shows no temporary object, no WAL bytes, and every counter within its
-    /// bound. Only a never-restored ledger can say anything about leaks.
-    pub fn verdict(
-        &self,
-        quota: &ReviewerQuota,
-        bounds: &GrowthBounds,
-    ) -> Result<(), GrowthRefused> {
-        if self.mode != GrowthMode::NeverRestored {
-            return Err(GrowthRefused::NotALeakVerdict { mode: self.mode });
-        }
-        let last = self.samples.last().ok_or(GrowthRefused::NoSamples)?;
-        if self.samples.len() < 2 {
-            return Err(GrowthRefused::NoBaseline);
+    /// The order, and every sample carrying every store family and a headroom
+    /// that follows from the constants read. Evidence both modes carry; only
+    /// `verdict` judges leaks.
+    pub fn check_samples(&self, quota: &ReviewerQuota) -> Result<(), GrowthRefused> {
+        if self.samples.is_empty() {
+            return Err(GrowthRefused::NoSamples);
         }
         self.check_order()?;
         for sample in &self.samples {
@@ -286,6 +268,37 @@ impl GrowthLedger {
                 });
             }
         }
+        Ok(())
+    }
+
+    /// A restore attempted under `never_restored` is refused and counted;
+    /// under `restoring` it is permitted and the ledger stays out of the leak verdict.
+    pub fn restore_attempted(&mut self) -> Result<(), GrowthRefused> {
+        match self.mode {
+            GrowthMode::NeverRestored => {
+                self.restores_refused += 1;
+                Err(GrowthRefused::RestoreUnderNeverRestored)
+            }
+            GrowthMode::Restoring => Ok(()),
+        }
+    }
+
+    /// Every sample's headroom matches the constants, and the final sample
+    /// shows no temporary object, no WAL bytes, and every counter within its
+    /// bound. Only a never-restored ledger can say anything about leaks.
+    pub fn verdict(
+        &self,
+        quota: &ReviewerQuota,
+        bounds: &GrowthBounds,
+    ) -> Result<(), GrowthRefused> {
+        if self.mode != GrowthMode::NeverRestored {
+            return Err(GrowthRefused::NotALeakVerdict { mode: self.mode });
+        }
+        let last = self.samples.last().ok_or(GrowthRefused::NoSamples)?;
+        if self.samples.len() < 2 {
+            return Err(GrowthRefused::NoBaseline);
+        }
+        self.check_samples(quota)?;
         if last.artifact_tmp_entries != 0 {
             return Err(GrowthRefused::Leak {
                 resource: "artifact_tmp_entries".to_string(),
@@ -477,13 +490,20 @@ pub enum IsolationRefused {
 /// Two campaigns are isolated when they share none of these, and their
 /// concurrent result digests equal their serial ones. A root and a publish
 /// directory are the same filesystem resource, so they are compared across
-/// the two kinds as well.
+/// the two kinds, and a path inside another campaign's path writes into it,
+/// so ancestors count as shared. Paths are compared as given, not
+/// canonicalized: the caller names the directories it created.
 pub fn isolated(a: &CampaignResources, b: &CampaignResources) -> Result<(), IsolationRefused> {
-    let b_paths: BTreeSet<&String> = b.roots.iter().chain(&b.publish_dirs).collect();
-    if let Some(path) = a.roots.iter().find(|p| b_paths.contains(p)) {
+    let overlaps = |p: &String| {
+        b.roots
+            .iter()
+            .chain(&b.publish_dirs)
+            .any(|q| Path::new(p).starts_with(q) || Path::new(q).starts_with(p))
+    };
+    if let Some(path) = a.roots.iter().find(|p| overlaps(p)) {
         return Err(IsolationRefused::SharedRoot { path: path.clone() });
     }
-    if let Some(path) = a.publish_dirs.iter().find(|p| b_paths.contains(p)) {
+    if let Some(path) = a.publish_dirs.iter().find(|p| overlaps(p)) {
         return Err(IsolationRefused::SharedPublishDir { path: path.clone() });
     }
     if let Some(namespace) = a
@@ -559,6 +579,10 @@ pub enum GrowthReportError {
     },
     /// The embedded bounds are not the approved ones the caller passed.
     BoundsNotApproved,
+    /// The embedded envelope bounds are not the approved profile's limits.
+    EnvelopeBoundsNotApproved,
+    /// The claim boundary is not the repository's pinned one.
+    ClaimBoundaryMismatch,
     /// The final sample's R24 count and the recorded R24 refusals disagree.
     R24Unreconciled {
         counted: u64,
@@ -569,16 +593,27 @@ pub enum GrowthReportError {
 }
 
 impl GrowthReport {
-    /// `bounds` are the approved bounds the caller holds; the embedded copy
-    /// must equal them, so a producer cannot widen what it is judged by.
-    pub fn validate(&self, bounds: &GrowthBounds) -> Result<(), GrowthReportError> {
+    /// `bounds` and `limits` are the approved growth bounds and the approved
+    /// profile's envelope; the embedded copies must equal them, so a producer
+    /// cannot widen what it is judged by.
+    pub fn validate(
+        &self,
+        bounds: &GrowthBounds,
+        limits: &crate::ResourceLimits,
+    ) -> Result<(), GrowthReportError> {
         if self.schema != GROWTH_REPORT_SCHEMA {
             return Err(GrowthReportError::SchemaMismatch {
                 found: self.schema.clone(),
             });
         }
+        if self.claim_boundary != crate::ClaimBoundary::pinned() {
+            return Err(GrowthReportError::ClaimBoundaryMismatch);
+        }
         if self.bounds != *bounds {
             return Err(GrowthReportError::BoundsNotApproved);
+        }
+        if self.envelope.bounds != *limits {
+            return Err(GrowthReportError::EnvelopeBoundsNotApproved);
         }
         self.mix.complete().map_err(GrowthReportError::Mix)?;
         let faulted = self.fault_episodes > 0 || self.mix.exercised(Operation::FaultEpisode);
@@ -592,7 +627,6 @@ impl GrowthReport {
             for (resource, observed) in [
                 (crate::Resource::StoreBytes, sample.store_total()),
                 (crate::Resource::CassetteBytes, sample.cassette_bytes),
-                (crate::Resource::ArtifactBytes, sample.artifact_bytes),
                 (crate::Resource::TempRoots, sample.temp_roots),
                 (crate::Resource::Processes, sample.processes),
             ] {
@@ -625,20 +659,20 @@ impl GrowthReport {
                 .ledger
                 .verdict(&self.quota, &self.bounds)
                 .map_err(GrowthReportError::Growth)?,
-            GrowthMode::Restoring => {
-                if self.ledger.samples.is_empty() {
-                    return Err(GrowthReportError::Growth(GrowthRefused::NoSamples));
-                }
-                self.ledger
-                    .check_order()
-                    .map_err(GrowthReportError::Growth)?;
-            }
+            GrowthMode::Restoring => self
+                .ledger
+                .check_samples(&self.quota)
+                .map_err(GrowthReportError::Growth)?,
         }
         Ok(())
     }
 
-    pub fn serialize(&self, bounds: &GrowthBounds) -> Result<Value, GrowthReportError> {
-        self.validate(bounds)?;
+    pub fn serialize(
+        &self,
+        bounds: &GrowthBounds,
+        limits: &crate::ResourceLimits,
+    ) -> Result<Value, GrowthReportError> {
+        self.validate(bounds, limits)?;
         serde_json::to_value(self).map_err(|e| GrowthReportError::Shape(e.to_string()))
     }
 
@@ -672,10 +706,11 @@ impl GrowthReport {
 pub fn parse_growth_report(
     value: &Value,
     bounds: &GrowthBounds,
+    limits: &crate::ResourceLimits,
 ) -> Result<GrowthReport, GrowthReportError> {
     let report =
         GrowthReport::deserialize(value).map_err(|e| GrowthReportError::Shape(e.to_string()))?;
-    report.validate(bounds)?;
+    report.validate(bounds, limits)?;
     let again =
         serde_json::to_value(&report).map_err(|e| GrowthReportError::Shape(e.to_string()))?;
     if again != *value {

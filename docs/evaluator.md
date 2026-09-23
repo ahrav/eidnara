@@ -1800,7 +1800,8 @@ never exercised, so a run that skipped a kind cannot report sustainability.
 `SharedRoot`, `SharedPublishDir`, `SharedCassetteNamespace`, or `SharedPort`
 by the shared value (a root and a publish directory are one filesystem
 resource, so one campaign's root equal to another's publish directory is
-refused too), and `digests_match_serial` refuses
+refused too, and so is a path inside another campaign's path, since it
+writes into it; paths are compared as given, not canonicalized), and `digests_match_serial` refuses
 `DigestDiffersFromSerial { campaign }` when a concurrent run's result digest
 differs from its serial one and `TooFewCampaigns` below two, since isolation
 is a claim about at least two.
@@ -1810,16 +1811,22 @@ publishes: identity, profile digest, claim boundary, the quota read, the
 bounds, the ledger, the mix, expected refusals, fault-episode and
 safety-check counts (`SafetyNeverChecked` when either the fault-episode count
 or the mix records a fault episode and no safety check ran while armed),
-markers, and envelope. `validate(bounds)` takes the approved bounds and
-refuses an embedded copy that differs (`BoundsNotApproved`), as the fault
+markers, and envelope. `validate(bounds, limits)` takes the approved growth
+bounds and the approved profile's envelope and refuses an embedded copy that
+differs (`BoundsNotApproved`, `EnvelopeBoundsNotApproved`), as the fault
 report takes its liveness bounds, so a producer cannot widen what it is
-judged by; it runs the mix and ledger refusals, refuses
+judged by, and refuses a claim boundary other than the pinned one
+(`ClaimBoundaryMismatch`), as the manifest does; it runs the mix and ledger
+refusals (a `restoring` ledger keeps `check_samples`, the order, store, and
+headroom evidence, and drops only the leak verdict), refuses
 an envelope whose peaks crossed a bound (`EnvelopeNotHonoured`) or that a
-sample's store total, cassette or artifact bytes, temp roots, or processes
-exceed (`EnvelopeNotCharged { resource, step, peak, observed }`), and refuses
+sample's store total, cassette bytes, temp roots, or processes
+exceed (`EnvelopeNotCharged { resource, step, peak, observed }`; the
+envelope's artifact bytes and retained artifacts are the published files, not
+the artifact store a sample measures), and refuses
 a final R24 count that differs from the R24 entries in `expected_refusals`
 (`R24Unreconciled { counted, recorded }`);
-`parse_growth_report(value, bounds)` reads a report back losslessly; `result_digest` drops
+`parse_growth_report(value, bounds, limits)` reads a report back losslessly; `result_digest` drops
 each sample's byte measurements (`stores`, `artifact_bytes`,
 `cassette_bytes`) and the envelope peaks, which name one machine's bytes, and
 keeps steps, commit sequence, row and object counts, and headroom, so a
@@ -2046,7 +2053,8 @@ suite, and the pure fault-contract markers (`flt_premature_success_fixture_refus
 `flt_liveness_unmet_named_at_bound`) by the eval-core fault suite, the pure
 growth markers (`flt_restore_under_never_restored_refused`,
 `xc_shared_fixture_refused`, `flt_incomplete_mix_not_success`) by the eval-core
-growth suite, and `eval_growth.rs` owns the growth-campaign markers
+growth suite, and `eval_growth.rs`, the campaign shell that lands with the
+second half of this change, owns the growth-campaign markers
 (`flt_leak_ledger_sampled_before_reopen`, `flt_headroom_accounted_from_store_constants`,
 `xc_envelope_breach_stops_the_run`, `xc_parallel_campaigns_isolated`,
 `flt_swarm_mix_complete`); `eval_fault.rs`
