@@ -92,6 +92,11 @@ pub struct Script {
     pub extra_tool_calls: u32,
     /// Sleep past any deadline after the fix.
     pub hang: bool,
+    /// Replace the `tests` directory with a regular file, a collision with
+    /// every hidden-test path.
+    pub tests_file: bool,
+    /// End the script with this exit status.
+    pub exit_status: Option<i32>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize)]
@@ -367,7 +372,7 @@ exec setpriv --no-new-privs --inh-caps=-all --ambient-caps=-all --bounding-set=-
 /// listed inside. `mask` is covered by an empty read-only tmpfs, `writable`
 /// is the one writable tree, and everything else is read-only; `inner`'s
 /// working directory is kept (the writable tree when it has none). Only
-/// `PATH`, `HOME`, and `inner`'s own variables cross.
+/// `PATH`, `HOME`, `RUSTUP_HOME`, and `inner`'s own variables cross.
 fn contain(mask: Option<&Path>, writable: &Path, inner: &Command) -> Command {
     let mut command = Command::new("unshare");
     command
@@ -391,7 +396,7 @@ fn contain(mask: Option<&Path>, writable: &Path, inner: &Command) -> Command {
         .arg(inner.get_program())
         .args(inner.get_args())
         .env_clear();
-    for key in ["PATH", "HOME"] {
+    for key in ["PATH", "HOME", "RUSTUP_HOME"] {
         if let Some(value) = std::env::var_os(key) {
             command.env(key, value);
         }
@@ -536,10 +541,17 @@ pub fn run_canaries(
     let _ = std::fs::remove_file(&outside);
     // A pathname socket where a host service would put one; `None` on a
     // host without a runtime directory, and the probe is then not run.
+    static SOCKETS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let serial = SOCKETS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let socket = std::env::var_os("XDG_RUNTIME_DIR")
         .map(PathBuf::from)
         .filter(|dir| dir.is_dir())
-        .map(|dir| dir.join(format!("eidnara-canary-{}.sock", std::process::id())));
+        .map(|dir| {
+            dir.join(format!(
+                "eidnara-canary-{}-{serial}.sock",
+                std::process::id()
+            ))
+        });
     if let Some(path) = &socket {
         let _ = std::fs::remove_file(path);
     }
@@ -765,9 +777,7 @@ pub fn hidden_results(
     files.extend(
         agent_files
             .iter()
-            .filter(|(path, _)| {
-                !oracle_owned(path) && !task.files.keys().any(|known| collides(path, known))
-            })
+            .filter(|(path, _)| !oracle_owned(path) && !collides_with_task(task, path))
             .map(|(path, content)| (path.clone(), content.clone())),
     );
     for test in &task.hidden_tests {
@@ -885,6 +895,16 @@ fn collides(agent_path: &str, task_path: &str) -> bool {
         .strip_prefix(task_path)
         .or_else(|| task_path.strip_prefix(agent_path))
         .is_some_and(|rest| rest.starts_with('/'))
+}
+
+/// Whether an agent path collides with any file the grade tree gets from the
+/// task: its files or its hidden tests.
+fn collides_with_task(task: &GeneratedTask, path: &str) -> bool {
+    task.files.keys().any(|known| collides(path, known))
+        || task
+            .hidden_tests
+            .iter()
+            .any(|test| collides(path, &test.path()))
 }
 
 fn remove_tree(path: &Path) -> std::io::Result<()> {
@@ -1028,8 +1048,14 @@ fn agent_run(
     for _ in 0..script.extra_tool_calls {
         lines.push(tool("true", "", "true"));
     }
+    if script.tests_file {
+        lines.push(tool("rm", "tests", "rm -rf tests && echo x > tests"));
+    }
     if script.hang {
         lines.push(format!("sh -c 'sleep 600' {HANG_MARKER}"));
+    }
+    if let Some(status) = script.exit_status {
+        lines.push(format!("exit {status}"));
     }
     let planned = u32::try_from(
         lines
@@ -1066,7 +1092,10 @@ fn agent_run(
     if status.is_none() {
         usage.elapsed_ms = usage.elapsed_ms.max(config.budgets.hard_deadline_ms);
     }
-    if status.is_some_and(|status| status.code() == Some(MOUNT_REFUSED)) {
+    // Exit 97 is the mounts script's refusal only before the script started;
+    // afterwards it is the agent's own status like any other.
+    let started = stdout.lines().next() == Some(AGENT_START_LINE);
+    if !started && status.is_some_and(|status| status.code() == Some(MOUNT_REFUSED)) {
         return Err(RunError::MountRefused {
             task: task.id.clone(),
         });
@@ -1082,14 +1111,9 @@ fn agent_run(
         .get(".eidnara/memories.md")
         .cloned()
         .unwrap_or_default();
-    let memory_rows: Vec<String> = after
+    let memory_rows = after
         .get(".eidnara/memories.md")
-        .map(|text| {
-            text.lines()
-                .filter(|line| !memory_before.contains(line))
-                .map(|line| line.trim_start_matches("- ").to_string())
-                .collect()
-        })
+        .map(|text| appended_rows(&memory_before, text))
         .unwrap_or_default();
     let written: Files = after
         .into_iter()
@@ -1105,6 +1129,17 @@ fn agent_run(
         linked_oracle,
         usage,
     })
+}
+
+/// The memory rows `after` holds that `before` did not, without their list
+/// marker.
+pub fn appended_rows(before: &str, after: &str) -> Vec<String> {
+    let known: BTreeSet<&str> = before.lines().collect();
+    after
+        .lines()
+        .filter(|line| !line.trim().is_empty() && !known.contains(line))
+        .map(|line| line.trim_start_matches("- ").to_string())
+        .collect()
 }
 
 /// What the agent's stdout carried: the tool calls it announced as `name`
@@ -1277,12 +1312,19 @@ pub fn run(config: &Config, host: Host) -> Result<Run, RunError> {
         let trace = trace.unwrap_or_default();
         let mut oracle_tamper = task.oracle_tamper(&trace.written);
         oracle_tamper.extend(linked_oracle);
-        // A manifest turned into a directory is a replacement too.
+        // A manifest turned into a directory, or a file where the hidden
+        // tests' directory goes, is a replacement too.
         oracle_tamper.extend(
             trace
                 .written
                 .keys()
-                .filter(|path| path.starts_with("Cargo.toml/"))
+                .filter(|path| {
+                    path.starts_with("Cargo.toml/")
+                        || task
+                            .hidden_tests
+                            .iter()
+                            .any(|test| collides(path, &test.path()))
+                })
                 .cloned(),
         );
         oracle_tamper.sort();
@@ -1290,6 +1332,10 @@ pub fn run(config: &Config, host: Host) -> Result<Run, RunError> {
         let hidden = if config.budgets.exhausted(&usage).is_some() {
             HiddenResults::new()
         } else {
+            // Adequacy shared one build cache over corpus code; a candidate's
+            // build script may leave anything in the cache it wrote to, so
+            // no candidate builds in a cache another one touched.
+            remove_tree(&private.join("target"))?;
             let hidden = hidden_results(
                 task,
                 &private,

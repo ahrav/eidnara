@@ -14,7 +14,8 @@ write-back are scored separately."
 - `crates/eval-core/src/task.rs` `observe_agent` and `AgentTrace`.
 - `crates/daemon/examples/eval_runner/suite_d.rs` `agent_run` records the
   commands it issued, the outputs, the files that changed, and the memory
-  rows appended; `later_session` reads the memory carrier afterwards.
+  rows appended (`appended_rows`, by whole line); `run` builds the
+  `LaterSession` from those rows after the agent exited.
 - `crates/daemon/tests/eval_suite_d.rs` `a_contained_task_is_judged_by_hidden_tests_the_agent_never_sees`:
   issue and memory cases `obeyed: yes`, memory `written_back_cross_session:
   yes`, summary `exposure: yes, obeyed: no`, tool output `exposure: yes`,
