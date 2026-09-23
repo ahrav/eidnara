@@ -119,7 +119,7 @@ fn budget_or_panic() -> u64 {
 fn the_fault_campaign_receipts_every_declared_cut_scenario(campaign: &Campaign) {
     let (run, out) = (&campaign.run, &campaign.out);
     let report = &run.report;
-    report.validate(&run.bounds, &run.limits).unwrap();
+    report.validate(&run.profile).unwrap();
     assert_eq!(
         report.coverage.declared.len(),
         report.coverage.receipted.len()
@@ -197,7 +197,7 @@ fn the_fault_campaign_receipts_every_declared_cut_scenario(campaign: &Campaign) 
 
     let published = serde_json::from_slice(&std::fs::read(out.join(REPORT_FILE)).unwrap()).unwrap();
     assert_eq!(
-        parse_fault_report(&published, &run.bounds, &run.limits).unwrap(),
+        parse_fault_report(&published, &run.profile).unwrap(),
         *report
     );
     let manifest = parse_manifest(
@@ -480,7 +480,7 @@ fn a_held_publication_admits_once_and_publishes_on_release_scenario(campaign: &C
 fn liveness_bounds_are_met_with_outside_core_faults_armed_scenario(campaign: &Campaign) {
     let run = &campaign.run;
     let liveness = run.report.liveness.as_ref().unwrap();
-    liveness.verdict(&run.bounds).unwrap();
+    liveness.verdict(&run.profile.liveness).unwrap();
     assert_eq!(
         liveness.outside_core.len(),
         1,
@@ -496,7 +496,11 @@ fn liveness_bounds_are_met_with_outside_core_faults_armed_scenario(campaign: &Ca
         "the reviewer coordinator is outside this campaign's core"
     );
     for (lane, progress) in &liveness.lanes {
-        assert_eq!(progress.bound, lane.bound(&run.bounds), "{lane:?}");
+        assert_eq!(
+            progress.bound,
+            lane.bound(&run.profile.liveness),
+            "{lane:?}"
+        );
         assert_eq!(
             progress.steps, progress.bound,
             "{lane:?} was driven to its bound"
@@ -520,10 +524,10 @@ fn liveness_bounds_are_met_with_outside_core_faults_armed_scenario(campaign: &Ca
     );
     assert_eq!(
         run.report.coverage.receipted.get("claims_materialized"),
-        Some(&run.bounds.materialization_episodes),
+        Some(&run.profile.liveness.materialization_episodes),
         "every materialization step leaves exactly the latest fed decision's claims live"
     );
-    assert!(run.report.safety_checks_while_armed > run.bounds.catch_up_episodes);
+    assert!(run.report.safety_checks_while_armed > run.profile.liveness.catch_up_episodes);
 }
 
 const SCENARIOS: [fn(&Campaign); 10] = [
@@ -645,16 +649,31 @@ fn every_fault_marker_fires_across_the_scenarios() {
     coverage.complete(SUITE).unwrap();
 }
 
-fn quota_episode_on_a_fresh_root() -> (tempfile::TempDir, Witness) {
+fn quota_episode_on_a_fresh_root() -> (tempfile::TempDir, Witness, campaign::Charges) {
     let root = tempfile::tempdir().unwrap();
     let mut witness = Witness::new();
-    fault::quota_episode(root.path(), &mut witness, 1, QUOTA_NOW_MS).unwrap();
-    (root, witness)
+    let profile = fault::profile(Scale::S0, MESSAGES, 600_000, None);
+    let mut charges = campaign::Charges::new(profile.envelope);
+    fault::quota_episode(root.path(), &mut witness, &mut charges, 1, QUOTA_NOW_MS).unwrap();
+    (root, witness, charges)
+}
+
+/// The R24 store's footprint is charged while its connection is open; the
+/// drop that ends the episode can checkpoint the WAL away.
+#[test]
+fn the_receipt_quota_episode_charges_its_store_while_open() {
+    let (root, _, charges) = quota_episode_on_a_fresh_root();
+    let closed = campaign::root_bytes(root.path());
+    let peak = charges.envelope.peaks.store_bytes;
+    assert!(
+        peak > 0 && peak >= closed,
+        "the open footprint is charged: peak {peak}, closed {closed}"
+    );
 }
 
 #[test]
 fn the_receipt_quota_refusal_outlives_every_released_allowance() {
-    let (root, _) = quota_episode_on_a_fresh_root();
+    let (root, _, _) = quota_episode_on_a_fresh_root();
     let store = MemoryStore::open(&daemon::store_descriptor_in(root.path())).unwrap();
     let open: Vec<String> = store
         .with_fenced_conn_for_test(|conn| {
@@ -701,7 +720,7 @@ fn the_receipt_quota_refusal_outlives_every_released_allowance() {
 
 #[test]
 fn the_receipt_quota_episode_claims_no_projection_safety_check() {
-    let (_root, witness) = quota_episode_on_a_fresh_root();
+    let (_root, witness, _) = quota_episode_on_a_fresh_root();
     assert_eq!(
         witness.safety_checks, 0,
         "the quota episode runs on a memory store of its own; no projection check ran"

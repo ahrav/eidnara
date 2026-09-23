@@ -13,8 +13,8 @@ use daemon::search_catchup::{Blocked, EpisodeEnd, EpisodeEvent, EpisodeFault, Ep
 use eval_core::{
     APPLICATION_CRASH, Approval, ArtifactDeletionFaultKind, ArtifactIngestFaultKind, ClaimBoundary,
     Coverage, Cut, CutCoverage, EffectLedger, EffectState, EnvelopeExceeded, ExecutionMode,
-    ExpectedRefusal, FAULT_REPORT_SCHEMA, FaultAction, FaultEpisode, FaultReport, FaultReportError,
-    FaultScope, Heal, KillLabel, LivenessBounds, ProfileError, PublicationFaultKind,
+    ExpectedRefusal, FAULT_REPORT_SCHEMA, FaultAction, FaultEpisode, FaultProfile, FaultReport,
+    FaultReportError, FaultScope, Heal, KillLabel, ProfileError, PublicationFaultKind,
     RecordedRefusal, RestoreRefused, RunProfile, Scale, SearchEpisodeFault, StoreFamily,
     TEST_BINARY_CHILD, WorkCounter, cut_receipts, eval_run_id,
 };
@@ -137,9 +137,8 @@ pub struct Run {
     pub report_bytes: Vec<u8>,
     pub manifest: eval_core::Manifest,
     pub manifest_bytes: Vec<u8>,
-    pub bounds: LivenessBounds,
-    /// The approved profile's limits the report was validated against.
-    pub limits: eval_core::ResourceLimits,
+    /// The approved profile the report was validated against.
+    pub profile: FaultProfile,
     pub coverage: Coverage,
 }
 
@@ -863,6 +862,7 @@ pub fn reviewer_inputs(candidate: &str) -> CausalInputs {
 pub fn quota_episode(
     root: &Path,
     witness: &mut Witness,
+    charges: &mut Charges,
     step: u32,
     now: i64,
 ) -> Result<(), RunError> {
@@ -943,6 +943,9 @@ pub fn quota_episode(
             (before, after),
         ));
     }
+    // The drop that ends the episode can checkpoint the WAL away, so the
+    // footprint is charged while the connection is open.
+    charges.store_bytes(root)?;
     witness.receipt("quota_refused");
     witness.receipt(&id);
     witness.refusals.push(RecordedRefusal {
@@ -1093,9 +1096,11 @@ pub fn publication_episode(
         Instant::now() + Duration::from_secs(10),
         now,
         &mut |event| {
-            // The reply is lost and the publisher is reconciling: the fault is
-            // armed here, so this is the counted safety check.
-            if event == PublicationEvent::Reconciling {
+            // The completion is staged and the search transaction still open;
+            // the fault fires at its commit or reply, so it is armed and not
+            // yet consumed here. This is the counted safety check; it reads
+            // the files and the kernel, not the held projection connection.
+            if event == PublicationEvent::LocalStaged {
                 witness.safety_check_while_armed(stores);
             }
             events.push(event)
@@ -1342,7 +1347,7 @@ pub fn campaign(
         .now_ms;
 
     let quota_root = charges.occupy()?;
-    quota_episode(quota_root.path(), witness, step(rest), resumed)?;
+    quota_episode(quota_root.path(), witness, charges, step(rest), resumed)?;
     charges.vacate(quota_root)?;
     r11_episode(&mut stores, witness, &evidence, step(rest), resumed)?;
     witness.checkpoint(Cut::AfterFaultPhase);
@@ -1424,7 +1429,7 @@ pub fn run(config: &Config, spawn: Spawn) -> Result<Run, RunError> {
         config.elapsed_bound_ms,
         config.approval.clone(),
     );
-    profile.approved()?;
+    let fault_profile = profile.fault_profile()?;
     prepare_publish(&config.publish, &[REPORT_FILE, MANIFEST_FILE]).map_err(publish_refused)?;
     let mut charges = Charges::new(profile.envelope.clone());
     let mut witness = Witness::new();
@@ -1445,7 +1450,6 @@ pub fn run(config: &Config, spawn: Spawn) -> Result<Run, RunError> {
         }),
         &[std::env::current_exe().unwrap()],
     );
-    let bounds = profile.statistics.liveness_bounds.clone();
     let expected = campaign(&plan, &mut charges, &mut witness)?;
     let mut expected = expected;
     for cut in KillCut::ALL {
@@ -1458,7 +1462,7 @@ pub fn run(config: &Config, spawn: Spawn) -> Result<Run, RunError> {
             cut,
         )?);
     }
-    let liveness = liveness(&plan, &mut charges, &mut witness, &bounds)?;
+    let liveness = liveness(&plan, &mut charges, &mut witness, &fault_profile.liveness)?;
     check_expectations(&expected, &witness.effects)?;
     witness.cuts.verdict().map_err(FaultReportError::Coverage)?;
     witness
@@ -1495,8 +1499,7 @@ pub fn run(config: &Config, spawn: Spawn) -> Result<Run, RunError> {
     charges.retain_publish_root()?;
     let bytes = loop {
         report.envelope = charges.envelope.clone();
-        let bytes =
-            serde_json::to_vec_pretty(&report.serialize(&bounds, &profile.envelope)?).unwrap();
+        let bytes = serde_json::to_vec_pretty(&report.serialize(&fault_profile)?).unwrap();
         let peak = charges.envelope.peaks.artifact_bytes;
         charges.observe(eval_core::Resource::ArtifactBytes, bytes.len() as u64)?;
         if charges.envelope.peaks.artifact_bytes == peak {
@@ -1529,8 +1532,7 @@ pub fn run(config: &Config, spawn: Spawn) -> Result<Run, RunError> {
         report_bytes: bytes,
         manifest,
         manifest_bytes,
-        bounds,
-        limits: profile.envelope,
+        profile: fault_profile,
         coverage: witness.coverage,
     })
 }
@@ -1568,7 +1570,7 @@ use std::sync::mpsc;
 
 use daemon::claim_sources::{ClaimMaterializer, MaterializationEnd};
 use daemon::embedding_dispatch::{DispatchBounds, DispatchEvent, EmbeddingDispatcher};
-use eval_core::{BarrierReceipt, HealthyCore, Lane, LaneProgress, LivenessReport};
+use eval_core::{BarrierReceipt, HealthyCore, Lane, LaneProgress, LivenessBounds, LivenessReport};
 use host_runtime::local_embeddings::{LocalEmbeddingsComponent, LocalEmbeddingsLimits};
 use kernel::CommitPageBounds;
 
