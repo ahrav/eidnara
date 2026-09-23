@@ -123,6 +123,15 @@ pub enum ArtifactDeletionFaultKind {
 
 /// One variant of a fault enum, hook, gate, lock holder, or kill that exists
 /// at HEAD. Nothing else is a fault a campaign may claim to have run.
+///
+/// The set closes over the test-support seams that lose a store reply or fail
+/// a store transaction or publication of a `StoreFamily` store. Hooks that
+/// fail a schema migration (`schema.rs`), a lifecycle or recovery directory
+/// sync (`projection_lifecycle`, `search_lifecycle_owner`,
+/// `search_replacement::selection::recovery`), or a memory-store reviewer or
+/// classifier side channel (`memory-store`'s `fail_next_*_for_test`) are
+/// unit-test hooks on component internals, not faults a campaign injects, and
+/// are outside the set on purpose; `retention.rs` reuses `ArtifactGcFault`.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum FaultAction {
@@ -148,6 +157,15 @@ pub enum FaultAction {
     /// `backup_with_fault_before_rename_for_test`: the backup fails after its
     /// staged copy is synced and before it is published.
     BackupBeforeRename,
+    /// `commit_with_fault_after_events_for_test`: the commit fails inside its
+    /// transaction after the change events are written, and rolls back.
+    KernelCommitFailAfterEvents,
+    /// `MessageCleanup::lose_next_write_reply_for_test`: a page reclaim's
+    /// COMMIT reply is lost after the projection applied it.
+    MessageCleanupLoseWriteReply,
+    /// `IdentitySweep::lose_next_reclaim_reply_for_test`: an identity
+    /// reclamation's COMMIT reply is lost after the projection applied it.
+    IdentitySweepLoseReclaimReply,
     ProjectionBatch {
         fault: BatchFaultKind,
     },
@@ -206,7 +224,11 @@ impl FaultAction {
                 }
                 RestoreFaultKind::RecoveryFailure => Heal::Reopen,
             },
-            Self::ProjectionBatch { .. } | Self::BackupBeforeRename => Heal::Consumed,
+            Self::ProjectionBatch { .. }
+            | Self::BackupBeforeRename
+            | Self::KernelCommitFailAfterEvents
+            | Self::MessageCleanupLoseWriteReply
+            | Self::IdentitySweepLoseReclaimReply => Heal::Consumed,
             Self::ProcessKill { .. } | Self::CorruptQuiescentFile => Heal::Reopen,
         }
     }
@@ -237,12 +259,14 @@ impl FaultAction {
                 fault,
                 ArtifactGcFaultKind::AfterReclaiming | ArtifactGcFaultKind::AfterUnlink
             ),
+            Self::MessageCleanupLoseWriteReply | Self::IdentitySweepLoseReclaimReply => true,
             Self::HeldPublication
             | Self::ArtifactIngest { .. }
             | Self::ArtifactDeletion { .. }
             | Self::KernelRestore { .. }
             | Self::ProjectionBatch { .. }
             | Self::BackupBeforeRename
+            | Self::KernelCommitFailAfterEvents
             | Self::ExternalLockHolder
             | Self::ProcessKill { .. }
             | Self::CorruptQuiescentFile => false,
@@ -258,13 +282,16 @@ impl FaultAction {
             | Self::EmbeddingPublication { .. }
             | Self::HeldPublication
             | Self::EmbeddingDispatch { .. }
-            | Self::ProjectionBatch { .. } => Some(StoreFamily::SearchProjection),
+            | Self::ProjectionBatch { .. }
+            | Self::MessageCleanupLoseWriteReply
+            | Self::IdentitySweepLoseReclaimReply => Some(StoreFamily::SearchProjection),
             Self::ClaimMaterialization { .. }
             | Self::ArtifactIngest { .. }
             | Self::ArtifactDeletion { .. }
             | Self::ArtifactGc { .. }
             | Self::KernelRestore { .. }
-            | Self::BackupBeforeRename => Some(StoreFamily::Kernel),
+            | Self::BackupBeforeRename
+            | Self::KernelCommitFailAfterEvents => Some(StoreFamily::Kernel),
             Self::ExternalLockHolder | Self::ProcessKill { .. } | Self::CorruptQuiescentFile => {
                 None
             }
@@ -805,7 +832,10 @@ impl EffectLedger {
             if effect.outcome == EffectOutcome::Unknown {
                 // Pending: a lost reply, or a retry after one, that nothing has
                 // resolved yet.
-                if !effect.reply_lost() {
+                if !effect.reply_lost() || effect.read_back {
+                    // Unknown without a lost reply, or after a read-back that
+                    // by construction named one state, is not a state the
+                    // events derive.
                     return Err(EffectRefused::OutcomeNotDerived { identity });
                 }
                 if effect.observed > 0 {

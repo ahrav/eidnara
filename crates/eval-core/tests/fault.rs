@@ -1575,6 +1575,48 @@ fn a_parsed_report_cannot_claim_what_no_run_recorded() {
         ),
         "the only constructor of a FaultProfile refuses an unapproved profile"
     );
+
+    for (action, family, loses) in [
+        (
+            FaultAction::KernelCommitFailAfterEvents,
+            StoreFamily::Kernel,
+            false,
+        ),
+        (
+            FaultAction::MessageCleanupLoseWriteReply,
+            StoreFamily::SearchProjection,
+            true,
+        ),
+        (
+            FaultAction::IdentitySweepLoseReclaimReply,
+            StoreFamily::SearchProjection,
+            true,
+        ),
+    ] {
+        assert_eq!(action.heal(), Heal::Consumed, "{action:?}");
+        assert_eq!(action.family(), Some(family), "{action:?}");
+        assert_eq!(action.loses_reply(), loses, "{action:?}");
+        let value = serde_json::to_value(&action).unwrap();
+        assert_eq!(
+            serde_json::from_value::<FaultAction>(value).unwrap(),
+            action
+        );
+    }
+    let mut read_back_yet_unknown = EffectLedger::default();
+    read_back_yet_unknown.attempt("rb");
+    read_back_yet_unknown.lose_reply("rb", "lost-ack").unwrap();
+    read_back_yet_unknown
+        .effects
+        .get_mut("rb")
+        .unwrap()
+        .read_back = true;
+    assert_eq!(
+        read_back_yet_unknown.validate(),
+        Err(EffectRefused::OutcomeNotDerived {
+            identity: "rb".to_string()
+        }),
+        "a read-back names one state; unknown after one is no read-back"
+    );
 }
 
 #[test]

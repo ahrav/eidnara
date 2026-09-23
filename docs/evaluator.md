@@ -2006,18 +2006,29 @@ mirroring the fault enums and hooks that exist: `search_episode`
 (`cas::gc::ArtifactGcFault`), `kernel_restore` (`backup::RestoreFault`),
 `projection_batch` (`retrieval::batch::BatchFault`), `backup_before_rename`
 (the kernel's `backup_with_fault_before_rename_for_test` hook),
+`kernel_commit_fail_after_events` (the commit hook that fails inside the
+transaction after the change events), `message_cleanup_lose_write_reply` and
+`identity_sweep_lose_reclaim_reply` (the two projection maintenance slices
+whose COMMIT reply is lost after the store applied it),
 `external_lock_holder` (an external `BEGIN IMMEDIATE`), `process_kill { cut }`,
-and `corrupt_quiescent_file`. `FaultAction::family` is the store the seam
+and `corrupt_quiescent_file`. The set closes over the test-support seams that
+lose a store reply or fail a store transaction or publication of a
+`StoreFamily` store; the hooks that fail a schema migration, a lifecycle or
+recovery directory sync, or a memory-store reviewer or classifier side channel
+are unit-test hooks on component internals, not faults a campaign injects, and
+stay outside it on purpose (`retention.rs` reuses `ArtifactGcFault`). `FaultAction::family` is the store the seam
 lives in: catch-up, publication, dispatch, and a projection batch write the
-search projection, the CAS, its GC, a restore, a backup, and
+search projection, as do the cleanup and sweep slices; the CAS, its GC, a
+restore, a backup, a commit, and
 the materializer's outbox are the kernel, and a lock holder, a kill, or a
 corrupted file names its own store; a scope on another family is
 `ScopeMismatch`. `FaultAction::loses_reply` names the actions that leave an
 operation's outcome unknown to its caller: the search-episode reply losses,
 `embedding_publication`'s `lose_local_commit_reply`, the materializer's
 `lose_acknowledgement_reply`, dispatch's
-`lose_charge_reply` and `lose_obsoletion_reply`, and
-GC's `after_reclaiming` and `after_unlink`; a rolled-back commit, a refused
+`lose_charge_reply` and `lose_obsoletion_reply`,
+GC's `after_reclaiming` and `after_unlink`, and the cleanup and sweep
+slices' lost COMMIT replies; a rolled-back commit, a refused
 statement, a skipped acknowledgement, or the materializer's
 `fail_acknowledgement` (which never calls the kernel) is known, not lost, and
 dispatch's `refuse_ledger_read` loses none itself: it blocks the read-back of
@@ -2027,8 +2038,9 @@ enums, `released` for gates and lock holders, `reopen` for kills and
 corruption. A restore interrupted `before_displace` or `after_displace` is
 rolled back by the handle before the fault returns and is `consumed`; only
 `recovery_failure` leaves the store for a `reopen`. A projection batch fault
-rolls its transaction back and is `consumed`, as is a backup that fails
-before its rename. The CAS faults split by whether they latch ingestion closed: the
+rolls its transaction back and is `consumed`, as are a backup that fails
+before its rename, a commit that fails after its events, and the two
+maintenance slices' lost replies. The CAS faults split by whether they latch ingestion closed: the
 ingest faults `write`, `file_sync`, `rename`, `after_directory_sync`, and
 `takeover_before_cleanup_unlink` and the EIO deletion faults `intent_append`
 and `unlink` heal by `reopen`; `reservation_commit` and `after_events` abort a
@@ -2115,7 +2127,8 @@ when `lost_by` names more episodes than attempts that went unacknowledged
 `PrematureSuccess` for a lost reply whose
 outcome is not `unknown` with neither a read-back nor an observation, and
 `ExpectationCollapsedWithoutReadBack` for a lost reply expecting fewer than two
-states, and `OutcomeNotDerived` when the outcome is not the state the
+states, and `OutcomeNotDerived` when the outcome is `unknown` after a
+read-back (a read-back names one state) or without a lost reply, when it is not the state the
 expectation names, an effect whose reply was never lost expects anything but
 `applied`, the only state the API ever admits for it, or an `applied`
 outcome with no observation behind it: an attempt alone establishes nothing,
