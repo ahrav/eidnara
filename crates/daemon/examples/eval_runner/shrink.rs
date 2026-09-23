@@ -39,7 +39,8 @@ pub const SEED: u64 = 0x5EED_5000_0000_0005;
 const FRESH_SEED: u64 = SEED ^ 0xABCD;
 const CUT: Cut = Cut::AtQuiescence;
 const REPLAY_TIMEOUT: Duration = Duration::from_secs(120);
-/// Attempts under one receipt key when the child exits before its barrier.
+/// Attempts under one receipt key when the child exits before its barrier;
+/// within the ledger's `MAX_REPLAY_ATTEMPTS`.
 const REPLAY_ATTEMPTS: u32 = 2;
 const MAX_REPLAYS: u64 = 400;
 const EPOCH_MS: i64 = 1_700_000_000_000;
@@ -237,16 +238,16 @@ impl Replayer<'_> {
             return Ok(answered.clone());
         }
         std::fs::write(&self.args.scenario, serde_json::to_vec(scenario).unwrap())?;
-        self.effects.issue(key)?;
-        let mut attempts = 1;
+        let mut attempt = self.effects.issue(key)?;
         let mut replayed = loop {
             match self.attempt()? {
                 Some(replayed) => break replayed,
-                None if attempts < REPLAY_ATTEMPTS => attempts = self.effects.retry(key)?,
+                None if attempt < REPLAY_ATTEMPTS => attempt = self.effects.retry(key)?,
                 None => break self.unanswered(UnknownReason::ChildExitedBeforeBarrier),
             }
         };
-        self.effects.resolve(key, replayed.outcome.clone())?;
+        self.effects
+            .resolve(key, attempt, replayed.outcome.clone())?;
         replayed.outcome = self.effects.outcome(key)?.clone();
         residue_drift(&self.expected_residue, &replayed.residue)?;
         self.answered.insert(key.to_string(), replayed.clone());
