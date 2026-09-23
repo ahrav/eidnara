@@ -463,7 +463,7 @@ fn a_held_publication_admits_once_and_publishes_on_release_scenario(campaign: &C
 fn liveness_bounds_are_met_with_outside_core_faults_armed_scenario(campaign: &Campaign) {
     let run = &campaign.run;
     let liveness = run.report.liveness.as_ref().unwrap();
-    liveness.verdict(&run.profile.liveness).unwrap();
+    liveness.verdict(run.profile.liveness()).unwrap();
     assert_eq!(
         liveness.outside_core.len(),
         1,
@@ -481,7 +481,7 @@ fn liveness_bounds_are_met_with_outside_core_faults_armed_scenario(campaign: &Ca
     for (lane, progress) in &liveness.lanes {
         assert_eq!(
             progress.bound,
-            lane.bound(&run.profile.liveness),
+            lane.bound(run.profile.liveness()),
             "{lane:?}"
         );
         assert_eq!(
@@ -507,10 +507,10 @@ fn liveness_bounds_are_met_with_outside_core_faults_armed_scenario(campaign: &Ca
     );
     assert_eq!(
         run.report.coverage.receipted.get("claims_materialized"),
-        Some(&run.profile.liveness.materialization_episodes),
+        Some(&run.profile.liveness().materialization_episodes),
         "every materialization step leaves exactly the latest fed decision's claims live"
     );
-    assert!(run.report.safety_checks_while_armed > run.profile.liveness.catch_up_episodes);
+    assert!(run.report.safety_checks_while_armed > run.profile.liveness().catch_up_episodes);
 }
 
 const SCENARIOS: [fn(&Campaign); 10] = [

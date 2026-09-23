@@ -1498,7 +1498,7 @@ pub fn run(config: &Config, spawn: Spawn) -> Result<Run, RunError> {
             cut,
         )?;
     }
-    let liveness = liveness(&plan, &mut charges, &mut witness, &fault_profile.liveness)?;
+    let liveness = liveness(&plan, &mut charges, &mut witness, fault_profile.liveness())?;
     check_expectations(&expected, &witness.effects)?;
     witness.cuts.verdict().map_err(FaultReportError::Coverage)?;
     witness
