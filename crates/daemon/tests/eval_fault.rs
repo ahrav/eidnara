@@ -770,7 +770,7 @@ fn liveness_window_stores(
     root: &std::path::Path,
 ) -> (aging::Plan, aging::Stores, Vec<aging::Planned>) {
     let plan = aging::plan(MESSAGES).unwrap();
-    let mut stores = aging::Stores::open(root, plan.rendering.clone());
+    let mut stores = aging::Stores::open(root, &plan);
     let k = plan.checkpoint_step as usize;
     aging::live(&mut stores, &plan.steps[..k]);
     daemon::claim_sources::ClaimMaterializer::register(&stores.corpus.kernel, plan.steps[k].now_ms)
@@ -933,11 +933,16 @@ fn a_lost_reply_without_a_matching_fixed_expectation_refuses_the_run() {
         check_expectations(&fixed, &effects).is_err(),
         "read back not applied"
     );
-    effects.read_back(identity, EffectState::Applied).unwrap();
-    check_expectations(&fixed, &effects).unwrap();
+    // A read-back fixes the expectation, so the applied case is a second
+    // ledger, not a second read-back of the same effect.
+    let mut applied = EffectLedger::default();
+    applied.attempt(identity);
+    applied.lose_reply(identity).unwrap();
+    applied.read_back(identity, EffectState::Applied).unwrap();
+    check_expectations(&fixed, &applied).unwrap();
     let stray = BTreeMap::from([("search_ack:9".to_string(), EffectState::Applied)]);
     assert!(
-        check_expectations(&stray, &effects).is_err(),
+        check_expectations(&stray, &applied).is_err(),
         "an expectation for an effect the campaign never lost"
     );
 }
@@ -946,7 +951,7 @@ fn a_lost_reply_without_a_matching_fixed_expectation_refuses_the_run() {
 fn a_read_back_after_later_catch_up_is_refused_as_masked() {
     let plan = aging::plan(MESSAGES).unwrap();
     let root = tempfile::tempdir().unwrap();
-    let mut stores = aging::Stores::open(root.path(), plan.rendering.clone());
+    let mut stores = aging::Stores::open(root.path(), &plan);
     aging::live(&mut stores, &plan.steps[..3]);
     let mut witness = Witness::new();
     stores.apply(&plan.steps[3]);
@@ -971,14 +976,72 @@ fn a_read_back_after_later_catch_up_is_refused_as_masked() {
     );
 }
 
+/// A 12-message plan leaves seven steps after the checkpoint: enough for a
+/// six-step fault phase, not for the nine the held publication needs.
 #[test]
 fn a_plan_too_short_for_the_fault_phase_is_refused() {
     let publish = tempfile::tempdir().unwrap();
     let mut config = config(publish.path().join("out"), 600_000);
     config.messages = 12;
     match fault::run(&config, spawn_child) {
-        Err(RunError::Unexpected { episode, .. }) if episode == "campaign" => {}
+        Err(RunError::HistoryTooShort { after_checkpoint }) => assert!(after_checkpoint < 9),
         Err(other) => panic!("refused by the wrong error: {other}"),
         Ok(_) => panic!("a 12-message plan ran the fault phase"),
     }
+}
+
+/// `--messages 7` plans a history whose checkpoint leaves fewer than the nine
+/// suffix steps the fault phase drives. The run refuses it as a `RunError`
+/// before any store opens; it does not panic on accepted numeric input.
+#[test]
+fn a_history_too_short_for_the_fault_phase_is_refused_not_panicked() {
+    let plan = aging::plan(7).unwrap();
+    assert!(
+        plan.steps.len() - (plan.checkpoint_step as usize) < 9,
+        "the case needs a short suffix: {} steps, checkpoint {}",
+        plan.steps.len(),
+        plan.checkpoint_step
+    );
+    let publish = tempfile::tempdir().unwrap();
+    let mut config = config(publish.path().join("out"), 600_000);
+    config.messages = 7;
+    let outcome = std::panic::catch_unwind(|| fault::run(&config, spawn_child).err());
+    let refused = outcome
+        .expect("a short history is refused, not a panic")
+        .expect("a short history is refused");
+    assert!(
+        refused.to_string().contains("after the checkpoint"),
+        "{refused}"
+    );
+    assert!(
+        !publish.path().join("out").join(REPORT_FILE).exists(),
+        "nothing is published"
+    );
+}
+
+/// The campaign's store-byte peak is the open footprint: closing the stores
+/// checkpoints every WAL away, so a peak read only after the close would
+/// let a run pass its bound while exceeding it.
+#[test]
+fn the_campaign_charges_the_stores_at_their_open_footprint_not_after_the_close() {
+    let plan = aging::plan(MESSAGES).unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let mut stores = aging::Stores::open(root.path(), &plan);
+    aging::live(&mut stores, &plan.steps);
+    let open = campaign::root_bytes(root.path());
+    drop(stores.close());
+    let closed = campaign::root_bytes(root.path());
+    assert!(
+        open > closed,
+        "closing checkpoints the WAL away: {open} vs {closed}"
+    );
+    let profile = fault::profile(Scale::S0, MESSAGES, 600_000, None);
+    let mut charges = campaign::Charges::new(profile.envelope);
+    let mut witness = Witness::new();
+    fault::campaign(&plan, &mut charges, &mut witness).unwrap();
+    let peak = charges.envelope.peaks.store_bytes;
+    assert!(
+        peak > (open + closed) / 2,
+        "the peak charged is the open footprint: peak {peak}, open {open}, closed {closed}"
+    );
 }

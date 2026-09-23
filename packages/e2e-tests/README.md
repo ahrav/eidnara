@@ -96,8 +96,14 @@ Environment:
   exits 2 for any other value.
 - `EIDNARA_E2E_REQUIRE_PI=1` makes `pi-smoke` fail rather than skip when a Pi
   prerequisite is missing.
-- `EIDNARA_E2E_DIRECT_HOST_FIXTURE_BIN` overrides the fixture binary path
-  (default `target/debug/examples/direct_host_fixture`).
+- `EIDNARA_E2E_DIRECT_HOST_FIXTURE_BIN` and `EIDNARA_E2E_EVAL_RUNNER_BIN`
+  override the daemon example binaries (defaults
+  `target/debug/examples/direct_host_fixture` and
+  `target/debug/examples/eval_runner`, built on demand with the
+  `direct-host-fixture` and `eval-runner` features). A set variable must name
+  an executable file; a stale path fails the prerequisite check and the build
+  step rather than falling back to a build. `scripts/check-rust-prerequisites.ts
+  --build` builds whichever examples are not yet resolved.
 - `EIDNARA_RUST_E2E_FOLD=1` and `EIDNARA_RUST_E2E_DUPLICATE_IDS=1` enable the
   two tests that drive the daemon past its pressure thresholds.
 
@@ -125,5 +131,6 @@ until the runtime can start the shared-memory channel.
 ## CI
 
 The `gates` job installs OpenCode 1.18.22 and Pi 0.80.2 on Node 24.18.0,
-builds the fixture, and runs `validate-mode-manifest` and `test:rust` with
+builds both daemon examples, exports their paths through the variables above,
+and runs `validate-mode-manifest` and `test:rust` with
 `EIDNARA_E2E_REQUIRE_PI=1`.

@@ -50,8 +50,6 @@ const emit = (r: Ratio) => {
   return { numerator: Number(r.numerator), denominator: Number(r.denominator) };
 };
 
-// Pair counts under the conservative rule: a censored arm never passes; a censored aged arm
-// is a loss; a censored fresh arm is neither a pass nor a fail.
 type Arm = "pass" | "fail" | { censored: string };
 interface Pair {
   pair_id: string;
@@ -70,7 +68,7 @@ function counts(pairs: readonly Pair[]) {
     if (isCensored(pair.fresh)) freshCensored += 1;
     if (isCensored(pair.aged)) agedCensored += 1;
     if (pair.aged === "pass") agedPass += 1;
-    if (pair.fresh === "pass" && pair.aged !== "pass") b += 1;
+    if (pair.fresh !== "fail" && pair.aged !== "pass") b += 1;
     if (pair.fresh === "fail" && pair.aged === "pass") c += 1;
   }
   const n = pairs.length;
@@ -92,12 +90,13 @@ function icc(groups: readonly (readonly number[])[]): Ratio {
   const k = BigInt(groups.length);
   const values = groups.flat();
   const n = BigInt(values.length);
-  const mean = ratio(BigInt(values.reduce((s, v) => s + v, 0)), n);
+  // Sums run in BigInt: a total of safe integers can leave the safe range before conversion.
+  const mean = ratio(values.reduce((s, v) => s + BigInt(v), 0n), n);
   let ssb: Ratio = whole(0);
   let ssw: Ratio = whole(0);
   for (const group of groups) {
     const m = BigInt(group.length);
-    const groupMean = ratio(BigInt(group.reduce((s, v) => s + v, 0)), m);
+    const groupMean = ratio(group.reduce((s, v) => s + BigInt(v), 0n), m);
     const between = sub(groupMean, mean);
     ssb = add(ssb, mul(whole(m), mul(between, between)));
     for (const value of group) {
@@ -107,8 +106,10 @@ function icc(groups: readonly (readonly number[])[]): Ratio {
   }
   const msb = div(ssb, whole(k - 1n));
   const msw = div(ssw, whole(n - k));
-  const m0 = ratio(n, k);
-  return div(sub(msb, msw), add(msb, mul(sub(m0, whole(1)), msw)));
+  // The unequal-group size correction n0 = (N - sum(n_i^2) / N) / (k - 1); the group size when balanced.
+  const sumOfSquares = groups.reduce((s, g) => s + BigInt(g.length) ** 2n, 0n);
+  const n0 = ratio(n * n - sumOfSquares, n * (k - 1n));
+  return div(sub(msb, msw), add(msb, mul(sub(n0, whole(1)), msw)));
 }
 
 interface Observation {
@@ -127,11 +128,18 @@ function groupBy(observations: readonly Observation[], key: (o: Observation) => 
   return [...groups.keys()].sort(compareKeys).map((k) => groups.get(k) ?? []);
 }
 const clusterKey = (family: string, seed: number) => `${family}\u0000${seed}`;
+// Families compare by UTF-8 bytes, the order Rust's `String` uses; JS `<` compares UTF-16 code
+// units, which disagrees for supplementary characters against private-use ones.
+// The seed follows the last NUL, so a family name that itself contains NUL splits correctly.
+function splitKey(key: string): [string, string] {
+  const at = key.lastIndexOf("\u0000");
+  return [key.slice(0, at), key.slice(at + 1)];
+}
 function compareKeys(left: string, right: string): number {
-  const [lf, ls] = left.split("\u0000");
-  const [rf, rs] = right.split("\u0000");
-  if (lf !== rf) return (lf ?? "") < (rf ?? "") ? -1 : 1;
-  return Number(ls ?? 0) - Number(rs ?? 0);
+  const [lf, ls] = splitKey(left);
+  const [rf, rs] = splitKey(right);
+  if (lf !== rf) return Buffer.compare(Buffer.from(lf, "utf8"), Buffer.from(rf, "utf8"));
+  return Number(ls) - Number(rs);
 }
 // The design effect is clamped at one, so deflation only ever shrinks N.
 function pilot(observations: readonly Observation[], maxAffordableWorlds: number) {
@@ -141,20 +149,26 @@ function pilot(observations: readonly Observation[], maxAffordableWorlds: number
   const iccWorld = icc(byWorld);
   const threshold = ratio(1n, 20n);
   const family = cmp(iccFamily, threshold) > 0;
-  const chosenIcc = family ? iccFamily : iccWorld;
-  const clusters = family ? byFamily.length : maxAffordableWorlds;
   const itemsAtMax = mul(ratio(BigInt(observations.length), BigInt(byWorld.length)), whole(maxAffordableWorlds));
-  const meanCluster = div(itemsAtMax, whole(clusters));
-  const positiveIcc = cmp(chosenIcc, whole(0)) < 0 ? whole(0) : chosenIcc;
-  const rawEffect = add(whole(1), mul(sub(meanCluster, whole(1)), positiveIcc));
-  const designEffect = cmp(rawEffect, whole(1)) < 0 ? whole(1) : rawEffect;
+  // Deflate at both nesting levels and keep the smaller, so a stronger finer-level correlation
+  // is never discarded by selecting the coarser unit. Each affordable world lies in one family,
+  // so at most that many family clusters are realized.
+  const deflate = (clusters: number, icc: Ratio): Ratio => {
+    const meanCluster = div(itemsAtMax, whole(clusters));
+    const positiveIcc = cmp(icc, whole(0)) < 0 ? whole(0) : icc;
+    const rawEffect = add(whole(1), mul(sub(meanCluster, whole(1)), positiveIcc));
+    const designEffect = cmp(rawEffect, whole(1)) < 0 ? whole(1) : rawEffect;
+    return div(itemsAtMax, designEffect);
+  };
+  const atFamily = deflate(Math.min(byFamily.length, maxAffordableWorlds), iccFamily);
+  const atWorld = deflate(maxAffordableWorlds, iccWorld);
   return {
     icc_family: emit(iccFamily),
     icc_world_seed: emit(iccWorld),
     clustering_unit: family ? "family" : "world_seed",
     n_families: byFamily.length,
     n_worlds: byWorld.length,
-    effective_n_at_max: emit(div(itemsAtMax, designEffect)),
+    effective_n_at_max: emit(cmp(atFamily, atWorld) <= 0 ? atFamily : atWorld),
   };
 }
 
@@ -187,12 +201,12 @@ function bootstrap(pairs: readonly Pair[], unit: "family" | "world_seed", seed: 
     statistics.push(ratio(BigInt(diff), BigInt(Math.max(n, 1))));
   }
   statistics.sort(cmp);
-  const tail = Math.floor(replicates / 40);
+  // The 1/40 and 39/40 order statistics: the ceil(B/40)-th and ceil(39B/40)-th smallest.
   return {
     n_clusters: ordered.length,
     n_items: pairs.length,
-    lower: emit(statistics[tail] ?? whole(0)),
-    upper: emit(statistics[replicates - tail - 1] ?? whole(0)),
+    lower: emit(statistics[Math.ceil(replicates / 40) - 1] ?? whole(0)),
+    upper: emit(statistics[replicates - Math.floor(replicates / 40) - 1] ?? whole(0)),
   };
 }
 
@@ -228,7 +242,6 @@ for (const [f, family] of families.entries()) {
 }
 const gateFixtures = {
   "aged-better": {
-    b: 3, c: 5, n: 20,
     pairs: [
       ...Array.from({ length: 3 }, (_, i): Pair => ({ pair_id: `b${i}`, cluster: { family: "f", world_seed: i }, fresh: "pass", aged: "fail" })),
       ...Array.from({ length: 5 }, (_, i): Pair => ({ pair_id: `c${i}`, cluster: { family: "f", world_seed: i + 3 }, fresh: "fail", aged: "pass" })),
@@ -310,6 +323,7 @@ const cases: GoldenCase[] = [
   pilotCase("pilot-no-family-effect", pilotFixture(false), 40),
   // Fewer affordable worlds than the pilot had: the clamp keeps effective N at the item count.
   pilotCase("pilot-fewer-affordable-worlds", pilotFixture(false), 2),
+  pilotCase("pilot-family-effect-fewer-affordable-worlds-than-families", pilotFixture(true), 2),
   pilotCase("pilot-unbalanced-worlds", unbalancedFixture, 3),
   pilotCase("pilot-constant-worlds", constantFixture, 1),
   {
@@ -324,12 +338,20 @@ const cases: GoldenCase[] = [
     input: { pairs: pairFixture, replicates: 400, seed: 7, unit: "world_seed" },
     expected: bootstrap(pairFixture, "world_seed", 7, 400),
   },
+  {
+    // At the minimum replicate count the 1/40 order statistic is the smallest replicate.
+    id: "bootstrap-world-seed-unit-minimum-replicates",
+    kind: "cluster_bootstrap",
+    input: { pairs: pairFixture, replicates: 40, seed: 7, unit: "world_seed" },
+    expected: bootstrap(pairFixture, "world_seed", 7, 40),
+  },
 ];
 
 // Right-censored latency. The reference derives the bound from first principles rather than
-// from the sorted prefix: a percentile is a point only when no censored attempt could have
-// changed the order statistic, that is when fewer censored attempts sort at or below the rank
-// than would be needed to displace it; equivalently, none does.
+// from the sorted prefix: pushing every censored attempt to infinity leaves the rank-th completed
+// duration as the order statistic, so a percentile is a point exactly when at least `rank`
+// completed attempts sit at or below the picked value; a censored attempt below the rank does
+// not by itself make it a bound.
 interface Attempt {
   duration_ms: number;
   censored: string | null;
@@ -343,9 +365,8 @@ function latency(attempts: readonly Attempt[]) {
   const percentile = (p: number) => {
     const rank = Math.ceil((p * n) / 100);
     const picked = sorted[rank - 1] ?? { duration_ms: 0, censored: null };
-    // Censored attempts strictly below the picked value, plus censored ties that sort before it.
-    const displacing = sorted.slice(0, rank).filter((a) => a.censored !== null).length;
-    return { p, value: picked.duration_ms, n, censored, bound: displacing === 0 ? "point" : "lower" };
+    const settled = sorted.filter((a) => a.censored === null && a.duration_ms <= picked.duration_ms).length;
+    return { p, value: picked.duration_ms, n, censored, bound: settled >= rank ? "point" : "lower" };
   };
   const percentiles = n === 0 ? [] : [percentile(50), percentile(95), ...(n >= 299 ? [percentile(99)] : [])];
   return { n, censored, percentiles };
@@ -355,17 +376,45 @@ const attempts = (completed: number, timeouts: number, duration: number, deadlin
   ...Array.from({ length: timeouts }, (): Attempt => ({ duration_ms: deadline, censored: "timeout" })),
 ];
 
-// Zero failures in n trials is the rule-of-three bound min(3/n, 1); otherwise the observed rate.
-// The rule approximates the exact one-sided bound 1 - 0.05^(1/n) from above, which the
-// generator checks so the convention itself is verified rather than copied.
-function counter(n: number, failures: number, unit: string) {
-  if (failures === 0) {
-    const exact = 1 - 0.05 ** (1 / n);
-    if (Math.min(3 / n, 1) < exact) throw new Error(`3/${n} is below the exact bound ${exact}`);
-    const bound = cmp(ratio(3n, BigInt(n)), whole(1)) > 0 ? whole(1) : ratio(3n, BigInt(n));
-    return { evidence_kind: "bound", upper_bound_95: emit(bound), bound_method: "rule_of_three", n, unit };
+// `counter` rejects envelopes below the exact one-sided 95% binomial bound.
+function binomialCdf(n: number, x: number, p: number): number {
+  let term = (1 - p) ** n;
+  let total = term;
+  for (let i = 1; i <= x; i += 1) {
+    term *= ((n - i + 1) / i) * (p / (1 - p));
+    total += term;
   }
-  return { evidence_kind: "observed", rate: emit(ratio(BigInt(failures), BigInt(n))), n, unit };
+  return total;
+}
+// `exactUpperBound` returns the `p` satisfying `P[X <= failures | n, p] = 0.05`.
+function exactUpperBound(n: number, failures: number): number {
+  if (failures === 0) return 1 - 0.05 ** (1 / n);
+  let lo = 0;
+  let hi = 1;
+  for (let step = 0; step < 200; step += 1) {
+    const mid = (lo + hi) / 2;
+    if (binomialCdf(n, failures, mid) > 0.05) lo = mid;
+    else hi = mid;
+  }
+  return hi;
+}
+function counter(n: number, failures: number, unit: string) {
+  const exact = exactUpperBound(n, failures);
+  const envelope = 2 * failures + 3;
+  if (Math.min(envelope / n, 1) < exact) throw new Error(`${envelope}/${n} is below the exact bound ${exact}`);
+  const raw = ratio(BigInt(envelope), BigInt(n));
+  const upper_bound_95 = emit(cmp(raw, whole(1)) > 0 ? whole(1) : raw);
+  if (failures === 0) {
+    return { evidence_kind: "bound", upper_bound_95, bound_method: "rule_of_three", n, unit };
+  }
+  return {
+    evidence_kind: "observed",
+    rate: emit(ratio(BigInt(failures), BigInt(n))),
+    upper_bound_95,
+    bound_method: "poisson_envelope",
+    n,
+    unit,
+  };
 }
 
 // pass^k by exhaustive enumeration of every k-subset: the share whose members all passed.
@@ -409,12 +458,14 @@ const censoredCases: GoldenCase[] = [
     "fifteen-timeouts": attempts(90, 15, 10, 1000),
     "mixed-deadlines": [...attempts(3, 2, 10, 500), { duration_ms: 900, censored: null }],
     "tie-at-the-rank": [...attempts(1, 1, 500, 500), { duration_ms: 900, censored: null }],
+    "censored-under-a-tie": [...attempts(0, 1, 0, 1), ...attempts(2, 0, 2, 0)],
     "single-attempt": attempts(0, 1, 0, 250),
   }).map(([id, input]) => ({ id: `latency-${id}`, kind: "latency", input: { attempts: input }, expected: latency(input) })),
   ...[
     [400, 0],
     [20, 0],
     [2, 0],
+    [60, 1],
     [60, 3],
   ].map(([n, failures]) => ({
     id: `counter-${n}-${failures}`,
@@ -435,16 +486,21 @@ cases.push(...censoredCases);
 // The Rust reader recomputes this hash over `serde_json::to_string_pretty` of the whole case
 // array, expectations included, whose maps sort keys; so keys are sorted here before hashing,
 // and a hand-edited expectation is caught.
-function sortKeys(value: unknown): unknown {
+type Json = null | boolean | number | string | Json[] | { [key: string]: Json };
+function sortKeys(value: unknown): Json {
   if (Array.isArray(value)) return value.map(sortKeys);
   if (value && typeof value === "object") {
+    const record = value as Record<string, unknown>;
     return Object.fromEntries(
-      Object.keys(value as Record<string, unknown>)
+      Object.keys(record)
         .sort()
-        .map((k) => [k, sortKeys((value as Record<string, unknown>)[k])]),
+        .map((k) => [k, sortKeys(record[k])]),
     );
   }
-  return value;
+  if (value === null || typeof value === "boolean" || typeof value === "number" || typeof value === "string") {
+    return value;
+  }
+  throw new Error(`not JSON: ${typeof value}`);
 }
 const canonical = (value: unknown): string => `${JSON.stringify(sortKeys(value), null, 2)}\n`;
 const inputHash = createHash("sha256").update(canonical(cases)).digest("hex");

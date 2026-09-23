@@ -59,6 +59,10 @@ pub enum RunError {
     Envelope(#[from] EnvelopeExceeded),
     #[error("plan refused: {0}")]
     Plan(#[from] aging::RunError),
+    #[error(
+        "history leaves {after_checkpoint} steps after the checkpoint; the fault phase drives {FAULT_PHASE_STEPS}"
+    )]
+    HistoryTooShort { after_checkpoint: usize },
     #[error("report refused: {0}")]
     Report(#[from] FaultReportError),
     #[error("episode {episode}: expected {expected}, observed {observed}")]
@@ -86,13 +90,30 @@ fn publish_refused((path, kind): (PathBuf, std::io::ErrorKind)) -> RunError {
     RunError::Publish { path, kind }
 }
 
+/// The steps the fault phase drives after the checkpoint: a lock-holder
+/// episode, two healthy steps, two reply-loss episodes, then at least one
+/// step each to open a job for the held publication and the two publication
+/// faults, and one step left to live after recovery.
+const FAULT_PHASE_STEPS: usize = 9;
+
+/// The aging plan, refused before any store opens when its checkpoint leaves
+/// fewer steps than the fault phase drives.
+pub fn plan(messages: u32) -> Result<Plan, RunError> {
+    let plan = aging::plan(messages)?;
+    let after_checkpoint = plan.steps.len() - plan.checkpoint_step as usize;
+    if after_checkpoint < FAULT_PHASE_STEPS {
+        return Err(RunError::HistoryTooShort { after_checkpoint });
+    }
+    Ok(plan)
+}
+
 pub fn profile(
     scale: Scale,
-    steps: u32,
+    messages: u32,
     elapsed_ms: u64,
     approval: Option<Approval>,
 ) -> RunProfile {
-    let mut profile = aging::profile(scale, steps, elapsed_ms, approval);
+    let mut profile = aging::profile(scale, messages, elapsed_ms, approval);
     profile.name = profile.name.replace("suite-c-aging", "suite-c-fault");
     profile.envelope.temp_roots = 6;
     profile
@@ -888,7 +909,7 @@ pub fn corruption_episode(
         StoreFamily::Kernel,
         "reopen",
         FaultAction::CorruptQuiescentFile,
-        "Checkpoint::accept: a copied file whose integrity_check is not ok is refused before any store opens; the corruption is detected, not repaired",
+        "Copied::reopen: a copied file whose bytes no longer match the checkpoint's digest is refused FileDiffers before any store opens; the corruption is detected, not repaired",
     ));
     let mut closed = stores.close();
     let copy_root = charges.occupy()?;
@@ -907,15 +928,18 @@ pub fn corruption_episode(
         *byte ^= 0xA5;
     }
     std::fs::write(&target, &bytes).unwrap();
+    let relative = target
+        .strip_prefix(copied.root())
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    let expected = format!("FileDiffers {{ path: {relative:?} }}");
     match copied.reopen(&checkpoint, now) {
-        Err(RestoreRefused::IntegrityCheck {
-            family: StoreFamily::Kernel,
-            ..
-        }) => {
+        Err(RestoreRefused::FileDiffers { path }) if path == relative => {
             witness.receipt("integrity_refused");
         }
-        Err(other) => return Err(unexpected(&id, "IntegrityCheck { kernel }", other)),
-        Ok(_) => return Err(unexpected(&id, "IntegrityCheck { kernel }", "Ok")),
+        Err(other) => return Err(unexpected(&id, &expected, other)),
+        Ok(_) => return Err(unexpected(&id, &expected, "Ok")),
     }
     charges.vacate(copy_root)?;
     let stores = closed.reopen(now);
@@ -1123,18 +1147,15 @@ pub fn campaign(
     witness: &mut Witness,
 ) -> Result<BTreeMap<String, EffectState>, RunError> {
     let k = plan.checkpoint_step as usize;
-    let steps = &plan.steps[k..];
-    if steps.len() < 9 {
-        return Err(unexpected(
-            "campaign",
-            "nine steps after the checkpoint",
-            steps.len(),
-        ));
-    }
     let root = charges.occupy()?;
-    let mut stores = Stores::open(root.path(), plan.rendering.clone());
+    let mut stores = Stores::open(root.path(), plan);
     live(&mut stores, &plan.steps[..k]);
     witness.checkpoint(Cut::AtQuiescence);
+    let steps = &plan.steps[k..];
+    assert!(
+        steps.len() >= FAULT_PHASE_STEPS,
+        "plan() refuses a history with fewer than {FAULT_PHASE_STEPS} steps after the checkpoint"
+    );
     let step = |i: usize| (k + i) as u32;
     let mut expected = BTreeMap::new();
 
@@ -1222,6 +1243,9 @@ pub fn campaign(
 
     live(&mut stores, &steps[rest..]);
     witness.checkpoint(Cut::EndOfRun);
+    // The stores' bytes are charged while they are open; closing them
+    // checkpoints the WAL away.
+    charges.store_bytes(root.path())?;
     drop(stores.close());
     charges.vacate(root)?;
     Ok(expected)
@@ -1280,11 +1304,9 @@ pub fn run(config: &Config, spawn: Spawn) -> Result<Run, RunError> {
             .as_millis(),
     )
     .unwrap();
-    let plan = aging::plan(config.messages)?;
-    let steps = plan.steps.len() as u32;
     let profile = profile(
         config.scale,
-        steps,
+        config.messages,
         config.elapsed_bound_ms,
         config.approval.clone(),
     );
@@ -1292,6 +1314,23 @@ pub fn run(config: &Config, spawn: Spawn) -> Result<Run, RunError> {
     prepare_publish(&config.publish, &[REPORT_FILE, MANIFEST_FILE]).map_err(publish_refused)?;
     let mut charges = Charges::new(profile.envelope.clone());
     let mut witness = Witness::new();
+    // Planning runs under the clock: the elapsed bound covers the whole run.
+    let plan = plan(config.messages)?;
+    let steps = plan.steps.len() as u32;
+    // The build identity is frozen before the campaign runs: the checkout,
+    // the lockfile, and the executable the outcomes come from, not whatever
+    // the tree holds when the report is written.
+    let identity = identity(
+        &profile,
+        SIMULATOR_VERSION,
+        aging::SEED,
+        json!({
+            "steps": steps,
+            "fault_phase_step": plan.checkpoint_step,
+            "messages": config.messages,
+        }),
+        &[std::env::current_exe().unwrap()],
+    );
     let bounds = profile.statistics.liveness_bounds.clone();
     let expected = campaign(&plan, &mut charges, &mut witness)?;
     let mut expected = expected;
@@ -1318,17 +1357,6 @@ pub fn run(config: &Config, spawn: Spawn) -> Result<Run, RunError> {
         Cut::AfterRecovery,
         Cut::EndOfRun,
     ];
-    let identity = identity(
-        &profile,
-        SIMULATOR_VERSION,
-        aging::SEED,
-        json!({
-            "steps": steps,
-            "fault_phase_step": plan.checkpoint_step,
-            "messages": config.messages,
-        }),
-        &std::env::current_exe().unwrap(),
-    );
     let mut report = FaultReport {
         schema: FAULT_REPORT_SCHEMA.to_string(),
         eval_run_id: eval_run_id(&identity).unwrap(),
@@ -1369,8 +1397,14 @@ pub fn run(config: &Config, spawn: Spawn) -> Result<Run, RunError> {
         started_at_ms,
     });
     let manifest_bytes = serde_json::to_vec_pretty(&manifest.to_value()).unwrap();
-    publish_file(&config.publish.join(REPORT_FILE), &bytes).map_err(publish_refused)?;
-    publish_file(&config.publish.join(MANIFEST_FILE), &manifest_bytes).map_err(publish_refused)?;
+    // A manifest the directory then refuses to take takes the report back out
+    // with it, as the aging shell does: a reader finds both files or none.
+    let report_path = config.publish.join(REPORT_FILE);
+    publish_file(&report_path, &bytes).map_err(publish_refused)?;
+    if let Err(error) = publish_file(&config.publish.join(MANIFEST_FILE), &manifest_bytes) {
+        let _ = std::fs::remove_file(&report_path);
+        return Err(publish_refused(error));
+    }
     Ok(Run {
         report,
         report_bytes: bytes,
@@ -1562,12 +1596,7 @@ pub type Spawn = fn(&ChildArgs) -> Command;
 pub fn child_main(args: &ChildArgs) -> ! {
     let plan = aging::plan(args.messages).expect("the parent planned the same history");
     let planned = &plan.steps[args.applied as usize];
-    let mut stores = Stores::reconstruct(
-        &args.root,
-        plan.rendering.clone(),
-        args.applied,
-        planned.now_ms,
-    );
+    let mut stores = Stores::reconstruct(&args.root, &plan, args.applied, planned.now_ms);
     stores.apply(planned);
     stores.publish_outbox();
     let cut = args.cut;
@@ -1620,7 +1649,7 @@ pub fn kill_episode(
     ));
     let k = plan.checkpoint_step as usize;
     let root = charges.occupy()?;
-    let mut stores = Stores::open(root.path(), plan.rendering.clone());
+    let mut stores = Stores::open(root.path(), plan);
     live(&mut stores, &plan.steps[..k]);
     drop(stores.close());
     let args = ChildArgs {
@@ -1696,7 +1725,7 @@ pub fn kill_episode(
         }
     }
     let now = plan.steps[k].now_ms;
-    let mut stores = Stores::reconstruct(root.path(), plan.rendering.clone(), k as u32 + 1, now);
+    let mut stores = Stores::reconstruct(root.path(), plan, k as u32 + 1, now);
     witness.checkpoint(Cut::AfterRecovery);
     stores.drain(now);
     witness.safety_check(&stores);
@@ -1784,7 +1813,13 @@ pub fn held_publication_episode(
         return Err(unexpected(&id, "a publication after release", &released));
     }
     witness.receipt("publication_released");
-    aging::embed_pending(&stores.corpus, &stores.projection, stores.root(), now);
+    aging::embed_pending(
+        &stores.corpus,
+        &stores.projection,
+        stores.root(),
+        stores.bounds.hold,
+        now,
+    );
     witness.receipt(&id);
     witness
         .coverage
@@ -1910,7 +1945,7 @@ pub fn liveness(
     bounds: &LivenessBounds,
 ) -> Result<LivenessReport, RunError> {
     let root = charges.occupy()?;
-    let mut stores = Stores::open(root.path(), plan.rendering.clone());
+    let mut stores = Stores::open(root.path(), plan);
     let k = plan.checkpoint_step as usize;
     live(&mut stores, &plan.steps[..k]);
     ClaimMaterializer::register(&stores.corpus.kernel, plan.steps[k].now_ms).unwrap();
