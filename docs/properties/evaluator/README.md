@@ -1642,8 +1642,13 @@ Fault contract (`crates/eval-core/tests/fault.rs`,
   handle rolls back itself is `consumed` while `recovery_failure` needs a
   reopen; a blank effect key is `EmptyIdentity`; a `profile_digest` other than
   the supplied `FaultProfile`'s is `ProfileDigestMismatch`; a retry observed
-  after a `not_applied` read-back lands as applied; an applied read-back with
-  no observation is `OutcomeNotDerived`.
+  after a `not_applied` read-back lands as applied; an `applied` outcome with
+  no observation behind it, an attempt alone included, is `OutcomeNotDerived`;
+  `backup_before_rename` encodes the backup hook; `fail_acknowledgement` loses
+  no reply; a GC fault that raises the writer fence heals by reopen; `lost_by`
+  is a set, so a retried identity keeps every losing episode; every oracle
+  checkpoint needs a receipt (`MissingCut`); a lane driven past its bound is
+  `LivenessUnmet`; a kill with a zero process peak is `KilledChildNotCounted`.
 
 Fault shell (`crates/daemon/tests/eval_fault.rs`, `--all-features`; the
 default shards run the campaign once with every scenario asserted over it,
@@ -1654,7 +1659,8 @@ job under `EIDNARA_EVAL_S0_BUDGET_MS`):
   (`flt-fault-episode-contract-faithful`,
   `flt-every-declared-cut-reached-per-campaign`; marker
   `flt_every_declared_cut_receipted`): every declared episode and observer
-  cut has a receipt, the four oracle checkpoints resolve to `reached`, every
+  cut has a receipt, the four checkpoints the campaign reaches resolve to
+  `reached` and `AfterAtomicTransition` to `not_reached`, every
   episode's heal is the one its seam permits, no episode carries a kill label,
   a safety check ran while every episode's fault was armed, the published report parses back
   equal, and the manifest names it by result digest under `generate`.
