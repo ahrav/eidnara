@@ -2395,13 +2395,16 @@ is not here; this module only judges the evidence it records.
 `license`, `base_sha` and `fix_sha` (forty lowercase hex), `issue`,
 `pull_request`, and `cutoff_ms`. The issue and pull-request text is fetched
 at run time and never written into a corpus, report, or witness; `validate`
-refuses an empty field, a field holding a newline or more than three words
-(`TextPersisted`), a malformed SHA, and a duplicate id. `is_pilot` accepts
+refuses an empty field, an `id` with whitespace, a `repository` that is not
+a scheme URL (so `git@host:path` refuses and `/pull/` URLs derive from the
+web path), a `license` that is not an SPDX expression (`TextPersisted`), a
+malformed SHA, and a duplicate id. `is_pilot` accepts
 exactly `PILOT_COMPOSITION`: eight Cargo, eight Tokio, four Django.
 
 **Time study.** `time_study(corpus, measured, bound_ms)` projects the pilot's
 preparation cost from exactly `TIME_STUDY_TASKS` (five) measured
-`Preparation {task, prepare_ms}` rows of distinct corpus tasks, scaled to the
+`Preparation {task, prepare_ms}` rows of distinct corpus tasks, summed
+without wrapping and scaled to the
 twenty-task pilot: `Affordable {projected_ms}` within the bound, else
 `StopForApproval {projected_ms, bound_ms}`, which stops for the maintainer
 rather than shrinking the pilot. A wrong count, a task outside the corpus,

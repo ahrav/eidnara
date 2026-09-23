@@ -77,7 +77,9 @@ pub enum AnchorError {
         id: String,
         field: &'static str,
     },
-    /// A field carries text that reads like a statement, issue, or diff.
+    /// A field holds text, not the identifier it names: an id or URL with
+    /// whitespace, a URL without a scheme, or a license that is not an SPDX
+    /// expression.
     TextPersisted {
         id: String,
         field: &'static str,
@@ -95,15 +97,15 @@ debug_display!(AnchorError);
 impl AnchorEntry {
     pub fn validate(&self) -> Result<(), AnchorError> {
         let id = || self.id.clone();
-        for (field, text) in [
-            ("id", &self.id),
-            ("repository", &self.repository),
-            ("license", &self.license),
+        for (field, text, is_identifier) in [
+            ("id", &self.id, is_token as fn(&str) -> bool),
+            ("repository", &self.repository, is_url),
+            ("license", &self.license, is_spdx_expression),
         ] {
             if text.trim().is_empty() {
                 return Err(AnchorError::EmptyField { id: id(), field });
             }
-            if text.contains('\n') || text.split_whitespace().count() > 3 {
+            if !is_identifier(text) {
                 return Err(AnchorError::TextPersisted { id: id(), field });
             }
         }
@@ -114,6 +116,33 @@ impl AnchorEntry {
         }
         Ok(())
     }
+}
+
+fn is_token(text: &str) -> bool {
+    !text.contains(char::is_whitespace)
+}
+
+/// A clone URL with a scheme; `git@host:path` is not one, and
+/// `repository_web_path` would read its `/pull/` URLs wrong.
+fn is_url(text: &str) -> bool {
+    is_token(text) && text.contains("://")
+}
+
+/// An SPDX expression: identifiers of SPDX characters joined by `AND`,
+/// `OR`, or `WITH`, so `MIT OR Apache-2.0` is one and `fixed by rebasing`
+/// is not.
+fn is_spdx_expression(text: &str) -> bool {
+    let tokens: Vec<&str> = text.split_whitespace().collect();
+    tokens.len() % 2 == 1
+        && tokens.iter().enumerate().all(|(i, token)| {
+            if i % 2 == 1 {
+                ["AND", "OR", "WITH"].contains(token)
+            } else {
+                token
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || "-.+()".contains(c))
+            }
+        })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -235,7 +264,9 @@ pub fn time_study(
             task: repeat.task.clone(),
         });
     }
-    let total: u64 = measured.iter().map(|p| p.prepare_ms).sum();
+    let total = measured
+        .iter()
+        .fold(0u64, |sum, p| sum.saturating_add(p.prepare_ms));
     let pilot: u64 = PILOT_COMPOSITION.iter().map(|(_, n)| u64::from(*n)).sum();
     let projected_ms = total.saturating_mul(pilot) / TIME_STUDY_TASKS as u64;
     Ok(if projected_ms <= bound_ms {

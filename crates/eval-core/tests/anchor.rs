@@ -834,3 +834,50 @@ fn settings_refuse_an_incomplete_provider_and_an_unmet_criterion() {
         ))
     );
 }
+
+#[test]
+fn the_corpus_refuses_short_text_and_unschemed_urls_in_identifier_fields() {
+    for (field, mutate) in [
+        (
+            "id",
+            (|e: &mut AnchorEntry| e.id = "cargo 0".to_string()) as fn(&mut AnchorEntry),
+        ),
+        ("repository", |e| {
+            e.repository = "git@github.com:rust-lang/cargo.git".to_string()
+        }),
+        ("license", |e| e.license = "fixed by rebasing".to_string()),
+    ] {
+        let mut entry = entry("cargo-0", Family::Cargo, 0x10);
+        mutate(&mut entry);
+        assert!(
+            entry.validate().is_err(),
+            "{field}: not the identifier the field names"
+        );
+    }
+    let mut dual = entry("cargo-0", Family::Cargo, 0x10);
+    dual.license = "MIT OR Apache-2.0".to_string();
+    dual.validate().unwrap();
+    dual.license = "(MIT OR Apache-2.0) AND Unicode-DFS-2016".to_string();
+    dual.validate().unwrap();
+}
+
+#[test]
+fn the_time_study_saturates_instead_of_wrapping() {
+    let corpus = pilot();
+    let mut measured: Vec<Preparation> = corpus.entries[..TIME_STUDY_TASKS]
+        .iter()
+        .map(|e| Preparation {
+            task: e.id.clone(),
+            prepare_ms: 1,
+        })
+        .collect();
+    measured[0].prepare_ms = u64::MAX;
+    assert_eq!(
+        time_study(&corpus, &measured, u64::MAX / 5 - 1),
+        Ok(Affordability::StopForApproval {
+            projected_ms: u64::MAX / 5,
+            bound_ms: u64::MAX / 5 - 1
+        }),
+        "a saturated total projects a saturated cost, not zero"
+    );
+}
