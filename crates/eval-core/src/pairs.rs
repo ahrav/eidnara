@@ -201,6 +201,36 @@ pub enum PairError {
 
 debug_display!(PairError);
 
+impl PairError {
+    /// The wire name a shrink report carries for a refused candidate; a
+    /// variant rename is a report protocol change.
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::UnresolvedRecencyBound { .. } => "UnresolvedRecencyBound",
+            Self::RecencyBoundConflict { .. } => "RecencyBoundConflict",
+            Self::EmptyAged => "EmptyAged",
+            Self::EmptyNaturalFresh => "EmptyNaturalFresh",
+            Self::NaturalFreshCopiedFromAged { .. } => "NaturalFreshCopiedFromAged",
+            Self::NaturalFreshInert { .. } => "NaturalFreshInert",
+            Self::AgedHistoryTooShort { .. } => "AgedHistoryTooShort",
+            Self::NoTasks => "NoTasks",
+            Self::DuplicateTask { .. } => "DuplicateTask",
+            Self::MixedQueries { .. } => "MixedQueries",
+            Self::EmptyEvidence { .. } => "EmptyEvidence",
+            Self::EvidenceNotRequired { .. } => "EvidenceNotRequired",
+            Self::EvidenceNotRequiredOnArm { .. } => "EvidenceNotRequiredOnArm",
+            Self::SharedVerdictDisagreement { .. } => "SharedVerdictDisagreement",
+            Self::TruthNotEarly { .. } => "TruthNotEarly",
+            Self::SupersededFalsifier { .. } => "SupersededFalsifier",
+            Self::NoFalsificationPair => "NoFalsificationPair",
+            Self::NoPositiveControl => "NoPositiveControl",
+            Self::Tampered { .. } => "Tampered",
+            Self::Reduce(_) => "Reduce",
+            Self::Log(_) => "Log",
+        }
+    }
+}
+
 /// The events the retriever needs to reach `evidence` and the events that
 /// decide its verdict: the evidence, every unit it descends from or refers
 /// to, and every correction or retraction aimed at any of those, closed under

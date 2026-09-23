@@ -259,10 +259,16 @@ impl EventLog {
     /// Removes one event and its incident edges; payloads naming it are untouched.
     pub fn without(&self, id: &EventId) -> Self {
         let mut log = self.clone();
-        log.events.retain(|event| event.id != *id);
-        log.causal_edges
-            .retain(|edge| edge.from != *id && edge.to != *id);
+        log.remove_where(|event| event == id);
         log
+    }
+
+    /// Removes, in one pass, every event `remove` names and every edge
+    /// incident to one; payloads naming them are untouched.
+    pub(crate) fn remove_where(&mut self, remove: impl Fn(&EventId) -> bool) {
+        self.events.retain(|event| !remove(&event.id));
+        self.causal_edges
+            .retain(|edge| !remove(&edge.from) && !remove(&edge.to));
     }
 
     /// Moves every event onto entities suffixed `~tag`, re-deriving each ID,

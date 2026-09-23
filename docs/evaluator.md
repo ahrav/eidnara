@@ -2732,6 +2732,125 @@ under `EIDNARA_EVAL_S0_BUDGET_MS` with the ignored scenarios, and the default
 shards run the never-restored campaign once with every scenario asserted over
 it. The S2 run is the same campaign under the S2 profile and budget.
 
+## Shrinking
+
+`crates/eval-core/src/shrink.rs` is the delta-debugging core. A `Scenario` is
+the semantic input a campaign failure replays: the aged and natural-fresh
+histories, the tasks over them, the evaluated surface and declared recency
+bound, and the fault episodes armed during the run. Its `Element`s are the
+self-contained things a candidate may delete: a fault episode by id, or an
+event by `History` (`aged` or `natural_fresh`) and id. The two histories are
+authored apart and their raw event ids overlap, so an event is named by its
+history; `Scenario::without` applies a deletion set to the named log only,
+removing each deleted event and its incident edges and leaving payloads that
+name it untouched, as `EventLog::without` does for one event.
+`Scenario::compile` recompiles the pair set from the candidate's own logs, so
+the fresh arm and the pair mapping are recomputed for every candidate and
+never carried over; both worlds are shrunk together because the fresh arm is
+derived from whatever survives in both. A candidate
+the compiler refuses (evidence deleted, a control class lost, an arm
+disagreeing) is `CandidateVerdict::InvalidPair { refusal }` carrying
+`PairError::kind`, the exhaustive wire name of the refusal, and no replay is
+issued for it.
+
+The failure is pinned before the first candidate as a `FailurePredicate`:
+the `Oracle` value itself (its kind and parameters, so a replay under other
+thresholds is a different predicate), the `Cut` it was evaluated at, the run
+profile's digest, and the `WitnessClass`, which names its subject as well as
+its kind: `failure { task, class }`, `recovery { effect }`, `liveness { lane }`,
+or `sustainability { resource }`, so a candidate under which the original
+subject passes and another fails the same way is a different predicate.
+`Oracle::evaluate` takes the task it evaluates for and names it. A replay reports
+a `ReplayOutcome`: `Failed { predicate }`, `Passed`, or `Unknown { reason }`
+where the reason is one of `replay_budget_exhausted`, `effect_unanswered`,
+`child_exited_before_barrier`, `read_back_failed`, `cancelled`.
+`classify_replay` compares field by field: an equal predicate is
+`Reproduced`; a different one is `Slipped { observed }` and is rejected even
+though a failure remains; `Passed` is `NotReproduced`; and `Unknown` is
+`Unknown` for every reason, never `NotReproduced`. The `ReplayRequest` a
+replay receives carries the oracle, cut, and profile digest and withholds the
+expected witness class, so a replay cannot echo it.
+
+`shrink` refuses an invalid pinned oracle as `InvalidOracle`, a pinned field
+that cannot be what it claims (`FailurePredicate::validate`: the profile
+digest is 64 lowercase hex characters) as `InvalidPredicate { field }`, an
+invalid episode set (`validate_episodes`) as `InvalidEpisodes`, and a `max_replays`
+outside the canonical integer range as `BudgetNotCanonical`, before any replay,
+then replays the original and refuses `OriginalNotReproduced` when
+it does not reproduce the pinned predicate. It then runs Zeller's ddmin once
+per transformation in the parent's order, `Transformation::ORDER` (fault
+episode removal, then event deletion), holding earlier deletions fixed. Only
+`Reproduced` shrinks; an `Unknown` candidate stays in the set. Every
+candidate is recorded with its scenario digest, its deletion set, and its
+verdict; a digest already answered is recorded again with its cached verdict
+and not replayed. After ddmin, every single deletion of the remaining
+elements is tried until a full pass rejects them all; a single deletion that
+still reproduces is accepted and the pass restarts. The report's
+`minimality` is `OneMinimal { transformations }` naming exactly the
+transformations that had elements to try, or `NotEstablished` with
+`replay_budget_exhausted` or `unknown_candidates { count }`. The report
+never claims global minimality. The budget `max_replays` counts issued
+replays and covers the original's replay too: no replay is issued past it, so
+a zero budget refuses `OriginalNotReproduced` with
+`Unknown { replay_budget_exhausted }` and never calls the replay.
+`InvalidPair` consumes none, and every pass stops at the budget rather than
+labelling the rest. `Scenario::without` applies a whole deletion set in one
+pass over each list, so building a candidate costs the same however many
+elements it deletes.
+
+Replays are effects a shell issues to fresh processes. `ReplayEffects` is
+the shell's ledger for them: it keys each by its receipt key (the candidate
+digest), bounds the outstanding set at `MAX_OUTSTANDING_REPLAY_EFFECTS` and
+attempts per key at `MAX_REPLAY_ATTEMPTS` (neither is configurable), refusing
+the effect issued at the bound and the retry past it, so one budgeted replay
+launches at most `MAX_REPLAY_ATTEMPTS` processes. `issue` and `retry` return
+the attempt number; `resolve` and `cancel` take it and refuse a `StaleAttempt`, so a
+superseded process's late answer or cancellation cannot resolve the key under
+the newer attempt. `cancel` resolves its attempt to `Unknown { cancelled }`, and
+`outcome` is refused on an outstanding key, so no verdict is reached before
+the replay answered. The in-core driver issues one replay at a time through
+its callback and does not need the ledger.
+
+`Oracle::RequiredCommits` is the evaluator's own planted defect for
+exercising the shrinker end to end: over the compiled pair set and the aged
+truth reduced at the first task's cut it fails from `failing_at` required
+commits, reporting `durable_state` below `slipping_at` and `interference`
+from it, so deleting one commit too many slips the class. `Oracle::validate`
+refuses `slipping_at` below `failing_at` as `InvertedThresholds`.
+
+A `ShrinkReport` is written through `ShrinkReport::serialize` and read back
+through `parse_shrink_report`, which, like the other report parsers, refuse
+an integer outside the canonical safe range as `NotCanonical`, run
+`ShrinkReport::validate`, and (on read) refuse a value that does not
+reserialize identically as `Lossy`. `validate`
+checks the `eval-shrink/v1` schema, the pinned predicate, and the report's
+accounting against its own candidate ledger as `Inconsistent { field }`: the
+digests are 64 lowercase hex characters; no slip observed the pinned
+predicate itself; the
+first candidate is the reproduced original with an empty deletion set; every
+record sharing a digest carries the same verdict; the
+last reproduced candidate's digest and deletion set are `minimized_digest`
+and `deleted`; `unknown_candidates` counts the distinct `Unknown` digests;
+`replays` equals the distinct non-`InvalidPair` digests (the driver checks
+the budget before every test, so every accepted candidate took exactly one
+replay and the budget refusal never reaches a returned report) and does not
+exceed `max_replays`; every candidate after the last reproduction deletes
+strictly more than the minimized scenario; and the minimality claim agrees
+with the single deletions among them, the final 1-minimality pass.
+`OneMinimal` needs that pass to cover all `remaining` elements with no
+`Unknown` and transformations listed in the parent's order;
+`unknown_candidates { count }` needs the same coverage with exactly `count`
+unknown single deletions; `replay_budget_exhausted` needs `replays` equal to
+`max_replays`. A report alone can only be self-consistent.
+`ShrinkReport::verify(&original)` binds it to the scenario it claims to have
+shrunk: the original's digest, that every deletion names an element the
+original held and every candidate's digest is the digest of the scenario its
+deletions leave, the digest of `original.without(&deleted)`, its element count
+as `remaining`, for a completed pass that the single deletions after the last
+reproduction are exactly those elements, and for `OneMinimal` that the
+transformations listed are exactly those the original had elements for. A
+shell that holds the scenario verifies rather than merely validates.
+
 ## Coverage markers
 
 `MARKERS` is the evaluator-owned registry: constant, globally unique names,

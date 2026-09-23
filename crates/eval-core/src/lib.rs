@@ -45,6 +45,7 @@ mod reducer;
 mod render;
 mod report;
 mod residue;
+mod shrink;
 mod statistics;
 mod stream;
 
@@ -143,6 +144,14 @@ pub use report::{
 pub use residue::{
     CLOCK_FIELD_KEEP_ALLOWLIST, ObservationSchema, ResidueEntry, ResidueError, Rule, SemanticTrace,
     TRACE_DIGEST_PROTOCOL, is_clock_named, is_never_kept,
+};
+pub use shrink::{
+    CandidateRecord, CandidateVerdict, Element, FailurePredicate, History,
+    MAX_OUTSTANDING_REPLAY_EFFECTS, MAX_REPLAY_ATTEMPTS, Minimality, NotEstablishedReason, Oracle,
+    OracleRefused, PredicateRefused, ReplayEffects, ReplayOutcome, ReplayRefused, ReplayRequest,
+    SCENARIO_DIGEST_PROTOCOL, SHRINK_REPORT_SCHEMA, Scenario, ShrinkRefused, ShrinkReport,
+    ShrinkReportError, Transformation, UnknownReason, WitnessClass, classify_replay,
+    parse_shrink_report, shrink,
 };
 pub use statistics::{
     ANALYSIS_FAMILY_SCHEMA, Analysis, AnalysisFamily, ArmResult, BlockedReason, CampaignProfile,
