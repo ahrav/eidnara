@@ -172,12 +172,13 @@ fn is_token(text: &str) -> bool {
 }
 
 /// An `https://` clone URL of a host in lowercase DNS labels and a
-/// repository path in unreserved URL characters: no user, port, query, or
-/// fragment, and one spelling per host, so the web path
-/// `repository_web_path` derives is the URL itself and the repository's
-/// `/pull/` URLs are recognizable from the row alone. `git@host:path`,
-/// `ssh://git@host:22/path`, `https:///path`, `file:///path`,
-/// `https://host/path?x`, `https://HOST/path`, `https://host./path`, and
+/// repository path of non-empty, non-dot segments in unreserved URL
+/// characters: no user, port, query, fragment, `./`, `..`, `//`, or trailing
+/// slash, and one spelling per host, so the web path `repository_web_path`
+/// derives is the URL itself and the repository's `/pull/` URLs are
+/// recognizable from the row alone. `git@host:path`, `ssh://git@host:22/path`,
+/// `https:///path`, `file:///path`, `https://host/path?x`,
+/// `https://HOST/path`, `https://host./path`, `https://host/a/./b`, and
 /// `https://host/` are not accepted.
 fn is_url(text: &str) -> bool {
     text.strip_prefix("https://")
@@ -188,10 +189,14 @@ fn is_url(text: &str) -> bool {
                     && label
                         .chars()
                         .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
-            }) && !path.trim_matches('/').is_empty()
-                && path
-                    .chars()
-                    .all(|c| c.is_ascii_alphanumeric() || "-._~/".contains(c))
+            }) && path.split('/').all(|segment| {
+                !segment.is_empty()
+                    && segment != "."
+                    && segment != ".."
+                    && segment
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || "-._~".contains(c))
+            })
         })
 }
 
@@ -207,6 +212,7 @@ fn is_spdx_expression(text: &str) -> bool {
                 OPERATORS.contains(token)
             } else {
                 !OPERATORS.contains(token)
+                    && token.chars().any(|c| c.is_ascii_alphanumeric())
                     && token
                         .chars()
                         .all(|c| c.is_ascii_alphanumeric() || "-.+()".contains(c))
@@ -565,15 +571,6 @@ pub struct ProviderProfile {
     pub provider: String,
     pub model: String,
     pub tokenizer_profile: String,
-}
-
-impl ProviderProfile {
-    pub fn key(&self) -> String {
-        format!(
-            "{}/{}@{}",
-            self.provider, self.model, self.tokenizer_profile
-        )
-    }
 }
 
 /// The no-repository control: the task statement alone, the same execution

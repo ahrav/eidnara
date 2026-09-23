@@ -2443,11 +2443,12 @@ refuses an empty field, an `id` with whitespace, a `repository` that is not
 an `https://` URL of a host in lowercase DNS labels and a repository path
 in unreserved characters (so `git@host:path`, `ssh://`, `file://`, a user,
 a port, a query, a fragment, an upper-case or trailing-dot host, an empty
-host, or a path of nothing but separators refuses, and the `/pull/` URLs
+host, a `.` or `..` or empty path segment, or a trailing slash refuses, and
+the `/pull/` URLs
 `future_answers` matches derive
-from the URL itself), a `license` that is not an SPDX expression by shape (identifiers of
-SPDX characters joined by `AND`, `OR`, or `WITH`; not checked against the
-SPDX list) (`TextPersisted`), a
+from the URL itself), a `license` that is not an SPDX expression by shape (identifiers of SPDX
+characters, each holding a letter or digit, joined by `AND`, `OR`, or
+`WITH`; not checked against the SPDX list) (`TextPersisted`), a
 malformed SHA, a fix commit that is the base commit (`FixIsBase`), an
 `issue` or `pull_request` of zero (`ZeroNumber`), a duplicate id, and one
 fix commit of one repository (by lowercased web path, so `repo`,
@@ -2502,8 +2503,9 @@ recorded run is not a proof. `validate_for` refuses a proof naming another
 task or another version of the row (`RowMismatch`).
 
 **No-repository control.** `NoRepositoryControl` is the statement-only run
-for one `ProviderProfile {provider, model, tokenizer_profile}` (key
-`provider/model@tokenizer_profile`): `task`, `entry_digest`, `provider`,
+for one `ProviderProfile {provider, model, tokenizer_profile}`, compared
+field by field, never through a rendered key: `task`, `entry_digest`,
+`provider`,
 `execution_image`,
 `analysis_family_digest`, `terminal`, the `repository_access` it reached, and
 the `future_answers` its output named. `RepositoryComparison` is the

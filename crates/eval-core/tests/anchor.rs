@@ -800,7 +800,6 @@ fn settings_refuse_before_execution_and_reasons_are_typed() {
         .unwrap(),
         json!({"kind": "unsupported", "reason": "unsupported_runtime", "family": "django"})
     );
-    assert_eq!(provider().key(), "anthropic/claude-x@tp-1");
 }
 
 #[test]
@@ -1413,4 +1412,27 @@ fn issue_and_pull_request_numbers_start_at_one() {
             field: "pull_request"
         })
     );
+}
+
+#[test]
+fn a_clone_url_path_has_no_dot_segments_or_empty_segments() {
+    for repository in [
+        "https://example.invalid/cargo/./repo.git",
+        "https://example.invalid/cargo/../repo.git",
+        "https://example.invalid/cargo//repo.git",
+        "https://example.invalid/cargo/repo.git/",
+    ] {
+        let mut entry = entry("cargo-0", Family::Cargo, 0x10);
+        entry.repository = repository.to_string();
+        assert!(entry.validate().is_err(), "{repository}");
+    }
+}
+
+#[test]
+fn a_license_operand_names_something() {
+    for license in ["()", ".", "MIT OR ()"] {
+        let mut entry = entry("cargo-0", Family::Cargo, 0x10);
+        entry.license = license.to_string();
+        assert!(entry.validate().is_err(), "{license}");
+    }
 }
