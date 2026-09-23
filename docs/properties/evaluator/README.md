@@ -1632,8 +1632,8 @@ Growth contract (`crates/eval-core/tests/growth.rs`,
 `xc-parallel-campaigns-isolated-on-shared-checkout`):
 
 - `headroom_is_accounted_from_the_constants_read_not_a_slot_count`: expected
-  project bytes are the receipt charge per terminal job plus receipt and
-  allowance per pending job plus page bytes, from the constants the store
+  project bytes are the receipt charge per terminal job or page plus receipt
+  and allowance per pending job or frozen page, from the constants the store
   declares; admissions remaining is derived from those constants; a sample
   whose bytes differ is `HeadroomMismatch`, and one whose remaining bytes are
   not the quota less those bytes is `RemainingMismatch`; job counts the
@@ -1651,7 +1651,9 @@ Growth contract (`crates/eval-core/tests/growth.rs`,
   `StoreMissing`; a single sample is `NoBaseline`; a negative commit sequence
   is `CommitSeqNegative`; store bytes past `u64` saturate, never a panic; an
   empty ledger, a repeated step, a receding
-  commit sequence, or a receding R24 count refuse, including in a ledger
+  commit sequence, a receding terminal-job or R24 count, an `admitted_total`
+  that is not pending plus terminal, or a sequence advance the commit log did
+  not retain (`CommitRowsDisagree`) refuse, including in a ledger
   assembled without `record`;
   the peak store total is the transient middle sample.
 - `a_restore_under_never_restored_is_refused_and_a_restoring_ledger_gives_no_leak_verdict`
@@ -1675,7 +1677,9 @@ Growth contract (`crates/eval-core/tests/growth.rs`,
   sequence and row counts, and the headroom; a restoring report with no
   samples, out-of-order samples, or a headroom that does not follow from the
   constants, faults with no safety check (whether the
-  episode count or the mix records them), a reordered report read back, a
+  episode count or the mix records them), a fault-episode count that differs
+  from the mix (`FaultEpisodesDisagree`), a frozen page the constants do not
+  account for, a reordered report read back, a
   leaked final sample, an envelope whose peaks crossed a bound, a sample the
   envelope peak never saw (`EnvelopeNotCharged`; artifact-store bytes are
   not the published bytes the envelope charges), embedded bounds that differ

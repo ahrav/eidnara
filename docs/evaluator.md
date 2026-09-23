@@ -2140,12 +2140,13 @@ envelope peaks under `eval-suite-c-fault-report-result/v1`.
 
 `growth` holds the value-level contract of a sustainability campaign.
 `ReviewerQuota` carries the reviewer quota constants as the memory store
-declares them (`receipt_charge_bytes`, `job_allowance_bytes`, the project and
+declares them (`receipt_charge_bytes`, `job_allowance_bytes`,
+`page_receipt_bytes`, `page_allowance_bytes`, the project and
 host metadata quotas); the shell reads them from the store, and the report
 carries what it read, never a figure copied from a document.
-`expected_project_bytes(headroom)` is the receipt charge per terminal job plus
-the receipt charge and the pending allowance per open job plus frozen page
-charges; `admissions_remaining` divides the remaining bytes by one admission's
+`expected_project_bytes(headroom)` is the receipt charge per terminal job or
+page plus the receipt charge and the allowance per open job or frozen page,
+so no byte figure in a sample is taken on trust; `admissions_remaining` divides the remaining bytes by one admission's
 charge as a report figure, not an acceptance count. Reaching the quota is R24,
 recorded as an expected refusal, and the report does not judge whether
 permanent exhaustion is intended.
@@ -2154,7 +2155,8 @@ A `ResourceSample` is everything a campaign holds at one quiescent point: per
 store family the file, `-wal`, and `-shm` bytes; artifact objects, temporary
 entries, and bytes; cassette bytes; temp roots and processes;
 commit-log and projection rows; open holds; and a `HeadroomSample` (pending
-and terminal jobs, page bytes, project bytes and remaining, admissions, R24
+and terminal jobs, frozen and terminal pages, project bytes and remaining,
+admissions, R24
 refusals). A `GrowthLedger` records samples under a `GrowthMode`
 (`never_restored` or `restoring`) with monotonic steps and commit sequence;
 `restore_attempted` under `never_restored` is `RestoreUnderNeverRestored` and
@@ -2175,12 +2177,19 @@ resource, step, observed }`), and its store total, artifact objects and bytes, c
 and projection rows, and open holds must be within the declared
 `GrowthBounds` (`BoundExceeded`); the main-file store bytes added between the
 first and the last sample must not exceed `store_bytes_per_commit` times the
-commits between them (`GrowthRateExceeded`; zero commits allow no growth), so a leak proportional to the
+commits between them (`GrowthRateExceeded`; zero commits allow no growth),
+and the commit-log rows added between them must equal those commits
+(`CommitRowsDisagree`, since the log is append-only and a rolled-back commit
+reverts its sequence), so a leak proportional to the
 history is refused even under the size bound. The rate excludes `-wal` and
 `-shm` bytes, so a WAL-heavy first sample cannot cancel the file bytes the
 history retained; byte totals saturate, so a reading past `u64` is a refusal,
 not a panic. `verdict` and `validate` re-check the step, commit, and R24
-ordering over the whole ledger (`R24NotMonotonic`) and refuse a negative
+ordering over the whole ledger, with every cumulative headroom count
+(`terminal_jobs`, `terminal_pages`, `admitted_total`, `r24_refusals`) never
+receding (`HeadroomNotMonotonic { step, field }`, rows being permanent
+receipts) and `admitted_total` equal to pending plus terminal jobs
+(`AdmittedMismatch`), and refuse a negative
 commit sequence (`CommitSeqNegative`, since a negative baseline would buy
 allowance for commits that never happened), because a deserialized
 ledger never passed
@@ -2208,7 +2217,9 @@ is a claim about at least two.
 publishes: identity, profile digest, claim boundary, the quota read, the
 bounds, the ledger, the mix, expected refusals, fault-episode and
 safety-check counts (`SafetyNeverChecked` when either the fault-episode count
-or the mix records a fault episode and no safety check ran while armed),
+or the mix records a fault episode and no safety check ran while armed;
+`FaultEpisodesDisagree` when the count and the mix's `fault_episode` tally
+differ),
 markers, and envelope. `validate(contract)` requires `eval_run_id` and
 `profile_digest` to be 64 lowercase hex digits (`MalformedDigest { field }`),
 as the Suite B report does; the manifest derives the run id and names the

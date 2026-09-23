@@ -14,6 +14,8 @@ fn quota() -> ReviewerQuota {
     ReviewerQuota {
         receipt_charge_bytes: 32 << 10,
         job_allowance_bytes: 32 << 10,
+        page_receipt_bytes: 4096,
+        page_allowance_bytes: 64 << 10,
         project_metadata_bytes: 64 << 20,
         host_metadata_bytes: 256 << 20,
     }
@@ -58,7 +60,8 @@ fn headroom(pending: u64, terminal: u64) -> HeadroomSample {
     HeadroomSample {
         pending_jobs: pending,
         terminal_jobs: terminal,
-        page_bytes: 0,
+        frozen_pages: 0,
+        terminal_pages: 0,
         project_metadata_bytes: bytes,
         project_metadata_remaining: q.project_metadata_bytes - bytes,
         admitted_total: pending + terminal,
@@ -126,7 +129,7 @@ fn report() -> GrowthReport {
         ledger,
         mix: mix(),
         expected_refusals: Vec::new(),
-        fault_episodes: 2,
+        fault_episodes: 1,
         safety_checks_while_armed: 2,
         markers: BTreeSet::new(),
         envelope,
@@ -144,10 +147,12 @@ fn headroom_is_accounted_from_the_constants_read_not_a_slot_count() {
         Some((2 * 64 + 3 * 32) << 10)
     );
     let mut with_pages = headroom(1, 1);
-    with_pages.page_bytes = 100;
+    with_pages.frozen_pages = 2;
+    with_pages.terminal_pages = 3;
     assert_eq!(
         q.expected_project_bytes(&with_pages),
-        Some((96 << 10) + 100)
+        Some((96 << 10) + 2 * (4096 + (64 << 10)) + 3 * 4096),
+        "a frozen page holds its receipt and allowance, a terminal page its receipt"
     );
     assert_eq!(q.admissions_remaining(q.project_metadata_bytes), 1024);
     let mut other = q.clone();
@@ -179,16 +184,17 @@ fn headroom_is_accounted_from_the_constants_read_not_a_slot_count() {
         "the remaining bytes must follow from the quota and the bytes charged"
     );
     let mut over_quota = ledger();
-    over_quota.samples[1].headroom.pending_jobs = 2048;
+    over_quota.samples[2].headroom.pending_jobs = 2048;
+    over_quota.samples[2].headroom.admitted_total = 2048 + 3;
     let held = q
-        .expected_project_bytes(&over_quota.samples[1].headroom)
+        .expected_project_bytes(&over_quota.samples[2].headroom)
         .unwrap();
-    over_quota.samples[1].headroom.project_metadata_bytes = held;
-    over_quota.samples[1].headroom.project_metadata_remaining = 0;
+    over_quota.samples[2].headroom.project_metadata_bytes = held;
+    over_quota.samples[2].headroom.project_metadata_remaining = 0;
     assert_eq!(
         over_quota.verdict(&q, &bounds()),
         Err(GrowthRefused::HeadroomOverQuota {
-            step: 2,
+            step: 3,
             expected: held,
             quota: 64 << 20,
         }),
@@ -203,10 +209,11 @@ fn headroom_is_accounted_from_the_constants_read_not_a_slot_count() {
         "a charge past u64 admits nothing, and does not panic"
     );
     let mut huge = ledger();
-    huge.samples[1].headroom.terminal_jobs = u64::MAX;
+    huge.samples[2].headroom.terminal_jobs = u64::MAX;
+    huge.samples[2].headroom.admitted_total = u64::MAX;
     assert_eq!(
         huge.verdict(&q, &bounds()),
-        Err(GrowthRefused::HeadroomOverflow { step: 2 }),
+        Err(GrowthRefused::HeadroomOverflow { step: 3 }),
         "job counts the constants cannot multiply are refused, not wrapped"
     );
 }
@@ -248,11 +255,11 @@ fn a_never_restored_ledger_passes_only_when_the_final_sample_holds_nothing_trans
         Err(GrowthRefused::Leak { resource, .. }) if resource == "temp_roots"
     ));
     let mut over = ledger.clone();
-    over.samples[2].commit_log_rows = 200_000;
+    over.samples[2].projection_rows = 200_000;
     assert_eq!(
         over.verdict(&quota(), &bounds()),
         Err(GrowthRefused::BoundExceeded {
-            resource: "commit_log_rows".to_string(),
+            resource: "projection_rows".to_string(),
             step: 3,
             bound: 100_000,
             observed: 200_000,
@@ -353,7 +360,43 @@ fn a_never_restored_ledger_passes_only_when_the_final_sample_holds_nothing_trans
     receding_r24.samples[1].headroom.r24_refusals = 2;
     assert_eq!(
         receding_r24.verdict(&quota(), &bounds()),
-        Err(GrowthRefused::R24NotMonotonic { step: 3 })
+        Err(GrowthRefused::HeadroomNotMonotonic {
+            step: 3,
+            field: "r24_refusals",
+        })
+    );
+    let mut forgotten = ledger.clone();
+    forgotten.samples[2].headroom.terminal_jobs = 1;
+    forgotten.samples[2].headroom.admitted_total = 2;
+    forgotten.samples[2].headroom.project_metadata_bytes = 96 << 10;
+    forgotten.samples[2].headroom.project_metadata_remaining = (64 << 20) - (96 << 10);
+    assert_eq!(
+        forgotten.verdict(&quota(), &bounds()),
+        Err(GrowthRefused::HeadroomNotMonotonic {
+            step: 3,
+            field: "terminal_jobs",
+        }),
+        "a terminal job is a permanent receipt; forgetting one restores headroom that was spent"
+    );
+    let mut unadmitted = ledger.clone();
+    unadmitted.samples[1].headroom.admitted_total += 1;
+    assert_eq!(
+        unadmitted.verdict(&quota(), &bounds()),
+        Err(GrowthRefused::AdmittedMismatch {
+            step: 2,
+            expected: 3,
+            observed: 4,
+        })
+    );
+    let mut rowless = ledger.clone();
+    rowless.samples[2].commit_seq = 12;
+    assert_eq!(
+        rowless.verdict(&quota(), &bounds()),
+        Err(GrowthRefused::CommitRowsDisagree {
+            commits: 9,
+            rows: 6,
+        }),
+        "a sequence advance the commit log did not retain buys no allowance"
     );
     let mut reordered = ledger.clone();
     reordered.samples.swap(1, 2);
@@ -648,6 +691,28 @@ fn a_growth_report_round_trips_and_its_digest_ignores_measurements() {
         Err(GrowthReportError::SafetyNeverChecked),
         "the mix exercised a fault episode, so a zero episode count cannot waive the safety check"
     );
+    let mut faultless = report.clone();
+    faultless.fault_episodes = 0;
+    assert_eq!(
+        faultless.validate(&contract()),
+        Err(GrowthReportError::FaultEpisodesDisagree {
+            declared: 0,
+            exercised: 1,
+        }),
+        "the mix exercised a fault episode the count denies"
+    );
+    let mut paged = report.clone();
+    paged.ledger.samples[2].headroom.frozen_pages = 1;
+    assert!(
+        matches!(
+            paged.validate(&contract()),
+            Err(GrowthReportError::Growth(GrowthRefused::HeadroomMismatch {
+                step: 3,
+                ..
+            }))
+        ),
+        "a frozen page is charged from the constants, not a byte figure the report supplies"
+    );
     let mut restoring_reordered = report.clone();
     restoring_reordered.ledger.mode = GrowthMode::Restoring;
     restoring_reordered.ledger.samples[2].commit_seq = 5;
@@ -742,8 +807,8 @@ fn a_growth_report_round_trips_and_its_digest_ignores_measurements() {
         "a sample the envelope peak never saw was not charged to it"
     );
     let mut loosened = report.clone();
-    loosened.ledger.samples[2].commit_log_rows = 200_000;
-    loosened.bounds.commit_log_rows = 300_000;
+    loosened.ledger.samples[2].projection_rows = 200_000;
+    loosened.bounds.projection_rows = 300_000;
     assert_eq!(
         loosened.validate(&contract()),
         Err(GrowthReportError::BoundsNotApproved),

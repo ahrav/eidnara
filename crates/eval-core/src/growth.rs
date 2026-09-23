@@ -25,24 +25,37 @@ const SAMPLE_BYTE_FIELDS: [&str; 3] = ["stores", "artifact_bytes", "cassette_byt
 pub struct ReviewerQuota {
     pub receipt_charge_bytes: u64,
     pub job_allowance_bytes: u64,
+    /// Permanent receipt charge each frozen page keeps once terminal.
+    pub page_receipt_bytes: u64,
+    /// Allowance a page holds while frozen; terminal pages hold none.
+    pub page_allowance_bytes: u64,
     pub project_metadata_bytes: u64,
     pub host_metadata_bytes: u64,
 }
 
 impl ReviewerQuota {
-    /// Bytes the quota should hold for the jobs counted: a permanent receipt
-    /// charge per terminal job, the receipt charge plus the pending allowance
-    /// per job still open, plus whatever frozen pages are charged. `None` when
-    /// the counts do not fit in `u64`.
+    /// Bytes the quota should hold for the jobs and pages counted: a permanent
+    /// receipt charge per terminal job or page, plus the receipt charge and
+    /// the allowance per job still open or page still frozen. `None` when the
+    /// counts do not fit in `u64`.
     pub fn expected_project_bytes(&self, headroom: &HeadroomSample) -> Option<u64> {
-        self.receipt_charge_bytes
+        let jobs = self
+            .receipt_charge_bytes
             .checked_mul(headroom.terminal_jobs)?
             .checked_add(
                 self.receipt_charge_bytes
                     .checked_add(self.job_allowance_bytes)?
                     .checked_mul(headroom.pending_jobs)?,
-            )?
-            .checked_add(headroom.page_bytes)
+            )?;
+        let pages = self
+            .page_receipt_bytes
+            .checked_mul(headroom.terminal_pages)?
+            .checked_add(
+                self.page_receipt_bytes
+                    .checked_add(self.page_allowance_bytes)?
+                    .checked_mul(headroom.frozen_pages)?,
+            )?;
+        jobs.checked_add(pages)
     }
 
     /// How many more admissions the remaining bytes allow, as a report figure
@@ -60,7 +73,8 @@ impl ReviewerQuota {
 pub struct HeadroomSample {
     pub pending_jobs: u64,
     pub terminal_jobs: u64,
-    pub page_bytes: u64,
+    pub frozen_pages: u64,
+    pub terminal_pages: u64,
     pub project_metadata_bytes: u64,
     pub project_metadata_remaining: u64,
     pub admitted_total: u64,
@@ -165,8 +179,19 @@ pub enum GrowthRefused {
     CommitSeqNotMonotonic {
         step: u32,
     },
-    R24NotMonotonic {
+    /// A cumulative headroom count (`terminal_jobs`, `terminal_pages`,
+    /// `admitted_total`, `r24_refusals`) went down; rows are permanent
+    /// receipts, so these never recede.
+    HeadroomNotMonotonic {
         step: u32,
+        field: &'static str,
+    },
+    /// `admitted_total` is not `pending_jobs + terminal_jobs`; every admitted
+    /// job is one or the other for the store incarnation.
+    AdmittedMismatch {
+        step: u32,
+        expected: u64,
+        observed: u64,
     },
     /// Commit sequences come from an append-only log and are never negative;
     /// a negative baseline would buy growth allowance for commits that never
@@ -214,6 +239,13 @@ pub enum GrowthRefused {
         bytes_per_commit: u64,
         observed_bytes: u64,
         commits: u64,
+    },
+    /// The commit log is append-only and a rolled-back commit reverts its
+    /// sequence, so the rows added between two samples equal the commits
+    /// between them; a sequence advance without rows would buy allowance.
+    CommitRowsDisagree {
+        commits: u64,
+        rows: u64,
     },
     NotALeakVerdict {
         mode: GrowthMode,
@@ -264,6 +296,18 @@ impl GrowthLedger {
                 return Err(GrowthRefused::StoreMissing {
                     step: sample.step,
                     family,
+                });
+            }
+            let admitted = sample
+                .headroom
+                .pending_jobs
+                .checked_add(sample.headroom.terminal_jobs)
+                .ok_or(GrowthRefused::HeadroomOverflow { step: sample.step })?;
+            if sample.headroom.admitted_total != admitted {
+                return Err(GrowthRefused::AdmittedMismatch {
+                    step: sample.step,
+                    expected: admitted,
+                    observed: sample.headroom.admitted_total,
                 });
             }
             let expected = quota
@@ -351,6 +395,10 @@ impl GrowthLedger {
         }
         let first = &self.samples[0];
         let commits = u64::try_from(last.commit_seq - first.commit_seq).unwrap_or(0);
+        let rows = last.commit_log_rows.saturating_sub(first.commit_log_rows);
+        if rows != commits {
+            return Err(GrowthRefused::CommitRowsDisagree { commits, rows });
+        }
         let grown = last
             .durable_store_bytes()
             .saturating_sub(first.durable_store_bytes());
@@ -412,8 +460,19 @@ fn in_order(prev: &ResourceSample, next: &ResourceSample) -> Result<(), GrowthRe
     if next.commit_seq < prev.commit_seq {
         return Err(GrowthRefused::CommitSeqNotMonotonic { step: next.step });
     }
-    if next.headroom.r24_refusals < prev.headroom.r24_refusals {
-        return Err(GrowthRefused::R24NotMonotonic { step: next.step });
+    let (p, n) = (&prev.headroom, &next.headroom);
+    for (field, before, after) in [
+        ("terminal_jobs", p.terminal_jobs, n.terminal_jobs),
+        ("terminal_pages", p.terminal_pages, n.terminal_pages),
+        ("admitted_total", p.admitted_total, n.admitted_total),
+        ("r24_refusals", p.r24_refusals, n.r24_refusals),
+    ] {
+        if after < before {
+            return Err(GrowthRefused::HeadroomNotMonotonic {
+                step: next.step,
+                field,
+            });
+        }
     }
     Ok(())
 }
@@ -617,6 +676,11 @@ pub enum GrowthReportError {
     Growth(GrowthRefused),
     Mix(MixIncomplete),
     SafetyNeverChecked,
+    /// `fault_episodes` and the mix's `fault_episode` count disagree.
+    FaultEpisodesDisagree {
+        declared: u64,
+        exercised: u64,
+    },
     EnvelopeNotHonoured(crate::EnvelopeExceeded),
     /// A sample read more of a resource than the envelope peak admits.
     EnvelopeNotCharged {
@@ -687,6 +751,18 @@ impl GrowthReport {
         let faulted = self.fault_episodes > 0 || self.mix.exercised(Operation::FaultEpisode);
         if faulted && self.safety_checks_while_armed == 0 {
             return Err(GrowthReportError::SafetyNeverChecked);
+        }
+        let exercised = self
+            .mix
+            .counts
+            .get(&Operation::FaultEpisode)
+            .copied()
+            .unwrap_or(0);
+        if self.fault_episodes != exercised {
+            return Err(GrowthReportError::FaultEpisodesDisagree {
+                declared: self.fault_episodes,
+                exercised,
+            });
         }
         if let Some(marker) = self
             .markers
