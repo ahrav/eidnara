@@ -1622,9 +1622,14 @@ Fault contract (`crates/eval-core/tests/fault.rs`,
   that met its bound yet records a `blocked` stop is `LivenessUnmet`; envelope
   bounds other than the profile's limits are `EnvelopeDisagreesWithProfile`;
   an observed effect read back or parsed as `not_applied` is
-  `ReadBackNotAdmissible`; a report whose lost-reply episodes outnumber the
-  ledger's lost replies is `LostReplyUnrecorded`, and `loses_reply` names
-  which actions count.
+  `ReadBackNotAdmissible`; each effect's `lost_by` names the episode that
+  lost its reply: a reply-losing episode (`loses_reply` names which) with no
+  effect naming it is `LostReplyUnrecorded`, an effect naming an episode that
+  loses none is `LostByNonLosingEpisode`, and one naming an episode the
+  report lacks is `UnknownEpisode`; a lost reply observed without a read-back
+  is `ObservedWithoutReadBack`; a barrier with pid 0 is `NoPid`; a second
+  barrier for one kill is `DuplicateBarrier`; a kill at a cut the coverage
+  never declared is `UndeclaredCut`.
 
 Aging drive (`crates/daemon/tests/eval_aging.rs`, `--all-features`):
 

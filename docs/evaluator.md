@@ -2038,14 +2038,18 @@ the kill. Barrier lines are `<prefix> <cut>`, so the line's last
 whitespace-separated token must equal the cut (`LineDoesNotNameCut`); a suffix
 match is not enough, and no line names an empty cut. The child must have died
 by signal (`ExitedWithStatus`), and the signal must be `SIGKILL` (`NotSigkill`),
-the one the runner sends and the one the kill label describes. A report with a
+the one the runner sends and the one the kill label describes, from a child
+with a pid (`NoPid`). A report with a
 kill episode and no barrier for
 that episode at the episode's declared `process_kill` cut is
 `KillWithoutBarrier { episode, cut }`: a kill without a barrier at its cut is a
 kill at an unknown point. The other direction holds too: a barrier whose
 episode is not a `process_kill` declared at that cut is
-`BarrierWithoutKill { episode, cut }`, and a `Cut` receipted twice in `cuts`
-is `DuplicateCut`, because two outcomes for one checkpoint is no outcome.
+`BarrierWithoutKill { episode, cut }`, a second barrier for one kill is
+`DuplicateBarrier` (one kill, one child, one barrier), a kill whose cut the
+campaign's coverage never declared is `UndeclaredCut`, and a `Cut` receipted
+twice in `cuts` is `DuplicateCut`, because two outcomes for one checkpoint is
+no outcome.
 
 `CutCoverage` holds the cuts a campaign declares (barrier names, fault
 variants, gate release points) and how many receipts each earned; a receipt
@@ -2057,7 +2061,9 @@ a checkpoint receipted at least once is `Reached`, every other declared one is
 `NotReached`.
 
 `EffectLedger` counts each effect identity's `attempted`, `observed`, and
-`acknowledged` and holds what the oracle may expect of it. `lose_reply` sets
+`acknowledged` and holds what the oracle may expect of it.
+`lose_reply(identity, episode)` records the episode whose fault lost the reply
+in `lost_by`, sets
 the expectation to `one_of {applied, not_applied}` and the outcome to
 `unknown`; `read_back(identity, state)` collapses it to `exactly { state }`
 and the matching outcome, adding the observation an applied read-back proves.
@@ -2068,7 +2074,9 @@ already observed, which would be a lost write that was seen.
 `validate` refuses, per identity, `NeverAttempted` at zero attempts (an entry
 `attempt` never created), `BoundsViolated` unless `acknowledged <=
 observed <= attempted`, `ReadBackNotAdmissible` for an observed effect
-whose outcome is `not_applied`, `PrematureSuccess` for a lost reply whose
+whose outcome is `not_applied`, `ObservedWithoutReadBack` for a lost reply
+observed but never read back (the observation is the read-back the ledger
+must record), `PrematureSuccess` for a lost reply whose
 outcome is not `unknown` without a read-back, and
 `ExpectationCollapsedWithoutReadBack` for a lost reply expecting fewer than two
 states, and `OutcomeNotDerived` when the outcome is not the state the
@@ -2125,8 +2133,10 @@ refusal above, and also refuses
 profile's limits, `EnvelopeExceeded` when any recorded peak is over its
 bound, `NoEpisode` when no fault was armed (so no safety check ran while one
 was), `UnregisteredMarker` for a marker `MARKERS` does not register,
-`LostReplyUnrecorded` when the ledger holds fewer lost replies than the
-episodes that lose one,
+`LostReplyUnrecorded { episode }` for an episode that loses a reply with no
+effect naming it in `lost_by`, `LostByNonLosingEpisode` for an effect naming
+an episode that loses none, `UnknownEpisode` for one naming an episode the
+report lacks,
 `UnknownEpisode` for a liveness outside-core episode that is not one of the
 report's episodes, `CoreFamilyFaulted` for one scoped to a family the healthy
 core names, and `ConsumedFaultArmed` for one whose heal is `consumed`: a
