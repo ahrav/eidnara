@@ -559,3 +559,43 @@ fn a_safety_check_outside_an_armed_window_is_not_counted_as_armed() {
         "a check after the episode returned is not a check while armed"
     );
 }
+
+/// The counted safety check inspects the state the faulted operation left:
+/// for a lost commit reply, `local_released`, after the batch committed and
+/// before the drive reconciles the lost reply (`local_staged` is inside the
+/// still-open transaction); for a lost acknowledgement reply, `acknowledged`,
+/// the first cut after the kernel write is durable.
+#[test]
+fn an_armed_safety_check_runs_after_the_faulted_effect_is_durable() {
+    let plan = aging::plan(MESSAGES).unwrap();
+    for (fault, cut) in [
+        (SearchEpisodeFault::LoseLocalCommitReply, "local_released"),
+        (SearchEpisodeFault::LoseAcknowledgementReply, "acknowledged"),
+    ] {
+        let root = tempfile::tempdir().unwrap();
+        let mut stores = aging::Stores::open(root.path(), &plan);
+        aging::live(&mut stores, &plan.steps[..3]);
+        let mut witness = Witness::new();
+        stores.apply(&plan.steps[3]);
+        lost_reply_episode(
+            &mut stores,
+            &mut witness,
+            "lost",
+            3,
+            plan.steps[3].now_ms,
+            fault,
+        )
+        .unwrap();
+        assert!(!witness.armed_check_cuts.is_empty(), "{fault:?}");
+        assert!(
+            witness.armed_check_cuts.iter().all(|c| *c == cut),
+            "{fault:?}: {:?}",
+            witness.armed_check_cuts
+        );
+        assert_eq!(
+            witness.safety_checks as usize,
+            witness.armed_check_cuts.len(),
+            "{fault:?}"
+        );
+    }
+}

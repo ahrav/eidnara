@@ -121,6 +121,8 @@ pub struct Witness {
     pub refusals: Vec<RecordedRefusal>,
     pub checkpoints: BTreeMap<Cut, u64>,
     pub safety_checks: u64,
+    /// The cut each counted check ran at, in order.
+    pub armed_check_cuts: Vec<&'static str>,
     pub coverage: Coverage,
     pub left_at: BTreeMap<String, i64>,
 }
@@ -138,6 +140,7 @@ impl Witness {
             refusals: Vec::new(),
             checkpoints: BTreeMap::new(),
             safety_checks: 0,
+            armed_check_cuts: Vec::new(),
             coverage: Coverage::default(),
             left_at: BTreeMap::new(),
         }
@@ -167,12 +170,13 @@ impl Witness {
     }
 
     /// The safety check at a cut where a fault is armed, run from the
-    /// episode's observer. At `LocalStaged` the projection connection is held
-    /// by the episode, so this reads the files and the kernel, not the
-    /// projection handle; it is the check `safety_checks_while_armed` counts.
-    pub fn safety_check_while_armed(&mut self, stores: &Stores) {
+    /// episode's observer between the episode's own store operations, so it
+    /// reads the files and the kernel, not the projection handle; it is the
+    /// check `safety_checks_while_armed` counts.
+    pub fn safety_check_while_armed(&mut self, stores: &Stores, cut: &'static str) {
         safety_invariants(stores);
         self.safety_checks += 1;
+        self.armed_check_cuts.push(cut);
     }
 }
 
@@ -284,19 +288,23 @@ pub fn lost_reply_episode(
     let mut events = Vec::new();
     let stores = &*stores;
     // The fault is armed for the whole episode and consumed when it returns,
-    // so the counted safety check runs at the cut whose reply the fault loses.
+    // so the counted safety check runs while it is armed, at the first cut
+    // after the faulted operation's effect is durable: `local_released`, once
+    // the batch committed and before the drive reconciles the lost reply
+    // (`local_staged` is inside the still-open transaction), and
+    // `acknowledged`, once the kernel write is durable.
     let report = stores.episode(now, Some(seam(fault).production), &mut |event| {
         if matches!(
             (fault, &event),
             (
                 SearchEpisodeFault::LoseLocalCommitReply,
-                EpisodeEvent::LocalStaged { .. }
+                EpisodeEvent::LocalReleased { .. }
             ) | (
                 SearchEpisodeFault::LoseAcknowledgementReply,
-                EpisodeEvent::AcknowledgementRequested { .. }
+                EpisodeEvent::Acknowledged { .. }
             )
         ) {
-            witness.safety_check_while_armed(stores);
+            witness.safety_check_while_armed(stores, cut_of(&event));
         }
         events.push(event)
     });
@@ -399,7 +407,7 @@ pub fn lock_holder_episode(
         EpisodeEnd::Blocked(Blocked::LocalCommitUnresolved) => witness.receipt("lock_blocked"),
         other => return Err(unexpected(id, "Blocked(LocalCommitUnresolved)", other)),
     }
-    witness.safety_check_while_armed(stores);
+    witness.safety_check_while_armed(stores, "lock_blocked");
     drop(holder);
     let released = stores.episode(now, None, &mut |_| {});
     if released.end != EpisodeEnd::ReachedTarget {

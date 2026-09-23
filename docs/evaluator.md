@@ -2351,10 +2351,12 @@ receipted `not_reached`. The safety invariants
 creation, and the projection never runs ahead of the kernel) are checked while
 each fault is armed, and only those checks count as
 `safety_checks_while_armed`: for the lock holder, while the holder still holds
-the projection; for a reply-loss fault, from the episode's observer at the cut
-whose reply the fault loses (`local_staged` or `acknowledgement_requested`),
-reading the files and the kernel because the episode holds the projection
-connection there. The same invariants plus the projection connection's
+the projection; for a reply-loss fault, from the episode's observer at the
+first cut after the faulted operation's effect is durable and before the drive
+reconciles the lost reply: `local_released` for a lost commit reply (the batch
+has committed; `local_staged` is still inside the open transaction) and
+`acknowledged` for a lost acknowledgement reply (the kernel write is durable),
+reading the files and the kernel rather than the projection handle. The same invariants plus the projection connection's
 verification run again after every episode and every reopen, as assertions
 that count nothing, since no fault is armed then. Each recovery charges the
 stores' bytes before the close that checkpoints their WALs away.
