@@ -880,6 +880,15 @@ fn calibration_refuses_a_foreign_schema_and_a_malformed_judge_digest() {
         }),
         "a rubric under another schema has no digest to bind a judge to"
     );
+    assert_eq!(
+        Rubric {
+            schema: JUDGE_SCHEMA.to_string(),
+            criteria: vec![String::new(), "  ".to_string()],
+        }
+        .digest(),
+        Err(CalibrationRefused::EmptyRubric),
+        "a rubric with no criterion binds a judge to nothing"
+    );
     let mut short = calibration();
     short.judge.prompt_digest = "abc".to_string();
     assert_eq!(

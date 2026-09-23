@@ -59,13 +59,17 @@ pub struct Rubric {
 }
 
 impl Rubric {
-    /// A rubric under another schema has no digest: nothing downstream keeps
-    /// the rubric, so this is the only point that can refuse it.
+    /// A rubric under another schema, or with no criterion, has no digest:
+    /// nothing downstream keeps the rubric, so this is the only point that
+    /// can refuse it.
     pub fn digest(&self) -> Result<String, CalibrationRefused> {
         if self.schema != JUDGE_SCHEMA {
             return Err(CalibrationRefused::SchemaMismatch {
                 found: self.schema.clone(),
             });
+        }
+        if !self.criteria.iter().any(|c| !c.trim().is_empty()) {
+            return Err(CalibrationRefused::EmptyRubric);
         }
         let value = serde_json::to_value(self).expect("rubric serializes");
         Ok(protocol_digest(RUBRIC_DIGEST_PROTOCOL, &value).expect("rubric is canonical"))
@@ -146,6 +150,8 @@ pub enum CalibrationRefused {
         planned: u32,
     },
     EmptyCalibrationSet,
+    /// A rubric with no non-empty criterion binds a judge to nothing.
+    EmptyRubric,
     SchemaMismatch {
         found: String,
     },

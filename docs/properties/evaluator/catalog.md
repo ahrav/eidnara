@@ -16,8 +16,8 @@ witnesses). Phase 6, Suite D: contained generated tasks, hidden-test
 authority, adequacy, and injection scoring. Phase 6, real history: cutoff
 audits, insufficiency proofs, no-repository controls, and the claim class.
 Phase 6, residual judge: blinded, order-swapped, versioned judge calls and
-identity-bound residual comparison. Each record names the entry point that reaches it in its `Reachability`
-field.
+identity-bound residual comparison. Each record names the entry point that
+reaches it in its `Reachability` field.
 
 ## Part artifacts
 
@@ -847,9 +847,10 @@ Guarantee: Every residual report records the judge identity, the live provider
   approved its provider profile, pass^k exponent, planned attempts per task,
   and held-out task set.
 Check: `always` - `ResidualReport::comparable` refuses `SchemaMismatch` or a
-  `MalformedDigest` (judge or calibration) on either report and returns `ReanchorRequired` naming
-  `judge`,
-  `live_provider`, or `calibration_digest` on the first inequality, with `tokenizer_profile` part of `ProviderProfile` equality;
+  `MalformedDigest` (judge or calibration) on either report and returns
+  `ReanchorRequired` naming `judge`, `live_provider`, or `calibration_digest`
+  on the first inequality, with `tokenizer_profile` part of `ProviderProfile`
+  equality;
   `ResidualReport::validate` refuses `CalibrationJudgeDiffers` and
   `DigestMismatch`; `live_slice` and `LiveSliceReport::validate` refuse
   `UnapprovedProvider`, `KDiffers`, `AttemptCountDiffers`,
