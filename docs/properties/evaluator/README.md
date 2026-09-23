@@ -1705,8 +1705,8 @@ job under `EIDNARA_EVAL_S0_BUDGET_MS`):
   blocks the local commit; release lets the next episode reach the target.
 - `artifact_faults_fail_with_their_named_errno_and_heal_by_reopen_or_consumption`
   (marker `flt_artifact_fault_named_errno`): four ingest faults refuse
-  `IngestionFailClosed` and two purge-intent faults refuse by kind, each
-  leaving no reference; after every EIO a plain ingest is
+  `IngestionFailClosed`, each leaving no reference for its evidence id, and
+  two purge-intent faults refuse by kind; after every EIO a plain ingest is
   refused `IngestionFailClosed` before the reopen (five `ingestion_latched`
   receipts, five reopen heals); ENOSPC is consumed.
 - `an_unapproved_profile_refuses_before_any_store_opens`: no approval, no

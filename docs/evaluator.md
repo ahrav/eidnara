@@ -2345,8 +2345,9 @@ steps, catching up after each, until a job is open, because a retirement opens
 none, and refuses a history that runs out first. `LoseLocalCommitReply` (the
 publisher returns `Embedded`) leaves `embedding:<occurrence>` `Unknown` in the
 ledger; `LoseLocalCommit` (`LocalCommitUnresolved`) rolled back, which the
-seam's contract fixes, so the outcome is known, the job's row is read at once
-and must not say `embedded`, and no ledger entry is made
+seam's contract fixes, so the outcome is known, the job's row and vector
+row are read at once and must be as they were before the attempt, and no
+ledger entry is made
 (`FaultAction::loses_reply` names only the first). Each must show the
 publisher's `Reconciling` then `ReconciliationRead` events (receipted
 `reconciling` and `reconciliation_read`), since a publication the fault never
@@ -2388,13 +2389,13 @@ kernel) are checked while each fault is armed, and only those checks count as
 the projection; for a reply-loss fault, from the episode's observer at the cut
 whose reply the fault loses (`local_staged` or `acknowledgement_requested`),
 reading the files and the kernel because the episode holds the projection
-connection there; for a publication fault, from the publisher's observer at
-`LocalStaged`, while the search transaction is open and before the commit or
-reply the fault takes; for a latching CAS fault, after the refusal and before the
+connection there; for a latching CAS fault, after the refusal and before the
 reopen that clears the latch; for R11, while the stall holds. The ENOSPC
 deletion fault is consumed inside its call, the corrupted copy is refused
-before any store opens, and R24 runs on a memory store, so none of the three
-has an armed window to check from. The same invariants plus the projection
+before any store opens, R24 runs on a memory store, and the publisher forbids
+its observer to call the kernel or the projection before a release event, by
+which time its one-shot fault is consumed, so none of the four has an armed
+window to check from. The same invariants plus the projection
 connection's verification run again after every episode and every reopen, as
 assertions that count nothing, since no fault is armed then. Each recovery
 charges the stores' bytes before the close that checkpoints their WALs away.
