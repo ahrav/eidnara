@@ -2900,7 +2900,9 @@ The minimality rule also reads the report. A `OneMinimal` claim must carry,
 for every element of the minimized scenario, a candidate record whose deletion
 set is the final set plus that element, whose `scenario_digest` is the digest
 of the minimized scenario without that element, and whose verdict is neither
-`Reproduced` nor `Unknown`; the first element without one is refused
+`Reproduced` nor `Unknown`, an `InvalidPair` counting only when the rebuilt
+candidate makes the pair compiler refuse with the recorded kind; the first
+element without one is refused
 (`MinimalityUnsupported { element }`), and the claim's `transformations`
 must be exactly those the original held elements for, in the shrinker's
 order (`TransformationsDisagree { expected }`). `NotEstablished` owes no such

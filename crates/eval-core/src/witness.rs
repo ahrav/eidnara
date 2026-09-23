@@ -260,20 +260,24 @@ impl WitnessPackage {
         if *transformations != expected {
             return Err(WitnessError::TransformationsDisagree { expected });
         }
+        let fixture = serialize_spec();
         for element in elements {
             let mut deleted = self.shrink.deleted.clone();
             deleted.insert(element.clone());
-            let digest = self
-                .minimized
-                .without(&BTreeSet::from([element.clone()]))
-                .digest();
+            let candidate = self.minimized.without(&BTreeSet::from([element.clone()]));
+            let digest = candidate.digest();
+            // An `InvalidPair` is a rejection only if the compiler makes it:
+            // the candidate is rebuilt and must refuse with the recorded kind.
             let rejected = self.shrink.candidates.iter().any(|record| {
                 record.deleted == deleted
                     && record.scenario_digest == digest
-                    && !matches!(
-                        record.verdict,
-                        CandidateVerdict::Reproduced | CandidateVerdict::Unknown { .. }
-                    )
+                    && match &record.verdict {
+                        CandidateVerdict::Reproduced | CandidateVerdict::Unknown { .. } => false,
+                        CandidateVerdict::InvalidPair { refusal } => candidate
+                            .compile(&fixture)
+                            .is_err_and(|error| error.kind() == refusal),
+                        _ => true,
+                    }
             });
             if !rejected {
                 return Err(WitnessError::MinimalityUnsupported { element });

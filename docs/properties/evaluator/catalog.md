@@ -299,6 +299,7 @@ Exercised: yes -
   `crates/eval-core/tests/witness.rs::the_failure_predicate_names_the_task_the_replay_evaluates`,
   `crates/eval-core/tests/witness.rs::the_recipe_regenerates_the_original_tape_too`,
   `crates/eval-core/tests/witness.rs::the_recipe_regenerates_the_original_causal_trace_too`,
+  `crates/eval-core/tests/witness.rs::an_invalid_pair_record_is_evidence_only_when_the_compiler_refuses`,
   and
   `crates/daemon/tests/eval_shrink.rs::a_fresh_process_reproduces_the_predicate_and_the_minimized_witness_is_published`
 Guarantee: A witness package carries the original failure (RunId, decision tape,
@@ -313,9 +314,9 @@ Check: `always` - `WitnessPackage::validate` refuses a recipe missing when
   (`RecipeDisagrees { history }`); a kind is count-triggered when more than one
   aged event of it survives and each one's single deletion was recorded
   `Slipped` or `NotReproduced` under the deleted scenario's digest; a `OneMinimal` claim without a rejected
-  record, under the digest of the scenario that deletion produces, for some
-  single deletion from the minimized scenario is refused
-  (`MinimalityUnsupported { element }`); a claim naming other
+  record, under the digest of the scenario that deletion produces and, for an
+  `InvalidPair`, with the compiler's own refusal, for some single deletion
+  from the minimized scenario is refused (`MinimalityUnsupported { element }`); a claim naming other
   transformations than the original held elements for is refused
   (`TransformationsDisagree { expected }`); a `remaining` count other than
   the minimized scenario's element count is refused

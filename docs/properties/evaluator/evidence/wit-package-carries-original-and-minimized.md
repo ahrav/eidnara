@@ -53,6 +53,8 @@ compact recipe form when multiplicity is the trigger."
   `the_recipe_regenerates_the_original_causal_trace_too`: a survivor named as
   deleted, a predicate over a task the scenario lacks, and an original tape
   or causal trace the aged generation does not produce are refused.
+- `crates/eval-core/tests/witness.rs` `an_invalid_pair_record_is_evidence_only_when_the_compiler_refuses`:
+  a compiling single deletion relabelled `InvalidPair` is refused.
 - `crates/eval-core/tests/witness.rs` `the_coverage_signature_names_only_registered_markers`:
   an unregistered name refuses through `validate` and `serialize`.
 - `crates/daemon/tests/eval_shrink.rs` `a_fresh_process_reproduces_the_predicate_and_the_minimized_witness_is_published`:

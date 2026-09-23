@@ -551,6 +551,55 @@ fn the_recipe_regenerates_the_original_causal_trace_too() {
 }
 
 #[test]
+fn an_invalid_pair_record_is_evidence_only_when_the_compiler_refuses() {
+    // Relabel one single deletion the compiler accepts as an `InvalidPair`,
+    // and keep the ledger and the recipe balanced.
+    let mut package = package();
+    let deleted = &package.shrink.deleted;
+    let target = package
+        .minimized
+        .elements()
+        .into_iter()
+        .find(|element| {
+            let mut single = deleted.clone();
+            single.insert(element.clone());
+            package.shrink.candidates.iter().any(|record| {
+                record.deleted == single
+                    && !matches!(record.verdict, CandidateVerdict::InvalidPair { .. })
+            })
+        })
+        .expect("an element whose deletion compiled");
+    let mut single = package.shrink.deleted.clone();
+    single.insert(target.clone());
+    let digest = package
+        .shrink
+        .candidates
+        .iter()
+        .find(|record| record.deleted == single)
+        .unwrap()
+        .scenario_digest
+        .clone();
+    for record in &mut package.shrink.candidates {
+        if record.scenario_digest == digest {
+            record.verdict = CandidateVerdict::InvalidPair {
+                refusal: "MixedQueries".to_string(),
+            };
+        }
+    }
+    package.shrink.replays -= 1;
+    let triggered = package.count_triggered();
+    match &mut package.recipe {
+        Some(recipe) if !triggered.is_empty() => recipe.multiplicities = triggered,
+        recipe => *recipe = None,
+    }
+    assert_eq!(
+        package.validate(),
+        Err(WitnessError::MinimalityUnsupported { element: target }),
+        "a refusal the compiler does not make is no rejection"
+    );
+}
+
+#[test]
 fn the_coverage_signature_names_only_registered_markers() {
     let mut package = package();
     package
