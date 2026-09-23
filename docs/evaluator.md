@@ -2184,9 +2184,12 @@ an unbounded regeneration.
 
 The minimality rule also reads the report. A `OneMinimal` claim must carry,
 for every element of the minimized scenario, a candidate record whose deletion
-set is the final set plus that element and whose verdict is neither
+set is the final set plus that element, whose `scenario_digest` is the digest
+of the minimized scenario without that element, and whose verdict is neither
 `Reproduced` nor `Unknown`; the first element without one is refused
 (`MinimalityUnsupported { element }`). `NotEstablished` owes no such records.
+After the claim scan, every name in `original.coverage` must be a registered
+marker (`UnregisteredMarker { name }`).
 After the package's own rules, the embedded report is checked on its own
 terms by `ShrinkReport::validate` (schema, oracle, and its accounting against
 the candidate ledger), wrapped as `ShrinkReport(ShrinkReportError)`.
@@ -2213,7 +2216,9 @@ commit) and a natural-fresh history under another seed, names the first
 commit as the falsifier and the last rename as the positive control, and
 declares two process-kill fault episodes so the fault-episode transformation
 has elements to try; the child never executes them, so they are inert and
-deleted first. `run` approves the profile, prepares the publish directory,
+deleted first. `profile` is the Suite B profile renamed `suite-c-shrink`
+with `tasks_per_world: 2`, the two tasks the scenario carries; its digest is
+pinned into every predicate. `run` approves it, prepares the publish directory,
 occupies one temp root for the candidate file, replays the original, and
 refuses `NoFailure` unless the child reports `Failed`; the reported predicate
 is the pinned one. It then drives `eval_core::shrink` with `Replayer::replay`

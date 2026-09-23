@@ -32,7 +32,7 @@ use eval_core::{
     Transformation, UnknownReason, WITNESS_DIGEST_PROTOCOL, WitnessClass, WitnessError,
     parse_manifest, parse_witness, residue_drift,
 };
-use serde_json::Value;
+use serde_json::{Value, json};
 use shrink::{BARRIER, ChildArgs, Config, MANIFEST_FILE, Replayed, RunError, WITNESS_FILE};
 
 const COMMITS: u32 = 8;
@@ -300,6 +300,15 @@ fn a_fresh_process_reproduces_the_predicate_and_the_minimized_witness_is_publish
         "the corpus names the seed the run identity was built from"
     );
     assert_eq!(manifest.component_versions.execution_image, "fresh-process");
+    assert_eq!(
+        manifest.run_identity.config["tasks_per_world"],
+        json!(witness.minimized.tasks.len()),
+        "the pinned profile describes the workload the scenario carries"
+    );
+    assert_eq!(
+        manifest.run_identity.config["name"],
+        json!("s0-suite-c-shrink")
+    );
     assert_eq!(
         manifest.cut_receipts,
         vec![eval_core::CutReceipt {

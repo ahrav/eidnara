@@ -400,6 +400,15 @@ pub fn scenario(commits: u32) -> (Scenario, eval_core::Tape) {
     (scenario, world.tape)
 }
 
+/// The Suite B profile renamed for this suite, with the two tasks `scenario`
+/// carries: the profile's digest is pinned into every failure predicate.
+pub fn profile(scale: Scale, elapsed_ms: u64, approval: Option<Approval>) -> RunProfile {
+    let mut profile = super::campaign::profile(scale, 128, elapsed_ms, approval);
+    profile.name = profile.name.replace("surface1-raw", "suite-c-shrink");
+    profile.tasks_per_world = 2;
+    profile
+}
+
 /// Replays the original in a fresh process, pins its failure, shrinks it with
 /// every candidate replayed the same way, and publishes the witness package
 /// with its manifest.
@@ -411,9 +420,8 @@ pub fn run(config: &Config, spawn: Spawn) -> Result<Run, RunError> {
             .as_millis(),
     )
     .unwrap();
-    let profile: RunProfile = super::campaign::profile(
+    let profile = profile(
         config.scale,
-        128,
         config.elapsed_bound_ms,
         config.approval.clone(),
     );

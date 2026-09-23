@@ -242,6 +242,45 @@ fn one_minimality_needs_a_rejected_record_for_every_single_deletion() {
     };
     bare.validate()
         .expect("a report that claims no minimality owes no rejection records");
+
+    // A rejection record is evidence only for the scenario it names: the
+    // same deletion set under a foreign digest is no record at all.
+    let mut forged = package();
+    let element = forged.minimized.elements()[0].clone();
+    let mut deleted = forged.shrink.deleted.clone();
+    deleted.insert(element.clone());
+    let mut hit = 0;
+    for record in &mut forged.shrink.candidates {
+        if record.deleted == deleted {
+            record.scenario_digest = "00".repeat(32);
+            hit += 1;
+        }
+    }
+    assert!(hit > 0, "the final pass recorded this deletion");
+    assert_eq!(
+        forged.validate(),
+        Err(WitnessError::MinimalityUnsupported { element })
+    );
+}
+
+#[test]
+fn the_coverage_signature_names_only_registered_markers() {
+    let mut package = package();
+    package
+        .original
+        .coverage
+        .insert("flt_shrink_marker_nobody_registered".to_string());
+    assert_eq!(
+        package.validate(),
+        Err(WitnessError::UnregisteredMarker {
+            name: "flt_shrink_marker_nobody_registered".to_string()
+        }),
+        "an unregistered marker is not a behaviour the run showed"
+    );
+    assert!(matches!(
+        package.serialize(&redactor(), ARTIFACT_BYTES),
+        Err(WitnessError::UnregisteredMarker { .. })
+    ));
 }
 
 #[test]
@@ -313,9 +352,9 @@ fn residue_drift_refuses_and_limits_apply_before_publication() {
         Err(WitnessError::TooLarge { bound: 16, .. })
     ));
     let mut leaking = package.clone();
-    leaking.original.coverage.insert(
-        "Authorization: Bearer sk-ant-api03-ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcd".to_string(),
-    );
+    leaking.original.predicate.profile_digest =
+        "Authorization: Bearer sk-ant-api03-ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcd".to_string();
+    leaking.shrink.predicate.profile_digest = leaking.original.predicate.profile_digest.clone();
     assert_eq!(
         leaking.serialize(&redactor(), ARTIFACT_BYTES).err(),
         Some(WitnessError::RedactionRefused(

@@ -14,6 +14,7 @@ use crate::event::{CausalEdge, EventId, EventLog};
 use crate::failure_class::Slice;
 use crate::generator::{Mode, WorldConfig, generate_all};
 use crate::manifest::{CLAIM_BOUNDARY_EXCLUSIONS, ClaimBoundary};
+use crate::markers::MARKERS;
 use crate::residue::ResidueEntry;
 use crate::shrink::{
     CandidateVerdict, Element, FailurePredicate, History, Minimality, Scenario, ShrinkReport,
@@ -105,6 +106,10 @@ pub enum WitnessError {
     MinimalityUnsupported {
         element: Element,
     },
+    /// The coverage signature names a marker the registry does not have.
+    UnregisteredMarker {
+        name: String,
+    },
     ResidueDrift {
         missing: BTreeSet<ResidueEntry>,
         unexpected: BTreeSet<ResidueEntry>,
@@ -154,11 +159,18 @@ impl WitnessPackage {
         self.check_minimality()?;
         self.shrink.validate().map_err(WitnessError::ShrinkReport)?;
         let value = serde_json::to_value(self).map_err(|e| WitnessError::Shape(e.to_string()))?;
-        check_claims(&value, "")
+        check_claims(&value, "")?;
+        for name in &self.original.coverage {
+            if !MARKERS.iter().any(|marker| marker.name == name) {
+                return Err(WitnessError::UnregisteredMarker { name: name.clone() });
+            }
+        }
+        Ok(())
     }
 
     /// `OneMinimal` claims every single deletion from the minimized scenario
-    /// was replayed and rejected; the report must carry that record for each.
+    /// was replayed and rejected; the report must carry that record for each,
+    /// under the digest of the scenario that deletion produces.
     fn check_minimality(&self) -> Result<(), WitnessError> {
         if !matches!(self.shrink.minimality, Minimality::OneMinimal { .. }) {
             return Ok(());
@@ -166,8 +178,13 @@ impl WitnessPackage {
         for element in self.minimized.elements() {
             let mut deleted = self.shrink.deleted.clone();
             deleted.insert(element.clone());
+            let digest = self
+                .minimized
+                .without(&BTreeSet::from([element.clone()]))
+                .digest();
             let rejected = self.shrink.candidates.iter().any(|record| {
                 record.deleted == deleted
+                    && record.scenario_digest == digest
                     && !matches!(
                         record.verdict,
                         CandidateVerdict::Reproduced | CandidateVerdict::Unknown { .. }

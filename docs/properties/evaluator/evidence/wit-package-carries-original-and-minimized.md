@@ -23,13 +23,19 @@ compact recipe form when multiplicity is the trigger."
   once the changing records are removed, a refused extra field, `Lossy`.
 - `crates/eval-core/src/witness.rs` `check_minimality`: a `OneMinimal`
   report must record, for every minimized element, a single deletion over
-  the final set whose verdict is neither `Reproduced` nor `Unknown`.
+  the final set, under the digest of the scenario it produces, whose
+  verdict is neither `Reproduced` nor `Unknown`.
+- `crates/eval-core/src/witness.rs` `validate` ends by checking every
+  `original.coverage` name against `MARKERS`.
 - `crates/eval-core/tests/witness.rs` `every_structural_refusal_names_its_cause`: outer and embedded
   schema, hex, digest, and predicate refusals through `validate` and
   `serialize` alike.
 - `crates/eval-core/tests/witness.rs` `one_minimality_needs_a_rejected_record_for_every_single_deletion`:
-  cleared candidate records refuse a `OneMinimal` claim and pass a
-  `NotEstablished` one.
+  a report that replayed only the original refuses a `OneMinimal` claim and
+  passes a `NotEstablished` one; a rejection record under a foreign digest is
+  no record.
+- `crates/eval-core/tests/witness.rs` `the_coverage_signature_names_only_registered_markers`:
+  an unregistered name refuses through `validate` and `serialize`.
 - `crates/daemon/tests/eval_shrink.rs` `a_fresh_process_reproduces_the_predicate_and_the_minimized_witness_is_published`:
   the published `witness.json` parses back to the run's package and the
   manifest's `witness_digest` is its protocol digest.

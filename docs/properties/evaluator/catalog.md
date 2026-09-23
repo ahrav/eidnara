@@ -281,6 +281,7 @@ Exercised: yes -
   `crates/eval-core/tests/witness.rs::the_package_round_trips_and_carries_the_recipe_for_a_count_triggered_failure`,
   `crates/eval-core/tests/witness.rs::every_structural_refusal_names_its_cause`,
   `crates/eval-core/tests/witness.rs::one_minimality_needs_a_rejected_record_for_every_single_deletion`,
+  `crates/eval-core/tests/witness.rs::the_coverage_signature_names_only_registered_markers`,
   and
   `crates/daemon/tests/eval_shrink.rs::a_fresh_process_reproduces_the_predicate_and_the_minimized_witness_is_published`
 Guarantee: A witness package carries the original failure (RunId, decision tape,
@@ -295,8 +296,10 @@ Check: `always` - `WitnessPackage::validate` refuses a recipe missing when
   (`RecipeDisagrees { history }`); a kind is count-triggered when more than one
   aged event of it survives and each one's single deletion was recorded
   `Slipped` or `NotReproduced`; a `OneMinimal` claim without a rejected
-  record for some single deletion from the minimized scenario is refused
-  (`MinimalityUnsupported { element }`); an embedded report that
+  record, under the digest of the scenario that deletion produces, for some
+  single deletion from the minimized scenario is refused
+  (`MinimalityUnsupported { element }`); a coverage name outside the
+  registry is refused (`UnregisteredMarker { name }`); an embedded report that
   `ShrinkReport::validate` refuses is refused (`ShrinkReport(..)`);
   `parse_witness(serialize(package)) == package`; the published bytes parse
   back to the run's package.
