@@ -3,6 +3,7 @@
 //! effects observed from outside, containment canaries, and admission.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::num::NonZeroU32;
 
 use eval_core::{
     AdequacyEvidence, AdequacyRefused, AdmissionRefused, AgentTrace, AxisValue, Canary,
@@ -14,9 +15,10 @@ use eval_core::{
 use serde_json::json;
 
 const SEED: u64 = 0x5EED_D000_0000_0006;
+const THREE: NonZeroU32 = NonZeroU32::new(3).unwrap();
 
 fn corpus() -> TaskCorpus {
-    generate_tasks(SEED, 3)
+    generate_tasks(SEED, THREE)
 }
 
 fn budgets() -> TaskBudgets {
@@ -61,10 +63,10 @@ fn evidence(task: &eval_core::GeneratedTask) -> AdequacyEvidence {
 fn the_corpus_is_deterministic_valid_and_carries_every_carrier() {
     let corpus = corpus();
     corpus.validate().unwrap();
-    assert_eq!(corpus, generate_tasks(SEED, 3));
+    assert_eq!(corpus, generate_tasks(SEED, THREE));
     assert_ne!(
         corpus.tasks[0].digest(),
-        generate_tasks(SEED ^ 1, 3).tasks[0].digest()
+        generate_tasks(SEED ^ 1, THREE).tasks[0].digest()
     );
     let defects: BTreeSet<&str> = corpus
         .tasks
@@ -154,6 +156,35 @@ fn a_corpus_refuses_a_stale_generator_a_duplicate_task_a_replanned_seed_and_an_u
         foreign_ids.validate(),
         Err(TaskError::InjectionPlanMismatch)
     );
+    let mut edited = corpus.clone();
+    edited.tasks[0].statement.push_str(" (edited)");
+    assert_eq!(edited.validate(), Err(TaskError::TasksNotDerived));
+    let mut reordered = corpus.clone();
+    reordered.tasks.swap(0, 1);
+    assert_eq!(reordered.validate(), Err(TaskError::TasksNotDerived));
+    for (target, path) in [
+        ("files", "../../host-file"),
+        ("correct_fix", "/tmp/host-file"),
+        ("wrong_fix", "src/./x.rs"),
+        ("files", "src//x.rs"),
+        ("files", ""),
+    ] {
+        let mut escaping = corpus.clone();
+        let task = &mut escaping.tasks[0];
+        let map = match target {
+            "files" => &mut task.files,
+            "correct_fix" => &mut task.correct_fix,
+            _ => &mut task.wrong_fixes[0].patch,
+        };
+        map.insert(path.to_string(), String::new());
+        assert_eq!(
+            escaping.validate(),
+            Err(TaskError::InvalidPath {
+                path: path.to_string()
+            }),
+            "{target} key {path:?} is not workspace-relative"
+        );
+    }
     let mut escaping = corpus.clone();
     let name = "x/../../src/lib";
     let task = &mut escaping.tasks[0];
@@ -606,6 +637,10 @@ fn admission_refuses_until_witness_self_tests_and_frozen_family_are_present() {
     assert_eq!(no_self_tests.admit(), Err(AdmissionRefused::NoSelfTests));
     let mut no_family = admitted;
     no_family.frozen = None;
+    assert_eq!(no_family.admit(), Err(AdmissionRefused::NoFrozenFamily));
+    no_family.frozen = Some(FrozenFamily {
+        analysis_family_digest: String::new(),
+    });
     assert_eq!(no_family.admit(), Err(AdmissionRefused::NoFrozenFamily));
 }
 

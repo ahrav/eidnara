@@ -4,6 +4,7 @@
 //! module decides what their results mean.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::num::NonZeroU32;
 
 use context_core::canonical_json::{is_lower_hex, protocol_digest};
 use serde::{Deserialize, Serialize};
@@ -76,6 +77,11 @@ pub enum TaskError {
     HiddenTestVisible {
         path: String,
     },
+    /// A file key that is not workspace-relative: `/`-separated components,
+    /// none empty, `.`, or `..`, so joining it to the workspace stays inside.
+    InvalidPath {
+        path: String,
+    },
     /// A fix that changes no file the repository holds under `src/`.
     TextOnlyFix {
         fix: String,
@@ -112,6 +118,9 @@ pub enum TaskError {
     /// The embedded injection plan is not the one the recorded seed and task
     /// IDs derive, so replay from the record would score different cases.
     InjectionPlanMismatch,
+    /// The tasks are not what the recorded seed and generator derive, so the
+    /// recorded provenance does not reproduce the oracle.
+    TasksNotDerived,
     Injection(crate::injection::InjectionError),
 }
 
@@ -132,6 +141,21 @@ impl GeneratedTask {
         }
         if self.wrong_fixes.is_empty() {
             return Err(TaskError::NoWrongFixes);
+        }
+        let is_relative = |path: &str| {
+            !path.is_empty()
+                && path
+                    .split('/')
+                    .all(|part| !part.is_empty() && part != "." && part != "..")
+        };
+        if let Some(path) = self
+            .files
+            .keys()
+            .chain(self.correct_fix.keys())
+            .chain(self.wrong_fixes.iter().flat_map(|fix| fix.patch.keys()))
+            .find(|path| !is_relative(path))
+        {
+            return Err(TaskError::InvalidPath { path: path.clone() });
         }
         let mut names = BTreeSet::new();
         for test in &self.hidden_tests {
@@ -285,6 +309,13 @@ impl TaskCorpus {
                 }
             }
         }
+        let count = u32::try_from(self.tasks.len())
+            .ok()
+            .and_then(NonZeroU32::new);
+        let derived = count.map(|count| generate_tasks(self.root_seed, count).tasks);
+        if derived.as_ref() != Some(&self.tasks) {
+            return Err(TaskError::TasksNotDerived);
+        }
         Ok(())
     }
 
@@ -320,7 +351,8 @@ fn instruction(case: &InjectionCase) -> String {
 /// one arithmetic function whose body carries one defect, a statement naming
 /// the symptom, two hidden tests, and three wrong fixes, each failing the
 /// hidden test it names.
-pub fn generate_tasks(root_seed: u64, count: u32) -> TaskCorpus {
+pub fn generate_tasks(root_seed: u64, count: NonZeroU32) -> TaskCorpus {
+    let count = count.get();
     let ids: BTreeSet<String> = (0..count).map(|i| format!("task-{i}")).collect();
     let injection = plan_injection_cases(root_seed, &ids);
     let planted: BTreeMap<Carrier, String> = injection
@@ -669,9 +701,9 @@ impl ContainmentReport {
 }
 
 /// What a Suite D campaign must hold before its first task: an accepted
-/// Phase 5 witness (its lowercase hex protocol digest), the deterministic
-/// self-tests that ran, and the frozen analysis family. Each is a value the
-/// runner supplies; none defaults.
+/// Phase 5 witness and the frozen analysis family (each its lowercase hex
+/// protocol digest) and the deterministic self-tests that ran. Each is a
+/// value the runner supplies; none defaults.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SuiteDAdmission {
@@ -701,7 +733,11 @@ impl SuiteDAdmission {
         if self.self_tests.is_empty() {
             return Err(AdmissionRefused::NoSelfTests);
         }
-        if self.frozen.is_none() {
+        if self
+            .frozen
+            .as_ref()
+            .is_none_or(|frozen| !is_lower_hex(&frozen.analysis_family_digest, 64))
+        {
             return Err(AdmissionRefused::NoFrozenFamily);
         }
         Ok(())

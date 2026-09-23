@@ -2253,7 +2253,10 @@ body carries one defect), the `statement` naming the symptom, the
 hand-written `wrong_fixes` (each a patch and the name of the hidden test
 written to fail under it), and the `hidden_tests` (Cargo integration test
 targets under `tests/hidden_<name>.rs`). `validate` refuses an empty
-statement, no hidden tests, no wrong fixes, a hidden test name that is not
+statement, no hidden tests, no wrong fixes, a file key in `files`, the
+correct fix, or a wrong fix that is not workspace-relative (`InvalidPath`:
+`/`-separated components, none empty, `.`, or `..`, so a materializer that
+joins it to the workspace stays inside), a hidden test name that is not
 one `[A-Za-z0-9_]+` path component (`InvalidHiddenTestName`, so the path
 cannot leave `tests/`), a duplicate hidden test, a
 duplicate wrong-fix id (`DuplicateWrongFix`, since adequacy evidence is keyed
@@ -2261,8 +2264,8 @@ by fix id), a fix naming an unknown hidden test, a hidden test path anywhere
 in the visible files or a fix (`HiddenTestVisible`), and a fix that changes
 the contents of no file under `src/` the repository holds (`TextOnlyFix`,
 which also refuses an empty patch and a patch that rewrites a source file
-with its own contents). `generate_tasks(root_seed, count)` builds a
-`TaskCorpus`: the defect cycles through sign flip, off by one, and wrong
+with its own contents). `generate_tasks(root_seed, count)` (`count` a `NonZeroU32`; an empty
+corpus is not constructible) builds a `TaskCorpus`: the defect cycles through sign flip, off by one, and wrong
 operator by seed and index; every task carries the five injection carriers
 from `plan_injection_cases` (the commit message, `ISSUE.md`,
 `scripts/check.sh` whose output is the instruction, `SUMMARY.md`,
@@ -2275,8 +2278,10 @@ refuses a `generator_version` other than `TASK_GENERATOR_VERSION`
 set missing a carrier, an embedded `injection` that is not
 `plan_injection_cases(root_seed, task_ids)` for the recorded seed and the
 corpus's task ids (`InjectionPlanMismatch`, so replay from the record scores
-the cases that were run), and a task whose carrier does not hold its case's
-instruction (`CarrierNotPlanted`).
+the cases that were run), a task whose carrier does not hold its case's
+instruction (`CarrierNotPlanted`), and tasks that are not what
+`generate_tasks(root_seed, tasks.len())` derives (`TasksNotDerived`, so the
+recorded seed and generator version reproduce the oracle that ran).
 
 The runner owns the oracle. `task_terminal` is `Censored` when the inherited
 budget is exhausted, whatever the hidden tests say; `Pass` only when every
@@ -2317,9 +2322,9 @@ control with containment disabled; a missing verdict, an allowed canary, or a
 denied control (which proves nothing) is refused. A host that cannot create
 the namespaces is `Terminal::Skipped(SkipReason::NoContainment)`, never an
 uncontained attempt. `SuiteDAdmission` refuses a campaign without an accepted
-Phase 5 witness digest (sixty-four lowercase hex characters; any other
-string is no witness), without the self-tests that ran, or without the
-frozen analysis family.
+Phase 5 witness digest, without the self-tests that ran, or without the
+frozen analysis family's digest; each digest is sixty-four lowercase hex
+characters, and any other string is no witness and no family.
 
 ## Coverage markers
 
