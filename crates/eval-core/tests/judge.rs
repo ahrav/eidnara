@@ -718,6 +718,7 @@ fn live_slice_validation_recomputes_each_task_and_checks_the_schema() {
     });
     let mut k = report.clone();
     k.k = 1;
+    k.settings_digest = settings(1).digest();
     assert_eq!(
         k.validate(&settings(1)),
         inconsistent,
@@ -739,6 +740,17 @@ fn live_slice_validation_recomputes_each_task_and_checks_the_schema() {
             provider: "anthropic/live-3@tp-1".to_string()
         }),
         "a deserialized report names an approved profile"
+    );
+    let mut other_plan = settings(2);
+    other_plan.sampling = Some(SamplingPlan {
+        pairs: 60,
+        human_sample: 20,
+    });
+    other_plan.validate().unwrap();
+    assert_eq!(
+        report.validate(&other_plan),
+        Err(LiveSliceRefused::SettingsDigestMismatch),
+        "a report ran under one pre-registration, not any valid one"
     );
     let mut unsettled = settings(2);
     unsettled.calibration = None;

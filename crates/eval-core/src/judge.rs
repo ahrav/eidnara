@@ -18,6 +18,7 @@ pub const JUDGE_SCHEMA: &str = "eval-judge/v1";
 pub const RESIDUAL_REPORT_SCHEMA: &str = "eval-residual-report/v1";
 pub const LIVE_SLICE_SCHEMA: &str = "eval-live-slice/v1";
 pub const CALIBRATION_DIGEST_PROTOCOL: &str = "eval-judge-calibration/v1";
+pub const LIVE_SETTINGS_DIGEST_PROTOCOL: &str = "eval-live-settings/v1";
 pub const RUBRIC_DIGEST_PROTOCOL: &str = "eval-judge-rubric/v1";
 /// Human review covers at least this share of judged pairs, and never fewer
 /// pairs than the minimum.
@@ -642,6 +643,9 @@ pub struct LiveTaskReport {
 #[serde(deny_unknown_fields)]
 pub struct LiveSliceReport {
     pub schema: String,
+    /// The pre-registered settings this slice ran under, so a report cannot
+    /// be attached to another plan after the fact.
+    pub settings_digest: String,
     pub provider: ProviderProfile,
     pub k: u32,
     pub replayable: bool,
@@ -673,6 +677,8 @@ pub enum LiveSliceRefused {
         report: u32,
         settings: u32,
     },
+    /// The report ran under other settings than the ones supplied.
+    SettingsDigestMismatch,
     Settings(LiveSettingsRefused),
     Statistics(StatisticsError),
 }
@@ -732,6 +738,7 @@ pub fn live_slice(
         .collect::<Result<Vec<_>, _>>()?;
     Ok(LiveSliceReport {
         schema: LIVE_SLICE_SCHEMA.to_string(),
+        settings_digest: settings.digest(),
         provider: provider.clone(),
         k,
         replayable: LIVE_REPLAYABLE,
@@ -754,6 +761,9 @@ impl LiveSliceReport {
                 report: self.k,
                 settings: settings.k,
             });
+        }
+        if self.settings_digest != settings.digest() {
+            return Err(LiveSliceRefused::SettingsDigestMismatch);
         }
         if self.replayable {
             return Err(LiveSliceRefused::RelabelledReplayable);
@@ -802,6 +812,11 @@ pub enum LiveSettingsRefused {
 debug_display!(LiveSettingsRefused);
 
 impl LiveSettings {
+    pub fn digest(&self) -> String {
+        let value = serde_json::to_value(self).expect("settings serialize");
+        protocol_digest(LIVE_SETTINGS_DIGEST_PROTOCOL, &value).expect("settings are canonical")
+    }
+
     pub fn validate(&self) -> Result<(), LiveSettingsRefused> {
         let distinct: BTreeSet<&ProviderProfile> = self.providers.iter().collect();
         if distinct.len() != 2 || self.providers.len() != 2 {

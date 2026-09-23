@@ -2483,10 +2483,12 @@ only from validated settings and one of their two profiles, with the
 settings' `k`; it refuses no tasks and a repeated task id. Each task keeps
 its attempts beside pass@1, the repeat counts, the censoring rate, and the
 pass^k interval through `pass_k`; every attempt censored is `indeterminate`,
-never zero. `replayable` is `LIVE_REPLAYABLE = false`; `validate` takes the
-same settings and refuses a relabelled report, another schema, an unapproved
-profile, another `k`, a repeated task, and a summary the attempts do not
-give, so a deserialized report is held to what a constructed one was. Tests:
+never zero. The report carries the settings' digest
+(`eval-live-settings/v1`). `replayable` is `LIVE_REPLAYABLE = false`;
+`validate` takes the same settings and refuses a relabelled report, another
+schema, an unapproved profile, another `k`, another settings digest, a
+repeated task, and a summary the attempts do not give, so a deserialized
+report is held to the pre-registration a constructed one ran under. Tests:
 `crates/eval-core/tests/judge.rs`.
 
 ## Coverage markers

@@ -850,7 +850,8 @@ Check: `always` - `ResidualReport::comparable` returns `ReanchorRequired`
   inequality, with `tokenizer_profile` part of `ProviderProfile` equality;
   `ResidualReport::validate` refuses `CalibrationJudgeDiffers` and
   `DigestMismatch`; `live_slice` and `LiveSliceReport::validate` refuse
-  `UnapprovedProvider`, `RepeatCountDiffers`, and `Settings`. Must hold on
+  `UnapprovedProvider`, `RepeatCountDiffers`, `SettingsDigestMismatch`, and
+  `Settings`. Must hold on
   every comparison and validation, so `always`.
 Fault/timing angle: None.
 Required faults and enabling state: Two reports differing in one identity
