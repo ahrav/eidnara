@@ -1204,3 +1204,75 @@ fn a_safety_check_outside_an_armed_window_is_not_counted_as_armed() {
         "a check after the episode returned is not a check while armed"
     );
 }
+
+#[test]
+fn each_kill_episode_counts_the_safety_check_its_child_ran_at_the_cut() {
+    let plan = fault::plan(MESSAGES).unwrap();
+    let profile = fault::profile(Scale::S0, MESSAGES, 600_000, None);
+    for cut in fault::KillCut::ALL {
+        let mut charges = campaign::Charges::new(profile.envelope.clone());
+        let mut witness = Witness::new();
+        fault::kill_episode(
+            &plan,
+            MESSAGES,
+            &mut charges,
+            &mut witness,
+            spawn_child,
+            cut,
+        )
+        .unwrap();
+        assert_eq!(
+            witness.safety_checks, 1,
+            "{cut:?}: one counted check, made while the child was parked at its cut"
+        );
+    }
+}
+
+/// Closing the stores checkpoints their WALs away, so an auxiliary root
+/// charged only at its vacate would report its closed footprint.
+#[test]
+fn the_kill_and_liveness_roots_are_charged_while_their_stores_are_open() {
+    let plan = fault::plan(MESSAGES).unwrap();
+    let k = plan.checkpoint_step as usize;
+    let root = tempfile::tempdir().unwrap();
+    let mut stores = aging::Stores::open(root.path(), &plan);
+    aging::live(&mut stores, &plan.steps[..k]);
+    let open = campaign::root_bytes(root.path());
+    drop(stores.close());
+    let closed = campaign::root_bytes(root.path());
+    assert!(open > closed, "closing checkpoints the WAL away");
+    // Another root's footprint differs by a few pages, so the bound sits
+    // between the open and closed footprints of this one.
+    let open_enough = (open + closed) / 2;
+    let profile = fault::profile(Scale::S0, MESSAGES, 600_000, None);
+
+    let mut charges = campaign::Charges::new(profile.envelope.clone());
+    fault::kill_episode(
+        &plan,
+        MESSAGES,
+        &mut charges,
+        &mut Witness::new(),
+        spawn_child,
+        fault::KillCut::LocalStaged,
+    )
+    .unwrap();
+    let peak = charges.envelope.peaks.store_bytes;
+    assert!(
+        peak > open_enough,
+        "kill: peak {peak}, open {open}, closed {closed}"
+    );
+
+    let mut charges = campaign::Charges::new(profile.envelope.clone());
+    fault::liveness(
+        &plan,
+        &mut charges,
+        &mut Witness::new(),
+        &profile.statistics.liveness_bounds,
+    )
+    .unwrap();
+    let peak = charges.envelope.peaks.store_bytes;
+    assert!(
+        peak > open_enough,
+        "liveness: peak {peak}, open {open}, closed {closed}"
+    );
+}

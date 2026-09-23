@@ -2366,21 +2366,25 @@ the caller's `Spawn` (the test re-executes the test binary at
 count, applied step, and cut in its environment; the example re-executes
 itself as `fault-child`). The child reconstructs the drive from the kernel's
 own descriptors (`Stores::reconstruct`), applies the next step, runs one
-catch-up episode, prints `eval-fault-barrier <through> <cut>` when its
-observer reaches the cut, and parks. The parent reads the barrier, attempts
-every effect the episode had reached by the cut, sends `SIGKILL`, waits for
-the signal, and records the `BarrierReceipt`. Each effect identity carries its
-episode id (`search_commit:<through>@<episode>`), because a kill root's
-windows repeat the campaign's, and the killed window is where the episode left
-the checkpoint, so a crashed checkpoint past it refuses as `ReadBackMasked`.
-The kill's expected states join the campaign's fixed expectations. Each effect
-is `Unknown` until the crashed files are read back: at `local_staged` the
-batch is `not_applied`; at `acknowledgement_requested` the local batch is
-`applied` and its acknowledgement `not_applied`. `Stores::reconstruct` then
-reopens the root, which deletes the crashed projection and bootstraps a new
-one at the kernel tip, so the committed but unacknowledged batch is discarded
-rather than resumed; the drain after it checks that the rebuilt stores reach
-the tip. The label is `application_crash` with the page cache intact and
+catch-up episode, and when its observer reaches the cut runs the safety
+invariants, prints `eval-fault-safety-checked <cut>` and then
+`eval-fault-barrier <through> <cut>`, and parks. The parent refuses a barrier
+without the safety line and counts that check as one made while armed, and it
+charges the kill root while its stores are open, including the crashed files
+with the child's WAL. The parent reads the barrier, attempts every effect the
+episode had reached by the cut, sends `SIGKILL`, waits for the signal, and
+records the `BarrierReceipt`. Each effect identity carries its episode id
+(`search_commit:<through>@<episode>`), because a kill root's windows repeat
+the campaign's, and the killed window is where the episode left the
+checkpoint, so a crashed checkpoint past it refuses as `ReadBackMasked`. The
+kill's expected states join the campaign's fixed expectations. Each effect is
+`Unknown` until the crashed files are read back: at `local_staged` the batch
+is `not_applied`; at `acknowledgement_requested` the local batch is `applied`
+and its acknowledgement `not_applied`. `Stores::reconstruct` then reopens the
+root, which deletes the crashed projection and bootstraps a new one at the
+kernel tip, so the committed but unacknowledged batch is discarded rather than
+resumed; the drain after it checks that the rebuilt stores reach the tip. The
+label is `application_crash` with the page cache intact and
 `test_binary_child`, which is all a kill of a parked child proves. The
 manifest's witness digest covers the barrier receipts without their `pid`,
 because the OS assigns it and two identical runs differ in it.
@@ -2426,7 +2430,8 @@ The reviewer coordinator lane is outside this campaign's core (its scripted
 model peer is not in the drive), so the report declares three lanes and
 `verdict` judges those; the R11 stall is listed under `permanent_stalls`. The
 evaluator drives every lane directly and the claim boundary says so: the
-lifecycle owner's wall-clock reads are outside the core.
+lifecycle owner's wall-clock reads are outside the core. The liveness root is
+charged while its stores are open, before the close checkpoints their WALs.
 
 The `fault` subcommand takes the same flags as `aging` and answers with one
 JSON line; `fault-child` is its kill child. A history whose checkpoint leaves

@@ -214,6 +214,12 @@ impl Witness {
         safety_invariants(stores);
         self.safety_checks += 1;
     }
+
+    /// The check a kill child ran at its cut, where the kill is armed; the
+    /// child owns the stores there, so the parent counts the line it printed.
+    fn child_safety_check(&mut self) {
+        self.safety_checks += 1;
+    }
 }
 
 /// No descriptor claims a commit past the tip or an invalidation before its
@@ -1576,6 +1582,8 @@ fn local_eligibility(project: &ProjectScope) -> EligibilityBinding<'_> {
 }
 
 pub const BARRIER: &str = "eval-fault-barrier";
+/// The line a kill child prints once the safety invariants held at its cut.
+pub const SAFETY_CHECKED: &str = "eval-fault-safety-checked";
 pub const CHILD_ROOT: &str = "EIDNARA_EVAL_FAULT_CHILD_ROOT";
 pub const CHILD_MESSAGES: &str = "EIDNARA_EVAL_FAULT_CHILD_MESSAGES";
 pub const CHILD_APPLIED: &str = "EIDNARA_EVAL_FAULT_CHILD_APPLIED";
@@ -1673,10 +1681,16 @@ pub fn child_main(args: &ChildArgs) -> ! {
     let mut stores = Stores::reconstruct(&args.root, &plan, args.applied, planned.now_ms);
     stores.apply(planned);
     stores.publish_outbox();
+    let stores = &stores;
     let cut = args.cut;
     let report = stores.episode(planned.now_ms, None, &mut |event| {
         if let Some(through) = cut.through(&event) {
+            // The kill is armed from here, so the check the parent counts
+            // runs here, before the barrier; a failed invariant panics and
+            // no barrier follows.
+            safety_invariants(stores);
             let mut stdout = std::io::stdout().lock();
+            writeln!(stdout, "{SAFETY_CHECKED} {}", cut.name()).unwrap();
             writeln!(stdout, "{BARRIER} {through} {}", cut.name()).unwrap();
             stdout.flush().unwrap();
             drop(stdout);
@@ -1725,6 +1739,7 @@ pub fn kill_episode(
     let root = charges.occupy()?;
     let mut stores = Stores::open(root.path(), plan);
     live(&mut stores, &plan.steps[..k]);
+    charges.store_bytes(stores.root())?;
     drop(stores.close());
     let args = ChildArgs {
         root: root.path().to_path_buf(),
@@ -1739,18 +1754,25 @@ pub fn kill_episode(
     let pid = child.0.id();
     let stdout = child.0.stdout.take().unwrap();
     let (tx, rx) = mpsc::sync_channel(1);
+    let checked = format!("{SAFETY_CHECKED} {}", cut.name());
     std::thread::spawn(move || {
+        let mut safe = false;
         let barrier = BufReader::new(stdout)
             .lines()
             .map_while(Result::ok)
+            .inspect(|line| safe |= line.ends_with(&checked))
             .find(|line| line.contains(BARRIER));
-        let _ = tx.send(barrier);
+        let _ = tx.send(barrier.map(|line| (safe, line)));
     });
-    let line = rx
+    let (safe, line) = rx
         .recv_timeout(Duration::from_secs(120))
         .ok()
         .flatten()
         .ok_or_else(|| unexpected(&id, "a barrier line before the kill", "none"))?;
+    if !safe {
+        return Err(unexpected(&id, "a safety check at the cut", &line));
+    }
+    witness.child_safety_check();
     let line = line[line.find(BARRIER).unwrap()..].to_string();
     let through: i64 = line
         .split(' ')
@@ -1798,6 +1820,8 @@ pub fn kill_episode(
             ));
         }
     }
+    // The crashed files hold the child's WAL: its open footprint.
+    charges.store_bytes(root.path())?;
     let now = plan.steps[k].now_ms;
     let mut stores = Stores::reconstruct(root.path(), plan, k as u32 + 1, now);
     witness.checkpoint(Cut::AfterRecovery);
@@ -1808,6 +1832,7 @@ pub fn kill_episode(
         .coverage
         .record("flt_kill_barrier_read_before_kill")
         .unwrap();
+    charges.store_bytes(stores.root())?;
     drop(stores.close());
     charges.vacate(root)?;
     Ok(effects.into_iter().collect())
@@ -2209,6 +2234,7 @@ pub fn liveness(
         .unwrap();
     let _ = materializer;
     drop(kernel);
+    charges.store_bytes(stores.root())?;
     drop(stores.close());
     charges.vacate(root)?;
     Ok(report)
