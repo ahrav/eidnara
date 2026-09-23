@@ -1894,18 +1894,27 @@ itself as `fault-child`). The child reconstructs the drive from the kernel's
 own descriptors (`Stores::reconstruct`), applies the next step, runs one
 catch-up episode, prints `eval-fault-barrier <through> <cut>` when its
 observer reaches the cut, and parks. The parent reads the barrier, attempts
-the effect it names, sends `SIGKILL`, waits for the signal, and records the
-`BarrierReceipt`; the effect is `Unknown` until the closed files are read
-back, where it is `not_applied` for both cuts (the killed step never
-committed its effect), and the reopened stores catch up to the tip. The
+every effect the episode had reached by the cut, sends `SIGKILL`, waits for
+the signal, and records the `BarrierReceipt`. Each effect is `Unknown` until
+the crashed files are read back: at `local_staged` the batch is `not_applied`;
+at `acknowledgement_requested` the local batch is `applied` and its
+acknowledgement `not_applied`. `Stores::reconstruct` then reopens the root,
+which deletes the crashed projection and bootstraps a new one at the kernel
+tip, so the committed but unacknowledged batch is discarded rather than
+resumed; the drain after it checks that the rebuilt stores reach the tip. The
 label is `application_crash` with the page cache intact and
-`test_binary_child`, which is all a kill of a parked child proves.
+`test_binary_child`, which is all a kill of a parked child proves. The
+manifest's witness digest covers the barrier receipts without their `pid`,
+because the OS assigns it and two identical runs differ in it.
 
 The held publication runs a real dispatcher pass with inference held behind
 the embedding fixture's gate on a multi-thread Tokio runtime: the job is
 admitted and nothing is published, a second pass re-admits nothing, and the
 release publishes it. Eligibility names the local destination, because the
-drive publishes its rows `LocalOnly`.
+drive publishes its rows `LocalOnly`. The gate, runtime, and lane live in one
+`GatedLane` whose gate drops before its runtime, so an episode that fails
+while inference is held reports the failure; a runtime dropped first waits
+forever for the blocked inference.
 
 Liveness runs on a root of its own after the fault phase. The healthy core is
 the kernel, the projection, the catch-up driver, the dispatcher, and the
@@ -1915,15 +1924,22 @@ second `BEGIN IMMEDIATE` fails). Half the remaining history is the backlog
 the window opens with; the other half is fed in one commit per step as fresh
 kernel-only work (`Stores::apply_kernel_only`, which leaves the memory store
 untouched because it is outside the core), so every lane's predicate is
-re-established against new commits rather than held by idling. In one window
-loop each lane still inside its bound takes one unit of work with a logical
-`now`: `run_episode` until `acknowledged_through` reaches the current tip,
-dispatcher `run_pass` until no embedding job is open,
-`ClaimMaterializer::run_episode` until it acknowledges the tip; the lane
+re-established against new commits rather than held by idling. Every fourth
+step inside the materialization lane's bound also commits one scoped decision
+and retires the one before it, so the materializer publishes and retires
+claims inside the window. In one window loop each lane still inside its bound
+takes one unit of work with a logical `now`: `run_episode` until
+`acknowledged_through` reaches the current tip, dispatcher `run_pass` until no
+embedding job is open, `ClaimMaterializer::run_episode` until it acknowledges
+the tip with exactly the newest decision's two `canonical_claims` descriptors
+live in the kernel (each such step receipts `claims_materialized`); the lane
 records the step the predicate first held, the first stall after that, and
-whether it held at the bound, and a stalled lane is unmet. A CAS ingest fault
-cannot be the permanent outside-core fault here: its latch refuses the kernel
-ingestion the fresh publishes need, which would put the fault inside the core. The reviewer coordinator lane
+whether it held at the bound, and a stalled lane is unmet. A catch-up hold
+admits evidence references for its whole window, retired ones included, so
+the drive's episode bounds admit 256 rather than the fixture's 64. A CAS
+ingest fault cannot be the permanent outside-core fault here: its latch
+refuses the kernel ingestion the fresh publishes need, which would put the
+fault inside the core. The reviewer coordinator lane
 is outside this campaign's core (its scripted model peer is not in the drive),
 so the report declares three lanes and `verdict` judges those; the R11 stall
 is listed under `permanent_stalls`. The evaluator drives every lane directly

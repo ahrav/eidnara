@@ -1356,8 +1356,12 @@ job under `EIDNARA_EVAL_S0_BUDGET_MS`):
   `flt_kill_barrier_read_before_kill`): two kill episodes, one per named cut,
   each labelled `application_crash` with the page cache intact and
   `test_binary_child`, each with a barrier receipt whose line ends with the
-  cut and whose child died by signal 9; the killed step's effect reads back
-  `not_applied` and the reopened stores catch up.
+  cut and whose child died by signal 9. Read back from the crashed files, the
+  `local_staged` kill's batch is `not_applied`; the
+  `acknowledgement_requested` kill's local batch is `applied` and its
+  acknowledgement `not_applied`. The reopen rebuilds the projection at the
+  kernel tip and discards that committed but unacknowledged batch, so this is
+  rebuild evidence, not resume-from-crash evidence.
 - `a_held_publication_admits_once_and_publishes_on_release`
   (`sls-liveness-embedding-completion-bounded`; marker
   `sls_embedding_publication_held_then_released`): a dispatcher pass behind
@@ -1370,10 +1374,14 @@ job under `EIDNARA_EVAL_S0_BUDGET_MS`):
   `sls-liveness-claim-materialization-bounded`; marker
   `flt_liveness_bounds_met_with_faults_armed`): three core lanes each driven
   to the approved profile's bound in their own unit, met at some step and
-  holding at the bound, with the memory-store lock and the CAS latch still
-  armed at the bound; the reviewer coordinator lane is declared outside the
-  core (`sls-liveness-memory-reviewer-work-bounded` is not exercised here);
-  R11 is listed as the permanent stall.
+  holding at the bound, with the memory-store lock still armed at the bound
+  as the only outside-core fault; every fourth materialization step feeds a
+  decision and retires the one before it, and the materialization lane holds
+  only when exactly the newest decision's two `canonical_claims` descriptors
+  are live (`claims_materialized` receipted once per materialization step);
+  the reviewer coordinator lane is declared outside the core
+  (`sls-liveness-memory-reviewer-work-bounded` is not exercised here); R11 is
+  listed as the permanent stall.
 - `an_unapproved_profile_refuses_before_any_store_opens`: no approval, no
   campaign, nothing published.
 

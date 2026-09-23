@@ -12,8 +12,10 @@ mod campaign;
 #[allow(dead_code)]
 mod fault;
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
+use std::sync::{Arc, mpsc};
+use std::time::{Duration, Instant};
 
 use eval_core::{
     Approval, Coverage, Cut, CutOutcome, EffectOutcome, ExecutionMode, Expected, ExpectedRefusal,
@@ -177,13 +179,24 @@ fn the_fault_campaign_receipts_every_declared_cut_scenario(campaign: &Campaign) 
         FaultReport::result_digest(&published).unwrap()
     );
     assert_eq!(manifest.cut_receipts, report.cuts);
+    assert_eq!(manifest.witness_digest, fault::witness_digest(report));
+    assert!(!report.barriers.is_empty());
+    let mut respawned = report.clone();
+    for barrier in &mut respawned.barriers {
+        barrier.pid = barrier.pid.wrapping_add(1);
+    }
+    assert_eq!(
+        fault::witness_digest(&respawned),
+        manifest.witness_digest,
+        "the pid the OS gave a kill child is not witness evidence"
+    );
 }
 
 fn a_lost_reply_stays_unknown_until_readback_at_after_recovery_scenario(campaign: &Campaign) {
     let run = &campaign.run;
     let effects = &run.report.effects.effects;
     let lost: Vec<_> = effects.iter().filter(|(_, e)| e.reply_lost).collect();
-    assert_eq!(lost.len(), 6, "{effects:?}");
+    assert_eq!(lost.len(), 7, "{effects:?}");
     for (identity, effect) in &lost {
         assert!(
             effect.read_back,
@@ -198,14 +211,14 @@ fn a_lost_reply_stays_unknown_until_readback_at_after_recovery_scenario(campaign
         .filter(|(id, _)| id.starts_with("search_commit:") || id.starts_with("search_ack:"))
         .map(|(_, e)| e.outcome)
         .collect();
-    assert_eq!(search.len(), 4, "two lost replies and two kills");
+    assert_eq!(search.len(), 5, "two lost replies and three killed effects");
     assert_eq!(
         search
             .iter()
             .filter(|o| **o == EffectOutcome::Applied)
             .count(),
-        2,
-        "the lost replies committed: {search:?}"
+        3,
+        "the lost replies and the acknowledgement kill's local commit committed: {search:?}"
     );
     assert_eq!(
         search
@@ -352,6 +365,29 @@ fn a_test_binary_child_killed_at_a_named_cut_recovers_scenario(campaign: &Campai
         assert!(barrier.line.ends_with(cut), "{barrier:?}");
         assert_eq!(barrier.signal, 9, "SIGKILL, not an exit status");
         assert!(barrier.pid > 0);
+        let suffix = format!("@{}", episode.id);
+        let effects: BTreeMap<&str, EffectOutcome> = run
+            .report
+            .effects
+            .effects
+            .iter()
+            .filter(|(identity, _)| identity.ends_with(&suffix))
+            .map(|(identity, effect)| (identity.split_once(':').unwrap().0, effect.outcome))
+            .collect();
+        let expected: BTreeMap<&str, EffectOutcome> = match cut.as_str() {
+            "local_staged" => [("search_commit", EffectOutcome::NotApplied)].into(),
+            "acknowledgement_requested" => [
+                ("search_commit", EffectOutcome::Applied),
+                ("search_ack", EffectOutcome::NotApplied),
+            ]
+            .into(),
+            other => panic!("no kill cut {other}"),
+        };
+        assert_eq!(
+            effects, expected,
+            "{}: the crashed files hold exactly what committed before the cut",
+            episode.id
+        );
     }
     assert!(
         run.report.coverage.receipted["local_staged"] >= 2,
@@ -413,6 +449,11 @@ fn liveness_bounds_are_met_with_outside_core_faults_armed_scenario(campaign: &Ca
         liveness.permanent_stalls.len(),
         1,
         "R11 is reported as the permanent stall it is"
+    );
+    assert_eq!(
+        run.report.coverage.receipted.get("claims_materialized"),
+        Some(&run.bounds.materialization_episodes),
+        "every materialization step leaves exactly the latest fed decision's claims live"
     );
     assert!(run.report.safety_checks_while_armed > run.bounds.catch_up_episodes);
 }
@@ -548,6 +589,36 @@ fn an_unapproved_profile_refuses_before_any_store_opens() {
         "{error}"
     );
     assert!(!out.exists());
+}
+
+#[test]
+fn a_gated_lane_drops_while_its_inference_is_held() {
+    use host_runtime::local_embeddings::EmbeddingEngine;
+
+    let lane = fault::GatedLane::new();
+    let engine = Arc::clone(&lane.engine);
+    drop(lane.runtime.spawn_blocking(move || engine.embed(&["held"])));
+    let started = Instant::now();
+    while lane.engine.calls() == 0 {
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "the inference never reached the gate"
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let engine = Arc::clone(&lane.engine);
+    let (dropped, done) = mpsc::channel();
+    std::thread::spawn(move || {
+        drop(lane);
+        let _ = dropped.send(());
+    });
+    done.recv_timeout(Duration::from_secs(10))
+        .expect("dropping the lane releases its held inference");
+    assert_eq!(
+        engine.completed(),
+        1,
+        "the held inference ran to completion"
+    );
 }
 
 #[test]

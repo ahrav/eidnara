@@ -27,7 +27,7 @@ use eval_core::{
 };
 use kernel::{
     ArtifactDestination, CommitPageBounds, CurrentInputDescriptor, EligibilityBinding,
-    ProjectScope, ProviderEgress, Sensitivity, SourceRow,
+    ProjectScope, ProviderEgress, Sensitivity, SourceHoldAdmission, SourceRow,
 };
 use lease::{HeldFileLease, LeaseError};
 use memory_store::{MemoryStore, MemoryStoreError, StoredHistorySegment};
@@ -216,6 +216,8 @@ fn straddling_step(log: &EventLog, steps: &[Planned]) -> Option<u32> {
     candidates.first().map(|k| *k as u32)
 }
 
+const HOLD_REFERENCES: usize = 256;
+
 fn episode_bounds() -> EpisodeBounds {
     EpisodeBounds {
         commits: CommitPageBounds {
@@ -223,7 +225,10 @@ fn episode_bounds() -> EpisodeBounds {
             max_rows: 64.try_into().unwrap(),
             max_payload_bytes: (1u64 << 20).try_into().unwrap(),
         },
-        hold_admission: hold_admission(),
+        hold_admission: SourceHoldAdmission {
+            max_references: HOLD_REFERENCES.try_into().unwrap(),
+            ..hold_admission()
+        },
         source_page: source_page_bounds(),
         max_source_pages: 8.try_into().unwrap(),
         max_source_encoded_bytes: (1u64 << 20).try_into().unwrap(),
@@ -708,9 +713,7 @@ impl Closed {
 }
 
 impl Stores {
-    /// Reopens a root another process left behind, rebuilding the drive's
-    /// lineage bookkeeping from the kernel's own descriptors rather than
-    /// from memory it never had.
+    /// The snapshot export holds only live descriptors, so `dead` stays empty.
     pub fn reconstruct(root: &Path, rendering: Rendering, applied: u32, now: i64) -> Stores {
         let mut stores = reopen_stores(
             root.to_path_buf(),
@@ -723,9 +726,6 @@ impl Stores {
         let mut rows = stores.corpus.export();
         rows.sort_by_key(|row| row.created_commit_seq);
         for row in rows {
-            if row.invalidated_commit_seq.is_some() && row.superseded_by.is_none() {
-                stores.dead.insert(row.object_id.clone());
-            }
             stores
                 .chains
                 .entry(row.detail.lineage_id.clone())
