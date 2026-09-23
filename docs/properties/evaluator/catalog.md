@@ -842,19 +842,22 @@ Exercised: partial - identity equality and re-anchoring refusals are executed by
   the tokenizer profile is a name, not a versioned digest
 Guarantee: Every residual report records the judge identity, the live provider
   profile with its tokenizer accounting profile, and the calibration digest;
-  two runs' `residual.*` metrics compare only when all three are equal, and a
-  live slice is constructed and validated only against the settings that
-  approved its provider profile, pass^k exponent, planned attempts per task,
-  and held-out task set.
+  two runs' `residual.*` metrics compare only when all three are equal; a
+  residual report validates only against the pre-registered settings and the
+  provider its run was approved for, and a live slice is constructed and
+  validated only against the settings that approved its provider profile,
+  pass^k exponent, planned attempts per task, and held-out task set.
 Check: `always` - `ResidualReport::comparable` runs every calibration-free
   check of `validate` (schema, digest form, plan, permutation, judgments) on
   either report and returns `ReanchorRequired` naming `judge`,
   `live_provider`, or `calibration_digest` on the first inequality, with
   `tokenizer_profile` part of `ProviderProfile` equality;
-  `ResidualReport::validate` refuses `CalibrationJudgeDiffers` and
-  `DigestMismatch`; `live_slice` and `LiveSliceReport::validate` refuse
-  `UnapprovedProvider`, `KDiffers`, `AttemptCountDiffers`,
-  `SettingsDigestMismatch`, `TaskSetDiffers`, and `Settings`. Must hold on
+  `ResidualReport::validate` refuses `Settings` (including
+  `UnapprovedProvider`), `ProviderDiffers`, `SamplingPlanDiffers`,
+  `CalibrationJudgeDiffers`, and `DigestMismatch`; `live_slice` and
+  `LiveSliceReport::validate` refuse `Settings`, `ProviderDiffers`,
+  `KDiffers`, `AttemptCountDiffers`, `SettingsDigestMismatch`, and
+  `TaskSetDiffers`. Must hold on
   every comparison and validation, so `always`.
 Fault/timing angle: None.
 Required faults and enabling state: Two reports differing in one identity

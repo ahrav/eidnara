@@ -556,6 +556,17 @@ pub enum ResidualRefused {
     ReanchorRequired {
         changed: &'static str,
     },
+    Settings(LiveSettingsRefused),
+    /// The report's plan is not the pre-registered one.
+    SamplingPlanDiffers {
+        report: SamplingPlan,
+        settings: SamplingPlan,
+    },
+    /// The report names another live provider than the run it is checked as.
+    ProviderDiffers {
+        report: String,
+        expected: String,
+    },
 }
 
 debug_display!(ResidualRefused);
@@ -602,11 +613,33 @@ impl ResidualReport {
         Ok(())
     }
 
-    pub fn validate(&self, calibration: &CalibrationSet) -> Result<(), ResidualRefused> {
+    /// Held to the pre-registration: validated settings, the live provider
+    /// this run was approved for, the settings' plan, and the settings'
+    /// calibration set under the same judge and digest.
+    pub fn validate(
+        &self,
+        settings: &LiveSettings,
+        live_provider: &ProviderProfile,
+    ) -> Result<(), ResidualRefused> {
         self.check_form()?;
-        calibration
-            .validate()
-            .map_err(ResidualRefused::Calibration)?;
+        settings
+            .approve(live_provider)
+            .map_err(ResidualRefused::Settings)?;
+        if self.live_provider != *live_provider {
+            return Err(ResidualRefused::ProviderDiffers {
+                report: self.live_provider.key(),
+                expected: live_provider.key(),
+            });
+        }
+        let (Some(calibration), Some(sampling)) = (&settings.calibration, settings.sampling) else {
+            unreachable!("approve validated the settings");
+        };
+        if self.sampling != sampling {
+            return Err(ResidualRefused::SamplingPlanDiffers {
+                report: self.sampling,
+                settings: sampling,
+            });
+        }
         if calibration.judge != self.judge {
             return Err(ResidualRefused::Calibration(
                 CalibrationRefused::CalibrationJudgeDiffers,
@@ -692,9 +725,10 @@ pub enum LiveSliceRefused {
     InconsistentTask {
         task: String,
     },
-    /// The provider profile is not one of the two approved by the settings.
-    UnapprovedProvider {
-        provider: String,
+    /// The report names another profile than the run it is checked as.
+    ProviderDiffers {
+        report: String,
+        expected: String,
     },
     /// The report's pass^k exponent is not the settings'.
     KDiffers {
@@ -735,17 +769,6 @@ fn summarize(
     Ok((pass_k, indeterminate))
 }
 
-/// Validated settings and one of their two profiles gate every live report.
-fn approve(settings: &LiveSettings, provider: &ProviderProfile) -> Result<(), LiveSliceRefused> {
-    settings.validate().map_err(LiveSliceRefused::Settings)?;
-    if !settings.providers.contains(provider) {
-        return Err(LiveSliceRefused::UnapprovedProvider {
-            provider: provider.key(),
-        });
-    }
-    Ok(())
-}
-
 /// The task ids are unique and exactly the settings' frozen held-out set.
 fn check_task_set<'a>(
     settings: &LiveSettings,
@@ -778,7 +801,9 @@ pub fn live_slice(
     provider: &ProviderProfile,
     tasks: &[LiveTask],
 ) -> Result<LiveSliceReport, LiveSliceRefused> {
-    approve(settings, provider)?;
+    settings
+        .approve(provider)
+        .map_err(LiveSliceRefused::Settings)?;
     if tasks.is_empty() {
         return Err(LiveSliceRefused::NoTasks);
     }
@@ -807,14 +832,27 @@ pub fn live_slice(
 
 impl LiveSliceReport {
     /// A deserialized report is held to the same settings as a constructed
-    /// one: validated, its profile approved, its `k` the settings'.
-    pub fn validate(&self, settings: &LiveSettings) -> Result<(), LiveSliceRefused> {
+    /// one, and to the profile this run was approved for: relabelling to the
+    /// other approved profile refuses.
+    pub fn validate(
+        &self,
+        settings: &LiveSettings,
+        provider: &ProviderProfile,
+    ) -> Result<(), LiveSliceRefused> {
         if self.schema != LIVE_SLICE_SCHEMA {
             return Err(LiveSliceRefused::SchemaMismatch {
                 found: self.schema.clone(),
             });
         }
-        approve(settings, &self.provider)?;
+        settings
+            .approve(provider)
+            .map_err(LiveSliceRefused::Settings)?;
+        if self.provider != *provider {
+            return Err(LiveSliceRefused::ProviderDiffers {
+                report: self.provider.key(),
+                expected: provider.key(),
+            });
+        }
         if self.k != settings.k {
             return Err(LiveSliceRefused::KDiffers {
                 report: self.k,
@@ -876,11 +914,26 @@ pub enum LiveSettingsRefused {
     NoCalibrationSet,
     NoSamplingPlan,
     Calibration(CalibrationRefused),
+    /// The provider profile is not one of the two approved.
+    UnapprovedProvider {
+        provider: String,
+    },
 }
 
 debug_display!(LiveSettingsRefused);
 
 impl LiveSettings {
+    /// Validated settings and one of their two profiles gate every report.
+    pub fn approve(&self, provider: &ProviderProfile) -> Result<(), LiveSettingsRefused> {
+        self.validate()?;
+        if !self.providers.contains(provider) {
+            return Err(LiveSettingsRefused::UnapprovedProvider {
+                provider: provider.key(),
+            });
+        }
+        Ok(())
+    }
+
     pub fn digest(&self) -> String {
         let value = serde_json::to_value(self).expect("settings serialize");
         protocol_digest(LIVE_SETTINGS_DIGEST_PROTOCOL, &value).expect("settings are canonical")
