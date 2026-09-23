@@ -147,13 +147,22 @@ pub enum LogError {
         target: EventId,
     },
     /// `:` separates the parts of a derived ID, so a tag holding one could
-    /// mint one ID for two entities.
+    /// mint one ID for two entities; `#` separates a harness message ID from
+    /// its block index, so a tag holding one would make an ID the harness
+    /// refuses.
     InvalidEntityTag {
         tag: String,
     },
 }
 
 debug_display!(LogError);
+
+/// A correction supersedes its target; a retraction invalidates its target.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Supersession {
+    Correction,
+    Retraction,
+}
 
 impl Payload {
     /// The event this payload points at: a cited message, a rename's
@@ -177,11 +186,13 @@ impl Payload {
         }
     }
 
-    /// The event this payload makes non-current, if it is a correction or a
-    /// retraction.
-    pub fn supersedes(&self) -> Option<&EventId> {
+    /// The event this payload makes non-current and how, if it is a
+    /// correction or a retraction. Every variant is listed so a new
+    /// superseding one cannot hide behind a wildcard.
+    pub fn supersedes(&self) -> Option<(Supersession, &EventId)> {
         match self {
-            Payload::Correction { target, .. } | Payload::Invalidation { target } => Some(target),
+            Payload::Correction { target, .. } => Some((Supersession::Correction, target)),
+            Payload::Invalidation { target } => Some((Supersession::Retraction, target)),
             Payload::Message { .. }
             | Payload::ToolSpan { .. }
             | Payload::Commit { .. }
@@ -258,11 +269,11 @@ impl EventLog {
     /// suffixing the message and call IDs a rendered message carries into the
     /// harness, and following every payload reference and causal edge, so a
     /// history authored apart from another can share a log and a session with
-    /// it without an identity collision. A reference to an event the log does
-    /// not hold is refused rather than left pointing into whatever log this
-    /// one joins.
+    /// it without an identity collision. A payload reference or a causal edge
+    /// naming an event the log does not hold is refused; left in place it
+    /// would resolve against the other history after the join.
     pub fn on_distinct_entities(&self, tag: &str) -> Result<Self, LogError> {
-        if tag.contains(':') {
+        if tag.contains([':', '#']) {
             return Err(LogError::InvalidEntityTag {
                 tag: tag.to_string(),
             });
@@ -300,13 +311,13 @@ impl EventLog {
             .causal_edges
             .iter()
             .map(|edge| {
-                Some(CausalEdge {
-                    from: follow(&edge.from)?,
-                    to: follow(&edge.to)?,
+                let dangling = || LogError::DanglingEdge { edge: edge.clone() };
+                Ok(CausalEdge {
+                    from: follow(&edge.from).ok_or_else(dangling)?,
+                    to: follow(&edge.to).ok_or_else(dangling)?,
                 })
             })
-            .collect::<Option<Vec<_>>>()
-            .expect("validated edges name held events");
+            .collect::<Result<Vec<_>, LogError>>()?;
         Ok(Self::new(events, edges))
     }
 

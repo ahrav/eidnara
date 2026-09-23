@@ -55,8 +55,17 @@ async function transcript(h: RustTestHarness, sessionId: string) {
     return { calls, texts };
 }
 
-async function replayer(path: string): Promise<CassetteOracle> {
+/** Every oracle this file starts; `afterAll` stops the ones a failing assertion left running. */
+const oracles: CassetteOracle[] = [];
+
+async function startOracle(): Promise<CassetteOracle> {
     const oracle = await CassetteOracle.start();
+    oracles.push(oracle);
+    return oracle;
+}
+
+async function replayer(path: string): Promise<CassetteOracle> {
+    const oracle = await startOracle();
     await oracle.open("replay", NAMESPACE, path);
     return oracle;
 }
@@ -112,13 +121,14 @@ describe.skipIf(!rustPrereqs.ok)("agent-loop cassette", () => {
     const driftFile = () => join(h.env.workdir, "drift.md");
 
     afterAll(async () => {
+        for (const oracle of oracles.splice(0)) await oracle.stop();
         await h?.dispose();
         if (dir) rmSync(dir, { recursive: true, force: true });
     });
 
     it("records a tool loop, replays it faithfully, and stops at the first miss", async () => {
         // Record.
-        const recorder = await CassetteOracle.start();
+        const recorder = await startOracle();
         expect(await recorder.open("record", NAMESPACE, cassettePath)).toEqual({ cases: 0 });
         const { sessionId: recordingSession, resultText } = await recordToolLoop(
             h,
@@ -202,7 +212,7 @@ describe.skipIf(!rustPrereqs.ok)("agent-loop cassette", () => {
 
     it("a changed tool result is a ToolResultDrift miss", async () => {
         const path = join(dir, "drift.json");
-        const recorder = await CassetteOracle.start();
+        const recorder = await startOracle();
         await recorder.open("record", NAMESPACE, path);
         const readPrompt = "Read drift.md and summarize in one word.";
         const { resultText } = await recordToolLoop(
@@ -237,7 +247,7 @@ describe.skipIf(!rustPrereqs.ok)("agent-loop cassette", () => {
 
     it("refuses to persist a planted credential and writes no cassette", async () => {
         const path = join(dir, "canary.json");
-        const recorder = await CassetteOracle.start();
+        const recorder = await startOracle();
         await recorder.open("record", NAMESPACE, path);
         h.mock.reset();
         h.mock.useCassette({ oracle: recorder, mode: "record", namespace: NAMESPACE });

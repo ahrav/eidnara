@@ -431,10 +431,15 @@ impl Generator {
             .map_err(WorldError::Replay)
     }
 
-    /// One drawn word, one word only this slot has, and the world's own
-    /// word: a lexical matcher needs two tokens of three characters or more,
-    /// one of them rare, to find a message by its own text, and a message
-    /// carried into another world must not read as one of that world's.
+    /// One drawn word, one word only this slot has within its entity, and the
+    /// world's own word: a lexical matcher needs two tokens of three characters
+    /// or more, one of them rare, to find a message by its own text, and a
+    /// message carried into another world must not read as one of that
+    /// world's. Entities number their slots from zero, so another entity's
+    /// same-index text shares the slot word; a surface that presents one
+    /// session and no commit never meets the collision, and naming the entity
+    /// in the token lengthens every text past the geometry the S0 campaign
+    /// pins.
     fn text(&mut self, slot: &Slot) -> Result<String, WorldError> {
         let word = self.choose(ChoiceKind::TextWord, slot, &WORDS)?;
         Ok(format!(

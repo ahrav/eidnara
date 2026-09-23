@@ -6,7 +6,7 @@ use eval_core::{
 use serde_json::{Value, json};
 
 fn ratio(numerator: i64, denominator: u64) -> Ratio {
-    Ratio::new(numerator, denominator)
+    Ratio::try_new(i128::from(numerator), i128::from(denominator)).unwrap()
 }
 
 fn completed(duration_ms: u64) -> Attempt {
@@ -69,7 +69,7 @@ fn the_frozen_reference_agrees_on_every_censored_case() {
         assert_eq!(&actual, expected, "{id}");
         seen += 1;
     }
-    assert_eq!(seen, 14);
+    assert_eq!(seen, 16);
 }
 
 #[test]
@@ -120,6 +120,16 @@ fn timeouts_stay_in_every_denominator_and_percentiles_carry_their_counts() {
     assert_eq!(
         (percentile(&early, 50).value, percentile(&early, 50).bound),
         (20, PercentileBound::Point)
+    );
+    // A censored attempt below the rank cannot move the order statistic when enough completions
+    // tie at the picked value: however long the censored attempt really ran, the median is 2.
+    let tied_over = LatencySummary::of(&[timed_out(1), completed(2), completed(2)]);
+    assert_eq!(
+        (
+            percentile(&tied_over, 50).value,
+            percentile(&tied_over, 50).bound
+        ),
+        (2, PercentileBound::Point)
     );
     // A censored attempt sorts after a completed one of equal duration, on either input order.
     for tie in [
@@ -200,14 +210,42 @@ fn zero_failures_is_a_bound_never_a_proof() {
     assert_eq!(counter(60, 0).rate().unwrap(), bound(60, ratio(1, 20)));
     // Below three trials the rule would exceed one; a rate is at most one.
     assert_eq!(counter(2, 0).rate().unwrap(), bound(2, Ratio::ONE));
+    // An observed rate carries a bound on the same scale as the zero-failure case, so a gate
+    // never compares a bound in one branch with a point estimate in the other:
+    // (2 * failures + 3) / n envelopes the one-sided 95 percent limit.
     assert_eq!(
         counter(60, 3).rate().unwrap(),
         FailureRate::Observed {
             rate: ratio(1, 20),
+            upper_bound_95: ratio(3, 20),
+            bound_method: BoundMethod::PoissonEnvelope,
             n: 60,
             unit: ClusteringUnit::WorldSeed,
         }
     );
+    assert_eq!(
+        counter(60, 1).rate().unwrap(),
+        FailureRate::Observed {
+            rate: ratio(1, 60),
+            upper_bound_95: ratio(1, 12),
+            bound_method: BoundMethod::PoissonEnvelope,
+            n: 60,
+            unit: ClusteringUnit::WorldSeed,
+        }
+    );
+    // The envelope caps at one like the rule of three does.
+    assert_eq!(counter(2, 1).rate().unwrap().upper_bound_95(), Ratio::ONE);
+    // Strictly worse evidence never reads as a smaller bound: one failure in sixty must not
+    // pass a 1/30 gate that zero failures in sixty fails.
+    let gate = ratio(1, 30);
+    let bounds: Vec<Ratio> = (0..=5)
+        .map(|failures| counter(60, failures).rate().unwrap().upper_bound_95())
+        .collect();
+    assert!(
+        bounds.windows(2).all(|pair| pair[0] < pair[1]),
+        "{bounds:?}"
+    );
+    assert!(bounds[0] > gate && bounds[1] > gate);
     assert_eq!(
         counter(0, 0).rate().err(),
         Some(StatisticsError::MalformedCounter { n: 0, failures: 0 })
@@ -224,6 +262,13 @@ fn zero_failures_is_a_bound_never_a_proof() {
         "a bound never renders as a rate"
     );
     assert!(rendered.get("proven").is_none());
+    let observed = serde_json::to_value(counter(60, 1).rate().unwrap()).unwrap();
+    assert_eq!(observed["evidence_kind"], json!("observed"));
+    assert_eq!(observed["bound_method"], json!("poisson_envelope"));
+    assert_eq!(
+        observed["upper_bound_95"],
+        json!({"numerator": 1, "denominator": 12})
+    );
 }
 
 #[test]
@@ -324,8 +369,38 @@ fn pass_k_bounds_resolve_censoring_both_ways_and_are_indeterminate_when_all_are_
     );
     // A binomial past the safe range refuses rather than wraps; one that reduces stays exact.
     assert_eq!(
-        pass_k(&[Pass; 130], 65).err(),
+        pass_k(&[Pass; 200], 100).err(),
         Some(StatisticsError::RationalOverflow)
+    );
+    // C(130,129)/C(130,129) is 1; the central coefficients on the way there are not visited.
+    assert_eq!(
+        pass_k(&[Pass; 130], 129).unwrap().pass_k,
+        PassKBounds::Bounds {
+            censored_as_fail: Ratio::ONE,
+            censored_excluded: Ratio::ONE,
+        }
+    );
+    // C(125,61)/C(126,61) = 65/126: the coefficients fit, so the walk must not overflow on the
+    // way to them.
+    let mut one_fail = vec![Pass; 126];
+    one_fail[0] = Fail;
+    assert_eq!(
+        pass_k(&one_fail, 61).unwrap().pass_k,
+        PassKBounds::Bounds {
+            censored_as_fail: ratio(65, 126),
+            censored_excluded: ratio(65, 126),
+        }
+    );
+    // C(131,65) sits between i128::MAX and u128::MAX; the ratio reduces to 66/131 before it is
+    // narrowed.
+    let mut one_fail = vec![Pass; 131];
+    one_fail[0] = Fail;
+    assert_eq!(
+        pass_k(&one_fail, 65).unwrap().pass_k,
+        PassKBounds::Bounds {
+            censored_as_fail: ratio(66, 131),
+            censored_excluded: ratio(66, 131),
+        }
     );
     let mut nearly = vec![Pass; 100];
     nearly[0] = Fail;

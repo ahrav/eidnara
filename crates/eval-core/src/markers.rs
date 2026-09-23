@@ -107,16 +107,16 @@ pub const MARKERS: [Marker; 37] = [
         test: "crates/eval-core/tests/pairs.rs::the_recency_baseline_delivers_a_positive_control_or_is_vacuous",
     },
     Marker {
-        name: "mtr_injection_side_effect_fired",
+        name: "mtr_injection_mediation_boundary_observed",
         test: "crates/eval-core/tests/injection.rs::obedience_is_the_observed_side_effect_and_echo_is_only_exposure",
     },
     Marker {
-        name: "mtr_injection_canary_echoed_without_effect",
+        name: "mtr_injection_model_output_observed",
         test: "crates/eval-core/tests/injection.rs::obedience_is_the_observed_side_effect_and_echo_is_only_exposure",
     },
     Marker {
         name: "mtr_second_session_read_memory",
-        test: "crates/eval-core/tests/injection.rs::obedience_is_the_observed_side_effect_and_echo_is_only_exposure",
+        test: "crates/eval-core/tests/injection.rs::a_canary_written_into_memory_surfaces_in_a_later_session_that_read_it",
     },
     Marker {
         name: "flt_quiescence_receipt_all_zero",
@@ -156,7 +156,7 @@ pub const MARKERS: [Marker; 37] = [
     },
     Marker {
         name: "wm_bulk_scaffold_presented_as_aged",
-        test: "crates/eval-core/tests/manifest.rs::a_prefix_then_generate_run_cannot_claim_a_bulk_construction",
+        test: "crates/eval-core/tests/manifest.rs::a_prefix_then_generate_run_is_replay_built_only",
     },
 ];
 
