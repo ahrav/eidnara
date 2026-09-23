@@ -1328,14 +1328,28 @@ job under `EIDNARA_EVAL_S0_BUDGET_MS`):
   (`flt-lost-ack-expected-is-admissible-set`; marker
   `flt_lost_reply_unknown_until_readback`): a lost local-commit reply and a
   lost acknowledgement reply are `unknown` until the closed files are read
-  back by identity before reopen; each reads back `applied`, since the
-  production reconciliation committed; every identity satisfies
+  back by identity before reopen, in a recovery that follows each reply-loss
+  episode before any later catch-up; each reads back `applied`, the state the
+  seam's contract fixed before the read-back; every identity satisfies
   `acknowledged <= observed <= attempted` with one attempt.
 - `an_external_lock_holder_blocks_then_releases` (marker
   `flt_external_lock_holder_released`): `BEGIN IMMEDIATE` on the projection
   blocks the local commit; release lets the next episode reach the target.
 - `an_unapproved_profile_refuses_before_any_store_opens`: no approval, no
   campaign, nothing published.
+- `a_lost_reply_episode_that_does_not_reach_its_target_is_refused`: a
+  reply-loss episode that ends anywhere but `ReachedTarget` refuses, with no
+  receipt and no effect recorded.
+- `every_window_of_a_lost_reply_episode_loses_its_reply`: an episode that
+  crosses two windows under a reply-loss fault leaves both windows' effects
+  `unknown`.
+- `a_lost_reply_without_a_matching_fixed_expectation_refuses_the_run`: a lost
+  reply with no fixed expectation, an expectation for an effect never lost, an
+  unread effect, and a read-back that differs from its expectation each refuse.
+- `a_read_back_after_later_catch_up_is_refused_as_masked`: a drain between a
+  lost commit reply and its read-back moves the checkpoint past where the
+  faulted episode left it, and the read-back refuses as `ReadBackMasked` with
+  the effect still `unknown`.
 
 Aging drive (`crates/daemon/tests/eval_aging.rs`, `--all-features`):
 

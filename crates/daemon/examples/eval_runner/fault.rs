@@ -1,7 +1,7 @@
 //! Suite C fault campaign: contract-faithful fault episodes on the aging drive,
 //! judged by `eval_core::fault`.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -20,11 +20,11 @@ use super::aging::{
     self, ManifestInputs, Plan, Stores, kernel_file, live, read_only, search_file, suite_c_manifest,
 };
 use super::campaign::{Charges, identity, prepare_publish, publish_file};
+use super::support::embedding_fixtures::CONSUMER;
 
 pub const REPORT_FILE: &str = "suite-c-fault-report.json";
 pub const MANIFEST_FILE: &str = "manifest.json";
 pub const SIMULATOR_VERSION: &str = "eval-fault-shell/v1";
-const CONSUMER: &str = "search";
 
 pub type Config = aging::Config;
 
@@ -43,6 +43,14 @@ pub enum RunError {
         episode: String,
         expected: String,
         observed: String,
+    },
+    #[error(
+        "read-back of {identity}: checkpoint {checkpoint} is past the faulted episode's {left_at}"
+    )]
+    ReadBackMasked {
+        identity: String,
+        left_at: i64,
+        checkpoint: i64,
     },
     #[error("publish {}: {kind}", path.display())]
     Publish {
@@ -94,6 +102,7 @@ pub struct Witness {
     pub checkpoints: BTreeMap<Cut, u64>,
     pub safety_checks: u64,
     pub coverage: Coverage,
+    pub left_at: BTreeMap<String, i64>,
 }
 
 impl Witness {
@@ -110,6 +119,7 @@ impl Witness {
             checkpoints: BTreeMap::new(),
             safety_checks: 0,
             coverage: Coverage::default(),
+            left_at: BTreeMap::new(),
         }
     }
 
@@ -199,8 +209,34 @@ fn cut_of(event: &EpisodeEvent) -> &'static str {
     }
 }
 
-/// A catch-up episode under `fault`; the effect whose reply the fault loses is
-/// attempted when the drive requests it and left `Unknown` when the episode ends.
+struct Seam {
+    production: EpisodeFault,
+    operation: &'static str,
+    contract: &'static str,
+    fixed: EffectState,
+}
+
+fn seam(fault: SearchEpisodeFault) -> Seam {
+    match fault {
+        SearchEpisodeFault::LoseLocalCommitReply => Seam {
+            production: EpisodeFault::LoseLocalCommitReply,
+            operation: "local_commit",
+            contract: "search_catchup::EpisodeFault::LoseLocalCommitReply: the batch commits, then its reply arrives as a store failure whose effect is unknown",
+            fixed: EffectState::Applied,
+        },
+        SearchEpisodeFault::LoseAcknowledgementReply => Seam {
+            production: EpisodeFault::LoseAcknowledgementReply,
+            operation: "acknowledge",
+            contract: "search_catchup::EpisodeFault::LoseAcknowledgementReply: the acknowledgement commits, then its reply arrives as a kernel I/O failure",
+            fixed: EffectState::Applied,
+        },
+        SearchEpisodeFault::LoseAcknowledgementReplyAndCancel
+        | SearchEpisodeFault::AcknowledgeInsideLocalTransaction => {
+            unreachable!("the campaign declares only reply-loss episodes")
+        }
+    }
+}
+
 pub fn lost_reply_episode(
     stores: &mut Stores,
     witness: &mut Witness,
@@ -208,23 +244,29 @@ pub fn lost_reply_episode(
     step: u32,
     now: i64,
     fault: SearchEpisodeFault,
-) -> Result<EpisodeReport, RunError> {
-    let (production, operation, contract) = match fault {
-        SearchEpisodeFault::LoseLocalCommitReply => (
-            EpisodeFault::LoseLocalCommitReply,
-            "local_commit",
-            "search_catchup::EpisodeFault::LoseLocalCommitReply: the batch commits, then its reply arrives as a store failure whose effect is unknown",
-        ),
-        SearchEpisodeFault::LoseAcknowledgementReply => (
-            EpisodeFault::LoseAcknowledgementReply,
-            "acknowledge",
-            "search_catchup::EpisodeFault::LoseAcknowledgementReply: the acknowledgement commits, then its reply arrives as a kernel I/O failure",
-        ),
-        SearchEpisodeFault::LoseAcknowledgementReplyAndCancel
-        | SearchEpisodeFault::AcknowledgeInsideLocalTransaction => {
-            unreachable!("the campaign declares only reply-loss episodes")
-        }
-    };
+) -> Result<BTreeMap<String, EffectState>, RunError> {
+    declare_lost_reply_episode(witness, id, step, fault);
+    stores.publish_outbox_now();
+    let mut events = Vec::new();
+    let report = stores.episode(now, Some(seam(fault).production), &mut |event| {
+        events.push(event)
+    });
+    let fixed = receipt_lost_reply_episode(witness, id, fault, &report, &events)?;
+    witness.safety_check(stores);
+    Ok(fixed)
+}
+
+pub fn declare_lost_reply_episode(
+    witness: &mut Witness,
+    id: &str,
+    step: u32,
+    fault: SearchEpisodeFault,
+) {
+    let Seam {
+        operation,
+        contract,
+        ..
+    } = seam(fault);
     witness.declare(episode(
         id,
         step,
@@ -233,37 +275,55 @@ pub fn lost_reply_episode(
         FaultAction::SearchEpisode { fault },
         contract,
     ));
-    stores.publish_outbox_now();
-    let mut events = Vec::new();
-    let report = stores.episode(now, Some(production), &mut |event| events.push(event));
-    let mut lost = None;
-    for event in &events {
+}
+
+pub fn receipt_lost_reply_episode(
+    witness: &mut Witness,
+    id: &str,
+    fault: SearchEpisodeFault,
+    report: &EpisodeReport,
+    events: &[EpisodeEvent],
+) -> Result<BTreeMap<String, EffectState>, RunError> {
+    if report.end != EpisodeEnd::ReachedTarget {
+        return Err(unexpected(
+            id,
+            "ReachedTarget after reconciling the lost reply",
+            &report.end,
+        ));
+    }
+    let mut lost = Vec::new();
+    for event in events {
         if EVENT_CUTS.contains(&cut_of(event)) {
             witness.receipt(cut_of(event));
         }
         match (fault, event) {
             (SearchEpisodeFault::LoseLocalCommitReply, EpisodeEvent::LocalStaged { through }) => {
-                let identity = format!("search_commit:{through}");
-                witness.effects.attempt(&identity);
-                lost = Some(identity);
+                lost.push(format!("search_commit:{through}"));
             }
             (
                 SearchEpisodeFault::LoseAcknowledgementReply,
                 EpisodeEvent::AcknowledgementRequested { through },
             ) => {
-                let identity = format!("search_ack:{through}");
-                witness.effects.attempt(&identity);
-                lost = Some(identity);
+                lost.push(format!("search_ack:{through}"));
             }
             _ => {}
         }
     }
-    let identity =
-        lost.ok_or_else(|| unexpected(id, "the faulted effect was requested", &events))?;
-    witness.effects.lose_reply(&identity).unwrap();
+    if lost.is_empty() {
+        return Err(unexpected(id, "the faulted effect was requested", events));
+    }
+    let state = seam(fault).fixed;
+    let mut fixed = BTreeMap::new();
+    for identity in lost {
+        witness.effects.attempt(&identity);
+        witness.effects.lose_reply(&identity).unwrap();
+        witness
+            .left_at
+            .insert(identity.clone(), report.acknowledged_through);
+        fixed.insert(identity, state);
+    }
     witness.receipt(id);
-    witness.safety_check(stores);
-    Ok(report)
+    Ok(fixed)
 }
 
 /// An external `BEGIN IMMEDIATE` holder on the projection blocks the local
@@ -313,38 +373,45 @@ pub fn hold_write_lock(path: &Path) -> Connection {
 }
 
 /// Reads every lost reply back by its identity from the closed files.
-pub fn read_back(root: &Path, witness: &mut Witness) {
-    let search = read_only(&search_file(root));
-    let kernel = read_only(&kernel_file(root));
+/// Read-back refuses checkpoints past the recorded fault boundary because monotonic checkpoints cannot prove the faulted effect.
+pub fn read_back(root: &Path, witness: &mut Witness) -> Result<(), RunError> {
+    let projection: i64 = read_only(&search_file(root))
+        .query_row(
+            "SELECT checkpoint_commit_seq FROM projection_checkpoint",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let kernel: i64 = read_only(&kernel_file(root))
+        .query_row(
+            "SELECT checkpoint_commit_seq FROM outbox_consumers WHERE consumer_id=?1",
+            [CONSUMER],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let mut states = Vec::new();
     for identity in witness.effects.unknown() {
         let (kind, key) = identity.split_once(':').unwrap();
-        let state = match kind {
-            "search_commit" => {
-                let through: i64 = key.parse().unwrap();
-                let checkpoint: i64 = search
-                    .query_row(
-                        "SELECT checkpoint_commit_seq FROM projection_checkpoint",
-                        [],
-                        |row| row.get(0),
-                    )
-                    .unwrap();
-                applied(checkpoint >= through)
-            }
-            "search_ack" => {
-                let through: i64 = key.parse().unwrap();
-                let checkpoint: i64 = kernel
-                    .query_row(
-                        "SELECT checkpoint_commit_seq FROM outbox_consumers WHERE consumer_id=?1",
-                        [CONSUMER],
-                        |row| row.get(0),
-                    )
-                    .unwrap();
-                applied(checkpoint >= through)
-            }
+        let checkpoint = match kind {
+            "search_commit" => projection,
+            "search_ack" => kernel,
             other => panic!("no read-back for effect kind {other}"),
         };
+        let left_at = witness.left_at[&identity];
+        if checkpoint > left_at {
+            return Err(RunError::ReadBackMasked {
+                identity,
+                left_at,
+                checkpoint,
+            });
+        }
+        let through: i64 = key.parse().unwrap();
+        states.push((identity, applied(checkpoint >= through)));
+    }
+    for (identity, state) in states {
         witness.effects.read_back(&identity, state).unwrap();
     }
+    Ok(())
 }
 
 fn applied(is: bool) -> EffectState {
@@ -355,8 +422,8 @@ fn applied(is: bool) -> EffectState {
     }
 }
 
-/// The campaign: a healthy prefix, the fault phase, recovery by reopen with
-/// read-back, and the rest of the history.
+/// Each lost reply is recovered before any later catch-up can advance the
+/// checkpoint its read-back reads.
 pub fn campaign(
     plan: &Plan,
     charges: &mut Charges,
@@ -373,60 +440,96 @@ pub fn campaign(
         "the fault phase needs six steps after the checkpoint"
     );
     let step = |i: usize| (k + i) as u32;
+    let mut expected = BTreeMap::new();
 
     stores.apply(&steps[0]);
-    lost_reply_episode(
-        &mut stores,
-        witness,
-        "search-commit-reply-lost",
-        step(0),
-        steps[0].now_ms,
-        SearchEpisodeFault::LoseLocalCommitReply,
-    )?;
-    stores.drain(steps[0].now_ms);
-
-    stores.apply(&steps[1]);
-    lost_reply_episode(
-        &mut stores,
-        witness,
-        "search-ack-reply-lost",
-        step(1),
-        steps[1].now_ms,
-        SearchEpisodeFault::LoseAcknowledgementReply,
-    )?;
-    stores.drain(steps[1].now_ms);
-
-    stores.apply(&steps[2]);
     lock_holder_episode(
         &mut stores,
         witness,
         "projection-lock-holder",
-        step(2),
-        steps[2].now_ms,
+        step(0),
+        steps[0].now_ms,
     )?;
-    stores.drain(steps[2].now_ms);
+    stores.drain(steps[0].now_ms);
 
-    for planned in &steps[3..5] {
+    for planned in &steps[1..3] {
         stores.apply(planned);
         stores.drain(planned.now_ms);
     }
-    witness.checkpoint(Cut::AfterFaultPhase);
 
+    stores.apply(&steps[3]);
+    expected.extend(lost_reply_episode(
+        &mut stores,
+        witness,
+        "search-commit-reply-lost",
+        step(3),
+        steps[3].now_ms,
+        SearchEpisodeFault::LoseLocalCommitReply,
+    )?);
+    let mut stores = recover(stores, witness, steps[4].now_ms)?;
+
+    stores.apply(&steps[4]);
+    expected.extend(lost_reply_episode(
+        &mut stores,
+        witness,
+        "search-ack-reply-lost",
+        step(4),
+        steps[4].now_ms,
+        SearchEpisodeFault::LoseAcknowledgementReply,
+    )?);
+    witness.checkpoint(Cut::AfterFaultPhase);
+    let mut stores = recover(stores, witness, steps[5].now_ms)?;
+
+    live(&mut stores, &steps[5..]);
+    witness.checkpoint(Cut::EndOfRun);
+    drop(stores.close());
+    charges.vacate(root)?;
+    Ok(expected)
+}
+
+fn recover(stores: Stores, witness: &mut Witness, now: i64) -> Result<Stores, RunError> {
     let closed = stores.close();
-    read_back(closed.root(), witness);
-    let expected: BTreeMap<String, EffectState> = BTreeMap::new();
-    let mut stores = closed.reopen(steps[5].now_ms);
+    read_back(closed.root(), witness)?;
+    let stores = closed.reopen(now);
     witness.checkpoint(Cut::AfterRecovery);
     witness
         .coverage
         .record("flt_lost_reply_unknown_until_readback")
         .unwrap();
     witness.safety_check(&stores);
-    live(&mut stores, &steps[5..]);
-    witness.checkpoint(Cut::EndOfRun);
-    drop(stores.close());
-    charges.vacate(root)?;
-    Ok(expected)
+    Ok(stores)
+}
+
+pub fn check_expectations(
+    expected: &BTreeMap<String, EffectState>,
+    effects: &EffectLedger,
+) -> Result<(), RunError> {
+    let lost: BTreeSet<&String> = effects
+        .effects
+        .iter()
+        .filter(|(_, effect)| effect.reply_lost)
+        .map(|(identity, _)| identity)
+        .collect();
+    let fixed: BTreeSet<&String> = expected.keys().collect();
+    if lost != fixed {
+        return Err(unexpected(
+            "campaign",
+            &format!("fixed expectations for exactly {lost:?}"),
+            fixed,
+        ));
+    }
+    for (identity, state) in expected {
+        let effect = &effects.effects[identity];
+        if !effect.read_back || effect.expected != (eval_core::Expected::Exactly { state: *state })
+        {
+            return Err(unexpected(
+                identity,
+                &format!("read back {state:?}"),
+                &effect.expected,
+            ));
+        }
+    }
+    Ok(())
 }
 
 pub fn run(config: &Config) -> Result<Run, RunError> {
@@ -450,16 +553,7 @@ pub fn run(config: &Config) -> Result<Run, RunError> {
     let mut charges = Charges::new(profile.envelope.clone());
     let mut witness = Witness::new();
     let expected = campaign(&plan, &mut charges, &mut witness)?;
-    for (identity, state) in &expected {
-        let effect = &witness.effects.effects[identity];
-        if effect.expected != (eval_core::Expected::Exactly { state: *state }) {
-            return Err(unexpected(
-                identity,
-                &format!("{state:?}"),
-                &effect.expected,
-            ));
-        }
-    }
+    check_expectations(&expected, &witness.effects)?;
     witness.cuts.verdict().map_err(FaultReportError::Coverage)?;
     witness
         .coverage

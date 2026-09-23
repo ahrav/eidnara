@@ -1833,39 +1833,50 @@ copied two stores.
 ## Fault shell
 
 `crates/daemon/examples/eval_runner/fault.rs` is the Suite C fault campaign.
-It drives the aging shell's `Stores` through a healthy prefix, a fault phase,
-a recovery by reopen with read-back, and the rest of the history, and records
-every observation in a `Witness` (episodes, cut coverage, effect ledger,
-expected refusals, oracle checkpoints, safety checks) that `FaultReport`
-judges. Every episode is declared before it runs, with the seam's own contract
-sentence, and receipted by what the runner observed, never by the fault it
-meant to inject.
+It drives the aging shell's `Stores` through a healthy prefix, a fault phase
+with a recovery by reopen and read-back after each lost reply, and the rest of
+the history, and records every observation in a `Witness` (episodes, cut
+coverage, effect ledger, expected refusals, oracle checkpoints, safety checks)
+that `FaultReport` judges. Every episode is declared before it runs, with the
+seam's own contract sentence, and receipted by what the runner observed, never
+by the fault it meant to inject.
 
-The fault phase on one root: a catch-up episode under `LoseLocalCommitReply`
-and one under `LoseAcknowledgementReply` (the effect `search_commit:<through>`
-or `search_ack:<through>` is attempted when the drive's observer sees
-`LocalStaged` or `AcknowledgementRequested` and left `Unknown` when the
-episode ends; the observer events `local_staged`, `local_released`,
-`acknowledgement_requested`, and `acknowledged` are the receipts), then an
-external `BEGIN IMMEDIATE` holder on the projection, whose episode ends
-`Blocked(LocalCommitUnresolved)` and whose release lets the next episode
-reach the target. The aging shell gained the seams this needs: `Stores`
-exposes its stores, `episode` (one catch-up episode, under one injected fault
-when asked), `catch_up` (outbox and episodes to the tip, the embedding lane
-left alone), and `Closed::reopen` (the stores reopened in place, as a restart
-would, with the projection rebuilt at the tip); `Closed::copy` borrows so a
-closed root can be copied and then reopened.
+The fault phase on one root: an external `BEGIN IMMEDIATE` holder on the
+projection, whose episode ends `Blocked(LocalCommitUnresolved)` and whose
+release lets the next episode reach the target; two healthy steps; then a
+catch-up episode under `LoseLocalCommitReply` and one under
+`LoseAcknowledgementReply`. The production drive reconciles a lost reply and
+carries on, so a reply-loss episode must end `ReachedTarget`; any other end is
+a failed reconciliation and refuses the run. The fault stays armed for the
+whole episode, so every window's effect (`search_commit:<through>` or
+`search_ack:<through>`) is attempted when the drive's observer sees
+`LocalStaged` or `AcknowledgementRequested` and left `Unknown` when the episode
+ends, and the seam's contract fixes `applied` as its expected state before any
+read-back. The observer events `local_staged`, `local_released`,
+`acknowledgement_requested`, and `acknowledged` are the receipts. The aging
+shell gained the seams this needs: `Stores` exposes its stores, `episode` (one
+catch-up episode, under one injected fault when asked), `catch_up` (outbox and
+episodes to the tip, the embedding lane left alone), and `Closed::reopen` (the
+stores reopened in place, as a restart would, with the projection rebuilt at
+the tip); `Closed::copy` borrows so a closed root can be copied and then
+reopened.
 
-Recovery closes the stores, reads every lost reply back by its identity from
-the closed files (`projection_checkpoint.checkpoint_commit_seq` for a local
-commit, `outbox_consumers.checkpoint_commit_seq` for an acknowledgement), and
-only then reopens; the run refuses if an expectation the campaign fixed
-differs. The rest of the history then runs on the reopened stores.
-`AtQuiescence`, `AfterFaultPhase`, `AfterRecovery`, and `EndOfRun` are
-receipted where the runner reached them. A safety check runs after every
-episode while its fault is armed: the projection connection verifies, no
-descriptor claims a commit past the tip or an invalidation before its
-creation, and the projection never runs ahead of the kernel.
+Each reply-loss episode is followed at once by a recovery: close the stores,
+read every lost reply back by its identity from the closed files
+(`projection_checkpoint.checkpoint_commit_seq` for a local commit,
+`outbox_consumers.checkpoint_commit_seq` for an acknowledgement), and only then
+reopen. Both checkpoints only advance, so any catch-up between the episode and
+its read-back would make every read-back `applied`; the runner records where
+the faulted episode left the checkpoint and refuses a read-back that finds it
+further on (`ReadBackMasked`), leaving the ledger untouched. Before publishing,
+the run refuses unless every lost reply has exactly one fixed expectation and
+its read-back matches it. The rest of the history then runs on the reopened
+stores. `AtQuiescence`, `AfterFaultPhase`, `AfterRecovery` (reached twice), and
+`EndOfRun` are receipted where the runner reached them. A safety check runs
+after every episode while its fault is armed and after every reopen: the
+projection connection verifies, no descriptor claims a commit past the tip or
+an invalidation before its creation, and the projection never runs ahead of
+the kernel.
 
 Not in this shell: the CAS artifact faults, the publication faults, quiescent
 corruption, R11, R24, a process kill at a named cut, a held publication

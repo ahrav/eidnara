@@ -12,14 +12,19 @@ mod campaign;
 #[allow(dead_code)]
 mod fault;
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
+use daemon::search_catchup::{Blocked, EpisodeEnd, EpisodeEvent, EpisodeReport};
 use eval_core::{
-    Approval, Coverage, Cut, CutOutcome, EffectOutcome, ExecutionMode, Expected, FaultReport,
-    MARKERS, ProfileError, Scale, parse_fault_report, parse_manifest,
+    Approval, Coverage, Cut, CutOutcome, EffectLedger, EffectOutcome, EffectState, ExecutionMode,
+    Expected, FaultReport, MARKERS, ProfileError, Scale, SearchEpisodeFault, parse_fault_report,
+    parse_manifest,
 };
-use fault::{Config, MANIFEST_FILE, REPORT_FILE, Run, RunError};
+use fault::{
+    Config, MANIFEST_FILE, REPORT_FILE, Run, RunError, Witness, check_expectations,
+    declare_lost_reply_episode, lost_reply_episode, read_back, receipt_lost_reply_episode,
+};
 
 const MESSAGES: u32 = 40;
 const SUITE: &str = "crates/daemon/tests/eval_fault.rs::";
@@ -276,4 +281,126 @@ fn fault_markers_each_name_a_scenario_here() {
         );
     }
     assert_eq!(mine.len(), 10);
+}
+
+fn reached(through: i64) -> EpisodeReport {
+    EpisodeReport {
+        target: through,
+        acknowledged_through: through,
+        batches_applied: 1,
+        commits_consumed: 1,
+        end: EpisodeEnd::ReachedTarget,
+    }
+}
+
+fn window(through: i64) -> [EpisodeEvent; 4] {
+    [
+        EpisodeEvent::LocalStaged { through },
+        EpisodeEvent::LocalReleased { through },
+        EpisodeEvent::AcknowledgementRequested { through },
+        EpisodeEvent::Acknowledged { through },
+    ]
+}
+
+const REPLY_LOSS: [(SearchEpisodeFault, &str); 2] = [
+    (SearchEpisodeFault::LoseLocalCommitReply, "search_commit"),
+    (SearchEpisodeFault::LoseAcknowledgementReply, "search_ack"),
+];
+
+#[test]
+fn a_lost_reply_episode_that_does_not_reach_its_target_is_refused() {
+    for (fault, _) in REPLY_LOSS {
+        let mut witness = Witness::new();
+        declare_lost_reply_episode(&mut witness, "lost", 7, fault);
+        let report = EpisodeReport {
+            end: EpisodeEnd::Blocked(Blocked::LocalCommitUnresolved),
+            acknowledged_through: 4,
+            ..reached(9)
+        };
+        let error = receipt_lost_reply_episode(&mut witness, "lost", fault, &report, &window(9))
+            .unwrap_err();
+        assert!(matches!(error, RunError::Unexpected { .. }), "{error}");
+        assert!(!witness.cuts.receipted.contains_key("lost"), "{fault:?}");
+        assert!(witness.effects.effects.is_empty(), "{fault:?}");
+    }
+}
+
+#[test]
+fn every_window_of_a_lost_reply_episode_loses_its_reply() {
+    for (fault, kind) in REPLY_LOSS {
+        let mut witness = Witness::new();
+        declare_lost_reply_episode(&mut witness, "lost", 7, fault);
+        let events: Vec<EpisodeEvent> = window(5).into_iter().chain(window(9)).collect();
+        receipt_lost_reply_episode(&mut witness, "lost", fault, &reached(9), &events).unwrap();
+        assert_eq!(
+            witness.effects.unknown(),
+            [format!("{kind}:5"), format!("{kind}:9")]
+                .into_iter()
+                .collect(),
+            "{fault:?}"
+        );
+        for effect in witness.effects.effects.values() {
+            assert!(effect.reply_lost && effect.attempted == 1, "{effect:?}");
+        }
+    }
+}
+
+#[test]
+fn a_lost_reply_without_a_matching_fixed_expectation_refuses_the_run() {
+    let identity = "search_commit:9";
+    let mut effects = EffectLedger::default();
+    effects.attempt(identity);
+    effects.lose_reply(identity).unwrap();
+    let fixed = BTreeMap::from([(identity.to_string(), EffectState::Applied)]);
+    assert!(
+        check_expectations(&fixed, &effects).is_err(),
+        "not read back"
+    );
+    effects
+        .read_back(identity, EffectState::NotApplied)
+        .unwrap();
+    assert!(
+        check_expectations(&BTreeMap::new(), &effects).is_err(),
+        "a lost reply the campaign fixed no expectation for"
+    );
+    assert!(
+        check_expectations(&fixed, &effects).is_err(),
+        "read back not applied"
+    );
+    effects.read_back(identity, EffectState::Applied).unwrap();
+    check_expectations(&fixed, &effects).unwrap();
+    let stray = BTreeMap::from([("search_ack:9".to_string(), EffectState::Applied)]);
+    assert!(
+        check_expectations(&stray, &effects).is_err(),
+        "an expectation for an effect the campaign never lost"
+    );
+}
+
+#[test]
+fn a_read_back_after_later_catch_up_is_refused_as_masked() {
+    let plan = aging::plan(MESSAGES).unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let mut stores = aging::Stores::open(root.path(), plan.rendering.clone());
+    aging::live(&mut stores, &plan.steps[..3]);
+    let mut witness = Witness::new();
+    stores.apply(&plan.steps[3]);
+    lost_reply_episode(
+        &mut stores,
+        &mut witness,
+        "lost",
+        3,
+        plan.steps[3].now_ms,
+        SearchEpisodeFault::LoseLocalCommitReply,
+    )
+    .unwrap();
+    stores.apply(&plan.steps[4]);
+    stores.drain(plan.steps[4].now_ms);
+    let closed = stores.close();
+    let error = read_back(closed.root(), &mut witness).unwrap_err();
+    assert!(matches!(error, RunError::ReadBackMasked { .. }), "{error}");
+    assert_eq!(
+        witness.effects.unknown().len(),
+        1,
+        "a masked read-back resolves nothing"
+    );
 }
