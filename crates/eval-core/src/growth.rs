@@ -4,7 +4,6 @@
 //! the isolation two concurrent campaigns must keep.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::Path;
 
 use context_core::canonical_json::protocol_digest;
 use serde::{Deserialize, Serialize};
@@ -498,7 +497,7 @@ pub fn isolated(a: &CampaignResources, b: &CampaignResources) -> Result<(), Isol
         b.roots
             .iter()
             .chain(&b.publish_dirs)
-            .any(|q| Path::new(p).starts_with(q) || Path::new(q).starts_with(p))
+            .any(|q| under(p, q) || under(q, p))
     };
     if let Some(path) = a.roots.iter().find(|p| overlaps(p)) {
         return Err(IsolationRefused::SharedRoot { path: path.clone() });
@@ -519,6 +518,14 @@ pub fn isolated(a: &CampaignResources, b: &CampaignResources) -> Result<(), Isol
         return Err(IsolationRefused::SharedPort { port: *port });
     }
     Ok(())
+}
+
+/// `path` is `dir` or lies inside it, by `/`-separated components as given.
+fn under(path: &str, dir: &str) -> bool {
+    path == dir
+        || path
+            .strip_prefix(dir)
+            .is_some_and(|rest| rest.starts_with('/'))
 }
 
 pub fn digests_match_serial(
