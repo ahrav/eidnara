@@ -7,11 +7,15 @@ subsystem with no production caller, so they live here as one part with
 cross-links from the stage catalogs rather than inside those catalogs, where
 they would distort reachability summaries.
 
-Records enter this directory when their checks are re-verified at the
-then-current HEAD, in the METHOD field order from [`../METHOD.md`](../METHOD.md).
-Until then, this file lists the executed checks the Phase 0 regression net,
-the Phase 1 world model, the Phase 2 stage ledger, the Phase 3 cassette, and
-the Phase 4 checkpoints provide, so a reader can find them by test name.
+Records enter [`catalog.md`](catalog.md) when their checks are re-verified at
+the then-current HEAD, in the METHOD field order from
+[`../METHOD.md`](../METHOD.md), with one evidence file per record under
+`evidence/`; `crates/eval-core/tests/method_records.rs` reads the catalog and
+refuses a record out of order, outside the closed check semantics, citing a
+test that does not exist, or missing its evidence. This file lists the
+executed checks the Phase 0 regression net, the Phase 1 world model, the
+Phase 2 stage ledger, the Phase 3 cassette, the Phase 4 checkpoints, and the
+Phase 5 shrinker provide, so a reader can find them by test name.
 
 ## Phase 0 executed checks
 
@@ -1547,6 +1551,18 @@ bound because it finishes inside the daemon suite's wall clock):
   differs, since it copied another store; a missing flag is refused before
   anything runs.
 
+## Phase 5 executed checks: shrinking and witness packages
+
+The METHOD-ordered records for these checks are in [`catalog.md`](catalog.md).
+
+- `classify_keeps_unknown_unknown_for_every_reason`, `an_unknown_replay_is_kept_and_never_becomes_not_reproduced`, `replay_effects_are_bounded_and_a_premature_verdict_is_refused` (`crates/eval-core/tests/shrink.rs`; `flt-shrinker-unknown-never-not-reproduced`). Every `UnknownReason` classifies `Unknown`; an element whose deletion never answered stays; the ledger refuses the effect at the bound, refuses a verdict on an outstanding key, keeps the key across a retry, and resolves a cancellation to `Unknown`.
+- `shrink_preserves_the_predicate_and_rejects_slipped_candidates`, `fault_episodes_are_tried_before_events`, `the_final_pass_deletes_an_episode_that_events_made_deletable`, `an_exhausted_replay_budget_stops_the_pass_and_keeps_the_last_reproduced_scenario`, `an_original_that_does_not_reproduce_is_refused`, `the_shrinker_invariants_hold_under_arbitrary_replay_answers` (`flt-shrink-preserves-precise-failure-predicate`). Six commits remain because one fewer slips the class; every slipped candidate observed the other class and none was accepted; episodes settle before events; the final pass restarts; the budget stops a pass; the returned scenario always has a recorded `Reproduced`.
+- `pair_validity_is_recomputed_and_both_worlds_are_shrunk_together` (`flt-paired-worlds-shrunk-together`). `InvalidPair` exactly when the compiler refuses; a deletion names its history; no deleted natural-fresh event reaches a fresh arm.
+- `wire_names_are_pinned`. The predicate, element, verdict, and minimality wire forms.
+- `the_package_round_trips_and_carries_the_recipe_for_a_count_triggered_failure`, `live_model_evidence_is_never_relabelled_replayable`, `the_serializer_requires_the_verbatim_claim_boundary_and_rejects_forbidden_claims`, `residue_drift_refuses_and_limits_apply_before_publication` (`crates/eval-core/tests/witness.rs`; `wit-*`). The package parses back to itself; the recipe is required and must regenerate the minimized logs; a live slice is never replayable; the boundary block is verbatim and an excluded claim in free text is refused with its path; residue drift, the byte bound, and a planted key refuse.
+- `a_fresh_process_reproduces_the_predicate_and_the_minimized_witness_is_published`, `a_child_that_dies_before_its_barrier_is_retried_then_unknown_and_kept`, `a_child_that_never_answers_is_cancelled_and_unknown`, `an_original_that_does_not_fail_or_an_unapproved_profile_is_refused`, `the_shrink_flags_are_parsed_and_the_child_needs_its_environment` (`crates/daemon/tests/eval_shrink.rs`; `rid-replay-equality-semantic-trace-digest`, `flt-coverage-witnesses-fire-only-on-observed-behaviour`). Every candidate replays in a fresh process at the pinned cut; two fresh processes agree on outcome and trace digest; the published `witness.json` parses back and its digest is in the manifest; a dying child is retried once under its key then `Unknown`; a hung child is cancelled; markers `flt_shrink_fresh_process_reproduced`, `flt_shrink_slipped_candidate_rejected`, `flt_shrink_unknown_effect_preserved`.
+- `every_evaluator_record_is_method_ordered_and_cites_an_executed_check` (`crates/eval-core/tests/method_records.rs`; `mtr-method-records-cite-executed-check`).
+
 ## Gaps recorded here
 
 - `sls-liveness-memory-reviewer-work-bounded`: the fault campaign's liveness
@@ -1650,7 +1666,15 @@ bound because it finishes inside the daemon suite's wall clock):
 - Every ingestion entry point lacks a production caller. No world is labelled
   "validated real ingestion" until one exists; every manifest carries
   `adapter-ingested, production caller: none` (a required field), and the
-  ingestion suite drives the adapters from tests only.
+  ingestion suite drives the adapters from tests only
+  (`ing-adapter-ingested-no-production-caller` in `catalog.md`). The Pi
+  adapter (`pi_units`) has no evaluator arm at all
+  (`ing-pi-adapter-unexercised-by-evaluator`).
+- The shrink shell's only oracle is the evaluator's planted `RequiredCommits`
+  defect over the reduced aged truth; a Suite B surface-1 failure is not yet
+  wired as a shrink replay, so no campaign failure has been minimized end to
+  end. The transformations beyond fault-episode removal and event deletion
+  that the parent lists have no representation in a `Scenario`.
 - The reducer takes the served class as a query input because generated
   worlds carry no admission events; the ingestion ticket decides what
   `SourcePublisher::publish` actually admits and pins the value.

@@ -198,7 +198,7 @@ const EVENT_CUTS: [&str; 13] = [
     "artifact_fault_named",
 ];
 
-fn episode(
+pub fn episode(
     id: &str,
     step: u32,
     store: StoreFamily,

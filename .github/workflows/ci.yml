@@ -92,6 +92,9 @@ jobs:
               - 'docs/properties/search-projection/witness-matrix.md'
               - 'docs/properties/search-projection/spec-traceability.md'
               - 'docs/properties/search-projection/projection-schema.md'
+              # `crates/eval-core/tests/method_records.rs` reads the evaluator
+              # catalog and its evidence files, so the part is a test input.
+              - 'docs/properties/evaluator/**'
             native:
               - *workflow
               - *cargo

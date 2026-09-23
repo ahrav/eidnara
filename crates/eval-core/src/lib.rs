@@ -43,6 +43,7 @@ mod residue;
 mod shrink;
 mod statistics;
 mod stream;
+mod witness;
 
 pub use campaign::{
     Approval, Ceilings, DisabledReason, Envelope, EnvelopeExceeded, ProfileError,
@@ -155,3 +156,8 @@ pub use statistics::{
     parse_campaign_profile, run_icc_pilot,
 };
 pub use stream::*;
+pub use witness::{
+    FORBIDDEN_CLAIM_PHRASES, Generation, MultiplicityRecipe, OriginalFailure,
+    WITNESS_DIGEST_PROTOCOL, WITNESS_SCHEMA, WitnessError, WitnessPackage, multiplicities,
+    parse_witness,
+};

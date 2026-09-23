@@ -9,7 +9,7 @@ pub struct Marker {
 }
 
 /// Every marker the evaluator's suites may record, globally unique by name.
-pub const MARKERS: [Marker; 59] = [
+pub const MARKERS: [Marker; 62] = [
     Marker {
         name: "ing_four_seam_hold_correct_release_query",
         test: "crates/daemon/tests/eval_ingestion.rs::hold_embedding_commit_correction_release_query_makes_the_predecessor_obsolete",
@@ -245,6 +245,18 @@ pub const MARKERS: [Marker; 59] = [
     Marker {
         name: "flt_incomplete_mix_not_success",
         test: "crates/eval-core/tests/growth.rs::a_mix_missing_an_operation_is_not_sustainability_success",
+    },
+    Marker {
+        name: "flt_shrink_fresh_process_reproduced",
+        test: "crates/daemon/tests/eval_shrink.rs::a_fresh_process_reproduces_the_predicate_and_the_minimized_witness_is_published",
+    },
+    Marker {
+        name: "flt_shrink_slipped_candidate_rejected",
+        test: "crates/daemon/tests/eval_shrink.rs::a_fresh_process_reproduces_the_predicate_and_the_minimized_witness_is_published",
+    },
+    Marker {
+        name: "flt_shrink_unknown_effect_preserved",
+        test: "crates/daemon/tests/eval_shrink.rs::a_child_that_dies_before_its_barrier_is_retried_then_unknown_and_kept",
     },
 ];
 
