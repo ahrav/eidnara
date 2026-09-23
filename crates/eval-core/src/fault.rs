@@ -56,6 +56,9 @@ pub enum ArtifactDeletionFaultKind {
 
 /// One variant of a fault enum, hook, gate, lock holder, or kill that exists
 /// at HEAD. Nothing else is a fault a campaign may claim to have run.
+/// `ExpectedRefusal` injects no fault: the runner drives production into a
+/// refusal it makes on purpose (a deletion-bearing catch-up window, a receipt
+/// charge at the quota) and records it as expected rather than as a failure.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum FaultAction {
@@ -67,12 +70,15 @@ pub enum FaultAction {
     ExternalLockHolder,
     ProcessKill { cut: String },
     CorruptQuiescentFile,
+    ExpectedRefusal { refusal: ExpectedRefusal },
 }
 
 impl FaultAction {
     /// The heal each seam permits. A CAS storage failure that is not capacity
     /// exhaustion latches artifact ingestion closed until the store reopens,
-    /// so every ingest fault and the EIO deletion faults heal by reopen.
+    /// so every ingest fault and the EIO deletion faults heal by reopen. R11
+    /// clears only when a reopen rebuilds the projection; R24's receipt
+    /// charges are retained for the store incarnation, so nothing heals it.
     pub fn heal(&self) -> Heal {
         match self {
             Self::SearchEpisode { .. } | Self::EmbeddingPublication { .. } => Heal::Consumed,
@@ -88,6 +94,10 @@ impl FaultAction {
             },
             Self::HeldPublication | Self::ExternalLockHolder => Heal::Released,
             Self::ProcessKill { .. } | Self::CorruptQuiescentFile => Heal::Reopen,
+            Self::ExpectedRefusal { refusal } => match refusal {
+                ExpectedRefusal::R11DeletionBearingCatchUp => Heal::Reopen,
+                ExpectedRefusal::R24ReceiptQuotaExhausted => Heal::Permanent,
+            },
         }
     }
 
@@ -102,6 +112,8 @@ pub enum Heal {
     Consumed,
     Released,
     Reopen,
+    /// Nothing in the run heals it; the refusal stands for the store incarnation.
+    Permanent,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -653,6 +665,7 @@ pub enum FaultReportError {
     Effect(EffectRefused),
     Liveness(LivenessRefused),
     KillWithoutBarrier { episode: String },
+    RefusalNotDeclared { episode: String },
     SafetyNeverChecked,
     Shape(String),
     Lossy,
@@ -673,6 +686,22 @@ impl FaultReport {
             if !self.barriers.iter().any(|b| b.episode == episode.id) {
                 return Err(FaultReportError::KillWithoutBarrier {
                     episode: episode.id.clone(),
+                });
+            }
+        }
+        // A refusal recorded against any other episode would attribute it to
+        // a fault that never ran.
+        for recorded in &self.expected_refusals {
+            let declared = FaultAction::ExpectedRefusal {
+                refusal: recorded.refusal,
+            };
+            if !self
+                .episodes
+                .iter()
+                .any(|e| e.id == recorded.episode && e.action == declared)
+            {
+                return Err(FaultReportError::RefusalNotDeclared {
+                    episode: recorded.episode.clone(),
                 });
             }
         }

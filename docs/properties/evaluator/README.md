@@ -1279,8 +1279,9 @@ Fault contract (`crates/eval-core/tests/fault.rs`,
 
 - `every_episode_is_a_named_action_with_the_heal_its_seam_permits`: an
   episode's action is one closed variant mirroring a fault enum, hook, gate,
-  lock holder, or kill at HEAD; one-shot enums heal by consumption, gates and
-  lock holders by release, kills and corruption by reopen; a wrong heal, an
+  lock holder, or kill at HEAD, or an expected refusal that injects no fault;
+  one-shot enums heal by consumption, gates and lock holders by release,
+  kills, corruption, and R11 by reopen, and R24 is permanent; a wrong heal, an
   empty layer contract, a kill label on a non-kill, and a duplicate id refuse;
   the tagged JSON form round-trips.
 - `a_power_loss_label_and_a_host_kill_are_refused` (marker
@@ -1309,7 +1310,9 @@ Fault contract (`crates/eval-core/tests/fault.rs`,
 - `a_fault_report_round_trips_and_refuses_what_it_cannot_prove`: the report
   parses back equal; its result digest ignores barrier pids and envelope peaks
   and changes with an effect outcome; a kill without a barrier, an unreceipted
-  declared cut, zero safety checks while armed, and a premature success refuse.
+  declared cut, zero safety checks while armed, a premature success, and a
+  recorded refusal whose episode is undeclared, carries another refusal, or
+  carries an injected fault's action (`RefusalNotDeclared`) refuse.
 
 Fault shell (`crates/daemon/tests/eval_fault.rs`, `--all-features`; the
 default shards run the campaign once with every scenario asserted over it,
@@ -1322,7 +1325,8 @@ job under `EIDNARA_EVAL_S0_BUDGET_MS`):
   `flt_every_declared_cut_receipted`): every declared episode and observer
   cut has a receipt, the four oracle checkpoints resolve to `reached`, every
   episode's heal is the one its seam permits, no episode carries a kill label,
-  a safety check ran for every episode, the published report parses back
+  a safety check ran for every episode on the aging drive's stores, the
+  action kinds include `expected_refusal`, the published report parses back
   equal, and the manifest names it by result digest under `generate`.
 - `a_lost_reply_stays_unknown_until_readback_at_after_recovery`
   (`flt-lost-ack-expected-is-admissible-set`; marker
@@ -1331,15 +1335,26 @@ job under `EIDNARA_EVAL_S0_BUDGET_MS`):
   files are read back by identity before reopen; the committed-then-lost
   publication reads back `applied` and the rolled-back one `not_applied`;
   every identity satisfies `acknowledged <= observed <= attempted` with one
-  attempt.
+  attempt; each publication episode's observer saw `Reconciling` and
+  `ReconciliationRead`. The campaign runs a 24-message history whose fifth
+  step after the checkpoint opens no embedding job, so the publication phase
+  applies later steps until a job is open.
 - `deletion_bearing_catch_up_is_an_expected_refusal_and_a_permanent_stall`
-  (marker `flt_r11_recorded_as_expected_refusal`): the healed deletion leaves
+  (marker `flt_r11_recorded_as_expected_refusal`): a plain deletion leaves
   the next episode `Blocked(DeletionUnpropagated)` and a second episode with
-  no progress; recorded as R11 against the projection.
+  no progress; recorded as R11 against the projection on an
+  `expected_refusal` episode healed by reopen, not a deletion fault.
 - `receipt_quota_exhaustion_is_an_expected_refusal` (marker
-  `flt_r24_recorded_as_expected_refusal`): a receipt charge at the project
-  quota makes `reserve_memory_reviewer_job` refuse `MetadataQuota` and
-  deletes nothing; recorded as R24 against the memory store.
+  `flt_r24_recorded_as_expected_refusal`): receipt charges retained by a
+  closed job make `reserve_memory_reviewer_job` refuse `MetadataQuota` and
+  delete nothing; recorded as R24 against the memory store on a permanent
+  `expected_refusal` episode, not a lock holder.
+- `the_receipt_quota_refusal_outlives_every_released_allowance`: after the R24
+  episode, closing every open reviewer job still leaves admission refused
+  `MetadataQuota`, so the refusal does not rest on a temporary allowance.
+- `the_receipt_quota_episode_claims_no_projection_safety_check`: the R24
+  episode adds nothing to the safety-check count, since it touches no
+  projection.
 - `a_corrupted_quiescent_file_is_detected_before_any_store_opens` (marker
   `flt_corruption_detected_at_quiescence`): one overwritten kernel page in a
   quiescent copy is `IntegrityCheck { kernel }` at reopen.
@@ -1348,9 +1363,9 @@ job under `EIDNARA_EVAL_S0_BUDGET_MS`):
   blocks the local commit; release lets the next episode reach the target.
 - `artifact_faults_fail_with_their_named_errno_and_heal_by_reopen_or_consumption`
   (marker `flt_artifact_fault_named_errno`): four ingest faults and two
-  purge-intent faults refuse by kind; every EIO latches CAS ingestion closed
-  until reopen (five reopen heals), ENOSPC and the healed deletion are
-  consumed.
+  purge-intent faults refuse by kind; after every EIO a plain ingest is
+  refused `IngestionFailClosed` before the reopen (five `ingestion_latched`
+  receipts, five reopen heals); ENOSPC is consumed.
 - `a_test_binary_child_killed_at_a_named_cut_recovers`
   (`flt-process-kill-is-test-binary-child`; marker
   `flt_kill_barrier_read_before_kill`): two kill episodes, one per named cut,
