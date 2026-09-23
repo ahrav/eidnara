@@ -760,6 +760,7 @@ pub fn r11_episode(
         },
         "search_catchup::Blocked::DeletionUnpropagated: a plain deletion puts a deletion in the next window, which is refused so the barrier stays unsatisfied while the projection serves the text; production heals it by rebuilding the projection",
     ));
+    let before = stores.projection_rows();
     stores
         .corpus
         .kernel
@@ -780,6 +781,17 @@ pub fn r11_episode(
     let again = stores.episode(now, None, &mut |_| {});
     if again.end != report.end || again.acknowledged_through != report.acknowledged_through {
         return Err(unexpected(&r11, "a permanent stall", &again));
+    }
+    // The refused window applied nothing: the rows the projection served
+    // before the deletion are the rows it serves while stalled, and nothing
+    // was tombstoned on the way to the refusal.
+    let after = stores.projection_rows();
+    if after != before {
+        return Err(unexpected(
+            &r11,
+            "the projection's rows unchanged by the refused window",
+            (&before, &after),
+        ));
     }
     witness.receipt("deletion_unpropagated");
     witness.receipt(&r11);

@@ -2334,10 +2334,14 @@ reply-loss episode recovers at once, and why the publication faults are read
 back by the recovery that ends the fault phase, right after R11: the
 committed-then-lost publication reads back `applied` and the rolled-back one
 `not_applied`. Before publishing, the run refuses unless every lost reply has
-exactly one fixed expectation and its read-back matches it. The reopen
-rebuilds the projection at the kernel tip, which is also what clears the R11
-stall: the stall is production's refusal, the rebuild is production's heal,
-and the report records both. The rest of the history then runs on the
+exactly one fixed expectation and its read-back matches it. Each ledger entry
+is the faulted attempt and its durable state at read-back, before the reopen:
+the reopen rebuilds the projection at the kernel tip and embeds every pending
+job, so it re-applies the lost search commits and embeds the rolled-back
+publication as production's recovery would, and the ledger does not count
+that heal as an attempt. The rebuild is also what clears the R11 stall: the
+stall is production's refusal, the rebuild is production's heal, and the
+report records both. The rest of the history then runs on the
 reopened stores. `AtQuiescence`, `AfterFaultPhase`, `AfterRecovery` (reached
 three times), and `EndOfRun` are receipted where the runner reached them. The
 safety invariants (no descriptor claims a commit past the tip or an
