@@ -2009,7 +2009,12 @@ fault: the runner drives production into a refusal it makes on purpose.
 write the search projection, the CAS and the materializer's outbox are the
 kernel, R11 is the projection's refusal and R24 the memory store's, and a lock
 holder, a kill, or a corrupted file names its own store; a scope on another
-family is `ScopeMismatch`.
+family is `ScopeMismatch`. `FaultAction::loses_reply` names the actions that
+leave an operation's outcome unknown to its caller: the search-episode reply
+losses, `embedding_publication`'s `lose_local_commit_reply`, and the
+materializer's `lose_acknowledgement_reply` and `fail_acknowledgement`; a
+rolled-back commit, a skipped acknowledgement, and an expected refusal are
+known, not lost.
 `FaultAction::heal` is the heal each class permits: `consumed` for one-shot
 enums, `released` for gates and lock holders, `reopen` for kills, corruption,
 and R11 (the reopen's projection rebuild clears it), and `permanent` for R24,
@@ -2063,11 +2068,11 @@ the expectation to `one_of {applied, not_applied}` and the outcome to
 and the matching outcome, adding the observation an applied read-back proves.
 A read-back is refused as `ReadBackNotAdmissible { identity, state }` and
 changes nothing when `state` is outside the admissible set (a reply that was
-not lost admits only `applied`) or when it is `not_applied` for an acknowledged
-effect, which would be a lost acknowledged write.
+not lost admits only `applied`) or when it is `not_applied` for an effect
+already observed, which would be a lost write that was seen.
 `validate` refuses, per identity, `NeverAttempted` at zero attempts (an entry
 `attempt` never created), `BoundsViolated` unless `acknowledged <=
-observed <= attempted`, `ReadBackNotAdmissible` for an acknowledged effect
+observed <= attempted`, `ReadBackNotAdmissible` for an observed effect
 whose outcome is `not_applied`, `PrematureSuccess` for a lost reply whose
 outcome is not `unknown` without a read-back, and
 `ExpectationCollapsedWithoutReadBack` for a lost reply expecting fewer than two
@@ -2121,11 +2126,16 @@ publishes: identity, profile digest, claim boundary, the episodes, barrier
 receipts, cut receipts, cut coverage, the effect ledger, expected refusals,
 the count of safety checks made while faults were armed (`SafetyNeverChecked`
 at zero), the optional liveness report, markers, and envelope. `validate`
-takes the profile's bounds and runs every refusal above, and also refuses
+takes the profile's liveness bounds and resource limits and runs every
+refusal above, and also refuses
 `ClaimBoundaryMismatch`, `MalformedDigest` for an `eval_run_id` or
-`profile_digest` that is not 64 lowercase hex digits, `EnvelopeExceeded` when any recorded peak is over its
+`profile_digest` that is not 64 lowercase hex digits,
+`EnvelopeDisagreesWithProfile` when the envelope's bounds are not the
+profile's limits, `EnvelopeExceeded` when any recorded peak is over its
 bound, `NoEpisode` when no fault was armed (so no safety check ran while one
 was), `UnregisteredMarker` for a marker `MARKERS` does not register,
+`LostReplyUnrecorded` when the ledger holds fewer lost replies than the
+episodes that lose one,
 `UnknownEpisode` for a liveness outside-core episode that is not one of the
 report's episodes, `CoreFamilyFaulted` for one scoped to a family the healthy
 core names, and `ConsumedFaultArmed` for one whose heal is `consumed`: a
@@ -2328,12 +2338,23 @@ rebuilds the projection at the kernel tip, which is also what clears the R11
 stall: the stall is production's refusal, the rebuild is production's heal,
 and the report records both. The rest of the history then runs on the
 reopened stores. `AtQuiescence`, `AfterFaultPhase`, `AfterRecovery` (reached
-three times), and `EndOfRun` are receipted where the runner reached them. A
-safety check runs after every episode on the aging drive's stores while its
-fault is armed and after every reopen (the R24 episode's memory store is not
-one of them): the projection connection verifies, no descriptor claims a
-commit past the tip or an invalidation before its creation, and the
-projection never runs ahead of the kernel.
+three times), and `EndOfRun` are receipted where the runner reached them. The
+safety invariants (no descriptor claims a commit past the tip or an
+invalidation before its creation, and the projection never runs ahead of the
+kernel) are checked while each fault is armed, and only those checks count as
+`safety_checks_while_armed`: for the lock holder, while the holder still holds
+the projection; for a reply-loss fault, from the episode's observer at the cut
+whose reply the fault loses (`local_staged` or `acknowledgement_requested`),
+reading the files and the kernel because the episode holds the projection
+connection there; for a publication fault, from the publisher's observer at
+`Reconciling`; for a latching CAS fault, after the refusal and before the
+reopen that clears the latch; for R11, while the stall holds. The ENOSPC
+deletion fault is consumed inside its call, the corrupted copy is refused
+before any store opens, and R24 runs on a memory store, so none of the three
+has an armed window to check from. The same invariants plus the projection
+connection's verification run again after every episode and every reopen, as
+assertions that count nothing, since no fault is armed then. Each recovery
+charges the stores' bytes before the close that checkpoints their WALs away.
 
 Not in this shell: a process kill at a named cut, a held publication through
 the dispatcher gate, and the liveness mode; the run publishes `liveness:
