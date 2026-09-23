@@ -756,6 +756,17 @@ fn calibration_refuses_a_foreign_schema_and_a_malformed_judge_digest() {
             field: "rubric_digest"
         })
     );
+    let mut judge_only = calibration();
+    judge_only
+        .human_labels
+        .insert("anchor-2".to_string(), Preference::Inconsistent);
+    assert_eq!(
+        judge_only.validate(),
+        Err(CalibrationRefused::InconsistentHumanLabel {
+            pair: "anchor-2".to_string()
+        }),
+        "a human labels A, B, or a tie; only two judge orders are inconsistent"
+    );
     let mut unbound = judge();
     unbound.prompt_digest = String::new();
     let both = [

@@ -2446,7 +2446,8 @@ A judge is a versioned dependency. `JudgeIdentity` is a `ProviderProfile`
 (`eval-judge/v1`) freezes that identity with the human labels over anchor
 pairs before any judging and digests into every report
 (`eval-judge-calibration/v1`); it refuses another schema, a malformed digest,
-and an empty label map. `SamplingPlan::validate` refuses fewer than 20 pairs
+an empty label map, and an `Inconsistent` label, which only two disagreeing
+judge orders produce. `SamplingPlan::validate` refuses fewer than 20 pairs
 and a human sample below ten percent rounded up or below 20 pairs; a campaign
 under the floor cannot claim calibrated acceptance.
 

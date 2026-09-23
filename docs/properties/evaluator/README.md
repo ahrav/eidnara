@@ -1597,8 +1597,8 @@ checks are listed here.
   judgment needs both orders under one judge; position-following orders are
   `Inconsistent`; per-arm lengths are recorded; an omitted order, another
   judge, an unknown pair, a duplicated pair, a rerolled call, an unblinded
-  pair, a foreign calibration schema, and a digest that is not 64 lowercase
-  hex refuse.
+  pair, a foreign calibration schema, a digest that is not 64 lowercase hex,
+  and an `Inconsistent` human label refuse.
 - `the_permutation_check_and_the_human_floor_gate_calibrated_acceptance`,
   `the_permutation_check_is_two_sided`: 25 of 40 correct refuses and 24 does
   not; 0 and 15 of 40 refuse as consistently wrong; 250 pairs need 25 human

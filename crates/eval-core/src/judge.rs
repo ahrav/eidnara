@@ -102,6 +102,13 @@ impl CalibrationSet {
         if self.human_labels.is_empty() {
             return Err(CalibrationRefused::EmptyCalibrationSet);
         }
+        if let Some((pair, _)) = self
+            .human_labels
+            .iter()
+            .find(|(_, label)| **label == Preference::Inconsistent)
+        {
+            return Err(CalibrationRefused::InconsistentHumanLabel { pair: pair.clone() });
+        }
         Ok(())
     }
 }
@@ -128,6 +135,11 @@ pub enum CalibrationRefused {
     EmptyCalibrationSet,
     SchemaMismatch {
         found: String,
+    },
+    /// `Inconsistent` is what two disagreeing judge orders produce, not a
+    /// human preference.
+    InconsistentHumanLabel {
+        pair: String,
     },
     /// A judge digest is not 64 lowercase hex characters, so two prompts or
     /// rubrics could share it.
