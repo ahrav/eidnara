@@ -9,15 +9,17 @@ in two fresh OS processes yields equal manifest and trace digests."
 - `crates/eval-core/src/residue.rs` `SemanticTrace::record` reduces each
   observation by its schema (`Keep`, `Drop`, `Presence`, `Relative`);
   `digest` is the protocol digest over the reduced entries.
-- `crates/daemon/examples/eval_runner/shrink.rs:139` `replay_schema` keeps
-  `scenario_digest` and `outcome`, drops `pid`.
-- `crates/daemon/examples/eval_runner/shrink.rs:161` `child_main` records one
-  observation and prints its digest with the outcome.
-- `crates/eval-core/tests/two_process.rs:157` equality across two fresh processes; `:165` planted map-order
-  leak fails it; `:195` a changed build component fails the identity check.
-- `crates/daemon/tests/eval_shrink.rs:154` `replay_in_fresh_process`; `:175` two fresh replays of the
-  minimized scenario are equal and the original replays to the recorded
-  trace digest.
+- `crates/daemon/examples/eval_runner/shrink.rs` `replay_schema` keeps
+  `scenario_digest` and `outcome`, drops `pid`; `child_main` records one
+  observation and prints its digest with the outcome and the residue.
+- `crates/eval-core/tests/two_process.rs` `two_process_same_identity_yields_equal_manifest_and_trace_digests`
+  is the equality across two fresh processes;
+  `two_process_planted_map_order_leak_fails_the_equality_test` is the
+  negative control; `two_process_changed_build_component_fails_the_identity_check`
+  shows one changed identity component changes the run id.
+- `crates/daemon/tests/eval_shrink.rs` `replay_in_fresh_process` spawns the child entrypoint; the
+  published test asserts two fresh replays of the minimized scenario are
+  equal and the original replays to the recorded trace digest.
 
 ## Failure scenario
 A witness records a trace digest computed over a `HashMap` iteration; the
@@ -38,3 +40,10 @@ negative control with an order leak.
   observation.
 - Missing evidence: none for this phase.
 - Conclusion: resolved with answer - one digest per replay.
+### Q: Does the shrink replay's trace carry anything the outcome does not?
+- Sources examined: `replay_schema`.
+- Findings: no; the kept fields are the scenario digest and the outcome, so
+  equal outcomes imply equal digests there. The manifest two-process test
+  carries the discriminating fields.
+- Missing evidence: none.
+- Conclusion: resolved with answer - cite both.

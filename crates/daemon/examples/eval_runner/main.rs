@@ -466,11 +466,9 @@ fn run_shrink(args: impl Iterator<Item = String>) -> io::Result<()> {
     let digest = |bytes: &[u8]| format!("{:x}", sha2::Sha256::digest(bytes));
     let summary = json!({
         "witness": config.publish.join(shrink::WITNESS_FILE),
-        "witness_digest": digest(&run.witness_bytes),
+        "witness_file_sha256": digest(&run.witness_bytes),
         "manifest": config.publish.join(shrink::MANIFEST_FILE),
-        "manifest_digest": digest(&run.manifest_bytes),
         "eval_run_id": run.manifest.eval_run_id,
-        "predicate": run.witness.original.predicate,
         "minimality": run.witness.shrink.minimality,
         "markers": run.coverage.fired(),
     });

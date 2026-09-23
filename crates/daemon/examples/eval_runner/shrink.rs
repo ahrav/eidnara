@@ -6,28 +6,29 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::{BufRead, BufReader, Write};
-use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
-use std::time::Duration;
+use std::path::PathBuf;
+use std::process::{Command, Stdio};
+use std::sync::mpsc::RecvTimeoutError;
+use std::time::{Duration, Instant};
 
 use context_core::canonical_json::protocol_digest;
 use context_core::redaction::Redactor;
 use eval_core::{
     Approval, CandidateVerdict, ClaimBoundary, Coverage, Cut, CutOutcome, CutReceipt,
     EnvelopeExceeded, EvaluatedSurface, EventId, ExecutionMode, FailurePredicate, FaultAction,
-    FaultEpisode, Generation, MAX_OUTSTANDING_REPLAY_EFFECTS, Manifest, Minimality, Mode,
-    MultiplicityRecipe, ObservationSchema, Oracle, OriginalFailure, Payload, ProfileError,
-    ReplayEffects, ReplayOutcome, ReplayRefused, ReplayRequest, RepositorySpec, ResidueEntry, Rule,
-    RunProfile, Scale, Scenario, SemanticTrace, SessionSpec, ShrinkRefused, Slice, StoreFamily,
-    Task, TaskRole, UnknownReason, WITNESS_DIGEST_PROTOCOL, WITNESS_SCHEMA, WitnessError,
-    WitnessPackage, WorldConfig, eval_run_id, generate_all, multiplicities, reduce, serialize_spec,
-    shrink,
+    Generation, MAX_OUTSTANDING_REPLAY_EFFECTS, Manifest, Mode, MultiplicityRecipe,
+    ObservationSchema, Oracle, OriginalFailure, Payload, ProfileError, ReplayEffects,
+    ReplayOutcome, ReplayRefused, ReplayRequest, RepositorySpec, ResidueEntry, Rule, RunProfile,
+    Scale, Scenario, SemanticTrace, SessionSpec, ShrinkRefused, Slice, StoreFamily, Task, TaskRole,
+    UnknownReason, WITNESS_DIGEST_PROTOCOL, WITNESS_SCHEMA, WitnessError, WitnessPackage,
+    WorldConfig, eval_run_id, generate_all, reduce, residue_drift, serialize_spec, shrink,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use super::aging::{ManifestInputs, suite_c_manifest};
 use super::campaign::{Charges, identity, parse_flags, prepare_publish, publish_file};
+use super::fault::ChildGuard;
 
 pub const SIMULATOR_VERSION: &str = "eval-shrink-shell/v1";
 pub const WITNESS_FILE: &str = "witness.json";
@@ -61,7 +62,6 @@ pub struct Config {
     pub approval: Option<Approval>,
     pub publish: PathBuf,
     pub oracle: Oracle,
-    /// How long one replay may run before its effect is cancelled.
     pub replay_timeout: Duration,
 }
 
@@ -79,7 +79,7 @@ pub enum RunError {
     Replay(#[from] ReplayRefused),
     #[error("witness refused: {0}")]
     Witness(#[from] WitnessError),
-    #[error("publish refused at {path:?}: {kind:?}")]
+    #[error("publish refused at {}: {kind}", path.display())]
     Publish {
         path: PathBuf,
         kind: std::io::ErrorKind,
@@ -98,7 +98,7 @@ pub struct Run {
     pub manifest: Manifest,
     pub manifest_bytes: Vec<u8>,
     pub coverage: Coverage,
-    /// What each fresh process reported for the original, first and last.
+    /// What the fresh process reported for the original scenario.
     pub original: Replayed,
 }
 
@@ -148,7 +148,7 @@ fn replay_schema() -> ObservationSchema {
     .unwrap()
 }
 
-fn residue() -> BTreeSet<ResidueEntry> {
+pub fn residue() -> BTreeSet<ResidueEntry> {
     replay_schema()
         .residue()
         .chain(Manifest::field_schema().residue())
@@ -207,25 +207,13 @@ pub fn child_main(args: &ChildArgs) -> ! {
     std::process::exit(0)
 }
 
-struct ChildGuard(Child);
-
-impl Drop for ChildGuard {
-    fn drop(&mut self) {
-        if self.0.try_wait().ok().flatten().is_none() {
-            let _ = self.0.kill();
-            let _ = self.0.wait();
-        }
-    }
-}
-
-/// Issues one replay to a fresh process and resolves its effect: the barrier
-/// line is the outcome; an exit before it is retried under the same key and
-/// then `Unknown`; a timeout kills the child and cancels the effect. A key
-/// already answered is read back from its receipt, never replayed again.
+/// Issues one replay per receipt key to a fresh process and resolves its
+/// effect; a key already answered is read back, never replayed again.
 struct Replayer<'a> {
     spawn: Spawn,
     timeout: Duration,
-    root: &'a Path,
+    /// The profile's elapsed bound; no replay waits past it.
+    deadline: Instant,
     args: ChildArgs,
     charges: &'a mut Charges,
     effects: ReplayEffects,
@@ -238,51 +226,24 @@ impl Replayer<'_> {
         if let Some(answered) = self.answered.get(key) {
             return Ok(answered.clone());
         }
-        let path = self.root.join(format!("{key}.json"));
-        std::fs::write(&path, serde_json::to_vec(scenario).unwrap())?;
-        self.args.scenario = path;
+        std::fs::write(&self.args.scenario, serde_json::to_vec(scenario).unwrap())?;
         self.effects.issue(key)?;
         let mut attempts = 1;
-        let replayed = loop {
+        let mut replayed = loop {
             match self.attempt()? {
-                Some(replayed) => break Some(replayed),
+                Some(replayed) => break replayed,
                 None if attempts < REPLAY_ATTEMPTS => attempts = self.effects.retry(key)?,
-                None => break None,
+                None => break self.unanswered(UnknownReason::ChildExitedBeforeBarrier),
             }
         };
-        let replayed = match replayed {
-            Some(replayed) => {
-                self.effects.resolve(key, replayed.outcome.clone())?;
-                replayed
-            }
-            None => {
-                let unanswered = self.unanswered(UnknownReason::ChildExitedBeforeBarrier);
-                self.effects.resolve(key, unanswered.outcome.clone())?;
-                unanswered
-            }
-        };
-        self.effects.outcome(key)?;
-        if replayed.residue != self.expected_residue {
-            return Err(WitnessError::ResidueDrift {
-                missing: self
-                    .expected_residue
-                    .difference(&replayed.residue)
-                    .cloned()
-                    .collect(),
-                unexpected: replayed
-                    .residue
-                    .difference(&self.expected_residue)
-                    .cloned()
-                    .collect(),
-            }
-            .into());
-        }
+        self.effects.resolve(key, replayed.outcome.clone())?;
+        replayed.outcome = self.effects.outcome(key)?.clone();
+        residue_drift(&self.expected_residue, &replayed.residue)?;
         self.answered.insert(key.to_string(), replayed.clone());
         Ok(replayed)
     }
 
-    /// What a replay that never answered contributes: the reason, no trace,
-    /// and this build's own residue.
+    /// The reason, no trace, and this build's own residue.
     fn unanswered(&self, reason: UnknownReason) -> Replayed {
         Replayed {
             outcome: ReplayOutcome::Unknown { reason },
@@ -291,12 +252,19 @@ impl Replayer<'_> {
         }
     }
 
-    /// `None` when the child exited before its barrier; a timeout is a
-    /// cancelled effect and answers `Unknown { cancelled }`.
+    /// `None` when the child exited before its barrier; a timeout answers
+    /// `Unknown { cancelled }`. The process charge is released either way.
     fn attempt(&mut self) -> Result<Option<Replayed>, RunError> {
         let mut command = (self.spawn)(&self.args);
         self.args.env(&mut command);
         self.charges.process_started()?;
+        let outcome = self.wait_for_barrier(command);
+        self.charges.process_ended();
+        self.charges.elapsed()?;
+        outcome
+    }
+
+    fn wait_for_barrier(&self, mut command: Command) -> Result<Option<Replayed>, RunError> {
         let mut child = ChildGuard(
             command
                 .stdout(Stdio::piped())
@@ -312,18 +280,20 @@ impl Replayer<'_> {
                 .find(|line| line.contains(BARRIER));
             let _ = tx.send(line);
         });
-        let outcome = match rx.recv_timeout(self.timeout) {
+        let wait = self
+            .timeout
+            .min(self.deadline.saturating_duration_since(Instant::now()));
+        Ok(match rx.recv_timeout(wait) {
             Ok(Some(line)) => {
                 let json = &line[line.find(BARRIER).unwrap() + BARRIER.len()..];
-                Some(serde_json::from_str::<Replayed>(json.trim()).map_err(std::io::Error::other)?)
+                Some(
+                    serde_json::from_str::<Replayed>(json.trim())
+                        .unwrap_or_else(|_| self.unanswered(UnknownReason::ReadBackFailed)),
+                )
             }
-            Ok(None) => None,
-            Err(_) => Some(self.unanswered(UnknownReason::Cancelled)),
-        };
-        drop(child);
-        self.charges.process_ended();
-        self.charges.elapsed()?;
-        Ok(outcome)
+            Ok(None) | Err(RecvTimeoutError::Disconnected) => None,
+            Err(RecvTimeoutError::Timeout) => Some(self.unanswered(UnknownReason::Cancelled)),
+        })
     }
 }
 
@@ -362,19 +332,6 @@ fn fresh_config() -> WorldConfig {
     }
 }
 
-fn episode(id: &str) -> FaultEpisode {
-    super::fault::episode(
-        id,
-        3,
-        StoreFamily::SearchProjection,
-        "acknowledge",
-        FaultAction::ProcessKill {
-            cut: "local_staged".to_string(),
-        },
-        "search_catchup::EpisodeFault",
-    )
-}
-
 /// The falsifier is the first commit and the positive control the last
 /// rename; both survive every valid candidate.
 pub fn scenario(commits: u32) -> (Scenario, eval_core::Tape) {
@@ -382,13 +339,17 @@ pub fn scenario(commits: u32) -> (Scenario, eval_core::Tape) {
     let natural_fresh = generate_all(FRESH_SEED, &fresh_config(), Mode::Generate)
         .unwrap()
         .log;
-    let repository: Vec<EventId> = world
-        .log
-        .events
-        .iter()
-        .filter(|e| matches!(e.payload, Payload::Commit { .. } | Payload::Rename { .. }))
-        .map(|e| e.id.clone())
-        .collect();
+    let repository = |kind: fn(&Payload) -> bool| {
+        world
+            .log
+            .events
+            .iter()
+            .filter(|e| kind(&e.payload))
+            .map(|e| e.id.clone())
+            .collect::<Vec<EventId>>()
+    };
+    let commit_ids = repository(|p| matches!(p, Payload::Commit { .. }));
+    let renames = repository(|p| matches!(p, Payload::Rename { .. }));
     let task = |name: &str, role, id: &EventId| Task {
         id: name.to_string(),
         role,
@@ -414,14 +375,27 @@ pub fn scenario(commits: u32) -> (Scenario, eval_core::Tape) {
         aged: world.log,
         natural_fresh,
         tasks: vec![
-            task("first-commit", TaskRole::Falsification, &repository[0]),
+            task("first-commit", TaskRole::Falsification, &commit_ids[0]),
             task(
                 "last-rename",
                 TaskRole::PositiveControl,
-                &repository[repository.len() - 1],
+                renames.last().expect("two commits make a rename"),
             ),
         ],
-        episodes: vec![episode("kill-1"), episode("kill-2")],
+        episodes: ["kill-1", "kill-2"]
+            .map(|id| {
+                super::fault::episode(
+                    id,
+                    3,
+                    StoreFamily::SearchProjection,
+                    "acknowledge",
+                    FaultAction::ProcessKill {
+                        cut: "local_staged".to_string(),
+                    },
+                    "search_catchup::EpisodeFault",
+                )
+            })
+            .to_vec(),
     };
     (scenario, world.tape)
 }
@@ -452,9 +426,9 @@ pub fn run(config: &Config, spawn: Spawn) -> Result<Run, RunError> {
     let mut replayer = Replayer {
         spawn,
         timeout: config.replay_timeout,
-        root: root.path(),
+        deadline: Instant::now() + Duration::from_millis(config.elapsed_bound_ms),
         args: ChildArgs {
-            scenario: PathBuf::new(),
+            scenario: root.path().join("candidate.json"),
             oracle: config.oracle.clone(),
             checkpoint: CUT,
             profile_digest: profile_digest.clone(),
@@ -472,17 +446,25 @@ pub fn run(config: &Config, spawn: Spawn) -> Result<Run, RunError> {
     };
     let predicate: FailurePredicate = predicate.clone();
     let fixture = serialize_spec();
+    // The shrinker's callback cannot fail, so the first refusal is kept and
+    // every later request is answered `Unknown` without a replay; the run
+    // then returns that refusal.
     let mut refused = None;
-    let mut callback =
-        |request: ReplayRequest<'_>| match replayer.replay(request.key, request.scenario) {
+    let mut callback = |request: ReplayRequest<'_>| {
+        let unanswered = ReplayOutcome::Unknown {
+            reason: UnknownReason::EffectUnanswered,
+        };
+        if refused.is_some() {
+            return unanswered;
+        }
+        match replayer.replay(request.key, request.scenario) {
             Ok(replayed) => replayed.outcome,
             Err(error) => {
-                refused.get_or_insert(error);
-                ReplayOutcome::Unknown {
-                    reason: UnknownReason::EffectUnanswered,
-                }
+                refused = Some(error);
+                unanswered
             }
-        };
+        }
+    };
     let shrunk = shrink(&original, &fixture, &predicate, MAX_REPLAYS, &mut callback);
     if let Some(error) = refused {
         return Err(error);
@@ -513,22 +495,7 @@ pub fn run(config: &Config, spawn: Spawn) -> Result<Run, RunError> {
         json!({"commits": config.commits, "oracle": config.oracle}),
         &std::env::current_exe().unwrap(),
     );
-    let counts = multiplicities(&minimized);
-    let recipe = (matches!(report.minimality, Minimality::OneMinimal { .. })
-        && counts.values().any(|count| *count > 1))
-    .then(|| MultiplicityRecipe {
-        aged: Generation {
-            config: aged_config(config.commits),
-            root_seed: SEED,
-        },
-        natural_fresh: Generation {
-            config: fresh_config(),
-            root_seed: FRESH_SEED,
-        },
-        deleted: report.deleted.clone(),
-        multiplicities: counts,
-    });
-    let witness = WitnessPackage {
+    let mut witness = WitnessPackage {
         schema: WITNESS_SCHEMA.to_string(),
         original: OriginalFailure {
             eval_run_id: eval_run_id(&run_identity).unwrap(),
@@ -542,14 +509,28 @@ pub fn run(config: &Config, spawn: Spawn) -> Result<Run, RunError> {
         replayable: true,
         residue: residue(),
         minimized,
-        recipe,
+        recipe: None,
         shrink: report,
         claim_boundary: ClaimBoundary::pinned(),
     };
+    if witness.validate() == Err(WitnessError::RecipeRequired) {
+        witness.recipe = Some(MultiplicityRecipe {
+            aged: Generation {
+                config: aged_config(config.commits),
+                root_seed: SEED,
+            },
+            natural_fresh: Generation {
+                config: fresh_config(),
+                root_seed: FRESH_SEED,
+            },
+            multiplicities: witness.count_triggered(),
+        });
+    }
+    charges.vacate(root)?;
     charges.retain_publish_root()?;
     let redactor = Redactor::new().map_err(|e| std::io::Error::other(format!("{e:?}")))?;
-    let value = witness.serialize(Some(&redactor), profile.envelope.artifact_bytes)?;
-    let witness_bytes = charges.publish_bytes(|_| serde_json::to_vec_pretty(&value).unwrap())?;
+    let (value, text) = witness.serialize(&redactor, profile.envelope.artifact_bytes)?;
+    let witness_bytes = charges.publish_bytes(|_| text.clone().into_bytes())?;
     let report_value = serde_json::to_value(&witness.shrink).unwrap();
     let manifest = suite_c_manifest(ManifestInputs {
         identity: run_identity,
@@ -568,7 +549,6 @@ pub fn run(config: &Config, spawn: Spawn) -> Result<Run, RunError> {
     let manifest_bytes = serde_json::to_vec_pretty(&manifest.to_value()).unwrap();
     publish_file(&config.publish.join(WITNESS_FILE), &witness_bytes).map_err(publish_refused)?;
     publish_file(&config.publish.join(MANIFEST_FILE), &manifest_bytes).map_err(publish_refused)?;
-    charges.vacate(root)?;
     Ok(Run {
         witness,
         witness_bytes,
@@ -591,8 +571,12 @@ pub fn config_from_args(args: impl IntoIterator<Item = String>) -> Result<Config
     };
     Ok(Config {
         scale,
-        commits: u32::try_from(number("commits")?)
-            .map_err(|error| format!("--commits: {error}"))?,
+        commits: match number("commits")? {
+            commits @ 2.. => {
+                u32::try_from(commits).map_err(|error| format!("--commits: {error}"))?
+            }
+            _ => return Err("--commits needs at least two, so a rename exists".to_string()),
+        },
         elapsed_bound_ms: number("elapsed-bound-ms")?,
         approval: Some(Approval {
             approved_by: take("approved-by"),

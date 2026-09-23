@@ -7,17 +7,30 @@ and checkpoint, coverage signature), minimized semantic scenario, and a
 compact recipe form when multiplicity is the trigger."
 
 ## Evidence trail
-- `crates/eval-core/src/witness.rs:30` `OriginalFailure`; `:62`
-  `WitnessPackage`; `:149` `check_recipe` regenerates both worlds through
-  `generate_all` and applies the deletions.
-- `crates/eval-core/tests/witness.rs:201` round trip, `RecipeRequired`, `RecipeDisagrees`, and a refused
-  extra field.
-- `crates/daemon/tests/eval_shrink.rs:175` the published `witness.json` parses back to the run's
-  package and the manifest's `witness_digest` is its protocol digest.
+- `crates/eval-core/src/witness.rs` `OriginalFailure`, `WitnessPackage`,
+  `MultiplicityRecipe` (two `Generation`s and the counted kinds).
+- `crates/eval-core/src/witness.rs` `count_triggered` reads the shrink
+  report: a surviving aged event whose single deletion (over the final
+  deletion set) was recorded `Slipped` or `NotReproduced` counts toward its
+  kind; kinds with one such event are dropped.
+- `crates/eval-core/src/witness.rs` `regenerates` compares the declared event
+  count with the minimized log plus that history's deletions before calling
+  `generate_all`, then applies the deletions and compares logs.
+- `crates/eval-core/tests/witness.rs` `the_package_round_trips_and_carries_the_recipe_for_a_count_triggered_failure`:
+  round trip, five counted commits (the sixth is evidence and pair-invalid to
+  delete), `RecipeRequired`, `RecipeDisagrees` for each history, the
+  oversized config, `RecipeMultiplicitiesDisagree`, `RecipeWithoutMultiplicity`
+  once the changing records are removed, a refused extra field, `Lossy`.
+- `crates/eval-core/tests/witness.rs` `every_structural_refusal_names_its_cause`: schema, hex, digest,
+  and predicate refusals through `validate` and `serialize` alike.
+- `crates/daemon/tests/eval_shrink.rs` `a_fresh_process_reproduces_the_predicate_and_the_minimized_witness_is_published`:
+  the published `witness.json` parses back to the run's package and the
+  manifest's `witness_digest` is its protocol digest.
 
 ## Failure scenario
 A recipe recorded with the wrong seed regenerates a different aged history;
-a reader following it reproduces nothing.
+a reader following it reproduces nothing. A recipe declaring a million
+commits would make the reader generate them before comparing.
 
 ## Timing windows and dependencies
 None.
@@ -27,9 +40,9 @@ A count-triggered minimized scenario and a tampered recipe.
 
 ## Investigation log
 ### Q: When is a recipe required?
-- Sources examined: `check_recipe`.
-- Findings: when minimality is `OneMinimal` and a payload kind survives more
-  than once in the aged log; `InvalidPair` can also force events to survive,
-  so the rule is over-inclusive and the form is always valid.
+- Sources examined: `check_recipe`, `count_triggered`.
+- Findings: when minimality is `OneMinimal` and some kind has more than one
+  surviving aged event whose single deletion changed the outcome. An event
+  whose deletion is `InvalidPair` (the evidence) does not count.
 - Missing evidence: none.
-- Conclusion: resolved with answer - over-inclusive by design.
+- Conclusion: resolved with answer.

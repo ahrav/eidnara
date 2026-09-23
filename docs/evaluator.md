@@ -2128,10 +2128,10 @@ as. `OriginalFailure` is the failure as the campaign observed it: the
 `eval_run_id`, the decision `Tape` of the aged world, the canonical semantic
 trace digest of the original replay, the causal trace (the aged log's causal
 edges), the pinned `FailurePredicate` (oracle and checkpoint), and the
-coverage signature (the markers the run fired). Beside it the package carries
-the `Slice` (`live` or `cassette`) and `replayable`, the recorded `residue`
-entries, the `minimized` `Scenario`, an optional `MultiplicityRecipe`, the
-`ShrinkReport`, and the verbatim `claim_boundary`.
+coverage signature (the shrink markers the shell recorded). Beside it the
+package carries the `Slice` (`live` or `cassette`) and `replayable`, the
+recorded `residue` entries, the `minimized` `Scenario`, an optional
+`MultiplicityRecipe`, the `ShrinkReport`, and the verbatim `claim_boundary`.
 
 `WitnessPackage::validate` refuses: a schema other than `eval-witness/v1`; a
 claim boundary other than `ClaimBoundary::pinned()`
@@ -2139,42 +2139,59 @@ claim boundary other than `ClaimBoundary::pinned()`
 (`LiveRelabelledReplayable`); a predicate that disagrees between the original
 and the shrink report; a minimized scenario whose digest is not the report's;
 a run id or trace digest that is not 64 lowercase hex; and any string leaf
-outside the `claim_boundary` block that names one of the four excluded
-claims (`ForbiddenClaim { path, phrase }`). The recipe rule: a scenario whose
-minimality is `OneMinimal` and whose surviving aged events still repeat a
-payload kind (`multiplicities`) must carry the compact form
-(`RecipeRequired`); a scenario without a repeated kind carries none
-(`RecipeWithoutMultiplicity`); and the form, two `Generation`s (config and
-root seed) plus the deletion set, must regenerate exactly the minimized logs
-(`RecipeDisagrees { world }`). The rule is over-inclusive by design: a kind
-can survive twice because each copy is individually pair-invalid to delete,
-and the compact form is still a faithful description.
+outside the root `claim_boundary` key that names one of the four excluded
+claims after ASCII lowercasing (`ForbiddenClaim { path, phrase }`, with array
+indices in the path).
 
-`serialize(redactor, max_bytes)` is the one serializer: `validate`, then the
-canonical byte length against the envelope's artifact bound (`TooLarge`),
-then, with a redactor, the cassette's full-text secret scan
-(`RedactionRefused`; a detection refuses the package, nothing is
-substituted). `parse_witness` refuses a field the type would drop and a value
-that does not re-serialize to itself (`Lossy`). `check_residue(current)`
-refuses `ResidueDrift { missing, unexpected }` when a replaying build's
-declared residue differs from the recorded set. The manifest's
-`witness_digest` is the protocol digest `eval-witness-digest/v1` over the
-serialized value.
+The recipe rule reads the shrink report. A payload kind is count-triggered
+when the minimized aged log keeps more than one event of it and each one's
+single deletion, over the final deletion set, was recorded `Slipped` or
+`NotReproduced`; an event whose deletion is `InvalidPair` (the evidence) does
+not count. `count_triggered` returns those kinds with their counts. A
+scenario whose minimality is `OneMinimal` and has a count-triggered kind must
+carry the compact form (`RecipeRequired`); a scenario without one carries
+none (`RecipeWithoutMultiplicity`); the form's `multiplicities` must equal
+`count_triggered` (`RecipeMultiplicitiesDisagree`); and each `Generation`
+(config and root seed) must regenerate exactly the minimized log once the
+report's deletions for that history are applied (`RecipeDisagrees {
+history }`). The declared event count is compared with the minimized log plus
+the deletions before anything is generated, so a parsed package cannot demand
+an unbounded regeneration.
+
+`serialize(redactor, artifact_bytes)` is the one serializer: `validate`, then
+one canonical encoding whose byte length is checked against the envelope's
+artifact bound (`TooLarge`), then the cassette's full-text secret scan over
+those bytes (`RedactionRefused`; a detection refuses the package, nothing is
+substituted). It returns the value and the canonical text; the text is what
+the shell publishes, so the bound is the bytes on disk. `parse_witness`
+refuses a field the type would drop and a value that does not re-serialize to
+itself (`Lossy`). `residue_drift(recorded, current)` refuses
+`ResidueDrift { missing, unexpected }` when a replaying build's declared
+residue differs from the recorded set; `check_residue` applies it to the
+package. The manifest's `witness_digest` is the protocol digest
+`eval-witness-digest/v1` over the serialized value.
 
 ## Shrink shell
 
 `crates/daemon/examples/eval_runner/shrink.rs` replays every candidate in a
 fresh process. `scenario(commits)` generates the aged world (one session and
-one repository with `commits` commits and a rename every second commit) and a
-natural-fresh history under another seed, names the first commit as the
-falsifier and the last rename as the positive control, and arms two
-process-kill fault episodes so the fault-episode transformation has elements
-to try. `run` approves the profile, prepares the publish directory, occupies
-one temp root for the candidate files, replays the original, and refuses
-`NoFailure` unless the child reports `Failed`; the reported predicate is the
-pinned one. It then drives `eval_core::shrink` with `Replayer::replay` as the
-callback and publishes `witness.json` and `manifest.json` with
-`publish_file`, charging the bytes and the publish root to the envelope.
+one repository with `commits` commits, at least two, and a rename every second
+commit) and a natural-fresh history under another seed, names the first
+commit as the falsifier and the last rename as the positive control, and
+declares two process-kill fault episodes so the fault-episode transformation
+has elements to try; the child never executes them, so they are inert and
+deleted first. `run` approves the profile, prepares the publish directory,
+occupies one temp root for the candidate file, replays the original, and
+refuses `NoFailure` unless the child reports `Failed`; the reported predicate
+is the pinned one. It then drives `eval_core::shrink` with `Replayer::replay`
+as the callback. The callback cannot fail, so the first refusal (drift, an
+envelope breach, an I/O error) is kept, every later request is answered
+`Unknown { effect_unanswered }` without a replay, and the run returns that
+refusal. The witness is validated once without a recipe; `RecipeRequired`
+adds the compact form from `count_triggered`. The temp root is vacated before
+the manifest is built, so the envelope it records is final. `witness.json`
+holds the canonical bytes `serialize` returned and `manifest.json` the
+manifest, each published with `publish_file`.
 
 The child (`shrink-child`, or the daemon test's re-executed entrypoint) reads
 `ChildArgs` from one environment variable: the candidate scenario path, the
@@ -2185,35 +2202,42 @@ dropped), and prints `eval-shrink-barrier <json>` carrying the
 `ReplayOutcome`, the trace digest of that observation, and the residue this
 build declares (the replay schema's entries and the manifest schema's). An
 unreadable scenario or a refused compile or reduce is
-`Unknown { read_back_failed }`.
+`Unknown { read_back_failed }`. The cut is the label the oracle is evaluated
+under: the reducer takes the query's cut, and a pure evaluation over the
+whole log is at quiescence by construction.
 
 `Replayer` keeps the `ReplayEffects` ledger keyed by the candidate digest. A
 key already answered is read back from its receipt and never replayed again,
 which is how the shrinker's second replay of the original resolves. Each
-issue spawns the child with piped stdout, charges a process, and waits for the
-barrier line up to the configured replay timeout: a line resolves the effect
-with the child's outcome; an exit before the line is retried once under the
-same key (`ReplayEffects::retry`) and then resolved
+issue writes the candidate to the one scenario file, spawns the child with
+piped stdout, charges a process, and waits for the barrier line up to the
+configured replay timeout capped by what remains of the profile's elapsed
+bound: a line resolves the effect with the child's outcome (a malformed line
+is `Unknown { read_back_failed }`); an exit before the line is retried once
+under the same key (`ReplayEffects::retry`) and then resolved
 `Unknown { child_exited_before_barrier }`; a timeout kills the child and
-resolves `Unknown { cancelled }`. The outcome is read back through
-`ReplayEffects::outcome` before it is returned, so a verdict is never formed
-on an outstanding effect. A child whose reported residue differs from the
-parent's is `ResidueDrift` and the run stops. The coverage markers
-`flt_shrink_fresh_process_reproduced`, `flt_shrink_slipped_candidate_rejected`,
-and `flt_shrink_unknown_effect_preserved` are recorded only when the report
-shows the behaviour each names; they are the package's coverage signature.
+resolves `Unknown { cancelled }`. The process charge is released however the
+attempt ends. The outcome is read back through `ReplayEffects::outcome`
+before it is kept, so a verdict is never formed on an outstanding effect. A
+child whose reported residue differs from the parent's is `ResidueDrift` and
+the run stops. The coverage markers `flt_shrink_fresh_process_reproduced`,
+`flt_shrink_slipped_candidate_rejected`, and
+`flt_shrink_unknown_effect_preserved` are recorded only when the report shows
+the behaviour each names; they are the package's coverage signature.
 
 The `shrink` subcommand takes `--scale`, `--commits`, `--elapsed-bound-ms`,
 `--approved-by`, `--approval-run-id`, and `--publish`, and pins the planted
 oracle at `failing_at: 3, slipping_at: 6`. `crates/daemon/tests/eval_shrink.rs`
 runs the shell with the test binary as the child: the minimized witness keeps
-six commits, two further fresh processes agree on outcome and trace digest,
-the original replays to the recorded trace digest, the published package
-parses back and its digest is in the manifest; a spawn that kills the child
-before its barrier for candidates lacking one commit leaves that commit in
-place with two deaths per distinct unknown candidate; a spawn that hangs
-those children is cancelled under a two-second timeout; a passing oracle and
-an unapproved profile refuse before anything is published.
+six commits and its recipe counts the five whose single deletion slips the
+class, two further fresh processes agree on outcome and trace digest, the
+original replays to the recorded trace digest, the published package parses
+back and its digest is in the manifest; a spawn whose child exits before its
+barrier for candidates lacking one commit leaves that commit in place with
+two deaths per distinct unknown candidate; a spawn that hangs those children
+is cancelled under a two-second timeout; a child that reports one residue
+entry fewer refuses the run; a passing oracle and an unapproved profile
+refuse before anything is published.
 
 ## Coverage markers
 

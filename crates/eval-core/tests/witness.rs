@@ -4,160 +4,31 @@
 
 mod support;
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use context_core::redaction::{RedactionErrorKind, Redactor};
 use eval_core::{
-    APPLICATION_CRASH, ClaimBoundary, Cut, Destination, EvaluatedSurface, EventId, EventLog,
-    FailureClass, FailurePredicate, FaultAction, FaultEpisode, FaultScope, Generation, KillLabel,
-    MAX_VALID_TIME_MS, Mode, MultiplicityRecipe, Oracle, OriginalFailure, Query, ReplayOutcome,
-    ReplayRequest, RepositorySpec, Scenario, Sensitivity, ServedClass, SessionSpec, Slice,
-    StoreFamily, TEST_BINARY_CHILD, Task, TaskRole, Visibility, WITNESS_SCHEMA, WitnessClass,
-    WitnessError, WitnessPackage, WorldConfig, multiplicities, parse_witness, reduce,
-    serialize_spec, shrink,
+    CandidateVerdict, ClaimBoundary, Cut, FailureClass, Generation, History, Minimality, Mode,
+    MultiplicityRecipe, OriginalFailure, Slice, WITNESS_SCHEMA, WitnessError, WitnessPackage,
+    parse_witness, residue_drift, shrink,
 };
 use serde_json::Value;
-use support::{WORLD_EPOCH_MS, WORLD_SEED, world_config};
+use support::shrink::{BUDGET, FRESH_SEED, evaluate, fixture, fresh_config, predicate, scenario};
+use support::{WORLD_SEED, world_config};
 
-const FRESH_SEED: u64 = WORLD_SEED ^ 0xABCD;
-const PROFILE: &str = "profile-digest";
-const CUT: Cut = Cut::AtQuiescence;
-const BUDGET: u64 = 400;
+const ARTIFACT_BYTES: u64 = 1 << 20;
 
-fn fresh_config() -> WorldConfig {
-    WorldConfig {
-        sessions: vec![SessionSpec {
-            messages: 3,
-            tool_span_every: 2,
-            correction_every: 0,
-            invalidation_every: 0,
-        }],
-        repositories: vec![RepositorySpec {
-            commits: 2,
-            rename_every: 0,
-        }],
-        epoch_ms: WORLD_EPOCH_MS,
-        tick_ms: 1_000,
-        max_events_per_log: 64,
-        planted: Vec::new(),
+type Mutate = fn(&mut WitnessPackage);
+
+fn redactor() -> Redactor {
+    Redactor::new().unwrap()
+}
+
+fn generation(seed: u64, config: eval_core::WorldConfig) -> Generation {
+    Generation {
+        config,
+        root_seed: seed,
     }
-}
-
-fn generate(seed: u64, config: &WorldConfig) -> EventLog {
-    eval_core::generate_all(seed, config, Mode::Generate)
-        .unwrap()
-        .log
-}
-
-fn query() -> Query {
-    Query {
-        valid_time_ms: MAX_VALID_TIME_MS,
-        observation_time_ms: MAX_VALID_TIME_MS,
-        scope: BTreeSet::from([
-            "session-0".to_string(),
-            "session-1".to_string(),
-            "repository-0".to_string(),
-        ]),
-        destination: Destination::Local,
-        served: Some(ServedClass {
-            sensitivity: Sensitivity::Normal,
-            visibility: Visibility::Labeled,
-            auto_inject: Visibility::Hidden,
-            auto_search: Visibility::Hidden,
-        }),
-        registry_sensitivity: Sensitivity::Normal,
-        max_events_per_log: 64,
-    }
-}
-
-fn task(name: &str, role: TaskRole, evidence: &str) -> Task {
-    Task {
-        id: name.to_string(),
-        role,
-        query: query(),
-        evidence: BTreeSet::from([EventId(evidence.to_string())]),
-    }
-}
-
-fn episode(id: &str) -> FaultEpisode {
-    let action = FaultAction::ProcessKill {
-        cut: "local_staged".to_string(),
-    };
-    FaultEpisode {
-        id: id.to_string(),
-        trigger_step: 3,
-        scope: FaultScope {
-            store: StoreFamily::SearchProjection,
-            operation: "acknowledge".to_string(),
-        },
-        heal: action.heal(),
-        action,
-        layer_contract: "search_catchup::EpisodeFault".to_string(),
-        kill: Some(KillLabel {
-            crash_model: APPLICATION_CRASH.to_string(),
-            page_cache_intact: true,
-            killed_process: TEST_BINARY_CHILD.to_string(),
-        }),
-    }
-}
-
-fn scenario() -> Scenario {
-    Scenario {
-        surface: EvaluatedSurface::Surface1,
-        recency_bound: None,
-        aged: generate(WORLD_SEED, &world_config()),
-        natural_fresh: generate(FRESH_SEED, &fresh_config()),
-        tasks: vec![
-            task(
-                "early-commit",
-                TaskRole::Falsification,
-                "repository:repository-0:0",
-            ),
-            task(
-                "last-rename",
-                TaskRole::PositiveControl,
-                "repository:repository-0:11",
-            ),
-        ],
-        episodes: vec![episode("kill-1"), episode("kill-2")],
-    }
-}
-
-fn fixture() -> Value {
-    serialize_spec()
-}
-
-fn oracle() -> Oracle {
-    Oracle::RequiredCommits {
-        failing_at: 3,
-        slipping_at: 6,
-    }
-}
-
-fn predicate(class: FailureClass) -> FailurePredicate {
-    FailurePredicate {
-        oracle: oracle().name().to_string(),
-        checkpoint: CUT,
-        profile_digest: PROFILE.to_string(),
-        witness_class: WitnessClass::Failure { class },
-    }
-}
-
-/// The in-process replay: the planted oracle over the compiled candidate and
-/// the aged truth reduced at the first task's cut.
-fn evaluate(request: ReplayRequest<'_>) -> ReplayOutcome {
-    let truth = reduce(
-        &request.set.aged,
-        &fixture(),
-        &request.set.pairs[0].task.query,
-    )
-    .unwrap();
-    oracle().evaluate(
-        request.set,
-        &truth,
-        request.checkpoint,
-        request.profile_digest,
-    )
 }
 
 fn package() -> WitnessPackage {
@@ -166,7 +37,7 @@ fn package() -> WitnessPackage {
     let (minimized, report) =
         shrink(&original, &fixture(), &expected, BUDGET, &mut evaluate).unwrap();
     let world = eval_core::generate_all(WORLD_SEED, &world_config(), Mode::Generate).unwrap();
-    WitnessPackage {
+    let mut package = WitnessPackage {
         schema: WITNESS_SCHEMA.to_string(),
         original: OriginalFailure {
             eval_run_id: "ab".repeat(32),
@@ -179,30 +50,30 @@ fn package() -> WitnessPackage {
         slice: Slice::Cassette,
         replayable: true,
         residue: support::manifest().residue,
-        recipe: Some(MultiplicityRecipe {
-            aged: Generation {
-                config: world_config(),
-                root_seed: WORLD_SEED,
-            },
-            natural_fresh: Generation {
-                config: fresh_config(),
-                root_seed: FRESH_SEED,
-            },
-            deleted: report.deleted.clone(),
-            multiplicities: multiplicities(&minimized),
-        }),
         minimized,
+        recipe: None,
         shrink: report,
         claim_boundary: ClaimBoundary::pinned(),
-    }
+    };
+    package.recipe = Some(MultiplicityRecipe {
+        aged: generation(WORLD_SEED, world_config()),
+        natural_fresh: generation(FRESH_SEED, fresh_config()),
+        multiplicities: package.count_triggered(),
+    });
+    package
 }
 
 #[test]
 fn the_package_round_trips_and_carries_the_recipe_for_a_count_triggered_failure() {
     let package = package();
-    let value = package.serialize(None, u64::MAX).unwrap();
+    let (value, text) = package.serialize(&redactor(), ARTIFACT_BYTES).unwrap();
     assert_eq!(parse_witness(&value).unwrap(), package);
-    assert_eq!(package.recipe.as_ref().unwrap().multiplicities["commit"], 6);
+    assert_eq!(serde_json::from_str::<Value>(&text).unwrap(), value);
+    assert_eq!(
+        package.recipe.as_ref().unwrap().multiplicities,
+        BTreeMap::from([("commit".to_string(), 5)]),
+        "six commits remain; deleting any of the five that are not the evidence slips the class"
+    );
 
     let mut without_recipe = package.clone();
     without_recipe.recipe = None;
@@ -212,7 +83,55 @@ fn the_package_round_trips_and_carries_the_recipe_for_a_count_triggered_failure(
     wrong_seed.recipe.as_mut().unwrap().aged.root_seed ^= 1;
     assert_eq!(
         wrong_seed.validate(),
-        Err(WitnessError::RecipeDisagrees { world: "aged" })
+        Err(WitnessError::RecipeDisagrees {
+            history: History::Aged
+        })
+    );
+    let mut wrong_fresh = package.clone();
+    wrong_fresh.recipe.as_mut().unwrap().natural_fresh.root_seed ^= 1;
+    assert_eq!(
+        wrong_fresh.validate(),
+        Err(WitnessError::RecipeDisagrees {
+            history: History::NaturalFresh
+        })
+    );
+    let mut oversized = package.clone();
+    oversized.recipe.as_mut().unwrap().aged.config.repositories[0].commits = 1_000_000;
+    assert_eq!(
+        oversized.validate(),
+        Err(WitnessError::RecipeDisagrees {
+            history: History::Aged
+        }),
+        "a declared size the minimized log cannot account for is refused before generating"
+    );
+    let mut wrong_counts = package.clone();
+    wrong_counts
+        .recipe
+        .as_mut()
+        .unwrap()
+        .multiplicities
+        .insert("message".to_string(), 2);
+    assert_eq!(
+        wrong_counts.validate(),
+        Err(WitnessError::RecipeMultiplicitiesDisagree)
+    );
+    let mut not_minimal = package.clone();
+    not_minimal.shrink.minimality = Minimality::NotEstablished {
+        reason: eval_core::NotEstablishedReason::UnknownCandidates { count: 1 },
+    };
+    not_minimal.recipe = None;
+    not_minimal.validate().unwrap();
+    let mut no_trigger = package.clone();
+    no_trigger.shrink.candidates.retain(|record| {
+        !matches!(
+            record.verdict,
+            CandidateVerdict::Slipped { .. } | CandidateVerdict::NotReproduced
+        )
+    });
+    assert_eq!(
+        no_trigger.validate(),
+        Err(WitnessError::RecipeWithoutMultiplicity),
+        "without a single deletion that changed the outcome, no count is the trigger"
     );
 
     let mut tampered = value.clone();
@@ -221,6 +140,56 @@ fn the_package_round_trips_and_carries_the_recipe_for_a_count_triggered_failure(
         parse_witness(&tampered),
         Err(WitnessError::Shape(_))
     ));
+    let mut lossy = value.clone();
+    lossy["shrink"]["deleted"].as_array_mut().unwrap().reverse();
+    assert_eq!(
+        parse_witness(&lossy).err(),
+        Some(WitnessError::Lossy),
+        "a set written out of order is not the value the type would write"
+    );
+}
+
+#[test]
+fn every_structural_refusal_names_its_cause() {
+    let package = package();
+    let cases: Vec<(Mutate, WitnessError)> = vec![
+        (
+            |p| p.schema = "eval-witness/v0".to_string(),
+            WitnessError::SchemaMismatch {
+                found: "eval-witness/v0".to_string(),
+            },
+        ),
+        (
+            |p| p.original.eval_run_id = "nope".to_string(),
+            WitnessError::NotHex {
+                field: "eval_run_id",
+            },
+        ),
+        (
+            |p| p.original.trace_digest = "AB".repeat(32),
+            WitnessError::NotHex {
+                field: "trace_digest",
+            },
+        ),
+        (
+            |p| p.shrink.minimized_digest = "00".repeat(32),
+            WitnessError::MinimizedDigestMismatch,
+        ),
+        (
+            |p| p.shrink.predicate.checkpoint = Cut::EndOfRun,
+            WitnessError::PredicateDisagrees,
+        ),
+    ];
+    for (mutate, expected) in cases {
+        let mut mutated = package.clone();
+        mutate(&mut mutated);
+        assert_eq!(mutated.validate(), Err(expected.clone()));
+        assert_eq!(
+            mutated.serialize(&redactor(), ARTIFACT_BYTES).err(),
+            Some(expected),
+            "the serializer refuses what validate refuses"
+        );
+    }
 }
 
 #[test]
@@ -231,6 +200,10 @@ fn live_model_evidence_is_never_relabelled_replayable() {
         witness.validate(),
         Err(WitnessError::LiveRelabelledReplayable)
     );
+    assert_eq!(
+        witness.serialize(&redactor(), ARTIFACT_BYTES).err(),
+        Some(WitnessError::LiveRelabelledReplayable)
+    );
     witness.replayable = false;
     witness.validate().unwrap();
 }
@@ -239,21 +212,35 @@ fn live_model_evidence_is_never_relabelled_replayable() {
 fn the_serializer_requires_the_verbatim_claim_boundary_and_rejects_forbidden_claims() {
     let mut witness = package();
     witness.claim_boundary.exclusions.pop();
-    assert_eq!(witness.validate(), Err(WitnessError::ClaimBoundaryMismatch));
+    assert_eq!(
+        witness.serialize(&redactor(), ARTIFACT_BYTES).err(),
+        Some(WitnessError::ClaimBoundaryMismatch)
+    );
 
     let mut claims = package();
     claims.original.predicate.oracle = "proves live-model quality".to_string();
     claims.shrink.predicate.oracle = claims.original.predicate.oracle.clone();
     assert_eq!(
-        claims.validate(),
-        Err(WitnessError::ForbiddenClaim {
+        claims.serialize(&redactor(), ARTIFACT_BYTES).err(),
+        Some(WitnessError::ForbiddenClaim {
             path: "/original/predicate/oracle".to_string(),
             phrase: "live-model quality".to_string(),
         })
     );
-    let mut disagrees = package();
-    disagrees.shrink.predicate.checkpoint = Cut::EndOfRun;
-    assert_eq!(disagrees.validate(), Err(WitnessError::PredicateDisagrees));
+    let mut cased = package();
+    cased
+        .original
+        .coverage
+        .insert("Scheduler-Order Independence shown".to_string());
+    let refused = cased.serialize(&redactor(), ARTIFACT_BYTES).err().unwrap();
+    assert_eq!(
+        refused,
+        WitnessError::ForbiddenClaim {
+            path: "/original/coverage[0]".to_string(),
+            phrase: "scheduler-order independence".to_string(),
+        },
+        "case does not hide a claim and an array leaf names its index"
+    );
 }
 
 #[test]
@@ -261,27 +248,24 @@ fn residue_drift_refuses_and_limits_apply_before_publication() {
     let package = package();
     let mut drifted = package.residue.clone();
     let moved = drifted.pop_first().unwrap();
-    package.check_residue(&package.residue).unwrap();
-    let refused = package.check_residue(&drifted).unwrap_err();
+    residue_drift(&package.residue, &package.residue).unwrap();
     assert_eq!(
-        refused,
-        WitnessError::ResidueDrift {
+        residue_drift(&package.residue, &drifted),
+        Err(WitnessError::ResidueDrift {
             missing: BTreeSet::from([moved]),
             unexpected: BTreeSet::new(),
-        }
+        })
     );
     assert!(matches!(
-        package.serialize(None, 16),
+        package.serialize(&redactor(), 16),
         Err(WitnessError::TooLarge { bound: 16, .. })
     ));
-    let redactor = Redactor::new().unwrap();
-    package.serialize(Some(&redactor), u64::MAX).unwrap();
     let mut leaking = package.clone();
     leaking.original.coverage.insert(
         "Authorization: Bearer sk-ant-api03-ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcd".to_string(),
     );
     assert_eq!(
-        leaking.serialize(Some(&redactor), u64::MAX).err(),
+        leaking.serialize(&redactor(), ARTIFACT_BYTES).err(),
         Some(WitnessError::RedactionRefused(
             RedactionErrorKind::SecretDetected
         ))

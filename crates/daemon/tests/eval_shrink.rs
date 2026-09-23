@@ -19,7 +19,7 @@ mod fault;
 #[allow(dead_code)]
 mod shrink;
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
@@ -29,8 +29,8 @@ use context_core::canonical_json::protocol_digest;
 use eval_core::{
     Approval, CandidateVerdict, Cut, CutOutcome, Element, EventId, FailureClass, History,
     Minimality, NotEstablishedReason, Oracle, ProfileError, ReplayOutcome, Scale, Scenario,
-    Transformation, UnknownReason, WITNESS_DIGEST_PROTOCOL, WitnessClass, parse_manifest,
-    parse_witness,
+    Transformation, UnknownReason, WITNESS_DIGEST_PROTOCOL, WitnessClass, WitnessError,
+    parse_manifest, parse_witness, residue_drift,
 };
 use serde_json::Value;
 use shrink::{BARRIER, ChildArgs, Config, MANIFEST_FILE, Replayed, RunError, WITNESS_FILE};
@@ -116,6 +116,27 @@ fn shrink_child_sleeps_past_the_timeout() {
     if std::env::var(shrink::CHILD_ARGS).is_ok() {
         std::thread::sleep(Duration::from_secs(60));
     }
+}
+
+/// Every child reports one residue entry fewer than this build declares.
+fn spawn_drifting(_: &ChildArgs) -> Command {
+    reexec("shrink_child_reports_a_drifted_residue")
+}
+
+#[test]
+#[ignore = "re-executed by the drift test"]
+fn shrink_child_reports_a_drifted_residue() {
+    if std::env::var(shrink::CHILD_ARGS).is_err() {
+        return;
+    }
+    let mut residue = shrink::residue();
+    residue.pop_first();
+    let replayed = Replayed {
+        outcome: ReplayOutcome::Passed,
+        trace_digest: String::new(),
+        residue,
+    };
+    println!("{BARRIER} {}", serde_json::to_string(&replayed).unwrap());
 }
 
 fn approval() -> Approval {
@@ -243,15 +264,18 @@ fn a_fresh_process_reproduces_the_predicate_and_the_minimized_witness_is_publish
         witness.original.trace_digest,
         "the original replays to its recorded trace digest"
     );
-    witness.check_residue(&first.residue).unwrap();
+    residue_drift(&witness.residue, &first.residue).unwrap();
 
     // The compact recipe regenerates the minimized worlds.
     let recipe = witness
         .recipe
         .as_ref()
         .expect("six commits remain: a count triggers it");
-    assert_eq!(recipe.multiplicities["commit"], 6);
-    assert_eq!(recipe.deleted, witness.shrink.deleted);
+    assert_eq!(
+        recipe.multiplicities,
+        BTreeMap::from([("commit".to_string(), 5)]),
+        "five of the six remaining commits slip the class when deleted alone; the sixth is evidence"
+    );
 
     // Published atomically, byte-identical to what parses back, digested in
     // the manifest.
@@ -288,6 +312,10 @@ fn a_fresh_process_reproduces_the_predicate_and_the_minimized_witness_is_publish
     let fired = run.coverage.fired();
     assert!(fired.contains("flt_shrink_fresh_process_reproduced"));
     assert!(fired.contains("flt_shrink_slipped_candidate_rejected"));
+    assert!(
+        !fired.contains("flt_shrink_unknown_effect_preserved"),
+        "no replay answered unknown, so the marker did not fire"
+    );
     assert!(
         witness
             .original
@@ -366,6 +394,12 @@ fn a_child_that_dies_before_its_barrier_is_retried_then_unknown_and_kept() {
             .fired()
             .contains("flt_shrink_unknown_effect_preserved")
     );
+    assert!(
+        run.coverage
+            .fired()
+            .contains("flt_shrink_slipped_candidate_rejected"),
+        "candidates that answered still slipped"
+    );
     assert!(witness.recipe.is_none(), "no 1-minimality, no recipe");
     let _ = std::fs::remove_file(death_log());
 }
@@ -409,6 +443,24 @@ fn a_child_that_never_answers_is_cancelled_and_unknown() {
             reason: NotEstablishedReason::UnknownCandidates { .. }
         }
     ));
+}
+
+#[test]
+fn a_child_whose_residue_drifted_refuses_the_run() {
+    let publish = tempfile::tempdir().unwrap();
+    let config = config(publish.path().join("out"));
+    let refused = shrink::run(&config, spawn_drifting).err().unwrap();
+    match refused {
+        RunError::Witness(WitnessError::ResidueDrift {
+            missing,
+            unexpected,
+        }) => {
+            assert_eq!(missing.len(), 1);
+            assert!(unexpected.is_empty());
+        }
+        other => panic!("expected residue drift, got {other:?}"),
+    }
+    assert!(!config.publish.join(WITNESS_FILE).exists());
 }
 
 #[test]
@@ -459,5 +511,24 @@ fn the_shrink_flags_are_parsed_and_the_child_needs_its_environment() {
     assert_eq!(config.commits, 8);
     assert_eq!(config.replay_timeout, Duration::from_secs(120));
     assert!(shrink::config_from_args(["--scale".to_string(), "s0".to_string()]).is_err());
+    let one_commit = [
+        "--scale",
+        "s0",
+        "--commits",
+        "1",
+        "--elapsed-bound-ms",
+        "1000",
+        "--approved-by",
+        "m",
+        "--approval-run-id",
+        &"ab".repeat(32),
+        "--publish",
+        "/tmp/x",
+    ]
+    .map(String::from);
+    assert!(
+        shrink::config_from_args(one_commit).is_err(),
+        "a rename needs two commits"
+    );
     assert!(ChildArgs::from_env().is_none());
 }

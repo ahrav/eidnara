@@ -469,19 +469,15 @@ impl Cassette {
 }
 
 fn admit(redactor: &Redactor, location: Location, value: &Value) -> Result<(), CassetteError> {
-    canonical_json_encode(value)?;
-    scan_for_secrets(redactor, value)
+    let text = canonical_json_encode(value)?;
+    scan_for_secrets(redactor, &text)
         .map_err(|kind| CassetteError::RedactionRefused(location, kind))
 }
 
-/// One full-text scan over the canonical encoding. A detection refuses the
+/// One full-text scan over a canonical encoding. A detection refuses the
 /// value; nothing is substituted.
-pub(crate) fn scan_for_secrets(
-    redactor: &Redactor,
-    value: &Value,
-) -> Result<(), RedactionErrorKind> {
-    let text = canonical_json_encode(value).map_err(|_| RedactionErrorKind::InputLimit)?;
-    let redaction = redactor.redact(&text).map_err(|error| error.kind())?;
+pub(crate) fn scan_for_secrets(redactor: &Redactor, text: &str) -> Result<(), RedactionErrorKind> {
+    let redaction = redactor.redact(text).map_err(|error| error.kind())?;
     if redaction.detections.is_empty() {
         Ok(())
     } else {

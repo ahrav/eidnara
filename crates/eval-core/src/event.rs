@@ -156,18 +156,6 @@ pub enum LogError {
 debug_display!(LogError);
 
 impl Payload {
-    /// The serde tag: the payload's kind in `snake_case`.
-    pub fn kind(&self) -> &'static str {
-        match self {
-            Self::Message { .. } => "message",
-            Self::ToolSpan { .. } => "tool_span",
-            Self::Commit { .. } => "commit",
-            Self::Rename { .. } => "rename",
-            Self::Correction { .. } => "correction",
-            Self::Invalidation { .. } => "invalidation",
-        }
-    }
-
     /// The event this payload points at: a cited message, a rename's
     /// predecessor, or a correction's or retraction's target. Every variant
     /// is listed so a new reference-bearing one cannot hide behind a wildcard.

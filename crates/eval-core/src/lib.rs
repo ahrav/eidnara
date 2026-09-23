@@ -157,7 +157,6 @@ pub use statistics::{
 };
 pub use stream::*;
 pub use witness::{
-    FORBIDDEN_CLAIM_PHRASES, Generation, MultiplicityRecipe, OriginalFailure,
-    WITNESS_DIGEST_PROTOCOL, WITNESS_SCHEMA, WitnessError, WitnessPackage, multiplicities,
-    parse_witness,
+    Generation, MultiplicityRecipe, OriginalFailure, WITNESS_DIGEST_PROTOCOL, WITNESS_SCHEMA,
+    WitnessError, WitnessPackage, parse_witness, residue_drift,
 };

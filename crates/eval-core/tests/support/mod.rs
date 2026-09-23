@@ -190,3 +190,162 @@ pub fn manifest_for(identity: RunIdentity, trace: &SemanticTrace) -> Manifest {
 pub fn manifest() -> Manifest {
     manifest_for(identity(), &trace())
 }
+
+/// The shrink fixtures: one aged world from `world_config`, a natural-fresh
+/// history under another seed, two tasks, two inert kill episodes, and the
+/// planted commit oracle.
+pub mod shrink {
+    use std::collections::BTreeSet;
+
+    use eval_core::{
+        APPLICATION_CRASH, Cut, Destination, EvaluatedSurface, EventId, EventLog, FailureClass,
+        FailurePredicate, FaultAction, FaultEpisode, FaultScope, KillLabel, MAX_VALID_TIME_MS,
+        Mode, Oracle, Query, ReplayOutcome, ReplayRequest, RepositorySpec, Scenario, Sensitivity,
+        ServedClass, SessionSpec, StoreFamily, TEST_BINARY_CHILD, Task, TaskRole, Visibility,
+        WitnessClass, WorldConfig, reduce, serialize_spec,
+    };
+    use serde_json::Value;
+
+    use super::{WORLD_EPOCH_MS, WORLD_SEED, world_config};
+
+    pub const FRESH_SEED: u64 = WORLD_SEED ^ 0xABCD;
+    pub const PROFILE: &str = "profile-digest";
+    pub const CUT: Cut = Cut::AtQuiescence;
+    pub const BUDGET: u64 = 400;
+
+    pub fn fresh_config() -> WorldConfig {
+        WorldConfig {
+            sessions: vec![SessionSpec {
+                messages: 3,
+                tool_span_every: 2,
+                correction_every: 0,
+                invalidation_every: 0,
+            }],
+            repositories: vec![RepositorySpec {
+                commits: 2,
+                rename_every: 0,
+            }],
+            epoch_ms: WORLD_EPOCH_MS,
+            tick_ms: 1_000,
+            max_events_per_log: 64,
+            planted: Vec::new(),
+        }
+    }
+
+    pub fn generate(seed: u64, config: &WorldConfig) -> EventLog {
+        eval_core::generate_all(seed, config, Mode::Generate)
+            .unwrap()
+            .log
+    }
+
+    pub fn query() -> Query {
+        Query {
+            valid_time_ms: MAX_VALID_TIME_MS,
+            observation_time_ms: MAX_VALID_TIME_MS,
+            scope: BTreeSet::from([
+                "session-0".to_string(),
+                "session-1".to_string(),
+                "repository-0".to_string(),
+            ]),
+            destination: Destination::Local,
+            served: Some(ServedClass {
+                sensitivity: Sensitivity::Normal,
+                visibility: Visibility::Labeled,
+                auto_inject: Visibility::Hidden,
+                auto_search: Visibility::Hidden,
+            }),
+            registry_sensitivity: Sensitivity::Normal,
+            max_events_per_log: 64,
+        }
+    }
+
+    pub fn task(name: &str, role: TaskRole, evidence: &str) -> Task {
+        Task {
+            id: name.to_string(),
+            role,
+            query: query(),
+            evidence: BTreeSet::from([EventId(evidence.to_string())]),
+        }
+    }
+
+    pub fn episode(id: &str) -> FaultEpisode {
+        let action = FaultAction::ProcessKill {
+            cut: "local_staged".to_string(),
+        };
+        FaultEpisode {
+            id: id.to_string(),
+            trigger_step: 3,
+            scope: FaultScope {
+                store: StoreFamily::SearchProjection,
+                operation: "acknowledge".to_string(),
+            },
+            heal: action.heal(),
+            action,
+            layer_contract: "search_catchup::EpisodeFault".to_string(),
+            kill: Some(KillLabel {
+                crash_model: APPLICATION_CRASH.to_string(),
+                page_cache_intact: true,
+                killed_process: TEST_BINARY_CHILD.to_string(),
+            }),
+        }
+    }
+
+    pub fn scenario() -> Scenario {
+        Scenario {
+            surface: EvaluatedSurface::Surface1,
+            recency_bound: None,
+            aged: generate(WORLD_SEED, &world_config()),
+            natural_fresh: generate(FRESH_SEED, &fresh_config()),
+            tasks: vec![
+                task(
+                    "early-commit",
+                    TaskRole::Falsification,
+                    "repository:repository-0:0",
+                ),
+                task(
+                    "last-rename",
+                    TaskRole::PositiveControl,
+                    "repository:repository-0:11",
+                ),
+            ],
+            episodes: vec![episode("kill-1"), episode("kill-2")],
+        }
+    }
+
+    pub fn fixture() -> Value {
+        serialize_spec()
+    }
+
+    pub fn oracle() -> Oracle {
+        Oracle::RequiredCommits {
+            failing_at: 3,
+            slipping_at: 6,
+        }
+    }
+
+    pub fn predicate(class: FailureClass) -> FailurePredicate {
+        FailurePredicate {
+            oracle: oracle().name().to_string(),
+            checkpoint: CUT,
+            profile_digest: PROFILE.to_string(),
+            witness_class: WitnessClass::Failure { class },
+        }
+    }
+
+    /// The in-process replay: the planted oracle over the compiled candidate and
+    /// the aged truth reduced at the first task's cut.
+    pub fn evaluate(request: ReplayRequest<'_>) -> ReplayOutcome {
+        let truth = reduce(
+            &request.set.aged,
+            &fixture(),
+            &request.set.pairs[0].task.query,
+        )
+        .unwrap();
+        oracle().evaluate(
+            request.set,
+            &truth,
+            request.checkpoint,
+            request.profile_digest,
+        )
+    }
+}

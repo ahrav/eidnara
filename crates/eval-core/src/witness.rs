@@ -10,19 +10,18 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::cassette::scan_for_secrets;
-use crate::event::CausalEdge;
+use crate::event::{CausalEdge, EventId, EventLog};
 use crate::failure_class::Slice;
 use crate::generator::{Mode, WorldConfig, generate_all};
 use crate::manifest::{CLAIM_BOUNDARY_EXCLUSIONS, ClaimBoundary};
 use crate::residue::ResidueEntry;
-use crate::shrink::{Element, FailurePredicate, History, Minimality, Scenario, ShrinkReport};
+use crate::shrink::{
+    CandidateVerdict, Element, FailurePredicate, History, Minimality, Scenario, ShrinkReport,
+};
 use crate::stream::Tape;
 
 pub const WITNESS_SCHEMA: &str = "eval-witness/v1";
 pub const WITNESS_DIGEST_PROTOCOL: &str = "eval-witness-digest/v1";
-/// The four excluded claims may be named only inside the claim-boundary
-/// block; anywhere else in a witness they are a claim the witness cannot make.
-pub const FORBIDDEN_CLAIM_PHRASES: [&str; 4] = CLAIM_BOUNDARY_EXCLUSIONS;
 
 /// The failure as the campaign observed it, before any shrinking.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -33,7 +32,7 @@ pub struct OriginalFailure {
     pub trace_digest: String,
     pub causal_trace: Vec<CausalEdge>,
     pub predicate: FailurePredicate,
-    /// The coverage markers the failing run fired.
+    /// The shrink markers the shell recorded for this failure.
     pub coverage: BTreeSet<String>,
 }
 
@@ -46,14 +45,15 @@ pub struct Generation {
     pub root_seed: u64,
 }
 
-/// A count-triggered failure's compact form: regenerate both worlds and apply
-/// the deletions instead of carrying every surviving event verbatim.
+/// A count-triggered failure's compact form beside the minimized scenario:
+/// regenerate both worlds and apply the report's deletions. `multiplicities`
+/// counts the surviving aged events of each kind whose single deletion
+/// changed the outcome.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MultiplicityRecipe {
     pub aged: Generation,
     pub natural_fresh: Generation,
-    pub deleted: BTreeSet<Element>,
     pub multiplicities: BTreeMap<String, u64>,
 }
 
@@ -90,8 +90,11 @@ pub enum WitnessError {
     /// compact form is required; or it carries one it does not need.
     RecipeRequired,
     RecipeWithoutMultiplicity,
+    RecipeMultiplicitiesDisagree,
+    /// The regenerated world is not the minimized one, or its declared size
+    /// is not what the minimized log and the deletions account for.
     RecipeDisagrees {
-        world: &'static str,
+        history: History,
     },
     ResidueDrift {
         missing: BTreeSet<ResidueEntry>,
@@ -143,108 +146,139 @@ impl WitnessPackage {
         check_claims(&value, "")
     }
 
-    /// A 1-minimal scenario whose surviving aged events still repeat a kind
-    /// carries the compact form, which must regenerate exactly the minimized
-    /// logs; a scenario without a repeated kind carries none.
+    /// A kind is count-triggered when the minimized scenario keeps more than
+    /// one aged event of it and deleting any one alone changed the outcome
+    /// (`Slipped` or `NotReproduced`). A 1-minimal scenario with such a kind
+    /// carries the compact form; one without carries none; the form must
+    /// regenerate exactly the minimized logs.
     fn check_recipe(&self) -> Result<(), WitnessError> {
-        let multiplicities = multiplicities(&self.minimized);
-        let repeated = multiplicities.values().any(|count| *count > 1);
+        let triggered = self.count_triggered();
         let minimal = matches!(self.shrink.minimality, Minimality::OneMinimal { .. });
         match &self.recipe {
-            None if minimal && repeated => Err(WitnessError::RecipeRequired),
+            None if minimal && !triggered.is_empty() => Err(WitnessError::RecipeRequired),
             None => Ok(()),
-            Some(_) if !repeated => Err(WitnessError::RecipeWithoutMultiplicity),
+            Some(_) if triggered.is_empty() => Err(WitnessError::RecipeWithoutMultiplicity),
+            Some(recipe) if recipe.multiplicities != triggered => {
+                Err(WitnessError::RecipeMultiplicitiesDisagree)
+            }
             Some(recipe) => {
-                if recipe.multiplicities != multiplicities || recipe.deleted != self.shrink.deleted
-                {
-                    return Err(WitnessError::RecipeDisagrees { world: "aged" });
-                }
-                let regenerate = |generation: &Generation| {
-                    generate_all(generation.root_seed, &generation.config, Mode::Generate)
-                        .map(|world| world.log)
-                };
-                let mut aged = regenerate(&recipe.aged);
-                let mut natural_fresh = regenerate(&recipe.natural_fresh);
-                for element in &recipe.deleted {
-                    match element {
-                        Element::Event {
-                            history: History::Aged,
-                            id,
-                        } => aged = aged.map(|log| log.without(id)),
-                        Element::Event {
-                            history: History::NaturalFresh,
-                            id,
-                        } => natural_fresh = natural_fresh.map(|log| log.without(id)),
-                        Element::Episode { .. } => {}
-                    }
-                }
-                if aged.as_ref() != Ok(&self.minimized.aged) {
-                    return Err(WitnessError::RecipeDisagrees { world: "aged" });
-                }
-                if natural_fresh.as_ref() != Ok(&self.minimized.natural_fresh) {
-                    return Err(WitnessError::RecipeDisagrees {
-                        world: "natural_fresh",
-                    });
-                }
-                Ok(())
+                self.regenerates(History::Aged, &recipe.aged, &self.minimized.aged)?;
+                self.regenerates(
+                    History::NaturalFresh,
+                    &recipe.natural_fresh,
+                    &self.minimized.natural_fresh,
+                )
             }
         }
     }
 
-    /// Refuses when the schemas a replaying process declares classify any
-    /// field differently from the recorded residue.
-    pub fn check_residue(&self, current: &BTreeSet<ResidueEntry>) -> Result<(), WitnessError> {
-        if self.residue == *current {
-            return Ok(());
+    /// The kinds a compact recipe must count, with their counts.
+    pub fn count_triggered(&self) -> BTreeMap<String, u64> {
+        let mut counts: BTreeMap<String, u64> = BTreeMap::new();
+        for event in &self.minimized.aged.events {
+            let mut deleted = self.shrink.deleted.clone();
+            deleted.insert(Element::Event {
+                history: History::Aged,
+                id: event.id.clone(),
+            });
+            let changed = self.shrink.candidates.iter().any(|record| {
+                record.deleted == deleted
+                    && matches!(
+                        record.verdict,
+                        CandidateVerdict::Slipped { .. } | CandidateVerdict::NotReproduced
+                    )
+            });
+            if changed {
+                let payload = serde_json::to_value(&event.payload).expect("payload serializes");
+                let kind = payload["kind"]
+                    .as_str()
+                    .expect("payload is tagged")
+                    .to_string();
+                *counts.entry(kind).or_insert(0) += 1;
+            }
         }
-        Err(WitnessError::ResidueDrift {
-            missing: self.residue.difference(current).cloned().collect(),
-            unexpected: current.difference(&self.residue).cloned().collect(),
-        })
+        counts.retain(|_, count| *count > 1);
+        counts
     }
 
-    /// The one serializer: refuses before a byte leaves. With a redactor, a
-    /// detected secret refuses the whole package rather than substituting a
-    /// placeholder; the byte bound is the envelope's artifact limit.
+    /// The declared size is checked before anything is generated, so a parsed
+    /// package cannot demand an unbounded regeneration.
+    fn regenerates(
+        &self,
+        history: History,
+        generation: &Generation,
+        minimized: &EventLog,
+    ) -> Result<(), WitnessError> {
+        let disagrees = || WitnessError::RecipeDisagrees { history };
+        let deleted: Vec<&EventId> = self
+            .shrink
+            .deleted
+            .iter()
+            .filter_map(|element| match element {
+                Element::Event { history: h, id } if *h == history => Some(id),
+                _ => None,
+            })
+            .collect();
+        if generation.config.declared_events() != (minimized.events.len() + deleted.len()) as u64 {
+            return Err(disagrees());
+        }
+        let mut log = generate_all(generation.root_seed, &generation.config, Mode::Generate)
+            .map_err(|_| disagrees())?
+            .log;
+        for id in deleted {
+            log = log.without(id);
+        }
+        if log != *minimized {
+            return Err(disagrees());
+        }
+        Ok(())
+    }
+
+    /// The one serializer: refuses before a byte leaves. A detected secret
+    /// refuses the whole package rather than substituting a placeholder; the
+    /// byte bound is the envelope's artifact limit over the canonical bytes,
+    /// which are the bytes to publish.
     pub fn serialize(
         &self,
-        redactor: Option<&Redactor>,
-        max_bytes: u64,
-    ) -> Result<Value, WitnessError> {
+        redactor: &Redactor,
+        artifact_bytes: u64,
+    ) -> Result<(Value, String), WitnessError> {
         self.validate()?;
         let value = serde_json::to_value(self).map_err(|e| WitnessError::Shape(e.to_string()))?;
-        let bytes = canonical_json_encode(&value)
-            .map_err(|e| WitnessError::Shape(e.to_string()))?
-            .len() as u64;
-        if bytes > max_bytes {
+        let text = canonical_json_encode(&value).map_err(|e| WitnessError::Shape(e.to_string()))?;
+        if text.len() as u64 > artifact_bytes {
             return Err(WitnessError::TooLarge {
-                bytes,
-                bound: max_bytes,
+                bytes: text.len() as u64,
+                bound: artifact_bytes,
             });
         }
-        if let Some(redactor) = redactor {
-            scan_for_secrets(redactor, &value).map_err(WitnessError::RedactionRefused)?;
-        }
-        Ok(value)
+        scan_for_secrets(redactor, &text).map_err(WitnessError::RedactionRefused)?;
+        Ok((value, text))
     }
 }
 
-/// How many aged events each payload kind contributes.
-pub fn multiplicities(scenario: &Scenario) -> BTreeMap<String, u64> {
-    let mut counts = BTreeMap::new();
-    for event in &scenario.aged.events {
-        *counts.entry(event.payload.kind().to_string()).or_insert(0) += 1;
+/// Refuses when `current` classifies any field differently from `recorded`.
+pub fn residue_drift(
+    recorded: &BTreeSet<ResidueEntry>,
+    current: &BTreeSet<ResidueEntry>,
+) -> Result<(), WitnessError> {
+    if recorded == current {
+        return Ok(());
     }
-    counts
+    Err(WitnessError::ResidueDrift {
+        missing: recorded.difference(current).cloned().collect(),
+        unexpected: current.difference(recorded).cloned().collect(),
+    })
 }
 
 /// Every string leaf outside `claim_boundary` is scanned for the excluded
-/// claims; the first hit names its path.
+/// claims, which may be named only inside that block; the first hit names
+/// its path.
 fn check_claims(value: &Value, path: &str) -> Result<(), WitnessError> {
     match value {
         Value::String(text) => {
             let lowered = text.to_ascii_lowercase();
-            for phrase in FORBIDDEN_CLAIM_PHRASES {
+            for phrase in CLAIM_BOUNDARY_EXCLUSIONS {
                 if lowered.contains(phrase) {
                     return Err(WitnessError::ForbiddenClaim {
                         path: path.to_string(),
