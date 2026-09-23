@@ -73,8 +73,9 @@ pub enum TaskError {
     EmptyStatement,
     NoHiddenTests,
     NoWrongFixes,
-    /// A hidden test path appears in the visible files or a fix.
-    HiddenTestVisible {
+    /// A path in the visible files or a fix that could select, modify, or
+    /// replace the hidden tests: the set `oracle_tamper` records.
+    SelectsOracle {
         path: String,
     },
     /// A file key that is not workspace-relative: `/`-separated components,
@@ -194,16 +195,13 @@ impl GeneratedTask {
                     fix: id.to_string(),
                 });
             }
-            if let Some(path) = patch.keys().find(|p| p.starts_with(HIDDEN_TEST_PREFIX)) {
-                return Err(TaskError::HiddenTestVisible { path: path.clone() });
-            }
         }
-        if let Some(path) = self
-            .files
-            .keys()
-            .find(|p| p.starts_with(HIDDEN_TEST_PREFIX))
+        if let Some(path) = std::iter::once(&self.files)
+            .chain([&self.correct_fix])
+            .chain(self.wrong_fixes.iter().map(|fix| &fix.patch))
+            .find_map(|files| self.oracle_tamper(files).into_iter().next())
         {
-            return Err(TaskError::HiddenTestVisible { path: path.clone() });
+            return Err(TaskError::SelectsOracle { path });
         }
         for fix in &self.wrong_fixes {
             if !names.contains(fix.fails.as_str()) {
