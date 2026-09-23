@@ -2086,6 +2086,8 @@ in `lost_by`, sets
 the expectation to `one_of {applied, not_applied}` and the outcome to
 `unknown`; `read_back(identity, state)` collapses it to `exactly { state }`
 and the matching outcome, adding the observation an applied read-back proves.
+An observation (`observe`, `acknowledge`) after a `not_applied` read-back is
+the retry landing, and moves the identity to `exactly { applied }`.
 A read-back is refused as `ReadBackNotAdmissible { identity, state }` and
 changes nothing when `state` is outside the admissible set (a reply that was
 not lost admits only `applied`) or when it is `not_applied` for an effect
@@ -2100,8 +2102,9 @@ acknowledged (nothing was lost), `PrematureSuccess` for a lost reply whose
 outcome is not `unknown` without a read-back, and
 `ExpectationCollapsedWithoutReadBack` for a lost reply expecting fewer than two
 states, and `OutcomeNotDerived` when the outcome is not the state the
-expectation names or an effect whose reply was never lost expects anything but
-`applied`, the only state the API ever admits for it. A read-back that finds the
+expectation names, an effect whose reply was never lost expects anything but
+`applied`, the only state the API ever admits for it, or an applied read-back
+recorded with no observation. A read-back that finds the
 effect applied counts as its one observation, the only one a lost reply
 leaves; it raises `observed` to at least one and never lowers it, so an
 over-count stays visible to the bounds check. Aggregate totals are never
@@ -2145,10 +2148,13 @@ publishes: identity, profile digest, claim boundary, the episodes, barrier
 receipts, cut receipts, cut coverage, the effect ledger, expected refusals,
 the count of safety checks made while faults were armed (`SafetyNeverChecked`
 at zero), the optional liveness report, markers, and envelope. `validate`
-takes the profile's liveness bounds and resource limits and runs every
+takes a `FaultProfile`, the approved profile's digest, liveness bounds, and
+resource limits (`RunProfile::fault_profile` builds one and refuses an
+unapproved profile), and runs every
 refusal above, and also refuses
 `ClaimBoundaryMismatch`, `MalformedDigest` for an `eval_run_id` or
-`profile_digest` that is not 64 lowercase hex digits,
+`profile_digest` that is not 64 lowercase hex digits, `ProfileDigestMismatch`
+when `profile_digest` is not the supplied profile's,
 `EnvelopeDisagreesWithProfile` when the envelope's bounds are not the
 profile's limits, `EnvelopeExceeded` when any recorded peak is over its
 bound, `NoEpisode` when no fault was armed (so no safety check ran while one

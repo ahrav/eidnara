@@ -91,8 +91,8 @@ pub use fault::{
     BarrierReceipt, BarrierRefused, BatchFaultKind, CoverageRefused, CutCoverage,
     DispatchFaultKind, Effect, EffectLedger, EffectOutcome, EffectRefused, EffectState,
     EpisodeRefused, Expected, ExpectedRefusal, FAULT_REPORT_SCHEMA, FaultAction, FaultEpisode,
-    FaultReport, FaultReportError, FaultScope, Heal, HealthyCore, KillLabel, Lane, LaneProgress,
-    LivenessRefused, LivenessReport, MaterializationFaultKind, PublicationFaultKind,
+    FaultProfile, FaultReport, FaultReportError, FaultScope, Heal, HealthyCore, KillLabel, Lane,
+    LaneProgress, LivenessRefused, LivenessReport, MaterializationFaultKind, PublicationFaultKind,
     RecordedRefusal, RestoreFaultKind, SIGKILL, SearchEpisodeFault, TEST_BINARY_CHILD,
     cut_receipts, parse_fault_report, validate_episodes,
 };

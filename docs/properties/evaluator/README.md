@@ -1236,7 +1236,9 @@ Campaign (`crates/eval-core/tests/campaign.rs`):
   validates and round-trips; its only default is surface 1's window of 100;
   the three ceilings read as exact ratios; an unapproved profile refuses
   `approved` by name and an approved one returns its approver and a digest
-  that differs from the unapproved one; an approval with an empty approver or
+  that differs from the unapproved one; `fault_profile` refuses the unapproved
+  profile and carries the approved one's digest, liveness bounds, and
+  envelope; an approval with an empty approver or
   an upper-case run ID refuses; each scale names its budget variable or none.
 - `a_profile_refuses_every_absent_or_zero_setting_by_name`: every top-level
   field and every nested budget, envelope, statistics, and liveness field is
@@ -1638,7 +1640,10 @@ Fault contract (`crates/eval-core/tests/fault.rs`,
   declared cut set derives from the episodes rather than the report's word;
   `projection_batch` encodes the retrieval batch seam; a restore fault the
   handle rolls back itself is `consumed` while `recovery_failure` needs a
-  reopen; a blank effect key is `EmptyIdentity`.
+  reopen; a blank effect key is `EmptyIdentity`; a `profile_digest` other than
+  the supplied `FaultProfile`'s is `ProfileDigestMismatch`; a retry observed
+  after a `not_applied` read-back lands as applied; an applied read-back with
+  no observation is `OutcomeNotDerived`.
 
 Aging drive (`crates/daemon/tests/eval_aging.rs`, `--all-features`):
 

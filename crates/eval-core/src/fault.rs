@@ -7,6 +7,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::campaign::{ProfileError, RunProfile};
 use crate::checkpoint::StoreFamily;
 use crate::manifest::{Cut, CutOutcome, CutReceipt, ResourceLimits};
 use crate::statistics::LivenessBounds;
@@ -559,6 +560,17 @@ impl Effect {
     pub fn reply_lost(&self) -> bool {
         self.lost_by.is_some()
     }
+
+    /// An observation after a `not_applied` read-back is the retry landing:
+    /// the identity's final state is applied.
+    fn retry_applied(&mut self) {
+        if self.outcome == EffectOutcome::NotApplied {
+            self.expected = Expected::Exactly {
+                state: EffectState::Applied,
+            };
+            self.outcome = EffectOutcome::Applied;
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -650,7 +662,9 @@ impl EffectLedger {
     }
 
     pub fn observe(&mut self, identity: &str) -> Result<(), EffectRefused> {
-        self.effect(identity)?.observed += 1;
+        let effect = self.effect(identity)?;
+        effect.observed += 1;
+        effect.retry_applied();
         Ok(())
     }
 
@@ -658,6 +672,7 @@ impl EffectLedger {
         let effect = self.effect(identity)?;
         effect.observed += 1;
         effect.acknowledged += 1;
+        effect.retry_applied();
         Ok(())
     }
 
@@ -750,7 +765,10 @@ impl EffectLedger {
             let derived = match &effect.expected {
                 Expected::Exactly {
                     state: EffectState::Applied,
-                } => effect.outcome == EffectOutcome::Applied,
+                } => {
+                    effect.outcome == EffectOutcome::Applied
+                        && (!effect.read_back || effect.observed > 0)
+                }
                 Expected::Exactly {
                     state: EffectState::NotApplied,
                 } => effect.reply_lost() && effect.outcome == EffectOutcome::NotApplied,
@@ -940,6 +958,28 @@ impl LivenessReport {
     }
 }
 
+/// What the approved profile fixes for a fault campaign: the digest a report
+/// must name, the liveness bounds, and the resource envelope.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FaultProfile {
+    pub digest: String,
+    pub liveness: LivenessBounds,
+    pub envelope: ResourceLimits,
+}
+
+impl RunProfile {
+    /// Only an approved profile gates a campaign; its digest is what the
+    /// report's `profile_digest` must equal.
+    pub fn fault_profile(&self) -> Result<FaultProfile, ProfileError> {
+        self.approved()?;
+        Ok(FaultProfile {
+            digest: self.digest()?,
+            liveness: self.statistics.liveness_bounds.clone(),
+            envelope: self.envelope.clone(),
+        })
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FaultReport {
@@ -965,6 +1005,7 @@ pub enum FaultReportError {
         found: String,
     },
     ClaimBoundaryMismatch,
+    ProfileDigestMismatch,
     MalformedDigest {
         field: &'static str,
     },
@@ -1031,13 +1072,11 @@ pub enum FaultReportError {
 }
 
 impl FaultReport {
-    /// `bounds` and `limits` are the approved profile's; the report may not
-    /// supply its own.
-    pub fn validate(
-        &self,
-        bounds: &LivenessBounds,
-        limits: &ResourceLimits,
-    ) -> Result<(), FaultReportError> {
+    /// `profile` is the approved profile's word on digest, bounds, and limits;
+    /// the report may not supply its own.
+    pub fn validate(&self, profile: &FaultProfile) -> Result<(), FaultReportError> {
+        let bounds = &profile.liveness;
+        let limits = &profile.envelope;
         if self.schema != FAULT_REPORT_SCHEMA {
             return Err(FaultReportError::SchemaMismatch {
                 found: self.schema.clone(),
@@ -1053,6 +1092,9 @@ impl FaultReport {
             if !is_lower_hex(digest, 64) {
                 return Err(FaultReportError::MalformedDigest { field });
             }
+        }
+        if self.profile_digest != profile.digest {
+            return Err(FaultReportError::ProfileDigestMismatch);
         }
         if self.envelope.bounds != *limits {
             return Err(FaultReportError::EnvelopeDisagreesWithProfile);
@@ -1209,12 +1251,8 @@ impl FaultReport {
 
     /// Digestible on both runtimes: no integer may leave the canonical safe
     /// range, or `result_digest` would refuse the value `validate` accepted.
-    pub fn serialize(
-        &self,
-        bounds: &LivenessBounds,
-        limits: &ResourceLimits,
-    ) -> Result<Value, FaultReportError> {
-        self.validate(bounds, limits)?;
+    pub fn serialize(&self, profile: &FaultProfile) -> Result<Value, FaultReportError> {
+        self.validate(profile)?;
         let value =
             serde_json::to_value(self).map_err(|e| FaultReportError::Shape(e.to_string()))?;
         canonical_json_encode(&value).map_err(FaultReportError::NotCanonical)?;
@@ -1241,12 +1279,11 @@ impl FaultReport {
 
 pub fn parse_fault_report(
     value: &Value,
-    bounds: &LivenessBounds,
-    limits: &ResourceLimits,
+    profile: &FaultProfile,
 ) -> Result<FaultReport, FaultReportError> {
     let report =
         FaultReport::deserialize(value).map_err(|e| FaultReportError::Shape(e.to_string()))?;
-    report.validate(bounds, limits)?;
+    report.validate(profile)?;
     canonical_json_encode(value).map_err(FaultReportError::NotCanonical)?;
     let again =
         serde_json::to_value(&report).map_err(|e| FaultReportError::Shape(e.to_string()))?;
