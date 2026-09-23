@@ -805,6 +805,18 @@ impl Copied {
     }
 
     pub fn reopen(self, checkpoint: &Checkpoint, now: i64) -> Result<Stores, RestoreRefused> {
+        // The copied root holds exactly the checkpoint's files. SQLite would
+        // read a sidecar left by a later opener beside the verified files
+        // without it appearing in any digest, so an unlisted file is a
+        // programming error the reopen panics on before any store opens.
+        for present in walk(&self.root) {
+            let relative = present.strip_prefix(&self.root).unwrap();
+            assert!(
+                checkpoint.files.contains_key(&*relative.to_string_lossy()),
+                "{} is listed by the checkpoint",
+                present.display()
+            );
+        }
         let integrity = |file: PathBuf| {
             let conn = read_only(&file);
             let integrity_check: String = conn

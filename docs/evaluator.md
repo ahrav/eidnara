@@ -2036,7 +2036,10 @@ only then copies
 `Checkpoint` from the copied bytes; a refused receipt copies nothing, and a
 destination that already holds anything (SQLite would read a stray sidecar
 beside the verified copy) is a programming error the copy panics on.
-`Copied::reopen` re-hashes every copied file and refuses an absent one as
+`Copied::reopen` first requires the copied root to hold exactly the
+checkpoint's files (a sidecar left by a later opener would be read beside the
+verified files without appearing in any digest; an unlisted file is a
+programming error it panics on), then re-hashes every copied file and refuses an absent one as
 `FileMissing` and a changed one as `FileDiffers` before any store opens (a
 malformed copy would otherwise fail its first query), reads each copy's
 integrity on its own

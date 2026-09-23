@@ -370,6 +370,22 @@ fn a_copy_into_a_root_that_is_not_empty_is_refused_before_any_byte_is_copied() {
 }
 
 #[test]
+fn a_copied_root_holding_a_file_the_checkpoint_does_not_list_is_refused_at_reopen() {
+    let plan = plan(MESSAGES).unwrap();
+    let (checkpoint, copied, _kept) = plan_copy(&plan, 3);
+    // A sidecar left by a later opener would be read beside the verified
+    // files without appearing in any recorded digest.
+    std::fs::write(copied.root().join("memory.sqlite-wal"), b"").unwrap();
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        copied.reopen(&checkpoint, plan.steps[3].now_ms).is_ok()
+    }));
+    assert!(
+        outcome.is_err(),
+        "an unlisted file in the copied root is refused"
+    );
+}
+
+#[test]
 fn a_copy_missing_a_store_file_is_refused_at_reopen() {
     let plan = plan(MESSAGES).unwrap();
     for file in [
