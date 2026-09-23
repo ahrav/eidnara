@@ -129,10 +129,15 @@ fn is_token(text: &str) -> bool {
     !text.contains(char::is_whitespace)
 }
 
-/// A clone URL with a scheme; `git@host:path` is not one, and
-/// `repository_web_path` would read its `/pull/` URLs wrong.
+/// A clone URL with a scheme and a bare host: no user or port in the
+/// authority, so the web path `repository_web_path` derives is the URL
+/// itself. `git@host:path` and `ssh://git@host:22/path` are not accepted.
 fn is_url(text: &str) -> bool {
-    is_token(text) && text.contains("://")
+    is_token(text)
+        && text.split_once("://").is_some_and(|(_, rest)| {
+            let authority = rest.split('/').next().unwrap_or(rest);
+            !authority.contains('@') && !authority.contains(':')
+        })
 }
 
 /// An SPDX expression: identifiers of SPDX characters joined by `AND`,
@@ -639,18 +644,14 @@ fn names_whole_number(output: &str, needle: &str) -> bool {
     })
 }
 
-/// The clone URL without its scheme, user (`ssh://git@host/...`), trailing
-/// slash, or `.git` suffix, which prefixes pull-request URLs for the
-/// repository.
+/// The clone URL without its scheme, trailing slash, or `.git` suffix,
+/// which prefixes pull-request URLs for the repository; `is_url` admits no
+/// user or port for it to strip.
 fn repository_web_path(repository: &str) -> &str {
     let path = repository
         .split_once("://")
         .map_or(repository, |(_, rest)| rest)
         .trim_end_matches('/');
-    let path = path
-        .split_once('@')
-        .filter(|(user, _)| !user.contains('/'))
-        .map_or(path, |(_, rest)| rest);
     path.strip_suffix(".git").unwrap_or(path)
 }
 

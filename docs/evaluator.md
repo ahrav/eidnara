@@ -2438,9 +2438,9 @@ is not here; this module only judges the evidence it records.
 `pull_request`, and `cutoff_ms`. The issue and pull-request text is fetched
 at run time and never written into a corpus, report, or witness; `validate`
 refuses an empty field, an `id` with whitespace, a `repository` that is not
-a scheme URL (so `git@host:path` refuses; a user in the authority, as in
-`ssh://git@host/...`, is dropped when `/pull/` URLs derive from the web
-path), a `license` that is not an SPDX expression by shape (identifiers of
+a scheme URL with a bare host (so `git@host:path`, a user, or a port in the
+authority refuses, and the `/pull/` URLs `future_answers` matches derive
+from the URL itself), a `license` that is not an SPDX expression by shape (identifiers of
 SPDX characters joined by `AND`, `OR`, or `WITH`; not checked against the
 SPDX list) (`TextPersisted`), a
 malformed SHA, and a duplicate id. `digest` validates first and refuses a

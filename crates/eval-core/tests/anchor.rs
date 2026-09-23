@@ -1007,15 +1007,17 @@ fn the_digest_refuses_a_number_json_cannot_carry() {
 }
 
 #[test]
-fn pull_request_urls_match_when_the_clone_url_carries_a_user() {
+fn pull_request_urls_derive_from_a_bare_host_clone_url() {
     let mut entry = entry("cargo-0", Family::Cargo, 0x10);
-    entry.repository = "ssh://git@example.invalid/cargo/repo.git".to_string();
+    entry.repository = "https://example.invalid/cargo/repo.git".to_string();
     entry.validate().unwrap();
     entry.pull_request = Some(2016);
     assert_eq!(
         future_answers(&entry, "https://example.invalid/cargo/repo/pull/2016"),
         vec!["pull_request:2016"]
     );
+    entry.repository = "file:///srv/cargo/repo".to_string();
+    entry.validate().unwrap();
 }
 
 #[test]
@@ -1074,4 +1076,17 @@ fn a_missing_audit_is_missing_evidence_not_an_invalid_cutoff() {
         BTreeSet::from(["cargo-3".to_string()])
     );
     assert_eq!(accounting.eligible.len(), 19);
+}
+
+#[test]
+fn a_clone_url_with_a_user_or_port_in_its_authority_refuses() {
+    for repository in [
+        "ssh://git@example.invalid:22/cargo/repo.git",
+        "ssh://git@example.invalid/cargo/repo.git",
+        "https://example.invalid:8443/cargo/repo.git",
+    ] {
+        let mut entry = entry("cargo-0", Family::Cargo, 0x10);
+        entry.repository = repository.to_string();
+        assert!(entry.validate().is_err(), "{repository}");
+    }
 }
