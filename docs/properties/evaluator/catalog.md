@@ -515,8 +515,10 @@ Exercised: yes -
   `crates/eval-core/tests/task.rs::an_agent_cannot_select_modify_or_replace_the_oracle`
 Guarantee: A Suite D task's terminal comes from hidden tests the runner writes
   from the corpus and executes after the run under its own process authority,
-  outside the agent's containment and in a tree the runner builds, never in
-  the agent's workspace; an inherited budget hit is censored before any hidden
+  after the agent's containment exited and inside a containment of its own
+  where the host has namespaces, in a tree the runner builds under the
+  private directory the agent's containment masks, never in the agent's
+  workspace; an inherited budget hit is censored before any hidden
   test is consulted; an agent's attempt to select, modify, or replace the
   oracle is recorded and never honoured, whether by writing, symlinking, or
   hard-linking an oracle path or by leaving a `.cargo/` the runner cannot
@@ -524,17 +526,24 @@ Guarantee: A Suite D task's terminal comes from hidden tests the runner writes
 Check: `always` - `task_terminal` is `Censored` when `TaskBudgets::exhausted`
   names a reason, `Pass` only when every hidden test the task names reports
   `passed`, `Fail` otherwise, `Indeterminate` with no results; the shell grades
-  in `grade/` under the run's root, built from the task's files, the
+  in `grade/` under the private directory, built from the task's files, the
   candidate's regular files less `Cargo.toml`, `.cargo/`, and the hidden-test
   paths, and the hidden tests from the corpus, and lists the agent's colliding
-  paths, and the oracle paths it replaced with symlinks, in `oracle_tamper`; a planted hidden test leaves the terminal what the
-  corpus's test says; a grading `cargo` past its deadline is killed with its
-  process group. Must hold on every task, so `always`.
-Fault/timing angle: The agent runs inside the containment and exits before the
-  hidden tests exist anywhere the runner reads; the grading tree is built
-  afterwards from the corpus and the agent's file contents, not its inodes.
+  paths, and the oracle paths it replaced with symlinks, in `oracle_tamper`;
+  a planted hidden test leaves the terminal what the corpus's test says; a
+  grading `cargo` past its deadline is killed with its process group; a
+  `build.rs` the agent adds runs inside the grading containment and cannot
+  write outside the private directory; an agent that copies from `../grade`
+  finds nothing. Must hold on every task, so `always`.
+Fault/timing angle: The agent runs inside the containment and exits before
+  its own grading tree exists; the grading tree is built afterwards from the
+  corpus and the agent's file contents, not its inodes, under a directory
+  the agent's containment masked, so an earlier task's tree is not readable
+  either.
 Required faults and enabling state: A scripted agent that applies the correct
-  fix and plants its own passing hidden test; one that applies a wrong fix; one
+  fix, plants its own passing hidden test, copies whatever `../grade/tests`
+  holds, and adds a `build.rs` that writes outside the run root; one that
+  applies a wrong fix; one
   that issues more tool calls than the budget; a workspace whose `Cargo.toml`
   is a symlink, whose hidden-test paths are one hard-linked inode, and whose
   `.cargo/` is mode `0555` with a runner config.

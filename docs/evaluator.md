@@ -2355,17 +2355,24 @@ has finished.
 For each task the runner first measures adequacy: it grades the repository
 unfixed, under the correct fix, and under every wrong fix, and runs
 `cargo test --offline --test hidden_<name>` for each under its own authority
-(exit 0 with the harness summary `test result: ok. 1 passed` is `passed`;
+and, where the host has namespaces, inside the same containment the agent
+gets, with the private directory the only writable tree (exit 0 with the
+harness summary `test result: ok. 1 passed` is `passed`;
 exit 101 with `test result: FAILED` is `failed`; anything else `errored`);
 `check_adequacy` refuses the campaign otherwise. Grading always happens in a
-tree the runner builds from the corpus (`grade/` under the run's root): the
+tree the runner builds from the corpus (`grade/` under the private directory
+the containment masks, beside the `target/` build cache, so no agent sees
+the hidden tests of any task): the
 task's files, the candidate's regular files except `Cargo.toml`, `.cargo/`,
 and the hidden-test paths, and the hidden tests from the corpus. Nothing in
 the agent's workspace is executed or written through, so a `Cargo.toml` the
 agent replaced with a symlink, two hidden-test paths it hard-linked together,
 or a `.cargo/` it made undeletable cannot reach the oracle; the agent's
 versions of those paths are recorded in `oracle_tamper` and never honoured.
-The workspace itself is materialized with `git init` and the task's commit
+The agent script prints a start line first; stdout without it means the
+containment's own `unshare` or `exec` failed, and the run refuses instead of
+grading an untouched workspace as the agent's failure. The workspace itself
+is materialized with `git init` and the task's commit
 message under a pinned git configuration (`GIT_CONFIG_GLOBAL=/dev/null`,
 `GIT_CONFIG_NOSYSTEM`, signing off, hooks off, no template), and a failed
 commit refuses the run instead of leaving a fixture without its commit
