@@ -74,11 +74,11 @@ fn publish_refused((path, kind): (PathBuf, std::io::ErrorKind)) -> RunError {
 
 pub fn profile(
     scale: Scale,
-    steps: u32,
+    messages: u32,
     elapsed_ms: u64,
     approval: Option<Approval>,
 ) -> RunProfile {
-    let mut profile = aging::profile(scale, steps, elapsed_ms, approval);
+    let mut profile = aging::profile(scale, messages, elapsed_ms, approval);
     profile.name = profile.name.replace("suite-c-aging", "suite-c-growth");
     profile
 }
@@ -126,8 +126,14 @@ pub struct Run {
     pub coverage: Coverage,
 }
 
+/// A file's bytes; a missing file is zero bytes, any other failure to read
+/// it refuses the sample rather than reporting zero.
 fn file_len(path: &Path) -> u64 {
-    std::fs::metadata(path).map(|m| m.len()).unwrap_or(0)
+    match std::fs::symlink_metadata(path) {
+        Ok(m) => m.len(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => 0,
+        Err(e) => panic!("{}: {e}", path.display()),
+    }
 }
 
 fn sidecar(path: &Path, suffix: &str) -> PathBuf {
@@ -136,26 +142,39 @@ fn sidecar(path: &Path, suffix: &str) -> PathBuf {
     PathBuf::from(name)
 }
 
-fn count_entries(dir: &Path) -> u64 {
-    std::fs::read_dir(dir)
-        .map(|entries| entries.filter_map(Result::ok).count() as u64)
-        .unwrap_or(0)
+/// A directory's entries; a missing directory is empty, any other failure to
+/// read it refuses the sample rather than reporting nothing.
+fn entries(dir: &Path) -> Vec<std::fs::DirEntry> {
+    match std::fs::read_dir(dir) {
+        Ok(entries) => entries
+            .map(|e| e.unwrap_or_else(|e| panic!("{}: {e}", dir.display())))
+            .collect(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(e) => panic!("{}: {e}", dir.display()),
+    }
 }
 
+fn count_entries(dir: &Path) -> u64 {
+    entries(dir).len() as u64
+}
+
+/// Regular files under `dir` and their bytes; a symlink is neither followed
+/// nor counted.
 fn walk_objects(dir: &Path) -> (u64, u64) {
     let mut count = 0;
     let mut bytes = 0;
-    if let Ok(entries) = std::fs::read_dir(dir) {
-        for entry in entries.filter_map(Result::ok) {
-            let path = entry.path();
-            if path.is_dir() {
-                let (c, b) = walk_objects(&path);
-                count += c;
-                bytes += b;
-            } else if path.is_file() {
-                count += 1;
-                bytes += file_len(&path);
-            }
+    for entry in entries(dir) {
+        let path = entry.path();
+        let kind = entry
+            .metadata()
+            .unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+        if kind.is_dir() {
+            let (c, b) = walk_objects(&path);
+            count += c;
+            bytes += b;
+        } else if kind.is_file() {
+            count += 1;
+            bytes += kind.len();
         }
     }
     (count, bytes)
@@ -217,7 +236,8 @@ impl Campaign {
         let i = self.next_step;
         let planned = self.plan.steps[i].clone();
         let now = planned.now_ms;
-        match self.stores.apply(&planned) {
+        let applied = self.stores.apply(&planned);
+        match applied {
             Applied::Published => self.mix.record(Operation::Publish),
             Applied::Corrected => self.mix.record(Operation::Correct),
             Applied::Retired => self.mix.record(Operation::Retire),
@@ -229,7 +249,8 @@ impl Campaign {
             assert!(rows.snapshot_commit_seq >= 0);
             self.mix.record(Operation::Query);
         }
-        if i % 5 == 4 {
+        // A lost reply needs a commit to acknowledge; a skipped retire left none.
+        if i % 5 == 4 && applied != Applied::RetireSkipped {
             lost_reply_episode(
                 &mut self.stores,
                 &mut self.witness,
@@ -458,18 +479,9 @@ impl Campaign {
 }
 
 pub fn run(config: &Config) -> Result<Run, RunError> {
-    let started_at_ms = i64::try_from(
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_millis(),
-    )
-    .unwrap();
-    let plan = aging::plan(config.messages)?;
-    let steps = plan.steps.len() as u32;
     let profile = profile(
         config.scale,
-        steps,
+        config.messages,
         config.elapsed_bound_ms,
         config.approval.clone(),
     );
@@ -479,7 +491,19 @@ pub fn run(config: &Config) -> Result<Run, RunError> {
         envelope.store_bytes = bound;
     }
     prepare_publish(&config.publish, &[REPORT_FILE, MANIFEST_FILE]).map_err(publish_refused)?;
+    // The manifest's clock and the envelope's start together, as the aging
+    // and fault shells' do.
+    let started_at_ms = i64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis(),
+    )
+    .unwrap();
     let mut charges = Charges::new(envelope);
+    // Planning runs under the clock: the elapsed bound covers the whole run.
+    let plan = aging::plan(config.messages)?;
+    let steps = plan.steps.len() as u32;
     let bounds = bounds(&profile, config.messages);
     let root = charges.occupy()?;
     let root_path = root.path().display().to_string();
@@ -569,8 +593,14 @@ pub fn run(config: &Config) -> Result<Run, RunError> {
         started_at_ms,
     });
     let manifest_bytes = serde_json::to_vec_pretty(&manifest.to_value()).unwrap();
-    publish_file(&config.publish.join(REPORT_FILE), &bytes).map_err(publish_refused)?;
-    publish_file(&config.publish.join(MANIFEST_FILE), &manifest_bytes).map_err(publish_refused)?;
+    // A manifest the directory then refuses to take takes the report back out
+    // with it, as the aging and fault shells do: a reader finds both files or none.
+    let report_path = config.publish.join(REPORT_FILE);
+    publish_file(&report_path, &bytes).map_err(publish_refused)?;
+    if let Err(error) = publish_file(&config.publish.join(MANIFEST_FILE), &manifest_bytes) {
+        let _ = std::fs::remove_file(&report_path);
+        return Err(publish_refused(error));
+    }
     Ok(Run {
         report,
         report_bytes: bytes,

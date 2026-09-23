@@ -93,10 +93,9 @@ fn campaign(mode: GrowthMode, coverage: &mut Coverage) -> Published {
 /// store's constants, not read back from the report.
 fn contract(published: &Published) -> GrowthContract {
     let config = &published.config;
-    let steps = aging::plan(config.messages).unwrap().steps.len() as u32;
     let profile = growth::profile(
         config.scale,
-        steps,
+        config.messages,
         config.elapsed_bound_ms,
         config.approval.clone(),
     );
@@ -624,4 +623,102 @@ fn growth_markers_each_name_a_scenario_here() {
         );
     }
     assert_eq!(mine.len(), 5);
+}
+
+#[test]
+fn the_profile_is_declared_from_the_message_count_not_the_step_count() {
+    // 48 messages plan more than 64 steps, so a profile built from the step
+    // count would declare a wider event bound than the generator used.
+    let publish = tempfile::tempdir().unwrap();
+    let mut config = config(
+        publish.path().join("out"),
+        600_000,
+        GrowthMode::NeverRestored,
+    );
+    config.messages = 48;
+    assert!(aging::plan(48).unwrap().steps.len() > 64);
+    let run = growth::run(&config).unwrap();
+    let declared = growth::profile(
+        config.scale,
+        config.messages,
+        config.elapsed_bound_ms,
+        config.approval.clone(),
+    );
+    assert_eq!(run.report.profile_digest, declared.digest().unwrap());
+}
+
+#[test]
+fn a_fifth_step_that_commits_nothing_runs_no_lost_reply_episode() {
+    let mut plan = aging::plan(MESSAGES).unwrap();
+    // The same retire twice in a row: the second finds its object already
+    // dead (or still unpublished) and commits nothing, on the step that would
+    // otherwise lose an acknowledgement reply.
+    let retire = plan
+        .steps
+        .iter()
+        .find(|p| matches!(p.step, aging::Step::Retire(_)))
+        .unwrap()
+        .step
+        .clone();
+    plan.steps[3].step = retire.clone();
+    plan.steps[4].step = retire;
+    let root = tempfile::tempdir().unwrap();
+    let mut charges = Charges::new(growth::profile(Scale::S0, 128, 600_000, None).envelope);
+    let mut live = Campaign::open(root.path(), plan, GrowthMode::NeverRestored);
+    for _ in 0..5 {
+        live.step(&mut charges).unwrap();
+    }
+    assert_eq!(live.mix.counts.get(&Operation::FaultEpisode), None);
+}
+
+#[test]
+fn a_symlink_under_the_artifact_objects_is_neither_an_object_nor_its_bytes() {
+    let plan = aging::plan(MESSAGES).unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let mut charges = Charges::new(growth::profile(Scale::S0, 128, 600_000, None).envelope);
+    let mut live = Campaign::open(root.path(), plan, GrowthMode::NeverRestored);
+    for _ in 0..4 {
+        live.step(&mut charges).unwrap();
+    }
+    let before = live.ledger.samples.last().unwrap().clone();
+    assert!(before.artifact_objects > 0);
+    let objects = root.path().join("kernel").join("artifacts").join("objects");
+    std::os::unix::fs::symlink(aging::kernel_file(root.path()), objects.join("link")).unwrap();
+    live.sample(before.step + 1, &mut charges).unwrap();
+    let after = live.ledger.samples.last().unwrap();
+    assert_eq!(after.artifact_objects, before.artifact_objects);
+    assert_eq!(after.artifact_bytes, before.artifact_bytes);
+}
+
+#[test]
+fn a_manifest_the_directory_refuses_takes_the_report_back_out() {
+    let publish = tempfile::tempdir().unwrap();
+    let out = publish.path().join("out");
+    let config = config(out.clone(), 600_000, GrowthMode::NeverRestored);
+    // Plant the manifest's name once the run has prepared its directory and
+    // is driving the campaign, which takes seconds; the report then publishes
+    // and the manifest cannot follow it.
+    let planted = out.join(MANIFEST_FILE);
+    let planter = std::thread::spawn({
+        let out = out.clone();
+        let planted = planted.clone();
+        move || {
+            while !out.is_dir() {
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            std::fs::write(&planted, b"not a manifest").unwrap();
+        }
+    });
+    let error = growth::run(&config).err().expect("the manifest is refused");
+    planter.join().unwrap();
+    let RunError::Publish { path, kind } = error else {
+        panic!("{error}");
+    };
+    assert_eq!(path, planted);
+    assert_eq!(kind, std::io::ErrorKind::AlreadyExists);
+    assert!(
+        !out.join(REPORT_FILE).exists(),
+        "a reader finds both files or none"
+    );
 }

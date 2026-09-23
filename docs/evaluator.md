@@ -2674,8 +2674,8 @@ route's project to MODULE memories authority, and commits the memory domain so
 the reviewer queue is real. `Campaign::step` applies the planned mutation
 (`publish`, `correct`, or `retire`, as `Stores::apply` reports it), reads the
 projection every third step (`query`), runs a lost-acknowledgement catch-up
-episode through the fault shell every fifth step (`fault_episode`, with its
-safety check), admits one reviewer job through the real reservation, staging,
+episode through the fault shell every fifth step that committed (`fault_episode`,
+with its safety check; a skipped retire leaves nothing to acknowledge), admits one reviewer job through the real reservation, staging,
 claim, and receipt path every fourth step and settles every other one by
 abstention (`quota_pressure`, so the ledger holds both pending allowances and
 permanent receipt charges), drains to quiescence, and samples. The store
