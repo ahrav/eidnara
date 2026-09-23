@@ -1606,7 +1606,16 @@ Fault contract (`crates/eval-core/tests/fault.rs`,
   episode; a parsed receipt for an undeclared cut refuses at the coverage
   verdict; an effect whose outcome is not the state its expectation names, or
   whose reply was never lost yet expects `not_applied`, is `OutcomeNotDerived`;
-  a healthy core with no family or no lane is `EmptyHealthyCore`.
+  a healthy core with no family or no lane is `EmptyHealthyCore`; an applied
+  read-back never lowers an over-count below what `BoundsViolated` sees; an
+  `eval_run_id` or `profile_digest` that is not 64 lowercase hex is
+  `MalformedDigest`; `claim_materialization` encodes the materializer's
+  acknowledgement faults, heals by consumption, and is a kernel fault; a CAS
+  fault scoped to another family is `ScopeMismatch` while a lock holder names
+  its own store; a barrier signal other than `SIGKILL` is `NotSigkill`; a
+  recorded refusal or permanent stall naming an episode the report lacks is
+  `UnknownEpisode`, and one whose error text does not name its production
+  variant is `RefusalNotEvidenced`.
 
 Aging drive (`crates/daemon/tests/eval_aging.rs`, `--all-features`):
 

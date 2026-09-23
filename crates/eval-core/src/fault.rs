@@ -10,7 +10,7 @@ use serde_json::Value;
 use crate::checkpoint::StoreFamily;
 use crate::manifest::{Cut, CutOutcome, CutReceipt};
 use crate::statistics::LivenessBounds;
-use context_core::canonical_json::protocol_digest;
+use context_core::canonical_json::{is_lower_hex, protocol_digest};
 
 pub const FAULT_REPORT_SCHEMA: &str = "eval-suite-c-fault-report/v1";
 const FAULT_RESULT_DIGEST_PROTOCOL: &str = "eval-suite-c-fault-report-result/v1";
@@ -29,6 +29,15 @@ pub enum SearchEpisodeFault {
 pub enum PublicationFaultKind {
     LoseLocalCommitReply,
     LoseLocalCommit,
+}
+
+/// `claim_sources::EpisodeFault`: the claim materializer's acknowledgement seam.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MaterializationFaultKind {
+    LoseAcknowledgementReply,
+    SkipAcknowledgement,
+    FailAcknowledgement,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -62,6 +71,7 @@ pub enum FaultAction {
     SearchEpisode { fault: SearchEpisodeFault },
     EmbeddingPublication { fault: PublicationFaultKind },
     HeldPublication,
+    ClaimMaterialization { fault: MaterializationFaultKind },
     ArtifactIngest { fault: ArtifactIngestFaultKind },
     ArtifactDeletion { fault: ArtifactDeletionFaultKind },
     ExternalLockHolder,
@@ -74,7 +84,9 @@ impl FaultAction {
     /// consumed; the other ingest faults latch CAS ingestion closed until reopen.
     pub fn heal(&self) -> Heal {
         match self {
-            Self::SearchEpisode { .. } | Self::EmbeddingPublication { .. } => Heal::Consumed,
+            Self::SearchEpisode { .. }
+            | Self::EmbeddingPublication { .. }
+            | Self::ClaimMaterialization { .. } => Heal::Consumed,
             Self::ArtifactIngest { fault } => match fault {
                 ArtifactIngestFaultKind::ReservationCommit
                 | ArtifactIngestFaultKind::AfterEvents => Heal::Consumed,
@@ -100,6 +112,23 @@ impl FaultAction {
 
     pub fn is_kill(&self) -> bool {
         matches!(self, Self::ProcessKill { .. })
+    }
+
+    /// The store the action's seam lives in: catch-up and publication write the
+    /// search projection, the CAS and the materializer's outbox are the kernel.
+    /// A lock holder, a kill, and a corrupted file name their own store.
+    pub fn family(&self) -> Option<StoreFamily> {
+        match self {
+            Self::SearchEpisode { .. }
+            | Self::EmbeddingPublication { .. }
+            | Self::HeldPublication => Some(StoreFamily::SearchProjection),
+            Self::ClaimMaterialization { .. }
+            | Self::ArtifactIngest { .. }
+            | Self::ArtifactDeletion { .. } => Some(StoreFamily::Kernel),
+            Self::ExternalLockHolder | Self::ProcessKill { .. } | Self::CorruptQuiescentFile => {
+                None
+            }
+        }
     }
 
     /// The cut a kill is declared at; `None` for every other action.
@@ -137,6 +166,8 @@ pub struct KillLabel {
 
 pub const APPLICATION_CRASH: &str = "application_crash";
 pub const TEST_BINARY_CHILD: &str = "test_binary_child";
+/// The one signal the runner sends; nothing else is the kill the label describes.
+pub const SIGKILL: i32 = 9;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -156,6 +187,11 @@ pub enum EpisodeRefused {
         id: String,
         declared: Heal,
         required: Heal,
+    },
+    ScopeMismatch {
+        id: String,
+        declared: StoreFamily,
+        required: StoreFamily,
     },
     CrashModelNotProved {
         id: String,
@@ -197,6 +233,15 @@ impl FaultEpisode {
             return Err(EpisodeRefused::HealMismatch {
                 id,
                 declared: self.heal,
+                required,
+            });
+        }
+        if let Some(required) = self.action.family()
+            && self.scope.store != required
+        {
+            return Err(EpisodeRefused::ScopeMismatch {
+                id,
+                declared: self.scope.store,
                 required,
             });
         }
@@ -254,6 +299,7 @@ pub struct BarrierReceipt {
 pub enum BarrierRefused {
     LineDoesNotNameCut { episode: String, line: String },
     ExitedWithStatus { episode: String },
+    NotSigkill { episode: String, signal: i32 },
 }
 
 impl BarrierReceipt {
@@ -269,6 +315,12 @@ impl BarrierReceipt {
         if self.signal == 0 {
             return Err(BarrierRefused::ExitedWithStatus {
                 episode: self.episode.clone(),
+            });
+        }
+        if self.signal != SIGKILL {
+            return Err(BarrierRefused::NotSigkill {
+                episode: self.episode.clone(),
+                signal: self.signal,
             });
         }
         Ok(())
@@ -479,6 +531,8 @@ impl EffectLedger {
     }
 
     /// Refuses states outside the admissible set, leaving the entry unchanged.
+    /// An applied read-back is one observation; it never lowers a count the
+    /// bounds check must still see.
     pub fn read_back(&mut self, identity: &str, state: EffectState) -> Result<(), EffectRefused> {
         let effect = self.effect(identity)?;
         if !effect.admits(state) {
@@ -491,7 +545,7 @@ impl EffectLedger {
         effect.expected = Expected::Exactly { state };
         effect.outcome = match state {
             EffectState::Applied => {
-                effect.observed = effect.observed.max(1).min(effect.attempted);
+                effect.observed = effect.observed.max(1);
                 EffectOutcome::Applied
             }
             EffectState::NotApplied => EffectOutcome::NotApplied,
@@ -564,6 +618,16 @@ impl EffectLedger {
 pub enum ExpectedRefusal {
     R11DeletionBearingCatchUp,
     R24ReceiptQuotaExhausted,
+}
+
+impl ExpectedRefusal {
+    /// The production variant whose text a record must carry as evidence.
+    pub fn production_variant(self) -> &'static str {
+        match self {
+            Self::R11DeletionBearingCatchUp => "DeletionUnpropagated",
+            Self::R24ReceiptQuotaExhausted => "MetadataQuota",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -739,6 +803,9 @@ pub enum FaultReportError {
         found: String,
     },
     ClaimBoundaryMismatch,
+    MalformedDigest {
+        field: &'static str,
+    },
     EnvelopeExceeded(crate::EnvelopeExceeded),
     NoEpisode,
     UnregisteredMarker {
@@ -765,6 +832,11 @@ pub enum FaultReportError {
     ConsumedFaultArmed {
         episode: String,
     },
+    /// A recorded refusal whose production error does not name its variant.
+    RefusalNotEvidenced {
+        episode: String,
+        refusal: ExpectedRefusal,
+    },
     SafetyNeverChecked,
     Shape(String),
     Lossy,
@@ -779,6 +851,14 @@ impl FaultReport {
         }
         if self.claim_boundary != crate::ClaimBoundary::pinned() {
             return Err(FaultReportError::ClaimBoundaryMismatch);
+        }
+        for (field, digest) in [
+            ("eval_run_id", &self.eval_run_id),
+            ("profile_digest", &self.profile_digest),
+        ] {
+            if !is_lower_hex(digest, 64) {
+                return Err(FaultReportError::MalformedDigest { field });
+            }
         }
         self.envelope
             .check()
@@ -818,6 +898,23 @@ impl FaultReport {
             .verdict()
             .map_err(FaultReportError::Coverage)?;
         self.effects.validate().map_err(FaultReportError::Effect)?;
+        let stalls = self.liveness.iter().flat_map(|l| &l.permanent_stalls);
+        for recorded in self.expected_refusals.iter().chain(stalls) {
+            if !self.episodes.iter().any(|e| e.id == recorded.episode) {
+                return Err(FaultReportError::UnknownEpisode {
+                    episode: recorded.episode.clone(),
+                });
+            }
+            if !recorded
+                .production_error
+                .contains(recorded.refusal.production_variant())
+            {
+                return Err(FaultReportError::RefusalNotEvidenced {
+                    episode: recorded.episode.clone(),
+                    refusal: recorded.refusal,
+                });
+            }
+        }
         if self.safety_checks_while_armed == 0 {
             return Err(FaultReportError::SafetyNeverChecked);
         }

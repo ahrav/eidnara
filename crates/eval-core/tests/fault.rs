@@ -6,8 +6,9 @@ use eval_core::{
     EffectLedger, EffectOutcome, EffectRefused, EffectState, Envelope, EpisodeRefused, Expected,
     ExpectedRefusal, FAULT_REPORT_SCHEMA, FaultAction, FaultEpisode, FaultReport, FaultReportError,
     FaultScope, Heal, HealthyCore, KillLabel, Lane, LaneProgress, LivenessBounds, LivenessRefused,
-    LivenessReport, PublicationFaultKind, RecordedRefusal, ResourceLimits, SearchEpisodeFault,
-    StoreFamily, TEST_BINARY_CHILD, cut_receipts, parse_fault_report, validate_episodes,
+    LivenessReport, MaterializationFaultKind, PublicationFaultKind, RecordedRefusal,
+    ResourceLimits, SIGKILL, SearchEpisodeFault, StoreFamily, TEST_BINARY_CHILD, cut_receipts,
+    parse_fault_report, validate_episodes,
 };
 
 const SUITE: &str = "crates/eval-core/tests/fault.rs::";
@@ -74,7 +75,7 @@ fn barrier(episode: &str) -> BarrierReceipt {
         cut: "acknowledged".to_string(),
         pid: 4242,
         line: "barrier acknowledged".to_string(),
-        signal: 9,
+        signal: SIGKILL,
     }
 }
 
@@ -161,7 +162,7 @@ fn report() -> FaultReport {
         coverage: coverage(&["lost-ack", "kill"]),
         effects,
         expected_refusals: vec![RecordedRefusal {
-            episode: "r11".to_string(),
+            episode: "lost-ack".to_string(),
             refusal: ExpectedRefusal::R11DeletionBearingCatchUp,
             production_error: "DeletionUnpropagated { commit_seq: 7 }".to_string(),
         }],
@@ -203,6 +204,7 @@ fn every_episode_is_a_named_action_with_the_heal_its_seam_permits() {
             "{fault:?} fails a transaction without latching, so the store stays usable"
         );
         let mut consumed = episode("ingest-transaction", action);
+        consumed.scope.store = StoreFamily::Kernel;
         consumed.heal = Heal::Consumed;
         consumed.validate().unwrap();
     }
@@ -812,6 +814,8 @@ fn a_parsed_report_cannot_claim_what_no_run_recorded() {
         })
     );
     let mut in_core = ok.clone();
+    in_core.episodes[2].action = FaultAction::ExternalLockHolder;
+    in_core.episodes[2].heal = Heal::Released;
     in_core.episodes[2].scope.store = StoreFamily::SearchProjection;
     assert_eq!(
         in_core.validate(&b),
@@ -897,6 +901,113 @@ fn a_parsed_report_cannot_claim_what_no_run_recorded() {
     assert_eq!(
         familyless.verdict(&b),
         Err(LivenessRefused::EmptyHealthyCore)
+    );
+
+    let mut overcounted = EffectLedger::default();
+    overcounted.attempt("dup");
+    overcounted.observe("dup").unwrap();
+    overcounted.observe("dup").unwrap();
+    overcounted.lose_reply("dup").unwrap();
+    overcounted.read_back("dup", EffectState::Applied).unwrap();
+    assert_eq!(overcounted.effects["dup"].observed, 2);
+    assert!(
+        matches!(
+            overcounted.validate(),
+            Err(EffectRefused::BoundsViolated {
+                attempted: 1,
+                observed: 2,
+                ..
+            })
+        ),
+        "an applied read-back adds evidence; it never erases an over-count"
+    );
+
+    let mut no_run = ok.clone();
+    no_run.eval_run_id = String::new();
+    assert_eq!(
+        no_run.validate(&b),
+        Err(FaultReportError::MalformedDigest {
+            field: "eval_run_id"
+        })
+    );
+    let mut no_profile = ok.clone();
+    no_profile.profile_digest = "ZZ".repeat(32);
+    assert_eq!(
+        no_profile.validate(&b),
+        Err(FaultReportError::MalformedDigest {
+            field: "profile_digest"
+        })
+    );
+
+    let materializer = FaultAction::ClaimMaterialization {
+        fault: MaterializationFaultKind::SkipAcknowledgement,
+    };
+    assert_eq!(materializer.heal(), Heal::Consumed);
+    assert_eq!(materializer.family(), Some(StoreFamily::Kernel));
+    assert_eq!(
+        serde_json::to_value(&materializer).unwrap(),
+        serde_json::json!({"kind": "claim_materialization", "fault": "skip_acknowledgement"})
+    );
+    let mut mislabelled = ok.episodes[2].clone();
+    mislabelled.scope.store = StoreFamily::Memory;
+    assert_eq!(
+        mislabelled.validate(),
+        Err(EpisodeRefused::ScopeMismatch {
+            id: "ingest-write".to_string(),
+            declared: StoreFamily::Memory,
+            required: StoreFamily::Kernel,
+        }),
+        "a CAS fault is a kernel fault whatever the episode says"
+    );
+    assert_eq!(FaultAction::ExternalLockHolder.family(), None);
+
+    for signal in [-1, 15, 999] {
+        let mut not_killed = barrier("kill");
+        not_killed.signal = signal;
+        assert_eq!(
+            not_killed.validate(),
+            Err(BarrierRefused::NotSigkill {
+                episode: "kill".to_string(),
+                signal,
+            }),
+            "only SIGKILL is the application crash the label describes"
+        );
+    }
+
+    let mut ghost_refusal = ok.clone();
+    ghost_refusal.expected_refusals[0].episode = "ghost".to_string();
+    assert_eq!(
+        ghost_refusal.validate(&b),
+        Err(FaultReportError::UnknownEpisode {
+            episode: "ghost".to_string()
+        })
+    );
+    let mut unevidenced = ok.clone();
+    unevidenced.expected_refusals[0].production_error = String::new();
+    assert_eq!(
+        unevidenced.validate(&b),
+        Err(FaultReportError::RefusalNotEvidenced {
+            episode: "lost-ack".to_string(),
+            refusal: ExpectedRefusal::R11DeletionBearingCatchUp,
+        })
+    );
+    let mut stalled_ghost = ok.clone();
+    stalled_ghost
+        .liveness
+        .as_mut()
+        .unwrap()
+        .permanent_stalls
+        .push(RecordedRefusal {
+            episode: "ghost".to_string(),
+            refusal: ExpectedRefusal::R24ReceiptQuotaExhausted,
+            production_error: "MetadataQuota".to_string(),
+        });
+    assert_eq!(
+        stalled_ghost.validate(&b),
+        Err(FaultReportError::UnknownEpisode {
+            episode: "ghost".to_string()
+        }),
+        "a permanent stall is a recorded refusal too"
     );
 }
 

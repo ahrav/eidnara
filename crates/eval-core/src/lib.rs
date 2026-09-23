@@ -91,9 +91,9 @@ pub use fault::{
     BarrierRefused, CoverageRefused, CutCoverage, Effect, EffectLedger, EffectOutcome,
     EffectRefused, EffectState, EpisodeRefused, Expected, ExpectedRefusal, FAULT_REPORT_SCHEMA,
     FaultAction, FaultEpisode, FaultReport, FaultReportError, FaultScope, Heal, HealthyCore,
-    KillLabel, Lane, LaneProgress, LivenessRefused, LivenessReport, PublicationFaultKind,
-    RecordedRefusal, SearchEpisodeFault, TEST_BINARY_CHILD, cut_receipts, parse_fault_report,
-    validate_episodes,
+    KillLabel, Lane, LaneProgress, LivenessRefused, LivenessReport, MaterializationFaultKind,
+    PublicationFaultKind, RecordedRefusal, SIGKILL, SearchEpisodeFault, TEST_BINARY_CHILD,
+    cut_receipts, parse_fault_report, validate_episodes,
 };
 pub use generator::*;
 pub use governance::{ArmError, ArmRecord, GovernanceArms, HistoryPolicy, pair_set_digest};
