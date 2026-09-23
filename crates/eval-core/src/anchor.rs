@@ -90,6 +90,13 @@ pub enum AnchorError {
     NotPilotComposition {
         found: BTreeMap<Family, u32>,
     },
+    /// The pilot corpus was offered as a transfer set; the pilot alone never
+    /// transfers.
+    PilotIsNotATransferSet,
+    /// The corpus does not canonicalize, so it has no digest.
+    NotCanonical {
+        detail: String,
+    },
 }
 
 debug_display!(AnchorError);
@@ -190,9 +197,14 @@ impl AnchorCorpus {
         }
     }
 
-    pub fn digest(&self) -> String {
+    pub fn digest(&self) -> Result<String, AnchorError> {
+        self.validate()?;
         let value = serde_json::to_value(self).expect("corpus serializes");
-        protocol_digest(ANCHOR_CORPUS_DIGEST_PROTOCOL, &value).expect("corpus is canonical")
+        protocol_digest(ANCHOR_CORPUS_DIGEST_PROTOCOL, &value).map_err(|e| {
+            AnchorError::NotCanonical {
+                detail: e.to_string(),
+            }
+        })
     }
 }
 
@@ -285,6 +297,10 @@ pub fn time_study(
 #[serde(deny_unknown_fields)]
 pub struct CutoffAudit {
     pub task: String,
+    /// The commits the audit timed; evidence for a row naming other commits
+    /// says nothing about it.
+    pub base_sha: String,
+    pub fix_sha: String,
     #[serde(with = "crate::decimal")]
     pub cutoff_ms: i64,
     #[serde(with = "crate::decimal")]
@@ -325,19 +341,25 @@ pub enum CutoffRefused {
     /// The audit judged a cutoff other than the corpus row's, so its
     /// timestamps say nothing about the row's cutoff.
     CutoffMismatch,
+    /// The audit timed commits other than the corpus row's.
+    CommitMismatch,
 }
 
 debug_display!(CutoffRefused);
 
 impl CutoffAudit {
     /// Validates the audit as evidence for `entry`: it must name the entry's
-    /// task and judge the entry's cutoff before its own timestamps count.
+    /// task, judge the entry's cutoff, and time the entry's commits before
+    /// its own timestamps count.
     pub fn validate_for(&self, entry: &AnchorEntry) -> Result<(), CutoffRefused> {
         if self.task != entry.id {
             return Err(CutoffRefused::AuditForOtherTask);
         }
         if self.cutoff_ms != entry.cutoff_ms {
             return Err(CutoffRefused::CutoffMismatch);
+        }
+        if self.base_sha != entry.base_sha || self.fix_sha != entry.fix_sha {
+            return Err(CutoffRefused::CommitMismatch);
         }
         self.validate()
     }
@@ -452,6 +474,19 @@ pub struct NoRepositoryControl {
     pub future_answers: Vec<String>,
 }
 
+/// The repository-bearing run a control is judged against: the same task,
+/// provider profile, execution image, and frozen analysis rules, with the
+/// repository. A control is never its own comparison.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RepositoryComparison {
+    pub task: String,
+    pub provider: ProviderProfile,
+    pub execution_image: String,
+    pub analysis_family_digest: String,
+    pub terminal: Terminal,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Contamination {
@@ -506,7 +541,7 @@ fn ran(terminal: Terminal) -> bool {
 /// `Pass`, `Fail`, or `Censored`.
 pub fn classify_control(
     control: &NoRepositoryControl,
-    comparison: &NoRepositoryControl,
+    comparison: &RepositoryComparison,
 ) -> Result<ClassifiedControl, ControlRefused> {
     for (field, same) in [
         ("task", control.task == comparison.task),
@@ -568,22 +603,26 @@ const SHA_ABBREV: usize = 7;
 /// The fix commit counts as any run of hexadecimal digits, in either case,
 /// that is at least `SHA_ABBREV` long and a prefix of it; the run is taken
 /// whole, so `a0123456` does not name `0123456...`. A pull request counts as
-/// `#<n>` or as the repository's `/pull/<n>` URL, each as a whole number, so
-/// `#20` is not found inside `#2016`.
+/// `#<n>` or as the repository's `/pull/<n>` URL in any letter case, each as
+/// a whole number, so `#20` is not found inside `#2016`.
 pub fn future_answers(entry: &AnchorEntry, output: &str) -> Vec<String> {
+    let output = output.to_ascii_lowercase();
     let mut found = Vec::new();
     if is_lower_hex(&entry.fix_sha, 40)
-        && output.split(|c: char| !c.is_ascii_hexdigit()).any(|run| {
-            run.len() >= SHA_ABBREV && entry.fix_sha.starts_with(&run.to_ascii_lowercase())
-        })
+        && output
+            .split(|c: char| !c.is_ascii_hexdigit())
+            .any(|run| run.len() >= SHA_ABBREV && entry.fix_sha.starts_with(run))
     {
         found.push(format!("fix_sha:{}", entry.fix_sha));
     }
     if let Some(pr) = entry.pull_request.filter(|pr| {
-        names_whole_number(output, &format!("#{pr}"))
+        names_whole_number(&output, &format!("#{pr}"))
             || names_whole_number(
-                output,
-                &format!("{}/pull/{pr}", repository_web_path(&entry.repository)),
+                &output,
+                &format!(
+                    "{}/pull/{pr}",
+                    repository_web_path(&entry.repository).to_ascii_lowercase()
+                ),
             )
     }) {
         found.push(format!("pull_request:{pr}"));
@@ -625,7 +664,8 @@ pub struct PairAccounting {
 }
 
 /// Folds audits, insufficiency proofs, and controls for one provider pair
-/// into the anchor set `derive_claim_class` judges. A task is `valid` only
+/// into the anchor set `derive_claim_class` judges. The corpus must validate,
+/// and the pilot corpus is never a `Transfer` set. A task is `valid` only
 /// when its audit and proof name it and pass, and its control was classified
 /// for it under `provider` as eligible; a failed audit is `cutoff_invalid`
 /// and every other task is `residue`. Each task lands in exactly one
@@ -637,7 +677,11 @@ pub fn anchor_set(
     proofs: &BTreeMap<String, InsufficiencyProof>,
     controls: &BTreeMap<String, ClassifiedControl>,
     provider: &ProviderProfile,
-) -> (AnchorSet, PairAccounting) {
+) -> Result<(AnchorSet, PairAccounting), AnchorError> {
+    corpus.validate()?;
+    if role == AnchorRole::Transfer && corpus.is_pilot().is_ok() {
+        return Err(AnchorError::PilotIsNotATransferSet);
+    }
     let mut accounting = PairAccounting {
         provider: provider.clone(),
         eligible: BTreeSet::new(),
@@ -698,7 +742,7 @@ pub fn anchor_set(
             }
         })
         .collect();
-    (AnchorSet { role, tasks }, accounting)
+    Ok((AnchorSet { role, tasks }, accounting))
 }
 
 /// The settings a real-history campaign must hold before it executes; none

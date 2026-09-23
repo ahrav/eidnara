@@ -2398,7 +2398,9 @@ at run time and never written into a corpus, report, or witness; `validate`
 refuses an empty field, an `id` with whitespace, a `repository` that is not
 a scheme URL (so `git@host:path` refuses and `/pull/` URLs derive from the
 web path), a `license` that is not an SPDX expression (`TextPersisted`), a
-malformed SHA, and a duplicate id. `is_pilot` accepts
+malformed SHA, and a duplicate id. `digest` validates first and refuses a
+row JSON cannot carry exactly (`NotCanonical`) instead of panicking.
+`is_pilot` accepts
 exactly `PILOT_COMPOSITION`: eight Cargo, eight Tokio, four Django.
 
 **Time study.** `time_study(corpus, measured, bound_ms)` projects the pilot's
@@ -2411,7 +2413,8 @@ rather than shrinking the pilot. A wrong count, a task outside the corpus,
 or the same task measured twice refuses.
 
 **Cutoff audit.** `CutoffAudit` is what the snapshot builder established
-from the repository's own commit times and the issue: `task`, `cutoff_ms`,
+from the repository's own commit times and the issue: `task`, `base_sha`,
+`fix_sha`, `cutoff_ms`,
 `base_committed_ms`, `fix_committed_ms`, `issue_created_ms`,
 `issue_text_ms` (the last edit of the issue text the task is given, or its
 creation when never edited), `snapshot_digest`, `base_tree_digest`, and
@@ -2420,9 +2423,10 @@ a base committed after the cutoff, a fix not strictly after it, an issue
 filed after it, issue text edited after it, a snapshot whose digest is not
 the base commit's tree, and a fix-added path in the snapshot; each is one
 `CutoffRefused` reason (`reason` on the wire). `validate_for(entry)` first
-requires the audit to name the entry's task (`AuditForOtherTask`) and judge
-its cutoff (`CutoffMismatch`), so timestamps judged against another cutoff
-say nothing about the row.
+requires the audit to name the entry's task (`AuditForOtherTask`), judge
+its cutoff (`CutoffMismatch`), and time its commits (`CommitMismatch`), so
+timestamps judged against another cutoff or another pair of commits say
+nothing about the row.
 
 **Insufficiency proof.** `InsufficiencyProof {task, hidden}` is the
 current-tree-only run: the hidden tests over the snapshot with no agent.
@@ -2436,9 +2440,12 @@ task.
 for one `ProviderProfile {provider, model, tokenizer_profile}` (key
 `provider/model@tokenizer_profile`): `task`, `provider`, `execution_image`,
 `analysis_family_digest`, `terminal`, the `repository_access` it reached, and
-the `future_answers` its output named. `classify_control(control,
+the `future_answers` its output named. `RepositoryComparison` is the
+repository-bearing run it is judged against (`task`, `provider`,
+`execution_image`, `analysis_family_digest`, `terminal`); a control is never
+its own comparison. `classify_control(control,
 comparison)` refuses `NotComparable {field}` unless task, provider, image,
-and analysis digest match the repository-bearing comparison, `NotRun` when
+and analysis digest match the comparison, `NotRun` when
 the control's terminal is not `pass`, `fail`, or `censored`, and
 `ComparisonNotRun` when the comparison's is not; then the pair is
 `Excluded` as `repository_access`, `future_answer`, or `memorized` (the
@@ -2447,10 +2454,14 @@ control is eligible. `future_answers(entry, output)` names the fix commit
 when any run of hex digits of seven or more, in either case, is a prefix of
 `fix_sha` (the run is taken whole, so `a0123456` does not name
 `0123456…`), and the pull request as `#<n>` or the repository's `/pull/<n>`
-URL as a whole number.
+URL as a whole number, in any letter case.
 
 **Anchor set.** `anchor_set(corpus, role, audits, proofs, controls,
-provider)` folds one pair's evidence into `(AnchorSet, PairAccounting)`.
+provider)` folds one pair's evidence into `(AnchorSet, PairAccounting)`. It
+refuses an invalid corpus (a duplicate row would count one task's evidence
+twice) and the pilot corpus under the `transfer` role
+(`PilotIsNotATransferSet`): the pilot alone never transfers, whatever role
+the caller names.
 Every task keeps its row: a failed audit is `cutoff_invalid`; a missing or
 refused proof, a missing control, a control classified for another task or
 provider, and an excluded control are each `residue`; only a task whose
@@ -2483,9 +2494,11 @@ future answer (twelve-character, seven-character, and upper-case fix SHAs and
 `#pr` detected; six characters and a longer run not), not comparable, not
 run on either side, censored stays eligible; the pilot with one memorized,
 one cutoff-invalid, and one unproven task keeps twenty rows with seventeen
-eligible and derives `generated_phase1`; a transfer-role set excludes the
+eligible and derives `generated_phase1`, and refuses the `transfer` role; a
+twenty-one-task transfer-role set excludes the
 memorized task for that pair and transfers once its control is eligible;
-evidence naming another task or cutoff is refused; settings refusals and
+evidence naming another task, cutoff, or pair of commits is refused; a
+duplicate row and an issue number above 2^53 refuse; settings refusals and
 wire names.
 
 ## Coverage markers

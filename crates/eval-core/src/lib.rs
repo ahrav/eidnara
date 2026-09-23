@@ -52,8 +52,8 @@ pub use anchor::{
     AnchorError, ClassifiedControl, Contamination, ControlRefused, ControlVerdict, CutoffAudit,
     CutoffRefused, Family, InsufficiencyProof, InsufficiencyRefused, NoRepositoryControl,
     PILOT_COMPOSITION, PairAccounting, Preparation, ProviderProfile, RealHistorySettings,
-    SettingsRefused, TIME_STUDY_TASKS, TimeStudyRefused, anchor_set, classify_control,
-    future_answers, time_study,
+    RepositoryComparison, SettingsRefused, TIME_STUDY_TASKS, TimeStudyRefused, anchor_set,
+    classify_control, future_answers, time_study,
 };
 pub use campaign::{
     Approval, Ceilings, DisabledReason, Envelope, EnvelopeExceeded, ProfileError,

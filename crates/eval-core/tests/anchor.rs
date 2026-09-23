@@ -9,9 +9,9 @@ use eval_core::{
     AnchorVerdict, ClaimClass, ClassifiedControl, Contamination, ControlRefused, ControlVerdict,
     CutoffAudit, CutoffRefused, DisabledReason, Family, HiddenOutcome, InsufficiencyProof,
     InsufficiencyRefused, NoRepositoryControl, PILOT_COMPOSITION, Preparation, ProviderProfile,
-    RealHistorySettings, SettingsRefused, SkipReason, TIME_STUDY_TASKS, Terminal, TimeStudyRefused,
-    TransferCriterion, UnmetClause, UnsupportedReason, WorldProvenance, anchor_set,
-    classify_control, derive_claim_class, future_answers, time_study,
+    RealHistorySettings, RepositoryComparison, SettingsRefused, SkipReason, TIME_STUDY_TASKS,
+    Terminal, TimeStudyRefused, TransferCriterion, UnmetClause, UnsupportedReason, WorldProvenance,
+    anchor_set, classify_control, derive_claim_class, future_answers, time_study,
 };
 use serde_json::json;
 
@@ -52,6 +52,21 @@ fn pilot() -> AnchorCorpus {
     }
 }
 
+/// The pilot and one more Cargo task: not the pilot, so a transfer set.
+fn full() -> AnchorCorpus {
+    let mut corpus = pilot();
+    corpus.entries.push(entry("cargo-8", Family::Cargo, 0x40));
+    corpus
+}
+
+fn corpus_entry(id: &str) -> AnchorEntry {
+    full()
+        .entries
+        .into_iter()
+        .find(|e| e.id == id)
+        .unwrap_or_else(|| entry(id, Family::Cargo, 0x10))
+}
+
 fn provider() -> ProviderProfile {
     ProviderProfile {
         provider: "anthropic".to_string(),
@@ -61,8 +76,11 @@ fn provider() -> ProviderProfile {
 }
 
 fn audit(task: &str) -> CutoffAudit {
+    let entry = corpus_entry(task);
     CutoffAudit {
         task: task.to_string(),
+        base_sha: entry.base_sha,
+        fix_sha: entry.fix_sha,
         cutoff_ms: CUTOFF,
         base_committed_ms: CUTOFF - 86_400_000,
         fix_committed_ms: CUTOFF + 3_600_000,
@@ -96,6 +114,16 @@ fn control(task: &str, terminal: Terminal) -> NoRepositoryControl {
     }
 }
 
+fn comparison(task: &str, terminal: Terminal) -> RepositoryComparison {
+    RepositoryComparison {
+        task: task.to_string(),
+        provider: provider(),
+        execution_image: "image-1".to_string(),
+        analysis_family_digest: "cd".repeat(32),
+        terminal,
+    }
+}
+
 fn classified(task: &str, verdict: ControlVerdict) -> ClassifiedControl {
     ClassifiedControl {
         task: task.to_string(),
@@ -106,7 +134,7 @@ fn classified(task: &str, verdict: ControlVerdict) -> ClassifiedControl {
 
 fn verdict_of(
     control: &NoRepositoryControl,
-    comparison: &NoRepositoryControl,
+    comparison: &RepositoryComparison,
 ) -> Result<ControlVerdict, ControlRefused> {
     classify_control(control, comparison).map(|c| c.verdict)
 }
@@ -175,7 +203,7 @@ fn the_corpus_persists_identifiers_only_and_is_the_pilot_composition() {
         not_pilot.is_pilot(),
         Err(AnchorError::NotPilotComposition { .. })
     ));
-    assert_ne!(corpus.digest(), not_pilot.digest());
+    assert_ne!(corpus.digest().unwrap(), not_pilot.digest().unwrap());
 }
 
 #[test]
@@ -307,7 +335,7 @@ fn the_insufficiency_proof_is_an_executed_failing_run() {
 
 #[test]
 fn a_control_marks_memorized_tasks_and_detects_seeded_contamination() {
-    let comparison = control("cargo-0", Terminal::Fail);
+    let comparison = comparison("cargo-0", Terminal::Fail);
     assert_eq!(
         classify_control(&control("cargo-0", Terminal::Fail), &comparison),
         Ok(classified("cargo-0", ControlVerdict::Eligible)),
@@ -410,7 +438,8 @@ fn the_pilot_alone_never_transfers_and_exclusions_keep_their_accounting() {
         &proofs_missing,
         &controls,
         &provider(),
-    );
+    )
+    .unwrap();
     assert_eq!(set.tasks.len(), 20, "every task keeps its row");
     let verdict = |id: &str| set.tasks.iter().find(|t| t.id == id).unwrap().verdict;
     assert_eq!(verdict("tokio-3"), AnchorVerdict::Residue);
@@ -448,7 +477,30 @@ fn the_pilot_alone_never_transfers_and_exclusions_keep_their_accounting() {
     );
     assert!(pilot_claim.unmet.contains(&UnmetClause::AnchorTaskNotValid));
     assert_eq!(pilot_claim.skipped.len(), 3);
+    assert_eq!(
+        anchor_set(
+            &corpus,
+            AnchorRole::Transfer,
+            &audits,
+            &proofs,
+            &controls,
+            &provider()
+        ),
+        Err(AnchorError::PilotIsNotATransferSet),
+        "the pilot corpus is never a transfer set, whatever role the caller names"
+    );
 
+    let corpus = full();
+    let (audits, proofs, mut controls) = evidence(&corpus);
+    controls.insert(
+        "tokio-3".to_string(),
+        classified(
+            "tokio-3",
+            ControlVerdict::Excluded {
+                contamination: Contamination::Memorized,
+            },
+        ),
+    );
     let (clean, _) = anchor_set(
         &corpus,
         AnchorRole::Transfer,
@@ -456,7 +508,8 @@ fn the_pilot_alone_never_transfers_and_exclusions_keep_their_accounting() {
         &proofs,
         &controls,
         &provider(),
-    );
+    )
+    .unwrap();
     let excluded_claim =
         derive_claim_class(WorldProvenance::RealHistory, Some(&clean), Some(&criterion));
     assert_eq!(
@@ -476,7 +529,8 @@ fn the_pilot_alone_never_transfers_and_exclusions_keep_their_accounting() {
         &proofs,
         &controls,
         &provider(),
-    );
+    )
+    .unwrap();
     assert_eq!(
         derive_claim_class(WorldProvenance::RealHistory, Some(&full), Some(&criterion)).class,
         ClaimClass::Transfer
@@ -490,7 +544,7 @@ fn the_pilot_alone_never_transfers_and_exclusions_keep_their_accounting() {
 
 #[test]
 fn evidence_counts_only_for_the_corpus_task_and_cutoff_it_names() {
-    let corpus = pilot();
+    let corpus = full();
     let (mut audits, mut proofs, controls) = evidence(&corpus);
     audits.insert("cargo-0".to_string(), audit("tokio-0"));
     let later = audits.get_mut("cargo-1").unwrap();
@@ -509,7 +563,8 @@ fn evidence_counts_only_for_the_corpus_task_and_cutoff_it_names() {
         &proofs,
         &controls,
         &provider(),
-    );
+    )
+    .unwrap();
     let verdict = |id: &str| set.tasks.iter().find(|t| t.id == id).unwrap().verdict;
     assert_eq!(verdict("cargo-0"), AnchorVerdict::CutoffInvalid);
     assert_eq!(
@@ -532,19 +587,22 @@ fn evidence_counts_only_for_the_corpus_task_and_cutoff_it_names() {
             InsufficiencyRefused::ProofForOtherTask
         )])
     );
-    assert_eq!(accounting.eligible.len(), 17);
+    assert_eq!(accounting.eligible.len(), 18);
 }
 
 #[test]
 fn a_control_qualifies_only_the_task_and_provider_it_was_run_for() {
-    let corpus = pilot();
+    let corpus = full();
     let (audits, proofs, _) = evidence(&corpus);
     let controls: BTreeMap<String, ClassifiedControl> = corpus
         .entries
         .iter()
         .map(|e| {
             let run = control(&e.id, Terminal::Fail);
-            (e.id.clone(), classify_control(&run, &run).unwrap())
+            (
+                e.id.clone(),
+                classify_control(&run, &comparison(&e.id, Terminal::Fail)).unwrap(),
+            )
         })
         .collect();
     let mut other = provider();
@@ -557,7 +615,8 @@ fn a_control_qualifies_only_the_task_and_provider_it_was_run_for() {
         &proofs,
         &controls,
         &other,
-    );
+    )
+    .unwrap();
     assert!(
         set.tasks
             .iter()
@@ -565,7 +624,7 @@ fn a_control_qualifies_only_the_task_and_provider_it_was_run_for() {
         "another provider's controls say nothing about this one"
     );
     assert!(accounting.eligible.is_empty());
-    assert_eq!(accounting.control_missing.len(), 20);
+    assert_eq!(accounting.control_missing.len(), 21);
 
     let (set, _) = anchor_set(
         &corpus,
@@ -574,7 +633,8 @@ fn a_control_qualifies_only_the_task_and_provider_it_was_run_for() {
         &proofs,
         &controls,
         &provider(),
-    );
+    )
+    .unwrap();
     assert!(set.tasks.iter().all(|t| t.verdict == AnchorVerdict::Valid));
 
     let mut misfiled = controls;
@@ -589,7 +649,8 @@ fn a_control_qualifies_only_the_task_and_provider_it_was_run_for() {
         &proofs,
         &misfiled,
         &provider(),
-    );
+    )
+    .unwrap();
     assert_eq!(
         accounting.control_missing,
         BTreeSet::from(["cargo-0".to_string()])
@@ -598,7 +659,7 @@ fn a_control_qualifies_only_the_task_and_provider_it_was_run_for() {
 
 #[test]
 fn accounting_names_a_missing_control_and_a_refused_proof_apart() {
-    let corpus = pilot();
+    let corpus = full();
     let (audits, mut proofs, mut controls) = evidence(&corpus);
     proofs
         .get_mut("cargo-1")
@@ -615,7 +676,8 @@ fn accounting_names_a_missing_control_and_a_refused_proof_apart() {
         &proofs,
         &controls,
         &provider(),
-    );
+    )
+    .unwrap();
     assert_eq!(
         accounting.control_missing,
         BTreeSet::from(["cargo-0".to_string()])
@@ -631,7 +693,7 @@ fn accounting_names_a_missing_control_and_a_refused_proof_apart() {
         accounting.insufficiency_missing,
         BTreeSet::from(["cargo-2".to_string()])
     );
-    assert_eq!(accounting.eligible.len(), 17);
+    assert_eq!(accounting.eligible.len(), 18);
     assert_eq!(
         set.tasks
             .iter()
@@ -764,11 +826,11 @@ fn a_control_needs_a_comparison_that_ran() {
         Terminal::Disabled(DisabledReason::FeatureOff),
     ] {
         assert!(
-            classify_control(&ran, &control("cargo-0", terminal)).is_err(),
+            classify_control(&ran, &comparison("cargo-0", terminal)).is_err(),
             "a comparison that never ran compares nothing: {terminal:?}"
         );
         assert_eq!(
-            classify_control(&ran, &control("cargo-0", terminal)),
+            classify_control(&ran, &comparison("cargo-0", terminal)),
             Err(ControlRefused::ComparisonNotRun { terminal })
         );
     }
@@ -880,4 +942,65 @@ fn the_time_study_saturates_instead_of_wrapping() {
         }),
         "a saturated total projects a saturated cost, not zero"
     );
+}
+
+#[test]
+fn the_audit_names_the_commits_it_timed() {
+    let mut other_base = entry("cargo-0", Family::Cargo, 0x10);
+    other_base.base_sha = sha(0x99);
+    assert!(audit("cargo-0").validate_for(&other_base).is_err());
+    assert_eq!(
+        audit("cargo-0").validate_for(&other_base),
+        Err(CutoffRefused::CommitMismatch)
+    );
+    let mut other_fix = entry("cargo-0", Family::Cargo, 0x10);
+    other_fix.fix_sha = sha(0x99);
+    assert_eq!(
+        audit("cargo-0").validate_for(&other_fix),
+        Err(CutoffRefused::CommitMismatch)
+    );
+    audit("cargo-0")
+        .validate_for(&entry("cargo-0", Family::Cargo, 0x10))
+        .unwrap();
+}
+
+#[test]
+fn pull_request_urls_match_in_any_letter_case() {
+    let mut entry = entry("cargo-0", Family::Cargo, 0x10);
+    entry.pull_request = Some(2016);
+    assert_eq!(
+        future_answers(&entry, "https://EXAMPLE.INVALID/Cargo/repo/pull/2016"),
+        vec!["pull_request:2016"]
+    );
+}
+
+#[test]
+fn the_anchor_set_refuses_an_invalid_corpus() {
+    let mut corpus = pilot();
+    corpus.entries.push(corpus.entries[0].clone());
+    let (audits, proofs, controls) = evidence(&corpus);
+    assert_eq!(
+        anchor_set(
+            &corpus,
+            AnchorRole::Pilot,
+            &audits,
+            &proofs,
+            &controls,
+            &provider()
+        ),
+        Err(AnchorError::DuplicateId {
+            id: "cargo-0".to_string()
+        }),
+        "a duplicate row would count one task's evidence twice"
+    );
+}
+
+#[test]
+fn the_digest_refuses_a_number_json_cannot_carry() {
+    let mut corpus = pilot();
+    corpus.entries[0].issue = 1 << 53;
+    assert!(matches!(
+        corpus.digest(),
+        Err(AnchorError::NotCanonical { .. })
+    ));
 }

@@ -41,3 +41,15 @@ A scripted agent that plants a hidden test, and a budget the script exceeds.
   exhausted and the terminal is `Censored`.
 - Missing evidence: none.
 - Conclusion: resolved with answer.
+### Q: Does grading run candidate code with the runner's authority?
+- Sources examined: `hidden_results` in the shell (`suite_d.rs`), which runs
+  `cargo test --offline --test hidden_<name>` "under the runner's own
+  authority, outside any containment"; the module doc at `suite_d.rs:3`.
+- Findings: yes. The hidden tests compile and run the agent's tree outside
+  the namespaces, so a build script or a test body written by the agent runs
+  as the runner. The oracle restore covers the manifest, `.cargo/`, and the
+  hidden test files, not what `src/` may do at build or test time.
+- Missing evidence: a maintainer decision on grading inside its own
+  restricted worker, and what that worker may keep (the target directory,
+  the network).
+- Conclusion: unresolved, needs human input.

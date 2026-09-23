@@ -43,3 +43,16 @@ A host seam reporting no namespaces, and the real namespaces where present.
   not covered without a `pivot_root` into a read-only root.
 - Missing evidence: a maintainer decision on the containment depth.
 - Conclusion: unresolved, needs human input.
+### Q: Can a slow host read a live escapee as denied?
+- Sources examined: the escape verdict in `run_canaries` (`suite_d.rs`): two
+  samples of the alive file 300 ms apart after the canary child exited,
+  `allowed` when the second is non-empty and differs from the first; the
+  escapee's 50 ms rewrite loop and `ESCAPEE_LIFETIME`.
+- Findings: the verdict is a timing measurement. An escapee that survived but
+  was descheduled for the whole 300 ms window, or whose writes had not yet
+  reached the file the runner reads, reads as `denied`; the inverted control
+  catches a host where the escapee never runs at all, not one where it runs
+  late.
+- Missing evidence: a bound on the sampling window the maintainer accepts,
+  or a verdict that waits for the escapee's own exit rather than sampling.
+- Conclusion: unresolved, needs human input.
