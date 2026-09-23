@@ -2076,8 +2076,9 @@ disagreeing) is `CandidateVerdict::InvalidPair { refusal }` carrying the
 `PairError` variant name, and no replay is issued for it.
 
 The failure is pinned before the first candidate as a `FailurePredicate`:
-the oracle name, the `Cut` it was evaluated at, the run profile's digest, and
-the `WitnessClass` (a task failure with its `FailureClass`, a recovery
+the `Oracle` value itself (its kind and parameters, so a replay under other
+thresholds is a different predicate), the `Cut` it was evaluated at, the run
+profile's digest, and the `WitnessClass` (a task failure with its `FailureClass`, a recovery
 disagreement, a liveness stall, or a sustainability breach). A replay reports
 a `ReplayOutcome`: `Failed { predicate }`, `Passed`, or `Unknown { reason }`
 where the reason is one of `replay_budget_exhausted`, `effect_unanswered`,
@@ -2086,10 +2087,11 @@ where the reason is one of `replay_budget_exhausted`, `effect_unanswered`,
 `Reproduced`; a different one is `Slipped { observed }` and is rejected even
 though a failure remains; `Passed` is `NotReproduced`; and `Unknown` is
 `Unknown` for every reason, never `NotReproduced`. The `ReplayRequest` a
-replay receives names the oracle, cut, and profile digest and withholds the
+replay receives carries the oracle, cut, and profile digest and withholds the
 expected witness class, so a replay cannot echo it.
 
-`shrink` first replays the original and refuses `OriginalNotReproduced` when
+`shrink` refuses an invalid pinned oracle as `InvalidOracle` before any
+replay, then replays the original and refuses `OriginalNotReproduced` when
 it does not reproduce the pinned predicate. It then runs Zeller's ddmin once
 per transformation in the parent's order, `Transformation::ORDER` (fault
 episode removal, then event deletion), holding earlier deletions fixed. Only
@@ -2124,7 +2126,13 @@ need the ledger.
 exercising the shrinker end to end: over the compiled pair set and the aged
 truth reduced at the first task's cut it fails from `failing_at` required
 commits, reporting `durable_state` below `slipping_at` and `interference`
-from it, so deleting one commit too many slips the class.
+from it, so deleting one commit too many slips the class. `Oracle::validate`
+refuses `slipping_at` below `failing_at` as `InvertedThresholds`.
+
+A `ShrinkReport` is read back through `parse_shrink_report`, which, like the
+other report parsers, deserializes, runs `ShrinkReport::validate` (the
+`eval-shrink/v1` schema and a valid pinned oracle), and refuses a value that
+does not reserialize identically as `Lossy`.
 
 ## Coverage markers
 

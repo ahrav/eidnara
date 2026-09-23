@@ -28,7 +28,7 @@ pub const MAX_OUTSTANDING_REPLAY_EFFECTS: usize = 4;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FailurePredicate {
-    pub oracle: String,
+    pub oracle: Oracle,
     pub checkpoint: Cut,
     pub profile_digest: String,
     pub witness_class: WitnessClass,
@@ -244,19 +244,41 @@ impl Scenario {
 }
 
 /// An oracle a replay evaluates over the compiled pair set and the aged truth
-/// at the pinned cut. `RequiredCommits` is the evaluator's own planted defect:
-/// it fails from `failing_at` required commits and changes class from
-/// `slipping_at`, which must not be below `failing_at`.
+/// at the pinned cut. The predicate pins the whole value, parameters included,
+/// so a replay under other parameters is a different predicate.
+/// `RequiredCommits` is the evaluator's own planted defect: it fails from
+/// `failing_at` required commits and changes class from `slipping_at`, which
+/// must not be below `failing_at`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Oracle {
     RequiredCommits { failing_at: u32, slipping_at: u32 },
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OracleRefused {
+    InvertedThresholds { failing_at: u32, slipping_at: u32 },
+}
+
+debug_display!(OracleRefused);
+
 impl Oracle {
     pub fn name(&self) -> &'static str {
         match self {
             Self::RequiredCommits { .. } => "planted:required-commits",
+        }
+    }
+
+    pub fn validate(&self) -> Result<(), OracleRefused> {
+        match *self {
+            Self::RequiredCommits {
+                failing_at,
+                slipping_at,
+            } if slipping_at < failing_at => Err(OracleRefused::InvertedThresholds {
+                failing_at,
+                slipping_at,
+            }),
+            Self::RequiredCommits { .. } => Ok(()),
         }
     }
 
@@ -289,7 +311,7 @@ impl Oracle {
         };
         ReplayOutcome::Failed {
             predicate: FailurePredicate {
-                oracle: self.name().to_string(),
+                oracle: self.clone(),
                 checkpoint,
                 profile_digest: profile_digest.to_string(),
                 witness_class: WitnessClass::Failure { class },
@@ -417,7 +439,7 @@ pub struct ReplayRequest<'a> {
     pub key: &'a str,
     pub scenario: &'a Scenario,
     pub set: &'a PairSet,
-    pub oracle: &'a str,
+    pub oracle: &'a Oracle,
     pub checkpoint: Cut,
     pub profile_digest: &'a str,
 }
@@ -471,12 +493,48 @@ pub struct ShrinkReport {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ShrinkReportError {
+    SchemaMismatch { found: String },
+    Oracle(OracleRefused),
+    Shape(String),
+    Lossy,
+}
+
+impl ShrinkReport {
+    pub fn validate(&self) -> Result<(), ShrinkReportError> {
+        if self.schema != SHRINK_REPORT_SCHEMA {
+            return Err(ShrinkReportError::SchemaMismatch {
+                found: self.schema.clone(),
+            });
+        }
+        self.predicate
+            .oracle
+            .validate()
+            .map_err(ShrinkReportError::Oracle)
+    }
+}
+
+pub fn parse_shrink_report(value: &Value) -> Result<ShrinkReport, ShrinkReportError> {
+    let report =
+        ShrinkReport::deserialize(value).map_err(|e| ShrinkReportError::Shape(e.to_string()))?;
+    report.validate()?;
+    let again =
+        serde_json::to_value(&report).map_err(|e| ShrinkReportError::Shape(e.to_string()))?;
+    if again != *value {
+        return Err(ShrinkReportError::Lossy);
+    }
+    Ok(report)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ShrinkRefused {
+    /// The pinned oracle is not a valid configuration; nothing is replayed.
+    InvalidOracle(OracleRefused),
     /// The original scenario itself did not reproduce the pinned predicate.
     OriginalNotReproduced { verdict: CandidateVerdict },
 }
 
-debug_display!(ShrinkRefused);
+debug_display!(ShrinkRefused, ShrinkReportError);
 
 struct Driver<'a> {
     fixture: &'a Value,
@@ -552,7 +610,8 @@ fn refusal_name(error: &PairError) -> String {
 
 /// Shrinks `original` until no single deletion under any tried transformation
 /// still reproduces `predicate`, or the replay budget runs out. The returned
-/// scenario reproduced the predicate on its last replay.
+/// scenario reproduced the predicate on its last replay. An invalid pinned
+/// oracle is refused before any replay.
 pub fn shrink(
     original: &Scenario,
     fixture: &Value,
@@ -560,6 +619,10 @@ pub fn shrink(
     max_replays: u64,
     replay: &mut dyn FnMut(ReplayRequest<'_>) -> ReplayOutcome,
 ) -> Result<(Scenario, ShrinkReport), ShrinkRefused> {
+    predicate
+        .oracle
+        .validate()
+        .map_err(ShrinkRefused::InvalidOracle)?;
     let mut driver = Driver {
         fixture,
         predicate,

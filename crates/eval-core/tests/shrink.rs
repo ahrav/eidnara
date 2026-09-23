@@ -9,10 +9,11 @@ use eval_core::{
     APPLICATION_CRASH, CandidateVerdict, Cut, Destination, Element, EvaluatedSurface, EventId,
     EventLog, FailureClass, FailurePredicate, FaultAction, FaultEpisode, FaultScope, History,
     KillLabel, MAX_OUTSTANDING_REPLAY_EFFECTS, MAX_VALID_TIME_MS, Minimality, Mode,
-    NotEstablishedReason, Oracle, Payload, Query, ReplayEffects, ReplayOutcome, ReplayRefused,
-    ReplayRequest, RepositorySpec, Scenario, Sensitivity, ServedClass, SessionSpec, ShrinkRefused,
-    StoreFamily, TEST_BINARY_CHILD, Task, TaskRole, Transformation, UnknownReason, Visibility,
-    WitnessClass, WorldConfig, classify_replay, reduce, serialize_spec, shrink,
+    NotEstablishedReason, Oracle, OracleRefused, Payload, Query, ReplayEffects, ReplayOutcome,
+    ReplayRefused, ReplayRequest, RepositorySpec, Scenario, Sensitivity, ServedClass, SessionSpec,
+    ShrinkRefused, ShrinkReportError, StoreFamily, TEST_BINARY_CHILD, Task, TaskRole,
+    Transformation, UnknownReason, Visibility, WitnessClass, WorldConfig, classify_replay,
+    parse_shrink_report, reduce, serialize_spec, shrink,
 };
 use serde_json::{Value, json};
 use support::{WORLD_EPOCH_MS, WORLD_SEED, world_config};
@@ -134,7 +135,7 @@ fn oracle() -> Oracle {
 
 fn predicate(class: FailureClass) -> FailurePredicate {
     FailurePredicate {
-        oracle: oracle().name().to_string(),
+        oracle: oracle(),
         checkpoint: CUT,
         profile_digest: PROFILE.to_string(),
         witness_class: WitnessClass::Failure { class },
@@ -150,7 +151,7 @@ fn evaluate(request: ReplayRequest<'_>) -> ReplayOutcome {
         &request.set.pairs[0].task.query,
     )
     .unwrap();
-    oracle().evaluate(
+    request.oracle.evaluate(
         request.set,
         &truth,
         request.checkpoint,
@@ -205,7 +206,12 @@ fn classify_keeps_unknown_unknown_for_every_reason() {
         CandidateVerdict::Reproduced
     );
     let slips: [fn(&mut FailurePredicate); 4] = [
-        |p| p.oracle = "planted:other".to_string(),
+        |p| {
+            p.oracle = Oracle::RequiredCommits {
+                failing_at: 1,
+                slipping_at: 4,
+            }
+        },
         |p| p.checkpoint = Cut::EndOfRun,
         |p| p.profile_digest = "other-profile".to_string(),
         |p| {
@@ -784,7 +790,7 @@ fn wire_names_are_pinned() {
     assert_eq!(
         serde_json::to_value(&predicate).unwrap(),
         json!({
-            "oracle": "planted:required-commits",
+            "oracle": {"kind": "required_commits", "failing_at": 3, "slipping_at": 6},
             "checkpoint": "AtQuiescence",
             "profile_digest": PROFILE,
             "witness_class": {"kind": "failure", "class": "interference"},
@@ -820,4 +826,110 @@ fn wire_names_are_pinned() {
     let mut extra = value;
     extra["extra"] = Value::Bool(true);
     assert!(serde_json::from_value::<eval_core::ShrinkReport>(extra).is_err());
+}
+
+#[test]
+fn a_replay_under_other_thresholds_slips_even_when_it_fails_the_same_class() {
+    // The original has enough commits to fail as `interference` under both
+    // `(3, 6)` and `(1, 4)`; only the pinned thresholds tell them apart.
+    let original = scenario();
+    let expected = predicate(FailureClass::Interference);
+    let other = Oracle::RequiredCommits {
+        failing_at: 1,
+        slipping_at: 4,
+    };
+    let mut replay = |request: ReplayRequest<'_>| {
+        let truth = reduce(
+            &request.set.aged,
+            &fixture(),
+            &request.set.pairs[0].task.query,
+        )
+        .unwrap();
+        other.evaluate(
+            request.set,
+            &truth,
+            request.checkpoint,
+            request.profile_digest,
+        )
+    };
+    let refused = shrink(&original, &fixture(), &expected, BUDGET, &mut replay);
+    assert!(
+        matches!(
+            refused,
+            Err(ShrinkRefused::OriginalNotReproduced {
+                verdict: CandidateVerdict::Slipped { .. }
+            })
+        ),
+        "a differently parameterised oracle is a different predicate: {refused:?}"
+    );
+}
+
+#[test]
+fn inverted_thresholds_are_refused_before_any_replay() {
+    let inverted = Oracle::RequiredCommits {
+        failing_at: 6,
+        slipping_at: 3,
+    };
+    let expected = FailurePredicate {
+        oracle: inverted,
+        ..predicate(FailureClass::Interference)
+    };
+    let mut issued = 0u32;
+    let mut replay = |request: ReplayRequest<'_>| {
+        issued += 1;
+        evaluate(request)
+    };
+    let refused = shrink(&scenario(), &fixture(), &expected, BUDGET, &mut replay);
+    assert_eq!(
+        refused.err(),
+        Some(ShrinkRefused::InvalidOracle(
+            OracleRefused::InvertedThresholds {
+                failing_at: 6,
+                slipping_at: 3,
+            }
+        ))
+    );
+    assert_eq!(issued, 0, "nothing is replayed under an invalid oracle");
+}
+
+#[test]
+fn a_report_is_read_back_only_under_its_schema_and_a_valid_oracle() {
+    let (_, report) = shrink(
+        &scenario(),
+        &fixture(),
+        &predicate(FailureClass::Interference),
+        3,
+        &mut evaluate,
+    )
+    .unwrap();
+    let value = serde_json::to_value(&report).unwrap();
+    assert_eq!(parse_shrink_report(&value).unwrap(), report);
+
+    let mut other_schema = value.clone();
+    other_schema["schema"] = Value::String("eval-shrink/v0".to_string());
+    assert_eq!(
+        parse_shrink_report(&other_schema),
+        Err(ShrinkReportError::SchemaMismatch {
+            found: "eval-shrink/v0".to_string()
+        })
+    );
+
+    let mut inverted = value.clone();
+    inverted["predicate"]["oracle"]["slipping_at"] = json!(1);
+    assert_eq!(
+        parse_shrink_report(&inverted),
+        Err(ShrinkReportError::Oracle(
+            OracleRefused::InvertedThresholds {
+                failing_at: 3,
+                slipping_at: 1,
+            }
+        ))
+    );
+
+    let mut extra = value;
+    extra["extra"] = Value::Bool(true);
+    assert!(matches!(
+        parse_shrink_report(&extra),
+        Err(ShrinkReportError::Shape(_))
+    ));
 }
