@@ -623,12 +623,28 @@ fn the_aged_arm_is_built_by_replay_and_matches_the_bulk_scaffold_only_by_enumera
     );
     assert!(full.against_bulk.live_digests_equal);
     assert!(full.rows.live.pending_embedding.is_empty());
-    assert!(
-        full.against_bulk
-            .divergences
-            .iter()
-            .any(|d| matches!(d, Divergence::TombstonedBeforeSnapshot { .. }))
-    );
+    // Every death the kernel recorded is one divergence: a dead row that
+    // vanished from both projections would leave the live digests equal and
+    // the enumeration short.
+    let mut enumerated: Vec<i64> = full
+        .against_bulk
+        .divergences
+        .iter()
+        .map(|d| match d {
+            Divergence::TombstonedBeforeSnapshot { death, .. } => death.invalidated_commit_seq,
+            other => panic!("the bulk scaffold diverges only by deaths: {other:?}"),
+        })
+        .collect();
+    let mut recorded: Vec<i64> = full
+        .state
+        .kernel
+        .values()
+        .filter_map(|d| d.invalidated_commit_seq)
+        .collect();
+    enumerated.sort_unstable();
+    recorded.sort_unstable();
+    assert!(!recorded.is_empty());
+    assert_eq!(enumerated, recorded);
     let root = tempfile::tempdir().unwrap();
     let mut prefix = Stores::open(root.path(), &plan);
     live(&mut prefix, &plan.steps[..plan.checkpoint_step as usize]);
@@ -698,4 +714,26 @@ fn a_history_beyond_the_fixture_bounds_is_lived_and_matches_the_bulk_scaffold() 
 #[test]
 fn a_history_too_short_to_straddle_a_death_is_refused() {
     assert!(matches!(plan(2), Err(RunError::NoStraddlingStep)));
+}
+
+#[test]
+fn the_store_is_charged_at_its_open_footprint_not_after_the_checkpoint() {
+    let plan = straddling_plan();
+    let root = tempfile::tempdir().unwrap();
+    let mut stores = Stores::open(root.path(), &plan);
+    live(&mut stores, &plan.steps);
+    let open = campaign::root_bytes(root.path());
+    drop(stores);
+    let closed = campaign::root_bytes(root.path());
+    assert!(
+        open > closed,
+        "closing checkpoints the WAL away: {open} vs {closed}"
+    );
+    let mut charges = charges();
+    full_life(&plan, &mut charges).unwrap();
+    let peak = charges.envelope.peaks.store_bytes;
+    assert!(
+        peak > (open + closed) / 2,
+        "the peak charged is the open footprint: peak {peak}, open {open}, closed {closed}"
+    );
 }

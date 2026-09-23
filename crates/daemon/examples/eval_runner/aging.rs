@@ -186,22 +186,21 @@ fn deaths(log: &EventLog, steps: &[Planned]) -> Vec<Option<(usize, Died)>> {
             _ => event.id.clone(),
         }
     };
-    let mut born: BTreeMap<EventId, usize> = BTreeMap::new();
+    // The step that created each lineage's live object, as the stores see it:
+    // a publish supersedes the live object or, after a retirement, starts a
+    // new life; a retirement kills the live object once.
+    let mut live: BTreeMap<EventId, usize> = BTreeMap::new();
     steps
         .iter()
         .enumerate()
-        .map(|(index, planned)| {
-            let (id, death) = match &planned.step {
-                Step::Publish(id) => (id, Died::Supersession),
-                Step::Retire(id) => (id, Died::Retirement),
-            };
-            let lineage = lineage_of(id);
-            match born.get(&lineage) {
-                Some(&at) => Some((at, death)),
-                None => {
-                    born.insert(lineage, index);
-                    None
-                }
+        .map(|(index, planned)| match &planned.step {
+            Step::Publish(id) => {
+                let born = live.insert(lineage_of(id), index);
+                born.map(|at| (at, Died::Supersession))
+            }
+            Step::Retire(id) => {
+                let born = live.remove(&lineage_of(id));
+                born.map(|at| (at, Died::Retirement))
             }
         })
         .collect()
@@ -1145,7 +1144,13 @@ fn embed_pending(
     }
 }
 
-fn bulk_scaffold(corpus: &Corpus, home: &Path, bounds: &DriveBounds, now: i64) -> ProjectionRows {
+fn bulk_scaffold(
+    corpus: &Corpus,
+    home: &Path,
+    bounds: &DriveBounds,
+    now: i64,
+    charges: &mut Charges,
+) -> Result<ProjectionRows, EnvelopeExceeded> {
     let (projection, hold, _) = corpus.bootstrap_within(home, bounds.hold, bounds.batch);
     embed_pending(corpus, &projection, home, bounds.hold, now);
     let rows = projection_rows(&search_file(home));
@@ -1153,13 +1158,16 @@ fn bulk_scaffold(corpus: &Corpus, home: &Path, bounds: &DriveBounds, now: i64) -
         rows.live.pending_embedding.is_empty(),
         "the bulk scaffold embeds every open job"
     );
+    // The projection's bytes are charged while it is open; closing it
+    // checkpoints the WAL away.
+    charges.store_bytes(home)?;
     let (_, lease) = projection.close();
     drop(lease);
     corpus
         .kernel
         .release_source_hold(&corpus.binding(), &hold.hold_id, hold.captured_at)
         .unwrap();
-    rows
+    Ok(rows)
 }
 
 pub struct Run {
@@ -1228,12 +1236,21 @@ pub fn full_life(plan: &Plan, charges: &mut Charges) -> Result<Full, RunError> {
     let rows = stores.projection_rows();
     let last_now = plan.steps.last().unwrap().now_ms;
     let bulk_home = charges.occupy()?;
-    let bulk_rows = bulk_scaffold(&stores.corpus, bulk_home.path(), &plan.bounds, last_now);
+    let bulk_rows = bulk_scaffold(
+        &stores.corpus,
+        bulk_home.path(),
+        &plan.bounds,
+        last_now,
+        charges,
+    )?;
     let against_bulk = GuardComparison::of(
         (&rows, ConstructionKind::CatchUp),
         (&bulk_rows, ConstructionKind::Bulk),
     )?;
     let incarnation_id = stores.incarnation();
+    // The stores' bytes are charged while they are open; closing them
+    // checkpoints the WAL away.
+    charges.store_bytes(root.path())?;
     drop(stores.close());
     charges.vacate(bulk_home)?;
     charges.vacate(root)?;
@@ -1262,6 +1279,7 @@ fn resumed_life(
     let mut prefix = Stores::open(prefix_root.path(), plan);
     live(&mut prefix, &plan.steps[..k]);
     let prefix_state = prefix.snapshot();
+    charges.store_bytes(prefix_root.path())?;
     let closed = prefix.close();
     let copy_root = charges.occupy()?;
     let (checkpoint, copied) = closed.copy(copy_root.path())?;
@@ -1276,6 +1294,7 @@ fn resumed_life(
     live(&mut resumed, &plan.steps[k..]);
     let state = resumed.snapshot();
     let rows = resumed.projection_rows();
+    charges.store_bytes(copy_root.path())?;
     drop(resumed.close());
     charges.vacate(copy_root)?;
     Ok(Resumed {
@@ -1489,4 +1508,98 @@ pub fn config_from_args(args: impl IntoIterator<Item = String>) -> Result<Config
         }),
         publish: PathBuf::from(take("publish")),
     })
+}
+
+#[cfg(test)]
+mod deaths_tests {
+    use eval_core::{Event, StreamLabel};
+
+    use super::*;
+
+    fn log(events: &[(&str, Payload)]) -> EventLog {
+        EventLog {
+            schema: String::new(),
+            linearization_rule_version: String::new(),
+            events: events
+                .iter()
+                .enumerate()
+                .map(|(seq, (id, payload))| Event {
+                    id: EventId(id.to_string()),
+                    stream: StreamLabel::Session,
+                    entity_id: SESSION.to_string(),
+                    local_seq: seq as u32,
+                    valid_time_ms: 0,
+                    observation_time_ms: 0,
+                    causal_depth: 0,
+                    payload: payload.clone(),
+                })
+                .collect(),
+            causal_edges: Vec::new(),
+        }
+    }
+
+    fn message() -> Payload {
+        Payload::Message {
+            message_id: String::new(),
+            role: String::new(),
+            text: String::new(),
+            cites: None,
+        }
+    }
+
+    fn correction(target: &str) -> Payload {
+        Payload::Correction {
+            target: EventId(target.to_string()),
+            text: String::new(),
+        }
+    }
+
+    fn step(step: Step) -> Planned {
+        Planned { step, now_ms: 0 }
+    }
+
+    fn publish(id: &str) -> Planned {
+        step(Step::Publish(EventId(id.to_string())))
+    }
+
+    fn retire(id: &str) -> Planned {
+        step(Step::Retire(EventId(id.to_string())))
+    }
+
+    /// A death is the live object's: a repeated retirement retires nothing, a
+    /// correction after a retirement is a birth, and a supersession kills the
+    /// object the previous publish created, not the lineage's first.
+    #[test]
+    fn deaths_follow_the_live_object_as_the_stores_do() {
+        let log = log(&[
+            ("m0", message()),
+            ("m1", message()),
+            ("c0", correction("m0")),
+            ("c1", correction("m1")),
+            ("c2", correction("m1")),
+        ]);
+        let steps = [
+            publish("m0"),
+            publish("m1"),
+            retire("m0"),
+            retire("m0"),
+            publish("c0"),
+            retire("m0"),
+            publish("c1"),
+            publish("c2"),
+        ];
+        assert_eq!(
+            deaths(&log, &steps),
+            vec![
+                None,
+                None,
+                Some((0, Died::Retirement)),
+                None,
+                None,
+                Some((4, Died::Retirement)),
+                Some((1, Died::Supersession)),
+                Some((6, Died::Supersession)),
+            ]
+        );
+    }
 }
