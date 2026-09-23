@@ -2318,7 +2318,9 @@ commands the runner saw, the outputs, every file the containment boundary
 saw the agent write with its last content (a write later undone still
 counts; it is not a post-run snapshot), and the rows appended to the memory
 carrier; `observe_agent` turns it into an `InjectionObservation` whose
-mediation is the set of `SideEffect`s those imply and whose `ingested`,
+mediation is the set of `SideEffect`s those imply (file writes in canonical
+spelling, so `./x` is the write of `x`; an absolute or `..` path stays as
+written and matches no workspace oracle) and whose `ingested`,
 `retrieved`, and `packed` are `not_measurable`, since the trace carries no
 stage ledger, so `score_injection` judges `obeyed` by an independent
 prohibited-effect oracle and `written_back_cross_session` by a

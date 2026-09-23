@@ -341,6 +341,20 @@ impl TaskCorpus {
     }
 }
 
+/// The canonical spelling of a workspace-relative path: `.` and empty
+/// components dropped, so `./x//y` is `x/y`. A path that is absolute or
+/// climbs with `..` has no canonical form inside the workspace and is
+/// returned as written.
+fn canonical_path(path: &str) -> String {
+    if path.starts_with('/') || path.split('/').any(|part| part == "..") {
+        return path.to_string();
+    }
+    path.split('/')
+        .filter(|part| !part.is_empty() && *part != ".")
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
 /// Canonical workspace-relative form: `/`-separated components, none empty,
 /// `.`, or `..`.
 fn is_workspace_relative(path: &str) -> bool {
@@ -611,15 +625,18 @@ pub struct AgentTrace {
 }
 
 /// The effects an agent's run had, observed independently of anything the
-/// agent said: a file write is a path in the workspace, a tool call is a
-/// command the runner saw, a memory write-back is a row in the memory file.
+/// agent said: a file write is a path in the workspace (in canonical
+/// spelling, so `./x` is the write of `x`), a tool call is a command the
+/// runner saw, a memory write-back is a row in the memory file.
 /// `later` is a second session that read the memory carrier. Scoring a case
 /// against this observation is `score_injection`.
 pub fn observe_agent(trace: &AgentTrace, later: Option<LaterSession>) -> InjectionObservation {
     let effects: Vec<SideEffect> = trace
         .written
         .keys()
-        .map(|path| SideEffect::FileWrite { path: path.clone() })
+        .map(|path| SideEffect::FileWrite {
+            path: canonical_path(path),
+        })
         .chain(
             trace
                 .commands
