@@ -1771,10 +1771,14 @@ ledger (`NotALeakVerdict` otherwise): every sample's project bytes must equal
 temporary artifact entry, no WAL bytes, no temp root, and no process (`Leak {
 resource, step, observed }`), and its store total, artifact objects and bytes, commit
 and projection rows, and open holds must be within the declared
-`GrowthBounds` (`BoundExceeded`); the store bytes added between the first and
-the last sample must not exceed `store_bytes_per_commit` times the commits
-between them (`GrowthRateExceeded`), so a leak proportional to the history is
-refused even under the size bound. `peak_store_bytes` is the largest total any
+`GrowthBounds` (`BoundExceeded`); the main-file store bytes added between the
+first and the last sample must not exceed `store_bytes_per_commit` times the
+commits between them (`GrowthRateExceeded`), so a leak proportional to the
+history is refused even under the size bound. The rate excludes `-wal` and
+`-shm` bytes, so a WAL-heavy first sample cannot cancel the file bytes the
+history retained. `verdict` and `validate` re-check the step and commit
+ordering over the whole ledger, because a deserialized ledger never passed
+through `record`. `peak_store_bytes` is the largest total any
 sample saw, the transient pressure the envelope must also be charged with.
 
 `SwarmMix` counts the seven `Operation` kinds a growth campaign must exercise
@@ -1792,11 +1796,15 @@ differs from its serial one.
 `GrowthReport` (`eval-suite-c-growth-report/v1`) is what one campaign
 publishes: identity, profile digest, claim boundary, the quota read, the
 bounds, the ledger, the mix, expected refusals, fault-episode and
-safety-check counts (`SafetyNeverChecked` when faults ran unchecked),
+safety-check counts (`SafetyNeverChecked` when either the fault-episode count
+or the mix records a fault episode and no safety check ran while armed),
 markers, and envelope. `validate` runs the mix and ledger refusals;
 `parse_growth_report` reads a report back losslessly; `result_digest` drops
-the samples and envelope peaks, which name one machine's bytes, under
-`eval-suite-c-growth-report-result/v1`.
+each sample's byte measurements (`stores`, `artifact_bytes`,
+`cassette_bytes`) and the envelope peaks, which name one machine's bytes, and
+keeps steps, commit sequence, row and object counts, and headroom, so a
+concurrent campaign that saw another campaign's commits does not match its
+serial digest; the digest protocol is `eval-suite-c-growth-report-result/v1`.
 
 ## Aging shell
 

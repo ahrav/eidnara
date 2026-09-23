@@ -219,6 +219,37 @@ fn a_never_restored_ledger_passes_only_when_the_final_sample_holds_nothing_trans
         ),
         "growth faster than the per-commit allowance is a leak even under the size bound"
     );
+    let mut wal_baseline = ledger.clone();
+    wal_baseline.samples[0]
+        .stores
+        .get_mut(&StoreFamily::Memory)
+        .unwrap()
+        .wal = 8 << 20;
+    wal_baseline.samples[2]
+        .stores
+        .get_mut(&StoreFamily::Kernel)
+        .unwrap()
+        .file = 8 << 20;
+    assert!(
+        matches!(
+            wal_baseline.verdict(&quota(), &bounds()),
+            Err(GrowthRefused::GrowthRateExceeded { commits: 6, .. })
+        ),
+        "a WAL-heavy first sample must not cancel the file bytes the history retained"
+    );
+    let mut reordered = ledger.clone();
+    reordered.samples.swap(1, 2);
+    assert_eq!(
+        reordered.verdict(&quota(), &bounds()),
+        Err(GrowthRefused::StepNotMonotonic { step: 2 }),
+        "a ledger built without `record` must still be in step order"
+    );
+    let mut receding = ledger.clone();
+    receding.samples[2].commit_seq = 5;
+    assert_eq!(
+        receding.verdict(&quota(), &bounds()),
+        Err(GrowthRefused::CommitSeqNotMonotonic { step: 3 })
+    );
     let mut empty = GrowthLedger::new(GrowthMode::NeverRestored);
     assert_eq!(
         empty.verdict(&quota(), &bounds()),
@@ -357,8 +388,25 @@ fn a_growth_report_round_trips_and_its_digest_ignores_measurements() {
     let digest = GrowthReport::result_digest(&value).unwrap();
     let mut other_machine = value.clone();
     other_machine["ledger"]["samples"][0]["stores"]["kernel"]["file"] = serde_json::json!(999_999);
+    other_machine["ledger"]["samples"][1]["stores"]["memory"]["wal"] = serde_json::json!(1);
+    other_machine["ledger"]["samples"][2]["artifact_bytes"] = serde_json::json!(999_999);
+    other_machine["ledger"]["samples"][2]["cassette_bytes"] = serde_json::json!(999_999);
     other_machine["envelope"]["peaks"]["store_bytes"] = serde_json::json!(999_999);
     assert_eq!(GrowthReport::result_digest(&other_machine).unwrap(), digest);
+    let mut other_history = value.clone();
+    other_history["ledger"]["samples"][2]["commit_seq"] = serde_json::json!(10);
+    other_history["ledger"]["samples"][2]["commit_log_rows"] = serde_json::json!(10);
+    assert_ne!(
+        GrowthReport::result_digest(&other_history).unwrap(),
+        digest,
+        "a campaign that saw another campaign's commits must not match its serial digest"
+    );
+    let mut other_headroom = value.clone();
+    other_headroom["ledger"]["samples"][0]["headroom"]["admitted_total"] = serde_json::json!(7);
+    assert_ne!(
+        GrowthReport::result_digest(&other_headroom).unwrap(),
+        digest
+    );
     let mut other_quota = value.clone();
     other_quota["quota"]["receipt_charge_bytes"] = serde_json::json!(1);
     assert_ne!(GrowthReport::result_digest(&other_quota).unwrap(), digest);
@@ -375,6 +423,32 @@ fn a_growth_report_round_trips_and_its_digest_ignores_measurements() {
     assert_eq!(
         unsafe_run.validate(),
         Err(GrowthReportError::SafetyNeverChecked)
+    );
+    let mut uncounted = report.clone();
+    uncounted.fault_episodes = 0;
+    uncounted.safety_checks_while_armed = 0;
+    assert_eq!(
+        uncounted.validate(),
+        Err(GrowthReportError::SafetyNeverChecked),
+        "the mix exercised a fault episode, so a zero episode count cannot waive the safety check"
+    );
+    let mut restoring_reordered = report.clone();
+    restoring_reordered.ledger.mode = GrowthMode::Restoring;
+    restoring_reordered.ledger.samples[2].commit_seq = 5;
+    assert_eq!(
+        restoring_reordered.validate(),
+        Err(GrowthReportError::Growth(
+            GrowthRefused::CommitSeqNotMonotonic { step: 3 }
+        ))
+    );
+    let mut reordered = report.clone();
+    reordered.ledger.samples.swap(0, 2);
+    assert_eq!(
+        parse_growth_report(&serde_json::to_value(&reordered).unwrap()),
+        Err(GrowthReportError::Growth(GrowthRefused::StepNotMonotonic {
+            step: 2
+        })),
+        "a report read back is held to the order `record` enforces"
     );
     let mut leaked = report;
     leaked.ledger.samples[2].artifact_tmp_entries = 3;

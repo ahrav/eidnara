@@ -1324,10 +1324,12 @@ Growth contract (`crates/eval-core/tests/growth.rs`,
   whose bytes differ is `HeadroomMismatch`.
 - `a_never_restored_ledger_passes_only_when_the_final_sample_holds_nothing_transient`:
   a final sample with WAL bytes, a temporary artifact entry, or a temp root
-  is a named `Leak`; a counter over its bound is `BoundExceeded`; store bytes
-  growing faster than the per-commit allowance are `GrowthRateExceeded` even
-  under the size bound; an empty ledger, a repeated step, or a receding commit
-  sequence refuse; the peak store total is the transient middle sample.
+  is a named `Leak`; a counter over its bound is `BoundExceeded`; main-file
+  store bytes growing faster than the per-commit allowance are
+  `GrowthRateExceeded` even under the size bound, and a WAL-heavy first sample
+  does not mask that growth; an empty ledger, a repeated step, or a receding
+  commit sequence refuse, including in a ledger assembled without `record`;
+  the peak store total is the transient middle sample.
 - `a_restore_under_never_restored_is_refused_and_a_restoring_ledger_gives_no_leak_verdict`
   (marker `flt_restore_under_never_restored_refused`): a restore is refused
   and counted under `never_restored`; a `restoring` ledger's verdict is
@@ -1340,9 +1342,12 @@ Growth contract (`crates/eval-core/tests/growth.rs`,
   namespace, or port is refused by value; a concurrent digest that differs
   from its serial run is refused by campaign index.
 - `a_growth_report_round_trips_and_its_digest_ignores_measurements`: the
-  report parses back equal; its digest ignores samples and peaks and changes
-  with the quota constants; a restoring report with no samples, faults with no
-  safety check, and a leaked final sample refuse.
+  report parses back equal; its digest ignores per-sample byte measurements
+  and envelope peaks, and changes with the quota constants, the commit
+  sequence and row counts, and the headroom; a restoring report with no
+  samples or out-of-order samples, faults with no safety check (whether the
+  episode count or the mix records them), a reordered report read back, and a
+  leaked final sample refuse.
 
 Fault shell (`crates/daemon/tests/eval_fault.rs`, `--all-features`; the
 default shards run the campaign once with every scenario asserted over it,

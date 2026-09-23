@@ -14,6 +14,7 @@ use crate::fault::RecordedRefusal;
 
 pub const GROWTH_REPORT_SCHEMA: &str = "eval-suite-c-growth-report/v1";
 const GROWTH_RESULT_DIGEST_PROTOCOL: &str = "eval-suite-c-growth-report-result/v1";
+const SAMPLE_BYTE_FIELDS: [&str; 3] = ["stores", "artifact_bytes", "cassette_bytes"];
 
 /// The reviewer quota constants as the memory store declares them; the
 /// report carries the values it read, never a figure copied from a document.
@@ -87,6 +88,11 @@ pub struct ResourceSample {
 impl ResourceSample {
     pub fn store_total(&self) -> u64 {
         self.stores.values().map(|b| b.file + b.wal + b.shm).sum()
+    }
+
+    /// Main database-file bytes, excluding the `-wal` and `-shm` sidecars.
+    pub fn durable_store_bytes(&self) -> u64 {
+        self.stores.values().map(|b| b.file).sum()
     }
 }
 
@@ -169,15 +175,18 @@ impl GrowthLedger {
 
     pub fn record(&mut self, sample: ResourceSample) -> Result<(), GrowthRefused> {
         if let Some(last) = self.samples.last() {
-            if sample.step <= last.step {
-                return Err(GrowthRefused::StepNotMonotonic { step: sample.step });
-            }
-            if sample.commit_seq < last.commit_seq {
-                return Err(GrowthRefused::CommitSeqNotMonotonic { step: sample.step });
-            }
+            in_order(last, &sample)?;
         }
         self.samples.push(sample);
         Ok(())
+    }
+
+    /// The ordering `record` enforces, re-checked for a ledger that was
+    /// deserialized or assembled through the public `samples` field.
+    pub fn check_order(&self) -> Result<(), GrowthRefused> {
+        self.samples
+            .windows(2)
+            .try_for_each(|pair| in_order(&pair[0], &pair[1]))
     }
 
     /// A restore attempted under `never_restored` is refused and counted;
@@ -204,6 +213,7 @@ impl GrowthLedger {
             return Err(GrowthRefused::NotALeakVerdict { mode: self.mode });
         }
         let last = self.samples.last().ok_or(GrowthRefused::NoSamples)?;
+        self.check_order()?;
         for sample in &self.samples {
             let expected = quota.expected_project_bytes(&sample.headroom);
             if sample.headroom.project_metadata_bytes != expected {
@@ -243,7 +253,9 @@ impl GrowthLedger {
         }
         let first = &self.samples[0];
         let commits = u64::try_from(last.commit_seq - first.commit_seq).unwrap_or(0);
-        let grown = last.store_total().saturating_sub(first.store_total());
+        let grown = last
+            .durable_store_bytes()
+            .saturating_sub(first.durable_store_bytes());
         if grown > bounds.store_bytes_per_commit.saturating_mul(commits.max(1)) {
             return Err(GrowthRefused::GrowthRateExceeded {
                 bytes_per_commit: bounds.store_bytes_per_commit,
@@ -295,6 +307,16 @@ impl GrowthLedger {
     }
 }
 
+fn in_order(prev: &ResourceSample, next: &ResourceSample) -> Result<(), GrowthRefused> {
+    if next.step <= prev.step {
+        return Err(GrowthRefused::StepNotMonotonic { step: next.step });
+    }
+    if next.commit_seq < prev.commit_seq {
+        return Err(GrowthRefused::CommitSeqNotMonotonic { step: next.step });
+    }
+    Ok(())
+}
+
 /// The operation kinds a swarm mix must exercise at least once.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -339,13 +361,17 @@ impl SwarmMix {
     pub fn complete(&self) -> Result<(), MixIncomplete> {
         let missing: BTreeSet<Operation> = Operation::ALL
             .into_iter()
-            .filter(|op| self.counts.get(op).is_none_or(|n| *n == 0))
+            .filter(|op| !self.exercised(*op))
             .collect();
         if missing.is_empty() {
             Ok(())
         } else {
             Err(MixIncomplete { missing })
         }
+    }
+
+    pub fn exercised(&self, operation: Operation) -> bool {
+        self.counts.get(&operation).is_some_and(|n| *n > 0)
     }
 }
 
@@ -445,7 +471,8 @@ impl GrowthReport {
             });
         }
         self.mix.complete().map_err(GrowthReportError::Mix)?;
-        if self.fault_episodes > 0 && self.safety_checks_while_armed == 0 {
+        let faulted = self.fault_episodes > 0 || self.mix.exercised(Operation::FaultEpisode);
+        if faulted && self.safety_checks_while_armed == 0 {
             return Err(GrowthReportError::SafetyNeverChecked);
         }
         match self.ledger.mode {
@@ -457,6 +484,9 @@ impl GrowthReport {
                 if self.ledger.samples.is_empty() {
                     return Err(GrowthReportError::Growth(GrowthRefused::NoSamples));
                 }
+                self.ledger
+                    .check_order()
+                    .map_err(GrowthReportError::Growth)?;
             }
         }
         Ok(())
@@ -467,14 +497,24 @@ impl GrowthReport {
         serde_json::to_value(self).map_err(|e| GrowthReportError::Shape(e.to_string()))
     }
 
-    /// The report less its measurements: samples and peaks name one machine's bytes.
+    /// The digest excludes per-sample byte measurements and envelope peaks.
+    /// It retains steps, commit sequence, row and object counts, and headroom,
+    /// so commits observed from another campaign change the digest.
     pub fn result_digest(report: &Value) -> Result<String, GrowthReportError> {
         let mut value = report.clone();
         let object = value
             .as_object_mut()
             .ok_or_else(|| GrowthReportError::Shape("report is not an object".to_string()))?;
-        if let Some(ledger) = object.get_mut("ledger").and_then(Value::as_object_mut) {
-            ledger.remove("samples");
+        if let Some(samples) = object
+            .get_mut("ledger")
+            .and_then(|ledger| ledger.get_mut("samples"))
+            .and_then(Value::as_array_mut)
+        {
+            for sample in samples.iter_mut().filter_map(Value::as_object_mut) {
+                for field in SAMPLE_BYTE_FIELDS {
+                    sample.remove(field);
+                }
+            }
         }
         if let Some(envelope) = object.get_mut("envelope").and_then(Value::as_object_mut) {
             envelope.remove("peaks");
