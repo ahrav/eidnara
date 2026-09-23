@@ -86,6 +86,7 @@ fn audit(task: &str) -> CutoffAudit {
         issue_text_ms: CUTOFF - 3_600_000,
         snapshot_digest: "ab".repeat(32),
         base_tree_digest: "ab".repeat(32),
+        fix_tree_digest: "ef".repeat(32),
         fix_paths_present: false,
         fix_descends_from_base: true,
     }
@@ -95,6 +96,7 @@ fn proof(task: &str) -> InsufficiencyProof {
     InsufficiencyProof {
         task: task.to_string(),
         entry_digest: corpus_entry(task).digest().unwrap(),
+        snapshot_digest: "ab".repeat(32),
         hidden: BTreeMap::from([
             ("regression".to_string(), HiddenOutcome::Failed),
             ("smoke".to_string(), HiddenOutcome::Passed),
@@ -251,7 +253,7 @@ fn the_time_study_projects_the_pilot_and_stops_for_approval_past_the_bound() {
 fn the_cutoff_audit_excludes_future_code_and_future_issue_knowledge() {
     let good = audit("cargo-0");
     good.validate().unwrap();
-    let cases: [(Mutate, CutoffRefused); 8] = [
+    let cases: [(Mutate, CutoffRefused); 9] = [
         (
             |a| a.base_committed_ms = a.cutoff_ms + 1,
             CutoffRefused::BaseAfterCutoff,
@@ -283,6 +285,10 @@ fn the_cutoff_audit_excludes_future_code_and_future_issue_knowledge() {
         (
             |a| a.fix_descends_from_base = false,
             CutoffRefused::FixNotFromBase,
+        ),
+        (
+            |a| a.fix_tree_digest = a.base_tree_digest.clone(),
+            CutoffRefused::FixChangesNothing,
         ),
     ];
     for (mutate, expected) in cases {
@@ -1543,4 +1549,38 @@ fn the_time_study_refuses_a_corpus_that_has_no_digest() {
         })
         .collect();
     assert!(time_study(&corpus, &measured, u64::MAX).is_err());
+}
+
+#[test]
+fn with_applies_to_a_simple_license_only() {
+    let mut entry = entry("cargo-0", Family::Cargo, 0x10);
+    entry.license = "(MIT OR Apache-2.0) WITH LLVM-exception".to_string();
+    assert!(entry.validate().is_err());
+    entry.license = "Apache-2.0 WITH LLVM-exception".to_string();
+    entry.validate().unwrap();
+    entry.license = "MIT OR (Apache-2.0 WITH LLVM-exception)".to_string();
+    entry.validate().unwrap();
+}
+
+#[test]
+fn a_proof_ran_over_the_audited_snapshot() {
+    let corpus = pilot();
+    let (audits, mut proofs, controls) = evidence(&corpus);
+    proofs.get_mut("cargo-4").unwrap().snapshot_digest = "cd".repeat(32);
+    let (set, accounting) = anchor_set(
+        &corpus,
+        AnchorRole::Pilot,
+        &audits,
+        &proofs,
+        &controls,
+        &provider(),
+    )
+    .unwrap();
+    let verdict = |id: &str| set.tasks.iter().find(|t| t.id == id).unwrap().verdict;
+    assert_eq!(verdict("cargo-4"), AnchorVerdict::Residue);
+    assert_eq!(
+        accounting.insufficiency_refused["cargo-4"],
+        InsufficiencyRefused::TreeMismatch,
+        "a failing run over another tree proves nothing about the audited snapshot"
+    );
 }

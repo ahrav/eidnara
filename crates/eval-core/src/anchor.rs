@@ -226,7 +226,11 @@ fn is_spdx_expression(text: &str) -> bool {
         && tokens.len() % 2 == 1
         && tokens.iter().enumerate().all(|(i, token)| {
             if i % 2 == 1 {
+                // `WITH` joins one simple license to one exception; neither
+                // side is a group.
                 OPERATORS.contains(token)
+                    && (*token != "WITH"
+                        || (!tokens[i - 1].ends_with(')') && !tokens[i + 1].starts_with('(')))
             } else {
                 let core = token.trim_start_matches('(').trim_end_matches(')');
                 !OPERATORS.contains(token)
@@ -433,6 +437,9 @@ pub struct CutoffAudit {
     /// The digest of `base_sha`'s tree, read from the repository the same
     /// way; the snapshot is that tree and nothing else.
     pub base_tree_digest: String,
+    /// The digest of `fix_sha`'s tree, read the same way; a fix that changes
+    /// no file is not a fix.
+    pub fix_tree_digest: String,
     /// Whether the snapshot holds any path the fix commit added.
     pub fix_paths_present: bool,
     /// Whether the base commit is an ancestor of the fix commit; a fix from
@@ -456,6 +463,8 @@ pub enum CutoffRefused {
     FutureContentInSnapshot,
     /// The fix commit does not descend from the base commit.
     FixNotFromBase,
+    /// The fix commit's tree is the base commit's tree: nothing changed.
+    FixChangesNothing,
     SnapshotDigestMissing,
     /// A tree digest that is neither a git object id (forty hex) nor a
     /// protocol digest (sixty-four hex) names no tree.
@@ -494,7 +503,11 @@ impl CutoffAudit {
         if self.snapshot_digest.is_empty() {
             return Err(CutoffRefused::SnapshotDigestMissing);
         }
-        for digest in [&self.snapshot_digest, &self.base_tree_digest] {
+        for digest in [
+            &self.snapshot_digest,
+            &self.base_tree_digest,
+            &self.fix_tree_digest,
+        ] {
             if (!is_lower_hex(digest, 40) && !is_lower_hex(digest, 64))
                 || digest.bytes().all(|b| b == b'0')
             {
@@ -525,6 +538,9 @@ impl CutoffAudit {
         if !self.fix_descends_from_base {
             return Err(CutoffRefused::FixNotFromBase);
         }
+        if self.fix_tree_digest == self.base_tree_digest {
+            return Err(CutoffRefused::FixChangesNothing);
+        }
         Ok(())
     }
 }
@@ -540,6 +556,8 @@ pub enum InsufficiencyRefused {
     ProofForOtherTask,
     /// The proof ran over a row with this id that has since changed.
     RowMismatch,
+    /// The proof ran over a tree other than the audited snapshot.
+    TreeMismatch,
 }
 
 debug_display!(InsufficiencyRefused);
@@ -552,6 +570,9 @@ pub struct InsufficiencyProof {
     pub task: String,
     /// `AnchorEntry::digest` of the row whose snapshot the tests ran over.
     pub entry_digest: String,
+    /// The digest of the tree the tests ran over; `anchor_set` requires it
+    /// to be the audited snapshot.
+    pub snapshot_digest: String,
     pub hidden: HiddenResults,
 }
 
@@ -855,7 +876,14 @@ pub fn anchor_set(
     for entry in &corpus.entries {
         let digest = entry.digest()?;
         let audit = audits.get(&entry.id).map(|audit| audit.validate_for(entry));
-        let proof = proofs.get(&entry.id).map(|proof| proof.validate_for(entry));
+        let proof = proofs.get(&entry.id).map(|proof| {
+            proof.validate_for(entry)?;
+            let audited = audits.get(&entry.id).map(|a| a.snapshot_digest.as_str());
+            if audited != Some(proof.snapshot_digest.as_str()) {
+                return Err(InsufficiencyRefused::TreeMismatch);
+            }
+            Ok(())
+        });
         let control = controls
             .get(&entry.id)
             .filter(|c| c.task == entry.id && c.entry_digest == digest && c.provider == *provider)
