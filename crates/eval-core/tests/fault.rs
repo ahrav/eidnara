@@ -102,7 +102,7 @@ fn lane(bound: u64, met_at: Option<u64>, holds: bool) -> LaneProgress {
 fn liveness() -> LivenessReport {
     LivenessReport {
         core: HealthyCore {
-            families: [StoreFamily::Kernel, StoreFamily::SearchProjection]
+            families: [StoreFamily::Memory, StoreFamily::SearchProjection]
                 .into_iter()
                 .collect(),
             lanes: [Lane::CatchUpEpisodes, Lane::EmbeddingPasses]
@@ -134,12 +134,18 @@ fn report() -> FaultReport {
         episodes: vec![
             episode("lost-ack", lost_ack()),
             episode("kill", kill()),
-            episode(
-                "ingest-write",
-                FaultAction::ArtifactIngest {
-                    fault: ArtifactIngestFaultKind::Write,
+            FaultEpisode {
+                scope: FaultScope {
+                    store: StoreFamily::Kernel,
+                    operation: "write".to_string(),
                 },
-            ),
+                ..episode(
+                    "ingest-write",
+                    FaultAction::ArtifactIngest {
+                        fault: ArtifactIngestFaultKind::Write,
+                    },
+                )
+            },
         ],
         barriers: vec![barrier("kill")],
         cuts: cut_receipts(
@@ -767,6 +773,130 @@ fn a_fault_report_round_trips_and_refuses_what_it_cannot_prove() {
     let _ = (
         PublicationFaultKind::LoseLocalCommit,
         BTreeMap::<String, u64>::new(),
+    );
+}
+
+#[test]
+fn a_parsed_report_cannot_claim_what_no_run_recorded() {
+    let ok = report();
+    let b = bounds();
+
+    let mut boundary = ok.clone();
+    boundary.claim_boundary.exclusions.clear();
+    assert_eq!(
+        boundary.validate(&b),
+        Err(FaultReportError::ClaimBoundaryMismatch)
+    );
+    let mut over = ok.clone();
+    over.envelope.peaks.processes = limits().processes + 1;
+    assert!(matches!(
+        over.validate(&b),
+        Err(FaultReportError::EnvelopeExceeded(_))
+    ));
+    let mut no_fault = ok.clone();
+    no_fault.episodes.clear();
+    no_fault.barriers.clear();
+    no_fault.coverage = CutCoverage::default();
+    no_fault.liveness = None;
+    assert_eq!(
+        no_fault.validate(&b),
+        Err(FaultReportError::NoEpisode),
+        "nothing was armed, so no safety check ran while a fault was"
+    );
+    let mut invented = ok.clone();
+    invented.markers.insert("flt_never_registered".to_string());
+    assert_eq!(
+        invented.validate(&b),
+        Err(FaultReportError::UnregisteredMarker {
+            marker: "flt_never_registered".to_string()
+        })
+    );
+    let mut in_core = ok.clone();
+    in_core.episodes[2].scope.store = StoreFamily::SearchProjection;
+    assert_eq!(
+        in_core.validate(&b),
+        Err(FaultReportError::CoreFamilyFaulted {
+            episode: "ingest-write".to_string(),
+            store: StoreFamily::SearchProjection,
+        }),
+        "a fault scoped to a healthy-core family is not outside the core"
+    );
+    let mut consumed = ok.clone();
+    consumed.episodes[2].action = FaultAction::ArtifactIngest {
+        fault: ArtifactIngestFaultKind::ReservationCommit,
+    };
+    consumed.episodes[2].heal = Heal::Consumed;
+    assert_eq!(
+        consumed.validate(&b),
+        Err(FaultReportError::ConsumedFaultArmed {
+            episode: "ingest-write".to_string()
+        }),
+        "a one-shot fault is consumed or never fired; neither is armed at the bound"
+    );
+
+    let mut unnamed = ok.episodes[0].clone();
+    unnamed.id = " ".to_string();
+    assert_eq!(
+        unnamed.validate(),
+        Err(EpisodeRefused::EmptyId),
+        "an episode nobody can name is not a named, scoped action"
+    );
+    let mut unscoped = ok.episodes[0].clone();
+    unscoped.scope.operation = String::new();
+    assert_eq!(
+        unscoped.validate(),
+        Err(EpisodeRefused::EmptyOperation {
+            id: "lost-ack".to_string()
+        })
+    );
+
+    let mut stray = coverage(&["kill"]);
+    stray.receipted.insert("unlink".to_string(), 1);
+    assert_eq!(
+        stray.verdict(),
+        Err(CoverageRefused::UndeclaredCut {
+            cut: "unlink".to_string()
+        }),
+        "a parsed receipt for an undeclared cut is the receipt the API refuses"
+    );
+
+    let mut claimed = ok.effects.clone();
+    let effect = claimed.effects.get_mut("ack:1").unwrap();
+    effect.reply_lost = false;
+    effect.read_back = false;
+    effect.expected = Expected::Exactly {
+        state: EffectState::NotApplied,
+    };
+    effect.outcome = EffectOutcome::NotApplied;
+    assert_eq!(
+        claimed.validate(),
+        Err(EffectRefused::OutcomeNotDerived {
+            identity: "ack:1".to_string()
+        }),
+        "a reply that was not lost derives applied; nothing else was observed"
+    );
+    let mut contradicted = ok.effects.clone();
+    contradicted.effects.get_mut("ack:1").unwrap().outcome = EffectOutcome::NotApplied;
+    assert_eq!(
+        contradicted.validate(),
+        Err(EffectRefused::OutcomeNotDerived {
+            identity: "ack:1".to_string()
+        }),
+        "an outcome must be the state its expectation names"
+    );
+
+    let mut laneless = liveness();
+    laneless.core.lanes.clear();
+    assert_eq!(
+        laneless.verdict(&b),
+        Err(LivenessRefused::EmptyHealthyCore),
+        "a core with no lane to drive proves no liveness"
+    );
+    let mut familyless = liveness();
+    familyless.core.families.clear();
+    assert_eq!(
+        familyless.verdict(&b),
+        Err(LivenessRefused::EmptyHealthyCore)
     );
 }
 

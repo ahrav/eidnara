@@ -1598,6 +1598,15 @@ Fault contract (`crates/eval-core/tests/fault.rs`,
   only barrier is at another cut, an armed outside-core fault that is not one
   of the report's episodes, an unreceipted declared cut, zero safety checks
   while armed, and a premature success refuse.
+- `a_parsed_report_cannot_claim_what_no_run_recorded`: a claim boundary that
+  is not the pinned one, a peak over its envelope bound, no episode at all, a
+  marker the registry does not know, an outside-core fault scoped to a
+  healthy-core family, and an outside-core fault whose heal is consumed each
+  refuse at the report; a blank episode id or operation refuses at the
+  episode; a parsed receipt for an undeclared cut refuses at the coverage
+  verdict; an effect whose outcome is not the state its expectation names, or
+  whose reply was never lost yet expects `not_applied`, is `OutcomeNotDerived`;
+  a healthy core with no family or no lane is `EmptyHealthyCore`.
 
 Aging drive (`crates/daemon/tests/eval_aging.rs`, `--all-features`):
 

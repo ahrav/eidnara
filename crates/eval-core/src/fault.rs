@@ -174,6 +174,10 @@ pub enum EpisodeRefused {
     EmptyLayerContract {
         id: String,
     },
+    EmptyId,
+    EmptyOperation {
+        id: String,
+    },
     DuplicateEpisode {
         id: String,
     },
@@ -181,7 +185,13 @@ pub enum EpisodeRefused {
 
 impl FaultEpisode {
     pub fn validate(&self) -> Result<(), EpisodeRefused> {
+        if crate::blank(&self.id) {
+            return Err(EpisodeRefused::EmptyId);
+        }
         let id = self.id.clone();
+        if crate::blank(&self.scope.operation) {
+            return Err(EpisodeRefused::EmptyOperation { id });
+        }
         let required = self.action.heal();
         if self.heal != required {
             return Err(EpisodeRefused::HealMismatch {
@@ -190,7 +200,7 @@ impl FaultEpisode {
                 required,
             });
         }
-        if self.layer_contract.trim().is_empty() {
+        if crate::blank(&self.layer_contract) {
             return Err(EpisodeRefused::EmptyLayerContract { id });
         }
         match (&self.kill, self.action.is_kill()) {
@@ -294,7 +304,15 @@ impl CutCoverage {
         Ok(())
     }
 
+    /// A receipt for a cut nobody declared is refused whichever way it arrived.
     pub fn verdict(&self) -> Result<(), CoverageRefused> {
+        if let Some(cut) = self
+            .receipted
+            .keys()
+            .find(|cut| !self.declared.contains(*cut))
+        {
+            return Err(CoverageRefused::UndeclaredCut { cut: cut.clone() });
+        }
         let missing: BTreeSet<String> = self
             .declared
             .iter()
@@ -398,6 +416,10 @@ pub enum EffectRefused {
     ReadBackNotAdmissible {
         identity: String,
         state: EffectState,
+    },
+    /// The outcome or expectation is not the one the recorded events derive.
+    OutcomeNotDerived {
+        identity: String,
     },
 }
 
@@ -506,6 +528,21 @@ impl EffectLedger {
                         });
                     }
                 }
+                continue;
+            }
+            // Without a lost reply only `Applied` was ever admissible; after a
+            // read-back the outcome is exactly the state it named.
+            let derived = match &effect.expected {
+                Expected::Exactly {
+                    state: EffectState::Applied,
+                } => effect.outcome == EffectOutcome::Applied,
+                Expected::Exactly {
+                    state: EffectState::NotApplied,
+                } => effect.reply_lost && effect.outcome == EffectOutcome::NotApplied,
+                Expected::OneOf { .. } => false,
+            };
+            if !derived {
+                return Err(EffectRefused::OutcomeNotDerived { identity });
             }
         }
         Ok(())
@@ -619,6 +656,7 @@ pub enum LivenessRefused {
         blocked: Option<String>,
     },
     NoOutsideCoreFault,
+    EmptyHealthyCore,
 }
 
 impl LivenessReport {
@@ -626,6 +664,9 @@ impl LivenessReport {
     /// and its predicate held from `met_at` through that bound with no stall.
     /// At least one outside-core fault is declared, and each stayed armed.
     pub fn verdict(&self, bounds: &LivenessBounds) -> Result<(), LivenessRefused> {
+        if self.core.families.is_empty() || self.core.lanes.is_empty() {
+            return Err(LivenessRefused::EmptyHealthyCore);
+        }
         if self.outside_core.is_empty() {
             return Err(LivenessRefused::NoOutsideCoreFault);
         }
@@ -694,14 +735,36 @@ pub struct FaultReport {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FaultReportError {
-    SchemaMismatch { found: String },
+    SchemaMismatch {
+        found: String,
+    },
+    ClaimBoundaryMismatch,
+    EnvelopeExceeded(crate::EnvelopeExceeded),
+    NoEpisode,
+    UnregisteredMarker {
+        marker: String,
+    },
     Episode(EpisodeRefused),
     Barrier(BarrierRefused),
     Coverage(CoverageRefused),
     Effect(EffectRefused),
     Liveness(LivenessRefused),
-    KillWithoutBarrier { episode: String, cut: String },
-    UnknownEpisode { episode: String },
+    KillWithoutBarrier {
+        episode: String,
+        cut: String,
+    },
+    UnknownEpisode {
+        episode: String,
+    },
+    /// An outside-core fault scoped to a family the healthy core names.
+    CoreFamilyFaulted {
+        episode: String,
+        store: StoreFamily,
+    },
+    /// A one-shot fault is consumed or never fired; neither is armed at the bound.
+    ConsumedFaultArmed {
+        episode: String,
+    },
     SafetyNeverChecked,
     Shape(String),
     Lossy,
@@ -712,6 +775,24 @@ impl FaultReport {
         if self.schema != FAULT_REPORT_SCHEMA {
             return Err(FaultReportError::SchemaMismatch {
                 found: self.schema.clone(),
+            });
+        }
+        if self.claim_boundary != crate::ClaimBoundary::pinned() {
+            return Err(FaultReportError::ClaimBoundaryMismatch);
+        }
+        self.envelope
+            .check()
+            .map_err(FaultReportError::EnvelopeExceeded)?;
+        if self.episodes.is_empty() {
+            return Err(FaultReportError::NoEpisode);
+        }
+        if let Some(marker) = self
+            .markers
+            .iter()
+            .find(|marker| !crate::MARKERS.iter().any(|m| m.name == marker.as_str()))
+        {
+            return Err(FaultReportError::UnregisteredMarker {
+                marker: marker.clone(),
             });
         }
         validate_episodes(&self.episodes).map_err(FaultReportError::Episode)?;
@@ -741,14 +822,23 @@ impl FaultReport {
             return Err(FaultReportError::SafetyNeverChecked);
         }
         if let Some(liveness) = &self.liveness {
-            if let Some(unknown) = liveness
-                .outside_core
-                .iter()
-                .find(|id| !self.episodes.iter().any(|e| &e.id == *id))
-            {
-                return Err(FaultReportError::UnknownEpisode {
-                    episode: unknown.clone(),
-                });
+            for id in &liveness.outside_core {
+                let Some(episode) = self.episodes.iter().find(|e| &e.id == id) else {
+                    return Err(FaultReportError::UnknownEpisode {
+                        episode: id.clone(),
+                    });
+                };
+                if liveness.core.families.contains(&episode.scope.store) {
+                    return Err(FaultReportError::CoreFamilyFaulted {
+                        episode: id.clone(),
+                        store: episode.scope.store,
+                    });
+                }
+                if episode.action.heal() == Heal::Consumed {
+                    return Err(FaultReportError::ConsumedFaultArmed {
+                        episode: id.clone(),
+                    });
+                }
             }
             liveness
                 .verdict(bounds)

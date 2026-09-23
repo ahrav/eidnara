@@ -2021,7 +2021,8 @@ declared heal that differs is `HealMismatch`. A kill carries a
 refused (`CrashModelNotProved`, `KilledProcessNotProved`), because a
 `SIGKILL` of a test-binary child proves application-crash recovery with the
 page cache intact and nothing else. A kill without a label, a label on a
-non-kill, an empty contract sentence, and a duplicate id refuse.
+non-kill, a blank id, operation, or contract sentence, and a duplicate id
+refuse.
 
 A `BarrierReceipt` is the line a killed child printed at its cut, read before
 the kill. Barrier lines are `<prefix> <cut>`, so the line's last
@@ -2034,7 +2035,8 @@ kill at an unknown point.
 
 `CutCoverage` holds the cuts a campaign declares (barrier names, fault
 variants, gate release points) and how many receipts each earned; a receipt
-for an undeclared cut is `UndeclaredCut`, and the verdict is
+for an undeclared cut is `UndeclaredCut`, whether it arrives through
+`receipt` or in a parsed report, and the verdict is
 `IncompleteCoverage { missing }` whenever a declared cut has no receipt. The
 oracle checkpoints (`Cut`) resolve to runner receipts through `cut_receipts`:
 a checkpoint receipted at least once is `Reached`, every other declared one is
@@ -2054,7 +2056,9 @@ observed <= attempted`, `ReadBackNotAdmissible` for an acknowledged effect
 whose outcome is `not_applied`, `PrematureSuccess` for a lost reply whose
 outcome is not `unknown` without a read-back, and
 `ExpectationCollapsedWithoutReadBack` for a lost reply expecting fewer than two
-states. A read-back that finds the
+states, and `OutcomeNotDerived` when the outcome is not the state the
+expectation names or an effect whose reply was never lost expects anything but
+`applied`, the only state the API ever admits for it. A read-back that finds the
 effect applied counts as its one observation, the only one a lost reply
 leaves. Aggregate totals are never consulted: a fixture whose totals satisfy the
 inequality while one identity violates it is refused.
@@ -2073,7 +2077,9 @@ lane's own unit (`catch_up_episodes`, `embedding_passes`,
 steps driven, the step the predicate first held, the first step after that at
 which it did not, whether it held at the bound, the fresh commits the window
 fed the lane, and the block that stopped it. `verdict(bounds)` takes the approved
-profile's `LivenessBounds` and refuses `NoOutsideCoreFault` when no
+profile's `LivenessBounds` and refuses `EmptyHealthyCore` when the core names
+no family or no lane (a core with nothing to drive proves no liveness),
+`NoOutsideCoreFault` when no
 outside-core episode is declared (the mode runs with outside-core faults
 armed), `FaultHealed` for an outside-core
 episode not armed at the bound, `ArmedInsideCore`, `LaneNotDriven` for a core
@@ -2089,9 +2095,15 @@ publishes: identity, profile digest, claim boundary, the episodes, barrier
 receipts, cut receipts, cut coverage, the effect ledger, expected refusals,
 the count of safety checks made while faults were armed (`SafetyNeverChecked`
 at zero), the optional liveness report, markers, and envelope. `validate`
-takes the profile's bounds and runs every refusal above, and refuses
+takes the profile's bounds and runs every refusal above, and also refuses
+`ClaimBoundaryMismatch`, `EnvelopeExceeded` when any recorded peak is over its
+bound, `NoEpisode` when no fault was armed (so no safety check ran while one
+was), `UnregisteredMarker` for a marker `MARKERS` does not register,
 `UnknownEpisode` for a liveness outside-core episode that is not one of the
-report's episodes; `parse_fault_report`
+report's episodes, `CoreFamilyFaulted` for one scoped to a family the healthy
+core names, and `ConsumedFaultArmed` for one whose heal is `consumed`: a
+one-shot fault is consumed or never fired, and neither is armed at the bound;
+`parse_fault_report`
 reads a report back losslessly; `result_digest` drops barrier pids and
 envelope peaks under `eval-suite-c-fault-report-result/v1`.
 
