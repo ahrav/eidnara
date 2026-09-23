@@ -30,6 +30,7 @@ use std::net::TcpListener;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use anchor::{Config, ControlScript, Fetched, Host, MANIFEST_FILE, REPORT_FILE, RunError};
@@ -746,7 +747,9 @@ fn the_store_is_charged_while_preparing_not_after_the_pilot() {
 
 #[test]
 fn the_clone_is_charged_before_it_is_removed() {
+    static CLONES: AtomicUsize = AtomicUsize::new(0);
     fn bulky_clone(entry: &AnchorEntry, into: &Path) -> std::io::Result<()> {
+        CLONES.fetch_add(1, Ordering::SeqCst);
         clone_local(entry, into)?;
         // Untracked, so no snapshot or fix tree holds it: only the clone does.
         std::fs::write(into.join("bulk.bin"), vec![0u8; 4 << 20])
@@ -766,6 +769,11 @@ fn the_clone_is_charged_before_it_is_removed() {
         Err(other) => panic!("expected the clone to trip the store bound, got {other:?}"),
         Ok(_) => panic!("expected the clone to trip the store bound, got a run"),
     }
+    assert_eq!(
+        CLONES.load(Ordering::SeqCst),
+        1,
+        "the first clone trips the bound while it exists; a charge after its removal would let every clone run"
+    );
     assert!(!config.publish.join(REPORT_FILE).exists());
 }
 
