@@ -1686,7 +1686,10 @@ Growth contract (`crates/eval-core/tests/growth.rs`,
   other than the pinned one (`ClaimBoundaryMismatch`), a run id or profile
   digest that is not 64 lowercase hex digits (`MalformedDigest`), and a final R24 count that
   disagrees with the recorded R24 refusals (`R24Unreconciled`; an R11 entry
-  is not counted) refuse.
+  is not counted), a recorded refusal whose production error does not name
+  its variant (`RefusalNotEvidenced`), a marker no suite owns
+  (`UnregisteredMarker`), and an integer past the canonical safe range on
+  serialize or parse (`NotCanonical`) refuse.
 
 Fault shell (`crates/daemon/tests/eval_fault.rs`, `--all-features`; the
 default shards run the campaign once with every scenario asserted over it,

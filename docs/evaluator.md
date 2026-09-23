@@ -2228,7 +2228,12 @@ exceed (`EnvelopeNotCharged { resource, step, peak, observed }`; the
 envelope's artifact bytes and retained artifacts are the published files, not
 the artifact store a sample measures), and refuses
 a final R24 count that differs from the R24 entries in `expected_refusals`
-(`R24Unreconciled { counted, recorded }`);
+(`R24Unreconciled { counted, recorded }`), a recorded refusal whose
+production error does not name its variant (`RefusalNotEvidenced`), and a
+marker no registered suite owns (`UnregisteredMarker`), as the fault report
+does; `serialize` and `parse_growth_report` refuse an integer outside the
+canonical safe range (`NotCanonical`), so a value `validate` accepts is one
+`result_digest` can digest;
 `parse_growth_report(value, contract)` reads a report back losslessly; `result_digest` drops
 each sample's byte measurements (`stores`, `artifact_bytes`,
 `cassette_bytes`) and the envelope peaks, which name one machine's bytes, and

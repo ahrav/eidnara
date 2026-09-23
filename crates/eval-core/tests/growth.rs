@@ -768,11 +768,11 @@ fn a_growth_report_round_trips_and_its_digest_ignores_measurements() {
             recorded: 0,
         })
     );
-    let mut r24_recorded = report;
+    let mut r24_recorded = report.clone();
     r24_recorded.expected_refusals.push(RecordedRefusal {
         episode: "quota".to_string(),
         refusal: ExpectedRefusal::R24ReceiptQuotaExhausted,
-        production_error: "metadata quota".to_string(),
+        production_error: "refused: MetadataQuota".to_string(),
     });
     assert_eq!(
         r24_recorded.validate(&contract()),
@@ -785,11 +785,51 @@ fn a_growth_report_round_trips_and_its_digest_ignores_measurements() {
     r24_recorded.expected_refusals.push(RecordedRefusal {
         episode: "catch-up".to_string(),
         refusal: ExpectedRefusal::R11DeletionBearingCatchUp,
-        production_error: "deletion unpropagated".to_string(),
+        production_error: "Blocked::DeletionUnpropagated".to_string(),
     });
     r24_recorded
         .validate(&contract())
         .expect("one R24 counted and one recorded agree; an R11 is not counted");
+    let mut relabeled = report.clone();
+    relabeled.ledger.samples[2].headroom.r24_refusals = 1;
+    relabeled.expected_refusals.push(RecordedRefusal {
+        episode: "quota".to_string(),
+        refusal: ExpectedRefusal::R24ReceiptQuotaExhausted,
+        production_error: "HostCapacity".to_string(),
+    });
+    assert_eq!(
+        relabeled.validate(&contract()),
+        Err(GrowthReportError::RefusalNotEvidenced {
+            episode: "quota".to_string(),
+            refusal: ExpectedRefusal::R24ReceiptQuotaExhausted,
+        }),
+        "a refusal is expected only when production named it"
+    );
+    let mut invented = report.clone();
+    invented
+        .markers
+        .insert("flt_marker_nobody_owns".to_string());
+    assert_eq!(
+        invented.validate(&contract()),
+        Err(GrowthReportError::UnregisteredMarker {
+            marker: "flt_marker_nobody_owns".to_string(),
+        })
+    );
+    let mut unsafe_int = report;
+    unsafe_int.ledger.restores_refused = 1 << 53;
+    assert!(
+        matches!(
+            unsafe_int.serialize(&contract()),
+            Err(GrowthReportError::NotCanonical(_))
+        ),
+        "an integer past the safe range would be accepted and then refused by the digest"
+    );
+    let mut wide_value = value.clone();
+    wide_value["ledger"]["restores_refused"] = serde_json::json!(1u64 << 53);
+    assert!(matches!(
+        parse_growth_report(&wide_value, &contract()),
+        Err(GrowthReportError::NotCanonical(_))
+    ));
     let mut extra = value;
     extra["surprise"] = serde_json::json!(1);
     assert!(matches!(

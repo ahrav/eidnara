@@ -5,7 +5,9 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use context_core::canonical_json::{is_lower_hex, protocol_digest};
+use context_core::canonical_json::{
+    ContractError, canonical_json_encode, is_lower_hex, protocol_digest,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -637,6 +639,19 @@ pub enum GrowthReportError {
         counted: u64,
         recorded: u64,
     },
+    /// A recorded refusal's production error does not name the variant the
+    /// refusal claims.
+    RefusalNotEvidenced {
+        episode: String,
+        refusal: ExpectedRefusal,
+    },
+    /// A marker no registered suite owns.
+    UnregisteredMarker {
+        marker: String,
+    },
+    /// An integer outside the canonical safe range; `result_digest` would
+    /// refuse the value `validate` accepted.
+    NotCanonical(ContractError),
     Shape(String),
     Lossy,
 }
@@ -673,6 +688,15 @@ impl GrowthReport {
         if faulted && self.safety_checks_while_armed == 0 {
             return Err(GrowthReportError::SafetyNeverChecked);
         }
+        if let Some(marker) = self
+            .markers
+            .iter()
+            .find(|marker| !crate::MARKERS.iter().any(|m| m.name == marker.as_str()))
+        {
+            return Err(GrowthReportError::UnregisteredMarker {
+                marker: marker.clone(),
+            });
+        }
         self.envelope
             .check()
             .map_err(GrowthReportError::EnvelopeNotHonoured)?;
@@ -692,6 +716,17 @@ impl GrowthReport {
                         observed,
                     });
                 }
+            }
+        }
+        for recorded in &self.expected_refusals {
+            if !recorded
+                .production_error
+                .contains(recorded.refusal.production_variant())
+            {
+                return Err(GrowthReportError::RefusalNotEvidenced {
+                    episode: recorded.episode.clone(),
+                    refusal: recorded.refusal,
+                });
             }
         }
         let recorded = self
@@ -720,9 +755,14 @@ impl GrowthReport {
         Ok(())
     }
 
+    /// Digestible on both runtimes: no integer may leave the canonical safe
+    /// range, or `result_digest` would refuse the value `validate` accepted.
     pub fn serialize(&self, contract: &GrowthContract) -> Result<Value, GrowthReportError> {
         self.validate(contract)?;
-        serde_json::to_value(self).map_err(|e| GrowthReportError::Shape(e.to_string()))
+        let value =
+            serde_json::to_value(self).map_err(|e| GrowthReportError::Shape(e.to_string()))?;
+        canonical_json_encode(&value).map_err(GrowthReportError::NotCanonical)?;
+        Ok(value)
     }
 
     /// The digest excludes per-sample byte measurements and envelope peaks.
@@ -759,6 +799,7 @@ pub fn parse_growth_report(
     let report =
         GrowthReport::deserialize(value).map_err(|e| GrowthReportError::Shape(e.to_string()))?;
     report.validate(contract)?;
+    canonical_json_encode(value).map_err(GrowthReportError::NotCanonical)?;
     let again =
         serde_json::to_value(&report).map_err(|e| GrowthReportError::Shape(e.to_string()))?;
     if again != *value {
