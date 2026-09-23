@@ -1027,6 +1027,11 @@ pub enum SettingsRefused {
     EmptyProviderField {
         field: &'static str,
     },
+    /// One pair listed twice is one pair; a second run of it has no
+    /// identity of its own and would overwrite the first.
+    DuplicateProvider {
+        provider: ProviderProfile,
+    },
     NoExecutionImage,
     NoPreparationBound,
 }
@@ -1041,6 +1046,7 @@ impl RealHistorySettings {
         if self.providers.is_empty() {
             return Err(SettingsRefused::NoProviders);
         }
+        let mut seen = BTreeSet::new();
         for profile in &self.providers {
             for (field, text) in [
                 ("provider", &profile.provider),
@@ -1050,6 +1056,11 @@ impl RealHistorySettings {
                 if text.trim().is_empty() {
                     return Err(SettingsRefused::EmptyProviderField { field });
                 }
+            }
+            if !seen.insert(profile) {
+                return Err(SettingsRefused::DuplicateProvider {
+                    provider: profile.clone(),
+                });
             }
         }
         if self.execution_image.trim().is_empty() {

@@ -2615,8 +2615,9 @@ transfer evidence without leaving the report.
 
 **Settings and terminals.** `RealHistorySettings {providers,
 execution_image, preparation_bound_ms}` refuses before execution: no
-providers, a provider profile with a blank field, no execution image, or no
-preparation bound. The transfer criterion is not a setting: it lives on the
+providers, a provider profile with a blank field, one profile listed twice
+(`DuplicateProvider`: a second run of a pair has no identity of its own),
+no execution image, or no preparation bound. The transfer criterion is not a setting: it lives on the
 frozen analysis family (see "Claim class"), the one place
 `AnalysisFamily::claim_class` reads it from, so none can be supplied out of
 band. The
@@ -2659,8 +2660,10 @@ the analysis family with `Config::transfer_criterion` in it, and refuses a
 host without namespaces (`RunError::NoContainment`) before anything is
 prepared: every proof and control runs inside the containment, so a host
 without it would only error every test. Then it prepares every entry,
-measuring each preparation: clone, the store charged against the bound while
-the clone still exists, `git show -s --format=%ct` for the base and fix
+measuring each preparation: clone, the store and the elapsed bound charged
+after the clone and after each extracted tree while all of them still exist
+(every git child's deadline is the campaign time left, at most two
+minutes), `git show -s --format=%ct` for the base and fix
 commits, the fix's first parent, `git merge-base --is-ancestor` for
 `fix_descends_from_base`, the earliest fix-side commit time (and the pull
 request's creation, when fetched) for `repair_public_ms`, `git archive` of
@@ -2690,11 +2693,14 @@ refusal recorded and no run. An audited task gets the current-tree-only run
 and a reference run: the snapshot copied into a fresh tree and its hidden
 tests run with no agent, then the fix tree copied into a fresh tree and the
 tests run again. Both go through Suite D's `run_hidden` inside the
-containment (`contain`), with the tree read-only and the build cache the
-only writable mount, Cargo's home under the private directory, the working
-directory at the tree's parent so no `.cargo/config.toml` in the tree is
-read, a throwaway `HOME`, the namespace's own loopback up, and the
-checkout's toolchain; a repository's own `Cargo.lock` is kept and held to
+containment (`contain`), with the tree read-only, the build cache the only
+writable mount, and `tasks/` (every clone, snapshot, and fix tree) covered
+by an empty tmpfs, so a build script or test in the graded tree reads no
+other task and no fix; the fix tree copy is removed before the control's
+patch is graded in the same place. Cargo's home sits under the private
+directory, the working directory at the tree's parent so no
+`.cargo/config.toml` in the tree is read, a throwaway `HOME`, the
+namespace's own loopback up, and the checkout's toolchain; a repository's own `Cargo.lock` is kept and held to
 with `--locked`, a tree without one gets one written by the runner, and a
 manifest that does not resolve offline errors every test. Each target
 passes when every harness summary is `ok` with at least one test passed.
@@ -2715,7 +2721,9 @@ trace printed before a deadline kill is kept. A control past its deadline is
 `Censored { hard_deadline_ms }` and is not graded; a control that exits
 non-zero refuses the run (`RunError::ControlExited`). Otherwise the patch's
 regular files are copied over a fresh copy of the snapshot, never through a
-symlinked directory, and graded with the hidden tests under the fixed
+symlinked directory (the patch is the files the control wrote: an agent
+without the repository deletes nothing and its symlinks are not honoured),
+and graded with the hidden tests under the fixed
 per-invocation `GRADE_TIMEOUT` (ten minutes: the agent's deadline bounds
 the agent, not the runner's grading of a real repository); the terminal is
 `hidden_terminal`, the budget-first rule `task_terminal` also uses.
@@ -2760,14 +2768,15 @@ detected; a different control script and criterion giving a different run
 id and family digest; a stalled control censored with its announced read
 kept; a failed control refusing the run; an unaffordable time study
 stopping for approval with nothing published; a one-byte store bound
-refusing during preparation, and a clone larger than the bound refusing
-before it is removed; a base whose failing build script the fix deletes
+refusing during preparation, a clone larger than the bound refusing before
+it is removed, four extracted trees refusing while the first clone still
+exists, and an exhausted campaign clock refusing before the second clone; a base whose failing build script the fix deletes
 proven insufficient because the reference is the fix commit's whole tree,
 and a test file an intervening commit added kept out of the fix's hidden
 tests; missing settings, a missing witness, a climbing id, and a host
 without namespaces refusing before execution; the contained grading reaching
-neither the runner's `HOME` nor its loopback listener while the test's own
-loopback works; and the archive pipeline returning within its deadline with
+neither the runner's `HOME`, its loopback listener, nor the task material
+under `tasks/` while the test's own loopback works; and the archive pipeline returning within its deadline with
 both ends reaped.
 
 ## Coverage markers

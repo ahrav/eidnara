@@ -920,7 +920,7 @@ fn settings_refuse_an_incomplete_provider() {
         execution_image: "image-1".to_string(),
         preparation_bound_ms: Some(1),
     };
-    let mut blank_model = settings;
+    let mut blank_model = settings.clone();
     blank_model.providers[0].model = " ".to_string();
     assert!(
         blank_model.validate().is_err(),
@@ -929,6 +929,15 @@ fn settings_refuse_an_incomplete_provider() {
     assert_eq!(
         blank_model.validate(),
         Err(SettingsRefused::EmptyProviderField { field: "model" })
+    );
+    let mut twice = settings;
+    twice.providers.push(twice.providers[0].clone());
+    assert_eq!(
+        twice.validate(),
+        Err(SettingsRefused::DuplicateProvider {
+            provider: provider()
+        }),
+        "one pair listed twice is one pair, not a replication"
     );
 }
 

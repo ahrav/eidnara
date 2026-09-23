@@ -510,7 +510,7 @@ fn read_capped(mut reader: impl std::io::Read, cap: usize) -> std::io::Result<St
 
 /// `run_bounded` under the campaign's charges: the deadline is clamped to the
 /// campaign time left, and the elapsed bound is checked once the process ends.
-fn charged_run(
+pub fn charged_run(
     command: Command,
     deadline: Duration,
     charges: &mut Charges,
@@ -811,6 +811,7 @@ pub fn hidden_results(
         target: &target,
         cargo_home: &cargo_home,
         tmp: &tmp,
+        mask: None,
     };
     run_hidden(&grade, &names, cache, false, contained, deadline, charges)?
         .ok_or_else(|| {
@@ -829,13 +830,16 @@ pub fn hidden_results(
         })
 }
 
-/// The writable directories a grade needs: the build cache, Cargo's home,
-/// and the linker's temporary directory, all outside the graded tree.
+/// The directories a grade needs besides the tree: the build cache, Cargo's
+/// home, and the linker's temporary directory, all outside the graded tree,
+/// and the one path the containment covers with an empty tmpfs while
+/// grading (material the graded code must not read).
 #[derive(Debug, Clone, Copy)]
 pub struct GradeCache<'a> {
     pub target: &'a Path,
     pub cargo_home: &'a Path,
     pub tmp: &'a Path,
+    pub mask: Option<&'a Path>,
 }
 
 /// What a grade produced: one outcome per hidden test, and whether some
@@ -853,8 +857,9 @@ pub struct Graded {
 /// tree is not read. The lockfile is written by the runner first, resolving
 /// nothing but the manifest and running no code, unless `keep_lockfile` says
 /// the tree carries its own; `None` when it could not be written. Under
-/// `contained`, only `cache.target` is writable: the grade tree, hidden
-/// tests included, is read-only to whatever the graded code does.
+/// `contained`, only `cache.target` is writable and `cache.mask` is
+/// covered: the grade tree, hidden tests included, is read-only to whatever
+/// the graded code does.
 pub fn run_hidden(
     grade: &Path,
     tests: &[String],
@@ -918,7 +923,7 @@ pub fn run_hidden(
             &format!("hidden_{name}"),
         ]);
         let command = if contained {
-            contain(None, cache.target, &command)
+            contain(cache.mask, cache.target, &command)
         } else {
             command
         };

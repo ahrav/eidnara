@@ -27,7 +27,7 @@ use sha2::{Digest, Sha256};
 use super::aging::{ManifestInputs, suite_c_manifest};
 use super::campaign::{Charges, identity, prepare_publish, publish_file, sha256_hex};
 use super::fault::ChildGuard;
-use super::suite_d::{self, GradeCache, contain, run_bounded, run_hidden};
+use super::suite_d::{self, GradeCache, charged_run, contain, run_bounded, run_hidden};
 
 pub const SIMULATOR_VERSION: &str = "eval-anchor-shell/v1";
 pub const ANCHOR_REPORT_SCHEMA: &str = "eval-anchor-report/v1";
@@ -175,18 +175,24 @@ pub struct Run {
     pub manifest_bytes: Vec<u8>,
 }
 
-fn git(dir: &Path, args: &[&str]) -> std::io::Result<Option<String>> {
+fn git(dir: &Path, args: &[&str], deadline: Duration) -> std::io::Result<Option<String>> {
     let mut command = Command::new("git");
     command.args(args).current_dir(dir).stderr(Stdio::null());
     let (status, out) =
-        run_bounded(command, GIT_TIMEOUT).map_err(|e| std::io::Error::other(e.to_string()))?;
+        run_bounded(command, deadline).map_err(|e| std::io::Error::other(e.to_string()))?;
     Ok(status.filter(ExitStatus::success).map(|_| out))
 }
 
 /// The paths `git diff` reports between two commits, added or changed
 /// according to `filter`; `-z` preserves unusual paths without Git's
 /// line-oriented quoting.
-fn diff_paths(repo: &Path, filter: &str, from: &str, to: &str) -> std::io::Result<Vec<String>> {
+fn diff_paths(
+    repo: &Path,
+    filter: &str,
+    from: &str,
+    to: &str,
+    deadline: Duration,
+) -> std::io::Result<Vec<String>> {
     let filter = format!("--diff-filter={filter}");
     let out = git(
         repo,
@@ -199,6 +205,7 @@ fn diff_paths(repo: &Path, filter: &str, from: &str, to: &str) -> std::io::Resul
             from,
             to,
         ],
+        deadline,
     )?
     .unwrap_or_default();
     Ok(out
@@ -245,16 +252,14 @@ pub fn pipe_bounded(
     Ok(Some(a.unwrap().success() && b.unwrap().success()))
 }
 
-fn archive(repo: &Path, rev: &str, paths: &[String], into: &Path) -> std::io::Result<bool> {
+fn archive(repo: &Path, rev: &str, into: &Path, deadline: Duration) -> std::io::Result<bool> {
     let mut producer = Command::new("git");
     producer
-        .args(["--literal-pathspecs", "archive", "--format=tar", rev])
-        .arg("--")
-        .args(paths)
+        .args(["archive", "--format=tar", rev])
         .current_dir(repo);
     let mut consumer = Command::new("tar");
     consumer.args(["-x", "-f", "-", "-C"]).arg(into);
-    Ok(pipe_bounded(producer, consumer, GIT_TIMEOUT)? == Some(true))
+    Ok(pipe_bounded(producer, consumer, deadline)? == Some(true))
 }
 
 /// `cp -RP` keeps bytes, symlinks, and modes but not timestamps: a file's
@@ -408,25 +413,31 @@ struct Prepared {
 
 /// The digest of `rev`'s tree read the same way as the snapshot's: archived
 /// into `scratch` and digested file by file.
-fn revision_tree_digest(repo: &Path, rev: &str, scratch: &Path) -> std::io::Result<Option<String>> {
+fn revision_tree_digest(
+    repo: &Path,
+    rev: &str,
+    scratch: &Path,
+    deadline: Duration,
+) -> std::io::Result<Option<String>> {
     fresh_dir(scratch)?;
-    let digest = if archive(repo, rev, &[], scratch)? {
+    let digest = if archive(repo, rev, scratch, deadline)? {
         Some(tree_digest(scratch)?)
     } else {
         None
     };
-    std::fs::remove_dir_all(scratch)?;
     Ok(digest)
 }
 
 /// Clones, archives the base into the snapshot and the whole fix into the
 /// fix tree, reads the commit times and tree digests the audit needs, and
-/// removes the clone. The store is charged while the clone still exists, so
-/// a checkout larger than the bound stops the run here.
+/// removes the clone and the scratch tree. The store and the elapsed bound
+/// are charged after the clone and after each tree is extracted, while all
+/// of them still exist, so a checkout or a tree larger than the bound stops
+/// the run here; every git child's deadline is the campaign time left.
 fn prepare(
     entry: &AnchorEntry,
     host: Host,
-    private: &Path,
+    tasks: &Path,
     charges: &mut Charges,
     store_root: &Path,
 ) -> Result<Result<Prepared, Terminal>, RunError> {
@@ -435,18 +446,22 @@ fn prepare(
             UnsupportedReason::SourceUnavailable,
         )))
     };
-    let repo = private.join("repos").join(&entry.id);
+    let repo = tasks.join("repos").join(&entry.id);
+    let scratch = tasks.join("scratch");
     fresh_dir(&repo)?;
     let prepared = (|| -> Result<Result<Prepared, Terminal>, RunError> {
+        charges.elapsed()?;
         if (host.clone)(entry, &repo).is_err() {
             return unavailable();
         }
         charges.charge_store(store_root)?;
+        charges.elapsed()?;
+        let deadline = GIT_TIMEOUT.min(charges.remaining());
         let Some(fetched) = (host.fetch)(entry) else {
             return unavailable();
         };
         let committed = |sha: &str| -> std::io::Result<Option<i64>> {
-            Ok(git(&repo, &["show", "-s", "--format=%ct", sha])?
+            Ok(git(&repo, &["show", "-s", "--format=%ct", sha], deadline)?
                 .and_then(|out| out.trim().parse::<i64>().ok())
                 .map(|seconds| seconds * 1_000))
         };
@@ -456,7 +471,7 @@ fn prepare(
             return unavailable();
         };
         let parent = format!("{}^", entry.fix_sha);
-        let Some(parent_sha) = git(&repo, &["rev-parse", "--verify", &parent])? else {
+        let Some(parent_sha) = git(&repo, &["rev-parse", "--verify", &parent], deadline)? else {
             return unavailable();
         };
         let parent_sha = parent_sha.trim().to_string();
@@ -468,12 +483,13 @@ fn prepare(
                 &entry.base_sha,
                 &entry.fix_sha,
             ],
+            deadline,
         )?
         .is_some();
         // The repair became public no later than the earliest fix-side
         // commit and, when known, the pull request's creation.
         let range = format!("{}..{}", entry.base_sha, entry.fix_sha);
-        let fix_side_ms = git(&repo, &["log", "--format=%ct", &range])?
+        let fix_side_ms = git(&repo, &["log", "--format=%ct", &range], deadline)?
             .unwrap_or_default()
             .lines()
             .filter_map(|line| line.trim().parse::<i64>().ok())
@@ -483,25 +499,29 @@ fn prepare(
         let repair_public_ms = fetched
             .pull_request_created_ms
             .map_or(fix_side_ms, |pr_ms| pr_ms.min(fix_side_ms));
-        let snapshot = private.join("snapshots").join(&entry.id);
+        let snapshot = tasks.join("snapshots").join(&entry.id);
         fresh_dir(&snapshot)?;
-        if !archive(&repo, &entry.base_sha, &[], &snapshot)? {
+        if !archive(&repo, &entry.base_sha, &snapshot, deadline)? {
             return unavailable();
         }
-        let fix = private.join("fixes").join(&entry.id);
+        charges.charge_store(store_root)?;
+        let fix = tasks.join("fixes").join(&entry.id);
         fresh_dir(&fix)?;
-        if !archive(&repo, &entry.fix_sha, &[], &fix)? {
+        if !archive(&repo, &entry.fix_sha, &fix, deadline)? {
             return unavailable();
         }
+        charges.charge_store(store_root)?;
         let fix_tree_digest = tree_digest(&fix)?;
-        let scratch = private.join("scratch");
-        let Some(fix_parent_tree_digest) = revision_tree_digest(&repo, &parent_sha, &scratch)?
+        let Some(fix_parent_tree_digest) =
+            revision_tree_digest(&repo, &parent_sha, &scratch, deadline)?
         else {
             return unavailable();
         };
+        charges.charge_store(store_root)?;
+        charges.elapsed()?;
         // The patch and the hidden tests are what the fix commit itself
         // changed against its parent; intervening history is not the fix.
-        let added = diff_paths(&repo, "A", &parent_sha, &entry.fix_sha)?;
+        let added = diff_paths(&repo, "A", &parent_sha, &entry.fix_sha, deadline)?;
         let mut hidden = Vec::new();
         for path in &added {
             let Some(name) = hidden_test_name(path) else {
@@ -537,13 +557,17 @@ fn prepare(
         }))
     })();
     std::fs::remove_dir_all(&repo)?;
+    if scratch.exists() {
+        std::fs::remove_dir_all(&scratch)?;
+    }
     prepared
 }
 
 /// Writes `tests` as `tests/hidden_<name>.rs` into `tree` (a `tests` entry
 /// that is not a directory and a symlink at a test's path are removed first,
 /// `.cargo/` is dropped) and grades them inside the containment, the tree
-/// read-only and only `layout.target` writable.
+/// read-only, only `layout.target` writable, and `layout.tasks` (every
+/// snapshot and fix tree) covered by an empty tmpfs.
 pub fn grade(
     tree: &Path,
     tests: &[(String, String)],
@@ -573,6 +597,7 @@ pub fn grade(
         target: &layout.target,
         cargo_home: &cargo_home,
         tmp: &tmp,
+        mask: Some(&layout.tasks),
     };
     // A repository's own lockfile is kept and held to; a tree without one
     // gets one written by the runner.
@@ -598,12 +623,15 @@ pub fn grade(
     }
 }
 
-/// The containment mounts an empty tmpfs over `private`, hiding all but
-/// `root`'s control workspace; grading sees everything read-only but
-/// `target`.
+/// The control's containment mounts an empty tmpfs over `private`, hiding
+/// all but `root`'s control workspace; grading runs with `tasks` (every
+/// clone, snapshot, and fix tree) covered the same way, the one tree being
+/// graded readable, and only `target` writable.
 pub struct Layout {
     pub root: PathBuf,
     pub private: PathBuf,
+    pub tasks: PathBuf,
+    pub tree: PathBuf,
     pub target: PathBuf,
 }
 
@@ -679,13 +707,13 @@ fn control(run: &ControlRun<'_>, charges: &mut Charges) -> Result<NoRepositoryCo
     inner.arg(".agent.sh").current_dir(&workspace);
     let deadline = config.budgets.hard_deadline_ms;
     let started = Instant::now();
-    charges.process_started()?;
-    let output = run_bounded(
+    // Under the campaign's charges: the deadline clamped to the time left,
+    // the elapsed bound checked before and after.
+    let (status, stdout) = charged_run(
         contain(Some(&layout.private), &workspace, &inner),
         Duration::from_millis(deadline),
-    );
-    charges.process_ended();
-    let (status, stdout) = output?;
+        charges,
+    )?;
     let mut usage = TaskUsage {
         elapsed_ms: u64::try_from(started.elapsed().as_millis()).unwrap(),
         ..TaskUsage::default()
@@ -724,11 +752,10 @@ fn control(run: &ControlRun<'_>, charges: &mut Charges) -> Result<NoRepositoryCo
     let hidden = if config.budgets.exhausted(&usage).is_some() {
         HiddenResults::new()
     } else {
-        let graded = layout.private.join("graded");
-        fresh_dir(&graded)?;
-        copy_tree(&prepared.snapshot, &graded)?;
-        overlay_patch(&workspace.join("patch"), &graded)?;
-        grade(&graded, &prepared.hidden, layout, &entry.id, charges)?
+        fresh_dir(&layout.tree)?;
+        copy_tree(&prepared.snapshot, &layout.tree)?;
+        overlay_patch(&workspace.join("patch"), &layout.tree)?;
+        grade(&layout.tree, &prepared.hidden, layout, &entry.id, charges)?
     };
     let terminal = hidden_terminal(
         prepared.hidden.iter().map(|(name, _)| name.as_str()),
@@ -792,12 +819,15 @@ pub fn run(config: &Config, host: Host) -> Result<Run, RunError> {
     let mut charges = Charges::new(profile.envelope.clone());
     prepare_publish(&config.publish, &[REPORT_FILE, MANIFEST_FILE]).map_err(publish_refused)?;
     let root = charges.occupy()?;
+    let private = root.path().join("private");
     let layout = Layout {
         root: root.path().to_path_buf(),
-        private: root.path().join("private"),
-        target: root.path().join("private").join("target"),
+        tasks: private.join("tasks"),
+        tree: private.join("tree"),
+        target: private.join("target"),
+        private,
     };
-    std::fs::create_dir_all(&layout.private)?;
+    std::fs::create_dir_all(&layout.tasks)?;
 
     // The time study: prepare the first tasks, measure, project, and stop
     // for approval before the rest is paid for.
@@ -806,9 +836,10 @@ pub fn run(config: &Config, host: Host) -> Result<Run, RunError> {
     let mut tasks = Vec::new();
     for entry in &config.corpus.entries {
         let started = Instant::now();
-        let outcome = prepare(entry, host, &layout.private, &mut charges, &layout.root)?;
+        let outcome = prepare(entry, host, &layout.tasks, &mut charges, &layout.root)?;
         let prepare_ms = u64::try_from(started.elapsed().as_millis()).unwrap();
         charges.charge_store(&layout.root)?;
+        charges.elapsed()?;
         if measured.len() < eval_core::TIME_STUDY_TASKS {
             measured.push(Preparation {
                 task: entry.id.clone(),
@@ -867,13 +898,26 @@ pub fn run(config: &Config, host: Host) -> Result<Run, RunError> {
             outcomes.push(outcome);
             continue;
         }
-        let tree = layout.private.join("tree");
-        fresh_dir(&tree)?;
-        copy_tree(&ready.snapshot, &tree)?;
-        let hidden = grade(&tree, &ready.hidden, &layout, &entry.id, &mut charges)?;
-        fresh_dir(&tree)?;
-        copy_tree(&ready.fix, &tree)?;
-        let reference = grade(&tree, &ready.hidden, &layout, &entry.id, &mut charges)?;
+        fresh_dir(&layout.tree)?;
+        copy_tree(&ready.snapshot, &layout.tree)?;
+        let hidden = grade(
+            &layout.tree,
+            &ready.hidden,
+            &layout,
+            &entry.id,
+            &mut charges,
+        )?;
+        fresh_dir(&layout.tree)?;
+        copy_tree(&ready.fix, &layout.tree)?;
+        let reference = grade(
+            &layout.tree,
+            &ready.hidden,
+            &layout,
+            &entry.id,
+            &mut charges,
+        )?;
+        // The fix tree is not left where the control's grade could read it.
+        fresh_dir(&layout.tree)?;
         let proof = InsufficiencyProof {
             task: entry.id.clone(),
             entry_digest: ready.audit.entry_digest.clone(),

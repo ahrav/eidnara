@@ -73,6 +73,9 @@ enum Variant {
     /// The base commit is two commits behind the fix: an intervening commit
     /// after the cutoff adds a test file that is not the fix's.
     IntermediateCommit,
+    /// The tree carries a megabyte that git stores in a few bytes, so every
+    /// extracted tree is large and the clone is not.
+    BulkyTree,
 }
 
 fn git(dir: &Path, args: &[&str], seconds: i64) -> String {
@@ -110,6 +113,10 @@ fn history(dir: &Path, index: u32, variant: Variant) -> (String, String) {
         let mut text = std::fs::read_to_string(&manifest).unwrap();
         text.push_str("eidnara-absent-offline = \"1\"\n");
         std::fs::write(&manifest, text).unwrap();
+    }
+    std::fs::create_dir_all(dir.join("assets")).unwrap();
+    if variant == Variant::BulkyTree {
+        std::fs::write(dir.join("assets/bulk.bin"), vec![0u8; 1 << 20]).unwrap();
     }
     if variant == Variant::DeletesBuildScript {
         std::fs::write(
@@ -778,6 +785,66 @@ fn the_clone_is_charged_before_it_is_removed() {
 }
 
 #[test]
+fn every_extracted_tree_is_charged_while_the_clone_still_exists() {
+    static CLONES: AtomicUsize = AtomicUsize::new(0);
+    fn counted_clone(entry: &AnchorEntry, into: &Path) -> std::io::Result<()> {
+        CLONES.fetch_add(1, Ordering::SeqCst);
+        clone_local(entry, into)
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = corpus(dir.path(), &[Variant::BulkyTree; 5]);
+    let mut config = config(dir.path(), corpus, ControlScript::default(), u64::MAX);
+    // Room for the clone and two extracted trees, not for the clone, the
+    // snapshot, the fix tree, and the parent's scratch tree at once.
+    config.store_bound_bytes = 7 << 19;
+    let host = Host {
+        clone: counted_clone,
+        ..HOST
+    };
+    match anchor::run(&config, host) {
+        Err(RunError::Envelope(exceeded)) => {
+            assert_eq!(exceeded.resource, Resource::StoreBytes);
+        }
+        Err(other) => panic!("expected the extraction to trip the store bound, got {other:?}"),
+        Ok(_) => panic!("expected the extraction to trip the store bound, got a run"),
+    }
+    assert_eq!(
+        CLONES.load(Ordering::SeqCst),
+        1,
+        "the first task's trees trip the bound while its clone exists; a charge after the clone and scratch are gone sees two tasks' trees first"
+    );
+}
+
+#[test]
+fn the_elapsed_bound_is_charged_while_preparing() {
+    static CLONES: AtomicUsize = AtomicUsize::new(0);
+    fn counted_clone(entry: &AnchorEntry, into: &Path) -> std::io::Result<()> {
+        CLONES.fetch_add(1, Ordering::SeqCst);
+        clone_local(entry, into)
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = corpus(dir.path(), &PLAIN);
+    let mut config = config(dir.path(), corpus, ControlScript::default(), u64::MAX);
+    config.elapsed_bound_ms = 1;
+    let host = Host {
+        clone: counted_clone,
+        ..HOST
+    };
+    match anchor::run(&config, host) {
+        Err(RunError::Envelope(exceeded)) => {
+            assert_eq!(exceeded.resource, Resource::ElapsedMs);
+        }
+        Err(other) => panic!("expected the elapsed bound during preparation, got {other:?}"),
+        Ok(_) => panic!("expected the elapsed bound during preparation, got a run"),
+    }
+    assert!(
+        CLONES.load(Ordering::SeqCst) <= 1,
+        "an exhausted campaign clock stops preparation at the next task, not after every clone"
+    );
+    assert!(!config.publish.join(REPORT_FILE).exists());
+}
+
+#[test]
 fn the_fix_is_its_own_diff_and_its_whole_tree() {
     if !suite_d::namespaces_available() {
         return;
@@ -882,6 +949,7 @@ fn grading_runs_repository_code_without_the_runners_home_or_network() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
     let home = std::env::var("HOME").unwrap();
+    let secret = dir.path().join("tasks/secret.txt");
     let probe = format!(
         r#"
 #[test]
@@ -890,15 +958,21 @@ fn isolated() {{
     assert!(std::net::TcpStream::connect(("127.0.0.1", {port})).is_err());
     let own = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     std::net::TcpStream::connect(own.local_addr().unwrap()).unwrap();
+    assert!(std::fs::read({secret:?}).is_err(), "the task material is masked");
 }}
 "#
     );
     let mut limits = campaign::profile(Scale::S0, 128, 600_000, None).envelope;
     limits.processes = 2;
     let mut charges = campaign::Charges::new(limits);
+    let tasks = dir.path().join("tasks");
+    std::fs::create_dir_all(&tasks).unwrap();
+    std::fs::write(tasks.join("secret.txt"), "the fix").unwrap();
     let layout = anchor::Layout {
         root: dir.path().to_path_buf(),
         private: dir.path().to_path_buf(),
+        tasks: tasks.clone(),
+        tree: workspace.clone(),
         target: dir.path().join("target"),
     };
     let results = anchor::grade(
@@ -912,7 +986,7 @@ fn isolated() {{
     assert_eq!(
         results["probe"],
         HiddenOutcome::Passed,
-        "the runner's home and loopback listener are out of reach; the test's own loopback works"
+        "the runner's home, its loopback listener, and the task material are out of reach; the test's own loopback works"
     );
     drop(listener);
 }
