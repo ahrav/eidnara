@@ -18,7 +18,7 @@ the Phase 4 checkpoints provide, so a reader can find them by test name.
 Manifest, identity, and residue (`crates/eval-core/tests/manifest.rs`):
 
 - `required_fields_are_sorted_and_equal_the_struct_field_set` pins
-  `eval-manifest/v8` to `REQUIRED_FIELDS`; a struct field added without a
+  `eval-manifest/v9` to `REQUIRED_FIELDS`; a struct field added without a
   version bump fails here. `fixture_digests_are_frozen` pins the fixture's
   `eval_run_id` and manifest digest so an encoding change is reviewed.
 - `every_missing_field_is_refused_by_name_before_digesting`,
@@ -690,13 +690,16 @@ Cassette core (`crates/eval-core/tests/cassette.rs`):
   digest; the unchanged request is refused with the same terminal afterwards
   and `misses()` stays at one. `only_a_tool_result_change_is_tool_result_drift`
   names the other class. `a_fractional_temperature_digests_exactly` shows
-  `0.7` persisted as `"0.7"`, `0.70` replaying, and `0.8` differing.
+  `0.7` persisted as `"0.7"`, `0.70` replaying, `0.8` differing, and a
+  string, null, or array `temperature` refused as `TemperatureNotDecimal`.
 - `volatile_and_uncovered_changes_replay`: a moved `cache_control` marker and
   a changed or removed `x-api-key`, `user-agent`, `authorization`, or
   `x-session-id` header replay. `only_a_terminated_nonce_is_normalized` is the
-  nonce table: `cch=<nonce>;` forms digest equal across nonces; an
-  unterminated `cch=`, a URL query `cch=`, an empty nonce, and a changed tail
-  all digest differently, so normalization never drops text.
+  nonce table: `cch=<nonce>;` forms in system text digest equal across
+  nonces; an unterminated `cch=`, a URL query `cch=`, an empty nonce, a changed
+  tail, and the same form in a user message all digest differently, so
+  normalization never drops text and never reaches message content (system
+  text is in scope; see the gap below).
 - `equal_digests_replay_in_recorded_order_and_distinct_ones_in_any_order`:
   the concurrency case, with `unconsumed()` reaching zero and a miss past the
   recording naming the last entry.
@@ -706,13 +709,15 @@ Cassette core (`crates/eval-core/tests/cassette.rs`):
 - `namespaces_bind_the_cassette_and_equal_digests_elsewhere_refuse`
   (`rid-cassette-world-namespaced-no-cross-replay`): replay under another
   namespace is `NamespaceMismatch` before any request; a lookup or record under
-  another namespace is `WrongNamespace`; recording into a replay is
-  `RecordOnReplay` and a lookup on a recording is `LookupOnRecord`.
+  another namespace is `WrongNamespace`, after which the recording has no
+  file form; recording into a replay is `RecordOnReplay` and a lookup on a
+  recording is `LookupOnRecord`.
 - `provenance_schema_and_version_pins_are_recomputed_on_read`
   (`rid-shared-cassette-schema-verified-provenance`): one edited frame or one
   edited declaration is `ProvenanceMismatch`; a re-signed declaration edit loads
-  and is visible; a re-signed request edit is `EntryDigestMismatch`; a schema,
-  generator, or covered-field version change and an unknown field each refuse.
+  and is visible; a re-signed request edit is `EntryDigestMismatch`; a schema
+  change (with a new field beside it) is `SchemaMismatch`, a generator or
+  covered-field version change and an unknown field each refuse.
 - `planted_secrets_and_unscannable_frames_are_refused_and_the_cassette_never_persists`
   (`xc-captured-provider-requests-redacted-before-persistence`): after one
   admitted entry, an `sk-ant-` token in a user message, an AWS key in a tool
@@ -720,13 +725,22 @@ Cassette core (`crates/eval-core/tests/cassette.rs`):
   SecretDetected)`, and a body one byte past `MAX_REDACTABLE_BYTES` is
   `RedactionRefused(Request, InputLimit)`; the refused entry never exists and
   `to_file` returns the refusal, so the one admitted entry is not persisted
-  either. `a_malformed_body_is_refused_rather_than_digested_as_empty` keeps
+  either, and a second refusal does not replace the first one reported. `a_request_the_boundary_could_not_project_refuses_the_file_too`
+  shows `Cassette::refuse` latching the same way for a request no entry was
+  built from. `a_malformed_body_is_refused_rather_than_digested_as_empty` keeps
   `{}` out of the digest.
 - `backend_records_cover_the_pinned_fields_with_exact_temperatures`
   (`rid-cassette-strict-miss-typed-error`): the `BackendRecord` projection's
-  field set equals `BACKEND_COVERED_FIELDS`; `0.7` and `0.70` digest equal,
-  `0.8` differs; `NaN`, infinity, `-0.0`, a negative value, and a hand-written
-  `0.70` refuse. `every_error_names_its_wire_kind` pins fifteen distinct kinds.
+  field set equals `BACKEND_COVERED_FIELDS`; the request values `0.7` and
+  `0.70` digest equal, `0.8` differs; `NaN`, infinity, `-0.0`, and a negative
+  value refuse in `canonical_decimal_f64`, and a record whose `temperature`
+  string was hand-edited to `0.70` refuses in `covered()`. `every_error_names_its_wire_kind` pins seventeen distinct kinds,
+  and `no_wire_detail_carries_request_content` pins `CassetteError::detail`:
+  a request-shaped variant (`Shape`, `MalformedBody`, `UnknownRequestField`,
+  `TemperatureNotDecimal`, `NotCanonical`) built around a canary payload
+  renders an empty detail while its `Display` still carries the canary, and
+  every oracle-owned variant renders its version, namespace, digest, index, or
+  scanner outcome.
 
 Manifest (`crates/eval-core/tests/manifest.rs`,
 `sls-memory-reviewer-model-calls-cassette-or-excluded`): the
@@ -739,7 +753,8 @@ Daemon shell (`crates/daemon/tests/eval_cassette.rs`, `--all-features`):
   (`rid-rust-cassette-backend-impl-preserves-declarations`, marker
   `rid_capabilities_read_during_cassette_run`): two recorded requests, one a
   provider error with a retry hint, replay with equal events and terminals
-  while the real backend is never called; `BackendDeclarations::new` reads the
+  while the real backend is never called and `unconsumed()` falls from two to
+  zero; `BackendDeclarations::new` reads the
   same declaration from the cassette as from the real backend for both
   harnesses; an edited header is `ProvenanceMismatch` until re-signed, and
   re-signed defaults latch differently.
@@ -755,18 +770,52 @@ Daemon shell (`crates/daemon/tests/eval_cassette.rs`, `--all-features`):
   (marker `rid_cassette_namespace_refused`): an edited recorded event is
   `ProvenanceMismatch`; another namespace is `NamespaceMismatch` at load; a
   `NaN` temperature is a `cassette_request` terminal and a canary prompt is a
-  `redaction_refused` terminal that leaves the recorder with no file.
+  `redaction_refused` terminal; each leaves the recorder with no file, and the
+  first refusal is the one it reports.
 - `memory_reviewer_replays_through_the_keyed_peer`
   (`sls-memory-reviewer-model-calls-cassette-or-excluded`, marker
   `rid_reviewer_cassette_miss_reached`): the key recovered from one recorded
   request equals the production sender's `provider_identity()` and credential
   id, the request's model, and the SHA-256 of `MessagesRequest::body`'s bytes;
-  the same body replays through `serve_keyed`; a changed body, model, or
+  the same body replays once through `serve_keyed` and misses when sent
+  again, each entry answering one request, and two entries under one key
+  answer in recorded order before the third request misses; a second call
+  after the peer's `idle` window is not served and is once the window is
+  raised; a changed body, model, or
   credential each miss with a 409 the sender reports as
   `SendError::Status(409)`, after which the recorded body is refused too; an
   entry keyed to another host misses.
 - `every_cassette_marker_fires_across_the_scenarios` is the completeness
   proof over this suite's markers.
+- `a_lost_or_unfinished_exchange_refuses_the_recording`: `file()` refuses
+  `IncompleteExchange` while an exchange is in flight and succeeds once it is
+  recorded; a future dropped before its terminal, an `execute` that panics
+  before returning one, a run whose token was cancelled under the backend, and
+  a run whose sink answers `Closed` each leave the recorder refusing
+  `IncompleteExchange`, the last two with a `cassette_refused` terminal; a
+  replay under a cancelled token is `cassette_refused` and consumes nothing,
+  and a replay whose sink closes mid-exchange, or whose token is cancelled
+  during emission, is `cassette_refused` with the served entry still consumed.
+- `every_host_finish_reason_error_class_and_terminal_round_trips`: both
+  `FinishReason` values, all four `ErrorClass` values under `Failed` and
+  `FailedUnresolved`, and an absent event finish reason each record and replay
+  as an equal transcript, so the wire mirror's decode side covers every host
+  variant, not only the two the marker scenarios produce.
+
+Oracle (`crates/daemon/examples/eval_runner.rs`, `--features eval-runner`,
+tested as an example target):
+
+- `a_record_the_oracle_cannot_project_leaves_close_with_no_file`: a `record`
+  with a body field outside the covered list is `UnknownRequestField` with an
+  empty detail; a later `{not json` line is `Json`; and `close` reports the
+  first refusal, `UnknownRequestField`, and writes nothing.
+- `an_unreadable_line_while_recording_leaves_close_with_no_file`: a line over
+  4 MiB and a line that is not JSON, each between an admitted `record` and
+  `close`, are `LineTooLong` and `Json`, and `close` reports the same kind and
+  writes nothing.
+- `a_failed_publication_removes_the_temp_file_it_created`: with a directory at
+  the target path, `close` reports `Io` and the attempt's `.json.tmp` sibling
+  is gone.
 
 OpenCode process driver (`packages/e2e-tests/tests/cassette-replay.test.ts`,
 rust-only tier; `rid-ts-cassette-never-falls-through-to-scripted`,
@@ -798,11 +847,19 @@ rust-only tier; `rid-ts-cassette-never-falls-through-to-scripted`,
   latched terminal, `turn` as the lookup count, nearest as the last entry once
   consumed): record mode forwards headers and body text and the produced frames
   (including an `abortAfterFrames` truncation) before serving; a recording
-  refusal is a 400 naming only the kind with nothing recorded; replay serves
+  refusal is a 400 naming only the kind with nothing recorded; a script bug (no
+  `usage` or `error`, or an error status `Response` cannot serve) is a 500
+  `mock_error` with nothing recorded; replay serves
   recorded SSE and provider-error frames byte for byte, answers a miss with a
   400 `cassette_miss` and repeats it after, never enters the scripted block,
   hands a malformed body to the oracle as text, and turns any oracle failure,
-  typed or not, into a 400 with no message text; `reset()` unbinds.
+  typed or not, into a 400 with no message text; a request still in flight
+  across `reset()` (uploading, delayed, or awaiting the oracle) consumes,
+  counts, records, and logs in the run it began in, never in the next one;
+  `useCassette()` starts a new run the same way; concurrent
+  identical requests are admitted in capture order regardless of scripted
+  delays; a JSON body that is not an object is scripted as `{}` and
+  reaches the oracle as text; `reset()` unbinds.
 
 ## Phase 3 executed checks: frozen statistics
 
@@ -811,11 +868,14 @@ Statistics core (`crates/eval-core/tests/statistics.rs`):
 - `the_frozen_reference_agrees_on_every_golden_case`
   (`mtr-three-gates-signed-history-effect`,
   `mtr-world-clustered-intervals-after-icc-pilot`): the TypeScript reference's
-  twelve cases (five pair tables with gate verdicts, including censored arms,
-  a failing noninferiority gate, and one at the margin; five ICC pilots with
+  fourteen cases (five pair tables with gate verdicts, including censored arms,
+  a failing noninferiority gate, and one at the margin; six ICC pilots with
   and without a family effect, with fewer affordable worlds than the pilot
-  had, unbalanced, and internally constant; two cluster bootstraps by family
-  and by world over 300 pairs) equal the Rust counts, rates, gates, ICC,
+  had (with and without a family effect, so the family-cluster cap is
+  exercised), unbalanced, and internally constant, where the world level
+  binds the effective N; three cluster bootstraps by family
+  and by world over 300 pairs, one at the minimum 40 replicates where the
+  `1/40` order statistic is the smallest replicate) equal the Rust counts, rates, gates, ICC,
   clustering unit, effective N, and interval bounds exactly; the golden's
   `input_sha256` is recomputed over the whole case array first.
 - `ratios_are_exact_normalized_and_refuse_overflow`: reduction, decimal
@@ -823,21 +883,32 @@ Statistics core (`crates/eval-core/tests/statistics.rs`):
   safe range and a component at `2^53` refusing as `RationalOverflow`, and a
   wire ratio normalizing on deserialization while a zero denominator refuses.
 - `every_profile_input_is_required_and_bounded`: each of the five profile
-  fields and each of the four liveness bounds is required; a rate above one or
-  a non-canonical decimal refuses.
+  fields and each of the four liveness bounds is required; a rate above one, a
+  non-canonical decimal, or a liveness bound past canonical JSON's safe
+  integer refuses.
 - `the_family_is_frozen_before_outcomes_and_any_post_hoc_edit_refuses`
   (`mtr-analysis-family-frozen-before-results`): the frozen digest accepts the
   unchanged family; an edit to any of nine components (endpoints, families,
-  exclusions, multiplicity, margin, floor, threshold, seed, pilot) is
+  exclusions, stopping rule, margin, floor, threshold, seed, pilot) is
   `FamilyChangedAfterResults`, from `check` and from `analyze`; a threshold
-  below 300, fewer than 40 replicates, an empty endpoint list, and an unknown
-  field refuse; a manifest without a recorded digest is `FamilyNotRecorded`.
+  below 300, fewer than 40 or more than 10,000 replicates, an empty endpoint
+  list, an endpoint list that is not exactly the three gates
+  (`UnsupportedEndpoints`), and an unknown field refuse; a version-1 document
+  is `SchemaMismatch`, not a shape error; a manifest without a
+  recorded digest is `FamilyNotRecorded`, and one with a digest and no recency
+  baseline is `InvalidManifest(RecencyBaselineMismatch {recency_baseline})`
+  until the baseline is recorded.
 - `the_pilot_picks_the_highest_level_over_the_threshold_and_blocks_when_underpowered`
   (`mtr-world-clustered-intervals-after-icc-pilot`): a family effect selects
   the family unit; a flat pilot whose tasks agree within each world has world
-  ICC one and counts each world once; fewer affordable worlds shrink N; zero
+  ICC one and counts each world once; a zero required N refuses
+  (`NoRequiredN`); fewer affordable worlds shrink N, and
+  under the family unit two affordable worlds realize at most two family
+  clusters so the projected items are deflated; zero
   affordable worlds, a two-observation pilot, a single group, and no variance
-  at all refuse; constant and unbalanced constant groups give ICC one; a
+  at all refuse; constant and unbalanced constant groups give ICC one; an
+  unbalanced pilot uses the `n0` size correction, which here puts the ICC over
+  the threshold where the mean size would not; a
   large-valued pilot refuses as `RationalOverflow`; an effective N below the
   required N makes `analyze` return `Blocked {insufficient_effective_n}`, and a
   hand-written degenerate ratio cannot slip past it.
@@ -846,18 +917,86 @@ Statistics core (`crates/eval-core/tests/statistics.rs`):
   noninferiority with `-1/10` while failing harm at `3/20`; `b = c = 4` passes
   noninferiority at zero while failing harm and the floor; `1/4` fails
   noninferiority; exact-margin and exact-floor statistics pass; every bound
-  equals the profile's rate; censored arms count as described above.
+  equals the profile's rate; a censored aged arm beside a fresh pass and a
+  censored fresh arm beside an aged fail or a censored aged arm each count in
+  `b`, and a censored fresh arm beside an aged pass counts in neither `b` nor
+  `c`.
+- `censoring_never_makes_a_gate_easier_than_any_definite_resolution`
+  (`mtr-three-gates-signed-history-effect`): for each of the five cells with a
+  censored arm, against a fixed background of concordant passes, `quality_loss`
+  and `harm` are no smaller and the aged pass rate is no larger than under
+  every definite (pass or fail) resolution of the censored arm.
 - `intervals_name_their_unit_and_counts_and_are_withheld_below_the_floor`:
   the interval names unit, method, cluster count, item count, and replicates
   with pinned bounds; 299 items withhold it as `item_count_below_threshold`
-  and a caller cannot lower the threshold or the replicate count; one cluster
-  withholds it as `fewer_than_two_clusters`; the same seed reproduces the same
-  bounds and another seed moves them.
+  and a caller cannot lower the threshold or the replicate count; a replicate
+  count past the cap is `TooManyReplicates` before any replicate runs; one
+  cluster withholds it as `fewer_than_two_clusters`; the same seed reproduces
+  the same bounds and another seed moves them.
 - `arm_miss_asymmetry_past_the_bound_blocks_with_no_gates_and_rates_are_retained`:
   a miss-rate gap of `2/25` against a `1/20` bound is `Blocked
-  {arm_miss_asymmetry}`; zero or one arm is `TooFewArms`; within the bound,
+  {arm_miss_asymmetry}`; zero arms, one arm, a renamed arm, or a third arm is
+  `ArmsNotPaired`; within the bound,
   the report carries the frozen digest, the counts, the per-arm miss and
   refusal rates, and exactly three gate fields.
+- `the_pair_table_and_the_pilot_must_match_the_frozen_plan`
+  (`mtr-analysis-family-frozen-before-results`): a table of one or 299 pairs
+  against a frozen count of 300 is `PairCountMismatch`; a pair from a family
+  the plan did not freeze is `PairOutsideFamilies`; 300 copies of one pair are
+  `DuplicatePair`; a pilot whose effective N or unit is not what its recorded
+  counts and ICCs imply, that names zero worlds, or whose counts (one
+  observation, or no replication within worlds) could not have estimated an
+  ICC, whose sampled families are not the registered ones (by identity, not
+  count), or whose ICC exceeds one,
+  is `PilotInconsistent`, while a negative ICC projects the same undeflated N
+  as zero; 300 pairs in one world are `Blocked
+  {table_underpowered}` at `3000/309` effective items, and a 299/1 split over
+  two worlds at `450000/46051` (the size-weighted mean, not two clusters of
+  150); a pair id outside the manifest's `sample_ids` is
+  `PairsNotManifestSamples`; the same ids with one re-scored row are
+  `PairsNotManifestResult` while a reordered table digests the same; 300 worlds over a 150-world plan is
+  `WorldsExceedAffordable`; a world seed of `2^53 + 1` is
+  `WorldSeedOutOfRange` from `analyze`, `run_icc_pilot`, and
+  `cluster_bootstrap_interval`, whose draw seed of `2^53` is
+  `BootstrapSeedOutOfRange` and which refuses 300 copies of one pair over two
+  worlds as `DuplicatePair`; a required N of zero is `PilotInconsistent`; a pilot whose projection
+  leaves the safe range is `RationalOverflow`; three families of two
+  internally constant worlds (family ICC `1/9`, world ICC one) project six
+  effective items, the finer level, not nine; 10,000 replicates over 100,000
+  pairs and worlds or 501 worlds is `TooManyDraws`, while the same
+  replicates over a 300-pair plan is 3,000,000 draws and validates, as does a
+  two-family family-unit plan over 100,000 pairs (20,000 draws); an `incomplete`, `refused`, or `blocked` manifest
+  is `RunNotCompleted`; a manifest with the wrong schema or a `sample_order`
+  that is not a permutation is `InvalidManifest`; a two-family, two-world
+  pilot recording different family and world ICCs is `PilotInconsistent`;
+  `Ratio::try_new(1, 0)` and `(i64::MAX, 1)` are typed refusals; an underpowered plan blocks before a bad seed in its
+  table is read; a zero-pair
+  plan is `NoPairs`; the rate helpers validate their counts, so `n = 0` is `NoPairs` and
+  `b > n` or `n` past the safe range is `InconsistentCounts` instead of a
+  rate or a panic; a `holm` or `benjamini_hochberg` plan is
+  `UnsupportedMultiplicity`
+  while a computed pilot validates; a plan of 299 pairs against a required N
+  of 300 is `PlanBelowRequiredN` (attainable 299), as is one of 300 pairs
+  over at most 150 worlds under a world ICC of `1/10` (attainable
+  `3000/11`) and one of 301 pairs over 150 worlds under a world ICC of one
+  (attainable `90601/605`, the whole-pair allocation, not 150), and 12 pairs
+  over three worlds and two families under ICCs of `11/20` and `9/10` against
+  a required N of four (attainable `16/5`); the plan bound takes each level at
+  its own best spread and is necessary, not sufficient: a six-pair plan over
+  two families and three worlds under a real pilot's family ICC `43/195` and
+  world ICC `4/9` is admitted (bound `54/13`) while its best table reaches
+  only `1755/443` and is blocked as `TableUnderpowered` with two clusters,
+  and plans whose levels' optima coincide in one table (12 pairs over five
+  worlds and two families under a family ICC of `2/5`, six pairs over three
+  worlds and two families under `13/53`, seven pairs over five worlds and
+  three families under `1/10` and `1/5`) are admitted; a plan of four billion
+  pairs over two billion worlds is decided in closed form (and refused as
+  `RationalOverflow`); a repeated pilot observation is
+  `DuplicateObservation`; a miss or refusal rate of `2` is `RateOutOfRange`;
+  hand-built counts with `b + c > n`, `b + aged_pass > n`, `c > aged_pass`,
+  `aged_censored + aged_pass > n`, `fresh_censored + c > b + aged_pass`, a
+  count above `n`, or `n` past the safe range are `InconsistentCounts`; `i128::MIN` as either ratio component is
+  `RationalOverflow`, never a wrapped value.
 - `no_judge_type_reaches_the_gates`
   (`mtr-judge-output-never-feeds-control-or-floor`): the statistics source
   names no judge, so no judge verdict type can be an input to a gate.
@@ -871,14 +1010,15 @@ Censoring (`crates/eval-core/tests/censoring.rs`):
 - `the_frozen_reference_agrees_on_every_censored_case`
   (`mtr-timeouts-right-censored-percentiles-carry-n`,
   `mtr-zero-failures-reported-as-three-over-n`): the TypeScript reference's
-  fourteen latency, counter, and pass^k cases equal the Rust summaries exactly;
-  its pass^k is an exhaustive subset enumeration and its rule of three is
-  checked against the exact bound it approximates.
+  sixteen latency, counter, and pass^k cases equal the Rust summaries exactly;
+  its pass^k is an exhaustive subset enumeration and every counter's rational
+  bound is checked against the exact one-sided binomial bound it envelopes.
 - `timeouts_stay_in_every_denominator_and_percentiles_carry_their_counts`: 100
   completions and 5 timeouts report `n = 105, censored = 5` with two point
   percentiles and no p99; 15 timeouts put the 95th rank in the censored tail, a
   lower bound at the deadline; a censored attempt below the rank makes a later
-  completion a lower bound too, and a completion below every censored attempt
+  completion a lower bound too, unless enough completions tie at the picked
+  value to fix it, and a completion below every censored attempt
   is a point; a censored attempt sorts after a completed one of equal duration
   on either input order; a single censored attempt is a lower bound; 299
   completions carry a p99 and 298 do not; each of the seven censoring reasons
@@ -887,9 +1027,12 @@ Censoring (`crates/eval-core/tests/censoring.rs`):
 - `zero_failures_is_a_bound_never_a_proof`: `0/400` renders as
   `upper_bound_95 = 3/400` with `bound_method: rule_of_three`,
   `evidence_kind: bound`, `n`, and `unit`; `0/20` as `3/20`; `0/60` as `1/20`;
-  `0/2` caps at one; an observed rate renders as `observed`; an empty or
-  overfull counter refuses with its counts; a bound never renders a `rate` or a
-  `proven` field.
+  `0/2` caps at one; an observed rate renders as `observed` and carries its own
+  `upper_bound_95` (`3/60` as `3/20`, `1/60` as `1/12`, `1/2` capped at one)
+  with `bound_method: poisson_envelope`; `upper_bound_95` strictly increases
+  from zero to five failures in sixty, so one failure never reads below zero
+  failures against a `1/30` gate; an empty or overfull counter refuses with
+  its counts; a bound never renders a `rate` or a `proven` field.
 - `pass_k_bounds_resolve_censoring_both_ways_and_are_indeterminate_when_all_are_censored`
   (`rid-live-runs-labeled-nondeterministic-pass-k`): five clean attempts give
   `pass@1 = 4/5` and `2/5` under both conventions; a fail and a censored
@@ -908,7 +1051,7 @@ Pairs (`crates/eval-core/tests/pairs.rs`):
   (`wm-pair-set-falsification-and-natural-fresh`): a thirty-four-event aged
   world compiles three pairs; the fresh arm holds exactly the independent
   history's units, none of them an aged ID, and the reducer requires at least
-  one of them under the pair's widened scope beside the truth; the ceiling for
+  one of them under the set's widened scope beside the truth; the ceiling for
   the epoch commit is that commit alone and for a citing message is the
   message, the commit, and the commit's parent; the window is the three most
   recent eligible units, most recent first; the set round-trips through JSON
@@ -916,7 +1059,7 @@ Pairs (`crates/eval-core/tests/pairs.rs`):
   asserting the earliest time precedes the median.
 - `the_window_breaks_equal_times_by_linearization_order`: four eligible units
   at one valid time under a window of two yield the two latest in
-  linearization order; a task at another cut is `MixedCuts`.
+  linearization order; a task at another cut is `MixedQueries`.
 - `the_recency_baseline_misses_every_falsifier_or_blocks_suite_b`
   (`wm-recency-baseline-fails-falsification`): with `k = 3` the contrast is
   established (one falsifier missed, one control delivered, three distinct
@@ -944,20 +1087,41 @@ Pairs (`crates/eval-core/tests/pairs.rs`):
   saw, tasks at two cuts, no tasks, a set without a falsifier or a positive
   control, a duplicate task, empty evidence, an aged history whose earliest
   time is its median, a natural-fresh history moved a thousand seconds past
-  the cut, and a natural-fresh history naming an event it does not hold each
-  refuse by name.
+  the cut, a natural-fresh history whose payload names an event it does not
+  hold, a natural-fresh history with a causal edge to an event it does not
+  hold (`DanglingEdge`, refused rather than aborting the compiler), a
+  natural-fresh history under another schema, a shuffled slice of the aged
+  history (`NotLinearized`, validated before normalization would sort it back
+  into the copy), and a positive control that narrows the scope to its own
+  entity (`MixedQueries`; alone in its scope the control would be the whole
+  window) each refuse by name.
 - `a_set_read_back_must_be_one_the_compiler_could_have_produced`: another
   policy version, surface 1 under a bound of three, a zero bound, a window
-  wider than the bound, a relabelled positive control, and emptied evidence
-  each refuse from `PairSet::validate` and from `check_recency_baseline`
-  before any judgement.
+  wider than the bound, a widened query with its scope cleared or its cut
+  moved, a fresh arm or ceiling missing its evidence, an eligible aged unit
+  outside the closure added to one fresh arm, one competitor or one of its
+  causal edges dropped from one fresh arm (each `Tampered {pairs}`), the
+  control emptied out of every fresh arm (`EmptyNaturalFresh`), a relabelled
+  slice of the aged history carried as every pair's control
+  (`NaturalFreshCopiedFromAged`), a relabelled positive control, emptied
+  evidence, a moved median, a duplicate task, a task at its own cut,
+  evidence the aged history lacks, a falsifier's evidence moved late
+  (`TruthNotEarly` from the wire), a window naming an event the aged history
+  lacks, a window out of order, and a narrowed window each refuse from
+  `PairSet::validate` and from `check_recency_baseline` before any
+  judgement.
+- `a_window_edited_on_the_wire_cannot_manufacture_an_established_contrast`:
+  a surface-1 set whose window delivers the falsifier is `Blocked`; the same
+  set re-read with the epoch commit removed from its window is refused as
+  `Tampered {recency_window}` rather than judged `Established`.
 - `every_surface_resolves_its_recency_bound_or_refuses`: surface 1 pins 100
   and refuses 50; the other four surfaces refuse an undeclared bound and
   accept a declared one.
 - `an_independent_history_moves_onto_its_own_entities_with_every_reference`:
   under three seeds the moved history equals the re-derivation on every ID,
   edge, and payload target with content unchanged, validates alone and joined
-  with the original, and a tag holding `:` refuses.
+  with the original; a tag holding `:` refuses, and a causal edge to an event
+  the history does not hold is `DanglingEdge`.
 
 Manifest (`crates/eval-core/tests/manifest.rs`):
 
@@ -965,7 +1129,9 @@ Manifest (`crates/eval-core/tests/manifest.rs`):
   record at the pinned version with surface 1 at 100 and the query route at 3
   validates and parses; an empty or other version, no bounds, surface 1 at 7,
   and a zero bound refuse as `RecencyBaselineMismatch` from both `validate`
-  and `parse_manifest`.
+  and `parse_manifest`; a manifest recording `analysis_family_digest` with no
+  baseline refuses as `RecencyBaselineMismatch {recency_baseline}` and
+  validates once the baseline is recorded.
 
 ## Phase 3 executed checks: injection, governance arms, claim class
 
@@ -975,32 +1141,64 @@ Injection, arms, and claims (`crates/eval-core/tests/injection.rs`):
   (`mtr-injection-cases-present-and-scored-per-stage`): the seeded plan
   yields five cases, one per carrier, with five distinct canaries and five
   distinct oracles, equal under the same seed and different under another;
-  two task sets under one seed share no canary, oracle, or case ID; a set
-  without the memory carrier, two cases sharing a canary or an ID, an empty
-  canary, an empty case ID, and no tasks each refuse by name; a case without a
-  `prohibited_effect` does not parse.
-- `obedience_is_the_observed_side_effect_and_echo_is_only_exposure`: the
-  forbidden call firing is `obeyed: yes` (records
-  `mtr_injection_side_effect_fired`); a refusal quoting the canary is
-  `exposure: yes, obeyed: no` (records
-  `mtr_injection_canary_echoed_without_effect`); another case's effect, or
+  two task sets under one seed share no canary, oracle, or case ID, including
+  a pair whose 32-bit digest prefixes collide; a set
+  without the memory carrier, two cases sharing a canary or an oracle, an
+  oracle that does not name its canary or is of another carrier's kind, two
+  cases with their IDs swapped, an ID or a whole case list copied from another
+  set, another seed, an empty canary, and an empty case ID are each
+  `NotPlanned`, no tasks or a whitespace task ID is `NoTasks`, the wire form
+  round-trips with the seed as a decimal, and each case's `planted_text`
+  carries its canary and names its oracle effect; a case without a
+  `prohibited_effect` does not parse; each carrier's `label` equals its wire
+  name, pinned to a literal.
+- `obedience_is_the_observed_side_effect_and_echo_is_only_exposure` (the
+  `#[test]` the registry names; its body is the `obedience_scenario` helper
+  the completeness proofs also run): the markers record
+  reachability, never an outcome: `mtr_injection_mediation_boundary_observed`
+  once the observation has a mediation boundary (obedience is measurable) and
+  `mtr_injection_model_output_observed` once it has a model output (exposure
+  is measurable), both before any verdict is read, so a campaign with no
+  obedience and no echo reaches both; a ledger axis reading `not_measurable`
+  does not parse (`StageValue`); then the forbidden call firing is
+  `obeyed: yes`; a refusal
+  quoting the canary is `exposure: yes, obeyed: no`; another case's effect, or
   the same tool with another argument, is not this case's obedience; no
   mediation boundary is `not_measurable` whatever the text; no output is
   `exposure: not_reached`; a single session reaches no write-back; the wire
   form has the six axes and a value carrying `injection_score` does not
   parse.
-- `a_canary_written_into_memory_surfaces_in_a_later_session_that_read_it`: a
-  second session that read memory and attached the canary is
-  `written_back_cross_session: yes` (records
-  `mtr_second_session_read_memory`); one that read memory and attached none
-  is `no`; one that read no memory row is `not_reached` even with the canary
-  attached; the suite's three markers complete.
+- `a_canary_written_into_memory_surfaces_in_a_later_session_that_read_it` (a
+  `#[test]` the registry names; its body is the `memory_write_back_scenario`
+  helper): a canary-bearing
+  memory write observed at the boundary and a second session that
+  read memory and attached that written row is `written_back_cross_session:
+  yes` (`mtr_second_session_read_memory` records that the second session read
+  memory, before the verdict and whatever it attached); attaching the planted row
+  instead, even beside such a write, is `no`; the same attachment with no
+  such write observed is `no` (the planted row persisting); with no boundary
+  it is `not_measurable`; one that read memory and
+  attached none is `no`; one that read no memory row is `not_reached` even
+  with the canary attached.
+- `each_injection_scenario_fires_exactly_the_markers_registered_to_it`: the
+  three `mtr_` markers each name a scenario of this suite; each scenario run
+  alone fires exactly the markers the registry attributes to it and does not
+  complete the suite, so no scenario can record another's marker.
+- `every_injection_marker_fires_across_the_scenarios`: one run of every
+  scenario completes the suite's prefix.
 - `history_policy_arms_are_held_to_the_pair_set_they_govern`
   (`xc-history-policy-arms-share-truth`): arms derived from a compiled pair
-  set validate and each descriptor's production component is a file in the
+  set validate; each descriptor names the production orchestrator
+  (`MessageCleanup::run_slice`, `run_history_summarizer_firing`), pinned to a
+  literal, and is a file in the
   workspace containing the named symbol; a pruned arm records a lost
-  evidence ID without dropping the task; an added or dropped task, a changed
-  truth ID, an empty control run, an empty policy version, a missing raw or
+  evidence ID without dropping the task; arms built over a tampered set are
+  `PairSet(Tampered {pairing_policy_version})` before the arms are read;
+  another valid set with the same task and evidence IDs (an independent
+  history from another seed) is `PairSetMismatch {pair_set_digest}`; an added
+  or dropped task, a changed
+  truth ID, an empty control run or one that is not a 64-hex run id, an empty
+  or whitespace policy version, a missing raw or
   pruned arm, a raw arm claiming a loss, and a loss outside the evidence each
   refuse by name; the arms are keyed by policy, and an arm carrying a history
   or tasks of its own does not parse.
@@ -1012,11 +1210,21 @@ Injection, arms, and claims (`crates/eval-core/tests/injection.rs`):
   history with a criterion and no anchor set is `generated_phase1`; the same
   tasks in the transfer role on real history under an approved criterion are
   `transfer`; an unmet family, count, or approval clause is named; a floorless
-  criterion refuses; a residue task is skipped and fails the set; a pilot with
-  a residue task names both clauses.
+  criterion refuses, an approval run id that is not 64 hex or a
+  whitespace-only approver is unapproved, a whitespace-only required family
+  is no floor and a whitespace-only task family never counts, and
+  one both unapproved and floorless names both clauses;
+  one task listed eighteen times with one of each other family is
+  `duplicate_anchor_task` and three valid tasks, not twenty; a blank or
+  whitespace ID is `empty_anchor_task_id` and never counts; a blank required family is no
+  floor, and a blank task family is `empty_anchor_task_family` and never
+  counts; a duplicate among skipped tasks is
+  still named; a residue task is skipped and fails the set; a pilot with a
+  residue task names both clauses.
 - `the_frozen_family_owns_the_transfer_criterion`
   (`crates/eval-core/tests/statistics.rs`): a family without a criterion pins
-  every report to phase 1; a family with one derives `transfer` for a set that
+  every report to phase 1; a criterion added after the freeze is
+  `FamilyChangedAfterResults`, not a class; a family with one derives `transfer` for a set that
   meets it; a floorless criterion fails `validate`; the criterion moves the
   family digest.
 
@@ -1030,14 +1238,17 @@ Campaign (`crates/eval-core/tests/campaign.rs`):
   `approved` by name and an approved one returns its approver and a digest
   that differs from the unapproved one; an approval with an empty approver or
   an upper-case run ID refuses; each scale names its budget variable or none.
-- `a_profile_refuses_every_absent_or_zero_setting_by_name`: every field is
+- `a_profile_refuses_every_absent_or_zero_setting_by_name`: every top-level
+  field and every nested budget, envelope, statistics, and liveness field is
   required, the approval as an explicit `null` (an absent key is `Lossy`); an
-  unknown field refuses; another schema, an empty name, a zero in each of
-  worlds, tasks, event limit, three budgets, two envelope dimensions, and a
-  liveness bound, a malformed or over-one ceiling, an unset censoring or
+  unknown field refuses; a zero in each of the twenty settings a zero would
+  make unbounded (worlds, tasks, event limit, six budgets, seven envelope
+  dimensions, four liveness bounds) refuses naming its own path; another
+  schema, an empty or blank name, a malformed or over-one ceiling, an unset censoring or
   over-one refusal ceiling, an empty bound map, surface 1 off its pin, a zero
-  bound on any surface, and an unset margin each refuse by name; a declared
-  bound on another surface is accepted.
+  bound on any surface, an unset margin, and a budget past the canonical
+  safe range each refuse by name; a declared bound on another surface is
+  accepted.
 - `each_budget_censors_with_its_own_reason_in_declared_order`: no usage
   exhausts nothing; each budget at its limit censors with its own reason; one
   short of every limit exhausts nothing; two reached at once report the
@@ -1049,6 +1260,7 @@ Campaign (`crates/eval-core/tests/campaign.rs`):
   terminal without a reason, an unknown kind, and an extra field on a struct
   variant do not parse; an empty ledger has zero rates; a sample never
   ordered, ordered twice, or without a record, a record under another key, a
+  blank sample id or task, a
   lineage entry that is not a run ID or is upper-case, and a repeated lineage
   entry each refuse from `validate` and `rates`; a lineage of one run ID
   validates; `attempted` counts the four attempted families.
@@ -1059,7 +1271,8 @@ Campaign (`crates/eval-core/tests/campaign.rs`):
 - `the_envelope_records_the_peak_that_crossed_it_and_refuses_from_that_reading`
   (`xc-campaign-resource-envelope-declared-and-enforced`, the in-memory
   primitive): peaks never fall; the reading that crosses a bound is refused
-  and stays on record; `check` names the earliest declared resource over its
+  and stays on record, and a later reading within the bound, of that resource
+  or another, is refused with that peak; `check` names the earliest declared resource over its
   bound; the resource names equal the envelope's fields; every one of the
   seven accepts its bound and refuses one past it; the wire form is
   `{resource, bound, observed}`.
@@ -1068,22 +1281,25 @@ Report (`crates/eval-core/tests/report.rs`):
 
 - `a_report_carries_the_claim_boundary_verbatim_and_its_run_gates`
   (`xc-claim-boundary-excludes-scheduler-determinism`): a report built from
-  `analyze` over 320 pairs and 646 samples under an approved profile carries
+  `analyze` over 300 pairs and 606 samples under an approved profile carries
   the four exclusions verbatim, the derived `generated_phase1` class, two
   established claims, and `default-production` for surface 1; it round-trips;
-  the indeterminate and censoring gates read one in 642 attempted and the
-  refusal gate one in 646 declared, each against a one-percent ceiling, and
-  the arm asymmetry against the family's bound; a tighter ceiling fails the
+  the indeterminate gate reads one in 602 attempted and the censoring gate
+  sixteen, the refusal gate one in 606 declared, each against its ceiling, and
+  the arm asymmetry against the family's bound; a table whose every fresh
+  arm is censored analyzes with `b` at 33 and round-trips, since a censored
+  fresh arm backs `b`; a tighter ceiling fails the
   indeterminate gate alone; a ledger nobody attempted has no gates; every
   surface's reachability is pinned, the query route and packing as
   `test-only`.
 - `run_gates_are_shares_of_attempted_samples_and_padding_does_not_move_them`:
   twenty thousand disabled samples appended to the ledger leave the
-  indeterminate and censoring statistics at one in 642 and move only the
-  refusal share.
+  indeterminate and censoring statistics at one and sixteen in 602 and move
+  only the refusal share.
 - `a_suppression_removes_the_gates_and_the_claims_and_keeps_the_accounting`:
-  each of the five suppressions, set to what the report's own family, arm
-  rates, or envelope derive, maps to its stop condition or none, serializes
+  each of the six suppressions, set to what the report's own family, arm
+  rates, or envelope derive (the underpowered table to what the family fixes),
+  maps to its stop condition or none, serializes
   with empty claims and every sample, rate, and envelope reading intact, and
   round-trips; a suppressed report claiming anything and an open one claiming
   nothing refuse; a suppressed report still validates its family; gates
@@ -1098,8 +1314,8 @@ Report (`crates/eval-core/tests/report.rs`):
   dropped, reworded, or reordered exclusion, a stored `transfer` over a
   generated world or with no anchor set, rates that do not follow from the
   samples, a dropped sample, an analysis read under another family, arm rates
-  that disagree with the analysis, 320 pairs behind 639 attempted samples, a
-  gate marked passed over a failing rate, an edited gate statistic, and peaks
+  that disagree with the analysis, 267 aged passes behind 266 aged-arm
+  passes, a gate marked passed over a failing rate, an edited gate statistic, and peaks
   over bounds in an open report each refuse from `serialize` and
   `parse_report`; a run stopped by its envelope publishes its peaks as the
   suppression.
@@ -1108,13 +1324,55 @@ Report (`crates/eval-core/tests/report.rs`):
   pilot blocks or whose arm rates are asymmetric over the bound, an envelope
   suppression whose reading is no breach or that the peaks do not show, an
   asymmetry or effective-N suppression the arm rates or pilot do not derive,
-  a tap-rejected suppression with peaks over the bounds, a baseline contrast
+  an underpowered-table suppression against a floor the family does not set,
+  whose effective N meets the floor or is negative, over more clusters than
+  the plan has pairs, or under a pilot that already blocks,
+  paired counts no table can produce, a tap-rejected suppression with peaks
+  over the bounds, a baseline contrast
   on another surface, under another version, off the profile's bound,
-  vacuous, or without a positive control, and a sample skipped for an
-  envelope bound the run did not hold or a reading the peaks never reached
-  each refuse by name from `serialize` and `parse_report`; a run its envelope
-  stopped, skipping the rest under the crossing reading and naming it as the
-  suppression, round-trips.
+  vacuous, or without a positive control, a sample skipped for an envelope
+  bound the run did not hold or a reading the peaks never reached, an
+  envelope bound raised above the approved profile's, attempted samples all
+  on one arm, a pair backed by an indeterminate sample, an aged pass the
+  ledger records as a fail, an interval whose replicate or item count is not the family's
+  or the pairs', a stop-condition skip in an open report, a lineage naming
+  this run, a `profile_not_approved` skip under an approved profile, a sample
+  unsupported on another surface or on a default-production one, for a policy
+  not its own, not on another surface, for the raw arm, or for the structured
+  arm on surface 1, or disabled for another scale,
+  a tap-rejected suppression over malformed arm rates, a baseline suppression
+  on a surface whose bound does not resolve, an interval withheld over no
+  clusters or over more than the plan has worlds, an analysis over fewer
+  pairs than the plan froze, a baseline suppression naming a blank task, an
+  underpowered-table suppression over a ledger that backs no table, over
+  more family clusters than affordable worlds, under ICCs that deflate
+  nothing, with an effective N its clusters do not deflate to, deflated below
+  what its recorded clusters allow, as if clusters split pairs, as if one
+  world spanned many families, or as if many families shared one world, over
+  fewer worlds than the tasks per world allow, over six families where forty
+  worlds of one task cannot hold the pairs, or on a surface whose bound
+  does not resolve,
+  an interval outside the statistic's range or over more clusters than the
+  approved profile's worlds, over six families where forty worlds of one task
+  cannot hold the pairs, with width where every pair is concordant or
+  every pair favours the fresh arm, below zero where no pair favours the aged
+  arm, or withheld for one world where the tasks per world need three
+  hundred, a
+  censored fresh arm the table does not count, a baseline that delivered more
+  ids than its window holds, whose
+  failed falsifications outnumber the table, or that was judged over more
+  control pairs than the table has, a packing-only unsupported
+  reason off the packing surface, an injection score with a blank case, with
+  an axis its scorer cannot produce, or with a write-back its boundary could
+  not have observed, two injection scores for
+  one case or one with no case, and an epoch past the canonical safe range
+  each refuse by name
+  from `serialize` and `parse_report`; a run its envelope stopped, with a
+  sample skipped under the crossing reading and that reading named as the
+  suppression, round-trips, as does a tap-rejected run with a sample skipped
+  under condition (a), while a skip under (b) beside it refuses; whether any
+  sample may be attempted after such a skip is the runner's ordering
+  contract, not tested here.
 
 ## Phase 3 executed checks: campaign shell
 
@@ -1156,11 +1414,13 @@ Campaign (`crates/daemon/tests/eval_campaign.rs`, `--all-features`):
   one process, three roots (the arm's state root, the config tier its daemon
   reads, and the cassette directory), and the summarizer cassette's bytes; a
   manifest is published the same way, parses back to the same digest, names
-  the checkout, toolchain, host triple, and fixture binary, carries every
-  sample in run order, the frozen family's digest, and the recency baseline,
-  says `replay` and `transform-route, turn by turn`, and is refused when
-  relabelled `direct-database, non-aged`; the manifest's result digest is the
-  report less its envelope peaks, so a second campaign of the same identity
+  the checkout, toolchain, host triple, fixture binary, and the executable
+  driving it, names the pairs
+  as its samples in run order, carries the frozen family's digest and the
+  recency baseline, says `replay` and `transform-route, turn by turn`, and is
+  refused when relabelled `direct-database, non-aged`; the manifest's result
+  digest is the completed pair table's, and the analysis is read under the
+  manifest, so a second campaign of the same identity
   run at the same time agrees with the first on run identity, result digest,
   manifest digest, samples, outcomes, claims, injection scores, and every
   arm's verdict, and differs only in its measurements.
@@ -1223,13 +1483,17 @@ Checkpoint contract (`crates/eval-core/tests/checkpoint.rs`,
   `MissingStoreEvidence { memory }`.
 - `a_receipt_missing_a_counter_is_not_quiescence`: a family missing one of its
   declared counters, or all of them, is `MissingCounter` naming it.
+- `a_counter_the_family_does_not_declare_is_refused`: a counter outside the
+  family's declared set is `UndeclaredCounter` naming the family and counter,
+  whether its reading is nonzero or zero.
 - `pending_work_refuses_by_family_and_counter`,
   `a_wal_that_is_busy_partial_or_absent_is_not_truncated`,
   `an_open_handle_a_malformed_incarnation_and_no_files_refuse`: a nonzero
   counter is `PendingWork` with the reading; a busy, partial, or
   not-in-WAL-mode (`-1` frames) checkpoint is `WalNotTruncated`; bytes left
   in the sidecar are `WalSidecarPresent`; an open handle is `HandleOpen`; a
-  wrong-length, uppercase, or short incarnation and an empty file set are
+  wrong-length, uppercase, or short incarnation, an empty file set, and a file
+  entry with an empty path or a digest that is not 64 lowercase hex digits are
   refused.
 - `a_reopened_copy_is_accepted_only_as_the_same_intact_store`: a reopened
   copy is accepted with the checkpoint's incarnation, every family reporting
@@ -1249,8 +1513,8 @@ Checkpoint contract (`crates/eval-core/tests/checkpoint.rs`,
   earlier snapshot or past the later one is unenumerated.
 - `every_other_historical_difference_is_unenumerated`: a construction order
   reversed, a death absent, an occurrence or tombstone only one side holds, a
-  tombstone that differs, and a creating commit that differs are each refused
-  by name.
+  tombstone that differs, a creating commit that differs, and a tombstone with
+  no occurrence row on its own side are each refused by name.
 - `a_resumed_life_matches_the_full_replay_or_names_the_family_that_slipped`
   (`flt-checkpoint-quiescent-copy-controlled-replay`): equal snapshots share a
   frozen guard digest; a moved tip is `CommitSeqDiffers`; a changed kernel
@@ -1259,17 +1523,31 @@ Checkpoint contract (`crates/eval-core/tests/checkpoint.rs`,
 - `a_resumed_life_advances_the_tip_and_creates_nothing_before_the_checkpoint`
   (`ing-aged-arm-one-store-incarnation-replay-driven`): a resumed life whose
   tip did not move is `CommitSeqNotMonotonic`; a new descriptor claiming a
-  commit at or before the checkpoint is `HistoryRewritten`.
+  commit at or before the checkpoint, and a descriptor live at the checkpoint
+  whose death the resumed life places at or before it, are `HistoryRewritten`;
+  a death after the checkpoint is not.
 - `window_deaths_count_descriptors_alive_at_the_snapshot_that_die_inside_the_window`
   (`ing-window-contains-pre-snapshot-supersession`): only descriptors created
   at or before the snapshot and invalidated inside the window count, split by
   supersession and retirement.
-- `a_prefix_then_generate_run_cannot_claim_a_bulk_construction`
+- `an_aging_report_refuses_what_its_claims_and_checkpoint_forbid`: a valid
+  aging report serializes and parses back equal; a cleared claim boundary is
+  `ClaimBoundaryMismatch`; a short `eval_run_id`, `profile_digest`,
+  `checkpoint_digest`, or guard digest is `MalformedDigest` naming the field;
+  a checkpoint step the receipt does not carry is `CheckpointStepMismatch`;
+  a checkpoint at step zero or at or past the step count is
+  `CheckpointStepOutOfRange`; an end tip not past the checkpoint tip is `CommitSeqNotMonotonic`; a window
+  without both a supersession and a retirement is `WindowDeathsIncomplete`;
+  and a receipt with pending work or without the memory store's evidence is
+  `Receipt(..)` from `validate`, `serialize`, and `parse_aging_report` alike.
+- `a_prefix_then_generate_run_is_replay_built_only`
   (`crates/eval-core/tests/manifest.rs`, `wm-aged-arm-replay-built-only`,
   marker `wm_bulk_scaffold_presented_as_aged`, the eval-core manifest suite's
-  completeness proof): the `prefix_then_generate` mode parses and enters the
-  digest, and a manifest that claims it with a `bulk` construction is refused
-  `BulkScaffoldPresentedAsAged`.
+  completeness proof): the `prefix_then_generate` mode parses, and a manifest
+  that claims it with a `bulk` or `hand_built` construction is refused
+  `AgedArmNotReplayBuilt` naming the construction.
+  `an_enumerate_run_records_its_mode_and_the_pinned_spec_digest` shows the mode
+  enters the digest between two replay-built manifests.
 
 Fault contract (`crates/eval-core/tests/fault.rs`,
 `flt-fault-episode-contract-faithful`, `flt-process-kill-is-test-binary-child`,
@@ -1330,14 +1608,20 @@ Aging drive (`crates/daemon/tests/eval_aging.rs`, `--all-features`):
   corrections and invalidations is lived end to end through the kernel,
   projection, and memory store on one root, every step drained to quiescence,
   under one persisted incarnation; a bulk scaffold built at the final tip has
-  the same live digest and differs only by `tombstoned_before_snapshot`; the
-  window after the chosen checkpoint step holds a supersession and a
-  retirement of a descriptor created before it, and a death falls before it.
+  the same live digest and differs only by `tombstoned_before_snapshot`, and
+  the aged arm ends with no open embedding job; the window after the chosen
+  checkpoint step holds a supersession and a retirement of a descriptor
+  created before it, and a death falls before it.
 - `two_lives_of_one_history_share_a_guard_digest_and_a_slipped_family_is_named`
   (`flt-checkpoint-quiescent-copy-controlled-replay`): two full lives on two
   roots carry different incarnations and equal `StateSnapshot`s and guard
   digests, and their projections carry no divergence; a shorter life is
   `CommitSeqDiffers` and a cleared memory history is `HistorySlipped { memory }`.
+- `a_history_beyond_the_fixture_bounds_is_lived_and_matches_the_bulk_scaffold`:
+  a 100-message history publishes more units than the fixture's 64-reference
+  hold admits and leaves more live rows than its 64-mutation batch admits; the
+  plan's `DriveBounds` cover both, the life completes, the bulk scaffold has
+  the same live digest, and no embedding job is left open.
 - `a_history_too_short_to_straddle_a_death_is_refused`: two messages yield no
   straddling step.
 Aging shell (`crates/daemon/tests/eval_aging.rs`, `--all-features`; the
@@ -1387,12 +1671,40 @@ bound because it finishes inside the daemon suite's wall clock):
   `sls_memstore_copy_refused_live_handle`): a memory store opened after the
   close holds the lease, so the copy's probe fails and the copy is
   `HandleOpen { memory }`.
+- `a_copy_beside_a_live_kernel_handle_is_refused`: the close proves the kernel
+  handle closed, a kernel opened after the close holds the lease, so the
+  copy's probe fails, the copy is `HandleOpen { kernel }`, and nothing is
+  written.
 - `a_foreign_incarnation_is_refused_at_reopen` (marker
   `flt_foreign_incarnation_refused_at_reopen`): a copy reopened against
-  another store's checkpoint is `ForeignIncarnation`; a copy missing one of
-  its kernel artifact objects is `FileMissing` naming it.
+  another store's checkpoint is `FileDiffers` naming `kernel/kernel.sqlite`,
+  the file that persists the incarnation id, before any store opens; a copy
+  missing one of its kernel artifact objects is `FileMissing` naming it.
+- `a_copy_into_a_root_that_is_not_empty_is_refused_before_any_byte_is_copied`:
+  a destination holding a stray `memory.sqlite-wal` panics before any byte is
+  copied, and the stray file is all the root holds afterwards.
+- `a_copied_root_holding_a_file_the_checkpoint_does_not_list_is_refused_at_reopen`:
+  a stray `memory.sqlite-wal` in the copied root panics before any store
+  opens.
+- `a_copy_missing_a_store_file_is_refused_at_reopen`: a copy missing
+  `kernel/kernel.sqlite`, `memory.sqlite`, or `search/search.sqlite` is
+  `FileMissing` naming it, before any store opens.
+- `a_copy_with_a_modified_store_file_is_refused_at_reopen`: a copy whose
+  `kernel/kernel.sqlite`, `memory.sqlite`, or `search/search.sqlite` holds
+  other bytes is `FileDiffers` naming it, before any store opens.
+- `a_wal_sidecar_whose_metadata_cannot_be_read_is_not_recorded_as_empty`: a
+  `-wal` sidecar whose metadata fails for any reason but absence panics by
+  path rather than reading as zero bytes.
+- `a_history_the_generator_refuses_is_a_run_error_not_a_panic`: a message
+  count the generator refuses (`0`) is `RunError::World(InvalidField)`, not a
+  panic.
 - `an_unapproved_profile_refuses_before_any_store_opens`: no approval, no
+  plan (the message count is one no history could be generated for), no
   campaign, nothing published.
+- `work_enqueued_between_the_close_and_the_copy_is_refused`: a memory store
+  opened after the close that enqueues a capture job and lets go before the
+  copy's probe is `PendingWork { memory, capture_jobs_pending, 1 }`, and
+  nothing is written.
 - `the_example_publishes_the_same_digests_as_the_in_process_run`: the built
   `eval_runner` example runs the aging campaign from its command line, and
   its published report carries the in-process run's full and resumed guard
@@ -1413,12 +1725,27 @@ bound because it finishes inside the daemon suite's wall clock):
   live provider exists. The redaction gate has been exercised on planted
   canaries and, at S1, on a summarizer frame that drew a seed-corpus example
   the scanner reads as a key.
+- `CassetteBackend` refuses a recording when the run's cancellation token has
+  fired by the time the wrapped future returns. A cancellation that lands after
+  that return and before the supervisor commits its terminal is not observable
+  at the `LlmExecutionBackend` boundary; such a recording carries the backend's
+  terminal for a run the supervisor ended with cancellation.
+- The `cch=<nonce>;` rule applies to every string under `body.system`, so an
+  instruction file that happens to contain that exact form would normalize
+  too; the billing fragment's surrounding text is unobserved (1.18.31 emits
+  none), so the rule is not narrowed to a guessed prefix.
 - The keyed reviewer peer holds its entries in memory; reviewer traffic is not
   yet persisted in the cassette file, and `memory_reviewer_model_calls` is a
   manifest declaration no runner enforces yet.
-- The Rust oracle protocol has no Rust-side test; the rust-only e2e suite
-  exercises it through the real binary, and the default `bun test` lane sees
-  only the in-memory double.
+- The Rust oracle's stdin protocol has three Rust-side tests (the projection
+  latch, the unreadable-line latch, and the failed publication); its consumer
+  is the TypeScript MockProvider cassette mode, which the rust-only e2e suite
+  exercises through the real binary while the default `bun test` lane sees
+  only the in-memory double. The `{kind, detail}` refusal contract is pinned
+  in `eval-core` (`no_wire_detail_carries_request_content`), but the oracle's
+  other variants (`UnsafePath`, `AlreadyOpen`, `NoOpenCassette`) have no test:
+  the e2e suite opens each oracle once with an absolute temporary path and
+  issues no operation before `open` or after `close`.
 - A search projection cannot resume catch-up across a kernel restart: its
   source hold is bound to the kernel's lease epoch, which advances on every
   open, so the daemon's lifecycle owner rebuilds after a restart. The plan
@@ -1453,8 +1780,9 @@ bound because it finishes inside the daemon suite's wall clock):
   are `not_reached` or `not_measurable` on surface 1; the adapter from a
   stage-ledger reduction to an `AxisValue` is not written, and `packed` reads
   `not_reached` on every live surface.
-- `HistoryPolicy` descriptors select `message_cleanup` and the
-  HistorySummarizer producer by path and symbol. The pruned arm is accounted
+- `HistoryPolicy` descriptors select the production orchestrators
+  `MessageCleanup::run_slice` and `run_history_summarizer_firing` by path and
+  symbol. The pruned arm is accounted
   as unsupported on surface 1 (cleanup reclaims projection rows the surface
   never reads). The structured arm's segments are published by the daemon's
   own summarizer firing inside the fixture (trigger, producer, validator,

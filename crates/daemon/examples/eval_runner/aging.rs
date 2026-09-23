@@ -2,6 +2,7 @@
 //! checkpoint.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::num::{NonZeroU64, NonZeroUsize};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -20,14 +21,18 @@ use eval_core::{
     ProjectionRows, QuiescenceReceipt, REDUCER_VERSION, Reachability, RenderConfig, Rendering,
     Reopened, RestoreRefused, RunIdentity, RunProfile, RunStatus, Scale, Segment, SessionSpec,
     StateSnapshot, StoreFamily, StoreIntegrity, StoreQuiescence, TokenizerProfile, Unenumerated,
-    WalCheckpoint, WindowDeaths, WorkCounter, WorldConfig, eval_run_id, generate_all, render,
+    WalCheckpoint, WindowDeaths, WorkCounter, WorldConfig, WorldError, eval_run_id, generate_all,
+    render,
 };
 use kernel::{
-    ArtifactDestination, CommitPageBounds, CurrentInputDescriptor, EligibilityBinding,
-    ProjectScope, ProviderEgress, Sensitivity, SourceRow,
+    ArtifactDestination, CommitPageBounds, CurrentInputDescriptor, EligibilityBinding, KernelError,
+    KernelStore, ProjectScope, ProviderEgress, Sensitivity, SourceHoldAdmission, SourceHoldBounds,
+    SourceRow,
 };
 use lease::{HeldFileLease, LeaseError};
 use memory_store::{MemoryStore, MemoryStoreError, StoredHistorySegment};
+use retrieval::PersistBounds;
+use retrieval::batch::BatchBounds;
 use rusqlite::{Connection, OpenFlags};
 use serde_json::{Value, json};
 use storage::StoreError;
@@ -36,8 +41,8 @@ use super::campaign::{
     Charges, identity, parse_flags, prepare_publish, profile as suite_b, publish_file, sha256_hex,
 };
 use super::support::embedding_fixtures::{
-    Corpus, GENERATION, PROJECT, SCOPE, TestEngine, batch_bounds, generation, hold_admission,
-    intent, kernel_incarnation_id, source_page_bounds,
+    Corpus, GENERATION, PROJECT, SCOPE, TestEngine, batch_bounds, generation, hold_bounds, intent,
+    kernel_incarnation_id, source_page_bounds,
 };
 
 pub const SEED: u64 = 0x5EED_C000_0000_0004;
@@ -75,6 +80,8 @@ pub enum RunError {
     Guard(#[from] Unenumerated),
     #[error("report refused: {0}")]
     Report(#[from] AgingReportError),
+    #[error("history refused: {0:?}")]
+    World(#[from] WorldError),
     #[error("no step straddles a supersession and a retirement")]
     NoStraddlingStep,
     #[error("publish {}: {kind}", path.display())]
@@ -90,15 +97,22 @@ fn publish_refused((path, kind): (PathBuf, std::io::ErrorKind)) -> RunError {
 
 pub fn profile(
     scale: Scale,
-    steps: u32,
+    messages: u32,
     elapsed_ms: u64,
     approval: Option<Approval>,
 ) -> RunProfile {
-    let mut profile = suite_b(scale, steps.max(64) * 2, elapsed_ms, approval);
+    let mut profile = suite_b(scale, event_bound(messages), elapsed_ms, approval);
     profile.name = profile.name.replace("surface1-raw", "suite-c-aging");
     profile.tasks_per_world = 1;
     profile.envelope.temp_roots = 4;
     profile
+}
+
+/// The one event bound the generator enforces on the log and the profile
+/// declares, so the two cannot drift; saturating, so an absurd message count
+/// reaches the profile's refusal instead of overflowing here.
+fn event_bound(messages: u32) -> u32 {
+    messages.max(64).saturating_mul(2)
 }
 
 fn world(messages: u32) -> WorldConfig {
@@ -112,7 +126,7 @@ fn world(messages: u32) -> WorldConfig {
         repositories: Vec::new(),
         epoch_ms: EPOCH_MS,
         tick_ms: 1_000,
-        max_events_per_log: messages.max(64) * 2,
+        max_events_per_log: event_bound(messages),
         planted: Vec::new(),
     }
 }
@@ -172,22 +186,21 @@ fn deaths(log: &EventLog, steps: &[Planned]) -> Vec<Option<(usize, Died)>> {
             _ => event.id.clone(),
         }
     };
-    let mut born: BTreeMap<EventId, usize> = BTreeMap::new();
+    // The step that created each lineage's live object, as the stores see it:
+    // a publish supersedes the live object or, after a retirement, starts a
+    // new life; a retirement kills the live object once.
+    let mut live: BTreeMap<EventId, usize> = BTreeMap::new();
     steps
         .iter()
         .enumerate()
-        .map(|(index, planned)| {
-            let (id, death) = match &planned.step {
-                Step::Publish(id) => (id, Died::Supersession),
-                Step::Retire(id) => (id, Died::Retirement),
-            };
-            let lineage = lineage_of(id);
-            match born.get(&lineage) {
-                Some(&at) => Some((at, death)),
-                None => {
-                    born.insert(lineage, index);
-                    None
-                }
+        .map(|(index, planned)| match &planned.step {
+            Step::Publish(id) => {
+                let born = live.insert(lineage_of(id), index);
+                born.map(|at| (at, Died::Supersession))
+            }
+            Step::Retire(id) => {
+                let born = live.remove(&lineage_of(id));
+                born.map(|at| (at, Died::Retirement))
             }
         })
         .collect()
@@ -213,18 +226,72 @@ fn straddling_step(log: &EventLog, steps: &[Planned]) -> Option<u32> {
     candidates.first().map(|k| *k as u32)
 }
 
-fn episode_bounds() -> EpisodeBounds {
+/// The hold admission limit counts total references, so it must cover every
+/// published unit.
+#[derive(Debug, Clone, Copy)]
+pub struct DriveBounds {
+    pub hold: SourceHoldBounds,
+    pub batch: BatchBounds,
+}
+
+impl DriveBounds {
+    fn admitting(rendering: &Rendering, steps: &[Planned]) -> Self {
+        let messages: BTreeMap<&EventId, &Value> = rendering
+            .messages
+            .iter()
+            .map(|m| (&m.event_id, &m.message))
+            .collect();
+        let (mut units, mut bytes) = (0usize, 0usize);
+        for planned in steps {
+            let Step::Publish(id) = &planned.step else {
+                continue;
+            };
+            for unit in opencode_units(&session(), messages[id]).unwrap() {
+                units += 1;
+                bytes += unit.text.len();
+            }
+        }
+        let raise = |floor: NonZeroUsize, demand: usize| {
+            floor.max(NonZeroUsize::new(demand).unwrap_or(floor))
+        };
+        let hold = hold_bounds();
+        let batch = batch_bounds();
+        let encoded = hold.admission.max_encoded_bytes;
+        Self {
+            hold: SourceHoldBounds {
+                max_descriptor_rows: raise(hold.max_descriptor_rows, units),
+                admission: SourceHoldAdmission {
+                    max_references: raise(hold.admission.max_references, units),
+                    max_encoded_bytes: encoded
+                        .max(NonZeroU64::new(bytes as u64).unwrap_or(encoded)),
+                },
+                ..hold
+            },
+            batch: BatchBounds {
+                persist: PersistBounds {
+                    max_records: raise(batch.persist.max_records, units),
+                    ..batch.persist
+                },
+                max_source_bytes: raise(batch.max_source_bytes, bytes),
+                max_local_mutations: raise(batch.max_local_mutations, units),
+                max_pending: raise(batch.max_pending, units),
+            },
+        }
+    }
+}
+
+fn episode_bounds(bounds: &DriveBounds) -> EpisodeBounds {
     EpisodeBounds {
         commits: CommitPageBounds {
             max_commits: 64.try_into().unwrap(),
             max_rows: 64.try_into().unwrap(),
             max_payload_bytes: (1u64 << 20).try_into().unwrap(),
         },
-        hold_admission: hold_admission(),
+        hold_admission: bounds.hold.admission,
         source_page: source_page_bounds(),
         max_source_pages: 8.try_into().unwrap(),
         max_source_encoded_bytes: (1u64 << 20).try_into().unwrap(),
-        batch: batch_bounds(),
+        batch: bounds.batch,
     }
 }
 
@@ -259,32 +326,39 @@ pub struct Stores {
     consumer: CatchUpConsumer,
     memory: MemoryStore,
     rendering: Rendering,
+    bounds: DriveBounds,
     chains: BTreeMap<String, Vec<String>>,
     dead: BTreeSet<String>,
     applied: u32,
 }
 
 impl Stores {
-    pub fn open(root: &Path, rendering: Rendering) -> Self {
+    pub fn open(root: &Path, plan: &Plan) -> Self {
         let corpus = Corpus::open(root);
         corpus.seed();
         let memory = MemoryStore::open(&daemon::store_descriptor_in(root)).unwrap();
-        let (projection, consumer) = Self::bootstrap(&corpus, root, EPOCH_MS);
+        let (projection, consumer) = Self::bootstrap(&corpus, root, &plan.bounds, EPOCH_MS);
         Self {
             root: root.to_path_buf(),
             corpus,
             projection,
             consumer,
             memory,
-            rendering,
+            rendering: plan.rendering.clone(),
+            bounds: plan.bounds,
             chains: BTreeMap::new(),
             dead: BTreeSet::new(),
             applied: 0,
         }
     }
 
-    fn bootstrap(corpus: &Corpus, root: &Path, now: i64) -> (SearchProjection, CatchUpConsumer) {
-        let (projection, hold, _) = corpus.bootstrap_with_hold(root);
+    fn bootstrap(
+        corpus: &Corpus,
+        root: &Path,
+        bounds: &DriveBounds,
+        now: i64,
+    ) -> (SearchProjection, CatchUpConsumer) {
+        let (projection, hold, _) = corpus.bootstrap_within(root, bounds.hold, bounds.batch);
         let binding = corpus.binding();
         corpus
             .kernel
@@ -410,10 +484,11 @@ impl Stores {
     pub fn drain(&mut self, now: i64) {
         self.publish_outbox();
         let tip = self.tip();
+        let bounds = episode_bounds(&self.bounds);
         let mut catch_up = SearchCatchUp::new(&self.corpus.kernel, &self.projection);
         for _ in 0..MAX_EPISODES_PER_DRAIN {
             let report = catch_up
-                .run_episode(&self.consumer, &episode_bounds(), now, &mut |_| {})
+                .run_episode(&self.consumer, &bounds, now, &mut |_| {})
                 .unwrap();
             assert_eq!(report.end, EpisodeEnd::ReachedTarget, "{report:?}");
             if report.acknowledged_through >= tip {
@@ -425,37 +500,22 @@ impl Stores {
             0,
             "the drain reaches the tip"
         );
-        embed_pending(&self.corpus, &self.projection, &self.root, now);
+        embed_pending(
+            &self.corpus,
+            &self.projection,
+            &self.root,
+            self.bounds.hold,
+            now,
+        );
+        assert_eq!(
+            self.pending(WorkCounter::EmbeddingOpen),
+            0,
+            "the drain embeds every open job"
+        );
     }
 
     fn pending(&self, counter: WorkCounter) -> u64 {
-        match counter {
-            WorkCounter::OutboxUnpublished => {
-                self.corpus.kernel.pending_outbox(1024).unwrap().len() as u64
-            }
-            WorkCounter::CatchUpLag => {
-                let acknowledged: i64 = read_only(&search_file(&self.root))
-                    .query_row(
-                        "SELECT checkpoint_commit_seq FROM projection_checkpoint",
-                        [],
-                        |row| row.get(0),
-                    )
-                    .unwrap();
-                u64::try_from(self.tip() - acknowledged).unwrap()
-            }
-            WorkCounter::EmbeddingOpen => count(
-                &search_file(&self.root),
-                "SELECT COUNT(*) FROM embedding_jobs WHERE state IN ('pending','admitted')",
-            ),
-            WorkCounter::CaptureJobsPending => count(
-                &memory_file(&self.root),
-                "SELECT COUNT(*) FROM memory_capture_jobs WHERE commit_seq IS NULL AND abandoned_at_ms IS NULL",
-            ),
-            WorkCounter::ReviewerJobsOpen => count(
-                &memory_file(&self.root),
-                "SELECT COUNT(*) FROM memory_reviewer_jobs WHERE state<>'terminal'",
-            ),
-        }
+        pending(&self.root, &self.corpus.kernel, counter)
     }
 
     pub fn snapshot(&self) -> StateSnapshot {
@@ -472,25 +532,14 @@ impl Stores {
     }
 
     pub fn close(self) -> Closed {
-        let pending: BTreeMap<StoreFamily, BTreeMap<WorkCounter, u64>> = StoreFamily::ALL
-            .into_iter()
-            .map(|family| {
-                let counters = family
-                    .counters()
-                    .iter()
-                    .map(|counter| (*counter, self.pending(*counter)))
-                    .collect();
-                (family, counters)
-            })
-            .collect();
+        let pending = pending_counters(&self.root, &self.corpus.kernel);
         let Stores {
             root,
             corpus,
             projection,
             memory,
             rendering,
-            chains,
-            dead,
+            bounds,
             applied,
             ..
         } = self;
@@ -546,11 +595,55 @@ impl Stores {
             receipt,
             search_lease,
             rendering,
-            chains,
-            dead,
+            bounds,
             applied,
         }
     }
+}
+
+fn pending(root: &Path, kernel: &KernelStore, counter: WorkCounter) -> u64 {
+    match counter {
+        WorkCounter::OutboxUnpublished => kernel.pending_outbox(1024).unwrap().len() as u64,
+        WorkCounter::CatchUpLag => {
+            let acknowledged: i64 = read_only(&search_file(root))
+                .query_row(
+                    "SELECT checkpoint_commit_seq FROM projection_checkpoint",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            u64::try_from(kernel.tip().unwrap() - acknowledged).unwrap()
+        }
+        WorkCounter::EmbeddingOpen => count(
+            &search_file(root),
+            "SELECT COUNT(*) FROM embedding_jobs WHERE state IN ('pending','admitted')",
+        ),
+        WorkCounter::CaptureJobsPending => count(
+            &memory_file(root),
+            "SELECT COUNT(*) FROM memory_capture_jobs WHERE commit_seq IS NULL AND abandoned_at_ms IS NULL",
+        ),
+        WorkCounter::ReviewerJobsOpen => count(
+            &memory_file(root),
+            "SELECT COUNT(*) FROM memory_reviewer_jobs WHERE state<>'terminal'",
+        ),
+    }
+}
+
+fn pending_counters(
+    root: &Path,
+    kernel: &KernelStore,
+) -> BTreeMap<StoreFamily, BTreeMap<WorkCounter, u64>> {
+    StoreFamily::ALL
+        .into_iter()
+        .map(|family| {
+            let counters = family
+                .counters()
+                .iter()
+                .map(|counter| (*counter, pending(root, kernel, *counter)))
+                .collect();
+            (family, counters)
+        })
+        .collect()
 }
 
 const NOT_TRUNCATED: WalCheckpoint = WalCheckpoint {
@@ -578,11 +671,15 @@ fn truncate(file: &Path) -> WalCheckpoint {
     )
 }
 
-fn sidecar_len(file: &Path) -> u64 {
+pub fn sidecar_len(file: &Path) -> u64 {
     assert!(file.is_file(), "{} exists", file.display());
     let mut wal = file.as_os_str().to_owned();
     wal.push("-wal");
-    std::fs::metadata(wal).map(|m| m.len()).unwrap_or(0)
+    match std::fs::metadata(&wal) {
+        Ok(metadata) => metadata.len(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => 0,
+        Err(e) => panic!("{}: {e}", PathBuf::from(wal).display()),
+    }
 }
 
 fn count(file: &Path, sql: &str) -> u64 {
@@ -597,8 +694,7 @@ pub struct Closed {
     pub receipt: QuiescenceReceipt,
     search_lease: Option<HeldFileLease>,
     rendering: Rendering,
-    chains: BTreeMap<String, Vec<String>>,
-    dead: BTreeSet<String>,
+    bounds: DriveBounds,
     applied: u32,
 }
 
@@ -608,18 +704,39 @@ impl Closed {
     }
 
     pub fn copy(mut self, into: &Path) -> Result<(Checkpoint, Copied), CheckpointRefused> {
-        let memory_file = memory_file(&self.root);
-        let memory = self.receipt.stores.get_mut(&StoreFamily::Memory).unwrap();
-        match MemoryStore::open(&daemon::store_descriptor_in(&self.root)) {
-            Ok(probe) => {
-                drop(probe);
-                memory.wal = truncate(&memory_file);
-                memory.wal_sidecar_bytes = sidecar_len(&memory_file);
-            }
-            Err(MemoryStoreError::Store(StoreError::Lease(LeaseError::Held { .. }))) => {
-                memory.handles_closed = false;
-            }
+        // The destination is a root this run owns and nothing else has
+        // written: SQLite would read a sidecar left there beside the verified
+        // copy, so anything already present is a programming error.
+        match std::fs::read_dir(into) {
+            Ok(mut entries) => assert!(
+                entries.next().is_none(),
+                "{} is empty before the copy",
+                into.display()
+            ),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => panic!("{}: {e}", into.display()),
+        }
+        // Each probe stays held until the copy is done, as the projection's
+        // lease does, so no other holder can take the store while its bytes
+        // are read.
+        let memory_probe = match MemoryStore::open(&daemon::store_descriptor_in(&self.root)) {
+            Ok(probe) => Some(probe),
+            Err(MemoryStoreError::Store(StoreError::Lease(LeaseError::Held { .. }))) => None,
             Err(e) => panic!("memory store probe at {}: {e}", self.root.display()),
+        };
+        self.seal_after_probe(StoreFamily::Memory, memory_probe.is_none());
+        let kernel_probe = match KernelStore::open(kernel_file(&self.root).parent().unwrap()) {
+            Ok(probe) => Some(probe),
+            Err(KernelError::Held) => None,
+            Err(e) => panic!("kernel probe at {}: {e}", self.root.display()),
+        };
+        self.seal_after_probe(StoreFamily::Kernel, kernel_probe.is_none());
+        // Work left by a holder that took a lease between the close and its
+        // probe is counted here, while both probes are held.
+        if let Some(kernel) = &kernel_probe {
+            for (family, counters) in pending_counters(&self.root, kernel) {
+                self.receipt.stores.get_mut(&family).unwrap().pending = counters;
+            }
         }
         let incarnation_id = kernel_incarnation_id(&self.root);
         Checkpoint::admit(&self.receipt, &incarnation_id)?;
@@ -628,17 +745,31 @@ impl Closed {
             copy_file(&self.root, into, &relative, &mut files);
         }
         drop(self.search_lease);
+        drop(memory_probe);
+        drop(kernel_probe);
         let checkpoint = Checkpoint::new(self.receipt, incarnation_id, files)?;
         Ok((
             checkpoint,
             Copied {
                 root: into.to_path_buf(),
                 rendering: self.rendering,
-                chains: self.chains,
-                dead: self.dead,
+                bounds: self.bounds,
                 applied: self.applied,
             },
         ))
+    }
+
+    /// Close-time evidence cannot see a handle opened after the close. A probe
+    /// refused by another holder's lease marks the family's handle open.
+    fn seal_after_probe(&mut self, family: StoreFamily, held: bool) {
+        let file = store_file(&self.root, family);
+        let store = self.receipt.stores.get_mut(&family).unwrap();
+        if held {
+            store.handles_closed = false;
+        } else {
+            store.wal = truncate(&file);
+            store.wal_sidecar_bytes = sidecar_len(&file);
+        }
     }
 }
 
@@ -664,8 +795,7 @@ fn copied_paths(root: &Path) -> Vec<PathBuf> {
 pub struct Copied {
     root: PathBuf,
     rendering: Rendering,
-    chains: BTreeMap<String, Vec<String>>,
-    dead: BTreeSet<String>,
+    bounds: DriveBounds,
     applied: u32,
 }
 
@@ -675,6 +805,18 @@ impl Copied {
     }
 
     pub fn reopen(self, checkpoint: &Checkpoint, now: i64) -> Result<Stores, RestoreRefused> {
+        // The copied root holds exactly the checkpoint's files. SQLite would
+        // read a sidecar left by a later opener beside the verified files
+        // without it appearing in any digest, so an unlisted file is a
+        // programming error the reopen panics on before any store opens.
+        for present in walk(&self.root) {
+            let relative = present.strip_prefix(&self.root).unwrap();
+            assert!(
+                checkpoint.files.contains_key(&*relative.to_string_lossy()),
+                "{} is listed by the checkpoint",
+                present.display()
+            );
+        }
         let integrity = |file: PathBuf| {
             let conn = read_only(&file);
             let integrity_check: String = conn
@@ -690,7 +832,7 @@ impl Copied {
                 foreign_key_violations: u64::try_from(violations).unwrap(),
             }
         };
-        let files = checkpoint
+        let files: BTreeMap<String, String> = checkpoint
             .files
             .keys()
             .filter_map(|relative| {
@@ -698,6 +840,18 @@ impl Copied {
                 Some((relative.clone(), sha256_hex(&bytes)))
             })
             .collect();
+        // A read-only open of an absent store file fails and a malformed one
+        // panics in its first query, so absent and changed files are refused
+        // before the incarnation and integrity reads open any store.
+        for (path, digest) in &checkpoint.files {
+            match files.get(path) {
+                None => return Err(RestoreRefused::FileMissing { path: path.clone() }),
+                Some(found) if found != digest => {
+                    return Err(RestoreRefused::FileDiffers { path: path.clone() });
+                }
+                Some(_) => {}
+            }
+        }
         checkpoint.accept(&Reopened {
             incarnation_id: kernel_incarnation_id(&self.root),
             stores: StoreFamily::ALL
@@ -722,8 +876,9 @@ impl Copied {
                 Err(e) => panic!("{}: {e}", PathBuf::from(sidecar).display()),
             }
         }
-        let (projection, consumer) = Stores::bootstrap(&corpus, &self.root, now);
-        embed_pending(&corpus, &projection, &self.root, now);
+        let (projection, consumer) = Stores::bootstrap(&corpus, &self.root, &self.bounds, now);
+        embed_pending(&corpus, &projection, &self.root, self.bounds.hold, now);
+        let (chains, dead) = mutation_state(&kernel_file(&self.root));
         Ok(Stores {
             root: self.root,
             corpus,
@@ -731,8 +886,9 @@ impl Copied {
             consumer,
             memory,
             rendering: self.rendering,
-            chains: self.chains,
-            dead: self.dead,
+            bounds: self.bounds,
+            chains,
+            dead,
             applied: self.applied,
         })
     }
@@ -771,6 +927,39 @@ fn copy_file(from: &Path, into: &Path, relative: &Path, files: &mut BTreeMap<Str
         .and_then(|mut file| std::io::Write::write_all(&mut file, &bytes))
         .unwrap();
     files.insert(relative.to_string_lossy().into_owned(), sha256_hex(&bytes));
+}
+
+/// The driver's view of the kernel's descriptor lineages: every published
+/// object per lineage in commit order, and the objects retired outright. A
+/// resumed driver rebuilds it from the copied kernel rather than inheriting
+/// the prefix driver's memory, as a fresh process would have to.
+fn mutation_state(kernel: &Path) -> (BTreeMap<String, Vec<String>>, BTreeSet<String>) {
+    let conn = read_only(kernel);
+    let mut statement = conn
+        .prepare(
+            "SELECT object_id,source_id,invalidated_commit_seq IS NOT NULL AND superseded_by IS NULL \
+             FROM object_registry WHERE object_id GLOB 'srcdesc:*' ORDER BY created_commit_seq",
+        )
+        .unwrap();
+    let mut chains: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    let mut dead = BTreeSet::new();
+    for row in statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, bool>(2)?,
+            ))
+        })
+        .unwrap()
+    {
+        let (object, lineage, retired) = row.unwrap();
+        if retired {
+            dead.insert(object.clone());
+        }
+        chains.entry(lineage).or_default().push(object);
+    }
+    (chains, dead)
 }
 
 fn descriptors(kernel: &Path) -> BTreeMap<String, Descriptor> {
@@ -910,7 +1099,13 @@ fn segments(memory: &MemoryStore) -> BTreeMap<i64, Segment> {
         .collect()
 }
 
-fn embed_pending(corpus: &Corpus, projection: &SearchProjection, root: &Path, now: i64) {
+fn embed_pending(
+    corpus: &Corpus,
+    projection: &SearchProjection,
+    root: &Path,
+    hold: SourceHoldBounds,
+    now: i64,
+) {
     let open: Vec<String> = read_only(&search_file(root))
         .prepare(
             "SELECT occurrence_id FROM embedding_jobs WHERE state IN ('pending','admitted') \
@@ -924,16 +1119,14 @@ fn embed_pending(corpus: &Corpus, projection: &SearchProjection, root: &Path, no
     if open.is_empty() {
         return;
     }
-    let rows: Vec<SourceRow> = corpus.export();
+    let rows: Vec<SourceRow> = corpus.export_within(hold);
     let project = ProjectScope::new(PROJECT).unwrap();
     let mut publisher = EmbeddingPublisher::new(&corpus.kernel, projection);
     for occurrence in open {
-        let Some(row) = rows
+        let row = rows
             .iter()
             .find(|row| row.detail.occurrence_id == occurrence)
-        else {
-            continue;
-        };
+            .expect("an open embedding job names an exported occurrence");
         let vector = TestEngine::vector_for(row.text.as_deref().unwrap_or_default());
         publisher
             .publish(
@@ -963,17 +1156,30 @@ fn embed_pending(corpus: &Corpus, projection: &SearchProjection, root: &Path, no
     }
 }
 
-fn bulk_scaffold(corpus: &Corpus, home: &Path, now: i64) -> ProjectionRows {
-    let (projection, hold, _) = corpus.bootstrap_with_hold(home);
-    embed_pending(corpus, &projection, home, now);
+fn bulk_scaffold(
+    corpus: &Corpus,
+    home: &Path,
+    bounds: &DriveBounds,
+    now: i64,
+    charges: &mut Charges,
+) -> Result<ProjectionRows, EnvelopeExceeded> {
+    let (projection, hold, _) = corpus.bootstrap_within(home, bounds.hold, bounds.batch);
+    embed_pending(corpus, &projection, home, bounds.hold, now);
     let rows = projection_rows(&search_file(home));
+    assert!(
+        rows.live.pending_embedding.is_empty(),
+        "the bulk scaffold embeds every open job"
+    );
+    // The projection's bytes are charged while it is open; closing it
+    // checkpoints the WAL away.
+    charges.store_bytes(home)?;
     let (_, lease) = projection.close();
     drop(lease);
     corpus
         .kernel
         .release_source_hold(&corpus.binding(), &hold.hold_id, hold.captured_at)
         .unwrap();
-    rows
+    Ok(rows)
 }
 
 pub struct Run {
@@ -992,12 +1198,11 @@ pub struct Plan {
     pub rendering: Rendering,
     pub steps: Vec<Planned>,
     pub checkpoint_step: u32,
+    pub bounds: DriveBounds,
 }
 
 pub fn plan(messages: u32) -> Result<Plan, RunError> {
-    let log = generate_all(SEED, &world(messages), Mode::Generate)
-        .unwrap()
-        .log;
+    let log = generate_all(SEED, &world(messages), Mode::Generate)?.log;
     let rendering = render(
         &log,
         &RenderConfig {
@@ -1012,10 +1217,12 @@ pub fn plan(messages: u32) -> Result<Plan, RunError> {
     }
     let steps = planned(&log);
     let checkpoint_step = straddling_step(&log, &steps).ok_or(RunError::NoStraddlingStep)?;
+    let bounds = DriveBounds::admitting(&rendering, &steps);
     Ok(Plan {
         rendering,
         steps,
         checkpoint_step,
+        bounds,
     })
 }
 
@@ -1035,18 +1242,27 @@ pub struct Full {
 
 pub fn full_life(plan: &Plan, charges: &mut Charges) -> Result<Full, RunError> {
     let root = charges.occupy()?;
-    let mut stores = Stores::open(root.path(), plan.rendering.clone());
+    let mut stores = Stores::open(root.path(), plan);
     live(&mut stores, &plan.steps);
     let state = stores.snapshot();
     let rows = stores.projection_rows();
     let last_now = plan.steps.last().unwrap().now_ms;
     let bulk_home = charges.occupy()?;
-    let bulk_rows = bulk_scaffold(&stores.corpus, bulk_home.path(), last_now);
+    let bulk_rows = bulk_scaffold(
+        &stores.corpus,
+        bulk_home.path(),
+        &plan.bounds,
+        last_now,
+        charges,
+    )?;
     let against_bulk = GuardComparison::of(
         (&rows, ConstructionKind::CatchUp),
         (&bulk_rows, ConstructionKind::Bulk),
     )?;
     let incarnation_id = stores.incarnation();
+    // The stores' bytes are charged while they are open; closing them
+    // checkpoints the WAL away.
+    charges.store_bytes(root.path())?;
     drop(stores.close());
     charges.vacate(bulk_home)?;
     charges.vacate(root)?;
@@ -1072,9 +1288,10 @@ fn resumed_life(
 ) -> Result<Resumed, RunError> {
     let k = plan.checkpoint_step as usize;
     let prefix_root = charges.occupy()?;
-    let mut prefix = Stores::open(prefix_root.path(), plan.rendering.clone());
+    let mut prefix = Stores::open(prefix_root.path(), plan);
     live(&mut prefix, &plan.steps[..k]);
     let prefix_state = prefix.snapshot();
+    charges.store_bytes(prefix_root.path())?;
     let closed = prefix.close();
     let copy_root = charges.occupy()?;
     let (checkpoint, copied) = closed.copy(copy_root.path())?;
@@ -1089,6 +1306,7 @@ fn resumed_life(
     live(&mut resumed, &plan.steps[k..]);
     let state = resumed.snapshot();
     let rows = resumed.projection_rows();
+    charges.store_bytes(copy_root.path())?;
     drop(resumed.close());
     charges.vacate(copy_root)?;
     Ok(Resumed {
@@ -1107,11 +1325,9 @@ pub fn run(config: &Config) -> Result<Run, RunError> {
             .as_millis(),
     )
     .unwrap();
-    let plan = plan(config.messages)?;
-    let steps = plan.steps.len() as u32;
     let profile = profile(
         config.scale,
-        steps,
+        config.messages,
         config.elapsed_bound_ms,
         config.approval.clone(),
     );
@@ -1119,6 +1335,23 @@ pub fn run(config: &Config) -> Result<Run, RunError> {
     prepare_publish(&config.publish, &[REPORT_FILE, MANIFEST_FILE]).map_err(publish_refused)?;
     let mut charges = Charges::new(profile.envelope.clone());
     let mut coverage = Coverage::default();
+    // Planning runs under the clock: the elapsed bound covers the whole run.
+    let plan = plan(config.messages)?;
+    let steps = plan.steps.len() as u32;
+    // The build identity is frozen before the first life runs: the checkout,
+    // the lockfile, and the executable the outcomes come from, not whatever
+    // the tree holds when the report is written.
+    let identity = identity(
+        &profile,
+        SIMULATOR_VERSION,
+        SEED,
+        json!({
+            "steps": steps,
+            "checkpoint_step": plan.checkpoint_step,
+            "messages": config.messages,
+        }),
+        &[std::env::current_exe().unwrap()],
+    );
 
     let full = full_life(&plan, &mut charges)?;
     let resumed = resumed_life(&plan, &mut charges, &mut coverage)?;
@@ -1144,17 +1377,6 @@ pub fn run(config: &Config) -> Result<Run, RunError> {
             .unwrap();
     }
 
-    let identity = identity(
-        &profile,
-        SIMULATOR_VERSION,
-        SEED,
-        json!({
-            "steps": steps,
-            "checkpoint_step": plan.checkpoint_step,
-            "messages": config.messages,
-        }),
-        &std::env::current_exe().unwrap(),
-    );
     let mut report = AgingReport {
         schema: AGING_REPORT_SCHEMA.to_string(),
         eval_run_id: eval_run_id(&identity).unwrap(),
@@ -1192,8 +1414,14 @@ pub fn run(config: &Config) -> Result<Run, RunError> {
         started_at_ms,
     )?;
     let manifest_bytes = serde_json::to_vec_pretty(&manifest.to_value()).unwrap();
-    publish_file(&config.publish.join(REPORT_FILE), &bytes).map_err(publish_refused)?;
-    publish_file(&config.publish.join(MANIFEST_FILE), &manifest_bytes).map_err(publish_refused)?;
+    // A manifest the directory then refuses to take takes the report back out
+    // with it, as Suite B does: a reader finds both files or none.
+    let report_path = config.publish.join(REPORT_FILE);
+    publish_file(&report_path, &bytes).map_err(publish_refused)?;
+    if let Err(error) = publish_file(&config.publish.join(MANIFEST_FILE), &manifest_bytes) {
+        let _ = std::fs::remove_file(&report_path);
+        return Err(publish_refused(error));
+    }
     Ok(Run {
         report,
         report_bytes: bytes,
@@ -1301,4 +1529,98 @@ pub fn config_from_args(args: impl IntoIterator<Item = String>) -> Result<Config
         }),
         publish: PathBuf::from(take("publish")),
     })
+}
+
+#[cfg(test)]
+mod deaths_tests {
+    use eval_core::{Event, StreamLabel};
+
+    use super::*;
+
+    fn log(events: &[(&str, Payload)]) -> EventLog {
+        EventLog {
+            schema: String::new(),
+            linearization_rule_version: String::new(),
+            events: events
+                .iter()
+                .enumerate()
+                .map(|(seq, (id, payload))| Event {
+                    id: EventId(id.to_string()),
+                    stream: StreamLabel::Session,
+                    entity_id: SESSION.to_string(),
+                    local_seq: seq as u32,
+                    valid_time_ms: 0,
+                    observation_time_ms: 0,
+                    causal_depth: 0,
+                    payload: payload.clone(),
+                })
+                .collect(),
+            causal_edges: Vec::new(),
+        }
+    }
+
+    fn message() -> Payload {
+        Payload::Message {
+            message_id: String::new(),
+            role: String::new(),
+            text: String::new(),
+            cites: None,
+        }
+    }
+
+    fn correction(target: &str) -> Payload {
+        Payload::Correction {
+            target: EventId(target.to_string()),
+            text: String::new(),
+        }
+    }
+
+    fn step(step: Step) -> Planned {
+        Planned { step, now_ms: 0 }
+    }
+
+    fn publish(id: &str) -> Planned {
+        step(Step::Publish(EventId(id.to_string())))
+    }
+
+    fn retire(id: &str) -> Planned {
+        step(Step::Retire(EventId(id.to_string())))
+    }
+
+    /// A death is the live object's: a repeated retirement retires nothing, a
+    /// correction after a retirement is a birth, and a supersession kills the
+    /// object the previous publish created, not the lineage's first.
+    #[test]
+    fn deaths_follow_the_live_object_as_the_stores_do() {
+        let log = log(&[
+            ("m0", message()),
+            ("m1", message()),
+            ("c0", correction("m0")),
+            ("c1", correction("m1")),
+            ("c2", correction("m1")),
+        ]);
+        let steps = [
+            publish("m0"),
+            publish("m1"),
+            retire("m0"),
+            retire("m0"),
+            publish("c0"),
+            retire("m0"),
+            publish("c1"),
+            publish("c2"),
+        ];
+        assert_eq!(
+            deaths(&log, &steps),
+            vec![
+                None,
+                None,
+                Some((0, Died::Retirement)),
+                None,
+                None,
+                Some((4, Died::Retirement)),
+                Some((1, Died::Supersession)),
+                Some((6, Died::Supersession)),
+            ]
+        );
+    }
 }

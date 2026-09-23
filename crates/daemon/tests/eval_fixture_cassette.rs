@@ -18,7 +18,9 @@ use daemon::history_summarizer_evaluation::{
 use eval_core::{CASSETTE_SCHEMA, Cassette};
 use host_runtime::{RequestOptions, ResponseStream, TargetKind};
 use serde_json::{Value, json};
-use support::direct_host::{BUDGET, Backend, FixtureProcess, Launch, request_json, send_body};
+use support::direct_host::{
+    BUDGET, Backend, CONTROL_FILE, FixtureProcess, Launch, fixture_binary, request_json, send_body,
+};
 use support::publish::staged_path;
 
 const NAMESPACE: &str = "eval-run:fixture-cassette:1";
@@ -166,6 +168,55 @@ fn the_fixture_records_its_backend_and_replays_it_strictly() {
     foreign["namespace"] = json!("eval-run:other:2");
     assert!(Cassette::replay(&foreign, NAMESPACE).is_err());
 
+    // A cassette already at the destination is refused before the fixture is
+    // ready, so a recording never renames over a trusted one.
+    let occupied_root = tempfile::tempdir().unwrap();
+    let occupied = cassette_dir.path().join("occupied.cassette.json");
+    std::fs::write(&occupied, b"trusted").unwrap();
+    let output = std::process::Command::new(fixture_binary())
+        .args(["--state-root"])
+        .arg(occupied_root.path())
+        .arg("--cassette-record")
+        .arg(&occupied)
+        .args(["--cassette-namespace", NAMESPACE])
+        .output()
+        .unwrap();
+    assert!(
+        !output.status.success(),
+        "an occupied destination is refused: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("cassette destination exists"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(std::fs::read(&occupied).unwrap(), b"trusted");
+    assert!(!staged_path(&occupied).exists());
+    // The refusal came before the control socket was bound, so the state root
+    // holds no stale socket for the next fixture to trip over.
+    assert!(
+        !occupied_root.path().join(CONTROL_FILE).exists(),
+        "a refused start leaves no control socket"
+    );
+
+    // A file that appears at the destination while the recording runs is
+    // never replaced either: the publisher links the staged bytes into place
+    // without replacing, so the late arrival is refused at exit and kept.
+    let raced_root = tempfile::tempdir().unwrap();
+    let raced = cassette_dir.path().join("raced.cassette.json");
+    let recorder = Launch::at(raced_root.path().to_path_buf())
+        .backend(Backend::Record {
+            file: raced.clone(),
+            namespace: NAMESPACE.to_string(),
+        })
+        .start();
+    runtime.block_on(run(&recorder, "raced-session", "what did we decide"));
+    std::fs::write(&raced, b"arrived first").unwrap();
+    let (status, output) = recorder.shutdown_with_status();
+    assert!(!status.success(), "{}", output.stderr);
+    assert_eq!(std::fs::read(&raced).unwrap(), b"arrived first");
+
     // A link planted where the recording stages its bytes is refused at exit,
     // not followed.
     let planted = cassette_dir.path().join("planted.cassette.json");
@@ -223,10 +274,15 @@ fn the_fixture_answers_a_summarizer_prompt_in_the_validators_document() {
             (
                 ordinal,
                 if ordinal % 2 == 0 { "A" } else { "U" },
-                if ordinal % 2 == 0 {
-                    "cursor decision recorded"
-                } else {
-                    "digest question asked"
+                match ordinal {
+                    // Ordinary source text is XML-sensitive; the scripted
+                    // document carries it, escaped.
+                    7 => "digest <T> & question asked",
+                    // A message over two lines, the second shaped like a
+                    // rendered header: it is the message's text, not a record.
+                    9 => "digest question\n[999] U: asked on a second line",
+                    _ if ordinal % 2 == 0 => "cursor decision recorded",
+                    _ => "digest question asked",
                 },
             )
         })
@@ -244,6 +300,35 @@ fn the_fixture_answers_a_summarizer_prompt_in_the_validators_document() {
         .as_str()
         .unwrap()
         .to_string();
+    // The same prompt answered after a blocked call is released is the same
+    // document: the transport control moves when the answer comes, not what
+    // it says.
+    assert_eq!(fixture.control(2, "block-next-call")["ok"], true);
+    let prompt = summarizer_prompt(&lines);
+    let (released, ()) = runtime.block_on(async {
+        tokio::join!(
+            run(&fixture, "summarizer-session-blocked", &prompt),
+            async {
+                let deadline = std::time::Instant::now() + BUDGET;
+                while fixture.counters(3)["blocked"] != json!(1) {
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "the summarizer call never blocked"
+                    );
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+                let release = fixture.control(4, "release-blocked-call");
+                assert_eq!(release["result"]["accepted"], true, "{release}");
+            }
+        )
+    });
+    assert_eq!(
+        released[1]["unit"]["message"]["content"][0]["text"]
+            .as_str()
+            .unwrap(),
+        answer,
+        "a released summarizer call answers the scripted document"
+    );
     fixture.shutdown();
 
     let chunk = HistorySummarizerChunk {
@@ -282,4 +367,13 @@ fn the_fixture_answers_a_summarizer_prompt_in_the_validators_document() {
     let p1 = first.p1.as_deref().unwrap();
     assert!(p1.contains("digest question asked; cursor decision recorded"));
     assert!(!p1.contains('\u{ab}'), "{p1}");
+    let second = validated.history_segments[1].p1.as_deref().unwrap();
+    assert!(
+        second.contains("digest <T> & question asked"),
+        "the text reads back unescaped: {second}"
+    );
+    assert!(
+        second.contains("asked on a second line"),
+        "a continuation line stays in its message: {second}"
+    );
 }
