@@ -325,7 +325,7 @@ pub mod shrink {
 
     pub fn predicate(class: FailureClass) -> FailurePredicate {
         FailurePredicate {
-            oracle: oracle().name().to_string(),
+            oracle: oracle(),
             checkpoint: CUT,
             profile_digest: PROFILE.to_string(),
             witness_class: WitnessClass::Failure { class },
@@ -341,7 +341,7 @@ pub mod shrink {
             &request.set.pairs[0].task.query,
         )
         .unwrap();
-        oracle().evaluate(
+        request.oracle.evaluate(
             request.set,
             &truth,
             request.checkpoint,

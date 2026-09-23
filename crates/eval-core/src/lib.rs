@@ -141,10 +141,10 @@ pub use residue::{
 };
 pub use shrink::{
     CandidateRecord, CandidateVerdict, Element, FailurePredicate, History,
-    MAX_OUTSTANDING_REPLAY_EFFECTS, Minimality, NotEstablishedReason, Oracle, ReplayEffects,
-    ReplayOutcome, ReplayRefused, ReplayRequest, SCENARIO_DIGEST_PROTOCOL, SHRINK_REPORT_SCHEMA,
-    Scenario, ShrinkRefused, ShrinkReport, Transformation, UnknownReason, WitnessClass,
-    classify_replay, shrink,
+    MAX_OUTSTANDING_REPLAY_EFFECTS, Minimality, NotEstablishedReason, Oracle, OracleRefused,
+    ReplayEffects, ReplayOutcome, ReplayRefused, ReplayRequest, SCENARIO_DIGEST_PROTOCOL,
+    SHRINK_REPORT_SCHEMA, Scenario, ShrinkRefused, ShrinkReport, ShrinkReportError, Transformation,
+    UnknownReason, WitnessClass, classify_replay, parse_shrink_report, shrink,
 };
 pub use statistics::{
     ANALYSIS_FAMILY_SCHEMA, Analysis, AnalysisFamily, ArmResult, BlockedReason, CampaignProfile,

@@ -7,9 +7,10 @@ use std::collections::BTreeSet;
 
 use eval_core::{
     CandidateVerdict, Cut, Element, EventId, EventLog, FailureClass, FailurePredicate, History,
-    MAX_OUTSTANDING_REPLAY_EFFECTS, Minimality, NotEstablishedReason, Payload, ReplayEffects,
-    ReplayOutcome, ReplayRefused, ReplayRequest, Scenario, ShrinkRefused, Transformation,
-    UnknownReason, WitnessClass, classify_replay, reduce, shrink,
+    MAX_OUTSTANDING_REPLAY_EFFECTS, Minimality, NotEstablishedReason, Oracle, OracleRefused,
+    Payload, ReplayEffects, ReplayOutcome, ReplayRefused, ReplayRequest, Scenario, ShrinkRefused,
+    ShrinkReportError, Transformation, UnknownReason, WitnessClass, classify_replay,
+    parse_shrink_report, reduce, shrink,
 };
 use serde_json::{Value, json};
 use support::shrink::{BUDGET, CUT, PROFILE, evaluate, fixture, oracle, predicate, scenario};
@@ -61,7 +62,12 @@ fn classify_keeps_unknown_unknown_for_every_reason() {
         CandidateVerdict::Reproduced
     );
     let slips: [fn(&mut FailurePredicate); 4] = [
-        |p| p.oracle = "planted:other".to_string(),
+        |p| {
+            p.oracle = Oracle::RequiredCommits {
+                failing_at: 1,
+                slipping_at: 4,
+            }
+        },
         |p| p.checkpoint = Cut::EndOfRun,
         |p| p.profile_digest = "other-profile".to_string(),
         |p| {
@@ -275,6 +281,32 @@ fn pair_validity_is_recomputed_and_both_worlds_are_shrunk_together() {
 }
 
 #[test]
+fn a_deletion_set_removes_exactly_what_one_deletion_at_a_time_removes() {
+    let original = scenario();
+    let deleted: BTreeSet<Element> = original.elements().into_iter().step_by(3).collect();
+    let mut expected = original.clone();
+    for element in &deleted {
+        match element {
+            Element::Episode { id } => expected.episodes.retain(|episode| episode.id != *id),
+            Element::Event {
+                history: History::Aged,
+                id,
+            } => expected.aged = expected.aged.without(id),
+            Element::Event {
+                history: History::NaturalFresh,
+                id,
+            } => expected.natural_fresh = expected.natural_fresh.without(id),
+        }
+    }
+    assert!(expected.episodes.len() < original.episodes.len());
+    assert!(expected.aged.causal_edges.len() < original.aged.causal_edges.len());
+    assert!(expected.natural_fresh.events.len() < original.natural_fresh.events.len());
+    let batched = original.without(&deleted);
+    assert_eq!(batched, expected);
+    assert_eq!(batched.digest(), expected.digest());
+}
+
+#[test]
 fn an_unknown_replay_is_kept_and_never_becomes_not_reproduced() {
     let original = scenario();
     let expected = predicate(FailureClass::Interference);
@@ -383,6 +415,27 @@ fn an_exhausted_replay_budget_stops_the_pass_and_keeps_the_last_reproduced_scena
         ReplayOutcome::Failed {
             predicate: expected
         }
+    );
+}
+
+#[test]
+fn a_zero_replay_budget_issues_no_replay_and_refuses_the_original_scenario() {
+    let original = scenario();
+    let expected = predicate(FailureClass::Interference);
+    let mut issued = 0u32;
+    let mut replay = |request: ReplayRequest<'_>| {
+        issued += 1;
+        evaluate(request)
+    };
+    let refused = shrink(&original, &fixture(), &expected, 0, &mut replay);
+    assert_eq!(issued, 0, "no replay is issued past the budget");
+    assert_eq!(
+        refused.err(),
+        Some(ShrinkRefused::OriginalNotReproduced {
+            verdict: CandidateVerdict::Unknown {
+                reason: UnknownReason::ReplayBudgetExhausted
+            }
+        })
     );
 }
 
@@ -593,7 +646,7 @@ fn wire_names_are_pinned() {
     assert_eq!(
         serde_json::to_value(&predicate).unwrap(),
         json!({
-            "oracle": "planted:required-commits",
+            "oracle": {"kind": "required_commits", "failing_at": 3, "slipping_at": 6},
             "checkpoint": "AtQuiescence",
             "profile_digest": PROFILE,
             "witness_class": {"kind": "failure", "class": "interference"},
@@ -629,4 +682,110 @@ fn wire_names_are_pinned() {
     let mut extra = value;
     extra["extra"] = Value::Bool(true);
     assert!(serde_json::from_value::<eval_core::ShrinkReport>(extra).is_err());
+}
+
+#[test]
+fn a_replay_under_other_thresholds_slips_even_when_it_fails_the_same_class() {
+    // The original has enough commits to fail as `interference` under both
+    // `(3, 6)` and `(1, 4)`; only the pinned thresholds tell them apart.
+    let original = scenario();
+    let expected = predicate(FailureClass::Interference);
+    let other = Oracle::RequiredCommits {
+        failing_at: 1,
+        slipping_at: 4,
+    };
+    let mut replay = |request: ReplayRequest<'_>| {
+        let truth = reduce(
+            &request.set.aged,
+            &fixture(),
+            &request.set.pairs[0].task.query,
+        )
+        .unwrap();
+        other.evaluate(
+            request.set,
+            &truth,
+            request.checkpoint,
+            request.profile_digest,
+        )
+    };
+    let refused = shrink(&original, &fixture(), &expected, BUDGET, &mut replay);
+    assert!(
+        matches!(
+            refused,
+            Err(ShrinkRefused::OriginalNotReproduced {
+                verdict: CandidateVerdict::Slipped { .. }
+            })
+        ),
+        "a differently parameterised oracle is a different predicate: {refused:?}"
+    );
+}
+
+#[test]
+fn inverted_thresholds_are_refused_before_any_replay() {
+    let inverted = Oracle::RequiredCommits {
+        failing_at: 6,
+        slipping_at: 3,
+    };
+    let expected = FailurePredicate {
+        oracle: inverted,
+        ..predicate(FailureClass::Interference)
+    };
+    let mut issued = 0u32;
+    let mut replay = |request: ReplayRequest<'_>| {
+        issued += 1;
+        evaluate(request)
+    };
+    let refused = shrink(&scenario(), &fixture(), &expected, BUDGET, &mut replay);
+    assert_eq!(
+        refused.err(),
+        Some(ShrinkRefused::InvalidOracle(
+            OracleRefused::InvertedThresholds {
+                failing_at: 6,
+                slipping_at: 3,
+            }
+        ))
+    );
+    assert_eq!(issued, 0, "nothing is replayed under an invalid oracle");
+}
+
+#[test]
+fn a_report_is_read_back_only_under_its_schema_and_a_valid_oracle() {
+    let (_, report) = shrink(
+        &scenario(),
+        &fixture(),
+        &predicate(FailureClass::Interference),
+        3,
+        &mut evaluate,
+    )
+    .unwrap();
+    let value = serde_json::to_value(&report).unwrap();
+    assert_eq!(parse_shrink_report(&value).unwrap(), report);
+
+    let mut other_schema = value.clone();
+    other_schema["schema"] = Value::String("eval-shrink/v0".to_string());
+    assert_eq!(
+        parse_shrink_report(&other_schema),
+        Err(ShrinkReportError::SchemaMismatch {
+            found: "eval-shrink/v0".to_string()
+        })
+    );
+
+    let mut inverted = value.clone();
+    inverted["predicate"]["oracle"]["slipping_at"] = json!(1);
+    assert_eq!(
+        parse_shrink_report(&inverted),
+        Err(ShrinkReportError::Oracle(
+            OracleRefused::InvertedThresholds {
+                failing_at: 3,
+                slipping_at: 1,
+            }
+        ))
+    );
+
+    let mut extra = value;
+    extra["extra"] = Value::Bool(true);
+    assert!(matches!(
+        parse_shrink_report(&extra),
+        Err(ShrinkReportError::Shape(_))
+    ));
 }

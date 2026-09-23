@@ -296,8 +296,8 @@ Check: `always` - `WitnessPackage::validate` refuses a recipe missing when
   aged event of it survives and each one's single deletion was recorded
   `Slipped` or `NotReproduced`; a `OneMinimal` claim without a rejected
   record for some single deletion from the minimized scenario is refused
-  (`MinimalityUnsupported { element }`); an embedded report whose schema is
-  not `eval-shrink/v1` is refused (`SchemaMismatch`);
+  (`MinimalityUnsupported { element }`); an embedded report that
+  `ShrinkReport::validate` refuses is refused (`ShrinkReport(..)`);
   `parse_witness(serialize(package)) == package`; the published bytes parse
   back to the run's package.
 Fault/timing angle: None.

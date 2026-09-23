@@ -9,8 +9,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use context_core::redaction::{RedactionErrorKind, Redactor};
 use eval_core::{
     CandidateVerdict, ClaimBoundary, Cut, FailureClass, Generation, History, Minimality, Mode,
-    MultiplicityRecipe, OriginalFailure, Slice, WITNESS_SCHEMA, WitnessError, WitnessPackage,
-    parse_witness, residue_drift, shrink,
+    MultiplicityRecipe, Oracle, OracleRefused, OriginalFailure, ShrinkReportError, Slice,
+    WITNESS_SCHEMA, WitnessError, WitnessPackage, parse_witness, residue_drift, shrink,
 };
 use serde_json::Value;
 use support::shrink::{BUDGET, FRESH_SEED, evaluate, fixture, fresh_config, predicate, scenario};
@@ -161,9 +161,24 @@ fn every_structural_refusal_names_its_cause() {
         ),
         (
             |p| p.shrink.schema = "eval-shrink/v0".to_string(),
-            WitnessError::SchemaMismatch {
+            WitnessError::ShrinkReport(ShrinkReportError::SchemaMismatch {
                 found: "eval-shrink/v0".to_string(),
+            }),
+        ),
+        (
+            |p| {
+                p.shrink.predicate.oracle = Oracle::RequiredCommits {
+                    failing_at: 6,
+                    slipping_at: 3,
+                };
+                p.original.predicate.oracle = p.shrink.predicate.oracle.clone();
             },
+            WitnessError::ShrinkReport(ShrinkReportError::Oracle(
+                OracleRefused::InvertedThresholds {
+                    failing_at: 6,
+                    slipping_at: 3,
+                },
+            )),
         ),
         (
             |p| p.original.eval_run_id = "nope".to_string(),
@@ -249,12 +264,12 @@ fn the_serializer_requires_the_verbatim_claim_boundary_and_rejects_forbidden_cla
     );
 
     let mut claims = package();
-    claims.original.predicate.oracle = "proves live-model quality".to_string();
-    claims.shrink.predicate.oracle = claims.original.predicate.oracle.clone();
+    claims.original.predicate.profile_digest = "proves live-model quality".to_string();
+    claims.shrink.predicate.profile_digest = claims.original.predicate.profile_digest.clone();
     assert_eq!(
         claims.serialize(&redactor(), ARTIFACT_BYTES).err(),
         Some(WitnessError::ForbiddenClaim {
-            path: "/original/predicate/oracle".to_string(),
+            path: "/original/predicate/profile_digest".to_string(),
             phrase: "live-model quality".to_string(),
         })
     );

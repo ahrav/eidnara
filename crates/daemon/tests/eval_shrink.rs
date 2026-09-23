@@ -207,7 +207,7 @@ fn a_fresh_process_reproduces_the_predicate_and_the_minimized_witness_is_publish
     };
     assert_eq!(predicate.witness_class, expected);
     assert_eq!(predicate.checkpoint, Cut::AtQuiescence);
-    assert_eq!(predicate.oracle, "planted:required-commits");
+    assert_eq!(predicate.oracle, config.oracle);
     let witness = &run.witness;
     assert_eq!(witness.original.predicate, *predicate);
     assert_eq!(

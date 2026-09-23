@@ -16,8 +16,8 @@ use crate::generator::{Mode, WorldConfig, generate_all};
 use crate::manifest::{CLAIM_BOUNDARY_EXCLUSIONS, ClaimBoundary};
 use crate::residue::ResidueEntry;
 use crate::shrink::{
-    CandidateVerdict, Element, FailurePredicate, History, Minimality, SHRINK_REPORT_SCHEMA,
-    Scenario, ShrinkReport,
+    CandidateVerdict, Element, FailurePredicate, History, Minimality, Scenario, ShrinkReport,
+    ShrinkReportError,
 };
 use crate::stream::Tape;
 
@@ -79,6 +79,8 @@ pub enum WitnessError {
     SchemaMismatch {
         found: String,
     },
+    /// The embedded report refuses on its own terms: schema or oracle.
+    ShrinkReport(ShrinkReportError),
     ClaimBoundaryMismatch,
     ForbiddenClaim {
         path: String,
@@ -127,11 +129,7 @@ impl WitnessPackage {
                 found: self.schema.clone(),
             });
         }
-        if self.shrink.schema != SHRINK_REPORT_SCHEMA {
-            return Err(WitnessError::SchemaMismatch {
-                found: self.shrink.schema.clone(),
-            });
-        }
+        self.shrink.validate().map_err(WitnessError::ShrinkReport)?;
         if self.claim_boundary != ClaimBoundary::pinned() {
             return Err(WitnessError::ClaimBoundaryMismatch);
         }
