@@ -2093,9 +2093,10 @@ report lists them apart from safety failures. The report refuses a record
 (an expected refusal or a liveness permanent stall) whose episode is not one
 of its episodes (`UnknownEpisode`) or whose error text does not name the
 variant's production type, `DeletionUnpropagated` or `MetadataQuota`
-(`RefusalNotEvidenced`). A recorded refusal whose episode is not a declared
-`expected_refusal` of the same refusal is `RefusalNotDeclared`: it would
-attribute the refusal to a fault that never ran. An `expected_refusal`
+(`RefusalNotEvidenced`). A recorded refusal or permanent stall whose episode
+is not a declared `expected_refusal` of the same refusal is
+`RefusalNotDeclared`: it would attribute the refusal to a fault that never
+ran. An `expected_refusal`
 episode with no recorded refusal of its own is `RefusalNotRecorded`: it would
 claim a refusal the run never observed.
 
@@ -2297,9 +2298,9 @@ quiescent copy whose kernel file has one page overwritten, refused
 match the checkpoint's digest) before any store opens, after which the
 original reopens in place; the four CAS ingest faults (`write`,
 `file_sync`, `rename`, `after_directory_sync`), each refused
-`IngestionFailClosed` or `ReferenceCommit` with no `evidence_meta` row for its
-evidence id, each healed by close and reopen and a fresh ingest; two
-purge-intent deletion faults,
+`IngestionFailClosed` with no `evidence_meta` row for its evidence id, each
+healed by close and reopen and a fresh ingest; two purge-intent deletion
+faults,
 `intent_storage_exhausted` (`StorageExhausted`, consumed; a plain ingest
 succeeds without a reopen) and `intent_append` (`PurgeIntent`, healed by
 reopen). After every EIO, before its reopen, a plain ingest must be refused

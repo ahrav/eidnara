@@ -740,7 +740,15 @@ impl Closed {
 
     /// Borrows so the closed root can be reopened after its copy is judged;
     /// the copy releases the projection lease, and `reopen` takes it again.
+    /// A closed root is copied once: after the lease is released the receipt
+    /// no longer describes the projection, so a second copy is a programming
+    /// error.
     pub fn copy(&mut self, into: &Path) -> Result<(Checkpoint, Copied), CheckpointRefused> {
+        assert!(
+            self.search_lease.is_some(),
+            "{} is copied once; reopen it to copy again",
+            self.root.display()
+        );
         // The destination is a root this run owns and nothing else has
         // written: SQLite would read a sidecar left there beside the verified
         // copy, so anything already present is a programming error.

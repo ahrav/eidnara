@@ -1033,9 +1033,10 @@ impl FaultReport {
                 });
             }
         }
-        // A refusal recorded against any other episode would attribute it to
-        // a fault that never ran.
-        for recorded in &self.expected_refusals {
+        // A refusal or stall recorded against any other episode would
+        // attribute it to a fault that never ran.
+        let stalls = self.liveness.iter().flat_map(|l| &l.permanent_stalls);
+        for recorded in self.expected_refusals.iter().chain(stalls) {
             let declared = FaultAction::ExpectedRefusal {
                 refusal: recorded.refusal,
             };

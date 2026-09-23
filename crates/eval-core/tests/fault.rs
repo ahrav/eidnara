@@ -809,6 +809,24 @@ fn a_fault_report_round_trips_and_refuses_what_it_cannot_prove() {
         }),
         "an evidenced refusal recorded against an episode declaring another refusal"
     );
+    let mut stalled_elsewhere = report.clone();
+    stalled_elsewhere
+        .liveness
+        .as_mut()
+        .unwrap()
+        .permanent_stalls
+        .push(RecordedRefusal {
+            episode: "lost-ack".to_string(),
+            refusal: ExpectedRefusal::R11DeletionBearingCatchUp,
+            production_error: "DeletionUnpropagated { commit_seq: 9 }".to_string(),
+        });
+    assert_eq!(
+        stalled_elsewhere.validate(&bounds(), &limits()),
+        Err(FaultReportError::RefusalNotDeclared {
+            episode: "lost-ack".to_string()
+        }),
+        "a permanent stall recorded against an injected fault's episode claims a refusal that episode never declared"
+    );
     let mut unrecorded = report.clone();
     unrecorded.expected_refusals.clear();
     assert_eq!(

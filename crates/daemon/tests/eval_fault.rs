@@ -710,6 +710,33 @@ fn a_history_too_short_for_the_fault_phase_is_refused_not_panicked() {
     );
 }
 
+/// The publication probes apply steps until a publish opens an embedding job,
+/// and recovery needs a step left to live; a history the probes would exhaust
+/// is refused by the same planning check, before any store opens, rather
+/// than by the campaign after it has opened and mutated its stores.
+#[test]
+fn a_history_the_publication_probes_would_exhaust_is_refused_before_any_store_opens() {
+    let plan = aging::plan(9).unwrap();
+    assert!(
+        plan.steps.len() - (plan.checkpoint_step as usize) >= 6,
+        "the case needs a suffix the six-step check accepts: {} steps, checkpoint {}",
+        plan.steps.len(),
+        plan.checkpoint_step
+    );
+    let publish = tempfile::tempdir().unwrap();
+    let mut config = config(publish.path().join("out"), 600_000);
+    config.messages = 9;
+    let refused = fault::run(&config).err().expect("the history is refused");
+    assert!(
+        matches!(refused, RunError::HistoryTooShort { .. }),
+        "refused at planning, not by the campaign: {refused}"
+    );
+    assert!(
+        !publish.path().join("out").join(REPORT_FILE).exists(),
+        "nothing is published"
+    );
+}
+
 /// The campaign's store-byte peak is the open footprint: closing the stores
 /// checkpoints every WAL away, so a peak read only after the close would
 /// let a run pass its bound while exceeding it.
@@ -789,6 +816,35 @@ fn the_campaign_charges_the_stores_before_each_recovery_closes_them() {
     assert!(
         peak > (before_recovery + end_open) / 2,
         "the peak charged is the footprint before the recovery: peak {peak}, before {before_recovery}, end {end_open}"
+    );
+}
+
+/// Every CAS episode's reopen closes the stores, which checkpoints the WALs
+/// away, so the footprint is charged before each of those closes too, as the
+/// recoveries charge it before theirs.
+#[test]
+fn the_cas_episodes_charge_the_stores_before_each_reopen_closes_them() {
+    let plan = aging::plan(MESSAGES).unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let mut stores = aging::Stores::open(root.path(), &plan);
+    aging::live(&mut stores, &plan.steps[..3]);
+    let open = campaign::root_bytes(root.path());
+    let profile = fault::profile(Scale::S0, MESSAGES, 600_000, None);
+    let mut charges = campaign::Charges::new(profile.envelope);
+    let mut witness = Witness::new();
+    let (stores, _) = fault::artifact_ingest_episodes(
+        stores,
+        &mut witness,
+        &mut charges,
+        3,
+        plan.steps[3].now_ms,
+    )
+    .unwrap();
+    drop(stores.close());
+    let peak = charges.envelope.peaks.store_bytes;
+    assert!(
+        peak >= open,
+        "the footprint before each CAS reopen is charged: peak {peak}, open before the episodes {open}"
     );
 }
 

@@ -1598,8 +1598,9 @@ Fault contract (`crates/eval-core/tests/fault.rs`,
   and changes with an effect outcome; a kill without a barrier, a kill whose
   only barrier is at another cut, an armed outside-core fault that is not one
   of the report's episodes, an unreceipted declared cut, zero safety checks
-  while armed, a premature success, a recorded refusal whose episode carries
-  another refusal or an injected fault's action (`RefusalNotDeclared`), and an
+  while armed, a premature success, a recorded refusal or permanent stall
+  whose episode carries another refusal or an injected fault's action
+  (`RefusalNotDeclared`), and an
   `expected_refusal` episode with no recorded refusal (`RefusalNotRecorded`)
   refuse.
 - `a_parsed_report_cannot_claim_what_no_run_recorded`: a claim boundary that
@@ -1683,8 +1684,9 @@ job under `EIDNARA_EVAL_S0_BUDGET_MS`):
   `flt_external_lock_holder_released`): `BEGIN IMMEDIATE` on the projection
   blocks the local commit; release lets the next episode reach the target.
 - `artifact_faults_fail_with_their_named_errno_and_heal_by_reopen_or_consumption`
-  (marker `flt_artifact_fault_named_errno`): four ingest faults and two
-  purge-intent faults refuse by kind; after every EIO a plain ingest is
+  (marker `flt_artifact_fault_named_errno`): four ingest faults refuse
+  `IngestionFailClosed` and two purge-intent faults refuse by kind, each
+  leaving no reference; after every EIO a plain ingest is
   refused `IngestionFailClosed` before the reopen (five `ingestion_latched`
   receipts, five reopen heals); ENOSPC is consumed.
 - `an_unapproved_profile_refuses_before_any_store_opens`: no approval, no
