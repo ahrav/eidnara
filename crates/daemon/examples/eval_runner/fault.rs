@@ -159,6 +159,8 @@ pub struct Witness {
     pub refusals: Vec<RecordedRefusal>,
     pub checkpoints: BTreeMap<Cut, u64>,
     pub safety_checks: u64,
+    /// The cut each counted check ran at, in order.
+    pub armed_check_cuts: Vec<&'static str>,
     pub coverage: Coverage,
     pub left_at: BTreeMap<String, i64>,
 }
@@ -177,6 +179,7 @@ impl Witness {
             refusals: Vec::new(),
             checkpoints: BTreeMap::new(),
             safety_checks: 0,
+            armed_check_cuts: Vec::new(),
             coverage: Coverage::default(),
             left_at: BTreeMap::new(),
         }
@@ -206,22 +209,25 @@ impl Witness {
     }
 
     /// The safety check at a cut where a fault is armed, run from the
-    /// episode's observer. At `LocalStaged` the projection connection is held
-    /// by the episode, so this reads the files and the kernel, not the
-    /// projection handle; it is the check `safety_checks_while_armed` counts.
-    pub fn safety_check_while_armed(&mut self, stores: &Stores) {
+    /// episode's observer between the episode's own store operations, so it
+    /// reads the files and the kernel, not the projection handle; it is the
+    /// check `safety_checks_while_armed` counts.
+    pub fn safety_check_while_armed(&mut self, stores: &Stores, cut: &'static str) {
         safety_invariants(stores);
         self.safety_checks += 1;
+        self.armed_check_cuts.push(cut);
     }
 
     /// The check a kill child ran at its cut, where the kill is armed; the
     /// child owns the stores there, so the parent counts the line it printed.
-    fn child_safety_check(&mut self) {
+    fn child_safety_check(&mut self, cut: &'static str) {
         self.safety_checks += 1;
+        self.armed_check_cuts.push(cut);
     }
 }
 
-/// No descriptor claims a commit past the tip or an invalidation before its
+/// No descriptor claims a creation or an invalidation past the tip or an
+/// invalidation before its
 /// creation, and the projection never runs ahead of the kernel.
 fn safety_invariants(stores: &Stores) {
     let snapshot = stores.snapshot();
@@ -234,6 +240,10 @@ fn safety_invariants(stores: &Stores) {
             assert!(
                 invalidated > descriptor.created_commit_seq,
                 "{object_id} invalidated before it was created"
+            );
+            assert!(
+                invalidated <= snapshot.commit_seq,
+                "{object_id} invalidated after the tip"
             );
         }
     }
@@ -350,19 +360,23 @@ pub fn lost_reply_episode(
     let mut events = Vec::new();
     let stores = &*stores;
     // The fault is armed for the whole episode and consumed when it returns,
-    // so the counted safety check runs at the cut whose reply the fault loses.
+    // so the counted safety check runs while it is armed, at the first cut
+    // after the faulted operation's effect is durable: `local_released`, once
+    // the batch committed and before the drive reconciles the lost reply
+    // (`local_staged` is inside the still-open transaction), and
+    // `acknowledged`, once the kernel write is durable.
     let report = stores.episode(now, Some(seam(fault).production), &mut |event| {
         if matches!(
             (fault, &event),
             (
                 SearchEpisodeFault::LoseLocalCommitReply,
-                EpisodeEvent::LocalStaged { .. }
+                EpisodeEvent::LocalReleased { .. }
             ) | (
                 SearchEpisodeFault::LoseAcknowledgementReply,
-                EpisodeEvent::AcknowledgementRequested { .. }
+                EpisodeEvent::Acknowledged { .. }
             )
         ) {
-            witness.safety_check_while_armed(stores);
+            witness.safety_check_while_armed(stores, cut_of(&event));
         }
         events.push(event)
     });
@@ -465,12 +479,13 @@ pub fn lock_holder_episode(
         EpisodeEnd::Blocked(Blocked::LocalCommitUnresolved) => witness.receipt("lock_blocked"),
         other => return Err(unexpected(id, "Blocked(LocalCommitUnresolved)", other)),
     }
-    witness.safety_check_while_armed(stores);
+    witness.safety_check_while_armed(stores, "lock_blocked");
     drop(holder);
     let released = stores.episode(now, None, &mut |_| {});
     if released.end != EpisodeEnd::ReachedTarget {
         return Err(unexpected(id, "ReachedTarget after release", &released.end));
     }
+    witness.safety_check(stores);
     witness.receipt("lock_released");
     witness.receipt(id);
     witness
@@ -634,7 +649,7 @@ pub fn artifact_ingest_episodes(
         observe_latched(&stores, witness, &id)?;
         witness.receipt("artifact_fault_named");
         // The latch holds until the reopen, so the fault is still armed here.
-        witness.safety_check_while_armed(&stores);
+        witness.safety_check_while_armed(&stores, "ingestion_latched");
         stores = reopen(stores, charges, now)?;
         let healed = stores
             .corpus
@@ -740,7 +755,7 @@ pub fn artifact_deletion_episodes(
         witness.receipt("artifact_fault_named");
         if heal == Heal::Reopen {
             // The latch holds until the reopen, so the fault is still armed here.
-            witness.safety_check_while_armed(&stores);
+            witness.safety_check_while_armed(&stores, "artifact_fault_named");
             observe_latched(&stores, witness, &id)?;
             stores = reopen(stores, charges, now)?;
         } else {
@@ -825,7 +840,7 @@ pub fn r11_episode(
     });
     // The stall holds until the reopen rebuilds the projection, so the refusal
     // is still in force here.
-    witness.safety_check_while_armed(stores);
+    witness.safety_check_while_armed(stores, "deletion_unpropagated");
     witness
         .coverage
         .record("flt_r11_recorded_as_expected_refusal")
@@ -1433,13 +1448,6 @@ pub fn check_expectations(
 }
 
 pub fn run(config: &Config, spawn: Spawn) -> Result<Run, RunError> {
-    let started_at_ms = i64::try_from(
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_millis(),
-    )
-    .unwrap();
     let profile = profile(
         config.scale,
         config.messages,
@@ -1448,6 +1456,16 @@ pub fn run(config: &Config, spawn: Spawn) -> Result<Run, RunError> {
     );
     let fault_profile = profile.fault_profile()?;
     prepare_publish(&config.publish, &[REPORT_FILE, MANIFEST_FILE]).map_err(publish_refused)?;
+    // The manifest's clock and the envelope's start at the same boundary, as
+    // Suite B's do, so `end_ms` is `start_ms` plus the elapsed time measured
+    // from `start_ms`.
+    let started_at_ms = i64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis(),
+    )
+    .unwrap();
     let mut charges = Charges::new(profile.envelope.clone());
     let mut witness = Witness::new();
     // Planning runs under the clock: the elapsed bound covers the whole run.
@@ -1485,7 +1503,10 @@ pub fn run(config: &Config, spawn: Spawn) -> Result<Run, RunError> {
         .coverage
         .record("flt_every_declared_cut_receipted")
         .unwrap();
+    // Every oracle checkpoint is receipted, reached or not: this campaign has
+    // no atomic transition, so `AfterAtomicTransition` is `NotReached`.
     let declared = [
+        Cut::AfterAtomicTransition,
         Cut::AtQuiescence,
         Cut::AfterFaultPhase,
         Cut::AfterRecovery,
@@ -1829,7 +1850,7 @@ pub fn kill_episode(
     if !safe {
         return Err(unexpected(&id, "a safety check at the cut", &line));
     }
-    witness.child_safety_check();
+    witness.child_safety_check(cut.name());
     let line = line[line.find(BARRIER).unwrap()..].to_string();
     let through: i64 = line
         .split(' ')
@@ -1958,7 +1979,7 @@ pub fn held_publication_episode(
         return Err(unexpected(&id, "no re-admission while held", &again));
     }
     witness.receipt("publication_held");
-    witness.safety_check_while_armed(stores);
+    witness.safety_check_while_armed(stores, "publication_held");
     TestEngine::release(&lane.gate.0);
     let released = pass(&dispatch_bounds());
     if published(&released) == 0 {
@@ -2275,7 +2296,7 @@ pub fn liveness(
                 progress.holds_at_bound = holds;
             }
         }
-        witness.safety_check_while_armed(&stores);
+        witness.safety_check_while_armed(&stores, "liveness_window_step");
     }
 
     let armed_at_bound = armed(&stores);

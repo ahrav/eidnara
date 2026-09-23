@@ -1603,8 +1603,8 @@ Fault contract (`crates/eval-core/tests/fault.rs`,
   while armed, a premature success, a recorded refusal or permanent stall
   whose episode carries another refusal or an injected fault's action
   (`RefusalNotDeclared`), and an
-  `expected_refusal` episode with no recorded refusal (`RefusalNotRecorded`)
-  refuse.
+  `expected_refusal` episode with no recorded refusal or permanent stall
+  (`RefusalNotRecorded`) refuse.
 - `a_parsed_report_cannot_claim_what_no_run_recorded`: a claim boundary that
   is not the pinned one, a peak over its envelope bound, no episode at all, a
   marker the registry does not know, an outside-core fault scoped to a
@@ -1647,8 +1647,13 @@ Fault contract (`crates/eval-core/tests/fault.rs`,
   handle rolls back itself is `consumed` while `recovery_failure` needs a
   reopen; a blank effect key is `EmptyIdentity`; a `profile_digest` other than
   the supplied `FaultProfile`'s is `ProfileDigestMismatch`; a retry observed
-  after a `not_applied` read-back lands as applied; an applied read-back with
-  no observation is `OutcomeNotDerived`.
+  after a `not_applied` read-back lands as applied; an `applied` outcome with
+  no observation behind it, an attempt alone included, is `OutcomeNotDerived`;
+  `backup_before_rename` encodes the backup hook; `fail_acknowledgement` loses
+  no reply; a GC fault that raises the writer fence heals by reopen; `lost_by`
+  is a set, so a retried identity keeps every losing episode; every oracle
+  checkpoint needs a receipt (`MissingCut`); a lane driven past its bound is
+  `LivenessUnmet`; a kill with a zero process peak is `KilledChildNotCounted`.
 
 Fault shell (`crates/daemon/tests/eval_fault.rs`, `--all-features`; the
 default shards run the campaign once with every scenario asserted over it,
@@ -1658,13 +1663,15 @@ job under `EIDNARA_EVAL_S0_BUDGET_MS`):
 - `the_fault_campaign_receipts_every_declared_cut`
   (`flt-fault-episode-contract-faithful`,
   `flt-every-declared-cut-reached-per-campaign`; marker
-  `flt_every_declared_cut_receipted`): every declared episode and observer cut
-  has a receipt, the four oracle checkpoints resolve to `reached`, every
+  `flt_every_declared_cut_receipted`): every declared episode and observer
+  cut has a receipt, the four checkpoints the campaign reaches resolve to
+  `reached` and `AfterAtomicTransition` to `not_reached`, every
   episode's heal is the one its seam permits, exactly the two kill episodes
-  carry a kill label, a safety check ran while every fault that arms on the
-  aging drive's stores was armed, the action kinds include `expected_refusal`,
-  the published report parses back equal, and the manifest names it by result
-  digest under `generate`.
+  carry a kill label,
+  a safety check ran while every fault that arms on the aging drive's stores
+  was armed, the action kinds include `expected_refusal`, the published
+  report parses back equal, and the manifest names it by result digest under
+  `generate`.
 - `a_lost_reply_stays_unknown_until_readback_at_after_recovery`
   (`flt-lost-ack-expected-is-admissible-set`; marker
   `flt_lost_reply_unknown_until_readback`): three lost replies (a local

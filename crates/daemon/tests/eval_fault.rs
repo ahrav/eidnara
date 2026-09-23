@@ -130,11 +130,17 @@ fn the_fault_campaign_receipts_every_declared_cut_scenario(campaign: &Campaign) 
         report.coverage.declared
     );
     for cut in &report.cuts {
-        assert_eq!(cut.outcome, CutOutcome::Reached, "{cut:?}");
+        let expected = if cut.cut == Cut::AfterAtomicTransition {
+            CutOutcome::NotReached
+        } else {
+            CutOutcome::Reached
+        };
+        assert_eq!(cut.outcome, expected, "{cut:?}");
     }
     assert_eq!(
         report.cuts.iter().map(|c| c.cut).collect::<Vec<_>>(),
         vec![
+            Cut::AfterAtomicTransition,
             Cut::AtQuiescence,
             Cut::AfterFaultPhase,
             Cut::AfterRecovery,
@@ -1234,6 +1240,46 @@ fn each_kill_episode_counts_the_safety_check_its_child_ran_at_the_cut() {
     }
 }
 
+/// The counted safety check inspects the state the faulted operation left:
+/// for a lost commit reply, `local_released`, after the batch committed and
+/// before the drive reconciles the lost reply (`local_staged` is inside the
+/// still-open transaction); for a lost acknowledgement reply, `acknowledged`,
+/// the first cut after the kernel write is durable.
+#[test]
+fn an_armed_safety_check_runs_after_the_faulted_effect_is_durable() {
+    let plan = aging::plan(MESSAGES).unwrap();
+    for (fault, cut) in [
+        (SearchEpisodeFault::LoseLocalCommitReply, "local_released"),
+        (SearchEpisodeFault::LoseAcknowledgementReply, "acknowledged"),
+    ] {
+        let root = tempfile::tempdir().unwrap();
+        let mut stores = aging::Stores::open(root.path(), &plan);
+        aging::live(&mut stores, &plan.steps[..3]);
+        let mut witness = Witness::new();
+        stores.apply(&plan.steps[3]);
+        lost_reply_episode(
+            &mut stores,
+            &mut witness,
+            "lost",
+            3,
+            plan.steps[3].now_ms,
+            fault,
+        )
+        .unwrap();
+        assert!(!witness.armed_check_cuts.is_empty(), "{fault:?}");
+        assert!(
+            witness.armed_check_cuts.iter().all(|c| *c == cut),
+            "{fault:?}: {:?}",
+            witness.armed_check_cuts
+        );
+        assert_eq!(
+            witness.safety_checks as usize,
+            witness.armed_check_cuts.len(),
+            "{fault:?}"
+        );
+    }
+}
+
 /// Closing the stores checkpoints their WALs away, so an auxiliary root
 /// charged only at its vacate would report its closed footprint.
 #[test]
@@ -1354,4 +1400,50 @@ fn a_lagging_predecessors_claims_are_not_the_newest_decisions() {
     );
     drop(kernel);
     drop(stores.close());
+}
+
+/// A descriptor whose invalidation names a commit past the kernel tip claims
+/// a commit that has not happened, as one created past the tip does; the
+/// safety invariants refuse both.
+#[test]
+fn a_descriptor_invalidated_past_the_tip_fails_the_safety_check() {
+    let plan = aging::plan(MESSAGES).unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let mut stores = aging::Stores::open(root.path(), &plan);
+    aging::live(&mut stores, &plan.steps[..4]);
+    let mut witness = Witness::new();
+    witness.safety_check(&stores);
+    let tip = stores.tip();
+    let kernel = rusqlite::Connection::open(aging::kernel_file(root.path())).unwrap();
+    kernel.execute_batch("PRAGMA foreign_keys = OFF").unwrap();
+    // The registry is append-only by trigger; the corruption this check must
+    // catch is written underneath that guard.
+    let guards: Vec<String> = kernel
+        .prepare("SELECT name FROM sqlite_master WHERE type = 'trigger' AND tbl_name = 'object_registry'")
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    for guard in &guards {
+        kernel
+            .execute_batch(&format!("DROP TRIGGER {guard}"))
+            .unwrap();
+    }
+    let changed = kernel
+        .execute(
+            "UPDATE object_registry SET invalidated_commit_seq = ?1 \
+             WHERE object_id GLOB 'srcdesc:*' AND invalidated_commit_seq IS NOT NULL",
+            [tip + 100],
+        )
+        .unwrap();
+    assert!(changed > 0, "the prefix retires or supersedes a descriptor");
+    drop(kernel);
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        witness.safety_check(&stores)
+    }));
+    assert!(
+        outcome.is_err(),
+        "an invalidation past the tip fails the safety check"
+    );
 }

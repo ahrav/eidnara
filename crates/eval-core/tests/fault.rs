@@ -166,10 +166,17 @@ fn report() -> FaultReport {
         ],
         barriers: vec![barrier("kill")],
         cuts: cut_receipts(
-            &[Cut::AtQuiescence, Cut::AfterRecovery, Cut::EndOfRun],
+            &[
+                Cut::AfterAtomicTransition,
+                Cut::AtQuiescence,
+                Cut::AfterRecovery,
+                Cut::AfterFaultPhase,
+                Cut::EndOfRun,
+            ],
             &[
                 (Cut::AtQuiescence, 1),
                 (Cut::AfterRecovery, 2),
+                (Cut::AfterFaultPhase, 1),
                 (Cut::EndOfRun, 1),
             ]
             .into_iter()
@@ -185,7 +192,11 @@ fn report() -> FaultReport {
         safety_checks_while_armed: 5,
         liveness: Some(liveness()),
         markers: BTreeSet::new(),
-        envelope: Envelope::new(limits()),
+        envelope: {
+            let mut envelope = Envelope::new(limits());
+            envelope.peaks.processes = 1;
+            envelope
+        },
     }
 }
 
@@ -833,6 +844,17 @@ fn a_fault_report_round_trips_and_refuses_what_it_cannot_prove() {
         }),
         "a permanent stall recorded against an injected fault's episode claims a refusal that episode never declared"
     );
+    let mut stalled_only = report.clone();
+    let stall = stalled_only.expected_refusals.remove(0);
+    stalled_only
+        .liveness
+        .as_mut()
+        .unwrap()
+        .permanent_stalls
+        .push(stall);
+    stalled_only.validate(&profile()).expect(
+        "a permanent stall recorded against its expected_refusal episode is the record that episode needs",
+    );
     let mut unrecorded = report.clone();
     unrecorded.expected_refusals.clear();
     assert_eq!(
@@ -947,7 +969,7 @@ fn a_parsed_report_cannot_claim_what_no_run_recorded() {
     let mut claimed = ok.effects.clone();
     let effect = claimed.effects.get_mut("ack:1").unwrap();
     effect.observed = 0;
-    effect.lost_by = None;
+    effect.lost_by.clear();
     effect.read_back = false;
     effect.expected = Expected::Exactly {
         state: EffectState::NotApplied,
@@ -1134,7 +1156,7 @@ fn a_parsed_report_cannot_claim_what_no_run_recorded() {
     let effect = untried.effects.get_mut("ack:1").unwrap();
     effect.attempted = 0;
     effect.observed = 0;
-    effect.lost_by = None;
+    effect.lost_by.clear();
     effect.read_back = false;
     assert_eq!(
         untried.validate(),
@@ -1239,7 +1261,7 @@ fn a_parsed_report_cannot_claim_what_no_run_recorded() {
         .effects
         .get_mut("ack:1")
         .unwrap()
-        .lost_by = Some("ghost".to_string());
+        .lost_by = ["ghost".to_string()].into_iter().collect();
     assert_eq!(
         ghost_loser.validate(&p),
         Err(FaultReportError::UnknownEpisode {
@@ -1290,9 +1312,16 @@ fn a_parsed_report_cannot_claim_what_no_run_recorded() {
     );
     assert!(
         FaultAction::ClaimMaterialization {
-            fault: MaterializationFaultKind::FailAcknowledgement
+            fault: MaterializationFaultKind::LoseAcknowledgementReply
         }
         .loses_reply()
+    );
+    assert!(
+        !FaultAction::ClaimMaterialization {
+            fault: MaterializationFaultKind::FailAcknowledgement
+        }
+        .loses_reply(),
+        "the materializer never calls the kernel for a failed acknowledgement; nothing was lost"
     );
     assert!(
         !FaultAction::EmbeddingPublication {
@@ -1459,6 +1488,80 @@ fn a_parsed_report_cannot_claim_what_no_run_recorded() {
             identity: "ghost".to_string()
         }),
         "an applied read-back is an observation; none recorded means none found"
+    );
+
+    let backup = FaultAction::BackupBeforeRename;
+    assert_eq!(backup.heal(), Heal::Consumed);
+    assert_eq!(backup.family(), Some(StoreFamily::Kernel));
+    assert!(!backup.loses_reply());
+    assert_eq!(
+        serde_json::to_value(&backup).unwrap(),
+        serde_json::json!({"kind": "backup_before_rename"})
+    );
+    assert_eq!(
+        FaultAction::ArtifactGc {
+            fault: ArtifactGcFaultKind::FenceRaisedBeforeUnlink
+        }
+        .heal(),
+        Heal::Reopen,
+        "a raised writer fence leaves the lease stale until reopen"
+    );
+    let mut merely_attempted = EffectLedger::default();
+    merely_attempted.attempt("tried");
+    assert_eq!(
+        merely_attempted.validate(),
+        Err(EffectRefused::OutcomeNotDerived {
+            identity: "tried".to_string()
+        }),
+        "an attempt alone establishes nothing; an observation or acknowledgement does"
+    );
+    merely_attempted.observe("tried").unwrap();
+    merely_attempted.validate().unwrap();
+    let mut no_checkpoints = ok.clone();
+    no_checkpoints.cuts.clear();
+    assert_eq!(
+        no_checkpoints.validate(&p),
+        Err(FaultReportError::MissingCut {
+            cut: Cut::AfterAtomicTransition
+        }),
+        "every oracle checkpoint is receipted, reached or not"
+    );
+    let mut twice_lost = EffectLedger::default();
+    twice_lost.attempt("x");
+    twice_lost.lose_reply("x", "first").unwrap();
+    twice_lost.read_back("x", EffectState::NotApplied).unwrap();
+    twice_lost.attempt("x");
+    twice_lost.lose_reply("x", "second").unwrap();
+    assert_eq!(
+        twice_lost.effects["x"].lost_by,
+        ["first".to_string(), "second".to_string()]
+            .into_iter()
+            .collect(),
+        "a retried identity keeps every episode that lost one of its replies"
+    );
+    let mut overdriven = liveness();
+    overdriven
+        .lanes
+        .get_mut(&Lane::CatchUpEpisodes)
+        .unwrap()
+        .steps = 65;
+    assert!(
+        matches!(
+            overdriven.verdict(&b),
+            Err(LivenessRefused::LivenessUnmet {
+                lane: Lane::CatchUpEpisodes,
+                progress_at_bound: 65,
+                ..
+            })
+        ),
+        "a lane is driven to its bound, not past it"
+    );
+    let mut uncounted = ok.clone();
+    uncounted.envelope.peaks.processes = 0;
+    assert_eq!(
+        uncounted.validate(&p),
+        Err(FaultReportError::KilledChildNotCounted),
+        "the killed child was a process the envelope must have seen"
     );
 }
 
