@@ -76,11 +76,9 @@ fn provider() -> ProviderProfile {
 }
 
 fn audit(task: &str) -> CutoffAudit {
-    let entry = corpus_entry(task);
     CutoffAudit {
         task: task.to_string(),
-        base_sha: entry.base_sha,
-        fix_sha: entry.fix_sha,
+        entry_digest: corpus_entry(task).digest().unwrap(),
         cutoff_ms: CUTOFF,
         base_committed_ms: CUTOFF - 86_400_000,
         fix_committed_ms: CUTOFF + 3_600_000,
@@ -95,6 +93,7 @@ fn audit(task: &str) -> CutoffAudit {
 fn proof(task: &str) -> InsufficiencyProof {
     InsufficiencyProof {
         task: task.to_string(),
+        entry_digest: corpus_entry(task).digest().unwrap(),
         hidden: BTreeMap::from([
             ("regression".to_string(), HiddenOutcome::Failed),
             ("smoke".to_string(), HiddenOutcome::Passed),
@@ -105,6 +104,7 @@ fn proof(task: &str) -> InsufficiencyProof {
 fn control(task: &str, terminal: Terminal) -> NoRepositoryControl {
     NoRepositoryControl {
         task: task.to_string(),
+        entry_digest: corpus_entry(task).digest().unwrap(),
         provider: provider(),
         execution_image: "image-1".to_string(),
         analysis_family_digest: "cd".repeat(32),
@@ -127,6 +127,7 @@ fn comparison(task: &str, terminal: Terminal) -> RepositoryComparison {
 fn classified(task: &str, verdict: ControlVerdict) -> ClassifiedControl {
     ClassifiedControl {
         task: task.to_string(),
+        entry_digest: corpus_entry(task).digest().unwrap(),
         provider: provider(),
         verdict,
     }
@@ -300,8 +301,8 @@ fn the_insufficiency_proof_is_an_executed_failing_run() {
         Err(InsufficiencyRefused::TreeAlreadyPasses)
     );
     let empty = InsufficiencyProof {
-        task: "cargo-0".to_string(),
         hidden: BTreeMap::new(),
+        ..proof("cargo-0")
     };
     assert_eq!(
         empty.validate(),
@@ -309,8 +310,8 @@ fn the_insufficiency_proof_is_an_executed_failing_run() {
         "a corpus row without a run is not a proof"
     );
     let errored = InsufficiencyProof {
-        task: "cargo-0".to_string(),
         hidden: BTreeMap::from([("regression".to_string(), HiddenOutcome::Errored)]),
+        ..proof("cargo-0")
     };
     assert_eq!(
         errored.validate(),
@@ -946,19 +947,19 @@ fn the_time_study_saturates_instead_of_wrapping() {
 }
 
 #[test]
-fn the_audit_names_the_commits_it_timed() {
+fn the_audit_names_the_row_it_timed() {
     let mut other_base = entry("cargo-0", Family::Cargo, 0x10);
     other_base.base_sha = sha(0x99);
     assert!(audit("cargo-0").validate_for(&other_base).is_err());
     assert_eq!(
         audit("cargo-0").validate_for(&other_base),
-        Err(CutoffRefused::CommitMismatch)
+        Err(CutoffRefused::RowMismatch)
     );
     let mut other_fix = entry("cargo-0", Family::Cargo, 0x10);
     other_fix.fix_sha = sha(0x99);
     assert_eq!(
         audit("cargo-0").validate_for(&other_fix),
-        Err(CutoffRefused::CommitMismatch)
+        Err(CutoffRefused::RowMismatch)
     );
     audit("cargo-0")
         .validate_for(&entry("cargo-0", Family::Cargo, 0x10))
@@ -1084,6 +1085,95 @@ fn a_clone_url_with_a_user_or_port_in_its_authority_refuses() {
         "ssh://git@example.invalid:22/cargo/repo.git",
         "ssh://git@example.invalid/cargo/repo.git",
         "https://example.invalid:8443/cargo/repo.git",
+    ] {
+        let mut entry = entry("cargo-0", Family::Cargo, 0x10);
+        entry.repository = repository.to_string();
+        assert!(entry.validate().is_err(), "{repository}");
+    }
+}
+
+#[test]
+fn evidence_is_bound_to_the_whole_row_it_was_produced_for() {
+    let row = entry("cargo-0", Family::Cargo, 0x10);
+    let mut other_issue = row.clone();
+    other_issue.issue += 1;
+    assert!(
+        audit("cargo-0").validate_for(&other_issue).is_err(),
+        "an audit timed another issue's text"
+    );
+    assert_eq!(
+        audit("cargo-0").validate_for(&other_issue),
+        Err(CutoffRefused::RowMismatch)
+    );
+    let mut other_base = row.clone();
+    other_base.base_sha = sha(0x99);
+    assert!(
+        proof("cargo-0").validate_for(&other_base).is_err(),
+        "a proof ran over another base's tree"
+    );
+    assert_eq!(
+        proof("cargo-0").validate_for(&other_base),
+        Err(InsufficiencyRefused::RowMismatch)
+    );
+    let mut stale = classified("cargo-0", ControlVerdict::Eligible);
+    stale.entry_digest = "00".repeat(32);
+    let corpus = pilot();
+    let (audits, proofs, mut controls) = evidence(&corpus);
+    controls.insert("cargo-0".to_string(), stale);
+    let (_, accounting) = anchor_set(
+        &corpus,
+        AnchorRole::Pilot,
+        &audits,
+        &proofs,
+        &controls,
+        &provider(),
+    )
+    .unwrap();
+    assert_eq!(
+        accounting.control_missing,
+        BTreeSet::from(["cargo-0".to_string()]),
+        "a control run on another version of the row says nothing about this one"
+    );
+    audit("cargo-0").validate_for(&row).unwrap();
+    proof("cargo-0").validate_for(&row).unwrap();
+}
+
+#[test]
+fn the_corpus_refuses_one_fix_commit_under_two_ids() {
+    let mut corpus = pilot();
+    let mut alias = corpus.entries[0].clone();
+    alias.id = "cargo-0-again".to_string();
+    corpus.entries.push(alias);
+    assert!(corpus.validate().is_err());
+    assert_eq!(
+        corpus.validate(),
+        Err(AnchorError::DuplicateTask {
+            id: "cargo-0-again".to_string(),
+            of: "cargo-0".to_string()
+        })
+    );
+}
+
+#[test]
+fn a_control_needs_a_well_formed_analysis_family_digest() {
+    let mut blank = control("cargo-0", Terminal::Fail);
+    blank.analysis_family_digest = String::new();
+    let mut blank_comparison = comparison("cargo-0", Terminal::Fail);
+    blank_comparison.analysis_family_digest = String::new();
+    assert!(classify_control(&blank, &blank_comparison).is_err());
+    assert_eq!(
+        classify_control(&blank, &blank_comparison),
+        Err(ControlRefused::MalformedDigest {
+            field: "analysis_family_digest"
+        })
+    );
+}
+
+#[test]
+fn a_clone_url_needs_a_scheme_and_a_host() {
+    for repository in [
+        "://example.invalid/cargo/repo.git",
+        "https:///cargo/repo.git",
     ] {
         let mut entry = entry("cargo-0", Family::Cargo, 0x10);
         entry.repository = repository.to_string();

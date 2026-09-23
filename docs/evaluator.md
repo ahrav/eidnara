@@ -2438,13 +2438,18 @@ is not here; this module only judges the evidence it records.
 `pull_request`, and `cutoff_ms`. The issue and pull-request text is fetched
 at run time and never written into a corpus, report, or witness; `validate`
 refuses an empty field, an `id` with whitespace, a `repository` that is not
-a scheme URL with a bare host (so `git@host:path`, a user, or a port in the
-authority refuses, and the `/pull/` URLs `future_answers` matches derive
+a scheme URL with a bare host (so `git@host:path`, a user, a port, an
+empty scheme, or an empty host other than `file://`'s refuses, and the
+`/pull/` URLs `future_answers` matches derive
 from the URL itself), a `license` that is not an SPDX expression by shape (identifiers of
 SPDX characters joined by `AND`, `OR`, or `WITH`; not checked against the
 SPDX list) (`TextPersisted`), a
-malformed SHA, and a duplicate id. `digest` validates first and refuses a
+malformed SHA, a duplicate id, and one fix commit of one repository under
+two ids (`DuplicateTask`). `digest` validates first and refuses a
 row JSON cannot carry exactly (`NotCanonical`) instead of panicking.
+`AnchorEntry::digest` (`eval-anchor-entry-digest/v1`) is the identity every
+piece of evidence names: an audit, a proof, or a control produced for one
+version of a row matches no other version of it.
 `is_pilot` accepts
 exactly `PILOT_COMPOSITION`: eight Cargo, eight Tokio, four Django.
 
@@ -2458,8 +2463,8 @@ rather than shrinking the pilot. A wrong count, a task outside the corpus,
 or the same task measured twice refuses.
 
 **Cutoff audit.** `CutoffAudit` is what the snapshot builder established
-from the repository's own commit times and the issue: `task`, `base_sha`,
-`fix_sha`, `cutoff_ms`,
+from the repository's own commit times and the issue: `task`,
+`entry_digest`, `cutoff_ms`,
 `base_committed_ms`, `fix_committed_ms`, `issue_created_ms`,
 `issue_text_ms` (the last edit of the issue text the task is given, or its
 creation when never edited), `snapshot_digest`, `base_tree_digest`, and
@@ -2468,28 +2473,32 @@ a base committed after the cutoff, a fix not strictly after it, an issue
 filed after it, issue text edited after it, a snapshot whose digest is not
 the base commit's tree, and a fix-added path in the snapshot; each is one
 `CutoffRefused` reason (`reason` on the wire). `validate_for(entry)` first
-requires the audit to name the entry's task (`AuditForOtherTask`), judge
-its cutoff (`CutoffMismatch`), and time its commits (`CommitMismatch`), so
-timestamps judged against another cutoff or another pair of commits say
-nothing about the row.
+requires the audit to name the entry's task (`AuditForOtherTask`) and the
+entry's row by digest (`RowMismatch`, when any field of the row changed
+since the audit) and to judge its cutoff (`CutoffMismatch`), so timestamps
+judged against another cutoff or another version of the row say nothing
+about it.
 
-**Insufficiency proof.** `InsufficiencyProof {task, hidden}` is the
+**Insufficiency proof.** `InsufficiencyProof {task, entry_digest, hidden}`
+is the
 current-tree-only run: the hidden tests over the snapshot with no agent.
 `validate` needs at least one hidden test that ran and `failed`; every
 verdict passing is `TreeAlreadyPasses`, and no verdict at all (an empty run
 or every test `errored`) is `NothingExecuted`. A corpus row without a
 recorded run is not a proof. `validate_for` refuses a proof naming another
-task.
+task or another version of the row (`RowMismatch`).
 
 **No-repository control.** `NoRepositoryControl` is the statement-only run
 for one `ProviderProfile {provider, model, tokenizer_profile}` (key
-`provider/model@tokenizer_profile`): `task`, `provider`, `execution_image`,
+`provider/model@tokenizer_profile`): `task`, `entry_digest`, `provider`,
+`execution_image`,
 `analysis_family_digest`, `terminal`, the `repository_access` it reached, and
 the `future_answers` its output named. `RepositoryComparison` is the
 repository-bearing run it is judged against (`task`, `provider`,
 `execution_image`, `analysis_family_digest`, `terminal`); a control is never
 its own comparison. `classify_control(control,
-comparison)` refuses `NotComparable {field}` unless task, provider, image,
+comparison)` refuses `MalformedDigest` unless the analysis digest is
+sixty-four lowercase hex, `NotComparable {field}` unless task, provider, image,
 and analysis digest match the comparison, `NotRun` when
 the control's terminal is not `pass`, `fail`, or `censored`, and
 `ComparisonNotRun` when the comparison's is not; then the pair is
@@ -2509,7 +2518,8 @@ twice) and the pilot corpus under the `transfer` role
 the caller names.
 Every task keeps its row: a failed audit is `cutoff_invalid`; a missing
 audit, a missing or
-refused proof, a missing control, a control classified for another task or
+refused proof, a missing control, a control classified for another task,
+another version of the row, or another
 provider, and an excluded control are each `residue`; only a task whose
 audit and proof name it and pass and whose control was classified for it
 under `provider` as eligible is `valid`. `PairAccounting` keeps each task in
@@ -2543,7 +2553,7 @@ one cutoff-invalid, and one unproven task keeps twenty rows with seventeen
 eligible and derives `generated_phase1`, and refuses the `transfer` role; a
 twenty-one-task transfer-role set excludes the
 memorized task for that pair and transfers once its control is eligible;
-evidence naming another task, cutoff, or pair of commits is refused; a
+evidence naming another task, cutoff, or version of the row is refused; a
 duplicate row and an issue number above 2^53 refuse; settings refusals and
 wire names.
 

@@ -17,6 +17,8 @@ use crate::task::{HiddenOutcome, HiddenResults};
 
 pub const ANCHOR_CORPUS_SCHEMA: &str = "eval-anchor-corpus/v1";
 pub const ANCHOR_CORPUS_DIGEST_PROTOCOL: &str = "eval-anchor-corpus-digest/v1";
+/// The digest evidence names to say which corpus row it was produced for.
+pub const ANCHOR_ENTRY_DIGEST_PROTOCOL: &str = "eval-anchor-entry-digest/v1";
 /// The pilot: eight Cargo, eight Tokio, four Django tasks.
 pub const PILOT_COMPOSITION: [(Family, u32); 3] =
     [(Family::Cargo, 8), (Family::Tokio, 8), (Family::Django, 4)];
@@ -87,6 +89,12 @@ pub enum AnchorError {
     DuplicateId {
         id: String,
     },
+    /// Two rows name one fix commit of one repository: one historical task
+    /// under two ids.
+    DuplicateTask {
+        id: String,
+        of: String,
+    },
     NotPilotComposition {
         found: BTreeMap<Family, u32>,
     },
@@ -123,6 +131,19 @@ impl AnchorEntry {
         }
         Ok(())
     }
+
+    /// The identity evidence for this row carries; a row edited in any field
+    /// has another digest, so evidence produced before the edit matches
+    /// nothing.
+    pub fn digest(&self) -> Result<String, AnchorError> {
+        self.validate()?;
+        let value = serde_json::to_value(self).expect("entry serializes");
+        protocol_digest(ANCHOR_ENTRY_DIGEST_PROTOCOL, &value).map_err(|e| {
+            AnchorError::NotCanonical {
+                detail: e.to_string(),
+            }
+        })
+    }
 }
 
 fn is_token(text: &str) -> bool {
@@ -131,12 +152,19 @@ fn is_token(text: &str) -> bool {
 
 /// A clone URL with a scheme and a bare host: no user or port in the
 /// authority, so the web path `repository_web_path` derives is the URL
-/// itself. `git@host:path` and `ssh://git@host:22/path` are not accepted.
+/// itself. `git@host:path`, `ssh://git@host:22/path`, and `https:///path`
+/// are not accepted; `file:///path` is, its authority being empty by design.
 fn is_url(text: &str) -> bool {
     is_token(text)
-        && text.split_once("://").is_some_and(|(_, rest)| {
+        && text.split_once("://").is_some_and(|(scheme, rest)| {
             let authority = rest.split('/').next().unwrap_or(rest);
-            !authority.contains('@') && !authority.contains(':')
+            !scheme.is_empty()
+                && scheme
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || "+-.".contains(c))
+                && (!authority.is_empty() || scheme == "file")
+                && !authority.contains('@')
+                && !authority.contains(':')
         })
 }
 
@@ -174,11 +202,21 @@ impl AnchorCorpus {
             });
         }
         let mut ids = BTreeSet::new();
+        let mut fixes = BTreeMap::new();
         for entry in &self.entries {
             entry.validate()?;
             if !ids.insert(entry.id.as_str()) {
                 return Err(AnchorError::DuplicateId {
                     id: entry.id.clone(),
+                });
+            }
+            if let Some(of) = fixes.insert(
+                (entry.repository.as_str(), entry.fix_sha.as_str()),
+                &entry.id,
+            ) {
+                return Err(AnchorError::DuplicateTask {
+                    id: entry.id.clone(),
+                    of: of.clone(),
                 });
             }
         }
@@ -302,10 +340,8 @@ pub fn time_study(
 #[serde(deny_unknown_fields)]
 pub struct CutoffAudit {
     pub task: String,
-    /// The commits the audit timed; evidence for a row naming other commits
-    /// says nothing about it.
-    pub base_sha: String,
-    pub fix_sha: String,
+    /// `AnchorEntry::digest` of the row the audit was produced for.
+    pub entry_digest: String,
     #[serde(with = "crate::decimal")]
     pub cutoff_ms: i64,
     #[serde(with = "crate::decimal")]
@@ -343,28 +379,29 @@ pub enum CutoffRefused {
     /// The snapshot's tree is not the base commit's tree.
     SnapshotNotBaseTree,
     AuditForOtherTask,
+    /// The audit was produced for a row with this id that has since changed
+    /// in some field (commits, issue, repository, cutoff).
+    RowMismatch,
     /// The audit judged a cutoff other than the corpus row's, so its
     /// timestamps say nothing about the row's cutoff.
     CutoffMismatch,
-    /// The audit timed commits other than the corpus row's.
-    CommitMismatch,
 }
 
 debug_display!(CutoffRefused);
 
 impl CutoffAudit {
     /// Validates the audit as evidence for `entry`: it must name the entry's
-    /// task, judge the entry's cutoff, and time the entry's commits before
-    /// its own timestamps count.
+    /// task and row and judge the entry's cutoff before its own timestamps
+    /// count. A row with no digest matches no audit.
     pub fn validate_for(&self, entry: &AnchorEntry) -> Result<(), CutoffRefused> {
         if self.task != entry.id {
             return Err(CutoffRefused::AuditForOtherTask);
         }
+        if entry.digest().ok().as_deref() != Some(self.entry_digest.as_str()) {
+            return Err(CutoffRefused::RowMismatch);
+        }
         if self.cutoff_ms != entry.cutoff_ms {
             return Err(CutoffRefused::CutoffMismatch);
-        }
-        if self.base_sha != entry.base_sha || self.fix_sha != entry.fix_sha {
-            return Err(CutoffRefused::CommitMismatch);
         }
         self.validate()
     }
@@ -404,6 +441,8 @@ pub enum InsufficiencyRefused {
     /// errored.
     NothingExecuted,
     ProofForOtherTask,
+    /// The proof ran over a row with this id that has since changed.
+    RowMismatch,
 }
 
 debug_display!(InsufficiencyRefused);
@@ -414,6 +453,8 @@ debug_display!(InsufficiencyRefused);
 #[serde(deny_unknown_fields)]
 pub struct InsufficiencyProof {
     pub task: String,
+    /// `AnchorEntry::digest` of the row whose snapshot the tests ran over.
+    pub entry_digest: String,
     pub hidden: HiddenResults,
 }
 
@@ -436,6 +477,9 @@ impl InsufficiencyProof {
     pub fn validate_for(&self, entry: &AnchorEntry) -> Result<(), InsufficiencyRefused> {
         if self.task != entry.id {
             return Err(InsufficiencyRefused::ProofForOtherTask);
+        }
+        if entry.digest().ok().as_deref() != Some(self.entry_digest.as_str()) {
+            return Err(InsufficiencyRefused::RowMismatch);
         }
         self.validate()
     }
@@ -468,6 +512,8 @@ impl ProviderProfile {
 #[serde(deny_unknown_fields)]
 pub struct NoRepositoryControl {
     pub task: String,
+    /// `AnchorEntry::digest` of the row whose statement the control was given.
+    pub entry_digest: String,
     pub provider: ProviderProfile,
     pub execution_image: String,
     pub analysis_family_digest: String,
@@ -516,6 +562,7 @@ pub enum ControlVerdict {
 #[serde(deny_unknown_fields)]
 pub struct ClassifiedControl {
     pub task: String,
+    pub entry_digest: String,
     pub provider: ProviderProfile,
     pub verdict: ControlVerdict,
 }
@@ -524,6 +571,9 @@ pub struct ClassifiedControl {
 pub enum ControlRefused {
     /// The control and its comparison differ in image, identity, or rules.
     NotComparable { field: &'static str },
+    /// The frozen analysis rules are not named by a digest, so nothing was
+    /// compared under them.
+    MalformedDigest { field: &'static str },
     /// The control did not run, so it cannot show the statement alone was
     /// insufficient.
     NotRun { terminal: Terminal },
@@ -548,6 +598,11 @@ pub fn classify_control(
     control: &NoRepositoryControl,
     comparison: &RepositoryComparison,
 ) -> Result<ClassifiedControl, ControlRefused> {
+    if !is_lower_hex(&control.analysis_family_digest, 64) {
+        return Err(ControlRefused::MalformedDigest {
+            field: "analysis_family_digest",
+        });
+    }
     for (field, same) in [
         ("task", control.task == comparison.task),
         ("provider", control.provider == comparison.provider),
@@ -595,6 +650,7 @@ pub fn classify_control(
     };
     Ok(ClassifiedControl {
         task: control.task.clone(),
+        entry_digest: control.entry_digest.clone(),
         provider: control.provider.clone(),
         verdict,
     })
@@ -699,57 +755,55 @@ pub fn anchor_set(
         insufficiency_refused: BTreeMap::new(),
         control_missing: BTreeSet::new(),
     };
-    let tasks = corpus
-        .entries
-        .iter()
-        .map(|entry| {
-            let audit = audits.get(&entry.id).map(|audit| audit.validate_for(entry));
-            let proof = proofs.get(&entry.id).map(|proof| proof.validate_for(entry));
-            let control = controls
-                .get(&entry.id)
-                .filter(|c| c.task == entry.id && c.provider == *provider)
-                .map(|c| &c.verdict);
-            let verdict = match (audit, proof, control) {
-                (None, _, _) => {
-                    accounting.cutoff_missing.insert(entry.id.clone());
-                    AnchorVerdict::Residue
-                }
-                (Some(Err(refused)), _, _) => {
-                    accounting.cutoff_invalid.insert(entry.id.clone(), refused);
-                    AnchorVerdict::CutoffInvalid
-                }
-                (Some(Ok(())), None, _) => {
-                    accounting.insufficiency_missing.insert(entry.id.clone());
-                    AnchorVerdict::Residue
-                }
-                (Some(Ok(())), Some(Err(refused)), _) => {
-                    accounting
-                        .insufficiency_refused
-                        .insert(entry.id.clone(), refused);
-                    AnchorVerdict::Residue
-                }
-                (Some(Ok(())), Some(Ok(())), None) => {
-                    accounting.control_missing.insert(entry.id.clone());
-                    AnchorVerdict::Residue
-                }
-                (Some(Ok(())), Some(Ok(())), Some(ControlVerdict::Eligible)) => {
-                    accounting.eligible.insert(entry.id.clone());
-                    AnchorVerdict::Valid
-                }
-                (Some(Ok(())), Some(Ok(())), Some(ControlVerdict::Excluded { contamination })) => {
-                    accounting
-                        .excluded
-                        .insert(entry.id.clone(), contamination.clone());
-                    AnchorVerdict::Residue
-                }
-            };
-            AnchorTask {
-                id: entry.id.clone(),
-                family: entry.family.label().to_string(),
-                verdict,
+    let mut tasks = Vec::with_capacity(corpus.entries.len());
+    for entry in &corpus.entries {
+        let digest = entry.digest()?;
+        let audit = audits.get(&entry.id).map(|audit| audit.validate_for(entry));
+        let proof = proofs.get(&entry.id).map(|proof| proof.validate_for(entry));
+        let control = controls
+            .get(&entry.id)
+            .filter(|c| c.task == entry.id && c.entry_digest == digest && c.provider == *provider)
+            .map(|c| &c.verdict);
+        let verdict = match (audit, proof, control) {
+            (None, _, _) => {
+                accounting.cutoff_missing.insert(entry.id.clone());
+                AnchorVerdict::Residue
             }
-        })
-        .collect();
+            (Some(Err(refused)), _, _) => {
+                accounting.cutoff_invalid.insert(entry.id.clone(), refused);
+                AnchorVerdict::CutoffInvalid
+            }
+            (Some(Ok(())), None, _) => {
+                accounting.insufficiency_missing.insert(entry.id.clone());
+                AnchorVerdict::Residue
+            }
+            (Some(Ok(())), Some(Err(refused)), _) => {
+                accounting
+                    .insufficiency_refused
+                    .insert(entry.id.clone(), refused);
+                AnchorVerdict::Residue
+            }
+            (Some(Ok(())), Some(Ok(())), None) => {
+                accounting.control_missing.insert(entry.id.clone());
+                AnchorVerdict::Residue
+            }
+            (Some(Ok(())), Some(Ok(())), Some(ControlVerdict::Eligible)) => {
+                accounting.eligible.insert(entry.id.clone());
+                AnchorVerdict::Valid
+            }
+            (Some(Ok(())), Some(Ok(())), Some(ControlVerdict::Excluded { contamination })) => {
+                accounting
+                    .excluded
+                    .insert(entry.id.clone(), contamination.clone());
+                AnchorVerdict::Residue
+            }
+        };
+        tasks.push(AnchorTask {
+            id: entry.id.clone(),
+            family: entry.family.label().to_string(),
+            verdict,
+        });
+    }
     Ok((AnchorSet { role, tasks }, accounting))
 }
 
