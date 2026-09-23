@@ -336,6 +336,8 @@ pub enum SkipReason {
     /// The host cannot create the namespaces Suite D contains an agent in;
     /// the task is never attempted uncontained.
     NoContainment,
+    /// A real-history task without a passing cutoff audit is never attempted.
+    MissingCutoffEvidence,
 }
 
 /// Why a sample cannot be measured on this surface.
@@ -344,6 +346,12 @@ pub enum SkipReason {
 pub enum UnsupportedReason {
     SurfaceNotActivated {
         surface: EvaluatedSurface,
+    },
+    /// The anchor task's source could not be fetched at its commit.
+    SourceUnavailable,
+    /// The task's family needs a runtime this host does not have.
+    UnsupportedRuntime {
+        family: crate::anchor::Family,
     },
     NoMediationBoundary,
     PackingHasNoCaller,

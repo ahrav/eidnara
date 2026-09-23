@@ -537,7 +537,10 @@ Existing check: `crates/eval-core/src/task.rs` `task_terminal`,
   `crates/daemon/examples/eval_runner/suite_d.rs` `hidden_results`; tests above.
 Impact: An agent could pass by writing its own test, or a censored run could be
   reported as a pass.
-Open questions: None.
+Open questions:
+- The hidden tests run candidate code with the runner's own authority; a
+  build script or a test body can reach the host. Grading in its own
+  restricted worker is not done. (needs human input)
 
 ### mtr-hidden-test-adequacy-kills-wrong-fix
 
@@ -615,8 +618,12 @@ Impact: An agent could read the runner's files or credentials, reach the
   task outcome.
 Open questions:
 - The read-only rebinds cover the temp directories and the home directory, not
-  every writable path on the host; a full read-only root needs `pivot_root`.
-  (needs human input)
+  every writable path on the host; a full read-only root needs `pivot_root`,
+  and the mapped root keeps mount authority inside its own namespace. (needs
+  human input)
+- The escape verdict is two 300 ms samples of the alive file after the canary
+  child exited; a slow host could read a live escapee as denied. (needs human
+  input)
 
 ### mtr-injection-cases-present-and-scored-per-stage
 
