@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::checkpoint::StoreFamily;
-use crate::manifest::{Cut, CutOutcome, CutReceipt};
+use crate::manifest::{Cut, CutOutcome, CutReceipt, ResourceLimits};
 use crate::statistics::LivenessBounds;
 use context_core::canonical_json::{
     ContractError, canonical_json_encode, is_lower_hex, protocol_digest,
@@ -114,6 +114,29 @@ impl FaultAction {
 
     pub fn is_kill(&self) -> bool {
         matches!(self, Self::ProcessKill { .. })
+    }
+
+    /// The action leaves an operation's outcome unknown to its caller: the
+    /// work may have committed while the reply said otherwise. `LoseLocalCommit`
+    /// rolls back and `SkipAcknowledgement` never acknowledges, which are known.
+    pub fn loses_reply(&self) -> bool {
+        match self {
+            Self::SearchEpisode { fault } => {
+                *fault != SearchEpisodeFault::AcknowledgeInsideLocalTransaction
+            }
+            Self::EmbeddingPublication { fault } => {
+                *fault == PublicationFaultKind::LoseLocalCommitReply
+            }
+            Self::ClaimMaterialization { fault } => {
+                *fault != MaterializationFaultKind::SkipAcknowledgement
+            }
+            Self::HeldPublication
+            | Self::ArtifactIngest { .. }
+            | Self::ArtifactDeletion { .. }
+            | Self::ExternalLockHolder
+            | Self::ProcessKill { .. }
+            | Self::CorruptQuiescentFile => false,
+        }
     }
 
     /// The store the action's seam lives in: catch-up and publication write the
@@ -440,7 +463,7 @@ pub struct EffectLedger {
 
 impl Effect {
     fn admits(&self, state: EffectState) -> bool {
-        if state == EffectState::NotApplied && self.acknowledged > 0 {
+        if state == EffectState::NotApplied && self.observed > 0 {
             return false;
         }
         match &self.expected {
@@ -573,7 +596,7 @@ impl EffectLedger {
                     acknowledged: effect.acknowledged,
                 });
             }
-            if effect.acknowledged > 0 && effect.outcome == EffectOutcome::NotApplied {
+            if effect.observed > 0 && effect.outcome == EffectOutcome::NotApplied {
                 return Err(EffectRefused::ReadBackNotAdmissible {
                     identity,
                     state: EffectState::NotApplied,
@@ -817,6 +840,8 @@ pub enum FaultReportError {
         field: &'static str,
     },
     EnvelopeExceeded(crate::EnvelopeExceeded),
+    /// The report's envelope bounds are not the approved profile's limits.
+    EnvelopeDisagreesWithProfile,
     NoEpisode,
     UnregisteredMarker {
         marker: String,
@@ -856,6 +881,11 @@ pub enum FaultReportError {
         episode: String,
         refusal: ExpectedRefusal,
     },
+    /// Fewer lost replies in the ledger than episodes that lose one.
+    LostReplyUnrecorded {
+        episodes: usize,
+        recorded: usize,
+    },
     SafetyNeverChecked,
     Shape(String),
     NotCanonical(ContractError),
@@ -863,7 +893,13 @@ pub enum FaultReportError {
 }
 
 impl FaultReport {
-    pub fn validate(&self, bounds: &LivenessBounds) -> Result<(), FaultReportError> {
+    /// `bounds` and `limits` are the approved profile's; the report may not
+    /// supply its own.
+    pub fn validate(
+        &self,
+        bounds: &LivenessBounds,
+        limits: &ResourceLimits,
+    ) -> Result<(), FaultReportError> {
         if self.schema != FAULT_REPORT_SCHEMA {
             return Err(FaultReportError::SchemaMismatch {
                 found: self.schema.clone(),
@@ -879,6 +915,9 @@ impl FaultReport {
             if !is_lower_hex(digest, 64) {
                 return Err(FaultReportError::MalformedDigest { field });
             }
+        }
+        if self.envelope.bounds != *limits {
+            return Err(FaultReportError::EnvelopeDisagreesWithProfile);
         }
         self.envelope
             .check()
@@ -934,6 +973,23 @@ impl FaultReport {
             .verdict()
             .map_err(FaultReportError::Coverage)?;
         self.effects.validate().map_err(FaultReportError::Effect)?;
+        let lost = self
+            .episodes
+            .iter()
+            .filter(|e| e.action.loses_reply())
+            .count();
+        let recorded = self
+            .effects
+            .effects
+            .values()
+            .filter(|e| e.reply_lost)
+            .count();
+        if recorded < lost {
+            return Err(FaultReportError::LostReplyUnrecorded {
+                episodes: lost,
+                recorded,
+            });
+        }
         let stalls = self.liveness.iter().flat_map(|l| &l.permanent_stalls);
         for recorded in self.expected_refusals.iter().chain(stalls) {
             if !self.episodes.iter().any(|e| e.id == recorded.episode) {
@@ -982,8 +1038,12 @@ impl FaultReport {
 
     /// Digestible on both runtimes: no integer may leave the canonical safe
     /// range, or `result_digest` would refuse the value `validate` accepted.
-    pub fn serialize(&self, bounds: &LivenessBounds) -> Result<Value, FaultReportError> {
-        self.validate(bounds)?;
+    pub fn serialize(
+        &self,
+        bounds: &LivenessBounds,
+        limits: &ResourceLimits,
+    ) -> Result<Value, FaultReportError> {
+        self.validate(bounds, limits)?;
         let value =
             serde_json::to_value(self).map_err(|e| FaultReportError::Shape(e.to_string()))?;
         canonical_json_encode(&value).map_err(FaultReportError::NotCanonical)?;
@@ -1011,10 +1071,11 @@ impl FaultReport {
 pub fn parse_fault_report(
     value: &Value,
     bounds: &LivenessBounds,
+    limits: &ResourceLimits,
 ) -> Result<FaultReport, FaultReportError> {
     let report =
         FaultReport::deserialize(value).map_err(|e| FaultReportError::Shape(e.to_string()))?;
-    report.validate(bounds)?;
+    report.validate(bounds, limits)?;
     canonical_json_encode(value).map_err(FaultReportError::NotCanonical)?;
     let again =
         serde_json::to_value(&report).map_err(|e| FaultReportError::Shape(e.to_string()))?;

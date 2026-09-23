@@ -2007,7 +2007,11 @@ and `corrupt_quiescent_file`. `FaultAction::family` is the store the seam
 lives in: catch-up and publication write the search projection, the CAS and
 the materializer's outbox are the kernel, and a lock holder, a kill, or a
 corrupted file names its own store; a scope on another family is
-`ScopeMismatch`.
+`ScopeMismatch`. `FaultAction::loses_reply` names the actions that leave an
+operation's outcome unknown to its caller: the search-episode reply losses,
+`embedding_publication`'s `lose_local_commit_reply`, and the materializer's
+`lose_acknowledgement_reply` and `fail_acknowledgement`; a rolled-back commit
+or a skipped acknowledgement is known, not lost.
 `FaultAction::heal` is the heal each class permits: `consumed` for one-shot
 enums, `released` for gates and lock holders, `reopen` for kills and
 corruption. The CAS faults split by whether they latch ingestion closed: the
@@ -2059,11 +2063,11 @@ the expectation to `one_of {applied, not_applied}` and the outcome to
 and the matching outcome, adding the observation an applied read-back proves.
 A read-back is refused as `ReadBackNotAdmissible { identity, state }` and
 changes nothing when `state` is outside the admissible set (a reply that was
-not lost admits only `applied`) or when it is `not_applied` for an acknowledged
-effect, which would be a lost acknowledged write.
+not lost admits only `applied`) or when it is `not_applied` for an effect
+already observed, which would be a lost write that was seen.
 `validate` refuses, per identity, `NeverAttempted` at zero attempts (an entry
 `attempt` never created), `BoundsViolated` unless `acknowledged <=
-observed <= attempted`, `ReadBackNotAdmissible` for an acknowledged effect
+observed <= attempted`, `ReadBackNotAdmissible` for an observed effect
 whose outcome is `not_applied`, `PrematureSuccess` for a lost reply whose
 outcome is not `unknown` without a read-back, and
 `ExpectationCollapsedWithoutReadBack` for a lost reply expecting fewer than two
@@ -2113,11 +2117,16 @@ publishes: identity, profile digest, claim boundary, the episodes, barrier
 receipts, cut receipts, cut coverage, the effect ledger, expected refusals,
 the count of safety checks made while faults were armed (`SafetyNeverChecked`
 at zero), the optional liveness report, markers, and envelope. `validate`
-takes the profile's bounds and runs every refusal above, and also refuses
+takes the profile's liveness bounds and resource limits and runs every
+refusal above, and also refuses
 `ClaimBoundaryMismatch`, `MalformedDigest` for an `eval_run_id` or
-`profile_digest` that is not 64 lowercase hex digits, `EnvelopeExceeded` when any recorded peak is over its
+`profile_digest` that is not 64 lowercase hex digits,
+`EnvelopeDisagreesWithProfile` when the envelope's bounds are not the
+profile's limits, `EnvelopeExceeded` when any recorded peak is over its
 bound, `NoEpisode` when no fault was armed (so no safety check ran while one
 was), `UnregisteredMarker` for a marker `MARKERS` does not register,
+`LostReplyUnrecorded` when the ledger holds fewer lost replies than the
+episodes that lose one,
 `UnknownEpisode` for a liveness outside-core episode that is not one of the
 report's episodes, `CoreFamilyFaulted` for one scoped to a family the healthy
 core names, and `ConsumedFaultArmed` for one whose heal is `consumed`: a
