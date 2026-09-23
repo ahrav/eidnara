@@ -2000,20 +2000,25 @@ mirroring the fault enums and hooks that exist: `search_episode`
 (`search_catchup::EpisodeFault`), `embedding_publication`
 (`PublicationFault`), `held_publication` (the embedding fixture's gate),
 `claim_materialization` (`claim_sources::EpisodeFault`),
+`embedding_dispatch` (`embedding_dispatch::DispatchFault`),
 `artifact_ingest` and `artifact_deletion` (the kernel CAS enums, including
-`after_directory_sync`, the approved directory-fsync hook),
+`after_directory_sync`, the approved directory-fsync hook), `artifact_gc`
+(`cas::gc::ArtifactGcFault`), `kernel_restore` (`backup::RestoreFault`),
 `external_lock_holder` (an external `BEGIN IMMEDIATE`), `process_kill { cut }`,
 and `corrupt_quiescent_file`. `FaultAction::family` is the store the seam
-lives in: catch-up and publication write the search projection, the CAS and
+lives in: catch-up, publication, and dispatch write the search projection,
+the CAS, its GC, a restore, and
 the materializer's outbox are the kernel, and a lock holder, a kill, or a
 corrupted file names its own store; a scope on another family is
 `ScopeMismatch`. `FaultAction::loses_reply` names the actions that leave an
 operation's outcome unknown to its caller: the search-episode reply losses,
-`embedding_publication`'s `lose_local_commit_reply`, and the materializer's
-`lose_acknowledgement_reply` and `fail_acknowledgement`; a rolled-back commit
-or a skipped acknowledgement is known, not lost.
+`embedding_publication`'s `lose_local_commit_reply`, the materializer's
+`lose_acknowledgement_reply` and `fail_acknowledgement`, dispatch's
+`lose_charge_reply`, `refuse_ledger_read`, and `lose_obsoletion_reply`, and
+GC's `after_reclaiming` and `after_unlink`; a rolled-back commit, a refused
+statement, or a skipped acknowledgement is known, not lost.
 `FaultAction::heal` is the heal each class permits: `consumed` for one-shot
-enums, `released` for gates and lock holders, `reopen` for kills and
+enums, `released` for gates and lock holders, `reopen` for kills, restores, and
 corruption. The CAS faults split by whether they latch ingestion closed: the
 ingest faults `write`, `file_sync`, `rename`, `after_directory_sync`, and
 `takeover_before_cleanup_unlink` and the EIO deletion faults `intent_append`
@@ -2022,7 +2027,9 @@ SQLite transaction and leave the store usable, and they and the ENOSPC and
 commit-point deletion faults heal by `consumed`. The kernel's
 `return_value_fault_table_latches_eio_and_never_publishes_a_reference` asserts
 that `reservation_commit` and `after_events` leave the store usable and the
-other ingest faults it drives fail closed. A
+other ingest faults it drives fail closed. GC's `unlink` latches GC closed
+(`latch_gc_failure`) and heals by `reopen`; its other three fail one pass and
+are `consumed`. A
 declared heal that differs is `HealMismatch`. A kill carries a
 `KillLabel` whose `crash_model` must be `application_crash` with
 `page_cache_intact` and whose `killed_process` must be `test_binary_child`;
@@ -2035,8 +2042,10 @@ refuse.
 
 A `BarrierReceipt` is the line a killed child printed at its cut, read before
 the kill. Barrier lines are `<prefix> <cut>`, so the line's last
-whitespace-separated token must equal the cut (`LineDoesNotNameCut`); a suffix
-match is not enough, and no line names an empty cut. The child must have died
+whitespace-separated token must equal the cut and must not be the only token
+(`LineDoesNotNameCut`); a suffix
+match is not enough, a bare cut is not a line the child printed, and no line
+names an empty cut. The child must have died
 by signal (`ExitedWithStatus`), and the signal must be `SIGKILL` (`NotSigkill`),
 the one the runner sends and the one the kill label describes, from a child
 with a pid (`NoPid`). A report with a
@@ -2076,7 +2085,8 @@ already observed, which would be a lost write that was seen.
 observed <= attempted`, `ReadBackNotAdmissible` for an observed effect
 whose outcome is `not_applied`, `ObservedWithoutReadBack` for a lost reply
 observed but never read back (the observation is the read-back the ledger
-must record), `PrematureSuccess` for a lost reply whose
+must record), `LostReplyAcknowledged` for a lost reply whose every attempt was
+acknowledged (nothing was lost), `PrematureSuccess` for a lost reply whose
 outcome is not `unknown` without a read-back, and
 `ExpectationCollapsedWithoutReadBack` for a lost reply expecting fewer than two
 states, and `OutcomeNotDerived` when the outcome is not the state the

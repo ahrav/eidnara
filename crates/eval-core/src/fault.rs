@@ -42,6 +42,38 @@ pub enum MaterializationFaultKind {
     FailAcknowledgement,
 }
 
+/// `embedding_dispatch::DispatchFault`: armed per pass, consumed when it fires.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DispatchFaultKind {
+    RefuseBinding,
+    RefuseEligibilityRead,
+    RefuseChargeStatement,
+    LoseChargeReply,
+    RefuseLedgerRead,
+    LoseObsoletionReply,
+}
+
+/// `cas::gc::ArtifactGcFault`: `unlink` latches GC closed, the rest fail one pass.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ArtifactGcFaultKind {
+    AfterReclaiming,
+    FenceRaisedBeforeUnlink,
+    Unlink,
+    AfterUnlink,
+}
+
+/// `backup::RestoreFault`: a restore interrupted at a named point, healed by
+/// the rollback recovery a reopen runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RestoreFaultKind {
+    BeforeDisplace,
+    AfterDisplace,
+    RecoveryFailure,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ArtifactIngestFaultKind {
@@ -74,6 +106,9 @@ pub enum FaultAction {
     EmbeddingPublication { fault: PublicationFaultKind },
     HeldPublication,
     ClaimMaterialization { fault: MaterializationFaultKind },
+    EmbeddingDispatch { fault: DispatchFaultKind },
+    ArtifactGc { fault: ArtifactGcFaultKind },
+    KernelRestore { fault: RestoreFaultKind },
     ArtifactIngest { fault: ArtifactIngestFaultKind },
     ArtifactDeletion { fault: ArtifactDeletionFaultKind },
     ExternalLockHolder,
@@ -108,6 +143,14 @@ impl FaultAction {
                 | ArtifactDeletionFaultKind::UnlinkStorageExhausted => Heal::Consumed,
             },
             Self::HeldPublication | Self::ExternalLockHolder => Heal::Released,
+            Self::EmbeddingDispatch { .. } => Heal::Consumed,
+            Self::ArtifactGc { fault } => match fault {
+                ArtifactGcFaultKind::Unlink => Heal::Reopen,
+                ArtifactGcFaultKind::AfterReclaiming
+                | ArtifactGcFaultKind::FenceRaisedBeforeUnlink
+                | ArtifactGcFaultKind::AfterUnlink => Heal::Consumed,
+            },
+            Self::KernelRestore { .. } => Heal::Reopen,
             Self::ProcessKill { .. } | Self::CorruptQuiescentFile => Heal::Reopen,
         }
     }
@@ -130,9 +173,20 @@ impl FaultAction {
             Self::ClaimMaterialization { fault } => {
                 *fault != MaterializationFaultKind::SkipAcknowledgement
             }
+            Self::EmbeddingDispatch { fault } => matches!(
+                fault,
+                DispatchFaultKind::LoseChargeReply
+                    | DispatchFaultKind::RefuseLedgerRead
+                    | DispatchFaultKind::LoseObsoletionReply
+            ),
+            Self::ArtifactGc { fault } => matches!(
+                fault,
+                ArtifactGcFaultKind::AfterReclaiming | ArtifactGcFaultKind::AfterUnlink
+            ),
             Self::HeldPublication
             | Self::ArtifactIngest { .. }
             | Self::ArtifactDeletion { .. }
+            | Self::KernelRestore { .. }
             | Self::ExternalLockHolder
             | Self::ProcessKill { .. }
             | Self::CorruptQuiescentFile => false,
@@ -146,10 +200,13 @@ impl FaultAction {
         match self {
             Self::SearchEpisode { .. }
             | Self::EmbeddingPublication { .. }
-            | Self::HeldPublication => Some(StoreFamily::SearchProjection),
+            | Self::HeldPublication
+            | Self::EmbeddingDispatch { .. } => Some(StoreFamily::SearchProjection),
             Self::ClaimMaterialization { .. }
             | Self::ArtifactIngest { .. }
-            | Self::ArtifactDeletion { .. } => Some(StoreFamily::Kernel),
+            | Self::ArtifactDeletion { .. }
+            | Self::ArtifactGc { .. }
+            | Self::KernelRestore { .. } => Some(StoreFamily::Kernel),
             Self::ExternalLockHolder | Self::ProcessKill { .. } | Self::CorruptQuiescentFile => {
                 None
             }
@@ -340,10 +397,12 @@ pub enum BarrierRefused {
 }
 
 impl BarrierReceipt {
-    /// Barrier lines are `<prefix> <cut>`, so the cut must be the last token;
-    /// a suffix match would let `unacknowledged` name `acknowledged`.
+    /// Barrier lines are `<prefix> <cut>`, so the cut must be the last token
+    /// and not the only one; a suffix match would let `unacknowledged` name
+    /// `acknowledged`, and a bare cut is not a line the child printed.
     pub fn validate(&self) -> Result<(), BarrierRefused> {
-        if self.line.split_whitespace().next_back() != Some(self.cut.as_str()) {
+        let mut tokens = self.line.split_whitespace();
+        if tokens.next_back() != Some(self.cut.as_str()) || tokens.next().is_none() {
             return Err(BarrierRefused::LineDoesNotNameCut {
                 episode: self.episode.clone(),
                 line: self.line.clone(),
@@ -532,6 +591,10 @@ pub enum EffectRefused {
     ObservedWithoutReadBack {
         identity: String,
     },
+    /// Every attempt was acknowledged, so no reply was lost.
+    LostReplyAcknowledged {
+        identity: String,
+    },
 }
 
 impl EffectLedger {
@@ -634,6 +697,9 @@ impl EffectLedger {
                     identity,
                     state: EffectState::NotApplied,
                 });
+            }
+            if effect.reply_lost() && effect.acknowledged >= effect.attempted {
+                return Err(EffectRefused::LostReplyAcknowledged { identity });
             }
             if effect.reply_lost() && !effect.read_back {
                 if effect.observed > 0 {

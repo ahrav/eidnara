@@ -87,13 +87,13 @@ pub use failure_class::{
     FailureClass, Outcome, Slice, cells, classify, serialize_table, table_digest,
 };
 pub use fault::{
-    APPLICATION_CRASH, ArtifactDeletionFaultKind, ArtifactIngestFaultKind, BarrierReceipt,
-    BarrierRefused, CoverageRefused, CutCoverage, Effect, EffectLedger, EffectOutcome,
-    EffectRefused, EffectState, EpisodeRefused, Expected, ExpectedRefusal, FAULT_REPORT_SCHEMA,
-    FaultAction, FaultEpisode, FaultReport, FaultReportError, FaultScope, Heal, HealthyCore,
-    KillLabel, Lane, LaneProgress, LivenessRefused, LivenessReport, MaterializationFaultKind,
-    PublicationFaultKind, RecordedRefusal, SIGKILL, SearchEpisodeFault, TEST_BINARY_CHILD,
-    cut_receipts, parse_fault_report, validate_episodes,
+    APPLICATION_CRASH, ArtifactDeletionFaultKind, ArtifactGcFaultKind, ArtifactIngestFaultKind,
+    BarrierReceipt, BarrierRefused, CoverageRefused, CutCoverage, DispatchFaultKind, Effect,
+    EffectLedger, EffectOutcome, EffectRefused, EffectState, EpisodeRefused, Expected,
+    ExpectedRefusal, FAULT_REPORT_SCHEMA, FaultAction, FaultEpisode, FaultReport, FaultReportError,
+    FaultScope, Heal, HealthyCore, KillLabel, Lane, LaneProgress, LivenessRefused, LivenessReport,
+    MaterializationFaultKind, PublicationFaultKind, RecordedRefusal, RestoreFaultKind, SIGKILL,
+    SearchEpisodeFault, TEST_BINARY_CHILD, cut_receipts, parse_fault_report, validate_episodes,
 };
 pub use generator::*;
 pub use governance::{ArmError, ArmRecord, GovernanceArms, HistoryPolicy, pair_set_digest};

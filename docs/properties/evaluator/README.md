@@ -1629,7 +1629,11 @@ Fault contract (`crates/eval-core/tests/fault.rs`,
   report lacks is `UnknownEpisode`; a lost reply observed without a read-back
   is `ObservedWithoutReadBack`; a barrier with pid 0 is `NoPid`; a second
   barrier for one kill is `DuplicateBarrier`; a kill at a cut the coverage
-  never declared is `UndeclaredCut`.
+  never declared is `UndeclaredCut`; `embedding_dispatch`, `artifact_gc`, and
+  `kernel_restore` encode the remaining seams at HEAD with their heal, family,
+  and reply-loss classification; a bare cut with no prefix token is
+  `LineDoesNotNameCut`; a lost reply whose every attempt was acknowledged is
+  `LostReplyAcknowledged`.
 
 Aging drive (`crates/daemon/tests/eval_aging.rs`, `--all-features`):
 

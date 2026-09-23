@@ -1,14 +1,15 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use eval_core::{
-    APPLICATION_CRASH, ArtifactDeletionFaultKind, ArtifactIngestFaultKind, BarrierReceipt,
-    BarrierRefused, ClaimBoundary, Coverage, CoverageRefused, Cut, CutCoverage, CutOutcome,
-    EffectLedger, EffectOutcome, EffectRefused, EffectState, Envelope, EpisodeRefused, Expected,
-    ExpectedRefusal, FAULT_REPORT_SCHEMA, FaultAction, FaultEpisode, FaultReport, FaultReportError,
-    FaultScope, Heal, HealthyCore, KillLabel, Lane, LaneProgress, LivenessBounds, LivenessRefused,
-    LivenessReport, MaterializationFaultKind, PublicationFaultKind, RecordedRefusal,
-    ResourceLimits, SIGKILL, SearchEpisodeFault, StoreFamily, TEST_BINARY_CHILD, cut_receipts,
-    parse_fault_report, validate_episodes,
+    APPLICATION_CRASH, ArtifactDeletionFaultKind, ArtifactGcFaultKind, ArtifactIngestFaultKind,
+    BarrierReceipt, BarrierRefused, ClaimBoundary, Coverage, CoverageRefused, Cut, CutCoverage,
+    CutOutcome, DispatchFaultKind, EffectLedger, EffectOutcome, EffectRefused, EffectState,
+    Envelope, EpisodeRefused, Expected, ExpectedRefusal, FAULT_REPORT_SCHEMA, FaultAction,
+    FaultEpisode, FaultReport, FaultReportError, FaultScope, Heal, HealthyCore, KillLabel, Lane,
+    LaneProgress, LivenessBounds, LivenessRefused, LivenessReport, MaterializationFaultKind,
+    PublicationFaultKind, RecordedRefusal, ResourceLimits, RestoreFaultKind, SIGKILL,
+    SearchEpisodeFault, StoreFamily, TEST_BINARY_CHILD, cut_receipts, parse_fault_report,
+    validate_episodes,
 };
 
 const SUITE: &str = "crates/eval-core/tests/fault.rs::";
@@ -1223,6 +1224,87 @@ fn a_parsed_report_cannot_claim_what_no_run_recorded() {
         }
         .loses_reply(),
         "a rolled-back commit whose reply says so is known, not lost"
+    );
+    for (action, heal, family, loses) in [
+        (
+            FaultAction::EmbeddingDispatch {
+                fault: DispatchFaultKind::LoseChargeReply,
+            },
+            Heal::Consumed,
+            StoreFamily::SearchProjection,
+            true,
+        ),
+        (
+            FaultAction::EmbeddingDispatch {
+                fault: DispatchFaultKind::RefuseChargeStatement,
+            },
+            Heal::Consumed,
+            StoreFamily::SearchProjection,
+            false,
+        ),
+        (
+            FaultAction::ArtifactGc {
+                fault: ArtifactGcFaultKind::Unlink,
+            },
+            Heal::Reopen,
+            StoreFamily::Kernel,
+            false,
+        ),
+        (
+            FaultAction::ArtifactGc {
+                fault: ArtifactGcFaultKind::AfterUnlink,
+            },
+            Heal::Consumed,
+            StoreFamily::Kernel,
+            true,
+        ),
+        (
+            FaultAction::KernelRestore {
+                fault: RestoreFaultKind::AfterDisplace,
+            },
+            Heal::Reopen,
+            StoreFamily::Kernel,
+            false,
+        ),
+    ] {
+        assert_eq!(action.heal(), heal, "{action:?}");
+        assert_eq!(action.family(), Some(family), "{action:?}");
+        assert_eq!(action.loses_reply(), loses, "{action:?}");
+        let value = serde_json::to_value(&action).unwrap();
+        assert_eq!(
+            serde_json::from_value::<FaultAction>(value).unwrap(),
+            action
+        );
+    }
+    assert_eq!(
+        serde_json::to_value(FaultAction::ArtifactGc {
+            fault: ArtifactGcFaultKind::FenceRaisedBeforeUnlink
+        })
+        .unwrap(),
+        serde_json::json!({"kind": "artifact_gc", "fault": "fence_raised_before_unlink"})
+    );
+    let bare = BarrierReceipt {
+        line: "acknowledged".to_string(),
+        ..barrier("kill")
+    };
+    assert!(
+        matches!(
+            bare.validate(),
+            Err(BarrierRefused::LineDoesNotNameCut { .. })
+        ),
+        "a bare cut is not the `<prefix> <cut>` line a child prints"
+    );
+    let mut all_acked = EffectLedger::default();
+    all_acked.attempt("x");
+    all_acked.acknowledge("x").unwrap();
+    all_acked.lose_reply("x", "lost-ack").unwrap();
+    all_acked.read_back("x", EffectState::Applied).unwrap();
+    assert_eq!(
+        all_acked.validate(),
+        Err(EffectRefused::LostReplyAcknowledged {
+            identity: "x".to_string()
+        }),
+        "every attempt acknowledged means no reply was lost"
     );
 }
 
