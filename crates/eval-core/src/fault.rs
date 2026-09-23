@@ -1313,15 +1313,17 @@ impl FaultReport {
                 });
             }
         }
-        // An expected-refusal episode with no recorded production error
-        // claims a refusal the run never observed.
+        // An expected-refusal episode with no recorded production error, as a
+        // refusal or a permanent stall, claims a refusal the run never observed.
         for episode in &self.episodes {
             let FaultAction::ExpectedRefusal { refusal } = episode.action else {
                 continue;
             };
+            let stalls = self.liveness.iter().flat_map(|l| &l.permanent_stalls);
             if !self
                 .expected_refusals
                 .iter()
+                .chain(stalls)
                 .any(|r| r.episode == episode.id && r.refusal == refusal)
             {
                 return Err(FaultReportError::RefusalNotRecorded {

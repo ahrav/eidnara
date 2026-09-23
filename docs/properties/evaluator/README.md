@@ -1603,8 +1603,8 @@ Fault contract (`crates/eval-core/tests/fault.rs`,
   while armed, a premature success, a recorded refusal or permanent stall
   whose episode carries another refusal or an injected fault's action
   (`RefusalNotDeclared`), and an
-  `expected_refusal` episode with no recorded refusal (`RefusalNotRecorded`)
-  refuse.
+  `expected_refusal` episode with no recorded refusal or permanent stall
+  (`RefusalNotRecorded`) refuse.
 - `a_parsed_report_cannot_claim_what_no_run_recorded`: a claim boundary that
   is not the pinned one, a peak over its envelope bound, no episode at all, a
   marker the registry does not know, an outside-core fault scoped to a

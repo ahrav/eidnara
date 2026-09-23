@@ -2133,9 +2133,9 @@ variant's production type, `DeletionUnpropagated` or `MetadataQuota`
 (`RefusalNotEvidenced`). A recorded refusal or permanent stall whose episode
 is not a declared `expected_refusal` of the same refusal is
 `RefusalNotDeclared`: it would attribute the refusal to a fault that never
-ran. An `expected_refusal`
-episode with no recorded refusal of its own is `RefusalNotRecorded`: it would
-claim a refusal the run never observed.
+ran. An `expected_refusal` episode with no recorded refusal or permanent
+stall of its own is `RefusalNotRecorded`: it would claim a refusal the run
+never observed.
 
 `LivenessReport` is the separate liveness mode: a `HealthyCore` (families and
 `Lane`s that must progress), the outside-core episodes, the set still armed
@@ -2367,7 +2367,13 @@ so no allowance is left to release; `reserve_memory_reviewer_job` then refuses
 of the ingested evidence leaves the next catch-up episode
 `Blocked(DeletionUnpropagated)` and a second episode with no progress (R11).
 R11 and R24 are declared `expected_refusal` episodes, with heals `reopen` and
-`permanent`, and recorded as expected refusals.
+`permanent`, and recorded as expected refusals. An episode's `trigger_step`
+is the step whose time the campaign's clock stands at when it fires: the step
+just applied for the lock holder and the reply losses, and for the episodes
+that run between two steps (the corruption, CAS, and deletion episodes, the
+publication probes, R24, and R11) the step about to be applied, whose
+`now_ms` the episode and any reopen inside it use, so the clock never moves
+back.
 
 A recovery closes the stores, reads every lost reply back by its identity from
 the closed files (`projection_checkpoint.checkpoint_commit_seq` for a local

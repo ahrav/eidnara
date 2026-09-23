@@ -844,6 +844,17 @@ fn a_fault_report_round_trips_and_refuses_what_it_cannot_prove() {
         }),
         "a permanent stall recorded against an injected fault's episode claims a refusal that episode never declared"
     );
+    let mut stalled_only = report.clone();
+    let stall = stalled_only.expected_refusals.remove(0);
+    stalled_only
+        .liveness
+        .as_mut()
+        .unwrap()
+        .permanent_stalls
+        .push(stall);
+    stalled_only.validate(&profile()).expect(
+        "a permanent stall recorded against its expected_refusal episode is the record that episode needs",
+    );
     let mut unrecorded = report.clone();
     unrecorded.expected_refusals.clear();
     assert_eq!(
