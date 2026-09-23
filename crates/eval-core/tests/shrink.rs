@@ -1317,3 +1317,103 @@ fn replay_attempts_are_bounded_and_a_stale_attempt_cannot_resolve() {
         .unwrap();
     assert_eq!(effects.outcome("candidate"), Ok(&ReplayOutcome::Passed));
 }
+
+#[test]
+fn impossible_ledger_shapes_are_refused_on_read_and_ghosts_on_verify() {
+    let original = scenario();
+    let expected = predicate(FailureClass::Interference);
+    let (_, report) = shrink(&original, &fixture(), &expected, BUDGET, &mut evaluate).unwrap();
+    let value = serde_json::to_value(&report).unwrap();
+
+    // A slipped verdict whose observed predicate equals the pinned one is
+    // what `classify_replay` calls `Reproduced`; it cannot appear.
+    let mut echoed = value.clone();
+    let records = echoed["candidates"].as_array_mut().unwrap();
+    let slipped: Vec<usize> = records
+        .iter()
+        .enumerate()
+        .filter(|(_, r)| r["verdict"]["kind"] == "slipped")
+        .map(|(i, _)| i)
+        .collect();
+    let digest = records[slipped[0]]["scenario_digest"].clone();
+    for record in records
+        .iter_mut()
+        .filter(|r| r["scenario_digest"] == digest)
+    {
+        record["verdict"]["observed"] = serde_json::to_value(&expected).unwrap();
+    }
+    assert_eq!(
+        parse_shrink_report(&echoed),
+        Err(ShrinkReportError::Inconsistent {
+            field: "candidates"
+        }),
+        "a slip that observed the pinned predicate is impossible"
+    );
+
+    // Digests are what `Scenario::digest` produces: 64 lowercase hex chars.
+    let mut renamed = value.clone();
+    renamed["original_digest"] = json!("the-original");
+    renamed["candidates"][0]["scenario_digest"] = json!("the-original");
+    assert_eq!(
+        parse_shrink_report(&renamed),
+        Err(ShrinkReportError::Inconsistent {
+            field: "original_digest"
+        })
+    );
+    let mut renamed = value.clone();
+    renamed["candidates"][1]["scenario_digest"] = json!("CAFE");
+    assert_eq!(
+        parse_shrink_report(&renamed),
+        Err(ShrinkReportError::Inconsistent {
+            field: "candidates"
+        })
+    );
+
+    // A deletion the original never held is a ghost, whatever the digests say.
+    let ghost = aged_event("repository:repository-9:99");
+    assert!(!has(&original, &ghost));
+    let mut haunted = report.clone();
+    haunted.deleted.insert(ghost.clone());
+    let last = haunted
+        .candidates
+        .iter()
+        .rposition(|record| record.verdict == CandidateVerdict::Reproduced)
+        .unwrap();
+    for record in &mut haunted.candidates[last..] {
+        record.deleted.insert(ghost.clone());
+    }
+    assert_eq!(
+        original.without(&haunted.deleted).digest(),
+        haunted.minimized_digest,
+        "the ghost changes nothing the digests can see"
+    );
+    haunted.validate().unwrap();
+    assert_eq!(
+        haunted.verify(&original),
+        Err(ShrinkReportError::Inconsistent { field: "deleted" })
+    );
+
+    // The transformations tried are exactly those the original had elements
+    // for; a scenario with no episodes never tried episode removal.
+    let mut eventless = original.clone();
+    eventless.episodes.clear();
+    let (_, report) = shrink(&eventless, &fixture(), &expected, BUDGET, &mut evaluate).unwrap();
+    assert_eq!(
+        report.minimality,
+        Minimality::OneMinimal {
+            transformations: vec![Transformation::EventDeletion]
+        }
+    );
+    report.verify(&eventless).unwrap();
+    let mut padded = report;
+    padded.minimality = Minimality::OneMinimal {
+        transformations: Transformation::ORDER.to_vec(),
+    };
+    padded.validate().unwrap();
+    assert_eq!(
+        padded.verify(&eventless),
+        Err(ShrinkReportError::Inconsistent {
+            field: "minimality"
+        })
+    );
+}

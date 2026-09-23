@@ -5,7 +5,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::num::NonZeroU32;
 
-use context_core::canonical_json::{ContractError, canonical_json_encode, protocol_digest};
+use context_core::canonical_json::{
+    ContractError, canonical_json_encode, is_lower_hex, protocol_digest,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -580,6 +582,22 @@ impl ShrinkReport {
             .validate()
             .map_err(ShrinkReportError::Oracle)?;
         let inconsistent = |field| Err(ShrinkReportError::Inconsistent { field });
+        // Digests are what `Scenario::digest` produces.
+        let digest = |text: &str| is_lower_hex(text, 64);
+        if !digest(&self.original_digest) {
+            return inconsistent("original_digest");
+        }
+        if !digest(&self.minimized_digest) {
+            return inconsistent("minimized_digest");
+        }
+        for record in &self.candidates {
+            // `classify_replay` calls an observed predicate equal to the pinned
+            // one `Reproduced`; a slip cannot have observed it.
+            let echoed = matches!(&record.verdict, CandidateVerdict::Slipped { observed } if *observed == self.predicate);
+            if !digest(&record.scenario_digest) || echoed {
+                return inconsistent("candidates");
+            }
+        }
         let Some(first) = self.candidates.first() else {
             return inconsistent("candidates");
         };
@@ -687,6 +705,17 @@ impl ShrinkReport {
         if self.original_digest != original.digest() {
             return inconsistent("original_digest");
         }
+        let held: BTreeSet<Element> = original.elements().into_iter().collect();
+        if !self.deleted.is_subset(&held) {
+            return inconsistent("deleted");
+        }
+        if !self
+            .candidates
+            .iter()
+            .all(|record| record.deleted.is_subset(&held))
+        {
+            return inconsistent("candidates");
+        }
         let minimized = original.without(&self.deleted);
         if self.minimized_digest != minimized.digest() {
             return inconsistent("minimized_digest");
@@ -710,14 +739,25 @@ impl ShrinkReport {
                 tried.insert((*element).clone());
             }
         }
-        let full_pass = !matches!(
-            self.minimality,
+        match &self.minimality {
             Minimality::NotEstablished {
-                reason: NotEstablishedReason::ReplayBudgetExhausted
+                reason: NotEstablishedReason::ReplayBudgetExhausted,
+            } => {}
+            Minimality::NotEstablished { .. } if tried != elements => {
+                return inconsistent("minimality");
             }
-        );
-        if full_pass && tried != elements {
-            return inconsistent("minimality");
+            Minimality::NotEstablished { .. } => {}
+            // A completed run tried exactly the transformations the original
+            // had elements for, in the parent's order.
+            Minimality::OneMinimal { transformations } => {
+                let evidenced: Vec<Transformation> = Transformation::ORDER
+                    .into_iter()
+                    .filter(|t| held.iter().any(|e| e.transformation() == *t))
+                    .collect();
+                if tried != elements || *transformations != evidenced {
+                    return inconsistent("minimality");
+                }
+            }
         }
         Ok(())
     }

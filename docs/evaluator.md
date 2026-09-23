@@ -2823,6 +2823,8 @@ an integer outside the canonical safe range as `NotCanonical`, run
 reserialize identically as `Lossy`. `validate`
 checks the `eval-shrink/v1` schema, the pinned oracle, and the report's
 accounting against its own candidate ledger as `Inconsistent { field }`: the
+digests are 64 lowercase hex characters; no slip observed the pinned
+predicate itself; the
 first candidate is the reproduced original with an empty deletion set; every
 record sharing a digest carries the same verdict; the
 last reproduced candidate's digest and deletion set are `minimized_digest`
@@ -2839,10 +2841,12 @@ with the single deletions among them, the final 1-minimality pass.
 unknown single deletions; `replay_budget_exhausted` needs `replays` equal to
 `max_replays`. A report alone can only be self-consistent.
 `ShrinkReport::verify(&original)` binds it to the scenario it claims to have
-shrunk: the original's digest, the digest of `original.without(&deleted)`,
-its element count as `remaining`, and, for a completed pass, that the single
-deletions after the last reproduction are exactly those elements. A shell
-that holds the scenario verifies rather than merely validates.
+shrunk: the original's digest, that every deletion names an element the
+original held, the digest of `original.without(&deleted)`, its element count
+as `remaining`, for a completed pass that the single deletions after the last
+reproduction are exactly those elements, and for `OneMinimal` that the
+transformations listed are exactly those the original had elements for. A
+shell that holds the scenario verifies rather than merely validates.
 
 ## Coverage markers
 
