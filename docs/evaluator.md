@@ -2210,7 +2210,9 @@ resource, so one campaign's root equal to another's publish directory is
 refused too, and so is a path inside another campaign's path, since it
 writes into it; paths must be canonical, absolute with plain components and
 no `.`, `..`, empty component, or trailing separator, else
-`NonCanonicalPath`, since a value-level check cannot resolve aliases), and `digests_match_serial` refuses
+`NonCanonicalPath`; the caller passes each directory as the filesystem
+resolves it, since eval-core has no filesystem and cannot see symlinks or
+mounts), and `digests_match_serial` refuses
 `DigestDiffersFromSerial { campaign }` when a concurrent run's result digest
 differs from its serial one and `TooFewCampaigns` below two, since isolation
 is a claim about at least two.

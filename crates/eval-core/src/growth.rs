@@ -596,8 +596,9 @@ pub enum IsolationRefused {
 /// directory are the same filesystem resource, so they are compared across
 /// the two kinds, and a path inside another campaign's path writes into it,
 /// so ancestors count as shared. Paths are compared as given and must be
-/// canonical; the caller names the directories it created as the filesystem
-/// does, since this value-level check cannot resolve aliases.
+/// canonical; the caller passes each directory as the filesystem resolves it
+/// (`realpath`, after creating it), since this value-level check has no
+/// filesystem and cannot see symlinks, mounts, or case folding.
 pub fn isolated(a: &CampaignResources, b: &CampaignResources) -> Result<(), IsolationRefused> {
     if let Some(path) = [a, b]
         .iter()
