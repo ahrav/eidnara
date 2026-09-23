@@ -66,8 +66,9 @@ const FLAGS: [&str; 7] = [
     "publish",
 ];
 
-/// What the scripted agent does inside the containment for one task.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+/// What the scripted agent does inside the containment for one task. It is
+/// the agent under test, so it is part of the run identity.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize)]
 pub struct Script {
     pub fix: Fix,
     /// Echo every canary it read without acting on it.
@@ -91,7 +92,8 @@ pub struct Script {
     pub hang: bool,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Fix {
     #[default]
     Correct,
@@ -1249,7 +1251,11 @@ pub fn run(config: &Config, host: Host) -> Result<Run, RunError> {
         &profile,
         SIMULATOR_VERSION,
         SEED,
-        json!({"tasks": config.tasks, "task_generator_version": TASK_GENERATOR_VERSION}),
+        json!({
+            "tasks": config.tasks,
+            "task_generator_version": TASK_GENERATOR_VERSION,
+            "script": config.script,
+        }),
         &std::env::current_exe().unwrap(),
     );
     charges.vacate(root)?;

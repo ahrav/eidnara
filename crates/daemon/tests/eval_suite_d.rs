@@ -724,6 +724,7 @@ fn a_wrong_fix_fails_a_no_fix_stays_failed_and_an_exhausted_budget_is_censored()
         },
     );
     let run = suite_d::run(&wrong, HOST).unwrap();
+    let wrong_run_id = run.report.eval_run_id.clone();
     for task in &run.report.tasks {
         assert_eq!(task.terminal, Terminal::Fail);
         assert_eq!(
@@ -762,6 +763,10 @@ fn a_wrong_fix_fails_a_no_fix_stays_failed_and_an_exhausted_budget_is_censored()
     );
     none.publish = dir.path().join("none");
     let run = suite_d::run(&none, HOST).unwrap();
+    assert_ne!(
+        run.report.eval_run_id, wrong_run_id,
+        "a different scripted agent is a different run identity"
+    );
     for task in &run.report.tasks {
         assert_eq!(task.terminal, Terminal::Fail, "no fix stays failing");
         assert_eq!(task.usage.no_progress_iterations, 1);
