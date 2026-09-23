@@ -984,6 +984,20 @@ fn a_parsed_report_cannot_claim_what_no_run_recorded() {
         }),
         "a one-shot fault is consumed or never fired; neither is armed at the bound"
     );
+    let mut refusal_armed = ok.clone();
+    {
+        let live = refusal_armed.liveness.as_mut().unwrap();
+        live.core.families = [StoreFamily::Kernel].into_iter().collect();
+        live.outside_core = ["r11".to_string()].into_iter().collect();
+        live.armed_at_bound = ["r11".to_string()].into_iter().collect();
+    }
+    assert_eq!(
+        refusal_armed.validate(&p),
+        Err(FaultReportError::RefusalArmed {
+            episode: "r11".to_string()
+        }),
+        "an expected refusal injects no fault, so it is not an armed outside-core fault"
+    );
 
     let mut unnamed = ok.episodes[0].clone();
     unnamed.id = " ".to_string();

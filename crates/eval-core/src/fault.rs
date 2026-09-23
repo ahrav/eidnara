@@ -1206,6 +1206,10 @@ pub enum FaultReportError {
     ConsumedFaultArmed {
         episode: String,
     },
+    /// An expected refusal injects no fault, so it is not an armed outside-core fault.
+    RefusalArmed {
+        episode: String,
+    },
     /// A recorded refusal whose production error does not name its variant.
     RefusalNotEvidenced {
         episode: String,
@@ -1454,6 +1458,11 @@ impl FaultReport {
                 }
                 if episode.action.heal() == Heal::Consumed {
                     return Err(FaultReportError::ConsumedFaultArmed {
+                        episode: id.clone(),
+                    });
+                }
+                if matches!(episode.action, FaultAction::ExpectedRefusal { .. }) {
+                    return Err(FaultReportError::RefusalArmed {
                         episode: id.clone(),
                     });
                 }

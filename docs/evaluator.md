@@ -2207,8 +2207,9 @@ an episode that loses none, `UnknownEpisode` for one naming an episode the
 report lacks,
 `UnknownEpisode` for a liveness outside-core episode that is not one of the
 report's episodes, `CoreFamilyFaulted` for one scoped to a family the healthy
-core names, and `ConsumedFaultArmed` for one whose heal is `consumed`: a
-one-shot fault is consumed or never fired, and neither is armed at the bound.
+core names, `ConsumedFaultArmed` for one whose heal is `consumed`: a
+one-shot fault is consumed or never fired, and neither is armed at the bound,
+and `RefusalArmed` for an `expected_refusal`, which injects no fault to arm.
 `serialize` and `parse_fault_report` also refuse `NotCanonical` for an integer
 outside the canonical safe range, which `result_digest` could not encode;
 `parse_fault_report`

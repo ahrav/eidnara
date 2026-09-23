@@ -1609,7 +1609,8 @@ Fault contract (`crates/eval-core/tests/fault.rs`,
   is not the pinned one, a peak over its envelope bound, no episode that
   injects a fault (none at all, or expected refusals alone), a
   marker the registry does not know, an outside-core fault scoped to a
-  healthy-core family, and an outside-core fault whose heal is consumed each
+  healthy-core family, an outside-core fault whose heal is consumed, and an
+  expected refusal named as an outside-core fault (`RefusalArmed`) each
   refuse at the report; a blank episode id or operation refuses at the
   episode; a parsed receipt for an undeclared cut refuses at the coverage
   verdict; an effect whose outcome is not the state its expectation names, or
