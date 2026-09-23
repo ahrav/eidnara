@@ -545,7 +545,7 @@ impl Stores {
 
     /// One catch-up episode, under one injected fault when `fault` is set.
     pub fn episode(
-        &mut self,
+        &self,
         now: i64,
         fault: Option<EpisodeFault>,
         observer: &mut dyn FnMut(EpisodeEvent),

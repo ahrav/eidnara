@@ -126,6 +126,8 @@ pub struct Run {
     pub manifest: eval_core::Manifest,
     pub manifest_bytes: Vec<u8>,
     pub bounds: LivenessBounds,
+    /// The approved profile's limits the report was validated against.
+    pub limits: eval_core::ResourceLimits,
     pub coverage: Coverage,
 }
 
@@ -184,38 +186,52 @@ impl Witness {
         *self.checkpoints.entry(cut).or_insert(0) += 1;
     }
 
-    /// The invariants that must hold while a fault is armed: the projection's
-    /// connection verifies, no descriptor claims a commit past the tip or an
-    /// invalidation before its creation, and the projection never runs ahead of the kernel.
+    /// The safety check after an episode returned or the stores reopened:
+    /// the projection's connection verifies and the invariants hold. No fault
+    /// is armed then, so the check is not counted as one made while armed.
     pub fn safety_check(&mut self, stores: &Stores) {
         stores.projection.verify_connection().unwrap();
-        let snapshot = stores.snapshot();
-        for (object_id, descriptor) in &snapshot.kernel {
-            assert!(
-                descriptor.created_commit_seq <= snapshot.commit_seq,
-                "{object_id} created after the tip"
-            );
-            if let Some(invalidated) = descriptor.invalidated_commit_seq {
-                assert!(
-                    invalidated > descriptor.created_commit_seq,
-                    "{object_id} invalidated before it was created"
-                );
-            }
-        }
-        let acknowledged: i64 = read_only(&search_file(stores.root()))
-            .query_row(
-                "SELECT checkpoint_commit_seq FROM projection_checkpoint",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert!(
-            acknowledged <= snapshot.commit_seq,
-            "the projection acknowledged {acknowledged} past the kernel tip {}",
-            snapshot.commit_seq
-        );
+        safety_invariants(stores);
+    }
+
+    /// The safety check at a cut where a fault is armed, run from the
+    /// episode's observer. At `LocalStaged` the projection connection is held
+    /// by the episode, so this reads the files and the kernel, not the
+    /// projection handle; it is the check `safety_checks_while_armed` counts.
+    pub fn safety_check_while_armed(&mut self, stores: &Stores) {
+        safety_invariants(stores);
         self.safety_checks += 1;
     }
+}
+
+/// No descriptor claims a commit past the tip or an invalidation before its
+/// creation, and the projection never runs ahead of the kernel.
+fn safety_invariants(stores: &Stores) {
+    let snapshot = stores.snapshot();
+    for (object_id, descriptor) in &snapshot.kernel {
+        assert!(
+            descriptor.created_commit_seq <= snapshot.commit_seq,
+            "{object_id} created after the tip"
+        );
+        if let Some(invalidated) = descriptor.invalidated_commit_seq {
+            assert!(
+                invalidated > descriptor.created_commit_seq,
+                "{object_id} invalidated before it was created"
+            );
+        }
+    }
+    let acknowledged: i64 = read_only(&search_file(stores.root()))
+        .query_row(
+            "SELECT checkpoint_commit_seq FROM projection_checkpoint",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(
+        acknowledged <= snapshot.commit_seq,
+        "the projection acknowledged {acknowledged} past the kernel tip {}",
+        snapshot.commit_seq
+    );
 }
 
 const EVENT_CUTS: [&str; 17] = [
@@ -315,7 +331,22 @@ pub fn lost_reply_episode(
     declare_lost_reply_episode(witness, id, step, fault);
     stores.publish_outbox();
     let mut events = Vec::new();
+    let stores = &*stores;
+    // The fault is armed for the whole episode and consumed when it returns,
+    // so the counted safety check runs at the cut whose reply the fault loses.
     let report = stores.episode(now, Some(seam(fault).production), &mut |event| {
+        if matches!(
+            (fault, &event),
+            (
+                SearchEpisodeFault::LoseLocalCommitReply,
+                EpisodeEvent::LocalStaged { .. }
+            ) | (
+                SearchEpisodeFault::LoseAcknowledgementReply,
+                EpisodeEvent::AcknowledgementRequested { .. }
+            )
+        ) {
+            witness.safety_check_while_armed(stores);
+        }
         events.push(event)
     });
     let fixed = receipt_lost_reply_episode(witness, id, fault, &report, &events)?;
@@ -417,7 +448,7 @@ pub fn lock_holder_episode(
         EpisodeEnd::Blocked(Blocked::LocalCommitUnresolved) => witness.receipt("lock_blocked"),
         other => return Err(unexpected(id, "Blocked(LocalCommitUnresolved)", other)),
     }
-    witness.safety_check(stores);
+    witness.safety_check_while_armed(stores);
     drop(holder);
     let released = stores.episode(now, None, &mut |_| {});
     if released.end != EpisodeEnd::ReachedTarget {
@@ -590,7 +621,8 @@ pub fn artifact_ingest_episodes(
         }
         observe_latched(&stores, witness, &id)?;
         witness.receipt("artifact_fault_named");
-        witness.safety_check(&stores);
+        // The latch holds until the reopen, so the fault is still armed here.
+        witness.safety_check_while_armed(&stores);
         stores = reopen(stores, now);
         let healed = stores
             .corpus
@@ -693,10 +725,13 @@ pub fn artifact_deletion_episodes(
             ));
         }
         witness.receipt("artifact_fault_named");
-        witness.safety_check(&stores);
         if heal == Heal::Reopen {
+            // The latch holds until the reopen, so the fault is still armed here.
+            witness.safety_check_while_armed(&stores);
             observe_latched(&stores, witness, &id)?;
             stores = reopen(stores, now);
+        } else {
+            witness.safety_check(&stores);
         }
         let probe = stores
             .corpus
@@ -763,7 +798,9 @@ pub fn r11_episode(
         refusal: ExpectedRefusal::R11DeletionBearingCatchUp,
         production_error: blocked,
     });
-    witness.safety_check(stores);
+    // The stall holds until the reopen rebuilds the projection, so the refusal
+    // is still in force here.
+    witness.safety_check_while_armed(stores);
     witness
         .coverage
         .record("flt_r11_recorded_as_expected_refusal")
@@ -998,6 +1035,7 @@ pub fn publication_episode(
     let identity = format!("embedding:{occurrence}@{id}");
     witness.effects.attempt(&identity);
     let mut events = Vec::new();
+    let stores = &*stores;
     let mut publisher = EmbeddingPublisher::new(&stores.corpus.kernel, &stores.projection);
     let result = publisher.publish_with_fault_for_test(
         &VectorPublication {
@@ -1020,7 +1058,14 @@ pub fn publication_episode(
         },
         Instant::now() + Duration::from_secs(10),
         now,
-        &mut |event| events.push(event),
+        &mut |event| {
+            // The reply is lost and the publisher is reconciling: the fault is
+            // armed here, so this is the counted safety check.
+            if event == PublicationEvent::Reconciling {
+                witness.safety_check_while_armed(stores);
+            }
+            events.push(event)
+        },
         production,
     );
     match (fault, &result) {
@@ -1183,7 +1228,7 @@ pub fn campaign(
         steps[3].now_ms,
         SearchEpisodeFault::LoseLocalCommitReply,
     )?);
-    let mut stores = recover(stores, witness, steps[4].now_ms)?;
+    let mut stores = recover(stores, witness, charges, steps[4].now_ms)?;
 
     stores.apply(&steps[4]);
     expected.extend(lost_reply_episode(
@@ -1194,7 +1239,7 @@ pub fn campaign(
         steps[4].now_ms,
         SearchEpisodeFault::LoseAcknowledgementReply,
     )?);
-    let stores = recover(stores, witness, steps[5].now_ms)?;
+    let stores = recover(stores, witness, charges, steps[5].now_ms)?;
 
     let stores = corruption_episode(stores, witness, charges, step(5), steps[5].now_ms)?;
     let (stores, evidence) = artifact_ingest_episodes(stores, witness, step(5), steps[5].now_ms)?;
@@ -1239,7 +1284,7 @@ pub fn campaign(
     charges.vacate(quota_root)?;
     r11_episode(&mut stores, witness, &evidence, step(rest), resumed)?;
     witness.checkpoint(Cut::AfterFaultPhase);
-    let mut stores = recover(stores, witness, resumed)?;
+    let mut stores = recover(stores, witness, charges, resumed)?;
 
     live(&mut stores, &steps[rest..]);
     witness.checkpoint(Cut::EndOfRun);
@@ -1251,7 +1296,14 @@ pub fn campaign(
     Ok(expected)
 }
 
-fn recover(stores: Stores, witness: &mut Witness, now: i64) -> Result<Stores, RunError> {
+fn recover(
+    stores: Stores,
+    witness: &mut Witness,
+    charges: &mut Charges,
+    now: i64,
+) -> Result<Stores, RunError> {
+    // Closing checkpoints the WALs away, so the footprint is charged first.
+    charges.store_bytes(stores.root())?;
     let closed = stores.close();
     read_back(closed.root(), witness)?;
     let stores = closed.reopen(now);
@@ -1379,11 +1431,16 @@ pub fn run(config: &Config, spawn: Spawn) -> Result<Run, RunError> {
         envelope: charges.envelope.clone(),
     };
     charges.retain_publish_root()?;
-    report.validate(&bounds)?;
-    let bytes = charges.publish_bytes(|envelope| {
-        report.envelope = envelope.clone();
-        serde_json::to_vec_pretty(&serde_json::to_value(&report).unwrap()).unwrap()
-    })?;
+    let bytes = loop {
+        report.envelope = charges.envelope.clone();
+        let bytes =
+            serde_json::to_vec_pretty(&report.serialize(&bounds, &profile.envelope)?).unwrap();
+        let peak = charges.envelope.peaks.artifact_bytes;
+        charges.observe(eval_core::Resource::ArtifactBytes, bytes.len() as u64)?;
+        if charges.envelope.peaks.artifact_bytes == peak {
+            break bytes;
+        }
+    };
     let published: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
     let manifest = suite_c_manifest(ManifestInputs {
         identity,
@@ -1411,6 +1468,7 @@ pub fn run(config: &Config, spawn: Spawn) -> Result<Run, RunError> {
         manifest,
         manifest_bytes,
         bounds,
+        limits: profile.envelope,
         coverage: witness.coverage,
     })
 }
@@ -1806,7 +1864,7 @@ pub fn held_publication_episode(
         return Err(unexpected(&id, "no re-admission while held", &again));
     }
     witness.receipt("publication_held");
-    witness.safety_check(stores);
+    witness.safety_check_while_armed(stores);
     TestEngine::release(&lane.gate.0);
     let released = pass(&dispatch_bounds());
     if published(&released) == 0 {
@@ -2099,7 +2157,7 @@ pub fn liveness(
                 progress.holds_at_bound = holds;
             }
         }
-        witness.safety_check(&stores);
+        witness.safety_check_while_armed(&stores);
     }
 
     let armed_at_bound = armed(&stores);
