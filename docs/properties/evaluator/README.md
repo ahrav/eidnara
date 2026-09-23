@@ -1321,13 +1321,16 @@ Growth contract (`crates/eval-core/tests/growth.rs`,
   project bytes are the receipt charge per terminal job plus receipt and
   allowance per pending job plus page bytes, from the constants the store
   declares; admissions remaining is derived from those constants; a sample
-  whose bytes differ is `HeadroomMismatch`.
+  whose bytes differ is `HeadroomMismatch`, and one whose remaining bytes are
+  not the quota less those bytes is `RemainingMismatch`.
 - `a_never_restored_ledger_passes_only_when_the_final_sample_holds_nothing_transient`:
   a final sample with WAL bytes, a temporary artifact entry, or a temp root
   is a named `Leak`; a counter over its bound is `BoundExceeded`; main-file
   store bytes growing faster than the per-commit allowance are
   `GrowthRateExceeded` even under the size bound, and a WAL-heavy first sample
-  does not mask that growth; an empty ledger, a repeated step, or a receding
+  does not mask that growth, and file bytes added with no commit between the
+  samples have no allowance; a sample that omits a store family is
+  `StoreMissing`; an empty ledger, a repeated step, or a receding
   commit sequence refuse, including in a ledger assembled without `record`;
   the peak store total is the transient middle sample.
 - `a_restore_under_never_restored_is_refused_and_a_restoring_ledger_gives_no_leak_verdict`
@@ -1339,15 +1342,16 @@ Growth contract (`crates/eval-core/tests/growth.rs`,
   `MixIncomplete` naming the kinds, and the report refuses it.
 - `a_shared_root_namespace_or_port_is_refused` (marker
   `xc_shared_fixture_refused`): a shared root, publish directory, cassette
-  namespace, or port is refused by value; a concurrent digest that differs
+  namespace, or port is refused by value, as is one campaign's root equal to
+  another's publish directory; a concurrent digest that differs
   from its serial run is refused by campaign index.
 - `a_growth_report_round_trips_and_its_digest_ignores_measurements`: the
   report parses back equal; its digest ignores per-sample byte measurements
   and envelope peaks, and changes with the quota constants, the commit
   sequence and row counts, and the headroom; a restoring report with no
   samples or out-of-order samples, faults with no safety check (whether the
-  episode count or the mix records them), a reordered report read back, and a
-  leaked final sample refuse.
+  episode count or the mix records them), a reordered report read back, a
+  leaked final sample, and an envelope whose peaks crossed a bound refuse.
 
 Fault shell (`crates/daemon/tests/eval_fault.rs`, `--all-features`; the
 default shards run the campaign once with every scenario asserted over it,

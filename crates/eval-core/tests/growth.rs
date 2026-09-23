@@ -1,10 +1,11 @@
 use std::collections::BTreeSet;
 
 use eval_core::{
-    CampaignResources, ClaimBoundary, Coverage, Envelope, GROWTH_REPORT_SCHEMA, GrowthBounds,
-    GrowthLedger, GrowthMode, GrowthRefused, GrowthReport, GrowthReportError, HeadroomSample,
-    IsolationRefused, MixIncomplete, Operation, ResourceLimits, ResourceSample, ReviewerQuota,
-    StoreBytes, StoreFamily, SwarmMix, digests_match_serial, isolated, parse_growth_report,
+    CampaignResources, ClaimBoundary, Coverage, Envelope, EnvelopeExceeded, GROWTH_REPORT_SCHEMA,
+    GrowthBounds, GrowthLedger, GrowthMode, GrowthRefused, GrowthReport, GrowthReportError,
+    HeadroomSample, IsolationRefused, MixIncomplete, Operation, Resource, ResourceLimits,
+    ResourceSample, ReviewerQuota, StoreBytes, StoreFamily, SwarmMix, digests_match_serial,
+    isolated, parse_growth_report,
 };
 
 const SUITE: &str = "crates/eval-core/tests/growth.rs::";
@@ -151,6 +152,18 @@ fn headroom_is_accounted_from_the_constants_read_not_a_slot_count() {
             observed: ((64 + 2 * 32) << 10) + 1,
         })
     );
+    let mut remaining = ledger();
+    remaining.samples[1].headroom.project_metadata_remaining += 1;
+    let expected = q.project_metadata_bytes - ((64 + 2 * 32) << 10);
+    assert_eq!(
+        remaining.verdict(&q, &bounds()),
+        Err(GrowthRefused::RemainingMismatch {
+            step: 2,
+            expected,
+            observed: expected + 1,
+        }),
+        "the remaining bytes must follow from the quota and the bytes charged"
+    );
 }
 
 #[test]
@@ -236,6 +249,33 @@ fn a_never_restored_ledger_passes_only_when_the_final_sample_holds_nothing_trans
             Err(GrowthRefused::GrowthRateExceeded { commits: 6, .. })
         ),
         "a WAL-heavy first sample must not cancel the file bytes the history retained"
+    );
+    let mut idle = GrowthLedger::new(GrowthMode::NeverRestored);
+    idle.record(sample(1, 3, 0, 0)).unwrap();
+    idle.record(sample(2, 3, 0, 0)).unwrap();
+    assert_eq!(
+        idle.verdict(&quota(), &bounds()),
+        Err(GrowthRefused::GrowthRateExceeded {
+            bytes_per_commit: 64 << 10,
+            observed_bytes: 3 * 4096,
+            commits: 0,
+        }),
+        "file bytes added with no commit between the samples have no allowance"
+    );
+    let mut hidden = ledger.clone();
+    hidden.samples[2]
+        .stores
+        .get_mut(&StoreFamily::Memory)
+        .unwrap()
+        .wal = 8192;
+    hidden.samples[2].stores.remove(&StoreFamily::Memory);
+    assert_eq!(
+        hidden.verdict(&quota(), &bounds()),
+        Err(GrowthRefused::StoreMissing {
+            step: 3,
+            family: StoreFamily::Memory,
+        }),
+        "a sample that omits a store family cannot hide that store's bytes"
     );
     let mut reordered = ledger.clone();
     reordered.samples.swap(1, 2);
@@ -348,6 +388,25 @@ fn a_shared_root_namespace_or_port_is_refused() {
         isolated(&a, &shared_out),
         Err(IsolationRefused::SharedPublishDir { .. })
     ));
+    let mut publishes_into_root = b.clone();
+    publishes_into_root
+        .publish_dirs
+        .insert("/tmp/a".to_string());
+    assert_eq!(
+        isolated(&a, &publishes_into_root),
+        Err(IsolationRefused::SharedRoot {
+            path: "/tmp/a".to_string()
+        }),
+        "one campaign's publish directory must not be another's root"
+    );
+    let mut rooted_in_out = b.clone();
+    rooted_in_out.roots.insert("/tmp/a/out".to_string());
+    assert_eq!(
+        isolated(&a, &rooted_in_out),
+        Err(IsolationRefused::SharedPublishDir {
+            path: "/tmp/a/out".to_string()
+        })
+    );
     let mut shared_ns = b.clone();
     shared_ns.cassette_namespaces.insert("world-a".to_string());
     assert!(matches!(
@@ -450,12 +509,23 @@ fn a_growth_report_round_trips_and_its_digest_ignores_measurements() {
         })),
         "a report read back is held to the order `record` enforces"
     );
-    let mut leaked = report;
+    let mut leaked = report.clone();
     leaked.ledger.samples[2].artifact_tmp_entries = 3;
     assert!(matches!(
         leaked.validate(),
         Err(GrowthReportError::Growth(GrowthRefused::Leak { .. }))
     ));
+    let mut breached = report;
+    breached.envelope.peaks.store_bytes = limits().store_bytes + 1;
+    assert_eq!(
+        breached.validate(),
+        Err(GrowthReportError::EnvelopeNotHonoured(EnvelopeExceeded {
+            resource: Resource::StoreBytes,
+            bound: limits().store_bytes,
+            observed: limits().store_bytes + 1,
+        })),
+        "a report whose envelope peaks crossed a bound is the run the envelope stops"
+    );
     let mut extra = value;
     extra["surprise"] = serde_json::json!(1);
     assert!(matches!(

@@ -138,12 +138,21 @@ pub enum GrowthRefused {
     CommitSeqNotMonotonic {
         step: u32,
     },
+    StoreMissing {
+        step: u32,
+        family: StoreFamily,
+    },
     Leak {
         resource: String,
         step: u32,
         observed: u64,
     },
     HeadroomMismatch {
+        step: u32,
+        expected: u64,
+        observed: u64,
+    },
+    RemainingMismatch {
         step: u32,
         expected: u64,
         observed: u64,
@@ -215,12 +224,29 @@ impl GrowthLedger {
         let last = self.samples.last().ok_or(GrowthRefused::NoSamples)?;
         self.check_order()?;
         for sample in &self.samples {
+            if let Some(family) = StoreFamily::ALL
+                .into_iter()
+                .find(|f| !sample.stores.contains_key(f))
+            {
+                return Err(GrowthRefused::StoreMissing {
+                    step: sample.step,
+                    family,
+                });
+            }
             let expected = quota.expected_project_bytes(&sample.headroom);
             if sample.headroom.project_metadata_bytes != expected {
                 return Err(GrowthRefused::HeadroomMismatch {
                     step: sample.step,
                     expected,
                     observed: sample.headroom.project_metadata_bytes,
+                });
+            }
+            let remaining = quota.project_metadata_bytes.saturating_sub(expected);
+            if sample.headroom.project_metadata_remaining != remaining {
+                return Err(GrowthRefused::RemainingMismatch {
+                    step: sample.step,
+                    expected: remaining,
+                    observed: sample.headroom.project_metadata_remaining,
                 });
             }
         }
@@ -256,7 +282,7 @@ impl GrowthLedger {
         let grown = last
             .durable_store_bytes()
             .saturating_sub(first.durable_store_bytes());
-        if grown > bounds.store_bytes_per_commit.saturating_mul(commits.max(1)) {
+        if grown > bounds.store_bytes_per_commit.saturating_mul(commits) {
             return Err(GrowthRefused::GrowthRateExceeded {
                 bytes_per_commit: bounds.store_bytes_per_commit,
                 observed_bytes: grown,
@@ -395,12 +421,15 @@ pub enum IsolationRefused {
 }
 
 /// Two campaigns are isolated when they share none of these, and their
-/// concurrent result digests equal their serial ones.
+/// concurrent result digests equal their serial ones. A root and a publish
+/// directory are the same filesystem resource, so they are compared across
+/// the two kinds as well.
 pub fn isolated(a: &CampaignResources, b: &CampaignResources) -> Result<(), IsolationRefused> {
-    if let Some(path) = a.roots.intersection(&b.roots).next() {
+    let b_paths: BTreeSet<&String> = b.roots.iter().chain(&b.publish_dirs).collect();
+    if let Some(path) = a.roots.iter().find(|p| b_paths.contains(p)) {
         return Err(IsolationRefused::SharedRoot { path: path.clone() });
     }
-    if let Some(path) = a.publish_dirs.intersection(&b.publish_dirs).next() {
+    if let Some(path) = a.publish_dirs.iter().find(|p| b_paths.contains(p)) {
         return Err(IsolationRefused::SharedPublishDir { path: path.clone() });
     }
     if let Some(namespace) = a
@@ -459,6 +488,7 @@ pub enum GrowthReportError {
     Growth(GrowthRefused),
     Mix(MixIncomplete),
     SafetyNeverChecked,
+    EnvelopeNotHonoured(crate::EnvelopeExceeded),
     Shape(String),
     Lossy,
 }
@@ -475,6 +505,9 @@ impl GrowthReport {
         if faulted && self.safety_checks_while_armed == 0 {
             return Err(GrowthReportError::SafetyNeverChecked);
         }
+        self.envelope
+            .check()
+            .map_err(GrowthReportError::EnvelopeNotHonoured)?;
         match self.ledger.mode {
             GrowthMode::NeverRestored => self
                 .ledger

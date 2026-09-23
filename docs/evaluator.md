@@ -1766,14 +1766,17 @@ refusals). A `GrowthLedger` records samples under a `GrowthMode`
 (`never_restored` or `restoring`) with monotonic steps and commit sequence;
 `restore_attempted` under `never_restored` is `RestoreUnderNeverRestored` and
 counted. `verdict(quota, bounds)` is a leak verdict only for a never-restored
-ledger (`NotALeakVerdict` otherwise): every sample's project bytes must equal
-`expected_project_bytes` (`HeadroomMismatch`), the final sample must hold no
+ledger (`NotALeakVerdict` otherwise): every sample must carry every store
+family (`StoreMissing { step, family }`, so an omitted store cannot hide its
+bytes), its project bytes must equal `expected_project_bytes`
+(`HeadroomMismatch`) and its remaining bytes the quota less that figure
+(`RemainingMismatch`), the final sample must hold no
 temporary artifact entry, no WAL bytes, no temp root, and no process (`Leak {
 resource, step, observed }`), and its store total, artifact objects and bytes, commit
 and projection rows, and open holds must be within the declared
 `GrowthBounds` (`BoundExceeded`); the main-file store bytes added between the
 first and the last sample must not exceed `store_bytes_per_commit` times the
-commits between them (`GrowthRateExceeded`), so a leak proportional to the
+commits between them (`GrowthRateExceeded`; zero commits allow no growth), so a leak proportional to the
 history is refused even under the size bound. The rate excludes `-wal` and
 `-shm` bytes, so a WAL-heavy first sample cannot cancel the file bytes the
 history retained. `verdict` and `validate` re-check the step and commit
@@ -1789,7 +1792,9 @@ never exercised, so a run that skipped a kind cannot report sustainability.
 `CampaignResources` names what two campaigns on one checkout must not share
 (roots, publish directories, cassette namespaces, ports); `isolated` refuses
 `SharedRoot`, `SharedPublishDir`, `SharedCassetteNamespace`, or `SharedPort`
-by the shared value, and `digests_match_serial` refuses
+by the shared value (a root and a publish directory are one filesystem
+resource, so one campaign's root equal to another's publish directory is
+refused too), and `digests_match_serial` refuses
 `DigestDiffersFromSerial { campaign }` when a concurrent run's result digest
 differs from its serial one.
 
@@ -1798,7 +1803,8 @@ publishes: identity, profile digest, claim boundary, the quota read, the
 bounds, the ledger, the mix, expected refusals, fault-episode and
 safety-check counts (`SafetyNeverChecked` when either the fault-episode count
 or the mix records a fault episode and no safety check ran while armed),
-markers, and envelope. `validate` runs the mix and ledger refusals;
+markers, and envelope. `validate` runs the mix and ledger refusals and refuses
+an envelope whose peaks crossed a bound (`EnvelopeNotHonoured`);
 `parse_growth_report` reads a report back losslessly; `result_digest` drops
 each sample's byte measurements (`stores`, `artifact_bytes`,
 `cassette_bytes`) and the envelope peaks, which name one machine's bytes, and
