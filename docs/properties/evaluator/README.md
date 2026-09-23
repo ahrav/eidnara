@@ -1312,7 +1312,9 @@ Fault contract (`crates/eval-core/tests/fault.rs`,
   and changes with an effect outcome; a kill without a barrier, an unreceipted
   declared cut, zero safety checks while armed, a premature success, and a
   recorded refusal whose episode is undeclared, carries another refusal, or
-  carries an injected fault's action (`RefusalNotDeclared`) refuse.
+  carries an injected fault's action (`RefusalNotDeclared`), and an
+  `expected_refusal` episode with no recorded refusal (`RefusalNotRecorded`)
+  refuse.
 
 Fault shell (`crates/daemon/tests/eval_fault.rs`, `--all-features`; the
 default shards run the campaign once with every scenario asserted over it,
@@ -1332,7 +1334,10 @@ job under `EIDNARA_EVAL_S0_BUDGET_MS`):
   (`flt-lost-ack-expected-is-admissible-set`; marker
   `flt_lost_reply_unknown_until_readback`): four lost replies (a local
   commit, an acknowledgement, two publications) are `unknown` until the closed
-  files are read back by identity before reopen; the committed-then-lost
+  files are read back by identity before reopen; the local commit and the
+  acknowledgement are read back in a recovery that follows each reply-loss
+  episode before any later catch-up, and each reads back `applied`, the state
+  the seam's contract fixed before the read-back; the committed-then-lost
   publication reads back `applied` and the rolled-back one `not_applied`;
   every identity satisfies `acknowledged <= observed <= attempted` with one
   attempt; each publication episode's observer saw `Reconciling` and
@@ -1401,6 +1406,19 @@ job under `EIDNARA_EVAL_S0_BUDGET_MS`):
   listed as the permanent stall.
 - `an_unapproved_profile_refuses_before_any_store_opens`: no approval, no
   campaign, nothing published.
+- `a_lost_reply_episode_that_does_not_reach_its_target_is_refused`: a
+  reply-loss episode that ends anywhere but `ReachedTarget` refuses, with no
+  receipt and no effect recorded.
+- `every_window_of_a_lost_reply_episode_loses_its_reply`: an episode that
+  crosses two windows under a reply-loss fault leaves both windows' effects
+  `unknown`.
+- `a_lost_reply_without_a_matching_fixed_expectation_refuses_the_run`: a lost
+  reply with no fixed expectation, an expectation for an effect never lost, an
+  unread effect, and a read-back that differs from its expectation each refuse.
+- `a_read_back_after_later_catch_up_is_refused_as_masked`: a drain between a
+  lost commit reply and its read-back moves the checkpoint past where the
+  faulted episode left it, and the read-back refuses as `ReadBackMasked` with
+  the effect still `unknown`.
 
 Aging drive (`crates/daemon/tests/eval_aging.rs`, `--all-features`):
 

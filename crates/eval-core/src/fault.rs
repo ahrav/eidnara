@@ -666,6 +666,7 @@ pub enum FaultReportError {
     Liveness(LivenessRefused),
     KillWithoutBarrier { episode: String },
     RefusalNotDeclared { episode: String },
+    RefusalNotRecorded { episode: String },
     SafetyNeverChecked,
     Shape(String),
     Lossy,
@@ -702,6 +703,22 @@ impl FaultReport {
             {
                 return Err(FaultReportError::RefusalNotDeclared {
                     episode: recorded.episode.clone(),
+                });
+            }
+        }
+        // An expected-refusal episode with no recorded production error
+        // claims a refusal the run never observed.
+        for episode in &self.episodes {
+            let FaultAction::ExpectedRefusal { refusal } = episode.action else {
+                continue;
+            };
+            if !self
+                .expected_refusals
+                .iter()
+                .any(|r| r.episode == episode.id && r.refusal == refusal)
+            {
+                return Err(FaultReportError::RefusalNotRecorded {
+                    episode: episode.id.clone(),
                 });
             }
         }
