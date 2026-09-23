@@ -106,6 +106,12 @@ fn lost_ack() -> FaultAction {
     }
 }
 
+fn r11() -> FaultAction {
+    FaultAction::ExpectedRefusal {
+        refusal: ExpectedRefusal::R11DeletionBearingCatchUp,
+    }
+}
+
 fn kill() -> FaultAction {
     FaultAction::ProcessKill {
         cut: "acknowledged".to_string(),
@@ -178,6 +184,7 @@ fn report() -> FaultReport {
         episodes: vec![
             episode("lost-ack", lost_ack()),
             episode("kill", kill()),
+            episode("r11", r11()),
             FaultEpisode {
                 scope: FaultScope {
                     store: StoreFamily::Kernel,
@@ -209,10 +216,10 @@ fn report() -> FaultReport {
             .into_iter()
             .collect(),
         ),
-        coverage: coverage(&["lost-ack", "kill", "ingest-write", "acknowledged"]),
+        coverage: coverage(&["lost-ack", "kill", "ingest-write", "acknowledged", "r11"]),
         effects,
         expected_refusals: vec![RecordedRefusal {
-            episode: "lost-ack".to_string(),
+            episode: "r11".to_string(),
             refusal: ExpectedRefusal::R11DeletionBearingCatchUp,
             production_error: "DeletionUnpropagated { commit_seq: 7 }".to_string(),
         }],
@@ -288,6 +295,19 @@ fn every_episode_is_a_named_action_with_the_heal_its_seam_permits() {
         }
         .heal(),
         Heal::Reopen
+    );
+    assert_eq!(
+        r11().heal(),
+        Heal::Reopen,
+        "the reopen's projection rebuild clears a deletion-bearing stall"
+    );
+    assert_eq!(
+        FaultAction::ExpectedRefusal {
+            refusal: ExpectedRefusal::R24ReceiptQuotaExhausted
+        }
+        .heal(),
+        Heal::Permanent,
+        "retained receipt charges refuse admission for the rest of the store incarnation"
     );
     let mut healed_wrong = ok.clone();
     healed_wrong.heal = Heal::Reopen;
@@ -817,6 +837,67 @@ fn a_fault_report_round_trips_and_refuses_what_it_cannot_prove() {
             EffectRefused::PrematureSuccess { .. }
         ))
     ));
+    let mut borrowed = report.clone();
+    borrowed.episodes[2].action = FaultAction::ArtifactDeletion {
+        fault: ArtifactDeletionFaultKind::AfterCommit,
+    };
+    borrowed.episodes[2].heal = Heal::Consumed;
+    borrowed.episodes[2].scope.store = StoreFamily::Kernel;
+    assert_eq!(
+        borrowed.validate(&profile()),
+        Err(FaultReportError::RefusalNotDeclared {
+            episode: "r11".to_string()
+        }),
+        "a refusal recorded against an injected fault's label claims a fault that never ran"
+    );
+    let mut mislabelled = report.clone();
+    mislabelled.expected_refusals[0].refusal = ExpectedRefusal::R24ReceiptQuotaExhausted;
+    mislabelled.expected_refusals[0].production_error = "MetadataQuota".to_string();
+    assert_eq!(
+        mislabelled.validate(&profile()),
+        Err(FaultReportError::RefusalNotDeclared {
+            episode: "r11".to_string()
+        }),
+        "an evidenced refusal recorded against an episode declaring another refusal"
+    );
+    let mut stalled_elsewhere = report.clone();
+    stalled_elsewhere
+        .liveness
+        .as_mut()
+        .unwrap()
+        .permanent_stalls
+        .push(RecordedRefusal {
+            episode: "lost-ack".to_string(),
+            refusal: ExpectedRefusal::R11DeletionBearingCatchUp,
+            production_error: "DeletionUnpropagated { commit_seq: 9 }".to_string(),
+        });
+    assert_eq!(
+        stalled_elsewhere.validate(&profile()),
+        Err(FaultReportError::RefusalNotDeclared {
+            episode: "lost-ack".to_string()
+        }),
+        "a permanent stall recorded against an injected fault's episode claims a refusal that episode never declared"
+    );
+    let mut stalled_only = report.clone();
+    let stall = stalled_only.expected_refusals.remove(0);
+    stalled_only
+        .liveness
+        .as_mut()
+        .unwrap()
+        .permanent_stalls
+        .push(stall);
+    stalled_only.validate(&profile()).expect(
+        "a permanent stall recorded against its expected_refusal episode is the record that episode needs",
+    );
+    let mut unrecorded = report.clone();
+    unrecorded.expected_refusals.clear();
+    assert_eq!(
+        unrecorded.validate(&profile()),
+        Err(FaultReportError::RefusalNotRecorded {
+            episode: "r11".to_string()
+        }),
+        "an expected-refusal episode with no recorded production error claims a refusal the run never observed"
+    );
     let mut extra = value.clone();
     extra["surprise"] = serde_json::json!(1);
     assert!(matches!(
@@ -860,6 +941,17 @@ fn a_parsed_report_cannot_claim_what_no_run_recorded() {
         Err(FaultReportError::NoEpisode),
         "nothing was armed, so no safety check ran while a fault was"
     );
+    let mut refusal_only = ok.clone();
+    refusal_only.episodes.retain(|e| e.id == "r11");
+    refusal_only.barriers.clear();
+    refusal_only.coverage = coverage(&["r11"]);
+    refusal_only.effects = EffectLedger::default();
+    refusal_only.liveness = None;
+    assert_eq!(
+        refusal_only.validate(&p),
+        Err(FaultReportError::NoEpisode),
+        "an expected refusal injects no fault, so a report of refusals alone armed nothing"
+    );
     let mut invented = ok.clone();
     invented.markers.insert("flt_never_registered".to_string());
     assert_eq!(
@@ -869,9 +961,9 @@ fn a_parsed_report_cannot_claim_what_no_run_recorded() {
         })
     );
     let mut in_core = ok.clone();
-    in_core.episodes[2].action = FaultAction::ExternalLockHolder;
-    in_core.episodes[2].heal = Heal::Released;
-    in_core.episodes[2].scope.store = StoreFamily::SearchProjection;
+    in_core.episodes[3].action = FaultAction::ExternalLockHolder;
+    in_core.episodes[3].heal = Heal::Released;
+    in_core.episodes[3].scope.store = StoreFamily::SearchProjection;
     assert_eq!(
         in_core.validate(&p),
         Err(FaultReportError::CoreFamilyFaulted {
@@ -881,16 +973,30 @@ fn a_parsed_report_cannot_claim_what_no_run_recorded() {
         "a fault scoped to a healthy-core family is not outside the core"
     );
     let mut consumed = ok.clone();
-    consumed.episodes[2].action = FaultAction::ArtifactIngest {
+    consumed.episodes[3].action = FaultAction::ArtifactIngest {
         fault: ArtifactIngestFaultKind::ReservationCommit,
     };
-    consumed.episodes[2].heal = Heal::Consumed;
+    consumed.episodes[3].heal = Heal::Consumed;
     assert_eq!(
         consumed.validate(&p),
         Err(FaultReportError::ConsumedFaultArmed {
             episode: "ingest-write".to_string()
         }),
         "a one-shot fault is consumed or never fired; neither is armed at the bound"
+    );
+    let mut refusal_armed = ok.clone();
+    {
+        let live = refusal_armed.liveness.as_mut().unwrap();
+        live.core.families = [StoreFamily::Kernel].into_iter().collect();
+        live.outside_core = ["r11".to_string()].into_iter().collect();
+        live.armed_at_bound = ["r11".to_string()].into_iter().collect();
+    }
+    assert_eq!(
+        refusal_armed.validate(&p),
+        Err(FaultReportError::RefusalArmed {
+            episode: "r11".to_string()
+        }),
+        "an expected refusal injects no fault, so it is not an armed outside-core fault"
     );
 
     let mut unnamed = ok.episodes[0].clone();
@@ -1008,7 +1114,7 @@ fn a_parsed_report_cannot_claim_what_no_run_recorded() {
         serde_json::to_value(&materializer).unwrap(),
         serde_json::json!({"kind": "claim_materialization", "fault": "skip_acknowledgement"})
     );
-    let mut mislabelled = ok.episodes[2].clone();
+    let mut mislabelled = ok.episodes[3].clone();
     mislabelled.scope.store = StoreFamily::Memory;
     assert_eq!(
         mislabelled.validate(),
@@ -1047,7 +1153,7 @@ fn a_parsed_report_cannot_claim_what_no_run_recorded() {
     assert_eq!(
         unevidenced.validate(&p),
         Err(FaultReportError::RefusalNotEvidenced {
-            episode: "lost-ack".to_string(),
+            episode: "r11".to_string(),
             refusal: ExpectedRefusal::R11DeletionBearingCatchUp,
         })
     );
@@ -1638,7 +1744,7 @@ fn a_parsed_report_cannot_claim_what_no_run_recorded() {
     assert_eq!(
         word_inside.validate(&p),
         Err(FaultReportError::RefusalNotEvidenced {
-            episode: "lost-ack".to_string(),
+            episode: "r11".to_string(),
             refusal: ExpectedRefusal::R11DeletionBearingCatchUp,
         }),
         "the variant is evidenced by production's own text, not by a word containing it"

@@ -158,7 +158,7 @@ fn a_copy_with_pending_work_is_refused_by_the_counter_it_left_scenario(coverage:
     let mut stores = Stores::open(root.path(), &plan);
     live(&mut stores, &plan.steps[..3]);
     stores.apply(&plan.steps[3]);
-    let closed = stores.close();
+    let mut closed = stores.close();
     assert_eq!(closed.receipt.step, 4);
     assert!(
         closed.receipt.stores[&StoreFamily::Kernel].pending[&WorkCounter::OutboxUnpublished] > 0,
@@ -193,7 +193,7 @@ fn a_reader_holding_the_projection_leaves_the_checkpoint_busy_scenario(coverage:
     let _held: i64 = reader
         .query_row("SELECT COUNT(*) FROM occurrences", [], |row| row.get(0))
         .unwrap();
-    let closed = stores.close();
+    let mut closed = stores.close();
     let wal = closed.receipt.stores[&StoreFamily::SearchProjection].wal;
     assert_ne!(wal.busy, 0, "{wal:?}");
     coverage.record("flt_checkpoint_observed_busy").unwrap();
@@ -213,7 +213,7 @@ fn a_copy_beside_a_live_memory_store_handle_is_refused_scenario(coverage: &mut C
     let root = tempfile::tempdir().unwrap();
     let mut stores = Stores::open(root.path(), &plan);
     live(&mut stores, &plan.steps[..3]);
-    let closed = stores.close();
+    let mut closed = stores.close();
     let live_handle = MemoryStore::open(&daemon::store_descriptor_in(closed.root())).unwrap();
     coverage
         .record("sls_memstore_copy_refused_live_handle")
@@ -288,7 +288,7 @@ fn a_copy_beside_a_live_kernel_handle_is_refused() {
     let root = tempfile::tempdir().unwrap();
     let mut stores = Stores::open(root.path(), &plan);
     live(&mut stores, &plan.steps[..3]);
-    let closed = stores.close();
+    let mut closed = stores.close();
     assert!(closed.receipt.stores[&StoreFamily::Kernel].handles_closed);
     let live_handle = kernel::KernelStore::open(closed.root().join("kernel")).unwrap();
     let into = tempfile::tempdir().unwrap();
@@ -311,7 +311,7 @@ fn work_enqueued_between_the_close_and_the_copy_is_refused() {
     let root = tempfile::tempdir().unwrap();
     let mut stores = Stores::open(root.path(), &plan);
     live(&mut stores, &plan.steps[..3]);
-    let closed = stores.close();
+    let mut closed = stores.close();
     assert_eq!(
         closed.receipt.stores[&StoreFamily::Memory].pending[&WorkCounter::CaptureJobsPending],
         0
@@ -348,13 +348,40 @@ fn work_enqueued_between_the_close_and_the_copy_is_refused() {
     );
 }
 
+/// The copy releases the projection lease and seals the receipt, so a second
+/// copy of the same closed root would probe nothing and copy under whatever
+/// took the lease since; the closed root is copied once, then reopened.
+#[test]
+fn a_closed_root_is_copied_once() {
+    let plan = plan(MESSAGES).unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let mut stores = Stores::open(root.path(), &plan);
+    live(&mut stores, &plan.steps[..3]);
+    let mut closed = stores.close();
+    let first = tempfile::tempdir().unwrap();
+    closed.copy(first.path()).unwrap();
+    let second = tempfile::tempdir().unwrap();
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        closed.copy(second.path()).is_ok()
+    }));
+    assert!(
+        outcome.is_err(),
+        "a second copy of a closed root is refused"
+    );
+    assert_eq!(
+        std::fs::read_dir(second.path()).unwrap().count(),
+        0,
+        "nothing was copied"
+    );
+}
+
 #[test]
 fn a_copy_into_a_root_that_is_not_empty_is_refused_before_any_byte_is_copied() {
     let plan = plan(MESSAGES).unwrap();
     let root = tempfile::tempdir().unwrap();
     let mut stores = Stores::open(root.path(), &plan);
     live(&mut stores, &plan.steps[..3]);
-    let closed = stores.close();
+    let mut closed = stores.close();
     let into = tempfile::tempdir().unwrap();
     // An unlisted sidecar would be read by SQLite beside the verified copy.
     std::fs::write(into.path().join("memory.sqlite-wal"), b"").unwrap();

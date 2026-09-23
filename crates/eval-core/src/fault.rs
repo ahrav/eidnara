@@ -123,6 +123,9 @@ pub enum ArtifactDeletionFaultKind {
 
 /// One variant of a fault enum, hook, gate, lock holder, or kill that exists
 /// at HEAD. Nothing else is a fault a campaign may claim to have run.
+/// `ExpectedRefusal` injects no fault: the runner drives production into a
+/// refusal it makes on purpose (a deletion-bearing catch-up window, a receipt
+/// charge at the quota) and records it as expected rather than as a failure.
 ///
 /// The set closes over the test-support seams that lose a store reply or fail
 /// a store transaction or publication of a `StoreFamily` store. Hooks that
@@ -180,11 +183,16 @@ pub enum FaultAction {
         cut: String,
     },
     CorruptQuiescentFile,
+    ExpectedRefusal {
+        refusal: ExpectedRefusal,
+    },
 }
 
 impl FaultAction {
     /// `ReservationCommit` and `AfterEvents` abort a SQLite transaction and are
     /// consumed; the other ingest faults latch CAS ingestion closed until reopen.
+    /// R11 clears only when a reopen rebuilds the projection; R24's receipt
+    /// charges are retained for the store incarnation, so nothing heals it.
     pub fn heal(&self) -> Heal {
         match self {
             Self::SearchEpisode { .. }
@@ -230,6 +238,10 @@ impl FaultAction {
             | Self::MessageCleanupLoseWriteReply
             | Self::IdentitySweepLoseReclaimReply => Heal::Consumed,
             Self::ProcessKill { .. } | Self::CorruptQuiescentFile => Heal::Reopen,
+            Self::ExpectedRefusal { refusal } => match refusal {
+                ExpectedRefusal::R11DeletionBearingCatchUp => Heal::Reopen,
+                ExpectedRefusal::R24ReceiptQuotaExhausted => Heal::Permanent,
+            },
         }
     }
 
@@ -269,13 +281,15 @@ impl FaultAction {
             | Self::KernelCommitFailAfterEvents
             | Self::ExternalLockHolder
             | Self::ProcessKill { .. }
-            | Self::CorruptQuiescentFile => false,
+            | Self::CorruptQuiescentFile
+            | Self::ExpectedRefusal { .. } => false,
         }
     }
 
     /// The store the action's seam lives in: catch-up and publication write the
-    /// search projection, the CAS and the materializer's outbox are the kernel.
-    /// A lock holder, a kill, and a corrupted file name their own store.
+    /// search projection, the CAS and the materializer's outbox are the kernel,
+    /// R11 is the projection's refusal and R24 the memory store's. A lock
+    /// holder, a kill, and a corrupted file name their own store.
     pub fn family(&self) -> Option<StoreFamily> {
         match self {
             Self::SearchEpisode { .. }
@@ -292,6 +306,10 @@ impl FaultAction {
             | Self::KernelRestore { .. }
             | Self::BackupBeforeRename
             | Self::KernelCommitFailAfterEvents => Some(StoreFamily::Kernel),
+            Self::ExpectedRefusal { refusal } => Some(match refusal {
+                ExpectedRefusal::R11DeletionBearingCatchUp => StoreFamily::SearchProjection,
+                ExpectedRefusal::R24ReceiptQuotaExhausted => StoreFamily::Memory,
+            }),
             Self::ExternalLockHolder | Self::ProcessKill { .. } | Self::CorruptQuiescentFile => {
                 None
             }
@@ -313,6 +331,8 @@ pub enum Heal {
     Consumed,
     Released,
     Reopen,
+    /// Nothing in the run heals it; the refusal stands for the store incarnation.
+    Permanent,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1140,6 +1160,7 @@ pub enum FaultReportError {
     EnvelopeExceeded(crate::EnvelopeExceeded),
     /// The report's envelope bounds are not the approved profile's limits.
     EnvelopeDisagreesWithProfile,
+    /// No episode injects a fault; expected refusals alone arm nothing.
     NoEpisode,
     UnregisteredMarker {
         marker: String,
@@ -1185,10 +1206,22 @@ pub enum FaultReportError {
     ConsumedFaultArmed {
         episode: String,
     },
+    /// An expected refusal injects no fault, so it is not an armed outside-core fault.
+    RefusalArmed {
+        episode: String,
+    },
     /// A recorded refusal whose production error does not name its variant.
     RefusalNotEvidenced {
         episode: String,
         refusal: ExpectedRefusal,
+    },
+    /// A recorded refusal whose episode is not an `expected_refusal` of that refusal.
+    RefusalNotDeclared {
+        episode: String,
+    },
+    /// An `expected_refusal` episode with no recorded refusal of its own.
+    RefusalNotRecorded {
+        episode: String,
     },
     /// Fewer lost replies in the ledger than episodes that lose one.
     LostReplyUnrecorded {
@@ -1243,7 +1276,13 @@ impl FaultReport {
         self.envelope
             .check()
             .map_err(FaultReportError::EnvelopeExceeded)?;
-        if self.episodes.is_empty() {
+        // An expected refusal injects no fault, so a report of refusals alone
+        // armed nothing.
+        if !self
+            .episodes
+            .iter()
+            .any(|e| !matches!(e.action, FaultAction::ExpectedRefusal { .. }))
+        {
             return Err(FaultReportError::NoEpisode);
         }
         if let Some(marker) = self
@@ -1366,6 +1405,41 @@ impl FaultReport {
                 });
             }
         }
+        // A refusal or stall recorded against any other episode would
+        // attribute it to a fault that never ran.
+        let stalls = self.liveness.iter().flat_map(|l| &l.permanent_stalls);
+        for recorded in self.expected_refusals.iter().chain(stalls) {
+            let declared = FaultAction::ExpectedRefusal {
+                refusal: recorded.refusal,
+            };
+            if !self
+                .episodes
+                .iter()
+                .any(|e| e.id == recorded.episode && e.action == declared)
+            {
+                return Err(FaultReportError::RefusalNotDeclared {
+                    episode: recorded.episode.clone(),
+                });
+            }
+        }
+        // An expected-refusal episode with no recorded production error, as a
+        // refusal or a permanent stall, claims a refusal the run never observed.
+        for episode in &self.episodes {
+            let FaultAction::ExpectedRefusal { refusal } = episode.action else {
+                continue;
+            };
+            let stalls = self.liveness.iter().flat_map(|l| &l.permanent_stalls);
+            if !self
+                .expected_refusals
+                .iter()
+                .chain(stalls)
+                .any(|r| r.episode == episode.id && r.refusal == refusal)
+            {
+                return Err(FaultReportError::RefusalNotRecorded {
+                    episode: episode.id.clone(),
+                });
+            }
+        }
         if self.safety_checks_while_armed == 0 {
             return Err(FaultReportError::SafetyNeverChecked);
         }
@@ -1384,6 +1458,11 @@ impl FaultReport {
                 }
                 if episode.action.heal() == Heal::Consumed {
                     return Err(FaultReportError::ConsumedFaultArmed {
+                        episode: id.clone(),
+                    });
+                }
+                if matches!(episode.action, FaultAction::ExpectedRefusal { .. }) {
+                    return Err(FaultReportError::RefusalArmed {
                         episode: id.clone(),
                     });
                 }

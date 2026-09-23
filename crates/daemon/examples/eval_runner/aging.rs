@@ -743,7 +743,17 @@ impl Closed {
         &self.root
     }
 
-    pub fn copy(mut self, into: &Path) -> Result<(Checkpoint, Copied), CheckpointRefused> {
+    /// Borrows so the closed root can be reopened after its copy is judged;
+    /// the copy releases the projection lease, and `reopen` takes it again.
+    /// A closed root is copied once: after the lease is released the receipt
+    /// no longer describes the projection, so a second copy is a programming
+    /// error.
+    pub fn copy(&mut self, into: &Path) -> Result<(Checkpoint, Copied), CheckpointRefused> {
+        assert!(
+            self.search_lease.is_some(),
+            "{} is copied once; reopen it to copy again",
+            self.root.display()
+        );
         // The destination is a root this run owns and nothing else has
         // written: SQLite would read a sidecar left there beside the verified
         // copy, so anything already present is a programming error.
@@ -784,15 +794,15 @@ impl Closed {
         for relative in copied_paths(&self.root) {
             copy_file(&self.root, into, &relative, &mut files);
         }
-        drop(self.search_lease);
+        drop(self.search_lease.take());
         drop(memory_probe);
         drop(kernel_probe);
-        let checkpoint = Checkpoint::new(self.receipt, incarnation_id, files)?;
+        let checkpoint = Checkpoint::new(self.receipt.clone(), incarnation_id, files)?;
         Ok((
             checkpoint,
             Copied {
                 root: into.to_path_buf(),
-                rendering: self.rendering,
+                rendering: self.rendering.clone(),
                 bounds: self.bounds,
                 applied: self.applied,
             },
@@ -1366,7 +1376,7 @@ fn resumed_life(
     live(&mut prefix, &plan.steps[..k]);
     let prefix_state = prefix.snapshot();
     charges.store_bytes(prefix_root.path())?;
-    let closed = prefix.close();
+    let mut closed = prefix.close();
     let copy_root = charges.occupy()?;
     let (checkpoint, copied) = closed.copy(copy_root.path())?;
     coverage.record("flt_quiescence_receipt_all_zero").unwrap();

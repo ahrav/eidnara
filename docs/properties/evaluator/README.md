@@ -1559,9 +1559,10 @@ Fault contract (`crates/eval-core/tests/fault.rs`,
 
 - `every_episode_is_a_named_action_with_the_heal_its_seam_permits`: an
   episode's action is one closed variant mirroring a fault enum, hook, gate,
-  lock holder, or kill at HEAD; one-shot enums heal by consumption, gates and
-  lock holders by release, kills and corruption by reopen; the ingest faults
-  that latch the CAS heal by reopen while `reservation_commit` and
+  lock holder, or kill at HEAD, or an expected refusal that injects no fault;
+  one-shot enums heal by consumption, gates and lock holders by release,
+  kills, corruption, and R11 by reopen, and R24 is permanent; the ingest
+  faults that latch the CAS heal by reopen while `reservation_commit` and
   `after_events` heal by consumption; a wrong heal, an
   empty layer contract, a kill label on a non-kill, and a duplicate id refuse;
   the tagged JSON form round-trips.
@@ -1599,11 +1600,17 @@ Fault contract (`crates/eval-core/tests/fault.rs`,
   and changes with an effect outcome; a kill without a barrier, a kill whose
   only barrier is at another cut, an armed outside-core fault that is not one
   of the report's episodes, an unreceipted declared cut, zero safety checks
-  while armed, and a premature success refuse.
+  while armed, a premature success, a recorded refusal or permanent stall
+  whose episode carries another refusal or an injected fault's action
+  (`RefusalNotDeclared`), and an
+  `expected_refusal` episode with no recorded refusal or permanent stall
+  (`RefusalNotRecorded`) refuse.
 - `a_parsed_report_cannot_claim_what_no_run_recorded`: a claim boundary that
-  is not the pinned one, a peak over its envelope bound, no episode at all, a
+  is not the pinned one, a peak over its envelope bound, no episode that
+  injects a fault (none at all, or expected refusals alone), a
   marker the registry does not know, an outside-core fault scoped to a
-  healthy-core family, and an outside-core fault whose heal is consumed each
+  healthy-core family, an outside-core fault whose heal is consumed, and an
+  expected refusal named as an outside-core fault (`RefusalArmed`) each
   refuse at the report; a blank episode id or operation refuses at the
   episode; a parsed receipt for an undeclared cut refuses at the coverage
   verdict; an effect whose outcome is not the state its expectation names, or
@@ -1676,19 +1683,54 @@ job under `EIDNARA_EVAL_S0_BUDGET_MS`):
   cut has a receipt, the four checkpoints the campaign reaches resolve to
   `reached` and `AfterAtomicTransition` to `not_reached`, every
   episode's heal is the one its seam permits, no episode carries a kill label,
-  a safety check ran while every episode's fault was armed, the published report parses back
-  equal, and the manifest names it by result digest under `generate`.
+  a safety check ran while every fault that arms on the aging drive's stores
+  was armed, the action kinds include `expected_refusal`, the published
+  report parses back equal, and the manifest names it by result digest under
+  `generate`.
 - `a_lost_reply_stays_unknown_until_readback_at_after_recovery`
   (`flt-lost-ack-expected-is-admissible-set`; marker
-  `flt_lost_reply_unknown_until_readback`): a lost local-commit reply and a
-  lost acknowledgement reply are `unknown` until the closed files are read
-  back by identity before reopen, in a recovery that follows each reply-loss
-  episode before any later catch-up; each reads back `applied`, the state the
-  seam's contract fixed before the read-back; every identity satisfies
-  `acknowledged <= observed <= attempted` with one attempt.
+  `flt_lost_reply_unknown_until_readback`): three lost replies (a local
+  commit, an acknowledgement, a committed-then-lost publication) are
+  `unknown` until the closed files are read back by identity before reopen;
+  the local commit and the acknowledgement are read back in a recovery that
+  follows each reply-loss episode before any later catch-up, and each reads
+  back `applied`, the state the seam's contract fixed before the read-back;
+  the committed-then-lost publication reads back `applied`; the rolled-back
+  publication is known, not lost, and enters no ledger entry; every identity
+  satisfies `acknowledged <= observed <= attempted` with one
+  attempt; each publication episode's observer saw `Reconciling` and
+  `ReconciliationRead`. The campaign runs a 24-message history whose fifth
+  step after the checkpoint opens no embedding job, so the publication phase
+  applies later steps until a job is open.
+- `deletion_bearing_catch_up_is_an_expected_refusal_and_a_permanent_stall`
+  (marker `flt_r11_recorded_as_expected_refusal`): a plain deletion leaves
+  the next episode `Blocked(DeletionUnpropagated)` and a second episode with
+  no progress; recorded as R11 against the projection on an
+  `expected_refusal` episode healed by reopen, not a deletion fault.
+- `receipt_quota_exhaustion_is_an_expected_refusal` (marker
+  `flt_r24_recorded_as_expected_refusal`): receipt charges retained by a
+  closed job make `reserve_memory_reviewer_job` refuse `MetadataQuota` and
+  delete nothing; recorded as R24 against the memory store on a permanent
+  `expected_refusal` episode, not a lock holder.
+- `the_receipt_quota_refusal_outlives_every_released_allowance`: after the R24
+  episode, closing every open reviewer job still leaves admission refused
+  `MetadataQuota`, so the refusal does not rest on a temporary allowance.
+- `the_receipt_quota_episode_claims_no_projection_safety_check`: the R24
+  episode adds nothing to the safety-check count, since it touches no
+  projection.
+- `a_corrupted_quiescent_file_is_detected_before_any_store_opens` (marker
+  `flt_corruption_detected_at_quiescence`): one overwritten kernel page in a
+  quiescent copy is `FileDiffers` for the kernel file at reopen, before any
+  store opens.
 - `an_external_lock_holder_blocks_then_releases` (marker
   `flt_external_lock_holder_released`): `BEGIN IMMEDIATE` on the projection
   blocks the local commit; release lets the next episode reach the target.
+- `artifact_faults_fail_with_their_named_errno_and_heal_by_reopen_or_consumption`
+  (marker `flt_artifact_fault_named_errno`): four ingest faults refuse
+  `IngestionFailClosed`, each leaving no reference for its evidence id, and
+  two purge-intent faults refuse by kind; after every EIO a plain ingest is
+  refused `IngestionFailClosed` before the reopen (five `ingestion_latched`
+  receipts, five reopen heals); ENOSPC is consumed.
 - `an_unapproved_profile_refuses_before_any_store_opens`: no approval, no
   campaign, nothing published.
 - `a_lost_reply_episode_that_does_not_reach_its_target_is_refused`: a

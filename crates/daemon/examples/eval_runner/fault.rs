@@ -3,28 +3,50 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
+use daemon::embedding_publication::{
+    EmbeddingPublisher, Publication, PublicationError, PublicationEvent, PublicationFault,
+    VectorPublication,
+};
 use daemon::search_catchup::{Blocked, EpisodeEnd, EpisodeEvent, EpisodeFault, EpisodeReport};
 use eval_core::{
-    APPLICATION_CRASH, Approval, ClaimBoundary, Coverage, Cut, CutCoverage, EffectLedger,
-    EffectState, EnvelopeExceeded, ExecutionMode, FAULT_REPORT_SCHEMA, FaultAction, FaultEpisode,
-    FaultProfile, FaultReport, FaultReportError, FaultScope, KillLabel, ProfileError,
-    RecordedRefusal, RunProfile, Scale, SearchEpisodeFault, StoreFamily, TEST_BINARY_CHILD,
-    WorkCounter, cut_receipts, eval_run_id,
+    APPLICATION_CRASH, Approval, ArtifactDeletionFaultKind, ArtifactIngestFaultKind, ClaimBoundary,
+    Coverage, Cut, CutCoverage, EffectLedger, EffectState, EnvelopeExceeded, ExecutionMode,
+    ExpectedRefusal, FAULT_REPORT_SCHEMA, FaultAction, FaultEpisode, FaultProfile, FaultReport,
+    FaultReportError, FaultScope, Heal, KillLabel, ProfileError, PublicationFaultKind,
+    RecordedRefusal, RestoreRefused, RunProfile, Scale, SearchEpisodeFault, StoreFamily,
+    TEST_BINARY_CHILD, WorkCounter, cut_receipts, eval_run_id,
+};
+use kernel::{
+    ArtifactDeletionFault, ArtifactDeletionIdentity, ArtifactDeletionKind, ArtifactDeletionRequest,
+    ArtifactDestination, ArtifactError, ArtifactIngestFault, ArtifactIngestRequest,
+    CurrentInputDescriptor, DomainSpec, EligibilityBinding, ProjectScope, ProviderEgress,
+    Sensitivity,
+};
+use memory_store::MemoryStore;
+use memory_store::memory_reviewer_jobs::{
+    CausalInputs, EvidenceAvailability, MAX_MEMORY_REVIEWER_METADATA_BYTES_PER_PROJECT,
+    MEMORY_REVIEWER_JOB_ALLOWANCE_BYTES, MEMORY_REVIEWER_RECEIPT_CHARGE_BYTES,
+    MemoryReviewerJobError, MemoryReviewerJobOutcome, MemoryReviewerJobRefusal, ProducerBinding,
+    ReviewTarget,
 };
 use rusqlite::{Connection, OpenFlags};
 use serde_json::json;
 
 use super::aging::{
-    self, ManifestInputs, Plan, Stores, kernel_file, live, read_only, search_file, suite_c_manifest,
+    self, ManifestInputs, Plan, Planned, Step, Stores, kernel_file, live, read_only, search_file,
+    suite_c_manifest,
 };
 use super::campaign::{Charges, identity, prepare_publish, publish_file};
-use super::support::embedding_fixtures::CONSUMER;
+use super::support::embedding_fixtures::{
+    CONSUMER, GENERATION, PROJECT, TestEngine, generation, intent,
+};
 
 pub const REPORT_FILE: &str = "suite-c-fault-report.json";
 pub const MANIFEST_FILE: &str = "manifest.json";
 pub const SIMULATOR_VERSION: &str = "eval-fault-shell/v1";
+const FAULT_DOMAIN: &str = "eval-fault-domain";
 
 pub type Config = aging::Config;
 
@@ -37,7 +59,7 @@ pub enum RunError {
     #[error("plan refused: {0}")]
     Plan(#[from] aging::RunError),
     #[error(
-        "history leaves {after_checkpoint} steps after the checkpoint; the fault phase drives {FAULT_PHASE_STEPS}"
+        "history leaves {after_checkpoint} steps after the checkpoint; the fault phase drives {FAULT_PHASE_STEPS}, then a publish step for each of two publication faults and a step to live after recovery"
     )]
     HistoryTooShort { after_checkpoint: usize },
     #[error("report refused: {0}")]
@@ -68,15 +90,29 @@ fn publish_refused((path, kind): (PathBuf, std::io::ErrorKind)) -> RunError {
 }
 
 /// The steps the fault phase drives after the checkpoint: a lock-holder
-/// episode, two healthy steps, and two reply-loss episodes, then the rest.
+/// episode, two healthy steps, and two reply-loss episodes, then the
+/// corruption and CAS episodes at the sixth step's time.
 const FAULT_PHASE_STEPS: usize = 6;
 
+/// From the sixth step on, each publication fault applies steps until a
+/// publish opens an embedding job (a retirement opens none), and recovery
+/// needs a step left to live after the second.
+fn publication_probes_fit(steps: &[Planned]) -> bool {
+    let mut publishes =
+        (FAULT_PHASE_STEPS - 1..steps.len()).filter(|i| matches!(steps[*i].step, Step::Publish(_)));
+    publishes
+        .nth(1)
+        .is_some_and(|second| second + 1 < steps.len())
+}
+
 /// The aging plan, refused before any store opens when its checkpoint leaves
-/// fewer steps than the fault phase drives.
+/// fewer steps than the fault phase drives or too few publishes for the
+/// publication faults.
 pub fn plan(messages: u32) -> Result<Plan, RunError> {
     let plan = aging::plan(messages)?;
-    let after_checkpoint = plan.steps.len() - plan.checkpoint_step as usize;
-    if after_checkpoint < FAULT_PHASE_STEPS {
+    let k = plan.checkpoint_step as usize;
+    let after_checkpoint = plan.steps.len() - k;
+    if after_checkpoint < FAULT_PHASE_STEPS || !publication_probes_fit(&plan.steps[k..]) {
         return Err(RunError::HistoryTooShort { after_checkpoint });
     }
     Ok(plan)
@@ -205,13 +241,21 @@ fn safety_invariants(stores: &Stores) {
     assert!(acknowledged <= snapshot.commit_seq);
 }
 
-const EVENT_CUTS: [&str; 6] = [
+const EVENT_CUTS: [&str; 14] = [
     "local_staged",
     "local_released",
     "acknowledgement_requested",
     "acknowledged",
     "lock_blocked",
     "lock_released",
+    "integrity_refused",
+    "deletion_unpropagated",
+    "quota_refused",
+    "publication_reconciled",
+    "reconciling",
+    "reconciliation_read",
+    "artifact_fault_named",
+    "ingestion_latched",
 ];
 
 fn episode(
@@ -435,10 +479,716 @@ pub fn hold_write_lock(path: &Path) -> Connection {
     conn
 }
 
+fn ingest_request(key: &str, payload: &[u8]) -> ArtifactIngestRequest {
+    ArtifactIngestRequest {
+        intent: intent(&format!("fault-ingest-{key}")),
+        payload: payload.to_vec(),
+        evidence_id: format!("eval-fault-evidence-{key}"),
+        object_id: format!("eval-fault-object-{key}"),
+        object_kind: "evidence".to_string(),
+        domain_id: FAULT_DOMAIN.to_string(),
+        source_kind: "conversation".to_string(),
+        source_id: format!("eval-fault/{key}"),
+        source_revision: 1,
+        media_type: "text/plain".to_string(),
+        retention_class: "durable".to_string(),
+        retain_until: None,
+        asserted_sensitivity: Sensitivity::Normal,
+        provider_egress: ProviderEgress::LocalOnly,
+        provenance: None,
+    }
+}
+
+fn seed_fault_domain(stores: &Stores) {
+    stores
+        .corpus
+        .kernel
+        .commit(intent("fault-domain"), |envelope| {
+            envelope.insert_domain(DomainSpec {
+                domain_id: FAULT_DOMAIN.into(),
+                object_id: "eval-fault-domain-object".into(),
+                name: "eval-fault".into(),
+                source_kind: "fixture".into(),
+                source_id: FAULT_DOMAIN.into(),
+                source_revision: 1,
+                sensitivity: Sensitivity::Normal,
+            })?;
+            Ok(FAULT_DOMAIN.into())
+        })
+        .unwrap();
+}
+
+fn artifact_error_text(error: &ArtifactError) -> String {
+    format!("{:?}: {error}", error.kind())
+}
+
+/// A plain ingest after a CAS EIO must be refused `IngestionFailClosed`: the
+/// runner observes the latch before the reopen that heals it.
+fn observe_latched(stores: &Stores, witness: &mut Witness, id: &str) -> Result<(), RunError> {
+    let latched = stores
+        .corpus
+        .kernel
+        .ingest_artifact(ingest_request(&format!("{id}-latched"), id.as_bytes()))
+        .err()
+        .ok_or_else(|| unexpected(id, "ingestion latched closed", "Ok"))?;
+    if latched.kind() != kernel::ArtifactErrorKind::IngestionFailClosed {
+        return Err(unexpected(
+            id,
+            "IngestionFailClosed while latched",
+            artifact_error_text(&latched),
+        ));
+    }
+    witness.receipt("ingestion_latched");
+    Ok(())
+}
+
+/// Closes and reopens the stores: the heal every latched CAS fault permits.
+/// Closing checkpoints the WALs away, so the footprint is charged first.
+fn reopen(stores: Stores, charges: &mut Charges, now: i64) -> Result<Stores, RunError> {
+    charges.store_bytes(stores.root())?;
+    Ok(stores.close().reopen(now))
+}
+
+/// Every CAS ingest fault fails closed with its named kind, latches ingestion
+/// closed until the store reopens, and leaves no reference; after the reopen
+/// the same payload ingests under a fresh intent.
+pub fn artifact_ingest_episodes(
+    mut stores: Stores,
+    witness: &mut Witness,
+    charges: &mut Charges,
+    step: u32,
+    now: i64,
+) -> Result<(Stores, String), RunError> {
+    seed_fault_domain(&stores);
+    let faults = [
+        (
+            ArtifactIngestFaultKind::Write,
+            ArtifactIngestFault::Write,
+            "EIO on the temporary object write",
+        ),
+        (
+            ArtifactIngestFaultKind::FileSync,
+            ArtifactIngestFault::FileSync,
+            "EIO on the object fsync",
+        ),
+        (
+            ArtifactIngestFaultKind::Rename,
+            ArtifactIngestFault::Rename,
+            "the object rename fails before publication",
+        ),
+        (
+            ArtifactIngestFaultKind::AfterDirectorySync,
+            ArtifactIngestFault::AfterDirectorySync,
+            "the directory fsync hook fails after the object is published to its directories",
+        ),
+    ];
+    let mut evidence = String::new();
+    for (kind, fault, contract) in faults {
+        let id = format!(
+            "artifact-ingest-{}",
+            serde_json::to_value(kind).unwrap().as_str().unwrap()
+        );
+        witness.declare(episode(
+            &id,
+            step,
+            StoreFamily::Kernel,
+            "ingest_artifact",
+            FaultAction::ArtifactIngest { fault: kind },
+            &format!("kernel::ArtifactIngestFault: {contract}; the ingest is refused IngestionFailClosed, publishes no reference, and latches CAS ingestion closed until the store reopens"),
+        ));
+        let payload = format!("fault payload {id} {now}");
+        let request = ingest_request(&id, payload.as_bytes());
+        let evidence_id = request.evidence_id.clone();
+        let error = stores
+            .corpus
+            .kernel
+            .ingest_artifact_with_fault_for_test(request, fault)
+            .err()
+            .ok_or_else(|| unexpected(&id, "an ingest refusal", "Ok"))?;
+        let named = artifact_error_text(&error);
+        if error.kind() != kernel::ArtifactErrorKind::IngestionFailClosed {
+            return Err(unexpected(&id, "IngestionFailClosed", named));
+        }
+        let references: i64 = read_only(&kernel_file(stores.root()))
+            .query_row(
+                "SELECT COUNT(*) FROM evidence_meta WHERE evidence_id=?1",
+                [&evidence_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        if references != 0 {
+            return Err(unexpected(
+                &id,
+                "no reference published by the faulted ingest",
+                references,
+            ));
+        }
+        observe_latched(&stores, witness, &id)?;
+        witness.receipt("artifact_fault_named");
+        // The latch holds until the reopen, so the fault is still armed here.
+        witness.safety_check_while_armed(&stores, "ingestion_latched");
+        stores = reopen(stores, charges, now)?;
+        let healed = stores
+            .corpus
+            .kernel
+            .ingest_artifact(ingest_request(&format!("{id}-healed"), payload.as_bytes()))
+            .map_err(|e| {
+                unexpected(&id, "a healed ingest after reopen", artifact_error_text(&e))
+            })?;
+        evidence = healed.evidence_id;
+        witness.receipt(&id);
+    }
+    witness
+        .coverage
+        .record("flt_artifact_fault_named_errno")
+        .unwrap();
+    Ok((stores, evidence))
+}
+
+fn evidence_digest(root: &Path, evidence_id: &str) -> String {
+    read_only(&kernel_file(root))
+        .query_row(
+            "SELECT artifact_digest FROM evidence_meta WHERE evidence_id=?1",
+            [evidence_id],
+            |row| row.get(0),
+        )
+        .unwrap()
+}
+
+fn deletion_request(
+    key: &str,
+    digest: &str,
+    kind: ArtifactDeletionKind,
+) -> ArtifactDeletionRequest {
+    let purge = kind == ArtifactDeletionKind::Purge;
+    ArtifactDeletionRequest {
+        intent: intent(&format!("fault-delete-{key}")),
+        identity: ArtifactDeletionIdentity::Digest(digest.to_string()),
+        kind,
+        operator_id: purge.then(|| "eval-fault".to_string()),
+        target_locator: purge.then(|| "incident://eval-fault".to_string()),
+        reason: purge.then(|| "fault campaign".to_string()),
+        deleted_at: 42,
+    }
+}
+
+/// Purge-intent faults fail with their named kind: ENOSPC is refused and
+/// consumed, EIO is refused and latches CAS until reopen. The healed
+/// deletion then commits a deletion the projection refuses to acknowledge
+/// past (R11), a permanent stall production heals only by rebuilding.
+pub fn artifact_deletion_episodes(
+    mut stores: Stores,
+    witness: &mut Witness,
+    charges: &mut Charges,
+    evidence_id: &str,
+    step: u32,
+    now: i64,
+) -> Result<Stores, RunError> {
+    let digest = evidence_digest(stores.root(), evidence_id);
+    let faults = [
+        (
+            ArtifactDeletionFaultKind::IntentStorageExhausted,
+            ArtifactDeletionFault::IntentStorageExhausted,
+            kernel::ArtifactErrorKind::StorageExhausted,
+            "ENOSPC while appending the purge intent; nothing is latched",
+        ),
+        (
+            ArtifactDeletionFaultKind::IntentAppend,
+            ArtifactDeletionFault::IntentAppend,
+            kernel::ArtifactErrorKind::PurgeIntent,
+            "EIO while appending the purge intent; CAS ingestion latches closed until reopen",
+        ),
+    ];
+    for (kind, fault, expected_kind, contract) in faults {
+        let id = format!(
+            "artifact-deletion-{}",
+            serde_json::to_value(kind).unwrap().as_str().unwrap()
+        );
+        let heal = FaultAction::ArtifactDeletion { fault: kind }.heal();
+        witness.declare(episode(
+            &id,
+            step,
+            StoreFamily::Kernel,
+            "delete_artifact",
+            FaultAction::ArtifactDeletion { fault: kind },
+            &format!("kernel::ArtifactDeletionFault: {contract}"),
+        ));
+        let error = stores
+            .corpus
+            .kernel
+            .delete_artifact_with_fault_for_test(
+                deletion_request(&id, &digest, ArtifactDeletionKind::Purge),
+                fault,
+            )
+            .err()
+            .ok_or_else(|| unexpected(&id, "a deletion refusal", "Ok"))?;
+        if error.kind() != expected_kind {
+            return Err(unexpected(
+                &id,
+                &format!("{expected_kind:?}"),
+                artifact_error_text(&error),
+            ));
+        }
+        witness.receipt("artifact_fault_named");
+        if heal == Heal::Reopen {
+            // The latch holds until the reopen, so the fault is still armed here.
+            witness.safety_check_while_armed(&stores, "artifact_fault_named");
+            observe_latched(&stores, witness, &id)?;
+            stores = reopen(stores, charges, now)?;
+        } else {
+            witness.safety_check(&stores);
+        }
+        let probe = stores
+            .corpus
+            .kernel
+            .ingest_artifact(ingest_request(&format!("{id}-probe"), b"probe"));
+        if let Err(e) = probe {
+            return Err(unexpected(
+                &id,
+                "ingestion open after the heal",
+                artifact_error_text(&e),
+            ));
+        }
+        witness.receipt(&id);
+    }
+    Ok(stores)
+}
+
+/// The healed deletion commits a deletion the projection refuses to
+/// acknowledge past (R11): a permanent stall production heals only by
+/// rebuilding the projection.
+pub fn r11_episode(
+    stores: &mut Stores,
+    witness: &mut Witness,
+    evidence_id: &str,
+    step: u32,
+    now: i64,
+) -> Result<(), RunError> {
+    let digest = evidence_digest(stores.root(), evidence_id);
+    let r11 = witness.declare(episode(
+        "r11-deletion-bearing-catch-up",
+        step,
+        StoreFamily::SearchProjection,
+        "acknowledge",
+        FaultAction::ExpectedRefusal {
+            refusal: ExpectedRefusal::R11DeletionBearingCatchUp,
+        },
+        "search_catchup::Blocked::DeletionUnpropagated: a plain deletion puts a deletion in the next window, which is refused so the barrier stays unsatisfied while the projection serves the text; production heals it by rebuilding the projection",
+    ));
+    let before = stores.projection_rows();
+    stores
+        .corpus
+        .kernel
+        .delete_artifact(deletion_request(
+            "healed",
+            &digest,
+            ArtifactDeletionKind::Delete,
+        ))
+        .map_err(|e| unexpected(&r11, "a healed deletion", artifact_error_text(&e)))?;
+    stores.publish_outbox_now();
+    let report = stores.episode(now, None, &mut |_| {});
+    let blocked = match &report.end {
+        EpisodeEnd::Blocked(Blocked::DeletionUnpropagated { commit_seq }) => {
+            format!("DeletionUnpropagated {{ commit_seq: {commit_seq} }}")
+        }
+        other => return Err(unexpected(&r11, "Blocked(DeletionUnpropagated)", other)),
+    };
+    let again = stores.episode(now, None, &mut |_| {});
+    if again.end != report.end || again.acknowledged_through != report.acknowledged_through {
+        return Err(unexpected(&r11, "a permanent stall", &again));
+    }
+    // The refused window applied nothing: the rows the projection served
+    // before the deletion are the rows it serves while stalled, and nothing
+    // was tombstoned on the way to the refusal.
+    let after = stores.projection_rows();
+    if after != before {
+        return Err(unexpected(
+            &r11,
+            "the projection's rows unchanged by the refused window",
+            (&before, &after),
+        ));
+    }
+    witness.receipt("deletion_unpropagated");
+    witness.receipt(&r11);
+    witness.refusals.push(RecordedRefusal {
+        episode: r11,
+        refusal: ExpectedRefusal::R11DeletionBearingCatchUp,
+        production_error: blocked,
+    });
+    // The stall holds until the reopen rebuilds the projection, so the refusal
+    // is still in force here.
+    witness.safety_check_while_armed(stores, "deletion_unpropagated");
+    witness
+        .coverage
+        .record("flt_r11_recorded_as_expected_refusal")
+        .unwrap();
+    Ok(())
+}
+
+pub fn reviewer_producer(firing: &str) -> ProducerBinding {
+    ProducerBinding {
+        producer: "history-summarizer".to_string(),
+        firing_id: firing.to_string(),
+        ordinal: 0,
+    }
+}
+
+pub fn reviewer_inputs(candidate: &str) -> CausalInputs {
+    CausalInputs {
+        target: ReviewTarget::StagedSubject {
+            kernel_incarnation: "0a".repeat(16),
+            candidate_id: candidate.to_string(),
+            payload_digest: "0d".repeat(32),
+        },
+        question_template: "extracted_facts".to_string(),
+        signals: vec!["contradiction".to_string()],
+        required_evidence: vec![EvidenceAvailability {
+            evidence_id: "ev-1".to_string(),
+            available: true,
+        }],
+        policy_versions: BTreeMap::from([("disclosure".to_string(), "3".to_string())]),
+    }
+}
+
+/// The receipt quota refuses new reviewer work by name and deletes nothing.
+pub fn quota_episode(
+    root: &Path,
+    witness: &mut Witness,
+    charges: &mut Charges,
+    step: u32,
+    now: i64,
+) -> Result<(), RunError> {
+    let id = witness.declare(episode(
+        "r24-receipt-quota",
+        step,
+        StoreFamily::Memory,
+        "reserve_memory_reviewer_job",
+        FaultAction::ExpectedRefusal {
+            refusal: ExpectedRefusal::R24ReceiptQuotaExhausted,
+        },
+        "memory_reviewer_jobs::MemoryReviewerJobRefusal::MetadataQuota: receipt charges retained by a terminal job leave less than one admission's charge and allowance under the project quota, so admission refuses with no allowance left to release and deletes no receipt",
+    ));
+    let store = MemoryStore::open(&daemon::store_descriptor_in(root)).unwrap();
+    let reserved = store
+        .reserve_memory_reviewer_job(
+            PROJECT,
+            &reviewer_producer("f1"),
+            &reviewer_inputs("cand-1"),
+            now,
+        )
+        .unwrap();
+    let causal_identity = match reserved {
+        memory_store::memory_reviewer_jobs::ReserveOutcome::Reserved(job) => job.causal_identity,
+        other => return Err(unexpected(&id, "a fresh reservation", other)),
+    };
+    let retained = i64::try_from(
+        MAX_MEMORY_REVIEWER_METADATA_BYTES_PER_PROJECT - MEMORY_REVIEWER_RECEIPT_CHARGE_BYTES,
+    )
+    .unwrap();
+    store
+        .with_fenced_conn_for_test(|conn| {
+            conn.execute(
+                "UPDATE memory_reviewer_jobs SET receipt_charge_bytes = ?1 WHERE causal_identity = ?2",
+                rusqlite::params![retained, causal_identity],
+            )
+        })
+        .unwrap();
+    store
+        .finish_memory_reviewer_job(
+            PROJECT,
+            &causal_identity,
+            MemoryReviewerJobOutcome::Failed,
+            now,
+        )
+        .map_err(|e| unexpected(&id, "the planted job closed", e))?;
+    let before = store.memory_reviewer_headroom(PROJECT).unwrap();
+    let admission = MEMORY_REVIEWER_RECEIPT_CHARGE_BYTES + MEMORY_REVIEWER_JOB_ALLOWANCE_BYTES;
+    if before.pending_jobs != 0 || before.project_metadata_remaining >= admission {
+        return Err(unexpected(
+            &id,
+            "no open allowance and less than one admission's headroom",
+            before,
+        ));
+    }
+    let error = store
+        .reserve_memory_reviewer_job(
+            PROJECT,
+            &reviewer_producer("f2"),
+            &reviewer_inputs("cand-2"),
+            now,
+        )
+        .err()
+        .ok_or_else(|| unexpected(&id, "MetadataQuota", "Ok"))?;
+    // The record carries the variant as production prints it, which is what
+    // the report's evidence check reads.
+    let refusal = match error {
+        MemoryReviewerJobError::Refused(variant @ MemoryReviewerJobRefusal::MetadataQuota) => {
+            format!("{variant:?}")
+        }
+        other => return Err(unexpected(&id, "MetadataQuota", other)),
+    };
+    let after = store.memory_reviewer_headroom(PROJECT).unwrap();
+    if after.pending_jobs != before.pending_jobs
+        || after.project_metadata_bytes != before.project_metadata_bytes
+    {
+        return Err(unexpected(
+            &id,
+            "nothing deleted by the refusal",
+            (before, after),
+        ));
+    }
+    // The drop that ends the episode can checkpoint the WAL away, so the
+    // footprint is charged while the connection is open.
+    charges.store_bytes(root)?;
+    witness.receipt("quota_refused");
+    witness.receipt(&id);
+    witness.refusals.push(RecordedRefusal {
+        episode: id,
+        refusal: ExpectedRefusal::R24ReceiptQuotaExhausted,
+        production_error: refusal,
+    });
+    witness
+        .coverage
+        .record("flt_r24_recorded_as_expected_refusal")
+        .unwrap();
+    Ok(())
+}
+
+/// A quiescent copy with one page of the kernel file overwritten is refused
+/// before any store opens; the original reopens as it was.
+pub fn corruption_episode(
+    stores: Stores,
+    witness: &mut Witness,
+    charges: &mut Charges,
+    step: u32,
+    now: i64,
+) -> Result<Stores, RunError> {
+    let id = witness.declare(episode(
+        "corrupt-quiescent-kernel-file",
+        step,
+        StoreFamily::Kernel,
+        "reopen",
+        FaultAction::CorruptQuiescentFile,
+        "Copied::reopen: a copied file whose bytes no longer match the checkpoint's digest is refused FileDiffers before any store opens; the corruption is detected, not repaired",
+    ));
+    charges.store_bytes(stores.root())?;
+    let mut closed = stores.close();
+    let copy_root = charges.occupy()?;
+    let (checkpoint, copied) = closed
+        .copy(copy_root.path())
+        .map_err(|e| unexpected(&id, "an admitted quiescent copy", e))?;
+    let target = kernel_file(copied.root());
+    let mut bytes = std::fs::read(&target).unwrap();
+    let page = 4096usize;
+    let start = page * 2;
+    assert!(
+        bytes.len() > start + page,
+        "the kernel copy has a third page"
+    );
+    for byte in &mut bytes[start..start + page] {
+        *byte ^= 0xA5;
+    }
+    std::fs::write(&target, &bytes).unwrap();
+    let relative = target
+        .strip_prefix(copied.root())
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    let expected = format!("FileDiffers {{ path: {relative:?} }}");
+    match copied.reopen(&checkpoint, now) {
+        Err(RestoreRefused::FileDiffers { path }) if path == relative => {
+            witness.receipt("integrity_refused");
+        }
+        Err(other) => return Err(unexpected(&id, &expected, other)),
+        Ok(_) => return Err(unexpected(&id, &expected, "Ok")),
+    }
+    charges.vacate(copy_root)?;
+    let stores = closed.reopen(now);
+    witness.receipt(&id);
+    witness.safety_check(&stores);
+    witness
+        .coverage
+        .record("flt_corruption_detected_at_quiescence")
+        .unwrap();
+    Ok(stores)
+}
+
+/// One pending embedding job published under a publication fault. Under
+/// `LoseLocalCommitReply` the outcome is unknown to the caller, so the job's
+/// identity enters the ledger as a lost reply and is returned for the
+/// read-back after reopen. Under `LoseLocalCommit` the commit rolled back,
+/// which the seam's contract fixes, so the row is read at once and nothing is
+/// returned.
+pub fn publication_episode(
+    stores: &mut Stores,
+    witness: &mut Witness,
+    id: &str,
+    step: u32,
+    now: i64,
+    fault: PublicationFaultKind,
+) -> Result<Option<String>, RunError> {
+    let (production, contract) = match fault {
+        PublicationFaultKind::LoseLocalCommitReply => (
+            PublicationFault::LoseLocalCommitReply,
+            "embedding_publication::PublicationFault::LoseLocalCommitReply: the vector and completion commit, then the reply is lost; the durable rows say it landed",
+        ),
+        PublicationFaultKind::LoseLocalCommit => (
+            PublicationFault::LoseLocalCommit,
+            "embedding_publication::PublicationFault::LoseLocalCommit: the commit rolls back and the reply arrives as a store failure; the durable rows say it did not land",
+        ),
+    };
+    witness.declare(episode(
+        id,
+        step,
+        StoreFamily::SearchProjection,
+        "publish_embedding",
+        FaultAction::EmbeddingPublication { fault },
+        contract,
+    ));
+    let occurrence: String = read_only(&search_file(stores.root()))
+        .query_row(
+            "SELECT occurrence_id FROM embedding_jobs WHERE state IN ('pending','admitted') \
+             ORDER BY occurrence_id LIMIT 1",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|e| unexpected(id, "a pending embedding job", e))?;
+    let rows = stores.corpus.export();
+    let row = rows
+        .iter()
+        .find(|row| row.detail.occurrence_id == occurrence)
+        .ok_or_else(|| unexpected(id, "the pending occurrence in the export", &occurrence))?;
+    let project = ProjectScope::new(PROJECT).unwrap();
+    let vector = TestEngine::vector_for(row.text.as_deref().unwrap_or_default());
+    let identity = format!("embedding:{occurrence}");
+    let lost = FaultAction::EmbeddingPublication { fault }.loses_reply();
+    if lost {
+        witness.effects.attempt(&identity);
+    }
+    // The job's state and whether its vector row exists, read from the file.
+    let durable = || -> Result<(String, bool), RunError> {
+        let conn = read_only(&search_file(stores.root()));
+        let state: String = conn
+            .query_row(
+                "SELECT state FROM embedding_jobs WHERE occurrence_id=?1 AND generation_id=?2",
+                [&occurrence, GENERATION],
+                |row| row.get(0),
+            )
+            .map_err(|e| unexpected(id, "the job's row", e))?;
+        let vectors: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM occurrence_vectors WHERE occurrence_id=?1 AND generation_id=?2",
+                [&occurrence, GENERATION],
+                |row| row.get(0),
+            )
+            .map_err(|e| unexpected(id, "the vector rows", e))?;
+        Ok((state, vectors > 0))
+    };
+    let before = durable()?;
+    if before.1 {
+        return Err(unexpected(id, "a job without a vector row", &before));
+    }
+    let mut events = Vec::new();
+    let stores = &*stores;
+    let mut publisher = EmbeddingPublisher::new(&stores.corpus.kernel, &stores.projection);
+    let result = publisher.publish_with_fault_for_test(
+        &VectorPublication {
+            input: CurrentInputDescriptor {
+                object_id: row.object_id.clone(),
+                source_revision: row.revision,
+                detail: row.detail.clone(),
+                domain_id: row.domain_id.clone(),
+                sensitivity: row.sensitivity,
+                created_commit_seq: row.created_commit_seq,
+            },
+            generation: &generation(),
+            vector: &vector,
+            input_bytes: row.text.as_ref().map_or(0, |t| t.len() as u64),
+            input_tokens: 3,
+        },
+        EligibilityBinding {
+            project: &project,
+            destination: ArtifactDestination::Local,
+        },
+        Instant::now() + Duration::from_secs(10),
+        now,
+        &mut |event| events.push(event),
+        production,
+    );
+    match (fault, &result) {
+        (PublicationFaultKind::LoseLocalCommitReply, Ok(Publication::Embedded))
+        | (PublicationFaultKind::LoseLocalCommit, Err(PublicationError::LocalCommitUnresolved)) => {
+        }
+        _ => return Err(unexpected(id, "the fault's documented outcome", &result)),
+    }
+    let reconciling = events
+        .iter()
+        .position(|e| *e == PublicationEvent::Reconciling);
+    let read = events
+        .iter()
+        .rposition(|e| *e == PublicationEvent::ReconciliationRead);
+    match (reconciling, read) {
+        (Some(started), Some(read)) if started < read => {
+            witness.receipt("reconciling");
+            witness.receipt("reconciliation_read");
+        }
+        _ => {
+            return Err(unexpected(
+                id,
+                "Reconciling then ReconciliationRead",
+                &events,
+            ));
+        }
+    }
+    let lost = if lost {
+        witness.effects.lose_reply(&identity, id).unwrap();
+        Some(identity)
+    } else {
+        // The rollback is the contract's fixed outcome, so the rows are read
+        // now: the job is as it was and no vector row from this attempt is
+        // durable.
+        let after = durable()?;
+        if after != before {
+            return Err(unexpected(
+                id,
+                "the job's row and vector as before the rolled-back attempt",
+                (&before, &after),
+            ));
+        }
+        None
+    };
+    witness.receipt("publication_reconciled");
+    witness.receipt(id);
+    witness.safety_check(stores);
+    Ok(lost)
+}
+
+/// Applies planned steps from `next`, catching up after each, until an
+/// embedding job is open, and returns the index of the last step applied; a
+/// retirement opens none, so a history that runs out first is refused.
+fn open_embedding_job(
+    stores: &mut Stores,
+    steps: &[Planned],
+    next: &mut usize,
+    id: &str,
+) -> Result<usize, RunError> {
+    while stores.pending(WorkCounter::EmbeddingOpen) == 0 {
+        let planned = steps
+            .get(*next)
+            .ok_or_else(|| unexpected(id, "a planned step that opens an embedding job", *next))?;
+        stores.apply(planned);
+        stores.catch_up(planned.now_ms);
+        *next += 1;
+    }
+    Ok(*next - 1)
+}
+
 /// Reads every lost reply back by its identity from the closed files.
 /// Read-back refuses checkpoints past the recorded fault boundary because monotonic checkpoints cannot prove the faulted effect.
+/// An embedding job's row names its own state, so it is read directly.
 pub fn read_back(root: &Path, witness: &mut Witness) -> Result<(), RunError> {
-    let projection: i64 = read_only(&search_file(root))
+    let search = read_only(&search_file(root));
+    let projection: i64 = search
         .query_row(
             "SELECT checkpoint_commit_seq FROM projection_checkpoint",
             [],
@@ -458,6 +1208,17 @@ pub fn read_back(root: &Path, witness: &mut Witness) -> Result<(), RunError> {
         let checkpoint = match kind {
             "search_commit" => projection,
             "search_ack" => kernel,
+            "embedding" => {
+                let state: String = search
+                    .query_row(
+                        "SELECT state FROM embedding_jobs WHERE occurrence_id=?1",
+                        [key],
+                        |row| row.get(0),
+                    )
+                    .unwrap();
+                states.push((identity, applied(state == "embedded")));
+                continue;
+            }
             other => panic!("no read-back for effect kind {other}"),
         };
         let left_at = witness.left_at[&identity];
@@ -540,10 +1301,60 @@ pub fn campaign(
         steps[4].now_ms,
         SearchEpisodeFault::LoseAcknowledgementReply,
     )?);
-    witness.checkpoint(Cut::AfterFaultPhase);
-    let mut stores = recover(stores, witness, charges, steps[5].now_ms)?;
+    let stores = recover(stores, witness, charges, steps[5].now_ms)?;
 
-    live(&mut stores, &steps[5..]);
+    let stores = corruption_episode(stores, witness, charges, step(5), steps[5].now_ms)?;
+    let (stores, evidence) =
+        artifact_ingest_episodes(stores, witness, charges, step(5), steps[5].now_ms)?;
+    let mut stores = artifact_deletion_episodes(
+        stores,
+        witness,
+        charges,
+        &evidence,
+        step(5),
+        steps[5].now_ms,
+    )?;
+    stores.drain(steps[5].now_ms);
+
+    let mut next = 5;
+    for (id, fault) in [
+        (
+            "publication-commit-reply-lost",
+            PublicationFaultKind::LoseLocalCommitReply,
+        ),
+        (
+            "publication-commit-lost",
+            PublicationFaultKind::LoseLocalCommit,
+        ),
+    ] {
+        let at = open_embedding_job(&mut stores, steps, &mut next, id)?;
+        if let Some(lost) =
+            publication_episode(&mut stores, witness, id, step(at), steps[at].now_ms, fault)?
+        {
+            // The vector and completion committed before the reply was lost.
+            expected.insert(lost, EffectState::Applied);
+        }
+    }
+    let rest = next;
+    let resumed = steps
+        .get(rest)
+        .ok_or_else(|| {
+            unexpected(
+                "r11-deletion-bearing-catch-up",
+                "a step left to live after recovery",
+                rest,
+            )
+        })?
+        .now_ms;
+
+    let quota_root = charges.occupy()?;
+    quota_episode(quota_root.path(), witness, charges, step(rest), resumed)?;
+    charges.vacate(quota_root)?;
+    r11_episode(&mut stores, witness, &evidence, step(rest), resumed)?;
+    witness.checkpoint(Cut::AfterFaultPhase);
+    let mut stores = recover(stores, witness, charges, resumed)?;
+
+    live(&mut stores, &steps[rest..]);
     witness.checkpoint(Cut::EndOfRun);
     // The stores' bytes are charged while they are open; closing them
     // checkpoints the WAL away.
