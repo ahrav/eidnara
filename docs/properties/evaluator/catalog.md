@@ -518,8 +518,8 @@ Guarantee: A Suite D task's terminal comes from hidden tests the runner writes
   after the agent's containment exited and inside a containment of its own
   where the host has namespaces, in a read-only tree the runner builds under
   the private directory the agent's containment masks, with only the build
-  cache writable, never in the agent's workspace; an inherited budget hit is censored before any hidden
-  test is consulted; an agent's attempt to select, modify, or replace the
+  cache writable, never in the agent's workspace; an inherited budget hit is
+  censored before any hidden test is consulted; an agent's attempt to select, modify, or replace the
   oracle is recorded and never honoured, whether by writing, symlinking, or
   hard-linking an oracle path or by leaving a `.cargo/` the runner cannot
   remove.
