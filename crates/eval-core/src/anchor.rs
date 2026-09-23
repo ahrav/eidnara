@@ -158,20 +158,26 @@ fn is_token(text: &str) -> bool {
     !text.contains(char::is_whitespace)
 }
 
-/// An `https://` clone URL of a bare host and path, in unreserved URL
-/// characters only: no user, port, query, or fragment, so the web path
-/// `repository_web_path` derives is the URL itself and the repository's
-/// `/pull/` URLs are recognizable from the row alone. `git@host:path`,
-/// `ssh://git@host:22/path`, `https:///path`, `file:///path`, and
-/// `https://host/path?x` are not accepted.
+/// An `https://` clone URL of a lowercase host and a repository path, in
+/// unreserved URL characters only: no user, port, query, or fragment, and
+/// one spelling per host, so the web path `repository_web_path` derives is
+/// the URL itself, the repository's `/pull/` URLs are recognizable from the
+/// row alone, and one repository has one key. `git@host:path`,
+/// `ssh://git@host:22/path`, `https:///path`, `file:///path`,
+/// `https://host/path?x`, `https://HOST/path`, and `https://host/` are not
+/// accepted.
 fn is_url(text: &str) -> bool {
-    text.strip_prefix("https://").is_some_and(|rest| {
-        let host = rest.split('/').next().unwrap_or(rest);
-        !host.is_empty()
-            && rest
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || "-._~/".contains(c))
-    })
+    text.strip_prefix("https://")
+        .and_then(|rest| rest.split_once('/'))
+        .is_some_and(|(host, path)| {
+            !host.is_empty()
+                && !host.contains(|c: char| c.is_ascii_uppercase())
+                && !path.is_empty()
+                && [host, path]
+                    .concat()
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || "-._~/".contains(c))
+        })
 }
 
 /// An SPDX expression: identifiers of SPDX characters joined by `AND`,

@@ -1300,3 +1300,16 @@ fn issue_text_cannot_predate_the_issue() {
         Err(CutoffRefused::IssueTextBeforeIssue)
     );
 }
+
+#[test]
+fn a_clone_url_has_a_lowercase_host_and_a_repository_path() {
+    for repository in [
+        "https://EXAMPLE.invalid/cargo/repo.git",
+        "https://example.invalid",
+        "https://example.invalid/",
+    ] {
+        let mut entry = entry("cargo-0", Family::Cargo, 0x10);
+        entry.repository = repository.to_string();
+        assert!(entry.validate().is_err(), "{repository}");
+    }
+}

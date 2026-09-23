@@ -2438,9 +2438,10 @@ is not here; this module only judges the evidence it records.
 `pull_request`, and `cutoff_ms`. The issue and pull-request text is fetched
 at run time and never written into a corpus, report, or witness; `validate`
 refuses an empty field, an `id` with whitespace, a `repository` that is not
-an `https://` URL of a bare host and path in unreserved characters (so
-`git@host:path`, `ssh://`, `file://`, a user, a port, a query, a fragment,
-or an empty host refuses, and the `/pull/` URLs
+an `https://` URL of a lowercase host and a repository path in unreserved
+characters (so `git@host:path`, `ssh://`, `file://`, a user, a port, a
+query, a fragment, an upper-case host, an empty host, or an empty path
+refuses, and the `/pull/` URLs
 `future_answers` matches derive
 from the URL itself), a `license` that is not an SPDX expression by shape (identifiers of
 SPDX characters joined by `AND`, `OR`, or `WITH`; not checked against the
