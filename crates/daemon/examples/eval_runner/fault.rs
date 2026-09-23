@@ -157,6 +157,8 @@ pub struct Witness {
     pub refusals: Vec<RecordedRefusal>,
     pub checkpoints: BTreeMap<Cut, u64>,
     pub safety_checks: u64,
+    /// The cut each counted check ran at, in order.
+    pub armed_check_cuts: Vec<&'static str>,
     pub coverage: Coverage,
     pub left_at: BTreeMap<String, i64>,
 }
@@ -174,6 +176,7 @@ impl Witness {
             refusals: Vec::new(),
             checkpoints: BTreeMap::new(),
             safety_checks: 0,
+            armed_check_cuts: Vec::new(),
             coverage: Coverage::default(),
             left_at: BTreeMap::new(),
         }
@@ -203,12 +206,13 @@ impl Witness {
     }
 
     /// The safety check at a cut where a fault is armed, run from the
-    /// episode's observer. At `LocalStaged` the projection connection is held
-    /// by the episode, so this reads the files and the kernel, not the
-    /// projection handle; it is the check `safety_checks_while_armed` counts.
-    pub fn safety_check_while_armed(&mut self, stores: &Stores) {
+    /// episode's observer between the episode's own store operations, so it
+    /// reads the files and the kernel, not the projection handle; it is the
+    /// check `safety_checks_while_armed` counts.
+    pub fn safety_check_while_armed(&mut self, stores: &Stores, cut: &'static str) {
         safety_invariants(stores);
         self.safety_checks += 1;
+        self.armed_check_cuts.push(cut);
     }
 }
 
@@ -328,19 +332,23 @@ pub fn lost_reply_episode(
     let mut events = Vec::new();
     let stores = &*stores;
     // The fault is armed for the whole episode and consumed when it returns,
-    // so the counted safety check runs at the cut whose reply the fault loses.
+    // so the counted safety check runs while it is armed, at the first cut
+    // after the faulted operation's effect is durable: `local_released`, once
+    // the batch committed and before the drive reconciles the lost reply
+    // (`local_staged` is inside the still-open transaction), and
+    // `acknowledged`, once the kernel write is durable.
     let report = stores.episode(now, Some(seam(fault).production), &mut |event| {
         if matches!(
             (fault, &event),
             (
                 SearchEpisodeFault::LoseLocalCommitReply,
-                EpisodeEvent::LocalStaged { .. }
+                EpisodeEvent::LocalReleased { .. }
             ) | (
                 SearchEpisodeFault::LoseAcknowledgementReply,
-                EpisodeEvent::AcknowledgementRequested { .. }
+                EpisodeEvent::Acknowledged { .. }
             )
         ) {
-            witness.safety_check_while_armed(stores);
+            witness.safety_check_while_armed(stores, cut_of(&event));
         }
         events.push(event)
     });
@@ -443,7 +451,7 @@ pub fn lock_holder_episode(
         EpisodeEnd::Blocked(Blocked::LocalCommitUnresolved) => witness.receipt("lock_blocked"),
         other => return Err(unexpected(id, "Blocked(LocalCommitUnresolved)", other)),
     }
-    witness.safety_check_while_armed(stores);
+    witness.safety_check_while_armed(stores, "lock_blocked");
     drop(holder);
     let released = stores.episode(now, None, &mut |_| {});
     if released.end != EpisodeEnd::ReachedTarget {
@@ -613,7 +621,7 @@ pub fn artifact_ingest_episodes(
         observe_latched(&stores, witness, &id)?;
         witness.receipt("artifact_fault_named");
         // The latch holds until the reopen, so the fault is still armed here.
-        witness.safety_check_while_armed(&stores);
+        witness.safety_check_while_armed(&stores, "ingestion_latched");
         stores = reopen(stores, charges, now)?;
         let healed = stores
             .corpus
@@ -719,7 +727,7 @@ pub fn artifact_deletion_episodes(
         witness.receipt("artifact_fault_named");
         if heal == Heal::Reopen {
             // The latch holds until the reopen, so the fault is still armed here.
-            witness.safety_check_while_armed(&stores);
+            witness.safety_check_while_armed(&stores, "artifact_fault_named");
             observe_latched(&stores, witness, &id)?;
             stores = reopen(stores, charges, now)?;
         } else {
@@ -804,7 +812,7 @@ pub fn r11_episode(
     });
     // The stall holds until the reopen rebuilds the projection, so the refusal
     // is still in force here.
-    witness.safety_check_while_armed(stores);
+    witness.safety_check_while_armed(stores, "deletion_unpropagated");
     witness
         .coverage
         .record("flt_r11_recorded_as_expected_refusal")

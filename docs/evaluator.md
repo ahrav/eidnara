@@ -2396,19 +2396,23 @@ past the tip or an invalidation before its creation, and the projection never
 runs ahead of the kernel) are checked while each fault is armed, and only
 those checks count as
 `safety_checks_while_armed`: for the lock holder, while the holder still holds
-the projection; for a reply-loss fault, from the episode's observer at the cut
-whose reply the fault loses (`local_staged` or `acknowledgement_requested`),
-reading the files and the kernel because the episode holds the projection
-connection there; for a latching CAS fault, after the refusal and before the
-reopen that clears the latch; for R11, while the stall holds. The ENOSPC
-deletion fault is consumed inside its call, the corrupted copy is refused
-before any store opens, R24 runs on a memory store, and the publisher forbids
-its observer to call the kernel or the projection before a release event, by
-which time its one-shot fault is consumed, so none of the four has an armed
-window to check from. The same invariants plus the projection
-connection's verification run again after every episode and every reopen, as
-assertions that count nothing, since no fault is armed then. Each recovery
-charges the stores' bytes before the close that checkpoints their WALs away.
+the projection; for a reply-loss fault, from the episode's observer at the
+first cut after the faulted operation's effect is durable and before the drive
+reconciles the lost reply: `local_released` for a lost commit reply (the batch
+has committed; `local_staged` is still inside the open transaction) and
+`acknowledged` for a lost acknowledgement reply (the kernel write is durable),
+reading the files and the kernel rather than the projection handle; for a
+latching CAS fault, after the refusal and before the reopen that clears the
+latch; for R11, while the stall holds. The ENOSPC deletion fault is consumed
+inside its call, the corrupted copy is refused before any store opens, R24
+runs on a memory store, and the publisher forbids its observer to call the
+kernel or the projection before a release event, by which time its one-shot
+fault is consumed, so none of the four has an armed window to check from. The
+witness records the cut of each counted check. The same invariants plus the
+projection connection's verification run again after every episode and every
+reopen, as assertions that count nothing, since no fault is armed then. Each
+recovery charges the stores' bytes before the close that checkpoints their
+WALs away.
 
 Not in this shell: a process kill at a named cut, a held publication through
 the dispatcher gate, and the liveness mode; the run publishes `liveness:
