@@ -2361,7 +2361,11 @@ unfixed, under the correct fix, and under every wrong fix, and runs
 authority and, where the host has namespaces, inside the same containment the
 agent gets, with the build cache the only writable tree and the grade tree
 itself read-only, so a `build.rs` or test the candidate wrote can neither
-reach the host nor rewrite a hidden test before it compiles; the runner
+reach the host nor rewrite a hidden test before it compiles; Cargo's home and
+its working directory are read-only paths under the private directory, so
+no `.cargo/config.toml` a build script plants is read by the next
+invocation, and `RUSTUP_TOOLCHAIN` names the checkout's toolchain because
+the rustup proxy would not find `rust-toolchain.toml` from there; the runner
 writes the dependency-free lockfile beforehand (exit 0 with the
 harness summary `test result: ok. 1 passed` is `passed`;
 exit 101 with `test result: FAILED` is `failed`; anything else `errored`);

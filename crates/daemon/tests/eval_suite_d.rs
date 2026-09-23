@@ -327,6 +327,23 @@ fn grading_ignores_symlinked_hard_linked_and_undeletable_workspace_entries() {
         "the corpus's test judged the wrong fix, not the hard-linked plant or the forged runner"
     );
     assert_eq!(results["sum_of_a_negative"], HiddenOutcome::Passed);
+    // The grading `cargo` runs from a directory outside the checkout, where
+    // `rust-toolchain.toml` does not reach the rustup proxy on its own.
+    let sysroot = String::from_utf8(
+        Command::new("rustc")
+            .args(["--print", "sysroot"])
+            .output()
+            .unwrap()
+            .stdout,
+    )
+    .unwrap();
+    let rustc_info =
+        std::fs::read_to_string(root.path().join("target").join(".rustc_info.json")).unwrap();
+    assert!(
+        rustc_info.contains(sysroot.trim()),
+        "grading used another toolchain than the checkout's {}",
+        sysroot.trim()
+    );
     std::fs::set_permissions(&cargo_dir, PermissionsExt::from_mode(0o755)).unwrap();
 }
 
@@ -693,7 +710,13 @@ fn a_wrong_fix_fails_a_no_fix_stays_failed_and_an_exhausted_budget_is_censored()
             // A build script that rewrites the hidden test after the runner
             // wrote it, and a manifest turned into a directory.
             build_script: Some(
-                "let _ = std::fs::write(\"tests/hidden_sum_of_positives.rs\", \"#[test]\\nfn planted() {}\\n\");"
+                r##"let _ = std::fs::write("tests/hidden_sum_of_positives.rs", "#[test]\nfn planted() {}\n");
+                let wrapper = "[build]\nrustc-wrapper = \"/nonexistent-wrapper\"\n";
+                let home = std::env::var("CARGO_HOME").unwrap();
+                let _ = std::fs::write(format!("{home}/config.toml"), wrapper);
+                let target = std::env::var("CARGO_TARGET_DIR").unwrap();
+                let _ = std::fs::create_dir_all(format!("{target}/.cargo"));
+                let _ = std::fs::write(format!("{target}/.cargo/config.toml"), wrapper);"##
                     .to_string(),
             ),
             manifest_dir: true,

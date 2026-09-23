@@ -307,21 +307,23 @@ pub fn escapee_main() -> ! {
 /// by an empty read-only tmpfs instead; a mount whose topmost instance is
 /// still writable after that refuses the containment, so the read-only set is
 /// "everything" rather than a list. A pre-mount working directory still
-/// resolves to the writable mount, so `cd` re-resolves `$2` after mounting.
+/// resolves to the writable mount, so `cd` re-resolves the working directory
+/// (`$3`, or `$2` itself) after mounting.
 const MOUNTS: &str = r#"{ mount --make-rprivate / &&
 { [ -z "$1" ] || mount -t tmpfs -o ro,size=1k tmpfs "$1"; } && mount --bind "$2" "$2"; } || exit 97
 awk '{ print $5 }' /proc/self/mountinfo | while read -r m; do
   [ "$m" = "$2" ] || mount -o remount,ro,bind "$m" 2>/dev/null || mount -t tmpfs -o ro,size=1k tmpfs "$m" 2>/dev/null
 done
 awk -v rw="$2" '{ top[$5] = $6 } END { for (m in top) if (m != rw && top[m] !~ /(^|,)ro(,|$)/) exit 1 }' /proc/self/mountinfo || exit 97
-cd "$2" || exit 97
-shift 2
+cd "${3:-$2}" || exit 97
+shift 3
 exec setpriv --no-new-privs --inh-caps=-all --ambient-caps=-all --bounding-set=-all -- "$@""#;
 
 /// `unshare` with user, mount, PID, and network namespaces, killed with the
 /// namespace init. `mask` is covered by an empty read-only tmpfs, `writable`
-/// is the one writable tree and the working directory, and everything else
-/// is read-only. Only `PATH`, `HOME`, and `inner`'s own variables cross.
+/// is the one writable tree, and everything else is read-only; `inner`'s
+/// working directory is kept (the writable tree when it has none). Only
+/// `PATH`, `HOME`, and `inner`'s own variables cross.
 fn contain(mask: Option<&Path>, writable: &Path, inner: &Command) -> Command {
     let mut command = Command::new("unshare");
     command
@@ -340,6 +342,7 @@ fn contain(mask: Option<&Path>, writable: &Path, inner: &Command) -> Command {
         ])
         .arg(mask.unwrap_or(Path::new("")))
         .arg(writable)
+        .arg(inner.get_current_dir().unwrap_or(Path::new("")))
         .arg(inner.get_program())
         .args(inner.get_args())
         .env_clear();
@@ -658,9 +661,15 @@ pub fn hidden_results(
     let target = root.join("target");
     remove_tree(&grade)?;
     // The linker wants a temporary directory and neither `/tmp` nor the
-    // package root is writable under the containment.
+    // package root is writable under the containment. Cargo's home and the
+    // working directory it reads `.cargo/config.toml` from stay outside the
+    // writable cache, so a build script cannot plant configuration for the
+    // next invocation.
     let tmp = target.join("tmp");
     std::fs::create_dir_all(&tmp)?;
+    let cargo_home = root.join("cargo-home");
+    std::fs::create_dir_all(&cargo_home)?;
+    let toolchain = grading_toolchain();
     let mut files = task.files.clone();
     // A path that replaced a task file with a directory, or a task directory
     // with a file, cannot be written beside the task's own; the task's wins.
@@ -680,11 +689,14 @@ pub fn hidden_results(
         let mut command = Command::new("cargo");
         command
             .args(args)
-            .current_dir(&target)
+            .current_dir(root)
             .env("CARGO_TARGET_DIR", &target)
-            .env("CARGO_HOME", target.join(".cargo-home"))
+            .env("CARGO_HOME", &cargo_home)
             .env("TMPDIR", &tmp)
             .stderr(Stdio::null());
+        if let Some(toolchain) = &toolchain {
+            command.env("RUSTUP_TOOLCHAIN", toolchain);
+        }
         command
     };
     // The lockfile is written by the runner, resolving nothing but the
@@ -696,7 +708,7 @@ pub fn hidden_results(
             "--offline",
             "--quiet",
             "--manifest-path",
-            "../grade/Cargo.toml",
+            "grade/Cargo.toml",
         ]),
         deadline,
         charges,
@@ -712,7 +724,7 @@ pub fn hidden_results(
             "--locked",
             "--quiet",
             "--manifest-path",
-            "../grade/Cargo.toml",
+            "grade/Cargo.toml",
             "--test",
             &format!("hidden_{}", test.name),
         ]);
@@ -749,6 +761,25 @@ pub fn hidden_results(
         results.insert(test.name.clone(), outcome);
     }
     Ok(results)
+}
+
+/// The toolchain the checkout pins, for a `cargo` run from a directory where
+/// the rustup proxy would not find `rust-toolchain.toml`: the override an
+/// outer `cargo +<channel>` already exported, else what rustup resolves at
+/// the workspace root. `None` without rustup, where there is one toolchain.
+fn grading_toolchain() -> Option<String> {
+    if let Some(toolchain) = std::env::var_os("RUSTUP_TOOLCHAIN") {
+        return Some(toolchain.to_string_lossy().into_owned());
+    }
+    let output = Command::new("rustup")
+        .args(["show", "active-toolchain"])
+        .current_dir(super::support::direct_host::workspace_root())
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+    let text = String::from_utf8(output.stdout).ok()?;
+    text.split_whitespace().next().map(str::to_string)
 }
 
 fn oracle_owned(path: &str) -> bool {
