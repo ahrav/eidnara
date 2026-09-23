@@ -126,6 +126,15 @@ pub enum ArtifactDeletionFaultKind {
 /// `ExpectedRefusal` injects no fault: the runner drives production into a
 /// refusal it makes on purpose (a deletion-bearing catch-up window, a receipt
 /// charge at the quota) and records it as expected rather than as a failure.
+///
+/// The set closes over the test-support seams that lose a store reply or fail
+/// a store transaction or publication of a `StoreFamily` store. Hooks that
+/// fail a schema migration (`schema.rs`), a lifecycle or recovery directory
+/// sync (`projection_lifecycle`, `search_lifecycle_owner`,
+/// `search_replacement::selection::recovery`), or a memory-store reviewer or
+/// classifier side channel (`memory-store`'s `fail_next_*_for_test`) are
+/// unit-test hooks on component internals, not faults a campaign injects, and
+/// are outside the set on purpose; `retention.rs` reuses `ArtifactGcFault`.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum FaultAction {
@@ -151,6 +160,15 @@ pub enum FaultAction {
     /// `backup_with_fault_before_rename_for_test`: the backup fails after its
     /// staged copy is synced and before it is published.
     BackupBeforeRename,
+    /// `commit_with_fault_after_events_for_test`: the commit fails inside its
+    /// transaction after the change events are written, and rolls back.
+    KernelCommitFailAfterEvents,
+    /// `MessageCleanup::lose_next_write_reply_for_test`: a page reclaim's
+    /// COMMIT reply is lost after the projection applied it.
+    MessageCleanupLoseWriteReply,
+    /// `IdentitySweep::lose_next_reclaim_reply_for_test`: an identity
+    /// reclamation's COMMIT reply is lost after the projection applied it.
+    IdentitySweepLoseReclaimReply,
     ProjectionBatch {
         fault: BatchFaultKind,
     },
@@ -214,7 +232,11 @@ impl FaultAction {
                 }
                 RestoreFaultKind::RecoveryFailure => Heal::Reopen,
             },
-            Self::ProjectionBatch { .. } | Self::BackupBeforeRename => Heal::Consumed,
+            Self::ProjectionBatch { .. }
+            | Self::BackupBeforeRename
+            | Self::KernelCommitFailAfterEvents
+            | Self::MessageCleanupLoseWriteReply
+            | Self::IdentitySweepLoseReclaimReply => Heal::Consumed,
             Self::ProcessKill { .. } | Self::CorruptQuiescentFile => Heal::Reopen,
             Self::ExpectedRefusal { refusal } => match refusal {
                 ExpectedRefusal::R11DeletionBearingCatchUp => Heal::Reopen,
@@ -249,12 +271,14 @@ impl FaultAction {
                 fault,
                 ArtifactGcFaultKind::AfterReclaiming | ArtifactGcFaultKind::AfterUnlink
             ),
+            Self::MessageCleanupLoseWriteReply | Self::IdentitySweepLoseReclaimReply => true,
             Self::HeldPublication
             | Self::ArtifactIngest { .. }
             | Self::ArtifactDeletion { .. }
             | Self::KernelRestore { .. }
             | Self::ProjectionBatch { .. }
             | Self::BackupBeforeRename
+            | Self::KernelCommitFailAfterEvents
             | Self::ExternalLockHolder
             | Self::ProcessKill { .. }
             | Self::CorruptQuiescentFile
@@ -272,13 +296,16 @@ impl FaultAction {
             | Self::EmbeddingPublication { .. }
             | Self::HeldPublication
             | Self::EmbeddingDispatch { .. }
-            | Self::ProjectionBatch { .. } => Some(StoreFamily::SearchProjection),
+            | Self::ProjectionBatch { .. }
+            | Self::MessageCleanupLoseWriteReply
+            | Self::IdentitySweepLoseReclaimReply => Some(StoreFamily::SearchProjection),
             Self::ClaimMaterialization { .. }
             | Self::ArtifactIngest { .. }
             | Self::ArtifactDeletion { .. }
             | Self::ArtifactGc { .. }
             | Self::KernelRestore { .. }
-            | Self::BackupBeforeRename => Some(StoreFamily::Kernel),
+            | Self::BackupBeforeRename
+            | Self::KernelCommitFailAfterEvents => Some(StoreFamily::Kernel),
             Self::ExpectedRefusal { refusal } => Some(match refusal {
                 ExpectedRefusal::R11DeletionBearingCatchUp => StoreFamily::SearchProjection,
                 ExpectedRefusal::R24ReceiptQuotaExhausted => StoreFamily::Memory,
@@ -616,14 +643,29 @@ impl Effect {
         !self.lost_by.is_empty()
     }
 
-    /// An observation after a `not_applied` read-back is the retry landing:
-    /// the identity's final state is applied.
-    fn retry_applied(&mut self) {
-        if self.outcome == EffectOutcome::NotApplied {
+    /// An observation resolves an identity whose last word was `not_applied`
+    /// or nothing at all: the effect is there, so the retry or the lost
+    /// attempt landed. An identity already applied stays applied.
+    fn resolve_applied(&mut self) {
+        if self.outcome != EffectOutcome::Applied {
             self.expected = Expected::Exactly {
                 state: EffectState::Applied,
             };
             self.outcome = EffectOutcome::Applied;
+        }
+    }
+
+    /// A retry of an identity read back as `not_applied` starts unresolved:
+    /// the old read-back spoke for the attempt before this one.
+    fn reopen_for_retry(&mut self) {
+        if self.outcome == EffectOutcome::NotApplied {
+            self.read_back = false;
+            self.expected = Expected::OneOf {
+                states: [EffectState::Applied, EffectState::NotApplied]
+                    .into_iter()
+                    .collect(),
+            };
+            self.outcome = EffectOutcome::Unknown;
         }
     }
 }
@@ -705,6 +747,7 @@ impl EffectLedger {
                 outcome: EffectOutcome::Applied,
             });
         effect.attempted += 1;
+        effect.reopen_for_retry();
         effect
     }
 
@@ -719,7 +762,7 @@ impl EffectLedger {
     pub fn observe(&mut self, identity: &str) -> Result<(), EffectRefused> {
         let effect = self.effect(identity)?;
         effect.observed += 1;
-        effect.retry_applied();
+        effect.resolve_applied();
         Ok(())
     }
 
@@ -727,7 +770,7 @@ impl EffectLedger {
         let effect = self.effect(identity)?;
         effect.observed += 1;
         effect.acknowledged += 1;
-        effect.retry_applied();
+        effect.resolve_applied();
         Ok(())
     }
 
@@ -739,6 +782,11 @@ impl EffectLedger {
     pub fn lose_reply(&mut self, identity: &str, episode: &str) -> Result<(), EffectRefused> {
         let effect = self.effect(identity)?;
         effect.lost_by.insert(episode.to_string());
+        // An identity already observed is applied whatever a later retry's
+        // reply did; the loss is recorded, the evidence stands.
+        if effect.observed > 0 {
+            return Ok(());
+        }
         effect.read_back = false;
         effect.expected = Expected::OneOf {
             states: [EffectState::Applied, EffectState::NotApplied]
@@ -795,15 +843,23 @@ impl EffectLedger {
                     state: EffectState::NotApplied,
                 });
             }
-            if effect.reply_lost() && effect.acknowledged >= effect.attempted {
+            // Every lost reply is an attempt that went unacknowledged; more
+            // losses than such attempts (or any, when all were acknowledged)
+            // is a loss that never happened.
+            if effect.lost_by.len() as u64 > effect.attempted - effect.acknowledged {
                 return Err(EffectRefused::LostReplyAcknowledged { identity });
             }
-            if effect.reply_lost() && !effect.read_back {
+            if effect.outcome == EffectOutcome::Unknown {
+                // Pending: a lost reply, or a retry after one, that nothing has
+                // resolved yet.
+                if !effect.reply_lost() || effect.read_back {
+                    // Unknown without a lost reply, or after a read-back that
+                    // by construction named one state, is not a state the
+                    // events derive.
+                    return Err(EffectRefused::OutcomeNotDerived { identity });
+                }
                 if effect.observed > 0 {
                     return Err(EffectRefused::ObservedWithoutReadBack { identity });
-                }
-                if effect.outcome != EffectOutcome::Unknown {
-                    return Err(EffectRefused::PrematureSuccess { identity });
                 }
                 match &effect.expected {
                     Expected::OneOf { states } if states.len() >= 2 => {}
@@ -814,6 +870,10 @@ impl EffectLedger {
                     }
                 }
                 continue;
+            }
+            if effect.reply_lost() && !effect.read_back && effect.observed == 0 {
+                // A lost reply claims a state though nothing resolved it.
+                return Err(EffectRefused::PrematureSuccess { identity });
             }
             // Without a lost reply only `Applied` was ever admissible; after a
             // read-back the outcome is exactly the state it named.
@@ -828,7 +888,11 @@ impl EffectLedger {
                 }
                 Expected::Exactly {
                     state: EffectState::NotApplied,
-                } => effect.reply_lost() && effect.outcome == EffectOutcome::NotApplied,
+                } => {
+                    effect.reply_lost()
+                        && effect.read_back
+                        && effect.outcome == EffectOutcome::NotApplied
+                }
                 Expected::OneOf { .. } => false,
             };
             if !derived {
@@ -863,6 +927,17 @@ impl ExpectedRefusal {
             Self::R11DeletionBearingCatchUp => "DeletionUnpropagated",
             Self::R24ReceiptQuotaExhausted => "MetadataQuota",
         }
+    }
+
+    /// The production variant's text in the form production prints it: the
+    /// variant name alone or followed by its fields, never as a substring of
+    /// some other word.
+    pub fn evidences(self, production_error: &str) -> bool {
+        let variant = self.production_variant();
+        production_error == variant
+            || production_error
+                .strip_prefix(variant)
+                .is_some_and(|rest| rest.starts_with(" {") || rest.starts_with('('))
     }
 }
 
@@ -1016,12 +1091,28 @@ impl LivenessReport {
 }
 
 /// What the approved profile fixes for a fault campaign: the digest a report
-/// must name, the liveness bounds, and the resource envelope.
+/// must name, the liveness bounds, and the resource envelope. Only
+/// `RunProfile::fault_profile` builds one, so holding a `FaultProfile` is
+/// holding an approved profile's word.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FaultProfile {
-    pub digest: String,
-    pub liveness: LivenessBounds,
-    pub envelope: ResourceLimits,
+    digest: String,
+    liveness: LivenessBounds,
+    envelope: ResourceLimits,
+}
+
+impl FaultProfile {
+    pub fn digest(&self) -> &str {
+        &self.digest
+    }
+
+    pub fn liveness(&self) -> &LivenessBounds {
+        &self.liveness
+    }
+
+    pub fn envelope(&self) -> &ResourceLimits {
+        &self.envelope
+    }
 }
 
 impl RunProfile {
@@ -1134,6 +1225,10 @@ pub enum FaultReportError {
     /// An effect names an episode that loses no reply as the one that lost its.
     LostByNonLosingEpisode {
         identity: String,
+        episode: String,
+    },
+    /// One episode fires once and loses one reply; two effects cannot both be it.
+    LostReplyClaimedTwice {
         episode: String,
     },
     SafetyNeverChecked,
@@ -1249,8 +1344,14 @@ impl FaultReport {
             .verdict()
             .map_err(FaultReportError::Coverage)?;
         self.effects.validate().map_err(FaultReportError::Effect)?;
+        let mut losers = BTreeSet::new();
         for (identity, effect) in &self.effects.effects {
             for episode in &effect.lost_by {
+                if !losers.insert(episode) {
+                    return Err(FaultReportError::LostReplyClaimedTwice {
+                        episode: episode.clone(),
+                    });
+                }
                 match self.episodes.iter().find(|e| &e.id == episode) {
                     None => {
                         return Err(FaultReportError::UnknownEpisode {
@@ -1286,10 +1387,7 @@ impl FaultReport {
                     episode: recorded.episode.clone(),
                 });
             }
-            if !recorded
-                .production_error
-                .contains(recorded.refusal.production_variant())
-            {
+            if !recorded.refusal.evidences(&recorded.production_error) {
                 return Err(FaultReportError::RefusalNotEvidenced {
                     episode: recorded.episode.clone(),
                     refusal: recorded.refusal,

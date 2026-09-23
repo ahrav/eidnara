@@ -2006,20 +2006,32 @@ mirroring the fault enums and hooks that exist: `search_episode`
 (`cas::gc::ArtifactGcFault`), `kernel_restore` (`backup::RestoreFault`),
 `projection_batch` (`retrieval::batch::BatchFault`), `backup_before_rename`
 (the kernel's `backup_with_fault_before_rename_for_test` hook),
+`kernel_commit_fail_after_events` (the commit hook that fails inside the
+transaction after the change events), `message_cleanup_lose_write_reply` and
+`identity_sweep_lose_reclaim_reply` (the two projection maintenance slices
+whose COMMIT reply is lost after the store applied it),
 `external_lock_holder` (an external `BEGIN IMMEDIATE`), `process_kill { cut }`,
 `corrupt_quiescent_file`, and `expected_refusal { refusal }`, which injects no
-fault: the runner drives production into a refusal it makes on purpose.
-`FaultAction::family` is the store the seam lives in: catch-up, publication,
-dispatch, and a projection batch write the search projection, the CAS, its
-GC, a restore, a backup, and the materializer's outbox are the kernel, R11 is
-the projection's refusal and R24 the memory store's, and a lock holder, a
-kill, or a corrupted file names its own store; a scope on another family is
+fault: the runner drives production into a refusal it makes on purpose. The
+set closes over the test-support seams that lose a store reply or fail a store
+transaction or publication of a `StoreFamily` store; the hooks that fail a
+schema migration, a lifecycle or recovery directory sync, or a memory-store
+reviewer or classifier side channel are unit-test hooks on component
+internals, not faults a campaign injects, and stay outside it on purpose
+(`retention.rs` reuses `ArtifactGcFault`). `FaultAction::family` is the store
+the seam lives in: catch-up, publication, dispatch, and a projection batch
+write the search projection, as do the cleanup and sweep slices; the CAS, its
+GC, a restore, a backup, a commit, and the materializer's outbox are the
+kernel; R11 is the projection's refusal and R24 the memory store's; and a
+lock holder, a kill, or a corrupted file names its own store; a scope on
+another family is
 `ScopeMismatch`. `FaultAction::loses_reply` names the actions that leave an
 operation's outcome unknown to its caller: the search-episode reply losses,
 `embedding_publication`'s `lose_local_commit_reply`, the materializer's
 `lose_acknowledgement_reply`, dispatch's
-`lose_charge_reply` and `lose_obsoletion_reply`, and
-GC's `after_reclaiming` and `after_unlink`; a rolled-back commit, a refused
+`lose_charge_reply` and `lose_obsoletion_reply`,
+GC's `after_reclaiming` and `after_unlink`, and the cleanup and sweep
+slices' lost COMMIT replies; a rolled-back commit, a refused
 statement, a skipped acknowledgement, the materializer's
 `fail_acknowledgement` (which never calls the kernel), or an expected refusal
 is known, not lost, and dispatch's `refuse_ledger_read` loses none itself: it
@@ -2031,8 +2043,9 @@ whose retained receipt charges refuse admission for the rest of the store
 incarnation. A restore interrupted `before_displace` or `after_displace` is
 rolled back by the handle before the fault returns and is `consumed`; only
 `recovery_failure` leaves the store for a `reopen`. A projection batch fault
-rolls its transaction back and is `consumed`, as is a backup that fails
-before its rename. The CAS faults split by whether they latch ingestion closed: the
+rolls its transaction back and is `consumed`, as are a backup that fails
+before its rename, a commit that fails after its events, and the two
+maintenance slices' lost replies. The CAS faults split by whether they latch ingestion closed: the
 ingest faults `write`, `file_sync`, `rename`, `after_directory_sync`, and
 `takeover_before_cleanup_unlink` and the EIO deletion faults `intent_append`
 and `unlink` heal by `reopen`; `reservation_commit` and `after_events` abort a
@@ -2094,10 +2107,16 @@ a checkpoint receipted at least once is `Reached`, every other declared one is
 `lose_reply(identity, episode)` adds the episode whose fault lost the reply
 to `lost_by` (a retried identity can lose one reply per attempt), sets
 the expectation to `one_of {applied, not_applied}` and the outcome to
-`unknown`; `read_back(identity, state)` collapses it to `exactly { state }`
+`unknown` (unless the identity was already observed, in which case the loss
+is recorded and the applied state stands: a later retry's lost reply cannot
+undo evidence); `read_back(identity, state)` collapses it to `exactly { state }`
 and the matching outcome, adding the observation an applied read-back proves.
-An observation (`observe`, `acknowledge`) after a `not_applied` read-back is
-the retry landing, and moves the identity to `exactly { applied }`.
+An observation (`observe`, `acknowledge`) resolves an identity whose last word
+was `not_applied` or `unknown`: the effect is there, so the identity moves to
+`exactly { applied }`. `attempt` on an identity read back as `not_applied`
+reopens it as `unknown` over both states with the old read-back cleared,
+since that read-back spoke for the attempt before this one; the retry stays
+unresolved until observed, acknowledged, lost, or read back.
 A read-back is refused as `ReadBackNotAdmissible { identity, state }` and
 changes nothing when `state` is outside the admissible set (a reply that was
 not lost admits only `applied`) or when it is `not_applied` for an effect
@@ -2105,13 +2124,16 @@ already observed, which would be a lost write that was seen.
 `validate` refuses, per identity, `NeverAttempted` at zero attempts (an entry
 `attempt` never created), `EmptyIdentity` for a blank key, `BoundsViolated` unless `acknowledged <=
 observed <= attempted`, `ReadBackNotAdmissible` for an observed effect
-whose outcome is `not_applied`, `ObservedWithoutReadBack` for a lost reply
-observed but never read back (the observation is the read-back the ledger
-must record), `LostReplyAcknowledged` for a lost reply whose every attempt was
-acknowledged (nothing was lost), `PrematureSuccess` for a lost reply whose
-outcome is not `unknown` without a read-back, and
+whose outcome is `not_applied`, `ObservedWithoutReadBack` for a parsed entry
+still `unknown` with an observation (the API resolves on observation, so the
+state claims an ambiguity the observation removed), `LostReplyAcknowledged`
+when `lost_by` names more episodes than attempts that went unacknowledged
+(each lost reply is one such attempt; none left means the replies came back),
+`PrematureSuccess` for a lost reply whose
+outcome is not `unknown` with neither a read-back nor an observation, and
 `ExpectationCollapsedWithoutReadBack` for a lost reply expecting fewer than two
-states, and `OutcomeNotDerived` when the outcome is not the state the
+states, and `OutcomeNotDerived` when the outcome is `unknown` after a
+read-back (a read-back names one state) or without a lost reply, when it is not the state the
 expectation names, an effect whose reply was never lost expects anything but
 `applied`, the only state the API ever admits for it, or an `applied`
 outcome with no observation behind it: an attempt alone establishes nothing,
@@ -2128,11 +2150,12 @@ inequality while one identity violates it is refused.
 `RecordedRefusal` carries the episode and the production error text, and the
 report lists them apart from safety failures. The report refuses a record
 (an expected refusal or a liveness permanent stall) whose episode is not one
-of its episodes (`UnknownEpisode`) or whose error text does not name the
-variant's production type, `DeletionUnpropagated` or `MetadataQuota`
-(`RefusalNotEvidenced`). A recorded refusal or permanent stall whose episode
-is not a declared `expected_refusal` of the same refusal is
-`RefusalNotDeclared`: it would attribute the refusal to a fault that never
+of its episodes (`UnknownEpisode`) or whose error text is not the variant's
+production type as production prints it, `DeletionUnpropagated` or
+`MetadataQuota` alone or followed by its fields (`RefusalNotEvidenced`); a word
+that merely contains the name is not evidence. A recorded refusal or permanent
+stall whose episode is not a declared `expected_refusal` of the same refusal
+is `RefusalNotDeclared`: it would attribute the refusal to a fault that never
 ran. An `expected_refusal` episode with no recorded refusal or permanent
 stall of its own is `RefusalNotRecorded`: it would claim a refusal the run
 never observed.
@@ -2166,8 +2189,9 @@ receipts, cut receipts, cut coverage, the effect ledger, expected refusals,
 the count of safety checks made while faults were armed (`SafetyNeverChecked`
 at zero), the optional liveness report, markers, and envelope. `validate`
 takes a `FaultProfile`, the approved profile's digest, liveness bounds, and
-resource limits (`RunProfile::fault_profile` builds one and refuses an
-unapproved profile), and runs every
+resource limits; its fields are private and `RunProfile::fault_profile` is
+its only constructor, refusing an unapproved profile, so holding one is
+holding an approved profile's word. `validate` runs every
 refusal above, and also refuses
 `ClaimBoundaryMismatch`, `MalformedDigest` for an `eval_run_id` or
 `profile_digest` that is not 64 lowercase hex digits, `ProfileDigestMismatch`
@@ -2177,7 +2201,8 @@ profile's limits, `EnvelopeExceeded` when any recorded peak is over its
 bound, `NoEpisode` when no fault was armed (so no safety check ran while one
 was), `UnregisteredMarker` for a marker `MARKERS` does not register,
 `LostReplyUnrecorded { episode }` for an episode that loses a reply that no
-effect's `lost_by` names, `LostByNonLosingEpisode` for an effect naming
+effect's `lost_by` names, `LostReplyClaimedTwice` for one that two effects
+name (an episode fires once and loses one reply), `LostByNonLosingEpisode` for an effect naming
 an episode that loses none, `UnknownEpisode` for one naming an episode the
 report lacks,
 `UnknownEpisode` for a liveness outside-core episode that is not one of the
@@ -2249,7 +2274,11 @@ programming error it panics on), then re-hashes every copied file and refuses an
 malformed copy would otherwise fail its first query), reads each copy's
 integrity on its own
 connection, accepts them against the checkpoint, and reopens the kernel and
-the memory store as they were. The resumed driver's lineage state (each
+the memory store as they were. Before the projection is rebuilt, the prefix
+projection's source hold, which rode along in the copy bound to a lease epoch
+the reopen has advanced past, is released through `reconcile_source_holds`,
+as the daemon's replacement cleanup does after a restart, so the rebuilt
+projection's hold is the only live one. The resumed driver's lineage state (each
 lineage's published objects in commit order, and the objects retired outright)
 is rebuilt from the copied kernel's `object_registry`, not inherited from the
 prefix driver, as a fresh process would have to rebuild it. A copy of another store therefore reads as
@@ -2279,13 +2308,15 @@ final tip from the snapshot export and embedded to quiescence has the full
 life's live digest and differs historically by every death in the history.
 
 The run refuses an unapproved profile before the history is generated or any
-store opens (the profile's event bound is the generator's, `messages.max(64)
-* 2`, so it needs no plan), starts the envelope's clock before planning, charges
-the roots, store bytes, elapsed time, and artifact bytes to the envelope, and
+store opens (the profile's event bound is the generator's,
+`messages.max(64) * 2`, so it needs no plan), starts the envelope's clock
+before planning, charges the roots, store bytes, elapsed time, and artifact
+bytes to the envelope, and
 publishes `suite-c-aging-report.json` and `manifest.json` write-then-rename;
 a manifest the directory refuses takes the report back out with it, so a
-reader finds both files or none, as in Suite B. The build identity is frozen
-after planning and before the first life runs.
+reader finds both files or none, as in Suite B. The manifest's clock and the
+envelope's start together after the publish directory is prepared, and the
+build identity is frozen after planning and before the first life runs.
 The manifest carries the aging shell's own root seed and the running binary's
 digest in its identity, says `prefix_then_generate` (the whole history is
 drawn by the seeded generator before the run, so the checkpoint step can be

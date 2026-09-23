@@ -413,6 +413,34 @@ fn a_copied_root_holding_a_file_the_checkpoint_does_not_list_is_refused_at_reope
 }
 
 #[test]
+fn a_reopened_copy_holds_one_live_source_hold_for_the_projection() {
+    let plan = plan(MESSAGES).unwrap();
+    let (checkpoint, copied, _kept) = plan_copy(&plan, 3);
+    let kernel = copied.root().join("kernel").join("kernel.sqlite");
+    let live_holds = |kernel: &std::path::Path| -> i64 {
+        Connection::open_with_flags(kernel, OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .unwrap()
+            .query_row(
+                "SELECT COUNT(*) FROM capture_pins WHERE pin_kind='source_hold' AND released_at IS NULL",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap()
+    };
+    // The prefix projection's hold rides along in the copy, bound to a lease
+    // epoch the copy has since advanced past; the rebuilt projection's hold
+    // is the only live one afterwards. (The copy is not read before the
+    // reopen: a read-only open would leave a sidecar the reopen refuses.)
+    let resumed = copied.reopen(&checkpoint, plan.steps[3].now_ms).unwrap();
+    assert_eq!(
+        live_holds(&kernel),
+        1,
+        "the stale hold is reconciled before the rebuilt projection captures its own"
+    );
+    drop(resumed);
+}
+
+#[test]
 fn a_copy_missing_a_store_file_is_refused_at_reopen() {
     let plan = plan(MESSAGES).unwrap();
     for file in [

@@ -294,8 +294,8 @@ fn receipt_quota_exhaustion_is_an_expected_refusal_scenario(campaign: &Campaign)
         .find(|r| r.refusal == ExpectedRefusal::R24ReceiptQuotaExhausted)
         .unwrap();
     assert_eq!(
-        r24.production_error,
-        "MemoryReviewerJobRefusal::MetadataQuota"
+        r24.production_error, "MetadataQuota",
+        "the record carries the variant as production prints it"
     );
     let episode = run
         .report

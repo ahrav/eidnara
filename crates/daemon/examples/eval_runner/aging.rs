@@ -105,6 +105,11 @@ pub fn profile(
     approval: Option<Approval>,
 ) -> RunProfile {
     let mut profile = suite_b(scale, event_bound(messages), elapsed_ms, approval);
+    assert!(
+        profile.name.contains("surface1-raw"),
+        "the Suite B profile name {:?} carries the segment Suite C renames",
+        profile.name
+    );
     profile.name = profile.name.replace("surface1-raw", "suite-c-aging");
     profile.tasks_per_world = 1;
     profile.envelope.temp_roots = 4;
@@ -836,6 +841,14 @@ fn reopen_stores(
     now: i64,
 ) -> Stores {
     let corpus = Corpus::open(&root);
+    // The closed projection's source hold is bound to a lease epoch this open
+    // has advanced past, in the copy and in place alike; it is released
+    // before the rebuilt projection captures its own, as the daemon's
+    // replacement cleanup does after a restart.
+    corpus
+        .kernel
+        .reconcile_source_holds(&corpus.binding().consumer_id, now)
+        .unwrap();
     let memory = MemoryStore::open(&daemon::store_descriptor_in(&root)).unwrap();
     let copied = SearchProjection::open(&root).unwrap();
     copied.verify_connection().unwrap();
@@ -1389,13 +1402,6 @@ fn resumed_life(
 }
 
 pub fn run(config: &Config) -> Result<Run, RunError> {
-    let started_at_ms = i64::try_from(
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_millis(),
-    )
-    .unwrap();
     let profile = profile(
         config.scale,
         config.messages,
@@ -1404,6 +1410,14 @@ pub fn run(config: &Config) -> Result<Run, RunError> {
     );
     profile.approved()?;
     prepare_publish(&config.publish, &[REPORT_FILE, MANIFEST_FILE]).map_err(publish_refused)?;
+    // The manifest's clock and the envelope's start together, as Suite B's do.
+    let started_at_ms = i64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis(),
+    )
+    .unwrap();
     let mut charges = Charges::new(profile.envelope.clone());
     let mut coverage = Coverage::default();
     // Planning runs under the clock: the elapsed bound covers the whole run.

@@ -919,9 +919,11 @@ pub fn quota_episode(
         )
         .err()
         .ok_or_else(|| unexpected(&id, "MetadataQuota", "Ok"))?;
+    // The record carries the variant as production prints it, which is what
+    // the report's evidence check reads.
     let refusal = match error {
-        MemoryReviewerJobError::Refused(MemoryReviewerJobRefusal::MetadataQuota) => {
-            "MemoryReviewerJobRefusal::MetadataQuota".to_string()
+        MemoryReviewerJobError::Refused(variant @ MemoryReviewerJobRefusal::MetadataQuota) => {
+            format!("{variant:?}")
         }
         other => return Err(unexpected(&id, "MetadataQuota", other)),
     };
