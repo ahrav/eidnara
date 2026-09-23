@@ -2057,6 +2057,70 @@ under `EIDNARA_EVAL_S0_BUDGET_MS` with the ignored scenarios, and the default
 shards run the never-restored campaign once with every scenario asserted over
 it. The S2 run is the same campaign under the S2 profile and budget.
 
+## Shrinking
+
+`crates/eval-core/src/shrink.rs` is the delta-debugging core. A `Scenario` is
+the semantic input a campaign failure replays: the aged and natural-fresh
+histories, the tasks over them, the evaluated surface and declared recency
+bound, and the fault episodes armed during the run. Its `Element`s are the
+self-contained things a candidate may delete: a fault episode by id, or an
+event by `History` (`aged` or `natural_fresh`) and id. The two histories are
+authored apart and their raw event ids overlap, so an event is named by its
+history; `Scenario::without` applies a deletion set to the named log only,
+with `EventLog::without`. `Scenario::compile` recompiles the pair set from the
+candidate's own logs, so the fresh arm and the pair mapping are recomputed
+for every candidate and never carried over; both worlds are shrunk together
+because the fresh arm is derived from whatever survives in both. A candidate
+the compiler refuses (evidence deleted, a control class lost, an arm
+disagreeing) is `CandidateVerdict::InvalidPair { refusal }` carrying the
+`PairError` variant name, and no replay is issued for it.
+
+The failure is pinned before the first candidate as a `FailurePredicate`:
+the oracle name, the `Cut` it was evaluated at, the run profile's digest, and
+the `WitnessClass` (a task failure with its `FailureClass`, a recovery
+disagreement, a liveness stall, or a sustainability breach). A replay reports
+a `ReplayOutcome`: `Failed { predicate }`, `Passed`, or `Unknown { reason }`
+where the reason is one of `replay_budget_exhausted`, `effect_unanswered`,
+`child_exited_before_barrier`, `read_back_failed`, `cancelled`.
+`classify_replay` compares field by field: an equal predicate is
+`Reproduced`; a different one is `Slipped { observed }` and is rejected even
+though a failure remains; `Passed` is `NotReproduced`; and `Unknown` is
+`Unknown` for every reason, never `NotReproduced`. The `ReplayRequest` a
+replay receives names the oracle, cut, and profile digest and withholds the
+expected witness class, so a replay cannot echo it.
+
+`shrink` first replays the original and refuses `OriginalNotReproduced` when
+it does not reproduce the pinned predicate. It then runs Zeller's ddmin once
+per transformation in the parent's order, `Transformation::ORDER` (fault
+episode removal, then event deletion), holding earlier deletions fixed. Only
+`Reproduced` shrinks; an `Unknown` candidate stays in the set. Every
+candidate is recorded with its scenario digest, its deletion set, and its
+verdict; a digest already answered is recorded again with its cached verdict
+and not replayed. After ddmin, every single deletion of the remaining
+elements is tried until a full pass rejects them all; a single deletion that
+still reproduces is accepted and the pass restarts. The report's
+`minimality` is `OneMinimal { transformations }` naming exactly the
+transformations that had elements to try, or `NotEstablished` with
+`replay_budget_exhausted` or `unknown_candidates { count }`. The report
+never claims global minimality. The budget `max_replays` counts issued
+replays; `InvalidPair` consumes none, and every pass stops at the budget
+rather than labelling the rest.
+
+Replays are effects a shell issues to fresh processes. `ReplayEffects` is
+the shell's ledger for them: it keys each by its receipt key (the candidate
+digest), bounds the outstanding set at `MAX_OUTSTANDING_REPLAY_EFFECTS` and
+refuses the effect issued at the bound, keeps the key across `retry`,
+resolves `cancel` to `Unknown { cancelled }`, and refuses `outcome` on an
+outstanding key, so no verdict is reached before the replay answered. The
+in-core driver issues one replay at a time through its callback and does not
+need the ledger.
+
+`Oracle::RequiredCommits` is the evaluator's own planted defect for
+exercising the shrinker end to end: over the compiled pair set and the aged
+truth reduced at the first task's cut it fails from `failing_at` required
+commits, reporting `durable_state` below `slipping_at` and `interference`
+from it, so deleting one commit too many slips the class.
+
 ## Coverage markers
 
 `MARKERS` is the evaluator-owned registry: constant, globally unique names,

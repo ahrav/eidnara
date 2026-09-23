@@ -1,5 +1,5 @@
 //! Delta debugging over paired worlds. A candidate removes self-contained
-//! scenario elements from both worlds; the pair compiler derives the fresh
+//! scenario elements from a named world; the pair compiler derives the fresh
 //! arm and mapping from each candidate's own logs.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -15,12 +15,12 @@ use crate::failure_class::FailureClass;
 use crate::fault::FaultEpisode;
 use crate::manifest::Cut;
 use crate::pairs::{PairError, PairSet, PairSetInput, Task, compile_pair_set};
-use crate::reducer::reduce;
+use crate::reducer::Truth;
 
 pub const SHRINK_REPORT_SCHEMA: &str = "eval-shrink/v1";
 pub const SCENARIO_DIGEST_PROTOCOL: &str = "eval-scenario/v1";
-/// Replay effects that may be unresolved at once. The effect issued at the
-/// bound is refused, never silently dropped.
+/// Replay effects a shell may leave unresolved at once. The effect issued at
+/// the bound is refused, never silently dropped.
 pub const MAX_OUTSTANDING_REPLAY_EFFECTS: usize = 4;
 
 /// What a failure is, pinned before the first candidate is tried. A candidate
@@ -95,9 +95,10 @@ pub enum CandidateVerdict {
     Unknown {
         reason: UnknownReason,
     },
-    /// The pair compiler refused the candidate; nothing was replayed.
+    /// The pair compiler refused the candidate with the named refusal;
+    /// nothing was replayed.
     InvalidPair {
-        reason: String,
+        refusal: String,
     },
 }
 
@@ -128,12 +129,21 @@ impl Transformation {
     pub const ORDER: [Self; 2] = [Self::FaultEpisodeRemoval, Self::EventDeletion];
 }
 
+/// The two authored histories. Their raw event ids overlap, so an event is
+/// named by its history as well as its id.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum History {
+    Aged,
+    NaturalFresh,
+}
+
 /// One self-contained thing a candidate may delete.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Element {
     Episode { id: String },
-    Event { id: EventId },
+    Event { history: History, id: EventId },
 }
 
 impl Element {
@@ -164,28 +174,34 @@ impl Scenario {
         let episodes = self.episodes.iter().map(|episode| Element::Episode {
             id: episode.id.clone(),
         });
-        let events = self
-            .aged
-            .events
-            .iter()
-            .chain(&self.natural_fresh.events)
-            .map(|event| Element::Event {
-                id: event.id.clone(),
-            });
-        episodes.chain(events).collect()
+        let events = |history, log: &EventLog| {
+            log.events
+                .iter()
+                .map(|event| Element::Event {
+                    history,
+                    id: event.id.clone(),
+                })
+                .collect::<Vec<_>>()
+        };
+        episodes
+            .chain(events(History::Aged, &self.aged))
+            .chain(events(History::NaturalFresh, &self.natural_fresh))
+            .collect()
     }
 
     pub fn without(&self, deleted: &BTreeSet<Element>) -> Self {
         let mut candidate = self.clone();
-        candidate.episodes.retain(|episode| {
-            !deleted.contains(&Element::Episode {
-                id: episode.id.clone(),
-            })
-        });
         for element in deleted {
-            if let Element::Event { id } = element {
-                candidate.aged = candidate.aged.without(id);
-                candidate.natural_fresh = candidate.natural_fresh.without(id);
+            match element {
+                Element::Episode { id } => candidate.episodes.retain(|episode| episode.id != *id),
+                Element::Event {
+                    history: History::Aged,
+                    id,
+                } => candidate.aged = candidate.aged.without(id),
+                Element::Event {
+                    history: History::NaturalFresh,
+                    id,
+                } => candidate.natural_fresh = candidate.natural_fresh.without(id),
             }
         }
         candidate
@@ -207,27 +223,12 @@ impl Scenario {
         let value = serde_json::to_value(self).expect("scenario serializes");
         protocol_digest(SCENARIO_DIGEST_PROTOCOL, &value).expect("scenario is canonical")
     }
-
-    /// How many aged events each payload kind contributes; a kind still
-    /// counted above one in a 1-minimal scenario is a count that triggers the
-    /// failure.
-    pub fn multiplicities(&self) -> BTreeMap<String, u64> {
-        let mut counts = BTreeMap::new();
-        for event in &self.aged.events {
-            let payload = serde_json::to_value(&event.payload).expect("payload serializes");
-            let kind = payload["kind"]
-                .as_str()
-                .expect("payload is tagged")
-                .to_string();
-            *counts.entry(kind).or_insert(0) += 1;
-        }
-        counts
-    }
 }
 
-/// An oracle a replay evaluates over the compiled pair set at the pinned cut.
-/// `RequiredCommits` is the evaluator's own planted defect: it fails from
-/// `failing_at` required commits and changes class from `slipping_at`.
+/// An oracle a replay evaluates over the compiled pair set and the aged truth
+/// at the pinned cut. `RequiredCommits` is the evaluator's own planted defect:
+/// it fails from `failing_at` required commits and changes class from
+/// `slipping_at`, which must not be below `failing_at`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Oracle {
@@ -235,29 +236,19 @@ pub enum Oracle {
 }
 
 impl Oracle {
-    pub fn name(&self) -> String {
+    pub fn name(&self) -> &'static str {
         match self {
-            Self::RequiredCommits { .. } => "planted:required-commits".to_string(),
+            Self::RequiredCommits { .. } => "planted:required-commits",
         }
     }
 
-    /// The truth is reduced from the aged log at the first task's cut, which
-    /// the compiler has already made every task's cut.
     pub fn evaluate(
         &self,
         set: &PairSet,
-        fixture: &Value,
+        truth: &Truth,
         checkpoint: Cut,
         profile_digest: &str,
     ) -> ReplayOutcome {
-        let Some(pair) = set.pairs.first() else {
-            return ReplayOutcome::Passed;
-        };
-        let Ok(truth) = reduce(&set.aged, fixture, &pair.task.query) else {
-            return ReplayOutcome::Unknown {
-                reason: UnknownReason::ReadBackFailed,
-            };
-        };
         let Self::RequiredCommits {
             failing_at,
             slipping_at,
@@ -280,7 +271,7 @@ impl Oracle {
         };
         ReplayOutcome::Failed {
             predicate: FailurePredicate {
-                oracle: self.name(),
+                oracle: self.name().to_string(),
                 checkpoint,
                 profile_digest: profile_digest.to_string(),
                 witness_class: WitnessClass::Failure { class },
@@ -289,9 +280,9 @@ impl Oracle {
     }
 }
 
-/// Replay effects issued and not yet resolved, keyed by a receipt key. A
-/// retry keeps its key; a cancellation resolves to `Unknown`; reading an
-/// outstanding effect is refused.
+/// Replay effects a shell has issued and not yet resolved, keyed by a receipt
+/// key. A retry keeps its key; a cancellation resolves to `Unknown`; reading
+/// an outstanding effect is refused.
 #[derive(Debug, Clone)]
 pub struct ReplayEffects {
     bound: usize,
@@ -328,11 +319,7 @@ impl ReplayEffects {
     }
 
     pub fn issue(&mut self, key: &str) -> Result<(), ReplayRefused> {
-        if self.resolved.contains_key(key) || self.outstanding.contains_key(key) {
-            return Err(ReplayRefused::AlreadyResolved {
-                key: key.to_string(),
-            });
-        }
+        self.absent(key)?;
         if self.outstanding.len() >= self.bound {
             return Err(ReplayRefused::OutstandingBound { bound: self.bound });
         }
@@ -342,8 +329,8 @@ impl ReplayEffects {
 
     /// Another attempt under the same key; returns the attempt count.
     pub fn retry(&mut self, key: &str) -> Result<u32, ReplayRefused> {
-        let refused = self.absent(key);
-        let attempts = self.outstanding.get_mut(key).ok_or(refused)?;
+        self.present(key)?;
+        let attempts = self.outstanding.get_mut(key).expect("checked present");
         *attempts += 1;
         Ok(*attempts)
     }
@@ -358,9 +345,8 @@ impl ReplayEffects {
     }
 
     pub fn resolve(&mut self, key: &str, outcome: ReplayOutcome) -> Result<(), ReplayRefused> {
-        self.outstanding
-            .remove(key)
-            .ok_or_else(|| self.absent(key))?;
+        self.present(key)?;
+        self.outstanding.remove(key);
         self.resolved.insert(key.to_string(), outcome);
         Ok(())
     }
@@ -378,27 +364,44 @@ impl ReplayEffects {
             })
     }
 
-    fn absent(&self, key: &str) -> ReplayRefused {
-        if self.resolved.contains_key(key) {
-            ReplayRefused::AlreadyResolved {
+    /// `Ok` when the key names an outstanding effect.
+    fn present(&self, key: &str) -> Result<(), ReplayRefused> {
+        if self.outstanding.contains_key(key) {
+            Ok(())
+        } else if self.resolved.contains_key(key) {
+            Err(ReplayRefused::AlreadyResolved {
                 key: key.to_string(),
-            }
+            })
         } else {
-            ReplayRefused::UnknownKey {
+            Err(ReplayRefused::UnknownKey {
                 key: key.to_string(),
-            }
+            })
+        }
+    }
+
+    /// `Ok` when the key names no effect at all.
+    fn absent(&self, key: &str) -> Result<(), ReplayRefused> {
+        match self.present(key) {
+            Ok(()) => Err(ReplayRefused::Outstanding {
+                key: key.to_string(),
+            }),
+            Err(ReplayRefused::UnknownKey { .. }) => Ok(()),
+            Err(refused) => Err(refused),
         }
     }
 }
 
-/// One candidate to replay.
+/// One candidate to replay: the oracle to run, where, and under which
+/// profile. The expected witness class is withheld so a replay cannot echo it.
 #[derive(Debug, Clone, Copy)]
 pub struct ReplayRequest<'a> {
     /// The receipt key: the candidate scenario's digest.
     pub key: &'a str,
     pub scenario: &'a Scenario,
     pub set: &'a PairSet,
-    pub predicate: &'a FailurePredicate,
+    pub oracle: &'a str,
+    pub checkpoint: Cut,
+    pub profile_digest: &'a str,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -423,7 +426,7 @@ pub enum Minimality {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+#[serde(tag = "reason", rename_all = "snake_case", deny_unknown_fields)]
 pub enum NotEstablishedReason {
     ReplayBudgetExhausted,
     /// A single deletion answered `Unknown`; the scenario may not be minimal.
@@ -440,8 +443,11 @@ pub struct ShrinkReport {
     pub original_digest: String,
     pub minimized_digest: String,
     pub deleted: BTreeSet<Element>,
+    /// Every attempt in order; a digest answered earlier is recorded again
+    /// with its cached verdict.
     pub candidates: Vec<CandidateRecord>,
     pub replays: u64,
+    /// Distinct candidates whose replay answered `Unknown`.
     pub unknown_candidates: u64,
     pub minimality: Minimality,
 }
@@ -449,10 +455,7 @@ pub struct ShrinkReport {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ShrinkRefused {
     /// The original scenario itself did not reproduce the pinned predicate.
-    OriginalNotReproduced {
-        verdict: CandidateVerdict,
-    },
-    Replay(ReplayRefused),
+    OriginalNotReproduced { verdict: CandidateVerdict },
 }
 
 debug_display!(ShrinkRefused);
@@ -462,7 +465,6 @@ struct Driver<'a> {
     predicate: &'a FailurePredicate,
     max_replays: u64,
     replay: &'a mut dyn FnMut(ReplayRequest<'_>) -> ReplayOutcome,
-    effects: ReplayEffects,
     verdicts: BTreeMap<String, CandidateVerdict>,
     candidates: Vec<CandidateRecord>,
     replays: u64,
@@ -470,16 +472,13 @@ struct Driver<'a> {
 
 impl Driver<'_> {
     /// Tries the candidate; a digest already answered is not replayed twice.
-    fn test(
-        &mut self,
-        candidate: &Scenario,
-        deleted: &BTreeSet<Element>,
-    ) -> Result<CandidateVerdict, ShrinkRefused> {
+    /// Callers check `exhausted` first, so the budget is never overrun.
+    fn test(&mut self, candidate: &Scenario, deleted: &BTreeSet<Element>) -> CandidateVerdict {
         let digest = candidate.digest();
         let verdict = match self.verdicts.get(&digest) {
             Some(verdict) => verdict.clone(),
             None => {
-                let verdict = self.replay(candidate, &digest)?;
+                let verdict = self.replay_candidate(candidate, &digest);
                 self.verdicts.insert(digest.clone(), verdict.clone());
                 verdict
             }
@@ -489,41 +488,43 @@ impl Driver<'_> {
             deleted: deleted.clone(),
             verdict: verdict.clone(),
         });
-        Ok(verdict)
+        verdict
     }
 
-    fn replay(
-        &mut self,
-        candidate: &Scenario,
-        key: &str,
-    ) -> Result<CandidateVerdict, ShrinkRefused> {
+    fn replay_candidate(&mut self, candidate: &Scenario, key: &str) -> CandidateVerdict {
         let set = match candidate.compile(self.fixture) {
             Ok(set) => set,
             Err(error) => {
-                return Ok(CandidateVerdict::InvalidPair {
-                    reason: format!("{error:?}"),
-                });
+                return CandidateVerdict::InvalidPair {
+                    refusal: refusal_name(&error),
+                };
             }
         };
-        if self.replays >= self.max_replays {
-            return Ok(CandidateVerdict::Unknown {
-                reason: UnknownReason::ReplayBudgetExhausted,
-            });
-        }
         self.replays += 1;
-        self.effects.issue(key).map_err(ShrinkRefused::Replay)?;
         let outcome = (self.replay)(ReplayRequest {
             key,
             scenario: candidate,
             set: &set,
-            predicate: self.predicate,
+            oracle: &self.predicate.oracle,
+            checkpoint: self.predicate.checkpoint,
+            profile_digest: &self.predicate.profile_digest,
         });
-        self.effects
-            .resolve(key, outcome)
-            .map_err(ShrinkRefused::Replay)?;
-        let outcome = self.effects.outcome(key).map_err(ShrinkRefused::Replay)?;
-        Ok(classify_replay(self.predicate, outcome))
+        classify_replay(self.predicate, &outcome)
     }
+
+    fn exhausted(&self) -> bool {
+        self.replays >= self.max_replays
+    }
+}
+
+/// The compiler's refusal by variant name: the closed vocabulary the wire
+/// carries, without the refusal's payload.
+fn refusal_name(error: &PairError) -> String {
+    let text = format!("{error:?}");
+    text.split(['{', '(', ' '])
+        .next()
+        .unwrap_or_default()
+        .to_string()
 }
 
 /// Shrinks `original` until no single deletion under any tried transformation
@@ -541,13 +542,11 @@ pub fn shrink(
         predicate,
         max_replays,
         replay,
-        effects: ReplayEffects::new(MAX_OUTSTANDING_REPLAY_EFFECTS),
         verdicts: BTreeMap::new(),
         candidates: Vec::new(),
         replays: 0,
     };
-    let none = BTreeSet::new();
-    let verdict = driver.test(original, &none)?;
+    let verdict = driver.test(original, &BTreeSet::new());
     if verdict != CandidateVerdict::Reproduced {
         return Err(ShrinkRefused::OriginalNotReproduced { verdict });
     }
@@ -560,18 +559,18 @@ pub fn shrink(
             .into_iter()
             .filter(|element| element.transformation() == transformation)
             .collect();
-        if kept.is_empty() {
+        if kept.is_empty() || driver.exhausted() {
             continue;
         }
         tried.push(transformation);
-        deleted = ddmin(&mut driver, original, deleted, kept)?;
+        deleted = ddmin(&mut driver, original, deleted, kept);
     }
-    let minimality = one_minimality(&mut driver, original, &mut deleted, &tried)?;
+    let minimality = one_minimality(&mut driver, original, &mut deleted, &tried);
     let minimized = original.without(&deleted);
     let unknown_candidates = driver
-        .candidates
-        .iter()
-        .filter(|record| matches!(record.verdict, CandidateVerdict::Unknown { .. }))
+        .verdicts
+        .values()
+        .filter(|verdict| matches!(verdict, CandidateVerdict::Unknown { .. }))
         .count() as u64;
     let report = ShrinkReport {
         schema: SHRINK_REPORT_SCHEMA.to_string(),
@@ -588,16 +587,17 @@ pub fn shrink(
 }
 
 /// Zeller's ddmin over `kept`, holding `deleted` from earlier transformations
-/// fixed. Only `Reproduced` shrinks; `Unknown` stays in the set.
+/// fixed. Only `Reproduced` shrinks; `Unknown` stays in the set; an exhausted
+/// budget stops the pass.
 fn ddmin(
     driver: &mut Driver<'_>,
     original: &Scenario,
     deleted: BTreeSet<Element>,
     mut kept: Vec<Element>,
-) -> Result<BTreeSet<Element>, ShrinkRefused> {
+) -> BTreeSet<Element> {
     let all: BTreeSet<Element> = kept.iter().cloned().collect();
     let mut n = 2;
-    while !kept.is_empty() {
+    while !kept.is_empty() && !driver.exhausted() {
         let chunk = kept.len().div_ceil(n);
         let subsets: Vec<Vec<Element>> = kept.chunks(chunk).map(<[Element]>::to_vec).collect();
         let mut reduced = None;
@@ -609,7 +609,7 @@ fn ddmin(
                 .flat_map(|(_, s)| s.iter().cloned())
                 .collect();
             for (candidate, next_n) in [(subset.clone(), 2), (complement, n.max(3) - 1)] {
-                if candidate.len() == kept.len() {
+                if candidate.len() == kept.len() || driver.exhausted() {
                     continue;
                 }
                 let drop: BTreeSet<Element> = deleted
@@ -617,8 +617,7 @@ fn ddmin(
                     .cloned()
                     .chain(all.iter().filter(|e| !candidate.contains(e)).cloned())
                     .collect();
-                let verdict = driver.test(&original.without(&drop), &drop)?;
-                if verdict == CandidateVerdict::Reproduced {
+                if driver.test(&original.without(&drop), &drop) == CandidateVerdict::Reproduced {
                     reduced = Some((candidate, next_n));
                     break 'subsets;
                 }
@@ -633,40 +632,37 @@ fn ddmin(
             None => n = (2 * n).min(kept.len()),
         }
     }
-    Ok(deleted
+    deleted
         .into_iter()
         .chain(all.into_iter().filter(|e| !kept.contains(e)))
-        .collect())
+        .collect()
 }
 
 /// Tries every single deletion against the minimized scenario until a full
 /// pass rejects them all. A rejection under every tried transformation is
-/// 1-minimality; an `Unknown` is not.
+/// 1-minimality; an `Unknown` or an exhausted budget is not.
 fn one_minimality(
     driver: &mut Driver<'_>,
     original: &Scenario,
     deleted: &mut BTreeSet<Element>,
     tried: &[Transformation],
-) -> Result<Minimality, ShrinkRefused> {
+) -> Minimality {
     loop {
         let mut unknown = 0;
         let mut reduced = false;
         for element in original.without(deleted).elements() {
+            if driver.exhausted() {
+                return Minimality::NotEstablished {
+                    reason: NotEstablishedReason::ReplayBudgetExhausted,
+                };
+            }
             let mut drop = deleted.clone();
-            drop.insert(element.clone());
-            let verdict = driver.test(&original.without(&drop), &drop)?;
-            match verdict {
+            drop.insert(element);
+            match driver.test(&original.without(&drop), &drop) {
                 CandidateVerdict::Reproduced => {
                     *deleted = drop;
                     reduced = true;
                     break;
-                }
-                CandidateVerdict::Unknown {
-                    reason: UnknownReason::ReplayBudgetExhausted,
-                } => {
-                    return Ok(Minimality::NotEstablished {
-                        reason: NotEstablishedReason::ReplayBudgetExhausted,
-                    });
                 }
                 CandidateVerdict::Unknown { .. } => unknown += 1,
                 _ => {}
@@ -675,7 +671,7 @@ fn one_minimality(
         if reduced {
             continue;
         }
-        return Ok(if unknown == 0 {
+        return if unknown == 0 {
             Minimality::OneMinimal {
                 transformations: tried.to_vec(),
             }
@@ -683,6 +679,6 @@ fn one_minimality(
             Minimality::NotEstablished {
                 reason: NotEstablishedReason::UnknownCandidates { count: unknown },
             }
-        });
+        };
     }
 }
