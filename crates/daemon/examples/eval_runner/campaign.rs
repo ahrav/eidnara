@@ -9,7 +9,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use daemon::transform::UserHintPass;
 use eval_core::{
@@ -816,6 +816,12 @@ impl Charges {
     pub fn elapsed(&mut self) -> Result<(), EnvelopeExceeded> {
         let elapsed = u64::try_from(self.started.elapsed().as_millis()).unwrap();
         self.observe(Resource::ElapsedMs, elapsed)
+    }
+
+    /// When the elapsed bound falls, measured from the clock `elapsed`
+    /// charges against, so no wait outlives the envelope.
+    pub fn deadline(&self) -> Instant {
+        self.started + Duration::from_millis(self.envelope.bounds.elapsed_ms)
     }
 
     /// Charges the publish directory as one more root and one retained

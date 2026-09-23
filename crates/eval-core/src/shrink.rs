@@ -183,7 +183,7 @@ pub enum Element {
 }
 
 impl Element {
-    fn transformation(&self) -> Transformation {
+    pub(crate) fn transformation(&self) -> Transformation {
         match self {
             Self::Episode { .. } => Transformation::FaultEpisodeRemoval,
             Self::Event { .. } => Transformation::EventDeletion,

@@ -522,18 +522,20 @@ impl Cassette {
     }
 }
 
-/// One full-text scan, so no match can straddle a window edge; the scanner's
-/// input cap is therefore the largest exchange a cassette admits.
 fn admit(redactor: &Redactor, location: Location, value: &Value) -> Result<(), CassetteError> {
     let text = canonical_json_encode(value)?;
-    let refused = |kind| CassetteError::RedactionRefused(location, kind);
-    let redaction = redactor
-        .redact(&text)
-        .map_err(|error| refused(error.kind()))?;
+    scan_for_secrets(redactor, &text)
+        .map_err(|kind| CassetteError::RedactionRefused(location, kind))
+}
+
+/// One full-text scan over a canonical encoding. A detection refuses the
+/// value; nothing is substituted.
+pub(crate) fn scan_for_secrets(redactor: &Redactor, text: &str) -> Result<(), RedactionErrorKind> {
+    let redaction = redactor.redact(text).map_err(|error| error.kind())?;
     if redaction.detections.is_empty() {
         Ok(())
     } else {
-        Err(refused(RedactionErrorKind::SecretDetected))
+        Err(RedactionErrorKind::SecretDetected)
     }
 }
 

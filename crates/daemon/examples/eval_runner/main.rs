@@ -25,6 +25,10 @@ mod fault;
 #[cfg(unix)]
 #[allow(dead_code)]
 mod growth;
+/// The shrink shell is shared with the daemon's shrink test the same way.
+#[cfg(unix)]
+#[allow(dead_code)]
+mod shrink;
 /// The fixture and surface helpers are shared with the evaluator tests, which
 /// use more of them than the campaign does.
 #[cfg(unix)]
@@ -475,6 +479,41 @@ fn run_growth(args: impl Iterator<Item = String>) -> io::Result<()> {
     Ok(())
 }
 
+/// The shrink campaign's replays re-execute this binary as `shrink-child`.
+#[cfg(unix)]
+fn spawn_shrink_child(_: &shrink::ChildArgs) -> std::process::Command {
+    let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+    command.arg("shrink-child");
+    command
+}
+
+/// Replays the scenario named in the environment and prints the barrier line.
+#[cfg(unix)]
+fn run_shrink_child() -> io::Result<()> {
+    let args = shrink::ChildArgs::from_env()
+        .ok_or_else(|| io::Error::other("shrink-child needs its environment"))?;
+    shrink::child_main(&args)
+}
+
+/// Shrinks the planted failure and prints one JSON line naming what was published.
+#[cfg(unix)]
+fn run_shrink(args: impl Iterator<Item = String>) -> io::Result<()> {
+    let config = shrink::config_from_args(args).map_err(io::Error::other)?;
+    let run = shrink::run(&config, spawn_shrink_child).map_err(io::Error::other)?;
+    let digest = |bytes: &[u8]| format!("{:x}", sha2::Sha256::digest(bytes));
+    let summary = json!({
+        "witness": config.publish.join(shrink::WITNESS_FILE),
+        "witness_file_sha256": digest(&run.witness_bytes),
+        "manifest": config.publish.join(shrink::MANIFEST_FILE),
+        "manifest_digest": digest(&run.manifest_bytes),
+        "eval_run_id": run.manifest.eval_run_id,
+        "minimality": run.witness.shrink.minimality,
+        "markers": run.coverage.fired(),
+    });
+    println!("{summary}");
+    Ok(())
+}
+
 fn main() {
     let mut args = std::env::args().skip(1);
     let outcome = match args.next().as_deref() {
@@ -489,6 +528,10 @@ fn main() {
         Some("fault-child") => run_fault_child(),
         #[cfg(unix)]
         Some("growth") => run_growth(args),
+        #[cfg(unix)]
+        Some("shrink") => run_shrink(args),
+        #[cfg(unix)]
+        Some("shrink-child") => run_shrink_child(),
         other => Err(io::Error::other(format!(
             "{USAGE}{} (got {other:?})",
             campaign_usage()
@@ -503,17 +546,18 @@ fn main() {
 #[cfg(unix)]
 fn campaign_usage() -> String {
     format!(
-        "{} | eval_runner {} | eval_runner {} | eval_runner {}",
+        "{} | eval_runner {} | eval_runner {} | eval_runner {} | eval_runner {}",
         campaign::USAGE,
         aging::USAGE,
         fault::USAGE,
-        growth::USAGE
+        growth::USAGE,
+        shrink::USAGE
     )
 }
 
 #[cfg(not(unix))]
 fn campaign_usage() -> String {
-    "campaign | aging | fault | growth (unix only)".to_string()
+    "campaign | aging | fault | growth | shrink (unix only)".to_string()
 }
 
 #[cfg(test)]

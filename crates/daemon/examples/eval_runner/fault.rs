@@ -281,7 +281,7 @@ const EVENT_CUTS: [&str; 17] = [
     "ingestion_latched",
 ];
 
-fn episode(
+pub fn episode(
     id: &str,
     step: u32,
     store: StoreFamily,
@@ -1782,7 +1782,8 @@ pub fn child_main(args: &ChildArgs) -> ! {
     panic!("the child was not killed at its barrier: {report:?}");
 }
 
-struct ChildGuard(Child);
+/// Kills and reaps a still-running child when dropped.
+pub struct ChildGuard(pub Child);
 
 impl Drop for ChildGuard {
     fn drop(&mut self) {
