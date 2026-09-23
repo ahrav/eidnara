@@ -2310,13 +2310,16 @@ canaries and the hidden-test adequacy run are recorded as the self-tests, and
 Containment is `unshare --user --map-root-user --mount --pid --net --fork
 --kill-child`. The script run inside before the agent covers the runner's
 private directory with an empty read-only tmpfs, binds the workspace
-writable, re-binds `/tmp`, `/var/tmp`, `/dev/shm`, and `$HOME` read-only,
-then enters the workspace by its absolute path (a working directory inherited
-from before the mounts still resolves to the writable mount underneath every
-read-only rebind) and drops the mapped root's capabilities with `setpriv`
-(bounding, inheritable, and ambient sets cleared, `no_new_privs` set), so the
-agent can neither unmount the tmpfs nor remount a bind writable. Any mount
-that fails exits 97 and the run is refused. `--kill-child` kills the
+writable, then remounts every other mount in the namespace read-only (one
+that refuses, such as a locked autofs, is covered by an empty read-only tmpfs
+instead) and refuses the run if any mount's topmost instance is still
+writable, so the read-only set is everything the host has rather than a list
+of directories; it then enters the workspace by its absolute path (a working
+directory inherited from before the mounts still resolves to the writable
+mount underneath every read-only remount) and drops the mapped root's
+capabilities with `setpriv` (bounding, inheritable, and ambient sets cleared,
+`no_new_privs` set), so the agent can neither unmount the tmpfs nor remount
+anything writable. Any mount that fails exits 97 and the run is refused. `--kill-child` kills the
 namespace init and with it everything the agent started. `Host::namespaces`
 says whether the host can create the four namespaces; when it cannot, the
 run records `Containment::Skipped { no_containment }`, every task terminal is
@@ -2354,9 +2357,12 @@ has finished.
 
 For each task the runner first measures adequacy: it grades the repository
 unfixed, under the correct fix, and under every wrong fix, and runs
-`cargo test --offline --test hidden_<name>` for each under its own authority
-and, where the host has namespaces, inside the same containment the agent
-gets, with the private directory the only writable tree (exit 0 with the
+`cargo test --offline --locked --test hidden_<name>` for each under its own
+authority and, where the host has namespaces, inside the same containment the
+agent gets, with the build cache the only writable tree and the grade tree
+itself read-only, so a `build.rs` or test the candidate wrote can neither
+reach the host nor rewrite a hidden test before it compiles; the runner
+writes the dependency-free lockfile beforehand (exit 0 with the
 harness summary `test result: ok. 1 passed` is `passed`;
 exit 101 with `test result: FAILED` is `failed`; anything else `errored`);
 `check_adequacy` refuses the campaign otherwise. Grading always happens in a
@@ -2364,11 +2370,14 @@ tree the runner builds from the corpus (`grade/` under the private directory
 the containment masks, beside the `target/` build cache, so no agent sees
 the hidden tests of any task): the
 task's files, the candidate's regular files except `Cargo.toml`, `.cargo/`,
-and the hidden-test paths, and the hidden tests from the corpus. Nothing in
-the agent's workspace is executed or written through, so a `Cargo.toml` the
-agent replaced with a symlink, two hidden-test paths it hard-linked together,
-or a `.cargo/` it made undeletable cannot reach the oracle; the agent's
-versions of those paths are recorded in `oracle_tamper` and never honoured.
+the hidden-test paths, and any path that collides with a task file (a
+manifest turned into a directory, say), and the hidden tests from the corpus.
+Nothing in the agent's workspace is executed or written through, so a
+`Cargo.toml` the agent replaced with a symlink or a directory, two
+hidden-test paths it hard-linked together, or a `.cargo/` it made undeletable
+cannot reach the oracle; the agent's versions of those paths are recorded in
+`oracle_tamper` and never honoured. The manifest's `component_versions.judge`
+names this judge, `eval-suite-d-hidden-tests/v1`.
 The agent script prints a start line first; stdout without it means the
 containment's own `unshare` or `exec` failed, and the run refuses instead of
 grading an untouched workspace as the agent's failure. The workspace itself
