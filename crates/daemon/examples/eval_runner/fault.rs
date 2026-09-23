@@ -6,7 +6,8 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use daemon::embedding_publication::{
-    EmbeddingPublisher, Publication, PublicationError, PublicationFault, VectorPublication,
+    EmbeddingPublisher, Publication, PublicationError, PublicationEvent, PublicationFault,
+    VectorPublication,
 };
 use daemon::search_catchup::{Blocked, EpisodeEnd, EpisodeEvent, EpisodeFault, EpisodeReport};
 use eval_core::{
@@ -18,30 +19,34 @@ use eval_core::{
     TEST_BINARY_CHILD, WorkCounter, cut_receipts, eval_run_id,
 };
 use kernel::{
-    ArtifactDeletionFault, ArtifactDeletionIdentity, ArtifactDeletionKind, ArtifactDeletionRequest,
-    ArtifactDestination, ArtifactError, ArtifactIngestFault, ArtifactIngestRequest,
-    CurrentInputDescriptor, DomainSpec, EligibilityBinding, ProjectScope, ProviderEgress,
-    Sensitivity,
+    AdmissionEvent, AdmissionRequest, ArtifactDeletionFault, ArtifactDeletionIdentity,
+    ArtifactDeletionKind, ArtifactDeletionRequest, ArtifactDestination, ArtifactError,
+    ArtifactIngestFault, ArtifactIngestRequest, CurrentInputDescriptor, DecisionPayload,
+    DecisionSpec, DomainSpec, EligibilityBinding, EventKind, ProjectScope, ProviderEgress,
+    Sensitivity, SourceClass, TaintClass,
 };
 use memory_store::MemoryStore;
 use memory_store::memory_reviewer_jobs::{
     CausalInputs, EvidenceAvailability, MAX_MEMORY_REVIEWER_METADATA_BYTES_PER_PROJECT,
     MEMORY_REVIEWER_JOB_ALLOWANCE_BYTES, MEMORY_REVIEWER_RECEIPT_CHARGE_BYTES,
-    MemoryReviewerJobError, MemoryReviewerJobRefusal, ProducerBinding, ReviewTarget,
+    MemoryReviewerJobError, MemoryReviewerJobOutcome, MemoryReviewerJobRefusal, ProducerBinding,
+    ReviewTarget,
 };
 use rusqlite::{Connection, OpenFlags};
 use serde_json::json;
 
 use super::aging::{
-    self, ManifestInputs, Plan, Stores, kernel_file, live, read_only, search_file, suite_c_manifest,
+    self, ManifestInputs, Plan, Planned, Stores, kernel_file, live, read_only, search_file,
+    suite_c_manifest,
 };
 use super::campaign::{Charges, identity, prepare_publish, publish_file};
-use super::support::embedding_fixtures::{PROJECT, TestEngine, generation, intent};
+use super::support::embedding_fixtures::{
+    CONSUMER, PROJECT, SCOPE, TestEngine, generation, intent,
+};
 
 pub const REPORT_FILE: &str = "suite-c-fault-report.json";
 pub const MANIFEST_FILE: &str = "manifest.json";
 pub const SIMULATOR_VERSION: &str = "eval-fault-shell/v1";
-const CONSUMER: &str = "search";
 const FAULT_DOMAIN: &str = "eval-fault-domain";
 
 pub type Config = aging::Config;
@@ -54,6 +59,10 @@ pub enum RunError {
     Envelope(#[from] EnvelopeExceeded),
     #[error("plan refused: {0}")]
     Plan(#[from] aging::RunError),
+    #[error(
+        "history leaves {after_checkpoint} steps after the checkpoint; the fault phase drives {FAULT_PHASE_STEPS}"
+    )]
+    HistoryTooShort { after_checkpoint: usize },
     #[error("report refused: {0}")]
     Report(#[from] FaultReportError),
     #[error("episode {episode}: expected {expected}, observed {observed}")]
@@ -61,6 +70,14 @@ pub enum RunError {
         episode: String,
         expected: String,
         observed: String,
+    },
+    #[error(
+        "read-back of {identity}: checkpoint {checkpoint} is past the faulted episode's {left_at}"
+    )]
+    ReadBackMasked {
+        identity: String,
+        left_at: i64,
+        checkpoint: i64,
     },
     #[error("publish {}: {kind}", path.display())]
     Publish {
@@ -73,13 +90,30 @@ fn publish_refused((path, kind): (PathBuf, std::io::ErrorKind)) -> RunError {
     RunError::Publish { path, kind }
 }
 
+/// The steps the fault phase drives after the checkpoint: a lock-holder
+/// episode, two healthy steps, two reply-loss episodes, then at least one
+/// step each to open a job for the held publication and the two publication
+/// faults, and one step left to live after recovery.
+const FAULT_PHASE_STEPS: usize = 9;
+
+/// The aging plan, refused before any store opens when its checkpoint leaves
+/// fewer steps than the fault phase drives.
+pub fn plan(messages: u32) -> Result<Plan, RunError> {
+    let plan = aging::plan(messages)?;
+    let after_checkpoint = plan.steps.len() - plan.checkpoint_step as usize;
+    if after_checkpoint < FAULT_PHASE_STEPS {
+        return Err(RunError::HistoryTooShort { after_checkpoint });
+    }
+    Ok(plan)
+}
+
 pub fn profile(
     scale: Scale,
-    steps: u32,
+    messages: u32,
     elapsed_ms: u64,
     approval: Option<Approval>,
 ) -> RunProfile {
-    let mut profile = aging::profile(scale, steps, elapsed_ms, approval);
+    let mut profile = aging::profile(scale, messages, elapsed_ms, approval);
     profile.name = profile.name.replace("suite-c-aging", "suite-c-fault");
     profile.envelope.temp_roots = 6;
     profile
@@ -113,6 +147,7 @@ pub struct Witness {
     pub checkpoints: BTreeMap<Cut, u64>,
     pub safety_checks: u64,
     pub coverage: Coverage,
+    pub left_at: BTreeMap<String, i64>,
 }
 
 impl Witness {
@@ -130,6 +165,7 @@ impl Witness {
             checkpoints: BTreeMap::new(),
             safety_checks: 0,
             coverage: Coverage::default(),
+            left_at: BTreeMap::new(),
         }
     }
 
@@ -182,9 +218,10 @@ impl Witness {
     }
 }
 
-const EVENT_CUTS: [&str; 13] = [
+const EVENT_CUTS: [&str; 17] = [
     "publication_held",
     "publication_released",
+    "claims_materialized",
     "local_staged",
     "local_released",
     "acknowledgement_requested",
@@ -195,7 +232,10 @@ const EVENT_CUTS: [&str; 13] = [
     "deletion_unpropagated",
     "quota_refused",
     "publication_reconciled",
+    "reconciling",
+    "reconciliation_read",
     "artifact_fault_named",
+    "ingestion_latched",
 ];
 
 fn episode(
@@ -236,8 +276,34 @@ fn cut_of(event: &EpisodeEvent) -> &'static str {
     }
 }
 
-/// A catch-up episode under `fault`; the effect whose reply the fault loses is
-/// attempted when the drive requests it and left `Unknown` when the episode ends.
+struct Seam {
+    production: EpisodeFault,
+    operation: &'static str,
+    contract: &'static str,
+    fixed: EffectState,
+}
+
+fn seam(fault: SearchEpisodeFault) -> Seam {
+    match fault {
+        SearchEpisodeFault::LoseLocalCommitReply => Seam {
+            production: EpisodeFault::LoseLocalCommitReply,
+            operation: "local_commit",
+            contract: "search_catchup::EpisodeFault::LoseLocalCommitReply: the batch commits, then its reply arrives as a store failure whose effect is unknown",
+            fixed: EffectState::Applied,
+        },
+        SearchEpisodeFault::LoseAcknowledgementReply => Seam {
+            production: EpisodeFault::LoseAcknowledgementReply,
+            operation: "acknowledge",
+            contract: "search_catchup::EpisodeFault::LoseAcknowledgementReply: the acknowledgement commits, then its reply arrives as a kernel I/O failure",
+            fixed: EffectState::Applied,
+        },
+        SearchEpisodeFault::LoseAcknowledgementReplyAndCancel
+        | SearchEpisodeFault::AcknowledgeInsideLocalTransaction => {
+            unreachable!("the campaign declares only reply-loss episodes")
+        }
+    }
+}
+
 pub fn lost_reply_episode(
     stores: &mut Stores,
     witness: &mut Witness,
@@ -245,23 +311,29 @@ pub fn lost_reply_episode(
     step: u32,
     now: i64,
     fault: SearchEpisodeFault,
-) -> Result<EpisodeReport, RunError> {
-    let (production, operation, contract) = match fault {
-        SearchEpisodeFault::LoseLocalCommitReply => (
-            EpisodeFault::LoseLocalCommitReply,
-            "local_commit",
-            "search_catchup::EpisodeFault::LoseLocalCommitReply: the batch commits, then its reply arrives as a store failure whose effect is unknown",
-        ),
-        SearchEpisodeFault::LoseAcknowledgementReply => (
-            EpisodeFault::LoseAcknowledgementReply,
-            "acknowledge",
-            "search_catchup::EpisodeFault::LoseAcknowledgementReply: the acknowledgement commits, then its reply arrives as a kernel I/O failure",
-        ),
-        SearchEpisodeFault::LoseAcknowledgementReplyAndCancel
-        | SearchEpisodeFault::AcknowledgeInsideLocalTransaction => {
-            unreachable!("the campaign declares only reply-loss episodes")
-        }
-    };
+) -> Result<BTreeMap<String, EffectState>, RunError> {
+    declare_lost_reply_episode(witness, id, step, fault);
+    stores.publish_outbox();
+    let mut events = Vec::new();
+    let report = stores.episode(now, Some(seam(fault).production), &mut |event| {
+        events.push(event)
+    });
+    let fixed = receipt_lost_reply_episode(witness, id, fault, &report, &events)?;
+    witness.safety_check(stores);
+    Ok(fixed)
+}
+
+pub fn declare_lost_reply_episode(
+    witness: &mut Witness,
+    id: &str,
+    step: u32,
+    fault: SearchEpisodeFault,
+) {
+    let Seam {
+        operation,
+        contract,
+        ..
+    } = seam(fault);
     witness.declare(episode(
         id,
         step,
@@ -270,37 +342,55 @@ pub fn lost_reply_episode(
         FaultAction::SearchEpisode { fault },
         contract,
     ));
-    stores.publish_outbox();
-    let mut events = Vec::new();
-    let report = stores.episode(now, Some(production), &mut |event| events.push(event));
-    let mut lost = None;
-    for event in &events {
+}
+
+pub fn receipt_lost_reply_episode(
+    witness: &mut Witness,
+    id: &str,
+    fault: SearchEpisodeFault,
+    report: &EpisodeReport,
+    events: &[EpisodeEvent],
+) -> Result<BTreeMap<String, EffectState>, RunError> {
+    if report.end != EpisodeEnd::ReachedTarget {
+        return Err(unexpected(
+            id,
+            "ReachedTarget after reconciling the lost reply",
+            &report.end,
+        ));
+    }
+    let mut lost = Vec::new();
+    for event in events {
         if EVENT_CUTS.contains(&cut_of(event)) {
             witness.receipt(cut_of(event));
         }
         match (fault, event) {
             (SearchEpisodeFault::LoseLocalCommitReply, EpisodeEvent::LocalStaged { through }) => {
-                let identity = format!("search_commit:{through}@{id}");
-                witness.effects.attempt(&identity);
-                lost = Some(identity);
+                lost.push(format!("search_commit:{through}@{id}"));
             }
             (
                 SearchEpisodeFault::LoseAcknowledgementReply,
                 EpisodeEvent::AcknowledgementRequested { through },
             ) => {
-                let identity = format!("search_ack:{through}@{id}");
-                witness.effects.attempt(&identity);
-                lost = Some(identity);
+                lost.push(format!("search_ack:{through}@{id}"));
             }
             _ => {}
         }
     }
-    let identity =
-        lost.ok_or_else(|| unexpected(id, "the faulted effect was requested", &events))?;
-    witness.effects.lose_reply(&identity).unwrap();
+    if lost.is_empty() {
+        return Err(unexpected(id, "the faulted effect was requested", events));
+    }
+    let state = seam(fault).fixed;
+    let mut fixed = BTreeMap::new();
+    for identity in lost {
+        witness.effects.attempt(&identity);
+        witness.effects.lose_reply(&identity).unwrap();
+        witness
+            .left_at
+            .insert(identity.clone(), report.acknowledged_through);
+        fixed.insert(identity, state);
+    }
     witness.receipt(id);
-    witness.safety_check(stores);
-    Ok(report)
+    Ok(fixed)
 }
 
 /// An external `BEGIN IMMEDIATE` holder on the projection blocks the local
@@ -392,6 +482,26 @@ fn artifact_error_text(error: &ArtifactError) -> String {
     format!("{:?}: {error}", error.kind())
 }
 
+/// A plain ingest after a CAS EIO must be refused `IngestionFailClosed`: the
+/// runner observes the latch before the reopen that heals it.
+fn observe_latched(stores: &Stores, witness: &mut Witness, id: &str) -> Result<(), RunError> {
+    let latched = stores
+        .corpus
+        .kernel
+        .ingest_artifact(ingest_request(&format!("{id}-latched"), id.as_bytes()))
+        .err()
+        .ok_or_else(|| unexpected(id, "ingestion latched closed", "Ok"))?;
+    if latched.kind() != kernel::ArtifactErrorKind::IngestionFailClosed {
+        return Err(unexpected(
+            id,
+            "IngestionFailClosed while latched",
+            artifact_error_text(&latched),
+        ));
+    }
+    witness.receipt("ingestion_latched");
+    Ok(())
+}
+
 /// Closes and reopens the stores: the heal every latched CAS fault permits.
 fn reopen(stores: Stores, now: i64) -> Stores {
     stores.close().reopen(now)
@@ -444,10 +554,12 @@ pub fn artifact_ingest_episodes(
             &format!("kernel::ArtifactIngestFault: {contract}; the ingest fails closed, publishes no reference, and latches CAS ingestion closed until the store reopens"),
         ));
         let payload = format!("fault payload {id} {now}");
+        let request = ingest_request(&id, payload.as_bytes());
+        let evidence_id = request.evidence_id.clone();
         let error = stores
             .corpus
             .kernel
-            .ingest_artifact_with_fault_for_test(ingest_request(&id, payload.as_bytes()), fault)
+            .ingest_artifact_with_fault_for_test(request, fault)
             .err()
             .ok_or_else(|| unexpected(&id, "an ingest refusal", "Ok"))?;
         let named = artifact_error_text(&error);
@@ -462,19 +574,21 @@ pub fn artifact_ingest_episodes(
                 named,
             ));
         }
-        let latched = stores
-            .corpus
-            .kernel
-            .ingest_artifact(ingest_request(&format!("{id}-latched"), payload.as_bytes()))
-            .err()
-            .ok_or_else(|| unexpected(&id, "ingestion latched closed", "Ok"))?;
-        if latched.kind() != kernel::ArtifactErrorKind::IngestionFailClosed {
+        let references: i64 = read_only(&kernel_file(stores.root()))
+            .query_row(
+                "SELECT COUNT(*) FROM evidence_meta WHERE evidence_id=?1",
+                [&evidence_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        if references != 0 {
             return Err(unexpected(
                 &id,
-                "IngestionFailClosed while latched",
-                artifact_error_text(&latched),
+                "no reference published by the faulted ingest",
+                references,
             ));
         }
+        observe_latched(&stores, witness, &id)?;
         witness.receipt("artifact_fault_named");
         witness.safety_check(&stores);
         stores = reopen(stores, now);
@@ -581,6 +695,7 @@ pub fn artifact_deletion_episodes(
         witness.receipt("artifact_fault_named");
         witness.safety_check(&stores);
         if heal == Heal::Reopen {
+            observe_latched(&stores, witness, &id)?;
             stores = reopen(stores, now);
         }
         let probe = stores
@@ -615,10 +730,10 @@ pub fn r11_episode(
         step,
         StoreFamily::SearchProjection,
         "acknowledge",
-        FaultAction::ArtifactDeletion {
-            fault: ArtifactDeletionFaultKind::AfterCommit,
+        FaultAction::ExpectedRefusal {
+            refusal: ExpectedRefusal::R11DeletionBearingCatchUp,
         },
-        "search_catchup::Blocked::DeletionUnpropagated: a window holding a deletion is refused so the barrier stays unsatisfied while the projection serves the text; production heals it by rebuilding the projection",
+        "search_catchup::Blocked::DeletionUnpropagated: a plain deletion puts a deletion in the next window, which is refused so the barrier stays unsatisfied while the projection serves the text; production heals it by rebuilding the projection",
     ));
     stores
         .corpus
@@ -656,32 +771,16 @@ pub fn r11_episode(
     Ok(())
 }
 
-/// The receipt quota refuses new reviewer work by name and deletes nothing.
-pub fn quota_episode(
-    root: &Path,
-    witness: &mut Witness,
-    step: u32,
-    now: i64,
-) -> Result<(), RunError> {
-    let id = witness.declare(FaultEpisode {
-        id: "r24-receipt-quota".to_string(),
-        trigger_step: step,
-        scope: FaultScope {
-            store: StoreFamily::Memory,
-            operation: "reserve_memory_reviewer_job".to_string(),
-        },
-        action: FaultAction::ExternalLockHolder,
-        heal: Heal::Released,
-        layer_contract: "memory_reviewer_jobs::MemoryReviewerJobRefusal::MetadataQuota: a receipt charge at the project quota refuses new admissions and deletes no receipt; the quota is permanent and this run releases nothing".to_string(),
-        kill: None,
-    });
-    let store = MemoryStore::open(&daemon::store_descriptor_in(root)).unwrap();
-    let producer = |firing: &str| ProducerBinding {
+pub fn reviewer_producer(firing: &str) -> ProducerBinding {
+    ProducerBinding {
         producer: "history-summarizer".to_string(),
         firing_id: firing.to_string(),
         ordinal: 0,
-    };
-    let inputs = |candidate: &str| CausalInputs {
+    }
+}
+
+pub fn reviewer_inputs(candidate: &str) -> CausalInputs {
+    CausalInputs {
         target: ReviewTarget::StagedSubject {
             kernel_incarnation: "0a".repeat(16),
             candidate_id: candidate.to_string(),
@@ -694,31 +793,75 @@ pub fn quota_episode(
             available: true,
         }],
         policy_versions: BTreeMap::from([("disclosure".to_string(), "3".to_string())]),
-    };
+    }
+}
+
+/// The receipt quota refuses new reviewer work by name and deletes nothing.
+pub fn quota_episode(
+    root: &Path,
+    witness: &mut Witness,
+    step: u32,
+    now: i64,
+) -> Result<(), RunError> {
+    let id = witness.declare(episode(
+        "r24-receipt-quota",
+        step,
+        StoreFamily::Memory,
+        "reserve_memory_reviewer_job",
+        FaultAction::ExpectedRefusal {
+            refusal: ExpectedRefusal::R24ReceiptQuotaExhausted,
+        },
+        "memory_reviewer_jobs::MemoryReviewerJobRefusal::MetadataQuota: receipt charges retained by a terminal job leave less than one admission's charge and allowance under the project quota, so admission refuses with no allowance left to release and deletes no receipt",
+    ));
+    let store = MemoryStore::open(&daemon::store_descriptor_in(root)).unwrap();
     let reserved = store
-        .reserve_memory_reviewer_job(PROJECT, &producer("f1"), &inputs("cand-1"), now)
+        .reserve_memory_reviewer_job(
+            PROJECT,
+            &reviewer_producer("f1"),
+            &reviewer_inputs("cand-1"),
+            now,
+        )
         .unwrap();
     let causal_identity = match reserved {
         memory_store::memory_reviewer_jobs::ReserveOutcome::Reserved(job) => job.causal_identity,
         other => return Err(unexpected(&id, "a fresh reservation", other)),
     };
-    let near_quota = i64::try_from(
-        MAX_MEMORY_REVIEWER_METADATA_BYTES_PER_PROJECT
-            - MEMORY_REVIEWER_JOB_ALLOWANCE_BYTES
-            - MEMORY_REVIEWER_RECEIPT_CHARGE_BYTES,
+    let retained = i64::try_from(
+        MAX_MEMORY_REVIEWER_METADATA_BYTES_PER_PROJECT - MEMORY_REVIEWER_RECEIPT_CHARGE_BYTES,
     )
     .unwrap();
     store
         .with_fenced_conn_for_test(|conn| {
             conn.execute(
                 "UPDATE memory_reviewer_jobs SET receipt_charge_bytes = ?1 WHERE causal_identity = ?2",
-                rusqlite::params![near_quota, causal_identity],
+                rusqlite::params![retained, causal_identity],
             )
         })
         .unwrap();
+    store
+        .finish_memory_reviewer_job(
+            PROJECT,
+            &causal_identity,
+            MemoryReviewerJobOutcome::Failed,
+            now,
+        )
+        .map_err(|e| unexpected(&id, "the planted job closed", e))?;
     let before = store.memory_reviewer_headroom(PROJECT).unwrap();
+    let admission = MEMORY_REVIEWER_RECEIPT_CHARGE_BYTES + MEMORY_REVIEWER_JOB_ALLOWANCE_BYTES;
+    if before.pending_jobs != 0 || before.project_metadata_remaining >= admission {
+        return Err(unexpected(
+            &id,
+            "no open allowance and less than one admission's headroom",
+            before,
+        ));
+    }
     let error = store
-        .reserve_memory_reviewer_job(PROJECT, &producer("f2"), &inputs("cand-2"), now)
+        .reserve_memory_reviewer_job(
+            PROJECT,
+            &reviewer_producer("f2"),
+            &reviewer_inputs("cand-2"),
+            now,
+        )
         .err()
         .ok_or_else(|| unexpected(&id, "MetadataQuota", "Ok"))?;
     let refusal = match error {
@@ -766,7 +909,7 @@ pub fn corruption_episode(
         StoreFamily::Kernel,
         "reopen",
         FaultAction::CorruptQuiescentFile,
-        "Checkpoint::accept: a copied file whose integrity_check is not ok is refused before any store opens; the corruption is detected, not repaired",
+        "Copied::reopen: a copied file whose bytes no longer match the checkpoint's digest is refused FileDiffers before any store opens; the corruption is detected, not repaired",
     ));
     let mut closed = stores.close();
     let copy_root = charges.occupy()?;
@@ -785,15 +928,18 @@ pub fn corruption_episode(
         *byte ^= 0xA5;
     }
     std::fs::write(&target, &bytes).unwrap();
+    let relative = target
+        .strip_prefix(copied.root())
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    let expected = format!("FileDiffers {{ path: {relative:?} }}");
     match copied.reopen(&checkpoint, now) {
-        Err(RestoreRefused::IntegrityCheck {
-            family: StoreFamily::Kernel,
-            ..
-        }) => {
+        Err(RestoreRefused::FileDiffers { path }) if path == relative => {
             witness.receipt("integrity_refused");
         }
-        Err(other) => return Err(unexpected(&id, "IntegrityCheck { kernel }", other)),
-        Ok(_) => return Err(unexpected(&id, "IntegrityCheck { kernel }", "Ok")),
+        Err(other) => return Err(unexpected(&id, &expected, other)),
+        Ok(_) => return Err(unexpected(&id, &expected, "Ok")),
     }
     charges.vacate(copy_root)?;
     let stores = closed.reopen(now);
@@ -851,6 +997,7 @@ pub fn publication_episode(
     let vector = TestEngine::vector_for(row.text.as_deref().unwrap_or_default());
     let identity = format!("embedding:{occurrence}@{id}");
     witness.effects.attempt(&identity);
+    let mut events = Vec::new();
     let mut publisher = EmbeddingPublisher::new(&stores.corpus.kernel, &stores.projection);
     let result = publisher.publish_with_fault_for_test(
         &VectorPublication {
@@ -873,7 +1020,7 @@ pub fn publication_episode(
         },
         Instant::now() + Duration::from_secs(10),
         now,
-        &mut |_| {},
+        &mut |event| events.push(event),
         production,
     );
     match (fault, &result) {
@@ -882,6 +1029,25 @@ pub fn publication_episode(
         }
         _ => return Err(unexpected(id, "the fault's documented outcome", &result)),
     }
+    let reconciling = events
+        .iter()
+        .position(|e| *e == PublicationEvent::Reconciling);
+    let read = events
+        .iter()
+        .rposition(|e| *e == PublicationEvent::ReconciliationRead);
+    match (reconciling, read) {
+        (Some(started), Some(read)) if started < read => {
+            witness.receipt("reconciling");
+            witness.receipt("reconciliation_read");
+        }
+        _ => {
+            return Err(unexpected(
+                id,
+                "Reconciling then ReconciliationRead",
+                &events,
+            ));
+        }
+    }
     witness.effects.lose_reply(&identity).unwrap();
     witness.receipt("publication_reconciled");
     witness.receipt(id);
@@ -889,36 +1055,52 @@ pub fn publication_episode(
     Ok(identity)
 }
 
+/// Applies planned steps from `next`, catching up after each, until an
+/// embedding job is open, and returns the index of the last step applied; a
+/// retirement opens none, so a history that runs out first is refused.
+fn open_embedding_job(
+    stores: &mut Stores,
+    steps: &[Planned],
+    next: &mut usize,
+    id: &str,
+) -> Result<usize, RunError> {
+    while stores.pending(WorkCounter::EmbeddingOpen) == 0 {
+        let planned = steps
+            .get(*next)
+            .ok_or_else(|| unexpected(id, "a planned step that opens an embedding job", *next))?;
+        stores.apply(planned);
+        stores.catch_up(planned.now_ms);
+        *next += 1;
+    }
+    Ok(*next - 1)
+}
+
 /// Reads every lost reply back by its identity from the closed files.
-pub fn read_back(root: &Path, witness: &mut Witness) {
+/// Read-back refuses checkpoints past the recorded fault boundary because monotonic checkpoints cannot prove the faulted effect.
+/// An embedding job's row names its own state, so it is read directly.
+pub fn read_back(root: &Path, witness: &mut Witness) -> Result<(), RunError> {
     let search = read_only(&search_file(root));
-    let kernel = read_only(&kernel_file(root));
+    let projection: i64 = search
+        .query_row(
+            "SELECT checkpoint_commit_seq FROM projection_checkpoint",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let kernel: i64 = read_only(&kernel_file(root))
+        .query_row(
+            "SELECT checkpoint_commit_seq FROM outbox_consumers WHERE consumer_id=?1",
+            [CONSUMER],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let mut states = Vec::new();
     for identity in witness.effects.unknown() {
         let (effect, _episode) = identity.split_once('@').unwrap();
         let (kind, key) = effect.split_once(':').unwrap();
-        let state = match kind {
-            "search_commit" => {
-                let through: i64 = key.parse().unwrap();
-                let checkpoint: i64 = search
-                    .query_row(
-                        "SELECT checkpoint_commit_seq FROM projection_checkpoint",
-                        [],
-                        |row| row.get(0),
-                    )
-                    .unwrap();
-                applied(checkpoint >= through)
-            }
-            "search_ack" => {
-                let through: i64 = key.parse().unwrap();
-                let checkpoint: i64 = kernel
-                    .query_row(
-                        "SELECT checkpoint_commit_seq FROM outbox_consumers WHERE consumer_id=?1",
-                        [CONSUMER],
-                        |row| row.get(0),
-                    )
-                    .unwrap();
-                applied(checkpoint >= through)
-            }
+        let checkpoint = match kind {
+            "search_commit" => projection,
+            "search_ack" => kernel,
             "embedding" => {
                 let state: String = search
                     .query_row(
@@ -927,12 +1109,26 @@ pub fn read_back(root: &Path, witness: &mut Witness) {
                         |row| row.get(0),
                     )
                     .unwrap();
-                applied(state == "embedded")
+                states.push((identity, applied(state == "embedded")));
+                continue;
             }
             other => panic!("no read-back for effect kind {other}"),
         };
+        let left_at = witness.left_at[&identity];
+        if checkpoint > left_at {
+            return Err(RunError::ReadBackMasked {
+                identity,
+                left_at,
+                checkpoint,
+            });
+        }
+        let through: i64 = key.parse().unwrap();
+        states.push((identity, applied(checkpoint >= through)));
+    }
+    for (identity, state) in states {
         witness.effects.read_back(&identity, state).unwrap();
     }
+    Ok(())
 }
 
 fn applied(is: bool) -> EffectState {
@@ -943,8 +1139,8 @@ fn applied(is: bool) -> EffectState {
     }
 }
 
-/// The campaign: a healthy prefix, the fault phase, recovery by reopen with
-/// read-back, and the rest of the history.
+/// Each lost reply is recovered before any later catch-up can advance the
+/// checkpoint its read-back reads.
 pub fn campaign(
     plan: &Plan,
     charges: &mut Charges,
@@ -952,104 +1148,152 @@ pub fn campaign(
 ) -> Result<BTreeMap<String, EffectState>, RunError> {
     let k = plan.checkpoint_step as usize;
     let root = charges.occupy()?;
-    let mut stores = Stores::open(root.path(), plan.rendering.clone());
+    let mut stores = Stores::open(root.path(), plan);
     live(&mut stores, &plan.steps[..k]);
     witness.checkpoint(Cut::AtQuiescence);
     let steps = &plan.steps[k..];
     assert!(
-        steps.len() >= 7,
-        "the fault phase needs seven steps after the checkpoint"
+        steps.len() >= FAULT_PHASE_STEPS,
+        "plan() refuses a history with fewer than {FAULT_PHASE_STEPS} steps after the checkpoint"
     );
     let step = |i: usize| (k + i) as u32;
+    let mut expected = BTreeMap::new();
 
     stores.apply(&steps[0]);
-    lost_reply_episode(
-        &mut stores,
-        witness,
-        "search-commit-reply-lost",
-        step(0),
-        steps[0].now_ms,
-        SearchEpisodeFault::LoseLocalCommitReply,
-    )?;
-    stores.drain(steps[0].now_ms);
-
-    stores.apply(&steps[1]);
-    lost_reply_episode(
-        &mut stores,
-        witness,
-        "search-ack-reply-lost",
-        step(1),
-        steps[1].now_ms,
-        SearchEpisodeFault::LoseAcknowledgementReply,
-    )?;
-    stores.drain(steps[1].now_ms);
-
-    stores.apply(&steps[2]);
     lock_holder_episode(
         &mut stores,
         witness,
         "projection-lock-holder",
-        step(2),
-        steps[2].now_ms,
+        step(0),
+        steps[0].now_ms,
     )?;
-    stores.drain(steps[2].now_ms);
+    stores.drain(steps[0].now_ms);
 
-    let stores = corruption_episode(stores, witness, charges, step(3), steps[3].now_ms)?;
-    let (stores, evidence) = artifact_ingest_episodes(stores, witness, step(3), steps[3].now_ms)?;
-    let mut stores =
-        artifact_deletion_episodes(stores, witness, &evidence, step(3), steps[3].now_ms)?;
-    stores.drain(steps[3].now_ms);
+    for planned in &steps[1..3] {
+        stores.apply(planned);
+        stores.drain(planned.now_ms);
+    }
 
     stores.apply(&steps[3]);
-    stores.catch_up(steps[3].now_ms);
-    held_publication_episode(&mut stores, witness, step(3), steps[3].now_ms)?;
-    stores.apply(&steps[4]);
-    stores.catch_up(steps[4].now_ms);
-    let applied_id = publication_episode(
+    expected.extend(lost_reply_episode(
         &mut stores,
         witness,
-        "publication-commit-reply-lost",
+        "search-commit-reply-lost",
+        step(3),
+        steps[3].now_ms,
+        SearchEpisodeFault::LoseLocalCommitReply,
+    )?);
+    let mut stores = recover(stores, witness, steps[4].now_ms)?;
+
+    stores.apply(&steps[4]);
+    expected.extend(lost_reply_episode(
+        &mut stores,
+        witness,
+        "search-ack-reply-lost",
         step(4),
         steps[4].now_ms,
-        PublicationFaultKind::LoseLocalCommitReply,
-    )?;
-    stores.apply(&steps[5]);
-    stores.catch_up(steps[5].now_ms);
-    let rolled_back_id = publication_episode(
-        &mut stores,
-        witness,
-        "publication-commit-lost",
-        step(5),
-        steps[5].now_ms,
-        PublicationFaultKind::LoseLocalCommit,
-    )?;
+        SearchEpisodeFault::LoseAcknowledgementReply,
+    )?);
+    let stores = recover(stores, witness, steps[5].now_ms)?;
+
+    let stores = corruption_episode(stores, witness, charges, step(5), steps[5].now_ms)?;
+    let (stores, evidence) = artifact_ingest_episodes(stores, witness, step(5), steps[5].now_ms)?;
+    let mut stores =
+        artifact_deletion_episodes(stores, witness, &evidence, step(5), steps[5].now_ms)?;
+    stores.drain(steps[5].now_ms);
+
+    let mut next = 5;
+    let at = open_embedding_job(&mut stores, steps, &mut next, "publication-held-at-gate")?;
+    held_publication_episode(&mut stores, witness, step(at), steps[at].now_ms)?;
+    for (id, fault, state) in [
+        (
+            "publication-commit-reply-lost",
+            PublicationFaultKind::LoseLocalCommitReply,
+            EffectState::Applied,
+        ),
+        (
+            "publication-commit-lost",
+            PublicationFaultKind::LoseLocalCommit,
+            EffectState::NotApplied,
+        ),
+    ] {
+        let at = open_embedding_job(&mut stores, steps, &mut next, id)?;
+        let identity =
+            publication_episode(&mut stores, witness, id, step(at), steps[at].now_ms, fault)?;
+        expected.insert(identity, state);
+    }
+    let rest = next;
+    let resumed = steps
+        .get(rest)
+        .ok_or_else(|| {
+            unexpected(
+                "r11-deletion-bearing-catch-up",
+                "a step left to live after recovery",
+                rest,
+            )
+        })?
+        .now_ms;
 
     let quota_root = charges.occupy()?;
-    quota_episode(quota_root.path(), witness, step(6), steps[6].now_ms)?;
+    quota_episode(quota_root.path(), witness, step(rest), resumed)?;
     charges.vacate(quota_root)?;
-    r11_episode(&mut stores, witness, &evidence, step(6), steps[6].now_ms)?;
+    r11_episode(&mut stores, witness, &evidence, step(rest), resumed)?;
     witness.checkpoint(Cut::AfterFaultPhase);
+    let mut stores = recover(stores, witness, resumed)?;
 
+    live(&mut stores, &steps[rest..]);
+    witness.checkpoint(Cut::EndOfRun);
+    // The stores' bytes are charged while they are open; closing them
+    // checkpoints the WAL away.
+    charges.store_bytes(root.path())?;
+    drop(stores.close());
+    charges.vacate(root)?;
+    Ok(expected)
+}
+
+fn recover(stores: Stores, witness: &mut Witness, now: i64) -> Result<Stores, RunError> {
     let closed = stores.close();
-    read_back(closed.root(), witness);
-    let expected: BTreeMap<String, EffectState> = [
-        (applied_id, EffectState::Applied),
-        (rolled_back_id, EffectState::NotApplied),
-    ]
-    .into_iter()
-    .collect();
-    let mut stores = closed.reopen(steps[6].now_ms);
+    read_back(closed.root(), witness)?;
+    let stores = closed.reopen(now);
     witness.checkpoint(Cut::AfterRecovery);
     witness
         .coverage
         .record("flt_lost_reply_unknown_until_readback")
         .unwrap();
     witness.safety_check(&stores);
-    live(&mut stores, &steps[6..]);
-    witness.checkpoint(Cut::EndOfRun);
-    drop(stores.close());
-    charges.vacate(root)?;
-    Ok(expected)
+    Ok(stores)
+}
+
+pub fn check_expectations(
+    expected: &BTreeMap<String, EffectState>,
+    effects: &EffectLedger,
+) -> Result<(), RunError> {
+    let lost: BTreeSet<&String> = effects
+        .effects
+        .iter()
+        .filter(|(_, effect)| effect.reply_lost)
+        .map(|(identity, _)| identity)
+        .collect();
+    let fixed: BTreeSet<&String> = expected.keys().collect();
+    if lost != fixed {
+        return Err(unexpected(
+            "campaign",
+            &format!("fixed expectations for exactly {lost:?}"),
+            fixed,
+        ));
+    }
+    for (identity, state) in expected {
+        let effect = &effects.effects[identity];
+        if !effect.read_back || effect.expected != (eval_core::Expected::Exactly { state: *state })
+        {
+            return Err(unexpected(
+                identity,
+                &format!("read back {state:?}"),
+                &effect.expected,
+            ));
+        }
+    }
+    Ok(())
 }
 
 pub fn run(config: &Config, spawn: Spawn) -> Result<Run, RunError> {
@@ -1060,11 +1304,9 @@ pub fn run(config: &Config, spawn: Spawn) -> Result<Run, RunError> {
             .as_millis(),
     )
     .unwrap();
-    let plan = aging::plan(config.messages)?;
-    let steps = plan.steps.len() as u32;
     let profile = profile(
         config.scale,
-        steps,
+        config.messages,
         config.elapsed_bound_ms,
         config.approval.clone(),
     );
@@ -1072,29 +1314,38 @@ pub fn run(config: &Config, spawn: Spawn) -> Result<Run, RunError> {
     prepare_publish(&config.publish, &[REPORT_FILE, MANIFEST_FILE]).map_err(publish_refused)?;
     let mut charges = Charges::new(profile.envelope.clone());
     let mut witness = Witness::new();
+    // Planning runs under the clock: the elapsed bound covers the whole run.
+    let plan = plan(config.messages)?;
+    let steps = plan.steps.len() as u32;
+    // The build identity is frozen before the campaign runs: the checkout,
+    // the lockfile, and the executable the outcomes come from, not whatever
+    // the tree holds when the report is written.
+    let identity = identity(
+        &profile,
+        SIMULATOR_VERSION,
+        aging::SEED,
+        json!({
+            "steps": steps,
+            "fault_phase_step": plan.checkpoint_step,
+            "messages": config.messages,
+        }),
+        &[std::env::current_exe().unwrap()],
+    );
     let bounds = profile.statistics.liveness_bounds.clone();
     let expected = campaign(&plan, &mut charges, &mut witness)?;
+    let mut expected = expected;
     for cut in KillCut::ALL {
-        kill_episode(
+        expected.extend(kill_episode(
             &plan,
             config.messages,
             &mut charges,
             &mut witness,
             spawn,
             cut,
-        )?;
+        )?);
     }
     let liveness = liveness(&plan, &mut charges, &mut witness, &bounds)?;
-    for (identity, state) in &expected {
-        let effect = &witness.effects.effects[identity];
-        if effect.expected != (eval_core::Expected::Exactly { state: *state }) {
-            return Err(unexpected(
-                identity,
-                &format!("{state:?}"),
-                &effect.expected,
-            ));
-        }
-    }
+    check_expectations(&expected, &witness.effects)?;
     witness.cuts.verdict().map_err(FaultReportError::Coverage)?;
     witness
         .coverage
@@ -1106,17 +1357,6 @@ pub fn run(config: &Config, spawn: Spawn) -> Result<Run, RunError> {
         Cut::AfterRecovery,
         Cut::EndOfRun,
     ];
-    let identity = identity(
-        &profile,
-        SIMULATOR_VERSION,
-        aging::SEED,
-        json!({
-            "steps": steps,
-            "fault_phase_step": plan.checkpoint_step,
-            "messages": config.messages,
-        }),
-        &std::env::current_exe().unwrap(),
-    );
     let mut report = FaultReport {
         schema: FAULT_REPORT_SCHEMA.to_string(),
         eval_run_id: eval_run_id(&identity).unwrap(),
@@ -1150,22 +1390,21 @@ pub fn run(config: &Config, spawn: Spawn) -> Result<Run, RunError> {
         eval_run_id: report.eval_run_id.clone(),
         sample: format!("fault:{}", plan.checkpoint_step),
         result_digest: FaultReport::result_digest(&published)?,
-        witness_digest: super::campaign::sha256_hex(
-            &serde_json::to_vec(&json!({
-                "barriers": report.barriers,
-                "effects": report.effects,
-                "coverage": report.coverage,
-            }))
-            .unwrap(),
-        ),
+        witness_digest: witness_digest(&report),
         cut_receipts: report.cuts.clone(),
         execution_mode: ExecutionMode::Generate,
         envelope: report.envelope.clone(),
         started_at_ms,
     });
     let manifest_bytes = serde_json::to_vec_pretty(&manifest.to_value()).unwrap();
-    publish_file(&config.publish.join(REPORT_FILE), &bytes).map_err(publish_refused)?;
-    publish_file(&config.publish.join(MANIFEST_FILE), &manifest_bytes).map_err(publish_refused)?;
+    // A manifest the directory then refuses to take takes the report back out
+    // with it, as the aging shell does: a reader finds both files or none.
+    let report_path = config.publish.join(REPORT_FILE);
+    publish_file(&report_path, &bytes).map_err(publish_refused)?;
+    if let Err(error) = publish_file(&config.publish.join(MANIFEST_FILE), &manifest_bytes) {
+        let _ = std::fs::remove_file(&report_path);
+        return Err(publish_refused(error));
+    }
     Ok(Run {
         report,
         report_bytes: bytes,
@@ -1174,6 +1413,24 @@ pub fn run(config: &Config, spawn: Spawn) -> Result<Run, RunError> {
         bounds,
         coverage: witness.coverage,
     })
+}
+
+/// The digest covers barrier receipts, the effect ledger, and cut coverage.
+/// A barrier's `pid` is omitted because the OS assigns it, so identical runs
+/// may differ.
+pub fn witness_digest(report: &FaultReport) -> String {
+    let mut barriers = serde_json::to_value(&report.barriers).unwrap();
+    for barrier in barriers.as_array_mut().unwrap() {
+        barrier.as_object_mut().unwrap().remove("pid");
+    }
+    super::campaign::sha256_hex(
+        &serde_json::to_vec(&json!({
+            "barriers": barriers,
+            "effects": report.effects,
+            "coverage": report.coverage,
+        }))
+        .unwrap(),
+    )
 }
 
 pub const USAGE: &str = "fault --scale <s0|s1|s2> --messages <n> --elapsed-bound-ms <n> \
@@ -1192,7 +1449,7 @@ use std::sync::mpsc;
 use daemon::claim_sources::{ClaimMaterializer, MaterializationEnd};
 use daemon::embedding_dispatch::{DispatchBounds, DispatchEvent, EmbeddingDispatcher};
 use eval_core::{BarrierReceipt, HealthyCore, Lane, LaneProgress, LivenessReport};
-use host_runtime::local_embeddings::LocalEmbeddingsLimits;
+use host_runtime::local_embeddings::{LocalEmbeddingsComponent, LocalEmbeddingsLimits};
 use kernel::CommitPageBounds;
 
 use super::aging::memory_file;
@@ -1208,6 +1465,31 @@ fn runtime() -> tokio::runtime::Runtime {
         .enable_all()
         .build()
         .unwrap()
+}
+
+/// Holds local embedding inference behind the fixture gate on its own runtime.
+///
+/// `gate` drops before `runtime` so a gate-blocked inference task resumes
+/// before `Runtime::drop` waits for it.
+pub struct GatedLane {
+    pub gate: GateGuard,
+    pub runtime: tokio::runtime::Runtime,
+    pub local: LocalEmbeddingsComponent,
+    pub engine: std::sync::Arc<TestEngine>,
+}
+
+impl GatedLane {
+    pub fn new() -> Self {
+        let engine = TestEngine::new();
+        let gate = GateGuard(engine.block_calls());
+        let local = component(&engine, LocalEmbeddingsLimits::default());
+        Self {
+            gate,
+            runtime: runtime(),
+            local,
+            engine,
+        }
+    }
 }
 
 /// The drive publishes its rows `LocalOnly`, so the dispatcher's eligibility
@@ -1259,10 +1541,19 @@ impl KillCut {
         }
     }
 
-    fn effect(self, through: i64, episode: &str) -> String {
+    /// At `acknowledgement_requested` the local batch has committed and its
+    /// acknowledgement has not, so the crashed files hold one and not the other.
+    fn effects(self, through: i64, episode: &str) -> Vec<(String, EffectState)> {
+        let commit = format!("search_commit:{through}@{episode}");
         match self {
-            KillCut::LocalStaged => format!("search_commit:{through}@{episode}"),
-            KillCut::AcknowledgementRequested => format!("search_ack:{through}@{episode}"),
+            KillCut::LocalStaged => vec![(commit, EffectState::NotApplied)],
+            KillCut::AcknowledgementRequested => vec![
+                (commit, EffectState::Applied),
+                (
+                    format!("search_ack:{through}@{episode}"),
+                    EffectState::NotApplied,
+                ),
+            ],
         }
     }
 }
@@ -1305,12 +1596,7 @@ pub type Spawn = fn(&ChildArgs) -> Command;
 pub fn child_main(args: &ChildArgs) -> ! {
     let plan = aging::plan(args.messages).expect("the parent planned the same history");
     let planned = &plan.steps[args.applied as usize];
-    let mut stores = Stores::reconstruct(
-        &args.root,
-        plan.rendering.clone(),
-        args.applied,
-        planned.now_ms,
-    );
+    let mut stores = Stores::reconstruct(&args.root, &plan, args.applied, planned.now_ms);
     stores.apply(planned);
     stores.publish_outbox();
     let cut = args.cut;
@@ -1339,9 +1625,6 @@ impl Drop for ChildGuard {
     }
 }
 
-/// A test-binary child is killed at a named cut inside a catch-up episode;
-/// the parent reads the barrier before the kill, reads the lost effect back
-/// from the closed files, reopens, and catches up to the tip.
 pub fn kill_episode(
     plan: &Plan,
     messages: u32,
@@ -1349,7 +1632,7 @@ pub fn kill_episode(
     witness: &mut Witness,
     spawn: Spawn,
     cut: KillCut,
-) -> Result<(), RunError> {
+) -> Result<BTreeMap<String, EffectState>, RunError> {
     let id = format!("kill-at-{}", cut.name());
     witness.declare(episode(
         &id,
@@ -1366,7 +1649,7 @@ pub fn kill_episode(
     ));
     let k = plan.checkpoint_step as usize;
     let root = charges.occupy()?;
-    let mut stores = Stores::open(root.path(), plan.rendering.clone());
+    let mut stores = Stores::open(root.path(), plan);
     live(&mut stores, &plan.steps[..k]);
     drop(stores.close());
     let args = ChildArgs {
@@ -1400,8 +1683,10 @@ pub fn kill_episode(
         .nth(1)
         .and_then(|t| t.parse().ok())
         .ok_or_else(|| unexpected(&id, "a barrier naming the window", &line))?;
-    let effect = cut.effect(through, &id);
-    witness.effects.attempt(&effect);
+    let effects = cut.effects(through, &id);
+    for (effect, _) in &effects {
+        witness.effects.attempt(effect);
+    }
     child.0.kill().unwrap();
     let status = child.0.wait().unwrap();
     let signal = {
@@ -1417,19 +1702,30 @@ pub fn kill_episode(
         line,
         signal,
     });
-    witness.effects.lose_reply(&effect).unwrap();
+    for (effect, _) in &effects {
+        witness.effects.lose_reply(effect).unwrap();
+        // The killed window is the last the child reached, so a crashed
+        // file's checkpoint past it would be masking, as for a reply loss.
+        witness.left_at.insert(effect.clone(), through);
+    }
     witness.receipt(cut.name());
-    read_back(root.path(), witness);
-    let state = witness.effects.effects[&effect].outcome;
-    if state != eval_core::EffectOutcome::NotApplied {
-        return Err(unexpected(
-            &id,
-            "NotApplied: the killed step never committed its effect",
-            state,
-        ));
+    read_back(root.path(), witness)?;
+    for (effect, expected) in &effects {
+        let outcome = witness.effects.effects[effect].outcome;
+        let expected_outcome = match expected {
+            EffectState::Applied => eval_core::EffectOutcome::Applied,
+            EffectState::NotApplied => eval_core::EffectOutcome::NotApplied,
+        };
+        if outcome != expected_outcome {
+            return Err(unexpected(
+                &id,
+                &format!("{effect} read back {expected:?} from the crashed files"),
+                outcome,
+            ));
+        }
     }
     let now = plan.steps[k].now_ms;
-    let mut stores = Stores::reconstruct(root.path(), plan.rendering.clone(), k as u32 + 1, now);
+    let mut stores = Stores::reconstruct(root.path(), plan, k as u32 + 1, now);
     witness.checkpoint(Cut::AfterRecovery);
     stores.drain(now);
     witness.safety_check(&stores);
@@ -1440,7 +1736,7 @@ pub fn kill_episode(
         .unwrap();
     drop(stores.close());
     charges.vacate(root)?;
-    Ok(())
+    Ok(effects.into_iter().collect())
 }
 
 /// A dispatcher pass with inference held behind the fixture gate admits the
@@ -1464,10 +1760,7 @@ pub fn held_publication_episode(
     if pending_before == 0 {
         return Err(unexpected(&id, "a pending embedding job", 0));
     }
-    let engine = TestEngine::new();
-    let gate = GateGuard(engine.block_calls());
-    let local = component(&engine, LocalEmbeddingsLimits::default());
-    let runtime = runtime();
+    let lane = GatedLane::new();
     let project = ProjectScope::new(PROJECT).unwrap();
     let short = DispatchBounds {
         result_wait: Duration::from_millis(50),
@@ -1477,8 +1770,8 @@ pub fn held_publication_episode(
     let pass = |bounds: &DispatchBounds| -> Vec<DispatchEvent> {
         let mut events = Vec::new();
         let mut dispatcher =
-            EmbeddingDispatcher::new(&stores.corpus.kernel, &stores.projection, &local);
-        let end = runtime.block_on(async {
+            EmbeddingDispatcher::new(&stores.corpus.kernel, &stores.projection, &lane.local);
+        let end = lane.runtime.block_on(async {
             dispatcher.run_pass(
                 local_eligibility(&project),
                 bounds,
@@ -1513,20 +1806,131 @@ pub fn held_publication_episode(
         return Err(unexpected(&id, "no re-admission while held", &again));
     }
     witness.receipt("publication_held");
-    TestEngine::release(&gate.0);
+    witness.safety_check(stores);
+    TestEngine::release(&lane.gate.0);
     let released = pass(&dispatch_bounds());
     if published(&released) == 0 {
         return Err(unexpected(&id, "a publication after release", &released));
     }
     witness.receipt("publication_released");
-    aging::embed_pending(&stores.corpus, &stores.projection, stores.root(), now);
+    aging::embed_pending(
+        &stores.corpus,
+        &stores.projection,
+        stores.root(),
+        stores.bounds.hold,
+        now,
+    );
     witness.receipt(&id);
-    witness.safety_check(stores);
     witness
         .coverage
         .record("sls_embedding_publication_held_then_released")
         .unwrap();
     Ok(())
+}
+
+const CLAIMS_PER_DECISION: u64 = 2;
+
+/// Each claim publication ingests evidence and commits, so the window feeds a
+/// decision every fourth step rather than every step.
+const DECISION_PERIOD: u64 = 4;
+
+fn decision_object(n: u64) -> String {
+    format!("liveness-decision-{n}")
+}
+
+fn decide(kernel: &kernel::KernelStore, n: u64) {
+    let object_id = decision_object(n);
+    let spec = DecisionSpec {
+        decision_id: format!("{object_id}-1"),
+        object_id: object_id.clone(),
+        domain_id: "domain".to_string(),
+        proposition_id: None,
+        scope_id: Some(SCOPE.to_string()),
+        anchor_id: None,
+        evidence_id: None,
+        decision_kind: "PROJECT_RULES".to_string(),
+        payload: DecisionPayload {
+            summary: format!("Liveness rule {n} holds."),
+            rationale: format!("Decision {n} is fed while the memory store is locked."),
+        },
+        source_kind: "assistant".to_string(),
+        source_id: object_id.clone(),
+        source_revision: 1,
+        sensitivity: Sensitivity::Normal,
+    };
+    let admission = AdmissionRequest {
+        candidate_id: None,
+        subject_object_id: Some(object_id.clone()),
+        source_class: Some(SourceClass::ExplicitUser),
+        taint_class: Some(TaintClass::UserExplicit),
+        event: AdmissionEvent {
+            kind: EventKind::Other,
+            trigger_object_id: None,
+            approval_object_id: None,
+            evidence_id: None,
+            reason: "liveness".to_string(),
+        },
+    };
+    kernel
+        .commit(intent(&format!("decide:{object_id}")), |envelope| {
+            envelope.insert_decision(spec.clone())?;
+            envelope.record_admission(admission.clone())?;
+            Ok(String::new())
+        })
+        .unwrap();
+}
+
+fn retire_decision(kernel: &kernel::KernelStore, n: u64) {
+    let object_id = decision_object(n);
+    kernel
+        .commit(intent(&format!("retire:{object_id}")), |envelope| {
+            envelope.retire_decision(&object_id)?;
+            Ok(String::new())
+        })
+        .unwrap();
+}
+
+/// Whether the live `canonical_claims` descriptors are exactly decision
+/// `n`'s. Only the materializer publishes that class and `n` is the newest
+/// decision, so a descriptor is `n`'s exactly when it was created after `n`
+/// committed; a stale predecessor's descriptor, or no decision `n`, fails.
+pub fn newest_claims_live(root: &Path, n: u64) -> bool {
+    let (live, of_n): (i64, i64) = read_only(&kernel_file(root))
+        .query_row(
+            "SELECT COUNT(*), COUNT(*) FILTER (WHERE o.created_commit_seq > \
+             (SELECT created_commit_seq FROM object_registry WHERE object_id=?1)) \
+             FROM object_registry o WHERE o.object_id GLOB 'srcdesc:*' \
+             AND o.source_kind='canonical_claims' AND o.invalidated_commit_seq IS NULL",
+            [decision_object(n)],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    let want = i64::try_from(CLAIMS_PER_DECISION).unwrap();
+    live == want && of_n == want
+}
+
+/// Feeds window step `step`: the next fresh planned step, kernel only, and on
+/// a decision step the next decision after retiring the one before it.
+/// Returns the kernel commits the feed made, read from the tip: a publish
+/// commits once per unit and a retire of a dead lineage commits nothing.
+pub fn feed(
+    stores: &mut Stores,
+    planned: Option<&Planned>,
+    step: u64,
+    materialization_bound: u64,
+) -> u64 {
+    let before = stores.tip();
+    if let Some(planned) = planned {
+        stores.apply_kernel_only(planned);
+    }
+    if step <= materialization_bound && step % DECISION_PERIOD == 1 {
+        let n = step / DECISION_PERIOD;
+        if n > 0 {
+            retire_decision(&stores.corpus.kernel, n - 1);
+        }
+        decide(&stores.corpus.kernel, n);
+    }
+    u64::try_from(stores.tip() - before).unwrap()
 }
 
 /// Liveness mode on its own root: the healthy core is the kernel, the
@@ -1541,7 +1945,7 @@ pub fn liveness(
     bounds: &LivenessBounds,
 ) -> Result<LivenessReport, RunError> {
     let root = charges.occupy()?;
-    let mut stores = Stores::open(root.path(), plan.rendering.clone());
+    let mut stores = Stores::open(root.path(), plan);
     let k = plan.checkpoint_step as usize;
     live(&mut stores, &plan.steps[..k]);
     ClaimMaterializer::register(&stores.corpus.kernel, plan.steps[k].now_ms).unwrap();
@@ -1578,9 +1982,6 @@ pub fn liveness(
         armed
     };
 
-    // One window: every step feeds one fresh kernel-only commit while any
-    // lane is still inside its bound, then each lane inside its bound takes
-    // one unit of work and checks its predicate against the current tip.
     let engine = TestEngine::new();
     let local = component(&engine, LocalEmbeddingsLimits::default());
     let runtime = runtime();
@@ -1616,13 +2017,13 @@ pub fn liveness(
     .collect();
     let window = lanes.values().map(|p| p.bound).max().unwrap_or(0);
     for step in 1..=window {
-        let fed = if let Some(planned) = fresh.next() {
-            stores.apply_kernel_only(planned);
-            stores.publish_outbox();
-            1
-        } else {
-            0
-        };
+        let fed = feed(
+            &mut stores,
+            fresh.next(),
+            step,
+            bounds.materialization_episodes,
+        );
+        stores.publish_outbox();
         let tip = stores.tip();
         for (lane, progress) in lanes.iter_mut() {
             if step > progress.bound {
@@ -1673,8 +2074,13 @@ pub fn liveness(
                         MaterializationEnd::Blocked(b) => Some(format!("{b:?}")),
                         MaterializationEnd::ReachedTarget => None,
                     };
+                    let materialized =
+                        newest_claims_live(stores.root(), (step - 1) / DECISION_PERIOD);
+                    if materialized {
+                        witness.receipt("claims_materialized");
+                    }
                     (
-                        blocked.is_none() && report.acknowledged_through >= tip,
+                        blocked.is_none() && report.acknowledged_through >= tip && materialized,
                         blocked,
                     )
                 }

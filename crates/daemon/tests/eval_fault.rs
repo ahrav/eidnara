@@ -12,17 +12,29 @@ mod campaign;
 #[allow(dead_code)]
 mod fault;
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
+use std::sync::{Arc, mpsc};
+use std::time::{Duration, Instant};
 
+use daemon::search_catchup::{Blocked, EpisodeEnd, EpisodeEvent, EpisodeReport};
 use eval_core::{
-    Approval, Coverage, Cut, CutOutcome, EffectOutcome, ExecutionMode, Expected, ExpectedRefusal,
-    FaultAction, FaultReport, Heal, MARKERS, ProfileError, Scale, StoreFamily, parse_fault_report,
-    parse_manifest,
+    Approval, Coverage, Cut, CutOutcome, EffectLedger, EffectOutcome, EffectState, ExecutionMode,
+    Expected, ExpectedRefusal, FaultAction, FaultReport, Heal, MARKERS, ProfileError, Scale,
+    SearchEpisodeFault, StoreFamily, parse_fault_report, parse_manifest,
 };
-use fault::{Config, MANIFEST_FILE, REPORT_FILE, Run, RunError};
+use fault::{
+    Config, MANIFEST_FILE, REPORT_FILE, Run, RunError, Witness, check_expectations,
+    declare_lost_reply_episode, lost_reply_episode, read_back, receipt_lost_reply_episode,
+};
+use memory_store::MemoryStore;
+use memory_store::memory_reviewer_jobs::{
+    MemoryReviewerJobError, MemoryReviewerJobOutcome, MemoryReviewerJobRefusal,
+};
+use support::embedding_fixtures::PROJECT;
 
-const MESSAGES: u32 = 40;
+const MESSAGES: u32 = 24;
+const QUOTA_NOW_MS: i64 = 1_000;
 
 /// The kill episodes re-execute this test binary at the child entrypoint.
 fn spawn_child(args: &fault::ChildArgs) -> std::process::Command {
@@ -148,6 +160,7 @@ fn the_fault_campaign_receipts_every_declared_cut_scenario(campaign: &Campaign) 
         "embedding_publication",
         "held_publication",
         "process_kill",
+        "expected_refusal",
     ] {
         assert!(actions.contains(kind), "{actions:?} lacks {kind}");
     }
@@ -156,7 +169,15 @@ fn the_fault_campaign_receipts_every_declared_cut_scenario(campaign: &Campaign) 
         assert!(!episode.layer_contract.is_empty());
         assert_eq!(episode.kill.is_some(), episode.action.is_kill());
     }
-    assert!(report.safety_checks_while_armed >= report.episodes.len() as u64);
+    let on_the_drive = report
+        .episodes
+        .iter()
+        .filter(|e| e.scope.store != StoreFamily::Memory)
+        .count();
+    assert!(
+        report.safety_checks_while_armed >= on_the_drive as u64,
+        "every episode on the aging drive's stores is followed by a safety check"
+    );
     assert!(
         report.liveness.is_some(),
         "liveness is reported as its own mode"
@@ -177,13 +198,24 @@ fn the_fault_campaign_receipts_every_declared_cut_scenario(campaign: &Campaign) 
         FaultReport::result_digest(&published).unwrap()
     );
     assert_eq!(manifest.cut_receipts, report.cuts);
+    assert_eq!(manifest.witness_digest, fault::witness_digest(report));
+    assert!(!report.barriers.is_empty());
+    let mut respawned = report.clone();
+    for barrier in &mut respawned.barriers {
+        barrier.pid = barrier.pid.wrapping_add(1);
+    }
+    assert_eq!(
+        fault::witness_digest(&respawned),
+        manifest.witness_digest,
+        "the pid the OS gave a kill child is not witness evidence"
+    );
 }
 
 fn a_lost_reply_stays_unknown_until_readback_at_after_recovery_scenario(campaign: &Campaign) {
     let run = &campaign.run;
     let effects = &run.report.effects.effects;
     let lost: Vec<_> = effects.iter().filter(|(_, e)| e.reply_lost).collect();
-    assert_eq!(lost.len(), 6, "{effects:?}");
+    assert_eq!(lost.len(), 7, "{effects:?}");
     for (identity, effect) in &lost {
         assert!(
             effect.read_back,
@@ -198,14 +230,14 @@ fn a_lost_reply_stays_unknown_until_readback_at_after_recovery_scenario(campaign
         .filter(|(id, _)| id.starts_with("search_commit:") || id.starts_with("search_ack:"))
         .map(|(_, e)| e.outcome)
         .collect();
-    assert_eq!(search.len(), 4, "two lost replies and two kills");
+    assert_eq!(search.len(), 5, "two lost replies and three killed effects");
     assert_eq!(
         search
             .iter()
             .filter(|o| **o == EffectOutcome::Applied)
             .count(),
-        2,
-        "the lost replies committed: {search:?}"
+        3,
+        "the lost replies and the acknowledgement kill's local commit committed: {search:?}"
     );
     assert_eq!(
         search
@@ -227,6 +259,13 @@ fn a_lost_reply_stays_unknown_until_readback_at_after_recovery_scenario(campaign
         vec![EffectOutcome::Applied, EffectOutcome::NotApplied],
         "a committed-then-lost reply reads back applied; a rolled-back one reads back not applied"
     );
+    for cut in ["reconciling", "reconciliation_read"] {
+        assert_eq!(
+            run.report.coverage.receipted.get(cut),
+            Some(&2),
+            "each publication episode's observer saw {cut}"
+        );
+    }
     assert!(run.report.effects.unknown().is_empty());
 }
 
@@ -251,6 +290,14 @@ fn deletion_bearing_catch_up_is_an_expected_refusal_and_a_permanent_stall_scenar
         .find(|e| e.id == r11.episode)
         .unwrap();
     assert_eq!(episode.scope.store, StoreFamily::SearchProjection);
+    assert_eq!(
+        episode.action,
+        FaultAction::ExpectedRefusal {
+            refusal: ExpectedRefusal::R11DeletionBearingCatchUp
+        },
+        "a plain deletion provokes R11; no deletion fault is injected"
+    );
+    assert_eq!(episode.heal, Heal::Reopen);
     assert!(episode.layer_contract.contains("rebuilding"));
 }
 
@@ -273,7 +320,14 @@ fn receipt_quota_exhaustion_is_an_expected_refusal_scenario(campaign: &Campaign)
         .find(|e| e.id == r24.episode)
         .unwrap();
     assert_eq!(episode.scope.store, StoreFamily::Memory);
-    assert_eq!(episode.heal, Heal::Released);
+    assert_eq!(
+        episode.action,
+        FaultAction::ExpectedRefusal {
+            refusal: ExpectedRefusal::R24ReceiptQuotaExhausted
+        },
+        "a planted receipt charge provokes R24; no lock is held"
+    );
+    assert_eq!(episode.heal, Heal::Permanent);
 }
 
 fn a_corrupted_quiescent_file_is_detected_before_any_store_opens_scenario(campaign: &Campaign) {
@@ -309,8 +363,13 @@ fn artifact_faults_fail_with_their_named_errno_and_heal_by_reopen_or_consumption
             )
         })
         .collect();
-    assert_eq!(artifact.len(), 7, "{artifact:?}");
+    assert_eq!(artifact.len(), 6, "{artifact:?}");
     assert_eq!(run.report.coverage.receipted["artifact_fault_named"], 6);
+    assert_eq!(
+        run.report.coverage.receipted.get("ingestion_latched"),
+        Some(&5),
+        "a plain ingest is refused after every EIO and before its reopen"
+    );
     let heals: Vec<Heal> = artifact.iter().map(|e| e.heal).collect();
     assert_eq!(
         heals.iter().filter(|h| **h == Heal::Reopen).count(),
@@ -319,8 +378,8 @@ fn artifact_faults_fail_with_their_named_errno_and_heal_by_reopen_or_consumption
     );
     assert_eq!(
         heals.iter().filter(|h| **h == Heal::Consumed).count(),
-        2,
-        "ENOSPC and the healed deletion are consumed: {heals:?}"
+        1,
+        "ENOSPC is consumed: {heals:?}"
     );
 }
 
@@ -352,6 +411,29 @@ fn a_test_binary_child_killed_at_a_named_cut_recovers_scenario(campaign: &Campai
         assert!(barrier.line.ends_with(cut), "{barrier:?}");
         assert_eq!(barrier.signal, 9, "SIGKILL, not an exit status");
         assert!(barrier.pid > 0);
+        let suffix = format!("@{}", episode.id);
+        let effects: BTreeMap<&str, EffectOutcome> = run
+            .report
+            .effects
+            .effects
+            .iter()
+            .filter(|(identity, _)| identity.ends_with(&suffix))
+            .map(|(identity, effect)| (identity.split_once(':').unwrap().0, effect.outcome))
+            .collect();
+        let expected: BTreeMap<&str, EffectOutcome> = match cut.as_str() {
+            "local_staged" => [("search_commit", EffectOutcome::NotApplied)].into(),
+            "acknowledgement_requested" => [
+                ("search_commit", EffectOutcome::Applied),
+                ("search_ack", EffectOutcome::NotApplied),
+            ]
+            .into(),
+            other => panic!("no kill cut {other}"),
+        };
+        assert_eq!(
+            effects, expected,
+            "{}: the crashed files hold exactly what committed before the cut",
+            episode.id
+        );
     }
     assert!(
         run.report.coverage.receipted["local_staged"] >= 2,
@@ -413,6 +495,11 @@ fn liveness_bounds_are_met_with_outside_core_faults_armed_scenario(campaign: &Ca
         liveness.permanent_stalls.len(),
         1,
         "R11 is reported as the permanent stall it is"
+    );
+    assert_eq!(
+        run.report.coverage.receipted.get("claims_materialized"),
+        Some(&run.bounds.materialization_episodes),
+        "every materialization step leaves exactly the latest fed decision's claims live"
     );
     assert!(run.report.safety_checks_while_armed > run.bounds.catch_up_episodes);
 }
@@ -536,6 +623,69 @@ fn every_fault_marker_fires_across_the_scenarios() {
     coverage.complete(SUITE).unwrap();
 }
 
+fn quota_episode_on_a_fresh_root() -> (tempfile::TempDir, Witness) {
+    let root = tempfile::tempdir().unwrap();
+    let mut witness = Witness::new();
+    fault::quota_episode(root.path(), &mut witness, 1, QUOTA_NOW_MS).unwrap();
+    (root, witness)
+}
+
+#[test]
+fn the_receipt_quota_refusal_outlives_every_released_allowance() {
+    let (root, _) = quota_episode_on_a_fresh_root();
+    let store = MemoryStore::open(&daemon::store_descriptor_in(root.path())).unwrap();
+    let open: Vec<String> = store
+        .with_fenced_conn_for_test(|conn| {
+            conn.prepare(
+                "SELECT causal_identity FROM memory_reviewer_jobs WHERE state <> 'terminal'",
+            )?
+            .query_map([], |row| row.get(0))?
+            .collect()
+        })
+        .unwrap();
+    for identity in open {
+        store
+            .finish_memory_reviewer_job(
+                PROJECT,
+                &identity,
+                MemoryReviewerJobOutcome::Failed,
+                QUOTA_NOW_MS,
+            )
+            .unwrap();
+    }
+    assert_eq!(
+        store
+            .memory_reviewer_headroom(PROJECT)
+            .unwrap()
+            .pending_jobs,
+        0
+    );
+    let again = store.reserve_memory_reviewer_job(
+        PROJECT,
+        &fault::reviewer_producer("f3"),
+        &fault::reviewer_inputs("cand-3"),
+        QUOTA_NOW_MS,
+    );
+    assert!(
+        matches!(
+            again,
+            Err(MemoryReviewerJobError::Refused(
+                MemoryReviewerJobRefusal::MetadataQuota
+            ))
+        ),
+        "R24 names a permanent refusal, not one a released allowance clears: {again:?}"
+    );
+}
+
+#[test]
+fn the_receipt_quota_episode_claims_no_projection_safety_check() {
+    let (_root, witness) = quota_episode_on_a_fresh_root();
+    assert_eq!(
+        witness.safety_checks, 0,
+        "the quota episode runs on a memory store of its own; no projection check ran"
+    );
+}
+
 #[test]
 fn an_unapproved_profile_refuses_before_any_store_opens() {
     let publish = tempfile::tempdir().unwrap();
@@ -548,6 +698,36 @@ fn an_unapproved_profile_refuses_before_any_store_opens() {
         "{error}"
     );
     assert!(!out.exists());
+}
+
+#[test]
+fn a_gated_lane_drops_while_its_inference_is_held() {
+    use host_runtime::local_embeddings::EmbeddingEngine;
+
+    let lane = fault::GatedLane::new();
+    let engine = Arc::clone(&lane.engine);
+    drop(lane.runtime.spawn_blocking(move || engine.embed(&["held"])));
+    let started = Instant::now();
+    while lane.engine.calls() == 0 {
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "the inference never reached the gate"
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let engine = Arc::clone(&lane.engine);
+    let (dropped, done) = mpsc::channel();
+    std::thread::spawn(move || {
+        drop(lane);
+        let _ = dropped.send(());
+    });
+    done.recv_timeout(Duration::from_secs(10))
+        .expect("dropping the lane releases its held inference");
+    assert_eq!(
+        engine.completed(),
+        1,
+        "the held inference ran to completion"
+    );
 }
 
 #[test]
@@ -582,4 +762,286 @@ fn fault_markers_each_name_a_scenario_here() {
     let _ = &Expected::Exactly {
         state: eval_core::EffectState::Applied,
     };
+}
+
+/// A liveness window's stores before the window opens: the healthy prefix
+/// lived, the claim materializer registered, and the backlog half applied.
+fn liveness_window_stores(
+    root: &std::path::Path,
+) -> (aging::Plan, aging::Stores, Vec<aging::Planned>) {
+    let plan = aging::plan(MESSAGES).unwrap();
+    let mut stores = aging::Stores::open(root, &plan);
+    let k = plan.checkpoint_step as usize;
+    aging::live(&mut stores, &plan.steps[..k]);
+    daemon::claim_sources::ClaimMaterializer::register(&stores.corpus.kernel, plan.steps[k].now_ms)
+        .unwrap();
+    let (backlog, fresh) = plan.steps[k..].split_at((plan.steps.len() - k) / 2);
+    for planned in backlog {
+        stores.apply(planned);
+    }
+    let fresh = fresh.to_vec();
+    (plan, stores, fresh)
+}
+
+#[test]
+fn a_fed_window_step_counts_the_kernel_commits_it_made() {
+    let root = tempfile::tempdir().unwrap();
+    let (_plan, mut stores, fresh) = liveness_window_stores(root.path());
+    for (i, planned) in fresh.iter().enumerate() {
+        let step = i as u64 + 1;
+        let before = stores.tip();
+        let fed = fault::feed(&mut stores, Some(planned), step, 64);
+        assert_eq!(
+            fed,
+            u64::try_from(stores.tip() - before).unwrap(),
+            "window step {step} fed {planned:?}"
+        );
+    }
+    drop(stores.close());
+}
+
+#[test]
+fn only_the_newest_decisions_claims_satisfy_the_materialization_lane() {
+    let root = tempfile::tempdir().unwrap();
+    let (plan, mut stores, _fresh) = liveness_window_stores(root.path());
+    let now = plan.steps.last().unwrap().now_ms;
+    fault::feed(&mut stores, None, 1, 64);
+    stores.publish_outbox();
+    let kernel = Arc::clone(&stores.corpus.kernel);
+    let mut materializer =
+        daemon::claim_sources::ClaimMaterializer::new(&kernel, kernel::ProviderEgress::LocalOnly);
+    let page = kernel::CommitPageBounds {
+        max_commits: 64.try_into().unwrap(),
+        max_rows: 1024.try_into().unwrap(),
+        max_payload_bytes: (1u64 << 20).try_into().unwrap(),
+    };
+    let materialize = |materializer: &mut daemon::claim_sources::ClaimMaterializer, tip: i64| {
+        for _ in 0..64 {
+            let report = materializer.run_episode(page, now).unwrap();
+            if matches!(
+                report.end,
+                daemon::claim_sources::MaterializationEnd::ReachedTarget
+            ) && report.acknowledged_through >= tip
+            {
+                return;
+            }
+        }
+        panic!("the materializer never reached the tip {tip}");
+    };
+    materialize(&mut materializer, stores.tip());
+    assert!(
+        fault::newest_claims_live(root.path(), 0),
+        "decision 0 was fed and materialized"
+    );
+    assert!(
+        !fault::newest_claims_live(root.path(), 1),
+        "decision 1 was never fed, so decision 0's claims are not its claims"
+    );
+    fault::feed(&mut stores, None, 1 + 4, 64);
+    stores.publish_outbox();
+    assert!(
+        !fault::newest_claims_live(root.path(), 1),
+        "decision 0's two claims are still live and decision 1's are unpublished"
+    );
+    materialize(&mut materializer, stores.tip());
+    assert!(fault::newest_claims_live(root.path(), 1));
+    drop(kernel);
+    drop(stores.close());
+}
+
+fn reached(through: i64) -> EpisodeReport {
+    EpisodeReport {
+        target: through,
+        acknowledged_through: through,
+        batches_applied: 1,
+        commits_consumed: 1,
+        end: EpisodeEnd::ReachedTarget,
+    }
+}
+
+fn window(through: i64) -> [EpisodeEvent; 4] {
+    [
+        EpisodeEvent::LocalStaged { through },
+        EpisodeEvent::LocalReleased { through },
+        EpisodeEvent::AcknowledgementRequested { through },
+        EpisodeEvent::Acknowledged { through },
+    ]
+}
+
+const REPLY_LOSS: [(SearchEpisodeFault, &str); 2] = [
+    (SearchEpisodeFault::LoseLocalCommitReply, "search_commit"),
+    (SearchEpisodeFault::LoseAcknowledgementReply, "search_ack"),
+];
+
+#[test]
+fn a_lost_reply_episode_that_does_not_reach_its_target_is_refused() {
+    for (fault, _) in REPLY_LOSS {
+        let mut witness = Witness::new();
+        declare_lost_reply_episode(&mut witness, "lost", 7, fault);
+        let report = EpisodeReport {
+            end: EpisodeEnd::Blocked(Blocked::LocalCommitUnresolved),
+            acknowledged_through: 4,
+            ..reached(9)
+        };
+        let error = receipt_lost_reply_episode(&mut witness, "lost", fault, &report, &window(9))
+            .unwrap_err();
+        assert!(matches!(error, RunError::Unexpected { .. }), "{error}");
+        assert!(!witness.cuts.receipted.contains_key("lost"), "{fault:?}");
+        assert!(witness.effects.effects.is_empty(), "{fault:?}");
+    }
+}
+
+#[test]
+fn every_window_of_a_lost_reply_episode_loses_its_reply() {
+    for (fault, kind) in REPLY_LOSS {
+        let mut witness = Witness::new();
+        declare_lost_reply_episode(&mut witness, "lost", 7, fault);
+        let events: Vec<EpisodeEvent> = window(5).into_iter().chain(window(9)).collect();
+        receipt_lost_reply_episode(&mut witness, "lost", fault, &reached(9), &events).unwrap();
+        assert_eq!(
+            witness.effects.unknown(),
+            [format!("{kind}:5@lost"), format!("{kind}:9@lost")]
+                .into_iter()
+                .collect(),
+            "{fault:?}"
+        );
+        for effect in witness.effects.effects.values() {
+            assert!(effect.reply_lost && effect.attempted == 1, "{effect:?}");
+        }
+    }
+}
+
+#[test]
+fn a_lost_reply_without_a_matching_fixed_expectation_refuses_the_run() {
+    let identity = "search_commit:9";
+    let mut effects = EffectLedger::default();
+    effects.attempt(identity);
+    effects.lose_reply(identity).unwrap();
+    let fixed = BTreeMap::from([(identity.to_string(), EffectState::Applied)]);
+    assert!(
+        check_expectations(&fixed, &effects).is_err(),
+        "not read back"
+    );
+    effects
+        .read_back(identity, EffectState::NotApplied)
+        .unwrap();
+    assert!(
+        check_expectations(&BTreeMap::new(), &effects).is_err(),
+        "a lost reply the campaign fixed no expectation for"
+    );
+    assert!(
+        check_expectations(&fixed, &effects).is_err(),
+        "read back not applied"
+    );
+    // A read-back fixes the expectation, so the applied case is a second
+    // ledger, not a second read-back of the same effect.
+    let mut applied = EffectLedger::default();
+    applied.attempt(identity);
+    applied.lose_reply(identity).unwrap();
+    applied.read_back(identity, EffectState::Applied).unwrap();
+    check_expectations(&fixed, &applied).unwrap();
+    let stray = BTreeMap::from([("search_ack:9".to_string(), EffectState::Applied)]);
+    assert!(
+        check_expectations(&stray, &applied).is_err(),
+        "an expectation for an effect the campaign never lost"
+    );
+}
+
+#[test]
+fn a_read_back_after_later_catch_up_is_refused_as_masked() {
+    let plan = aging::plan(MESSAGES).unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let mut stores = aging::Stores::open(root.path(), &plan);
+    aging::live(&mut stores, &plan.steps[..3]);
+    let mut witness = Witness::new();
+    stores.apply(&plan.steps[3]);
+    lost_reply_episode(
+        &mut stores,
+        &mut witness,
+        "lost",
+        3,
+        plan.steps[3].now_ms,
+        SearchEpisodeFault::LoseLocalCommitReply,
+    )
+    .unwrap();
+    stores.apply(&plan.steps[4]);
+    stores.drain(plan.steps[4].now_ms);
+    let closed = stores.close();
+    let error = read_back(closed.root(), &mut witness).unwrap_err();
+    assert!(matches!(error, RunError::ReadBackMasked { .. }), "{error}");
+    assert_eq!(
+        witness.effects.unknown().len(),
+        1,
+        "a masked read-back resolves nothing"
+    );
+}
+
+/// A 12-message plan leaves seven steps after the checkpoint: enough for a
+/// six-step fault phase, not for the nine the held publication needs.
+#[test]
+fn a_plan_too_short_for_the_fault_phase_is_refused() {
+    let publish = tempfile::tempdir().unwrap();
+    let mut config = config(publish.path().join("out"), 600_000);
+    config.messages = 12;
+    match fault::run(&config, spawn_child) {
+        Err(RunError::HistoryTooShort { after_checkpoint }) => assert!(after_checkpoint < 9),
+        Err(other) => panic!("refused by the wrong error: {other}"),
+        Ok(_) => panic!("a 12-message plan ran the fault phase"),
+    }
+}
+
+/// `--messages 7` plans a history whose checkpoint leaves fewer than the nine
+/// suffix steps the fault phase drives. The run refuses it as a `RunError`
+/// before any store opens; it does not panic on accepted numeric input.
+#[test]
+fn a_history_too_short_for_the_fault_phase_is_refused_not_panicked() {
+    let plan = aging::plan(7).unwrap();
+    assert!(
+        plan.steps.len() - (plan.checkpoint_step as usize) < 9,
+        "the case needs a short suffix: {} steps, checkpoint {}",
+        plan.steps.len(),
+        plan.checkpoint_step
+    );
+    let publish = tempfile::tempdir().unwrap();
+    let mut config = config(publish.path().join("out"), 600_000);
+    config.messages = 7;
+    let outcome = std::panic::catch_unwind(|| fault::run(&config, spawn_child).err());
+    let refused = outcome
+        .expect("a short history is refused, not a panic")
+        .expect("a short history is refused");
+    assert!(
+        refused.to_string().contains("after the checkpoint"),
+        "{refused}"
+    );
+    assert!(
+        !publish.path().join("out").join(REPORT_FILE).exists(),
+        "nothing is published"
+    );
+}
+
+/// The campaign's store-byte peak is the open footprint: closing the stores
+/// checkpoints every WAL away, so a peak read only after the close would
+/// let a run pass its bound while exceeding it.
+#[test]
+fn the_campaign_charges_the_stores_at_their_open_footprint_not_after_the_close() {
+    let plan = aging::plan(MESSAGES).unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let mut stores = aging::Stores::open(root.path(), &plan);
+    aging::live(&mut stores, &plan.steps);
+    let open = campaign::root_bytes(root.path());
+    drop(stores.close());
+    let closed = campaign::root_bytes(root.path());
+    assert!(
+        open > closed,
+        "closing checkpoints the WAL away: {open} vs {closed}"
+    );
+    let profile = fault::profile(Scale::S0, MESSAGES, 600_000, None);
+    let mut charges = campaign::Charges::new(profile.envelope);
+    let mut witness = Witness::new();
+    fault::campaign(&plan, &mut charges, &mut witness).unwrap();
+    let peak = charges.envelope.peaks.store_bytes;
+    assert!(
+        peak > (open + closed) / 2,
+        "the peak charged is the open footprint: peak {peak}, open {open}, closed {closed}"
+    );
 }

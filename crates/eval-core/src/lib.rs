@@ -3,6 +3,11 @@
 
 #![forbid(unsafe_code)]
 
+/// An identifier or name that is empty or whitespace names nothing.
+pub(crate) fn blank(text: &str) -> bool {
+    text.trim().is_empty()
+}
+
 /// Variant names and fields are the message; callers match on the variant.
 macro_rules! debug_display {
     ($($error:ty),*) => {$(
@@ -87,12 +92,12 @@ pub use fault::{
     BarrierRefused, CoverageRefused, CutCoverage, Effect, EffectLedger, EffectOutcome,
     EffectRefused, EffectState, EpisodeRefused, Expected, ExpectedRefusal, FAULT_REPORT_SCHEMA,
     FaultAction, FaultEpisode, FaultReport, FaultReportError, FaultScope, Heal, HealthyCore,
-    KillLabel, Lane, LaneProgress, LivenessRefused, LivenessReport, PublicationFaultKind,
-    RecordedRefusal, SearchEpisodeFault, TEST_BINARY_CHILD, cut_receipts, parse_fault_report,
-    validate_episodes,
+    KillLabel, Lane, LaneProgress, LivenessRefused, LivenessReport, MaterializationFaultKind,
+    PublicationFaultKind, RecordedRefusal, SIGKILL, SearchEpisodeFault, TEST_BINARY_CHILD,
+    cut_receipts, parse_fault_report, validate_episodes,
 };
 pub use generator::*;
-pub use governance::{ArmError, ArmRecord, GovernanceArms, HistoryPolicy};
+pub use governance::{ArmError, ArmRecord, GovernanceArms, HistoryPolicy, pair_set_digest};
 pub use growth::{
     CampaignResources, GROWTH_REPORT_SCHEMA, GrowthBounds, GrowthContract, GrowthLedger,
     GrowthMode, GrowthRefused, GrowthReport, GrowthReportError, HeadroomSample, IsolationRefused,
@@ -105,8 +110,8 @@ pub use identity::{
 };
 pub use injection::{
     AxisValue, Carrier, INJECTION_CANARY_PROTOCOL, InjectionCase, InjectionError,
-    InjectionObservation, InjectionScore, LaterSession, SideEffect, TaskSet, plan_injection_cases,
-    score_injection,
+    InjectionObservation, InjectionScore, LaterSession, SideEffect, StageValue, TaskSet,
+    plan_injection_cases, score_injection,
 };
 pub use ledger::{
     CHAIN_STAGES, ChainStage, Completed, Evidence, Ledger, LedgerError,
@@ -123,9 +128,10 @@ pub use manifest::{
 pub use markers::*;
 pub use occurrence::*;
 pub use pairs::{
-    ArmKind, BaselineContrast, BaselineFailure, BaselineVerdict, NATURAL_FRESH_ENTITY_TAG,
-    PAIRING_POLICY_VERSION, Pair, PairError, PairSet, PairSetInput, RECENCY_BASELINE_VERSION,
-    StopCondition, Suite, Task, TaskRole, check_recency_baseline, compile_pair_set, recency_bound,
+    ArmKind, Baseline, BaselineContrast, BaselineFailure, BaselineVerdict,
+    NATURAL_FRESH_ENTITY_TAG, PAIRING_POLICY_VERSION, Pair, PairError, PairSet, PairSetInput,
+    RECENCY_BASELINE_VERSION, StopCondition, Suite, Task, TaskRole, check_recency_baseline,
+    compile_pair_set, recency_bound,
 };
 pub use reducer::*;
 pub use render::*;
@@ -139,11 +145,12 @@ pub use residue::{
 };
 pub use statistics::{
     ANALYSIS_FAMILY_SCHEMA, Analysis, AnalysisFamily, ArmResult, BlockedReason, CampaignProfile,
-    CensorReason, ClusterKey, ClusteringUnit, FrozenFamily, GateVerdict, Gates, ICC_THRESHOLD,
-    ITEM_COUNT_THRESHOLD, IccPilot, Interval, IntervalMethod, IntervalOutcome, IntervalWithheld,
-    LivenessBounds, MIN_BOOTSTRAP_REPLICATES, MultiplicityCorrection, PairCounts, PairOutcome,
-    PairedReport, PilotObservation, ProfileRates, Ratio, StatisticsError, StoppingRule, analyze,
-    arm_miss_asymmetry, cluster_bootstrap_interval, intraclass_correlation, parse_analysis_family,
-    parse_campaign_profile, run_icc_pilot,
+    CensorReason, ClusterKey, ClusteringUnit, FrozenFamily, GATE_ENDPOINTS, GateVerdict, Gates,
+    ICC_THRESHOLD, ITEM_COUNT_THRESHOLD, IccPilot, Interval, IntervalMethod, IntervalOutcome,
+    IntervalWithheld, LivenessBounds, MAX_BOOTSTRAP_DRAWS, MAX_BOOTSTRAP_REPLICATES,
+    MIN_BOOTSTRAP_REPLICATES, MultiplicityCorrection, PAIR_TABLE_DIGEST_PROTOCOL, PAIRED_ARMS,
+    PairCounts, PairOutcome, PairedReport, PilotObservation, ProfileRates, Ratio, StatisticsError,
+    StoppingRule, analyze, arm_miss_asymmetry, cluster_bootstrap_interval, intraclass_correlation,
+    pair_table_digest, parse_analysis_family, parse_campaign_profile, run_icc_pilot,
 };
 pub use stream::*;
