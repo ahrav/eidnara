@@ -2291,11 +2291,18 @@ further on (`ReadBackMasked`), leaving the ledger untouched. Before publishing,
 the run refuses unless every lost reply has exactly one fixed expectation and
 its read-back matches it. The rest of the history then runs on the reopened
 stores. `AtQuiescence`, `AfterFaultPhase`, `AfterRecovery` (reached twice), and
-`EndOfRun` are receipted where the runner reached them. A safety check runs
-after every episode while its fault is armed and after every reopen: the
-projection connection verifies, no descriptor claims a commit past the tip or
-an invalidation before its creation, and the projection never runs ahead of
-the kernel.
+`EndOfRun` are receipted where the runner reached them. The safety invariants
+(no descriptor claims a commit past the tip or an invalidation before its
+creation, and the projection never runs ahead of the kernel) are checked while
+each fault is armed, and only those checks count as
+`safety_checks_while_armed`: for the lock holder, while the holder still holds
+the projection; for a reply-loss fault, from the episode's observer at the cut
+whose reply the fault loses (`local_staged` or `acknowledgement_requested`),
+reading the files and the kernel because the episode holds the projection
+connection there. The same invariants plus the projection connection's
+verification run again after every episode and every reopen, as assertions
+that count nothing, since no fault is armed then. Each recovery charges the
+stores' bytes before the close that checkpoints their WALs away.
 
 Not in this shell: the CAS artifact faults, the publication faults, quiescent
 corruption, R11, R24, a process kill at a named cut, a held publication

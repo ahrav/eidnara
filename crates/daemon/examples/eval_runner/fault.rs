@@ -157,28 +157,42 @@ impl Witness {
         *self.checkpoints.entry(cut).or_insert(0) += 1;
     }
 
-    /// The invariants that must hold while a fault is armed: the projection's
-    /// connection verifies, no descriptor claims a commit past the tip or an
-    /// invalidation before its creation, and the projection never runs ahead of the kernel.
+    /// The safety check after an episode returned or the stores reopened:
+    /// the projection's connection verifies and the invariants hold. No fault
+    /// is armed then, so the check is not counted as one made while armed.
     pub fn safety_check(&mut self, stores: &Stores) {
         stores.projection.verify_connection().unwrap();
-        let snapshot = stores.snapshot();
-        for (object_id, descriptor) in &snapshot.kernel {
-            assert!(
-                descriptor.created_commit_seq <= snapshot.commit_seq,
-                "{object_id} created after the tip"
-            );
-            if let Some(invalidated) = descriptor.invalidated_commit_seq {
-                assert!(
-                    invalidated > descriptor.created_commit_seq,
-                    "{object_id} invalidated before it was created"
-                );
-            }
-        }
-        let acknowledged = snapshot.commit_seq - stores.pending(WorkCounter::CatchUpLag) as i64;
-        assert!(acknowledged <= snapshot.commit_seq);
+        safety_invariants(stores);
+    }
+
+    /// The safety check at a cut where a fault is armed, run from the
+    /// episode's observer. At `LocalStaged` the projection connection is held
+    /// by the episode, so this reads the files and the kernel, not the
+    /// projection handle; it is the check `safety_checks_while_armed` counts.
+    pub fn safety_check_while_armed(&mut self, stores: &Stores) {
+        safety_invariants(stores);
         self.safety_checks += 1;
     }
+}
+
+/// No descriptor claims a commit past the tip or an invalidation before its
+/// creation, and the projection never runs ahead of the kernel.
+fn safety_invariants(stores: &Stores) {
+    let snapshot = stores.snapshot();
+    for (object_id, descriptor) in &snapshot.kernel {
+        assert!(
+            descriptor.created_commit_seq <= snapshot.commit_seq,
+            "{object_id} created after the tip"
+        );
+        if let Some(invalidated) = descriptor.invalidated_commit_seq {
+            assert!(
+                invalidated > descriptor.created_commit_seq,
+                "{object_id} invalidated before it was created"
+            );
+        }
+    }
+    let acknowledged = snapshot.commit_seq - stores.pending(WorkCounter::CatchUpLag) as i64;
+    assert!(acknowledged <= snapshot.commit_seq);
 }
 
 const EVENT_CUTS: [&str; 6] = [
@@ -267,7 +281,22 @@ pub fn lost_reply_episode(
     declare_lost_reply_episode(witness, id, step, fault);
     stores.publish_outbox_now();
     let mut events = Vec::new();
+    let stores = &*stores;
+    // The fault is armed for the whole episode and consumed when it returns,
+    // so the counted safety check runs at the cut whose reply the fault loses.
     let report = stores.episode(now, Some(seam(fault).production), &mut |event| {
+        if matches!(
+            (fault, &event),
+            (
+                SearchEpisodeFault::LoseLocalCommitReply,
+                EpisodeEvent::LocalStaged { .. }
+            ) | (
+                SearchEpisodeFault::LoseAcknowledgementReply,
+                EpisodeEvent::AcknowledgementRequested { .. }
+            )
+        ) {
+            witness.safety_check_while_armed(stores);
+        }
         events.push(event)
     });
     let fixed = receipt_lost_reply_episode(witness, id, fault, &report, &events)?;
@@ -369,7 +398,7 @@ pub fn lock_holder_episode(
         EpisodeEnd::Blocked(Blocked::LocalCommitUnresolved) => witness.receipt("lock_blocked"),
         other => return Err(unexpected(id, "Blocked(LocalCommitUnresolved)", other)),
     }
-    witness.safety_check(stores);
+    witness.safety_check_while_armed(stores);
     drop(holder);
     let released = stores.episode(now, None, &mut |_| {});
     if released.end != EpisodeEnd::ReachedTarget {
@@ -485,7 +514,7 @@ pub fn campaign(
         steps[3].now_ms,
         SearchEpisodeFault::LoseLocalCommitReply,
     )?);
-    let mut stores = recover(stores, witness, steps[4].now_ms)?;
+    let mut stores = recover(stores, witness, charges, steps[4].now_ms)?;
 
     stores.apply(&steps[4]);
     expected.extend(lost_reply_episode(
@@ -497,7 +526,7 @@ pub fn campaign(
         SearchEpisodeFault::LoseAcknowledgementReply,
     )?);
     witness.checkpoint(Cut::AfterFaultPhase);
-    let mut stores = recover(stores, witness, steps[5].now_ms)?;
+    let mut stores = recover(stores, witness, charges, steps[5].now_ms)?;
 
     live(&mut stores, &steps[5..]);
     witness.checkpoint(Cut::EndOfRun);
@@ -509,7 +538,14 @@ pub fn campaign(
     Ok(expected)
 }
 
-fn recover(stores: Stores, witness: &mut Witness, now: i64) -> Result<Stores, RunError> {
+fn recover(
+    stores: Stores,
+    witness: &mut Witness,
+    charges: &mut Charges,
+    now: i64,
+) -> Result<Stores, RunError> {
+    // Closing checkpoints the WALs away, so the footprint is charged first.
+    charges.store_bytes(stores.root())?;
     let closed = stores.close();
     read_back(closed.root(), witness)?;
     let stores = closed.reopen(now);

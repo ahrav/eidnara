@@ -465,3 +465,91 @@ fn the_campaign_charges_the_stores_at_their_open_footprint_not_after_the_close()
         "the peak charged is the open footprint: peak {peak}, open {open}, closed {closed}"
     );
 }
+
+/// Each recovery closes the stores, which checkpoints the WALs away, so the
+/// footprint before a recovery is charged too, not only the one at the end.
+/// With ten messages the run's largest footprint is the one before the first
+/// recovery; a peak charged only at the end would understate it.
+#[test]
+fn the_campaign_charges_the_stores_before_each_recovery_closes_them() {
+    let plan = fault::plan(10).unwrap();
+    let k = plan.checkpoint_step as usize;
+    let steps = &plan.steps[k..];
+    // The footprint the campaign reaches right before its first recovery,
+    // measured on a root of its own by the same steps.
+    let root = tempfile::tempdir().unwrap();
+    let mut stores = aging::Stores::open(root.path(), &plan);
+    aging::live(&mut stores, &plan.steps[..k]);
+    let mut witness = Witness::new();
+    stores.apply(&steps[0]);
+    fault::lock_holder_episode(&mut stores, &mut witness, "lock", k as u32, steps[0].now_ms)
+        .unwrap();
+    stores.drain(steps[0].now_ms);
+    for planned in &steps[1..3] {
+        stores.apply(planned);
+        stores.drain(planned.now_ms);
+    }
+    stores.apply(&steps[3]);
+    lost_reply_episode(
+        &mut stores,
+        &mut witness,
+        "lost",
+        (k + 3) as u32,
+        steps[3].now_ms,
+        SearchEpisodeFault::LoseLocalCommitReply,
+    )
+    .unwrap();
+    let before_recovery = campaign::root_bytes(root.path());
+    let closed = stores.close();
+    let mut stores = closed.reopen(steps[4].now_ms);
+    aging::live(&mut stores, &steps[4..]);
+    let end_open = campaign::root_bytes(root.path());
+    drop(stores.close());
+    assert!(
+        before_recovery > end_open,
+        "the case needs its peak before the recovery: {before_recovery} vs {end_open}"
+    );
+
+    let profile = fault::profile(Scale::S0, 10, 600_000, None);
+    let mut charges = campaign::Charges::new(profile.envelope);
+    let mut witness = Witness::new();
+    fault::campaign(&plan, &mut charges, &mut witness).unwrap();
+    let peak = charges.envelope.peaks.store_bytes;
+    assert!(
+        peak > (before_recovery + end_open) / 2,
+        "the peak charged is the footprint before the recovery: peak {peak}, before {before_recovery}, end {end_open}"
+    );
+}
+
+/// `safety_checks_while_armed` counts checks made while a fault is armed. A
+/// reply-loss fault is consumed when its episode returns, so the checks after
+/// the episode and after the reopen run as assertions but are not counted;
+/// the episode's own check runs at the cut where the fault is armed.
+#[test]
+fn a_safety_check_outside_an_armed_window_is_not_counted_as_armed() {
+    let plan = aging::plan(MESSAGES).unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let mut stores = aging::Stores::open(root.path(), &plan);
+    aging::live(&mut stores, &plan.steps[..3]);
+    let mut witness = Witness::new();
+    stores.apply(&plan.steps[3]);
+    lost_reply_episode(
+        &mut stores,
+        &mut witness,
+        "lost",
+        3,
+        plan.steps[3].now_ms,
+        SearchEpisodeFault::LoseLocalCommitReply,
+    )
+    .unwrap();
+    let armed = witness.safety_checks;
+    assert!(
+        armed >= 1,
+        "the episode checks safety while its fault is armed"
+    );
+    witness.safety_check(&stores);
+    assert_eq!(
+        witness.safety_checks, armed,
+        "a check after the episode returned is not a check while armed"
+    );
+}

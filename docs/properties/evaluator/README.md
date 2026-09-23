@@ -1632,7 +1632,7 @@ job under `EIDNARA_EVAL_S0_BUDGET_MS`):
   `flt_every_declared_cut_receipted`): every declared episode and observer
   cut has a receipt, the four oracle checkpoints resolve to `reached`, every
   episode's heal is the one its seam permits, no episode carries a kill label,
-  a safety check ran for every episode, the published report parses back
+  a safety check ran while every episode's fault was armed, the published report parses back
   equal, and the manifest names it by result digest under `generate`.
 - `a_lost_reply_stays_unknown_until_readback_at_after_recovery`
   (`flt-lost-ack-expected-is-admissible-set`; marker
