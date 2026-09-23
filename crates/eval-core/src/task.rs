@@ -232,6 +232,8 @@ impl GeneratedTask {
     /// A changed `Cargo.toml` can redefine test targets, the build script, or dependencies.
     /// Cargo reads both `.cargo/config` and `.cargo/config.toml`.
     /// A root `build.rs` runs before the test targets compile and can rewrite them.
+    /// A `rust-toolchain` or `rust-toolchain.toml` override makes rustup run an
+    /// agent-supplied `cargo` for every command in the directory.
     /// The runner writes the hidden tests regardless, so these paths are only recorded.
     pub fn oracle_tamper(&self, agent_files: &Files) -> Vec<String> {
         agent_files
@@ -241,6 +243,8 @@ impl GeneratedTask {
                     || (path.as_str() == "Cargo.toml" && self.files.get(*path) != Some(*content))
                     || path.starts_with(".cargo/")
                     || path.as_str() == "build.rs"
+                    || path.as_str() == "rust-toolchain"
+                    || path.as_str() == "rust-toolchain.toml"
             })
             .map(|(path, _)| path.clone())
             .collect()
@@ -730,7 +734,7 @@ impl SuiteDAdmission {
         {
             return Err(AdmissionRefused::NoAcceptedWitness);
         }
-        if self.self_tests.is_empty() {
+        if self.self_tests.is_empty() || self.self_tests.iter().any(|t| t.trim().is_empty()) {
             return Err(AdmissionRefused::NoSelfTests);
         }
         if self
