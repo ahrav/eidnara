@@ -432,6 +432,10 @@ pub fn run(config: &Config, spawn: Spawn) -> Result<Run, RunError> {
     )
     .unwrap();
     commits(u64::from(config.commits)).map_err(RunError::Commits)?;
+    config
+        .oracle
+        .validate()
+        .map_err(ShrinkRefused::InvalidOracle)?;
     let profile = profile(
         config.scale,
         config.elapsed_bound_ms,
@@ -441,6 +445,16 @@ pub fn run(config: &Config, spawn: Spawn) -> Result<Run, RunError> {
     let profile_digest = profile.digest()?;
     let mut charges = Charges::new(profile.envelope.clone());
     prepare_publish(&config.publish, &[WITNESS_FILE, MANIFEST_FILE]).map_err(publish_refused)?;
+    // The build identity is frozen before the first child runs: the
+    // checkout, the lockfile, and the executable the outcomes come from,
+    // not whatever the tree holds once the shrink has finished.
+    let run_identity = identity(
+        &profile,
+        SIMULATOR_VERSION,
+        SEED,
+        json!({"commits": config.commits, "oracle": config.oracle}),
+        &[std::env::current_exe().unwrap()],
+    );
     let root = charges.occupy()?;
     let (original, tape) = scenario(config.commits);
     let mut replayer = Replayer {
@@ -516,13 +530,6 @@ pub fn run(config: &Config, spawn: Spawn) -> Result<Run, RunError> {
             .record("flt_shrink_unknown_effect_preserved")
             .unwrap();
     }
-    let run_identity = identity(
-        &profile,
-        SIMULATOR_VERSION,
-        SEED,
-        json!({"commits": config.commits, "oracle": config.oracle}),
-        &[std::env::current_exe().unwrap()],
-    );
     let mut witness = WitnessPackage {
         schema: WITNESS_SCHEMA.to_string(),
         original: OriginalFailure {
@@ -579,8 +586,14 @@ pub fn run(config: &Config, spawn: Spawn) -> Result<Run, RunError> {
     manifest.component_versions.task_corpus = format!("generated:{SEED:#x}");
     manifest.component_versions.execution_image = "fresh-process".to_string();
     let manifest_bytes = serde_json::to_vec_pretty(&manifest.to_value()).unwrap();
-    publish_file(&config.publish.join(WITNESS_FILE), &witness_bytes).map_err(publish_refused)?;
-    publish_file(&config.publish.join(MANIFEST_FILE), &manifest_bytes).map_err(publish_refused)?;
+    // A reader finds both files or none: a witness whose manifest could not
+    // follow it is taken back out, as the other shells do.
+    let witness_path = config.publish.join(WITNESS_FILE);
+    publish_file(&witness_path, &witness_bytes).map_err(publish_refused)?;
+    if let Err(error) = publish_file(&config.publish.join(MANIFEST_FILE), &manifest_bytes) {
+        let _ = std::fs::remove_file(&witness_path);
+        return Err(publish_refused(error));
+    }
     Ok(Run {
         witness,
         witness_bytes,

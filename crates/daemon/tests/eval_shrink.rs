@@ -28,9 +28,9 @@ use std::time::Duration;
 use context_core::canonical_json::protocol_digest;
 use eval_core::{
     Approval, CandidateVerdict, Cut, CutOutcome, Element, EventId, FailureClass, History,
-    Minimality, NotEstablishedReason, Oracle, ProfileError, ReplayOutcome, Scale, Scenario,
-    Transformation, UnknownReason, WITNESS_DIGEST_PROTOCOL, WitnessClass, WitnessError,
-    parse_manifest, parse_witness, residue_drift,
+    Minimality, NotEstablishedReason, Oracle, OracleRefused, ProfileError, ReplayOutcome, Scale,
+    Scenario, ShrinkRefused, Transformation, UnknownReason, WITNESS_DIGEST_PROTOCOL, WitnessClass,
+    WitnessError, parse_manifest, parse_witness, residue_drift,
 };
 use serde_json::{Value, json};
 use shrink::{BARRIER, ChildArgs, Config, MANIFEST_FILE, Replayed, RunError, WITNESS_FILE};
@@ -540,6 +540,27 @@ fn a_commit_count_the_scenario_cannot_carry_is_refused_before_anything_runs() {
             "{commits} commits published a root"
         );
     }
+}
+
+#[test]
+fn an_inverted_oracle_is_refused_before_the_original_is_replayed() {
+    let publish = tempfile::tempdir().unwrap();
+    let mut config = config(publish.path().join("out"));
+    config.oracle = Oracle::RequiredCommits {
+        failing_at: 1_000,
+        slipping_at: 3,
+    };
+    let refused = shrink::run(&config, spawn_child).err().unwrap();
+    assert!(
+        matches!(
+            refused,
+            RunError::Shrink(ShrinkRefused::InvalidOracle(
+                OracleRefused::InvertedThresholds { .. }
+            ))
+        ),
+        "{refused:?}"
+    );
+    assert!(!config.publish.exists(), "refused before the publish root");
 }
 
 #[test]

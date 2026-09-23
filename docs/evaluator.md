@@ -2901,7 +2901,8 @@ those bytes (`RedactionRefused`; a detection refuses the package, nothing is
 substituted). It returns the value and the canonical text; the text is what
 the shell publishes, so the bound is the bytes on disk. `parse_witness`
 refuses a field the type would drop and a value that does not re-serialize to
-itself (`Lossy`). `residue_drift(recorded, current)` refuses
+itself (`Lossy`), and before either an integer outside the canonical range
+(`Shape`), as the serializer would. `residue_drift(recorded, current)` refuses
 `ResidueDrift { missing, unexpected }` when a replaying build's declared
 residue differs from the recorded set; the shell's `Replayer::replay` applies
 it to every child's report. The manifest's `witness_digest` is the protocol digest
@@ -2918,7 +2919,9 @@ declares two process-kill fault episodes so the fault-episode transformation
 has elements to try; the child never executes them, so they are inert and
 deleted first. `profile` is the Suite B profile renamed `suite-c-shrink`
 with `tasks_per_world: 2`, the two tasks the scenario carries; its digest is
-pinned into every predicate. `run` approves it, prepares the publish directory,
+pinned into every predicate. `run` refuses an inverted oracle
+(`InvalidOracle`) before anything else, approves the profile, prepares the
+publish directory, freezes the run identity before the first child runs,
 occupies one temp root for the candidate file, replays the original, and
 refuses `NoFailure` unless the child reports `Failed`; the reported predicate
 is the pinned one, and refuses `ForeignPredicate` when the child's oracle,
@@ -2932,7 +2935,8 @@ refusal. The witness is validated once without a recipe; `RecipeRequired`
 adds the compact form from `count_triggered`. The temp root is vacated before
 the manifest is built, so the envelope it records is final. `witness.json`
 holds the canonical bytes `serialize` returned and `manifest.json` the
-manifest, each published with `publish_file`.
+manifest, each published with `publish_file`; a witness whose manifest could
+not follow it is removed again, so a reader finds both files or none.
 
 The child (`shrink-child`, or the daemon test's re-executed entrypoint) reads
 `ChildArgs` from one environment variable: the candidate scenario path, the

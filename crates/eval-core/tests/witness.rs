@@ -315,6 +315,17 @@ fn a_multiplicity_record_counts_only_under_its_own_scenario_digest() {
 }
 
 #[test]
+fn a_parsed_package_holds_every_integer_to_the_canonical_range() {
+    let (value, _) = package().serialize(&redactor(), ARTIFACT_BYTES).unwrap();
+    let mut huge = value.clone();
+    huge["shrink"]["max_replays"] = serde_json::json!(9_007_199_254_740_992u64);
+    assert!(
+        matches!(parse_witness(&huge), Err(WitnessError::Shape(_))),
+        "a budget Bun cannot represent exactly is refused at the parser, as the serializer refuses it"
+    );
+}
+
+#[test]
 fn the_coverage_signature_names_only_registered_markers() {
     let mut package = package();
     package

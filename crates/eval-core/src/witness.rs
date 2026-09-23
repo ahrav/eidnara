@@ -358,9 +358,10 @@ fn check_claims(value: &Value, path: &str) -> Result<(), WitnessError> {
     }
 }
 
-/// Refuses a missing block by name, a field the type would drop, then
-/// everything `validate` refuses.
+/// Refuses an integer outside the canonical range, a missing block by name,
+/// a field the type would drop, then everything `validate` refuses.
 pub fn parse_witness(value: &Value) -> Result<WitnessPackage, WitnessError> {
+    canonical_json_encode(value).map_err(|e| WitnessError::Shape(e.to_string()))?;
     let package =
         WitnessPackage::deserialize(value).map_err(|e| WitnessError::Shape(e.to_string()))?;
     package.validate()?;
