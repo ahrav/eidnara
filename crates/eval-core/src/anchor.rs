@@ -474,7 +474,8 @@ pub enum CutoffRefused {
     IssueTextBeforeIssue,
     /// The fix commit does not descend from the base commit.
     FixNotFromBase,
-    /// The fix commit's tree is its parent's tree: nothing changed.
+    /// The fix commit's tree is its parent's tree or the base tree: nothing
+    /// was repaired.
     FixChangesNothing,
     SnapshotDigestMissing,
     /// A tree digest that is neither a git object id (forty hex) nor a
@@ -553,7 +554,9 @@ impl CutoffAudit {
         if !self.fix_descends_from_base {
             return Err(CutoffRefused::FixNotFromBase);
         }
-        if self.fix_tree_digest == self.fix_parent_tree_digest {
+        if self.fix_tree_digest == self.fix_parent_tree_digest
+            || self.fix_tree_digest == self.base_tree_digest
+        {
             return Err(CutoffRefused::FixChangesNothing);
         }
         Ok(())
@@ -824,10 +827,11 @@ pub fn future_answers(entry: &AnchorEntry, output: &str) -> Vec<String> {
     found
 }
 
-/// `needle` occurs in `output` as a whole number: not followed by a digit,
-/// and, when it begins with a host name rather than `#`, not preceded by a
-/// name character, so `notexample.invalid/...` does not name
-/// `example.invalid/...` (a `.` before it may, as in `www.`) while
+/// `needle` occurs in `output` as a whole number: not followed by a letter
+/// or digit (so `#2016ff` is a colour, not `#2016`, while `/pull/2016/files`
+/// still names 2016), and, when it begins with a host name rather than `#`,
+/// not preceded by a name character, so `notexample.invalid/...` does not
+/// name `example.invalid/...` (a `.` before it may, as in `www.`) while
 /// `PR#2016` still names `#2016`.
 fn names_whole_number(output: &str, needle: &str) -> bool {
     let bytes = output.as_bytes();
@@ -836,7 +840,7 @@ fn names_whole_number(output: &str, needle: &str) -> bool {
         let before = at.checked_sub(1).map(|i| bytes[i]);
         let after = bytes.get(at + needle.len());
         !(bounded_left && before.is_some_and(|b| b.is_ascii_alphanumeric() || b == b'-'))
-            && !after.is_some_and(u8::is_ascii_digit)
+            && !after.is_some_and(u8::is_ascii_alphanumeric)
     })
 }
 

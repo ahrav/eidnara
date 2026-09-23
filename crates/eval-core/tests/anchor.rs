@@ -1676,3 +1676,24 @@ fn an_exception_takes_no_plus() {
     entry.license = "GPL-2.0+ WITH Classpath-exception-2.0".to_string();
     entry.validate().unwrap();
 }
+
+#[test]
+fn a_fix_that_reverts_to_the_base_tree_fixes_nothing() {
+    let mut revert = audit("cargo-0");
+    revert.fix_parent_tree_digest = "cd".repeat(32);
+    revert.fix_tree_digest = revert.base_tree_digest.clone();
+    assert!(revert.validate().is_err());
+}
+
+#[test]
+fn a_pull_request_number_is_not_the_prefix_of_a_word() {
+    let mut entry = entry("cargo-0", Family::Cargo, 0x10);
+    entry.pull_request = Some(2016);
+    for output in ["color #2016ff", "PR 2016abc"] {
+        assert!(future_answers(&entry, output).is_empty(), "{output}");
+    }
+    assert_eq!(
+        future_answers(&entry, "https://example.invalid/cargo/repo/pull/2016/files"),
+        vec!["pull_request:2016"]
+    );
+}

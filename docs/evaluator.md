@@ -2535,7 +2535,8 @@ filed after it, issue text edited after it or dated before the issue
 (`IssueTextBeforeIssue`), a snapshot whose digest is not
 the base commit's tree (which alone keeps every fix-side change out of the
 snapshot), a fix that does not descend from the base (`FixNotFromBase`),
-and a fix whose tree is its parent's (`FixChangesNothing`); each is one
+and a fix whose tree is its parent's or the base's (`FixChangesNothing`);
+each is one
 `CutoffRefused` reason (`reason` on the wire). `validate_for(entry)` first
 requires the audit to name the entry's task (`AuditForOtherTask`) and the
 entry's row by digest (`RowMismatch`, when any field of the row changed
@@ -2578,8 +2579,8 @@ when any run of hex digits of seven or more, in either case, is a prefix of
 `/pull/<n>` URL, or the words `PR <n>`, `pull request <n>`, or
 `pull-request <n>`, as a whole number (a URL, `GH-`, or a word form not
 preceded by a name character, so another host ending in this one does not match; `#<n>` beside
-a word, as in `PR#2016`, does; none followed by a digit), in any letter
-case.
+a word, as in `PR#2016`, does; none followed by a letter or digit, so
+`#2016ff` is a colour), in any letter case.
 
 **Anchor set.** `anchor_set(corpus, role, audits, proofs, controls,
 provider)` folds one pair's evidence into `(AnchorSet, PairAccounting)`. It
