@@ -2133,8 +2133,9 @@ package carries the `Slice` (`live` or `cassette`) and `replayable`, the
 recorded `residue` entries, the `minimized` `Scenario`, an optional
 `MultiplicityRecipe`, the `ShrinkReport`, and the verbatim `claim_boundary`.
 
-`WitnessPackage::validate` refuses: a schema other than `eval-witness/v1`; a
-claim boundary other than `ClaimBoundary::pinned()`
+`WitnessPackage::validate` refuses: a schema other than `eval-witness/v1`, or
+an embedded shrink report whose schema is not `eval-shrink/v1`
+(`SchemaMismatch { found }` names whichever it read); a claim boundary other than `ClaimBoundary::pinned()`
 (`ClaimBoundaryMismatch`); a live slice labelled replayable
 (`LiveRelabelledReplayable`); a predicate that disagrees between the original
 and the shrink report; a minimized scenario whose digest is not the report's;
@@ -2158,6 +2159,12 @@ history }`). The declared event count is compared with the minimized log plus
 the deletions before anything is generated, so a parsed package cannot demand
 an unbounded regeneration.
 
+The minimality rule also reads the report. A `OneMinimal` claim must carry,
+for every element of the minimized scenario, a candidate record whose deletion
+set is the final set plus that element and whose verdict is neither
+`Reproduced` nor `Unknown`; the first element without one is refused
+(`MinimalityUnsupported { element }`). `NotEstablished` owes no such records.
+
 `serialize(redactor, artifact_bytes)` is the one serializer: `validate`, then
 one canonical encoding whose byte length is checked against the envelope's
 artifact bound (`TooLarge`), then the cassette's full-text secret scan over
@@ -2167,8 +2174,8 @@ the shell publishes, so the bound is the bytes on disk. `parse_witness`
 refuses a field the type would drop and a value that does not re-serialize to
 itself (`Lossy`). `residue_drift(recorded, current)` refuses
 `ResidueDrift { missing, unexpected }` when a replaying build's declared
-residue differs from the recorded set; `check_residue` applies it to the
-package. The manifest's `witness_digest` is the protocol digest
+residue differs from the recorded set; the shell's `Replayer::replay` applies
+it to every child's report. The manifest's `witness_digest` is the protocol digest
 `eval-witness-digest/v1` over the serialized value.
 
 ## Shrink shell

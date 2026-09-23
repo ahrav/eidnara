@@ -532,7 +532,7 @@ pub fn run(config: &Config, spawn: Spawn) -> Result<Run, RunError> {
     let (value, text) = witness.serialize(&redactor, profile.envelope.artifact_bytes)?;
     let witness_bytes = charges.publish_bytes(|_| text.clone().into_bytes())?;
     let report_value = serde_json::to_value(&witness.shrink).unwrap();
-    let manifest = suite_c_manifest(ManifestInputs {
+    let mut manifest = suite_c_manifest(ManifestInputs {
         identity: run_identity,
         eval_run_id: witness.original.eval_run_id.clone(),
         sample: format!("shrink:{}", witness.shrink.minimized_digest),
@@ -546,6 +546,10 @@ pub fn run(config: &Config, spawn: Spawn) -> Result<Run, RunError> {
         envelope: charges.envelope.clone(),
         started_at_ms,
     });
+    // The Suite C builder names the aging corpus and an in-process image; this
+    // run generated its worlds from `SEED` and replayed each in a fresh child.
+    manifest.component_versions.task_corpus = format!("generated:{SEED:#x}");
+    manifest.component_versions.execution_image = "fresh-process".to_string();
     let manifest_bytes = serde_json::to_vec_pretty(&manifest.to_value()).unwrap();
     publish_file(&config.publish.join(WITNESS_FILE), &witness_bytes).map_err(publish_refused)?;
     publish_file(&config.publish.join(MANIFEST_FILE), &manifest_bytes).map_err(publish_refused)?;

@@ -16,7 +16,8 @@ use crate::generator::{Mode, WorldConfig, generate_all};
 use crate::manifest::{CLAIM_BOUNDARY_EXCLUSIONS, ClaimBoundary};
 use crate::residue::ResidueEntry;
 use crate::shrink::{
-    CandidateVerdict, Element, FailurePredicate, History, Minimality, Scenario, ShrinkReport,
+    CandidateVerdict, Element, FailurePredicate, History, Minimality, SHRINK_REPORT_SCHEMA,
+    Scenario, ShrinkReport,
 };
 use crate::stream::Tape;
 
@@ -96,6 +97,11 @@ pub enum WitnessError {
     RecipeDisagrees {
         history: History,
     },
+    /// The report claims 1-minimality without a rejected replay record for
+    /// this single deletion from the minimized scenario.
+    MinimalityUnsupported {
+        element: Element,
+    },
     ResidueDrift {
         missing: BTreeSet<ResidueEntry>,
         unexpected: BTreeSet<ResidueEntry>,
@@ -121,6 +127,11 @@ impl WitnessPackage {
                 found: self.schema.clone(),
             });
         }
+        if self.shrink.schema != SHRINK_REPORT_SCHEMA {
+            return Err(WitnessError::SchemaMismatch {
+                found: self.shrink.schema.clone(),
+            });
+        }
         if self.claim_boundary != ClaimBoundary::pinned() {
             return Err(WitnessError::ClaimBoundaryMismatch);
         }
@@ -142,8 +153,32 @@ impl WitnessPackage {
             }
         }
         self.check_recipe()?;
+        self.check_minimality()?;
         let value = serde_json::to_value(self).map_err(|e| WitnessError::Shape(e.to_string()))?;
         check_claims(&value, "")
+    }
+
+    /// `OneMinimal` claims every single deletion from the minimized scenario
+    /// was replayed and rejected; the report must carry that record for each.
+    fn check_minimality(&self) -> Result<(), WitnessError> {
+        if !matches!(self.shrink.minimality, Minimality::OneMinimal { .. }) {
+            return Ok(());
+        }
+        for element in self.minimized.elements() {
+            let mut deleted = self.shrink.deleted.clone();
+            deleted.insert(element.clone());
+            let rejected = self.shrink.candidates.iter().any(|record| {
+                record.deleted == deleted
+                    && !matches!(
+                        record.verdict,
+                        CandidateVerdict::Reproduced | CandidateVerdict::Unknown { .. }
+                    )
+            });
+            if !rejected {
+                return Err(WitnessError::MinimalityUnsupported { element });
+            }
+        }
+        Ok(())
     }
 
     /// A kind is count-triggered when the minimized scenario keeps more than

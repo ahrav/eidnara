@@ -37,6 +37,7 @@ use shrink::{BARRIER, ChildArgs, Config, MANIFEST_FILE, Replayed, RunError, WITN
 
 const COMMITS: u32 = 8;
 const STUBBORN: &str = "repository:repository-0:2";
+const SUITE: &str = "crates/daemon/tests/eval_shrink.rs::";
 
 fn reexec(entrypoint: &str) -> Command {
     let mut command = Command::new(std::env::current_exe().unwrap());
@@ -294,6 +295,12 @@ fn a_fresh_process_reproduces_the_predicate_and_the_minimized_witness_is_publish
     );
     assert_eq!(manifest.eval_run_id, witness.original.eval_run_id);
     assert_eq!(
+        manifest.component_versions.task_corpus,
+        format!("generated:{:#x}", shrink::SEED),
+        "the corpus names the seed the run identity was built from"
+    );
+    assert_eq!(manifest.component_versions.execution_image, "fresh-process");
+    assert_eq!(
         manifest.cut_receipts,
         vec![eval_core::CutReceipt {
             cut: Cut::AtQuiescence,
@@ -400,6 +407,9 @@ fn a_child_that_dies_before_its_barrier_is_retried_then_unknown_and_kept() {
             .contains("flt_shrink_slipped_candidate_rejected"),
         "candidates that answered still slipped"
     );
+    run.coverage
+        .complete(SUITE)
+        .expect("this run fires every marker the suite owns");
     assert!(witness.recipe.is_none(), "no 1-minimality, no recipe");
     let _ = std::fs::remove_file(death_log());
 }

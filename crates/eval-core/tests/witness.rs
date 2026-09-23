@@ -160,6 +160,12 @@ fn every_structural_refusal_names_its_cause() {
             },
         ),
         (
+            |p| p.shrink.schema = "eval-shrink/v0".to_string(),
+            WitnessError::SchemaMismatch {
+                found: "eval-shrink/v0".to_string(),
+            },
+        ),
+        (
             |p| p.original.eval_run_id = "nope".to_string(),
             WitnessError::NotHex {
                 field: "eval_run_id",
@@ -190,6 +196,31 @@ fn every_structural_refusal_names_its_cause() {
             "the serializer refuses what validate refuses"
         );
     }
+}
+
+#[test]
+fn one_minimality_needs_a_rejected_record_for_every_single_deletion() {
+    let package = package();
+    let element = package.minimized.elements()[0].clone();
+    let mut bare = package.clone();
+    bare.shrink.candidates.clear();
+    bare.recipe = None;
+    assert_eq!(
+        bare.validate(),
+        Err(WitnessError::MinimalityUnsupported {
+            element: element.clone()
+        }),
+        "a 1-minimal claim with no candidate records has no evidence"
+    );
+    assert_eq!(
+        bare.serialize(&redactor(), ARTIFACT_BYTES).err(),
+        Some(WitnessError::MinimalityUnsupported { element })
+    );
+    bare.shrink.minimality = Minimality::NotEstablished {
+        reason: eval_core::NotEstablishedReason::ReplayBudgetExhausted,
+    };
+    bare.validate()
+        .expect("a report that claims no minimality owes no rejection records");
 }
 
 #[test]
