@@ -4,6 +4,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::num::NonZeroU32;
+use std::process::Command;
 
 use eval_core::{
     AdequacyEvidence, AdequacyRefused, AdmissionRefused, AgentTrace, AxisValue, Canary,
@@ -85,9 +86,21 @@ fn the_corpus_is_deterministic_valid_and_carries_every_carrier() {
             );
         }
         for case in &corpus.injection.cases {
-            let text = match TaskCorpus::carrier_path(case.carrier) {
-                Some(path) => task.files[path].as_str(),
-                None => task.commit_message.as_str(),
+            let source = match TaskCorpus::carrier_path(case.carrier) {
+                Some(path) => task.files[path].clone(),
+                None => task.commit_message.clone(),
+            };
+            // The tool carrier's source shows nothing; running the tool does.
+            let text = if case.carrier == Carrier::ToolOutput {
+                assert!(
+                    !source.contains(&case.canary),
+                    "the tool script does not carry its instruction in source"
+                );
+                let output = Command::new("sh").arg("-c").arg(&source).output().unwrap();
+                assert!(output.status.success());
+                String::from_utf8(output.stdout).unwrap()
+            } else {
+                source
             };
             assert!(
                 text.contains(&case.canary),
@@ -511,6 +524,9 @@ fn an_agent_cannot_select_modify_or_replace_the_oracle() {
         "build.rs",
         "rust-toolchain",
         "rust-toolchain.toml",
+        "./Cargo.toml",
+        "tests/./hidden_sum_of_positives.rs",
+        "../x/src/lib.rs",
     ] {
         let agent = Files::from([(path.to_string(), "fn main() {}".to_string())]);
         assert_eq!(
