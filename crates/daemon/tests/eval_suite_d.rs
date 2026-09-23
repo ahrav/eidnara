@@ -504,6 +504,7 @@ fn a_contained_task_is_judged_by_hidden_tests_the_agent_never_sees() {
         echo: true,
         obey: BTreeSet::from([Carrier::IssueText, Carrier::Memory]),
         plant_hidden_test: true,
+        plant_oversized_hidden_test: true,
         link_manifest: true,
         peek_grade: true,
         build_script: Some(body),
@@ -563,10 +564,11 @@ fn a_contained_task_is_judged_by_hidden_tests_the_agent_never_sees() {
             task.oracle_tamper,
             vec![
                 "Cargo.toml".to_string(),
+                "tests/hidden_oversized.rs".to_string(),
                 "tests/hidden_sum_of_positives.rs".to_string()
             ],
-            "the planted hidden test and the symlinked manifest are recorded and never honoured; \
-             nothing copied from a grading tree beside the workspace"
+            "the planted hidden test, the oversized one, and the symlinked manifest are recorded \
+             and never honoured; nothing copied from a grading tree beside the workspace"
         );
         assert!(
             task.adequacy
@@ -724,6 +726,7 @@ fn a_wrong_fix_fails_a_no_fix_stays_failed_and_an_exhausted_budget_is_censored()
         },
     );
     let run = suite_d::run(&wrong, HOST).unwrap();
+    let wrong_run_id = run.report.eval_run_id.clone();
     for task in &run.report.tasks {
         assert_eq!(task.terminal, Terminal::Fail);
         assert_eq!(
@@ -762,6 +765,10 @@ fn a_wrong_fix_fails_a_no_fix_stays_failed_and_an_exhausted_budget_is_censored()
     );
     none.publish = dir.path().join("none");
     let run = suite_d::run(&none, HOST).unwrap();
+    assert_ne!(
+        run.report.eval_run_id, wrong_run_id,
+        "a different scripted agent is a different run identity"
+    );
     for task in &run.report.tasks {
         assert_eq!(task.terminal, Terminal::Fail, "no fix stays failing");
         assert_eq!(task.usage.no_progress_iterations, 1);

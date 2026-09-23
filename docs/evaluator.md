@@ -2313,24 +2313,29 @@ refuses before the first agent if any is missing.
 Containment is `unshare --user --map-root-user --mount --pid --net --fork
 --kill-child --mount-proc` with the environment cleared to `PATH`, `HOME`,
 and the variables the inner command sets, so `/proc` inside lists the
-namespace's own processes, not the host's; the canary refuses a run whose
-`/proc/self` names a PID other than its own. The script run inside before
-the agent covers the runner's private directory with an empty read-only
-tmpfs, binds the workspace writable, then remounts every other mount in the
-namespace read-only (one that refuses, such as a locked autofs, is covered
-by an empty read-only tmpfs instead) and refuses the run if any mount's
-topmost instance is still writable, so the read-only set is everything the
-host has rather than a list of directories; it then enters the workspace by
-its absolute path (a working directory inherited from before the mounts
-still resolves to the writable mount underneath every read-only remount) and
-drops the mapped root's capabilities with `setpriv` (bounding, inheritable,
-and ambient sets cleared, `no_new_privs` set), so the agent can neither
-unmount the tmpfs nor remount anything writable. Any mount that fails exits
-97 and the run is refused as `MountRefused`, so no agent runs
-half-contained. `--kill-child` kills the namespace init and with it
-everything the agent started. A bounded child's stdout is read under a cap
-and its stderr is discarded, so nothing it prints reaches the runner's own
-log. `Host::namespaces`
+namespace's own processes, not the host's; the canary refuses a run whose `/proc/self` names
+a PID other than its own, one that can connect to a socket the runner
+listens on under the host's runtime directory, or one whose 200 forks all
+succeed. The script run inside before the agent covers the runner's
+private directory with an empty read-only tmpfs, binds the workspace
+writable, then remounts every other mount in the namespace read-only (one
+that refuses, such as a locked autofs, is covered by an empty read-only tmpfs
+instead) and refuses the run if any mount's topmost instance is still
+writable, so the read-only set is everything the host has rather than a list
+of directories, covers `/run` with an empty tmpfs so host services' pathname
+sockets are out of reach (a network namespace does not stop `connect` on a
+socket file; one elsewhere on the host stays reachable), and sets a process
+limit of 128 that `RLIMIT_NPROC` enforces per user namespace, so a fork bomb
+stops there; it then enters the workspace by its absolute path (a working
+directory inherited from before the mounts still resolves to the writable
+mount underneath every read-only remount) and drops the mapped root's
+capabilities with `setpriv` (bounding, inheritable, and ambient sets cleared,
+`no_new_privs` set), so the agent can neither unmount the tmpfs nor remount
+anything writable. Any mount that fails exits 97 and the run is refused as
+`MountRefused`, so no agent runs half-contained. `--kill-child` kills the
+namespace init and with it everything the agent started. A bounded child's
+stdout is read under a cap and its stderr is discarded, so nothing it prints
+reaches the runner's own log. `Host::namespaces`
 says whether the host can create the four namespaces; when it cannot, the
 run records `Containment::Skipped { no_containment }`, every task terminal is
 `Skipped(NoContainment)`, no agent process is spawned, every injection case
@@ -2389,8 +2394,11 @@ manifest turned into a directory, say), and the hidden tests from the corpus.
 Nothing in the agent's workspace is executed or written through, so a
 `Cargo.toml` the agent replaced with a symlink or a directory, two
 hidden-test paths it hard-linked together, or a `.cargo/` it made undeletable
-cannot reach the oracle; the agent's versions of those paths are recorded in
-`oracle_tamper` and never honoured. The manifest's `component_versions.judge`
+cannot reach the oracle; the agent's versions of those paths, and a file over
+the read cap at one of them, are recorded in `oracle_tamper` and never
+honoured. The manifest is published before the report, and a report that
+fails to publish takes its manifest back, so a directory holds both or
+neither. The manifest's `component_versions.judge`
 names this judge, `eval-suite-d-hidden-tests/v1`.
 The agent script prints a start line first; stdout without it means the
 containment's own `unshare` or `exec` failed, and the run refuses instead of

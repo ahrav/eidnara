@@ -1681,8 +1681,9 @@ The METHOD-ordered records are in [`catalog.md`](catalog.md).
   session runs a generated task yet, so `retrieved` and `packed` are
   `not_measurable` and the empirical Suite D acceptance waits on a live
   agent and an approved profile. Inside the containment every mount but the
-  one writable tree is read-only, but the home directory and the rest of the
-  host filesystem are readable. Hidden tests run candidate code inside a
+  one writable tree is read-only and `/run` is masked, but the home directory
+  and the rest of the host filesystem are readable, and a pathname socket
+  outside `/run` is still connectable. Hidden tests run candidate code inside a
   grading containment with only the build cache writable, but in the same
   process as the hidden tests: code the candidate wrote can read the oracle
   sources beside it and can forge the harness summary, so the terminal is
