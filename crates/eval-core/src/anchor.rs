@@ -235,7 +235,7 @@ fn is_spdx_expression(text: &str) -> bool {
                             && tokens.get(i + 2) != Some(&"WITH")))
             } else {
                 let core = token.trim_start_matches('(').trim_end_matches(')');
-                !OPERATORS.contains(token)
+                !OPERATORS.contains(&core)
                     && core.chars().any(|c| c.is_ascii_alphanumeric())
                     && core
                         .chars()
@@ -439,11 +439,10 @@ pub struct CutoffAudit {
     /// The digest of `base_sha`'s tree, read from the repository the same
     /// way; the snapshot is that tree and nothing else.
     pub base_tree_digest: String,
-    /// The digest of `fix_sha`'s tree, read the same way; a fix that changes
-    /// no file is not a fix.
+    /// The digests of `fix_sha`'s tree and of its first parent's tree, read
+    /// the same way; a fix that changes no file is not a fix.
     pub fix_tree_digest: String,
-    /// Whether the snapshot holds any path the fix commit added.
-    pub fix_paths_present: bool,
+    pub fix_parent_tree_digest: String,
     /// Whether the base commit is an ancestor of the fix commit; a fix from
     /// an unrelated branch fixes nothing at this base.
     pub fix_descends_from_base: bool,
@@ -462,10 +461,9 @@ pub enum CutoffRefused {
     /// The issue text is dated before the issue was filed, so the audit is
     /// not evidence of anything.
     IssueTextBeforeIssue,
-    FutureContentInSnapshot,
     /// The fix commit does not descend from the base commit.
     FixNotFromBase,
-    /// The fix commit's tree is the base commit's tree: nothing changed.
+    /// The fix commit's tree is its parent's tree: nothing changed.
     FixChangesNothing,
     SnapshotDigestMissing,
     /// A tree digest that is neither a git object id (forty hex) nor a
@@ -511,6 +509,7 @@ impl CutoffAudit {
             &self.snapshot_digest,
             &self.base_tree_digest,
             &self.fix_tree_digest,
+            &self.fix_parent_tree_digest,
         ] {
             if (width != 40 && width != 64)
                 || !is_lower_hex(digest, width)
@@ -537,13 +536,10 @@ impl CutoffAudit {
         if self.snapshot_digest != self.base_tree_digest {
             return Err(CutoffRefused::SnapshotNotBaseTree);
         }
-        if self.fix_paths_present {
-            return Err(CutoffRefused::FutureContentInSnapshot);
-        }
         if !self.fix_descends_from_base {
             return Err(CutoffRefused::FixNotFromBase);
         }
-        if self.fix_tree_digest == self.base_tree_digest {
+        if self.fix_tree_digest == self.fix_parent_tree_digest {
             return Err(CutoffRefused::FixChangesNothing);
         }
         Ok(())
@@ -784,8 +780,9 @@ const SHA_ABBREV: usize = 7;
 /// The fix commit counts as any run of hexadecimal digits, in either case,
 /// that is at least `SHA_ABBREV` long and a prefix of it; the run is taken
 /// whole, so `a0123456` does not name `0123456...`. A pull request counts as
-/// `#<n>` or as the repository's `/pull/<n>` URL in any letter case, each as
-/// a whole number, so `#20` is not found inside `#2016`.
+/// `#<n>`, GitHub's `GH-<n>`, or the repository's `/pull/<n>` URL in any
+/// letter case, each as a whole number, so `#20` is not found inside
+/// `#2016`.
 pub fn future_answers(entry: &AnchorEntry, output: &str) -> Vec<String> {
     let output = output.to_ascii_lowercase();
     let mut found = Vec::new();
@@ -798,6 +795,7 @@ pub fn future_answers(entry: &AnchorEntry, output: &str) -> Vec<String> {
     }
     if let Some(pr) = entry.pull_request.filter(|pr| {
         names_whole_number(&output, &format!("#{pr}"))
+            || names_whole_number(&output, &format!("gh-{pr}"))
             || names_whole_number(
                 &output,
                 &format!("{}/pull/{pr}", repository_web_path(&entry.repository)),

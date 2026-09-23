@@ -87,7 +87,7 @@ fn audit(task: &str) -> CutoffAudit {
         snapshot_digest: "ab".repeat(32),
         base_tree_digest: "ab".repeat(32),
         fix_tree_digest: "ef".repeat(32),
-        fix_paths_present: false,
+        fix_parent_tree_digest: "ab".repeat(32),
         fix_descends_from_base: true,
     }
 }
@@ -253,7 +253,7 @@ fn the_time_study_projects_the_pilot_and_stops_for_approval_past_the_bound() {
 fn the_cutoff_audit_excludes_future_code_and_future_issue_knowledge() {
     let good = audit("cargo-0");
     good.validate().unwrap();
-    let cases: [(Mutate, CutoffRefused); 9] = [
+    let cases: [(Mutate, CutoffRefused); 8] = [
         (
             |a| a.base_committed_ms = a.cutoff_ms + 1,
             CutoffRefused::BaseAfterCutoff,
@@ -271,10 +271,6 @@ fn the_cutoff_audit_excludes_future_code_and_future_issue_knowledge() {
             CutoffRefused::IssueTextAfterCutoff,
         ),
         (
-            |a| a.fix_paths_present = true,
-            CutoffRefused::FutureContentInSnapshot,
-        ),
-        (
             |a| a.snapshot_digest.clear(),
             CutoffRefused::SnapshotDigestMissing,
         ),
@@ -287,7 +283,7 @@ fn the_cutoff_audit_excludes_future_code_and_future_issue_knowledge() {
             CutoffRefused::FixNotFromBase,
         ),
         (
-            |a| a.fix_tree_digest = a.base_tree_digest.clone(),
+            |a| a.fix_tree_digest = a.fix_parent_tree_digest.clone(),
             CutoffRefused::FixChangesNothing,
         ),
     ];
@@ -441,7 +437,7 @@ fn the_pilot_alone_never_transfers_and_exclusions_keep_their_accounting() {
     audits_with_failure
         .get_mut("django-1")
         .unwrap()
-        .fix_paths_present = true;
+        .base_tree_digest = "cd".repeat(32);
     let mut proofs_missing = proofs.clone();
     proofs_missing.remove("cargo-7");
 
@@ -464,7 +460,7 @@ fn the_pilot_alone_never_transfers_and_exclusions_keep_their_accounting() {
     assert_eq!(accounting.excluded["tokio-3"], Contamination::Memorized);
     assert_eq!(
         accounting.cutoff_invalid["django-1"],
-        CutoffRefused::FutureContentInSnapshot
+        CutoffRefused::SnapshotNotBaseTree
     );
     assert_eq!(
         accounting.insufficiency_missing,
@@ -1208,6 +1204,7 @@ fn the_audit_needs_well_formed_tree_digests() {
     git_tree.snapshot_digest = "ab".repeat(20);
     git_tree.base_tree_digest = "ab".repeat(20);
     git_tree.fix_tree_digest = "ef".repeat(20);
+    git_tree.fix_parent_tree_digest = "ab".repeat(20);
     git_tree.validate().unwrap();
 }
 
@@ -1610,5 +1607,25 @@ fn a_hashtag_pull_request_is_found_beside_a_word() {
             vec!["pull_request:2016"],
             "{output}"
         );
+    }
+}
+
+#[test]
+fn a_gh_prefixed_pull_request_is_a_future_answer() {
+    let mut entry = entry("cargo-0", Family::Cargo, 0x10);
+    entry.pull_request = Some(2016);
+    assert_eq!(
+        future_answers(&entry, "see GH-2016"),
+        vec!["pull_request:2016"]
+    );
+    assert!(future_answers(&entry, "see GH-20160 and XGH-2016").is_empty());
+}
+
+#[test]
+fn a_parenthesized_operator_is_not_a_license() {
+    for license in ["(AND)", "MIT OR (WITH)"] {
+        let mut entry = entry("cargo-0", Family::Cargo, 0x10);
+        entry.license = license.to_string();
+        assert!(entry.validate().is_err(), "{license}");
     }
 }
