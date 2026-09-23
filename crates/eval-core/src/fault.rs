@@ -596,14 +596,29 @@ impl Effect {
         !self.lost_by.is_empty()
     }
 
-    /// An observation after a `not_applied` read-back is the retry landing:
-    /// the identity's final state is applied.
-    fn retry_applied(&mut self) {
-        if self.outcome == EffectOutcome::NotApplied {
+    /// An observation resolves an identity whose last word was `not_applied`
+    /// or nothing at all: the effect is there, so the retry or the lost
+    /// attempt landed. An identity already applied stays applied.
+    fn resolve_applied(&mut self) {
+        if self.outcome != EffectOutcome::Applied {
             self.expected = Expected::Exactly {
                 state: EffectState::Applied,
             };
             self.outcome = EffectOutcome::Applied;
+        }
+    }
+
+    /// A retry of an identity read back as `not_applied` starts unresolved:
+    /// the old read-back spoke for the attempt before this one.
+    fn reopen_for_retry(&mut self) {
+        if self.outcome == EffectOutcome::NotApplied {
+            self.read_back = false;
+            self.expected = Expected::OneOf {
+                states: [EffectState::Applied, EffectState::NotApplied]
+                    .into_iter()
+                    .collect(),
+            };
+            self.outcome = EffectOutcome::Unknown;
         }
     }
 }
@@ -685,6 +700,7 @@ impl EffectLedger {
                 outcome: EffectOutcome::Applied,
             });
         effect.attempted += 1;
+        effect.reopen_for_retry();
         effect
     }
 
@@ -699,7 +715,7 @@ impl EffectLedger {
     pub fn observe(&mut self, identity: &str) -> Result<(), EffectRefused> {
         let effect = self.effect(identity)?;
         effect.observed += 1;
-        effect.retry_applied();
+        effect.resolve_applied();
         Ok(())
     }
 
@@ -707,7 +723,7 @@ impl EffectLedger {
         let effect = self.effect(identity)?;
         effect.observed += 1;
         effect.acknowledged += 1;
-        effect.retry_applied();
+        effect.resolve_applied();
         Ok(())
     }
 
@@ -775,15 +791,20 @@ impl EffectLedger {
                     state: EffectState::NotApplied,
                 });
             }
-            if effect.reply_lost() && effect.acknowledged >= effect.attempted {
+            // Every lost reply is an attempt that went unacknowledged; more
+            // losses than such attempts (or any, when all were acknowledged)
+            // is a loss that never happened.
+            if effect.lost_by.len() as u64 > effect.attempted - effect.acknowledged {
                 return Err(EffectRefused::LostReplyAcknowledged { identity });
             }
-            if effect.reply_lost() && !effect.read_back {
+            if effect.outcome == EffectOutcome::Unknown {
+                // Pending: a lost reply, or a retry after one, that nothing has
+                // resolved yet.
+                if !effect.reply_lost() {
+                    return Err(EffectRefused::OutcomeNotDerived { identity });
+                }
                 if effect.observed > 0 {
                     return Err(EffectRefused::ObservedWithoutReadBack { identity });
-                }
-                if effect.outcome != EffectOutcome::Unknown {
-                    return Err(EffectRefused::PrematureSuccess { identity });
                 }
                 match &effect.expected {
                     Expected::OneOf { states } if states.len() >= 2 => {}
@@ -794,6 +815,10 @@ impl EffectLedger {
                     }
                 }
                 continue;
+            }
+            if effect.reply_lost() && !effect.read_back && effect.observed == 0 {
+                // A lost reply claims a state though nothing resolved it.
+                return Err(EffectRefused::PrematureSuccess { identity });
             }
             // Without a lost reply only `Applied` was ever admissible; after a
             // read-back the outcome is exactly the state it named.
@@ -808,7 +833,11 @@ impl EffectLedger {
                 }
                 Expected::Exactly {
                     state: EffectState::NotApplied,
-                } => effect.reply_lost() && effect.outcome == EffectOutcome::NotApplied,
+                } => {
+                    effect.reply_lost()
+                        && effect.read_back
+                        && effect.outcome == EffectOutcome::NotApplied
+                }
                 Expected::OneOf { .. } => false,
             };
             if !derived {

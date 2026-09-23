@@ -1192,11 +1192,23 @@ fn a_parsed_report_cannot_claim_what_no_run_recorded() {
     seen_pending.lose_reply("x", "lost-ack").unwrap();
     seen_pending.observe("x").unwrap();
     assert_eq!(
+        seen_pending.effects["x"].outcome,
+        EffectOutcome::Applied,
+        "an observed lost reply is known applied; the observation resolves it"
+    );
+    seen_pending.validate().unwrap();
+    seen_pending.effects.get_mut("x").unwrap().outcome = EffectOutcome::Unknown;
+    seen_pending.effects.get_mut("x").unwrap().expected = Expected::OneOf {
+        states: [EffectState::Applied, EffectState::NotApplied]
+            .into_iter()
+            .collect(),
+    };
+    assert_eq!(
         seen_pending.validate(),
         Err(EffectRefused::ObservedWithoutReadBack {
             identity: "x".to_string()
         }),
-        "an observed lost reply is known applied; the ledger must say so through a read-back"
+        "a parsed entry observed yet still unknown claims an ambiguity the observation removed"
     );
     let mut no_pid = barrier("kill");
     no_pid.pid = 0;
@@ -1478,6 +1490,36 @@ fn a_parsed_report_cannot_claim_what_no_run_recorded() {
         Err(FaultReportError::KilledChildNotCounted),
         "the killed child was a process the envelope must have seen"
     );
+
+    let mut double_loss = EffectLedger::default();
+    double_loss.attempt("once");
+    double_loss.lose_reply("once", "first").unwrap();
+    double_loss.lose_reply("once", "second").unwrap();
+    assert_eq!(
+        double_loss.validate(),
+        Err(EffectRefused::LostReplyAcknowledged {
+            identity: "once".to_string()
+        }),
+        "one unacknowledged attempt loses one reply, not two"
+    );
+    let mut reopened = EffectLedger::default();
+    reopened.attempt("re");
+    reopened.lose_reply("re", "lost-ack").unwrap();
+    reopened.read_back("re", EffectState::NotApplied).unwrap();
+    reopened.attempt("re");
+    let e = &reopened.effects["re"];
+    assert_eq!(e.outcome, EffectOutcome::Unknown);
+    assert!(
+        !e.read_back,
+        "the old read-back spoke for the attempt before this one"
+    );
+    reopened.validate().expect(
+        "a retry is unresolved until something resolves it, and unresolved is a valid state",
+    );
+    assert_eq!(reopened.unknown(), ["re".to_string()].into_iter().collect());
+    reopened.acknowledge("re").unwrap();
+    assert_eq!(reopened.effects["re"].outcome, EffectOutcome::Applied);
+    reopened.validate().unwrap();
 }
 
 #[test]

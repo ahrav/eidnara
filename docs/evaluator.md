@@ -2092,8 +2092,12 @@ to `lost_by` (a retried identity can lose one reply per attempt), sets
 the expectation to `one_of {applied, not_applied}` and the outcome to
 `unknown`; `read_back(identity, state)` collapses it to `exactly { state }`
 and the matching outcome, adding the observation an applied read-back proves.
-An observation (`observe`, `acknowledge`) after a `not_applied` read-back is
-the retry landing, and moves the identity to `exactly { applied }`.
+An observation (`observe`, `acknowledge`) resolves an identity whose last word
+was `not_applied` or `unknown`: the effect is there, so the identity moves to
+`exactly { applied }`. `attempt` on an identity read back as `not_applied`
+reopens it as `unknown` over both states with the old read-back cleared,
+since that read-back spoke for the attempt before this one; the retry stays
+unresolved until observed, acknowledged, lost, or read back.
 A read-back is refused as `ReadBackNotAdmissible { identity, state }` and
 changes nothing when `state` is outside the admissible set (a reply that was
 not lost admits only `applied`) or when it is `not_applied` for an effect
@@ -2101,11 +2105,13 @@ already observed, which would be a lost write that was seen.
 `validate` refuses, per identity, `NeverAttempted` at zero attempts (an entry
 `attempt` never created), `EmptyIdentity` for a blank key, `BoundsViolated` unless `acknowledged <=
 observed <= attempted`, `ReadBackNotAdmissible` for an observed effect
-whose outcome is `not_applied`, `ObservedWithoutReadBack` for a lost reply
-observed but never read back (the observation is the read-back the ledger
-must record), `LostReplyAcknowledged` for a lost reply whose every attempt was
-acknowledged (nothing was lost), `PrematureSuccess` for a lost reply whose
-outcome is not `unknown` without a read-back, and
+whose outcome is `not_applied`, `ObservedWithoutReadBack` for a parsed entry
+still `unknown` with an observation (the API resolves on observation, so the
+state claims an ambiguity the observation removed), `LostReplyAcknowledged`
+when `lost_by` names more episodes than attempts that went unacknowledged
+(each lost reply is one such attempt; none left means the replies came back),
+`PrematureSuccess` for a lost reply whose
+outcome is not `unknown` with neither a read-back nor an observation, and
 `ExpectationCollapsedWithoutReadBack` for a lost reply expecting fewer than two
 states, and `OutcomeNotDerived` when the outcome is not the state the
 expectation names, an effect whose reply was never lost expects anything but

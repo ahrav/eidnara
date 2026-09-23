@@ -1624,12 +1624,13 @@ Fault contract (`crates/eval-core/tests/fault.rs`,
   that met its bound yet records a `blocked` stop is `LivenessUnmet`; envelope
   bounds other than the profile's limits are `EnvelopeDisagreesWithProfile`;
   an observed effect read back or parsed as `not_applied` is
-  `ReadBackNotAdmissible`; each effect's `lost_by` names the episode that
-  lost its reply: a reply-losing episode (`loses_reply` names which) with no
+  `ReadBackNotAdmissible`; each effect's `lost_by` names the episodes that
+  lost its replies: a reply-losing episode (`loses_reply` names which) with no
   effect naming it is `LostReplyUnrecorded`, an effect naming an episode that
   loses none is `LostByNonLosingEpisode`, and one naming an episode the
-  report lacks is `UnknownEpisode`; a lost reply observed without a read-back
-  is `ObservedWithoutReadBack`; a barrier with pid 0 is `NoPid`; a second
+  report lacks is `UnknownEpisode`; an observation resolves a lost reply to
+  applied, and a parsed entry observed yet still `unknown` is
+  `ObservedWithoutReadBack`; a barrier with pid 0 is `NoPid`; a second
   barrier for one kill is `DuplicateBarrier`; a kill at a cut the coverage
   never declared is `UndeclaredCut`; `embedding_dispatch`, `artifact_gc`, and
   `kernel_restore` encode the remaining seams at HEAD with their heal, family,
@@ -1648,7 +1649,11 @@ Fault contract (`crates/eval-core/tests/fault.rs`,
   no reply; a GC fault that raises the writer fence heals by reopen; `lost_by`
   is a set, so a retried identity keeps every losing episode; every oracle
   checkpoint needs a receipt (`MissingCut`); a lane driven past its bound is
-  `LivenessUnmet`; a kill with a zero process peak is `KilledChildNotCounted`.
+  `LivenessUnmet`; a kill with a zero process peak is `KilledChildNotCounted`;
+  `lost_by` may not name more episodes than unacknowledged attempts; `attempt`
+  after a `not_applied` read-back reopens the identity as `unknown` (a valid
+  pending state) and an observation or acknowledgement then resolves it to
+  applied.
 
 Aging drive (`crates/daemon/tests/eval_aging.rs`, `--all-features`):
 
