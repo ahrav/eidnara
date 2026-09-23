@@ -998,3 +998,116 @@ fn invalid_episodes_are_refused_before_any_replay() {
     );
     assert_eq!(issued, 0, "nothing is replayed under invalid episodes");
 }
+
+#[test]
+fn a_report_that_understates_its_replays_or_overstates_its_minimality_is_refused() {
+    let expected = predicate(FailureClass::Interference);
+    let stubborn = aged_event("repository:repository-0:2");
+    let mut unknown_replay = |request: ReplayRequest<'_>| {
+        if !has(request.scenario, &stubborn) {
+            return ReplayOutcome::Unknown {
+                reason: UnknownReason::ChildExitedBeforeBarrier,
+            };
+        }
+        evaluate(request)
+    };
+    let (_, unknown) = shrink(
+        &scenario(),
+        &fixture(),
+        &expected,
+        BUDGET,
+        &mut unknown_replay,
+    )
+    .unwrap();
+    let (_, exhausted) = shrink(&scenario(), &fixture(), &expected, 5, &mut evaluate).unwrap();
+    let (_, minimal) = shrink(&scenario(), &fixture(), &expected, BUDGET, &mut evaluate).unwrap();
+    assert!(matches!(
+        unknown.minimality,
+        Minimality::NotEstablished {
+            reason: NotEstablishedReason::UnknownCandidates { .. }
+        }
+    ));
+    assert!(matches!(
+        exhausted.minimality,
+        Minimality::NotEstablished {
+            reason: NotEstablishedReason::ReplayBudgetExhausted
+        }
+    ));
+    assert!(matches!(minimal.minimality, Minimality::OneMinimal { .. }));
+    for report in [&unknown, &exhausted, &minimal] {
+        let value = serde_json::to_value(report).unwrap();
+        assert_eq!(parse_shrink_report(&value).unwrap(), *report);
+    }
+
+    let completed = unknown
+        .candidates
+        .iter()
+        .filter(|record| {
+            matches!(
+                record.verdict,
+                CandidateVerdict::Reproduced
+                    | CandidateVerdict::NotReproduced
+                    | CandidateVerdict::Slipped { .. }
+            )
+        })
+        .map(|record| record.scenario_digest.as_str())
+        .collect::<BTreeSet<_>>()
+        .len() as u64;
+    assert!(
+        completed < unknown.replays,
+        "the unknown replays were issued too"
+    );
+    let mut understated = serde_json::to_value(&unknown).unwrap();
+    understated["replays"] = json!(completed);
+    assert_eq!(
+        parse_shrink_report(&understated),
+        Err(ShrinkReportError::Inconsistent { field: "replays" }),
+        "every unknown answer in a returned report took a replay"
+    );
+
+    let one_minimal = json!({"kind": "one_minimal", "transformations": []});
+    let mut claimed = serde_json::to_value(&exhausted).unwrap();
+    claimed["minimality"] = one_minimal.clone();
+    assert_eq!(
+        parse_shrink_report(&claimed),
+        Err(ShrinkReportError::Inconsistent {
+            field: "minimality"
+        }),
+        "a budget-exhausted run cannot claim 1-minimality"
+    );
+    let mut claimed = serde_json::to_value(&unknown).unwrap();
+    claimed["minimality"] = one_minimal;
+    assert_eq!(
+        parse_shrink_report(&claimed),
+        Err(ShrinkReportError::Inconsistent {
+            field: "minimality"
+        }),
+        "an unknown single deletion cannot claim 1-minimality"
+    );
+    let mut miscounted = serde_json::to_value(&unknown).unwrap();
+    miscounted["minimality"]["reason"]["count"] = json!(9);
+    assert_eq!(
+        parse_shrink_report(&miscounted),
+        Err(ShrinkReportError::Inconsistent {
+            field: "minimality"
+        })
+    );
+    let mut disproved = serde_json::to_value(&minimal).unwrap();
+    disproved["minimality"] =
+        json!({"kind": "not_established", "reason": {"reason": "replay_budget_exhausted"}});
+    assert_eq!(
+        parse_shrink_report(&disproved),
+        Err(ShrinkReportError::Inconsistent {
+            field: "minimality"
+        }),
+        "a run that stopped short of its budget did not exhaust it"
+    );
+    let mut reordered = serde_json::to_value(&minimal).unwrap();
+    reordered["minimality"]["transformations"] = json!(["event_deletion", "fault_episode_removal"]);
+    assert_eq!(
+        parse_shrink_report(&reordered),
+        Err(ShrinkReportError::Inconsistent {
+            field: "minimality"
+        })
+    );
+}

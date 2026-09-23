@@ -2813,12 +2813,20 @@ other report parsers, deserializes, runs `ShrinkReport::validate`, and
 refuses a value that does not reserialize identically as `Lossy`. `validate`
 checks the `eval-shrink/v1` schema, the pinned oracle, and the report's
 accounting against its own candidate ledger as `Inconsistent { field }`: the
-first candidate is the reproduced original with an empty deletion set, the
+first candidate is the reproduced original with an empty deletion set; the
 last reproduced candidate's digest and deletion set are `minimized_digest`
-and `deleted`, `unknown_candidates` counts the distinct `Unknown` digests,
-and `replays` lies between the distinct completed verdicts (each took a
-replay) and the distinct non-`InvalidPair` digests (an `Unknown` may have
-been refused without one).
+and `deleted`; `unknown_candidates` counts the distinct `Unknown` digests;
+`replays` equals the distinct non-`InvalidPair` digests (the driver checks
+the budget before every test, so every accepted candidate took exactly one
+replay and the budget refusal never reaches a returned report) and does not
+exceed `max_replays`; every candidate after the last reproduction deletes
+strictly more than the minimized scenario; and the minimality claim agrees
+with the single deletions among them, the final 1-minimality pass.
+`OneMinimal` needs that pass to cover all `remaining` elements with no
+`Unknown` and transformations listed in the parent's order;
+`unknown_candidates { count }` needs the same coverage with exactly `count`
+unknown single deletions; `replay_budget_exhausted` needs `replays` equal to
+`max_replays`.
 
 ## Coverage markers
 

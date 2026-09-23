@@ -477,10 +477,16 @@ pub struct ShrinkReport {
     pub original_digest: String,
     pub minimized_digest: String,
     pub deleted: BTreeSet<Element>,
+    /// Elements the minimized scenario still holds: the single deletions a
+    /// completed 1-minimality pass tried.
+    pub remaining: u64,
     /// Every attempt in order; a digest answered earlier is recorded again
     /// with its cached verdict.
     pub candidates: Vec<CandidateRecord>,
+    /// Replays issued, the original's included; every distinct candidate the
+    /// compiler accepted took exactly one.
     pub replays: u64,
+    pub max_replays: u64,
     /// Distinct candidates whose replay answered `Unknown`.
     pub unknown_candidates: u64,
     pub minimality: Minimality,
@@ -503,8 +509,9 @@ pub enum ShrinkReportError {
 impl ShrinkReport {
     /// The schema, the pinned oracle, and the report's accounting against its
     /// own candidate ledger: the first candidate is the reproduced original,
-    /// the last reproduced candidate is the minimized scenario, and the
-    /// counters agree with the distinct verdicts.
+    /// the last reproduced candidate is the minimized scenario, the counters
+    /// agree with the distinct verdicts, and the minimality claim agrees with
+    /// the single deletions tried after the last reproduction.
     pub fn validate(&self) -> Result<(), ShrinkReportError> {
         if self.schema != SHRINK_REPORT_SCHEMA {
             return Err(ShrinkReportError::SchemaMismatch {
@@ -525,12 +532,12 @@ impl ShrinkReport {
         {
             return inconsistent("candidates");
         }
-        let last_reproduced = self
+        let last = self
             .candidates
             .iter()
-            .rev()
-            .find(|record| record.verdict == CandidateVerdict::Reproduced)
-            .unwrap_or(first);
+            .rposition(|record| record.verdict == CandidateVerdict::Reproduced)
+            .unwrap_or(0);
+        let last_reproduced = &self.candidates[last];
         if last_reproduced.scenario_digest != self.minimized_digest {
             return inconsistent("minimized_digest");
         }
@@ -550,19 +557,57 @@ impl ShrinkReport {
         {
             return inconsistent("unknown_candidates");
         }
-        // Every completed verdict took a replay; an `InvalidPair` took none;
-        // an `Unknown` may be either (the budget refusal is issued without one).
-        let completed = count(|verdict| {
-            matches!(
-                verdict,
-                CandidateVerdict::Reproduced
-                    | CandidateVerdict::NotReproduced
-                    | CandidateVerdict::Slipped { .. }
-            )
-        });
-        let replayable = count(|verdict| !matches!(verdict, CandidateVerdict::InvalidPair { .. }));
-        if self.replays < completed || self.replays > replayable {
+        // Every distinct candidate the compiler accepted took one replay: the
+        // driver checks the budget before each test, so the budget refusal
+        // never reaches a returned report.
+        if self.replays != count(|verdict| !matches!(verdict, CandidateVerdict::InvalidPair { .. }))
+            || self.replays > self.max_replays
+        {
             return inconsistent("replays");
+        }
+        // Everything after the last reproduction deletes strictly more than the
+        // minimized scenario; the single deletions among it are the final
+        // 1-minimality pass, the only evidence the minimality claim rests on.
+        let mut singles: BTreeMap<&str, (&CandidateVerdict, Transformation)> = BTreeMap::new();
+        for record in &self.candidates[last + 1..] {
+            if !record.deleted.is_superset(&self.deleted)
+                || record.deleted.len() == self.deleted.len()
+            {
+                return inconsistent("candidates");
+            }
+            if record.deleted.len() == self.deleted.len() + 1 {
+                let Some(extra) = record.deleted.difference(&self.deleted).next() else {
+                    return inconsistent("candidates");
+                };
+                singles.insert(
+                    record.scenario_digest.as_str(),
+                    (&record.verdict, extra.transformation()),
+                );
+            }
+        }
+        let unknown_singles = singles
+            .values()
+            .filter(|(verdict, _)| matches!(verdict, CandidateVerdict::Unknown { .. }))
+            .count() as u64;
+        let full_pass = singles.len() as u64 == self.remaining;
+        let claim_holds = match &self.minimality {
+            Minimality::OneMinimal { transformations } => {
+                full_pass
+                    && unknown_singles == 0
+                    && transformations.windows(2).all(|pair| pair[0] < pair[1])
+                    && singles
+                        .values()
+                        .all(|(_, transformation)| transformations.contains(transformation))
+            }
+            Minimality::NotEstablished {
+                reason: NotEstablishedReason::UnknownCandidates { count },
+            } => full_pass && *count == unknown_singles && *count > 0,
+            Minimality::NotEstablished {
+                reason: NotEstablishedReason::ReplayBudgetExhausted,
+            } => self.replays == self.max_replays,
+        };
+        if !claim_holds {
+            return inconsistent("minimality");
         }
         Ok(())
     }
@@ -711,8 +756,10 @@ pub fn shrink(
         original_digest: original.digest(),
         minimized_digest: minimized.digest(),
         deleted,
+        remaining: minimized.elements().len() as u64,
         candidates: driver.candidates,
         replays: driver.replays,
+        max_replays,
         unknown_candidates,
         minimality,
     };
