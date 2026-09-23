@@ -9,7 +9,9 @@ semantics. Missing explicit campaign settings refuse before execution."
 - `crates/eval-core/src/campaign.rs` `SkipReason::MissingCutoffEvidence`,
   `UnsupportedReason::SourceUnavailable`,
   `UnsupportedReason::UnsupportedRuntime { family }`.
-- `crates/eval-core/src/anchor.rs` `RealHistorySettings::validate`.
+- `crates/eval-core/src/anchor.rs` `RealHistorySettings::validate`;
+  `AnchorEntry::validate` refuses an id that is not one plain path component
+  (`NotAPathComponent`).
 - `crates/daemon/examples/eval_runner/anchor.rs`: `prepare` answers
   `source_unavailable` when the clone, the fetch, or a commit is missing;
   `run` answers `missing_cutoff_evidence` for a failed audit and
@@ -32,8 +34,11 @@ One entry per cause, and settings with each field missing in turn.
 
 ## Investigation log
 ### Q: Where does budget exhaustion sit?
-- Sources examined: `Terminal::Censored`; the shell's control deadline.
-- Findings: a control past its deadline is `Censored`, which
-  `classify_control` treats as eligible, never memorized.
+- Sources examined: `Terminal::Censored`; the shell's control deadline,
+  `hidden_terminal`, `a_control_past_its_deadline_is_censored_with_its_trace_and_a_failed_control_refuses`.
+- Findings: a control past its deadline is `Censored { hard_deadline_ms }`
+  and is not graded; `classify_control` treats it as eligible, never
+  memorized, unless its kept trace shows repository access or a future
+  answer.
 - Missing evidence: none.
 - Conclusion: resolved with answer.

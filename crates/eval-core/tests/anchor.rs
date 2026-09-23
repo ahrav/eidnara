@@ -79,6 +79,10 @@ fn proof(task: &str) -> InsufficiencyProof {
             ("regression".to_string(), HiddenOutcome::Failed),
             ("smoke".to_string(), HiddenOutcome::Passed),
         ]),
+        reference: BTreeMap::from([
+            ("regression".to_string(), HiddenOutcome::Passed),
+            ("smoke".to_string(), HiddenOutcome::Passed),
+        ]),
     }
 }
 
@@ -135,6 +139,17 @@ fn the_corpus_persists_identifiers_only_and_is_the_pilot_composition() {
         duplicate.validate(),
         Err(AnchorError::DuplicateId { .. })
     ));
+    for unsafe_id in ["../escape", "/abs", "a/b", ".", "..", "a\\b"] {
+        let mut row = corpus.clone();
+        row.entries[3].id = unsafe_id.to_string();
+        assert_eq!(
+            row.validate(),
+            Err(AnchorError::NotAPathComponent {
+                id: unsafe_id.to_string()
+            }),
+            "{unsafe_id} is not one plain path component"
+        );
+    }
     let mut not_pilot = corpus.clone();
     not_pilot.entries.pop();
     assert!(matches!(
@@ -232,11 +247,42 @@ fn the_insufficiency_proof_is_an_executed_failing_run() {
     let empty = InsufficiencyProof {
         task: "cargo-0".to_string(),
         hidden: BTreeMap::new(),
+        reference: BTreeMap::new(),
     };
     assert_eq!(
         empty.validate(),
         Err(InsufficiencyRefused::NothingExecuted),
         "a corpus row without a run is not a proof"
+    );
+    let unbuildable = InsufficiencyProof {
+        task: "cargo-0".to_string(),
+        hidden: BTreeMap::from([("regression".to_string(), HiddenOutcome::Errored)]),
+        reference: BTreeMap::from([("regression".to_string(), HiddenOutcome::Errored)]),
+    };
+    assert_eq!(
+        unbuildable.validate(),
+        Err(InsufficiencyRefused::ReferenceDoesNotPass),
+        "an error on both trees proves nothing about the base tree"
+    );
+    let mut partial = proof("cargo-0");
+    partial.reference.remove("smoke");
+    assert_eq!(
+        partial.validate(),
+        Err(InsufficiencyRefused::ReferenceDoesNotPass),
+        "every hidden test must pass on the fix tree"
+    );
+    let mut new_api = proof("cargo-0");
+    new_api
+        .hidden
+        .insert("regression".to_string(), HiddenOutcome::Errored);
+    assert_eq!(
+        new_api.validate(),
+        Ok(()),
+        "a test that needs the fix to compile, passing on the fix tree, is insufficiency"
+    );
+    assert_eq!(
+        serde_json::to_value(InsufficiencyRefused::ReferenceDoesNotPass).unwrap(),
+        json!({"reason": "reference_does_not_pass"})
     );
 }
 

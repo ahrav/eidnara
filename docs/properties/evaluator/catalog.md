@@ -675,27 +675,36 @@ Reachability: test-only - `crates/daemon/tests/eval_anchor.rs` through the
 Status: active
 Exercised: partial -
   `crates/daemon/tests/eval_anchor.rs::every_anchor_task_has_an_audit_a_proof_and_a_control_and_the_pilot_never_transfers`,
+  `crates/daemon/tests/eval_anchor.rs::grading_runs_repository_code_without_the_runners_home_or_network`,
   `crates/eval-core/tests/anchor.rs::the_cutoff_audit_excludes_future_code_and_future_issue_knowledge`,
   `crates/eval-core/tests/anchor.rs::the_insufficiency_proof_is_an_executed_failing_run`;
   local Cargo-family repositories only, no Cargo, Tokio, or Django upstream task
   prepared yet.
 Guarantee: Every real-history task runs from a snapshot built at its base commit
-  with a per-task cutoff audit that excludes future code and future issue
-  knowledge, and carries an executed current-tree-only run that fails; a task
-  without a passing audit is skipped with a typed reason and a corpus row
-  without a run is no proof.
+  with its bytes, symlinks, and executable modes, under a per-task cutoff audit
+  that excludes future code and future issue knowledge, and carries an executed
+  current-tree-only run that does not pass next to a fix-tree run that passes;
+  a task without a passing audit is skipped with a typed reason, and a corpus
+  row without a run, or a tree the runner cannot build, is no proof.
 Check: `always` - `CutoffAudit::validate` refuses a base after the cutoff, a fix
   not strictly after it, an issue filed after it, a fix-added path present in
   the snapshot, or a missing snapshot digest; the shell records
   `Skipped(MissingCutoffEvidence)` and runs nothing for such a task;
-  `InsufficiencyProof::validate` refuses `NothingExecuted` and
-  `TreeAlreadyPasses`; every prepared task's proof holds a failed hidden test.
-  Must hold for every task, so `always`.
+  `InsufficiencyProof::validate` refuses `NothingExecuted`,
+  `ReferenceDoesNotPass` (some hidden test does not pass on the fix tree), and
+  `TreeAlreadyPasses`; a task without a valid proof is `Indeterminate` and runs
+  no control; the snapshot digest (`eval-anchor-snapshot/v2`) covers each
+  file's bytes and executable bit and each symlink's target; the hidden tests
+  run under `Grading::Isolated`. Must hold for every task, so `always`.
 Fault/timing angle: Commit times are read from the clone; the issue creation
   time comes from the fetcher; a fix committed one minute before the cutoff is
-  refused.
+  refused; a base that depends on a crate the offline runner cannot resolve
+  errors on both trees and is refused.
 Required faults and enabling state: A local repository whose fix commit is dated
-  before the cutoff; an entry whose issue cannot be fetched.
+  before the cutoff; an entry whose issue cannot be fetched; a base commit with
+  an unresolvable dependency; a base commit holding a binary file, a symlink, and
+  an executable script that the hidden tests read; a fix-added module under a
+  `tests/` subdirectory.
 Confidence: medium -
   [evidence](evidence/mtr-anchor-task-cutoff-snapshot-and-insufficiency-proof.md).
   Ran the shell test at HEAD against local repositories built from the generated
@@ -703,7 +712,9 @@ Confidence: medium -
   preparation time does not exist yet.
 Existing check: `crates/eval-core/src/anchor.rs` `CutoffAudit::validate`,
   `InsufficiencyProof::validate`; `crates/daemon/examples/eval_runner/anchor.rs`
-  `prepare` and the tree run in `run`; tests above.
+  `prepare`, `tree_digest`, and the tree and reference runs in `run`;
+  `crates/daemon/examples/eval_runner/suite_d.rs` `run_hidden` under
+  `Grading::Isolated`; tests above.
 Impact: A task could carry the fix, or knowledge of it, into the snapshot and
   the agent's success would be memorization of the future.
 Open questions:
@@ -720,7 +731,8 @@ Status: active
 Exercised: yes -
   `crates/eval-core/tests/anchor.rs::the_pilot_alone_never_transfers_and_exclusions_keep_their_accounting`,
   `crates/daemon/tests/eval_anchor.rs::every_anchor_task_has_an_audit_a_proof_and_a_control_and_the_pilot_never_transfers`,
-  `crates/daemon/tests/eval_anchor.rs::a_memorizing_provider_is_excluded_for_its_pair_and_seeded_contamination_is_detected`
+  `crates/daemon/tests/eval_anchor.rs::a_memorizing_provider_is_excluded_for_its_pair_and_seeded_contamination_is_detected`,
+  `crates/daemon/tests/eval_anchor.rs::a_control_past_its_deadline_is_censored_with_its_trace_and_a_failed_control_refuses`
 Guarantee: Generated worlds and the 20-task pilot claim `generated_phase1` only;
   `transfer` needs the full real-history anchor set with every task valid for
   the provider pair and a frozen, maintainer-approved criterion, and a task the
@@ -731,16 +743,24 @@ Check: `always` - `derive_claim_class` lists `AnchorSetIsPilot` for a pilot-role
   `NoTransferCriterion` without a criterion; `anchor_set` marks a memorized or
   contaminated task `residue` and keeps it in `PairAccounting::excluded` with
   its `Contamination`; only a transfer-role set with every task valid and an
-  approved criterion is `transfer`. Must hold on every derivation, so `always`.
-Fault/timing angle: None.
+  approved criterion is `transfer`. The shell freezes the settings' criterion
+  into the analysis family and derives each claim with
+  `AnalysisFamily::claim_class`; the control runs with everything but its
+  workspace under a private root it sees as an empty tmpfs; an announced call
+  that climbs out of the workspace or names that root is repository access; the
+  trace a control printed before a deadline kill is kept and the control is
+  `Censored`, never graded. Must hold on every derivation, so `always`.
+Fault/timing angle: A control that reads the snapshot by a relative path and
+  then stalls past its deadline.
 Required faults and enabling state: A pilot corpus, a memorizing control script,
-  a transfer criterion.
+  a relative repository read, a stalled control, a transfer criterion.
 Confidence: high -
   [evidence](evidence/mtr-generated-world-claims-phase1-only.md). Ran both tests
   at HEAD.
 Existing check: `crates/eval-core/src/claim.rs` `derive_claim_class`;
-  `crates/eval-core/src/anchor.rs` `anchor_set`, `classify_control`; shell `run`
-  derives one claim per provider pair.
+  `crates/eval-core/src/statistics.rs` `AnalysisFamily::claim_class`;
+  `crates/eval-core/src/anchor.rs` `anchor_set`, `classify_control`; shell
+  `control` and `run` derive one claim per provider pair.
 Impact: A pilot or a memorized task would be reported as transfer evidence.
 Open questions: None.
 
@@ -753,7 +773,8 @@ Status: active
 Exercised: yes -
   `crates/eval-core/tests/anchor.rs::settings_refuse_before_execution_and_reasons_are_typed`,
   `crates/daemon/tests/eval_anchor.rs::every_anchor_task_has_an_audit_a_proof_and_a_control_and_the_pilot_never_transfers`,
-  `crates/daemon/tests/eval_anchor.rs::missing_settings_and_an_unaccepted_witness_refuse_before_execution`
+  `crates/daemon/tests/eval_anchor.rs::missing_settings_and_an_unaccepted_witness_refuse_before_execution`,
+  `crates/daemon/tests/eval_anchor.rs::a_control_past_its_deadline_is_censored_with_its_trace_and_a_failed_control_refuses`
 Guarantee: A real-history task that is not attempted carries a typed reason from
   a closed vocabulary (`missing_cutoff_evidence`, `source_unavailable`,
   `unsupported_runtime { family }`) distinct from a censored budget hit, and
@@ -762,12 +783,15 @@ Check: `always` - `Terminal::Skipped(SkipReason::MissingCutoffEvidence)`,
   `Terminal::Unsupported(UnsupportedReason::SourceUnavailable)`, and
   `Terminal::Unsupported(UnsupportedReason::UnsupportedRuntime { family })`
   serialize under their `reason` tags; the shell assigns each from its own cause
-  and never reuses one for another; `RealHistorySettings::validate` refuses
-  `NoProviders`, `NoExecutionImage`, and `NoPreparationBound` before the first
-  clone. Must hold on every run, so `always`.
+  and never reuses one for another; a control past its deadline is
+  `Censored { hard_deadline_ms }`, apart from all three;
+  `RealHistorySettings::validate` refuses `NoProviders`, `NoExecutionImage`,
+  and `NoPreparationBound`, and `AnchorEntry::validate` refuses an id that is
+  not one plain path component, before the first clone. Must hold on every
+  run, so `always`.
 Fault/timing angle: None.
 Required faults and enabling state: An early-fix entry, an unfetchable issue,
-  empty settings.
+  empty settings, a climbing id, a stalled control.
 Confidence: high -
   [evidence](evidence/mtr-skipped-cases-carry-closed-vocabulary-reason.md). Ran
   the tests at HEAD.

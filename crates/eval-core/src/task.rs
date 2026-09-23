@@ -347,16 +347,29 @@ pub fn task_terminal(
     usage: &TaskUsage,
     budgets: &TaskBudgets,
 ) -> Terminal {
+    hidden_terminal(
+        task.hidden_tests.iter().map(|test| test.name.as_str()),
+        results,
+        usage,
+        budgets,
+    )
+}
+
+pub fn hidden_terminal<'a>(
+    expected: impl IntoIterator<Item = &'a str>,
+    results: &HiddenResults,
+    usage: &TaskUsage,
+    budgets: &TaskBudgets,
+) -> Terminal {
     if let Some(reason) = budgets.exhausted(usage) {
         return Terminal::Censored { reason };
     }
     if results.is_empty() {
         return Terminal::Indeterminate;
     }
-    let all_passed = task
-        .hidden_tests
-        .iter()
-        .all(|test| results.get(&test.name) == Some(&HiddenOutcome::Passed));
+    let all_passed = expected
+        .into_iter()
+        .all(|name| results.get(name) == Some(&HiddenOutcome::Passed));
     if all_passed {
         Terminal::Pass
     } else {

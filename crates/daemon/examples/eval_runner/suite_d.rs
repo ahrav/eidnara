@@ -318,9 +318,30 @@ pub fn namespaces_available() -> bool {
 /// Runs `command` within `deadline`; past it the child, and everything in its
 /// namespace, is killed and reaped, and `None` is returned.
 pub fn run_bounded(
-    mut command: Command,
+    command: Command,
     deadline: Duration,
 ) -> Result<Option<(ExitStatus, String)>, RunError> {
+    let (status, stdout) = run_traced(command, deadline)?;
+    let Some(status) = status else {
+        return Ok(None);
+    };
+    let text = String::from_utf8(stdout)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+    Ok(Some((status, text)))
+}
+
+/// How long the stdout reader may drain after a deadline kill; a descendant
+/// that left the namespace could still hold the pipe open.
+const READER_GRACE: Duration = Duration::from_secs(2);
+
+/// Returns `None` for status if `deadline` expires; stdout may be partial.
+pub fn run_traced(
+    mut command: Command,
+    deadline: Duration,
+) -> Result<(Option<ExitStatus>, Vec<u8>), RunError> {
+    use std::io::Read;
+    use std::sync::{Arc, Mutex};
+
     let started = Instant::now();
     let mut child = ChildGuard(
         command
@@ -328,21 +349,41 @@ pub fn run_bounded(
             .stdout(Stdio::piped())
             .spawn()?,
     );
-    let stdout = child.0.stdout.take().unwrap();
-    let reader = std::thread::spawn(move || std::io::read_to_string(stdout));
+    let mut stdout = child.0.stdout.take().unwrap();
+    let buffer = Arc::new(Mutex::new(Vec::new()));
+    let (done, drained) = std::sync::mpsc::channel();
+    let sink = Arc::clone(&buffer);
+    std::thread::spawn(move || {
+        let mut chunk = [0u8; 8192];
+        let result = loop {
+            match stdout.read(&mut chunk) {
+                Ok(0) => break Ok(()),
+                Ok(n) => sink.lock().unwrap().extend_from_slice(&chunk[..n]),
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(error) => break Err(error),
+            }
+        };
+        let _ = done.send(result);
+    });
     let status = loop {
         if let Some(status) = child.0.try_wait()? {
-            break status;
+            break Some(status);
         }
         if started.elapsed() >= deadline {
-            return Ok(None);
+            break None;
         }
         std::thread::sleep(Duration::from_millis(20));
     };
-    let text = reader
-        .join()
-        .map_err(|_| std::io::Error::other("stdout reader panicked"))??;
-    Ok(Some((status, text)))
+    drop(child);
+    if status.is_some() {
+        drained
+            .recv()
+            .map_err(|_| std::io::Error::other("stdout reader panicked"))??;
+    } else if let Ok(result) = drained.recv_timeout(READER_GRACE) {
+        result?;
+    }
+    let bytes = std::mem::take(&mut *buffer.lock().unwrap());
+    Ok((status, bytes))
 }
 
 /// The four canaries once, contained or not, against disposable targets: two
@@ -482,18 +523,108 @@ fn hidden_results(
         .iter()
         .map(|test| (test.name.clone(), test.content.clone()))
         .collect();
-    run_hidden(workspace, &tests, target, deadline, charges)
+    run_hidden(workspace, &tests, target, deadline, Grading::Host, charges)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Grading {
+    /// The runner's own process environment, for code the runner generated.
+    Host,
+    /// Fresh user, PID, and network namespaces with loopback only, a cleared
+    /// environment, and a throwaway `HOME`, for code the runner did not write.
+    Isolated,
+}
+
+/// Brings the namespace's loopback up, or exits 96 so the test errors.
+const LOOPBACK_UP: &str = r#"ip link set lo up 2>/dev/null || exit 96; exec "$@""#;
+
+fn cargo_test(workspace: &Path, name: &str, target: &Path, grading: Grading) -> Command {
+    let test = format!("hidden_{name}");
+    let args = ["test", "--offline", "--quiet", "--test", test.as_str()];
+    let mut command = match grading {
+        Grading::Host => {
+            let mut command = Command::new("cargo");
+            command.args(args);
+            command
+        }
+        Grading::Isolated => {
+            let mut command = Command::new("unshare");
+            command
+                .args([
+                    "--user",
+                    "--map-root-user",
+                    "--pid",
+                    "--net",
+                    "--fork",
+                    "--kill-child",
+                    "sh",
+                    "-c",
+                    LOOPBACK_UP,
+                    "sh",
+                    "cargo",
+                ])
+                .args(args)
+                .env_clear()
+                .env("HOME", target.join(".grading-home"));
+            if let Some(path) = std::env::var_os("PATH") {
+                command.env("PATH", path);
+            }
+            let rustup_home = std::env::var_os("RUSTUP_HOME").or_else(|| {
+                let home = PathBuf::from(std::env::var_os("HOME")?).join(".rustup");
+                home.is_dir().then(|| home.into_os_string())
+            });
+            if let Some(rustup_home) = rustup_home {
+                command.env("RUSTUP_HOME", rustup_home);
+            }
+            if let Some(toolchain) = std::env::var_os("RUSTUP_TOOLCHAIN") {
+                command.env("RUSTUP_TOOLCHAIN", toolchain);
+            }
+            command
+        }
+    };
+    command
+        .current_dir(workspace)
+        .env("CARGO_TARGET_DIR", target)
+        .env("CARGO_HOME", target.join(".cargo-home"))
+        .stderr(Stdio::null());
+    command
+}
+
+/// The outcome from the harness summaries, which are the runner's evidence
+/// that the assertions ran; an exit code alone is not. A target passes when
+/// every summary is `ok` and at least one test passed.
+fn harness_outcome(status: Option<ExitStatus>, stdout: &str) -> HiddenOutcome {
+    let summaries: Vec<&str> = stdout
+        .lines()
+        .filter_map(|line| line.trim().strip_prefix("test result: "))
+        .collect();
+    let passed: u64 = summaries
+        .iter()
+        .filter_map(|summary| summary.strip_prefix("ok. "))
+        .filter_map(|rest| rest.split(' ').next()?.parse::<u64>().ok())
+        .sum();
+    let all_ok = !summaries.is_empty() && summaries.iter().all(|s| s.starts_with("ok. "));
+    match status {
+        Some(status) if status.success() && all_ok && passed > 0 => HiddenOutcome::Passed,
+        Some(status)
+            if status.code() == Some(101) && summaries.iter().any(|s| s.starts_with("FAILED")) =>
+        {
+            HiddenOutcome::Failed
+        }
+        _ => HiddenOutcome::Errored,
+    }
 }
 
 /// Writes `tests` as `tests/hidden_<name>.rs` over whatever the workspace
 /// holds (a `tests` entry that is not a directory and a symlink at a test's
-/// path are removed first, `.cargo/` is dropped) and runs each under the
-/// runner's own authority, outside any containment, within `deadline`.
+/// path are removed first, `.cargo/` is dropped) and runs each under
+/// `grading` within `deadline`.
 pub fn run_hidden(
     workspace: &Path,
     tests: &[(String, String)],
     target: &Path,
     deadline: Duration,
+    grading: Grading,
     charges: &mut Charges,
 ) -> Result<HiddenResults, RunError> {
     let _ = std::fs::remove_dir_all(workspace.join(".cargo"));
@@ -502,6 +633,9 @@ pub fn run_hidden(
         std::fs::remove_file(&dir)?;
     }
     std::fs::create_dir_all(&dir)?;
+    if grading == Grading::Isolated {
+        std::fs::create_dir_all(target.join(".grading-home"))?;
+    }
     for (name, content) in tests {
         let path = dir.join(format!("hidden_{name}.rs"));
         if std::fs::symlink_metadata(&path).is_ok_and(|m| m.is_symlink()) {
@@ -511,37 +645,11 @@ pub fn run_hidden(
     }
     let mut results = HiddenResults::new();
     for (name, _) in tests {
-        let mut command = Command::new("cargo");
-        command
-            .args([
-                "test",
-                "--offline",
-                "--quiet",
-                "--test",
-                &format!("hidden_{name}"),
-            ])
-            .current_dir(workspace)
-            .env("CARGO_TARGET_DIR", target)
-            .env("CARGO_HOME", target.join(".cargo-home"))
-            .stderr(Stdio::null());
         charges.process_started()?;
-        let output = run_bounded(command, deadline);
+        let output = run_traced(cargo_test(workspace, name, target, grading), deadline);
         charges.process_ended();
-        // The harness summary is the runner's evidence that the assertions
-        // ran; an exit code alone is not.
-        let outcome = match output? {
-            Some((status, stdout))
-                if status.success() && stdout.contains("test result: ok. 1 passed") =>
-            {
-                HiddenOutcome::Passed
-            }
-            Some((status, stdout))
-                if status.code() == Some(101) && stdout.contains("test result: FAILED") =>
-            {
-                HiddenOutcome::Failed
-            }
-            _ => HiddenOutcome::Errored,
-        };
+        let (status, stdout) = output?;
+        let outcome = harness_outcome(status, &String::from_utf8_lossy(&stdout));
         results.insert(name.clone(), outcome);
     }
     Ok(results)

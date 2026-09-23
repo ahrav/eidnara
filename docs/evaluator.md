@@ -2339,8 +2339,9 @@ correct fix, and under every wrong fix, restores the oracle it owns
 that is not a directory removed, every hidden test written from the corpus
 with a symlink at its path removed first), and runs `cargo test --offline
 --test hidden_<name>` for each within the task deadline under its own
-authority: exit 0 with the harness summary `test result: ok. 1 passed` is
-`passed`, so a candidate that exits zero before the assertions is not;
+authority: exit 0 with every harness summary `test result: ok.` and at least
+one test passed is `passed`, so a candidate that exits zero before the
+assertions is not;
 exit 101 with `test result: FAILED` is `failed`; anything else, a timeout
 included, is `errored`. `check_adequacy` refuses the campaign otherwise.
 
@@ -2387,51 +2388,89 @@ before anything is published.
 through two host seams: `Host::clone` puts a repository at its clone URL into
 a directory, and `Host::fetch` returns the issue text and creation time at
 run time; neither is persisted. No subcommand exists yet; the daemon test
-drives the shell against local repositories. `run` approves the profile
-(Suite D's budgets), validates the settings and the corpus, accepts the
-Phase 5 witness, freezes the analysis family, and then prepares every entry,
-measuring each preparation: clone, `git show -s --format=%ct` for the base
-and fix commits, `git archive` of the base into the snapshot, the fix's
-added paths and its added `tests/*.rs` files (the task's hidden tests) and
-its other changed files (what a memorizing control reproduces), the snapshot
-digest, and the `CutoffAudit`. After the first five preparations
-`time_study` projects the pilot; `StopForApproval` returns
-`RunError::StopForApproval` and nothing is published.
+drives the shell against local repositories. `AnchorEntry::validate` refuses
+an id that is not one plain path component (`NotAPathComponent`), because
+the id names the task's directories. `run` approves the profile (the
+configured control budgets and store bound), validates the settings and the
+corpus, accepts the Phase 5 witness, freezes the analysis family with the
+settings' transfer criterion in it, and then prepares every entry, measuring
+each preparation: clone, `git show -s --format=%ct` for the base and fix
+commits, `git archive` of the base piped into `tar` under a deadline (bytes,
+symlinks, and executable modes kept), `git diff -z --no-renames` for the
+fix's added and changed paths, `git archive` of the fix's changed files, the
+snapshot digest (`eval-anchor-snapshot/v2`: each file's bytes and executable
+bit and each symlink's target), and the `CutoffAudit`. A fix-added file
+directly under `tests/` is a hidden test; every other changed file, a module
+under a `tests/` subdirectory included, is what a memorizing control
+reproduces. The clone is removed once its snapshot and fix files are
+extracted, and the store is charged against the bound after every
+preparation and every task, so a run that outgrows it stops there. After the
+first five preparations `time_study` projects the pilot; `StopForApproval`
+returns `RunError::StopForApproval` and nothing is published.
 
 Per task: a clone, fetch, or commit that is missing is
 `Unsupported(SourceUnavailable)`; a Django task is
 `Unsupported(UnsupportedRuntime { django })`; a failed audit is
 `Skipped(MissingCutoffEvidence)` with the refusal recorded and no run. An
-audited task gets the current-tree-only run: the snapshot copied into a fresh
-tree and its hidden tests run with no agent through `run_hidden`; the
-`InsufficiencyProof` must fail. Then, per provider profile, the
-no-repository control: an otherwise empty workspace holding `STATEMENT.md`,
-the scripted control agent inside the Suite D containment (`memorize`
-reproduces the fix's changed files into `patch/`, `reach_repository` reads the
-snapshot it was not given, `cite_future` names the pull request), each tool
-call announced on an `eval-anchor-tool` line; the announced calls naming the
-repository or snapshot roots are `repository_access`, the outputs are
-scanned with `future_answers`, and the patch is graded on a fresh copy of the
-snapshot with the hidden tests. `classify_control` judges the control against
-its own descriptor (task, provider, execution image, family digest).
-`anchor_set` folds audits, proofs, and verdicts per provider pair into the
-anchor set (role `pilot`) and `derive_claim_class` derives one claim per
-pair with the settings' criterion.
+audited task gets the current-tree-only run and a reference run: the snapshot
+copied into a fresh tree and its hidden tests run with no agent, then the
+fix's files copied over the same tree and the tests run again. Both go
+through `run_hidden` under `Grading::Isolated`: fresh user, PID, and network
+namespaces with only loopback up, a cleared environment, and a throwaway
+`HOME`. A target passes when every harness summary is `ok` with at least one
+test passed. `InsufficiencyProof::validate` needs every hidden test to pass
+on the fix tree (`ReferenceDoesNotPass` otherwise, so a tree the runner cannot
+build proves nothing) and at least one not to pass on the base tree; a task
+without a valid proof is `Indeterminate` and runs no control. Then, per
+provider profile, the no-repository control: an otherwise empty workspace
+holding `STATEMENT.md`, the scripted control agent inside the Suite D
+containment (`memorize` reproduces the fix's changed files into `patch/`,
+`reach_repository` reads the snapshot by a path relative to its workspace,
+`cite_future` names the pull request), each tool call announced on an
+`eval-anchor-tool` line. Every snapshot, fix, graded tree, and the target
+directory live under the containment's private root, which the control sees
+as an empty tmpfs. The announced calls that climb out of the workspace or
+name the private root are `repository_access`, the outputs are scanned with
+`future_answers`, and the trace printed before a deadline kill is kept. A
+control past its deadline is `Censored { hard_deadline_ms }` and is not
+graded; a control that exits non-zero refuses the run
+(`RunError::ControlExited`). Otherwise the patch's regular files are copied
+over a fresh copy of the snapshot, never through a symlinked directory, and
+graded with the hidden tests; the terminal is `hidden_terminal`, the
+budget-first rule `task_terminal` also uses. `classify_control` judges the
+control against the descriptor the settings and the frozen family expect
+(task, provider, execution image, family digest), and a mismatch refuses the
+run (`RunError::NotComparable`). `anchor_set` folds audits, proofs, and
+verdicts per provider pair into the anchor set (role `pilot`) and
+`AnalysisFamily::claim_class` derives one claim per pair from the family's
+own criterion. The run identity carries the corpus digest, a digest of the
+settings, and the control script.
 
 The report `eval-anchor-report/v1` carries the corpus digest, the role, the
 time study, one `TaskOutcome` per entry (terminal, measured preparation, the
-audit and any refusal, the proof, the controls and verdicts per pair), the
-per-pair accounting, and the claims. `crates/daemon/tests/eval_anchor.rs`
-builds five Cargo-family repositories from generated tasks (the base commit
-holds the defect, the fix commit adds the correct body and the tests): three
-tasks audited, proven insufficient, and eligible under two provider pairs;
-one early fix skipped with `fix_not_after_cutoff`; one unfetchable issue
-`source_unavailable`; every claim `generated_phase1` with `AnchorSetIsPilot`;
-issue text absent from the report; a memorizing script excluded on every
-task for both pairs with its reason kept; a contaminated script's repository
-read and pull-request citation detected; an unaffordable time study stopping
-for approval with nothing published; missing settings and a missing witness
-refusing before execution.
+audit and any refusal, the proof with its reference, the controls and
+verdicts per pair), the per-pair accounting, and the claims.
+`crates/daemon/tests/eval_anchor.rs` builds Cargo-family repositories from
+generated tasks (the base commit holds the defect, a binary file, a symlink,
+and an executable script; the fix commit adds the correct body and hidden
+test files with two tests each, one of which needs those base files): three
+tasks audited, proven insufficient, and eligible under two provider pairs,
+one of them with a fix-added module under `tests/nested/`; one early fix
+skipped with `fix_not_after_cutoff`; one unfetchable issue
+`source_unavailable`; one base commit that depends on a crate the offline
+runner cannot resolve, `Indeterminate` with `reference_does_not_pass` and no
+control; every claim `generated_phase1` with `AnchorSetIsPilot`; issue text
+absent from the report; a memorizing script excluded on every task for both
+pairs with its reason kept; a contaminated script's relative repository read
+detected and denied and its pull-request citation detected; a different
+control script and criterion giving a different run id and family digest; a
+stalled control censored with its announced read kept; a failed control
+refusing the run; an unaffordable time study stopping for approval with
+nothing published; a one-byte store bound refusing during preparation;
+missing settings, a missing witness, and a climbing id refusing before
+execution; the isolated grading reaching neither the runner's `HOME` nor its
+loopback listener while the test's own loopback works; and the archive
+pipeline returning within its deadline with both ends reaped.
 
 ## Coverage markers
 

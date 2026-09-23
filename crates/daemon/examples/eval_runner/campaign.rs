@@ -718,8 +718,12 @@ impl Charges {
     /// Releases a root after its fixture exited: the store's bytes are charged
     /// as they peaked, then the root goes, and the run's elapsed time is read.
     pub fn vacate(&mut self, root: tempfile::TempDir) -> Result<(), EnvelopeExceeded> {
-        self.observe(Resource::StoreBytes, root_bytes(root.path()))?;
+        self.charge_store(root.path())?;
         self.release(root)
+    }
+
+    pub fn charge_store(&mut self, root: &Path) -> Result<(), EnvelopeExceeded> {
+        self.observe(Resource::StoreBytes, root_bytes(root))
     }
 
     /// Releases a root after the caller has already charged its store bytes.

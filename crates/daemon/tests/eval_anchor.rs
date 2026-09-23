@@ -26,21 +26,47 @@ mod shrink;
 mod suite_d;
 
 use std::collections::BTreeSet;
+use std::net::TcpListener;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anchor::{Config, ControlScript, Fetched, Host, MANIFEST_FILE, REPORT_FILE, RunError};
 use eval_core::{
-    ANCHOR_CORPUS_SCHEMA, Affordability, AnchorCorpus, AnchorEntry, ClaimClass, Contamination,
-    ControlVerdict, CutoffRefused, Family, HiddenOutcome, Oracle, ProviderProfile,
-    RealHistorySettings, Scale, SkipReason, Terminal, TransferCriterion, UnmetClause,
-    UnsupportedReason, generate_tasks,
+    ANCHOR_CORPUS_SCHEMA, Affordability, AnchorCorpus, AnchorEntry, AnchorError, CensorReason,
+    ClaimClass, Contamination, ControlVerdict, CutoffRefused, Family, HiddenOutcome,
+    InsufficiencyRefused, Oracle, ProviderProfile, RealHistorySettings, Resource, Scale,
+    SkipReason, TaskBudgets, Terminal, TransferCriterion, UnmetClause, UnsupportedReason,
+    generate_tasks,
 };
 
 const CUTOFF_SECONDS: i64 = 1_700_000_000;
 const BASE_SECONDS: i64 = CUTOFF_SECONDS - 86_400;
 const FIX_SECONDS: i64 = CUTOFF_SECONDS + 3_600;
+const BLOB: [u8; 4] = [0xff, 0xfe, 0x00, 0x01];
+const ASSETS_TEST: &str = r#"
+#[test]
+fn base_assets_survive_the_snapshot() {
+    use std::os::unix::fs::PermissionsExt;
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    assert_eq!(std::fs::read(root.join("assets/blob.bin")).unwrap(), [0xff, 0xfe, 0x00, 0x01]);
+    let link = std::fs::symlink_metadata(root.join("assets/link")).unwrap();
+    assert!(link.file_type().is_symlink());
+    let mode = std::fs::metadata(root.join("scripts/anchor-tool.sh")).unwrap().permissions().mode();
+    assert_ne!(mode & 0o111, 0);
+}
+"#;
+
+/// How one fixture repository departs from a plain real-history task.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Variant {
+    Plain,
+    EarlyFix,
+    MissingIssue,
+    UnresolvableDependency,
+    NestedTestFile,
+}
 
 fn git(dir: &Path, args: &[&str], seconds: i64) -> String {
     let stamp = format!("{seconds} +0000");
@@ -64,13 +90,27 @@ fn git(dir: &Path, args: &[&str], seconds: i64) -> String {
 }
 
 /// A real-history repository from a generated task: the base commit holds
-/// the defect, the fix commit adds the correct body and the tests that catch
-/// it. Returns the two SHAs.
-fn history(dir: &Path, index: u32, fix_seconds: i64) -> (String, String) {
+/// the defect and a binary file, a symlink, and an executable script; the
+/// fix commit adds the correct body and the tests that catch the defect.
+/// Returns the two SHAs.
+fn history(dir: &Path, index: u32, variant: Variant) -> (String, String) {
     let corpus = generate_tasks(0x5EED_D000_0000_0006, index + 1);
     let task = &corpus.tasks[index as usize];
     std::fs::create_dir_all(dir).unwrap();
     suite_d::write_files(dir, &task.files).unwrap();
+    if variant == Variant::UnresolvableDependency {
+        let manifest = dir.join("Cargo.toml");
+        let mut text = std::fs::read_to_string(&manifest).unwrap();
+        text.push_str("eidnara-absent-offline = \"1\"\n");
+        std::fs::write(&manifest, text).unwrap();
+    }
+    std::fs::create_dir_all(dir.join("assets")).unwrap();
+    std::fs::write(dir.join("assets/blob.bin"), BLOB).unwrap();
+    std::os::unix::fs::symlink("blob.bin", dir.join("assets/link")).unwrap();
+    let tool = dir.join("scripts/anchor-tool.sh");
+    std::fs::create_dir_all(tool.parent().unwrap()).unwrap();
+    std::fs::write(&tool, "#!/bin/sh\nexit 0\n").unwrap();
+    std::fs::set_permissions(&tool, std::fs::Permissions::from_mode(0o755)).unwrap();
     git(dir, &["init", "-q"], BASE_SECONDS);
     git(dir, &["add", "-A"], BASE_SECONDS);
     git(dir, &["commit", "-q", "-m", "base"], BASE_SECONDS);
@@ -79,8 +119,18 @@ fn history(dir: &Path, index: u32, fix_seconds: i64) -> (String, String) {
     for test in &task.hidden_tests {
         let path = dir.join(test.path());
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(path, &test.content).unwrap();
+        std::fs::write(path, format!("{}{ASSETS_TEST}", test.content)).unwrap();
     }
+    if variant == Variant::NestedTestFile {
+        let helper = dir.join("tests/nested/helper.rs");
+        std::fs::create_dir_all(helper.parent().unwrap()).unwrap();
+        std::fs::write(helper, "pub fn helper() {}\n").unwrap();
+    }
+    let fix_seconds = if variant == Variant::EarlyFix {
+        CUTOFF_SECONDS - 60
+    } else {
+        FIX_SECONDS
+    };
     git(dir, &["add", "-A"], fix_seconds);
     git(dir, &["commit", "-q", "-m", "fix"], fix_seconds);
     let fix = git(dir, &["rev-parse", "HEAD"], fix_seconds);
@@ -185,18 +235,13 @@ fn approval() -> eval_core::Approval {
     }
 }
 
-/// Five local Cargo-family repositories; `fix_seconds` moves one fix before
-/// the cutoff and `missing_issue` makes one issue unfetchable.
-fn corpus(dir: &Path, early_fix: Option<usize>, missing_issue: Option<usize>) -> AnchorCorpus {
-    let entries = (0..5u32)
-        .map(|index| {
+/// One local Cargo-family repository per variant, in order.
+fn corpus(dir: &Path, variants: &[Variant]) -> AnchorCorpus {
+    let entries = (0u32..)
+        .zip(variants)
+        .map(|(index, &variant)| {
             let repo = dir.join(format!("repo-{index}"));
-            let fix_seconds = if early_fix == Some(index as usize) {
-                CUTOFF_SECONDS - 60
-            } else {
-                FIX_SECONDS
-            };
-            let (base_sha, fix_sha) = history(&repo, index, fix_seconds);
+            let (base_sha, fix_sha) = history(&repo, index, variant);
             AnchorEntry {
                 id: format!("cargo-{index}"),
                 family: Family::Cargo,
@@ -204,7 +249,7 @@ fn corpus(dir: &Path, early_fix: Option<usize>, missing_issue: Option<usize>) ->
                 license: "MIT".to_string(),
                 base_sha,
                 fix_sha,
-                issue: if missing_issue == Some(index as usize) {
+                issue: if variant == Variant::MissingIssue {
                     404
                 } else {
                     100 + u64::from(index)
@@ -220,6 +265,8 @@ fn corpus(dir: &Path, early_fix: Option<usize>, missing_issue: Option<usize>) ->
     }
 }
 
+const PLAIN: [Variant; 5] = [Variant::Plain; 5];
+
 fn config(dir: &Path, corpus: AnchorCorpus, control: ControlScript, bound_ms: u64) -> Config {
     Config {
         scale: Scale::S0,
@@ -230,6 +277,8 @@ fn config(dir: &Path, corpus: AnchorCorpus, control: ControlScript, bound_ms: u6
         corpus,
         settings: settings(bound_ms),
         control,
+        budgets: suite_d::BUDGETS,
+        store_bound_bytes: 1 << 30,
     }
 }
 
@@ -239,7 +288,17 @@ fn every_anchor_task_has_an_audit_a_proof_and_a_control_and_the_pilot_never_tran
         return;
     }
     let dir = tempfile::tempdir().unwrap();
-    let corpus = corpus(dir.path(), Some(3), Some(4));
+    let corpus = corpus(
+        dir.path(),
+        &[
+            Variant::Plain,
+            Variant::Plain,
+            Variant::NestedTestFile,
+            Variant::EarlyFix,
+            Variant::MissingIssue,
+            Variant::UnresolvableDependency,
+        ],
+    );
     let config = config(
         dir.path(),
         corpus.clone(),
@@ -252,7 +311,7 @@ fn every_anchor_task_has_an_audit_a_proof_and_a_control_and_the_pilot_never_tran
         report.time_study,
         Affordability::Affordable { .. }
     ));
-    assert_eq!(report.tasks.len(), 5);
+    assert_eq!(report.tasks.len(), 6);
     for task in &report.tasks {
         assert!(
             task.prepare_ms > 0,
@@ -277,6 +336,13 @@ fn every_anchor_task_has_an_audit_a_proof_and_a_control_and_the_pilot_never_tran
         let proof = task.insufficiency.as_ref().unwrap();
         proof.validate().unwrap();
         assert!(proof.hidden.values().any(|o| *o == HiddenOutcome::Failed));
+        assert!(
+            proof
+                .reference
+                .values()
+                .all(|o| *o == HiddenOutcome::Passed),
+            "{id}: the fix tree passes every hidden test, assets included"
+        );
         assert_eq!(task.controls.len(), 2, "one control per provider pair");
         for (pair, control) in &task.controls {
             assert_eq!(
@@ -288,6 +354,12 @@ fn every_anchor_task_has_an_audit_a_proof_and_a_control_and_the_pilot_never_tran
             assert_eq!(task.verdicts[pair], ControlVerdict::Eligible);
         }
     }
+    let nested = by_id("cargo-2").insufficiency.as_ref().unwrap();
+    assert_eq!(
+        nested.hidden.len(),
+        2,
+        "a module under a tests/ subdirectory is not a hidden test target"
+    );
     let early = by_id("cargo-3");
     assert_eq!(
         early.terminal,
@@ -305,9 +377,29 @@ fn every_anchor_task_has_an_audit_a_proof_and_a_control_and_the_pilot_never_tran
         Terminal::Unsupported(UnsupportedReason::SourceUnavailable)
     );
     assert!(missing.audit.is_none());
+    let unbuildable = by_id("cargo-5");
+    assert_eq!(
+        unbuildable.terminal,
+        Terminal::Indeterminate,
+        "a tree the runner cannot build is not proven insufficient"
+    );
+    let proof = unbuildable.insufficiency.as_ref().unwrap();
+    assert!(proof.hidden.values().all(|o| *o == HiddenOutcome::Errored));
+    assert_eq!(
+        proof.validate(),
+        Err(InsufficiencyRefused::ReferenceDoesNotPass)
+    );
+    assert!(
+        unbuildable.controls.is_empty() && unbuildable.verdicts.is_empty(),
+        "no control runs for a task without a proof"
+    );
 
     for (pair, accounting) in &report.accounting {
-        assert_eq!(accounting.eligible.len(), 3, "{pair}");
+        assert_eq!(
+            accounting.eligible,
+            BTreeSet::from(["cargo-0".into(), "cargo-1".into(), "cargo-2".into()]),
+            "{pair}"
+        );
         assert_eq!(
             accounting.cutoff_invalid["cargo-3"],
             CutoffRefused::FixNotAfterCutoff
@@ -317,6 +409,7 @@ fn every_anchor_task_has_an_audit_a_proof_and_a_control_and_the_pilot_never_tran
             CutoffRefused::SnapshotDigestMissing,
             "an unfetchable source has no cutoff evidence at all"
         );
+        assert!(accounting.insufficiency_missing.contains("cargo-5"));
         let claim = &report.claims[pair];
         assert_eq!(claim.class, ClaimClass::GeneratedPhase1);
         assert!(
@@ -349,7 +442,7 @@ fn a_memorizing_provider_is_excluded_for_its_pair_and_seeded_contamination_is_de
         return;
     }
     let dir = tempfile::tempdir().unwrap();
-    let corpus = corpus(dir.path(), None, None);
+    let corpus = corpus(dir.path(), &PLAIN);
     let memorized = config(
         dir.path(),
         corpus.clone(),
@@ -359,13 +452,13 @@ fn a_memorizing_provider_is_excluded_for_its_pair_and_seeded_contamination_is_de
         },
         u64::MAX,
     );
-    let run = anchor::run(&memorized, HOST).unwrap();
-    for task in &run.report.tasks {
+    let first = anchor::run(&memorized, HOST).unwrap();
+    for task in &first.report.tasks {
         for (pair, control) in &task.controls {
             assert_eq!(
                 control.terminal,
                 Terminal::Pass,
-                "{pair}: solved from the statement alone"
+                "{pair}: solved from the statement alone, every test in the file passing"
             );
             assert_eq!(
                 task.verdicts[pair],
@@ -375,16 +468,16 @@ fn a_memorizing_provider_is_excluded_for_its_pair_and_seeded_contamination_is_de
             );
         }
     }
-    for (pair, accounting) in &run.report.accounting {
+    for (pair, accounting) in &first.report.accounting {
         assert!(accounting.eligible.is_empty(), "{pair}");
         assert_eq!(
             accounting.excluded.len(),
             5,
             "{pair}: every task keeps its row and reason"
         );
-        assert_eq!(run.report.claims[pair].skipped.len(), 5);
+        assert_eq!(first.report.claims[pair].skipped.len(), 5);
     }
-    assert!(run.report.tasks.iter().all(|t| {
+    assert!(first.report.tasks.iter().all(|t| {
         t.verdicts
             .values()
             .all(|v| matches!(v, ControlVerdict::Excluded { .. }))
@@ -394,6 +487,7 @@ fn a_memorizing_provider_is_excluded_for_its_pair_and_seeded_contamination_is_de
         dir.path(),
         corpus,
         ControlScript {
+            memorize: true,
             reach_repository: true,
             cite_future: true,
             ..ControlScript::default()
@@ -401,12 +495,18 @@ fn a_memorizing_provider_is_excluded_for_its_pair_and_seeded_contamination_is_de
         u64::MAX,
     );
     contaminated.publish = dir.path().join("contaminated");
-    let run = anchor::run(&contaminated, HOST).unwrap();
-    for task in &run.report.tasks {
+    contaminated.settings.transfer_criterion = None;
+    let second = anchor::run(&contaminated, HOST).unwrap();
+    for task in &second.report.tasks {
         for (pair, control) in &task.controls {
             assert!(
                 !control.repository_access.is_empty(),
-                "{pair}: the repository read was observed"
+                "{pair}: the relative repository read was observed"
+            );
+            assert_eq!(
+                control.terminal,
+                Terminal::Pass,
+                "{pair}: the read was denied, so the base file never replaced the memorized fix"
             );
             assert!(
                 !control.future_answers.is_empty(),
@@ -420,12 +520,96 @@ fn a_memorizing_provider_is_excluded_for_its_pair_and_seeded_contamination_is_de
             ));
         }
     }
+    assert_ne!(
+        first.report.eval_run_id, second.report.eval_run_id,
+        "the control script and settings are part of the run's identity"
+    );
+    let digest = |run: &anchor::Run| {
+        run.report.tasks[0]
+            .controls
+            .values()
+            .next()
+            .unwrap()
+            .analysis_family_digest
+            .clone()
+    };
+    assert_ne!(
+        digest(&first),
+        digest(&second),
+        "the transfer criterion is frozen into the analysis family"
+    );
+}
+
+#[test]
+fn a_control_past_its_deadline_is_censored_with_its_trace_and_a_failed_control_refuses() {
+    if !suite_d::namespaces_available() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = corpus(dir.path(), &PLAIN);
+    let mut stalled = config(
+        dir.path(),
+        corpus.clone(),
+        ControlScript {
+            reach_repository: true,
+            stall: true,
+            ..ControlScript::default()
+        },
+        u64::MAX,
+    );
+    stalled.settings.providers.truncate(1);
+    stalled.budgets = TaskBudgets {
+        hard_deadline_ms: 1_500,
+        ..suite_d::BUDGETS
+    };
+    let run = anchor::run(&stalled, HOST).unwrap();
+    for task in &run.report.tasks {
+        for (pair, control) in &task.controls {
+            assert_eq!(
+                control.terminal,
+                Terminal::Censored {
+                    reason: CensorReason::HardDeadlineMs
+                },
+                "{pair}"
+            );
+            assert!(
+                !control.repository_access.is_empty(),
+                "{pair}: the read announced before the deadline is kept"
+            );
+            assert!(matches!(
+                task.verdicts[pair],
+                ControlVerdict::Excluded {
+                    contamination: Contamination::RepositoryAccess { .. }
+                }
+            ));
+        }
+    }
+
+    let mut exited = config(
+        dir.path(),
+        corpus,
+        ControlScript {
+            exit_code: Some(3),
+            ..ControlScript::default()
+        },
+        u64::MAX,
+    );
+    exited.publish = dir.path().join("exited");
+    match anchor::run(&exited, HOST) {
+        Err(RunError::ControlExited { task, code }) => {
+            assert_eq!(task, "cargo-0");
+            assert_eq!(code, Some(3));
+        }
+        Err(other) => panic!("expected the failed control to refuse, got {other:?}"),
+        Ok(_) => panic!("expected the failed control to refuse, got a run"),
+    }
+    assert!(!exited.publish.join(REPORT_FILE).exists());
 }
 
 #[test]
 fn an_unaffordable_time_study_stops_for_approval_before_the_pilot_is_paid_for() {
     let dir = tempfile::tempdir().unwrap();
-    let corpus = corpus(dir.path(), None, None);
+    let corpus = corpus(dir.path(), &PLAIN);
     let config = config(dir.path(), corpus, ControlScript::default(), 1);
     match anchor::run(&config, HOST) {
         Err(RunError::StopForApproval(Affordability::StopForApproval {
@@ -445,9 +629,26 @@ fn an_unaffordable_time_study_stops_for_approval_before_the_pilot_is_paid_for() 
 }
 
 #[test]
+fn the_store_is_charged_while_preparing_not_after_the_pilot() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = corpus(dir.path(), &PLAIN);
+    let mut config = config(dir.path(), corpus, ControlScript::default(), 1);
+    config.store_bound_bytes = 1;
+    match anchor::run(&config, HOST) {
+        Err(RunError::Envelope(exceeded)) => {
+            assert_eq!(exceeded.resource, Resource::StoreBytes);
+            assert_eq!(exceeded.bound, 1);
+        }
+        Err(other) => panic!("expected the store bound during preparation, got {other:?}"),
+        Ok(_) => panic!("expected the store bound during preparation, got a run"),
+    }
+    assert!(!config.publish.join(REPORT_FILE).exists());
+}
+
+#[test]
 fn missing_settings_and_an_unaccepted_witness_refuse_before_execution() {
     let dir = tempfile::tempdir().unwrap();
-    let corpus = corpus(dir.path(), None, None);
+    let corpus = corpus(dir.path(), &PLAIN);
     let mut config = config(dir.path(), corpus, ControlScript::default(), u64::MAX);
     config.settings.providers.clear();
     assert!(matches!(
@@ -468,5 +669,82 @@ fn missing_settings_and_an_unaccepted_witness_refuse_before_execution() {
         anchor::run(&bad_witness, HOST),
         Err(RunError::Io(_))
     ));
+    let mut climbing = config.clone();
+    climbing.settings = settings(1);
+    climbing.corpus.entries[0].id = "../escape".to_string();
+    assert!(matches!(
+        anchor::run(&climbing, HOST),
+        Err(RunError::Corpus(AnchorError::NotAPathComponent { .. }))
+    ));
     assert!(!config.publish.exists());
+}
+
+#[test]
+fn grading_runs_repository_code_without_the_runners_home_or_network() {
+    if !suite_d::namespaces_available() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let workspace = dir.path().join("workspace");
+    std::fs::create_dir_all(workspace.join("src")).unwrap();
+    std::fs::write(
+        workspace.join("Cargo.toml"),
+        "[package]\nname = \"probe\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    )
+    .unwrap();
+    std::fs::write(workspace.join("src/lib.rs"), "").unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let home = std::env::var("HOME").unwrap();
+    let probe = format!(
+        r#"
+#[test]
+fn isolated() {{
+    assert_ne!(std::env::var("HOME").ok().as_deref(), Some({home:?}));
+    assert!(std::net::TcpStream::connect(("127.0.0.1", {port})).is_err());
+    let own = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    std::net::TcpStream::connect(own.local_addr().unwrap()).unwrap();
+}}
+"#
+    );
+    let mut limits = campaign::profile(Scale::S0, 128, 600_000, None).envelope;
+    limits.processes = 2;
+    let mut charges = campaign::Charges::new(limits);
+    let results = anchor::grade(
+        &workspace,
+        &[("probe".to_string(), probe)],
+        &dir.path().join("target"),
+        &mut charges,
+    )
+    .unwrap();
+    assert_eq!(
+        results["probe"],
+        HiddenOutcome::Passed,
+        "the runner's home and loopback listener are out of reach; the test's own loopback works"
+    );
+    drop(listener);
+}
+
+#[test]
+fn the_archive_pipeline_is_bounded_and_both_ends_are_reaped() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = dir.path().join("out.txt");
+    let mut producer = Command::new("printf");
+    producer.arg("archived");
+    let mut consumer = Command::new("sh");
+    consumer.args(["-c", "cat > \"$1\"", "sh"]).arg(&out);
+    assert_eq!(
+        anchor::pipe_bounded(producer, consumer, Duration::from_secs(30)).unwrap(),
+        Some(true)
+    );
+    assert_eq!(std::fs::read_to_string(&out).unwrap(), "archived");
+
+    let mut stalled = Command::new("sh");
+    stalled.args(["-c", "exec sleep 30"]);
+    let started = Instant::now();
+    assert_eq!(
+        anchor::pipe_bounded(stalled, Command::new("cat"), Duration::from_millis(300)).unwrap(),
+        None
+    );
+    assert!(started.elapsed() < Duration::from_secs(10));
 }

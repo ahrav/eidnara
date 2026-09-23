@@ -83,6 +83,11 @@ pub enum AnchorError {
     DuplicateId {
         id: String,
     },
+    /// The id names clone and snapshot directories; it must be one plain path
+    /// component to remain under the runner root.
+    NotAPathComponent {
+        id: String,
+    },
     NotPilotComposition {
         found: BTreeMap<Family, u32>,
     },
@@ -109,6 +114,13 @@ impl AnchorEntry {
             if !is_lower_hex(sha, 40) {
                 return Err(AnchorError::NotASha { id: id(), field });
             }
+        }
+        let plain = self
+            .id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'));
+        if !plain || self.id == "." || self.id == ".." {
+            return Err(AnchorError::NotAPathComponent { id: id() });
         }
         Ok(())
     }
@@ -292,23 +304,37 @@ pub enum InsufficiencyRefused {
     /// The tree at the cutoff already passes: there is nothing to fix.
     TreeAlreadyPasses,
     NothingExecuted,
+    /// Some hidden test does not pass on the fix tree.
+    ReferenceDoesNotPass,
 }
 
 debug_display!(InsufficiencyRefused);
 
 /// The current-tree-only run: the hidden tests over the snapshot with no
-/// agent. A recorded result is the proof; a corpus row without one is not.
+/// agent, next to the same tests over the snapshot with the fix applied. A
+/// recorded pair of results is the proof; a corpus row without one is not.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct InsufficiencyProof {
     pub task: String,
     pub hidden: HiddenResults,
+    /// The hidden tests over the fix tree. A base-tree failure or error
+    /// counts only when every test passes here, because then the runner's
+    /// environment is shown to build and run them.
+    pub reference: HiddenResults,
 }
 
 impl InsufficiencyProof {
     pub fn validate(&self) -> Result<(), InsufficiencyRefused> {
         if self.hidden.is_empty() {
             return Err(InsufficiencyRefused::NothingExecuted);
+        }
+        let reference_passes = self
+            .hidden
+            .keys()
+            .all(|name| self.reference.get(name) == Some(&HiddenOutcome::Passed));
+        if !reference_passes {
+            return Err(InsufficiencyRefused::ReferenceDoesNotPass);
         }
         if self.hidden.values().all(|o| *o == HiddenOutcome::Passed) {
             return Err(InsufficiencyRefused::TreeAlreadyPasses);

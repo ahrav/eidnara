@@ -18,14 +18,29 @@ provider/model pair."
   `AnchorSetIsPilot`; a transfer-role set with one memorized task does not
   transfer for that pair and does once the control is eligible; no criterion
   refuses.
+- `crates/daemon/examples/eval_runner/anchor.rs` `control`: the workspace sits
+  outside the private root that the containment covers with an empty tmpfs;
+  an announced call that climbs out of the workspace or names the private root
+  is repository access; `run_traced` keeps the trace printed before a
+  deadline kill; the terminal is `hidden_terminal`. `run` freezes the
+  settings' criterion into the analysis family and derives claims with
+  `AnalysisFamily::claim_class`.
 - `crates/daemon/tests/eval_anchor.rs` `a_memorizing_provider_is_excluded_for_its_pair_and_seeded_contamination_is_detected`:
-  the memorizing script passes every control from the statement alone and
-  every task is excluded for both pairs with its reason; the contaminated
-  script's repository read and pull-request citation are detected.
+  the memorizing script passes every control from the statement alone, every
+  test in each hidden file passing, and every task is excluded for both pairs
+  with its reason; the contaminated script's relative repository read is
+  detected and denied (the memorized fix it would have overwritten still
+  passes) and its pull-request citation is detected; the second run's control
+  script and criterion change its run id and family digest.
+- `crates/daemon/tests/eval_anchor.rs` `a_control_past_its_deadline_is_censored_with_its_trace_and_a_failed_control_refuses`:
+  a control that announces a repository read and stalls is `Censored` with
+  the read kept and excluded; a control that exits non-zero refuses the run.
 
 ## Failure scenario
 A provider that has seen the fix upstream solves the task from the issue
-text; counting it would measure memorization as transfer.
+text; counting it would measure memorization as transfer. A control that can
+read the clone or snapshot, or whose trace is dropped at its deadline, is
+contaminated without the report showing it.
 
 ## Timing windows and dependencies
 None.
