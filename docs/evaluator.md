@@ -1987,13 +1987,122 @@ stores agree on it.
 
 ## Aging shell
 
-The bulk scaffold is compared against the aged arm: a projection built at the
-final tip from the kernel's snapshot export and embedded to quiescence has the
-aged arm's live digest and differs historically by every death in the history,
-each an enumerated `tombstoned_before_snapshot`. The window after the chosen
-checkpoint step straddles a supersession and a retirement of a descriptor
-created before it, and at least one death falls before it; a history with no
-such step is refused (`NoStraddlingStep`).
+`crates/daemon/examples/eval_runner/aging.rs` is the Suite C aging shell. It
+generates one history (one session with a tool span on every fourth message,
+a correction on every third, and an invalidation on every fifth; no
+repository) and lives it through the real ingestion seams in-process on one
+root: `KernelStore` for the kernel, `SearchProjection` for the search
+projection, and `MemoryStore` for the memory store. The drive is mutate, then
+drain: every message or correction publishes its units through
+`opencode_units` and `SourcePublisher::publish` with the event's observation
+time and appends one history segment to the memory store; every invalidation
+retires the live tip of its target lineage through the kernel's
+`retire_observation`; after each step the outbox is published,
+`SearchCatchUp::run_episode` runs until the projection acknowledges the tip,
+and every open embedding job is published through `EmbeddingPublisher`. Every
+time the drive passes is the event's own valid time; the only monotonic
+deadlines are the checkpoint and embedding waits, which are never persisted.
+The projection is constructed once at the start, before any descriptor
+exists, and caught up commit by commit from there, so the aged arm keeps one
+persisted `database_incarnation_id`, a monotonic `commit_seq`, and a
+projection no bulk build ever touched.
+
+The checkpoint step is chosen from the generated history so the window after
+it straddles a supersession and a retirement of a descriptor created before it
+and at least one death falls before it; a history with no such step is
+refused (`NoStraddlingStep`). `Stores::close` reads every declared counter,
+truncates the projection's WAL through its own `checkpoint_truncate`, closes
+every handle (the kernel handle is proved sole by `Arc::try_unwrap`, and a
+second holder reads as `handles_closed: false`; the projection and memory
+handles are owned values, so dropping them is the proof), truncates the
+kernel's and the memory store's WAL on the closed files (the storage layer
+denies the checkpoint pragma on its own connections), and records the bytes
+left in each `-wal` sidecar. A handle that could not be proved closed, or a
+projection truncation that ran past its wait, is recorded as `busy: 1` with
+`-1` frames rather than touched again: the receipt reports what was
+observed, and `admit` refuses it. The projection's file lease stays held until the
+copy is done, so nothing can open the projection in between. The kernel and
+memory store release their leases at close, so `Closed::copy` reopens each of
+them once to prove no other holder took its lease after the close, and holds
+each probe until the copy is done; the probe
+itself writes a fence, so on success that store's WAL is truncated and its
+sidecar read again, and every counter is read again while both probes are
+held, so work left by a holder that took a lease between the close and the
+probe is counted before the receipt is admitted; a held lease is
+recorded as an open handle. The copy admits the receipt and
+only then copies
+`kernel/kernel.sqlite`, the kernel's artifact objects, `memory.sqlite`, and
+`search/search.sqlite` into a fresh root with owner-only modes, building the
+`Checkpoint` from the copied bytes; a refused receipt copies nothing, and a
+destination that already holds anything (SQLite would read a stray sidecar
+beside the verified copy) is a programming error the copy panics on.
+`Copied::reopen` first requires the copied root to hold exactly the
+checkpoint's files (a sidecar left by a later opener would be read beside the
+verified files without appearing in any digest; an unlisted file is a
+programming error it panics on), then re-hashes every copied file and refuses an absent one as
+`FileMissing` and a changed one as `FileDiffers` before any store opens (a
+malformed copy would otherwise fail its first query), reads each copy's
+integrity on its own
+connection, accepts them against the checkpoint, and reopens the kernel and
+the memory store as they were. Before the projection is rebuilt, the prefix
+projection's source hold, which rode along in the copy bound to a lease epoch
+the reopen has advanced past, is released through `reconcile_source_holds`,
+as the daemon's replacement cleanup does after a restart, so the rebuilt
+projection's hold is the only live one. The resumed driver's lineage state (each
+lineage's published objects in commit order, and the objects retired outright)
+is rebuilt from the copied kernel's `object_registry`, not inherited from the
+prefix driver, as a fresh process would have to rebuild it. A copy of another store therefore reads as
+`FileDiffers { kernel/kernel.sqlite }`, the file that persists the incarnation
+id; `accept`'s own `ForeignIncarnation` check stands behind it.
+
+The search projection is the repository correction Phase 4 records. Its
+catch-up runs under a source hold bound to the kernel's lease epoch, and the
+lease epoch advances on every kernel open; after a restart the hold is dead
+(`BindingMismatch`) and the daemon's lifecycle owner serves the family as it
+is until it trails the tip, then rebuilds. The plan assumed a projection could
+resume catch-up across a restart; it cannot in this repository. The resumed
+life therefore verifies the copied projection (it opens, its connection
+verifies, integrity is `ok`) and then rebuilds it at the checkpoint commit
+from the kernel's snapshot export, embeds it to quiescence, and catches up
+from there, as production does after any restart. The report says so:
+`against_resumed.later` is `bulk` at the checkpoint commit, and the
+comparison of the full life's projection (built at the first commit) against
+the resumed life's is exactly the divergence table's case: equal live digests
+and `tombstoned_before_snapshot` for every descriptor that died after the
+first snapshot and at or before the checkpoint. The kernel and memory store
+carry no such divergence: the reopened copy's `StateSnapshot` equals the
+prefix's, the resumed life advances the tip without rewriting anything at or
+before it, and its final snapshot equals the full life's, so the guard digests
+agree. The bulk scaffold is compared separately: a projection built at the
+final tip from the snapshot export and embedded to quiescence has the full
+life's live digest and differs historically by every death in the history.
+
+The run refuses an unapproved profile before the history is generated or any
+store opens (the profile's event bound is the generator's,
+`messages.max(64) * 2`, so it needs no plan), starts the envelope's clock
+before planning, charges the roots, store bytes, elapsed time, and artifact
+bytes to the envelope, and
+publishes `suite-c-aging-report.json` and `manifest.json` write-then-rename;
+a manifest the directory refuses takes the report back out with it, so a
+reader finds both files or none, as in Suite B. The manifest's clock and the
+envelope's start together after the publish directory is prepared, and the
+build identity is frozen after planning and before the first life runs.
+The manifest carries the aging shell's own root seed and the running binary's
+digest in its identity, says `prefix_then_generate` (the whole history is
+drawn by the seeded generator before the run, so the checkpoint step can be
+chosen to straddle deaths; the generator never reads a store, so the suffix
+drawn before the copy is the suffix that would have been drawn after it, and
+the choices after the checkpoint land only on the reopened copy), `replay`,
+`adapter-ingested, production caller: none`, `test-only`, reaches
+`AtQuiescence`, `AfterRecovery`, and `EndOfRun`, names the report by its
+result digest and the checkpoint digest as its witness. The `aging`
+subcommand takes every input on the command line (`--scale`, `--messages`,
+`--elapsed-bound-ms`, `--approved-by`, `--approval-run-id`, `--publish`) and
+answers with one JSON line; `crates/daemon/tests/eval_aging.rs` drives the
+shell in-process, asserts what a run found, exercises each refusal, and runs
+the built example to show that two OS processes agree on both guard digests
+and both comparisons while their checkpoint digests differ, because they
+copied two stores.
 
 Every drain ends with no catch-up lag and no open embedding job, and the bulk
 scaffold ends with no open embedding job; either failing stops the run. The
