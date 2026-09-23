@@ -2719,7 +2719,8 @@ A run may tighten its store-bytes bound below the profile's to show the breach
 path end to end: `EnvelopeExceeded` names the resource, bound, and the peak
 that crossed it, and nothing is published. R24 refusals are counted and
 reported, not planted: a reservation the store refuses with
-`MemoryReviewerJobRefusal::MetadataQuota` adds one to `r24_refusals` and
+`MemoryReviewerJobRefusal::MetadataQuota` adds one to `r24_refusals`, records
+the R24 expected refusal the report reconciles that count against, and
 admits nothing, and the campaign continues; any other refusal stops the run
 with `RunError::Admission`. An S0 history never reaches the quota, and the
 report says zero. Two campaigns run from one checkout on two roots publish the same

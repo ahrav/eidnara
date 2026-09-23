@@ -6,10 +6,10 @@ use std::path::{Path, PathBuf};
 
 use eval_core::{
     Approval, CampaignResources, ClaimBoundary, Coverage, Cut, EnvelopeExceeded, ExecutionMode,
-    GROWTH_REPORT_SCHEMA, GrowthBounds, GrowthContract, GrowthLedger, GrowthMode, GrowthRefused,
-    GrowthReport, GrowthReportError, HeadroomSample, Operation, ProfileError, ResourceSample,
-    ReviewerQuota, RunProfile, Scale, SearchEpisodeFault, StoreBytes, StoreFamily, SwarmMix,
-    eval_run_id,
+    ExpectedRefusal, GROWTH_REPORT_SCHEMA, GrowthBounds, GrowthContract, GrowthLedger, GrowthMode,
+    GrowthRefused, GrowthReport, GrowthReportError, HeadroomSample, Operation, ProfileError,
+    RecordedRefusal, ResourceSample, ReviewerQuota, RunProfile, Scale, SearchEpisodeFault,
+    StoreBytes, StoreFamily, SwarmMix, eval_run_id,
 };
 use memory_store::memory_reviewer_jobs::{
     FROZEN_PAGE_RECEIPT_CHARGE_BYTES, FROZEN_SELECTION_ALLOWANCE_BYTES,
@@ -274,7 +274,8 @@ impl Campaign {
     /// Admits one reviewer job. Admissions at `i % 8 == 3` abstain; once
     /// pending jobs reach the cap, every admission abstains so the next
     /// reservation still has a slot. A reservation refused by the permanent
-    /// receipt quota is R24: counted, with nothing admitted.
+    /// receipt quota is R24: counted, recorded as the expected refusal the
+    /// report reconciles the count against, with nothing admitted.
     pub fn quota_pressure(&mut self, i: usize, now: i64) -> Result<(), RunError> {
         self.mix.record(Operation::QuotaPressure);
         let incarnation = reviewer::kernel_incarnation(&self.stores.corpus.kernel);
@@ -289,8 +290,15 @@ impl Campaign {
             now,
         ) {
             Ok(begun) => begun,
-            Err(MemoryReviewerJobRefusal::MetadataQuota) => {
+            Err(refusal @ MemoryReviewerJobRefusal::MetadataQuota) => {
                 self.r24_refusals += 1;
+                self.witness.refusals.push(RecordedRefusal {
+                    episode: format!("growth-r24-{i}"),
+                    refusal: ExpectedRefusal::R24ReceiptQuotaExhausted,
+                    // The variant as production prints it, which the report's
+                    // evidence check reads.
+                    production_error: format!("{refusal:?}"),
+                });
                 return Ok(());
             }
             Err(refusal) => return Err(RunError::Admission(refusal)),

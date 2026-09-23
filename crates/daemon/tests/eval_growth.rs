@@ -20,9 +20,9 @@ use std::path::PathBuf;
 
 use campaign::Charges;
 use eval_core::{
-    Approval, Coverage, EnvelopeExceeded, GrowthContract, GrowthMode, GrowthRefused, GrowthReport,
-    MARKERS, Operation, ProfileError, Resource, Scale, StoreFamily, digests_match_serial, isolated,
-    parse_growth_report, parse_manifest,
+    Approval, Coverage, EnvelopeExceeded, ExpectedRefusal, GrowthContract, GrowthMode,
+    GrowthRefused, GrowthReport, MARKERS, Operation, ProfileError, Resource, Scale, StoreFamily,
+    digests_match_serial, isolated, parse_growth_report, parse_manifest,
 };
 use growth::{Campaign, Config, MANIFEST_FILE, REPORT_FILE, Run, RunError};
 use memory_store::memory_reviewer_jobs::{
@@ -418,6 +418,16 @@ fn a_receipt_quota_refusal_is_counted_as_r24_and_admits_nothing() {
     assert_eq!(headroom.r24_refusals, 1);
     assert_eq!(headroom.admitted_total, 1);
     assert_eq!(live.mix.counts[&Operation::QuotaPressure], 2);
+    // The count the report reconciles against: one recorded refusal per R24,
+    // carrying the variant as production prints it.
+    let recorded: Vec<_> = live
+        .witness
+        .refusals
+        .iter()
+        .filter(|r| r.refusal == ExpectedRefusal::R24ReceiptQuotaExhausted)
+        .collect();
+    assert_eq!(recorded.len(), 1, "{:?}", live.witness.refusals);
+    assert!(ExpectedRefusal::R24ReceiptQuotaExhausted.evidences(&recorded[0].production_error));
 }
 
 fn a_deliberate_envelope_breach_names_the_resource_and_publishes_nothing_scenario(
@@ -488,6 +498,15 @@ fn an_unapproved_profile_refuses_before_any_store_opens() {
         "{error}"
     );
     assert!(!out.exists());
+    // Refused before planning too: a history the generator would refuse does
+    // not get generated, or judged, for an unapproved run.
+    config.messages = 0;
+    assert!(aging::plan(0).is_err());
+    let error = growth::run(&config).err().unwrap();
+    assert!(
+        matches!(error, RunError::Profile(ProfileError::NotApproved { .. })),
+        "{error}"
+    );
 }
 
 /// The figures cross-talk between two campaigns would move.
