@@ -366,7 +366,7 @@ pub fn receipt_lost_reply_episode(
     let mut fixed = BTreeMap::new();
     for identity in lost {
         witness.effects.attempt(&identity);
-        witness.effects.lose_reply(&identity).unwrap();
+        witness.effects.lose_reply(&identity, id).unwrap();
         witness
             .left_at
             .insert(identity.clone(), report.acknowledged_through);
@@ -567,7 +567,7 @@ pub fn check_expectations(
     let lost: BTreeSet<&String> = effects
         .effects
         .iter()
-        .filter(|(_, effect)| effect.reply_lost)
+        .filter(|(_, effect)| effect.reply_lost())
         .map(|(identity, _)| identity)
         .collect();
     let fixed: BTreeSet<&String> = expected.keys().collect();

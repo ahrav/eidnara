@@ -145,7 +145,7 @@ fn the_fault_campaign_receipts_every_declared_cut_scenario(campaign: &Campaign) 
 fn a_lost_reply_stays_unknown_until_readback_at_after_recovery_scenario(campaign: &Campaign) {
     let run = &campaign.run;
     let effects = &run.report.effects.effects;
-    let lost: Vec<_> = effects.iter().filter(|(_, e)| e.reply_lost).collect();
+    let lost: Vec<_> = effects.iter().filter(|(_, e)| e.reply_lost()).collect();
     assert_eq!(lost.len(), 2, "{effects:?}");
     for (identity, effect) in &lost {
         assert!(
@@ -340,7 +340,7 @@ fn every_window_of_a_lost_reply_episode_loses_its_reply() {
             "{fault:?}"
         );
         for effect in witness.effects.effects.values() {
-            assert!(effect.reply_lost && effect.attempted == 1, "{effect:?}");
+            assert!(effect.reply_lost() && effect.attempted == 1, "{effect:?}");
         }
     }
 }
@@ -350,7 +350,7 @@ fn a_lost_reply_without_a_matching_fixed_expectation_refuses_the_run() {
     let identity = "search_commit:9";
     let mut effects = EffectLedger::default();
     effects.attempt(identity);
-    effects.lose_reply(identity).unwrap();
+    effects.lose_reply(identity, "episode").unwrap();
     let fixed = BTreeMap::from([(identity.to_string(), EffectState::Applied)]);
     assert!(
         check_expectations(&fixed, &effects).is_err(),
@@ -371,7 +371,7 @@ fn a_lost_reply_without_a_matching_fixed_expectation_refuses_the_run() {
     // ledger, not a second read-back of the same effect.
     let mut applied = EffectLedger::default();
     applied.attempt(identity);
-    applied.lose_reply(identity).unwrap();
+    applied.lose_reply(identity, "episode").unwrap();
     applied.read_back(identity, EffectState::Applied).unwrap();
     check_expectations(&fixed, &applied).unwrap();
     let stray = BTreeMap::from([("search_ack:9".to_string(), EffectState::Applied)]);
