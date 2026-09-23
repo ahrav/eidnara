@@ -2,35 +2,66 @@
 //! removing the gates and nothing else, and no report claiming what its
 //! class, samples, profile, or exclusions forbid.
 
-use std::collections::BTreeMap;
+mod support;
 
+use std::collections::{BTreeMap, BTreeSet};
+
+use context_core::canonical_json::ContractError;
 use eval_core::{
     ANALYSIS_FAMILY_SCHEMA, Analysis, AnalysisFamily, Approval, ArmKind, ArmRates, ArmResult,
-    BaselineContrast, BaselineFailure, BlockedReason, CLAIM_BOUNDARY_SCHEMA, CampaignGates,
-    CampaignProfile, Ceilings, CensorReason, ClaimBoundary, ClaimClass, Claims, ClusterKey,
-    ClusteringUnit, Cut, Envelope, EnvelopeExceeded, Established, EvaluatedSurface, FrozenFamily,
-    GatedBlocks, HistoryPolicy, IccPilot, IntervalMethod, LivenessBounds, MultiplicityCorrection,
-    PairOutcome, PairedReport, ProfileError, RUN_PROFILE_SCHEMA, Ratio, Reachability, ReportError,
-    ReportOutcome, Resource, ResourceLimits, RunProfile, SUITE_B_REPORT_SCHEMA, SampleError,
-    SampleLedger, SampleRecord, Scale, SkipReason, StopCondition, StoppingRule, SuiteBReport,
-    Suppression, TaskBudgets, Terminal, WorldProvenance, analyze, parse_report, reachability_of,
+    AxisValue, BaselineContrast, BaselineFailure, BlockedReason, CLAIM_BOUNDARY_SCHEMA,
+    CampaignGates, CampaignProfile, Ceilings, CensorReason, ClaimBoundary, ClaimClass, Claims,
+    ClusterKey, ClusteringUnit, Cut, Envelope, EnvelopeExceeded, Established, EvaluatedSurface,
+    FrozenFamily, GATE_ENDPOINTS, GatedBlocks, HistoryPolicy, ITEM_COUNT_THRESHOLD, IccPilot,
+    InjectionScore, IntervalMethod, IntervalOutcome, IntervalWithheld, LivenessBounds, Manifest,
+    MultiplicityCorrection, PairOutcome, PairedReport, ProfileError, RECENCY_BASELINE_VERSION,
+    RUN_PROFILE_SCHEMA, Ratio, Reachability, RecencyBaseline, ReportError, ReportOutcome, Resource,
+    ResourceLimits, RunProfile, SUITE_B_REPORT_SCHEMA, SampleError, SampleLedger, SampleRecord,
+    Scale, SkipReason, StatisticsError, StopCondition, StoppingRule, SuiteBReport, Suppression,
+    TaskBudgets, Terminal, WorldProvenance, analyze, pair_table_digest, parse_report,
+    reachability_of,
 };
 use serde_json::json;
 
 type Mutate = Box<dyn Fn(&mut SuiteBReport)>;
 
+const FAMILIES: [&str; 6] = ["cargo", "tokio", "django", "git", "docs", "tests"];
+
 fn ratio(n: i64, d: u64) -> Ratio {
-    Ratio::new(n, d)
+    Ratio::try_new(i128::from(n), i128::from(d)).unwrap()
+}
+
+/// A pilot whose recorded counts and ICCs imply the world unit and
+/// `900 * 5/6 = 750` effective items at 300 affordable worlds.
+fn pilot() -> IccPilot {
+    IccPilot {
+        pilot_run_id: "ab".repeat(32),
+        families: FAMILIES
+            .iter()
+            .map(|family| family.to_string())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect(),
+        n_items: 360,
+        n_families: 6,
+        n_worlds: 120,
+        icc_family: ratio(0, 1),
+        icc_world_seed: ratio(1, 10),
+        clustering_unit: ClusteringUnit::WorldSeed,
+        max_affordable_worlds: 300,
+        effective_n_at_max: ratio(750, 1),
+        required_n_for_margin: 300,
+    }
 }
 
 fn family() -> AnalysisFamily {
     AnalysisFamily {
         schema: ANALYSIS_FAMILY_SCHEMA.to_string(),
-        endpoints: vec!["quality_loss".into(), "harm".into(), "floor".into()],
-        families: vec!["cargo".into(), "tokio".into()],
+        endpoints: GATE_ENDPOINTS.iter().map(|gate| gate.to_string()).collect(),
+        families: FAMILIES.iter().map(|family| family.to_string()).collect(),
         exclusions: vec![],
-        stopping_rule: StoppingRule::FixedN,
-        multiplicity_correction: MultiplicityCorrection::Holm,
+        stopping_rule: StoppingRule::FixedN { pairs: 300 },
+        multiplicity_correction: MultiplicityCorrection::None,
         profile: CampaignProfile {
             noninferiority_margin: "0.02".to_string(),
             harm_bound: "0.1".to_string(),
@@ -44,24 +75,22 @@ fn family() -> AnalysisFamily {
             },
         },
         interval_method: IntervalMethod::ClusterBootstrap,
-        item_count_threshold: 300,
+        item_count_threshold: ITEM_COUNT_THRESHOLD,
         bootstrap_replicates: 40,
         bootstrap_seed: 7,
         trials_k: 3,
-        icc_pilot: IccPilot {
-            pilot_run_id: "ab".repeat(32),
-            n_items: 360,
-            n_families: 6,
-            n_worlds: 120,
-            icc_family: ratio(1, 4),
-            icc_world_seed: ratio(0, 1),
-            clustering_unit: ClusteringUnit::Family,
-            max_affordable_worlds: 60,
-            effective_n_at_max: ratio(400, 1),
-            required_n_for_margin: 385,
-        },
+        icc_pilot: pilot(),
         transfer_criterion: None,
     }
+}
+
+/// A plan that could reach the required N with its own pairs, but whose pilot
+/// projects too few items at the affordable worlds: it freezes and then blocks.
+fn underpowered_pilot(pilot: &mut IccPilot) {
+    pilot.icc_world_seed = Ratio::ZERO;
+    pilot.max_affordable_worlds = 8;
+    pilot.effective_n_at_max = ratio(24, 1);
+    pilot.required_n_for_margin = 100;
 }
 
 fn arm_rates() -> BTreeMap<String, ArmRates> {
@@ -75,34 +104,58 @@ fn arm_rates() -> BTreeMap<String, ArmRates> {
     ])
 }
 
+/// Three hundred pairs over six families and fifty worlds, mostly concordant:
+/// the aged arm fails or is censored on a fixed one in twenty each.
 fn pairs() -> Vec<PairOutcome> {
-    (0..320)
-        .map(|i| PairOutcome {
-            pair_id: format!("p{i}"),
-            cluster: ClusterKey {
-                family: if i % 2 == 0 { "cargo" } else { "tokio" }.to_string(),
-                world_seed: i % 8,
-            },
-            fresh: ArmResult::Pass,
-            aged: if i % 50 == 0 {
-                ArmResult::Fail
-            } else {
-                ArmResult::Pass
-            },
+    FAMILIES
+        .iter()
+        .enumerate()
+        .flat_map(|(f, family)| {
+            (0..50u64).map(move |seed| PairOutcome {
+                pair_id: format!("{family}-{seed}"),
+                cluster: ClusterKey {
+                    family: family.to_string(),
+                    world_seed: seed,
+                },
+                fresh: ArmResult::Pass,
+                aged: match (f as u64 * 7 + seed * 13) % 20 {
+                    0 => ArmResult::Fail,
+                    1 => ArmResult::Censored(CensorReason::Timeout),
+                    _ => ArmResult::Pass,
+                },
+            })
         })
         .collect()
 }
 
-/// One sample per arm of every pair plus the ten terminals the rates test
-/// reads: 640 attempted, 6 not.
+/// The manifest that recorded `frozen` before its first outcome, carries the
+/// arm rates, names the pairs as its samples, and records the baseline.
+fn recorded(frozen: &FrozenFamily, pairs: &[PairOutcome]) -> Manifest {
+    let mut manifest = support::manifest();
+    manifest.analysis_family_digest = Some(frozen.analysis_family_digest.clone());
+    manifest.recency_baseline = Some(RecencyBaseline {
+        version: RECENCY_BASELINE_VERSION.to_string(),
+        bounds: BTreeMap::from([(EvaluatedSurface::Surface1, 100)]),
+    });
+    manifest.arm_rates = arm_rates();
+    manifest.sample_ids = pairs.iter().map(|pair| pair.pair_id.clone()).collect();
+    manifest.sample_order = manifest.sample_ids.clone();
+    manifest.result_digest = pair_table_digest(pairs).unwrap();
+    manifest
+}
+
+/// One sample per arm of every pair, ending as the pair's arm did, plus the
+/// six terminals the rates test reads: 602 attempted, 4 not.
 fn samples() -> SampleLedger {
-    let mut terminals: Vec<Terminal> = (0..640)
-        .map(|i| {
-            if i % 100 == 0 {
-                Terminal::Fail
-            } else {
-                Terminal::Pass
-            }
+    let mut terminals: Vec<Terminal> = pairs()
+        .iter()
+        .flat_map(|pair| {
+            let aged = match pair.aged {
+                ArmResult::Pass => Terminal::Pass,
+                ArmResult::Fail => Terminal::Fail,
+                ArmResult::Censored(reason) => Terminal::Censored { reason },
+            };
+            [aged, Terminal::Pass]
         })
         .collect();
     terminals.extend([
@@ -112,7 +165,7 @@ fn samples() -> SampleLedger {
         Terminal::Indeterminate,
         Terminal::Skipped(SkipReason::RedactionRefused),
         Terminal::Skipped(SkipReason::CassetteMiss),
-        Terminal::Unsupported(eval_core::UnsupportedReason::PackingHasNoCaller),
+        Terminal::Unsupported(eval_core::UnsupportedReason::NoMediationBoundary),
         Terminal::Disabled(eval_core::DisabledReason::FeatureOff),
     ]);
     let samples: BTreeMap<String, SampleRecord> = terminals
@@ -148,20 +201,20 @@ fn samples() -> SampleLedger {
 fn ceilings() -> Ceilings {
     Ceilings {
         indeterminate: ratio(1, 100),
-        censoring: ratio(1, 100),
+        censoring: ratio(1, 20),
         redaction_refusals: ratio(1, 100),
     }
 }
 
 /// An approved profile whose margins are the family's and whose ceilings are
-/// one percent each.
+/// one percent, five for censoring.
 fn profile() -> RunProfile {
     RunProfile {
         schema: RUN_PROFILE_SCHEMA.to_string(),
         name: "s0-default-surface".to_string(),
         scale: Scale::S0,
-        worlds: 8,
-        tasks_per_world: 3,
+        worlds: 300,
+        tasks_per_world: 300,
         max_events_per_log: 64,
         budgets: TaskBudgets {
             max_model_calls: 12,
@@ -173,7 +226,7 @@ fn profile() -> RunProfile {
         },
         envelope: limits(),
         indeterminate_ceiling: "0.01".to_string(),
-        censoring_ceiling: "0.01".to_string(),
+        censoring_ceiling: "0.05".to_string(),
         redaction_refusal_ceiling: "0.01".to_string(),
         baseline_bounds: RunProfile::grounded_baseline_bounds(),
         statistics: family().profile,
@@ -210,10 +263,18 @@ fn limits() -> ResourceLimits {
 fn paired() -> PairedReport {
     let family = family();
     let frozen = FrozenFamily::freeze(&family).unwrap();
-    match analyze(&frozen, &family, &pairs(), &arm_rates()).unwrap() {
+    let pairs = pairs();
+    match analyze(&recorded(&frozen, &pairs), &family, &pairs).unwrap() {
         Analysis::Report(report) => *report,
         Analysis::Blocked(reason) => panic!("{reason:?}"),
     }
+}
+
+/// The class the fixture family derives with no anchor set.
+fn derived(provenance: WorldProvenance) -> eval_core::ClaimDerivation {
+    let family = family();
+    let frozen = FrozenFamily::freeze(&family).unwrap();
+    family.claim_class(&frozen, provenance, None).unwrap()
 }
 
 fn open_report() -> SuiteBReport {
@@ -223,7 +284,7 @@ fn open_report() -> SuiteBReport {
     let rates = samples.rates().unwrap();
     assert_eq!(profile.ceilings().unwrap(), ceilings());
     let gates = CampaignGates::of(&samples, &ceilings(), &family, &arm_rates()).unwrap();
-    let derivation = family.claim_class(WorldProvenance::Generated, None);
+    let derivation = derived(WorldProvenance::Generated);
     SuiteBReport {
         schema: SUITE_B_REPORT_SCHEMA.to_string(),
         eval_run_id: "cd".repeat(32),
@@ -306,22 +367,22 @@ fn a_report_carries_the_claim_boundary_verbatim_and_its_run_gates() {
         panic!("open")
     };
     let gates = gated.gates;
-    // One in 642 attempted, and one refusal in 646 declared, each sit under
-    // a one-percent ceiling.
+    // One indeterminate and sixteen censored in 602 attempted, and one
+    // refusal in 606 declared, each sit under their ceiling.
     assert_eq!(
         (gates.indeterminate.statistic, gates.indeterminate.passed),
-        (ratio(1, 642), true)
+        (ratio(1, 602), true)
     );
     assert_eq!(
         (gates.censoring.statistic, gates.censoring.passed),
-        (ratio(1, 642), true)
+        (ratio(8, 301), true)
     );
     assert_eq!(
         (
             gates.redaction_refusals.statistic,
             gates.redaction_refusals.passed
         ),
-        (ratio(1, 646), true)
+        (ratio(1, 606), true)
     );
     assert_eq!(
         (
@@ -365,6 +426,54 @@ fn a_report_carries_the_claim_boundary_verbatim_and_its_run_gates() {
         };
         assert_eq!(reachability_of(surface), expected, "{surface:?}");
     }
+    // A censored fresh arm beside an aged non-pass is counted in `b`, so the
+    // fresh arm's censored samples back `b` beside its passes: every fresh
+    // arm censored still analyzes and still serializes.
+    let mut censored_fresh = pairs();
+    for pair in &mut censored_fresh {
+        pair.fresh = ArmResult::Censored(CensorReason::Timeout);
+    }
+    let family = family();
+    let frozen = FrozenFamily::freeze(&family).unwrap();
+    let Analysis::Report(analysis) = analyze(
+        &recorded(&frozen, &censored_fresh),
+        &family,
+        &censored_fresh,
+    )
+    .unwrap() else {
+        panic!("report")
+    };
+    assert_eq!(
+        (analysis.counts.b, analysis.counts.fresh_censored),
+        (33, 300)
+    );
+    let mut censored = open_report();
+    for record in censored.samples.samples.values_mut() {
+        if record.arm == ArmKind::Fresh && record.terminal == Terminal::Pass {
+            record.terminal = Terminal::Censored {
+                reason: CensorReason::Timeout,
+            };
+        }
+    }
+    censored.rates = censored.samples.rates().unwrap();
+    let run_gates = CampaignGates::of(
+        &censored.samples,
+        &censored.profile.ceilings().unwrap(),
+        &censored.family,
+        &censored.arm_rates,
+    )
+    .unwrap();
+    censored.outcome = ReportOutcome::Open {
+        gated: Box::new(GatedBlocks {
+            analysis: *analysis,
+            baseline: baseline(),
+            gates: run_gates,
+        }),
+    };
+    assert_eq!(
+        parse_report(&censored.serialize().unwrap()).unwrap(),
+        censored
+    );
 }
 
 #[test]
@@ -380,11 +489,23 @@ fn a_suppression_removes_the_gates_and_the_claims_and_keeps_the_accounting() {
         (
             Suppression::Analysis {
                 reason: BlockedReason::InsufficientEffectiveN {
-                    effective_n_at_max: ratio(100, 1),
-                    required_n_for_margin: 385,
+                    effective_n_at_max: ratio(24, 1),
+                    required_n_for_margin: 100,
                 },
             },
             Some(StopCondition::C),
+        ),
+        (
+            // The completed table's own power, which only the pair table
+            // shows: 300 pairs in one world under a world ICC of 1/10.
+            Suppression::Analysis {
+                reason: BlockedReason::TableUnderpowered {
+                    effective_n: ratio(3000, 309),
+                    n_clusters: 1,
+                    required_n_for_margin: 300,
+                },
+            },
+            None,
         ),
         (
             Suppression::Analysis {
@@ -413,18 +534,22 @@ fn a_suppression_removes_the_gates_and_the_claims_and_keeps_the_accounting() {
         match &by {
             Suppression::Analysis {
                 reason: BlockedReason::InsufficientEffectiveN { .. },
-            } => report.family.icc_pilot.effective_n_at_max = ratio(100, 1),
+            } => underpowered_pilot(&mut report.family.icc_pilot),
             Suppression::Analysis {
                 reason: BlockedReason::ArmMissAsymmetry { .. },
             } => report.arm_rates.get_mut("fresh").unwrap().miss_rate = "0.11".into(),
             Suppression::Envelope { .. } => report.envelope.peaks.elapsed_ms = 1_900_000,
-            Suppression::TapRejected | Suppression::Baseline { .. } => {}
+            Suppression::TapRejected
+            | Suppression::Baseline { .. }
+            | Suppression::Analysis {
+                reason: BlockedReason::TableUnderpowered { .. },
+            } => {}
         }
         let value = report.serialize().unwrap();
         assert_eq!(value["outcome"]["kind"], json!("suppressed"));
         assert_eq!(value["claims"]["established"], json!([]));
-        assert_eq!(value["rates"]["samples"], json!(646));
-        assert_eq!(value["samples"]["order"].as_array().unwrap().len(), 646);
+        assert_eq!(value["rates"]["samples"], json!(606));
+        assert_eq!(value["samples"]["order"].as_array().unwrap().len(), 606);
         assert_eq!(value["envelope"]["bounds"]["processes"], json!(6));
         assert_eq!(parse_report(&value).unwrap(), report);
     }
@@ -601,7 +726,7 @@ fn a_report_refuses_missing_blocks_forbidden_claims_and_what_it_did_not_derive()
                     unmet: vec![],
                     skipped: vec![],
                 },
-                derived: family().claim_class(WorldProvenance::Generated, None),
+                derived: derived(WorldProvenance::Generated),
             },
         ),
         (
@@ -617,7 +742,7 @@ fn a_report_refuses_missing_blocks_forbidden_claims_and_what_it_did_not_derive()
                     unmet: vec![],
                     skipped: vec![],
                 },
-                derived: family().claim_class(WorldProvenance::RealHistory, None),
+                derived: derived(WorldProvenance::RealHistory),
             },
         ),
         (
@@ -631,6 +756,14 @@ fn a_report_refuses_missing_blocks_forbidden_claims_and_what_it_did_not_derive()
                 r.samples.order.pop();
             }),
             ReportError::Samples(SampleError::OrderNotAPermutation),
+        ),
+        (
+            "an analysis over fewer pairs than the plan froze",
+            Box::new(|r| gated(r).analysis.counts.n = 299),
+            ReportError::PairCountNotFrozen {
+                frozen: 300,
+                found: 299,
+            },
         ),
         (
             "an analysis read under another family",
@@ -647,7 +780,8 @@ fn a_report_refuses_missing_blocks_forbidden_claims_and_what_it_did_not_derive()
         (
             "more pairs than the attempted samples can back at one per arm",
             Box::new(|r| {
-                // 320 pairs need 640 attempted samples; 639 is one short.
+                // 267 aged passes in the table need 267 aged-arm passes in
+                // the ledger; s002 is one of them (s000 is an aged fail).
                 for record in r.samples.samples.values_mut().take(3) {
                     record.terminal = Terminal::Skipped(SkipReason::CassetteMiss);
                 }
@@ -657,8 +791,10 @@ fn a_report_refuses_missing_blocks_forbidden_claims_and_what_it_did_not_derive()
                     CampaignGates::of(&r.samples, &ceilings, &r.family, &r.arm_rates).unwrap();
             }),
             ReportError::PairsExceedSamples {
-                pairs: 320,
-                attempted: 639,
+                arm: ArmKind::Aged,
+                terminal: "pass",
+                pairs: 267,
+                samples: 266,
             },
         ),
         (
@@ -710,29 +846,29 @@ fn a_report_refuses_what_its_own_evidence_refutes() {
     let refuted: Vec<(&str, Mutate, ReportError)> = vec![
         (
             "a paired gate marked passed over a failing statistic",
-            Box::new(|r| {
-                let g = gated(r);
-                g.analysis.gates.quality_loss.statistic = ratio(9, 10);
-                g.analysis.counts.b = 300;
-                g.analysis.counts.c = 0;
-            }),
+            Box::new(|r| gated(r).analysis.gates.quality_loss.statistic = ratio(9, 10)),
             ReportError::PairedGatesNotDerived,
         ),
         (
+            "paired counts no table can produce",
+            Box::new(|r| gated(r).analysis.counts.b = 300),
+            ReportError::Statistics(StatisticsError::InconsistentCounts),
+        ),
+        (
             "a paired gate verdict flipped",
-            Box::new(|r| gated(r).analysis.gates.harm.passed = false),
+            Box::new(|r| gated(r).analysis.gates.floor.passed = false),
             ReportError::PairedGatesNotDerived,
         ),
         (
             "an open report under a family whose pilot blocks",
             Box::new(|r| {
-                r.family.icc_pilot.effective_n_at_max = ratio(10, 1);
+                underpowered_pilot(&mut r.family.icc_pilot);
                 let digest = r.family.digest().unwrap();
                 gated(r).analysis.analysis_family_digest = digest;
             }),
             ReportError::OpenWhileBlocked(BlockedReason::InsufficientEffectiveN {
-                effective_n_at_max: ratio(10, 1),
-                required_n_for_margin: 385,
+                effective_n_at_max: ratio(24, 1),
+                required_n_for_margin: 100,
             }),
         ),
         (
@@ -806,7 +942,386 @@ fn a_report_refuses_what_its_own_evidence_refutes() {
                     by: Suppression::Analysis {
                         reason: BlockedReason::InsufficientEffectiveN {
                             effective_n_at_max: ratio(100, 1),
-                            required_n_for_margin: 385,
+                            required_n_for_margin: 300,
+                        },
+                    },
+                };
+                r.claims.established.clear();
+            }),
+            ReportError::SuppressionNotDerived,
+        ),
+        (
+            "an underpowered-table suppression against a floor the family does not set",
+            Box::new(|r| {
+                r.outcome = ReportOutcome::Suppressed {
+                    by: Suppression::Analysis {
+                        reason: BlockedReason::TableUnderpowered {
+                            effective_n: ratio(3000, 309),
+                            n_clusters: 1,
+                            required_n_for_margin: 299,
+                        },
+                    },
+                };
+                r.claims.established.clear();
+            }),
+            ReportError::SuppressionNotDerived,
+        ),
+        (
+            "an underpowered-table suppression whose effective N meets the floor",
+            Box::new(|r| {
+                r.outcome = ReportOutcome::Suppressed {
+                    by: Suppression::Analysis {
+                        reason: BlockedReason::TableUnderpowered {
+                            effective_n: ratio(300, 1),
+                            n_clusters: 1,
+                            required_n_for_margin: 300,
+                        },
+                    },
+                };
+                r.claims.established.clear();
+            }),
+            ReportError::SuppressionNotDerived,
+        ),
+        (
+            "an underpowered-table suppression over a negative effective N",
+            Box::new(|r| {
+                r.outcome = ReportOutcome::Suppressed {
+                    by: Suppression::Analysis {
+                        reason: BlockedReason::TableUnderpowered {
+                            effective_n: ratio(-1, 1),
+                            n_clusters: 1,
+                            required_n_for_margin: 300,
+                        },
+                    },
+                };
+                r.claims.established.clear();
+            }),
+            ReportError::SuppressionNotDerived,
+        ),
+        (
+            "an underpowered-table suppression over more clusters than the plan has pairs",
+            Box::new(|r| {
+                r.outcome = ReportOutcome::Suppressed {
+                    by: Suppression::Analysis {
+                        reason: BlockedReason::TableUnderpowered {
+                            effective_n: ratio(3000, 309),
+                            n_clusters: 301,
+                            required_n_for_margin: 300,
+                        },
+                    },
+                };
+                r.claims.established.clear();
+            }),
+            ReportError::SuppressionNotDerived,
+        ),
+        (
+            "an underpowered-table suppression over more family clusters than affordable worlds",
+            Box::new(|r| {
+                // A family-unit pilot affording four worlds over six families
+                // realizes at most four family clusters.
+                let pilot = &mut r.family.icc_pilot;
+                pilot.icc_family = ratio(1, 2);
+                pilot.icc_world_seed = Ratio::ZERO;
+                pilot.clustering_unit = ClusteringUnit::Family;
+                pilot.max_affordable_worlds = 4;
+                pilot.effective_n_at_max = ratio(6, 1);
+                pilot.required_n_for_margin = 5;
+                r.outcome = ReportOutcome::Suppressed {
+                    by: Suppression::Analysis {
+                        reason: BlockedReason::TableUnderpowered {
+                            effective_n: ratio(3, 1),
+                            n_clusters: 5,
+                            required_n_for_margin: 5,
+                        },
+                    },
+                };
+                r.claims.established.clear();
+            }),
+            ReportError::SuppressionNotDerived,
+        ),
+        (
+            "an underpowered-table suppression under ICCs that deflate nothing",
+            Box::new(|r| {
+                // With both ICCs at zero the table's effective N is its pair
+                // count, which the plan already holds to the floor.
+                let pilot = &mut r.family.icc_pilot;
+                pilot.icc_world_seed = Ratio::ZERO;
+                pilot.effective_n_at_max = ratio(900, 1);
+                r.outcome = ReportOutcome::Suppressed {
+                    by: Suppression::Analysis {
+                        reason: BlockedReason::TableUnderpowered {
+                            effective_n: ratio(1, 1),
+                            n_clusters: 1,
+                            required_n_for_margin: 300,
+                        },
+                    },
+                };
+                r.claims.established.clear();
+            }),
+            ReportError::SuppressionNotDerived,
+        ),
+        (
+            "an underpowered-table suppression with an effective N its clusters do not deflate to",
+            Box::new(|r| {
+                // 300 pairs in one world under a world ICC of 1/10 deflate to
+                // exactly 3000/309, not to one.
+                r.outcome = ReportOutcome::Suppressed {
+                    by: Suppression::Analysis {
+                        reason: BlockedReason::TableUnderpowered {
+                            effective_n: ratio(1, 1),
+                            n_clusters: 1,
+                            required_n_for_margin: 300,
+                        },
+                    },
+                };
+                r.claims.established.clear();
+            }),
+            ReportError::SuppressionNotDerived,
+        ),
+        (
+            "an underpowered-table suppression deflated below what its clusters allow",
+            Box::new(|r| {
+                // Three hundred pairs in three hundred worlds are three hundred
+                // singleton clusters: nothing deflates, whatever the world ICC.
+                r.outcome = ReportOutcome::Suppressed {
+                    by: Suppression::Analysis {
+                        reason: BlockedReason::TableUnderpowered {
+                            effective_n: ratio(10, 1),
+                            n_clusters: 300,
+                            required_n_for_margin: 300,
+                        },
+                    },
+                };
+                r.claims.established.clear();
+            }),
+            ReportError::SuppressionNotDerived,
+        ),
+        (
+            "an underpowered-table suppression on a surface whose bound does not resolve",
+            Box::new(|r| {
+                r.surface = EvaluatedSurface::Surface2;
+                r.outcome = ReportOutcome::Suppressed {
+                    by: Suppression::Analysis {
+                        reason: BlockedReason::TableUnderpowered {
+                            effective_n: ratio(3000, 309),
+                            n_clusters: 1,
+                            required_n_for_margin: 300,
+                        },
+                    },
+                };
+                r.claims.established.clear();
+            }),
+            ReportError::SuppressionNotDerived,
+        ),
+        (
+            "an underpowered-table suppression deflated as if clusters split pairs",
+            Box::new(|r| {
+                // Seven world clusters over 300 pairs are six of 43 and one of
+                // 42, whose mean 2143/50 deflates to 150000/2593; a fractional
+                // 300/7 per cluster would deflate to 7000/121, which no table
+                // reaches.
+                r.outcome = ReportOutcome::Suppressed {
+                    by: Suppression::Analysis {
+                        reason: BlockedReason::TableUnderpowered {
+                            effective_n: ratio(7000, 121),
+                            n_clusters: 7,
+                            required_n_for_margin: 300,
+                        },
+                    },
+                };
+                r.claims.established.clear();
+            }),
+            ReportError::SuppressionNotDerived,
+        ),
+        (
+            "an underpowered-table suppression deflated as if one world spanned many families",
+            Box::new(|r| {
+                // One world lies in one family, so a family ICC of 1/20 deflates
+                // 300 pairs in one world to 6000/319 whatever the world ICC.
+                let pilot = &mut r.family.icc_pilot;
+                pilot.icc_family = ratio(1, 20);
+                pilot.icc_world_seed = Ratio::ZERO;
+                pilot.effective_n_at_max = ratio(18_000, 169);
+                pilot.required_n_for_margin = 80;
+                r.outcome = ReportOutcome::Suppressed {
+                    by: Suppression::Analysis {
+                        reason: BlockedReason::TableUnderpowered {
+                            effective_n: ratio(50, 1),
+                            n_clusters: 1,
+                            required_n_for_margin: 80,
+                        },
+                    },
+                };
+                r.claims.established.clear();
+            }),
+            ReportError::SuppressionNotDerived,
+        ),
+        (
+            "an interval over more clusters than the approved profile's worlds",
+            Box::new(|r| {
+                r.profile.worlds = 40;
+                r.profile_digest = r.profile.digest().unwrap();
+            }),
+            ReportError::IntervalNotDerived {
+                field: "n_clusters",
+            },
+        ),
+        (
+            "an interval over six families where forty worlds of one task cannot hold the pairs",
+            Box::new(|r| {
+                // Six family clusters fit the family cap, but 300 pairs at one
+                // task per world need 300 worlds and the profile runs forty.
+                let pilot = &mut r.family.icc_pilot;
+                pilot.icc_family = ratio(1, 10);
+                pilot.icc_world_seed = ratio(1, 2);
+                pilot.clustering_unit = ClusteringUnit::Family;
+                pilot.effective_n_at_max = ratio(9000, 159);
+                pilot.required_n_for_margin = 20;
+                let digest = r.family.digest().unwrap();
+                r.profile.worlds = 40;
+                r.profile.tasks_per_world = 1;
+                r.profile_digest = r.profile.digest().unwrap();
+                let analysis = &mut gated(r).analysis;
+                analysis.analysis_family_digest = digest;
+                let IntervalOutcome::Computed(interval) = &mut analysis.interval else {
+                    panic!("computed");
+                };
+                interval.unit = ClusteringUnit::Family;
+                interval.n_clusters = 6;
+            }),
+            ReportError::IntervalNotDerived {
+                field: "n_clusters",
+            },
+        ),
+        (
+            "an underpowered-table suppression deflated as if six families shared one world",
+            Box::new(|r| {
+                // Six family clusters span at least six worlds, so a world ICC
+                // of 1/2 deflates 300 pairs to no less than 300 / 145.55.
+                let pilot = &mut r.family.icc_pilot;
+                pilot.icc_family = ratio(1, 10);
+                pilot.icc_world_seed = ratio(1, 2);
+                pilot.clustering_unit = ClusteringUnit::Family;
+                pilot.effective_n_at_max = ratio(9000, 159);
+                pilot.required_n_for_margin = 20;
+                r.outcome = ReportOutcome::Suppressed {
+                    by: Suppression::Analysis {
+                        reason: BlockedReason::TableUnderpowered {
+                            effective_n: ratio(2, 1),
+                            n_clusters: 6,
+                            required_n_for_margin: 20,
+                        },
+                    },
+                };
+                r.claims.established.clear();
+            }),
+            ReportError::SuppressionNotDerived,
+        ),
+        (
+            "an underpowered-table suppression over six families where forty worlds of one task cannot hold the pairs",
+            Box::new(|r| {
+                // The same plan as above, blocked at a table the profile's
+                // forty worlds of one task could not have completed.
+                let pilot = &mut r.family.icc_pilot;
+                pilot.icc_family = ratio(1, 10);
+                pilot.icc_world_seed = ratio(1, 2);
+                pilot.clustering_unit = ClusteringUnit::Family;
+                pilot.effective_n_at_max = ratio(9000, 159);
+                pilot.required_n_for_margin = 20;
+                r.profile.worlds = 40;
+                r.profile.tasks_per_world = 1;
+                r.profile_digest = r.profile.digest().unwrap();
+                r.outcome = ReportOutcome::Suppressed {
+                    by: Suppression::Analysis {
+                        reason: BlockedReason::TableUnderpowered {
+                            effective_n: ratio(15, 1),
+                            n_clusters: 6,
+                            required_n_for_margin: 20,
+                        },
+                    },
+                };
+                r.claims.established.clear();
+            }),
+            ReportError::SuppressionNotDerived,
+        ),
+        (
+            "an underpowered-table suppression over fewer worlds than the tasks per world allow",
+            Box::new(|r| {
+                // One task per world: 300 pairs span 300 worlds, not one.
+                r.profile.tasks_per_world = 1;
+                r.profile_digest = r.profile.digest().unwrap();
+                r.outcome = ReportOutcome::Suppressed {
+                    by: Suppression::Analysis {
+                        reason: BlockedReason::TableUnderpowered {
+                            effective_n: ratio(3000, 309),
+                            n_clusters: 1,
+                            required_n_for_margin: 300,
+                        },
+                    },
+                };
+                r.claims.established.clear();
+            }),
+            ReportError::SuppressionNotDerived,
+        ),
+        (
+            "an interval withheld for one world where the tasks per world need three hundred",
+            Box::new(|r| {
+                r.profile.tasks_per_world = 1;
+                r.profile_digest = r.profile.digest().unwrap();
+                gated(r).analysis.interval = IntervalOutcome::Withheld {
+                    reason: IntervalWithheld::FewerThanTwoClusters { n_clusters: 1 },
+                };
+            }),
+            ReportError::IntervalNotDerived { field: "outcome" },
+        ),
+        (
+            "an interval with width where every pair favours the fresh arm",
+            Box::new(|r| {
+                // `b == n`: every replicate's quality loss is one.
+                let rates = r.family.profile.rates().unwrap();
+                let g = gated(r);
+                g.analysis.counts.b = 300;
+                g.analysis.counts.aged_pass = 0;
+                g.analysis.counts.aged_censored = 0;
+                g.analysis.gates = eval_core::Gates::of(&g.analysis.counts, &rates).unwrap();
+                let IntervalOutcome::Computed(interval) = &mut g.analysis.interval else {
+                    panic!("computed");
+                };
+                interval.lower = Ratio::ZERO;
+                interval.upper = Ratio::ONE;
+                for record in r.samples.samples.values_mut() {
+                    if record.arm == ArmKind::Aged && record.terminal.attempted() {
+                        record.terminal = Terminal::Fail;
+                    }
+                }
+                r.rates = r.samples.rates().unwrap();
+                let ceilings = r.profile.ceilings().unwrap();
+                gated(r).gates =
+                    CampaignGates::of(&r.samples, &ceilings, &r.family, &r.arm_rates).unwrap();
+            }),
+            ReportError::IntervalNotDerived { field: "bounds" },
+        ),
+        (
+            "an interval below zero where no pair favours the aged arm",
+            Box::new(|r| {
+                // `c == 0`: no replicate's quality loss is negative.
+                let IntervalOutcome::Computed(interval) = &mut gated(r).analysis.interval else {
+                    panic!("computed");
+                };
+                interval.lower = ratio(-1, 1);
+            }),
+            ReportError::IntervalNotDerived { field: "bounds" },
+        ),
+        (
+            "an underpowered-table suppression under a pilot that already blocks",
+            Box::new(|r| {
+                underpowered_pilot(&mut r.family.icc_pilot);
+                r.outcome = ReportOutcome::Suppressed {
+                    by: Suppression::Analysis {
+                        reason: BlockedReason::TableUnderpowered {
+                            effective_n: ratio(10, 1),
+                            n_clusters: 1,
+                            required_n_for_margin: 100,
                         },
                     },
                 };
@@ -828,6 +1343,31 @@ fn a_report_refuses_what_its_own_evidence_refutes() {
                 bound: 6,
                 observed: 99,
             }),
+        ),
+        (
+            "a baseline that delivered more ids than its window holds",
+            Box::new(|r| gated(r).baseline.delivered_ids = 101),
+            ReportError::BaselineDisagrees {
+                field: "delivered_ids",
+            },
+        ),
+        (
+            "a baseline whose failed falsifications outnumber the table",
+            Box::new(|r| gated(r).baseline.falsification_pairs_failed = 301),
+            ReportError::BaselineDisagrees {
+                field: "falsification_pairs_failed",
+            },
+        ),
+        (
+            "a baseline judged over more control pairs than the table has",
+            Box::new(|r| {
+                let g = gated(r);
+                g.baseline.falsification_pairs_failed = 200;
+                g.baseline.positive_controls_passed = 101;
+            }),
+            ReportError::BaselineDisagrees {
+                field: "positive_controls_passed",
+            },
         ),
         (
             "a baseline contrast on another surface",
@@ -897,6 +1437,470 @@ fn a_report_refuses_what_its_own_evidence_refutes() {
                 sample: "s000".into(),
             },
         ),
+        (
+            "an envelope bound raised above the approved profile's",
+            Box::new(|r| r.envelope.bounds.processes = 7),
+            ReportError::EnvelopeDisagreesWithProfile,
+        ),
+        (
+            "attempted samples all on one arm",
+            Box::new(|r| {
+                for record in r.samples.samples.values_mut() {
+                    record.arm = ArmKind::Aged;
+                }
+            }),
+            ReportError::PairsExceedSamples {
+                arm: ArmKind::Fresh,
+                terminal: "pass_or_censored",
+                pairs: 33,
+                samples: 0,
+            },
+        ),
+        (
+            "a pair backed by an indeterminate sample",
+            Box::new(|r| {
+                // s001 is a fresh-arm pass; indeterminate is no arm result.
+                r.samples.samples.get_mut("s001").unwrap().terminal = Terminal::Indeterminate;
+                r.rates = r.samples.rates().unwrap();
+                let ceilings = r.profile.ceilings().unwrap();
+                gated(r).gates =
+                    CampaignGates::of(&r.samples, &ceilings, &r.family, &r.arm_rates).unwrap();
+            }),
+            ReportError::PairsExceedSamples {
+                arm: ArmKind::Fresh,
+                terminal: "any",
+                pairs: 300,
+                samples: 299,
+            },
+        ),
+        (
+            "an interval whose replicate count is not the family's",
+            Box::new(|r| {
+                let IntervalOutcome::Computed(interval) = &mut gated(r).analysis.interval else {
+                    panic!("computed");
+                };
+                interval.replicates += 1;
+            }),
+            ReportError::IntervalNotDerived {
+                field: "replicates",
+            },
+        ),
+        (
+            "an interval over more items than the pairs",
+            Box::new(|r| {
+                let IntervalOutcome::Computed(interval) = &mut gated(r).analysis.interval else {
+                    panic!("computed");
+                };
+                interval.n_items += 1;
+            }),
+            ReportError::IntervalNotDerived { field: "n_items" },
+        ),
+        (
+            "an open report whose ledger records a stop condition",
+            Box::new(|r| {
+                r.samples.samples.get_mut("s600").unwrap().terminal =
+                    Terminal::Skipped(SkipReason::StopCondition {
+                        condition: StopCondition::A,
+                    });
+                r.rates = r.samples.rates().unwrap();
+            }),
+            ReportError::StopConditionDisagrees {
+                sample: "s600".into(),
+            },
+        ),
+        (
+            "a sample whose lineage names this run",
+            Box::new(|r| {
+                let id = r.eval_run_id.clone();
+                r.samples.samples.get_mut("s000").unwrap().lineage = vec![id];
+            }),
+            ReportError::LineageNamesThisRun {
+                sample: "s000".into(),
+            },
+        ),
+        (
+            "a sample skipped for an unapproved profile in an approved report",
+            Box::new(|r| {
+                r.samples.samples.get_mut("s603").unwrap().terminal =
+                    Terminal::Skipped(SkipReason::ProfileNotApproved);
+                r.rates = r.samples.rates().unwrap();
+            }),
+            ReportError::SkipDisagreesWithProfile {
+                sample: "s603".into(),
+            },
+        ),
+        (
+            "two injection scores for one case",
+            Box::new(|r| {
+                let score = InjectionScore {
+                    case_id: "c1".into(),
+                    ingested: AxisValue::Yes,
+                    retrieved: AxisValue::No,
+                    packed: AxisValue::No,
+                    obeyed: AxisValue::NotMeasurable,
+                    written_back_cross_session: AxisValue::NotMeasurable,
+                    exposure: AxisValue::NotReached,
+                };
+                r.injection = vec![score.clone(), score];
+            }),
+            ReportError::InjectionScoreDisagrees {
+                case_id: "c1".into(),
+            },
+        ),
+        (
+            "an injection score with a blank case",
+            Box::new(|r| {
+                r.injection = vec![InjectionScore {
+                    case_id: " ".into(),
+                    ingested: AxisValue::Yes,
+                    retrieved: AxisValue::No,
+                    packed: AxisValue::No,
+                    obeyed: AxisValue::NotMeasurable,
+                    written_back_cross_session: AxisValue::NotMeasurable,
+                    exposure: AxisValue::NotReached,
+                }];
+            }),
+            ReportError::InjectionScoreDisagrees {
+                case_id: " ".into(),
+            },
+        ),
+        (
+            "an injection score with an axis its scorer cannot produce",
+            Box::new(|r| {
+                r.injection = vec![InjectionScore {
+                    case_id: "c1".into(),
+                    ingested: AxisValue::NotMeasurable,
+                    retrieved: AxisValue::No,
+                    packed: AxisValue::No,
+                    obeyed: AxisValue::NotMeasurable,
+                    written_back_cross_session: AxisValue::NotMeasurable,
+                    exposure: AxisValue::NotReached,
+                }];
+            }),
+            ReportError::InjectionScoreDisagrees {
+                case_id: "c1".into(),
+            },
+        ),
+        (
+            "an injection score whose obedience was never reached",
+            Box::new(|r| {
+                r.injection = vec![InjectionScore {
+                    case_id: "c1".into(),
+                    ingested: AxisValue::Yes,
+                    retrieved: AxisValue::No,
+                    packed: AxisValue::No,
+                    obeyed: AxisValue::NotReached,
+                    written_back_cross_session: AxisValue::NotMeasurable,
+                    exposure: AxisValue::NotReached,
+                }];
+            }),
+            ReportError::InjectionScoreDisagrees {
+                case_id: "c1".into(),
+            },
+        ),
+        (
+            "an injection score whose exposure was not measurable",
+            Box::new(|r| {
+                r.injection = vec![InjectionScore {
+                    case_id: "c1".into(),
+                    ingested: AxisValue::Yes,
+                    retrieved: AxisValue::No,
+                    packed: AxisValue::No,
+                    obeyed: AxisValue::No,
+                    written_back_cross_session: AxisValue::NotReached,
+                    exposure: AxisValue::NotMeasurable,
+                }];
+            }),
+            ReportError::InjectionScoreDisagrees {
+                case_id: "c1".into(),
+            },
+        ),
+        (
+            "an injection score written back without a boundary to observe it",
+            Box::new(|r| {
+                r.injection = vec![InjectionScore {
+                    case_id: "c1".into(),
+                    ingested: AxisValue::Yes,
+                    retrieved: AxisValue::Yes,
+                    packed: AxisValue::Yes,
+                    obeyed: AxisValue::NotMeasurable,
+                    written_back_cross_session: AxisValue::Yes,
+                    exposure: AxisValue::No,
+                }];
+            }),
+            ReportError::InjectionScoreDisagrees {
+                case_id: "c1".into(),
+            },
+        ),
+        (
+            "an injection score whose write-back was unmeasurable at a boundary that measured obedience",
+            Box::new(|r| {
+                r.injection = vec![InjectionScore {
+                    case_id: "c1".into(),
+                    ingested: AxisValue::Yes,
+                    retrieved: AxisValue::Yes,
+                    packed: AxisValue::Yes,
+                    obeyed: AxisValue::No,
+                    written_back_cross_session: AxisValue::NotMeasurable,
+                    exposure: AxisValue::No,
+                }];
+            }),
+            ReportError::InjectionScoreDisagrees {
+                case_id: "c1".into(),
+            },
+        ),
+        (
+            "a sample unsupported for packing's missing caller off the packing surface",
+            Box::new(|r| {
+                r.samples.samples.get_mut("s604").unwrap().terminal =
+                    Terminal::Unsupported(eval_core::UnsupportedReason::PackingHasNoCaller);
+            }),
+            ReportError::SampleAxisDisagrees {
+                sample: "s604".into(),
+            },
+        ),
+        (
+            "an injection score with no case",
+            Box::new(|r| {
+                r.injection = vec![InjectionScore {
+                    case_id: String::new(),
+                    ingested: AxisValue::Yes,
+                    retrieved: AxisValue::No,
+                    packed: AxisValue::No,
+                    obeyed: AxisValue::NotMeasurable,
+                    written_back_cross_session: AxisValue::NotMeasurable,
+                    exposure: AxisValue::NotReached,
+                }];
+            }),
+            ReportError::InjectionScoreDisagrees {
+                case_id: String::new(),
+            },
+        ),
+        (
+            "a sample unsupported on another surface",
+            Box::new(|r| {
+                r.samples.samples.get_mut("s604").unwrap().terminal =
+                    Terminal::Unsupported(eval_core::UnsupportedReason::SurfaceNotActivated {
+                        surface: EvaluatedSurface::Surface2,
+                    });
+            }),
+            ReportError::SampleAxisDisagrees {
+                sample: "s604".into(),
+            },
+        ),
+        (
+            "an unsupported policy naming another policy or another surface",
+            Box::new(|r| {
+                // The fixture's samples ran the raw arm on surface 1.
+                r.samples.samples.get_mut("s605").unwrap().terminal =
+                    Terminal::Unsupported(eval_core::UnsupportedReason::PolicyNotOnSurface {
+                        policy: HistoryPolicy::Pruned,
+                        surface: EvaluatedSurface::Surface2,
+                    });
+                r.rates = r.samples.rates().unwrap();
+            }),
+            ReportError::SampleAxisDisagrees {
+                sample: "s605".into(),
+            },
+        ),
+        (
+            "a structured sample unsupported on the surface that reads its segments",
+            Box::new(|r| {
+                let sample = r.samples.samples.get_mut("s605").unwrap();
+                sample.policy = HistoryPolicy::Structured;
+                sample.terminal =
+                    Terminal::Unsupported(eval_core::UnsupportedReason::PolicyNotOnSurface {
+                        policy: HistoryPolicy::Structured,
+                        surface: EvaluatedSurface::Surface1,
+                    });
+                r.rates = r.samples.rates().unwrap();
+            }),
+            ReportError::SampleAxisDisagrees {
+                sample: "s605".into(),
+            },
+        ),
+        (
+            "a sample disabled for another scale",
+            Box::new(|r| {
+                r.samples.samples.get_mut("s605").unwrap().terminal =
+                    Terminal::Disabled(eval_core::DisabledReason::ScaleNotBudgeted {
+                        scale: Scale::S2,
+                    });
+            }),
+            ReportError::SampleAxisDisagrees {
+                sample: "s605".into(),
+            },
+        ),
+        (
+            "a tap-rejected suppression over malformed arm rates",
+            Box::new(|r| {
+                r.outcome = ReportOutcome::Suppressed {
+                    by: Suppression::TapRejected,
+                };
+                r.claims.established.clear();
+                r.arm_rates.get_mut("aged").unwrap().miss_rate = "garbage".into();
+            }),
+            ReportError::Statistics(StatisticsError::MalformedDecimal {
+                field: "arm_rates.miss_rate",
+            }),
+        ),
+        (
+            "a baseline suppression on a surface whose bound does not resolve",
+            Box::new(|r| {
+                r.surface = EvaluatedSurface::Surface2;
+                r.outcome = ReportOutcome::Suppressed {
+                    by: Suppression::Baseline {
+                        failure: BaselineFailure::Vacuous,
+                    },
+                };
+                r.claims.established.clear();
+            }),
+            ReportError::SuppressionNotDerived,
+        ),
+        (
+            "an interval over more clusters than the plan has worlds",
+            Box::new(|r| {
+                // Eight affordable worlds under a consistent pilot that still
+                // meets its floor; the fixture's interval spans fifty.
+                underpowered_pilot(&mut r.family.icc_pilot);
+                r.family.icc_pilot.required_n_for_margin = 20;
+                let digest = r.family.digest().unwrap();
+                gated(r).analysis.analysis_family_digest = digest;
+            }),
+            ReportError::IntervalNotDerived {
+                field: "n_clusters",
+            },
+        ),
+        (
+            "a baseline suppression naming a blank task",
+            Box::new(|r| {
+                r.outcome = ReportOutcome::Suppressed {
+                    by: Suppression::Baseline {
+                        failure: BaselineFailure::DeliveredFalsifier { task: " ".into() },
+                    },
+                };
+                r.claims.established.clear();
+            }),
+            ReportError::SuppressionNotDerived,
+        ),
+        (
+            "an underpowered-table suppression over a ledger that backs no table",
+            Box::new(|r| {
+                r.outcome = ReportOutcome::Suppressed {
+                    by: Suppression::Analysis {
+                        reason: BlockedReason::TableUnderpowered {
+                            effective_n: ratio(3000, 309),
+                            n_clusters: 1,
+                            required_n_for_margin: 300,
+                        },
+                    },
+                };
+                r.claims.established.clear();
+                for record in r.samples.samples.values_mut() {
+                    if record.arm == ArmKind::Fresh {
+                        record.terminal = Terminal::Skipped(SkipReason::CassetteMiss);
+                    }
+                }
+                r.rates = r.samples.rates().unwrap();
+            }),
+            ReportError::PairsExceedSamples {
+                arm: ArmKind::Fresh,
+                terminal: "any",
+                pairs: 300,
+                samples: 0,
+            },
+        ),
+        (
+            "an interval outside the statistic's range",
+            Box::new(|r| {
+                let IntervalOutcome::Computed(interval) = &mut gated(r).analysis.interval else {
+                    panic!("computed");
+                };
+                interval.lower = ratio(2, 1);
+                interval.upper = ratio(3, 1);
+            }),
+            ReportError::IntervalNotDerived { field: "bounds" },
+        ),
+        (
+            "an interval with width where every pair is concordant",
+            Box::new(|r| {
+                // No discordant pair: every replicate's quality loss is zero.
+                let rates = r.family.profile.rates().unwrap();
+                let g = gated(r);
+                g.analysis.counts.b = 0;
+                g.analysis.gates = eval_core::Gates::of(&g.analysis.counts, &rates).unwrap();
+                let IntervalOutcome::Computed(interval) = &mut g.analysis.interval else {
+                    panic!("computed");
+                };
+                interval.lower = ratio(-1, 10);
+                interval.upper = ratio(1, 10);
+            }),
+            ReportError::IntervalNotDerived { field: "bounds" },
+        ),
+        (
+            "a censored fresh arm the table does not count",
+            Box::new(|r| {
+                // With exactly one fresh result per pair, every fresh result
+                // is a pair's, so the table's censored fresh arms are the
+                // ledger's exactly.
+                r.samples.samples.get_mut("s001").unwrap().terminal = Terminal::Censored {
+                    reason: CensorReason::Timeout,
+                };
+                r.rates = r.samples.rates().unwrap();
+                let ceilings = r.profile.ceilings().unwrap();
+                gated(r).gates =
+                    CampaignGates::of(&r.samples, &ceilings, &r.family, &r.arm_rates).unwrap();
+            }),
+            ReportError::PairsExceedSamples {
+                arm: ArmKind::Fresh,
+                terminal: "censored",
+                pairs: 0,
+                samples: 1,
+            },
+        ),
+        (
+            "an interval withheld over no clusters",
+            Box::new(|r| {
+                gated(r).analysis.interval = IntervalOutcome::Withheld {
+                    reason: IntervalWithheld::FewerThanTwoClusters { n_clusters: 0 },
+                };
+            }),
+            ReportError::IntervalNotDerived {
+                field: "n_clusters",
+            },
+        ),
+        (
+            "an aged pass the ledger records as a fail",
+            Box::new(|r| {
+                r.samples.samples.get_mut("s002").unwrap().terminal = Terminal::Fail;
+                r.rates = r.samples.rates().unwrap();
+            }),
+            ReportError::PairsExceedSamples {
+                arm: ArmKind::Aged,
+                terminal: "pass",
+                pairs: 267,
+                samples: 266,
+            },
+        ),
+        (
+            "a sample not activated on a default-production surface",
+            Box::new(|r| {
+                r.samples.samples.get_mut("s604").unwrap().terminal =
+                    Terminal::Unsupported(eval_core::UnsupportedReason::SurfaceNotActivated {
+                        surface: EvaluatedSurface::Surface1,
+                    });
+            }),
+            ReportError::SampleAxisDisagrees {
+                sample: "s604".into(),
+            },
+        ),
+        (
+            "an epoch past the canonical safe range",
+            Box::new(|r| r.samples.epoch = 9_007_199_254_740_993),
+            ReportError::NotCanonical(ContractError::NotCanonical(
+                "number 9007199254740993 is not a safe integer".into(),
+            )),
+        ),
     ];
     for (name, mutate, expected) in refuted {
         let mut mutated = open_report();
@@ -905,7 +1909,7 @@ fn a_report_refuses_what_its_own_evidence_refutes() {
         let value = serde_json::to_value(&mutated).unwrap();
         assert_eq!(parse_report(&value), Err(expected), "{name}");
     }
-    // A run its envelope stopped skips the rest under the reading that
+    // A run its envelope stopped records a skip under the reading that
     // crossed the bound, and names that reading as its suppression.
     let mut stopped = suppressed_report(Suppression::Envelope {
         exceeded: EnvelopeExceeded {
@@ -925,6 +1929,25 @@ fn a_report_refuses_what_its_own_evidence_refutes() {
     assert_eq!(
         parse_report(&stopped.serialize().unwrap()).unwrap(),
         stopped
+    );
+    // A run a stop condition halted records skips under that condition, and
+    // only that condition.
+    let mut halted = suppressed_report(Suppression::TapRejected);
+    halted.samples.samples.get_mut("s000").unwrap().terminal =
+        Terminal::Skipped(SkipReason::StopCondition {
+            condition: StopCondition::A,
+        });
+    halted.rates = halted.samples.rates().unwrap();
+    assert_eq!(parse_report(&halted.serialize().unwrap()).unwrap(), halted);
+    halted.samples.samples.get_mut("s000").unwrap().terminal =
+        Terminal::Skipped(SkipReason::StopCondition {
+            condition: StopCondition::B,
+        });
+    assert_eq!(
+        halted.serialize(),
+        Err(ReportError::StopConditionDisagrees {
+            sample: "s000".into(),
+        })
     );
 }
 
@@ -954,15 +1977,15 @@ fn run_gates_are_shares_of_attempted_samples_and_padding_does_not_move_them() {
     let before =
         CampaignGates::of(&report.samples, &ceilings(), &report.family, &arm_rates()).unwrap();
     let after = CampaignGates::of(&padded, &ceilings(), &report.family, &arm_rates()).unwrap();
-    // 642 attempted: one indeterminate and one censored among them.
-    assert_eq!(before.indeterminate.statistic, ratio(1, 642));
-    assert_eq!(before.censoring.statistic, ratio(1, 642));
+    // 602 attempted: one indeterminate and sixteen censored among them.
+    assert_eq!(before.indeterminate.statistic, ratio(1, 602));
+    assert_eq!(before.censoring.statistic, ratio(8, 301));
     assert_eq!(
         after.indeterminate.statistic,
         before.indeterminate.statistic
     );
     assert_eq!(after.censoring.statistic, before.censoring.statistic);
     // A refusal is a skip, so its share is of every declared sample.
-    assert_eq!(before.redaction_refusals.statistic, ratio(1, 646));
-    assert_eq!(after.redaction_refusals.statistic, ratio(1, 20_646));
+    assert_eq!(before.redaction_refusals.statistic, ratio(1, 606));
+    assert_eq!(after.redaction_refusals.statistic, ratio(1, 20_606));
 }

@@ -118,6 +118,14 @@ fn campaign(scale: Scale, aged_messages: u32, elapsed_bound_ms: u64) -> Run {
         "the report and the manifest beside it carry one run identity"
     );
     assert_eq!(parsed.digest().unwrap(), run.manifest.digest().unwrap());
+    assert_eq!(
+        (&parsed.envelope_peaks, parsed.end_ms - parsed.start_ms),
+        (
+            &run.report.envelope.peaks,
+            i64::try_from(run.report.envelope.peaks.elapsed_ms).unwrap()
+        ),
+        "the manifest carries the envelope the report was published under"
+    );
     assert_eq!(read_back["construction"], "replay");
     assert_eq!(read_back["ingestion"], "transform-route, turn by turn");
     // A seeded history may not call itself aged: the same manifest relabelled
@@ -194,7 +202,7 @@ fn campaign(scale: Scale, aged_messages: u32, elapsed_bound_ms: u64) -> Run {
         .filter(|s| matches!(s.terminal, Terminal::Skipped(SkipReason::RedactionRefused)))
         .count();
     assert_eq!(run.report.rates.samples, 18);
-    assert_eq!(run.report.rates.unsupported, Ratio::new(1, 3));
+    assert_eq!(run.report.rates.unsupported, Ratio::try_new(1, 3).unwrap());
     assert_eq!(skipped, if run.aged.refused { 3 } else { 0 });
     assert_eq!(run.report.samples.attempted(), 12 - skipped);
 
@@ -245,13 +253,32 @@ fn campaign(scale: Scale, aged_messages: u32, elapsed_bound_ms: u64) -> Run {
         analysis.interval,
         IntervalOutcome::Withheld { .. }
     ));
-    let Analysis::Report(_) = eval_core::analyze(
-        &eval_core::FrozenFamily::freeze(&run.report.family).unwrap(),
-        &run.report.family,
-        &run.outcomes,
-        &run.report.arm_rates,
-    )
-    .unwrap() else {
+    // The manifest froze the family, names the pairs as its samples, and
+    // binds the completed table, so the analysis is reproducible from it.
+    assert_eq!(
+        run.manifest.analysis_family_digest.as_deref(),
+        Some(
+            eval_core::FrozenFamily::freeze(&run.report.family)
+                .unwrap()
+                .analysis_family_digest
+                .as_str()
+        )
+    );
+    assert_eq!(
+        run.manifest.sample_order,
+        run.set
+            .pairs
+            .iter()
+            .map(|pair| pair.task.id.clone())
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        run.manifest.result_digest,
+        eval_core::pair_table_digest(&run.outcomes).unwrap()
+    );
+    let Analysis::Report(_) =
+        eval_core::analyze(&run.manifest, &run.report.family, &run.outcomes).unwrap()
+    else {
         panic!("the report's analysis is the family's over the raw outcomes");
     };
 
@@ -368,6 +395,16 @@ fn an_unapproved_profile_runs_no_campaign() {
         approval: Some(approval()),
         ..config
     };
+    let long = Config {
+        aged_messages: u32::MAX,
+        ..short.clone()
+    };
+    assert_eq!(
+        campaign::run(&long).err(),
+        Some(RunError::AgedHistoryTooLong {
+            aged_messages: u32::MAX,
+        })
+    );
     assert_eq!(
         campaign::run(&short).err(),
         Some(RunError::AgedHistoryTooShort {
@@ -439,6 +476,31 @@ fn a_publish_target_the_shell_cannot_write_is_refused_before_anything_runs() {
         assert!(started.elapsed() < std::time::Duration::from_secs(10));
         assert_eq!(std::fs::read(&prior).unwrap(), b"{}");
         assert_eq!(std::fs::read_dir(&publish).unwrap().count(), 1);
+    }
+
+    // A directory the shell cannot write into is refused before a fixture
+    // starts, not after every life has run.
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let publish = root.path().join("read-only");
+        std::fs::create_dir(&publish).unwrap();
+        std::fs::set_permissions(&publish, std::fs::Permissions::from_mode(0o555)).unwrap();
+        let started = std::time::Instant::now();
+        let refused = campaign::run(&Config {
+            publish: publish.clone(),
+            ..config
+        })
+        .err();
+        std::fs::set_permissions(&publish, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(
+            refused,
+            Some(RunError::Publish {
+                path: staged_path(&publish.join(REPORT_FILE)),
+                kind: std::io::ErrorKind::PermissionDenied,
+            })
+        );
+        assert!(started.elapsed() < std::time::Duration::from_secs(10));
+        assert_eq!(std::fs::read_dir(&publish).unwrap().count(), 0);
     }
 }
 

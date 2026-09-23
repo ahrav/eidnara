@@ -1341,7 +1341,7 @@ pub fn run(config: &Config) -> Result<Run, RunError> {
             "checkpoint_step": plan.checkpoint_step,
             "messages": config.messages,
         }),
-        &std::env::current_exe().unwrap(),
+        &[std::env::current_exe().unwrap()],
     );
     let mut report = AgingReport {
         schema: AGING_REPORT_SCHEMA.to_string(),
