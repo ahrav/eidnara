@@ -10,8 +10,8 @@ use context_core::redaction::{RedactionErrorKind, Redactor};
 use eval_core::{
     CandidateVerdict, ClaimBoundary, Cut, Element, FailureClass, Generation, History, Minimality,
     Mode, MultiplicityRecipe, Oracle, OracleRefused, OriginalFailure, ShrinkReportError, Slice,
-    Transformation, WITNESS_SCHEMA, WitnessClass, WitnessError, WitnessPackage, parse_witness,
-    residue_drift, shrink,
+    Transformation, WITNESS_SCHEMA, WitnessError, WitnessPackage, parse_witness, residue_drift,
+    shrink,
 };
 use serde_json::Value;
 use support::shrink::{BUDGET, FRESH_SEED, evaluate, fixture, fresh_config, predicate, scenario};
@@ -456,6 +456,88 @@ fn a_minimized_scenario_that_cannot_compile_is_refused() {
 }
 
 #[test]
+fn a_deleted_element_cannot_also_survive() {
+    // A budget claim owes no final pass, so a forged ledger can name one
+    // surviving element as deleted and still balance every counter.
+    let mut package = package();
+    package.shrink.minimality = Minimality::NotEstablished {
+        reason: eval_core::NotEstablishedReason::ReplayBudgetExhausted,
+    };
+    package.recipe = None;
+    let survivor = package.minimized.elements()[0].clone();
+    let last = package
+        .shrink
+        .candidates
+        .iter()
+        .rposition(|record| record.verdict == CandidateVerdict::Reproduced)
+        .unwrap();
+    package.shrink.candidates.truncate(last + 1);
+    package.shrink.candidates[last]
+        .deleted
+        .insert(survivor.clone());
+    package.shrink.deleted.insert(survivor);
+    let distinct: BTreeMap<&str, &CandidateVerdict> = package
+        .shrink
+        .candidates
+        .iter()
+        .map(|record| (record.scenario_digest.as_str(), &record.verdict))
+        .collect();
+    package.shrink.replays = distinct
+        .values()
+        .filter(|verdict| !matches!(verdict, CandidateVerdict::InvalidPair { .. }))
+        .count() as u64;
+    package.shrink.max_replays = package.shrink.replays;
+    package.shrink.unknown_candidates = distinct
+        .values()
+        .filter(|verdict| matches!(verdict, CandidateVerdict::Unknown { .. }))
+        .count() as u64;
+    assert_eq!(
+        package.validate(),
+        Err(WitnessError::ShrinkReport(
+            ShrinkReportError::Inconsistent { field: "deleted" }
+        )),
+        "an element both deleted and kept is refused"
+    );
+}
+
+#[test]
+fn the_failure_predicate_names_the_task_the_replay_evaluates() {
+    let mut package = package();
+    let Some(eval_core::WitnessClass::Failure { class, .. }) =
+        Some(package.original.predicate.witness_class.clone())
+    else {
+        panic!("the fixture fails a task");
+    };
+    package.original.predicate.witness_class = eval_core::WitnessClass::Failure {
+        task: "nobody".to_string(),
+        class,
+    };
+    package.shrink.predicate.witness_class = package.original.predicate.witness_class.clone();
+    assert_eq!(
+        package.validate(),
+        Err(WitnessError::PredicateNamesAnotherTask {
+            task: "nobody".to_string()
+        }),
+        "a task the scenario does not carry cannot be the failing subject"
+    );
+}
+
+#[test]
+fn the_recipe_regenerates_the_original_tape_too() {
+    let mut package = package();
+    package.original.tape = eval_core::generate_all(FRESH_SEED, &fresh_config(), Mode::Generate)
+        .unwrap()
+        .tape;
+    assert_eq!(
+        package.validate(),
+        Err(WitnessError::RecipeDisagrees {
+            history: History::Aged
+        }),
+        "the aged generation regenerates the log and the decision tape alike"
+    );
+}
+
+#[test]
 fn the_coverage_signature_names_only_registered_markers() {
     let mut package = package();
     package
@@ -500,17 +582,19 @@ fn the_serializer_requires_the_verbatim_claim_boundary_and_rejects_forbidden_cla
         Some(WitnessError::ClaimBoundaryMismatch)
     );
 
-    // The task name is the predicate's one free-text field.
+    // A dropped field's name is free text the package does not otherwise bind.
     let mut claims = package();
-    claims.original.predicate.witness_class = WitnessClass::Failure {
-        task: "proves live-model quality".to_string(),
-        class: FailureClass::Interference,
+    let entry = eval_core::ResidueEntry {
+        type_name: "shrink_replay".to_string(),
+        field: "proves live-model quality".to_string(),
+        rule: eval_core::Rule::Drop,
     };
-    claims.shrink.predicate.witness_class = claims.original.predicate.witness_class.clone();
+    claims.residue.insert(entry.clone());
+    let index = claims.residue.iter().position(|e| *e == entry).unwrap();
     assert_eq!(
         claims.serialize(&redactor(), ARTIFACT_BYTES).err(),
         Some(WitnessError::ForbiddenClaim {
-            path: "/original/predicate/witness_class/task".to_string(),
+            path: format!("/residue[{index}]/field"),
             phrase: "live-model quality".to_string(),
         })
     );
@@ -548,11 +632,11 @@ fn residue_drift_refuses_and_limits_apply_before_publication() {
         Err(WitnessError::TooLarge { bound: 16, .. })
     ));
     let mut leaking = package.clone();
-    leaking.original.predicate.witness_class = WitnessClass::Failure {
-        task: "Authorization: Bearer sk-ant-api03-ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcd".to_string(),
-        class: FailureClass::Interference,
-    };
-    leaking.shrink.predicate.witness_class = leaking.original.predicate.witness_class.clone();
+    leaking.residue.insert(eval_core::ResidueEntry {
+        type_name: "shrink_replay".to_string(),
+        field: "Authorization: Bearer sk-ant-api03-ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcd".to_string(),
+        rule: eval_core::Rule::Drop,
+    });
     assert_eq!(
         leaking.serialize(&redactor(), ARTIFACT_BYTES).err(),
         Some(WitnessError::RedactionRefused(

@@ -175,10 +175,28 @@ pub fn residue() -> BTreeSet<ResidueEntry> {
         .collect()
 }
 
-/// The child: evaluates the oracle over the scenario at the cut and prints
-/// it over the barrier line with the trace digest of the one observation and
-/// the residue this build declares, then exits.
-pub fn child_main(args: &ChildArgs) -> ! {
+/// The digest of the one `shrink_replay` observation a replay records: the
+/// scenario and what the oracle said of it. `pid` is dropped by the schema,
+/// so the parent recomputes the same digest from the reply alone.
+pub fn trace_digest(scenario_digest: &str, outcome: &ReplayOutcome, pid: u32) -> String {
+    let mut trace = SemanticTrace::new([replay_schema()]).unwrap();
+    trace
+        .record(
+            "shrink_replay",
+            &json!({
+                "scenario_digest": scenario_digest,
+                "outcome": outcome,
+                "pid": pid,
+            }),
+        )
+        .unwrap();
+    trace.digest().unwrap()
+}
+
+/// What the child answers for `args`: the oracle over the scenario at the
+/// cut, the trace digest of that observation, and the residue this build
+/// declares.
+pub fn replayed(args: &ChildArgs) -> Replayed {
     let fixture = serialize_spec();
     let outcome = std::fs::read(&args.scenario)
         .ok()
@@ -206,23 +224,17 @@ pub fn child_main(args: &ChildArgs) -> ! {
             },
         )
     });
-    let mut trace = SemanticTrace::new([replay_schema()]).unwrap();
-    trace
-        .record(
-            "shrink_replay",
-            &json!({
-                "scenario_digest": scenario_digest,
-                "outcome": outcome,
-                "pid": std::process::id(),
-            }),
-        )
-        .unwrap();
-    let replayed = Replayed {
+    Replayed {
+        trace_digest: trace_digest(&scenario_digest, &outcome, std::process::id()),
         scenario_digest,
         outcome,
-        trace_digest: trace.digest().unwrap(),
         residue: residue(),
-    };
+    }
+}
+
+/// The child: prints `replayed(args)` over the barrier line, then exits.
+pub fn child_main(args: &ChildArgs) -> ! {
+    let replayed = replayed(args);
     let mut stdout = std::io::stdout().lock();
     writeln!(
         stdout,
@@ -292,9 +304,10 @@ impl Replayer<'_> {
         outcome
     }
 
-    /// An answer that names another scenario than `key` is no answer to this
-    /// key: it reads back as `Unknown { read_back_failed }`, like a line the
-    /// type cannot carry.
+    /// An answer that names another scenario than `key`, or whose trace
+    /// digest is not the digest of the observation it reports, is no answer
+    /// to this key: it reads back as `Unknown { read_back_failed }`, like a
+    /// line the type cannot carry.
     fn wait_for_barrier(
         &self,
         mut command: Command,
@@ -324,7 +337,10 @@ impl Replayer<'_> {
                 Some(
                     serde_json::from_str::<Replayed>(json.trim())
                         .ok()
-                        .filter(|replayed| replayed.scenario_digest == key)
+                        .filter(|replayed| {
+                            replayed.scenario_digest == key
+                                && replayed.trace_digest == trace_digest(key, &replayed.outcome, 0)
+                        })
                         .unwrap_or_else(|| self.unanswered(UnknownReason::ReadBackFailed)),
                 )
             }

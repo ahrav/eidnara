@@ -139,12 +139,30 @@ fn shrink_child_reports_a_drifted_residue() {
     };
     let mut residue = shrink::residue();
     residue.pop_first();
+    let scenario_digest = scenario_digest(&args);
+    let outcome = ReplayOutcome::Passed;
     let replayed = Replayed {
-        scenario_digest: scenario_digest(&args),
-        outcome: ReplayOutcome::Passed,
-        trace_digest: String::new(),
+        trace_digest: shrink::trace_digest(&scenario_digest, &outcome, 0),
+        scenario_digest,
+        outcome,
         residue,
     };
+    println!("{BARRIER} {}", serde_json::to_string(&replayed).unwrap());
+}
+
+/// Every child answers honestly but under a trace digest of its own choosing.
+fn spawn_forged_trace(_: &ChildArgs) -> Command {
+    reexec("shrink_child_reports_a_forged_trace")
+}
+
+#[test]
+#[ignore = "re-executed by the forged-trace test"]
+fn shrink_child_reports_a_forged_trace() {
+    let Some(args) = ChildArgs::from_env() else {
+        return;
+    };
+    let mut replayed = shrink::replayed(&args);
+    replayed.trace_digest = "ab".repeat(32);
     println!("{BARRIER} {}", serde_json::to_string(&replayed).unwrap());
 }
 
@@ -168,20 +186,22 @@ fn shrink_child_reports_a_foreign_predicate() {
     let Some(args) = ChildArgs::from_env() else {
         return;
     };
-    let replayed = Replayed {
-        scenario_digest: scenario_digest(&args),
-        outcome: ReplayOutcome::Failed {
-            predicate: eval_core::FailurePredicate {
-                oracle: args.oracle,
-                checkpoint: Cut::EndOfRun,
-                profile_digest: args.profile_digest,
-                witness_class: WitnessClass::Failure {
-                    task: "first-commit".to_string(),
-                    class: FailureClass::Interference,
-                },
+    let scenario_digest = scenario_digest(&args);
+    let outcome = ReplayOutcome::Failed {
+        predicate: eval_core::FailurePredicate {
+            oracle: args.oracle,
+            checkpoint: Cut::EndOfRun,
+            profile_digest: args.profile_digest,
+            witness_class: WitnessClass::Failure {
+                task: "first-commit".to_string(),
+                class: FailureClass::Interference,
             },
         },
-        trace_digest: "ab".repeat(32),
+    };
+    let replayed = Replayed {
+        trace_digest: shrink::trace_digest(&scenario_digest, &outcome, 0),
+        scenario_digest,
+        outcome,
         residue: shrink::residue(),
     };
     println!("{BARRIER} {}", serde_json::to_string(&replayed).unwrap());
@@ -646,6 +666,25 @@ fn a_candidate_answered_under_a_foreign_predicate_is_unknown_not_slipped() {
             reason: NotEstablishedReason::UnknownCandidates { .. }
         }
     ));
+}
+
+#[test]
+fn a_trace_digest_that_is_not_the_observation_s_is_no_answer() {
+    let publish = tempfile::tempdir().unwrap();
+    let config = config(publish.path().join("out"));
+    let refused = shrink::run(&config, spawn_forged_trace).err().unwrap();
+    assert!(
+        matches!(
+            refused,
+            RunError::NoFailure {
+                outcome: ReplayOutcome::Unknown {
+                    reason: UnknownReason::ReadBackFailed
+                }
+            }
+        ),
+        "{refused:?}"
+    );
+    assert!(!config.publish.join(WITNESS_FILE).exists());
 }
 
 #[test]

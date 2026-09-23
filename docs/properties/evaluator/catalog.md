@@ -295,6 +295,9 @@ Exercised: yes -
   `crates/eval-core/tests/witness.rs::the_remaining_count_is_the_minimized_scenario_s_element_count`,
   `crates/eval-core/tests/witness.rs::a_residue_that_no_schema_could_declare_is_refused`,
   `crates/eval-core/tests/witness.rs::a_minimized_scenario_that_cannot_compile_is_refused`,
+  `crates/eval-core/tests/witness.rs::a_deleted_element_cannot_also_survive`,
+  `crates/eval-core/tests/witness.rs::the_failure_predicate_names_the_task_the_replay_evaluates`,
+  `crates/eval-core/tests/witness.rs::the_recipe_regenerates_the_original_tape_too`,
   and
   `crates/daemon/tests/eval_shrink.rs::a_fresh_process_reproduces_the_predicate_and_the_minimized_witness_is_published`
 Guarantee: A witness package carries the original failure (RunId, decision tape,
@@ -318,7 +321,11 @@ Check: `always` - `WitnessPackage::validate` refuses a recipe missing when
   (`ShrinkReport(Inconsistent { remaining })`); a residue holding a `Keep`
   rule or two rules for one field is refused (`ResidueContradiction`); a
   minimized scenario the pair compiler or episode validator refuses is
-  refused (`MinimizedNotReplayable`); a
+  refused (`MinimizedNotReplayable`); a failure predicate naming another task
+  than the first pair's is refused (`PredicateNamesAnotherTask`); a deleted
+  element the minimized scenario still holds is refused
+  (`ShrinkReport(Inconsistent { deleted })`); the aged generation must
+  regenerate the original's decision tape (`RecipeDisagrees`); a
   coverage name outside the registry is refused (`UnregisteredMarker { name }`); an embedded report that
   `ShrinkReport::validate` refuses is refused (`ShrinkReport(..)`);
   `parse_witness(serialize(package)) == package`; the published bytes parse

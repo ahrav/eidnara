@@ -20,7 +20,7 @@ use crate::markers::MARKERS;
 use crate::residue::{ResidueEntry, residue_contradiction};
 use crate::shrink::{
     CandidateVerdict, Element, FailurePredicate, History, Minimality, Scenario, ShrinkReport,
-    ShrinkReportError, Transformation,
+    ShrinkReportError, Transformation, WitnessClass,
 };
 use crate::stream::Tape;
 
@@ -98,6 +98,11 @@ pub enum WitnessError {
     MinimizedNotReplayable {
         refusal: String,
     },
+    /// The failure predicate names a task other than the one a replay
+    /// evaluates, the minimized scenario's first pair.
+    PredicateNamesAnotherTask {
+        task: String,
+    },
     /// The minimized scenario still fails only in multiplicity, so the
     /// compact form is required; or it carries one it does not need.
     RecipeRequired,
@@ -173,11 +178,32 @@ impl WitnessPackage {
                 refusal: format!("{refusal:?}"),
             }
         })?;
-        self.minimized
+        let set = self
+            .minimized
             .compile(&serialize_spec())
             .map_err(|refusal| WitnessError::MinimizedNotReplayable {
                 refusal: refusal.kind().to_string(),
             })?;
+        // A child evaluates the first pair's task; a failure's subject is that
+        // task or the predicate cannot be reproduced, only slipped from.
+        if let WitnessClass::Failure { task, .. } = &self.original.predicate.witness_class {
+            let evaluated = set.pairs.first().map(|pair| pair.task.id.as_str());
+            if evaluated != Some(task.as_str()) {
+                return Err(WitnessError::PredicateNamesAnotherTask { task: task.clone() });
+            }
+        }
+        // What the report deleted is gone from the minimized scenario.
+        let elements = self.minimized.elements();
+        if self
+            .shrink
+            .deleted
+            .iter()
+            .any(|element| elements.contains(element))
+        {
+            return Err(WitnessError::ShrinkReport(
+                ShrinkReportError::Inconsistent { field: "deleted" },
+            ));
+        }
         if let Some(entry) = residue_contradiction(&self.residue) {
             return Err(WitnessError::ResidueContradiction {
                 type_name: entry.type_name.clone(),
@@ -342,9 +368,14 @@ impl WitnessPackage {
         if generation.config.declared_events() != (minimized.events.len() + deleted.len()) as u64 {
             return Err(disagrees());
         }
-        let mut log = generate_all(generation.root_seed, &generation.config, Mode::Generate)
-            .map_err(|_| disagrees())?
-            .log;
+        let world = generate_all(generation.root_seed, &generation.config, Mode::Generate)
+            .map_err(|_| disagrees())?;
+        // The aged generation is the original's world: its decision tape is
+        // the one the failure recorded, not just its log.
+        if history == History::Aged && world.tape != self.original.tape {
+            return Err(disagrees());
+        }
+        let mut log = world.log;
         for id in deleted {
             log = log.without(id);
         }

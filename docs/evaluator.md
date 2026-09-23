@@ -2867,7 +2867,11 @@ recorded `residue` entries, the `minimized` `Scenario`, an optional
 (`SchemaMismatch { found }`); a claim boundary other than `ClaimBoundary::pinned()`
 (`ClaimBoundaryMismatch`); a minimized scenario whose episodes are not a
 valid set or that the pair compiler refuses, so no child could replay it
-(`MinimizedNotReplayable { refusal }`); a live slice labelled replayable
+(`MinimizedNotReplayable { refusal }`); a failure predicate whose task is not
+the minimized scenario's first pair, the one a child evaluates
+(`PredicateNamesAnotherTask { task }`); a deleted element the minimized
+scenario still holds (`ShrinkReport(Inconsistent { deleted })`); a live slice
+labelled replayable
 (`LiveRelabelledReplayable`); a predicate that disagrees between the original
 and the shrink report; a minimized scenario whose digest is not the report's;
 a run id or trace digest that is not 64 lowercase hex; and any string leaf
@@ -2886,8 +2890,8 @@ carry the compact form (`RecipeRequired`); a scenario without one, or whose
 minimality is not established, carries none (`RecipeWithoutMultiplicity`); the form's `multiplicities` must equal
 `count_triggered` (`RecipeMultiplicitiesDisagree`); and each `Generation`
 (config and root seed) must regenerate exactly the minimized log once the
-report's deletions for that history are applied (`RecipeDisagrees {
-history }`). The declared event count is compared with the minimized log plus
+report's deletions for that history are applied, and the aged generation's
+decision tape must be the original's (`RecipeDisagrees { history }`). The declared event count is compared with the minimized log plus
 the deletions before anything is generated, so a parsed package cannot demand
 an unbounded regeneration.
 
@@ -2980,8 +2984,9 @@ issue writes the candidate to the one scenario file, spawns the child with
 piped stdout, charges a process, and waits for the barrier line up to the
 configured replay timeout capped by what remains of the profile's elapsed
 bound, a deadline measured from the envelope's own clock so no wait outlives
-it: a line resolves the effect with the child's outcome (a malformed line, or
-one whose digest names another scenario than the key, is
+it: a line resolves the effect with the child's outcome (a malformed line, one
+whose digest names another scenario than the key, or one whose trace digest
+is not `trace_digest` of the scenario and outcome it reports, is
 `Unknown { read_back_failed }`); an exit before the line is retried once
 under the same key (`ReplayEffects::retry`) and then resolved
 `Unknown { child_exited_before_barrier }`; a timeout kills the child and
