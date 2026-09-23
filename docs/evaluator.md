@@ -3036,7 +3036,9 @@ recorded seed and generator version reproduce the oracle that ran).
 
 The runner owns the oracle and never runs it in the agent's workspace:
 `oracle_workspace(agent_files)` is a fresh copy of the task's files with only
-the agent's `src/` writes applied by content, plus the hidden tests, so the
+the agent's `src/` writes applied by content (canonical workspace-relative
+keys only, so `src/../Cargo.toml` is not a `src/` write), plus the hidden
+tests, so the
 manifest, `.cargo/`, `build.rs`, toolchain overrides, and every alias
 (symlink or hard link) the agent arranged are irrelevant to what is judged.
 `task_terminal` is `Censored` when the inherited

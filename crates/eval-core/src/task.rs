@@ -240,8 +240,9 @@ impl GeneratedTask {
     }
 
     /// The workspace the runner judges an agent's run in: a fresh copy of the
-    /// task's files with only the agent's `src/` writes applied by content,
-    /// plus the hidden tests. Nothing else the agent wrote is carried, so the
+    /// task's files with only the agent's `src/` writes applied by content
+    /// (canonical workspace-relative keys only; `src/../x` is not under
+    /// `src/`), plus the hidden tests. Nothing else the agent wrote is carried, so the
     /// manifest, `.cargo/`, `build.rs`, toolchain overrides, and every alias
     /// (symlink or hard link) in the agent's workspace are irrelevant to the
     /// oracle; `oracle_tamper` only records what was left behind.
@@ -250,7 +251,7 @@ impl GeneratedTask {
         files.extend(
             agent_files
                 .iter()
-                .filter(|(path, _)| path.starts_with("src/"))
+                .filter(|(path, _)| is_workspace_relative(path) && path.starts_with("src/"))
                 .map(|(p, c)| (p.clone(), c.clone())),
         );
         files.extend(

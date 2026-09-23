@@ -599,6 +599,8 @@ fn an_agent_cannot_select_modify_or_replace_the_oracle() {
             task.correct_fix["src/lib.rs"].clone(),
         ),
         ("src/extra.rs".to_string(), "pub fn x() {}".to_string()),
+        ("src/../Cargo.toml".to_string(), "evil".to_string()),
+        ("src/./sneaky.rs".to_string(), "pub fn y() {}".to_string()),
         (
             "Cargo.toml".to_string(),
             "[package]\nname = \"evil\"\n".to_string(),
@@ -618,7 +620,13 @@ fn an_agent_cannot_select_modify_or_replace_the_oracle() {
     assert_eq!(oracle["Cargo.toml"], task.files["Cargo.toml"]);
     assert_eq!(oracle["src/lib.rs"], task.correct_fix["src/lib.rs"]);
     assert_eq!(oracle["src/extra.rs"], "pub fn x() {}");
-    for absent in ["build.rs", ".cargo", "tests/mine.rs"] {
+    for absent in [
+        "build.rs",
+        ".cargo",
+        "tests/mine.rs",
+        "src/../Cargo.toml",
+        "src/./sneaky.rs",
+    ] {
         assert!(
             !oracle.contains_key(absent),
             "{absent} does not reach the oracle"
