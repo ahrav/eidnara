@@ -2145,9 +2145,10 @@ inequality while one identity violates it is refused.
 `RecordedRefusal` carries the episode and the production error text, and the
 report lists them apart from safety failures. The report refuses a record
 (an expected refusal or a liveness permanent stall) whose episode is not one
-of its episodes (`UnknownEpisode`) or whose error text does not name the
-variant's production type, `DeletionUnpropagated` or `MetadataQuota`
-(`RefusalNotEvidenced`).
+of its episodes (`UnknownEpisode`) or whose error text is not the variant's
+production type as production prints it, `DeletionUnpropagated` or
+`MetadataQuota` alone or followed by its fields (`RefusalNotEvidenced`); a word
+that merely contains the name is not evidence.
 
 `LivenessReport` is the separate liveness mode: a `HealthyCore` (families and
 `Lane`s that must progress), the outside-core episodes, the set still armed
@@ -2190,7 +2191,8 @@ profile's limits, `EnvelopeExceeded` when any recorded peak is over its
 bound, `NoEpisode` when no fault was armed (so no safety check ran while one
 was), `UnregisteredMarker` for a marker `MARKERS` does not register,
 `LostReplyUnrecorded { episode }` for an episode that loses a reply that no
-effect's `lost_by` names, `LostByNonLosingEpisode` for an effect naming
+effect's `lost_by` names, `LostReplyClaimedTwice` for one that two effects
+name (an episode fires once and loses one reply), `LostByNonLosingEpisode` for an effect naming
 an episode that loses none, `UnknownEpisode` for one naming an episode the
 report lacks,
 `UnknownEpisode` for a liveness outside-core episode that is not one of the

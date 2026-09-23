@@ -1617,6 +1617,49 @@ fn a_parsed_report_cannot_claim_what_no_run_recorded() {
         }),
         "a read-back names one state; unknown after one is no read-back"
     );
+
+    for (text, evidences) in [
+        ("DeletionUnpropagated { commit_seq: 7 }", true),
+        ("DeletionUnpropagated", true),
+        ("DeletionUnpropagated(7)", true),
+        ("NotDeletionUnpropagated", false),
+        ("a message mentioning DeletionUnpropagated", false),
+        ("DeletionUnpropagatedX", false),
+        ("", false),
+    ] {
+        assert_eq!(
+            ExpectedRefusal::R11DeletionBearingCatchUp.evidences(text),
+            evidences,
+            "{text:?}"
+        );
+    }
+    let mut word_inside = ok.clone();
+    word_inside.expected_refusals[0].production_error = "NotDeletionUnpropagated".to_string();
+    assert_eq!(
+        word_inside.validate(&p),
+        Err(FaultReportError::RefusalNotEvidenced {
+            episode: "lost-ack".to_string(),
+            refusal: ExpectedRefusal::R11DeletionBearingCatchUp,
+        }),
+        "the variant is evidenced by production's own text, not by a word containing it"
+    );
+    let mut claimed_twice = ok.clone();
+    claimed_twice.effects.attempt("ack:2");
+    claimed_twice
+        .effects
+        .lose_reply("ack:2", "lost-ack")
+        .unwrap();
+    claimed_twice
+        .effects
+        .read_back("ack:2", EffectState::Applied)
+        .unwrap();
+    assert_eq!(
+        claimed_twice.validate(&p),
+        Err(FaultReportError::LostReplyClaimedTwice {
+            episode: "lost-ack".to_string()
+        }),
+        "one episode fires once and loses one reply"
+    );
 }
 
 #[test]

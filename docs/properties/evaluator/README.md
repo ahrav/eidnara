@@ -1659,7 +1659,10 @@ Fault contract (`crates/eval-core/tests/fault.rs`,
   approved `RunProfile` and derives the report's `profile_digest` from it;
   `kernel_commit_fail_after_events`, `message_cleanup_lose_write_reply`, and
   `identity_sweep_lose_reclaim_reply` encode the last reply-loss and
-  transaction seams; `unknown` after a read-back is `OutcomeNotDerived`.
+  transaction seams; `unknown` after a read-back is `OutcomeNotDerived`; a
+  refusal's error text must be the production variant as printed, not a word
+  containing it; one losing episode named by two effects is
+  `LostReplyClaimedTwice`.
 
 Aging drive (`crates/daemon/tests/eval_aging.rs`, `--all-features`):
 

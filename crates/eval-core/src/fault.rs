@@ -908,6 +908,17 @@ impl ExpectedRefusal {
             Self::R24ReceiptQuotaExhausted => "MetadataQuota",
         }
     }
+
+    /// The production variant's text in the form production prints it: the
+    /// variant name alone or followed by its fields, never as a substring of
+    /// some other word.
+    pub fn evidences(self, production_error: &str) -> bool {
+        let variant = self.production_variant();
+        production_error == variant
+            || production_error
+                .strip_prefix(variant)
+                .is_some_and(|rest| rest.starts_with(" {") || rest.starts_with('('))
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1188,6 +1199,10 @@ pub enum FaultReportError {
         identity: String,
         episode: String,
     },
+    /// One episode fires once and loses one reply; two effects cannot both be it.
+    LostReplyClaimedTwice {
+        episode: String,
+    },
     SafetyNeverChecked,
     Shape(String),
     NotCanonical(ContractError),
@@ -1301,8 +1316,14 @@ impl FaultReport {
             .verdict()
             .map_err(FaultReportError::Coverage)?;
         self.effects.validate().map_err(FaultReportError::Effect)?;
+        let mut losers = BTreeSet::new();
         for (identity, effect) in &self.effects.effects {
             for episode in &effect.lost_by {
+                if !losers.insert(episode) {
+                    return Err(FaultReportError::LostReplyClaimedTwice {
+                        episode: episode.clone(),
+                    });
+                }
                 match self.episodes.iter().find(|e| &e.id == episode) {
                     None => {
                         return Err(FaultReportError::UnknownEpisode {
@@ -1338,10 +1359,7 @@ impl FaultReport {
                     episode: recorded.episode.clone(),
                 });
             }
-            if !recorded
-                .production_error
-                .contains(recorded.refusal.production_variant())
-            {
+            if !recorded.refusal.evidences(&recorded.production_error) {
                 return Err(FaultReportError::RefusalNotEvidenced {
                     episode: recorded.episode.clone(),
                     refusal: recorded.refusal,
