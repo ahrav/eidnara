@@ -1364,6 +1364,7 @@ fn manifest(
         envelope: report.envelope.clone(),
         started_at_ms,
         task_corpus: suite_c_task_corpus(),
+        judge: "none".to_string(),
     }))
 }
 
@@ -1380,6 +1381,9 @@ pub struct ManifestInputs {
     pub started_at_ms: i64,
     /// `component_versions.task_corpus`: which corpus the run executed.
     pub task_corpus: String,
+    /// `component_versions.judge`: what decided the terminals, `none` where
+    /// the oracle is the reducer's own.
+    pub judge: String,
 }
 
 /// The task corpus every Suite C shell reads: the aging world under `SEED`.
@@ -1426,7 +1430,7 @@ pub fn suite_c_manifest(inputs: ManifestInputs) -> Manifest {
             oracles: PAIRING_POLICY_VERSION.to_string(),
             execution_image: "in-process".to_string(),
             task_corpus: inputs.task_corpus,
-            judge: "none".to_string(),
+            judge: inputs.judge,
         },
         envelope_bounds: inputs.envelope.bounds.clone(),
         envelope_peaks: inputs.envelope.peaks,

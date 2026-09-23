@@ -546,6 +546,7 @@ pub fn run(config: &Config, spawn: Spawn) -> Result<Run, RunError> {
         envelope: charges.envelope.clone(),
         started_at_ms,
         task_corpus: suite_c_task_corpus(),
+        judge: "none".to_string(),
     });
     let manifest_bytes = serde_json::to_vec_pretty(&manifest.to_value()).unwrap();
     publish_file(&config.publish.join(WITNESS_FILE), &witness_bytes).map_err(publish_refused)?;
