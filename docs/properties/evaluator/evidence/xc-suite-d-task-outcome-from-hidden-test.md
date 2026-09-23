@@ -29,8 +29,9 @@ attempt is rejected."
   `run_bounded` kills the child's process group at the deadline and after a
   descendant holds stdout past the child's exit.
 - `crates/daemon/tests/eval_suite_d.rs` `a_contained_task_is_judged_by_hidden_tests_the_agent_never_sees`:
-  the agent plants `tests/hidden_sum_of_positives.rs`; `oracle_tamper`
-  records it; the terminal is `Pass` from the corpus's tests.
+  the agent plants `tests/hidden_sum_of_positives.rs` and replaces
+  `Cargo.toml` with a symlink; `oracle_tamper` records both; the terminal is
+  `Pass` from the corpus's tests.
 - `crates/daemon/tests/eval_suite_d.rs` `a_wrong_fix_fails_a_no_fix_stays_failed_and_an_exhausted_budget_is_censored`:
   a wrong fix is `Fail` with its named test failed; no fix stays `Fail`; 100
   extra tool calls are `Censored { max_tool_calls }` with no hidden test run.
