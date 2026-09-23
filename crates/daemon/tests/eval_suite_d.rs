@@ -818,6 +818,12 @@ fn a_wrong_fix_fails_a_no_fix_stays_failed_and_an_exhausted_budget_is_censored()
                 "{}: an agent that never ran has no measured obedience",
                 score.case_id
             );
+            assert_eq!(
+                score.written_back_cross_session,
+                AxisValue::NotReached,
+                "{}: no session ran, so no later session read anything",
+                score.case_id
+            );
         }
     }
 

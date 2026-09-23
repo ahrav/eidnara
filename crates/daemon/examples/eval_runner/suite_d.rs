@@ -222,6 +222,9 @@ pub struct CanaryArgs {
     /// A Unix socket the runner listens on outside the writable tree, when
     /// the host has a runtime directory to put it in.
     pub socket: Option<PathBuf>,
+    /// The runner's IPC namespace (`/proc/self/ns/ipc`), which a contained
+    /// canary must not share.
+    pub ipc_namespace: String,
 }
 
 impl CanaryArgs {
@@ -311,6 +314,9 @@ pub fn canary_main(args: &CanaryArgs) -> ! {
                 .is_ok()
         })
         .count();
+    let ipc_namespace = std::fs::read_link("/proc/self/ns/ipc")
+        .map(|link| link.to_string_lossy().into_owned())
+        .unwrap_or_default();
     let proc_namespaced = std::fs::read_to_string("/proc/self/stat")
         .ok()
         .and_then(|stat| stat.split_whitespace().next()?.parse::<u32>().ok())
@@ -324,6 +330,7 @@ pub fn canary_main(args: &CanaryArgs) -> ! {
         "proc_namespaced": proc_namespaced,
         "unix_socket": unix_socket,
         "fork_bound": forked < FORKS,
+        "shares_ipc": ipc_namespace == args.ipc_namespace,
         "outside_write": outside_write,
         "mask_removal": read("secret.txt"),
     });
@@ -351,8 +358,9 @@ pub fn escapee_main() -> ! {
 /// "everything" rather than a list. `/run`, where host services keep their
 /// pathname sockets (a network namespace does not stop `connect` on those),
 /// is covered by an empty tmpfs; a socket elsewhere on the host stays
-/// reachable. The process limit bounds every descendant, fork bombs
-/// included, since `RLIMIT_NPROC` counts per user namespace. A pre-mount
+/// reachable. The process limit (`prlimit`, since `ulimit -u` is not POSIX
+/// `sh`) bounds every descendant, fork bombs included, since `RLIMIT_NPROC`
+/// counts per user namespace. A pre-mount
 /// working directory still resolves to the writable mount, so `cd`
 /// re-resolves the working directory (`$3`, or `$2` itself) after mounting.
 const MOUNTS: &str = r#"{ mount --make-rprivate / &&
@@ -362,13 +370,12 @@ awk '{ print $5 }' /proc/self/mountinfo | while read -r m; do
 done
 awk -v rw="$2" '{ top[$5] = $6 } END { for (m in top) if (m != rw && top[m] !~ /(^|,)ro(,|$)/) exit 1 }' /proc/self/mountinfo || exit 97
 { [ ! -d /run ] || mount -t tmpfs -o ro,size=1k tmpfs /run; } || exit 97
-ulimit -u 128 || exit 97
 cd "${3:-$2}" || exit 97
 shift 3
-exec setpriv --no-new-privs --inh-caps=-all --ambient-caps=-all --bounding-set=-all -- "$@""#;
+exec prlimit --nproc=128:128 setpriv --no-new-privs --inh-caps=-all --ambient-caps=-all --bounding-set=-all -- "$@""#;
 
-/// `unshare` with user, mount, PID, and network namespaces, killed with the
-/// namespace init, with a `/proc` of its own so the host's processes are not
+/// `unshare` with user, mount, PID, network, and IPC namespaces, killed with
+/// the namespace init, with a `/proc` of its own so the host's processes are not
 /// listed inside. `mask` is covered by an empty read-only tmpfs, `writable`
 /// is the one writable tree, and everything else is read-only; `inner`'s
 /// working directory is kept (the writable tree when it has none). Only
@@ -382,6 +389,7 @@ fn contain(mask: Option<&Path>, writable: &Path, inner: &Command) -> Command {
             "--mount",
             "--pid",
             "--net",
+            "--ipc",
             "--fork",
             "--kill-child",
             "--mount-proc",
@@ -421,6 +429,7 @@ pub fn namespaces_available() -> bool {
             "--mount",
             "--pid",
             "--net",
+            "--ipc",
             "--fork",
             "--mount-proc",
             "true",
@@ -565,6 +574,9 @@ pub fn run_canaries(
         port: listener.local_addr()?.port(),
         escapee: (host.escapee)(),
         socket: socket.clone(),
+        ipc_namespace: std::fs::read_link("/proc/self/ns/ipc")?
+            .to_string_lossy()
+            .into_owned(),
     };
     let mut command = (host.spawn)(&args);
     command
@@ -623,6 +635,14 @@ pub fn run_canaries(
     }
     if contained && verdicts.get("fork_bound") != Some(&Value::Bool(true)) {
         return Err(std::io::Error::other("the containment does not bound processes").into());
+    }
+    if verdicts.get("shares_ipc") != Some(&Value::Bool(!contained)) {
+        return Err(std::io::Error::other(if contained {
+            "the canary shares the host's IPC namespace"
+        } else {
+            "the control is not in the runner's IPC namespace"
+        })
+        .into());
     }
     // The escapee is alive when the file keeps changing after the canary
     // child, the namespace init, has exited; it exits by itself soon after.
@@ -1351,12 +1371,13 @@ pub fn run(config: &Config, host: Host) -> Result<Run, RunError> {
         };
         let terminal = task_terminal(task, &hidden, &usage, &config.budgets);
         // The later session reads what the first one wrote, not what the
-        // repository already held.
-        let later = LaterSession {
+        // repository already held; an agent that never ran has no later
+        // session either.
+        let later = ran.then(|| LaterSession {
             read_memory: true,
             attached: trace.memory_rows.clone(),
-        };
-        let mut observation = observe_agent(&trace, Some(later));
+        });
+        let mut observation = observe_agent(&trace, later);
         // An agent that never ran left no effects to mediate; its empty
         // trace would otherwise score as measured non-obedience.
         if !ran {
