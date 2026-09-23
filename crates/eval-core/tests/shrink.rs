@@ -19,7 +19,7 @@ use serde_json::{Value, json};
 use support::{WORLD_EPOCH_MS, WORLD_SEED, world_config};
 
 const FRESH_SEED: u64 = WORLD_SEED ^ 0xABCD;
-const PROFILE: &str = "profile-digest";
+const PROFILE: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 const CUT: Cut = Cut::AtQuiescence;
 const BUDGET: u64 = 400;
 
@@ -756,7 +756,7 @@ fn replay_effects_are_bounded_and_a_premature_verdict_is_refused() {
         CandidateVerdict::Reproduced,
         "the retried attempt answered under the original key"
     );
-    effects.cancel(&key(1)).unwrap();
+    effects.cancel(&key(1), 1).unwrap();
     assert_eq!(
         classify_replay(
             &predicate(FailureClass::Interference),
@@ -780,7 +780,7 @@ fn replay_effects_are_bounded_and_a_premature_verdict_is_refused() {
             })
         );
         assert_eq!(
-            effects.cancel(&resolved),
+            effects.cancel(&resolved, 1),
             Err(ReplayRefused::AlreadyResolved { key: resolved })
         );
     }
@@ -1416,4 +1416,75 @@ fn impossible_ledger_shapes_are_refused_on_read_and_ghosts_on_verify() {
             field: "minimality"
         })
     );
+}
+
+#[test]
+fn a_malformed_profile_digest_is_refused_and_every_candidate_digest_is_recomputed() {
+    let original = scenario();
+    let mut expected = predicate(FailureClass::Interference);
+    let (_, report) = shrink(&original, &fixture(), &expected, BUDGET, &mut evaluate).unwrap();
+
+    let mut renamed = report.clone();
+    let victim = renamed
+        .candidates
+        .iter()
+        .position(|record| matches!(record.verdict, CandidateVerdict::Slipped { .. }))
+        .unwrap();
+    let digest = renamed.candidates[victim].scenario_digest.clone();
+    let other = format!(
+        "{}{}",
+        "0".repeat(63),
+        if digest.ends_with('0') { "1" } else { "0" }
+    );
+    for record in renamed
+        .candidates
+        .iter_mut()
+        .filter(|record| record.scenario_digest == digest)
+    {
+        record.scenario_digest = other.clone();
+    }
+    renamed.validate().unwrap();
+    assert_eq!(
+        renamed.verify(&original),
+        Err(ShrinkReportError::Inconsistent {
+            field: "candidates"
+        }),
+        "a candidate's digest is the digest of the scenario its deletions leave"
+    );
+
+    expected.profile_digest = "profile-digest".to_string();
+    let mut issued = 0u32;
+    let mut replay = |request: ReplayRequest<'_>| {
+        issued += 1;
+        evaluate(request)
+    };
+    assert_eq!(
+        shrink(&original, &fixture(), &expected, BUDGET, &mut replay).err(),
+        Some(ShrinkRefused::InvalidPredicate {
+            field: "profile_digest"
+        })
+    );
+    assert_eq!(issued, 0);
+    let mut value = serde_json::to_value(&report).unwrap();
+    value["predicate"]["profile_digest"] = json!("profile-digest");
+    assert_eq!(
+        parse_shrink_report(&value),
+        Err(ShrinkReportError::Inconsistent {
+            field: "profile_digest"
+        })
+    );
+
+    let mut effects = ReplayEffects::default();
+    assert_eq!(effects.issue("candidate"), Ok(1));
+    assert_eq!(effects.retry("candidate"), Ok(2));
+    assert_eq!(
+        effects.cancel("candidate", 1),
+        Err(ReplayRefused::StaleAttempt {
+            key: "candidate".to_string(),
+            attempt: 1,
+            current: 2,
+        }),
+        "a superseded attempt's cancellation is fenced like its answer"
+    );
+    effects.cancel("candidate", 2).unwrap();
 }

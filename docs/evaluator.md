@@ -2771,8 +2771,10 @@ though a failure remains; `Passed` is `NotReproduced`; and `Unknown` is
 replay receives carries the oracle, cut, and profile digest and withholds the
 expected witness class, so a replay cannot echo it.
 
-`shrink` refuses an invalid pinned oracle as `InvalidOracle` and an invalid
-episode set (`validate_episodes`) as `InvalidEpisodes`, and a `max_replays`
+`shrink` refuses an invalid pinned oracle as `InvalidOracle`, a pinned field
+that cannot be what it claims (`FailurePredicate::validate`: the profile
+digest is 64 lowercase hex characters) as `InvalidPredicate { field }`, an
+invalid episode set (`validate_episodes`) as `InvalidEpisodes`, and a `max_replays`
 outside the canonical integer range as `BudgetNotCanonical`, before any replay,
 then replays the original and refuses `OriginalNotReproduced` when
 it does not reproduce the pinned predicate. It then runs Zeller's ddmin once
@@ -2802,9 +2804,9 @@ digest), bounds the outstanding set at `MAX_OUTSTANDING_REPLAY_EFFECTS` and
 attempts per key at `MAX_REPLAY_ATTEMPTS` (neither is configurable), refusing
 the effect issued at the bound and the retry past it, so one budgeted replay
 launches at most `MAX_REPLAY_ATTEMPTS` processes. `issue` and `retry` return
-the attempt number; `resolve` takes it and refuses a `StaleAttempt`, so a
-superseded process's late answer cannot resolve the key under the newer
-attempt. `cancel` resolves the current attempt to `Unknown { cancelled }`, and
+the attempt number; `resolve` and `cancel` take it and refuse a `StaleAttempt`, so a
+superseded process's late answer or cancellation cannot resolve the key under
+the newer attempt. `cancel` resolves its attempt to `Unknown { cancelled }`, and
 `outcome` is refused on an outstanding key, so no verdict is reached before
 the replay answered. The in-core driver issues one replay at a time through
 its callback and does not need the ledger.
@@ -2821,7 +2823,7 @@ through `parse_shrink_report`, which, like the other report parsers, refuse
 an integer outside the canonical safe range as `NotCanonical`, run
 `ShrinkReport::validate`, and (on read) refuse a value that does not
 reserialize identically as `Lossy`. `validate`
-checks the `eval-shrink/v1` schema, the pinned oracle, and the report's
+checks the `eval-shrink/v1` schema, the pinned predicate, and the report's
 accounting against its own candidate ledger as `Inconsistent { field }`: the
 digests are 64 lowercase hex characters; no slip observed the pinned
 predicate itself; the
@@ -2842,7 +2844,8 @@ unknown single deletions; `replay_budget_exhausted` needs `replays` equal to
 `max_replays`. A report alone can only be self-consistent.
 `ShrinkReport::verify(&original)` binds it to the scenario it claims to have
 shrunk: the original's digest, that every deletion names an element the
-original held, the digest of `original.without(&deleted)`, its element count
+original held and every candidate's digest is the digest of the scenario its
+deletions leave, the digest of `original.without(&deleted)`, its element count
 as `remaining`, for a completed pass that the single deletions after the last
 reproduction are exactly those elements, and for `OneMinimal` that the
 transformations listed are exactly those the original had elements for. A
