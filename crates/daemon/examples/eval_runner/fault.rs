@@ -405,6 +405,7 @@ pub fn lock_holder_episode(
     if released.end != EpisodeEnd::ReachedTarget {
         return Err(unexpected(id, "ReachedTarget after release", &released.end));
     }
+    witness.safety_check(stores);
     witness.receipt("lock_released");
     witness.receipt(id);
     witness
