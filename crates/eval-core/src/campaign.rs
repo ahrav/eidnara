@@ -335,15 +335,10 @@ pub fn parse_run_profile(value: &Value) -> Result<RunProfile, ProfileError> {
 #[serde(tag = "reason", rename_all = "snake_case", deny_unknown_fields)]
 pub enum SkipReason {
     ProfileNotApproved,
-    StopCondition {
-        condition: StopCondition,
-    },
+    StopCondition { condition: StopCondition },
     EnvelopeExceeded(EnvelopeExceeded),
     CassetteMiss,
     RedactionRefused,
-    /// The host cannot create the namespaces Suite D contains an agent in;
-    /// the task is never attempted uncontained.
-    NoContainment,
 }
 
 /// Why a sample cannot be measured on this surface.
