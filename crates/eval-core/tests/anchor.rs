@@ -87,6 +87,7 @@ fn audit(task: &str) -> CutoffAudit {
         snapshot_digest: "ab".repeat(32),
         base_tree_digest: "ab".repeat(32),
         fix_paths_present: false,
+        fix_descends_from_base: true,
     }
 }
 
@@ -250,7 +251,7 @@ fn the_time_study_projects_the_pilot_and_stops_for_approval_past_the_bound() {
 fn the_cutoff_audit_excludes_future_code_and_future_issue_knowledge() {
     let good = audit("cargo-0");
     good.validate().unwrap();
-    let cases: [(Mutate, CutoffRefused); 7] = [
+    let cases: [(Mutate, CutoffRefused); 8] = [
         (
             |a| a.base_committed_ms = a.cutoff_ms + 1,
             CutoffRefused::BaseAfterCutoff,
@@ -278,6 +279,10 @@ fn the_cutoff_audit_excludes_future_code_and_future_issue_knowledge() {
         (
             |a| a.base_tree_digest = "cd".repeat(32),
             CutoffRefused::SnapshotNotBaseTree,
+        ),
+        (
+            |a| a.fix_descends_from_base = false,
+            CutoffRefused::FixNotFromBase,
         ),
     ];
     for (mutate, expected) in cases {
@@ -1367,5 +1372,45 @@ fn a_preparation_measures_the_row_it_names() {
             task: "cargo-2".to_string()
         }),
         "a measurement of another version of the row says nothing about this one"
+    );
+}
+
+#[test]
+fn a_clone_url_host_is_canonical_dns_labels() {
+    for repository in [
+        "https://example.invalid./cargo/repo.git",
+        "https://.example.invalid/cargo/repo.git",
+        "https://example..invalid/cargo/repo.git",
+    ] {
+        let mut entry = entry("cargo-0", Family::Cargo, 0x10);
+        entry.repository = repository.to_string();
+        assert!(entry.validate().is_err(), "{repository}");
+    }
+}
+
+#[test]
+fn one_repository_path_in_two_cases_is_one_duplicate_task_key() {
+    let mut corpus = pilot();
+    let mut alias = corpus.entries[0].clone();
+    alias.id = "cargo-0-again".to_string();
+    alias.repository = alias.repository.replace("/cargo/repo", "/Cargo/Repo");
+    corpus.entries.push(alias);
+    assert!(corpus.validate().is_err());
+}
+
+#[test]
+fn issue_and_pull_request_numbers_start_at_one() {
+    let mut zero_issue = entry("cargo-0", Family::Cargo, 0x10);
+    zero_issue.issue = 0;
+    assert!(zero_issue.validate().is_err());
+    let mut zero_pr = entry("cargo-0", Family::Cargo, 0x10);
+    zero_pr.pull_request = Some(0);
+    assert!(zero_pr.validate().is_err());
+    assert_eq!(
+        zero_pr.validate(),
+        Err(AnchorError::ZeroNumber {
+            id: "cargo-0".to_string(),
+            field: "pull_request"
+        })
     );
 }

@@ -2440,17 +2440,18 @@ is not here; this module only judges the evidence it records.
 `pull_request`, and `cutoff_ms`. The issue and pull-request text is fetched
 at run time and never written into a corpus, report, or witness; `validate`
 refuses an empty field, an `id` with whitespace, a `repository` that is not
-an `https://` URL of a lowercase host and a repository path in unreserved
-characters (so `git@host:path`, `ssh://`, `file://`, a user, a port, a
-query, a fragment, an upper-case host, an empty host, or a path of nothing
-but separators refuses, and the `/pull/` URLs
+an `https://` URL of a host in lowercase DNS labels and a repository path
+in unreserved characters (so `git@host:path`, `ssh://`, `file://`, a user,
+a port, a query, a fragment, an upper-case or trailing-dot host, an empty
+host, or a path of nothing but separators refuses, and the `/pull/` URLs
 `future_answers` matches derive
 from the URL itself), a `license` that is not an SPDX expression by shape (identifiers of
 SPDX characters joined by `AND`, `OR`, or `WITH`; not checked against the
 SPDX list) (`TextPersisted`), a
-malformed SHA, a fix commit that is the base commit (`FixIsBase`), a
-duplicate id, and one fix commit of one repository (by web path, so
-`repo` and `repo.git` are one repository) under two ids (`DuplicateTask`). `digest` validates first and refuses a
+malformed SHA, a fix commit that is the base commit (`FixIsBase`), an
+`issue` or `pull_request` of zero (`ZeroNumber`), a duplicate id, and one
+fix commit of one repository (by lowercased web path, so `repo`,
+`repo.git`, and `Repo` are one repository) under two ids (`DuplicateTask`). `digest` validates first and refuses a
 row JSON cannot carry exactly (`NotCanonical`) instead of panicking.
 `AnchorEntry::digest` (`eval-anchor-entry-digest/v1`) is the identity every
 piece of evidence names: an audit, a proof, or a control produced for one
@@ -2476,12 +2477,14 @@ from the repository's own commit times and the issue: `task`,
 `base_committed_ms`, `fix_committed_ms`, `issue_created_ms`,
 `issue_text_ms` (the last edit of the issue text the task is given, or its
 creation when never edited), `snapshot_digest`, `base_tree_digest`, and
-`fix_paths_present`. `validate` refuses, in order, a missing snapshot digest,
+`fix_paths_present`, and `fix_descends_from_base`. `validate` refuses, in
+order, a missing snapshot digest,
 a tree digest that is neither forty nor sixty-four lowercase hex
 (`MalformedDigest`), a base committed after the cutoff, a fix not strictly after it, an issue
 filed after it, issue text edited after it or dated before the issue
 (`IssueTextBeforeIssue`), a snapshot whose digest is not
-the base commit's tree, and a fix-added path in the snapshot; each is one
+the base commit's tree, a fix-added path in the snapshot, and a fix that
+does not descend from the base (`FixNotFromBase`); each is one
 `CutoffRefused` reason (`reason` on the wire). `validate_for(entry)` first
 requires the audit to name the entry's task (`AuditForOtherTask`) and the
 entry's row by digest (`RowMismatch`, when any field of the row changed

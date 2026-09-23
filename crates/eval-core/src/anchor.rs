@@ -84,6 +84,11 @@ pub enum AnchorError {
     FixIsBase {
         id: String,
     },
+    /// Issues and pull requests are numbered from one.
+    ZeroNumber {
+        id: String,
+        field: &'static str,
+    },
     /// A field holds text, not the identifier it names: an id or URL with
     /// whitespace, a URL without a scheme, or a license that is not an SPDX
     /// expression.
@@ -137,6 +142,14 @@ impl AnchorEntry {
         if self.fix_sha == self.base_sha {
             return Err(AnchorError::FixIsBase { id: id() });
         }
+        for (field, number) in [
+            ("issue", Some(self.issue)),
+            ("pull_request", self.pull_request),
+        ] {
+            if number == Some(0) {
+                return Err(AnchorError::ZeroNumber { id: id(), field });
+            }
+        }
         Ok(())
     }
 
@@ -158,23 +171,25 @@ fn is_token(text: &str) -> bool {
     !text.contains(char::is_whitespace)
 }
 
-/// An `https://` clone URL of a lowercase host and a repository path, in
-/// unreserved URL characters only: no user, port, query, or fragment, and
-/// one spelling per host, so the web path `repository_web_path` derives is
-/// the URL itself, the repository's `/pull/` URLs are recognizable from the
-/// row alone, and one repository has one key. `git@host:path`,
+/// An `https://` clone URL of a host in lowercase DNS labels and a
+/// repository path in unreserved URL characters: no user, port, query, or
+/// fragment, and one spelling per host, so the web path
+/// `repository_web_path` derives is the URL itself and the repository's
+/// `/pull/` URLs are recognizable from the row alone. `git@host:path`,
 /// `ssh://git@host:22/path`, `https:///path`, `file:///path`,
-/// `https://host/path?x`, `https://HOST/path`, and `https://host/` are not
-/// accepted.
+/// `https://host/path?x`, `https://HOST/path`, `https://host./path`, and
+/// `https://host/` are not accepted.
 fn is_url(text: &str) -> bool {
     text.strip_prefix("https://")
         .and_then(|rest| rest.split_once('/'))
         .is_some_and(|(host, path)| {
-            !host.is_empty()
-                && !host.contains(|c: char| c.is_ascii_uppercase())
-                && !path.trim_matches('/').is_empty()
-                && [host, path]
-                    .concat()
+            host.split('.').all(|label| {
+                !label.is_empty()
+                    && label
+                        .chars()
+                        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+            }) && !path.trim_matches('/').is_empty()
+                && path
                     .chars()
                     .all(|c| c.is_ascii_alphanumeric() || "-._~/".contains(c))
         })
@@ -224,7 +239,7 @@ impl AnchorCorpus {
             }
             if let Some(of) = fixes.insert(
                 (
-                    repository_web_path(&entry.repository),
+                    repository_web_path(&entry.repository).to_ascii_lowercase(),
                     entry.fix_sha.as_str(),
                 ),
                 &entry.id,
@@ -397,6 +412,9 @@ pub struct CutoffAudit {
     pub base_tree_digest: String,
     /// Whether the snapshot holds any path the fix commit added.
     pub fix_paths_present: bool,
+    /// Whether the base commit is an ancestor of the fix commit; a fix from
+    /// an unrelated branch fixes nothing at this base.
+    pub fix_descends_from_base: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -413,6 +431,8 @@ pub enum CutoffRefused {
     /// not evidence of anything.
     IssueTextBeforeIssue,
     FutureContentInSnapshot,
+    /// The fix commit does not descend from the base commit.
+    FixNotFromBase,
     SnapshotDigestMissing,
     /// A tree digest that is neither a git object id (forty hex) nor a
     /// protocol digest (sixty-four hex) names no tree.
@@ -476,6 +496,9 @@ impl CutoffAudit {
         }
         if self.fix_paths_present {
             return Err(CutoffRefused::FutureContentInSnapshot);
+        }
+        if !self.fix_descends_from_base {
+            return Err(CutoffRefused::FixNotFromBase);
         }
         Ok(())
     }
