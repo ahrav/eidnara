@@ -99,11 +99,17 @@ fn the_fault_campaign_receipts_every_declared_cut_scenario(campaign: &Campaign) 
         report.coverage.declared
     );
     for cut in &report.cuts {
-        assert_eq!(cut.outcome, CutOutcome::Reached, "{cut:?}");
+        let expected = if cut.cut == Cut::AfterAtomicTransition {
+            CutOutcome::NotReached
+        } else {
+            CutOutcome::Reached
+        };
+        assert_eq!(cut.outcome, expected, "{cut:?}");
     }
     assert_eq!(
         report.cuts.iter().map(|c| c.cut).collect::<Vec<_>>(),
         vec![
+            Cut::AfterAtomicTransition,
             Cut::AtQuiescence,
             Cut::AfterFaultPhase,
             Cut::AfterRecovery,

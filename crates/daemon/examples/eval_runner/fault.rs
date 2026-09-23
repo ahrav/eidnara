@@ -449,6 +449,7 @@ pub fn lock_holder_episode(
     if released.end != EpisodeEnd::ReachedTarget {
         return Err(unexpected(id, "ReachedTarget after release", &released.end));
     }
+    witness.safety_check(stores);
     witness.receipt("lock_released");
     witness.receipt(id);
     witness
@@ -1442,7 +1443,10 @@ pub fn run(config: &Config) -> Result<Run, RunError> {
         .coverage
         .record("flt_every_declared_cut_receipted")
         .unwrap();
+    // Every oracle checkpoint is receipted, reached or not: this campaign has
+    // no atomic transition, so `AfterAtomicTransition` is `NotReached`.
     let declared = [
+        Cut::AfterAtomicTransition,
         Cut::AtQuiescence,
         Cut::AfterFaultPhase,
         Cut::AfterRecovery,
