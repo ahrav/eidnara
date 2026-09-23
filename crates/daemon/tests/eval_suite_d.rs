@@ -997,6 +997,53 @@ fn the_suite_d_flags_are_parsed() {
     assert_eq!(config.tasks, 2);
     assert_eq!(config.script, Script::default());
     assert!(suite_d::config_from_args(["--scale".to_string(), "s0".to_string()]).is_err());
+    // A corpus is generated whole before anything is charged, so the count
+    // is bounded at the flag, not by the envelope afterwards.
+    let too_many = suite_d::config_from_args(
+        [
+            "--scale",
+            "s0",
+            "--tasks",
+            &(suite_d::MAX_TASKS + 1).to_string(),
+            "--elapsed-bound-ms",
+            "1000",
+            "--approved-by",
+            "m",
+            "--approval-run-id",
+            &"ab".repeat(32),
+            "--witness",
+            "/tmp/w.json",
+            "--publish",
+            "/tmp/x",
+        ]
+        .map(String::from),
+    );
+    assert!(
+        matches!(&too_many, Err(message) if message.contains("--tasks")),
+        "{too_many:?}"
+    );
+}
+
+#[test]
+fn a_wrong_fix_the_task_does_not_have_refuses_before_anything_runs() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = config(
+        dir.path(),
+        Script {
+            fix: Fix::Wrong(99),
+            ..Script::default()
+        },
+    );
+    let started = std::time::Instant::now();
+    let refused = suite_d::run(&config, NO_NAMESPACES).err();
+    assert!(
+        matches!(refused, Some(RunError::Io(_))),
+        "a fix the corpus does not hold is not the no-fix scenario: {refused:?}"
+    );
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "refused before adequacy ran"
+    );
 }
 
 #[test]

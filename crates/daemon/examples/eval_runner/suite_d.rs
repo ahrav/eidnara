@@ -26,6 +26,9 @@ use super::campaign::{Charges, identity, parse_flags, prepare_publish, publish_f
 use super::fault::ChildGuard;
 
 pub const SIMULATOR_VERSION: &str = "eval-suite-d-shell/v1";
+/// The most tasks one run generates: the corpus is built whole before the
+/// envelope charges anything, so the count is bounded at the flag.
+pub const MAX_TASKS: u32 = 256;
 /// The judge every Suite D terminal comes from: `hidden_results` running the
 /// corpus's hidden tests in a tree the runner builds.
 pub const JUDGE_VERSION: &str = "eval-suite-d-hidden-tests/v1";
@@ -1303,6 +1306,21 @@ pub fn run(config: &Config, host: Host) -> Result<Run, RunError> {
         .expect("the approved profile refuses zero tasks per world");
     let corpus = generate_tasks(SEED, tasks);
     corpus.validate()?;
+    // A wrong fix the corpus does not hold would otherwise run as the no-fix
+    // scenario under an identity that names the fix.
+    if let Fix::Wrong(index) = config.script.fix
+        && let Some(task) = corpus
+            .tasks
+            .iter()
+            .find(|task| index >= task.wrong_fixes.len())
+    {
+        return Err(std::io::Error::other(format!(
+            "the script selects wrong fix {index}; {} has {}",
+            task.id,
+            task.wrong_fixes.len()
+        ))
+        .into());
+    }
     let mut coverage = Coverage::default();
     let contained = (host.namespaces)();
 
@@ -1566,7 +1584,11 @@ pub fn config_from_args(args: impl IntoIterator<Item = String>) -> Result<Config
     };
     Ok(Config {
         scale,
-        tasks: u32::try_from(number("tasks")?).map_err(|error| format!("--tasks: {error}"))?,
+        tasks: match u32::try_from(number("tasks")?) {
+            Ok(tasks) if tasks <= MAX_TASKS => tasks,
+            Ok(tasks) => return Err(format!("--tasks: {tasks} is over the limit of {MAX_TASKS}")),
+            Err(error) => return Err(format!("--tasks: {error}")),
+        },
         elapsed_bound_ms: number("elapsed-bound-ms")?,
         approval: Some(Approval {
             approved_by: take("approved-by"),
