@@ -2332,6 +2332,78 @@ admission, the capture's descriptor rows, and the batch bounds to every unit
 it publishes (`DriveBounds`), never below the fixture defaults. The bulk
 scaffold applies its whole snapshot as one batch under the same bounds.
 
+## Fault shell
+
+`crates/daemon/examples/eval_runner/fault.rs` is the Suite C fault campaign.
+It drives the aging shell's `Stores` through a healthy prefix, a fault phase
+with a recovery by reopen and read-back after each lost reply, and the rest of
+the history, and records every observation in a `Witness` (episodes, cut
+coverage, effect ledger, expected refusals, oracle checkpoints, safety checks)
+that `FaultReport` judges. Every episode is declared before it runs, with the
+seam's own contract sentence, and receipted by what the runner observed, never
+by the fault it meant to inject.
+
+The fault phase on one root: an external `BEGIN IMMEDIATE` holder on the
+projection, whose episode ends `Blocked(LocalCommitUnresolved)` and whose
+release lets the next episode reach the target; two healthy steps; then a
+catch-up episode under `LoseLocalCommitReply` and one under
+`LoseAcknowledgementReply`. The production drive reconciles a lost reply and
+carries on, so a reply-loss episode must end `ReachedTarget`; any other end is
+a failed reconciliation and refuses the run. The fault stays armed for the
+whole episode, so every window's effect (`search_commit:<through>` or
+`search_ack:<through>`) is attempted when the drive's observer sees
+`LocalStaged` or `AcknowledgementRequested` and left `Unknown` when the episode
+ends, and the seam's contract fixes `applied` as its expected state before any
+read-back. The observer events `local_staged`, `local_released`,
+`acknowledgement_requested`, and `acknowledged` are the receipts. The aging
+shell gained the seams this needs: `Stores` exposes its stores, `episode` (one
+catch-up episode, under one injected fault when asked), `catch_up` (outbox and
+episodes to the tip, the embedding lane left alone), and `Closed::reopen` (the
+stores reopened in place, as a restart would, with the projection rebuilt at
+the tip, and the driver's lineage state rebuilt from the kernel, as a resumed
+copy does).
+
+Each reply-loss episode is followed at once by a recovery: close the stores,
+read every lost reply back by its identity from the closed files
+(`projection_checkpoint.checkpoint_commit_seq` for a local commit,
+`outbox_consumers.checkpoint_commit_seq` for an acknowledgement), and only then
+reopen. Both checkpoints only advance, so any catch-up between the episode and
+its read-back would make every read-back `applied`; the runner records where
+the faulted episode left the checkpoint and refuses a read-back that finds it
+further on (`ReadBackMasked`), leaving the ledger untouched. Before publishing,
+the run refuses unless every lost reply has exactly one fixed expectation and
+its read-back matches it. The rest of the history then runs on the reopened
+stores. `AtQuiescence`, `AfterFaultPhase`, `AfterRecovery` (reached twice), and
+`EndOfRun` are receipted where the runner reached them, and
+`AfterAtomicTransition`, which this campaign has no transition to reach, is
+receipted `not_reached`. The safety invariants
+(no descriptor claims a creation or an invalidation past the tip or an
+invalidation before its creation, and the projection never runs ahead of the
+kernel) are checked while
+each fault is armed, and only those checks count as
+`safety_checks_while_armed`: for the lock holder, while the holder still holds
+the projection; for a reply-loss fault, from the episode's observer at the
+first cut after the faulted operation's effect is durable and before the drive
+reconciles the lost reply: `local_released` for a lost commit reply (the batch
+has committed; `local_staged` is still inside the open transaction) and
+`acknowledged` for a lost acknowledgement reply (the kernel write is durable),
+reading the files and the kernel rather than the projection handle. The same invariants plus the projection connection's
+verification run again after every episode and every reopen, as assertions
+that count nothing, since no fault is armed then. Each recovery charges the
+stores' bytes before the close that checkpoints their WALs away.
+
+Not in this shell: the CAS artifact faults, the publication faults, quiescent
+corruption, R11, R24, a process kill at a named cut, a held publication
+through the dispatcher gate, and the liveness mode; the run publishes
+`liveness: null`. The `fault` subcommand takes the same flags as `aging` and
+answers with one JSON line; a history whose checkpoint leaves fewer than the
+six steps the fault phase drives is refused (`HistoryTooShort`) before any
+store opens, and the run freezes its build identity, charges the stores at
+their open footprint, and takes the report back out when the manifest cannot
+follow it, as the aging shell does; the CI `eval-campaign` job runs `eval_fault`
+under `EIDNARA_EVAL_S0_BUDGET_MS` with the ignored scenarios, and the default
+shards run the campaign once with every scenario asserted over it.
+
 ## Coverage markers
 
 `MARKERS` is the evaluator-owned registry: constant, globally unique names,

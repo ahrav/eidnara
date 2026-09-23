@@ -9,7 +9,10 @@ use std::time::{Duration, Instant};
 
 use daemon::embedding_publication::{EmbeddingPublisher, VectorPublication};
 use daemon::harness_sources::{Harness, SessionIdentity, SourcePublisher, opencode_units};
-use daemon::search_catchup::{CatchUpConsumer, EpisodeBounds, EpisodeEnd, SearchCatchUp};
+use daemon::search_catchup::{
+    CatchUpConsumer, EpisodeBounds, EpisodeEnd, EpisodeEvent, EpisodeFault, EpisodeReport,
+    SearchCatchUp,
+};
 use daemon::search_projection::SearchProjection;
 use eval_core::{
     AGING_REPORT_SCHEMA, AgingReport, AgingReportError, Approval, Attestation, Checkpoint,
@@ -300,23 +303,23 @@ fn episode_bounds(bounds: &DriveBounds) -> EpisodeBounds {
     }
 }
 
-fn read_only(path: &Path) -> Connection {
+pub fn read_only(path: &Path) -> Connection {
     Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap()
 }
 
-fn kernel_file(root: &Path) -> PathBuf {
+pub fn kernel_file(root: &Path) -> PathBuf {
     root.join("kernel").join("kernel.sqlite")
 }
 
-fn search_file(root: &Path) -> PathBuf {
+pub fn search_file(root: &Path) -> PathBuf {
     root.join("search").join("search.sqlite")
 }
 
-fn memory_file(root: &Path) -> PathBuf {
+pub fn memory_file(root: &Path) -> PathBuf {
     root.join(daemon::STORE_FILE_NAME)
 }
 
-fn store_file(root: &Path, family: StoreFamily) -> PathBuf {
+pub fn store_file(root: &Path, family: StoreFamily) -> PathBuf {
     match family {
         StoreFamily::Kernel => kernel_file(root),
         StoreFamily::Memory => memory_file(root),
@@ -326,10 +329,10 @@ fn store_file(root: &Path, family: StoreFamily) -> PathBuf {
 
 pub struct Stores {
     root: PathBuf,
-    corpus: Corpus,
-    projection: SearchProjection,
-    consumer: CatchUpConsumer,
-    memory: MemoryStore,
+    pub corpus: Corpus,
+    pub projection: SearchProjection,
+    pub consumer: CatchUpConsumer,
+    pub memory: MemoryStore,
     rendering: Rendering,
     bounds: DriveBounds,
     chains: BTreeMap<String, Vec<String>>,
@@ -380,6 +383,10 @@ impl Stores {
 
     pub fn projection_path(&self) -> PathBuf {
         search_file(&self.root)
+    }
+
+    pub fn root(&self) -> &Path {
+        &self.root
     }
 
     pub fn tip(&self) -> i64 {
@@ -487,24 +494,7 @@ impl Stores {
     }
 
     pub fn drain(&mut self, now: i64) {
-        self.publish_outbox();
-        let tip = self.tip();
-        let bounds = episode_bounds(&self.bounds);
-        let mut catch_up = SearchCatchUp::new(&self.corpus.kernel, &self.projection);
-        for _ in 0..MAX_EPISODES_PER_DRAIN {
-            let report = catch_up
-                .run_episode(&self.consumer, &bounds, now, &mut |_| {})
-                .unwrap();
-            assert_eq!(report.end, EpisodeEnd::ReachedTarget, "{report:?}");
-            if report.acknowledged_through >= tip {
-                break;
-            }
-        }
-        assert_eq!(
-            self.pending(WorkCounter::CatchUpLag),
-            0,
-            "the drain reaches the tip"
-        );
+        self.catch_up(now);
         embed_pending(
             &self.corpus,
             &self.projection,
@@ -519,7 +509,52 @@ impl Stores {
         );
     }
 
-    fn pending(&self, counter: WorkCounter) -> u64 {
+    /// Publishes the outbox and runs catch-up episodes until the projection
+    /// acknowledges the tip; the embedding lane is left as it is.
+    pub fn catch_up(&mut self, now: i64) {
+        self.publish_outbox();
+        let tip = self.tip();
+        for _ in 0..MAX_EPISODES_PER_DRAIN {
+            let report = self.episode(now, None, &mut |_| {});
+            assert_eq!(report.end, EpisodeEnd::ReachedTarget, "{report:?}");
+            if report.acknowledged_through >= tip {
+                break;
+            }
+        }
+        assert_eq!(
+            self.pending(WorkCounter::CatchUpLag),
+            0,
+            "the drain reaches the tip"
+        );
+    }
+
+    /// One catch-up episode, under one injected fault when `fault` is set.
+    pub fn episode(
+        &self,
+        now: i64,
+        fault: Option<EpisodeFault>,
+        observer: &mut dyn FnMut(EpisodeEvent),
+    ) -> EpisodeReport {
+        let mut catch_up = SearchCatchUp::new(&self.corpus.kernel, &self.projection);
+        let bounds = episode_bounds(&self.bounds);
+        match fault {
+            None => catch_up.run_episode(&self.consumer, &bounds, now, observer),
+            Some(fault) => catch_up.run_episode_with_fault_for_test(
+                &self.consumer,
+                &bounds,
+                now,
+                observer,
+                fault,
+            ),
+        }
+        .unwrap()
+    }
+
+    pub fn publish_outbox_now(&self) {
+        self.publish_outbox();
+    }
+
+    pub fn pending(&self, counter: WorkCounter) -> u64 {
         pending(&self.root, &self.corpus.kernel, counter)
     }
 
@@ -764,6 +799,12 @@ impl Closed {
         ))
     }
 
+    /// Reopens the closed stores on their own root, as a restart would.
+    pub fn reopen(mut self, now: i64) -> Stores {
+        drop(self.search_lease.take());
+        reopen_stores(self.root, self.rendering, self.bounds, self.applied, now)
+    }
+
     /// Close-time evidence cannot see a handle opened after the close. A probe
     /// refused by another holder's lease marks the family's handle open.
     fn seal_after_probe(&mut self, family: StoreFamily, held: bool) {
@@ -775,6 +816,58 @@ impl Closed {
             store.wal = truncate(&file);
             store.wal_sidecar_bytes = sidecar_len(&file);
         }
+    }
+}
+
+/// The kernel and the memory store reopen as they were; the projection is
+/// rebuilt at the kernel tip, since its catch-up hold died with the lease
+/// epoch, and embedded to quiescence. The driver's lineage state is rebuilt
+/// from the kernel, as a fresh process would have to.
+fn reopen_stores(
+    root: PathBuf,
+    rendering: Rendering,
+    bounds: DriveBounds,
+    applied: u32,
+    now: i64,
+) -> Stores {
+    let corpus = Corpus::open(&root);
+    // The closed projection's source hold is bound to a lease epoch this open
+    // has advanced past, in the copy and in place alike; it is released
+    // before the rebuilt projection captures its own, as the daemon's
+    // replacement cleanup does after a restart.
+    corpus
+        .kernel
+        .reconcile_source_holds(&corpus.binding().consumer_id, now)
+        .unwrap();
+    let memory = MemoryStore::open(&daemon::store_descriptor_in(&root)).unwrap();
+    let copied = SearchProjection::open(&root).unwrap();
+    copied.verify_connection().unwrap();
+    let (path, lease) = copied.close();
+    drop(lease);
+    std::fs::remove_file(&path).unwrap();
+    for suffix in ["-wal", "-shm"] {
+        let mut sidecar = path.as_os_str().to_owned();
+        sidecar.push(suffix);
+        match std::fs::remove_file(&sidecar) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => panic!("{}: {e}", PathBuf::from(sidecar).display()),
+        }
+    }
+    let (projection, consumer) = Stores::bootstrap(&corpus, &root, &bounds, now);
+    embed_pending(&corpus, &projection, &root, bounds.hold, now);
+    let (chains, dead) = mutation_state(&kernel_file(&root));
+    Stores {
+        root,
+        corpus,
+        projection,
+        consumer,
+        memory,
+        rendering,
+        bounds,
+        chains,
+        dead,
+        applied,
     }
 }
 
@@ -865,45 +958,13 @@ impl Copied {
                 .collect(),
             files,
         })?;
-        let corpus = Corpus::open(&self.root);
-        // The prefix projection's source hold rides along in the copy, bound
-        // to a lease epoch this open has advanced past; it is released before
-        // the rebuilt projection captures its own, as the daemon's replacement
-        // cleanup does after a restart.
-        corpus
-            .kernel
-            .reconcile_source_holds(&corpus.binding().consumer_id, now)
-            .unwrap();
-        let memory = MemoryStore::open(&daemon::store_descriptor_in(&self.root)).unwrap();
-        let copied = SearchProjection::open(&self.root).unwrap();
-        copied.verify_connection().unwrap();
-        let (path, lease) = copied.close();
-        drop(lease);
-        std::fs::remove_file(&path).unwrap();
-        for suffix in ["-wal", "-shm"] {
-            let mut sidecar = path.as_os_str().to_owned();
-            sidecar.push(suffix);
-            match std::fs::remove_file(&sidecar) {
-                Ok(()) => {}
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                Err(e) => panic!("{}: {e}", PathBuf::from(sidecar).display()),
-            }
-        }
-        let (projection, consumer) = Stores::bootstrap(&corpus, &self.root, &self.bounds, now);
-        embed_pending(&corpus, &projection, &self.root, self.bounds.hold, now);
-        let (chains, dead) = mutation_state(&kernel_file(&self.root));
-        Ok(Stores {
-            root: self.root,
-            corpus,
-            projection,
-            consumer,
-            memory,
-            rendering: self.rendering,
-            bounds: self.bounds,
-            chains,
-            dead,
-            applied: self.applied,
-        })
+        Ok(reopen_stores(
+            self.root,
+            self.rendering,
+            self.bounds,
+            self.applied,
+            now,
+        ))
     }
 }
 
@@ -1112,7 +1173,7 @@ fn segments(memory: &MemoryStore) -> BTreeMap<i64, Segment> {
         .collect()
 }
 
-fn embed_pending(
+pub fn embed_pending(
     corpus: &Corpus,
     projection: &SearchProjection,
     root: &Path,
@@ -1456,28 +1517,13 @@ fn manifest(
     checkpoint: &Checkpoint,
     started_at_ms: i64,
 ) -> Result<Manifest, RunError> {
-    let sample = format!("aging:{}", report.checkpoint_step);
     let published: Value = serde_json::from_slice(report_bytes).expect("the report is JSON");
-    Ok(Manifest {
-        schema: MANIFEST_SCHEMA.to_string(),
+    Ok(suite_c_manifest(ManifestInputs {
+        identity,
         eval_run_id: report.eval_run_id.clone(),
-        run_identity: identity,
-        start_ms: started_at_ms,
-        end_ms: started_at_ms + i64::try_from(report.envelope.peaks.elapsed_ms).unwrap(),
-        status: RunStatus::Completed,
-        error: None,
-        sample_ids: vec![sample.clone()],
-        sample_order: vec![sample],
-        sample_epoch: 1,
-        retry_lineage: Vec::new(),
+        sample: format!("aging:{}", report.checkpoint_step),
         result_digest: AgingReport::result_digest(&published)?,
         witness_digest: checkpoint.digest()?,
-        attestation: Attestation::None,
-        tokenizer_profile: TokenizerProfile {
-            name: "none".to_string(),
-            revision: "lexical-projection".to_string(),
-            digest: sha256_hex(b"lexical-projection"),
-        },
         cut_receipts: [Cut::AtQuiescence, Cut::AfterRecovery, Cut::EndOfRun]
             .into_iter()
             .map(|cut| CutReceipt {
@@ -1485,9 +1531,50 @@ fn manifest(
                 outcome: CutOutcome::Reached,
             })
             .collect(),
+        execution_mode: ExecutionMode::PrefixThenGenerate,
+        envelope: report.envelope.clone(),
+        started_at_ms,
+    }))
+}
+
+/// What differs between one Suite C campaign's manifest and another's.
+pub struct ManifestInputs {
+    pub identity: RunIdentity,
+    pub eval_run_id: String,
+    pub sample: String,
+    pub result_digest: String,
+    pub witness_digest: String,
+    pub cut_receipts: Vec<CutReceipt>,
+    pub execution_mode: ExecutionMode,
+    pub envelope: eval_core::Envelope,
+    pub started_at_ms: i64,
+}
+
+pub fn suite_c_manifest(inputs: ManifestInputs) -> Manifest {
+    Manifest {
+        schema: MANIFEST_SCHEMA.to_string(),
+        eval_run_id: inputs.eval_run_id,
+        run_identity: inputs.identity,
+        start_ms: inputs.started_at_ms,
+        end_ms: inputs.started_at_ms + i64::try_from(inputs.envelope.peaks.elapsed_ms).unwrap(),
+        status: RunStatus::Completed,
+        error: None,
+        sample_ids: vec![inputs.sample.clone()],
+        sample_order: vec![inputs.sample],
+        sample_epoch: 1,
+        retry_lineage: Vec::new(),
+        result_digest: inputs.result_digest,
+        witness_digest: inputs.witness_digest,
+        attestation: Attestation::None,
+        tokenizer_profile: TokenizerProfile {
+            name: "none".to_string(),
+            revision: "lexical-projection".to_string(),
+            digest: sha256_hex(b"lexical-projection"),
+        },
+        cut_receipts: inputs.cut_receipts,
         residue: Manifest::field_schema().residue().collect(),
         construction: Construction::Replay,
-        execution_mode: ExecutionMode::PrefixThenGenerate,
+        execution_mode: inputs.execution_mode,
         failure_class_table_digest: FAILURE_CLASS_TABLE_DIGEST.to_string(),
         ingestion: Ingestion::AdapterIngestedNoProductionCaller,
         memory_reviewer_model_calls: MemoryReviewerModelCalls::Excluded,
@@ -1504,10 +1591,10 @@ fn manifest(
             task_corpus: format!("generated:{SEED:#x}"),
             judge: "none".to_string(),
         },
-        envelope_bounds: report.envelope.bounds.clone(),
-        envelope_peaks: report.envelope.peaks.clone(),
+        envelope_bounds: inputs.envelope.bounds.clone(),
+        envelope_peaks: inputs.envelope.peaks,
         arm_rates: BTreeMap::new(),
-    })
+    }
 }
 
 pub const USAGE: &str = "aging --scale <s0|s1|s2> --messages <n> --elapsed-bound-ms <n> \
