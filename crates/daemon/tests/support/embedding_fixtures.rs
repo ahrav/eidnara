@@ -485,15 +485,12 @@ impl Corpus {
     }
 
     pub fn capture_hold(&self) -> SourceHold {
+        self.capture_hold_within(hold_bounds())
+    }
+
+    pub fn capture_hold_within(&self, bounds: SourceHoldBounds) -> SourceHold {
         self.kernel
-            .capture_source_hold(
-                &self.binding(),
-                SourceHoldBounds {
-                    max_descriptor_rows: NonZeroUsize::new(256).unwrap(),
-                    admission: hold_admission(),
-                    expiry_ms: NonZeroU64::new((20 * DAY_MS) as u64).unwrap(),
-                },
-            )
+            .capture_source_hold(&self.binding(), bounds)
             .unwrap()
     }
 
@@ -523,7 +520,11 @@ impl Corpus {
     }
 
     pub fn export(&self) -> Vec<SourceRow> {
-        let hold = self.capture_hold();
+        self.export_within(hold_bounds())
+    }
+
+    pub fn export_within(&self, bounds: SourceHoldBounds) -> Vec<SourceRow> {
+        let hold = self.capture_hold_within(bounds);
         let rows = self.export_under(&hold);
         self.kernel
             .release_source_hold(&self.binding(), &hold.hold_id, hold.captured_at)
@@ -535,7 +536,10 @@ impl Corpus {
         let rows = self.export();
         let hold_id = "0123456789abcdef0123456789abcdef";
         let snapshot = self.tip();
-        (self.project(data_home, &rows, hold_id, snapshot), rows)
+        (
+            self.project(data_home, &rows, hold_id, snapshot, batch_bounds()),
+            rows,
+        )
     }
 
     /// `bootstrap` under a real hold the caller keeps, so a catch-up consumer
@@ -544,9 +548,20 @@ impl Corpus {
         &self,
         data_home: &Path,
     ) -> (SearchProjection, SourceHold, Vec<SourceRow>) {
-        let hold = self.capture_hold();
+        self.bootstrap_within(data_home, hold_bounds(), batch_bounds())
+    }
+
+    /// The snapshot is applied as one batch: `limits` must admit every live
+    /// row at once.
+    pub fn bootstrap_within(
+        &self,
+        data_home: &Path,
+        hold: SourceHoldBounds,
+        limits: BatchBounds,
+    ) -> (SearchProjection, SourceHold, Vec<SourceRow>) {
+        let hold = self.capture_hold_within(hold);
         let rows = self.export_under(&hold);
-        let projection = self.project(data_home, &rows, &hold.hold_id, hold.snapshot);
+        let projection = self.project(data_home, &rows, &hold.hold_id, hold.snapshot, limits);
         (projection, hold, rows)
     }
 
@@ -556,9 +571,13 @@ impl Corpus {
         rows: &[SourceRow],
         hold_id: &str,
         snapshot: i64,
+        limits: BatchBounds,
     ) -> SearchProjection {
         let projection = SearchProjection::open(data_home).unwrap();
-        let kernel_incarnation_id = kernel_incarnation_id(data_home);
+        let kernel_incarnation_id = self
+            .kernel
+            .database_incarnation_id_within_budget(&EvalBudget::unbounded())
+            .unwrap();
         projection
             .write(|conn| {
                 install_identity(conn, &identity(&kernel_incarnation_id), 1)?;
@@ -579,7 +598,7 @@ impl Corpus {
             Some(GENERATION),
         )
         .unwrap();
-        projection.apply_batch(&batch, batch_bounds(), 2).unwrap();
+        projection.apply_batch(&batch, limits, 2).unwrap();
         projection
     }
 }
@@ -588,6 +607,14 @@ pub fn hold_admission() -> SourceHoldAdmission {
     SourceHoldAdmission {
         max_references: NonZeroUsize::new(64).unwrap(),
         max_encoded_bytes: NonZeroU64::new(1 << 20).unwrap(),
+    }
+}
+
+pub fn hold_bounds() -> SourceHoldBounds {
+    SourceHoldBounds {
+        max_descriptor_rows: NonZeroUsize::new(256).unwrap(),
+        admission: hold_admission(),
+        expiry_ms: NonZeroU64::new((20 * DAY_MS) as u64).unwrap(),
     }
 }
 

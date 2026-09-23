@@ -106,6 +106,10 @@ impl From<EnvelopeExceeded> for RunError {
     }
 }
 
+fn publish_refused((path, kind): (PathBuf, std::io::ErrorKind)) -> RunError {
+    RunError::Publish { path, kind }
+}
+
 /// What the aged world's recorded life established: how often the daemon's
 /// summarizer fired, whether a frame was refused, and the messages each of
 /// its segments covers, by sequence.
@@ -520,7 +524,7 @@ fn live(
     // The store is read while the fixture holds it: closing the last
     // connection checkpoints the WAL away, so the root after shutdown is the
     // smaller reading.
-    charges.observe(Resource::StoreBytes, root_bytes(root.path()))?;
+    charges.store_bytes(root.path())?;
     let mut firings: u32 = 0;
     let mut failures_seen = false;
     for diagnostics in turns
@@ -704,7 +708,7 @@ fn decision(message: &RenderedMessage) -> &str {
 
 /// Every regular file under the arm's root: the kernel store with its WAL and
 /// shm, and the fixture's own files beside it; the control socket has no size.
-fn root_bytes(root: &Path) -> u64 {
+pub fn root_bytes(root: &Path) -> u64 {
     fn walk(path: &Path) -> u64 {
         let Ok(kind) = std::fs::symlink_metadata(path) else {
             return 0;
@@ -726,15 +730,15 @@ fn root_bytes(root: &Path) -> u64 {
 /// The run's envelope with what it holds at once, so a reading is a live
 /// count rather than each acquisition as one, and the clock the elapsed bound
 /// is read against. Every charge is a reading the envelope may refuse.
-struct Charges {
-    envelope: Envelope,
+pub struct Charges {
+    pub envelope: Envelope,
     roots: u64,
     processes: u64,
     started: Instant,
 }
 
 impl Charges {
-    fn new(bounds: ResourceLimits) -> Self {
+    pub fn new(bounds: ResourceLimits) -> Self {
         Self {
             envelope: Envelope::new(bounds),
             roots: 0,
@@ -743,23 +747,29 @@ impl Charges {
         }
     }
 
-    fn observe(&mut self, resource: Resource, observed: u64) -> Result<(), EnvelopeExceeded> {
+    pub fn observe(&mut self, resource: Resource, observed: u64) -> Result<(), EnvelopeExceeded> {
         self.envelope.observe(resource, observed)
     }
 
     /// A root of its own for one fixture, charged while held.
-    fn occupy(&mut self) -> Result<tempfile::TempDir, EnvelopeExceeded> {
+    pub fn occupy(&mut self) -> Result<tempfile::TempDir, EnvelopeExceeded> {
         let root = tempfile::tempdir().unwrap();
         self.roots += 1;
         self.observe(Resource::TempRoots, self.roots)?;
         Ok(root)
     }
 
+    /// Charges the store's bytes under `root` as they stand now: read while
+    /// the store is open, since closing it checkpoints the WAL away.
+    pub fn store_bytes(&mut self, root: &Path) -> Result<(), EnvelopeExceeded> {
+        self.observe(Resource::StoreBytes, root_bytes(root))
+    }
+
     /// Releases a root after its fixture exited: the store's bytes are charged
     /// once more as the checkpoint left them, then the root goes, and the
     /// run's elapsed time is read.
-    fn vacate(&mut self, root: tempfile::TempDir) -> Result<(), EnvelopeExceeded> {
-        self.observe(Resource::StoreBytes, root_bytes(root.path()))?;
+    pub fn vacate(&mut self, root: tempfile::TempDir) -> Result<(), EnvelopeExceeded> {
+        self.store_bytes(root.path())?;
         drop(root);
         self.roots -= 1;
         self.elapsed()
@@ -774,9 +784,19 @@ impl Charges {
         self.processes -= 1;
     }
 
-    fn elapsed(&mut self) -> Result<(), EnvelopeExceeded> {
+    pub fn elapsed(&mut self) -> Result<(), EnvelopeExceeded> {
         let elapsed = u64::try_from(self.started.elapsed().as_millis()).unwrap();
         self.observe(Resource::ElapsedMs, elapsed)
+    }
+
+    /// Charges the publish directory as one more root and one retained
+    /// artifact, held for the rest of the run.
+    pub fn retain_publish_root(&mut self) -> Result<(), EnvelopeExceeded> {
+        self.roots += 1;
+        self.observe(Resource::TempRoots, self.roots)?;
+        self.observe(Resource::RetainedArtifacts, 1)?;
+        self.elapsed()?;
+        self.envelope.check()
     }
 }
 
@@ -1045,16 +1065,16 @@ fn terminal_of(result: ArmResult) -> Terminal {
     }
 }
 
-fn prepare_publish(publish: &Path) -> Result<(), RunError> {
-    let refused = |path: &Path, error: std::io::Error| RunError::Publish {
-        path: path.to_path_buf(),
-        kind: error.kind(),
-    };
+pub fn prepare_publish(
+    publish: &Path,
+    files: &[&str],
+) -> Result<(), (PathBuf, std::io::ErrorKind)> {
+    let refused = |path: &Path, error: std::io::Error| (path.to_path_buf(), error.kind());
     std::fs::create_dir_all(publish).map_err(|error| refused(publish, error))?;
     // A leftover staged file or a prior run's final file is refused: the
     // publisher never renames over either, so one directory holds one
     // generation's report and manifest or none.
-    for file in [REPORT_FILE, MANIFEST_FILE] {
+    for file in files {
         let path = publish.join(file);
         for path in [staged_path(&path), path] {
             if path.symlink_metadata().is_ok() {
@@ -1066,19 +1086,18 @@ fn prepare_publish(publish: &Path) -> Result<(), RunError> {
         }
     }
     // The directory must take a staged file now, not after every life has
-    // run: a probe at the report's staged path is created and removed, so a
-    // permission publication would hit refuses before a fixture starts.
-    let probe = staged_path(&publish.join(REPORT_FILE));
-    std::fs::File::create_new(&probe).map_err(|error| refused(&probe, error))?;
-    std::fs::remove_file(&probe).map_err(|error| refused(&probe, error))?;
+    // run: a probe at the first file's staged path is created and removed, so
+    // a permission publication would hit refuses before a fixture starts.
+    if let Some(file) = files.first() {
+        let probe = staged_path(&publish.join(file));
+        std::fs::File::create_new(&probe).map_err(|error| refused(&probe, error))?;
+        std::fs::remove_file(&probe).map_err(|error| refused(&probe, error))?;
+    }
     Ok(())
 }
 
-fn publish_file(path: &Path, bytes: &[u8]) -> Result<(), RunError> {
-    write_then_rename(path, bytes).map_err(|error| RunError::Publish {
-        path: path.to_path_buf(),
-        kind: error.kind(),
-    })
+pub fn publish_file(path: &Path, bytes: &[u8]) -> Result<(), (PathBuf, std::io::ErrorKind)> {
+    write_then_rename(path, bytes).map_err(|error| (path.to_path_buf(), error.kind()))
 }
 
 /// Runs one campaign under `config`: compiles the pairs, drives every arm of
@@ -1110,7 +1129,7 @@ pub fn run(config: &Config) -> Result<Run, RunError> {
             window,
         });
     }
-    prepare_publish(publish)?;
+    prepare_publish(publish, &[REPORT_FILE, MANIFEST_FILE]).map_err(publish_refused)?;
     // The fixture is built before the envelope is held: compiling it is the
     // harness's work, and its processes and time are not the campaign's.
     fixture_binary();
@@ -1164,7 +1183,17 @@ pub fn run(config: &Config) -> Result<Run, RunError> {
     // The build identity is frozen before the first arm runs: the checkout,
     // the lockfile, and the binaries the outcomes come from, not whatever the
     // tree holds when the report is written.
-    let identity = identity(&profile, &set);
+    let identity = identity(
+        &profile,
+        "eval-campaign-shell/v1",
+        SEED,
+        json!({
+            "surface": EvaluatedSurface::Surface1,
+            "tasks": set.pairs.iter().map(|p| p.task.id.clone()).collect::<Vec<_>>(),
+            "aged_events": set.aged.events.len(),
+        }),
+        &[fixture_binary(), std::env::current_exe().unwrap()],
+    );
     let eval_run_id = eval_run_id(&identity).unwrap();
 
     let aged_world = world(&set.aged);
@@ -1469,11 +1498,7 @@ pub fn run(config: &Config) -> Result<Run, RunError> {
     // peaks include the publication. The report carries its own size as a
     // peak, so it is serialized until the bytes written carry the peak they
     // are: each reading is charged, and the envelope refuses on any of them.
-    charges.roots += 1;
-    charges.observe(Resource::TempRoots, charges.roots)?;
-    charges.observe(Resource::RetainedArtifacts, 1)?;
-    charges.elapsed()?;
-    charges.envelope.check()?;
+    charges.retain_publish_root()?;
     let bytes = loop {
         report.envelope = charges.envelope.clone();
         let bytes = serde_json::to_vec_pretty(&report.serialize().unwrap()).unwrap();
@@ -1496,10 +1521,10 @@ pub fn run(config: &Config) -> Result<Run, RunError> {
     // the next run into the directory is refused rather than mixed.
     let manifest_bytes = serde_json::to_vec_pretty(&manifest.to_value()).unwrap();
     let report_path = publish.join(REPORT_FILE);
-    publish_file(&report_path, &bytes)?;
+    publish_file(&report_path, &bytes).map_err(publish_refused)?;
     if let Err(error) = publish_file(&publish.join(MANIFEST_FILE), &manifest_bytes) {
         let _ = std::fs::remove_file(&report_path);
-        return Err(error);
+        return Err(publish_refused(error));
     }
     Ok(Run {
         report,
@@ -1537,18 +1562,22 @@ const FLAGS: [&str; 6] = [
     "publish",
 ];
 
-/// Reads a `Config` from the `campaign` subcommand's arguments. A flag that is
-/// unknown, repeated, missing, or missing its value is refused with the flag
-/// named, before any value is read.
-pub fn config_from_args(args: impl IntoIterator<Item = String>) -> Result<Config, String> {
+/// Reads every flag in `flags` from `args`, each given exactly once with a
+/// value. A flag that is unknown, repeated, missing, or missing its value is
+/// refused with the flag named, before any value is read.
+pub fn parse_flags(
+    args: impl IntoIterator<Item = String>,
+    flags: &[&str],
+    usage: &str,
+) -> Result<BTreeMap<String, String>, String> {
     let mut values: BTreeMap<String, String> = BTreeMap::new();
     let mut args = args.into_iter();
     while let Some(flag) = args.next() {
         let Some(name) = flag.strip_prefix("--") else {
-            return Err(format!("unexpected argument {flag:?}; {USAGE}"));
+            return Err(format!("unexpected argument {flag:?}; {usage}"));
         };
-        if !FLAGS.contains(&name) {
-            return Err(format!("unknown flag --{name}; {USAGE}"));
+        if !flags.contains(&name) {
+            return Err(format!("unknown flag --{name}; {usage}"));
         }
         let value = match args.next() {
             Some(value) if !value.starts_with("--") => value,
@@ -1558,9 +1587,15 @@ pub fn config_from_args(args: impl IntoIterator<Item = String>) -> Result<Config
             return Err(format!("--{name} given twice"));
         }
     }
-    if let Some(missing) = FLAGS.iter().find(|flag| !values.contains_key(**flag)) {
-        return Err(format!("--{missing} is required; {USAGE}"));
+    if let Some(missing) = flags.iter().find(|flag| !values.contains_key(**flag)) {
+        return Err(format!("--{missing} is required; {usage}"));
     }
+    Ok(values)
+}
+
+/// Reads a `Config` from the `campaign` subcommand's arguments.
+pub fn config_from_args(args: impl IntoIterator<Item = String>) -> Result<Config, String> {
+    let values = parse_flags(args, &FLAGS, USAGE)?;
     let take = |name: &str| values[name].clone();
     let scale: Scale = serde_json::from_value(Value::String(take("scale")))
         .map_err(|error| format!("--scale: {error}"))?;
@@ -1583,7 +1618,7 @@ pub fn config_from_args(args: impl IntoIterator<Item = String>) -> Result<Config
     })
 }
 
-fn sha256_hex(bytes: &[u8]) -> String {
+pub fn sha256_hex(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
 
@@ -1619,7 +1654,13 @@ fn enabled_features() -> BTreeSet<String> {
 /// config, the surface and tasks as its scenario, and the generator's
 /// versions. It does not depend on what the run found, so the report is
 /// stamped with it before the manifest is.
-fn identity(profile: &RunProfile, set: &PairSet) -> RunIdentity {
+pub fn identity(
+    profile: &RunProfile,
+    simulator_version: &str,
+    root_seed: u64,
+    scenario: Value,
+    binaries: &[PathBuf],
+) -> RunIdentity {
     let dirty = !command("git", &["status", "--porcelain"]).is_empty();
     let lockfile =
         std::fs::read(super::support::direct_host::workspace_root().join("Cargo.lock")).unwrap();
@@ -1639,22 +1680,18 @@ fn identity(profile: &RunProfile, set: &PairSet) -> RunIdentity {
             // changes only the shell changes this digest too.
             binary_digest: BinaryDigest::Present {
                 sha256: sha256_hex(
-                    &[
-                        std::fs::read(fixture_binary()).unwrap(),
-                        std::fs::read(std::env::current_exe().unwrap()).unwrap(),
-                    ]
-                    .concat(),
+                    &binaries
+                        .iter()
+                        .map(|binary| std::fs::read(binary).unwrap())
+                        .collect::<Vec<_>>()
+                        .concat(),
                 ),
             },
         },
-        simulator_version: "eval-campaign-shell/v1".to_string(),
+        simulator_version: simulator_version.to_string(),
         config: serde_json::to_value(profile).unwrap(),
-        scenario: serde_json::json!({
-            "surface": EvaluatedSurface::Surface1,
-            "tasks": set.pairs.iter().map(|p| p.task.id.clone()).collect::<Vec<_>>(),
-            "aged_events": set.aged.events.len(),
-        }),
-        root_seed: SEED,
+        scenario,
+        root_seed,
         random_schema_version: RANDOM_SCHEMA_VERSION.to_string(),
         generator_version: GENERATOR_VERSION.to_string(),
         eligibility_spec_digest: ELIGIBILITY_SPEC_DIGEST.to_string(),

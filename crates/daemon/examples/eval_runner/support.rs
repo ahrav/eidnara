@@ -3,6 +3,8 @@
 
 #[path = "../../tests/support/direct_host.rs"]
 pub mod direct_host;
+#[path = "../../tests/support/embedding_fixtures.rs"]
+pub mod embedding_fixtures;
 #[path = "../../tests/support/eval_surface.rs"]
 pub mod eval_surface;
 #[path = "../../tests/support/publish.rs"]
