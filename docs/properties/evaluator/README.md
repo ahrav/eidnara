@@ -1324,7 +1324,9 @@ Growth contract (`crates/eval-core/tests/growth.rs`,
   whose bytes differ is `HeadroomMismatch`, and one whose remaining bytes are
   not the quota less those bytes is `RemainingMismatch`; job counts the
   constants cannot multiply within `u64` are `HeadroomOverflow`, not a wrap,
-  and a charge past `u64` admits nothing rather than panicking.
+  held bytes above the project quota are `HeadroomOverQuota`, not an
+  exhausted quota, and a charge past `u64` admits nothing rather than
+  panicking.
 - `a_never_restored_ledger_passes_only_when_the_final_sample_holds_nothing_transient`:
   a final sample with WAL bytes, a temporary artifact entry, or a temp root
   is a named `Leak`; a counter over its bound is `BoundExceeded`; main-file
@@ -1349,7 +1351,8 @@ Growth contract (`crates/eval-core/tests/growth.rs`,
   `xc_shared_fixture_refused`): a shared root, publish directory, cassette
   namespace, or port is refused by value, as is one campaign's root equal to
   another's publish directory or a path inside another campaign's root or
-  publish directory; a concurrent digest that differs
+  publish directory, whatever the trailing separators, with `/` containing
+  every campaign; a concurrent digest that differs
   from its serial run is refused by campaign index, and fewer than two
   campaigns are `TooFewCampaigns`.
 - `a_growth_report_round_trips_and_its_digest_ignores_measurements`: the
@@ -1362,8 +1365,9 @@ Growth contract (`crates/eval-core/tests/growth.rs`,
   leaked final sample, an envelope whose peaks crossed a bound, a sample the
   envelope peak never saw (`EnvelopeNotCharged`; artifact-store bytes are
   not the published bytes the envelope charges), embedded bounds that differ
-  from the approved bounds passed to `validate` (`BoundsNotApproved`, after
-  which the approved bounds judge the sample), envelope bounds that differ
+  from the `GrowthContract` passed to `validate` (`BoundsNotApproved`, after
+  which the approved bounds judge the sample), quota constants that differ
+  from the ones the caller read (`QuotaMismatch`), envelope bounds that differ
   from the approved limits (`EnvelopeBoundsNotApproved`), a claim boundary
   other than the pinned one (`ClaimBoundaryMismatch`), and a final R24 count that
   disagrees with the recorded R24 refusals (`R24Unreconciled`; an R11 entry

@@ -1772,7 +1772,9 @@ every sample must carry every store
 family (`StoreMissing { step, family }`, so an omitted store cannot hide its
 bytes), its project bytes must equal `expected_project_bytes`
 (`HeadroomMismatch`; `HeadroomOverflow` when the counts do not fit in `u64`,
-since a report is read from disk and never trusted to be small) and its
+since a report is read from disk and never trusted to be small;
+`HeadroomOverQuota` when they exceed the project quota, which admission never
+lets happen) and its
 remaining bytes the quota less that figure
 (`RemainingMismatch`), the final sample must hold no
 temporary artifact entry, no WAL bytes, no temp root, and no process (`Leak {
@@ -1801,7 +1803,8 @@ never exercised, so a run that skipped a kind cannot report sustainability.
 by the shared value (a root and a publish directory are one filesystem
 resource, so one campaign's root equal to another's publish directory is
 refused too, and so is a path inside another campaign's path, since it
-writes into it; paths are compared as given, not canonicalized), and `digests_match_serial` refuses
+writes into it; paths are compared by `/`-separated components as given,
+ignoring trailing separators, not canonicalized), and `digests_match_serial` refuses
 `DigestDiffersFromSerial { campaign }` when a concurrent run's result digest
 differs from its serial one and `TooFewCampaigns` below two, since isolation
 is a claim about at least two.
@@ -1811,9 +1814,11 @@ publishes: identity, profile digest, claim boundary, the quota read, the
 bounds, the ledger, the mix, expected refusals, fault-episode and
 safety-check counts (`SafetyNeverChecked` when either the fault-episode count
 or the mix records a fault episode and no safety check ran while armed),
-markers, and envelope. `validate(bounds, limits)` takes the approved growth
-bounds and the approved profile's envelope and refuses an embedded copy that
-differs (`BoundsNotApproved`, `EnvelopeBoundsNotApproved`), as the fault
+markers, and envelope. `validate(contract)` takes a `GrowthContract`, what
+the caller knows independently of the report: the quota constants it read
+from the store, the bounds the manifest declares, and the approved profile's
+envelope; an embedded copy that differs is refused (`QuotaMismatch`,
+`BoundsNotApproved`, `EnvelopeBoundsNotApproved`), as the fault
 report takes its liveness bounds, so a producer cannot widen what it is
 judged by, and refuses a claim boundary other than the pinned one
 (`ClaimBoundaryMismatch`), as the manifest does; it runs the mix and ledger
@@ -1826,7 +1831,7 @@ envelope's artifact bytes and retained artifacts are the published files, not
 the artifact store a sample measures), and refuses
 a final R24 count that differs from the R24 entries in `expected_refusals`
 (`R24Unreconciled { counted, recorded }`);
-`parse_growth_report(value, bounds, limits)` reads a report back losslessly; `result_digest` drops
+`parse_growth_report(value, contract)` reads a report back losslessly; `result_digest` drops
 each sample's byte measurements (`stores`, `artifact_bytes`,
 `cassette_bytes`) and the envelope peaks, which name one machine's bytes, and
 keeps steps, commit sequence, row and object counts, and headroom, so a

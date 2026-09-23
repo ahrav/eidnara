@@ -184,6 +184,13 @@ pub enum GrowthRefused {
     HeadroomOverflow {
         step: u32,
     },
+    /// The bytes the jobs counted should hold exceed the project quota, which
+    /// admission never lets happen.
+    HeadroomOverQuota {
+        step: u32,
+        expected: u64,
+        quota: u64,
+    },
     RemainingMismatch {
         step: u32,
         expected: u64,
@@ -258,7 +265,13 @@ impl GrowthLedger {
                     observed: sample.headroom.project_metadata_bytes,
                 });
             }
-            let remaining = quota.project_metadata_bytes.saturating_sub(expected);
+            let remaining = quota.project_metadata_bytes.checked_sub(expected).ok_or(
+                GrowthRefused::HeadroomOverQuota {
+                    step: sample.step,
+                    expected,
+                    quota: quota.project_metadata_bytes,
+                },
+            )?;
             if sample.headroom.project_metadata_remaining != remaining {
                 return Err(GrowthRefused::RemainingMismatch {
                     step: sample.step,
@@ -520,8 +533,11 @@ pub fn isolated(a: &CampaignResources, b: &CampaignResources) -> Result<(), Isol
     Ok(())
 }
 
-/// `path` is `dir` or lies inside it, by `/`-separated components as given.
+/// `path` is `dir` or lies inside it, by `/`-separated components; trailing
+/// separators do not count, so `/` (trimmed to nothing) contains every
+/// absolute path.
 fn under(path: &str, dir: &str) -> bool {
+    let (path, dir) = (path.trim_end_matches('/'), dir.trim_end_matches('/'));
     path == dir
         || path
             .strip_prefix(dir)
@@ -548,6 +564,17 @@ pub fn digests_match_serial(
         }
     }
     Ok(())
+}
+
+/// What the caller knows independently of the report and holds it to: the
+/// quota constants it read from the store, the bounds the manifest declares,
+/// and the approved profile's envelope. The report's embedded copies must
+/// equal these, so a producer cannot widen what it is judged by.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GrowthContract {
+    pub quota: ReviewerQuota,
+    pub bounds: GrowthBounds,
+    pub envelope: crate::ResourceLimits,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -584,6 +611,9 @@ pub enum GrowthReportError {
         peak: u64,
         observed: u64,
     },
+    /// The embedded quota constants are not the ones the caller read from
+    /// the store.
+    QuotaMismatch,
     /// The embedded bounds are not the approved ones the caller passed.
     BoundsNotApproved,
     /// The embedded envelope bounds are not the approved profile's limits.
@@ -600,14 +630,7 @@ pub enum GrowthReportError {
 }
 
 impl GrowthReport {
-    /// `bounds` and `limits` are the approved growth bounds and the approved
-    /// profile's envelope; the embedded copies must equal them, so a producer
-    /// cannot widen what it is judged by.
-    pub fn validate(
-        &self,
-        bounds: &GrowthBounds,
-        limits: &crate::ResourceLimits,
-    ) -> Result<(), GrowthReportError> {
+    pub fn validate(&self, contract: &GrowthContract) -> Result<(), GrowthReportError> {
         if self.schema != GROWTH_REPORT_SCHEMA {
             return Err(GrowthReportError::SchemaMismatch {
                 found: self.schema.clone(),
@@ -616,10 +639,13 @@ impl GrowthReport {
         if self.claim_boundary != crate::ClaimBoundary::pinned() {
             return Err(GrowthReportError::ClaimBoundaryMismatch);
         }
-        if self.bounds != *bounds {
+        if self.quota != contract.quota {
+            return Err(GrowthReportError::QuotaMismatch);
+        }
+        if self.bounds != contract.bounds {
             return Err(GrowthReportError::BoundsNotApproved);
         }
-        if self.envelope.bounds != *limits {
+        if self.envelope.bounds != contract.envelope {
             return Err(GrowthReportError::EnvelopeBoundsNotApproved);
         }
         self.mix.complete().map_err(GrowthReportError::Mix)?;
@@ -674,12 +700,8 @@ impl GrowthReport {
         Ok(())
     }
 
-    pub fn serialize(
-        &self,
-        bounds: &GrowthBounds,
-        limits: &crate::ResourceLimits,
-    ) -> Result<Value, GrowthReportError> {
-        self.validate(bounds, limits)?;
+    pub fn serialize(&self, contract: &GrowthContract) -> Result<Value, GrowthReportError> {
+        self.validate(contract)?;
         serde_json::to_value(self).map_err(|e| GrowthReportError::Shape(e.to_string()))
     }
 
@@ -712,12 +734,11 @@ impl GrowthReport {
 
 pub fn parse_growth_report(
     value: &Value,
-    bounds: &GrowthBounds,
-    limits: &crate::ResourceLimits,
+    contract: &GrowthContract,
 ) -> Result<GrowthReport, GrowthReportError> {
     let report =
         GrowthReport::deserialize(value).map_err(|e| GrowthReportError::Shape(e.to_string()))?;
-    report.validate(bounds, limits)?;
+    report.validate(contract)?;
     let again =
         serde_json::to_value(&report).map_err(|e| GrowthReportError::Shape(e.to_string()))?;
     if again != *value {
