@@ -2756,8 +2756,11 @@ issued for it.
 The failure is pinned before the first candidate as a `FailurePredicate`:
 the `Oracle` value itself (its kind and parameters, so a replay under other
 thresholds is a different predicate), the `Cut` it was evaluated at, the run
-profile's digest, and the `WitnessClass` (a task failure with its `FailureClass`, a recovery
-disagreement, a liveness stall, or a sustainability breach). A replay reports
+profile's digest, and the `WitnessClass`, which names its subject as well as
+its kind: `failure { task, class }`, `recovery { effect }`, `liveness { lane }`,
+or `sustainability { resource }`, so a candidate under which the original
+subject passes and another fails the same way is a different predicate.
+`Oracle::evaluate` takes the task it evaluates for and names it. A replay reports
 a `ReplayOutcome`: `Failed { predicate }`, `Passed`, or `Unknown { reason }`
 where the reason is one of `replay_budget_exhausted`, `effect_unanswered`,
 `child_exited_before_barrier`, `read_back_failed`, `cancelled`.
@@ -2769,7 +2772,8 @@ replay receives carries the oracle, cut, and profile digest and withholds the
 expected witness class, so a replay cannot echo it.
 
 `shrink` refuses an invalid pinned oracle as `InvalidOracle` and an invalid
-episode set (`validate_episodes`) as `InvalidEpisodes` before any replay,
+episode set (`validate_episodes`) as `InvalidEpisodes`, and a `max_replays`
+outside the canonical integer range as `BudgetNotCanonical`, before any replay,
 then replays the original and refuses `OriginalNotReproduced` when
 it does not reproduce the pinned predicate. It then runs Zeller's ddmin once
 per transformation in the parent's order, `Transformation::ORDER` (fault
@@ -2808,9 +2812,11 @@ commits, reporting `durable_state` below `slipping_at` and `interference`
 from it, so deleting one commit too many slips the class. `Oracle::validate`
 refuses `slipping_at` below `failing_at` as `InvertedThresholds`.
 
-A `ShrinkReport` is read back through `parse_shrink_report`, which, like the
-other report parsers, deserializes, runs `ShrinkReport::validate`, and
-refuses a value that does not reserialize identically as `Lossy`. `validate`
+A `ShrinkReport` is written through `ShrinkReport::serialize` and read back
+through `parse_shrink_report`, which, like the other report parsers, refuse
+an integer outside the canonical safe range as `NotCanonical`, run
+`ShrinkReport::validate`, and (on read) refuse a value that does not
+reserialize identically as `Lossy`. `validate`
 checks the `eval-shrink/v1` schema, the pinned oracle, and the report's
 accounting against its own candidate ledger as `Inconsistent { field }`: the
 first candidate is the reproduced original with an empty deletion set; the

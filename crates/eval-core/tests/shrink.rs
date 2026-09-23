@@ -8,8 +8,8 @@ use std::collections::BTreeSet;
 use eval_core::{
     APPLICATION_CRASH, CandidateVerdict, Cut, Destination, Element, EpisodeRefused,
     EvaluatedSurface, EventId, EventLog, FailureClass, FailurePredicate, FaultAction, FaultEpisode,
-    FaultScope, History, KillLabel, MAX_OUTSTANDING_REPLAY_EFFECTS, MAX_VALID_TIME_MS, Minimality,
-    Mode, NotEstablishedReason, Oracle, OracleRefused, Payload, Query, ReplayEffects,
+    FaultScope, History, KillLabel, Lane, MAX_OUTSTANDING_REPLAY_EFFECTS, MAX_VALID_TIME_MS,
+    Minimality, Mode, NotEstablishedReason, Oracle, OracleRefused, Payload, Query, ReplayEffects,
     ReplayOutcome, ReplayRefused, ReplayRequest, RepositorySpec, Scenario, Sensitivity,
     ServedClass, SessionSpec, ShrinkRefused, ShrinkReportError, StoreFamily, TEST_BINARY_CHILD,
     Task, TaskRole, Transformation, UnknownReason, Visibility, WitnessClass, WorldConfig,
@@ -138,7 +138,10 @@ fn predicate(class: FailureClass) -> FailurePredicate {
         oracle: oracle(),
         checkpoint: CUT,
         profile_digest: PROFILE.to_string(),
-        witness_class: WitnessClass::Failure { class },
+        witness_class: WitnessClass::Failure {
+            task: "early-commit".to_string(),
+            class,
+        },
     }
 }
 
@@ -153,6 +156,7 @@ fn evaluate(request: ReplayRequest<'_>) -> ReplayOutcome {
     .unwrap();
     request.oracle.evaluate(
         request.set,
+        &request.set.pairs[0].task.id,
         &truth,
         request.checkpoint,
         request.profile_digest,
@@ -205,7 +209,7 @@ fn classify_keeps_unknown_unknown_for_every_reason() {
         ),
         CandidateVerdict::Reproduced
     );
-    let slips: [fn(&mut FailurePredicate); 4] = [
+    let slips: [fn(&mut FailurePredicate); 5] = [
         |p| {
             p.oracle = Oracle::RequiredCommits {
                 failing_at: 1,
@@ -216,7 +220,14 @@ fn classify_keeps_unknown_unknown_for_every_reason() {
         |p| p.profile_digest = "other-profile".to_string(),
         |p| {
             p.witness_class = WitnessClass::Failure {
+                task: "early-commit".to_string(),
                 class: FailureClass::DurableState,
+            }
+        },
+        |p| {
+            p.witness_class = WitnessClass::Failure {
+                task: "last-rename".to_string(),
+                class: FailureClass::Interference,
             }
         },
     ];
@@ -265,7 +276,7 @@ fn shrink_preserves_the_predicate_and_rejects_slipped_candidates() {
         .expect("the minimized pair is valid");
     let truth = reduce(&set.aged, &fixture(), &set.pairs[0].task.query).unwrap();
     assert_eq!(
-        oracle().evaluate(&set, &truth, CUT, PROFILE),
+        oracle().evaluate(&set, "early-commit", &truth, CUT, PROFILE),
         ReplayOutcome::Failed {
             predicate: expected.clone()
         },
@@ -285,6 +296,7 @@ fn shrink_preserves_the_predicate_and_rejects_slipped_candidates() {
         assert_eq!(
             observed.witness_class,
             WitnessClass::Failure {
+                task: "early-commit".to_string(),
                 class: FailureClass::DurableState
             }
         );
@@ -555,7 +567,7 @@ fn an_exhausted_replay_budget_stops_the_pass_and_keeps_the_last_reproduced_scena
     let set = minimized.compile(&fixture()).unwrap();
     let truth = reduce(&set.aged, &fixture(), &set.pairs[0].task.query).unwrap();
     assert_eq!(
-        oracle().evaluate(&set, &truth, CUT, PROFILE),
+        oracle().evaluate(&set, "early-commit", &truth, CUT, PROFILE),
         ReplayOutcome::Failed {
             predicate: expected
         }
@@ -796,7 +808,7 @@ fn wire_names_are_pinned() {
             "oracle": {"kind": "required_commits", "failing_at": 3, "slipping_at": 6},
             "checkpoint": "AtQuiescence",
             "profile_digest": PROFILE,
-            "witness_class": {"kind": "failure", "class": "interference"},
+            "witness_class": {"kind": "failure", "task": "early-commit", "class": "interference"},
         })
     );
     assert_eq!(
@@ -818,8 +830,18 @@ fn wire_names_are_pinned() {
         json!({"kind": "not_established", "reason": {"reason": "unknown_candidates", "count": 2}})
     );
     assert_eq!(
-        serde_json::to_value(WitnessClass::Recovery).unwrap(),
-        json!({"kind": "recovery"})
+        serde_json::to_value(WitnessClass::Recovery {
+            effect: "effect-1".to_string()
+        })
+        .unwrap(),
+        json!({"kind": "recovery", "effect": "effect-1"})
+    );
+    assert_eq!(
+        serde_json::to_value(WitnessClass::Liveness {
+            lane: Lane::CatchUpEpisodes
+        })
+        .unwrap(),
+        json!({"kind": "liveness", "lane": "catch_up_episodes"})
     );
     let (_, report) = shrink(&scenario(), &fixture(), &predicate, 3, &mut evaluate).unwrap();
     let value = serde_json::to_value(&report).unwrap();
@@ -850,6 +872,7 @@ fn a_replay_under_other_thresholds_slips_even_when_it_fails_the_same_class() {
         .unwrap();
         other.evaluate(
             request.set,
+            &request.set.pairs[0].task.id,
             &truth,
             request.checkpoint,
             request.profile_digest,
@@ -1110,4 +1133,73 @@ fn a_report_that_understates_its_replays_or_overstates_its_minimality_is_refused
             field: "minimality"
         })
     );
+}
+
+#[test]
+fn a_candidate_that_moves_the_failure_to_another_task_slips() {
+    // The replay reports the pinned class, but for the positive control
+    // rather than the falsification task the original failed on.
+    let original = scenario();
+    let expected = predicate(FailureClass::Interference);
+    let mut replay = |request: ReplayRequest<'_>| {
+        if request.scenario.digest() == original.digest() {
+            return evaluate(request);
+        }
+        ReplayOutcome::Failed {
+            predicate: FailurePredicate {
+                witness_class: WitnessClass::Failure {
+                    task: "last-rename".to_string(),
+                    class: FailureClass::Interference,
+                },
+                ..expected.clone()
+            },
+        }
+    };
+    let (minimized, report) =
+        shrink(&original, &fixture(), &expected, BUDGET, &mut replay).unwrap();
+    assert_eq!(minimized, original, "no candidate was accepted");
+    assert!(report.candidates.len() > 1);
+    for record in &report.candidates[1..] {
+        assert!(
+            matches!(
+                record.verdict,
+                CandidateVerdict::Slipped { .. } | CandidateVerdict::InvalidPair { .. }
+            ),
+            "another task's failure is a different predicate: {:?}",
+            record.verdict
+        );
+    }
+}
+
+#[test]
+fn a_budget_outside_the_canonical_range_is_refused_and_so_is_such_a_report() {
+    let expected = predicate(FailureClass::Interference);
+    let mut issued = 0u32;
+    let mut replay = |request: ReplayRequest<'_>| {
+        issued += 1;
+        evaluate(request)
+    };
+    let refused = shrink(&scenario(), &fixture(), &expected, u64::MAX, &mut replay);
+    assert_eq!(
+        refused.err(),
+        Some(ShrinkRefused::BudgetNotCanonical {
+            max_replays: u64::MAX
+        })
+    );
+    assert_eq!(issued, 0);
+
+    let (_, mut report) = shrink(&scenario(), &fixture(), &expected, 3, &mut evaluate).unwrap();
+    let value = report.serialize().unwrap();
+    assert_eq!(parse_shrink_report(&value).unwrap(), report);
+    let mut huge = value;
+    huge["max_replays"] = json!(9_007_199_254_740_992u64);
+    assert!(matches!(
+        parse_shrink_report(&huge),
+        Err(ShrinkReportError::NotCanonical(_))
+    ));
+    report.max_replays = 9_007_199_254_740_992;
+    assert!(matches!(
+        report.serialize(),
+        Err(ShrinkReportError::NotCanonical(_))
+    ));
 }

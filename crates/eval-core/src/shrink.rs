@@ -5,14 +5,14 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::num::NonZeroU32;
 
-use context_core::canonical_json::protocol_digest;
+use context_core::canonical_json::{ContractError, canonical_json_encode, protocol_digest};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::census::EvaluatedSurface;
 use crate::event::{EventId, EventLog, Payload};
 use crate::failure_class::FailureClass;
-use crate::fault::{EpisodeRefused, FaultEpisode, validate_episodes};
+use crate::fault::{EpisodeRefused, FaultEpisode, Lane, validate_episodes};
 use crate::manifest::Cut;
 use crate::pairs::{PairError, PairSet, PairSetInput, Task, compile_pair_set};
 use crate::reducer::Truth;
@@ -34,17 +34,22 @@ pub struct FailurePredicate {
     pub witness_class: WitnessClass,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// What failed, and to what. Each variant names its subject, so a candidate
+/// under which the original subject passes and another fails the same way
+/// is a different predicate.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum WitnessClass {
-    /// A task failed at its cut; the class comes from the pinned truth table.
-    Failure { class: FailureClass },
-    /// An effect's outcome disagreed with its expectation after recovery.
-    Recovery,
-    /// A lane missed its bound while the healthy core was declared.
-    Liveness,
-    /// A never-restored resource grew past its bound.
-    Sustainability,
+    /// The named task failed at its cut; the class comes from the pinned
+    /// truth table.
+    Failure { task: String, class: FailureClass },
+    /// The keyed effect's outcome disagreed with its expectation after
+    /// recovery.
+    Recovery { effect: String },
+    /// The lane missed its bound while the healthy core was declared.
+    Liveness { lane: Lane },
+    /// The never-restored resource grew past its bound.
+    Sustainability { resource: String },
 }
 
 /// What one replay of a candidate reported.
@@ -282,9 +287,12 @@ impl Oracle {
         }
     }
 
+    /// Evaluates over the aged arm and the truth reduced for `task`; a
+    /// failure names that task.
     pub fn evaluate(
         &self,
         set: &PairSet,
+        task: &str,
         truth: &Truth,
         checkpoint: Cut,
         profile_digest: &str,
@@ -314,7 +322,10 @@ impl Oracle {
                 oracle: self.clone(),
                 checkpoint,
                 profile_digest: profile_digest.to_string(),
-                witness_class: WitnessClass::Failure { class },
+                witness_class: WitnessClass::Failure {
+                    task: task.to_string(),
+                    class,
+                },
             },
         }
     }
@@ -502,6 +513,8 @@ pub enum ShrinkReportError {
     Inconsistent {
         field: &'static str,
     },
+    /// An integer left the range both runtimes represent exactly.
+    NotCanonical(ContractError),
     Shape(String),
     Lossy,
 }
@@ -613,7 +626,20 @@ impl ShrinkReport {
     }
 }
 
+impl ShrinkReport {
+    /// Digestible on both runtimes: no integer may leave the canonical safe
+    /// range, or a Bun reader would corrupt it.
+    pub fn serialize(&self) -> Result<Value, ShrinkReportError> {
+        let value =
+            serde_json::to_value(self).map_err(|e| ShrinkReportError::Shape(e.to_string()))?;
+        canonical_json_encode(&value).map_err(ShrinkReportError::NotCanonical)?;
+        self.validate()?;
+        Ok(value)
+    }
+}
+
 pub fn parse_shrink_report(value: &Value) -> Result<ShrinkReport, ShrinkReportError> {
+    canonical_json_encode(value).map_err(ShrinkReportError::NotCanonical)?;
     let report =
         ShrinkReport::deserialize(value).map_err(|e| ShrinkReportError::Shape(e.to_string()))?;
     report.validate()?;
@@ -631,6 +657,8 @@ pub enum ShrinkRefused {
     InvalidOracle(OracleRefused),
     /// The original's fault episodes are not a valid set; nothing is replayed.
     InvalidEpisodes(EpisodeRefused),
+    /// The budget would leave the report's canonical integer range.
+    BudgetNotCanonical { max_replays: u64 },
     /// The original scenario itself did not reproduce the pinned predicate.
     OriginalNotReproduced { verdict: CandidateVerdict },
 }
@@ -702,7 +730,7 @@ impl Driver<'_> {
 /// Shrinks `original` until no single deletion under any tried transformation
 /// still reproduces `predicate`, or the replay budget runs out. The returned
 /// scenario reproduced the predicate on its last replay. An invalid pinned
-/// oracle or episode set is refused before any replay.
+/// oracle, episode set, or budget is refused before any replay.
 pub fn shrink(
     original: &Scenario,
     fixture: &Value,
@@ -715,6 +743,9 @@ pub fn shrink(
         .validate()
         .map_err(ShrinkRefused::InvalidOracle)?;
     validate_episodes(&original.episodes).map_err(ShrinkRefused::InvalidEpisodes)?;
+    if canonical_json_encode(&Value::from(max_replays)).is_err() {
+        return Err(ShrinkRefused::BudgetNotCanonical { max_replays });
+    }
     let mut driver = Driver {
         fixture,
         predicate,
