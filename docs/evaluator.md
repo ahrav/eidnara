@@ -2005,7 +2005,12 @@ episode through the fault shell every fifth step (`fault_episode`, with its
 safety check), admits one reviewer job through the real reservation, staging,
 claim, and receipt path every fourth step and settles every other one by
 abstention (`quota_pressure`, so the ledger holds both pending allowances and
-permanent receipt charges), drains to quiescence, and samples. The reviewer
+permanent receipt charges), drains to quiescence, and samples. The store
+refuses a reservation past `MAX_PENDING_MEMORY_REVIEWER_JOBS_PER_PROJECT`
+pending jobs, so an admission that brings the pending count to that cap is
+settled by abstention as well; the pending queue then holds one slot free and
+every later admission becomes a permanent receipt charge, which is how a long
+history reaches the receipt quota. The reviewer
 queue's deadlines are wall-clock by design, so its admissions are stamped with
 the wall clock; every other time the drive passes is the event's own.
 
@@ -2017,10 +2022,15 @@ campaign's own and the processes charged; and the headroom
 sample charges the envelope with the store total it saw, so a transient WAL
 peak is the pressure the envelope judges, not the closed size; a bound
 crossed stops the run with `EnvelopeExceeded { resource, bound, observed }`
-and nothing is published. `Campaign::finish` closes the stores, which
-truncates every WAL, and takes the final sample from the closed files, with
-the headroom the memory store itself reports once reopened with no other
-holder. `Campaign::restore` is refused
+and nothing is published. The campaign root is released with
+`Charges::release`, not `Charges::vacate`: the samples already charged its
+store bytes, and a whole-root walk would also count the artifact objects the
+samples charge as artifact bytes. `Campaign::finish` reads the headroom from
+the live memory store, closes the stores, which truncates every WAL, and takes
+the final sample from the closed files. No store is opened again before the
+files are measured: an open commits a new fence epoch and runs startup
+maintenance, so a sample taken after it would not be the history's own.
+`Campaign::restore` is refused
 and counted under `never_restored`; under `restoring` it closes and reopens
 in place, and the ledger then gives no leak verdict.
 
@@ -2035,8 +2045,11 @@ witness digest covers the samples, the mix, and the fault episodes' effects.
 A run may tighten its store-bytes bound below the profile's to show the breach
 path end to end: `EnvelopeExceeded` names the resource, bound, and the peak
 that crossed it, and nothing is published. R24 refusals are counted and
-reported, not planted: an S0 history never reaches the quota, and the report
-says zero. Two campaigns run from one checkout on two roots publish the same
+reported, not planted: a reservation the store refuses with
+`MemoryReviewerJobRefusal::MetadataQuota` adds one to `r24_refusals` and
+admits nothing, and the campaign continues; any other refusal stops the run
+with `RunError::Admission`. An S0 history never reaches the quota, and the
+report says zero. Two campaigns run from one checkout on two roots publish the same
 result digest as their serial runs; a fixture that shares a root is refused.
 The `growth` subcommand takes the `aging` flags plus `--mode
 <never_restored|restoring>`; the CI `eval-campaign` job runs `eval_growth`

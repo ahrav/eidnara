@@ -12,7 +12,8 @@ use eval_core::{
 };
 use memory_store::memory_reviewer_jobs::{
     MAX_MEMORY_REVIEWER_METADATA_BYTES_PER_HOST, MAX_MEMORY_REVIEWER_METADATA_BYTES_PER_PROJECT,
-    MEMORY_REVIEWER_JOB_ALLOWANCE_BYTES, MEMORY_REVIEWER_RECEIPT_CHARGE_BYTES,
+    MAX_PENDING_MEMORY_REVIEWER_JOBS_PER_PROJECT, MEMORY_REVIEWER_JOB_ALLOWANCE_BYTES,
+    MEMORY_REVIEWER_RECEIPT_CHARGE_BYTES, MemoryReviewerJobRefusal,
 };
 use serde_json::json;
 
@@ -23,7 +24,7 @@ use super::aging::{
 use super::campaign::{Charges, identity, prepare_publish, publish_file};
 use super::fault::{self, Witness, lost_reply_episode};
 use super::support::memory_reviewer_publish::{
-    self as reviewer, abstain, activate_module_authority, begin_job, commit_memory_domain,
+    self as reviewer, abstain, activate_module_authority, commit_memory_domain, try_begin_job,
 };
 
 pub const REPORT_FILE: &str = "suite-c-growth-report.json";
@@ -56,6 +57,8 @@ pub enum RunError {
     Growth(#[from] GrowthRefused),
     #[error("report refused: {0}")]
     Report(#[from] GrowthReportError),
+    #[error("reviewer admission refused: {0}")]
+    Admission(MemoryReviewerJobRefusal),
     #[error("publish {}: {kind}", path.display())]
     Publish {
         path: PathBuf,
@@ -236,20 +239,22 @@ impl Campaign {
         if i % 4 == 3 {
             // The reviewer queue's deadlines are wall-clock by design, so its
             // admissions are stamped with the wall clock, not the drive's logical time.
-            self.quota_pressure(i, reviewer::now_ms());
+            self.quota_pressure(i, reviewer::now_ms())?;
         }
         self.stores.drain(now);
         self.next_step += 1;
         self.sample(i as u32, charges)
     }
 
-    /// One reviewer job admitted through the real reservation, staging,
-    /// claim, and receipt path; every other one is settled by abstention so
-    /// the ledger holds both pending and terminal charges.
-    fn quota_pressure(&mut self, i: usize, now: i64) {
+    /// Admits one reviewer job. Admissions at `i % 8 == 3` abstain; once
+    /// pending jobs reach the cap, every admission abstains so the next
+    /// reservation still has a slot. A reservation refused by the permanent
+    /// receipt quota is R24: counted, with nothing admitted.
+    pub fn quota_pressure(&mut self, i: usize, now: i64) -> Result<(), RunError> {
+        self.mix.record(Operation::QuotaPressure);
         let incarnation = reviewer::kernel_incarnation(&self.stores.corpus.kernel);
         let digest = format!("{:064x}", i);
-        let begun = begin_job(
+        let begun = match try_begin_job(
             &self.stores.corpus.kernel,
             &self.stores.memory,
             &digest,
@@ -257,15 +262,28 @@ impl Campaign {
             self.generation,
             i as u64,
             now,
-        );
+        ) {
+            Ok(begun) => begun,
+            Err(MemoryReviewerJobRefusal::MetadataQuota) => {
+                self.r24_refusals += 1;
+                return Ok(());
+            }
+            Err(refusal) => return Err(RunError::Admission(refusal)),
+        };
         self.admitted_total += 1;
-        if i % 8 == 3 {
+        let pending = self
+            .stores
+            .memory
+            .memory_reviewer_headroom(reviewer::PROJECT)
+            .unwrap()
+            .pending_jobs;
+        if i % 8 == 3 || pending >= MAX_PENDING_MEMORY_REVIEWER_JOBS_PER_PROJECT {
             abstain(&self.stores.memory, &incarnation, &begun, now);
         }
-        self.mix.record(Operation::QuotaPressure);
+        Ok(())
     }
 
-    fn headroom(&self) -> HeadroomSample {
+    pub fn headroom(&self) -> HeadroomSample {
         let headroom = self
             .stores
             .memory
@@ -345,26 +363,6 @@ fn sample_root(
     }
 }
 
-/// The headroom of a closed memory store, as the store itself reports it
-/// once reopened with no other holder.
-fn closed_headroom(root: &Path, admitted_total: u64, r24_refusals: u64) -> HeadroomSample {
-    let store = memory_store::MemoryStore::open(&daemon::store_descriptor_in(root)).unwrap();
-    let headroom = store.memory_reviewer_headroom(reviewer::PROJECT).unwrap();
-    drop(store);
-    HeadroomSample {
-        pending_jobs: headroom.pending_jobs as u64,
-        terminal_jobs: count(
-            &memory_file(root),
-            "SELECT COUNT(*) FROM memory_reviewer_jobs WHERE state='terminal'",
-        ),
-        page_bytes: 0,
-        project_metadata_bytes: headroom.project_metadata_bytes,
-        project_metadata_remaining: headroom.project_metadata_remaining,
-        admitted_total,
-        r24_refusals,
-    }
-}
-
 impl Campaign {
     /// Records the sample and charges the envelope with the transient store
     /// pressure it shows.
@@ -424,13 +422,12 @@ impl Campaign {
     /// Closes the stores, which truncates every WAL, and takes the final
     /// sample from the closed files: quiescent, with nothing transient left.
     pub fn finish(self, charges: &mut Charges) -> Result<Finished, RunError> {
+        let headroom = self.headroom();
         let Campaign {
             stores,
             mut ledger,
             mix,
             witness,
-            admitted_total,
-            r24_refusals,
             mut checkpoints,
             ..
         } = self;
@@ -438,13 +435,7 @@ impl Campaign {
         let root = stores.root().to_path_buf();
         let tip = stores.tip();
         drop(stores.close());
-        let sample = sample_root(
-            &root,
-            step,
-            tip,
-            charges,
-            closed_headroom(&root, admitted_total, r24_refusals),
-        );
+        let sample = sample_root(&root, step, tip, charges, headroom);
         charges.observe(eval_core::Resource::StoreBytes, sample.store_total())?;
         ledger.record(sample)?;
         *checkpoints.entry(Cut::EndOfRun).or_insert(0) += 1;
@@ -493,7 +484,7 @@ pub fn run(config: &Config) -> Result<Run, RunError> {
         witness,
         checkpoints,
     } = campaign.finish(&mut charges)?;
-    charges.vacate(root)?;
+    charges.release(root)?;
     let mut coverage = witness.coverage;
     let quota = quota();
     if ledger.mode == GrowthMode::NeverRestored {

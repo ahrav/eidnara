@@ -719,6 +719,11 @@ impl Charges {
     /// as they peaked, then the root goes, and the run's elapsed time is read.
     pub fn vacate(&mut self, root: tempfile::TempDir) -> Result<(), EnvelopeExceeded> {
         self.observe(Resource::StoreBytes, root_bytes(root.path()))?;
+        self.release(root)
+    }
+
+    /// Releases a root after the caller has already charged its store bytes.
+    pub fn release(&mut self, root: tempfile::TempDir) -> Result<(), EnvelopeExceeded> {
         drop(root);
         self.roots -= 1;
         self.elapsed()

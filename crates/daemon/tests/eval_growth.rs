@@ -21,10 +21,15 @@ use std::path::PathBuf;
 use campaign::Charges;
 use eval_core::{
     Approval, Coverage, EnvelopeExceeded, GrowthMode, GrowthRefused, GrowthReport, MARKERS,
-    Operation, ProfileError, Resource, Scale, digests_match_serial, isolated, parse_growth_report,
-    parse_manifest,
+    Operation, ProfileError, Resource, Scale, StoreFamily, digests_match_serial, isolated,
+    parse_growth_report, parse_manifest,
 };
 use growth::{Campaign, Config, MANIFEST_FILE, REPORT_FILE, Run, RunError};
+use memory_store::memory_reviewer_jobs::{
+    MAX_MEMORY_REVIEWER_METADATA_BYTES_PER_PROJECT, MAX_PENDING_MEMORY_REVIEWER_JOBS_PER_PROJECT,
+    MEMORY_REVIEWER_JOB_ALLOWANCE_BYTES, MEMORY_REVIEWER_RECEIPT_CHARGE_BYTES,
+};
+use support::memory_reviewer_publish::{PROJECT, now_ms};
 
 const MESSAGES: u32 = 40;
 const SUITE: &str = "crates/daemon/tests/eval_growth.rs::";
@@ -107,9 +112,10 @@ fn a_never_restored_campaign_samples_every_quiescence_and_refuses_a_restore_scen
         report.ledger.peak_store_bytes() > last.store_total(),
         "WAL frames make the transient peak larger than the closed size"
     );
-    assert!(
-        report.envelope.peaks.store_bytes >= report.ledger.peak_store_bytes(),
-        "the envelope was charged with the transient pressure"
+    assert_eq!(
+        report.envelope.peaks.store_bytes,
+        report.ledger.peak_store_bytes(),
+        "only the samples charged store bytes, with the transient total each saw"
     );
     for window in report.ledger.samples.windows(2) {
         assert!(window[0].commit_seq <= window[1].commit_seq);
@@ -274,6 +280,122 @@ fn a_restoring_campaign_cleans_a_stray_temporary_on_reopen_but_gives_no_leak_ver
         ),
         Err(GrowthRefused::NotALeakVerdict { .. })
     ));
+}
+
+#[test]
+fn the_final_sample_reads_the_closed_files_without_reopening_the_memory_store() {
+    let plan = aging::plan(MESSAGES).unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let mut charges = Charges::new(growth::profile(Scale::S0, 128, 600_000, None).envelope);
+    let mut live = Campaign::open(root.path(), plan, GrowthMode::NeverRestored);
+    for _ in 0..4 {
+        live.step(&mut charges).unwrap();
+    }
+    // Every open of the memory store commits a higher fence epoch, so an
+    // unchanged epoch shows nothing opened it between the close and the sample.
+    let memory = aging::memory_file(root.path());
+    let fence_epoch = || {
+        aging::read_only(&memory)
+            .query_row("SELECT epoch FROM fence WHERE id = 0", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap()
+    };
+    let epoch = fence_epoch();
+    let headroom = live.headroom();
+    assert!(headroom.admitted_total > 0);
+    let finished = live.finish(&mut charges).unwrap();
+    assert_eq!(
+        fence_epoch(),
+        epoch,
+        "the final sample reopened the memory store"
+    );
+    let last = finished.ledger.samples.last().unwrap();
+    assert_eq!(last.headroom, headroom);
+    assert_eq!(
+        last.stores[&StoreFamily::Memory].file,
+        std::fs::metadata(&memory).unwrap().len()
+    );
+}
+
+#[test]
+fn releasing_the_campaign_root_charges_no_store_bytes_beyond_the_samples() {
+    let mut charges = Charges::new(growth::profile(Scale::S0, 128, 600_000, None).envelope);
+    let root = charges.occupy().unwrap();
+    // Artifact objects are charged as artifact bytes at every sample; a
+    // whole-root walk at release would charge them as store bytes too.
+    let objects = root.path().join("kernel/artifacts/objects");
+    std::fs::create_dir_all(&objects).unwrap();
+    std::fs::write(objects.join("object"), vec![0u8; 1 << 20]).unwrap();
+    charges.observe(Resource::StoreBytes, 4096).unwrap();
+    charges.release(root).unwrap();
+    assert_eq!(charges.envelope.peaks.store_bytes, 4096);
+    assert_eq!(charges.roots(), 0);
+}
+
+#[test]
+fn quota_pressure_past_the_pending_cap_settles_new_admissions_instead_of_panicking() {
+    let plan = aging::plan(MESSAGES).unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let mut live = Campaign::open(root.path(), plan, GrowthMode::NeverRestored);
+    // Every other admission stays pending, so twice the cap overruns it.
+    let admissions = 2 * MAX_PENDING_MEMORY_REVIEWER_JOBS_PER_PROJECT + 4;
+    for k in 0..admissions {
+        live.quota_pressure(4 * k + 3, now_ms()).unwrap();
+    }
+    let headroom = live.headroom();
+    assert_eq!(
+        headroom.pending_jobs,
+        MAX_PENDING_MEMORY_REVIEWER_JOBS_PER_PROJECT as u64 - 1,
+        "the pending queue stops one short of the store's cap"
+    );
+    assert_eq!(headroom.admitted_total, admissions as u64);
+    assert_eq!(
+        headroom.pending_jobs + headroom.terminal_jobs,
+        headroom.admitted_total
+    );
+    assert_eq!(headroom.r24_refusals, 0);
+    assert_eq!(
+        headroom.project_metadata_bytes,
+        growth::quota().expected_project_bytes(&headroom)
+    );
+}
+
+#[test]
+fn a_receipt_quota_refusal_is_counted_as_r24_and_admits_nothing() {
+    let plan = aging::plan(MESSAGES).unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let mut live = Campaign::open(root.path(), plan, GrowthMode::NeverRestored);
+    // Step 3 settles its admission, so the one row holds a receipt charge only.
+    live.quota_pressure(3, now_ms()).unwrap();
+    let over_quota = MAX_MEMORY_REVIEWER_METADATA_BYTES_PER_PROJECT
+        - (MEMORY_REVIEWER_RECEIPT_CHARGE_BYTES + MEMORY_REVIEWER_JOB_ALLOWANCE_BYTES)
+        + 1;
+    live.stores
+        .memory
+        .with_fenced_conn_for_test(|conn| {
+            conn.execute(
+                "UPDATE memory_reviewer_jobs SET receipt_charge_bytes = ?1",
+                [i64::try_from(over_quota).unwrap()],
+            )
+        })
+        .unwrap();
+    let before = live
+        .stores
+        .memory
+        .memory_reviewer_headroom(PROJECT)
+        .unwrap();
+    live.quota_pressure(7, now_ms()).unwrap();
+    let after = live
+        .stores
+        .memory
+        .memory_reviewer_headroom(PROJECT)
+        .unwrap();
+    assert_eq!(after, before, "a refused reservation charges nothing");
+    let headroom = live.headroom();
+    assert_eq!(headroom.r24_refusals, 1);
+    assert_eq!(headroom.admitted_total, 1);
+    assert_eq!(live.mix.counts[&Operation::QuotaPressure], 2);
 }
 
 fn a_deliberate_envelope_breach_names_the_resource_and_publishes_nothing_scenario(

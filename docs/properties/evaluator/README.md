@@ -1355,7 +1355,7 @@ completeness proof run in the `eval-campaign` CI job under
   `flt_leak_ledger_sampled_before_reopen`): one sample per quiescence and one
   from the closed files; the final sample holds no temporary entry, no WAL
   bytes, no stray root, no process; the transient peak exceeds the closed
-  size and the envelope was charged with it; the ledger's verdict passes; the
+  size and the envelope's store-bytes peak equals it; the ledger's verdict passes; the
   published report and manifest parse back; a restore request on a live
   never-restored campaign is refused, counted, and moves nothing.
 - `reviewer_headroom_is_accounted_from_the_stores_own_constants`
@@ -1365,6 +1365,20 @@ completeness proof run in the `eval-campaign` CI job under
   terminal jobs plus receipt and allowance for pending ones; pending and
   terminal jobs both exist; R24 refusals are reported as zero at S0; the
   admissions-remaining figure is derived, not 2,047.
+- `quota_pressure_past_the_pending_cap_settles_new_admissions_instead_of_panicking`:
+  twice the per-project pending cap of admissions leaves the pending count one
+  short of the cap, every admission pending or terminal, and the project bytes
+  equal to the constants' figure.
+- `a_receipt_quota_refusal_is_counted_as_r24_and_admits_nothing`: with the
+  project's receipt charges planted past the quota, the next admission is
+  refused with `MetadataQuota`, counted once in `r24_refusals`, charges
+  nothing, and the campaign continues.
+- `the_final_sample_reads_the_closed_files_without_reopening_the_memory_store`:
+  the memory store's fence epoch is unchanged across `Campaign::finish`, and
+  the final sample's headroom is the live store's.
+- `releasing_the_campaign_root_charges_no_store_bytes_beyond_the_samples`: a
+  root released with `Charges::release` leaves the store-bytes peak where the
+  samples put it, even with a 1 MiB artifact under the root.
 - `the_swarm_mix_exercises_every_operation_kind` (marker
   `flt_swarm_mix_complete`): publish, correct, retire, query, fault episode,
   quota pressure, and store growth each occur; every fault episode has a

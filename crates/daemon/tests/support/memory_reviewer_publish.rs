@@ -12,8 +12,8 @@ use kernel::{
 use memory_store::LeaseAcquireOutcome;
 use memory_store::MemoryStore;
 use memory_store::memory_reviewer_jobs::{
-    CausalInputs, MemoryReviewerJob, MemoryReviewerJobInput, ProducerBinding, ReserveOutcome,
-    ReviewTarget,
+    CausalInputs, MemoryReviewerJob, MemoryReviewerJobError, MemoryReviewerJobInput,
+    MemoryReviewerJobRefusal, ProducerBinding, ReserveOutcome, ReviewTarget,
 };
 use memory_store::memory_reviewer_ledger::{
     AbstainReason, AttemptMarker, DispatchOutcome, MemoryReviewerAttemptTerminal,
@@ -79,6 +79,28 @@ pub fn begin_job(
     firing: u64,
     now: i64,
 ) -> BegunJob {
+    try_begin_job(
+        kernel,
+        store,
+        digest,
+        kernel_incarnation,
+        generation,
+        firing,
+        now,
+    )
+    .unwrap_or_else(|refusal| panic!("fresh inputs reserve: {refusal}"))
+}
+
+/// [`begin_job`], returning the reservation's refusal instead of panicking on it; a refusal writes nothing.
+pub fn try_begin_job(
+    kernel: &KernelStore,
+    store: &MemoryStore,
+    digest: &str,
+    kernel_incarnation: &str,
+    generation: u64,
+    firing: u64,
+    now: i64,
+) -> Result<BegunJob, MemoryReviewerJobRefusal> {
     let producer = ProducerBinding {
         producer: "history_summarizer".to_string(),
         firing_id: format!("{}#{firing}", "5".repeat(32)),
@@ -115,11 +137,11 @@ pub fn begin_job(
         required_evidence: Vec::new(),
         policy_versions: review_policy_versions(),
     };
-    let ReserveOutcome::Reserved(job) = store
-        .reserve_memory_reviewer_job(PROJECT, &producer, &inputs, now)
-        .unwrap()
-    else {
-        panic!("fresh inputs reserve")
+    let job = match store.reserve_memory_reviewer_job(PROJECT, &producer, &inputs, now) {
+        Ok(ReserveOutcome::Reserved(job)) => job,
+        Ok(ReserveOutcome::Existing(_)) => panic!("fresh inputs reserve"),
+        Err(MemoryReviewerJobError::Refused(refusal)) => return Err(refusal),
+        Err(error) => panic!("reserve: {error}"),
     };
     let run_id = format!("hs-run-{firing}");
     kernel
@@ -180,11 +202,11 @@ pub fn begin_job(
         .lookup_memory_reviewer_job(PROJECT, &job.causal_identity)
         .unwrap()
         .unwrap();
-    BegunJob {
+    Ok(BegunJob {
         job,
         claim_id: claim.claim_id,
         receipt,
-    }
+    })
 }
 
 /// The run abstained on a Sensitive subject, recorded in the ledger alone.
