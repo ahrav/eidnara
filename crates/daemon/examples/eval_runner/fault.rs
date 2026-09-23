@@ -1123,15 +1123,18 @@ pub fn campaign(
     witness: &mut Witness,
 ) -> Result<BTreeMap<String, EffectState>, RunError> {
     let k = plan.checkpoint_step as usize;
+    let steps = &plan.steps[k..];
+    if steps.len() < 9 {
+        return Err(unexpected(
+            "campaign",
+            "nine steps after the checkpoint",
+            steps.len(),
+        ));
+    }
     let root = charges.occupy()?;
     let mut stores = Stores::open(root.path(), plan.rendering.clone());
     live(&mut stores, &plan.steps[..k]);
     witness.checkpoint(Cut::AtQuiescence);
-    let steps = &plan.steps[k..];
-    assert!(
-        steps.len() >= 9,
-        "the fault phase needs nine steps after the checkpoint"
-    );
     let step = |i: usize| (k + i) as u32;
     let mut expected = BTreeMap::new();
 

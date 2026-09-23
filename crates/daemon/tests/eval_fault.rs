@@ -970,3 +970,15 @@ fn a_read_back_after_later_catch_up_is_refused_as_masked() {
         "a masked read-back resolves nothing"
     );
 }
+
+#[test]
+fn a_plan_too_short_for_the_fault_phase_is_refused() {
+    let publish = tempfile::tempdir().unwrap();
+    let mut config = config(publish.path().join("out"), 600_000);
+    config.messages = 12;
+    match fault::run(&config, spawn_child) {
+        Err(RunError::Unexpected { episode, .. }) if episode == "campaign" => {}
+        Err(other) => panic!("refused by the wrong error: {other}"),
+        Ok(_) => panic!("a 12-message plan ran the fault phase"),
+    }
+}
