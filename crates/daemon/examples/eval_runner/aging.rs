@@ -1363,6 +1363,7 @@ fn manifest(
         execution_mode: ExecutionMode::PrefixThenGenerate,
         envelope: report.envelope.clone(),
         started_at_ms,
+        task_corpus: suite_c_task_corpus(),
     }))
 }
 
@@ -1377,6 +1378,13 @@ pub struct ManifestInputs {
     pub execution_mode: ExecutionMode,
     pub envelope: eval_core::Envelope,
     pub started_at_ms: i64,
+    /// `component_versions.task_corpus`: which corpus the run executed.
+    pub task_corpus: String,
+}
+
+/// The task corpus every Suite C shell reads: the aging world under `SEED`.
+pub fn suite_c_task_corpus() -> String {
+    format!("generated:{SEED:#x}")
 }
 
 pub fn suite_c_manifest(inputs: ManifestInputs) -> Manifest {
@@ -1417,7 +1425,7 @@ pub fn suite_c_manifest(inputs: ManifestInputs) -> Manifest {
             reducer: REDUCER_VERSION.to_string(),
             oracles: PAIRING_POLICY_VERSION.to_string(),
             execution_image: "in-process".to_string(),
-            task_corpus: format!("generated:{SEED:#x}"),
+            task_corpus: inputs.task_corpus,
             judge: "none".to_string(),
         },
         envelope_bounds: inputs.envelope.bounds.clone(),

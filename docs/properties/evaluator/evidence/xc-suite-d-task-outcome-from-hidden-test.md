@@ -11,10 +11,23 @@ attempt is rejected."
   hidden tests passed, else `Fail`; empty results `Indeterminate`.
 - `crates/eval-core/src/task.rs` `GeneratedTask::oracle_tamper`: hidden
   test paths, a `Cargo.toml` with `[[test]]`, `.cargo/config.toml`.
-- `crates/daemon/examples/eval_runner/suite_d.rs` `hidden_results` writes
-  each hidden test from the corpus and runs `cargo test --offline --test
-  hidden_<name>` outside the containment; exit 0 is `passed`, exit 101 with
-  `test result: FAILED` is `failed`, anything else `errored`.
+- `crates/daemon/examples/eval_runner/suite_d.rs` `hidden_results` builds
+  a grading tree under the run's root from the corpus (the task's files, the
+  candidate's regular files except `Cargo.toml`, `.cargo/`, and the
+  hidden-test paths, and the hidden tests from the corpus) and runs
+  `cargo test --offline --test hidden_<name>` there, outside the
+  containment; exit 0 with `test result: ok. 1 passed` is `passed`, exit 101
+  with `test result: FAILED` is `failed`, anything else `errored`. Nothing
+  in the agent's workspace is executed or written through.
+- `crates/daemon/tests/eval_suite_d.rs` `grading_ignores_symlinked_hard_linked_and_undeletable_workspace_entries`:
+  a `Cargo.toml` symlinked to a host file is not written through; two
+  hidden-test paths hard-linked to one planted file do not share the grade;
+  a `.cargo/config.toml` naming a forged runner inside a `0555` directory
+  does not run.
+- `crates/daemon/tests/eval_suite_d.rs` `a_bounded_run_past_its_deadline_kills_the_whole_process_tree_and_keeps_partial_output`
+  and `a_bounded_run_whose_grandchild_keeps_stdout_open_still_returns_at_exit`:
+  `run_bounded` kills the child's process group at the deadline and after a
+  descendant holds stdout past the child's exit.
 - `crates/daemon/tests/eval_suite_d.rs` `a_contained_task_is_judged_by_hidden_tests_the_agent_never_sees`:
   the agent plants `tests/hidden_sum_of_positives.rs`; `oracle_tamper`
   records it; the terminal is `Pass` from the corpus's tests.
@@ -26,10 +39,18 @@ attempt is rejected."
 
 ## Failure scenario
 An agent writes `tests/hidden_sum_of_positives.rs` with an empty test; a
-runner that ran the workspace's tests would report `Pass`.
+runner that ran the workspace's tests would report `Pass`. The first
+version of the shell restored the oracle in place over the agent's
+workspace: a `Cargo.toml` replaced by a symlink would have been written
+through to its target, two hidden-test paths hard-linked together would have
+both held the second test written, and a `.cargo/` made `0555` survived a
+silent `remove_dir_all` with its runner config active. Grading in a tree the
+runner builds closes all three.
 
 ## Timing windows and dependencies
-The hidden tests are written after the agent's containment exited.
+The grading tree is built after the agent's containment exited. A grading
+`cargo` that outlives its deadline is killed with its process group, so a
+looping test binary does not survive the run.
 
 ## What a test must construct
 A scripted agent that plants a hidden test, and a budget the script exceeds.
@@ -43,13 +64,23 @@ A scripted agent that plants a hidden test, and a budget the script exceeds.
 - Conclusion: resolved with answer.
 ### Q: Does grading run candidate code with the runner's authority?
 - Sources examined: `hidden_results` in the shell (`suite_d.rs`), which runs
-  `cargo test --offline --test hidden_<name>` "under the runner's own
-  authority, outside any containment"; the module doc at `suite_d.rs:3`.
-- Findings: yes. The hidden tests compile and run the agent's tree outside
-  the namespaces, so a build script or a test body written by the agent runs
-  as the runner. The oracle restore covers the manifest, `.cargo/`, and the
-  hidden test files, not what `src/` may do at build or test time.
+  `cargo test --offline --test hidden_<name>` over the grade tree "under the
+  runner's own authority, outside any containment"; the module doc at
+  `suite_d.rs:3`.
+- Findings: yes. The grade tree is the runner's (the corpus's oracle paths,
+  the candidate's regular files), but the candidate's `src/` and any build
+  script it carries compile and run outside the namespaces as the runner.
 - Missing evidence: a maintainer decision on grading inside its own
   restricted worker, and what that worker may keep (the target directory,
   the network).
 - Conclusion: unresolved, needs human input.
+
+### Q: Does a file the agent deleted reach the grade?
+- Sources examined: `hidden_results`, `AgentTrace::written`.
+- Findings: no. The grading tree starts from the task's files; a path the
+  agent deleted from the workspace is absent from `written` and so present in
+  the grade with its original contents. A fix that depended on deleting a
+  source file would compile differently from the workspace.
+- Missing evidence: none of the corpus's fixes delete a file.
+- Conclusion: resolved with answer; a live agent's deletions are not
+  reflected in the grade until the trace records them.
