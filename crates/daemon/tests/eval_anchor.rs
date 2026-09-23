@@ -137,9 +137,17 @@ fn history(dir: &Path, index: u32, variant: Variant) -> (String, String) {
     (base, fix)
 }
 
+/// The corpus persists an `https://` clone URL; the local host resolves it
+/// to the fixture directory it names under `LOCAL_HOST`.
+const LOCAL_HOST: &str = "https://local.invalid";
+
 fn clone_local(entry: &AnchorEntry, into: &Path) -> std::io::Result<()> {
+    let local = entry
+        .repository
+        .strip_prefix(LOCAL_HOST)
+        .expect("a fixture URL");
     let status = Command::new("git")
-        .args(["clone", "-q", &entry.repository])
+        .args(["clone", "-q", "--", local])
         .arg(into)
         .status()?;
     if status.success() {
@@ -156,12 +164,15 @@ fn fetch_issue(entry: &AnchorEntry) -> Option<Fetched> {
             entry.id
         ),
         issue_created_ms: (CUTOFF_SECONDS - 7_200) * 1_000,
+        issue_text_ms: (CUTOFF_SECONDS - 7_200) * 1_000,
+        pull_request_created_ms: None,
     })
 }
 
 const HOST: Host = Host {
     clone: clone_local,
     fetch: fetch_issue,
+    namespaces: suite_d::namespaces_available,
 };
 
 fn provider(model: &str) -> ProviderProfile {
@@ -177,12 +188,15 @@ fn settings(bound_ms: u64) -> RealHistorySettings {
         providers: vec![provider("honest"), provider("memorizer")],
         execution_image: "in-process".to_string(),
         preparation_bound_ms: Some(bound_ms),
-        transfer_criterion: Some(TransferCriterion {
-            approved_by: "maintainer".to_string(),
-            approved_at_run_id: "ab".repeat(32),
-            min_valid_tasks: 5,
-            required_families: BTreeSet::from(["cargo".to_string()]),
-        }),
+    }
+}
+
+fn criterion() -> TransferCriterion {
+    TransferCriterion {
+        approved_by: "maintainer".to_string(),
+        approved_at_run_id: "ab".repeat(32),
+        min_valid_tasks: 5,
+        required_families: BTreeSet::from(["cargo".to_string()]),
     }
 }
 
@@ -236,16 +250,28 @@ fn approval() -> eval_core::Approval {
 }
 
 /// One local Cargo-family repository per variant, in order.
+/// The pilot composition over local repositories: eight Cargo, eight Tokio,
+/// and four Django rows, in that order, one repository each. The first rows
+/// take `variants`; the rest are early fixes, prepared but never graded, so
+/// a test pays for the tasks it looks at. Every row is a Cargo crate; the
+/// family is the corpus's label for it.
 fn corpus(dir: &Path, variants: &[Variant]) -> AnchorCorpus {
-    let entries = (0u32..)
-        .zip(variants)
-        .map(|(index, &variant)| {
+    let pilot: Vec<Family> = eval_core::PILOT_COMPOSITION
+        .iter()
+        .flat_map(|(family, count)| std::iter::repeat_n(*family, *count as usize))
+        .collect();
+    let entries = pilot
+        .iter()
+        .enumerate()
+        .map(|(index, &family)| {
+            let variant = variants.get(index).copied().unwrap_or(Variant::EarlyFix);
+            let index = u32::try_from(index).unwrap();
             let repo = dir.join(format!("repo-{index}"));
             let (base_sha, fix_sha) = history(&repo, index, variant);
             AnchorEntry {
-                id: format!("cargo-{index}"),
-                family: Family::Cargo,
-                repository: repo.to_string_lossy().to_string(),
+                id: format!("{}-{index}", family.label()),
+                family,
+                repository: format!("{LOCAL_HOST}{}", repo.display()),
                 license: "MIT".to_string(),
                 base_sha,
                 fix_sha,
@@ -267,6 +293,16 @@ fn corpus(dir: &Path, variants: &[Variant]) -> AnchorCorpus {
 
 const PLAIN: [Variant; 5] = [Variant::Plain; 5];
 
+/// The verdict recorded for `control`'s provider pair on `task`.
+fn verdict(task: &anchor::TaskOutcome, control: &eval_core::NoRepositoryControl) -> ControlVerdict {
+    task.verdicts
+        .iter()
+        .find(|v| v.provider == control.provider)
+        .unwrap()
+        .verdict
+        .clone()
+}
+
 fn config(dir: &Path, corpus: AnchorCorpus, control: ControlScript, bound_ms: u64) -> Config {
     Config {
         scale: Scale::S0,
@@ -276,6 +312,7 @@ fn config(dir: &Path, corpus: AnchorCorpus, control: ControlScript, bound_ms: u6
         publish: dir.join("out"),
         corpus,
         settings: settings(bound_ms),
+        transfer_criterion: Some(criterion()),
         control,
         budgets: suite_d::BUDGETS,
         store_bound_bytes: 1 << 30,
@@ -311,12 +348,21 @@ fn every_anchor_task_has_an_audit_a_proof_and_a_control_and_the_pilot_never_tran
         report.time_study,
         Affordability::Affordable { .. }
     ));
-    assert_eq!(report.tasks.len(), 6);
+    assert_eq!(report.tasks.len(), 20, "the pilot composition, no more");
     for task in &report.tasks {
         assert!(
             task.prepare_ms > 0,
             "preparation time is measured, not asserted"
         );
+    }
+    for task in report.tasks.iter().filter(|t| t.id.starts_with("django-")) {
+        assert_eq!(
+            task.terminal,
+            Terminal::Unsupported(UnsupportedReason::UnsupportedRuntime {
+                family: Family::Django
+            })
+        );
+        assert!(task.audit.is_none() && task.insufficiency.is_none());
     }
     let by_id = |id: &str| report.tasks.iter().find(|t| t.id == id).unwrap();
     for id in ["cargo-0", "cargo-1", "cargo-2"] {
@@ -327,12 +373,14 @@ fn every_anchor_task_has_an_audit_a_proof_and_a_control_and_the_pilot_never_tran
             "{id}: the tree alone is insufficient"
         );
         let audit = task.audit.as_ref().unwrap();
-        audit.validate().unwrap();
-        assert!(
-            !audit.fix_paths_present,
-            "the snapshot holds nothing the fix added"
-        );
+        audit
+            .validate_for(corpus.entries.iter().find(|e| e.id == id).unwrap())
+            .unwrap();
         assert_eq!(audit.snapshot_digest.len(), 64);
+        assert_ne!(
+            audit.fix_tree_digest, audit.fix_parent_tree_digest,
+            "the fix commit's tree is read next to its parent's"
+        );
         let proof = task.insufficiency.as_ref().unwrap();
         proof.validate().unwrap();
         assert!(proof.hidden.values().any(|o| *o == HiddenOutcome::Failed));
@@ -344,14 +392,15 @@ fn every_anchor_task_has_an_audit_a_proof_and_a_control_and_the_pilot_never_tran
             "{id}: the fix tree passes every hidden test, assets included"
         );
         assert_eq!(task.controls.len(), 2, "one control per provider pair");
-        for (pair, control) in &task.controls {
+        for control in &task.controls {
+            let pair = &control.provider.model;
             assert_eq!(
                 control.terminal,
                 Terminal::Fail,
                 "{pair}: the statement alone did not solve it"
             );
             assert!(control.repository_access.is_empty());
-            assert_eq!(task.verdicts[pair], ControlVerdict::Eligible);
+            assert_eq!(verdict(task, control), ControlVerdict::Eligible);
         }
     }
     let nested = by_id("cargo-2").insufficiency.as_ref().unwrap();
@@ -394,7 +443,9 @@ fn every_anchor_task_has_an_audit_a_proof_and_a_control_and_the_pilot_never_tran
         "no control runs for a task without a proof"
     );
 
-    for (pair, accounting) in &report.accounting {
+    assert_eq!(report.accounting.len(), 2);
+    for accounting in &report.accounting {
+        let pair = &accounting.provider.model;
         assert_eq!(
             accounting.eligible,
             BTreeSet::from(["cargo-0".into(), "cargo-1".into(), "cargo-2".into()]),
@@ -404,13 +455,25 @@ fn every_anchor_task_has_an_audit_a_proof_and_a_control_and_the_pilot_never_tran
             accounting.cutoff_invalid["cargo-3"],
             CutoffRefused::FixNotAfterCutoff
         );
-        assert_eq!(
-            accounting.cutoff_invalid["cargo-4"],
-            CutoffRefused::SnapshotDigestMissing,
+        assert!(
+            accounting.cutoff_missing.contains("cargo-4"),
             "an unfetchable source has no cutoff evidence at all"
         );
-        assert!(accounting.insufficiency_missing.contains("cargo-5"));
-        let claim = &report.claims[pair];
+        assert!(
+            accounting.cutoff_missing.contains("django-16"),
+            "an unsupported runtime is missing evidence, not a failed cutoff"
+        );
+        assert_eq!(
+            accounting.cutoff_invalid["tokio-8"],
+            CutoffRefused::FixNotAfterCutoff
+        );
+        assert!(accounting.insufficiency_refused.contains_key("cargo-5"));
+        let claim = &report
+            .claims
+            .iter()
+            .find(|c| c.provider == accounting.provider)
+            .unwrap()
+            .claim;
         assert_eq!(claim.class, ClaimClass::GeneratedPhase1);
         assert!(
             claim.unmet.contains(&UnmetClause::AnchorSetIsPilot),
@@ -424,7 +487,7 @@ fn every_anchor_task_has_an_audit_a_proof_and_a_control_and_the_pilot_never_tran
         !text.contains("make it return the sum"),
         "issue text is fetched, never published"
     );
-    assert_eq!(published["corpus_digest"], corpus.digest());
+    assert_eq!(published["corpus_digest"], corpus.digest().unwrap());
     let corpus_text = serde_json::to_string(&corpus).unwrap();
     for entry in &corpus.entries {
         assert!(
@@ -454,33 +517,40 @@ fn a_memorizing_provider_is_excluded_for_its_pair_and_seeded_contamination_is_de
     );
     let first = anchor::run(&memorized, HOST).unwrap();
     for task in &first.report.tasks {
-        for (pair, control) in &task.controls {
+        for control in &task.controls {
+            let pair = &control.provider.model;
             assert_eq!(
                 control.terminal,
                 Terminal::Pass,
                 "{pair}: solved from the statement alone, every test in the file passing"
             );
             assert_eq!(
-                task.verdicts[pair],
+                verdict(task, control),
                 ControlVerdict::Excluded {
                     contamination: Contamination::Memorized
                 }
             );
         }
     }
-    for (pair, accounting) in &first.report.accounting {
+    for (accounting, claim) in first.report.accounting.iter().zip(&first.report.claims) {
+        let pair = &accounting.provider.model;
+        assert_eq!(accounting.provider, claim.provider);
         assert!(accounting.eligible.is_empty(), "{pair}");
         assert_eq!(
             accounting.excluded.len(),
             5,
             "{pair}: every task keeps its row and reason"
         );
-        assert_eq!(first.report.claims[pair].skipped.len(), 5);
+        assert_eq!(
+            claim.claim.skipped.len(),
+            20,
+            "{pair}: no task in the pilot is valid for a memorizing pair"
+        );
     }
     assert!(first.report.tasks.iter().all(|t| {
         t.verdicts
-            .values()
-            .all(|v| matches!(v, ControlVerdict::Excluded { .. }))
+            .iter()
+            .all(|v| matches!(v.verdict, ControlVerdict::Excluded { .. }))
     }));
 
     let mut contaminated = config(
@@ -495,10 +565,11 @@ fn a_memorizing_provider_is_excluded_for_its_pair_and_seeded_contamination_is_de
         u64::MAX,
     );
     contaminated.publish = dir.path().join("contaminated");
-    contaminated.settings.transfer_criterion = None;
+    contaminated.transfer_criterion = None;
     let second = anchor::run(&contaminated, HOST).unwrap();
     for task in &second.report.tasks {
-        for (pair, control) in &task.controls {
+        for control in &task.controls {
+            let pair = &control.provider.model;
             assert!(
                 !control.repository_access.is_empty(),
                 "{pair}: the relative repository read was observed"
@@ -513,7 +584,7 @@ fn a_memorizing_provider_is_excluded_for_its_pair_and_seeded_contamination_is_de
                 "{pair}: the pull request was named"
             );
             assert!(matches!(
-                task.verdicts[pair],
+                verdict(task, control),
                 ControlVerdict::Excluded {
                     contamination: Contamination::RepositoryAccess { .. }
                 }
@@ -525,11 +596,7 @@ fn a_memorizing_provider_is_excluded_for_its_pair_and_seeded_contamination_is_de
         "the control script and settings are part of the run's identity"
     );
     let digest = |run: &anchor::Run| {
-        run.report.tasks[0]
-            .controls
-            .values()
-            .next()
-            .unwrap()
+        run.report.tasks[0].controls[0]
             .analysis_family_digest
             .clone()
     };
@@ -564,7 +631,8 @@ fn a_control_past_its_deadline_is_censored_with_its_trace_and_a_failed_control_r
     };
     let run = anchor::run(&stalled, HOST).unwrap();
     for task in &run.report.tasks {
-        for (pair, control) in &task.controls {
+        for control in &task.controls {
+            let pair = &control.provider.model;
             assert_eq!(
                 control.terminal,
                 Terminal::Censored {
@@ -577,7 +645,7 @@ fn a_control_past_its_deadline_is_censored_with_its_trace_and_a_failed_control_r
                 "{pair}: the read announced before the deadline is kept"
             );
             assert!(matches!(
-                task.verdicts[pair],
+                verdict(task, control),
                 ControlVerdict::Excluded {
                     contamination: Contamination::RepositoryAccess { .. }
                 }
@@ -710,10 +778,16 @@ fn isolated() {{
     let mut limits = campaign::profile(Scale::S0, 128, 600_000, None).envelope;
     limits.processes = 2;
     let mut charges = campaign::Charges::new(limits);
+    let layout = anchor::Layout {
+        root: dir.path().to_path_buf(),
+        private: dir.path().to_path_buf(),
+        target: dir.path().join("target"),
+    };
     let results = anchor::grade(
         &workspace,
         &[("probe".to_string(), probe)],
-        &dir.path().join("target"),
+        &layout,
+        "probe",
         &mut charges,
     )
     .unwrap();

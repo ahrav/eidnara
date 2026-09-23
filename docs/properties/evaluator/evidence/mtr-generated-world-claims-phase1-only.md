@@ -21,14 +21,15 @@ provider/model pair."
 - `crates/daemon/examples/eval_runner/anchor.rs` `control`: the workspace sits
   outside the private root that the containment covers with an empty tmpfs;
   an announced call that climbs out of the workspace or names the private root
-  is repository access; `run_traced` keeps the trace printed before a
-  deadline kill; the terminal is `hidden_terminal`. `run` freezes the
-  settings' criterion into the analysis family and derives claims with
-  `AnalysisFamily::claim_class`.
+  is repository access; `run_bounded` keeps the trace printed before a
+  deadline kill; the terminal is `hidden_terminal`. `run` freezes
+  `Config::transfer_criterion` into the analysis family and derives claims
+  with `AnalysisFamily::claim_class`, one per `ProviderProfile`, never keyed
+  by a rendered string.
 - `crates/daemon/tests/eval_anchor.rs` `a_memorizing_provider_is_excluded_for_its_pair_and_seeded_contamination_is_detected`:
   the memorizing script passes every control from the statement alone, every
-  test in each hidden file passing, and every task is excluded for both pairs
-  with its reason; the contaminated script's relative repository read is
+  test in each hidden file passing, every graded task is excluded for both
+  pairs with its reason, and every pilot row is skipped; the contaminated script's relative repository read is
   detected and denied (the memorized fix it would have overwritten still
   passes) and its pull-request citation is detected; the second run's control
   script and criterion change its run id and family digest.

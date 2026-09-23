@@ -498,7 +498,7 @@ pub fn observe_agent(trace: &AgentTrace, later: Option<LaterSession>) -> Injecti
     }
 }
 
-/// The four canaries a containment must deny before generated code runs.
+/// The six canaries a containment must deny before generated code runs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Canary {
@@ -506,14 +506,20 @@ pub enum Canary {
     OutboundTcp,
     SetsidEscape,
     CredentialRead,
+    /// A write through a relative path that leaves the workspace.
+    OutsideWrite,
+    /// Unmounting whatever covers the private directory, then reading it.
+    MaskRemoval,
 }
 
 impl Canary {
-    pub const ALL: [Self; 4] = [
+    pub const ALL: [Self; 6] = [
         Self::ParentFileRead,
         Self::OutboundTcp,
         Self::SetsidEscape,
         Self::CredentialRead,
+        Self::OutsideWrite,
+        Self::MaskRemoval,
     ];
 }
 

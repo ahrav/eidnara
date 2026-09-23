@@ -552,6 +552,8 @@ pub fn run(config: &Config) -> Result<Run, RunError> {
         execution_mode: ExecutionMode::Generate,
         envelope: report.envelope.clone(),
         started_at_ms,
+        task_corpus: aging::suite_c_task_corpus(),
+        judge: "none".to_string(),
     });
     let manifest_bytes = serde_json::to_vec_pretty(&manifest.to_value()).unwrap();
     publish_file(&config.publish.join(REPORT_FILE), &bytes).map_err(publish_refused)?;

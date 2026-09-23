@@ -26,7 +26,7 @@ use eval_core::{
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use super::aging::{ManifestInputs, suite_c_manifest};
+use super::aging::{ManifestInputs, suite_c_manifest, suite_c_task_corpus};
 use super::campaign::{Charges, identity, parse_flags, prepare_publish, publish_file};
 use super::fault::ChildGuard;
 
@@ -545,6 +545,8 @@ pub fn run(config: &Config, spawn: Spawn) -> Result<Run, RunError> {
         execution_mode: ExecutionMode::Generate,
         envelope: charges.envelope.clone(),
         started_at_ms,
+        task_corpus: suite_c_task_corpus(),
+        judge: "none".to_string(),
     });
     let manifest_bytes = serde_json::to_vec_pretty(&manifest.to_value()).unwrap();
     publish_file(&config.publish.join(WITNESS_FILE), &witness_bytes).map_err(publish_refused)?;

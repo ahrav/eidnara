@@ -6,18 +6,19 @@
 use std::collections::BTreeMap;
 use std::io::Read;
 use std::path::{Component, Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Command, ExitStatus, Stdio};
 use std::time::{Duration, Instant};
 
 use context_core::canonical_json::protocol_digest;
 use eval_core::{
     Affordability, AnchorCorpus, AnchorEntry, AnchorError, AnchorRole, Approval, ClaimBoundary,
-    ClaimDerivation, ControlRefused, ControlVerdict, CutoffAudit, CutoffRefused, Family,
-    HiddenResults, InsufficiencyProof, NoRepositoryControl, PairAccounting, Preparation,
-    ProfileError, ProviderProfile, RealHistorySettings, RunProfile, Scale, SettingsRefused,
-    SkipReason, TaskBudgets, TaskUsage, Terminal, TimeStudyRefused, UnsupportedReason,
-    WitnessError, WorldProvenance, anchor_set, classify_control, eval_run_id, future_answers,
-    hidden_terminal, parse_witness, time_study,
+    ClaimDerivation, ClassifiedControl, ControlRefused, CutoffAudit, CutoffRefused, Family,
+    HiddenOutcome, HiddenResults, InsufficiencyProof, NoRepositoryControl, PairAccounting,
+    Preparation, ProfileError, ProviderProfile, RealHistorySettings, RepositoryComparison,
+    RunProfile, Scale, SettingsRefused, SkipReason, TaskBudgets, TaskUsage, Terminal,
+    TimeStudyRefused, TransferCriterion, UnsupportedReason, WitnessError, WorldProvenance,
+    anchor_set, classify_control, eval_run_id, future_answers, hidden_terminal, parse_witness,
+    time_study,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -26,7 +27,7 @@ use sha2::{Digest, Sha256};
 use super::aging::{ManifestInputs, suite_c_manifest};
 use super::campaign::{Charges, identity, prepare_publish, publish_file, sha256_hex};
 use super::fault::ChildGuard;
-use super::suite_d::{self, Grading, contain, run_bounded, run_hidden, run_traced};
+use super::suite_d::{self, GradeCache, contain, run_bounded, run_hidden};
 
 pub const SIMULATOR_VERSION: &str = "eval-anchor-shell/v1";
 pub const ANCHOR_REPORT_SCHEMA: &str = "eval-anchor-report/v1";
@@ -42,13 +43,21 @@ const GRADE_TIMEOUT: Duration = Duration::from_secs(600);
 pub struct Fetched {
     pub issue_text: String,
     pub issue_created_ms: i64,
+    /// When `issue_text` was written: the issue's last edit, or its creation
+    /// when it was never edited.
+    pub issue_text_ms: i64,
+    /// When the pull request was opened, when the entry names one and the
+    /// host knows.
+    pub pull_request_created_ms: Option<i64>,
 }
 
-/// The host seams: how a repository is cloned and how an issue is fetched.
+/// The host seams: how a repository is cloned, how an issue is fetched, and
+/// whether the host can create the containment's namespaces.
 #[derive(Debug, Clone, Copy)]
 pub struct Host {
     pub clone: fn(&AnchorEntry, &Path) -> std::io::Result<()>,
     pub fetch: fn(&AnchorEntry) -> Option<Fetched>,
+    pub namespaces: fn() -> bool,
 }
 
 /// What the scripted control agent does from the statement alone.
@@ -73,6 +82,9 @@ pub struct Config {
     pub publish: PathBuf,
     pub corpus: AnchorCorpus,
     pub settings: RealHistorySettings,
+    /// Frozen into the analysis family; absent, every claim derives as
+    /// `generated_phase1`.
+    pub transfer_criterion: Option<TransferCriterion>,
     pub control: ControlScript,
     pub budgets: TaskBudgets,
     pub store_bound_bytes: u64,
@@ -92,6 +104,10 @@ pub enum RunError {
     TimeStudy(#[from] TimeStudyRefused),
     #[error("the pilot is not affordable; stopping for maintainer approval: {0:?}")]
     StopForApproval(Affordability),
+    #[error("this host cannot create the containment's namespaces; nothing can run")]
+    NoContainment,
+    #[error("the containment refused to mount while grading {task}")]
+    MountRefused { task: String },
     #[error("suite d shell: {0}")]
     SuiteD(#[from] suite_d::RunError),
     #[error("envelope exceeded: {0:?}")]
@@ -122,8 +138,17 @@ pub struct TaskOutcome {
     pub audit: Option<CutoffAudit>,
     pub audit_refused: Option<CutoffRefused>,
     pub insufficiency: Option<InsufficiencyProof>,
-    pub controls: BTreeMap<String, NoRepositoryControl>,
-    pub verdicts: BTreeMap<String, ControlVerdict>,
+    /// One control per provider pair, each naming its provider.
+    pub controls: Vec<NoRepositoryControl>,
+    pub verdicts: Vec<ClassifiedControl>,
+}
+
+/// One provider pair's claim, next to the profile it was derived for.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PairClaim {
+    pub provider: ProviderProfile,
+    pub claim: ClaimDerivation,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -137,8 +162,9 @@ pub struct AnchorReport {
     pub role: AnchorRole,
     pub time_study: Affordability,
     pub tasks: Vec<TaskOutcome>,
-    pub accounting: BTreeMap<String, PairAccounting>,
-    pub claims: BTreeMap<String, ClaimDerivation>,
+    /// Per provider pair, in the settings' order; each names its provider.
+    pub accounting: Vec<PairAccounting>,
+    pub claims: Vec<PairClaim>,
     pub envelope: eval_core::Envelope,
 }
 
@@ -152,14 +178,15 @@ pub struct Run {
 fn git(dir: &Path, args: &[&str]) -> std::io::Result<Option<String>> {
     let mut command = Command::new("git");
     command.args(args).current_dir(dir).stderr(Stdio::null());
-    Ok(run_bounded(command, GIT_TIMEOUT)
-        .map_err(|e| std::io::Error::other(e.to_string()))?
-        .filter(|(status, _)| status.success())
-        .map(|(_, out)| out))
+    let (status, out) =
+        run_bounded(command, GIT_TIMEOUT).map_err(|e| std::io::Error::other(e.to_string()))?;
+    Ok(status.filter(ExitStatus::success).map(|_| out))
 }
 
-/// `-z` preserves unusual paths without Git's line-oriented quoting.
-fn diff_paths(repo: &Path, filter: &str, base: &str, fix: &str) -> std::io::Result<Vec<String>> {
+/// The paths `git diff` reports between two commits, added or changed
+/// according to `filter`; `-z` preserves unusual paths without Git's
+/// line-oriented quoting.
+fn diff_paths(repo: &Path, filter: &str, from: &str, to: &str) -> std::io::Result<Vec<String>> {
     let filter = format!("--diff-filter={filter}");
     let out = git(
         repo,
@@ -169,8 +196,8 @@ fn diff_paths(repo: &Path, filter: &str, base: &str, fix: &str) -> std::io::Resu
             "--name-only",
             "--no-renames",
             &filter,
-            base,
-            fix,
+            from,
+            to,
         ],
     )?
     .unwrap_or_default();
@@ -372,16 +399,36 @@ fn sh_quote(text: &str) -> String {
 
 struct Prepared {
     snapshot: PathBuf,
+    /// The fix commit's whole tree, its hidden tests removed.
     fix: PathBuf,
     audit: CutoffAudit,
     hidden: Vec<(String, String)>,
     fetched: Fetched,
 }
 
+/// The digest of `rev`'s tree read the same way as the snapshot's: archived
+/// into `scratch` and digested file by file.
+fn revision_tree_digest(repo: &Path, rev: &str, scratch: &Path) -> std::io::Result<Option<String>> {
+    fresh_dir(scratch)?;
+    let digest = if archive(repo, rev, &[], scratch)? {
+        Some(tree_digest(scratch)?)
+    } else {
+        None
+    };
+    std::fs::remove_dir_all(scratch)?;
+    Ok(digest)
+}
+
+/// Clones, archives the base into the snapshot and the whole fix into the
+/// fix tree, reads the commit times and tree digests the audit needs, and
+/// removes the clone. The store is charged while the clone still exists, so
+/// a checkout larger than the bound stops the run here.
 fn prepare(
     entry: &AnchorEntry,
     host: Host,
     private: &Path,
+    charges: &mut Charges,
+    store_root: &Path,
 ) -> Result<Result<Prepared, Terminal>, RunError> {
     let unavailable = || {
         Ok(Err(Terminal::Unsupported(
@@ -394,6 +441,7 @@ fn prepare(
         if (host.clone)(entry, &repo).is_err() {
             return unavailable();
         }
+        charges.charge_store(store_root)?;
         let Some(fetched) = (host.fetch)(entry) else {
             return unavailable();
         };
@@ -407,18 +455,53 @@ fn prepare(
         else {
             return unavailable();
         };
+        let parent = format!("{}^", entry.fix_sha);
+        let Some(parent_sha) = git(&repo, &["rev-parse", "--verify", &parent])? else {
+            return unavailable();
+        };
+        let parent_sha = parent_sha.trim().to_string();
+        let descends = git(
+            &repo,
+            &[
+                "merge-base",
+                "--is-ancestor",
+                &entry.base_sha,
+                &entry.fix_sha,
+            ],
+        )?
+        .is_some();
+        // The repair became public no later than the earliest fix-side
+        // commit and, when known, the pull request's creation.
+        let range = format!("{}..{}", entry.base_sha, entry.fix_sha);
+        let fix_side_ms = git(&repo, &["log", "--format=%ct", &range])?
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|line| line.trim().parse::<i64>().ok())
+            .map(|seconds| seconds * 1_000)
+            .min()
+            .unwrap_or(fix_ms);
+        let repair_public_ms = fetched
+            .pull_request_created_ms
+            .map_or(fix_side_ms, |pr_ms| pr_ms.min(fix_side_ms));
         let snapshot = private.join("snapshots").join(&entry.id);
         fresh_dir(&snapshot)?;
         if !archive(&repo, &entry.base_sha, &[], &snapshot)? {
             return unavailable();
         }
-        let added = diff_paths(&repo, "A", &entry.base_sha, &entry.fix_sha)?;
-        let changed = diff_paths(&repo, "d", &entry.base_sha, &entry.fix_sha)?;
         let fix = private.join("fixes").join(&entry.id);
         fresh_dir(&fix)?;
-        if !changed.is_empty() && !archive(&repo, &entry.fix_sha, &changed, &fix)? {
+        if !archive(&repo, &entry.fix_sha, &[], &fix)? {
             return unavailable();
         }
+        let fix_tree_digest = tree_digest(&fix)?;
+        let scratch = private.join("scratch");
+        let Some(fix_parent_tree_digest) = revision_tree_digest(&repo, &parent_sha, &scratch)?
+        else {
+            return unavailable();
+        };
+        // The patch and the hidden tests are what the fix commit itself
+        // changed against its parent; intervening history is not the fix.
+        let added = diff_paths(&repo, "A", &parent_sha, &entry.fix_sha)?;
         let mut hidden = Vec::new();
         for path in &added {
             let Some(name) = hidden_test_name(path) else {
@@ -429,16 +512,21 @@ fn prepare(
                 hidden.push((name.to_string(), content));
             }
         }
+        let snapshot_digest = tree_digest(&snapshot)?;
         let audit = CutoffAudit {
             task: entry.id.clone(),
+            entry_digest: entry.digest()?,
             cutoff_ms: entry.cutoff_ms,
             base_committed_ms: base_ms,
             fix_committed_ms: fix_ms,
+            repair_public_ms,
             issue_created_ms: fetched.issue_created_ms,
-            snapshot_digest: tree_digest(&snapshot)?,
-            fix_paths_present: added
-                .iter()
-                .any(|path| std::fs::symlink_metadata(snapshot.join(path)).is_ok()),
+            issue_text_ms: fetched.issue_text_ms,
+            base_tree_digest: snapshot_digest.clone(),
+            snapshot_digest,
+            fix_tree_digest,
+            fix_parent_tree_digest,
+            fix_descends_from_base: descends,
         };
         Ok(Ok(Prepared {
             snapshot,
@@ -452,28 +540,71 @@ fn prepare(
     prepared
 }
 
+/// Writes `tests` as `tests/hidden_<name>.rs` into `tree` (a `tests` entry
+/// that is not a directory and a symlink at a test's path are removed first,
+/// `.cargo/` is dropped) and grades them inside the containment, the tree
+/// read-only and only `layout.target` writable.
 pub fn grade(
-    workspace: &Path,
+    tree: &Path,
     tests: &[(String, String)],
-    target: &Path,
+    layout: &Layout,
+    task: &str,
     charges: &mut Charges,
 ) -> Result<HiddenResults, RunError> {
-    Ok(run_hidden(
-        workspace,
-        tests,
-        target,
+    let _ = std::fs::remove_dir_all(tree.join(".cargo"));
+    let dir = tree.join("tests");
+    if std::fs::symlink_metadata(&dir).is_ok_and(|meta| !meta.is_dir()) {
+        std::fs::remove_file(&dir)?;
+    }
+    std::fs::create_dir_all(&dir)?;
+    for (name, content) in tests {
+        let path = dir.join(format!("hidden_{name}.rs"));
+        if std::fs::symlink_metadata(&path).is_ok_and(|m| m.is_symlink()) {
+            std::fs::remove_file(&path)?;
+        }
+        std::fs::write(path, content)?;
+    }
+    let names: Vec<String> = tests.iter().map(|(name, _)| name.clone()).collect();
+    let tmp = layout.target.join("tmp");
+    let cargo_home = layout.private.join("cargo-home");
+    std::fs::create_dir_all(&tmp)?;
+    std::fs::create_dir_all(&cargo_home)?;
+    let cache = GradeCache {
+        target: &layout.target,
+        cargo_home: &cargo_home,
+        tmp: &tmp,
+    };
+    // A repository's own lockfile is kept and held to; a tree without one
+    // gets one written by the runner.
+    let keep_lockfile = tree.join("Cargo.lock").is_file();
+    match run_hidden(
+        tree,
+        &names,
+        cache,
+        keep_lockfile,
+        true,
         GRADE_TIMEOUT,
-        Grading::Isolated,
         charges,
-    )?)
+    )? {
+        Some(graded) if graded.mount_refused => Err(RunError::MountRefused {
+            task: task.to_string(),
+        }),
+        Some(graded) => Ok(graded.hidden),
+        // The manifest did not resolve offline: nothing was executed.
+        None => Ok(names
+            .into_iter()
+            .map(|name| (name, HiddenOutcome::Errored))
+            .collect()),
+    }
 }
 
 /// The containment mounts an empty tmpfs over `private`, hiding all but
-/// `root`'s control workspace.
-struct Layout {
-    root: PathBuf,
-    private: PathBuf,
-    target: PathBuf,
+/// `root`'s control workspace; grading sees everything read-only but
+/// `target`.
+pub struct Layout {
+    pub root: PathBuf,
+    pub private: PathBuf,
+    pub target: PathBuf,
 }
 
 /// The control: the statement alone in an otherwise empty workspace inside
@@ -549,8 +680,8 @@ fn control(run: &ControlRun<'_>, charges: &mut Charges) -> Result<NoRepositoryCo
     let deadline = config.budgets.hard_deadline_ms;
     let started = Instant::now();
     charges.process_started()?;
-    let output = run_traced(
-        contain(&layout.private, &workspace, &inner),
+    let output = run_bounded(
+        contain(Some(&layout.private), &workspace, &inner),
         Duration::from_millis(deadline),
     );
     charges.process_ended();
@@ -573,7 +704,7 @@ fn control(run: &ControlRun<'_>, charges: &mut Charges) -> Result<NoRepositoryCo
     let mut calls = 0u32;
     let mut repository_access = Vec::new();
     let mut outputs = Vec::new();
-    for line in String::from_utf8_lossy(&stdout).lines() {
+    for line in stdout.lines() {
         match line.strip_prefix(TOOL_LINE) {
             Some(call) => {
                 calls += 1;
@@ -597,7 +728,7 @@ fn control(run: &ControlRun<'_>, charges: &mut Charges) -> Result<NoRepositoryCo
         fresh_dir(&graded)?;
         copy_tree(&prepared.snapshot, &graded)?;
         overlay_patch(&workspace.join("patch"), &graded)?;
-        grade(&graded, &prepared.hidden, &layout.target, charges)?
+        grade(&graded, &prepared.hidden, layout, &entry.id, charges)?
     };
     let terminal = hidden_terminal(
         prepared.hidden.iter().map(|(name, _)| name.as_str()),
@@ -607,10 +738,12 @@ fn control(run: &ControlRun<'_>, charges: &mut Charges) -> Result<NoRepositoryCo
     );
     Ok(NoRepositoryControl {
         task: entry.id.clone(),
+        entry_digest: prepared.audit.entry_digest.clone(),
         provider: provider.clone(),
         execution_image: config.settings.execution_image.clone(),
         analysis_family_digest: digest.to_string(),
         terminal,
+        started: true,
         repository_access,
         future_answers: future_answers(entry, &outputs.join("\n")),
     })
@@ -643,7 +776,7 @@ pub fn run(config: &Config, host: Host) -> Result<Run, RunError> {
         serde_json::from_slice(&std::fs::read(&config.witness)?).map_err(std::io::Error::other)?;
     parse_witness(&witness_value)?;
     let mut family = super::campaign::family(&profile);
-    family.transfer_criterion = config.settings.transfer_criterion.clone();
+    family.transfer_criterion = config.transfer_criterion.clone();
     let family_digest = family
         .digest()
         .map_err(|e| std::io::Error::other(format!("{e:?}")))?;
@@ -651,6 +784,11 @@ pub fn run(config: &Config, host: Host) -> Result<Run, RunError> {
         .settings
         .preparation_bound_ms
         .ok_or(SettingsRefused::NoPreparationBound)?;
+    // Every proof and control runs inside the containment; a host without
+    // it grades nothing, and says so instead of erroring every test.
+    if !(host.namespaces)() {
+        return Err(RunError::NoContainment);
+    }
     let mut charges = Charges::new(profile.envelope.clone());
     prepare_publish(&config.publish, &[REPORT_FILE, MANIFEST_FILE]).map_err(publish_refused)?;
     let root = charges.occupy()?;
@@ -668,12 +806,13 @@ pub fn run(config: &Config, host: Host) -> Result<Run, RunError> {
     let mut tasks = Vec::new();
     for entry in &config.corpus.entries {
         let started = Instant::now();
-        let outcome = prepare(entry, host, &layout.private)?;
+        let outcome = prepare(entry, host, &layout.private, &mut charges, &layout.root)?;
         let prepare_ms = u64::try_from(started.elapsed().as_millis()).unwrap();
         charges.charge_store(&layout.root)?;
         if measured.len() < eval_core::TIME_STUDY_TASKS {
             measured.push(Preparation {
                 task: entry.id.clone(),
+                entry_digest: entry.digest()?,
                 prepare_ms,
             });
         }
@@ -691,7 +830,8 @@ pub fn run(config: &Config, host: Host) -> Result<Run, RunError> {
 
     let mut audits = BTreeMap::new();
     let mut proofs = BTreeMap::new();
-    let mut controls_by_pair: BTreeMap<String, BTreeMap<String, ControlVerdict>> = BTreeMap::new();
+    let mut controls_by_pair: BTreeMap<ProviderProfile, BTreeMap<String, ClassifiedControl>> =
+        BTreeMap::new();
     let mut outcomes = Vec::new();
     for (entry, prepare_ms) in tasks {
         let mut outcome = TaskOutcome {
@@ -701,8 +841,8 @@ pub fn run(config: &Config, host: Host) -> Result<Run, RunError> {
             audit: None,
             audit_refused: None,
             insufficiency: None,
-            controls: BTreeMap::new(),
-            verdicts: BTreeMap::new(),
+            controls: Vec::new(),
+            verdicts: Vec::new(),
         };
         let ready = match prepared.remove(&entry.id).unwrap() {
             Ok(ready) => ready,
@@ -721,7 +861,7 @@ pub fn run(config: &Config, host: Host) -> Result<Run, RunError> {
         }
         outcome.audit = Some(ready.audit.clone());
         audits.insert(entry.id.clone(), ready.audit.clone());
-        if let Err(refused) = ready.audit.validate() {
+        if let Err(refused) = ready.audit.validate_for(entry) {
             outcome.audit_refused = Some(refused);
             outcome.terminal = Terminal::Skipped(SkipReason::MissingCutoffEvidence);
             outcomes.push(outcome);
@@ -730,11 +870,14 @@ pub fn run(config: &Config, host: Host) -> Result<Run, RunError> {
         let tree = layout.private.join("tree");
         fresh_dir(&tree)?;
         copy_tree(&ready.snapshot, &tree)?;
-        let hidden = grade(&tree, &ready.hidden, &layout.target, &mut charges)?;
+        let hidden = grade(&tree, &ready.hidden, &layout, &entry.id, &mut charges)?;
+        fresh_dir(&tree)?;
         copy_tree(&ready.fix, &tree)?;
-        let reference = grade(&tree, &ready.hidden, &layout.target, &mut charges)?;
+        let reference = grade(&tree, &ready.hidden, &layout, &entry.id, &mut charges)?;
         let proof = InsufficiencyProof {
             task: entry.id.clone(),
+            entry_digest: ready.audit.entry_digest.clone(),
+            snapshot_digest: ready.audit.snapshot_digest.clone(),
             hidden,
             reference,
         };
@@ -759,52 +902,64 @@ pub fn run(config: &Config, host: Host) -> Result<Run, RunError> {
                     },
                     &mut charges,
                 )?;
-                let expected = NoRepositoryControl {
+                // No agent runs with the repository in this shell yet; the
+                // proven current-tree-only run (`Fail`) is the repository-
+                // bearing baseline the control is judged against.
+                let expected = RepositoryComparison {
                     task: entry.id.clone(),
+                    entry_digest: ready.audit.entry_digest.clone(),
                     provider: provider.clone(),
                     execution_image: config.settings.execution_image.clone(),
                     analysis_family_digest: family_digest.clone(),
-                    terminal: Terminal::Indeterminate,
-                    repository_access: Vec::new(),
-                    future_answers: Vec::new(),
+                    terminal: outcome.terminal,
+                    started: true,
                 };
-                let verdict = classify_control(&control, &expected).map_err(|refused| {
+                let classified = classify_control(&control, &expected).map_err(|refused| {
                     RunError::NotComparable {
                         task: entry.id.clone(),
                         refused,
                     }
                 })?;
                 controls_by_pair
-                    .entry(provider.key())
+                    .entry(provider.clone())
                     .or_default()
-                    .insert(entry.id.clone(), verdict.clone());
-                outcome.controls.insert(provider.key(), control);
-                outcome.verdicts.insert(provider.key(), verdict);
+                    .insert(entry.id.clone(), classified.clone());
+                outcome.controls.push(control);
+                outcome.verdicts.push(classified);
             }
         }
         charges.charge_store(&layout.root)?;
         outcomes.push(outcome);
     }
     let role = AnchorRole::Pilot;
-    let mut accounting = BTreeMap::new();
-    let mut claims = BTreeMap::new();
+    let mut accounting = Vec::new();
+    let mut claims = Vec::new();
     for provider in &config.settings.providers {
-        let verdicts = controls_by_pair.remove(&provider.key()).unwrap_or_default();
-        let (set, pair) = anchor_set(&config.corpus, role, &audits, &proofs, &verdicts, provider);
-        claims.insert(
-            provider.key(),
-            family.claim_class(WorldProvenance::RealHistory, Some(&set)),
-        );
-        accounting.insert(provider.key(), pair);
+        let classified = controls_by_pair.remove(provider).unwrap_or_default();
+        let (set, pair) = anchor_set(
+            &config.corpus,
+            role,
+            &audits,
+            &proofs,
+            &classified,
+            provider,
+        )?;
+        claims.push(PairClaim {
+            provider: provider.clone(),
+            claim: family.claim_class(WorldProvenance::RealHistory, Some(&set)),
+        });
+        accounting.push(pair);
     }
 
+    let corpus_digest = config.corpus.digest()?;
     let run_identity = identity(
         &profile,
         SIMULATOR_VERSION,
         0,
         json!({
-            "corpus": config.corpus.digest(),
+            "corpus": corpus_digest,
             "settings": sha256_hex(&serde_json::to_vec(&config.settings).unwrap()),
+            "transfer_criterion": config.transfer_criterion,
             "control": config.control,
         }),
         &std::env::current_exe().unwrap(),
@@ -816,7 +971,7 @@ pub fn run(config: &Config, host: Host) -> Result<Run, RunError> {
         eval_run_id: eval_run_id(&run_identity).unwrap(),
         profile_digest,
         claim_boundary: ClaimBoundary::pinned(),
-        corpus_digest: config.corpus.digest(),
+        corpus_digest,
         role,
         time_study: affordability,
         tasks: outcomes,
@@ -843,6 +998,8 @@ pub fn run(config: &Config, host: Host) -> Result<Run, RunError> {
         execution_mode: eval_core::ExecutionMode::Generate,
         envelope: report.envelope.clone(),
         started_at_ms,
+        task_corpus: format!("anchor:{}", report.corpus_digest),
+        judge: suite_d::JUDGE_VERSION.to_string(),
     });
     let manifest_bytes = serde_json::to_vec_pretty(&manifest.to_value()).unwrap();
     publish_file(&config.publish.join(REPORT_FILE), &report_bytes).map_err(publish_refused)?;

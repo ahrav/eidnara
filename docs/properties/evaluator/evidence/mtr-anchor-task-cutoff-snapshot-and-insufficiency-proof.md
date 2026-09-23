@@ -10,18 +10,22 @@ run." Ticket #767 acceptance.
   `InsufficiencyProof::validate` (`NothingExecuted`, `ReferenceDoesNotPass`,
   `TreeAlreadyPasses`).
 - `crates/daemon/examples/eval_runner/anchor.rs` `prepare`: clone through the
-  host seam, `git show -s --format=%ct` for both commits, `git archive` of the
-  base piped into `tar` under `pipe_bounded`, `git diff -z --no-renames` for
-  the fix's added and changed paths, `git archive` of the changed files,
-  `hidden_test_name` for files directly under `tests/`, `tree_digest` over
-  bytes, executable bits, and symlink targets; `run` copies the snapshot into a
-  fresh tree with `cp -RP`, runs the hidden tests, copies the fix over the same
-  tree, and runs them again as the reference.
+  host seam with the store charged while the clone exists, `git show -s
+  --format=%ct` for both commits, `git merge-base --is-ancestor` for the
+  descent, the earliest fix-side commit for the repair's publication,
+  `git archive` of the base and of the whole fix commit piped into `tar` under
+  `pipe_bounded`, `git diff -z --no-renames` from the fix's parent to the fix
+  for the added paths, `hidden_test_name` for files directly under `tests/`,
+  `tree_digest` over bytes, executable bits, and symlink targets for the
+  snapshot, the fix tree, and the fix's parent; `run` copies the snapshot into
+  a fresh tree with `cp -RP`, runs the hidden tests, copies the fix tree into a
+  fresh tree, and runs them again as the reference.
 - `crates/daemon/examples/eval_runner/suite_d.rs` `run_hidden` under
-  `Grading::Isolated` and `harness_outcome`: every summary `ok` with at least
-  one test passed.
+  `contain` (tree read-only, build cache writable, throwaway `HOME`, loopback
+  up) and `harness_outcome`: every summary `ok` with at least one test passed.
 - `crates/daemon/tests/eval_anchor.rs` `every_anchor_task_has_an_audit_a_proof_and_a_control_and_the_pilot_never_transfers`:
-  three tasks audited, proven failing, and passing on the fix tree with a
+  over the pilot composition of local repositories, three tasks audited
+  (each fix tree unlike its parent's), proven failing, and passing on the fix tree with a
   binary file, a symlink, and an executable script read by the hidden tests,
   one of them with a module under `tests/nested/`; one with an early fix
   skipped as `missing_cutoff_evidence` with `fix_not_after_cutoff` and no run;

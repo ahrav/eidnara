@@ -458,6 +458,14 @@ fn wire_names_are_pinned() {
         json!("setsid_escape")
     );
     assert_eq!(
+        serde_json::to_value(Canary::OutsideWrite).unwrap(),
+        json!("outside_write")
+    );
+    assert_eq!(
+        serde_json::to_value(Canary::MaskRemoval).unwrap(),
+        json!("mask_removal")
+    );
+    assert_eq!(
         serde_json::to_value(HiddenOutcome::Errored).unwrap(),
         json!("errored")
     );
