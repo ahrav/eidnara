@@ -2760,8 +2760,12 @@ detected; a different control script and criterion giving a different run
 id and family digest; a stalled control censored with its announced read
 kept; a failed control refusing the run; an unaffordable time study
 stopping for approval with nothing published; a one-byte store bound
-refusing during preparation; missing settings, a missing witness, and a
-climbing id refusing before execution; the contained grading reaching
+refusing during preparation, and a clone larger than the bound refusing
+before it is removed; a base whose failing build script the fix deletes
+proven insufficient because the reference is the fix commit's whole tree,
+and a test file an intervening commit added kept out of the fix's hidden
+tests; missing settings, a missing witness, a climbing id, and a host
+without namespaces refusing before execution; the contained grading reaching
 neither the runner's `HOME` nor its loopback listener while the test's own
 loopback works; and the archive pipeline returning within its deadline with
 both ends reaped.

@@ -66,6 +66,12 @@ enum Variant {
     MissingIssue,
     UnresolvableDependency,
     NestedTestFile,
+    /// The base commit carries a build script that fails; the fix deletes
+    /// it, so only the exact fix tree builds.
+    DeletesBuildScript,
+    /// The base commit is two commits behind the fix: an intervening commit
+    /// after the cutoff adds a test file that is not the fix's.
+    IntermediateCommit,
 }
 
 fn git(dir: &Path, args: &[&str], seconds: i64) -> String {
@@ -104,6 +110,13 @@ fn history(dir: &Path, index: u32, variant: Variant) -> (String, String) {
         text.push_str("eidnara-absent-offline = \"1\"\n");
         std::fs::write(&manifest, text).unwrap();
     }
+    if variant == Variant::DeletesBuildScript {
+        std::fs::write(
+            dir.join("build.rs"),
+            "fn main() { panic!(\"the base tree does not build\"); }\n",
+        )
+        .unwrap();
+    }
     std::fs::create_dir_all(dir.join("assets")).unwrap();
     std::fs::write(dir.join("assets/blob.bin"), BLOB).unwrap();
     std::os::unix::fs::symlink("blob.bin", dir.join("assets/link")).unwrap();
@@ -115,6 +128,24 @@ fn history(dir: &Path, index: u32, variant: Variant) -> (String, String) {
     git(dir, &["add", "-A"], BASE_SECONDS);
     git(dir, &["commit", "-q", "-m", "base"], BASE_SECONDS);
     let base = git(dir, &["rev-parse", "HEAD"], BASE_SECONDS);
+    if variant == Variant::IntermediateCommit {
+        std::fs::create_dir_all(dir.join("tests")).unwrap();
+        std::fs::write(
+            dir.join("tests/unrelated.rs"),
+            "#[test]\nfn unrelated() {}\n",
+        )
+        .unwrap();
+        // After the cutoff, as every fix-side commit must be.
+        git(dir, &["add", "-A"], FIX_SECONDS - 1_800);
+        git(
+            dir,
+            &["commit", "-q", "-m", "unrelated"],
+            FIX_SECONDS - 1_800,
+        );
+    }
+    if variant == Variant::DeletesBuildScript {
+        std::fs::remove_file(dir.join("build.rs")).unwrap();
+    }
     suite_d::write_files(dir, &task.correct_fix).unwrap();
     for test in &task.hidden_tests {
         let path = dir.join(test.path());
@@ -714,6 +745,70 @@ fn the_store_is_charged_while_preparing_not_after_the_pilot() {
 }
 
 #[test]
+fn the_clone_is_charged_before_it_is_removed() {
+    fn bulky_clone(entry: &AnchorEntry, into: &Path) -> std::io::Result<()> {
+        clone_local(entry, into)?;
+        // Untracked, so no snapshot or fix tree holds it: only the clone does.
+        std::fs::write(into.join("bulk.bin"), vec![0u8; 4 << 20])
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = corpus(dir.path(), &PLAIN);
+    let mut config = config(dir.path(), corpus, ControlScript::default(), u64::MAX);
+    config.store_bound_bytes = 2 << 20;
+    let host = Host {
+        clone: bulky_clone,
+        ..HOST
+    };
+    match anchor::run(&config, host) {
+        Err(RunError::Envelope(exceeded)) => {
+            assert_eq!(exceeded.resource, Resource::StoreBytes);
+        }
+        Err(other) => panic!("expected the clone to trip the store bound, got {other:?}"),
+        Ok(_) => panic!("expected the clone to trip the store bound, got a run"),
+    }
+    assert!(!config.publish.join(REPORT_FILE).exists());
+}
+
+#[test]
+fn the_fix_is_its_own_diff_and_its_whole_tree() {
+    if !suite_d::namespaces_available() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = corpus(
+        dir.path(),
+        &[Variant::DeletesBuildScript, Variant::IntermediateCommit],
+    );
+    let mut config = config(dir.path(), corpus, ControlScript::default(), u64::MAX);
+    config.settings.providers.truncate(1);
+    let run = anchor::run(&config, HOST).unwrap();
+    let by_id = |id: &str| run.report.tasks.iter().find(|t| t.id == id).unwrap();
+    let deletes = by_id("cargo-0");
+    let proof = deletes.insufficiency.as_ref().unwrap();
+    assert!(
+        proof.hidden.values().all(|o| *o == HiddenOutcome::Errored),
+        "the base tree's build script fails every test"
+    );
+    assert!(
+        proof
+            .reference
+            .values()
+            .all(|o| *o == HiddenOutcome::Passed),
+        "the reference is the fix commit's tree, the deleted build script gone"
+    );
+    assert_eq!(deletes.terminal, Terminal::Fail);
+    let intermediate = by_id("cargo-1");
+    let proof = intermediate.insufficiency.as_ref().unwrap();
+    assert_eq!(
+        proof.hidden.len(),
+        2,
+        "a test file an intervening commit added is not one of the fix's hidden tests"
+    );
+    assert!(!proof.hidden.contains_key("unrelated"));
+    assert_eq!(intermediate.terminal, Terminal::Fail);
+}
+
+#[test]
 fn missing_settings_and_an_unaccepted_witness_refuse_before_execution() {
     let dir = tempfile::tempdir().unwrap();
     let corpus = corpus(dir.path(), &PLAIN);
@@ -744,6 +839,21 @@ fn missing_settings_and_an_unaccepted_witness_refuse_before_execution() {
         anchor::run(&climbing, HOST),
         Err(RunError::Corpus(AnchorError::NotAPathComponent { .. }))
     ));
+    let mut no_namespaces = config.clone();
+    no_namespaces.settings = settings(1);
+    assert!(
+        matches!(
+            anchor::run(
+                &no_namespaces,
+                Host {
+                    namespaces: || false,
+                    ..HOST
+                }
+            ),
+            Err(RunError::NoContainment)
+        ),
+        "a host without namespaces refuses before preparing anything"
+    );
     assert!(!config.publish.exists());
 }
 
