@@ -113,6 +113,7 @@ fn control(task: &str, terminal: Terminal) -> NoRepositoryControl {
         execution_image: "image-1".to_string(),
         analysis_family_digest: "cd".repeat(32),
         terminal,
+        started: true,
         repository_access: Vec::new(),
         future_answers: Vec::new(),
     }
@@ -126,6 +127,7 @@ fn comparison(task: &str, terminal: Terminal) -> RepositoryComparison {
         execution_image: "image-1".to_string(),
         analysis_family_digest: "cd".repeat(32),
         terminal,
+        started: true,
     }
 }
 
@@ -1731,4 +1733,23 @@ fn a_textual_pull_request_reference_survives_odd_whitespace() {
             "{output:?}"
         );
     }
+}
+
+#[test]
+fn a_censored_run_that_never_started_did_not_run() {
+    let censored = Terminal::Censored {
+        reason: eval_core::CensorReason::MaxToolCalls,
+    };
+    let mut unstarted = control("cargo-0", censored);
+    unstarted.started = false;
+    assert!(classify_control(&unstarted, &comparison("cargo-0", Terminal::Fail)).is_err());
+    let mut unstarted_comparison = comparison("cargo-0", censored);
+    unstarted_comparison.started = false;
+    assert!(classify_control(&control("cargo-0", Terminal::Fail), &unstarted_comparison).is_err());
+    let started = control("cargo-0", censored);
+    assert_eq!(
+        verdict_of(&started, &comparison("cargo-0", Terminal::Fail)),
+        Ok(ControlVerdict::Eligible),
+        "a censored control that ran is not memorized"
+    );
 }

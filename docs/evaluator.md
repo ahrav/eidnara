@@ -2561,16 +2561,18 @@ for one `ProviderProfile {provider, model, tokenizer_profile}`, compared
 field by field, never through a rendered key: `task`, `entry_digest`,
 `provider`,
 `execution_image`,
-`analysis_family_digest`, `terminal`, the `repository_access` it reached, and
-the `future_answers` its output named. `RepositoryComparison` is the
+`analysis_family_digest`, `terminal`, `started` (whether the agent ran at
+all), the `repository_access` it reached, and the `future_answers` its
+output named. `RepositoryComparison` is the
 repository-bearing run it is judged against (`task`, `entry_digest`,
-`provider`, `execution_image`, `analysis_family_digest`, `terminal`); a
-control is never its own comparison. `classify_control(control,
+`provider`, `execution_image`, `analysis_family_digest`, `terminal`,
+`started`); a control is never its own comparison. `classify_control(control,
 comparison)` refuses `MalformedDigest` unless the analysis digest is
 sixty-four lowercase hex, `NotComparable {field}` unless task, row digest,
 provider, image, and analysis digest match the comparison, `NotRun` when
-the control's terminal is not `pass`, `fail`, or `censored`, and
-`ComparisonNotRun` when the comparison's is not; then the pair is
+the control's terminal is not `pass`, `fail`, or `censored` or its agent
+never started (a budget spent before the first call), and
+`ComparisonNotRun` likewise for the comparison; then the pair is
 `Excluded` as `repository_access`, `future_answer`, or `memorized` (the
 control passed from the statement alone), else `Eligible`; a censored
 control is eligible. `future_answers(entry, output)` names the fix commit

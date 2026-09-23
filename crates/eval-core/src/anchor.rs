@@ -651,6 +651,9 @@ pub struct NoRepositoryControl {
     pub execution_image: String,
     pub analysis_family_digest: String,
     pub terminal: Terminal,
+    /// Whether the agent started; a run censored before it did shows nothing
+    /// about the statement.
+    pub started: bool,
     /// Repository paths or commands the control reached; a control has none.
     pub repository_access: Vec<String>,
     /// Post-cutoff identifiers (the fix commit, the pull request) the
@@ -671,6 +674,8 @@ pub struct RepositoryComparison {
     pub execution_image: String,
     pub analysis_family_digest: String,
     pub terminal: Terminal,
+    /// Whether the agent started.
+    pub started: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -719,12 +724,14 @@ pub enum ControlRefused {
 
 debug_display!(ControlRefused);
 
-/// A terminal a run reached, not one it never started.
-fn ran(terminal: Terminal) -> bool {
-    matches!(
-        terminal,
-        Terminal::Pass | Terminal::Fail | Terminal::Censored { .. }
-    )
+/// A terminal a started run reached; a censored run whose agent never
+/// started (a budget spent before the first call) ran nothing.
+fn ran(terminal: Terminal, started: bool) -> bool {
+    started
+        && matches!(
+            terminal,
+            Terminal::Pass | Terminal::Fail | Terminal::Censored { .. }
+        )
 }
 
 /// Classifies comparable controls whose control and comparison both ran to
@@ -758,12 +765,12 @@ pub fn classify_control(
             return Err(ControlRefused::NotComparable { field });
         }
     }
-    if !ran(control.terminal) {
+    if !ran(control.terminal, control.started) {
         return Err(ControlRefused::NotRun {
             terminal: control.terminal,
         });
     }
-    if !ran(comparison.terminal) {
+    if !ran(comparison.terminal, comparison.started) {
         return Err(ControlRefused::ComparisonNotRun {
             terminal: comparison.terminal,
         });
