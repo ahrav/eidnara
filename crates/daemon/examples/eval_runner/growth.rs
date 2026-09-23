@@ -6,11 +6,13 @@ use std::path::{Path, PathBuf};
 
 use eval_core::{
     Approval, CampaignResources, ClaimBoundary, Coverage, Cut, EnvelopeExceeded, ExecutionMode,
-    GROWTH_REPORT_SCHEMA, GrowthBounds, GrowthLedger, GrowthMode, GrowthRefused, GrowthReport,
-    GrowthReportError, HeadroomSample, Operation, ProfileError, ResourceSample, ReviewerQuota,
-    RunProfile, Scale, SearchEpisodeFault, StoreBytes, StoreFamily, SwarmMix, eval_run_id,
+    GROWTH_REPORT_SCHEMA, GrowthBounds, GrowthContract, GrowthLedger, GrowthMode, GrowthRefused,
+    GrowthReport, GrowthReportError, HeadroomSample, Operation, ProfileError, ResourceSample,
+    ReviewerQuota, RunProfile, Scale, SearchEpisodeFault, StoreBytes, StoreFamily, SwarmMix,
+    eval_run_id,
 };
 use memory_store::memory_reviewer_jobs::{
+    FROZEN_PAGE_RECEIPT_CHARGE_BYTES, FROZEN_SELECTION_ALLOWANCE_BYTES,
     MAX_MEMORY_REVIEWER_METADATA_BYTES_PER_HOST, MAX_MEMORY_REVIEWER_METADATA_BYTES_PER_PROJECT,
     MAX_PENDING_MEMORY_REVIEWER_JOBS_PER_PROJECT, MEMORY_REVIEWER_JOB_ALLOWANCE_BYTES,
     MEMORY_REVIEWER_RECEIPT_CHARGE_BYTES, MemoryReviewerJobRefusal,
@@ -86,6 +88,8 @@ pub fn quota() -> ReviewerQuota {
     ReviewerQuota {
         receipt_charge_bytes: MEMORY_REVIEWER_RECEIPT_CHARGE_BYTES,
         job_allowance_bytes: MEMORY_REVIEWER_JOB_ALLOWANCE_BYTES,
+        page_receipt_bytes: FROZEN_PAGE_RECEIPT_CHARGE_BYTES,
+        page_allowance_bytes: FROZEN_SELECTION_ALLOWANCE_BYTES,
         project_metadata_bytes: MAX_MEMORY_REVIEWER_METADATA_BYTES_PER_PROJECT,
         host_metadata_bytes: MAX_MEMORY_REVIEWER_METADATA_BYTES_PER_HOST,
     }
@@ -181,7 +185,7 @@ pub struct Campaign {
 
 impl Campaign {
     pub fn open(root: &Path, plan: Plan, mode: GrowthMode) -> Self {
-        let stores = Stores::open(root, plan.rendering.clone());
+        let stores = Stores::open(root, &plan);
         let generation = activate_module_authority(&stores.memory, root);
         commit_memory_domain(&stores.corpus.kernel);
         Self {
@@ -293,10 +297,15 @@ impl Campaign {
             &memory_file(self.root()),
             "SELECT COUNT(*) FROM memory_reviewer_jobs WHERE state='terminal'",
         );
+        let terminal_pages = count(
+            &memory_file(self.root()),
+            "SELECT COUNT(*) FROM memory_reviewer_frozen_selections WHERE state<>'frozen'",
+        );
         HeadroomSample {
             pending_jobs: headroom.pending_jobs as u64,
             terminal_jobs: terminal,
-            page_bytes: 0,
+            frozen_pages: headroom.frozen_pages as u64,
+            terminal_pages,
             project_metadata_bytes: headroom.project_metadata_bytes,
             project_metadata_remaining: headroom.project_metadata_remaining,
             admitted_total: self.admitted_total,
@@ -494,7 +503,8 @@ pub fn run(config: &Config) -> Result<Run, RunError> {
             .unwrap();
     }
     if ledger.samples.iter().all(|sample| {
-        sample.headroom.project_metadata_bytes == quota.expected_project_bytes(&sample.headroom)
+        quota.expected_project_bytes(&sample.headroom)
+            == Some(sample.headroom.project_metadata_bytes)
     }) {
         coverage
             .record("flt_headroom_accounted_from_store_constants")
@@ -511,8 +521,13 @@ pub fn run(config: &Config) -> Result<Run, RunError> {
             "messages": config.messages,
             "mode": config.mode,
         }),
-        &std::env::current_exe().unwrap(),
+        &[std::env::current_exe().unwrap()],
     );
+    let contract = GrowthContract {
+        quota: quota.clone(),
+        bounds: bounds.clone(),
+        envelope: profile.envelope.clone(),
+    };
     let mut report = GrowthReport {
         schema: GROWTH_REPORT_SCHEMA.to_string(),
         eval_run_id: eval_run_id(&identity).unwrap(),
@@ -529,7 +544,7 @@ pub fn run(config: &Config) -> Result<Run, RunError> {
         envelope: charges.envelope.clone(),
     };
     charges.retain_publish_root()?;
-    report.validate()?;
+    report.validate(&contract)?;
     let bytes = charges.publish_bytes(|envelope| {
         report.envelope = envelope.clone();
         serde_json::to_vec_pretty(&serde_json::to_value(&report).unwrap()).unwrap()

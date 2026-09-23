@@ -20,8 +20,8 @@ use std::path::PathBuf;
 
 use campaign::Charges;
 use eval_core::{
-    Approval, Coverage, EnvelopeExceeded, GrowthMode, GrowthRefused, GrowthReport, MARKERS,
-    Operation, ProfileError, Resource, Scale, StoreFamily, digests_match_serial, isolated,
+    Approval, Coverage, EnvelopeExceeded, GrowthContract, GrowthMode, GrowthRefused, GrowthReport,
+    MARKERS, Operation, ProfileError, Resource, Scale, StoreFamily, digests_match_serial, isolated,
     parse_growth_report, parse_manifest,
 };
 use growth::{Campaign, Config, MANIFEST_FILE, REPORT_FILE, Run, RunError};
@@ -68,6 +68,7 @@ fn config(publish: PathBuf, elapsed_bound_ms: u64, mode: GrowthMode) -> Config {
 
 struct Published {
     run: Run,
+    config: Config,
     out: PathBuf,
     _publish: tempfile::TempDir,
 }
@@ -75,14 +76,34 @@ struct Published {
 fn campaign(mode: GrowthMode, coverage: &mut Coverage) -> Published {
     let publish = tempfile::tempdir().unwrap();
     let out = publish.path().join("out");
-    let run = growth::run(&config(out.clone(), budget().unwrap_or(600_000), mode)).unwrap();
+    let config = config(out.clone(), budget().unwrap_or(600_000), mode);
+    let run = growth::run(&config).unwrap();
     for marker in run.coverage.fired() {
         coverage.record(marker).unwrap();
     }
     Published {
         run,
+        config,
         out,
         _publish: publish,
+    }
+}
+
+/// What the test holds the report to, derived from the config it ran and the
+/// store's constants, not read back from the report.
+fn contract(published: &Published) -> GrowthContract {
+    let config = &published.config;
+    let steps = aging::plan(config.messages).unwrap().steps.len() as u32;
+    let profile = growth::profile(
+        config.scale,
+        steps,
+        config.elapsed_bound_ms,
+        config.approval.clone(),
+    );
+    GrowthContract {
+        quota: growth::quota(),
+        bounds: growth::bounds(&profile, config.messages),
+        envelope: profile.envelope.clone(),
     }
 }
 
@@ -90,7 +111,8 @@ fn a_never_restored_campaign_samples_every_quiescence_and_refuses_a_restore_scen
     published: &Published,
 ) {
     let report = &published.run.report;
-    report.validate().unwrap();
+    let contract = contract(published);
+    report.validate(&contract).unwrap();
     assert_eq!(report.ledger.mode, GrowthMode::NeverRestored);
     assert_eq!(report.ledger.restores_refused, 0);
     let steps = aging::plan(MESSAGES).unwrap().steps.len();
@@ -127,6 +149,7 @@ fn a_never_restored_campaign_samples_every_quiescence_and_refuses_a_restore_scen
 
     let parsed = parse_growth_report(
         &serde_json::from_slice(&std::fs::read(published.out.join(REPORT_FILE)).unwrap()).unwrap(),
+        &contract,
     )
     .unwrap();
     assert_eq!(parsed, *report);
@@ -135,7 +158,7 @@ fn a_never_restored_campaign_samples_every_quiescence_and_refuses_a_restore_scen
             .unwrap(),
     )
     .unwrap();
-    let value = serde_json::to_value(report.serialize().unwrap()).unwrap();
+    let value = serde_json::to_value(report.serialize(&contract).unwrap()).unwrap();
     assert_eq!(
         manifest.result_digest,
         GrowthReport::result_digest(&value).unwrap()
@@ -190,7 +213,7 @@ fn reviewer_headroom_is_accounted_from_the_stores_own_constants_scenario(publish
     );
     for sample in &report.ledger.samples {
         assert_eq!(
-            sample.headroom.project_metadata_bytes,
+            Some(sample.headroom.project_metadata_bytes),
             report.quota.expected_project_bytes(&sample.headroom),
             "step {}: receipt charges and pending allowances account for every byte",
             sample.step
@@ -356,7 +379,7 @@ fn quota_pressure_past_the_pending_cap_settles_new_admissions_instead_of_panicki
     );
     assert_eq!(headroom.r24_refusals, 0);
     assert_eq!(
-        headroom.project_metadata_bytes,
+        Some(headroom.project_metadata_bytes),
         growth::quota().expected_project_bytes(&headroom)
     );
 }
