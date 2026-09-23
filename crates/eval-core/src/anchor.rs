@@ -99,8 +99,8 @@ pub enum AnchorError {
     DuplicateId {
         id: String,
     },
-    /// Two rows name one fix commit of one repository: one historical task
-    /// under two ids.
+    /// Two rows name one fix commit, or one issue, of one repository: one
+    /// historical task under two ids.
     DuplicateTask {
         id: String,
         of: String,
@@ -135,7 +135,7 @@ impl AnchorEntry {
             }
         }
         for (field, sha) in [("base_sha", &self.base_sha), ("fix_sha", &self.fix_sha)] {
-            if !is_lower_hex(sha, 40) {
+            if !is_lower_hex(sha, 40) || sha.bytes().all(|b| b == b'0') {
                 return Err(AnchorError::NotASha { id: id(), field });
             }
         }
@@ -184,24 +184,29 @@ fn is_url(text: &str) -> bool {
     text.strip_prefix("https://")
         .and_then(|rest| rest.split_once('/'))
         .is_some_and(|(host, path)| {
-            host.split('.').all(|label| {
-                let edges_alphanumeric = label
-                    .chars()
-                    .next()
-                    .zip(label.chars().last())
-                    .is_some_and(|(a, z)| a.is_ascii_alphanumeric() && z.is_ascii_alphanumeric());
-                edges_alphanumeric
-                    && label
+            host.len() <= 253
+                && host.split('.').all(|label| {
+                    let edges_alphanumeric = label
                         .chars()
-                        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
-            }) && path.split('/').all(|segment| {
-                !segment.is_empty()
-                    && segment != "."
-                    && segment != ".."
-                    && segment
-                        .chars()
-                        .all(|c| c.is_ascii_alphanumeric() || "-._~".contains(c))
-            })
+                        .next()
+                        .zip(label.chars().last())
+                        .is_some_and(|(a, z)| {
+                            a.is_ascii_alphanumeric() && z.is_ascii_alphanumeric()
+                        });
+                    edges_alphanumeric
+                        && label.len() <= 63
+                        && label
+                            .chars()
+                            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+                })
+                && path.split('/').all(|segment| {
+                    !segment.is_empty()
+                        && segment != "."
+                        && segment != ".."
+                        && segment
+                            .chars()
+                            .all(|c| c.is_ascii_alphanumeric() || "-._~".contains(c))
+                })
         })
 }
 
@@ -210,8 +215,17 @@ fn is_url(text: &str) -> bool {
 /// is not. Identifiers are judged by shape, not against the SPDX list.
 fn is_spdx_expression(text: &str) -> bool {
     const OPERATORS: [&str; 3] = ["AND", "OR", "WITH"];
+    let balanced = text
+        .chars()
+        .try_fold(0i32, |depth, c| match c {
+            '(' => Some(depth + 1),
+            ')' => (depth > 0).then(|| depth - 1),
+            _ => Some(depth),
+        })
+        .is_some_and(|depth| depth == 0);
     let tokens: Vec<&str> = text.split_whitespace().collect();
-    tokens.len() % 2 == 1
+    balanced
+        && tokens.len() % 2 == 1
         && tokens.iter().enumerate().all(|(i, token)| {
             if i % 2 == 1 {
                 OPERATORS.contains(token)
@@ -241,6 +255,7 @@ impl AnchorCorpus {
         }
         let mut ids = BTreeSet::new();
         let mut fixes = BTreeMap::new();
+        let mut issues = BTreeMap::new();
         for entry in &self.entries {
             entry.validate()?;
             if !ids.insert(entry.id.as_str()) {
@@ -248,13 +263,10 @@ impl AnchorCorpus {
                     id: entry.id.clone(),
                 });
             }
-            if let Some(of) = fixes.insert(
-                (
-                    repository_web_path(&entry.repository).to_ascii_lowercase(),
-                    entry.fix_sha.as_str(),
-                ),
-                &entry.id,
-            ) {
+            let repository = repository_web_path(&entry.repository).to_ascii_lowercase();
+            let by_fix = fixes.insert((repository.clone(), entry.fix_sha.as_str()), &entry.id);
+            let by_issue = issues.insert((repository, entry.issue), &entry.id);
+            if let Some(of) = by_fix.or(by_issue) {
                 return Err(AnchorError::DuplicateTask {
                     id: entry.id.clone(),
                     of: of.clone(),

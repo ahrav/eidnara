@@ -1476,3 +1476,36 @@ fn a_projection_past_u64_is_never_affordable() {
         })
     );
 }
+
+#[test]
+fn one_issue_under_two_fixes_is_one_task() {
+    let mut corpus = pilot();
+    let mut alias = corpus.entries[0].clone();
+    alias.id = "cargo-0-again".to_string();
+    alias.fix_sha = sha(0x99);
+    corpus.entries.push(alias);
+    assert!(corpus.validate().is_err());
+}
+
+#[test]
+fn a_license_expression_balances_its_parentheses() {
+    for license in ["MIT)", "MIT OR (Apache-2.0", "(MIT OR Apache-2.0))"] {
+        let mut entry = entry("cargo-0", Family::Cargo, 0x10);
+        entry.license = license.to_string();
+        assert!(entry.validate().is_err(), "{license}");
+    }
+}
+
+#[test]
+fn a_dns_label_is_at_most_sixty_three_bytes() {
+    let mut entry = entry("cargo-0", Family::Cargo, 0x10);
+    entry.repository = format!("https://{}.invalid/cargo/repo.git", "a".repeat(64));
+    assert!(entry.validate().is_err());
+}
+
+#[test]
+fn the_null_object_id_names_no_commit() {
+    let mut entry = entry("cargo-0", Family::Cargo, 0x10);
+    entry.base_sha = "0".repeat(40);
+    assert!(entry.validate().is_err());
+}

@@ -2443,17 +2443,20 @@ refuses an empty field, an `id` with whitespace, a `repository` that is not
 an `https://` URL of a host in lowercase DNS labels and a repository path
 in unreserved characters (so `git@host:path`, `ssh://`, `file://`, a user,
 a port, a query, a fragment, an upper-case or trailing-dot host, a label
-starting or ending in `-`, an empty
+starting or ending in `-` or longer than sixty-three bytes, an empty
 host, a `.` or `..` or empty path segment, or a trailing slash refuses, and
 the `/pull/` URLs
 `future_answers` matches derive
 from the URL itself), a `license` that is not an SPDX expression by shape (identifiers of SPDX
 characters, each holding a letter or digit, joined by `AND`, `OR`, or
-`WITH`; not checked against the SPDX list) (`TextPersisted`), a
-malformed SHA, a fix commit that is the base commit (`FixIsBase`), an
+`WITH`, with balanced parentheses; not checked against the SPDX list)
+(`TextPersisted`), a
+malformed or all-zero SHA, a fix commit that is the base commit
+(`FixIsBase`), an
 `issue` or `pull_request` of zero (`ZeroNumber`), a duplicate id, and one
-fix commit of one repository (by lowercased web path, so `repo`,
-`repo.git`, and `Repo` are one repository) under two ids (`DuplicateTask`). `digest` validates first and refuses a
+fix commit or one issue of one repository (by lowercased web path, so
+`repo`, `repo.git`, and `Repo` are one repository) under two ids
+(`DuplicateTask`). `digest` validates first and refuses a
 row JSON cannot carry exactly (`NotCanonical`) instead of panicking.
 `AnchorEntry::digest` (`eval-anchor-entry-digest/v1`) is the identity every
 piece of evidence names: an audit, a proof, or a control produced for one
