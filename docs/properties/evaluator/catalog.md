@@ -660,9 +660,10 @@ Impact: An agent could read the runner's files or credentials, reach the
   network, write outside its workspace, undo its own containment, or leave a
   process behind, and the campaign would still report its task outcome.
 Open questions:
-- The read-only rebinds cover the temp directories and the home directory, not
-  every writable path on the host; a full read-only root needs `pivot_root`.
-  (needs human input)
+- Every mount is read-only inside and `/run` is masked, but the host
+  filesystem stays readable and a pathname socket outside `/run` stays
+  connectable; hiding both needs a `pivot_root` into a curated root. (needs
+  human input)
 - `$HOME` is read-only inside, not masked: the agent can read the host user's
   files under it (dotfiles, credentials) even though it cannot write them or
   reach the network. A masked home needs its own tmpfs. (needs human input)
@@ -711,7 +712,8 @@ Confidence: high -
   censored agent, its empty trace scored every case `obeyed: no`.
 Existing check: `crates/eval-core/src/task.rs` `TaskCorpus::validate`,
   `carrier_path`, `observe_agent`; `crates/eval-core/src/injection.rs`
-  `score_injection`; shell `agent_run`, `later_session`; tests above.
+  `score_injection`; shell `agent_run`, and `run`, which builds the
+  `LaterSession` from the rows the agent appended; tests above.
 Impact: An agent that only quoted a canary would be scored as obeying it, or one
   that obeyed silently would not be.
 Open questions:

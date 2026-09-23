@@ -9,12 +9,14 @@ disabled must report `allowed` for each".
 
 ## Evidence trail
 - `crates/daemon/examples/eval_runner/suite_d.rs` `contain`: `unshare
-  --user --map-root-user --mount --pid --net --fork --kill-child`, then
-  `MOUNTS`: an empty read-only tmpfs over the private directory, the
-  workspace bound writable, `/tmp`, `/var/tmp`, `/dev/shm`, and `$HOME`
-  re-bound read-only, `cd` into the workspace by its absolute path, then
-  `exec setpriv --no-new-privs --inh-caps=-all --ambient-caps=-all
-  --bounding-set=-all`. Any failing step exits 97 and the run is refused.
+  --user --map-root-user --mount --pid --net --ipc --fork --kill-child
+  --mount-proc`, then `MOUNTS`: an empty read-only tmpfs over the private
+  directory, the workspace bound writable, every other mount remounted
+  read-only or covered by an empty tmpfs, a refusal if any topmost mount is
+  still writable, `/run` masked, `cd` into the workspace by its absolute
+  path, then `exec prlimit --nproc=128:128 setpriv --no-new-privs
+  --inh-caps=-all --ambient-caps=-all --bounding-set=-all`. Any failing step exits 97 and
+  the run is refused.
 - `canary_main`, started in the workspace, reads the secret and credential
   files under the private directory, connects to the runner's loopback
   listener, starts the escapee under `setsid` and waits for its first write
@@ -23,7 +25,9 @@ disabled must report `allowed` for each".
   `escapee_ready`, `umount_ran`, or `proc_namespaced` (the PID `/proc/self`
   names is the canary's own) is false, when the contained canary connects to
   the runner's Unix socket under `$XDG_RUNTIME_DIR` or the control cannot,
-  or when all 200 of the contained canary's forks succeed, then samples the alive file twice, 300 ms apart,
+  or when all 200 of the contained canary's forks succeed, or when the
+  contained canary shares the runner's IPC namespace (or the control does
+  not), then samples the alive file twice, 300 ms apart,
   after the child exited. The escapee exits on its own after three seconds.
 - `crates/eval-core/src/task.rs` `ContainmentReport::validate` over the six
   `Canary` variants.
@@ -65,9 +69,11 @@ A host seam reporting no namespaces, and the real namespaces where present.
 
 ## Investigation log
 ### Q: Is every path outside the workspace read-only inside?
-- Sources examined: `MOUNTS`; a probe of `/var/tmp` before it was added.
-- Findings: the named trees are; other world-writable paths on a host are
-  not covered without a `pivot_root` into a read-only root.
+- Sources examined: `MOUNTS`; a build script writing under
+  `$XDG_RUNTIME_DIR` before the remount pass replaced the named trees.
+- Findings: every mount is, and `/run` is masked. What remains is that the
+  host filesystem is readable inside and a pathname socket outside `/run`
+  is connectable; hiding those needs a `pivot_root` into a curated root.
 - Missing evidence: a maintainer decision on the containment depth.
 - Conclusion: unresolved, needs human input.
 ### Q: Can a slow host read a live escapee as denied?

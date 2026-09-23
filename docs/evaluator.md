@@ -2310,13 +2310,15 @@ frozen; the containment canaries and the hidden-test adequacy of every task
 run first and are recorded as the self-tests, and `SuiteDAdmission::admit`
 refuses before the first agent if any is missing.
 
-Containment is `unshare --user --map-root-user --mount --pid --net --fork
---kill-child --mount-proc` with the environment cleared to `PATH`, `HOME`,
-and the variables the inner command sets, so `/proc` inside lists the
-namespace's own processes, not the host's; the canary refuses a run whose `/proc/self` names
-a PID other than its own, one that can connect to a socket the runner
-listens on under the host's runtime directory, or one whose 200 forks all
-succeed. The script run inside before the agent covers the runner's
+Containment is `unshare --user --map-root-user --mount --pid --net --ipc
+--fork --kill-child --mount-proc` with the environment cleared to `PATH`,
+`HOME`, and the variables the inner command sets, so `/proc` inside lists
+the namespace's own processes, not the host's, and System V IPC objects are
+the namespace's own; the canary refuses a run whose `/proc/self` names a PID
+other than its own, one that shares the runner's IPC namespace (or a control
+that does not), one that can connect to a socket the runner listens on under
+the host's runtime directory, or one whose 200 forks all succeed. The script
+run inside before the agent covers the runner's
 private directory with an empty read-only tmpfs, binds the workspace
 writable, then remounts every other mount in the namespace read-only (one
 that refuses, such as a locked autofs, is covered by an empty read-only tmpfs
@@ -2324,9 +2326,9 @@ instead) and refuses the run if any mount's topmost instance is still
 writable, so the read-only set is everything the host has rather than a list
 of directories, covers `/run` with an empty tmpfs so host services' pathname
 sockets are out of reach (a network namespace does not stop `connect` on a
-socket file; one elsewhere on the host stays reachable), and sets a process
-limit of 128 that `RLIMIT_NPROC` enforces per user namespace, so a fork bomb
-stops there; it then enters the workspace by its absolute path (a working
+socket file; one elsewhere on the host stays reachable), and runs the
+program under `prlimit --nproc=128`, which `RLIMIT_NPROC` enforces per user
+namespace, so a fork bomb stops there; it then enters the workspace by its absolute path (a working
 directory inherited from before the mounts still resolves to the writable
 mount underneath every read-only remount) and drops the mapped root's
 capabilities with `setpriv` (bounding, inheritable, and ambient sets cleared,
