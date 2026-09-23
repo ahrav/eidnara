@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::checkpoint::StoreFamily;
-use crate::fault::RecordedRefusal;
+use crate::fault::{ExpectedRefusal, RecordedRefusal};
 
 pub const GROWTH_REPORT_SCHEMA: &str = "eval-suite-c-growth-report/v1";
 const GROWTH_RESULT_DIGEST_PROTOCOL: &str = "eval-suite-c-growth-report-result/v1";
@@ -30,11 +30,17 @@ pub struct ReviewerQuota {
 impl ReviewerQuota {
     /// Bytes the quota should hold for the jobs counted: a permanent receipt
     /// charge per terminal job, the receipt charge plus the pending allowance
-    /// per job still open, plus whatever frozen pages are charged.
-    pub fn expected_project_bytes(&self, headroom: &HeadroomSample) -> u64 {
-        self.receipt_charge_bytes * headroom.terminal_jobs
-            + (self.receipt_charge_bytes + self.job_allowance_bytes) * headroom.pending_jobs
-            + headroom.page_bytes
+    /// per job still open, plus whatever frozen pages are charged. `None` when
+    /// the counts do not fit in `u64`.
+    pub fn expected_project_bytes(&self, headroom: &HeadroomSample) -> Option<u64> {
+        self.receipt_charge_bytes
+            .checked_mul(headroom.terminal_jobs)?
+            .checked_add(
+                self.receipt_charge_bytes
+                    .checked_add(self.job_allowance_bytes)?
+                    .checked_mul(headroom.pending_jobs)?,
+            )?
+            .checked_add(headroom.page_bytes)
     }
 
     /// How many more admissions the remaining bytes allow, as a report figure
@@ -86,14 +92,30 @@ pub struct ResourceSample {
 }
 
 impl ResourceSample {
+    /// Store bytes with their sidecars, saturating so a read past `u64` is a
+    /// refusal downstream and not a panic.
     pub fn store_total(&self) -> u64 {
-        self.stores.values().map(|b| b.file + b.wal + b.shm).sum()
+        self.stores
+            .values()
+            .fold(0u64, |t, b| saturating_sum(t, [b.file, b.wal, b.shm]))
     }
 
     /// Main database-file bytes, excluding the `-wal` and `-shm` sidecars.
     pub fn durable_store_bytes(&self) -> u64 {
-        self.stores.values().map(|b| b.file).sum()
+        self.stores
+            .values()
+            .fold(0u64, |t, b| t.saturating_add(b.file))
     }
+
+    fn wal_bytes(&self) -> u64 {
+        self.stores
+            .values()
+            .fold(0u64, |t, b| t.saturating_add(b.wal))
+    }
+}
+
+fn saturating_sum(start: u64, terms: impl IntoIterator<Item = u64>) -> u64 {
+    terms.into_iter().fold(start, u64::saturating_add)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -132,10 +154,15 @@ pub struct GrowthLedger {
 pub enum GrowthRefused {
     RestoreUnderNeverRestored,
     NoSamples,
+    /// A leak verdict needs a baseline and a final sample.
+    NoBaseline,
     StepNotMonotonic {
         step: u32,
     },
     CommitSeqNotMonotonic {
+        step: u32,
+    },
+    R24NotMonotonic {
         step: u32,
     },
     StoreMissing {
@@ -151,6 +178,10 @@ pub enum GrowthRefused {
         step: u32,
         expected: u64,
         observed: u64,
+    },
+    /// The quota constants times the jobs counted do not fit in `u64`.
+    HeadroomOverflow {
+        step: u32,
     },
     RemainingMismatch {
         step: u32,
@@ -222,6 +253,9 @@ impl GrowthLedger {
             return Err(GrowthRefused::NotALeakVerdict { mode: self.mode });
         }
         let last = self.samples.last().ok_or(GrowthRefused::NoSamples)?;
+        if self.samples.len() < 2 {
+            return Err(GrowthRefused::NoBaseline);
+        }
         self.check_order()?;
         for sample in &self.samples {
             if let Some(family) = StoreFamily::ALL
@@ -233,7 +267,9 @@ impl GrowthLedger {
                     family,
                 });
             }
-            let expected = quota.expected_project_bytes(&sample.headroom);
+            let expected = quota
+                .expected_project_bytes(&sample.headroom)
+                .ok_or(GrowthRefused::HeadroomOverflow { step: sample.step })?;
             if sample.headroom.project_metadata_bytes != expected {
                 return Err(GrowthRefused::HeadroomMismatch {
                     step: sample.step,
@@ -257,7 +293,7 @@ impl GrowthLedger {
                 observed: last.artifact_tmp_entries,
             });
         }
-        let wal: u64 = last.stores.values().map(|b| b.wal).sum();
+        let wal = last.wal_bytes();
         if wal != 0 {
             return Err(GrowthRefused::Leak {
                 resource: "wal_bytes_after_truncate".to_string(),
@@ -278,7 +314,8 @@ impl GrowthLedger {
             }
         }
         let first = &self.samples[0];
-        let commits = u64::try_from(last.commit_seq - first.commit_seq).unwrap_or(0);
+        let commits =
+            u64::try_from(i128::from(last.commit_seq) - i128::from(first.commit_seq)).unwrap_or(0);
         let grown = last
             .durable_store_bytes()
             .saturating_sub(first.durable_store_bytes());
@@ -339,6 +376,9 @@ fn in_order(prev: &ResourceSample, next: &ResourceSample) -> Result<(), GrowthRe
     }
     if next.commit_seq < prev.commit_seq {
         return Err(GrowthRefused::CommitSeqNotMonotonic { step: next.step });
+    }
+    if next.headroom.r24_refusals < prev.headroom.r24_refusals {
+        return Err(GrowthRefused::R24NotMonotonic { step: next.step });
     }
     Ok(())
 }
@@ -413,11 +453,25 @@ pub struct CampaignResources {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IsolationRefused {
-    SharedRoot { path: String },
-    SharedPublishDir { path: String },
-    SharedCassetteNamespace { namespace: String },
-    SharedPort { port: u16 },
-    DigestDiffersFromSerial { campaign: usize },
+    SharedRoot {
+        path: String,
+    },
+    SharedPublishDir {
+        path: String,
+    },
+    SharedCassetteNamespace {
+        namespace: String,
+    },
+    SharedPort {
+        port: u16,
+    },
+    /// Isolation is a claim about at least two campaigns.
+    TooFewCampaigns {
+        campaigns: usize,
+    },
+    DigestDiffersFromSerial {
+        campaign: usize,
+    },
 }
 
 /// Two campaigns are isolated when they share none of these, and their
@@ -456,6 +510,11 @@ pub fn digests_match_serial(
             campaign: concurrent.len().min(serial.len()),
         });
     }
+    if concurrent.len() < 2 {
+        return Err(IsolationRefused::TooFewCampaigns {
+            campaigns: concurrent.len(),
+        });
+    }
     for (i, (c, s)) in concurrent.iter().zip(serial).enumerate() {
         if c != s {
             return Err(IsolationRefused::DigestDiffersFromSerial { campaign: i });
@@ -484,21 +543,42 @@ pub struct GrowthReport {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GrowthReportError {
-    SchemaMismatch { found: String },
+    SchemaMismatch {
+        found: String,
+    },
     Growth(GrowthRefused),
     Mix(MixIncomplete),
     SafetyNeverChecked,
     EnvelopeNotHonoured(crate::EnvelopeExceeded),
+    /// A sample read more of a resource than the envelope peak admits.
+    EnvelopeNotCharged {
+        resource: crate::Resource,
+        step: u32,
+        peak: u64,
+        observed: u64,
+    },
+    /// The embedded bounds are not the approved ones the caller passed.
+    BoundsNotApproved,
+    /// The final sample's R24 count and the recorded R24 refusals disagree.
+    R24Unreconciled {
+        counted: u64,
+        recorded: u64,
+    },
     Shape(String),
     Lossy,
 }
 
 impl GrowthReport {
-    pub fn validate(&self) -> Result<(), GrowthReportError> {
+    /// `bounds` are the approved bounds the caller holds; the embedded copy
+    /// must equal them, so a producer cannot widen what it is judged by.
+    pub fn validate(&self, bounds: &GrowthBounds) -> Result<(), GrowthReportError> {
         if self.schema != GROWTH_REPORT_SCHEMA {
             return Err(GrowthReportError::SchemaMismatch {
                 found: self.schema.clone(),
             });
+        }
+        if self.bounds != *bounds {
+            return Err(GrowthReportError::BoundsNotApproved);
         }
         self.mix.complete().map_err(GrowthReportError::Mix)?;
         let faulted = self.fault_episodes > 0 || self.mix.exercised(Operation::FaultEpisode);
@@ -508,6 +588,38 @@ impl GrowthReport {
         self.envelope
             .check()
             .map_err(GrowthReportError::EnvelopeNotHonoured)?;
+        for sample in &self.ledger.samples {
+            for (resource, observed) in [
+                (crate::Resource::StoreBytes, sample.store_total()),
+                (crate::Resource::CassetteBytes, sample.cassette_bytes),
+                (crate::Resource::ArtifactBytes, sample.artifact_bytes),
+                (crate::Resource::TempRoots, sample.temp_roots),
+                (crate::Resource::Processes, sample.processes),
+            ] {
+                let peak = resource.of(&self.envelope.peaks);
+                if observed > peak {
+                    return Err(GrowthReportError::EnvelopeNotCharged {
+                        resource,
+                        step: sample.step,
+                        peak,
+                        observed,
+                    });
+                }
+            }
+        }
+        let recorded = self
+            .expected_refusals
+            .iter()
+            .filter(|r| r.refusal == ExpectedRefusal::R24ReceiptQuotaExhausted)
+            .count() as u64;
+        let counted = self
+            .ledger
+            .samples
+            .last()
+            .map_or(0, |s| s.headroom.r24_refusals);
+        if counted != recorded {
+            return Err(GrowthReportError::R24Unreconciled { counted, recorded });
+        }
         match self.ledger.mode {
             GrowthMode::NeverRestored => self
                 .ledger
@@ -525,8 +637,8 @@ impl GrowthReport {
         Ok(())
     }
 
-    pub fn serialize(&self) -> Result<Value, GrowthReportError> {
-        self.validate()?;
+    pub fn serialize(&self, bounds: &GrowthBounds) -> Result<Value, GrowthReportError> {
+        self.validate(bounds)?;
         serde_json::to_value(self).map_err(|e| GrowthReportError::Shape(e.to_string()))
     }
 
@@ -557,10 +669,13 @@ impl GrowthReport {
     }
 }
 
-pub fn parse_growth_report(value: &Value) -> Result<GrowthReport, GrowthReportError> {
+pub fn parse_growth_report(
+    value: &Value,
+    bounds: &GrowthBounds,
+) -> Result<GrowthReport, GrowthReportError> {
     let report =
         GrowthReport::deserialize(value).map_err(|e| GrowthReportError::Shape(e.to_string()))?;
-    report.validate()?;
+    report.validate(bounds)?;
     let again =
         serde_json::to_value(&report).map_err(|e| GrowthReportError::Shape(e.to_string()))?;
     if again != *value {

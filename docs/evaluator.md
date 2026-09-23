@@ -1766,10 +1766,14 @@ refusals). A `GrowthLedger` records samples under a `GrowthMode`
 (`never_restored` or `restoring`) with monotonic steps and commit sequence;
 `restore_attempted` under `never_restored` is `RestoreUnderNeverRestored` and
 counted. `verdict(quota, bounds)` is a leak verdict only for a never-restored
-ledger (`NotALeakVerdict` otherwise): every sample must carry every store
+ledger (`NotALeakVerdict` otherwise) with a baseline and a final sample
+(`NoBaseline` for one sample, which has no interval to judge growth over):
+every sample must carry every store
 family (`StoreMissing { step, family }`, so an omitted store cannot hide its
 bytes), its project bytes must equal `expected_project_bytes`
-(`HeadroomMismatch`) and its remaining bytes the quota less that figure
+(`HeadroomMismatch`; `HeadroomOverflow` when the counts do not fit in `u64`,
+since a report is read from disk and never trusted to be small) and its
+remaining bytes the quota less that figure
 (`RemainingMismatch`), the final sample must hold no
 temporary artifact entry, no WAL bytes, no temp root, and no process (`Leak {
 resource, step, observed }`), and its store total, artifact objects and bytes, commit
@@ -1779,8 +1783,10 @@ first and the last sample must not exceed `store_bytes_per_commit` times the
 commits between them (`GrowthRateExceeded`; zero commits allow no growth), so a leak proportional to the
 history is refused even under the size bound. The rate excludes `-wal` and
 `-shm` bytes, so a WAL-heavy first sample cannot cancel the file bytes the
-history retained. `verdict` and `validate` re-check the step and commit
-ordering over the whole ledger, because a deserialized ledger never passed
+history retained; byte totals saturate, so a reading past `u64` is a refusal,
+not a panic. `verdict` and `validate` re-check the step, commit, and R24
+ordering over the whole ledger (`R24NotMonotonic`), because a deserialized
+ledger never passed
 through `record`. `peak_store_bytes` is the largest total any
 sample saw, the transient pressure the envelope must also be charged with.
 
@@ -1796,16 +1802,24 @@ by the shared value (a root and a publish directory are one filesystem
 resource, so one campaign's root equal to another's publish directory is
 refused too), and `digests_match_serial` refuses
 `DigestDiffersFromSerial { campaign }` when a concurrent run's result digest
-differs from its serial one.
+differs from its serial one and `TooFewCampaigns` below two, since isolation
+is a claim about at least two.
 
 `GrowthReport` (`eval-suite-c-growth-report/v1`) is what one campaign
 publishes: identity, profile digest, claim boundary, the quota read, the
 bounds, the ledger, the mix, expected refusals, fault-episode and
 safety-check counts (`SafetyNeverChecked` when either the fault-episode count
 or the mix records a fault episode and no safety check ran while armed),
-markers, and envelope. `validate` runs the mix and ledger refusals and refuses
-an envelope whose peaks crossed a bound (`EnvelopeNotHonoured`);
-`parse_growth_report` reads a report back losslessly; `result_digest` drops
+markers, and envelope. `validate(bounds)` takes the approved bounds and
+refuses an embedded copy that differs (`BoundsNotApproved`), as the fault
+report takes its liveness bounds, so a producer cannot widen what it is
+judged by; it runs the mix and ledger refusals, refuses
+an envelope whose peaks crossed a bound (`EnvelopeNotHonoured`) or that a
+sample's store total, cassette or artifact bytes, temp roots, or processes
+exceed (`EnvelopeNotCharged { resource, step, peak, observed }`), and refuses
+a final R24 count that differs from the R24 entries in `expected_refusals`
+(`R24Unreconciled { counted, recorded }`);
+`parse_growth_report(value, bounds)` reads a report back losslessly; `result_digest` drops
 each sample's byte measurements (`stores`, `artifact_bytes`,
 `cassette_bytes`) and the envelope peaks, which name one machine's bytes, and
 keeps steps, commit sequence, row and object counts, and headroom, so a

@@ -1,11 +1,11 @@
 use std::collections::BTreeSet;
 
 use eval_core::{
-    CampaignResources, ClaimBoundary, Coverage, Envelope, EnvelopeExceeded, GROWTH_REPORT_SCHEMA,
-    GrowthBounds, GrowthLedger, GrowthMode, GrowthRefused, GrowthReport, GrowthReportError,
-    HeadroomSample, IsolationRefused, MixIncomplete, Operation, Resource, ResourceLimits,
-    ResourceSample, ReviewerQuota, StoreBytes, StoreFamily, SwarmMix, digests_match_serial,
-    isolated, parse_growth_report,
+    CampaignResources, ClaimBoundary, Coverage, Envelope, EnvelopeExceeded, ExpectedRefusal,
+    GROWTH_REPORT_SCHEMA, GrowthBounds, GrowthLedger, GrowthMode, GrowthRefused, GrowthReport,
+    GrowthReportError, HeadroomSample, IsolationRefused, MixIncomplete, Operation, RecordedRefusal,
+    Resource, ResourceLimits, ResourceSample, ReviewerQuota, StoreBytes, StoreFamily, SwarmMix,
+    digests_match_serial, isolated, parse_growth_report,
 };
 
 const SUITE: &str = "crates/eval-core/tests/growth.rs::";
@@ -105,6 +105,10 @@ fn mix() -> SwarmMix {
 }
 
 fn report() -> GrowthReport {
+    let ledger = ledger();
+    let mut envelope = Envelope::new(limits());
+    envelope.peaks.store_bytes = ledger.peak_store_bytes();
+    envelope.peaks.artifact_bytes = 3072;
     GrowthReport {
         schema: GROWTH_REPORT_SCHEMA.to_string(),
         eval_run_id: "ab".repeat(32),
@@ -112,29 +116,32 @@ fn report() -> GrowthReport {
         claim_boundary: ClaimBoundary::pinned(),
         quota: quota(),
         bounds: bounds(),
-        ledger: ledger(),
+        ledger,
         mix: mix(),
         expected_refusals: Vec::new(),
         fault_episodes: 2,
         safety_checks_while_armed: 2,
         markers: BTreeSet::new(),
-        envelope: Envelope::new(limits()),
+        envelope,
     }
 }
 
 #[test]
 fn headroom_is_accounted_from_the_constants_read_not_a_slot_count() {
     let q = quota();
-    assert_eq!(q.expected_project_bytes(&headroom(0, 0)), 0);
-    assert_eq!(q.expected_project_bytes(&headroom(1, 0)), 64 << 10);
-    assert_eq!(q.expected_project_bytes(&headroom(0, 1)), 32 << 10);
+    assert_eq!(q.expected_project_bytes(&headroom(0, 0)), Some(0));
+    assert_eq!(q.expected_project_bytes(&headroom(1, 0)), Some(64 << 10));
+    assert_eq!(q.expected_project_bytes(&headroom(0, 1)), Some(32 << 10));
     assert_eq!(
         q.expected_project_bytes(&headroom(2, 3)),
-        (2 * 64 + 3 * 32) << 10
+        Some((2 * 64 + 3 * 32) << 10)
     );
     let mut with_pages = headroom(1, 1);
     with_pages.page_bytes = 100;
-    assert_eq!(q.expected_project_bytes(&with_pages), (96 << 10) + 100);
+    assert_eq!(
+        q.expected_project_bytes(&with_pages),
+        Some((96 << 10) + 100)
+    );
     assert_eq!(q.admissions_remaining(q.project_metadata_bytes), 1024);
     let mut other = q.clone();
     other.receipt_charge_bytes = 64 << 10;
@@ -163,6 +170,13 @@ fn headroom_is_accounted_from_the_constants_read_not_a_slot_count() {
             observed: expected + 1,
         }),
         "the remaining bytes must follow from the quota and the bytes charged"
+    );
+    let mut huge = ledger();
+    huge.samples[1].headroom.terminal_jobs = u64::MAX;
+    assert_eq!(
+        huge.verdict(&q, &bounds()),
+        Err(GrowthRefused::HeadroomOverflow { step: 2 }),
+        "job counts the constants cannot multiply are refused, not wrapped"
     );
 }
 
@@ -277,6 +291,36 @@ fn a_never_restored_ledger_passes_only_when_the_final_sample_holds_nothing_trans
         }),
         "a sample that omits a store family cannot hide that store's bytes"
     );
+    let mut single = GrowthLedger::new(GrowthMode::NeverRestored);
+    single.record(sample(3, 9, 0, 0)).unwrap();
+    assert_eq!(
+        single.verdict(&quota(), &bounds()),
+        Err(GrowthRefused::NoBaseline),
+        "one sample has no interval to judge growth over"
+    );
+    let mut wide = ledger.clone();
+    wide.samples[0].commit_seq = i64::MIN;
+    wide.verdict(&quota(), &bounds())
+        .expect("a commit span wider than i64 is counted, not a panic");
+    let mut fat = ledger.clone();
+    fat.samples[2]
+        .stores
+        .get_mut(&StoreFamily::Kernel)
+        .unwrap()
+        .file = u64::MAX;
+    assert!(
+        matches!(
+            fat.verdict(&quota(), &bounds()),
+            Err(GrowthRefused::GrowthRateExceeded { .. })
+        ),
+        "store bytes past u64 saturate into a refusal, not a panic"
+    );
+    let mut receding_r24 = ledger.clone();
+    receding_r24.samples[1].headroom.r24_refusals = 2;
+    assert_eq!(
+        receding_r24.verdict(&quota(), &bounds()),
+        Err(GrowthRefused::R24NotMonotonic { step: 3 })
+    );
     let mut reordered = ledger.clone();
     reordered.samples.swap(1, 2);
     assert_eq!(
@@ -354,7 +398,10 @@ fn a_mix_missing_an_operation_is_not_sustainability_success() {
     );
     let mut report = report();
     report.mix = partial;
-    assert!(matches!(report.validate(), Err(GrowthReportError::Mix(_))));
+    assert!(matches!(
+        report.validate(&bounds()),
+        Err(GrowthReportError::Mix(_))
+    ));
     coverage.record("flt_incomplete_mix_not_success").unwrap();
 }
 
@@ -436,14 +483,23 @@ fn a_shared_root_namespace_or_port_is_refused() {
         ),
         Err(IsolationRefused::DigestDiffersFromSerial { campaign: 1 })
     );
+    assert_eq!(
+        digests_match_serial(&[], &[]),
+        Err(IsolationRefused::TooFewCampaigns { campaigns: 0 }),
+        "no campaigns is no isolation evidence"
+    );
+    assert_eq!(
+        digests_match_serial(&["x".to_string()], &["x".to_string()]),
+        Err(IsolationRefused::TooFewCampaigns { campaigns: 1 })
+    );
     coverage.record("xc_shared_fixture_refused").unwrap();
 }
 
 #[test]
 fn a_growth_report_round_trips_and_its_digest_ignores_measurements() {
     let report = report();
-    let value = report.serialize().unwrap();
-    assert_eq!(parse_growth_report(&value).unwrap(), report);
+    let value = report.serialize(&bounds()).unwrap();
+    assert_eq!(parse_growth_report(&value, &bounds()).unwrap(), report);
     let digest = GrowthReport::result_digest(&value).unwrap();
     let mut other_machine = value.clone();
     other_machine["ledger"]["samples"][0]["stores"]["kernel"]["file"] = serde_json::json!(999_999);
@@ -471,23 +527,23 @@ fn a_growth_report_round_trips_and_its_digest_ignores_measurements() {
     assert_ne!(GrowthReport::result_digest(&other_quota).unwrap(), digest);
     let mut restoring = report.clone();
     restoring.ledger.mode = GrowthMode::Restoring;
-    restoring.validate().unwrap();
+    restoring.validate(&bounds()).unwrap();
     restoring.ledger.samples.clear();
     assert_eq!(
-        restoring.validate(),
+        restoring.validate(&bounds()),
         Err(GrowthReportError::Growth(GrowthRefused::NoSamples))
     );
     let mut unsafe_run = report.clone();
     unsafe_run.safety_checks_while_armed = 0;
     assert_eq!(
-        unsafe_run.validate(),
+        unsafe_run.validate(&bounds()),
         Err(GrowthReportError::SafetyNeverChecked)
     );
     let mut uncounted = report.clone();
     uncounted.fault_episodes = 0;
     uncounted.safety_checks_while_armed = 0;
     assert_eq!(
-        uncounted.validate(),
+        uncounted.validate(&bounds()),
         Err(GrowthReportError::SafetyNeverChecked),
         "the mix exercised a fault episode, so a zero episode count cannot waive the safety check"
     );
@@ -495,7 +551,7 @@ fn a_growth_report_round_trips_and_its_digest_ignores_measurements() {
     restoring_reordered.ledger.mode = GrowthMode::Restoring;
     restoring_reordered.ledger.samples[2].commit_seq = 5;
     assert_eq!(
-        restoring_reordered.validate(),
+        restoring_reordered.validate(&bounds()),
         Err(GrowthReportError::Growth(
             GrowthRefused::CommitSeqNotMonotonic { step: 3 }
         ))
@@ -503,7 +559,7 @@ fn a_growth_report_round_trips_and_its_digest_ignores_measurements() {
     let mut reordered = report.clone();
     reordered.ledger.samples.swap(0, 2);
     assert_eq!(
-        parse_growth_report(&serde_json::to_value(&reordered).unwrap()),
+        parse_growth_report(&serde_json::to_value(&reordered).unwrap(), &bounds()),
         Err(GrowthReportError::Growth(GrowthRefused::StepNotMonotonic {
             step: 2
         })),
@@ -512,13 +568,13 @@ fn a_growth_report_round_trips_and_its_digest_ignores_measurements() {
     let mut leaked = report.clone();
     leaked.ledger.samples[2].artifact_tmp_entries = 3;
     assert!(matches!(
-        leaked.validate(),
+        leaked.validate(&bounds()),
         Err(GrowthReportError::Growth(GrowthRefused::Leak { .. }))
     ));
-    let mut breached = report;
+    let mut breached = report.clone();
     breached.envelope.peaks.store_bytes = limits().store_bytes + 1;
     assert_eq!(
-        breached.validate(),
+        breached.validate(&bounds()),
         Err(GrowthReportError::EnvelopeNotHonoured(EnvelopeExceeded {
             resource: Resource::StoreBytes,
             bound: limits().store_bytes,
@@ -526,10 +582,72 @@ fn a_growth_report_round_trips_and_its_digest_ignores_measurements() {
         })),
         "a report whose envelope peaks crossed a bound is the run the envelope stops"
     );
+    let mut uncharged = report.clone();
+    let peak = report.ledger.peak_store_bytes();
+    uncharged.envelope.peaks.store_bytes = peak - 1;
+    assert_eq!(
+        uncharged.validate(&bounds()),
+        Err(GrowthReportError::EnvelopeNotCharged {
+            resource: Resource::StoreBytes,
+            step: 2,
+            peak: peak - 1,
+            observed: peak,
+        }),
+        "a sample the envelope peak never saw was not charged to it"
+    );
+    let mut loosened = report.clone();
+    loosened.ledger.samples[2].commit_log_rows = 200_000;
+    loosened.bounds.commit_log_rows = 300_000;
+    assert_eq!(
+        loosened.validate(&bounds()),
+        Err(GrowthReportError::BoundsNotApproved),
+        "bounds the producer widened are not the approved bounds"
+    );
+    loosened.bounds = bounds();
+    assert!(
+        matches!(
+            loosened.validate(&bounds()),
+            Err(GrowthReportError::Growth(
+                GrowthRefused::BoundExceeded { .. }
+            ))
+        ),
+        "held to the approved bounds, the widened sample is over"
+    );
+    let mut r24_counted = report.clone();
+    r24_counted.ledger.samples[2].headroom.r24_refusals = 1;
+    assert_eq!(
+        r24_counted.validate(&bounds()),
+        Err(GrowthReportError::R24Unreconciled {
+            counted: 1,
+            recorded: 0,
+        })
+    );
+    let mut r24_recorded = report;
+    r24_recorded.expected_refusals.push(RecordedRefusal {
+        episode: "quota".to_string(),
+        refusal: ExpectedRefusal::R24ReceiptQuotaExhausted,
+        production_error: "metadata quota".to_string(),
+    });
+    assert_eq!(
+        r24_recorded.validate(&bounds()),
+        Err(GrowthReportError::R24Unreconciled {
+            counted: 0,
+            recorded: 1,
+        })
+    );
+    r24_recorded.ledger.samples[2].headroom.r24_refusals = 1;
+    r24_recorded.expected_refusals.push(RecordedRefusal {
+        episode: "catch-up".to_string(),
+        refusal: ExpectedRefusal::R11DeletionBearingCatchUp,
+        production_error: "deletion unpropagated".to_string(),
+    });
+    r24_recorded
+        .validate(&bounds())
+        .expect("one R24 counted and one recorded agree; an R11 is not counted");
     let mut extra = value;
     extra["surprise"] = serde_json::json!(1);
     assert!(matches!(
-        parse_growth_report(&extra),
+        parse_growth_report(&extra, &bounds()),
         Err(GrowthReportError::Shape(_))
     ));
 }

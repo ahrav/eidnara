@@ -1322,7 +1322,8 @@ Growth contract (`crates/eval-core/tests/growth.rs`,
   allowance per pending job plus page bytes, from the constants the store
   declares; admissions remaining is derived from those constants; a sample
   whose bytes differ is `HeadroomMismatch`, and one whose remaining bytes are
-  not the quota less those bytes is `RemainingMismatch`.
+  not the quota less those bytes is `RemainingMismatch`; job counts the
+  constants cannot multiply within `u64` are `HeadroomOverflow`, not a wrap.
 - `a_never_restored_ledger_passes_only_when_the_final_sample_holds_nothing_transient`:
   a final sample with WAL bytes, a temporary artifact entry, or a temp root
   is a named `Leak`; a counter over its bound is `BoundExceeded`; main-file
@@ -1330,8 +1331,11 @@ Growth contract (`crates/eval-core/tests/growth.rs`,
   `GrowthRateExceeded` even under the size bound, and a WAL-heavy first sample
   does not mask that growth, and file bytes added with no commit between the
   samples have no allowance; a sample that omits a store family is
-  `StoreMissing`; an empty ledger, a repeated step, or a receding
-  commit sequence refuse, including in a ledger assembled without `record`;
+  `StoreMissing`; a single sample is `NoBaseline`; a commit span wider than
+  `i64` and store bytes past `u64` are counted or saturated, never a panic; an
+  empty ledger, a repeated step, a receding
+  commit sequence, or a receding R24 count refuse, including in a ledger
+  assembled without `record`;
   the peak store total is the transient middle sample.
 - `a_restore_under_never_restored_is_refused_and_a_restoring_ledger_gives_no_leak_verdict`
   (marker `flt_restore_under_never_restored_refused`): a restore is refused
@@ -1344,14 +1348,20 @@ Growth contract (`crates/eval-core/tests/growth.rs`,
   `xc_shared_fixture_refused`): a shared root, publish directory, cassette
   namespace, or port is refused by value, as is one campaign's root equal to
   another's publish directory; a concurrent digest that differs
-  from its serial run is refused by campaign index.
+  from its serial run is refused by campaign index, and fewer than two
+  campaigns are `TooFewCampaigns`.
 - `a_growth_report_round_trips_and_its_digest_ignores_measurements`: the
   report parses back equal; its digest ignores per-sample byte measurements
   and envelope peaks, and changes with the quota constants, the commit
   sequence and row counts, and the headroom; a restoring report with no
   samples or out-of-order samples, faults with no safety check (whether the
   episode count or the mix records them), a reordered report read back, a
-  leaked final sample, and an envelope whose peaks crossed a bound refuse.
+  leaked final sample, an envelope whose peaks crossed a bound, a sample the
+  envelope peak never saw (`EnvelopeNotCharged`), embedded bounds that differ
+  from the approved bounds passed to `validate` (`BoundsNotApproved`, after
+  which the approved bounds judge the sample), and a final R24 count that
+  disagrees with the recorded R24 refusals (`R24Unreconciled`; an R11 entry
+  is not counted) refuse.
 
 Fault shell (`crates/daemon/tests/eval_fault.rs`, `--all-features`; the
 default shards run the campaign once with every scenario asserted over it,
