@@ -41,7 +41,7 @@ use super::aging::{
 };
 use super::campaign::{Charges, identity, prepare_publish, publish_file};
 use super::support::embedding_fixtures::{
-    CONSUMER, PROJECT, SCOPE, TestEngine, generation, intent,
+    CONSUMER, GENERATION, PROJECT, SCOPE, TestEngine, generation, intent,
 };
 
 pub const REPORT_FILE: &str = "suite-c-fault-report.json";
@@ -1071,6 +1071,29 @@ pub fn publication_episode(
     if lost {
         witness.effects.attempt(&identity);
     }
+    // The job's state and whether its vector row exists, read from the file.
+    let durable = || -> Result<(String, bool), RunError> {
+        let conn = read_only(&search_file(stores.root()));
+        let state: String = conn
+            .query_row(
+                "SELECT state FROM embedding_jobs WHERE occurrence_id=?1 AND generation_id=?2",
+                [&occurrence, GENERATION],
+                |row| row.get(0),
+            )
+            .map_err(|e| unexpected(id, "the job's row", e))?;
+        let vectors: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM occurrence_vectors WHERE occurrence_id=?1 AND generation_id=?2",
+                [&occurrence, GENERATION],
+                |row| row.get(0),
+            )
+            .map_err(|e| unexpected(id, "the vector rows", e))?;
+        Ok((state, vectors > 0))
+    };
+    let before = durable()?;
+    if before.1 {
+        return Err(unexpected(id, "a job without a vector row", &before));
+    }
     let mut events = Vec::new();
     let stores = &*stores;
     let mut publisher = EmbeddingPublisher::new(&stores.corpus.kernel, &stores.projection);
@@ -1095,16 +1118,7 @@ pub fn publication_episode(
         },
         Instant::now() + Duration::from_secs(10),
         now,
-        &mut |event| {
-            // The completion is staged and the search transaction still open;
-            // the fault fires at its commit or reply, so it is armed and not
-            // yet consumed here. This is the counted safety check; it reads
-            // the files and the kernel, not the held projection connection.
-            if event == PublicationEvent::LocalStaged {
-                witness.safety_check_while_armed(stores);
-            }
-            events.push(event)
-        },
+        &mut |event| events.push(event),
         production,
     );
     match (fault, &result) {
@@ -1132,24 +1146,20 @@ pub fn publication_episode(
             ));
         }
     }
-    let job_state = || -> Result<String, RunError> {
-        read_only(&search_file(stores.root()))
-            .query_row(
-                "SELECT state FROM embedding_jobs WHERE occurrence_id=?1",
-                [&occurrence],
-                |row| row.get(0),
-            )
-            .map_err(|e| unexpected(id, "the job's row", e))
-    };
     let lost = if lost {
         witness.effects.lose_reply(&identity, id).unwrap();
         Some(identity)
     } else {
-        // The rollback is the contract's fixed outcome, so the row is read
-        // now: it must not say the vector landed.
-        let state = job_state()?;
-        if state == "embedded" {
-            return Err(unexpected(id, "a job the rollback left open", state));
+        // The rollback is the contract's fixed outcome, so the rows are read
+        // now: the job is as it was and no vector row from this attempt is
+        // durable.
+        let after = durable()?;
+        if after != before {
+            return Err(unexpected(
+                id,
+                "the job's row and vector as before the rolled-back attempt",
+                (&before, &after),
+            ));
         }
         None
     };

@@ -170,9 +170,11 @@ fn the_fault_campaign_receipts_every_declared_cut_scenario(campaign: &Campaign) 
         assert_eq!(episode.kill.is_some(), episode.action.is_kill());
     }
     // An armed window the runner can check from: a lock held, a latch or
-    // stall that holds until the reopen, or an observer cut inside a one-shot
-    // fault. ENOSPC is consumed inside its call, the corrupted copy is
-    // refused before any store opens, and R24 runs on a memory store.
+    // stall that holds until the reopen, or a catch-up observer cut inside a
+    // one-shot fault. ENOSPC is consumed inside its call, the corrupted copy
+    // is refused before any store opens, R24 runs on a memory store, and the
+    // publisher forbids its observer to call the stores before a release
+    // event, by which time its fault is consumed.
     let armed = report
         .episodes
         .iter()
@@ -183,6 +185,7 @@ fn the_fault_campaign_receipts_every_declared_cut_scenario(campaign: &Campaign) 
                     != FaultAction::ArtifactDeletion {
                         fault: ArtifactDeletionFaultKind::IntentStorageExhausted,
                     }
+                && !matches!(e.action, FaultAction::EmbeddingPublication { .. })
         })
         .count();
     assert!(
