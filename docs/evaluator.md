@@ -2364,7 +2364,8 @@ the projection; for a reply-loss fault, from the episode's observer at the cut
 whose reply the fault loses (`local_staged` or `acknowledgement_requested`),
 reading the files and the kernel because the episode holds the projection
 connection there; for a publication fault, from the publisher's observer at
-`Reconciling`; for a latching CAS fault, after the refusal and before the
+`LocalStaged`, while the search transaction is open and before the commit or
+reply the fault takes; for a latching CAS fault, after the refusal and before the
 reopen that clears the latch; for R11, while the stall holds. The ENOSPC
 deletion fault is consumed inside its call, the corrupted copy is refused
 before any store opens, and R24 runs on a memory store, so none of the three

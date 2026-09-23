@@ -456,16 +456,31 @@ fn every_fault_marker_fires_across_the_scenarios() {
     );
 }
 
-fn quota_episode_on_a_fresh_root() -> (tempfile::TempDir, Witness) {
+fn quota_episode_on_a_fresh_root() -> (tempfile::TempDir, Witness, campaign::Charges) {
     let root = tempfile::tempdir().unwrap();
     let mut witness = Witness::new();
-    fault::quota_episode(root.path(), &mut witness, 1, QUOTA_NOW_MS).unwrap();
-    (root, witness)
+    let profile = fault::profile(Scale::S0, MESSAGES, 600_000, None);
+    let mut charges = campaign::Charges::new(profile.envelope);
+    fault::quota_episode(root.path(), &mut witness, &mut charges, 1, QUOTA_NOW_MS).unwrap();
+    (root, witness, charges)
+}
+
+/// The R24 store's footprint is charged while its connection is open; the
+/// drop that ends the episode can checkpoint the WAL away.
+#[test]
+fn the_receipt_quota_episode_charges_its_store_while_open() {
+    let (root, _, charges) = quota_episode_on_a_fresh_root();
+    let closed = campaign::root_bytes(root.path());
+    let peak = charges.envelope.peaks.store_bytes;
+    assert!(
+        peak > 0 && peak >= closed,
+        "the open footprint is charged: peak {peak}, closed {closed}"
+    );
 }
 
 #[test]
 fn the_receipt_quota_refusal_outlives_every_released_allowance() {
-    let (root, _) = quota_episode_on_a_fresh_root();
+    let (root, _, _) = quota_episode_on_a_fresh_root();
     let store = MemoryStore::open(&daemon::store_descriptor_in(root.path())).unwrap();
     let open: Vec<String> = store
         .with_fenced_conn_for_test(|conn| {
@@ -512,7 +527,7 @@ fn the_receipt_quota_refusal_outlives_every_released_allowance() {
 
 #[test]
 fn the_receipt_quota_episode_claims_no_projection_safety_check() {
-    let (_root, witness) = quota_episode_on_a_fresh_root();
+    let (_root, witness, _) = quota_episode_on_a_fresh_root();
     assert_eq!(
         witness.safety_checks, 0,
         "the quota episode runs on a memory store of its own; no projection check ran"

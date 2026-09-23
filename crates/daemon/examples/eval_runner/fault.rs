@@ -839,6 +839,7 @@ pub fn reviewer_inputs(candidate: &str) -> CausalInputs {
 pub fn quota_episode(
     root: &Path,
     witness: &mut Witness,
+    charges: &mut Charges,
     step: u32,
     now: i64,
 ) -> Result<(), RunError> {
@@ -919,6 +920,9 @@ pub fn quota_episode(
             (before, after),
         ));
     }
+    // The drop that ends the episode can checkpoint the WAL away, so the
+    // footprint is charged while the connection is open.
+    charges.store_bytes(root)?;
     witness.receipt("quota_refused");
     witness.receipt(&id);
     witness.refusals.push(RecordedRefusal {
@@ -1069,9 +1073,11 @@ pub fn publication_episode(
         Instant::now() + Duration::from_secs(10),
         now,
         &mut |event| {
-            // The reply is lost and the publisher is reconciling: the fault is
-            // armed here, so this is the counted safety check.
-            if event == PublicationEvent::Reconciling {
+            // The completion is staged and the search transaction still open;
+            // the fault fires at its commit or reply, so it is armed and not
+            // yet consumed here. This is the counted safety check; it reads
+            // the files and the kernel, not the held projection connection.
+            if event == PublicationEvent::LocalStaged {
                 witness.safety_check_while_armed(stores);
             }
             events.push(event)
@@ -1315,7 +1321,7 @@ pub fn campaign(
         .now_ms;
 
     let quota_root = charges.occupy()?;
-    quota_episode(quota_root.path(), witness, step(rest), resumed)?;
+    quota_episode(quota_root.path(), witness, charges, step(rest), resumed)?;
     charges.vacate(quota_root)?;
     r11_episode(&mut stores, witness, &evidence, step(rest), resumed)?;
     witness.checkpoint(Cut::AfterFaultPhase);
