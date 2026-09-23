@@ -63,7 +63,7 @@ Guarantee: Every candidate the shrinker accepts reproduces the pinned failure
 Check: `always` - for every `CandidateRecord` with verdict `Reproduced`,
   replaying `original.without(deleted)` yields `Failed { predicate }` equal to
   the pinned predicate; every `Slipped { observed }` record has `observed !=
-  predicate` and its deletion set is not a subset of the final `deleted`; and
+  predicate` and was not accepted as a reduction; and
   `minimality` is `OneMinimal { transformations }` only when every single
   deletion of the minimized scenario was recorded with a non-`Reproduced`,
   non-`Unknown` verdict. The property must hold on every shrink, so `always`.
@@ -177,12 +177,16 @@ Exercised: partial -
   (progress); the safety count is refused by `FaultReport::validate`
   (`SafetyNeverChecked`); the three are checked per report, not per hard case.
 Guarantee: Every hard case carries a coverage witness, a safety check evaluated
-  while faults are armed, and a bounded healthy-progress check; a missing entry
-  is `IncompleteCoverage`, never `Pass`.
-Check: `always` - for every fault report, `cuts` receipts every declared cut,
-  `safety_checks_while_armed > 0`, and `liveness.verdict(bounds)` is met; a
-  report missing any of the three is refused by `FaultReport::validate`. The
-  three are report-wide today, so the check is per report, not per hard case.
+  while faults are armed, and a bounded healthy-progress check; a missing
+  coverage entry is `IncompleteCoverage`, never `Pass`.
+Check: `always` - for every fault report, `cuts` receipts every declared cut
+  and `safety_checks_while_armed > 0`, both refused by `FaultReport::validate`
+  when missing; `liveness.verdict(bounds)` is met when the member is present.
+  `FaultReport::validate` accepts `liveness: None` (`if let Some(liveness)`;
+  `crates/eval-core/tests/fault.rs` validates a `liveness_less` report), so a
+  missing progress member is not refused by validation: the drive asserts it
+  per campaign, not the report. The three are report-wide today, so the check
+  is per report, not per hard case.
 Fault/timing angle: The safety check runs while a fault is armed; a check that
   only runs after healing proves nothing about the armed window.
 Required faults and enabling state: A fault campaign with declared cuts, at
@@ -199,6 +203,10 @@ Impact: A hard case that was never actually reached, never checked while armed,
 Open questions:
 - Is the safety check owed per hard case or shared per checkpoint? Today it is
   shared per report. (needs human input)
+- Should `FaultReport::validate` require `liveness` once every campaign
+  declares its lanes? Today it accepts `None`, so the progress member of the
+  triple is asserted by the drive, not refused by the report. (needs human
+  input)
 
 ### rid-replay-equality-semantic-trace-digest
 
@@ -284,6 +292,8 @@ Exercised: yes -
   `crates/eval-core/tests/witness.rs::the_coverage_signature_names_only_registered_markers`,
   `crates/eval-core/tests/witness.rs::a_multiplicity_record_counts_only_under_its_own_scenario_digest`,
   `crates/eval-core/tests/witness.rs::a_one_minimal_claim_names_exactly_the_transformations_the_scenario_held`,
+  `crates/eval-core/tests/witness.rs::the_remaining_count_is_the_minimized_scenario_s_element_count`,
+  `crates/eval-core/tests/witness.rs::a_residue_that_no_schema_could_declare_is_refused`,
   and
   `crates/daemon/tests/eval_shrink.rs::a_fresh_process_reproduces_the_predicate_and_the_minimized_witness_is_published`
 Guarantee: A witness package carries the original failure (RunId, decision tape,
@@ -302,8 +312,11 @@ Check: `always` - `WitnessPackage::validate` refuses a recipe missing when
   single deletion from the minimized scenario is refused
   (`MinimalityUnsupported { element }`); a claim naming other
   transformations than the original held elements for is refused
-  (`TransformationsDisagree { expected }`); a coverage name outside the
-  registry is refused (`UnregisteredMarker { name }`); an embedded report that
+  (`TransformationsDisagree { expected }`); a `remaining` count other than
+  the minimized scenario's element count is refused
+  (`ShrinkReport(Inconsistent { remaining })`); a residue holding a `Keep`
+  rule or two rules for one field is refused (`ResidueContradiction`); a
+  coverage name outside the registry is refused (`UnregisteredMarker { name }`); an embedded report that
   `ShrinkReport::validate` refuses is refused (`ShrinkReport(..)`);
   `parse_witness(serialize(package)) == package`; the published bytes parse
   back to the run's package.

@@ -225,6 +225,7 @@ fn one_minimality_needs_a_rejected_record_for_every_single_deletion() {
     bare.shrink.candidates.truncate(1);
     bare.shrink.minimized_digest = bare.shrink.original_digest.clone();
     bare.shrink.deleted.clear();
+    bare.shrink.remaining = bare.minimized.elements().len() as u64;
     bare.shrink.replays = 1;
     bare.shrink.max_replays = 1;
     bare.shrink.unknown_candidates = 0;
@@ -364,6 +365,58 @@ fn a_one_minimal_claim_names_exactly_the_transformations_the_scenario_held() {
         padded.validate(),
         Err(WitnessError::TransformationsDisagree { expected }),
         "a claim padded past the transformations held is refused"
+    );
+}
+
+#[test]
+fn the_remaining_count_is_the_minimized_scenario_s_element_count() {
+    // A budget claim owes no rejection records, so only the count binds it.
+    let mut package = package();
+    package.shrink.minimality = Minimality::NotEstablished {
+        reason: eval_core::NotEstablishedReason::ReplayBudgetExhausted,
+    };
+    package.shrink.max_replays = package.shrink.replays;
+    package.recipe = None;
+    package.validate().unwrap();
+    package.shrink.remaining += 1;
+    assert_eq!(
+        package.validate(),
+        Err(WitnessError::ShrinkReport(
+            ShrinkReportError::Inconsistent { field: "remaining" }
+        )),
+        "a declared survivor count the minimized scenario contradicts is refused"
+    );
+}
+
+#[test]
+fn a_residue_that_no_schema_could_declare_is_refused() {
+    let mut kept = package();
+    kept.residue.insert(eval_core::ResidueEntry {
+        type_name: "shrink_replay".to_string(),
+        field: "extra".to_string(),
+        rule: eval_core::Rule::Keep,
+    });
+    assert_eq!(
+        kept.validate(),
+        Err(WitnessError::ResidueContradiction {
+            type_name: "shrink_replay".to_string(),
+            field: "extra".to_string(),
+        }),
+        "a kept field is never residue"
+    );
+    let mut twice = package();
+    let mut entry = twice.residue.iter().next().unwrap().clone();
+    entry.rule = if entry.rule == eval_core::Rule::Drop {
+        eval_core::Rule::Relative
+    } else {
+        eval_core::Rule::Drop
+    };
+    let (type_name, field) = (entry.type_name.clone(), entry.field.clone());
+    twice.residue.insert(entry);
+    assert_eq!(
+        twice.validate(),
+        Err(WitnessError::ResidueContradiction { type_name, field }),
+        "one field, one rule"
     );
 }
 

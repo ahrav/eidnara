@@ -40,6 +40,11 @@ compact recipe form when multiplicity is the trigger."
   and the recipe disagrees.
 - `crates/eval-core/tests/witness.rs` `a_one_minimal_claim_names_exactly_the_transformations_the_scenario_held`:
   a dropped or padded transformation list is refused.
+- `crates/eval-core/tests/witness.rs` `the_remaining_count_is_the_minimized_scenario_s_element_count`:
+  a budget claim with a survivor count the minimized scenario contradicts is
+  refused.
+- `crates/eval-core/tests/witness.rs` `a_residue_that_no_schema_could_declare_is_refused`:
+  a `Keep` entry and a second rule for one field are refused.
 - `crates/eval-core/tests/witness.rs` `the_coverage_signature_names_only_registered_markers`:
   an unregistered name refuses through `validate` and `serialize`.
 - `crates/daemon/tests/eval_shrink.rs` `a_fresh_process_reproduces_the_predicate_and_the_minimized_witness_is_published`:

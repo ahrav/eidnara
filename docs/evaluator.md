@@ -2902,7 +2902,10 @@ After the claim scan, every name in `original.coverage` must be a registered
 marker (`UnregisteredMarker { name }`).
 After the package's own rules, the embedded report is checked on its own
 terms by `ShrinkReport::validate` (schema, oracle, and its accounting against
-the candidate ledger), wrapped as `ShrinkReport(ShrinkReportError)`.
+the candidate ledger), wrapped as `ShrinkReport(ShrinkReportError)`, and its
+`remaining` must be the minimized scenario's element count
+(`Inconsistent { remaining }`). The recorded residue must be one non-`Keep`
+rule per field, as the manifest requires (`ResidueContradiction`).
 
 `serialize(redactor, artifact_bytes)` is the one serializer: `validate`, then
 one canonical encoding whose byte length is checked against the envelope's
@@ -2933,7 +2936,8 @@ pinned into every predicate. `run` refuses an inverted oracle
 (`InvalidOracle`) before anything else, approves the profile, prepares the
 publish directory, freezes the run identity before the first child runs,
 occupies one temp root for the candidate file, replays the original, and
-refuses `NoFailure` unless the child reports `Failed`; the reported predicate
+refuses `NoFailure` unless the child reports `Failed`, verifies the returned
+report against the original (`ShrinkReport::verify`, refused as `Report`); the reported predicate
 is the pinned one, and refuses `ForeignPredicate` when the child's oracle,
 cut, or profile digest is not the one it was sent. A `Config` whose commit
 count the aged world cannot carry is refused (`Commits`) before the publish

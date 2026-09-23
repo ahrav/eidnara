@@ -10,7 +10,9 @@ use serde_json::Value;
 use crate::census::{Construction, EvaluatedSurface, Reachability};
 use crate::identity::{IdentityError, RunIdentity, eval_run_id};
 use crate::pairs::{RECENCY_BASELINE_VERSION, recency_bound};
-use crate::residue::{ObservationSchema, RelativeDomains, ResidueEntry, ResidueError, Rule};
+use crate::residue::{
+    ObservationSchema, RelativeDomains, ResidueEntry, ResidueError, Rule, residue_contradiction,
+};
 
 pub const MANIFEST_SCHEMA: &str = "eval-manifest/v9";
 pub const MANIFEST_DIGEST_PROTOCOL: &str = "eval-manifest-digest/v9";
@@ -416,17 +418,11 @@ impl Manifest {
                 return Err(ManifestError::ResidueIncomplete { field: entry.field });
             }
         }
-        // Residue lists only non-`Keep` rules, one per `(type_name, field)`.
-        let mut classified = BTreeSet::new();
-        for entry in &self.residue {
-            if entry.rule == Rule::Keep
-                || !classified.insert((entry.type_name.as_str(), entry.field.as_str()))
-            {
-                return Err(ManifestError::ResidueContradiction {
-                    type_name: entry.type_name.clone(),
-                    field: entry.field.clone(),
-                });
-            }
+        if let Some(entry) = residue_contradiction(&self.residue) {
+            return Err(ManifestError::ResidueContradiction {
+                type_name: entry.type_name.clone(),
+                field: entry.field.clone(),
+            });
         }
         let ids: BTreeSet<&str> = self.sample_ids.iter().map(String::as_str).collect();
         let ordered: BTreeSet<&str> = self.sample_order.iter().map(String::as_str).collect();

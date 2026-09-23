@@ -8,7 +8,11 @@ check; a missing entry is `IncompleteCoverage`, not `Pass`."
 ## Evidence trail
 - `crates/eval-core/src/fault.rs` `FaultReport::safety_checks_while_armed`;
   `FaultReport::validate` refuses `SafetyNeverChecked` when it is zero.
-- `crates/eval-core/src/fault.rs` `LivenessReport` and its `verdict`.
+- `crates/eval-core/src/fault.rs` `LivenessReport` and its `verdict`;
+  `FaultReport::validate` evaluates it only `if let Some(liveness)`, and
+  `crates/eval-core/tests/fault.rs` validates a report with `liveness: None`,
+  so the progress member is asserted by the drive rather than refused by the
+  report.
 - `crates/eval-core/src/markers.rs` `Coverage::complete` refuses
   `Incomplete { missing }`.
 - `crates/eval-core/tests/fault.rs`

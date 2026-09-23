@@ -19,9 +19,9 @@ use eval_core::{
     Generation, Manifest, Mode, MultiplicityRecipe, ObservationSchema, Oracle, OriginalFailure,
     Payload, ProfileError, ReplayEffects, ReplayOutcome, ReplayRefused, ReplayRequest,
     RepositorySpec, ResidueEntry, Rule, RunProfile, Scale, Scenario, SemanticTrace, SessionSpec,
-    ShrinkRefused, Slice, StoreFamily, Task, TaskRole, UnknownReason, WITNESS_DIGEST_PROTOCOL,
-    WITNESS_SCHEMA, WitnessError, WitnessPackage, WorldConfig, eval_run_id, generate_all, reduce,
-    residue_drift, serialize_spec, shrink,
+    ShrinkRefused, ShrinkReportError, Slice, StoreFamily, Task, TaskRole, UnknownReason,
+    WITNESS_DIGEST_PROTOCOL, WITNESS_SCHEMA, WitnessError, WitnessPackage, WorldConfig,
+    eval_run_id, generate_all, reduce, residue_drift, serialize_spec, shrink,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -80,6 +80,8 @@ pub enum RunError {
     ForeignPredicate { predicate: FailurePredicate },
     #[error("shrink refused: {0}")]
     Shrink(#[from] ShrinkRefused),
+    #[error("shrink report refused against its scenario: {0}")]
+    Report(#[from] ShrinkReportError),
     #[error("replay effect refused: {0}")]
     Replay(#[from] ReplayRefused),
     #[error("witness refused: {0}")]
@@ -526,6 +528,9 @@ pub fn run(config: &Config, spawn: Spawn) -> Result<Run, RunError> {
         return Err(error);
     }
     let (minimized, report) = shrunk?;
+    // The shell holds the original, so it verifies the report against it
+    // rather than trusting the shrinker's bookkeeping.
+    report.verify(&original)?;
     let mut coverage = Coverage::default();
     coverage
         .record("flt_shrink_fresh_process_reproduced")

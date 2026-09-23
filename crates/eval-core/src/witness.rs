@@ -15,7 +15,7 @@ use crate::failure_class::Slice;
 use crate::generator::{Mode, WorldConfig, generate_all};
 use crate::manifest::{CLAIM_BOUNDARY_EXCLUSIONS, ClaimBoundary};
 use crate::markers::MARKERS;
-use crate::residue::ResidueEntry;
+use crate::residue::{ResidueEntry, residue_contradiction};
 use crate::shrink::{
     CandidateVerdict, Element, FailurePredicate, History, Minimality, Scenario, ShrinkReport,
     ShrinkReportError, Transformation,
@@ -119,6 +119,12 @@ pub enum WitnessError {
         missing: BTreeSet<ResidueEntry>,
         unexpected: BTreeSet<ResidueEntry>,
     },
+    /// The recorded residue holds a `Keep` rule or two rules for one field,
+    /// which no schema declares; no replay could ever match it.
+    ResidueContradiction {
+        type_name: String,
+        field: String,
+    },
     NotHex {
         field: &'static str,
     },
@@ -152,6 +158,12 @@ impl WitnessPackage {
         if self.minimized.digest() != self.shrink.minimized_digest {
             return Err(WitnessError::MinimizedDigestMismatch);
         }
+        if let Some(entry) = residue_contradiction(&self.residue) {
+            return Err(WitnessError::ResidueContradiction {
+                type_name: entry.type_name.clone(),
+                field: entry.field.clone(),
+            });
+        }
         for (field, text, len) in [
             ("eval_run_id", &self.original.eval_run_id, 64),
             ("trace_digest", &self.original.trace_digest, 64),
@@ -162,7 +174,14 @@ impl WitnessPackage {
         }
         self.check_recipe()?;
         self.check_minimality()?;
+        // The report's own accounting, then what only the package can check:
+        // the survivors it declares are the minimized scenario's elements.
         self.shrink.validate().map_err(WitnessError::ShrinkReport)?;
+        if self.shrink.remaining != self.minimized.elements().len() as u64 {
+            return Err(WitnessError::ShrinkReport(
+                ShrinkReportError::Inconsistent { field: "remaining" },
+            ));
+        }
         let value = serde_json::to_value(self).map_err(|e| WitnessError::Shape(e.to_string()))?;
         check_claims(&value, "")?;
         for name in &self.original.coverage {
