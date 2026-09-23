@@ -5,7 +5,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::num::NonZeroU32;
 
-use context_core::canonical_json::{ContractError, canonical_json_encode, protocol_digest};
+use context_core::canonical_json::{
+    ContractError, canonical_json_encode, is_lower_hex, protocol_digest,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -34,8 +36,33 @@ pub const MAX_REPLAY_ATTEMPTS: u32 = 3;
 pub struct FailurePredicate {
     pub oracle: Oracle,
     pub checkpoint: Cut,
+    /// `RunProfile::digest`: 64 lowercase hex characters.
     pub profile_digest: String,
     pub witness_class: WitnessClass,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PredicateRefused {
+    Oracle(OracleRefused),
+    /// The named field cannot be what it claims to pin.
+    Malformed {
+        field: &'static str,
+    },
+}
+
+debug_display!(PredicateRefused);
+
+impl FailurePredicate {
+    /// A valid oracle and a profile digest that could name a run profile.
+    pub fn validate(&self) -> Result<(), PredicateRefused> {
+        self.oracle.validate().map_err(PredicateRefused::Oracle)?;
+        if !is_lower_hex(&self.profile_digest, 64) {
+            return Err(PredicateRefused::Malformed {
+                field: "profile_digest",
+            });
+        }
+        Ok(())
+    }
 }
 
 /// What failed, and to what. Each variant names its subject, so a candidate
@@ -405,13 +432,12 @@ impl ReplayEffects {
         Ok(*attempts)
     }
 
-    /// Resolves the current attempt to `Unknown { cancelled }`.
-    pub fn cancel(&mut self, key: &str) -> Result<(), ReplayRefused> {
-        self.present(key)?;
-        let current = self.outstanding[key];
+    /// Resolves `attempt` to `Unknown { cancelled }`; a superseded attempt's
+    /// cancellation is refused like its answer.
+    pub fn cancel(&mut self, key: &str, attempt: u32) -> Result<(), ReplayRefused> {
         self.resolve(
             key,
-            current,
+            attempt,
             ReplayOutcome::Unknown {
                 reason: UnknownReason::Cancelled,
             },
@@ -553,7 +579,8 @@ pub enum ShrinkReportError {
         found: String,
     },
     Oracle(OracleRefused),
-    /// The named field disagrees with the candidate ledger.
+    /// The named field disagrees with the candidate ledger or cannot be what
+    /// it claims to be.
     Inconsistent {
         field: &'static str,
     },
@@ -575,11 +602,30 @@ impl ShrinkReport {
                 found: self.schema.clone(),
             });
         }
-        self.predicate
-            .oracle
-            .validate()
-            .map_err(ShrinkReportError::Oracle)?;
         let inconsistent = |field| Err(ShrinkReportError::Inconsistent { field });
+        match self.predicate.validate() {
+            Ok(()) => {}
+            Err(PredicateRefused::Oracle(refused)) => {
+                return Err(ShrinkReportError::Oracle(refused));
+            }
+            Err(PredicateRefused::Malformed { field }) => return inconsistent(field),
+        }
+        // Digests are what `Scenario::digest` produces.
+        let digest = |text: &str| is_lower_hex(text, 64);
+        if !digest(&self.original_digest) {
+            return inconsistent("original_digest");
+        }
+        if !digest(&self.minimized_digest) {
+            return inconsistent("minimized_digest");
+        }
+        for record in &self.candidates {
+            // `classify_replay` calls an observed predicate equal to the pinned
+            // one `Reproduced`; a slip cannot have observed it.
+            let echoed = matches!(&record.verdict, CandidateVerdict::Slipped { observed } if *observed == self.predicate);
+            if !digest(&record.scenario_digest) || echoed {
+                return inconsistent("candidates");
+            }
+        }
         let Some(first) = self.candidates.first() else {
             return inconsistent("candidates");
         };
@@ -687,6 +733,18 @@ impl ShrinkReport {
         if self.original_digest != original.digest() {
             return inconsistent("original_digest");
         }
+        let held: BTreeSet<Element> = original.elements().into_iter().collect();
+        if !self.deleted.is_subset(&held) {
+            return inconsistent("deleted");
+        }
+        // Every record names the scenario its deletions leave.
+        for record in &self.candidates {
+            if !record.deleted.is_subset(&held)
+                || record.scenario_digest != original.without(&record.deleted).digest()
+            {
+                return inconsistent("candidates");
+            }
+        }
         let minimized = original.without(&self.deleted);
         if self.minimized_digest != minimized.digest() {
             return inconsistent("minimized_digest");
@@ -710,14 +768,25 @@ impl ShrinkReport {
                 tried.insert((*element).clone());
             }
         }
-        let full_pass = !matches!(
-            self.minimality,
+        match &self.minimality {
             Minimality::NotEstablished {
-                reason: NotEstablishedReason::ReplayBudgetExhausted
+                reason: NotEstablishedReason::ReplayBudgetExhausted,
+            } => {}
+            Minimality::NotEstablished { .. } if tried != elements => {
+                return inconsistent("minimality");
             }
-        );
-        if full_pass && tried != elements {
-            return inconsistent("minimality");
+            Minimality::NotEstablished { .. } => {}
+            // A completed run tried exactly the transformations the original
+            // had elements for, in the parent's order.
+            Minimality::OneMinimal { transformations } => {
+                let evidenced: Vec<Transformation> = Transformation::ORDER
+                    .into_iter()
+                    .filter(|t| held.iter().any(|e| e.transformation() == *t))
+                    .collect();
+                if tried != elements || *transformations != evidenced {
+                    return inconsistent("minimality");
+                }
+            }
         }
         Ok(())
     }
@@ -750,6 +819,8 @@ pub fn parse_shrink_report(value: &Value) -> Result<ShrinkReport, ShrinkReportEr
 pub enum ShrinkRefused {
     /// The pinned oracle is not a valid configuration; nothing is replayed.
     InvalidOracle(OracleRefused),
+    /// A pinned field cannot be what it claims to pin; nothing is replayed.
+    InvalidPredicate { field: &'static str },
     /// The original's fault episodes are not a valid set; nothing is replayed.
     InvalidEpisodes(EpisodeRefused),
     /// The budget would leave the report's canonical integer range.
@@ -833,10 +904,10 @@ pub fn shrink(
     max_replays: u64,
     replay: &mut dyn FnMut(ReplayRequest<'_>) -> ReplayOutcome,
 ) -> Result<(Scenario, ShrinkReport), ShrinkRefused> {
-    predicate
-        .oracle
-        .validate()
-        .map_err(ShrinkRefused::InvalidOracle)?;
+    predicate.validate().map_err(|refused| match refused {
+        PredicateRefused::Oracle(refused) => ShrinkRefused::InvalidOracle(refused),
+        PredicateRefused::Malformed { field } => ShrinkRefused::InvalidPredicate { field },
+    })?;
     validate_episodes(&original.episodes).map_err(ShrinkRefused::InvalidEpisodes)?;
     if canonical_json_encode(&Value::from(max_replays)).is_err() {
         return Err(ShrinkRefused::BudgetNotCanonical { max_replays });

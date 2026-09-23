@@ -209,7 +209,7 @@ pub mod shrink {
     use super::{WORLD_EPOCH_MS, WORLD_SEED, world_config};
 
     pub const FRESH_SEED: u64 = WORLD_SEED ^ 0xABCD;
-    pub const PROFILE: &str = "profile-digest";
+    pub const PROFILE: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
     pub const CUT: Cut = Cut::AtQuiescence;
     pub const BUDGET: u64 = 400;
 

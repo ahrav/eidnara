@@ -10,7 +10,8 @@ use context_core::redaction::{RedactionErrorKind, Redactor};
 use eval_core::{
     CandidateVerdict, ClaimBoundary, Cut, Element, FailureClass, Generation, History, Minimality,
     Mode, MultiplicityRecipe, Oracle, OracleRefused, OriginalFailure, ShrinkReportError, Slice,
-    WITNESS_SCHEMA, WitnessError, WitnessPackage, parse_witness, residue_drift, shrink,
+    WITNESS_SCHEMA, WitnessClass, WitnessError, WitnessPackage, parse_witness, residue_drift,
+    shrink,
 };
 use serde_json::Value;
 use support::shrink::{BUDGET, FRESH_SEED, evaluate, fixture, fresh_config, predicate, scenario};
@@ -370,13 +371,17 @@ fn the_serializer_requires_the_verbatim_claim_boundary_and_rejects_forbidden_cla
         Some(WitnessError::ClaimBoundaryMismatch)
     );
 
+    // The task name is the predicate's one free-text field.
     let mut claims = package();
-    claims.original.predicate.profile_digest = "proves live-model quality".to_string();
-    claims.shrink.predicate.profile_digest = claims.original.predicate.profile_digest.clone();
+    claims.original.predicate.witness_class = WitnessClass::Failure {
+        task: "proves live-model quality".to_string(),
+        class: FailureClass::Interference,
+    };
+    claims.shrink.predicate.witness_class = claims.original.predicate.witness_class.clone();
     assert_eq!(
         claims.serialize(&redactor(), ARTIFACT_BYTES).err(),
         Some(WitnessError::ForbiddenClaim {
-            path: "/original/predicate/profile_digest".to_string(),
+            path: "/original/predicate/witness_class/task".to_string(),
             phrase: "live-model quality".to_string(),
         })
     );
@@ -414,9 +419,11 @@ fn residue_drift_refuses_and_limits_apply_before_publication() {
         Err(WitnessError::TooLarge { bound: 16, .. })
     ));
     let mut leaking = package.clone();
-    leaking.original.predicate.profile_digest =
-        "Authorization: Bearer sk-ant-api03-ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcd".to_string();
-    leaking.shrink.predicate.profile_digest = leaking.original.predicate.profile_digest.clone();
+    leaking.original.predicate.witness_class = WitnessClass::Failure {
+        task: "Authorization: Bearer sk-ant-api03-ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcd".to_string(),
+        class: FailureClass::Interference,
+    };
+    leaking.shrink.predicate.witness_class = leaking.original.predicate.witness_class.clone();
     assert_eq!(
         leaking.serialize(&redactor(), ARTIFACT_BYTES).err(),
         Some(WitnessError::RedactionRefused(

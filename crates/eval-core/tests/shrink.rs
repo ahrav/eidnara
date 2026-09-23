@@ -610,7 +610,7 @@ fn replay_effects_are_bounded_and_a_premature_verdict_is_refused() {
         CandidateVerdict::Reproduced,
         "the retried attempt answered under the original key"
     );
-    effects.cancel(&key(1)).unwrap();
+    effects.cancel(&key(1), 1).unwrap();
     assert_eq!(
         classify_replay(
             &predicate(FailureClass::Interference),
@@ -634,7 +634,7 @@ fn replay_effects_are_bounded_and_a_premature_verdict_is_refused() {
             })
         );
         assert_eq!(
-            effects.cancel(&resolved),
+            effects.cancel(&resolved, 1),
             Err(ReplayRefused::AlreadyResolved { key: resolved })
         );
     }
@@ -1170,4 +1170,175 @@ fn replay_attempts_are_bounded_and_a_stale_attempt_cannot_resolve() {
         .resolve("candidate", MAX_REPLAY_ATTEMPTS, ReplayOutcome::Passed)
         .unwrap();
     assert_eq!(effects.outcome("candidate"), Ok(&ReplayOutcome::Passed));
+}
+
+#[test]
+fn impossible_ledger_shapes_are_refused_on_read_and_ghosts_on_verify() {
+    let original = scenario();
+    let expected = predicate(FailureClass::Interference);
+    let (_, report) = shrink(&original, &fixture(), &expected, BUDGET, &mut evaluate).unwrap();
+    let value = serde_json::to_value(&report).unwrap();
+
+    // A slipped verdict whose observed predicate equals the pinned one is
+    // what `classify_replay` calls `Reproduced`; it cannot appear.
+    let mut echoed = value.clone();
+    let records = echoed["candidates"].as_array_mut().unwrap();
+    let slipped: Vec<usize> = records
+        .iter()
+        .enumerate()
+        .filter(|(_, r)| r["verdict"]["kind"] == "slipped")
+        .map(|(i, _)| i)
+        .collect();
+    let digest = records[slipped[0]]["scenario_digest"].clone();
+    for record in records
+        .iter_mut()
+        .filter(|r| r["scenario_digest"] == digest)
+    {
+        record["verdict"]["observed"] = serde_json::to_value(&expected).unwrap();
+    }
+    assert_eq!(
+        parse_shrink_report(&echoed),
+        Err(ShrinkReportError::Inconsistent {
+            field: "candidates"
+        }),
+        "a slip that observed the pinned predicate is impossible"
+    );
+
+    // Digests are what `Scenario::digest` produces: 64 lowercase hex chars.
+    let mut renamed = value.clone();
+    renamed["original_digest"] = json!("the-original");
+    renamed["candidates"][0]["scenario_digest"] = json!("the-original");
+    assert_eq!(
+        parse_shrink_report(&renamed),
+        Err(ShrinkReportError::Inconsistent {
+            field: "original_digest"
+        })
+    );
+    let mut renamed = value.clone();
+    renamed["candidates"][1]["scenario_digest"] = json!("CAFE");
+    assert_eq!(
+        parse_shrink_report(&renamed),
+        Err(ShrinkReportError::Inconsistent {
+            field: "candidates"
+        })
+    );
+
+    // A deletion the original never held is a ghost, whatever the digests say.
+    let ghost = aged_event("repository:repository-9:99");
+    assert!(!has(&original, &ghost));
+    let mut haunted = report.clone();
+    haunted.deleted.insert(ghost.clone());
+    let last = haunted
+        .candidates
+        .iter()
+        .rposition(|record| record.verdict == CandidateVerdict::Reproduced)
+        .unwrap();
+    for record in &mut haunted.candidates[last..] {
+        record.deleted.insert(ghost.clone());
+    }
+    assert_eq!(
+        original.without(&haunted.deleted).digest(),
+        haunted.minimized_digest,
+        "the ghost changes nothing the digests can see"
+    );
+    haunted.validate().unwrap();
+    assert_eq!(
+        haunted.verify(&original),
+        Err(ShrinkReportError::Inconsistent { field: "deleted" })
+    );
+
+    // The transformations tried are exactly those the original had elements
+    // for; a scenario with no episodes never tried episode removal.
+    let mut eventless = original.clone();
+    eventless.episodes.clear();
+    let (_, report) = shrink(&eventless, &fixture(), &expected, BUDGET, &mut evaluate).unwrap();
+    assert_eq!(
+        report.minimality,
+        Minimality::OneMinimal {
+            transformations: vec![Transformation::EventDeletion]
+        }
+    );
+    report.verify(&eventless).unwrap();
+    let mut padded = report;
+    padded.minimality = Minimality::OneMinimal {
+        transformations: Transformation::ORDER.to_vec(),
+    };
+    padded.validate().unwrap();
+    assert_eq!(
+        padded.verify(&eventless),
+        Err(ShrinkReportError::Inconsistent {
+            field: "minimality"
+        })
+    );
+}
+
+#[test]
+fn a_malformed_profile_digest_is_refused_and_every_candidate_digest_is_recomputed() {
+    let original = scenario();
+    let mut expected = predicate(FailureClass::Interference);
+    let (_, report) = shrink(&original, &fixture(), &expected, BUDGET, &mut evaluate).unwrap();
+
+    let mut renamed = report.clone();
+    let victim = renamed
+        .candidates
+        .iter()
+        .position(|record| matches!(record.verdict, CandidateVerdict::Slipped { .. }))
+        .unwrap();
+    let digest = renamed.candidates[victim].scenario_digest.clone();
+    let other = format!(
+        "{}{}",
+        "0".repeat(63),
+        if digest.ends_with('0') { "1" } else { "0" }
+    );
+    for record in renamed
+        .candidates
+        .iter_mut()
+        .filter(|record| record.scenario_digest == digest)
+    {
+        record.scenario_digest = other.clone();
+    }
+    renamed.validate().unwrap();
+    assert_eq!(
+        renamed.verify(&original),
+        Err(ShrinkReportError::Inconsistent {
+            field: "candidates"
+        }),
+        "a candidate's digest is the digest of the scenario its deletions leave"
+    );
+
+    expected.profile_digest = "profile-digest".to_string();
+    let mut issued = 0u32;
+    let mut replay = |request: ReplayRequest<'_>| {
+        issued += 1;
+        evaluate(request)
+    };
+    assert_eq!(
+        shrink(&original, &fixture(), &expected, BUDGET, &mut replay).err(),
+        Some(ShrinkRefused::InvalidPredicate {
+            field: "profile_digest"
+        })
+    );
+    assert_eq!(issued, 0);
+    let mut value = serde_json::to_value(&report).unwrap();
+    value["predicate"]["profile_digest"] = json!("profile-digest");
+    assert_eq!(
+        parse_shrink_report(&value),
+        Err(ShrinkReportError::Inconsistent {
+            field: "profile_digest"
+        })
+    );
+
+    let mut effects = ReplayEffects::default();
+    assert_eq!(effects.issue("candidate"), Ok(1));
+    assert_eq!(effects.retry("candidate"), Ok(2));
+    assert_eq!(
+        effects.cancel("candidate", 1),
+        Err(ReplayRefused::StaleAttempt {
+            key: "candidate".to_string(),
+            attempt: 1,
+            current: 2,
+        }),
+        "a superseded attempt's cancellation is fenced like its answer"
+    );
+    effects.cancel("candidate", 2).unwrap();
 }
