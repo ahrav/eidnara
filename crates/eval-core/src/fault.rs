@@ -75,7 +75,7 @@ pub enum RestoreFaultKind {
     RecoveryFailure,
 }
 
-/// `retrieval::batch::BatchFault`: the phase after which one projection batch
+/// `batch::BatchFault`: the phase after which one projection batch
 /// fails; the transaction leaves nothing of the batch behind.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
