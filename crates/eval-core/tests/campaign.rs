@@ -569,6 +569,10 @@ fn every_sample_ends_in_exactly_one_closed_vocabulary_terminal() {
             json!({"kind": "skipped", "reason": "redaction_refused"}),
         ),
         (
+            Terminal::Skipped(SkipReason::NoContainment),
+            json!({"kind": "skipped", "reason": "no_containment"}),
+        ),
+        (
             terminals[6],
             json!({"kind": "unsupported", "reason": "surface_not_activated", "surface": "surface2"}),
         ),

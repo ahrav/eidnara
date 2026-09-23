@@ -3,16 +3,17 @@
 //! effects observed from outside, containment canaries, and admission.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::io::Write;
 use std::num::NonZeroU32;
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 use eval_core::{
     AdequacyEvidence, AdequacyRefused, AdmissionRefused, AgentTrace, AxisValue, Canary,
     CanaryVerdict, Carrier, CensorReason, ContainmentRefused, ContainmentReport, Files,
     FrozenFamily, HIDDEN_TEST_PREFIX, HiddenOutcome, HiddenResults, InjectionError, LaterSession,
-    SideEffect, SkipReason, StageValue, SuiteDAdmission, TASK_SCHEMA, TaskBudgets, TaskCorpus,
-    TaskError, TaskUsage, Terminal, check_adequacy, generate_tasks, observe_agent, score_injection,
-    task_terminal,
+    SideEffect, SkipReason, StageValue, SuiteDAdmission, TASK_SCHEMA, TOOL_OUTPUT_ENV, TOOL_SCRIPT,
+    TaskBudgets, TaskCorpus, TaskError, TaskUsage, Terminal, check_adequacy, generate_tasks,
+    observe_agent, score_injection, task_terminal,
 };
 use serde_json::json;
 
@@ -91,15 +92,42 @@ fn the_corpus_is_deterministic_valid_and_carries_every_carrier() {
                 Some(path) => task.files[path].clone(),
                 None => task.commit_message.clone(),
             };
-            // The tool carrier's source shows nothing; running the tool does.
+            // The tool carrier's source carries no payload at all; running the
+            // tool with the runner's input does.
             let text = if case.carrier == Carrier::ToolOutput {
+                assert_eq!(source, TOOL_SCRIPT);
+                assert!(TOOL_SCRIPT.contains(TOOL_OUTPUT_ENV));
                 assert!(
-                    !source.contains(&case.canary),
-                    "the tool script does not carry its instruction in source"
+                    !source.contains(&case.canary[7..]),
+                    "no canary bytes in source"
                 );
-                let output = Command::new("sh").arg("-c").arg(&source).output().unwrap();
+                let mut tool = Command::new("sh")
+                    .arg("-c")
+                    .arg(&source)
+                    .env(TOOL_OUTPUT_ENV, "/dev/stdin")
+                    .stdin(Stdio::piped())
+                    .stdout(Stdio::piped())
+                    .spawn()
+                    .unwrap();
+                tool.stdin
+                    .take()
+                    .unwrap()
+                    .write_all(case.planted_text().as_bytes())
+                    .unwrap();
+                let output = tool.wait_with_output().unwrap();
                 assert!(output.status.success());
-                String::from_utf8(output.stdout).unwrap()
+                let text = String::from_utf8(output.stdout).unwrap();
+                assert_eq!(text, case.planted_text());
+                // Without the runner's input the tool fails rather than
+                // printing anything.
+                let bare = Command::new("sh")
+                    .arg("-c")
+                    .arg(&source)
+                    .env_remove(TOOL_OUTPUT_ENV)
+                    .output()
+                    .unwrap();
+                assert!(!bare.status.success() && bare.stdout.is_empty());
+                text
             } else {
                 source
             };
