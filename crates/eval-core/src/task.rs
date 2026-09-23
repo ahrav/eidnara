@@ -5,7 +5,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use context_core::canonical_json::protocol_digest;
+use context_core::canonical_json::{is_lower_hex, protocol_digest};
 use serde::{Deserialize, Serialize};
 
 use crate::campaign::{TaskBudgets, TaskUsage, Terminal};
@@ -87,6 +87,11 @@ pub enum TaskError {
     DuplicateHiddenTest {
         name: String,
     },
+    /// A hidden test name is one path component under the hidden prefix:
+    /// `[A-Za-z0-9_]+`, so it cannot escape `tests/` and is a Rust identifier.
+    InvalidHiddenTestName {
+        name: String,
+    },
     /// Adequacy evidence is keyed by fix ID; duplicate IDs share a result.
     DuplicateWrongFix {
         id: String,
@@ -97,6 +102,16 @@ pub enum TaskError {
         task: String,
         carrier: Carrier,
     },
+    GeneratorVersionMismatch {
+        found: String,
+    },
+    /// Evidence is keyed by task ID; duplicate IDs share a result.
+    DuplicateTask {
+        id: String,
+    },
+    /// The embedded injection plan is not the one the recorded seed and task
+    /// IDs derive, so replay from the record would score different cases.
+    InjectionPlanMismatch,
     Injection(crate::injection::InjectionError),
 }
 
@@ -120,6 +135,16 @@ impl GeneratedTask {
         }
         let mut names = BTreeSet::new();
         for test in &self.hidden_tests {
+            if test.name.is_empty()
+                || !test
+                    .name
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'_')
+            {
+                return Err(TaskError::InvalidHiddenTestName {
+                    name: test.name.clone(),
+                });
+            }
             if !names.insert(test.name.as_str()) {
                 return Err(TaskError::DuplicateHiddenTest {
                     name: test.name.clone(),
@@ -222,15 +247,23 @@ pub struct TaskCorpus {
 
 impl TaskCorpus {
     pub fn validate(&self) -> Result<(), TaskError> {
+        if self.generator_version != TASK_GENERATOR_VERSION {
+            return Err(TaskError::GeneratorVersionMismatch {
+                found: self.generator_version.clone(),
+            });
+        }
+        let mut ids = BTreeSet::new();
         for task in &self.tasks {
             task.validate()?;
+            if !ids.insert(task.id.clone()) {
+                return Err(TaskError::DuplicateTask {
+                    id: task.id.clone(),
+                });
+            }
         }
         self.injection.validate().map_err(TaskError::Injection)?;
-        let ids: BTreeSet<String> = self.tasks.iter().map(|t| t.id.clone()).collect();
-        if ids != self.injection.task_ids {
-            return Err(TaskError::Injection(
-                crate::injection::InjectionError::NoTasks,
-            ));
+        if self.injection != plan_injection_cases(self.root_seed, &ids) {
+            return Err(TaskError::InjectionPlanMismatch);
         }
         let planted: Vec<(Carrier, String)> = self
             .injection
@@ -506,8 +539,9 @@ pub struct AgentTrace {
     /// Shell commands the agent ran, as `name` and its argument text.
     pub commands: Vec<(String, String)>,
     pub outputs: Vec<String>,
-    /// Files present in the workspace after the run that the repository did
-    /// not hold or that changed.
+    /// Every file the containment boundary saw the agent write, by path, with
+    /// the content last written. A write the agent later undid is still here;
+    /// this is not a snapshot of the workspace after the run.
     pub written: Files,
     /// Rows the agent appended to the memory carrier's file.
     pub memory_rows: Vec<String>,
@@ -540,7 +574,7 @@ pub fn observe_agent(trace: &AgentTrace, later: Option<LaterSession>) -> Injecti
         )
         .collect();
     InjectionObservation {
-        ingested: crate::injection::AxisValue::Yes,
+        ingested: crate::injection::AxisValue::NotMeasurable,
         retrieved: crate::injection::AxisValue::NotMeasurable,
         packed: crate::injection::AxisValue::NotMeasurable,
         mediation: Some(effects),
@@ -635,8 +669,9 @@ impl ContainmentReport {
 }
 
 /// What a Suite D campaign must hold before its first task: an accepted
-/// Phase 5 witness, the deterministic self-tests that ran, and the frozen
-/// analysis family. Each is a value the runner supplies; none defaults.
+/// Phase 5 witness (its lowercase hex protocol digest), the deterministic
+/// self-tests that ran, and the frozen analysis family. Each is a value the
+/// runner supplies; none defaults.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SuiteDAdmission {
@@ -659,7 +694,7 @@ impl SuiteDAdmission {
         if self
             .accepted_witness_digest
             .as_deref()
-            .is_none_or(str::is_empty)
+            .is_none_or(|digest| !is_lower_hex(digest, 64))
         {
             return Err(AdmissionRefused::NoAcceptedWitness);
         }
