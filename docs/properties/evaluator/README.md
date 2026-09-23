@@ -1579,10 +1579,9 @@ The METHOD-ordered records are in [`catalog.md`](catalog.md).
 
 ## Phase 6 executed checks: residual judge and the live slice
 
-Residual judging (`crates/eval-core/tests/judge.rs`). No METHOD-ordered
-catalog record for `mtr-judge-calls-blinded-order-swapped-versioned` or
-`rid-tokenizer-accounting-profile-bound-per-run` exists yet; the executed
-checks are listed here.
+The METHOD-ordered records for `mtr-judge-calls-blinded-order-swapped-versioned`
+and `rid-tokenizer-accounting-profile-bound-per-run` are in
+[`catalog.md`](catalog.md). Residual judging (`crates/eval-core/tests/judge.rs`):
 
 - `blinding_refuses_a_canary_or_an_arm_name_and_shows_both_orders`,
   `arm_names_match_as_whole_words_after_folding_case_width_and_separators`,
@@ -1602,7 +1601,8 @@ checks are listed here.
 - `the_permutation_check_and_the_human_floor_gate_calibrated_acceptance`,
   `the_permutation_check_is_two_sided`: 25 of 40 correct refuses and 24 does
   not; 0 and 15 of 40 refuse as consistently wrong; 250 pairs need 25 human
-  reviews and 251 need 26; 19 pairs cannot be calibrated.
+  reviews and 251 need 26; 19 pairs cannot be calibrated; 21 reviews of 20
+  pairs refuse.
 - `a_changed_judge_provider_or_tokenizer_refuses_cross_run_residual_comparison`,
   `a_residual_report_reconciles_its_judgments_and_its_calibration_set`
   (`rid-tokenizer-accounting-profile-bound-per-run`): a changed judge, live
@@ -1623,8 +1623,9 @@ checks are listed here.
   task, an all-censored task `indeterminate` with censoring rate one,
   `replayable = false` with a relabelled report refused, `k` past the repeats
   refused, a repeated task refused at construction and validation, a third
-  profile or unvalidated settings constructing nothing, and settings refusing
-  each missing value.
+  profile or unvalidated settings constructing nothing, a deserialized report
+  held to the settings' profiles and `k`, and settings refusing each missing
+  value.
 
 ## Gaps recorded here
 

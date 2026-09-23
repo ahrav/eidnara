@@ -132,6 +132,11 @@ pub enum CalibrationRefused {
         required: u32,
         planned: u32,
     },
+    /// More reviewed pairs than judged pairs is not a plan.
+    HumanSampleExceedsPairs {
+        pairs: u32,
+        planned: u32,
+    },
     EmptyCalibrationSet,
     SchemaMismatch {
         found: String,
@@ -175,6 +180,12 @@ impl SamplingPlan {
         if self.human_sample < required {
             return Err(CalibrationRefused::HumanSampleBelowFloor {
                 required,
+                planned: self.human_sample,
+            });
+        }
+        if self.human_sample > self.pairs {
+            return Err(CalibrationRefused::HumanSampleExceedsPairs {
+                pairs: self.pairs,
                 planned: self.human_sample,
             });
         }
@@ -650,6 +661,11 @@ pub enum LiveSliceRefused {
     UnapprovedProvider {
         provider: String,
     },
+    /// The report's repeat count is not the settings'.
+    RepeatCountDiffers {
+        report: u32,
+        settings: u32,
+    },
     Settings(LiveSettingsRefused),
     Statistics(StatisticsError),
 }
@@ -660,6 +676,17 @@ fn summarize(attempts: &[ArmResult], k: u32) -> Result<(PassK, bool), LiveSliceR
     let pass_k = pass_k(attempts, k).map_err(LiveSliceRefused::Statistics)?;
     let indeterminate = pass_k.pass_k == PassKBounds::Indeterminate;
     Ok((pass_k, indeterminate))
+}
+
+/// Validated settings and one of their two profiles gate every live report.
+fn approve(settings: &LiveSettings, provider: &ProviderProfile) -> Result<(), LiveSliceRefused> {
+    settings.validate().map_err(LiveSliceRefused::Settings)?;
+    if !settings.providers.contains(provider) {
+        return Err(LiveSliceRefused::UnapprovedProvider {
+            provider: provider.key(),
+        });
+    }
+    Ok(())
 }
 
 fn first_duplicate_task<'a>(mut tasks: impl Iterator<Item = &'a str>) -> Option<String> {
@@ -676,12 +703,7 @@ pub fn live_slice(
     provider: &ProviderProfile,
     tasks: &[LiveTask],
 ) -> Result<LiveSliceReport, LiveSliceRefused> {
-    settings.validate().map_err(LiveSliceRefused::Settings)?;
-    if !settings.providers.contains(provider) {
-        return Err(LiveSliceRefused::UnapprovedProvider {
-            provider: provider.key(),
-        });
-    }
+    approve(settings, provider)?;
     if tasks.is_empty() {
         return Err(LiveSliceRefused::NoTasks);
     }
@@ -711,10 +733,19 @@ pub fn live_slice(
 }
 
 impl LiveSliceReport {
-    pub fn validate(&self) -> Result<(), LiveSliceRefused> {
+    /// A deserialized report is held to the same settings as a constructed
+    /// one: validated, its profile approved, its `k` the settings'.
+    pub fn validate(&self, settings: &LiveSettings) -> Result<(), LiveSliceRefused> {
         if self.schema != LIVE_SLICE_SCHEMA {
             return Err(LiveSliceRefused::SchemaMismatch {
                 found: self.schema.clone(),
+            });
+        }
+        approve(settings, &self.provider)?;
+        if self.k != settings.k {
+            return Err(LiveSliceRefused::RepeatCountDiffers {
+                report: self.k,
+                settings: settings.k,
             });
         }
         if self.replayable {

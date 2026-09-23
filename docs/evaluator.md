@@ -2448,8 +2448,9 @@ pairs before any judging and digests into every report
 (`eval-judge-calibration/v1`); it refuses another schema, a malformed digest,
 an empty label map, and an `Inconsistent` label, which only two disagreeing
 judge orders produce. `SamplingPlan::validate` refuses fewer than 20 pairs
-and a human sample below ten percent rounded up or below 20 pairs; a campaign
-under the floor cannot claim calibrated acceptance.
+and a human sample below ten percent rounded up or below 20 pairs, or above
+the pair count; a campaign under the floor cannot claim calibrated
+acceptance.
 
 `blind` presents one `Pair` in one `Order`, refusing a planted canary in
 either response and any arm name matched as whole words after folding case,
@@ -2481,9 +2482,11 @@ only from validated settings and one of their two profiles, with the
 settings' `k`; it refuses no tasks and a repeated task id. Each task keeps
 its attempts beside pass@1, the repeat counts, the censoring rate, and the
 pass^k interval through `pass_k`; every attempt censored is `indeterminate`,
-never zero. `replayable` is `LIVE_REPLAYABLE = false`; `validate` refuses a
-relabelled report, another schema, a repeated task, and a summary the
-attempts do not give. Tests: `crates/eval-core/tests/judge.rs`.
+never zero. `replayable` is `LIVE_REPLAYABLE = false`; `validate` takes the
+same settings and refuses a relabelled report, another schema, an unapproved
+profile, another `k`, a repeated task, and a summary the attempts do not
+give, so a deserialized report is held to what a constructed one was. Tests:
+`crates/eval-core/tests/judge.rs`.
 
 ## Coverage markers
 

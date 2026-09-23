@@ -257,6 +257,18 @@ fn the_permutation_check_and_the_human_floor_gate_calibrated_acceptance() {
     );
     assert_eq!(
         SamplingPlan {
+            pairs: 20,
+            human_sample: 21
+        }
+        .validate(),
+        Err(CalibrationRefused::HumanSampleExceedsPairs {
+            pairs: 20,
+            planned: 21
+        }),
+        "humans cannot review more pairs than were judged"
+    );
+    assert_eq!(
+        SamplingPlan {
             pairs: 19,
             human_sample: 19
         }
@@ -391,7 +403,7 @@ fn the_live_slice_reports_trials_intervals_and_censoring_and_is_never_replayable
         },
     ];
     let report = live_slice(&settings(2), &provider("live-1"), &tasks).unwrap();
-    report.validate().unwrap();
+    report.validate(&settings(2)).unwrap();
     assert!(!report.replayable);
     const { assert!(!LIVE_REPLAYABLE) };
     assert_eq!(report.tasks[0].pass_k.repeats, 3);
@@ -410,7 +422,7 @@ fn the_live_slice_reports_trials_intervals_and_censoring_and_is_never_replayable
     let mut relabelled = report.clone();
     relabelled.replayable = true;
     assert_eq!(
-        relabelled.validate(),
+        relabelled.validate(&settings(2)),
         Err(LiveSliceRefused::RelabelledReplayable)
     );
     assert!(
@@ -691,11 +703,11 @@ fn live_slice_validation_recomputes_each_task_and_checks_the_schema() {
         ],
     }];
     let report = live_slice(&settings(2), &provider("live-1"), &tasks).unwrap();
-    report.validate().unwrap();
+    report.validate(&settings(2)).unwrap();
     let mut schema = report.clone();
     schema.schema = "eval-live-slice/v999".to_string();
     assert_eq!(
-        schema.validate(),
+        schema.validate(&settings(2)),
         Err(LiveSliceRefused::SchemaMismatch {
             found: "eval-live-slice/v999".to_string()
         })
@@ -706,14 +718,40 @@ fn live_slice_validation_recomputes_each_task_and_checks_the_schema() {
     let mut k = report.clone();
     k.k = 1;
     assert_eq!(
-        k.validate(),
+        k.validate(&settings(1)),
         inconsistent,
         "outer k disagrees with the task"
+    );
+    assert_eq!(
+        k.validate(&settings(2)),
+        Err(LiveSliceRefused::RepeatCountDiffers {
+            report: 1,
+            settings: 2
+        }),
+        "a deserialized report is held to the settings' k"
+    );
+    let mut foreign = report.clone();
+    foreign.provider = provider("live-3");
+    assert_eq!(
+        foreign.validate(&settings(2)),
+        Err(LiveSliceRefused::UnapprovedProvider {
+            provider: "anthropic/live-3@tp-1".to_string()
+        }),
+        "a deserialized report names an approved profile"
+    );
+    let mut unsettled = settings(2);
+    unsettled.calibration = None;
+    assert_eq!(
+        report.validate(&unsettled),
+        Err(LiveSliceRefused::Settings(
+            LiveSettingsRefused::NoCalibrationSet
+        )),
+        "validation consumes the settings"
     );
     let mut flipped = report.clone();
     flipped.tasks[0].indeterminate = false;
     assert_eq!(
-        flipped.validate(),
+        flipped.validate(&settings(2)),
         inconsistent,
         "all censored is indeterminate"
     );
@@ -724,7 +762,7 @@ fn live_slice_validation_recomputes_each_task_and_checks_the_schema() {
         censored_excluded: Ratio::ONE,
     };
     assert_eq!(
-        fabricated.validate(),
+        fabricated.validate(&settings(2)),
         inconsistent,
         "bounds the attempts do not give"
     );
@@ -801,7 +839,7 @@ fn the_live_slice_refuses_a_repeated_task() {
     let mut report = live_slice(&settings(1), &provider("live-1"), &[task]).unwrap();
     report.tasks.push(report.tasks[0].clone());
     assert_eq!(
-        report.validate(),
+        report.validate(&settings(1)),
         Err(LiveSliceRefused::DuplicateTask {
             task: "t".to_string()
         })
