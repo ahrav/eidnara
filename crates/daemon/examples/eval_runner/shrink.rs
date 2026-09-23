@@ -573,7 +573,12 @@ pub fn config_from_args(args: impl IntoIterator<Item = String>) -> Result<Config
         scale,
         commits: match number("commits")? {
             commits @ 2.. => {
-                u32::try_from(commits).map_err(|error| format!("--commits: {error}"))?
+                let commits =
+                    u32::try_from(commits).map_err(|error| format!("--commits: {error}"))?;
+                aged_config(commits)
+                    .validate()
+                    .map_err(|error| format!("--commits: {error:?}"))?;
+                commits
             }
             _ => return Err("--commits needs at least two, so a rename exists".to_string()),
         },

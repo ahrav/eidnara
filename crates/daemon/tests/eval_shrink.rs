@@ -490,45 +490,36 @@ fn an_original_that_does_not_fail_or_an_unapproved_profile_is_refused() {
 
 #[test]
 fn the_shrink_flags_are_parsed_and_the_child_needs_its_environment() {
-    let config = shrink::config_from_args(
+    let run_id = "ab".repeat(32);
+    let flags = |commits: &str| {
         [
             "--scale",
             "s0",
             "--commits",
-            "8",
+            commits,
             "--elapsed-bound-ms",
             "1000",
             "--approved-by",
             "m",
             "--approval-run-id",
-            &"ab".repeat(32),
+            &run_id,
             "--publish",
             "/tmp/x",
         ]
-        .map(String::from),
-    )
-    .unwrap();
+        .map(String::from)
+    };
+    let config = shrink::config_from_args(flags("8")).unwrap();
     assert_eq!(config.commits, 8);
     assert_eq!(config.replay_timeout, Duration::from_secs(120));
     assert!(shrink::config_from_args(["--scale".to_string(), "s0".to_string()]).is_err());
-    let one_commit = [
-        "--scale",
-        "s0",
-        "--commits",
-        "1",
-        "--elapsed-bound-ms",
-        "1000",
-        "--approved-by",
-        "m",
-        "--approval-run-id",
-        &"ab".repeat(32),
-        "--publish",
-        "/tmp/x",
-    ]
-    .map(String::from);
     assert!(
-        shrink::config_from_args(one_commit).is_err(),
+        shrink::config_from_args(flags("1")).is_err(),
         "a rename needs two commits"
     );
+    let largest = shrink::config_from_args(flags("77")).unwrap();
+    shrink::scenario(largest.commits);
+    let refused = shrink::config_from_args(flags("78"))
+        .expect_err("78 commits exceed the aged world's 128-event bound");
+    assert!(refused.starts_with("--commits:"), "{refused}");
     assert!(ChildArgs::from_env().is_none());
 }

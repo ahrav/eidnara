@@ -2227,7 +2227,9 @@ the behaviour each names; they are the package's coverage signature.
 
 The `shrink` subcommand takes `--scale`, `--commits`, `--elapsed-bound-ms`,
 `--approved-by`, `--approval-run-id`, and `--publish`, and pins the planted
-oracle at `failing_at: 3, slipping_at: 6`. `crates/daemon/tests/eval_shrink.rs`
+oracle at `failing_at: 3, slipping_at: 6`. `--commits` below two is refused,
+and so is a count whose aged world declares more than its 128-event bound (78
+commits and above), before anything is created. `crates/daemon/tests/eval_shrink.rs`
 runs the shell with the test binary as the child: the minimized witness keeps
 six commits and its recipe counts the five whose single deletion slips the
 class, two further fresh processes agree on outcome and trace digest, the
