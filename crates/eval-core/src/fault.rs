@@ -251,7 +251,8 @@ impl FaultAction {
 
     /// The action leaves an operation's outcome unknown to its caller: the
     /// work may have committed while the reply said otherwise. `LoseLocalCommit`
-    /// rolls back and `SkipAcknowledgement` never acknowledges, which are known.
+    /// rolls back and `SkipAcknowledgement` never acknowledges, which are
+    /// known, and a process kill's cut fixes what committed before it.
     pub fn loses_reply(&self) -> bool {
         match self {
             Self::SearchEpisode { fault } => {

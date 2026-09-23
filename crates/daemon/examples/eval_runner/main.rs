@@ -406,11 +406,28 @@ fn run_aging(args: impl Iterator<Item = String>) -> io::Result<()> {
     Ok(())
 }
 
+/// The fault campaign's kill episodes re-execute this binary as `fault-child`.
+#[cfg(unix)]
+fn spawn_fault_child(args: &fault::ChildArgs) -> std::process::Command {
+    let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+    command.arg("fault-child");
+    args.env(&mut command);
+    command
+}
+
+/// Reopens the root the parent prepared, parks at the named cut, and waits to be killed.
+#[cfg(unix)]
+fn run_fault_child() -> io::Result<()> {
+    let args = fault::ChildArgs::from_env()
+        .ok_or_else(|| io::Error::other("fault-child needs its environment"))?;
+    fault::child_main(&args)
+}
+
 /// Runs the fault campaign and prints one JSON line naming what was published.
 #[cfg(unix)]
 fn run_fault(args: impl Iterator<Item = String>) -> io::Result<()> {
     let config = fault::config_from_args(args).map_err(io::Error::other)?;
-    let run = fault::run(&config).map_err(io::Error::other)?;
+    let run = fault::run(&config, spawn_fault_child).map_err(io::Error::other)?;
     let digest = |bytes: &[u8]| format!("{:x}", sha2::Sha256::digest(bytes));
     let summary = json!({
         "report": config.publish.join(fault::REPORT_FILE),
@@ -440,6 +457,8 @@ fn main() {
         Some("aging") => run_aging(args),
         #[cfg(unix)]
         Some("fault") => run_fault(args),
+        #[cfg(unix)]
+        Some("fault-child") => run_fault_child(),
         other => Err(io::Error::other(format!(
             "{USAGE}{} (got {other:?})",
             campaign_usage()

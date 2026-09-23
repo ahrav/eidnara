@@ -1401,6 +1401,10 @@ fn a_parsed_report_cannot_claim_what_no_run_recorded() {
         .loses_reply(),
         "a rolled-back commit whose reply says so is known, not lost"
     );
+    assert!(
+        !kill().loses_reply(),
+        "a kill's cut fixes what committed before it"
+    );
     for (action, heal, family, loses) in [
         (
             FaultAction::EmbeddingDispatch {

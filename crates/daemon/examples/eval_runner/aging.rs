@@ -334,7 +334,7 @@ pub struct Stores {
     pub consumer: CatchUpConsumer,
     pub memory: MemoryStore,
     rendering: Rendering,
-    bounds: DriveBounds,
+    pub bounds: DriveBounds,
     chains: BTreeMap<String, Vec<String>>,
     dead: BTreeSet<String>,
     applied: u32,
@@ -405,7 +405,47 @@ impl Stores {
         self.applied += 1;
     }
 
+    /// Applies the step to the kernel only: the memory store is left
+    /// untouched, for a window in which it is outside the healthy core.
+    pub fn apply_kernel_only(&mut self, planned: &Planned) {
+        match &planned.step {
+            Step::Publish(id) => {
+                self.publish_kernel(id);
+            }
+            Step::Retire(id) => self.retire(id),
+        }
+        self.applied += 1;
+    }
+
     fn publish(&mut self, id: &EventId) {
+        let ordinal = self.publish_kernel(id);
+        let message = &self.rendering.messages[ordinal];
+        let ordinal = ordinal as i64 + 1;
+        let text = message.message["parts"][0]["text"].as_str().unwrap();
+        let block = format!("{}#0", message.message["info"]["id"].as_str().unwrap());
+        self.memory
+            .append_history_segments(
+                SESSION,
+                &[StoredHistorySegment {
+                    sequence: ordinal,
+                    start_message: ordinal,
+                    end_message: ordinal,
+                    start_message_id: block.clone(),
+                    end_message_id: block,
+                    title: format!("C{ordinal}"),
+                    content: text.to_string(),
+                    p1: Some(text.to_string()),
+                    importance: 50,
+                    created_at: message.observation_time_ms,
+                    ..Default::default()
+                }],
+            )
+            .unwrap();
+    }
+
+    /// Publishes the message's units through the real source publisher and
+    /// returns the message's ordinal in the rendering.
+    fn publish_kernel(&mut self, id: &EventId) -> usize {
         let ordinal = self
             .rendering
             .messages
@@ -436,27 +476,7 @@ impl Stores {
             }
             chain.push(published.object_id);
         }
-        let ordinal = ordinal as i64 + 1;
-        let text = message.message["parts"][0]["text"].as_str().unwrap();
-        let block = format!("{}#0", message.message["info"]["id"].as_str().unwrap());
-        self.memory
-            .append_history_segments(
-                SESSION,
-                &[StoredHistorySegment {
-                    sequence: ordinal,
-                    start_message: ordinal,
-                    end_message: ordinal,
-                    start_message_id: block.clone(),
-                    end_message_id: block,
-                    title: format!("C{ordinal}"),
-                    content: text.to_string(),
-                    p1: Some(text.to_string()),
-                    importance: 50,
-                    created_at: message.observation_time_ms,
-                    ..Default::default()
-                }],
-            )
-            .unwrap();
+        ordinal
     }
 
     fn retire(&mut self, target: &EventId) {
@@ -483,7 +503,7 @@ impl Stores {
             .unwrap();
     }
 
-    fn publish_outbox(&self) {
+    pub fn publish_outbox(&self) {
         let pending = self.corpus.kernel.pending_outbox(1024).unwrap();
         if let Some(last) = pending.iter().rev().find(|entry| entry.commit_boundary) {
             self.corpus
@@ -548,10 +568,6 @@ impl Stores {
             ),
         }
         .unwrap()
-    }
-
-    pub fn publish_outbox_now(&self) {
-        self.publish_outbox();
     }
 
     pub fn pending(&self, counter: WorkCounter) -> u64 {
@@ -826,6 +842,19 @@ impl Closed {
             store.wal = truncate(&file);
             store.wal_sidecar_bytes = sidecar_len(&file);
         }
+    }
+}
+
+impl Stores {
+    /// Reopens a root this process did not open, as a fresh process would.
+    pub fn reconstruct(root: &Path, plan: &Plan, applied: u32, now: i64) -> Stores {
+        reopen_stores(
+            root.to_path_buf(),
+            plan.rendering.clone(),
+            plan.bounds,
+            applied,
+            now,
+        )
     }
 }
 
@@ -1482,15 +1511,11 @@ pub fn run(config: &Config) -> Result<Run, RunError> {
         envelope: charges.envelope.clone(),
     };
     charges.retain_publish_root()?;
-    let bytes = loop {
-        report.envelope = charges.envelope.clone();
-        let bytes = serde_json::to_vec_pretty(&report.serialize()?).unwrap();
-        let peak = charges.envelope.peaks.artifact_bytes;
-        charges.observe(eval_core::Resource::ArtifactBytes, bytes.len() as u64)?;
-        if charges.envelope.peaks.artifact_bytes == peak {
-            break bytes;
-        }
-    };
+    report.validate()?;
+    let bytes = charges.publish_bytes(|envelope| {
+        report.envelope = envelope.clone();
+        serde_json::to_vec_pretty(&serde_json::to_value(&report).unwrap()).unwrap()
+    })?;
     let manifest = manifest(
         identity,
         &report,

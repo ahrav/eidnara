@@ -14,6 +14,8 @@ mod fault;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
+use std::sync::{Arc, mpsc};
+use std::time::{Duration, Instant};
 
 use daemon::search_catchup::{Blocked, EpisodeEnd, EpisodeEvent, EpisodeReport};
 use eval_core::{
@@ -33,6 +35,31 @@ use support::embedding_fixtures::PROJECT;
 
 const MESSAGES: u32 = 24;
 const QUOTA_NOW_MS: i64 = 1_000;
+
+/// The kill episodes re-execute this test binary at the child entrypoint.
+fn spawn_child(args: &fault::ChildArgs) -> std::process::Command {
+    let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+    command.args([
+        "--exact",
+        "fault_child_entrypoint_reexecuted_by_the_parent",
+        "--ignored",
+        "--nocapture",
+        "--test-threads=1",
+    ]);
+    args.env(&mut command);
+    command
+}
+
+/// The child owns its parked episode; an ignored-test sweep without the
+/// parent's environment returns at once.
+#[test]
+#[ignore = "re-executed by the kill episodes with their environment set"]
+fn fault_child_entrypoint_reexecuted_by_the_parent() {
+    let Some(args) = fault::ChildArgs::from_env() else {
+        return;
+    };
+    fault::child_main(&args);
+}
 const SUITE: &str = "crates/daemon/tests/eval_fault.rs::";
 
 fn budget() -> Option<u64> {
@@ -65,7 +92,11 @@ struct Campaign {
 fn campaign(coverage: &mut Coverage) -> Campaign {
     let publish = tempfile::tempdir().unwrap();
     let out = publish.path().join("out");
-    let run = fault::run(&config(out.clone(), budget().unwrap_or(600_000))).unwrap();
+    let run = fault::run(
+        &config(out.clone(), budget().unwrap_or(600_000)),
+        spawn_child,
+    )
+    .unwrap();
     for marker in run.coverage.fired() {
         coverage.record(marker).unwrap();
     }
@@ -133,6 +164,8 @@ fn the_fault_campaign_receipts_every_declared_cut_scenario(campaign: &Campaign) 
         "artifact_deletion",
         "corrupt_quiescent_file",
         "embedding_publication",
+        "held_publication",
+        "process_kill",
         "expected_refusal",
     ] {
         assert!(actions.contains(kind), "{actions:?} lacks {kind}");
@@ -140,7 +173,7 @@ fn the_fault_campaign_receipts_every_declared_cut_scenario(campaign: &Campaign) 
     for episode in &report.episodes {
         assert_eq!(episode.heal, episode.action.heal());
         assert!(!episode.layer_contract.is_empty());
-        assert!(episode.kill.is_none(), "no kill episode in this campaign");
+        assert_eq!(episode.kill.is_some(), episode.action.is_kill());
     }
     // An armed window the runner can check from: a lock held, a latch or
     // stall that holds until the reopen, or a catch-up observer cut inside a
@@ -166,7 +199,10 @@ fn the_fault_campaign_receipts_every_declared_cut_scenario(campaign: &Campaign) 
         "a safety check ran while every fault that arms on the aging drive's stores was armed: {} < {armed}",
         report.safety_checks_while_armed
     );
-    assert!(report.liveness.is_none(), "liveness is a separate mode");
+    assert!(
+        report.liveness.is_some(),
+        "liveness is reported as its own mode"
+    );
 
     let published = serde_json::from_slice(&std::fs::read(out.join(REPORT_FILE)).unwrap()).unwrap();
     assert_eq!(
@@ -183,6 +219,17 @@ fn the_fault_campaign_receipts_every_declared_cut_scenario(campaign: &Campaign) 
         FaultReport::result_digest(&published).unwrap()
     );
     assert_eq!(manifest.cut_receipts, report.cuts);
+    assert_eq!(manifest.witness_digest, fault::witness_digest(report));
+    assert!(!report.barriers.is_empty());
+    let mut respawned = report.clone();
+    for barrier in &mut respawned.barriers {
+        barrier.pid = barrier.pid.wrapping_add(1);
+    }
+    assert_eq!(
+        fault::witness_digest(&respawned),
+        manifest.witness_digest,
+        "the pid the OS gave a kill child is not witness evidence"
+    );
 }
 
 fn a_lost_reply_stays_unknown_until_readback_at_after_recovery_scenario(campaign: &Campaign) {
@@ -199,27 +246,15 @@ fn a_lost_reply_stays_unknown_until_readback_at_after_recovery_scenario(campaign
         assert!(effect.acknowledged <= effect.observed && effect.observed <= effect.attempted);
         assert_eq!(effect.attempted, 1, "{identity}");
     }
-    let commit = lost
+    let search: Vec<EffectOutcome> = lost
         .iter()
-        .find(|(id, _)| id.starts_with("search_commit:"))
-        .unwrap()
-        .1;
+        .filter(|(id, _)| id.starts_with("search_commit:") || id.starts_with("search_ack:"))
+        .map(|(_, e)| e.outcome)
+        .collect();
     assert_eq!(
-        commit.expected,
-        Expected::Exactly {
-            state: eval_core::EffectState::Applied
-        }
-    );
-    let ack = lost
-        .iter()
-        .find(|(id, _)| id.starts_with("search_ack:"))
-        .unwrap()
-        .1;
-    assert_eq!(
-        ack.expected,
-        Expected::Exactly {
-            state: eval_core::EffectState::Applied
-        }
+        search,
+        [EffectOutcome::Applied; 2],
+        "the two lost replies committed; a kill loses none"
     );
     let embeddings: Vec<_> = lost
         .iter()
@@ -367,7 +402,121 @@ fn artifact_faults_fail_with_their_named_errno_and_heal_by_reopen_or_consumption
     );
 }
 
-const SCENARIOS: [fn(&Campaign); 7] = [
+fn a_test_binary_child_killed_at_a_named_cut_recovers_scenario(campaign: &Campaign) {
+    let run = &campaign.run;
+    let kills: Vec<_> = run
+        .report
+        .episodes
+        .iter()
+        .filter(|e| e.action.is_kill())
+        .collect();
+    assert_eq!(kills.len(), 2);
+    for episode in &kills {
+        let label = episode.kill.as_ref().unwrap();
+        assert_eq!(label.crash_model, eval_core::APPLICATION_CRASH);
+        assert!(label.page_cache_intact);
+        assert_eq!(label.killed_process, eval_core::TEST_BINARY_CHILD);
+        assert_eq!(episode.heal, Heal::Reopen);
+        let barrier = run
+            .report
+            .barriers
+            .iter()
+            .find(|b| b.episode == episode.id)
+            .unwrap();
+        let FaultAction::ProcessKill { cut } = &episode.action else {
+            unreachable!()
+        };
+        assert_eq!(&barrier.cut, cut);
+        assert!(barrier.line.ends_with(cut), "{barrier:?}");
+        assert_eq!(barrier.signal, 9, "SIGKILL, not an exit status");
+        assert!(barrier.pid > 0);
+        assert!(
+            !run.report
+                .effects
+                .effects
+                .keys()
+                .any(|identity| identity.ends_with(&format!("@{}", episode.id))),
+            "{}: the cut fixes what committed, so the kill loses no reply",
+            episode.id
+        );
+    }
+    assert!(
+        run.report.coverage.receipted["local_staged"] >= 2,
+        "the lost-reply episodes and the kill each stage a batch"
+    );
+    assert!(run.report.coverage.receipted["acknowledgement_requested"] >= 2);
+}
+
+fn a_held_publication_admits_once_and_publishes_on_release_scenario(campaign: &Campaign) {
+    let run = &campaign.run;
+    let held = run
+        .report
+        .episodes
+        .iter()
+        .find(|e| e.action == FaultAction::HeldPublication)
+        .unwrap();
+    assert_eq!(held.heal, Heal::Released);
+    assert_eq!(run.report.coverage.receipted["publication_held"], 1);
+    assert_eq!(run.report.coverage.receipted["publication_released"], 1);
+}
+
+fn liveness_bounds_are_met_with_outside_core_faults_armed_scenario(campaign: &Campaign) {
+    let run = &campaign.run;
+    let liveness = run.report.liveness.as_ref().unwrap();
+    liveness.verdict(&run.profile.liveness).unwrap();
+    assert_eq!(
+        liveness.outside_core.len(),
+        1,
+        "the memory-store lock holder is the permanent outside-core fault"
+    );
+    assert_eq!(liveness.armed_at_bound, liveness.outside_core);
+    assert_eq!(liveness.core.lanes.len(), 3);
+    assert!(
+        !liveness
+            .core
+            .lanes
+            .contains(&eval_core::Lane::ReviewerCoordinatorPasses),
+        "the reviewer coordinator is outside this campaign's core"
+    );
+    for (lane, progress) in &liveness.lanes {
+        assert_eq!(
+            progress.bound,
+            lane.bound(&run.profile.liveness),
+            "{lane:?}"
+        );
+        assert_eq!(
+            progress.steps, progress.bound,
+            "{lane:?} was driven to its bound"
+        );
+        assert!(
+            progress.met_at.is_some_and(|k| k <= progress.bound),
+            "{lane:?}: {progress:?}"
+        );
+        assert!(progress.holds_at_bound, "{lane:?}");
+        assert!(progress.stalled_at.is_none(), "{lane:?}: {progress:?}");
+        assert!(progress.blocked.is_none(), "{lane:?}: {progress:?}");
+        assert!(
+            progress.fresh_commits >= 8,
+            "{lane:?} was fed fresh kernel work inside its window: {progress:?}"
+        );
+    }
+    assert_eq!(
+        liveness.permanent_stalls.len(),
+        1,
+        "R11 is reported as the permanent stall it is"
+    );
+    assert_eq!(
+        run.report.coverage.receipted.get("claims_materialized"),
+        Some(&run.profile.liveness.materialization_episodes),
+        "every materialization step leaves exactly the latest fed decision's claims live"
+    );
+    assert!(run.report.safety_checks_while_armed > run.profile.liveness.catch_up_episodes);
+}
+
+const SCENARIOS: [fn(&Campaign); 10] = [
+    a_test_binary_child_killed_at_a_named_cut_recovers_scenario,
+    a_held_publication_admits_once_and_publishes_on_release_scenario,
+    liveness_bounds_are_met_with_outside_core_faults_armed_scenario,
     the_fault_campaign_receipts_every_declared_cut_scenario,
     a_lost_reply_stays_unknown_until_readback_at_after_recovery_scenario,
     deletion_bearing_catch_up_is_an_expected_refusal_and_a_permanent_stall_scenario,
@@ -438,6 +587,33 @@ fn artifact_faults_fail_with_their_named_errno_and_heal_by_reopen_or_consumption
 
 #[test]
 #[ignore = "S0 runs under an explicit budget: set EIDNARA_EVAL_S0_BUDGET_MS and run with --ignored"]
+fn a_test_binary_child_killed_at_a_named_cut_recovers() {
+    budget_or_panic();
+    a_test_binary_child_killed_at_a_named_cut_recovers_scenario(
+        &campaign(&mut Coverage::default()),
+    );
+}
+
+#[test]
+#[ignore = "S0 runs under an explicit budget: set EIDNARA_EVAL_S0_BUDGET_MS and run with --ignored"]
+fn a_held_publication_admits_once_and_publishes_on_release() {
+    budget_or_panic();
+    a_held_publication_admits_once_and_publishes_on_release_scenario(&campaign(
+        &mut Coverage::default(),
+    ));
+}
+
+#[test]
+#[ignore = "S0 runs under an explicit budget: set EIDNARA_EVAL_S0_BUDGET_MS and run with --ignored"]
+fn liveness_bounds_are_met_with_outside_core_faults_armed() {
+    budget_or_panic();
+    liveness_bounds_are_met_with_outside_core_faults_armed_scenario(&campaign(
+        &mut Coverage::default(),
+    ));
+}
+
+#[test]
+#[ignore = "S0 runs under an explicit budget: set EIDNARA_EVAL_S0_BUDGET_MS and run with --ignored"]
 fn every_fault_marker_fires_across_the_scenarios() {
     budget_or_panic();
     let mut coverage = Coverage::default();
@@ -451,18 +627,9 @@ fn every_fault_marker_fires_across_the_scenarios() {
         .map(|m| m.name)
         .collect();
     let fired: BTreeSet<&str> = coverage.fired().iter().copied().collect();
-    let pending: BTreeSet<&str> = [
-        "flt_kill_barrier_read_before_kill",
-        "flt_liveness_bounds_met_with_faults_armed",
-        "sls_embedding_publication_held_then_released",
-    ]
-    .into_iter()
-    .collect();
     let missing: BTreeSet<&str> = owned.difference(&fired).copied().collect();
-    assert_eq!(
-        missing, pending,
-        "every marker this suite owns fires here except the kill and liveness markers, which their scenarios record"
-    );
+    assert!(missing.is_empty(), "{missing:?}");
+    coverage.complete(SUITE).unwrap();
 }
 
 fn quota_episode_on_a_fresh_root() -> (tempfile::TempDir, Witness, campaign::Charges) {
@@ -549,12 +716,42 @@ fn an_unapproved_profile_refuses_before_any_store_opens() {
     let out = publish.path().join("out");
     let mut config = config(out.clone(), 600_000);
     config.approval = None;
-    let error = fault::run(&config).err().unwrap();
+    let error = fault::run(&config, spawn_child).err().unwrap();
     assert!(
         matches!(error, RunError::Profile(ProfileError::NotApproved { .. })),
         "{error}"
     );
     assert!(!out.exists());
+}
+
+#[test]
+fn a_gated_lane_drops_while_its_inference_is_held() {
+    use host_runtime::local_embeddings::EmbeddingEngine;
+
+    let lane = fault::GatedLane::new();
+    let engine = Arc::clone(&lane.engine);
+    drop(lane.runtime.spawn_blocking(move || engine.embed(&["held"])));
+    let started = Instant::now();
+    while lane.engine.calls() == 0 {
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "the inference never reached the gate"
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let engine = Arc::clone(&lane.engine);
+    let (dropped, done) = mpsc::channel();
+    std::thread::spawn(move || {
+        drop(lane);
+        let _ = dropped.send(());
+    });
+    done.recv_timeout(Duration::from_secs(10))
+        .expect("dropping the lane releases its held inference");
+    assert_eq!(
+        engine.completed(),
+        1,
+        "the held inference ran to completion"
+    );
 }
 
 #[test]
@@ -586,6 +783,94 @@ fn fault_markers_each_name_a_scenario_here() {
         );
     }
     assert_eq!(mine.len(), 10);
+    let _ = &Expected::Exactly {
+        state: eval_core::EffectState::Applied,
+    };
+}
+
+/// A liveness window's stores before the window opens: the healthy prefix
+/// lived, the claim materializer registered, and the backlog half applied.
+fn liveness_window_stores(
+    root: &std::path::Path,
+) -> (aging::Plan, aging::Stores, Vec<aging::Planned>) {
+    let plan = aging::plan(MESSAGES).unwrap();
+    let mut stores = aging::Stores::open(root, &plan);
+    let k = plan.checkpoint_step as usize;
+    aging::live(&mut stores, &plan.steps[..k]);
+    daemon::claim_sources::ClaimMaterializer::register(&stores.corpus.kernel, plan.steps[k].now_ms)
+        .unwrap();
+    let (backlog, fresh) = plan.steps[k..].split_at((plan.steps.len() - k) / 2);
+    for planned in backlog {
+        stores.apply(planned);
+    }
+    let fresh = fresh.to_vec();
+    (plan, stores, fresh)
+}
+
+#[test]
+fn a_fed_window_step_counts_the_kernel_commits_it_made() {
+    let root = tempfile::tempdir().unwrap();
+    let (_plan, mut stores, fresh) = liveness_window_stores(root.path());
+    for (i, planned) in fresh.iter().enumerate() {
+        let step = i as u64 + 1;
+        let before = stores.tip();
+        let fed = fault::feed(&mut stores, Some(planned), step, 64);
+        assert_eq!(
+            fed,
+            u64::try_from(stores.tip() - before).unwrap(),
+            "window step {step} fed {planned:?}"
+        );
+    }
+    drop(stores.close());
+}
+
+#[test]
+fn only_the_newest_decisions_claims_satisfy_the_materialization_lane() {
+    let root = tempfile::tempdir().unwrap();
+    let (plan, mut stores, _fresh) = liveness_window_stores(root.path());
+    let now = plan.steps.last().unwrap().now_ms;
+    fault::feed(&mut stores, None, 1, 64);
+    stores.publish_outbox();
+    let kernel = Arc::clone(&stores.corpus.kernel);
+    let mut materializer =
+        daemon::claim_sources::ClaimMaterializer::new(&kernel, kernel::ProviderEgress::LocalOnly);
+    let page = kernel::CommitPageBounds {
+        max_commits: 64.try_into().unwrap(),
+        max_rows: 1024.try_into().unwrap(),
+        max_payload_bytes: (1u64 << 20).try_into().unwrap(),
+    };
+    let materialize = |materializer: &mut daemon::claim_sources::ClaimMaterializer, tip: i64| {
+        for _ in 0..64 {
+            let report = materializer.run_episode(page, now).unwrap();
+            if matches!(
+                report.end,
+                daemon::claim_sources::MaterializationEnd::ReachedTarget
+            ) && report.acknowledged_through >= tip
+            {
+                return;
+            }
+        }
+        panic!("the materializer never reached the tip {tip}");
+    };
+    materialize(&mut materializer, stores.tip());
+    assert!(
+        fault::newest_claims_live(root.path(), 0),
+        "decision 0 was fed and materialized"
+    );
+    assert!(
+        !fault::newest_claims_live(root.path(), 1),
+        "decision 1 was never fed, so decision 0's claims are not its claims"
+    );
+    fault::feed(&mut stores, None, 1 + 4, 64);
+    stores.publish_outbox();
+    assert!(
+        !fault::newest_claims_live(root.path(), 1),
+        "decision 0's two claims are still live and decision 1's are unpublished"
+    );
+    materialize(&mut materializer, stores.tip());
+    assert!(fault::newest_claims_live(root.path(), 1));
+    drop(kernel);
+    drop(stores.close());
 }
 
 fn reached(through: i64) -> EpisodeReport {
@@ -639,7 +924,7 @@ fn every_window_of_a_lost_reply_episode_loses_its_reply() {
         receipt_lost_reply_episode(&mut witness, "lost", fault, &reached(9), &events).unwrap();
         assert_eq!(
             witness.effects.unknown(),
-            [format!("{kind}:5"), format!("{kind}:9")]
+            [format!("{kind}:5@lost"), format!("{kind}:9@lost")]
                 .into_iter()
                 .collect(),
             "{fault:?}"
@@ -715,6 +1000,21 @@ fn a_read_back_after_later_catch_up_is_refused_as_masked() {
     );
 }
 
+/// A 13-message plan's suffix ends at its third publish (the sixth, seventh,
+/// and eighth steps after the checkpoint): room for two publication probes
+/// and a step to live after, not for the held publication's probe ahead.
+#[test]
+fn a_plan_too_short_for_the_fault_phase_is_refused() {
+    let publish = tempfile::tempdir().unwrap();
+    let mut config = config(publish.path().join("out"), 600_000);
+    config.messages = 13;
+    match fault::run(&config, spawn_child) {
+        Err(RunError::HistoryTooShort { .. }) => {}
+        Err(other) => panic!("refused by the wrong error: {other}"),
+        Ok(_) => panic!("a 13-message plan ran the fault phase"),
+    }
+}
+
 /// `--messages 7` plans a history whose checkpoint leaves fewer than the six
 /// suffix steps the fault phase drives. The run refuses it as a `RunError`
 /// before any store opens; it does not panic on accepted numeric input.
@@ -730,7 +1030,7 @@ fn a_history_too_short_for_the_fault_phase_is_refused_not_panicked() {
     let publish = tempfile::tempdir().unwrap();
     let mut config = config(publish.path().join("out"), 600_000);
     config.messages = 7;
-    let outcome = std::panic::catch_unwind(|| fault::run(&config).err());
+    let outcome = std::panic::catch_unwind(|| fault::run(&config, spawn_child).err());
     let refused = outcome
         .expect("a short history is refused, not a panic")
         .expect("a short history is refused");
@@ -760,7 +1060,9 @@ fn a_history_the_publication_probes_would_exhaust_is_refused_before_any_store_op
     let publish = tempfile::tempdir().unwrap();
     let mut config = config(publish.path().join("out"), 600_000);
     config.messages = 9;
-    let refused = fault::run(&config).err().expect("the history is refused");
+    let refused = fault::run(&config, spawn_child)
+        .err()
+        .expect("the history is refused");
     assert!(
         matches!(refused, RunError::HistoryTooShort { .. }),
         "refused at planning, not by the campaign: {refused}"
@@ -915,6 +1217,29 @@ fn a_safety_check_outside_an_armed_window_is_not_counted_as_armed() {
     );
 }
 
+#[test]
+fn each_kill_episode_counts_the_safety_check_its_child_ran_at_the_cut() {
+    let plan = fault::plan(MESSAGES).unwrap();
+    let profile = fault::profile(Scale::S0, MESSAGES, 600_000, None);
+    for cut in fault::KillCut::ALL {
+        let mut charges = campaign::Charges::new(profile.envelope.clone());
+        let mut witness = Witness::new();
+        fault::kill_episode(
+            &plan,
+            MESSAGES,
+            &mut charges,
+            &mut witness,
+            spawn_child,
+            cut,
+        )
+        .unwrap();
+        assert_eq!(
+            witness.safety_checks, 1,
+            "{cut:?}: one counted check, made while the child was parked at its cut"
+        );
+    }
+}
+
 /// The counted safety check inspects the state the faulted operation left:
 /// for a lost commit reply, `local_released`, after the batch committed and
 /// before the drive reconciles the lost reply (`local_staged` is inside the
@@ -953,6 +1278,128 @@ fn an_armed_safety_check_runs_after_the_faulted_effect_is_durable() {
             "{fault:?}"
         );
     }
+}
+
+/// Closing the stores checkpoints their WALs away, so an auxiliary root
+/// charged only at its vacate would report its closed footprint.
+#[test]
+fn the_kill_and_liveness_roots_are_charged_while_their_stores_are_open() {
+    let plan = fault::plan(MESSAGES).unwrap();
+    let k = plan.checkpoint_step as usize;
+    let root = tempfile::tempdir().unwrap();
+    let mut stores = aging::Stores::open(root.path(), &plan);
+    aging::live(&mut stores, &plan.steps[..k]);
+    let open = campaign::root_bytes(root.path());
+    drop(stores.close());
+    let closed = campaign::root_bytes(root.path());
+    assert!(open > closed, "closing checkpoints the WAL away");
+    // Another root's footprint differs by a few pages, so the bound sits
+    // between the open and closed footprints of this one.
+    let open_enough = (open + closed) / 2;
+    let profile = fault::profile(Scale::S0, MESSAGES, 600_000, None);
+
+    let mut charges = campaign::Charges::new(profile.envelope.clone());
+    fault::kill_episode(
+        &plan,
+        MESSAGES,
+        &mut charges,
+        &mut Witness::new(),
+        spawn_child,
+        fault::KillCut::LocalStaged,
+    )
+    .unwrap();
+    let peak = charges.envelope.peaks.store_bytes;
+    assert!(
+        peak > open_enough,
+        "kill: peak {peak}, open {open}, closed {closed}"
+    );
+
+    let mut charges = campaign::Charges::new(profile.envelope.clone());
+    fault::liveness(
+        &plan,
+        &mut charges,
+        &mut Witness::new(),
+        &profile.statistics.liveness_bounds,
+    )
+    .unwrap();
+    let peak = charges.envelope.peaks.store_bytes;
+    assert!(
+        peak > open_enough,
+        "liveness: peak {peak}, open {open}, closed {closed}"
+    );
+}
+
+/// The child parks inside the observer, which runs before the call it names:
+/// at `acknowledgement_requested` the acknowledgement was never called, and
+/// neither cut leaves an outcome the kill made unknown, so the episode checks
+/// the crashed files itself and enters nothing in the ledger.
+#[test]
+fn a_kill_records_no_uncalled_operation_and_loses_no_reply() {
+    let plan = fault::plan(MESSAGES).unwrap();
+    let profile = fault::profile(Scale::S0, MESSAGES, 600_000, None);
+    for cut in fault::KillCut::ALL {
+        let mut charges = campaign::Charges::new(profile.envelope.clone());
+        let mut witness = Witness::new();
+        fault::kill_episode(
+            &plan,
+            MESSAGES,
+            &mut charges,
+            &mut witness,
+            spawn_child,
+            cut,
+        )
+        .unwrap();
+        assert!(
+            witness.effects.effects.is_empty(),
+            "{cut:?}: the cut fixes what committed, so nothing is unknown: {:?}",
+            witness.effects.effects
+        );
+    }
+}
+
+/// A materializer one page behind publishes decision 0's claims after
+/// decision 1 has committed, so ordering alone would take them for decision
+/// 1's; only their descriptor identity says whose they are.
+#[test]
+fn a_lagging_predecessors_claims_are_not_the_newest_decisions() {
+    let root = tempfile::tempdir().unwrap();
+    let (plan, mut stores, _fresh) = liveness_window_stores(root.path());
+    let now = plan.steps.last().unwrap().now_ms;
+    let kernel = Arc::clone(&stores.corpus.kernel);
+    let mut materializer =
+        daemon::claim_sources::ClaimMaterializer::new(&kernel, kernel::ProviderEgress::LocalOnly);
+    let page = |commits: usize| kernel::CommitPageBounds {
+        max_commits: commits.try_into().unwrap(),
+        max_rows: 1024.try_into().unwrap(),
+        max_payload_bytes: (1u64 << 20).try_into().unwrap(),
+    };
+    stores.publish_outbox();
+    for _ in 0..64 {
+        let report = materializer.run_episode(page(64), now).unwrap();
+        if report.acknowledged_through >= stores.tip() {
+            break;
+        }
+    }
+    fault::feed(&mut stores, None, 1, 64);
+    fault::feed(&mut stores, None, 1 + 4, 64);
+    stores.publish_outbox();
+    // One page: decision 0's commit publishes its claims, then the
+    // acknowledgement fails, so its retirement and decision 1 wait.
+    let _ = materializer.run_episode_with_fault_for_test(
+        page(1),
+        now,
+        daemon::claim_sources::EpisodeFault::FailAcknowledgement,
+    );
+    assert!(
+        fault::newest_claims_live(root.path(), 0),
+        "the live claims are decision 0's"
+    );
+    assert!(
+        !fault::newest_claims_live(root.path(), 1),
+        "decision 0's claims, published after decision 1 committed, are not its"
+    );
+    drop(kernel);
+    drop(stores.close());
 }
 
 /// A descriptor whose invalidation names a commit past the kernel tip claims

@@ -19,10 +19,11 @@ use eval_core::{
     TEST_BINARY_CHILD, WorkCounter, cut_receipts, eval_run_id,
 };
 use kernel::{
-    ArtifactDeletionFault, ArtifactDeletionIdentity, ArtifactDeletionKind, ArtifactDeletionRequest,
-    ArtifactDestination, ArtifactError, ArtifactIngestFault, ArtifactIngestRequest,
-    CurrentInputDescriptor, DomainSpec, EligibilityBinding, ProjectScope, ProviderEgress,
-    Sensitivity,
+    AdmissionEvent, AdmissionRequest, ArtifactDeletionFault, ArtifactDeletionIdentity,
+    ArtifactDeletionKind, ArtifactDeletionRequest, ArtifactDestination, ArtifactError,
+    ArtifactIngestFault, ArtifactIngestRequest, CurrentInputDescriptor, DecisionPayload,
+    DecisionSpec, DomainSpec, EligibilityBinding, EventKind, ProjectScope, ProviderEgress,
+    Sensitivity, SourceClass, TaintClass,
 };
 use memory_store::MemoryStore;
 use memory_store::memory_reviewer_jobs::{
@@ -40,7 +41,7 @@ use super::aging::{
 };
 use super::campaign::{Charges, identity, prepare_publish, publish_file};
 use super::support::embedding_fixtures::{
-    CONSUMER, GENERATION, PROJECT, TestEngine, generation, intent,
+    CONSUMER, GENERATION, PROJECT, SCOPE, TestEngine, generation, intent,
 };
 
 pub const REPORT_FILE: &str = "suite-c-fault-report.json";
@@ -59,7 +60,7 @@ pub enum RunError {
     #[error("plan refused: {0}")]
     Plan(#[from] aging::RunError),
     #[error(
-        "history leaves {after_checkpoint} steps after the checkpoint; the fault phase drives {FAULT_PHASE_STEPS}, then a publish step for each of two publication faults and a step to live after recovery"
+        "history leaves {after_checkpoint} steps after the checkpoint; the fault phase drives {FAULT_PHASE_STEPS}, then a publish step for the held publication and each of two publication faults and a step to live after recovery"
     )]
     HistoryTooShort { after_checkpoint: usize },
     #[error("report refused: {0}")]
@@ -94,15 +95,15 @@ fn publish_refused((path, kind): (PathBuf, std::io::ErrorKind)) -> RunError {
 /// corruption and CAS episodes at the sixth step's time.
 const FAULT_PHASE_STEPS: usize = 6;
 
-/// From the sixth step on, each publication fault applies steps until a
-/// publish opens an embedding job (a retirement opens none), and recovery
-/// needs a step left to live after the second.
+/// From the sixth step on, the held publication and each publication fault
+/// apply steps until a publish opens an embedding job (a retirement opens
+/// none), and recovery needs a step left to live after the third.
 fn publication_probes_fit(steps: &[Planned]) -> bool {
     let mut publishes =
         (FAULT_PHASE_STEPS - 1..steps.len()).filter(|i| matches!(steps[*i].step, Step::Publish(_)));
     publishes
-        .nth(1)
-        .is_some_and(|second| second + 1 < steps.len())
+        .nth(2)
+        .is_some_and(|third| third + 1 < steps.len())
 }
 
 /// The aging plan, refused before any store opens when its checkpoint leaves
@@ -152,6 +153,7 @@ fn unexpected(episode: &str, expected: &str, observed: impl std::fmt::Debug) -> 
 /// The campaign's mutable evidence while episodes run.
 pub struct Witness {
     pub episodes: Vec<FaultEpisode>,
+    pub barriers: Vec<BarrierReceipt>,
     pub cuts: CutCoverage,
     pub effects: EffectLedger,
     pub refusals: Vec<RecordedRefusal>,
@@ -171,6 +173,7 @@ impl Witness {
         }
         Self {
             episodes: Vec::new(),
+            barriers: Vec::new(),
             cuts,
             effects: EffectLedger::default(),
             refusals: Vec::new(),
@@ -214,6 +217,13 @@ impl Witness {
         self.safety_checks += 1;
         self.armed_check_cuts.push(cut);
     }
+
+    /// The check a kill child ran at its cut, where the kill is armed; the
+    /// child owns the stores there, so the parent counts the line it printed.
+    fn child_safety_check(&mut self, cut: &'static str) {
+        self.safety_checks += 1;
+        self.armed_check_cuts.push(cut);
+    }
 }
 
 /// No descriptor claims a creation or an invalidation past the tip or an
@@ -237,11 +247,24 @@ fn safety_invariants(stores: &Stores) {
             );
         }
     }
-    let acknowledged = snapshot.commit_seq - stores.pending(WorkCounter::CatchUpLag) as i64;
-    assert!(acknowledged <= snapshot.commit_seq);
+    let acknowledged: i64 = read_only(&search_file(stores.root()))
+        .query_row(
+            "SELECT checkpoint_commit_seq FROM projection_checkpoint",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(
+        acknowledged <= snapshot.commit_seq,
+        "the projection acknowledged {acknowledged} past the kernel tip {}",
+        snapshot.commit_seq
+    );
 }
 
-const EVENT_CUTS: [&str; 14] = [
+const EVENT_CUTS: [&str; 17] = [
+    "publication_held",
+    "publication_released",
+    "claims_materialized",
     "local_staged",
     "local_released",
     "acknowledgement_requested",
@@ -333,7 +356,7 @@ pub fn lost_reply_episode(
     fault: SearchEpisodeFault,
 ) -> Result<BTreeMap<String, EffectState>, RunError> {
     declare_lost_reply_episode(witness, id, step, fault);
-    stores.publish_outbox_now();
+    stores.publish_outbox();
     let mut events = Vec::new();
     let stores = &*stores;
     // The fault is armed for the whole episode and consumed when it returns,
@@ -404,13 +427,13 @@ pub fn receipt_lost_reply_episode(
         }
         match (fault, event) {
             (SearchEpisodeFault::LoseLocalCommitReply, EpisodeEvent::LocalStaged { through }) => {
-                lost.push(format!("search_commit:{through}"));
+                lost.push(format!("search_commit:{through}@{id}"));
             }
             (
                 SearchEpisodeFault::LoseAcknowledgementReply,
                 EpisodeEvent::AcknowledgementRequested { through },
             ) => {
-                lost.push(format!("search_ack:{through}"));
+                lost.push(format!("search_ack:{through}@{id}"));
             }
             _ => {}
         }
@@ -449,7 +472,7 @@ pub fn lock_holder_episode(
         FaultAction::ExternalLockHolder,
         "an external connection holds BEGIN IMMEDIATE on the projection; the batch never commits and nothing is acknowledged",
     ));
-    stores.publish_outbox_now();
+    stores.publish_outbox();
     let holder = hold_write_lock(&search_file(stores.root()));
     let blocked = stores.episode(now, None, &mut |_| {});
     match &blocked.end {
@@ -785,7 +808,7 @@ pub fn r11_episode(
             ArtifactDeletionKind::Delete,
         ))
         .map_err(|e| unexpected(&r11, "a healed deletion", artifact_error_text(&e)))?;
-    stores.publish_outbox_now();
+    stores.publish_outbox();
     let report = stores.episode(now, None, &mut |_| {});
     let blocked = match &report.end {
         EpisodeEnd::Blocked(Blocked::DeletionUnpropagated { commit_seq }) => {
@@ -1060,7 +1083,7 @@ pub fn publication_episode(
         .ok_or_else(|| unexpected(id, "the pending occurrence in the export", &occurrence))?;
     let project = ProjectScope::new(PROJECT).unwrap();
     let vector = TestEngine::vector_for(row.text.as_deref().unwrap_or_default());
-    let identity = format!("embedding:{occurrence}");
+    let identity = format!("embedding:{occurrence}@{id}");
     let lost = FaultAction::EmbeddingPublication { fault }.loses_reply();
     if lost {
         witness.effects.attempt(&identity);
@@ -1188,23 +1211,11 @@ fn open_embedding_job(
 /// An embedding job's row names its own state, so it is read directly.
 pub fn read_back(root: &Path, witness: &mut Witness) -> Result<(), RunError> {
     let search = read_only(&search_file(root));
-    let projection: i64 = search
-        .query_row(
-            "SELECT checkpoint_commit_seq FROM projection_checkpoint",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap();
-    let kernel: i64 = read_only(&kernel_file(root))
-        .query_row(
-            "SELECT checkpoint_commit_seq FROM outbox_consumers WHERE consumer_id=?1",
-            [CONSUMER],
-            |row| row.get(0),
-        )
-        .unwrap();
+    let (projection, kernel) = checkpoints(root);
     let mut states = Vec::new();
     for identity in witness.effects.unknown() {
-        let (kind, key) = identity.split_once(':').unwrap();
+        let (effect, _episode) = identity.split_once('@').unwrap();
+        let (kind, key) = effect.split_once(':').unwrap();
         let checkpoint = match kind {
             "search_commit" => projection,
             "search_ack" => kernel,
@@ -1236,6 +1247,26 @@ pub fn read_back(root: &Path, witness: &mut Witness) -> Result<(), RunError> {
         witness.effects.read_back(&identity, state).unwrap();
     }
     Ok(())
+}
+
+/// The projection's local checkpoint and the kernel's acknowledged one, read
+/// from the closed or crashed files.
+fn checkpoints(root: &Path) -> (i64, i64) {
+    let projection = read_only(&search_file(root))
+        .query_row(
+            "SELECT checkpoint_commit_seq FROM projection_checkpoint",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let kernel = read_only(&kernel_file(root))
+        .query_row(
+            "SELECT checkpoint_commit_seq FROM outbox_consumers WHERE consumer_id=?1",
+            [CONSUMER],
+            |row| row.get(0),
+        )
+        .unwrap();
+    (projection, kernel)
 }
 
 fn applied(is: bool) -> EffectState {
@@ -1317,6 +1348,8 @@ pub fn campaign(
     stores.drain(steps[5].now_ms);
 
     let mut next = 5;
+    let at = open_embedding_job(&mut stores, steps, &mut next, "publication-held-at-gate")?;
+    held_publication_episode(&mut stores, witness, step(at), steps[at].now_ms)?;
     for (id, fault) in [
         (
             "publication-commit-reply-lost",
@@ -1416,7 +1449,7 @@ pub fn check_expectations(
     Ok(())
 }
 
-pub fn run(config: &Config) -> Result<Run, RunError> {
+pub fn run(config: &Config, spawn: Spawn) -> Result<Run, RunError> {
     let profile = profile(
         config.scale,
         config.messages,
@@ -1455,6 +1488,17 @@ pub fn run(config: &Config) -> Result<Run, RunError> {
         &[std::env::current_exe().unwrap()],
     );
     let expected = campaign(&plan, &mut charges, &mut witness)?;
+    for cut in KillCut::ALL {
+        kill_episode(
+            &plan,
+            config.messages,
+            &mut charges,
+            &mut witness,
+            spawn,
+            cut,
+        )?;
+    }
+    let liveness = liveness(&plan, &mut charges, &mut witness, &fault_profile.liveness)?;
     check_expectations(&expected, &witness.effects)?;
     witness.cuts.verdict().map_err(FaultReportError::Coverage)?;
     witness
@@ -1476,13 +1520,13 @@ pub fn run(config: &Config) -> Result<Run, RunError> {
         profile_digest: profile.digest().unwrap(),
         claim_boundary: ClaimBoundary::pinned(),
         episodes: witness.episodes.clone(),
-        barriers: Vec::new(),
+        barriers: witness.barriers.clone(),
         cuts: cut_receipts(&declared, &witness.checkpoints),
         coverage: witness.cuts.clone(),
         effects: witness.effects.clone(),
         expected_refusals: witness.refusals.clone(),
         safety_checks_while_armed: witness.safety_checks,
-        liveness: None,
+        liveness: Some(liveness),
         markers: witness
             .coverage
             .fired()
@@ -1507,7 +1551,7 @@ pub fn run(config: &Config) -> Result<Run, RunError> {
         eval_run_id: report.eval_run_id.clone(),
         sample: format!("fault:{}", plan.checkpoint_step),
         result_digest: FaultReport::result_digest(&published)?,
-        witness_digest: FaultReport::result_digest(&published)?,
+        witness_digest: witness_digest(&report),
         cut_receipts: report.cuts.clone(),
         execution_mode: ExecutionMode::Generate,
         envelope: report.envelope.clone(),
@@ -1532,9 +1576,766 @@ pub fn run(config: &Config) -> Result<Run, RunError> {
     })
 }
 
+/// The digest covers barrier receipts, the effect ledger, and cut coverage.
+/// A barrier's `pid` is omitted because the OS assigns it, so identical runs
+/// may differ.
+pub fn witness_digest(report: &FaultReport) -> String {
+    let mut barriers = serde_json::to_value(&report.barriers).unwrap();
+    for barrier in barriers.as_array_mut().unwrap() {
+        barrier.as_object_mut().unwrap().remove("pid");
+    }
+    super::campaign::sha256_hex(
+        &serde_json::to_vec(&json!({
+            "barriers": barriers,
+            "effects": report.effects,
+            "coverage": report.coverage,
+        }))
+        .unwrap(),
+    )
+}
+
 pub const USAGE: &str = "fault --scale <s0|s1|s2> --messages <n> --elapsed-bound-ms <n> \
 --approved-by <name> --approval-run-id <hex64> --publish <dir>";
 
 pub fn config_from_args(args: impl IntoIterator<Item = String>) -> Result<Config, String> {
     aging::config_from_args(args).map_err(|error| error.replace(aging::USAGE, USAGE))
+}
+
+// Process kill at a named cut, the held publication gate, and liveness mode.
+
+use std::io::{BufRead, BufReader, Write};
+use std::process::{Child, Command, Stdio};
+use std::sync::mpsc;
+
+use daemon::claim_sources::{ClaimMaterializer, MaterializationEnd};
+use daemon::embedding_dispatch::{DispatchBounds, DispatchEvent, EmbeddingDispatcher};
+use daemon::harness_sources::Representation;
+use eval_core::{BarrierReceipt, HealthyCore, Lane, LaneProgress, LivenessBounds, LivenessReport};
+use host_runtime::local_embeddings::{LocalEmbeddingsComponent, LocalEmbeddingsLimits};
+use kernel::CommitPageBounds;
+use kernel::descriptor_object_id;
+use kernel::source_identity::{Occurrence, OccurrenceClass, encode_preserving_span};
+
+use super::aging::memory_file;
+use super::support::embedding_fixtures::{
+    GateGuard, bounds as dispatch_bounds, budget as dispatch_budget, component, grant,
+};
+
+/// One runtime per episode: the dispatcher parks blocking inference tasks on
+/// it, and a runtime dropped while a gate still holds one would wait forever.
+fn runtime() -> tokio::runtime::Runtime {
+    tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap()
+}
+
+/// Holds local embedding inference behind the fixture gate on its own runtime.
+///
+/// `gate` drops before `runtime` so a gate-blocked inference task resumes
+/// before `Runtime::drop` waits for it.
+pub struct GatedLane {
+    pub gate: GateGuard,
+    pub runtime: tokio::runtime::Runtime,
+    pub local: LocalEmbeddingsComponent,
+    pub engine: std::sync::Arc<TestEngine>,
+}
+
+impl GatedLane {
+    pub fn new() -> Self {
+        let engine = TestEngine::new();
+        let gate = GateGuard(engine.block_calls());
+        let local = component(&engine, LocalEmbeddingsLimits::default());
+        Self {
+            gate,
+            runtime: runtime(),
+            local,
+            engine,
+        }
+    }
+}
+
+/// The drive publishes its rows `LocalOnly`, so the dispatcher's eligibility
+/// names the local destination.
+fn local_eligibility(project: &ProjectScope) -> EligibilityBinding<'_> {
+    EligibilityBinding {
+        project,
+        destination: ArtifactDestination::Local,
+    }
+}
+
+pub const BARRIER: &str = "eval-fault-barrier";
+/// The line a kill child prints once the safety invariants held at its cut.
+pub const SAFETY_CHECKED: &str = "eval-fault-safety-checked";
+pub const CHILD_ROOT: &str = "EIDNARA_EVAL_FAULT_CHILD_ROOT";
+pub const CHILD_MESSAGES: &str = "EIDNARA_EVAL_FAULT_CHILD_MESSAGES";
+pub const CHILD_APPLIED: &str = "EIDNARA_EVAL_FAULT_CHILD_APPLIED";
+pub const CHILD_CUT: &str = "EIDNARA_EVAL_FAULT_CHILD_CUT";
+
+/// The named cuts a child can park at inside one catch-up episode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KillCut {
+    /// The batch is staged and its local transaction is still open.
+    LocalStaged,
+    /// The local prefix committed; the kernel writer is about to acknowledge it.
+    AcknowledgementRequested,
+}
+
+impl KillCut {
+    pub const ALL: [KillCut; 2] = [KillCut::LocalStaged, KillCut::AcknowledgementRequested];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            KillCut::LocalStaged => "local_staged",
+            KillCut::AcknowledgementRequested => "acknowledgement_requested",
+        }
+    }
+
+    pub fn parse(name: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|cut| cut.name() == name)
+    }
+
+    fn through(self, event: &EpisodeEvent) -> Option<i64> {
+        match (self, event) {
+            (KillCut::LocalStaged, EpisodeEvent::LocalStaged { through })
+            | (
+                KillCut::AcknowledgementRequested,
+                EpisodeEvent::AcknowledgementRequested { through },
+            ) => Some(*through),
+            _ => None,
+        }
+    }
+
+    /// The local commit's state in the crashed files. The child parks inside
+    /// the observer, which runs before the call it names: at `local_staged`
+    /// the commit's transaction is open and the kill rolls it back; at
+    /// `acknowledgement_requested` it has committed and the acknowledgement
+    /// was never called. The cut fixes both, so the kill loses no reply.
+    fn commit_state(self) -> EffectState {
+        match self {
+            KillCut::LocalStaged => EffectState::NotApplied,
+            KillCut::AcknowledgementRequested => EffectState::Applied,
+        }
+    }
+}
+
+/// What a child needs to reach its cut on a root the parent prepared.
+#[derive(Debug, Clone)]
+pub struct ChildArgs {
+    pub root: PathBuf,
+    pub messages: u32,
+    pub applied: u32,
+    pub cut: KillCut,
+}
+
+impl ChildArgs {
+    pub fn from_env() -> Option<Self> {
+        let root = std::env::var(CHILD_ROOT).ok()?;
+        Some(Self {
+            root: PathBuf::from(root),
+            messages: std::env::var(CHILD_MESSAGES).ok()?.parse().ok()?,
+            applied: std::env::var(CHILD_APPLIED).ok()?.parse().ok()?,
+            cut: KillCut::parse(&std::env::var(CHILD_CUT).ok()?)?,
+        })
+    }
+
+    pub fn env(&self, command: &mut Command) {
+        command
+            .env(CHILD_ROOT, &self.root)
+            .env(CHILD_MESSAGES, self.messages.to_string())
+            .env(CHILD_APPLIED, self.applied.to_string())
+            .env(CHILD_CUT, self.cut.name());
+    }
+}
+
+/// How the campaign starts its child: the test re-executes the test binary at
+/// its entrypoint, the example re-executes itself with `fault-child`.
+pub type Spawn = fn(&ChildArgs) -> Command;
+
+/// The child: reopen the root, apply the next step, run one episode, print the
+/// barrier at the cut, and park until killed. Never returns.
+pub fn child_main(args: &ChildArgs) -> ! {
+    let plan = aging::plan(args.messages).expect("the parent planned the same history");
+    let planned = &plan.steps[args.applied as usize];
+    let mut stores = Stores::reconstruct(&args.root, &plan, args.applied, planned.now_ms);
+    stores.apply(planned);
+    stores.publish_outbox();
+    let stores = &stores;
+    let cut = args.cut;
+    let report = stores.episode(planned.now_ms, None, &mut |event| {
+        if let Some(through) = cut.through(&event) {
+            // The kill is armed from here, so the check the parent counts
+            // runs here, before the barrier; a failed invariant panics and
+            // no barrier follows.
+            safety_invariants(stores);
+            let mut stdout = std::io::stdout().lock();
+            writeln!(stdout, "{SAFETY_CHECKED} {}", cut.name()).unwrap();
+            writeln!(stdout, "{BARRIER} {through} {}", cut.name()).unwrap();
+            stdout.flush().unwrap();
+            drop(stdout);
+            loop {
+                std::thread::sleep(Duration::from_secs(1));
+            }
+        }
+    });
+    panic!("the child was not killed at its barrier: {report:?}");
+}
+
+struct ChildGuard(Child);
+
+impl Drop for ChildGuard {
+    fn drop(&mut self) {
+        if self.0.try_wait().ok().flatten().is_none() {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+}
+
+pub fn kill_episode(
+    plan: &Plan,
+    messages: u32,
+    charges: &mut Charges,
+    witness: &mut Witness,
+    spawn: Spawn,
+    cut: KillCut,
+) -> Result<(), RunError> {
+    let id = format!("kill-at-{}", cut.name());
+    witness.declare(episode(
+        &id,
+        plan.checkpoint_step,
+        StoreFamily::SearchProjection,
+        match cut {
+            KillCut::LocalStaged => "local_commit",
+            KillCut::AcknowledgementRequested => "acknowledge",
+        },
+        FaultAction::ProcessKill {
+            cut: cut.name().to_string(),
+        },
+        "a SIGKILL of the test-binary child parked at the named cut: application-crash recovery with the page cache intact; not power loss, not a daemon crash, not a SQLite I/O fault",
+    ));
+    let k = plan.checkpoint_step as usize;
+    let root = charges.occupy()?;
+    let mut stores = Stores::open(root.path(), plan);
+    live(&mut stores, &plan.steps[..k]);
+    charges.store_bytes(stores.root())?;
+    drop(stores.close());
+    let args = ChildArgs {
+        root: root.path().to_path_buf(),
+        messages,
+        applied: k as u32,
+        cut,
+    };
+    let mut command = spawn(&args);
+    command.stdout(Stdio::piped());
+    charges.process_started()?;
+    let mut child = ChildGuard(command.spawn().expect("the child spawns"));
+    let pid = child.0.id();
+    let stdout = child.0.stdout.take().unwrap();
+    let (tx, rx) = mpsc::sync_channel(1);
+    let checked = format!("{SAFETY_CHECKED} {}", cut.name());
+    std::thread::spawn(move || {
+        let mut safe = false;
+        let barrier = BufReader::new(stdout)
+            .lines()
+            .map_while(Result::ok)
+            .inspect(|line| safe |= line.ends_with(&checked))
+            .find(|line| line.contains(BARRIER));
+        let _ = tx.send(barrier.map(|line| (safe, line)));
+    });
+    let (safe, line) = rx
+        .recv_timeout(Duration::from_secs(120))
+        .ok()
+        .flatten()
+        .ok_or_else(|| unexpected(&id, "a barrier line before the kill", "none"))?;
+    if !safe {
+        return Err(unexpected(&id, "a safety check at the cut", &line));
+    }
+    witness.child_safety_check(cut.name());
+    let line = line[line.find(BARRIER).unwrap()..].to_string();
+    let through: i64 = line
+        .split(' ')
+        .nth(1)
+        .and_then(|t| t.parse().ok())
+        .ok_or_else(|| unexpected(&id, "a barrier naming the window", &line))?;
+    child.0.kill().unwrap();
+    let status = child.0.wait().unwrap();
+    let signal = {
+        use std::os::unix::process::ExitStatusExt;
+        status.signal().unwrap_or(0)
+    };
+    drop(child);
+    charges.process_ended();
+    witness.barriers.push(BarrierReceipt {
+        episode: id.clone(),
+        cut: cut.name().to_string(),
+        pid,
+        line,
+        signal,
+    });
+    witness.receipt(cut.name());
+    // The cut fixes both states, so they are checked here and enter no
+    // ledger entry, as a rolled-back publication enters none.
+    let (projection, acknowledged) = checkpoints(root.path());
+    let state = applied(projection >= through);
+    if state != cut.commit_state() {
+        return Err(unexpected(
+            &id,
+            &format!(
+                "the local commit through {through} {:?} in the crashed files",
+                cut.commit_state()
+            ),
+            state,
+        ));
+    }
+    if acknowledged >= through {
+        return Err(unexpected(
+            &id,
+            "no acknowledgement in the crashed files",
+            acknowledged,
+        ));
+    }
+    // The crashed files hold the child's WAL: its open footprint.
+    charges.store_bytes(root.path())?;
+    let now = plan.steps[k].now_ms;
+    let mut stores = Stores::reconstruct(root.path(), plan, k as u32 + 1, now);
+    witness.checkpoint(Cut::AfterRecovery);
+    stores.drain(now);
+    witness.safety_check(&stores);
+    witness.receipt(&id);
+    witness
+        .coverage
+        .record("flt_kill_barrier_read_before_kill")
+        .unwrap();
+    charges.store_bytes(stores.root())?;
+    drop(stores.close());
+    charges.vacate(root)?;
+    Ok(())
+}
+
+/// A dispatcher pass with inference held behind the fixture gate admits the
+/// job once and publishes nothing; passes while held re-admit nothing; the
+/// release publishes it.
+pub fn held_publication_episode(
+    stores: &mut Stores,
+    witness: &mut Witness,
+    step: u32,
+    now: i64,
+) -> Result<(), RunError> {
+    let id = witness.declare(episode(
+        "publication-held-at-gate",
+        step,
+        StoreFamily::SearchProjection,
+        "dispatch_pass",
+        FaultAction::HeldPublication,
+        "embedding_fixtures::TestEngine::block_calls: inference does not answer until released; the row stays admitted, later passes poll it by identity without re-admitting, and the release publishes it once",
+    ));
+    let pending_before = stores.pending(WorkCounter::EmbeddingOpen);
+    if pending_before == 0 {
+        return Err(unexpected(&id, "a pending embedding job", 0));
+    }
+    let lane = GatedLane::new();
+    let project = ProjectScope::new(PROJECT).unwrap();
+    let short = DispatchBounds {
+        result_wait: Duration::from_millis(50),
+        grant: grant(3, now + 86_400_000),
+        ..dispatch_bounds()
+    };
+    let pass = |bounds: &DispatchBounds| -> Vec<DispatchEvent> {
+        let mut events = Vec::new();
+        let mut dispatcher =
+            EmbeddingDispatcher::new(&stores.corpus.kernel, &stores.projection, &lane.local);
+        let end = lane.runtime.block_on(async {
+            dispatcher.run_pass(
+                local_eligibility(&project),
+                bounds,
+                &dispatch_budget(Duration::from_secs(30)),
+                now,
+                &mut |event| events.push(event),
+            )
+        });
+        assert!(end.unwrap().is_none(), "the pass is not blocked");
+        events
+    };
+    let held = pass(&short);
+    let admitted = held
+        .iter()
+        .filter(|e| matches!(e, DispatchEvent::Admitted { .. }))
+        .count();
+    let published = |events: &[DispatchEvent]| {
+        events
+            .iter()
+            .filter(|e| matches!(e, DispatchEvent::Published { .. }))
+            .count()
+    };
+    if admitted == 0 || published(&held) != 0 {
+        return Err(unexpected(&id, "admitted, nothing published", &held));
+    }
+    let again = pass(&short);
+    if again
+        .iter()
+        .any(|e| matches!(e, DispatchEvent::Admitted { .. }))
+        || published(&again) != 0
+    {
+        return Err(unexpected(&id, "no re-admission while held", &again));
+    }
+    witness.receipt("publication_held");
+    witness.safety_check_while_armed(stores, "publication_held");
+    TestEngine::release(&lane.gate.0);
+    let released = pass(&dispatch_bounds());
+    if published(&released) == 0 {
+        return Err(unexpected(&id, "a publication after release", &released));
+    }
+    witness.receipt("publication_released");
+    aging::embed_pending(
+        &stores.corpus,
+        &stores.projection,
+        stores.root(),
+        stores.bounds.hold,
+        now,
+    );
+    witness.receipt(&id);
+    witness
+        .coverage
+        .record("sls_embedding_publication_held_then_released")
+        .unwrap();
+    Ok(())
+}
+
+/// Every liveness decision is revision 1: none is corrected.
+const DECISION_REVISION: i64 = 1;
+
+/// Each claim publication ingests evidence and commits, so the window feeds a
+/// decision every fourth step rather than every step.
+const DECISION_PERIOD: u64 = 4;
+
+fn decision_object(n: u64) -> String {
+    format!("liveness-decision-{n}")
+}
+
+fn decide(kernel: &kernel::KernelStore, n: u64) {
+    let object_id = decision_object(n);
+    let spec = DecisionSpec {
+        decision_id: format!("{object_id}-1"),
+        object_id: object_id.clone(),
+        domain_id: "domain".to_string(),
+        proposition_id: None,
+        scope_id: Some(SCOPE.to_string()),
+        anchor_id: None,
+        evidence_id: None,
+        decision_kind: "PROJECT_RULES".to_string(),
+        payload: DecisionPayload {
+            summary: format!("Liveness rule {n} holds."),
+            rationale: format!("Decision {n} is fed while the memory store is locked."),
+        },
+        source_kind: "assistant".to_string(),
+        source_id: object_id.clone(),
+        source_revision: DECISION_REVISION,
+        sensitivity: Sensitivity::Normal,
+    };
+    let admission = AdmissionRequest {
+        candidate_id: None,
+        subject_object_id: Some(object_id.clone()),
+        source_class: Some(SourceClass::ExplicitUser),
+        taint_class: Some(TaintClass::UserExplicit),
+        event: AdmissionEvent {
+            kind: EventKind::Other,
+            trigger_object_id: None,
+            approval_object_id: None,
+            evidence_id: None,
+            reason: "liveness".to_string(),
+        },
+    };
+    kernel
+        .commit(intent(&format!("decide:{object_id}")), |envelope| {
+            envelope.insert_decision(spec.clone())?;
+            envelope.record_admission(admission.clone())?;
+            Ok(String::new())
+        })
+        .unwrap();
+}
+
+fn retire_decision(kernel: &kernel::KernelStore, n: u64) {
+    let object_id = decision_object(n);
+    kernel
+        .commit(intent(&format!("retire:{object_id}")), |envelope| {
+            envelope.retire_decision(&object_id)?;
+            Ok(String::new())
+        })
+        .unwrap();
+}
+
+/// Decision `n`'s `canonical_claims` descriptor ids: the kernel's identity
+/// encoding of its object id and revision, one per representation the
+/// materializer publishes for the class.
+fn claim_descriptors(n: u64) -> BTreeSet<String> {
+    let object_id = decision_object(n);
+    let revision = DECISION_REVISION.to_string();
+    let class = OccurrenceClass::CanonicalClaims;
+    [Representation::DecisionSummary, Representation::Rationale]
+        .into_iter()
+        .map(|representation| {
+            let encoded = encode_preserving_span(&Occurrence {
+                class: class.code(),
+                identity: &[(class.identity_fields()[0], &object_id)],
+                revision: &revision,
+                representation: representation.as_str(),
+                span: None,
+            })
+            .unwrap();
+            descriptor_object_id(&encoded.lineage_id, &revision)
+        })
+        .collect()
+}
+
+/// Whether the live `canonical_claims` descriptors are exactly decision
+/// `n`'s, by descriptor identity: a predecessor's descriptor fails whenever
+/// it was published.
+pub fn newest_claims_live(root: &Path, n: u64) -> bool {
+    let kernel = read_only(&kernel_file(root));
+    let mut live = kernel
+        .prepare(
+            "SELECT object_id FROM object_registry WHERE object_id GLOB 'srcdesc:*' \
+             AND source_kind='canonical_claims' AND invalidated_commit_seq IS NULL",
+        )
+        .unwrap();
+    let live: BTreeSet<String> = live
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    live == claim_descriptors(n)
+}
+
+/// Feeds window step `step`: the next fresh planned step, kernel only, and on
+/// a decision step the next decision after retiring the one before it.
+/// Returns the kernel commits the feed made, read from the tip: a publish
+/// commits once per unit and a retire of a dead lineage commits nothing.
+pub fn feed(
+    stores: &mut Stores,
+    planned: Option<&Planned>,
+    step: u64,
+    materialization_bound: u64,
+) -> u64 {
+    let before = stores.tip();
+    if let Some(planned) = planned {
+        stores.apply_kernel_only(planned);
+    }
+    if step <= materialization_bound && step % DECISION_PERIOD == 1 {
+        let n = step / DECISION_PERIOD;
+        if n > 0 {
+            retire_decision(&stores.corpus.kernel, n - 1);
+        }
+        decide(&stores.corpus.kernel, n);
+    }
+    u64::try_from(stores.tip() - before).unwrap()
+}
+
+/// Liveness mode on its own root: the healthy core is the kernel, the
+/// projection, the catch-up driver, the dispatcher, and the materializer;
+/// a held memory-store write lock stays armed for the whole window while
+/// fresh kernel-only work is fed in, and each lane is driven to its profile
+/// bound in its own unit.
+pub fn liveness(
+    plan: &Plan,
+    charges: &mut Charges,
+    witness: &mut Witness,
+    bounds: &LivenessBounds,
+) -> Result<LivenessReport, RunError> {
+    let root = charges.occupy()?;
+    let mut stores = Stores::open(root.path(), plan);
+    let k = plan.checkpoint_step as usize;
+    live(&mut stores, &plan.steps[..k]);
+    ClaimMaterializer::register(&stores.corpus.kernel, plan.steps[k].now_ms).unwrap();
+    // Half the remaining history is the backlog the window opens with; the
+    // other half is fed in as fresh kernel-only work while the faults stay armed.
+    let (backlog, fresh) = plan.steps[k..].split_at((plan.steps.len() - k) / 2);
+    for planned in backlog {
+        stores.apply(planned);
+    }
+    let now = plan.steps.last().unwrap().now_ms;
+    stores.publish_outbox();
+
+    let memory_lock = witness.declare(episode(
+        "liveness-memory-lock-holder",
+        k as u32,
+        StoreFamily::Memory,
+        "write",
+        FaultAction::ExternalLockHolder,
+        "an external connection holds BEGIN IMMEDIATE on the memory store for the whole liveness window; the memory store is outside the healthy core and the lock is never released inside it",
+    ));
+    let holder = hold_write_lock(&memory_file(stores.root()));
+    let outside_core: BTreeSet<String> = [memory_lock.clone()].into_iter().collect();
+    let armed = |stores: &Stores| -> BTreeSet<String> {
+        let mut armed = BTreeSet::new();
+        let probe = Connection::open_with_flags(
+            memory_file(stores.root()),
+            OpenFlags::SQLITE_OPEN_READ_WRITE,
+        )
+        .unwrap();
+        probe.busy_timeout(Duration::ZERO).unwrap();
+        if probe.execute_batch("BEGIN IMMEDIATE").is_err() {
+            armed.insert(memory_lock.clone());
+        }
+        armed
+    };
+
+    let engine = TestEngine::new();
+    let local = component(&engine, LocalEmbeddingsLimits::default());
+    let runtime = runtime();
+    let project = ProjectScope::new(PROJECT).unwrap();
+    let kernel = std::sync::Arc::clone(&stores.corpus.kernel);
+    let mut materializer = ClaimMaterializer::new(&kernel, ProviderEgress::LocalOnly);
+    let page = CommitPageBounds {
+        max_commits: 8.try_into().unwrap(),
+        max_rows: 64.try_into().unwrap(),
+        max_payload_bytes: (1u64 << 20).try_into().unwrap(),
+    };
+    let mut fresh = fresh.iter();
+    let mut lanes: BTreeMap<Lane, LaneProgress> = [
+        Lane::CatchUpEpisodes,
+        Lane::EmbeddingPasses,
+        Lane::MaterializationEpisodes,
+    ]
+    .into_iter()
+    .map(|lane| {
+        (
+            lane,
+            LaneProgress {
+                bound: lane.bound(bounds),
+                steps: 0,
+                met_at: None,
+                stalled_at: None,
+                holds_at_bound: false,
+                fresh_commits: 0,
+                blocked: None,
+            },
+        )
+    })
+    .collect();
+    let window = lanes.values().map(|p| p.bound).max().unwrap_or(0);
+    for step in 1..=window {
+        let fed = feed(
+            &mut stores,
+            fresh.next(),
+            step,
+            bounds.materialization_episodes,
+        );
+        stores.publish_outbox();
+        let tip = stores.tip();
+        for (lane, progress) in lanes.iter_mut() {
+            if step > progress.bound {
+                continue;
+            }
+            progress.steps += 1;
+            progress.fresh_commits += fed;
+            let (holds, blocked) = match lane {
+                Lane::CatchUpEpisodes => {
+                    let report = stores.episode(now, None, &mut |_| {});
+                    let blocked = match &report.end {
+                        EpisodeEnd::Blocked(b) => Some(format!("{b:?}")),
+                        EpisodeEnd::ReachedTarget => None,
+                    };
+                    (
+                        blocked.is_none() && report.acknowledged_through >= tip,
+                        blocked,
+                    )
+                }
+                Lane::EmbeddingPasses => {
+                    let mut dispatcher =
+                        EmbeddingDispatcher::new(&stores.corpus.kernel, &stores.projection, &local);
+                    let end = runtime.block_on(async {
+                        dispatcher.run_pass(
+                            local_eligibility(&project),
+                            &DispatchBounds {
+                                grant: grant(3, now + 86_400_000),
+                                ..dispatch_bounds()
+                            },
+                            &dispatch_budget(Duration::from_secs(30)),
+                            now,
+                            &mut |_| {},
+                        )
+                    });
+                    let blocked = match &end {
+                        Ok(Some(b)) => Some(format!("{b:?}")),
+                        Ok(None) => None,
+                        Err(e) => Some(format!("{e:?}")),
+                    };
+                    (
+                        blocked.is_none() && stores.pending(WorkCounter::EmbeddingOpen) == 0,
+                        blocked,
+                    )
+                }
+                Lane::MaterializationEpisodes => {
+                    let report = materializer.run_episode(page, now).unwrap();
+                    let blocked = match &report.end {
+                        MaterializationEnd::Blocked(b) => Some(format!("{b:?}")),
+                        MaterializationEnd::ReachedTarget => None,
+                    };
+                    let materialized =
+                        newest_claims_live(stores.root(), (step - 1) / DECISION_PERIOD);
+                    if materialized {
+                        witness.receipt("claims_materialized");
+                    }
+                    (
+                        blocked.is_none() && report.acknowledged_through >= tip && materialized,
+                        blocked,
+                    )
+                }
+                Lane::ReviewerCoordinatorPasses => unreachable!("outside this campaign's core"),
+            };
+            if let Some(b) = blocked {
+                progress.blocked = Some(b);
+            }
+            if holds && progress.met_at.is_none() {
+                progress.met_at = Some(step);
+            }
+            if !holds && progress.met_at.is_some() && progress.stalled_at.is_none() {
+                progress.stalled_at = Some(step);
+            }
+            if step == progress.bound {
+                progress.holds_at_bound = holds;
+            }
+        }
+        witness.safety_check_while_armed(&stores, "liveness_window_step");
+    }
+
+    let armed_at_bound = armed(&stores);
+    drop(holder);
+    witness.receipt(&memory_lock);
+    let report = LivenessReport {
+        core: HealthyCore {
+            families: [StoreFamily::Kernel, StoreFamily::SearchProjection]
+                .into_iter()
+                .collect(),
+            lanes: [
+                Lane::CatchUpEpisodes,
+                Lane::EmbeddingPasses,
+                Lane::MaterializationEpisodes,
+            ]
+            .into_iter()
+            .collect(),
+        },
+        outside_core,
+        armed_at_bound,
+        lanes,
+        permanent_stalls: witness
+            .refusals
+            .iter()
+            .filter(|r| r.refusal == ExpectedRefusal::R11DeletionBearingCatchUp)
+            .cloned()
+            .collect(),
+    };
+    report.verdict(bounds).map_err(FaultReportError::Liveness)?;
+    witness
+        .coverage
+        .record("flt_liveness_bounds_met_with_faults_armed")
+        .unwrap();
+    let _ = materializer;
+    drop(kernel);
+    charges.store_bytes(stores.root())?;
+    drop(stores.close());
+    charges.vacate(root)?;
+    Ok(report)
 }

@@ -775,13 +775,29 @@ impl Charges {
         self.elapsed()
     }
 
-    fn process_started(&mut self) -> Result<(), EnvelopeExceeded> {
+    pub fn process_started(&mut self) -> Result<(), EnvelopeExceeded> {
         self.processes += 1;
         self.observe(Resource::Processes, self.processes)
     }
 
-    fn process_ended(&mut self) {
+    pub fn process_ended(&mut self) {
         self.processes -= 1;
+    }
+
+    /// Serializes the report with its envelope inside it, charging the bytes
+    /// until the recorded peak stops moving.
+    pub fn publish_bytes(
+        &mut self,
+        mut serialize: impl FnMut(&Envelope) -> Vec<u8>,
+    ) -> Result<Vec<u8>, EnvelopeExceeded> {
+        loop {
+            let bytes = serialize(&self.envelope);
+            let peak = self.envelope.peaks.artifact_bytes;
+            self.observe(Resource::ArtifactBytes, bytes.len() as u64)?;
+            if self.envelope.peaks.artifact_bytes == peak {
+                return Ok(bytes);
+            }
+        }
     }
 
     pub fn elapsed(&mut self) -> Result<(), EnvelopeExceeded> {

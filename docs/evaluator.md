@@ -2033,9 +2033,10 @@ operation's outcome unknown to its caller: the search-episode reply losses,
 GC's `after_reclaiming` and `after_unlink`, and the cleanup and sweep
 slices' lost COMMIT replies; a rolled-back commit, a refused
 statement, a skipped acknowledgement, the materializer's
-`fail_acknowledgement` (which never calls the kernel), or an expected refusal
-is known, not lost, and dispatch's `refuse_ledger_read` loses none itself: it
-blocks the read-back of a reply `lose_charge_reply` lost.
+`fail_acknowledgement` (which never calls the kernel), an expected refusal, or
+a process kill, whose cut fixes what committed, is known, not lost, and
+dispatch's `refuse_ledger_read` loses none itself: it blocks the read-back of
+a reply `lose_charge_reply` lost.
 `FaultAction::heal` is the heal each class permits: `consumed` for one-shot
 enums, `released` for gates and lock holders, `reopen` for kills, corruption,
 and R11 (the reopen's projection rebuild clears it), and `permanent` for R24,
@@ -2379,8 +2380,8 @@ faults,
 `intent_storage_exhausted` (`StorageExhausted`, consumed; a plain ingest
 succeeds without a reopen) and `intent_append` (`PurgeIntent`, healed by
 reopen). After every EIO, before its reopen, a plain ingest must be refused
-`IngestionFailClosed`, receipted `ingestion_latched`. Two publication faults
-follow, each on an open embedding job: the drive applies the next planned
+`IngestionFailClosed`, receipted `ingestion_latched`. The held publication
+(below) and two publication faults follow, each on an open embedding job: the drive applies the next planned
 steps, catching up after each, until a job is open, because a retirement opens
 none, and refuses a history that runs out first. `LoseLocalCommitReply` (the
 publisher returns `Embedded`) leaves `embedding:<occurrence>` `Unknown` in the
@@ -2452,14 +2453,93 @@ reopen, as assertions that count nothing, since no fault is armed then. Each
 recovery charges the stores' bytes before the close that checkpoints their
 WALs away.
 
-Not in this shell: a process kill at a named cut, a held publication through
-the dispatcher gate, and the liveness mode; the run publishes `liveness:
-null`. The `fault` subcommand takes the same flags as `aging` and answers with
-one JSON line; a history whose checkpoint leaves fewer than the six steps the
-fault phase drives is refused (`HistoryTooShort`) before any store opens, and
-the run freezes its build identity, charges the stores at their open
-footprint, and takes the report back out when the manifest cannot follow it,
-as the aging shell does; the CI `eval-campaign` job runs `eval_fault` under
+The process kill is a `TestBinaryChild`: for each named cut (`local_staged`,
+the batch staged with its transaction open; `acknowledgement_requested`, the
+local prefix committed and the kernel writer about to be taken) the campaign
+lives the prefix on a root of its own, closes it, and starts a child through
+the caller's `Spawn` (the test re-executes the test binary at
+`fault_child_entrypoint_reexecuted_by_the_parent` with the root, message
+count, applied step, and cut in its environment; the example re-executes
+itself as `fault-child`). The child reconstructs the drive from the kernel's
+own descriptors (`Stores::reconstruct`), applies the next step, runs one
+catch-up episode, and when its observer reaches the cut runs the safety
+invariants, prints `eval-fault-safety-checked <cut>` and then
+`eval-fault-barrier <through> <cut>`, and parks. The parent refuses a barrier
+without the safety line and counts that check as one made while armed, and it
+charges the kill root while its stores are open, including the crashed files
+with the child's WAL. The parent reads the barrier, sends `SIGKILL`, waits for
+the signal, and records the `BarrierReceipt`. The child parks inside the
+observer, which runs before the call it names, so the cut fixes what the
+crashed files hold and the kill loses no reply (`FaultAction::loses_reply` is
+false for it): at `local_staged` the commit's transaction is open and the kill
+rolls it back, and at `acknowledgement_requested` the local batch has
+committed and the acknowledgement was never called. The parent reads both
+checkpoints from the crashed files and refuses the episode unless the local
+batch is `not_applied` at `local_staged` and `applied` at
+`acknowledgement_requested` and no acknowledgement reached the kernel at
+either cut; these known states enter no ledger entry, as the rolled-back
+publication enters none. `Stores::reconstruct` then reopens the root, which
+deletes the crashed projection and bootstraps a new one at the kernel tip, so
+the committed but unacknowledged batch is discarded rather than resumed; the
+drain after it checks that the rebuilt stores reach the tip. The label is
+`application_crash` with the page cache intact and `test_binary_child`, which
+is all a kill of a parked child proves. The manifest's witness digest covers
+the barrier receipts without their `pid`, because the OS assigns it and two
+identical runs differ in it.
+
+The held publication runs a real dispatcher pass with inference held behind
+the embedding fixture's gate on a multi-thread Tokio runtime: the job is
+admitted and nothing is published, a second pass re-admits nothing, the safety
+check runs while the gate still holds, and the release publishes it.
+Eligibility names the local destination, because the drive publishes its rows
+`LocalOnly`. The gate, runtime, and lane live in one `GatedLane` whose gate
+drops before its runtime, so an episode that fails while inference is held
+reports the failure; a runtime dropped first waits forever for the blocked
+inference.
+
+Liveness runs on a root of its own after the fault phase. The healthy core is
+the kernel, the projection, the catch-up driver, the dispatcher, and the claim
+materializer; outside it, an external `BEGIN IMMEDIATE` on the memory store
+stays armed for the whole window and is probed again at the bound (a second
+`BEGIN IMMEDIATE` fails). Half the remaining history is the backlog the window
+opens with; the other half is fed one planned step per window step as fresh
+kernel-only work (`Stores::apply_kernel_only`, which leaves the memory store
+untouched because it is outside the core), so every lane's predicate is
+re-established against new commits rather than held by idling. A lane's
+`fresh_commits` is the kernel tip's advance across each feed, because a
+publish commits once per unit and a retirement of a dead lineage commits
+nothing. Every fourth step inside the materialization lane's bound also
+commits one scoped decision and retires the one before it, so the materializer
+publishes and retires claims inside the window. In one window loop each lane
+still inside its bound takes one unit of work with a logical `now`:
+`run_episode` until `acknowledged_through` reaches the current tip, dispatcher
+`run_pass` until no embedding job is open, `ClaimMaterializer::run_episode`
+until it acknowledges the tip with exactly the newest decision's two
+`canonical_claims` descriptors live in the kernel, matched by descriptor id
+from the kernel's identity encoding of the decision's object id and revision,
+so a predecessor's descriptor published late is not the newest's (each such
+step receipts `claims_materialized`); the lane records the step the predicate
+first held, the first stall after that, and whether it held at the bound, and
+a stalled lane is unmet. A catch-up hold admits evidence references for its
+whole window, retired ones included; the drive's hold bounds, raised to every
+unit its plan publishes (`DriveBounds`), cover it. A CAS ingest fault cannot
+be the permanent outside-core fault here: its latch refuses the kernel
+ingestion the fresh publishes need, which would put the fault inside the core.
+The reviewer coordinator lane is outside this campaign's core (its scripted
+model peer is not in the drive), so the report declares three lanes and
+`verdict` judges those; the R11 stall is listed under `permanent_stalls`. The
+evaluator drives every lane directly and the claim boundary says so: the
+lifecycle owner's wall-clock reads are outside the core. The liveness root is
+charged while its stores are open, before the close checkpoints their WALs.
+
+The `fault` subcommand takes the same flags as `aging` and answers with one
+JSON line; `fault-child` is its kill child. A history whose checkpoint leaves
+fewer than the six steps the fault phase drives, or too few publishes after
+them for the held publication, the two publication faults, and a step to live
+after recovery, is refused (`HistoryTooShort`) before any store opens, and the
+run freezes its build identity, charges the stores at their open footprint,
+and takes the report back out when the manifest cannot follow it, as the aging
+shell does; the CI `eval-campaign` job runs `eval_fault` under
 `EIDNARA_EVAL_S0_BUDGET_MS` with the ignored scenarios, and the default shards
 run the campaign once with every scenario asserted over it.
 
