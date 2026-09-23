@@ -2103,8 +2103,13 @@ still reproduces is accepted and the pass restarts. The report's
 transformations that had elements to try, or `NotEstablished` with
 `replay_budget_exhausted` or `unknown_candidates { count }`. The report
 never claims global minimality. The budget `max_replays` counts issued
-replays; `InvalidPair` consumes none, and every pass stops at the budget
-rather than labelling the rest.
+replays and covers the original's replay too: no replay is issued past it, so
+a zero budget refuses `OriginalNotReproduced` with
+`Unknown { replay_budget_exhausted }` and never calls the replay.
+`InvalidPair` consumes none, and every pass stops at the budget rather than
+labelling the rest. `Scenario::without` applies a whole deletion set in one
+pass over each list, so building a candidate costs the same however many
+elements it deletes.
 
 Replays are effects a shell issues to fresh processes. `ReplayEffects` is
 the shell's ledger for them: it keys each by its receipt key (the candidate

@@ -189,20 +189,38 @@ impl Scenario {
             .collect()
     }
 
+    /// Applies the whole deletion set with one pass over each list, so a
+    /// candidate costs the same whether it deletes one element or most.
     pub fn without(&self, deleted: &BTreeSet<Element>) -> Self {
-        let mut candidate = self.clone();
+        let mut episodes = BTreeSet::new();
+        let mut aged = BTreeSet::new();
+        let mut natural_fresh = BTreeSet::new();
         for element in deleted {
             match element {
-                Element::Episode { id } => candidate.episodes.retain(|episode| episode.id != *id),
+                Element::Episode { id } => episodes.insert(id),
                 Element::Event {
                     history: History::Aged,
                     id,
-                } => candidate.aged = candidate.aged.without(id),
+                } => aged.insert(id),
                 Element::Event {
                     history: History::NaturalFresh,
                     id,
-                } => candidate.natural_fresh = candidate.natural_fresh.without(id),
-            }
+                } => natural_fresh.insert(id),
+            };
+        }
+        let mut candidate = self.clone();
+        if !episodes.is_empty() {
+            candidate
+                .episodes
+                .retain(|episode| !episodes.contains(&episode.id));
+        }
+        if !aged.is_empty() {
+            candidate.aged.remove_where(|id| aged.contains(id));
+        }
+        if !natural_fresh.is_empty() {
+            candidate
+                .natural_fresh
+                .remove_where(|id| natural_fresh.contains(id));
         }
         candidate
     }
@@ -472,7 +490,7 @@ struct Driver<'a> {
 
 impl Driver<'_> {
     /// Tries the candidate; a digest already answered is not replayed twice.
-    /// Callers check `exhausted` first, so the budget is never overrun.
+    /// `replay_candidate` refuses a replay past the budget for every caller.
     fn test(&mut self, candidate: &Scenario, deleted: &BTreeSet<Element>) -> CandidateVerdict {
         let digest = candidate.digest();
         let verdict = match self.verdicts.get(&digest) {
@@ -500,6 +518,11 @@ impl Driver<'_> {
                 };
             }
         };
+        if self.exhausted() {
+            return CandidateVerdict::Unknown {
+                reason: UnknownReason::ReplayBudgetExhausted,
+            };
+        }
         self.replays += 1;
         let outcome = (self.replay)(ReplayRequest {
             key,

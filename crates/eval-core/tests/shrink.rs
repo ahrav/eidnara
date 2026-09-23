@@ -419,6 +419,32 @@ fn pair_validity_is_recomputed_and_both_worlds_are_shrunk_together() {
 }
 
 #[test]
+fn a_deletion_set_removes_exactly_what_one_deletion_at_a_time_removes() {
+    let original = scenario();
+    let deleted: BTreeSet<Element> = original.elements().into_iter().step_by(3).collect();
+    let mut expected = original.clone();
+    for element in &deleted {
+        match element {
+            Element::Episode { id } => expected.episodes.retain(|episode| episode.id != *id),
+            Element::Event {
+                history: History::Aged,
+                id,
+            } => expected.aged = expected.aged.without(id),
+            Element::Event {
+                history: History::NaturalFresh,
+                id,
+            } => expected.natural_fresh = expected.natural_fresh.without(id),
+        }
+    }
+    assert!(expected.episodes.len() < original.episodes.len());
+    assert!(expected.aged.causal_edges.len() < original.aged.causal_edges.len());
+    assert!(expected.natural_fresh.events.len() < original.natural_fresh.events.len());
+    let batched = original.without(&deleted);
+    assert_eq!(batched, expected);
+    assert_eq!(batched.digest(), expected.digest());
+}
+
+#[test]
 fn an_unknown_replay_is_kept_and_never_becomes_not_reproduced() {
     let original = scenario();
     let expected = predicate(FailureClass::Interference);
@@ -527,6 +553,27 @@ fn an_exhausted_replay_budget_stops_the_pass_and_keeps_the_last_reproduced_scena
         ReplayOutcome::Failed {
             predicate: expected
         }
+    );
+}
+
+#[test]
+fn a_zero_replay_budget_issues_no_replay_and_refuses_the_original() {
+    let original = scenario();
+    let expected = predicate(FailureClass::Interference);
+    let mut issued = 0u32;
+    let mut replay = |request: ReplayRequest<'_>| {
+        issued += 1;
+        evaluate(request)
+    };
+    let refused = shrink(&original, &fixture(), &expected, 0, &mut replay);
+    assert_eq!(issued, 0, "no replay is issued past the budget");
+    assert_eq!(
+        refused.err(),
+        Some(ShrinkRefused::OriginalNotReproduced {
+            verdict: CandidateVerdict::Unknown {
+                reason: UnknownReason::ReplayBudgetExhausted
+            }
+        })
     );
 }
 
