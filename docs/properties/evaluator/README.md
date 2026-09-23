@@ -1635,7 +1635,10 @@ Fault contract (`crates/eval-core/tests/fault.rs`,
   `LineDoesNotNameCut`; a lost reply whose every attempt was acknowledged is
   `LostReplyAcknowledged`; dispatch's `refuse_ledger_read` loses no reply; an
   episode id missing from `coverage.declared` is `UndeclaredCut`, so the
-  declared cut set derives from the episodes rather than the report's word.
+  declared cut set derives from the episodes rather than the report's word;
+  `projection_batch` encodes the retrieval batch seam; a restore fault the
+  handle rolls back itself is `consumed` while `recovery_failure` needs a
+  reopen; a blank effect key is `EmptyIdentity`.
 
 Aging drive (`crates/daemon/tests/eval_aging.rs`, `--all-features`):
 

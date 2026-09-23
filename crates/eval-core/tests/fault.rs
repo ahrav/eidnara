@@ -2,14 +2,14 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use eval_core::{
     APPLICATION_CRASH, ArtifactDeletionFaultKind, ArtifactGcFaultKind, ArtifactIngestFaultKind,
-    BarrierReceipt, BarrierRefused, ClaimBoundary, Coverage, CoverageRefused, Cut, CutCoverage,
-    CutOutcome, DispatchFaultKind, EffectLedger, EffectOutcome, EffectRefused, EffectState,
-    Envelope, EpisodeRefused, Expected, ExpectedRefusal, FAULT_REPORT_SCHEMA, FaultAction,
-    FaultEpisode, FaultReport, FaultReportError, FaultScope, Heal, HealthyCore, KillLabel, Lane,
-    LaneProgress, LivenessBounds, LivenessRefused, LivenessReport, MaterializationFaultKind,
-    PublicationFaultKind, RecordedRefusal, ResourceLimits, RestoreFaultKind, SIGKILL,
-    SearchEpisodeFault, StoreFamily, TEST_BINARY_CHILD, cut_receipts, parse_fault_report,
-    validate_episodes,
+    BarrierReceipt, BarrierRefused, BatchFaultKind, ClaimBoundary, Coverage, CoverageRefused, Cut,
+    CutCoverage, CutOutcome, DispatchFaultKind, EffectLedger, EffectOutcome, EffectRefused,
+    EffectState, Envelope, EpisodeRefused, Expected, ExpectedRefusal, FAULT_REPORT_SCHEMA,
+    FaultAction, FaultEpisode, FaultReport, FaultReportError, FaultScope, Heal, HealthyCore,
+    KillLabel, Lane, LaneProgress, LivenessBounds, LivenessRefused, LivenessReport,
+    MaterializationFaultKind, PublicationFaultKind, RecordedRefusal, ResourceLimits,
+    RestoreFaultKind, SIGKILL, SearchEpisodeFault, StoreFamily, TEST_BINARY_CHILD, cut_receipts,
+    parse_fault_report, validate_episodes,
 };
 
 const SUITE: &str = "crates/eval-core/tests/fault.rs::";
@@ -1262,8 +1262,24 @@ fn a_parsed_report_cannot_claim_what_no_run_recorded() {
             FaultAction::KernelRestore {
                 fault: RestoreFaultKind::AfterDisplace,
             },
+            Heal::Consumed,
+            StoreFamily::Kernel,
+            false,
+        ),
+        (
+            FaultAction::KernelRestore {
+                fault: RestoreFaultKind::RecoveryFailure,
+            },
             Heal::Reopen,
             StoreFamily::Kernel,
+            false,
+        ),
+        (
+            FaultAction::ProjectionBatch {
+                fault: BatchFaultKind::AfterRows,
+            },
+            Heal::Consumed,
+            StoreFamily::SearchProjection,
             false,
         ),
     ] {
@@ -1323,6 +1339,14 @@ fn a_parsed_report_cannot_claim_what_no_run_recorded() {
             cut: "ingest-write".to_string()
         })),
         "every episode's firing point is a cut the report cannot drop"
+    );
+
+    let mut nameless = EffectLedger::default();
+    nameless.attempt(" ");
+    assert_eq!(
+        nameless.validate(),
+        Err(EffectRefused::EmptyIdentity),
+        "a key that names no operation is no identity to bound"
     );
 }
 

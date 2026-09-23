@@ -2004,10 +2004,11 @@ mirroring the fault enums and hooks that exist: `search_episode`
 `artifact_ingest` and `artifact_deletion` (the kernel CAS enums, including
 `after_directory_sync`, the approved directory-fsync hook), `artifact_gc`
 (`cas::gc::ArtifactGcFault`), `kernel_restore` (`backup::RestoreFault`),
+`projection_batch` (`retrieval::batch::BatchFault`),
 `external_lock_holder` (an external `BEGIN IMMEDIATE`), `process_kill { cut }`,
 and `corrupt_quiescent_file`. `FaultAction::family` is the store the seam
-lives in: catch-up, publication, and dispatch write the search projection,
-the CAS, its GC, a restore, and
+lives in: catch-up, publication, dispatch, and a projection batch write the
+search projection, the CAS, its GC, a restore, and
 the materializer's outbox are the kernel, and a lock holder, a kill, or a
 corrupted file names its own store; a scope on another family is
 `ScopeMismatch`. `FaultAction::loses_reply` names the actions that leave an
@@ -2020,8 +2021,11 @@ statement, or a skipped acknowledgement is known, not lost, and dispatch's
 `refuse_ledger_read` loses none itself: it blocks the read-back of a reply
 `lose_charge_reply` lost.
 `FaultAction::heal` is the heal each class permits: `consumed` for one-shot
-enums, `released` for gates and lock holders, `reopen` for kills, restores, and
-corruption. The CAS faults split by whether they latch ingestion closed: the
+enums, `released` for gates and lock holders, `reopen` for kills and
+corruption. A restore interrupted `before_displace` or `after_displace` is
+rolled back by the handle before the fault returns and is `consumed`; only
+`recovery_failure` leaves the store for a `reopen`. A projection batch fault
+rolls its transaction back and is `consumed`. The CAS faults split by whether they latch ingestion closed: the
 ingest faults `write`, `file_sync`, `rename`, `after_directory_sync`, and
 `takeover_before_cleanup_unlink` and the EIO deletion faults `intent_append`
 and `unlink` heal by `reopen`; `reservation_commit` and `after_events` abort a
@@ -2087,7 +2091,7 @@ changes nothing when `state` is outside the admissible set (a reply that was
 not lost admits only `applied`) or when it is `not_applied` for an effect
 already observed, which would be a lost write that was seen.
 `validate` refuses, per identity, `NeverAttempted` at zero attempts (an entry
-`attempt` never created), `BoundsViolated` unless `acknowledged <=
+`attempt` never created), `EmptyIdentity` for a blank key, `BoundsViolated` unless `acknowledged <=
 observed <= attempted`, `ReadBackNotAdmissible` for an observed effect
 whose outcome is `not_applied`, `ObservedWithoutReadBack` for a lost reply
 observed but never read back (the observation is the read-back the ledger

@@ -64,14 +64,29 @@ pub enum ArtifactGcFaultKind {
     AfterUnlink,
 }
 
-/// `backup::RestoreFault`: a restore interrupted at a named point, healed by
-/// the rollback recovery a reopen runs.
+/// `backup::RestoreFault`: a restore interrupted at a named point. The handle
+/// rolls the interruption back itself before returning the fault, so the fault
+/// is consumed; only a forced recovery failure leaves the store for a reopen.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RestoreFaultKind {
     BeforeDisplace,
     AfterDisplace,
     RecoveryFailure,
+}
+
+/// `retrieval::batch::BatchFault`: the phase after which one projection batch
+/// fails; the transaction leaves nothing of the batch behind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BatchFaultKind {
+    AfterAdmission,
+    AfterRows,
+    AfterAssociations,
+    AfterLexical,
+    AfterTombstones,
+    AfterPending,
+    AfterCheckpoint,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -109,6 +124,7 @@ pub enum FaultAction {
     EmbeddingDispatch { fault: DispatchFaultKind },
     ArtifactGc { fault: ArtifactGcFaultKind },
     KernelRestore { fault: RestoreFaultKind },
+    ProjectionBatch { fault: BatchFaultKind },
     ArtifactIngest { fault: ArtifactIngestFaultKind },
     ArtifactDeletion { fault: ArtifactDeletionFaultKind },
     ExternalLockHolder,
@@ -150,7 +166,13 @@ impl FaultAction {
                 | ArtifactGcFaultKind::FenceRaisedBeforeUnlink
                 | ArtifactGcFaultKind::AfterUnlink => Heal::Consumed,
             },
-            Self::KernelRestore { .. } => Heal::Reopen,
+            Self::KernelRestore { fault } => match fault {
+                RestoreFaultKind::BeforeDisplace | RestoreFaultKind::AfterDisplace => {
+                    Heal::Consumed
+                }
+                RestoreFaultKind::RecoveryFailure => Heal::Reopen,
+            },
+            Self::ProjectionBatch { .. } => Heal::Consumed,
             Self::ProcessKill { .. } | Self::CorruptQuiescentFile => Heal::Reopen,
         }
     }
@@ -185,6 +207,7 @@ impl FaultAction {
             | Self::ArtifactIngest { .. }
             | Self::ArtifactDeletion { .. }
             | Self::KernelRestore { .. }
+            | Self::ProjectionBatch { .. }
             | Self::ExternalLockHolder
             | Self::ProcessKill { .. }
             | Self::CorruptQuiescentFile => false,
@@ -199,7 +222,8 @@ impl FaultAction {
             Self::SearchEpisode { .. }
             | Self::EmbeddingPublication { .. }
             | Self::HeldPublication
-            | Self::EmbeddingDispatch { .. } => Some(StoreFamily::SearchProjection),
+            | Self::EmbeddingDispatch { .. }
+            | Self::ProjectionBatch { .. } => Some(StoreFamily::SearchProjection),
             Self::ClaimMaterialization { .. }
             | Self::ArtifactIngest { .. }
             | Self::ArtifactDeletion { .. }
@@ -564,6 +588,8 @@ pub enum EffectRefused {
     NeverAttempted {
         identity: String,
     },
+    /// A key that names no operation.
+    EmptyIdentity,
     BoundsViolated {
         identity: String,
         attempted: u64,
@@ -678,6 +704,9 @@ impl EffectLedger {
 
     pub fn validate(&self) -> Result<(), EffectRefused> {
         for (identity, effect) in &self.effects {
+            if crate::blank(identity) {
+                return Err(EffectRefused::EmptyIdentity);
+            }
             let identity = identity.clone();
             if effect.attempted == 0 {
                 return Err(EffectRefused::NeverAttempted { identity });
