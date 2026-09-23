@@ -2261,10 +2261,13 @@ joins it to the workspace stays inside), a hidden test name that is not
 one `[A-Za-z0-9_]+` path component (`InvalidHiddenTestName`, so the path
 cannot leave `tests/`), a duplicate hidden test, a
 duplicate wrong-fix id (`DuplicateWrongFix`, since adequacy evidence is keyed
-by fix id), a fix naming an unknown hidden test, any path in the visible files
-or a fix that `oracle_tamper` would record (`SelectsOracle`: a hidden test
-path, a `Cargo.toml` differing from the repository's, `.cargo/`, `build.rs`,
-a toolchain override), and a fix that changes
+by fix id), a fix naming an unknown hidden test, a base `Cargo.toml` that is not
+the one pinned `TASK_MANIFEST` (exact match, since any other manifest can
+redefine test targets, the build script, or dependencies), any path in the
+visible files or a fix that `oracle_tamper` would record (`SelectsOracle`
+for both: a hidden test path, a `Cargo.toml` differing from the
+repository's, `.cargo/`, `build.rs`, a toolchain override), and a fix that
+changes
 the contents of no file under `src/` the repository holds (`TextOnlyFix`,
 which also refuses an empty patch and a patch that rewrites a source file
 with its own contents). `generate_tasks(root_seed, count)` (`count` a `NonZeroU32`; an empty

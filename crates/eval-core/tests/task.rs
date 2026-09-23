@@ -236,6 +236,26 @@ fn a_task_refuses_a_missing_or_visible_oracle_and_a_text_only_fix() {
             path: "Cargo.toml".to_string()
         })
     );
+    // The base manifest is pinned, not compared with itself.
+    let mut redirected_base = task.clone();
+    redirected_base.files.insert(
+        "Cargo.toml".to_string(),
+        task.files["Cargo.toml"].replace("[package]\n", "[package]\nautotests = false\n"),
+    );
+    assert_eq!(
+        redirected_base.validate(),
+        Err(TaskError::SelectsOracle {
+            path: "Cargo.toml".to_string()
+        })
+    );
+    let mut no_manifest = task.clone();
+    no_manifest.files.remove("Cargo.toml");
+    assert_eq!(
+        no_manifest.validate(),
+        Err(TaskError::SelectsOracle {
+            path: "Cargo.toml".to_string()
+        })
+    );
     for (path, in_base) in [
         ("build.rs", false),
         (".cargo/config.toml", true),
