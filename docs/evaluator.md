@@ -3034,7 +3034,12 @@ instruction (`CarrierNotPlanted`), and tasks that are not what
 `generate_tasks(root_seed, tasks.len())` derives (`TasksNotDerived`, so the
 recorded seed and generator version reproduce the oracle that ran).
 
-The runner owns the oracle. `task_terminal` is `Censored` when the inherited
+The runner owns the oracle and never runs it in the agent's workspace:
+`oracle_workspace(agent_files)` is a fresh copy of the task's files with only
+the agent's `src/` writes applied by content, plus the hidden tests, so the
+manifest, `.cargo/`, `build.rs`, toolchain overrides, and every alias
+(symlink or hard link) the agent arranged are irrelevant to what is judged.
+`task_terminal` is `Censored` when the inherited
 budget is exhausted, whatever the hidden tests say; `Pass` only when every
 hidden test the task names reports `passed`; `Fail` when any failed, errored,
 or is missing; `Indeterminate` when nothing ran. `oracle_tamper` lists the
@@ -3047,10 +3052,12 @@ symlinked directory; the `tests` entry itself, which redirects where the
 hidden tests land; a root `build.rs`, which Cargo runs
 before the test targets compile and which can rewrite them; and
 `rust-toolchain` or `rust-toolchain.toml`, since a rustup override with a
-`path` makes every `cargo` in the directory the agent's own. The runner
-writes the hidden tests from the corpus regardless and records the attempt.
-`check_adequacy` over `AdequacyEvidence` (hidden results on the unfixed
-repository, the correct fix, and every wrong fix) refuses `BaselinePasses`
+`path` makes every `cargo` in the directory the agent's own. The oracle
+runs in `oracle_workspace`, so these paths are only recorded.
+`check_adequacy` over `AdequacyEvidence` (the task's digest, then hidden
+results on the unfixed repository, the correct fix, and every wrong fix)
+refuses `WrongTask { found }` when the digest is another task's (every task
+shares the test names and fix ids), `BaselinePasses`
 (nothing fails to pass), `BaselineUnmeasured` when no hidden test reported
 `failed` on the unfixed repository (a missing or errored result is not an
 observed failure), `CorrectFixFails { test }`,

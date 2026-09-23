@@ -239,6 +239,28 @@ impl GeneratedTask {
         files
     }
 
+    /// The workspace the runner judges an agent's run in: a fresh copy of the
+    /// task's files with only the agent's `src/` writes applied by content,
+    /// plus the hidden tests. Nothing else the agent wrote is carried, so the
+    /// manifest, `.cargo/`, `build.rs`, toolchain overrides, and every alias
+    /// (symlink or hard link) in the agent's workspace are irrelevant to the
+    /// oracle; `oracle_tamper` only records what was left behind.
+    pub fn oracle_workspace(&self, agent_files: &Files) -> Files {
+        let mut files = self.files.clone();
+        files.extend(
+            agent_files
+                .iter()
+                .filter(|(path, _)| path.starts_with("src/"))
+                .map(|(p, c)| (p.clone(), c.clone())),
+        );
+        files.extend(
+            self.hidden_tests
+                .iter()
+                .map(|test| (test.path(), test.content.clone())),
+        );
+        files
+    }
+
     /// Agent-written paths that could select, modify, or replace the hidden tests.
     /// A changed `Cargo.toml` can redefine test targets, the build script, or dependencies.
     /// Cargo reads both `.cargo/config` and `.cargo/config.toml`.
@@ -251,7 +273,8 @@ impl GeneratedTask {
     /// The `.cargo` and `tests` entries themselves are recorded too: written
     /// as a file or a symlink, they redirect where Cargo reads its
     /// configuration and where the hidden tests land.
-    /// The runner writes the hidden tests regardless, so these paths are only recorded.
+    /// The oracle runs in `oracle_workspace`, never in the agent's workspace,
+    /// so these paths are only recorded.
     pub fn oracle_tamper(&self, agent_files: &Files) -> Vec<String> {
         agent_files
             .iter()
@@ -527,10 +550,12 @@ pub fn task_terminal(
 }
 
 /// Hidden-test results over the unfixed repository, the correct fix, and
-/// every wrong fix, as the runner executed them.
+/// every wrong fix, as the runner executed them, bound to the task they were
+/// gathered for by its digest.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AdequacyEvidence {
+    pub task_digest: String,
     pub baseline: HiddenResults,
     pub correct: HiddenResults,
     pub wrong: BTreeMap<String, HiddenResults>,
@@ -539,6 +564,11 @@ pub struct AdequacyEvidence {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "reason", rename_all = "snake_case", deny_unknown_fields)]
 pub enum AdequacyRefused {
+    /// The evidence was gathered for another task; every task shares the
+    /// hidden-test names and wrong-fix ids, so only the digest tells them apart.
+    WrongTask {
+        found: String,
+    },
     /// The unfixed repository passes every hidden test: nothing fails to pass.
     BaselinePasses,
     /// No hidden test reported `failed` on the unfixed repository: a missing
@@ -566,6 +596,11 @@ pub fn check_adequacy(
     task: &GeneratedTask,
     evidence: &AdequacyEvidence,
 ) -> Result<(), AdequacyRefused> {
+    if evidence.task_digest != task.digest() {
+        return Err(AdequacyRefused::WrongTask {
+            found: evidence.task_digest.clone(),
+        });
+    }
     let passed =
         |results: &HiddenResults, name: &str| results.get(name) == Some(&HiddenOutcome::Passed);
     if task

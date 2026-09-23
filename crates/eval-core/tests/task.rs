@@ -48,6 +48,7 @@ fn evidence(task: &eval_core::GeneratedTask) -> AdequacyEvidence {
     let mut baseline = all(task, HiddenOutcome::Passed);
     baseline.insert("sum_of_positives".to_string(), HiddenOutcome::Failed);
     AdequacyEvidence {
+        task_digest: task.digest(),
         baseline,
         correct: all(task, HiddenOutcome::Passed),
         wrong: task
@@ -384,9 +385,18 @@ fn a_task_refuses_a_missing_or_visible_oracle_and_a_text_only_fix() {
 
 #[test]
 fn adequacy_needs_fail_to_pass_and_every_wrong_fix_killed_by_its_named_test() {
-    let task = &corpus().tasks[0];
+    let corpus = corpus();
+    let task = &corpus.tasks[0];
     let good = evidence(task);
     check_adequacy(task, &good).unwrap();
+    // Every task shares the test names and fix ids; the digest binds evidence
+    // to the task it was gathered for.
+    assert_eq!(
+        check_adequacy(&corpus.tasks[1], &good),
+        Err(AdequacyRefused::WrongTask {
+            found: task.digest()
+        })
+    );
 
     let mut passing_baseline = good.clone();
     passing_baseline.baseline = all(task, HiddenOutcome::Passed);
@@ -581,6 +591,47 @@ fn an_agent_cannot_select_modify_or_replace_the_oracle() {
         task.files.len(),
         "a fix overlays, it does not add"
     );
+    // The oracle never runs in the agent's workspace: only `src/` content
+    // crosses into a fresh copy of the task, with the hidden tests.
+    let agent = Files::from([
+        (
+            "src/lib.rs".to_string(),
+            task.correct_fix["src/lib.rs"].clone(),
+        ),
+        ("src/extra.rs".to_string(), "pub fn x() {}".to_string()),
+        (
+            "Cargo.toml".to_string(),
+            "[package]\nname = \"evil\"\n".to_string(),
+        ),
+        ("build.rs".to_string(), "fn main() {}".to_string()),
+        (".cargo".to_string(), "evil".to_string()),
+        (
+            task.hidden_tests[0].path(),
+            "#[test] fn sum_of_positives() {}".to_string(),
+        ),
+        (
+            "tests/mine.rs".to_string(),
+            "#[test] fn mine() {}".to_string(),
+        ),
+    ]);
+    let oracle = task.oracle_workspace(&agent);
+    assert_eq!(oracle["Cargo.toml"], task.files["Cargo.toml"]);
+    assert_eq!(oracle["src/lib.rs"], task.correct_fix["src/lib.rs"]);
+    assert_eq!(oracle["src/extra.rs"], "pub fn x() {}");
+    for absent in ["build.rs", ".cargo", "tests/mine.rs"] {
+        assert!(
+            !oracle.contains_key(absent),
+            "{absent} does not reach the oracle"
+        );
+    }
+    for test in &task.hidden_tests {
+        assert_eq!(
+            oracle[&test.path()],
+            test.content,
+            "the corpus's hidden test, not the agent's"
+        );
+    }
+    assert_eq!(oracle.len(), task.files.len() + 1 + task.hidden_tests.len());
 }
 
 #[test]
