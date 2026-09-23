@@ -2,7 +2,7 @@
 //! check, the human sample floor, identity-bound comparison, the judge-type
 //! firewall around the gates, and the held-out live slice.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use eval_core::{
     AnalysisFamily, ArmRates, ArmResult, BlindingRefused, CalibrationRefused, CalibrationSet,
@@ -90,10 +90,11 @@ fn report(
     }
 }
 
-fn settings(k: u32) -> LiveSettings {
+fn settings(k: u32, tasks: &[&str]) -> LiveSettings {
     LiveSettings {
         providers: vec![provider("live-1"), provider("live-2")],
         k,
+        tasks: tasks.iter().map(|t| t.to_string()).collect::<BTreeSet<_>>(),
         calibration: Some(calibration()),
         sampling: Some(SamplingPlan {
             pairs: 40,
@@ -345,6 +346,17 @@ fn a_changed_judge_provider_or_tokenizer_refuses_cross_run_residual_comparison()
         "two reports sharing a malformed digest share no judge"
     );
     assert_eq!(base.comparable(&unbound), malformed);
+    let mut unanchored = base.clone();
+    unanchored.calibration_digest = String::new();
+    assert_eq!(
+        unanchored.comparable(&unanchored),
+        Err(ResidualRefused::Calibration(
+            CalibrationRefused::MalformedDigest {
+                field: "calibration_digest",
+            },
+        )),
+        "an empty calibration digest anchors nothing"
+    );
     let mut leaked = base.clone();
     leaked.permutation.correct = 40;
     assert!(matches!(
@@ -427,8 +439,8 @@ fn the_live_slice_reports_trials_intervals_and_censoring_and_is_never_replayable
             ],
         },
     ];
-    let report = live_slice(&settings(2), &provider("live-1"), &tasks).unwrap();
-    report.validate(&settings(2)).unwrap();
+    let report = live_slice(&settings(2, &["t1", "t2"]), &provider("live-1"), &tasks).unwrap();
+    report.validate(&settings(2, &["t1", "t2"])).unwrap();
     assert!(!report.replayable);
     const { assert!(!LIVE_REPLAYABLE) };
     assert_eq!(report.tasks[0].pass_k.repeats, 3);
@@ -447,25 +459,25 @@ fn the_live_slice_reports_trials_intervals_and_censoring_and_is_never_replayable
     let mut relabelled = report.clone();
     relabelled.replayable = true;
     assert_eq!(
-        relabelled.validate(&settings(2)),
+        relabelled.validate(&settings(2, &["t1", "t2"])),
         Err(LiveSliceRefused::RelabelledReplayable)
     );
     assert!(
         matches!(
-            live_slice(&settings(4), &provider("live-1"), &tasks),
+            live_slice(&settings(4, &["t1", "t2"]), &provider("live-1"), &tasks),
             Err(LiveSliceRefused::Statistics(_))
         ),
         "k past the repeats refuses"
     );
     assert_eq!(
-        live_slice(&settings(2), &provider("live-1"), &[]),
+        live_slice(&settings(2, &["t1", "t2"]), &provider("live-1"), &[]),
         Err(LiveSliceRefused::NoTasks)
     );
 }
 
 #[test]
 fn live_settings_refuse_until_two_profiles_a_calibration_set_and_a_plan_exist() {
-    let settings = settings(3);
+    let settings = settings(3, &["t"]);
     settings.validate().unwrap();
     let mut one = settings.clone();
     one.providers.pop();
@@ -482,6 +494,9 @@ fn live_settings_refuse_until_two_profiles_a_calibration_set_and_a_plan_exist() 
     let mut zero = settings.clone();
     zero.k = 0;
     assert_eq!(zero.validate(), Err(LiveSettingsRefused::ZeroRepeats));
+    let mut no_tasks = settings.clone();
+    no_tasks.tasks.clear();
+    assert_eq!(no_tasks.validate(), Err(LiveSettingsRefused::NoTasks));
     let mut no_cal = settings.clone();
     no_cal.calibration = None;
     assert_eq!(
@@ -727,12 +742,12 @@ fn live_slice_validation_recomputes_each_task_and_checks_the_schema() {
             ArmResult::Censored(CensorReason::Timeout),
         ],
     }];
-    let report = live_slice(&settings(2), &provider("live-1"), &tasks).unwrap();
-    report.validate(&settings(2)).unwrap();
+    let report = live_slice(&settings(2, &["t"]), &provider("live-1"), &tasks).unwrap();
+    report.validate(&settings(2, &["t"])).unwrap();
     let mut schema = report.clone();
     schema.schema = "eval-live-slice/v999".to_string();
     assert_eq!(
-        schema.validate(&settings(2)),
+        schema.validate(&settings(2, &["t"])),
         Err(LiveSliceRefused::SchemaMismatch {
             found: "eval-live-slice/v999".to_string()
         })
@@ -742,14 +757,14 @@ fn live_slice_validation_recomputes_each_task_and_checks_the_schema() {
     });
     let mut k = report.clone();
     k.k = 1;
-    k.settings_digest = settings(1).digest();
+    k.settings_digest = settings(1, &["t"]).digest();
     assert_eq!(
-        k.validate(&settings(1)),
+        k.validate(&settings(1, &["t"])),
         inconsistent,
         "outer k disagrees with the task"
     );
     assert_eq!(
-        k.validate(&settings(2)),
+        k.validate(&settings(2, &["t"])),
         Err(LiveSliceRefused::RepeatCountDiffers {
             report: 1,
             settings: 2
@@ -759,13 +774,13 @@ fn live_slice_validation_recomputes_each_task_and_checks_the_schema() {
     let mut foreign = report.clone();
     foreign.provider = provider("live-3");
     assert_eq!(
-        foreign.validate(&settings(2)),
+        foreign.validate(&settings(2, &["t"])),
         Err(LiveSliceRefused::UnapprovedProvider {
             provider: "anthropic/live-3@tp-1".to_string()
         }),
         "a deserialized report names an approved profile"
     );
-    let mut other_plan = settings(2);
+    let mut other_plan = settings(2, &["t"]);
     other_plan.sampling = Some(SamplingPlan {
         pairs: 60,
         human_sample: 20,
@@ -776,7 +791,20 @@ fn live_slice_validation_recomputes_each_task_and_checks_the_schema() {
         Err(LiveSliceRefused::SettingsDigestMismatch),
         "a report ran under one pre-registration, not any valid one"
     );
-    let mut unsettled = settings(2);
+    let cherry_picked = settings(2, &["t", "t2"]);
+    cherry_picked.validate().unwrap();
+    let mut picked = report.clone();
+    picked.settings_digest = cherry_picked.digest();
+    assert_eq!(
+        picked.validate(&cherry_picked),
+        Err(LiveSliceRefused::TaskSetDiffers),
+        "a report over one task is not the two-task held-out slice"
+    );
+    assert_eq!(
+        live_slice(&cherry_picked, &provider("live-1"), &tasks),
+        Err(LiveSliceRefused::TaskSetDiffers)
+    );
+    let mut unsettled = settings(2, &["t"]);
     unsettled.calibration = None;
     assert_eq!(
         report.validate(&unsettled),
@@ -788,7 +816,7 @@ fn live_slice_validation_recomputes_each_task_and_checks_the_schema() {
     let mut flipped = report.clone();
     flipped.tasks[0].indeterminate = false;
     assert_eq!(
-        flipped.validate(&settings(2)),
+        flipped.validate(&settings(2, &["t"])),
         inconsistent,
         "all censored is indeterminate"
     );
@@ -799,7 +827,7 @@ fn live_slice_validation_recomputes_each_task_and_checks_the_schema() {
         censored_excluded: Ratio::ONE,
     };
     assert_eq!(
-        fabricated.validate(&settings(2)),
+        fabricated.validate(&settings(2, &["t"])),
         inconsistent,
         "bounds the attempts do not give"
     );
@@ -876,7 +904,7 @@ fn the_live_slice_refuses_a_repeated_task() {
     };
     assert_eq!(
         live_slice(
-            &settings(1),
+            &settings(1, &["t"]),
             &provider("live-1"),
             &[task.clone(), task.clone()]
         ),
@@ -884,10 +912,10 @@ fn the_live_slice_refuses_a_repeated_task() {
             task: "t".to_string()
         })
     );
-    let mut report = live_slice(&settings(1), &provider("live-1"), &[task]).unwrap();
+    let mut report = live_slice(&settings(1, &["t"]), &provider("live-1"), &[task]).unwrap();
     report.tasks.push(report.tasks[0].clone());
     assert_eq!(
-        report.validate(&settings(1)),
+        report.validate(&settings(1, &["t"])),
         Err(LiveSliceRefused::DuplicateTask {
             task: "t".to_string()
         })
@@ -901,13 +929,13 @@ fn the_live_slice_is_constructed_only_from_validated_settings_and_an_approved_pr
         attempts: vec![ArmResult::Pass],
     }];
     assert_eq!(
-        live_slice(&settings(1), &provider("live-3"), &tasks),
+        live_slice(&settings(1, &["t"]), &provider("live-3"), &tasks),
         Err(LiveSliceRefused::UnapprovedProvider {
             provider: "anthropic/live-3@tp-1".to_string()
         }),
         "a third profile is not one of the two approved"
     );
-    let mut no_plan = settings(1);
+    let mut no_plan = settings(1, &["t"]);
     no_plan.sampling = None;
     assert_eq!(
         live_slice(&no_plan, &provider("live-1"), &tasks),
@@ -917,7 +945,7 @@ fn the_live_slice_is_constructed_only_from_validated_settings_and_an_approved_pr
         "unvalidated settings construct no live evidence"
     );
     assert_eq!(
-        live_slice(&settings(1), &provider("live-1"), &tasks)
+        live_slice(&settings(1, &["t"]), &provider("live-1"), &tasks)
             .unwrap()
             .k,
         1,

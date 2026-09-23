@@ -563,7 +563,10 @@ impl ResidualReport {
                 found: self.schema.clone(),
             });
         }
-        if let Some(field) = self.judge.malformed_digest() {
+        let malformed = self.judge.malformed_digest().or_else(|| {
+            (!is_lower_hex(&self.calibration_digest, 64)).then_some("calibration_digest")
+        });
+        if let Some(field) = malformed {
             return Err(ResidualRefused::Calibration(
                 CalibrationRefused::MalformedDigest { field },
             ));
@@ -694,6 +697,8 @@ pub enum LiveSliceRefused {
     },
     /// The report ran under other settings than the ones supplied.
     SettingsDigestMismatch,
+    /// The tasks are not the pre-registered held-out set.
+    TaskSetDiffers,
     Settings(LiveSettingsRefused),
     Statistics(StatisticsError),
 }
@@ -717,9 +722,27 @@ fn approve(settings: &LiveSettings, provider: &ProviderProfile) -> Result<(), Li
     Ok(())
 }
 
-fn first_duplicate_task<'a>(mut tasks: impl Iterator<Item = &'a str>) -> Option<String> {
+/// The task ids are unique and exactly the settings' frozen held-out set.
+fn check_task_set<'a>(
+    settings: &LiveSettings,
+    tasks: impl Iterator<Item = &'a str>,
+) -> Result<(), LiveSliceRefused> {
     let mut seen = BTreeSet::new();
-    tasks.find(|t| !seen.insert(*t)).map(str::to_string)
+    for task in tasks {
+        if !seen.insert(task) {
+            return Err(LiveSliceRefused::DuplicateTask {
+                task: task.to_string(),
+            });
+        }
+    }
+    if !seen
+        .iter()
+        .copied()
+        .eq(settings.tasks.iter().map(String::as_str))
+    {
+        return Err(LiveSliceRefused::TaskSetDiffers);
+    }
+    Ok(())
 }
 
 /// Summarizes the live slice with the inherited conservative rules: pass@1,
@@ -735,9 +758,7 @@ pub fn live_slice(
     if tasks.is_empty() {
         return Err(LiveSliceRefused::NoTasks);
     }
-    if let Some(task) = first_duplicate_task(tasks.iter().map(|t| t.task.as_str())) {
-        return Err(LiveSliceRefused::DuplicateTask { task });
-    }
+    check_task_set(settings, tasks.iter().map(|t| t.task.as_str()))?;
     let k = settings.k;
     let reports = tasks
         .iter()
@@ -786,9 +807,7 @@ impl LiveSliceReport {
         if self.tasks.is_empty() {
             return Err(LiveSliceRefused::NoTasks);
         }
-        if let Some(task) = first_duplicate_task(self.tasks.iter().map(|t| t.task.as_str())) {
-            return Err(LiveSliceRefused::DuplicateTask { task });
-        }
+        check_task_set(settings, self.tasks.iter().map(|t| t.task.as_str()))?;
         for task in &self.tasks {
             let (pass_k, indeterminate) = summarize(&task.attempts, self.k)?;
             if pass_k != task.pass_k || indeterminate != task.indeterminate {
@@ -801,13 +820,16 @@ impl LiveSliceReport {
     }
 }
 
-/// The pre-registered values a live campaign must hold before it runs; none
-/// defaults, and the two provider profiles are distinct.
+/// The pre-registered values a live campaign must hold before it runs: none
+/// defaults, the two provider profiles are distinct, and the held-out task
+/// set is frozen.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LiveSettings {
     pub providers: Vec<ProviderProfile>,
     pub k: u32,
+    /// The held-out task ids, frozen before any run.
+    pub tasks: BTreeSet<String>,
     pub calibration: Option<CalibrationSet>,
     pub sampling: Option<SamplingPlan>,
 }
@@ -819,6 +841,7 @@ pub enum LiveSettingsRefused {
         found: usize,
     },
     ZeroRepeats,
+    NoTasks,
     NoCalibrationSet,
     NoSamplingPlan,
     Calibration(CalibrationRefused),
@@ -841,6 +864,9 @@ impl LiveSettings {
         }
         if self.k == 0 {
             return Err(LiveSettingsRefused::ZeroRepeats);
+        }
+        if self.tasks.is_empty() {
+            return Err(LiveSettingsRefused::NoTasks);
         }
         let calibration = self
             .calibration

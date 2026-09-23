@@ -2470,7 +2470,7 @@ name alone: the judge, the calibration digest, the live provider, the plan,
 the permutation check, and the judgments. `validate` reconciles the plan, the
 permutation check, and the calibration set (same judge, same digest) and
 refuses duplicated or miscounted judgments. `comparable` refuses a report
-under another schema or with a malformed judge digest, and refuses cross-run
+under another schema or with a malformed judge or calibration digest, and refuses cross-run
 `residual.*` comparison
 (`ReanchorRequired`) until the anchor set is re-scored when the judge, the
 live provider or its tokenizer profile, or the calibration digest changes. The gates take only oracle inputs: `analyze`'s
@@ -2478,17 +2478,18 @@ signature is pinned in the tests, and the residual report carries no gate
 field.
 
 `LiveSettings::validate` refuses without exactly two distinct approved
-provider profiles, a repeat count, a calibration set, and a plan above the
-floor. `live_slice` constructs a `LiveSliceReport` (`eval-live-slice/v1`)
-only from validated settings and one of their two profiles, with the
-settings' `k`; it refuses no tasks and a repeated task id. Each task keeps
+provider profiles, a repeat count, a frozen held-out task set, a calibration
+set, and a plan above the floor. `live_slice` constructs a `LiveSliceReport`
+(`eval-live-slice/v1`) only from validated settings and one of their two
+profiles, with the settings' `k`; it refuses no tasks, a repeated task id,
+and a task set that is not exactly the settings'. Each task keeps
 its attempts beside pass@1, the repeat counts, the censoring rate, and the
 pass^k interval through `pass_k`; every attempt censored is `indeterminate`,
 never zero. The report carries the settings' digest
 (`eval-live-settings/v1`). `replayable` is `LIVE_REPLAYABLE = false`;
 `validate` takes the same settings and refuses a relabelled report, another
 schema, an unapproved profile, another `k`, another settings digest, a
-repeated task, and a summary the attempts do not give, so a deserialized
+repeated task, another task set, and a summary the attempts do not give, so a deserialized
 report is held to the pre-registration a constructed one ran under. Tests:
 `crates/eval-core/tests/judge.rs`.
 

@@ -1624,8 +1624,8 @@ and `rid-tokenizer-accounting-profile-bound-per-run` are in
   `replayable = false` with a relabelled report refused, `k` past the repeats
   refused, a repeated task refused at construction and validation, a third
   profile or unvalidated settings constructing nothing, a deserialized report
-  held to the settings' profiles, `k`, and digest, and settings refusing each
-  missing value.
+  held to the settings' profiles, `k`, task set, and digest, and settings
+  refusing each missing value.
 
 ## Gaps recorded here
 
