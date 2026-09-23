@@ -662,6 +662,15 @@ fn a_fault_report_round_trips_and_refuses_what_it_cannot_prove() {
             episode: "r24".to_string()
         })
     );
+    let mut unrecorded = report.clone();
+    unrecorded.expected_refusals.clear();
+    assert_eq!(
+        unrecorded.validate(&bounds()),
+        Err(FaultReportError::RefusalNotRecorded {
+            episode: "r11".to_string()
+        }),
+        "an expected-refusal episode with no recorded production error claims a refusal the run never observed"
+    );
     let mut extra = value.clone();
     extra["surprise"] = serde_json::json!(1);
     assert!(matches!(

@@ -1722,6 +1722,8 @@ inequality while one identity violates it is refused.
 report lists them apart from safety failures. A recorded refusal whose episode
 is not a declared `expected_refusal` of the same refusal is
 `RefusalNotDeclared`: it would attribute the refusal to a fault that never ran.
+An `expected_refusal` episode with no recorded refusal of its own is
+`RefusalNotRecorded`: it would claim a refusal the run never observed.
 
 `LivenessReport` is the separate liveness mode: a `HealthyCore` (families and
 `Lane`s that must progress), the outside-core episodes, the set still armed
@@ -1864,8 +1866,9 @@ quiescent copy whose kernel file has one page overwritten, refused
 `IntegrityCheck { kernel }` by `Copied::reopen` before any store opens, after
 which the original reopens in place; the four CAS ingest faults (`write`,
 `file_sync`, `rename`, `after_directory_sync`), each refused
-`IngestionFailClosed` or `ReferenceCommit`, each healed by close and reopen
-and a fresh ingest; two purge-intent deletion faults,
+`IngestionFailClosed` or `ReferenceCommit` with no `evidence_meta` row for its
+evidence id, each healed by close and reopen and a fresh ingest; two
+purge-intent deletion faults,
 `intent_storage_exhausted` (`StorageExhausted`, consumed; a plain ingest
 succeeds without a reopen) and `intent_append` (`PurgeIntent`, healed by
 reopen). After every EIO, before its reopen, a plain ingest must be refused

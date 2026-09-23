@@ -515,10 +515,12 @@ pub fn artifact_ingest_episodes(
             &format!("kernel::ArtifactIngestFault: {contract}; the ingest fails closed, publishes no reference, and latches CAS ingestion closed until the store reopens"),
         ));
         let payload = format!("fault payload {id} {now}");
+        let request = ingest_request(&id, payload.as_bytes());
+        let evidence_id = request.evidence_id.clone();
         let error = stores
             .corpus
             .kernel
-            .ingest_artifact_with_fault_for_test(ingest_request(&id, payload.as_bytes()), fault)
+            .ingest_artifact_with_fault_for_test(request, fault)
             .err()
             .ok_or_else(|| unexpected(&id, "an ingest refusal", "Ok"))?;
         let named = artifact_error_text(&error);
@@ -531,6 +533,20 @@ pub fn artifact_ingest_episodes(
                 &id,
                 "IngestionFailClosed | ReferenceCommit",
                 named,
+            ));
+        }
+        let references: i64 = read_only(&kernel_file(stores.root()))
+            .query_row(
+                "SELECT COUNT(*) FROM evidence_meta WHERE evidence_id=?1",
+                [&evidence_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        if references != 0 {
+            return Err(unexpected(
+                &id,
+                "no reference published by the faulted ingest",
+                references,
             ));
         }
         observe_latched(&stores, witness, &id)?;

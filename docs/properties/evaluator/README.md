@@ -1312,7 +1312,9 @@ Fault contract (`crates/eval-core/tests/fault.rs`,
   and changes with an effect outcome; a kill without a barrier, an unreceipted
   declared cut, zero safety checks while armed, a premature success, and a
   recorded refusal whose episode is undeclared, carries another refusal, or
-  carries an injected fault's action (`RefusalNotDeclared`) refuse.
+  carries an injected fault's action (`RefusalNotDeclared`), and an
+  `expected_refusal` episode with no recorded refusal (`RefusalNotRecorded`)
+  refuse.
 
 Fault shell (`crates/daemon/tests/eval_fault.rs`, `--all-features`; the
 default shards run the campaign once with every scenario asserted over it,
