@@ -10,7 +10,9 @@ use serde_json::Value;
 use crate::checkpoint::StoreFamily;
 use crate::manifest::{Cut, CutOutcome, CutReceipt};
 use crate::statistics::LivenessBounds;
-use context_core::canonical_json::{is_lower_hex, protocol_digest};
+use context_core::canonical_json::{
+    ContractError, canonical_json_encode, is_lower_hex, protocol_digest,
+};
 
 pub const FAULT_REPORT_SCHEMA: &str = "eval-suite-c-fault-report/v1";
 const FAULT_RESULT_DIGEST_PROTOCOL: &str = "eval-suite-c-fault-report-result/v1";
@@ -453,6 +455,10 @@ pub enum EffectRefused {
     UnknownIdentity {
         identity: String,
     },
+    /// An entry `attempt` never created: nothing was tried under this identity.
+    NeverAttempted {
+        identity: String,
+    },
     BoundsViolated {
         identity: String,
         attempted: u64,
@@ -556,6 +562,9 @@ impl EffectLedger {
     pub fn validate(&self) -> Result<(), EffectRefused> {
         for (identity, effect) in &self.effects {
             let identity = identity.clone();
+            if effect.attempted == 0 {
+                return Err(EffectRefused::NeverAttempted { identity });
+            }
             if !(effect.acknowledged <= effect.observed && effect.observed <= effect.attempted) {
                 return Err(EffectRefused::BoundsViolated {
                     identity,
@@ -765,6 +774,7 @@ impl LivenessReport {
                 .met_at
                 .is_some_and(|k| k <= progress.bound && progress.holds_at_bound)
                 && progress.stalled_at.is_none()
+                && progress.blocked.is_none()
                 && progress.fresh_commits > 0;
             if !met || progress.steps < progress.bound {
                 return Err(LivenessRefused::LivenessUnmet {
@@ -820,6 +830,15 @@ pub enum FaultReportError {
         episode: String,
         cut: String,
     },
+    /// A barrier no kill episode declares at that cut.
+    BarrierWithoutKill {
+        episode: String,
+        cut: String,
+    },
+    /// One cut receipted twice; two outcomes for one checkpoint is no outcome.
+    DuplicateCut {
+        cut: Cut,
+    },
     UnknownEpisode {
         episode: String,
     },
@@ -839,6 +858,7 @@ pub enum FaultReportError {
     },
     SafetyNeverChecked,
     Shape(String),
+    NotCanonical(ContractError),
     Lossy,
 }
 
@@ -894,6 +914,22 @@ impl FaultReport {
                 });
             }
         }
+        for barrier in &self.barriers {
+            if !self
+                .episodes
+                .iter()
+                .any(|e| e.id == barrier.episode && e.action.kill_cut() == Some(&barrier.cut))
+            {
+                return Err(FaultReportError::BarrierWithoutKill {
+                    episode: barrier.episode.clone(),
+                    cut: barrier.cut.clone(),
+                });
+            }
+        }
+        let mut cuts = BTreeSet::new();
+        if let Some(receipt) = self.cuts.iter().find(|r| !cuts.insert(r.cut)) {
+            return Err(FaultReportError::DuplicateCut { cut: receipt.cut });
+        }
         self.coverage
             .verdict()
             .map_err(FaultReportError::Coverage)?;
@@ -944,9 +980,14 @@ impl FaultReport {
         Ok(())
     }
 
+    /// Digestible on both runtimes: no integer may leave the canonical safe
+    /// range, or `result_digest` would refuse the value `validate` accepted.
     pub fn serialize(&self, bounds: &LivenessBounds) -> Result<Value, FaultReportError> {
         self.validate(bounds)?;
-        serde_json::to_value(self).map_err(|e| FaultReportError::Shape(e.to_string()))
+        let value =
+            serde_json::to_value(self).map_err(|e| FaultReportError::Shape(e.to_string()))?;
+        canonical_json_encode(&value).map_err(FaultReportError::NotCanonical)?;
+        Ok(value)
     }
 
     pub fn result_digest(report: &Value) -> Result<String, FaultReportError> {
@@ -974,6 +1015,7 @@ pub fn parse_fault_report(
     let report =
         FaultReport::deserialize(value).map_err(|e| FaultReportError::Shape(e.to_string()))?;
     report.validate(bounds)?;
+    canonical_json_encode(value).map_err(FaultReportError::NotCanonical)?;
     let again =
         serde_json::to_value(&report).map_err(|e| FaultReportError::Shape(e.to_string()))?;
     if again != *value {

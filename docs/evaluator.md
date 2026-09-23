@@ -2038,7 +2038,10 @@ the one the runner sends and the one the kill label describes. A report with a
 kill episode and no barrier for
 that episode at the episode's declared `process_kill` cut is
 `KillWithoutBarrier { episode, cut }`: a kill without a barrier at its cut is a
-kill at an unknown point.
+kill at an unknown point. The other direction holds too: a barrier whose
+episode is not a `process_kill` declared at that cut is
+`BarrierWithoutKill { episode, cut }`, and a `Cut` receipted twice in `cuts`
+is `DuplicateCut`, because two outcomes for one checkpoint is no outcome.
 
 `CutCoverage` holds the cuts a campaign declares (barrier names, fault
 variants, gate release points) and how many receipts each earned; a receipt
@@ -2058,7 +2061,8 @@ A read-back is refused as `ReadBackNotAdmissible { identity, state }` and
 changes nothing when `state` is outside the admissible set (a reply that was
 not lost admits only `applied`) or when it is `not_applied` for an acknowledged
 effect, which would be a lost acknowledged write.
-`validate` refuses, per identity, `BoundsViolated` unless `acknowledged <=
+`validate` refuses, per identity, `NeverAttempted` at zero attempts (an entry
+`attempt` never created), `BoundsViolated` unless `acknowledged <=
 observed <= attempted`, `ReadBackNotAdmissible` for an acknowledged effect
 whose outcome is `not_applied`, `PrematureSuccess` for a lost reply whose
 outcome is not `unknown` without a read-back, and
@@ -2100,8 +2104,9 @@ lane with no progress record, `BoundMismatch` when a lane's declared bound is
 not the profile's (a bound fitted to the observed progress is not a bound),
 and `LivenessUnmet { lane, progress_at_bound, blocked }` when the predicate
 never held, held only transiently, stalled after it first held, the lane was
-fed no fresh commits (an idle lane meets its predicate trivially), or the lane
-stopped before the bound.
+fed no fresh commits (an idle lane meets its predicate trivially), the lane
+stopped before the bound, or the lane records the `blocked` stop that a met
+predicate contradicts.
 
 `FaultReport` (`eval-suite-c-fault-report/v1`) is what one fault campaign
 publishes: identity, profile digest, claim boundary, the episodes, barrier
@@ -2116,7 +2121,9 @@ was), `UnregisteredMarker` for a marker `MARKERS` does not register,
 `UnknownEpisode` for a liveness outside-core episode that is not one of the
 report's episodes, `CoreFamilyFaulted` for one scoped to a family the healthy
 core names, and `ConsumedFaultArmed` for one whose heal is `consumed`: a
-one-shot fault is consumed or never fired, and neither is armed at the bound;
+one-shot fault is consumed or never fired, and neither is armed at the bound.
+`serialize` and `parse_fault_report` also refuse `NotCanonical` for an integer
+outside the canonical safe range, which `result_digest` could not encode;
 `parse_fault_report`
 reads a report back losslessly; `result_digest` drops barrier pids and
 envelope peaks under `eval-suite-c-fault-report-result/v1`.

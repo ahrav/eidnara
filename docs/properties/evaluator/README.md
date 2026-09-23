@@ -1615,7 +1615,11 @@ Fault contract (`crates/eval-core/tests/fault.rs`,
   its own store; a barrier signal other than `SIGKILL` is `NotSigkill`; a
   recorded refusal or permanent stall naming an episode the report lacks is
   `UnknownEpisode`, and one whose error text does not name its production
-  variant is `RefusalNotEvidenced`.
+  variant is `RefusalNotEvidenced`; a barrier no kill episode declares at its
+  cut is `BarrierWithoutKill`; a `Cut` receipted twice is `DuplicateCut`; an
+  effect entry with zero attempts is `NeverAttempted`; an integer outside the
+  canonical safe range is `NotCanonical` at `serialize` and at parse; a lane
+  that met its bound yet records a `blocked` stop is `LivenessUnmet`.
 
 Aging drive (`crates/daemon/tests/eval_aging.rs`, `--all-features`):
 

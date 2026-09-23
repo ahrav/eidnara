@@ -1009,6 +1009,86 @@ fn a_parsed_report_cannot_claim_what_no_run_recorded() {
         }),
         "a permanent stall is a recorded refusal too"
     );
+
+    let mut orphan_barrier = ok.clone();
+    orphan_barrier.barriers.push(barrier("ingest-write"));
+    assert_eq!(
+        orphan_barrier.validate(&b),
+        Err(FaultReportError::BarrierWithoutKill {
+            episode: "ingest-write".to_string(),
+            cut: "acknowledged".to_string(),
+        }),
+        "a barrier claims a kill; only a kill episode at that cut backs it"
+    );
+    let mut other_cut = ok.clone();
+    other_cut.barriers.push(BarrierReceipt {
+        cut: "staged".to_string(),
+        line: "barrier staged".to_string(),
+        ..barrier("kill")
+    });
+    assert_eq!(
+        other_cut.validate(&b),
+        Err(FaultReportError::BarrierWithoutKill {
+            episode: "kill".to_string(),
+            cut: "staged".to_string(),
+        })
+    );
+    let mut twice = ok.clone();
+    twice.cuts.push(eval_core::CutReceipt {
+        cut: Cut::AtQuiescence,
+        outcome: CutOutcome::NotReached,
+    });
+    assert_eq!(
+        twice.validate(&b),
+        Err(FaultReportError::DuplicateCut {
+            cut: Cut::AtQuiescence
+        }),
+        "two outcomes for one checkpoint is no outcome"
+    );
+    let mut untried = ok.effects.clone();
+    let effect = untried.effects.get_mut("ack:1").unwrap();
+    effect.attempted = 0;
+    effect.observed = 0;
+    effect.reply_lost = false;
+    effect.read_back = false;
+    assert_eq!(
+        untried.validate(),
+        Err(EffectRefused::NeverAttempted {
+            identity: "ack:1".to_string()
+        })
+    );
+    let mut unsafe_int = ok.clone();
+    unsafe_int.safety_checks_while_armed = 9_007_199_254_740_992;
+    assert!(
+        matches!(
+            unsafe_int.serialize(&b),
+            Err(FaultReportError::NotCanonical(_))
+        ),
+        "a report the result digest refuses is not serialized as valid"
+    );
+    let mut unsafe_value = ok.serialize(&b).unwrap();
+    unsafe_value["safety_checks_while_armed"] = serde_json::json!(9_007_199_254_740_992u64);
+    assert!(matches!(
+        parse_fault_report(&unsafe_value, &b),
+        Err(FaultReportError::NotCanonical(_))
+    ));
+    let mut met_but_blocked = liveness();
+    met_but_blocked
+        .lanes
+        .get_mut(&Lane::CatchUpEpisodes)
+        .unwrap()
+        .blocked = Some("DeletionUnpropagated { commit_seq: 9 }".to_string());
+    assert!(
+        matches!(
+            met_but_blocked.verdict(&b),
+            Err(LivenessRefused::LivenessUnmet {
+                lane: Lane::CatchUpEpisodes,
+                blocked: Some(_),
+                ..
+            })
+        ),
+        "a lane that records the block that stopped it did not meet its bound"
+    );
 }
 
 #[test]
