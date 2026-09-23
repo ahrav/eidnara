@@ -2014,9 +2014,11 @@ corrupted file names its own store; a scope on another family is
 operation's outcome unknown to its caller: the search-episode reply losses,
 `embedding_publication`'s `lose_local_commit_reply`, the materializer's
 `lose_acknowledgement_reply` and `fail_acknowledgement`, dispatch's
-`lose_charge_reply`, `refuse_ledger_read`, and `lose_obsoletion_reply`, and
+`lose_charge_reply` and `lose_obsoletion_reply`, and
 GC's `after_reclaiming` and `after_unlink`; a rolled-back commit, a refused
-statement, or a skipped acknowledgement is known, not lost.
+statement, or a skipped acknowledgement is known, not lost, and dispatch's
+`refuse_ledger_read` loses none itself: it blocks the read-back of a reply
+`lose_charge_reply` lost.
 `FaultAction::heal` is the heal each class permits: `consumed` for one-shot
 enums, `released` for gates and lock holders, `reopen` for kills, restores, and
 corruption. The CAS faults split by whether they latch ingestion closed: the
@@ -2065,6 +2067,10 @@ variants, gate release points) and how many receipts each earned; a receipt
 for an undeclared cut is `UndeclaredCut`, whether it arrives through
 `receipt` or in a parsed report, and the verdict is
 `IncompleteCoverage { missing }` whenever a declared cut has no receipt. The
+declared set is not the report's to shrink: every episode's id is a cut (the
+fault's firing point) and every kill's barrier cut is one too, and a report
+whose `declared` lacks either is `UndeclaredCut`, so each fault the campaign
+ran must be receipted as fired. The
 oracle checkpoints (`Cut`) resolve to runner receipts through `cut_receipts`:
 a checkpoint receipted at least once is `Reached`, every other declared one is
 `NotReached`.

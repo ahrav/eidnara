@@ -1633,7 +1633,9 @@ Fault contract (`crates/eval-core/tests/fault.rs`,
   `kernel_restore` encode the remaining seams at HEAD with their heal, family,
   and reply-loss classification; a bare cut with no prefix token is
   `LineDoesNotNameCut`; a lost reply whose every attempt was acknowledged is
-  `LostReplyAcknowledged`.
+  `LostReplyAcknowledged`; dispatch's `refuse_ledger_read` loses no reply; an
+  episode id missing from `coverage.declared` is `UndeclaredCut`, so the
+  declared cut set derives from the episodes rather than the report's word.
 
 Aging drive (`crates/daemon/tests/eval_aging.rs`, `--all-features`):
 

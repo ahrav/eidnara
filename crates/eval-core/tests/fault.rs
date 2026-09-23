@@ -160,7 +160,7 @@ fn report() -> FaultReport {
             .into_iter()
             .collect(),
         ),
-        coverage: coverage(&["lost-ack", "kill", "acknowledged"]),
+        coverage: coverage(&["lost-ack", "kill", "ingest-write", "acknowledged"]),
         effects,
         expected_refusals: vec![RecordedRefusal {
             episode: "lost-ack".to_string(),
@@ -1305,6 +1305,24 @@ fn a_parsed_report_cannot_claim_what_no_run_recorded() {
             identity: "x".to_string()
         }),
         "every attempt acknowledged means no reply was lost"
+    );
+
+    assert!(
+        !FaultAction::EmbeddingDispatch {
+            fault: DispatchFaultKind::RefuseLedgerRead
+        }
+        .loses_reply(),
+        "a refused ledger read blocks the read-back of a reply another fault lost"
+    );
+    let mut undeclared_fault = ok.clone();
+    undeclared_fault.coverage.declared.remove("ingest-write");
+    undeclared_fault.coverage.receipted.remove("ingest-write");
+    assert_eq!(
+        undeclared_fault.validate(&b, &limits()),
+        Err(FaultReportError::Coverage(CoverageRefused::UndeclaredCut {
+            cut: "ingest-write".to_string()
+        })),
+        "every episode's firing point is a cut the report cannot drop"
     );
 }
 

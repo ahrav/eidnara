@@ -175,9 +175,7 @@ impl FaultAction {
             }
             Self::EmbeddingDispatch { fault } => matches!(
                 fault,
-                DispatchFaultKind::LoseChargeReply
-                    | DispatchFaultKind::RefuseLedgerRead
-                    | DispatchFaultKind::LoseObsoletionReply
+                DispatchFaultKind::LoseChargeReply | DispatchFaultKind::LoseObsoletionReply
             ),
             Self::ArtifactGc { fault } => matches!(
                 fault,
@@ -1049,7 +1047,14 @@ impl FaultReport {
         for barrier in &self.barriers {
             barrier.validate().map_err(FaultReportError::Barrier)?;
         }
+        // The cut set is derived from the episodes, not trusted from the report:
+        // every fault's firing point is a cut, and a kill's barrier cut is one too.
         for episode in &self.episodes {
+            if !self.coverage.declared.contains(&episode.id) {
+                return Err(FaultReportError::Coverage(CoverageRefused::UndeclaredCut {
+                    cut: episode.id.clone(),
+                }));
+            }
             let Some(cut) = episode.action.kill_cut() else {
                 continue;
             };
