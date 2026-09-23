@@ -5,7 +5,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use context_core::canonical_json::protocol_digest;
+use context_core::canonical_json::{is_lower_hex, protocol_digest};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -166,6 +166,12 @@ pub enum GrowthRefused {
     R24NotMonotonic {
         step: u32,
     },
+    /// Commit sequences come from an append-only log and are never negative;
+    /// a negative baseline would buy growth allowance for commits that never
+    /// happened.
+    CommitSeqNegative {
+        step: u32,
+    },
     StoreMissing {
         step: u32,
         family: StoreFamily,
@@ -246,6 +252,9 @@ impl GrowthLedger {
         }
         self.check_order()?;
         for sample in &self.samples {
+            if sample.commit_seq < 0 {
+                return Err(GrowthRefused::CommitSeqNegative { step: sample.step });
+            }
             if let Some(family) = StoreFamily::ALL
                 .into_iter()
                 .find(|f| !sample.stores.contains_key(f))
@@ -339,8 +348,7 @@ impl GrowthLedger {
             }
         }
         let first = &self.samples[0];
-        let commits =
-            u64::try_from(i128::from(last.commit_seq) - i128::from(first.commit_seq)).unwrap_or(0);
+        let commits = u64::try_from(last.commit_seq - first.commit_seq).unwrap_or(0);
         let grown = last
             .durable_store_bytes()
             .saturating_sub(first.durable_store_bytes());
@@ -600,6 +608,10 @@ pub enum GrowthReportError {
     SchemaMismatch {
         found: String,
     },
+    /// `eval_run_id` or `profile_digest` is not 64 lowercase hex digits.
+    MalformedDigest {
+        field: &'static str,
+    },
     Growth(GrowthRefused),
     Mix(MixIncomplete),
     SafetyNeverChecked,
@@ -635,6 +647,14 @@ impl GrowthReport {
             return Err(GrowthReportError::SchemaMismatch {
                 found: self.schema.clone(),
             });
+        }
+        for (field, digest) in [
+            ("eval_run_id", &self.eval_run_id),
+            ("profile_digest", &self.profile_digest),
+        ] {
+            if !is_lower_hex(digest, 64) {
+                return Err(GrowthReportError::MalformedDigest { field });
+            }
         }
         if self.claim_boundary != crate::ClaimBoundary::pinned() {
             return Err(GrowthReportError::ClaimBoundaryMismatch);

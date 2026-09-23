@@ -329,10 +329,13 @@ fn a_never_restored_ledger_passes_only_when_the_final_sample_holds_nothing_trans
         Err(GrowthRefused::NoBaseline),
         "one sample has no interval to judge growth over"
     );
-    let mut wide = ledger.clone();
-    wide.samples[0].commit_seq = i64::MIN;
-    wide.verdict(&quota(), &bounds())
-        .expect("a commit span wider than i64 is counted, not a panic");
+    let mut negative = ledger.clone();
+    negative.samples[0].commit_seq = -100;
+    assert_eq!(
+        negative.verdict(&quota(), &bounds()),
+        Err(GrowthRefused::CommitSeqNegative { step: 1 }),
+        "a negative baseline would buy allowance for commits that never happened"
+    );
     let mut fat = ledger.clone();
     fat.samples[2]
         .stores
@@ -702,6 +705,22 @@ fn a_growth_report_round_trips_and_its_digest_ignores_measurements() {
         raised.validate(&contract()),
         Err(GrowthReportError::EnvelopeBoundsNotApproved),
         "envelope bounds the producer widened are not the approved limits"
+    );
+    let mut misnamed = report.clone();
+    misnamed.eval_run_id = "not-a-digest".to_string();
+    assert_eq!(
+        misnamed.validate(&contract()),
+        Err(GrowthReportError::MalformedDigest {
+            field: "eval_run_id"
+        })
+    );
+    let mut unprofiled = report.clone();
+    unprofiled.profile_digest.truncate(10);
+    assert_eq!(
+        unprofiled.validate(&contract()),
+        Err(GrowthReportError::MalformedDigest {
+            field: "profile_digest"
+        })
     );
     let mut unpinned = report.clone();
     unpinned.claim_boundary.exclusions.clear();

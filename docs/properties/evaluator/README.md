@@ -1334,8 +1334,8 @@ Growth contract (`crates/eval-core/tests/growth.rs`,
   `GrowthRateExceeded` even under the size bound, and a WAL-heavy first sample
   does not mask that growth, and file bytes added with no commit between the
   samples have no allowance; a sample that omits a store family is
-  `StoreMissing`; a single sample is `NoBaseline`; a commit span wider than
-  `i64` and store bytes past `u64` are counted or saturated, never a panic; an
+  `StoreMissing`; a single sample is `NoBaseline`; a negative commit sequence
+  is `CommitSeqNegative`; store bytes past `u64` saturate, never a panic; an
   empty ledger, a repeated step, a receding
   commit sequence, or a receding R24 count refuse, including in a ledger
   assembled without `record`;
@@ -1369,7 +1369,8 @@ Growth contract (`crates/eval-core/tests/growth.rs`,
   which the approved bounds judge the sample), quota constants that differ
   from the ones the caller read (`QuotaMismatch`), envelope bounds that differ
   from the approved limits (`EnvelopeBoundsNotApproved`), a claim boundary
-  other than the pinned one (`ClaimBoundaryMismatch`), and a final R24 count that
+  other than the pinned one (`ClaimBoundaryMismatch`), a run id or profile
+  digest that is not 64 lowercase hex digits (`MalformedDigest`), and a final R24 count that
   disagrees with the recorded R24 refusals (`R24Unreconciled`; an R11 entry
   is not counted) refuse.
 

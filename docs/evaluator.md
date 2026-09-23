@@ -1787,7 +1787,9 @@ history is refused even under the size bound. The rate excludes `-wal` and
 `-shm` bytes, so a WAL-heavy first sample cannot cancel the file bytes the
 history retained; byte totals saturate, so a reading past `u64` is a refusal,
 not a panic. `verdict` and `validate` re-check the step, commit, and R24
-ordering over the whole ledger (`R24NotMonotonic`), because a deserialized
+ordering over the whole ledger (`R24NotMonotonic`) and refuse a negative
+commit sequence (`CommitSeqNegative`, since a negative baseline would buy
+allowance for commits that never happened), because a deserialized
 ledger never passed
 through `record`. `peak_store_bytes` is the largest total any
 sample saw, the transient pressure the envelope must also be charged with.
@@ -1814,7 +1816,10 @@ publishes: identity, profile digest, claim boundary, the quota read, the
 bounds, the ledger, the mix, expected refusals, fault-episode and
 safety-check counts (`SafetyNeverChecked` when either the fault-episode count
 or the mix records a fault episode and no safety check ran while armed),
-markers, and envelope. `validate(contract)` takes a `GrowthContract`, what
+markers, and envelope. `validate(contract)` requires `eval_run_id` and
+`profile_digest` to be 64 lowercase hex digits (`MalformedDigest { field }`),
+as the Suite B report does; the manifest derives the run id and names the
+report by a result digest that covers both fields. It takes a `GrowthContract`, what
 the caller knows independently of the report: the quota constants it read
 from the store, the bounds the manifest declares, and the approved profile's
 envelope; an embedded copy that differs is refused (`QuotaMismatch`,
