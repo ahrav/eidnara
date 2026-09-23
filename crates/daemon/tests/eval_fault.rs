@@ -409,3 +409,59 @@ fn a_read_back_after_later_catch_up_is_refused_as_masked() {
         "a masked read-back resolves nothing"
     );
 }
+
+/// `--messages 7` plans a history whose checkpoint leaves fewer than the six
+/// suffix steps the fault phase drives. The run refuses it as a `RunError`
+/// before any store opens; it does not panic on accepted numeric input.
+#[test]
+fn a_history_too_short_for_the_fault_phase_is_refused_not_panicked() {
+    let plan = aging::plan(7).unwrap();
+    assert!(
+        plan.steps.len() - (plan.checkpoint_step as usize) < 6,
+        "the case needs a short suffix: {} steps, checkpoint {}",
+        plan.steps.len(),
+        plan.checkpoint_step
+    );
+    let publish = tempfile::tempdir().unwrap();
+    let mut config = config(publish.path().join("out"), 600_000);
+    config.messages = 7;
+    let outcome = std::panic::catch_unwind(|| fault::run(&config).err());
+    let refused = outcome
+        .expect("a short history is refused, not a panic")
+        .expect("a short history is refused");
+    assert!(
+        refused.to_string().contains("after the checkpoint"),
+        "{refused}"
+    );
+    assert!(
+        !publish.path().join("out").join(REPORT_FILE).exists(),
+        "nothing is published"
+    );
+}
+
+/// The campaign's store-byte peak is the open footprint: closing the stores
+/// checkpoints every WAL away, so a peak read only after the close would
+/// let a run pass its bound while exceeding it.
+#[test]
+fn the_campaign_charges_the_stores_at_their_open_footprint_not_after_the_close() {
+    let plan = aging::plan(MESSAGES).unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let mut stores = aging::Stores::open(root.path(), &plan);
+    aging::live(&mut stores, &plan.steps);
+    let open = campaign::root_bytes(root.path());
+    drop(stores.close());
+    let closed = campaign::root_bytes(root.path());
+    assert!(
+        open > closed,
+        "closing checkpoints the WAL away: {open} vs {closed}"
+    );
+    let profile = fault::profile(Scale::S0, MESSAGES, 600_000, None);
+    let mut charges = campaign::Charges::new(profile.envelope);
+    let mut witness = Witness::new();
+    fault::campaign(&plan, &mut charges, &mut witness).unwrap();
+    let peak = charges.envelope.peaks.store_bytes;
+    assert!(
+        peak > (open + closed) / 2,
+        "the peak charged is the open footprint: peak {peak}, open {open}, closed {closed}"
+    );
+}

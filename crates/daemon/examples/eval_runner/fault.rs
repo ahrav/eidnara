@@ -36,6 +36,10 @@ pub enum RunError {
     Envelope(#[from] EnvelopeExceeded),
     #[error("plan refused: {0}")]
     Plan(#[from] aging::RunError),
+    #[error(
+        "history leaves {after_checkpoint} steps after the checkpoint; the fault phase drives {FAULT_PHASE_STEPS}"
+    )]
+    HistoryTooShort { after_checkpoint: usize },
     #[error("report refused: {0}")]
     Report(#[from] FaultReportError),
     #[error("episode {episode}: expected {expected}, observed {observed}")]
@@ -61,6 +65,21 @@ pub enum RunError {
 
 fn publish_refused((path, kind): (PathBuf, std::io::ErrorKind)) -> RunError {
     RunError::Publish { path, kind }
+}
+
+/// The steps the fault phase drives after the checkpoint: a lock-holder
+/// episode, two healthy steps, and two reply-loss episodes, then the rest.
+const FAULT_PHASE_STEPS: usize = 6;
+
+/// The aging plan, refused before any store opens when its checkpoint leaves
+/// fewer steps than the fault phase drives.
+pub fn plan(messages: u32) -> Result<Plan, RunError> {
+    let plan = aging::plan(messages)?;
+    let after_checkpoint = plan.steps.len() - plan.checkpoint_step as usize;
+    if after_checkpoint < FAULT_PHASE_STEPS {
+        return Err(RunError::HistoryTooShort { after_checkpoint });
+    }
+    Ok(plan)
 }
 
 pub fn profile(
@@ -436,8 +455,8 @@ pub fn campaign(
     witness.checkpoint(Cut::AtQuiescence);
     let steps = &plan.steps[k..];
     assert!(
-        steps.len() >= 6,
-        "the fault phase needs six steps after the checkpoint"
+        steps.len() >= FAULT_PHASE_STEPS,
+        "plan() refuses a history with fewer than {FAULT_PHASE_STEPS} steps after the checkpoint"
     );
     let step = |i: usize| (k + i) as u32;
     let mut expected = BTreeMap::new();
@@ -482,6 +501,9 @@ pub fn campaign(
 
     live(&mut stores, &steps[5..]);
     witness.checkpoint(Cut::EndOfRun);
+    // The stores' bytes are charged while they are open; closing them
+    // checkpoints the WAL away.
+    charges.store_bytes(root.path())?;
     drop(stores.close());
     charges.vacate(root)?;
     Ok(expected)
@@ -540,8 +562,6 @@ pub fn run(config: &Config) -> Result<Run, RunError> {
             .as_millis(),
     )
     .unwrap();
-    let plan = aging::plan(config.messages)?;
-    let steps = plan.steps.len() as u32;
     let profile = profile(
         config.scale,
         config.messages,
@@ -552,6 +572,23 @@ pub fn run(config: &Config) -> Result<Run, RunError> {
     prepare_publish(&config.publish, &[REPORT_FILE, MANIFEST_FILE]).map_err(publish_refused)?;
     let mut charges = Charges::new(profile.envelope.clone());
     let mut witness = Witness::new();
+    // Planning runs under the clock: the elapsed bound covers the whole run.
+    let plan = plan(config.messages)?;
+    let steps = plan.steps.len() as u32;
+    // The build identity is frozen before the campaign runs: the checkout,
+    // the lockfile, and the executable the outcomes come from, not whatever
+    // the tree holds when the report is written.
+    let identity = identity(
+        &profile,
+        SIMULATOR_VERSION,
+        aging::SEED,
+        json!({
+            "steps": steps,
+            "fault_phase_step": plan.checkpoint_step,
+            "messages": config.messages,
+        }),
+        &[std::env::current_exe().unwrap()],
+    );
     let expected = campaign(&plan, &mut charges, &mut witness)?;
     check_expectations(&expected, &witness.effects)?;
     witness.cuts.verdict().map_err(FaultReportError::Coverage)?;
@@ -565,17 +602,6 @@ pub fn run(config: &Config) -> Result<Run, RunError> {
         Cut::AfterRecovery,
         Cut::EndOfRun,
     ];
-    let identity = identity(
-        &profile,
-        SIMULATOR_VERSION,
-        aging::SEED,
-        json!({
-            "steps": steps,
-            "fault_phase_step": plan.checkpoint_step,
-            "messages": config.messages,
-        }),
-        &[std::env::current_exe().unwrap()],
-    );
     let bounds = profile.statistics.liveness_bounds.clone();
     let mut report = FaultReport {
         schema: FAULT_REPORT_SCHEMA.to_string(),
@@ -621,8 +647,14 @@ pub fn run(config: &Config) -> Result<Run, RunError> {
         started_at_ms,
     });
     let manifest_bytes = serde_json::to_vec_pretty(&manifest.to_value()).unwrap();
-    publish_file(&config.publish.join(REPORT_FILE), &bytes).map_err(publish_refused)?;
-    publish_file(&config.publish.join(MANIFEST_FILE), &manifest_bytes).map_err(publish_refused)?;
+    // A manifest the directory then refuses to take takes the report back out
+    // with it, as the aging shell does: a reader finds both files or none.
+    let report_path = config.publish.join(REPORT_FILE);
+    publish_file(&report_path, &bytes).map_err(publish_refused)?;
+    if let Err(error) = publish_file(&config.publish.join(MANIFEST_FILE), &manifest_bytes) {
+        let _ = std::fs::remove_file(&report_path);
+        return Err(publish_refused(error));
+    }
     Ok(Run {
         report,
         report_bytes: bytes,

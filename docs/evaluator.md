@@ -2301,7 +2301,11 @@ Not in this shell: the CAS artifact faults, the publication faults, quiescent
 corruption, R11, R24, a process kill at a named cut, a held publication
 through the dispatcher gate, and the liveness mode; the run publishes
 `liveness: null`. The `fault` subcommand takes the same flags as `aging` and
-answers with one JSON line; the CI `eval-campaign` job runs `eval_fault`
+answers with one JSON line; a history whose checkpoint leaves fewer than the
+six steps the fault phase drives is refused (`HistoryTooShort`) before any
+store opens, and the run freezes its build identity, charges the stores at
+their open footprint, and takes the report back out when the manifest cannot
+follow it, as the aging shell does; the CI `eval-campaign` job runs `eval_fault`
 under `EIDNARA_EVAL_S0_BUDGET_MS` with the ignored scenarios, and the default
 shards run the campaign once with every scenario asserted over it.
 
