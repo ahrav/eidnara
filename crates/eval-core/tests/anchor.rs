@@ -458,6 +458,7 @@ fn the_pilot_alone_never_transfers_and_exclusions_keep_their_accounting() {
     );
     assert!(accounting.insufficiency_refused.is_empty());
     assert!(accounting.control_missing.is_empty());
+    assert!(accounting.cutoff_missing.is_empty());
 
     let criterion = TransferCriterion {
         approved_by: "maintainer".to_string(),
@@ -935,12 +936,12 @@ fn the_time_study_saturates_instead_of_wrapping() {
         .collect();
     measured[0].prepare_ms = u64::MAX;
     assert_eq!(
-        time_study(&corpus, &measured, u64::MAX / 5 - 1),
+        time_study(&corpus, &measured, u64::MAX - 1),
         Ok(Affordability::StopForApproval {
-            projected_ms: u64::MAX / 5,
-            bound_ms: u64::MAX / 5 - 1
+            projected_ms: u64::MAX,
+            bound_ms: u64::MAX - 1
         }),
-        "a saturated total projects a saturated cost, not zero"
+        "a total past u64 projects a clamped cost, not zero"
     );
 }
 
@@ -1003,4 +1004,74 @@ fn the_digest_refuses_a_number_json_cannot_carry() {
         corpus.digest(),
         Err(AnchorError::NotCanonical { .. })
     ));
+}
+
+#[test]
+fn pull_request_urls_match_when_the_clone_url_carries_a_user() {
+    let mut entry = entry("cargo-0", Family::Cargo, 0x10);
+    entry.repository = "ssh://git@example.invalid/cargo/repo.git".to_string();
+    entry.validate().unwrap();
+    entry.pull_request = Some(2016);
+    assert_eq!(
+        future_answers(&entry, "https://example.invalid/cargo/repo/pull/2016"),
+        vec!["pull_request:2016"]
+    );
+}
+
+#[test]
+fn the_time_study_projection_does_not_lose_magnitude_to_saturation() {
+    let corpus = pilot();
+    let mut measured: Vec<Preparation> = corpus.entries[..TIME_STUDY_TASKS]
+        .iter()
+        .map(|e| Preparation {
+            task: e.id.clone(),
+            prepare_ms: u64::MAX / 10,
+        })
+        .collect();
+    measured[0].prepare_ms = 0;
+    assert!(
+        matches!(
+            time_study(&corpus, &measured, u64::MAX / 4),
+            Ok(Affordability::StopForApproval { .. })
+        ),
+        "four tenths of u64::MAX scaled fourfold exceeds a quarter of it"
+    );
+    assert_eq!(
+        time_study(&corpus, &measured, u64::MAX),
+        Ok(Affordability::Affordable {
+            projected_ms: u64::MAX
+        }),
+        "the projection is clamped at u64::MAX, never reduced"
+    );
+}
+
+#[test]
+fn a_license_expression_needs_an_operand_between_operators() {
+    let mut entry = entry("cargo-0", Family::Cargo, 0x10);
+    entry.license = "MIT AND OR".to_string();
+    assert!(entry.validate().is_err());
+}
+
+#[test]
+fn a_missing_audit_is_missing_evidence_not_an_invalid_cutoff() {
+    let corpus = pilot();
+    let (mut audits, proofs, controls) = evidence(&corpus);
+    audits.remove("cargo-3");
+    let (set, accounting) = anchor_set(
+        &corpus,
+        AnchorRole::Pilot,
+        &audits,
+        &proofs,
+        &controls,
+        &provider(),
+    )
+    .unwrap();
+    let verdict = |id: &str| set.tasks.iter().find(|t| t.id == id).unwrap().verdict;
+    assert_eq!(verdict("cargo-3"), AnchorVerdict::Residue);
+    assert!(!accounting.cutoff_invalid.contains_key("cargo-3"));
+    assert_eq!(
+        accounting.cutoff_missing,
+        BTreeSet::from(["cargo-3".to_string()])
+    );
+    assert_eq!(accounting.eligible.len(), 19);
 }

@@ -137,17 +137,19 @@ fn is_url(text: &str) -> bool {
 
 /// An SPDX expression: identifiers of SPDX characters joined by `AND`,
 /// `OR`, or `WITH`, so `MIT OR Apache-2.0` is one and `fixed by rebasing`
-/// is not.
+/// is not. Identifiers are judged by shape, not against the SPDX list.
 fn is_spdx_expression(text: &str) -> bool {
+    const OPERATORS: [&str; 3] = ["AND", "OR", "WITH"];
     let tokens: Vec<&str> = text.split_whitespace().collect();
     tokens.len() % 2 == 1
         && tokens.iter().enumerate().all(|(i, token)| {
             if i % 2 == 1 {
-                ["AND", "OR", "WITH"].contains(token)
+                OPERATORS.contains(token)
             } else {
-                token
-                    .chars()
-                    .all(|c| c.is_ascii_alphanumeric() || "-.+()".contains(c))
+                !OPERATORS.contains(token)
+                    && token
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || "-.+()".contains(c))
             }
         })
 }
@@ -276,11 +278,9 @@ pub fn time_study(
             task: repeat.task.clone(),
         });
     }
-    let total = measured
-        .iter()
-        .fold(0u64, |sum, p| sum.saturating_add(p.prepare_ms));
-    let pilot: u64 = PILOT_COMPOSITION.iter().map(|(_, n)| u64::from(*n)).sum();
-    let projected_ms = total.saturating_mul(pilot) / TIME_STUDY_TASKS as u64;
+    let total: u128 = measured.iter().map(|p| u128::from(p.prepare_ms)).sum();
+    let pilot: u128 = PILOT_COMPOSITION.iter().map(|(_, n)| u128::from(*n)).sum();
+    let projected_ms = u64::try_from(total * pilot / TIME_STUDY_TASKS as u128).unwrap_or(u64::MAX);
     Ok(if projected_ms <= bound_ms {
         Affordability::Affordable { projected_ms }
     } else {
@@ -639,13 +639,18 @@ fn names_whole_number(output: &str, needle: &str) -> bool {
     })
 }
 
-/// The clone URL without its scheme, trailing slash, or `.git` suffix,
-/// which prefixes pull-request URLs for the repository.
+/// The clone URL without its scheme, user (`ssh://git@host/...`), trailing
+/// slash, or `.git` suffix, which prefixes pull-request URLs for the
+/// repository.
 fn repository_web_path(repository: &str) -> &str {
     let path = repository
         .split_once("://")
         .map_or(repository, |(_, rest)| rest)
         .trim_end_matches('/');
+    let path = path
+        .split_once('@')
+        .filter(|(user, _)| !user.contains('/'))
+        .map_or(path, |(_, rest)| rest);
     path.strip_suffix(".git").unwrap_or(path)
 }
 
@@ -657,6 +662,7 @@ pub struct PairAccounting {
     pub provider: ProviderProfile,
     pub eligible: BTreeSet<String>,
     pub excluded: BTreeMap<String, Contamination>,
+    pub cutoff_missing: BTreeSet<String>,
     pub cutoff_invalid: BTreeMap<String, CutoffRefused>,
     pub insufficiency_missing: BTreeSet<String>,
     pub insufficiency_refused: BTreeMap<String, InsufficiencyRefused>,
@@ -668,8 +674,8 @@ pub struct PairAccounting {
 /// and the pilot corpus is never a `Transfer` set. A task is `valid` only
 /// when its audit and proof name it and pass, and its control was classified
 /// for it under `provider` as eligible; a failed audit is `cutoff_invalid`
-/// and every other task is `residue`. Each task lands in exactly one
-/// accounting set, at its first failing gate.
+/// and every other task, a task with no audit included, is `residue`. Each
+/// task lands in exactly one accounting set, at its first failing gate.
 pub fn anchor_set(
     corpus: &AnchorCorpus,
     role: AnchorRole,
@@ -686,6 +692,7 @@ pub fn anchor_set(
         provider: provider.clone(),
         eligible: BTreeSet::new(),
         excluded: BTreeMap::new(),
+        cutoff_missing: BTreeSet::new(),
         cutoff_invalid: BTreeMap::new(),
         insufficiency_missing: BTreeSet::new(),
         insufficiency_refused: BTreeMap::new(),
@@ -695,40 +702,40 @@ pub fn anchor_set(
         .entries
         .iter()
         .map(|entry| {
-            let audit = audits
-                .get(&entry.id)
-                .map_or(Err(CutoffRefused::SnapshotDigestMissing), |audit| {
-                    audit.validate_for(entry)
-                });
+            let audit = audits.get(&entry.id).map(|audit| audit.validate_for(entry));
             let proof = proofs.get(&entry.id).map(|proof| proof.validate_for(entry));
             let control = controls
                 .get(&entry.id)
                 .filter(|c| c.task == entry.id && c.provider == *provider)
                 .map(|c| &c.verdict);
             let verdict = match (audit, proof, control) {
-                (Err(refused), _, _) => {
+                (None, _, _) => {
+                    accounting.cutoff_missing.insert(entry.id.clone());
+                    AnchorVerdict::Residue
+                }
+                (Some(Err(refused)), _, _) => {
                     accounting.cutoff_invalid.insert(entry.id.clone(), refused);
                     AnchorVerdict::CutoffInvalid
                 }
-                (Ok(()), None, _) => {
+                (Some(Ok(())), None, _) => {
                     accounting.insufficiency_missing.insert(entry.id.clone());
                     AnchorVerdict::Residue
                 }
-                (Ok(()), Some(Err(refused)), _) => {
+                (Some(Ok(())), Some(Err(refused)), _) => {
                     accounting
                         .insufficiency_refused
                         .insert(entry.id.clone(), refused);
                     AnchorVerdict::Residue
                 }
-                (Ok(()), Some(Ok(())), None) => {
+                (Some(Ok(())), Some(Ok(())), None) => {
                     accounting.control_missing.insert(entry.id.clone());
                     AnchorVerdict::Residue
                 }
-                (Ok(()), Some(Ok(())), Some(ControlVerdict::Eligible)) => {
+                (Some(Ok(())), Some(Ok(())), Some(ControlVerdict::Eligible)) => {
                     accounting.eligible.insert(entry.id.clone());
                     AnchorVerdict::Valid
                 }
-                (Ok(()), Some(Ok(())), Some(ControlVerdict::Excluded { contamination })) => {
+                (Some(Ok(())), Some(Ok(())), Some(ControlVerdict::Excluded { contamination })) => {
                     accounting
                         .excluded
                         .insert(entry.id.clone(), contamination.clone());

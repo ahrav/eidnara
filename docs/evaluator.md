@@ -2438,8 +2438,11 @@ is not here; this module only judges the evidence it records.
 `pull_request`, and `cutoff_ms`. The issue and pull-request text is fetched
 at run time and never written into a corpus, report, or witness; `validate`
 refuses an empty field, an `id` with whitespace, a `repository` that is not
-a scheme URL (so `git@host:path` refuses and `/pull/` URLs derive from the
-web path), a `license` that is not an SPDX expression (`TextPersisted`), a
+a scheme URL (so `git@host:path` refuses; a user in the authority, as in
+`ssh://git@host/...`, is dropped when `/pull/` URLs derive from the web
+path), a `license` that is not an SPDX expression by shape (identifiers of
+SPDX characters joined by `AND`, `OR`, or `WITH`; not checked against the
+SPDX list) (`TextPersisted`), a
 malformed SHA, and a duplicate id. `digest` validates first and refuses a
 row JSON cannot carry exactly (`NotCanonical`) instead of panicking.
 `is_pilot` accepts
@@ -2447,8 +2450,8 @@ exactly `PILOT_COMPOSITION`: eight Cargo, eight Tokio, four Django.
 
 **Time study.** `time_study(corpus, measured, bound_ms)` projects the pilot's
 preparation cost from exactly `TIME_STUDY_TASKS` (five) measured
-`Preparation {task, prepare_ms}` rows of distinct corpus tasks, summed
-without wrapping and scaled to the
+`Preparation {task, prepare_ms}` rows of distinct corpus tasks, scaled in
+128-bit arithmetic and clamped at `u64::MAX` to the
 twenty-task pilot: `Affordable {projected_ms}` within the bound, else
 `StopForApproval {projected_ms, bound_ms}`, which stops for the maintainer
 rather than shrinking the pilot. A wrong count, a task outside the corpus,
@@ -2504,13 +2507,14 @@ refuses an invalid corpus (a duplicate row would count one task's evidence
 twice) and the pilot corpus under the `transfer` role
 (`PilotIsNotATransferSet`): the pilot alone never transfers, whatever role
 the caller names.
-Every task keeps its row: a failed audit is `cutoff_invalid`; a missing or
+Every task keeps its row: a failed audit is `cutoff_invalid`; a missing
+audit, a missing or
 refused proof, a missing control, a control classified for another task or
 provider, and an excluded control are each `residue`; only a task whose
 audit and proof name it and pass and whose control was classified for it
 under `provider` as eligible is `valid`. `PairAccounting` keeps each task in
 exactly one set at its first failing gate: `eligible`, `excluded` (with the
-contamination), `cutoff_invalid`, `insufficiency_missing`,
+contamination), `cutoff_missing`, `cutoff_invalid`, `insufficiency_missing`,
 `insufficiency_refused`, `control_missing`. The set feeds
 `derive_claim_class`, so the pilot alone derives `generated_phase1` with
 `anchor_set_is_pilot`, and a memorized task excludes itself from that pair's
