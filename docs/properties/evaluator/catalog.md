@@ -603,6 +603,7 @@ Exercised: yes -
   `crates/daemon/tests/eval_suite_d.rs::a_contained_task_is_judged_by_hidden_tests_the_agent_never_sees`,
   `crates/daemon/tests/eval_suite_d.rs::the_containment_denies_relative_writes_and_mask_removal_that_the_control_allows`,
   `crates/daemon/tests/eval_suite_d.rs::an_escapee_that_never_starts_refuses_the_canaries_instead_of_reading_as_denied`,
+  `crates/daemon/tests/eval_suite_d.rs::a_mask_removal_probe_that_never_ran_umount_refuses_the_canaries`,
   `crates/daemon/tests/eval_suite_d.rs::a_host_without_namespaces_skips_every_task_with_no_containment`,
   `crates/eval-core/tests/task.rs::every_canary_must_be_denied_inside_and_allowed_under_the_inverted_control`
 Guarantee: Before any generated code runs, the six canaries (parent-file read,

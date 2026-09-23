@@ -250,17 +250,21 @@ pub fn canary_main(args: &CanaryArgs) -> ! {
     };
     let parent_file_read = read("secret.txt");
     let credential_read = read("credential");
-    let _ = Command::new("umount")
+    // A probe whose `umount` never ran would report the mask as unremovable
+    // without exercising removal; only a spawned `umount` counts.
+    let umount_ran = Command::new("umount")
         .arg(&args.private)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .status();
+        .status()
+        .is_ok();
     let verdicts = json!({
         "parent_file_read": parent_file_read,
         "credential_read": credential_read,
         "outbound_tcp": tcp,
         "escapee_ready": escapee_ready,
+        "umount_ran": umount_ran,
         "outside_write": outside_write,
         "mask_removal": read("secret.txt"),
     });
@@ -487,6 +491,9 @@ pub fn run_canaries(
         |name: &str| serde_json::from_value::<CanaryVerdict>(verdicts[name].clone()).unwrap();
     if verdicts.get("escapee_ready") != Some(&Value::Bool(true)) {
         return Err(std::io::Error::other("the escapee never wrote the alive file").into());
+    }
+    if verdicts.get("umount_ran") != Some(&Value::Bool(true)) {
+        return Err(std::io::Error::other("the mask-removal probe never ran umount").into());
     }
     // The escapee is alive when the file keeps changing after the canary
     // child, the namespace init, has exited; it exits by itself soon after.
@@ -828,14 +835,9 @@ fn agent_run(
     ))
 }
 
-pub fn run(config: &Config, host: Host) -> Result<Run, RunError> {
-    let started_at_ms = i64::try_from(
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_millis(),
-    )
-    .unwrap();
+/// The profile a run is gated by and digested under: the campaign profile
+/// with this suite's name, budgets, and process envelope.
+pub fn profile(config: &Config) -> RunProfile {
     let mut profile: RunProfile = super::campaign::profile(
         config.scale,
         128,
@@ -845,6 +847,19 @@ pub fn run(config: &Config, host: Host) -> Result<Run, RunError> {
     profile.name = format!("{}-suite-d", profile.name);
     profile.budgets = config.budgets.clone();
     profile.envelope.processes = 2;
+    profile.tasks_per_world = config.tasks;
+    profile
+}
+
+pub fn run(config: &Config, host: Host) -> Result<Run, RunError> {
+    let started_at_ms = i64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis(),
+    )
+    .unwrap();
+    let profile = profile(config);
     profile.approved()?;
     let profile_digest = profile.digest()?;
     let witness_value: Value =
@@ -948,19 +963,20 @@ pub fn run(config: &Config, host: Host) -> Result<Run, RunError> {
         let hidden = if config.budgets.exhausted(&usage).is_some() {
             HiddenResults::new()
         } else {
-            hidden_results(
+            let hidden = hidden_results(
                 task,
                 root.path(),
                 &trace.written,
                 &target,
                 deadline,
                 &mut charges,
-            )?
+            )?;
+            coverage
+                .record("xc_suite_d_task_outcome_from_hidden_test")
+                .unwrap();
+            hidden
         };
         let terminal = task_terminal(task, &hidden, &usage, &config.budgets);
-        coverage
-            .record("xc_suite_d_task_outcome_from_hidden_test")
-            .unwrap();
         // The later session reads what the first one wrote, not what the
         // repository already held.
         let later = LaterSession {

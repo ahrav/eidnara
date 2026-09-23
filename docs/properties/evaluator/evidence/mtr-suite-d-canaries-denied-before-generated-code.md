@@ -20,7 +20,7 @@ disabled must report `allowed` for each".
   listener, starts the escapee under `setsid` and waits for its first write
   (`escapee_ready`), writes `../escaped.write`, runs `umount` on the private
   directory, and reads the secret again; `run_canaries` refuses when
-  `escapee_ready` is false, then samples the alive file twice, 300 ms apart,
+  `escapee_ready` or `umount_ran` is false, then samples the alive file twice, 300 ms apart,
   after the child exited. The escapee exits on its own after three seconds.
 - `crates/eval-core/src/task.rs` `ContainmentReport::validate` over the six
   `Canary` variants.
@@ -30,6 +30,8 @@ disabled must report `allowed` for each".
   `run_canaries` alone; nothing written outside the workspace remains.
 - `crates/daemon/tests/eval_suite_d.rs` `an_escapee_that_never_starts_refuses_the_canaries_instead_of_reading_as_denied`:
   a `Host` whose escapee is a missing binary refuses in both modes.
+- `crates/daemon/tests/eval_suite_d.rs` `a_mask_removal_probe_that_never_ran_umount_refuses_the_canaries`:
+  a canary whose `PATH` has no `umount` refuses instead of reading as denied.
 - `crates/daemon/tests/eval_suite_d.rs` `a_host_without_namespaces_skips_every_task_with_no_containment`:
   `Containment::Skipped { no_containment }`, every task skipped, no agent
   run, adequacy still measured.
