@@ -2316,7 +2316,11 @@ writable, then remounts every other mount in the namespace read-only (one
 that refuses, such as a locked autofs, is covered by an empty read-only tmpfs
 instead) and refuses the run if any mount's topmost instance is still
 writable, so the read-only set is everything the host has rather than a list
-of directories; it then enters the workspace by its absolute path (a working
+of directories, covers `/run` with an empty tmpfs so host services' pathname
+sockets are out of reach (a network namespace does not stop `connect` on a
+socket file; one elsewhere on the host stays reachable), and sets a process
+limit of 128 that `RLIMIT_NPROC` enforces per user namespace, so a fork bomb
+stops there; it then enters the workspace by its absolute path (a working
 directory inherited from before the mounts still resolves to the writable
 mount underneath every read-only remount) and drops the mapped root's
 capabilities with `setpriv` (bounding, inheritable, and ambient sets cleared,
