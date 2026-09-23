@@ -2442,7 +2442,8 @@ at run time and never written into a corpus, report, or witness; `validate`
 refuses an empty field, an `id` with whitespace, a `repository` that is not
 an `https://` URL of a host in lowercase DNS labels and a repository path
 in unreserved characters (so `git@host:path`, `ssh://`, `file://`, a user,
-a port, a query, a fragment, an upper-case or trailing-dot host, an empty
+a port, a query, a fragment, an upper-case or trailing-dot host, a label
+starting or ending in `-`, an empty
 host, a `.` or `..` or empty path segment, or a trailing slash refuses, and
 the `/pull/` URLs
 `future_answers` matches derive
@@ -2466,10 +2467,12 @@ preparation cost from exactly `TIME_STUDY_TASKS` (five) measured
 valid pilot corpus (an invalid corpus refuses `Corpus(..)`, any other
 composition `NotThePilot`, a measurement of another version of a row
 `RowMismatch`), scaled in
-128-bit arithmetic and clamped at `u64::MAX` to the
+128-bit arithmetic to the
 twenty-task pilot: `Affordable {projected_ms}` within the bound, else
 `StopForApproval {projected_ms, bound_ms}`, which stops for the maintainer
-rather than shrinking the pilot. A wrong count, a task outside the corpus,
+rather than shrinking the pilot; the comparison is made before the
+projection is clamped to `u64::MAX` for the record, so a cost past `u64`
+always stops. A wrong count, a task outside the corpus,
 or the same task measured twice refuses.
 
 **Cutoff audit.** `CutoffAudit` is what the snapshot builder established

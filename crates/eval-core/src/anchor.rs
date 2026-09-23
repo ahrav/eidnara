@@ -178,14 +178,19 @@ fn is_token(text: &str) -> bool {
 /// derives is the URL itself and the repository's `/pull/` URLs are
 /// recognizable from the row alone. `git@host:path`, `ssh://git@host:22/path`,
 /// `https:///path`, `file:///path`, `https://host/path?x`,
-/// `https://HOST/path`, `https://host./path`, `https://host/a/./b`, and
-/// `https://host/` are not accepted.
+/// `https://HOST/path`, `https://host./path`, `https://-host/path`,
+/// `https://host/a/./b`, and `https://host/` are not accepted.
 fn is_url(text: &str) -> bool {
     text.strip_prefix("https://")
         .and_then(|rest| rest.split_once('/'))
         .is_some_and(|(host, path)| {
             host.split('.').all(|label| {
-                !label.is_empty()
+                let edges_alphanumeric = label
+                    .chars()
+                    .next()
+                    .zip(label.chars().last())
+                    .is_some_and(|(a, z)| a.is_ascii_alphanumeric() && z.is_ascii_alphanumeric());
+                edges_alphanumeric
                     && label
                         .chars()
                         .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
@@ -379,8 +384,9 @@ pub fn time_study(
     }
     let total: u128 = measured.iter().map(|p| u128::from(p.prepare_ms)).sum();
     let pilot: u128 = PILOT_COMPOSITION.iter().map(|(_, n)| u128::from(*n)).sum();
-    let projected_ms = u64::try_from(total * pilot / TIME_STUDY_TASKS as u128).unwrap_or(u64::MAX);
-    Ok(if projected_ms <= bound_ms {
+    let projected = total * pilot / TIME_STUDY_TASKS as u128;
+    let projected_ms = u64::try_from(projected).unwrap_or(u64::MAX);
+    Ok(if projected <= u128::from(bound_ms) {
         Affordability::Affordable { projected_ms }
     } else {
         Affordability::StopForApproval {

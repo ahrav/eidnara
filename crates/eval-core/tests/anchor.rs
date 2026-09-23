@@ -1048,10 +1048,11 @@ fn the_time_study_projection_does_not_lose_magnitude_to_saturation() {
     );
     assert_eq!(
         time_study(&corpus, &measured, u64::MAX),
-        Ok(Affordability::Affordable {
-            projected_ms: u64::MAX
+        Ok(Affordability::StopForApproval {
+            projected_ms: u64::MAX,
+            bound_ms: u64::MAX
         }),
-        "the projection is clamped at u64::MAX, never reduced"
+        "a cost past u64 is recorded clamped and still stops"
     );
 }
 
@@ -1435,4 +1436,43 @@ fn a_license_operand_names_something() {
         entry.license = license.to_string();
         assert!(entry.validate().is_err(), "{license}");
     }
+}
+
+#[test]
+fn a_dns_label_starts_and_ends_alphanumeric() {
+    for repository in [
+        "https://-example.invalid/cargo/repo.git",
+        "https://example-.invalid/cargo/repo.git",
+    ] {
+        let mut entry = entry("cargo-0", Family::Cargo, 0x10);
+        entry.repository = repository.to_string();
+        assert!(entry.validate().is_err(), "{repository}");
+    }
+}
+
+#[test]
+fn a_projection_past_u64_is_never_affordable() {
+    let corpus = pilot();
+    let measured: Vec<Preparation> = corpus.entries[..TIME_STUDY_TASKS]
+        .iter()
+        .map(|e| Preparation {
+            task: e.id.clone(),
+            entry_digest: e.digest().unwrap(),
+            prepare_ms: u64::MAX / 2,
+        })
+        .collect();
+    assert!(
+        matches!(
+            time_study(&corpus, &measured, u64::MAX),
+            Ok(Affordability::StopForApproval { .. })
+        ),
+        "ten times u64::MAX / 2 exceeds any u64 bound"
+    );
+    assert_eq!(
+        time_study(&corpus, &measured, u64::MAX),
+        Ok(Affordability::StopForApproval {
+            projected_ms: u64::MAX,
+            bound_ms: u64::MAX
+        })
+    );
 }
