@@ -534,7 +534,10 @@ Check: `always` - `task_terminal` is `Censored` when `TaskBudgets::exhausted`
   grading `cargo` past its deadline is killed with its process group; a
   `build.rs` the agent adds runs inside the grading containment and can write
   neither outside the build cache (every other mount, `/run/user` included,
-  is read-only) nor over the hidden tests it is compiled beside; a path that
+  is read-only) nor over the hidden tests it is compiled beside, and a
+  `config.toml` it plants in Cargo's home or under the cache is not read by
+  the next invocation; the grading `cargo` runs the checkout's toolchain; a
+  path that
   collides with a task file (`Cargo.toml/x`) is dropped from the grade and
   recorded; an agent that copies from `../grade` finds nothing. Must hold on
   every task, so `always`.

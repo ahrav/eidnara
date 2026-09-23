@@ -26,7 +26,8 @@ attempt is rejected."
   a `Cargo.toml` symlinked to a host file is not written through; two
   hidden-test paths hard-linked to one planted file do not share the grade;
   a `.cargo/config.toml` naming a forged runner inside a `0555` directory
-  does not run.
+  does not run; the grading `cargo` recorded the checkout's toolchain sysroot
+  in `target/.rustc_info.json`.
 - `crates/daemon/tests/eval_suite_d.rs` `a_bounded_run_past_its_deadline_kills_the_whole_process_tree_and_keeps_partial_output`
   and `a_bounded_run_whose_grandchild_keeps_stdout_open_still_returns_at_exit`:
   `run_bounded` kills the child's process group at the deadline and after a
@@ -40,8 +41,9 @@ attempt is rejected."
   is `Pass` from the corpus's tests.
 - `crates/daemon/tests/eval_suite_d.rs` `a_wrong_fix_fails_a_no_fix_stays_failed_and_an_exhausted_budget_is_censored`:
   a wrong fix is `Fail` with its named test failed, although the agent's
-  `build.rs` tried to rewrite that test and its manifest became a directory
-  (`Cargo.toml/x` recorded, the run not aborted); no fix stays `Fail`; 100
+  `build.rs` tried to rewrite that test and to plant a `rustc-wrapper` in
+  Cargo's home and under the build cache, and its manifest became a
+  directory (`Cargo.toml/x` recorded, the run not aborted); no fix stays `Fail`; 100
   extra tool calls are `Censored { max_tool_calls }` with no hidden test run.
 - `crates/eval-core/tests/task.rs` `the_terminal_comes_from_the_hidden_tests_after_the_budget` and
   `an_agent_cannot_select_modify_or_replace_the_oracle`.

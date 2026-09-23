@@ -20,7 +20,8 @@ disabled must report `allowed` for each".
   listener, starts the escapee under `setsid` and waits for its first write
   (`escapee_ready`), writes `../escaped.write`, runs `umount` on the private
   directory, and reads the secret again; `run_canaries` refuses when
-  `escapee_ready` or `umount_ran` is false, then samples the alive file twice, 300 ms apart,
+  `escapee_ready`, `umount_ran`, or `proc_namespaced` (the PID `/proc/self`
+  names is the canary's own) is false, then samples the alive file twice, 300 ms apart,
   after the child exited. The escapee exits on its own after three seconds.
 - `crates/eval-core/src/task.rs` `ContainmentReport::validate` over the six
   `Canary` variants.

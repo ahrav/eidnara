@@ -1680,11 +1680,15 @@ The METHOD-ordered records are in [`catalog.md`](catalog.md).
 - Suite D's agent is scripted by the runner; no live model or OpenCode
   session runs a generated task yet, so `retrieved` and `packed` are
   `not_measurable` and the empirical Suite D acceptance waits on a live
-  agent and an approved profile. The read-only rebinds inside the containment
-  cover the temp directories and the home directory, not every writable path
-  a host may have, and the home directory is readable inside. Hidden tests
-  run candidate code under the runner's authority (a `build.rs` the agent
-  wrote would run too); grading in a restricted worker is not done.
+  agent and an approved profile. Inside the containment every mount but the
+  one writable tree is read-only, but the home directory and the rest of the
+  host filesystem are readable. Hidden tests run candidate code inside a
+  grading containment with only the build cache writable, but in the same
+  process as the hidden tests: code the candidate wrote can read the oracle
+  sources beside it and can forge the harness summary, so the terminal is
+  trustworthy only against a candidate that does not subvert the test
+  process. The store-bytes envelope is measured when the run root is
+  vacated, not enforced while candidate code runs.
 - The shrink shell's only oracle is the evaluator's planted `RequiredCommits`
   defect over the reduced aged truth; a Suite B surface-1 failure is not yet
   wired as a shrink replay, so no campaign failure has been minimized end to

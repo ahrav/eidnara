@@ -2311,22 +2311,26 @@ run first and are recorded as the self-tests, and `SuiteDAdmission::admit`
 refuses before the first agent if any is missing.
 
 Containment is `unshare --user --map-root-user --mount --pid --net --fork
---kill-child` with the environment cleared to `PATH`, `HOME`, and the
-variables the inner command sets. The script run inside before the agent
-covers the runner's private directory with an empty read-only tmpfs, binds
-the workspace writable, then remounts every other mount in the namespace
-read-only (one that refuses, such as a locked autofs, is covered by an empty
-read-only tmpfs instead) and refuses the run if any mount's topmost instance
-is still writable, so the read-only set is everything the host has rather
-than a list of directories; it then enters the workspace by its absolute
-path (a working directory inherited from before the mounts still resolves to
-the writable mount underneath every read-only remount) and drops the mapped
-root's capabilities with `setpriv` (bounding, inheritable, and ambient sets
-cleared, `no_new_privs` set), so the agent can neither unmount the tmpfs nor
-remount anything writable. Any mount that fails exits 97 and the run is
-refused as `MountRefused`, so no agent runs half-contained. `--kill-child`
-kills the
-namespace init and with it everything the agent started. `Host::namespaces`
+--kill-child --mount-proc` with the environment cleared to `PATH`, `HOME`,
+and the variables the inner command sets, so `/proc` inside lists the
+namespace's own processes, not the host's; the canary refuses a run whose
+`/proc/self` names a PID other than its own. The script run inside before
+the agent covers the runner's private directory with an empty read-only
+tmpfs, binds the workspace writable, then remounts every other mount in the
+namespace read-only (one that refuses, such as a locked autofs, is covered
+by an empty read-only tmpfs instead) and refuses the run if any mount's
+topmost instance is still writable, so the read-only set is everything the
+host has rather than a list of directories; it then enters the workspace by
+its absolute path (a working directory inherited from before the mounts
+still resolves to the writable mount underneath every read-only remount) and
+drops the mapped root's capabilities with `setpriv` (bounding, inheritable,
+and ambient sets cleared, `no_new_privs` set), so the agent can neither
+unmount the tmpfs nor remount anything writable. Any mount that fails exits
+97 and the run is refused as `MountRefused`, so no agent runs
+half-contained. `--kill-child` kills the namespace init and with it
+everything the agent started. A bounded child's stdout is read under a cap
+and its stderr is discarded, so nothing it prints reaches the runner's own
+log. `Host::namespaces`
 says whether the host can create the four namespaces; when it cannot, the
 run records `Containment::Skipped { no_containment }`, every task terminal is
 `Skipped(NoContainment)`, no agent process is spawned, every injection case
@@ -2367,7 +2371,11 @@ unfixed, under the correct fix, and under every wrong fix, and runs
 authority and, where the host has namespaces, inside the same containment the
 agent gets, with the build cache the only writable tree and the grade tree
 itself read-only, so a `build.rs` or test the candidate wrote can neither
-reach the host nor rewrite a hidden test before it compiles; the runner
+reach the host nor rewrite a hidden test before it compiles; Cargo's home and
+its working directory are read-only paths under the private directory, so
+no `.cargo/config.toml` a build script plants is read by the next
+invocation, and `RUSTUP_TOOLCHAIN` names the checkout's toolchain because
+the rustup proxy would not find `rust-toolchain.toml` from there; the runner
 writes the dependency-free lockfile beforehand (exit 0 with the
 harness summary `test result: ok. 1 passed` is `passed`;
 exit 101 with `test result: FAILED` is `failed`; anything else `errored`);
