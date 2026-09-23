@@ -6,14 +6,16 @@ mod support;
 use std::collections::BTreeSet;
 
 use eval_core::{
-    CandidateVerdict, Cut, Element, EventId, EventLog, FailureClass, FailurePredicate, History,
-    MAX_OUTSTANDING_REPLAY_EFFECTS, Minimality, NotEstablishedReason, Oracle, OracleRefused,
-    Payload, ReplayEffects, ReplayOutcome, ReplayRefused, ReplayRequest, Scenario, ShrinkRefused,
-    ShrinkReportError, Transformation, UnknownReason, WitnessClass, classify_replay,
-    parse_shrink_report, reduce, shrink,
+    CandidateVerdict, Cut, Element, EpisodeRefused, EventId, EventLog, FailureClass,
+    FailurePredicate, History, MAX_OUTSTANDING_REPLAY_EFFECTS, Minimality, NotEstablishedReason,
+    Oracle, OracleRefused, Payload, ReplayEffects, ReplayOutcome, ReplayRefused, ReplayRequest,
+    Scenario, ShrinkRefused, ShrinkReportError, Transformation, UnknownReason, WitnessClass,
+    classify_replay, parse_shrink_report, reduce, shrink,
 };
 use serde_json::{Value, json};
-use support::shrink::{BUDGET, CUT, PROFILE, evaluate, fixture, oracle, predicate, scenario};
+use support::shrink::{
+    BUDGET, CUT, PROFILE, episode, evaluate, fixture, oracle, predicate, scenario,
+};
 
 fn commits(log: &EventLog) -> usize {
     log.events
@@ -510,6 +512,9 @@ fn the_shrinker_invariants_hold_under_arbitrary_replay_answers() {
         };
         let (minimized, report) =
             shrink(&original, &fixture(), &expected, BUDGET, &mut replay).unwrap();
+        report
+            .validate()
+            .unwrap_or_else(|e| panic!("seed {seed}: the report accounts for itself: {e}"));
         let recorded = |digest: &str| {
             report
                 .candidates
@@ -555,7 +560,7 @@ fn the_shrinker_invariants_hold_under_arbitrary_replay_answers() {
 #[test]
 fn replay_effects_are_bounded_and_a_premature_verdict_is_refused() {
     let key = |index: usize| format!("candidate-{index}");
-    let mut effects = ReplayEffects::new(MAX_OUTSTANDING_REPLAY_EFFECTS);
+    let mut effects = ReplayEffects::default();
     for index in 0..MAX_OUTSTANDING_REPLAY_EFFECTS {
         effects.issue(&key(index)).unwrap();
     }
@@ -788,4 +793,66 @@ fn a_report_is_read_back_only_under_its_schema_and_a_valid_oracle() {
         parse_shrink_report(&extra),
         Err(ShrinkReportError::Shape(_))
     ));
+}
+
+#[test]
+fn a_report_whose_accounting_disagrees_with_its_ledger_is_refused() {
+    let (_, report) = shrink(
+        &scenario(),
+        &fixture(),
+        &predicate(FailureClass::Interference),
+        BUDGET,
+        &mut evaluate,
+    )
+    .unwrap();
+    let value = serde_json::to_value(&report).unwrap();
+    assert_eq!(parse_shrink_report(&value).unwrap(), report);
+    let tampered = |edit: fn(&mut Value)| {
+        let mut copy = value.clone();
+        edit(&mut copy);
+        parse_shrink_report(&copy)
+    };
+    type Edit = fn(&mut Value);
+    let cases: [(&str, Edit); 4] = [
+        ("replays", |v| v["replays"] = json!(0)),
+        ("unknown_candidates", |v| v["unknown_candidates"] = json!(7)),
+        ("minimized_digest", |v| {
+            v["minimized_digest"] = v["original_digest"].clone()
+        }),
+        ("deleted", |v| v["deleted"] = json!([])),
+    ];
+    for (field, edit) in cases {
+        assert_eq!(
+            tampered(edit),
+            Err(ShrinkReportError::Inconsistent { field }),
+            "{field} disagrees with the candidate ledger"
+        );
+    }
+}
+
+#[test]
+fn invalid_episodes_are_refused_before_any_replay() {
+    let mut original = scenario();
+    original.episodes.push(episode("kill-1"));
+    let mut issued = 0u32;
+    let mut replay = |request: ReplayRequest<'_>| {
+        issued += 1;
+        evaluate(request)
+    };
+    let refused = shrink(
+        &original,
+        &fixture(),
+        &predicate(FailureClass::Interference),
+        BUDGET,
+        &mut replay,
+    );
+    assert_eq!(
+        refused.err(),
+        Some(ShrinkRefused::InvalidEpisodes(
+            EpisodeRefused::DuplicateEpisode {
+                id: "kill-1".to_string()
+            }
+        ))
+    );
+    assert_eq!(issued, 0, "nothing is replayed under invalid episodes");
 }

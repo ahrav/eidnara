@@ -16,12 +16,12 @@ use context_core::redaction::Redactor;
 use eval_core::{
     Approval, CandidateVerdict, ClaimBoundary, Coverage, Cut, CutOutcome, CutReceipt,
     EnvelopeExceeded, EvaluatedSurface, EventId, ExecutionMode, FailurePredicate, FaultAction,
-    Generation, MAX_OUTSTANDING_REPLAY_EFFECTS, Manifest, Mode, MultiplicityRecipe,
-    ObservationSchema, Oracle, OriginalFailure, Payload, ProfileError, ReplayEffects,
-    ReplayOutcome, ReplayRefused, ReplayRequest, RepositorySpec, ResidueEntry, Rule, RunProfile,
-    Scale, Scenario, SemanticTrace, SessionSpec, ShrinkRefused, Slice, StoreFamily, Task, TaskRole,
-    UnknownReason, WITNESS_DIGEST_PROTOCOL, WITNESS_SCHEMA, WitnessError, WitnessPackage,
-    WorldConfig, eval_run_id, generate_all, reduce, residue_drift, serialize_spec, shrink,
+    Generation, Manifest, Mode, MultiplicityRecipe, ObservationSchema, Oracle, OriginalFailure,
+    Payload, ProfileError, ReplayEffects, ReplayOutcome, ReplayRefused, ReplayRequest,
+    RepositorySpec, ResidueEntry, Rule, RunProfile, Scale, Scenario, SemanticTrace, SessionSpec,
+    ShrinkRefused, Slice, StoreFamily, Task, TaskRole, UnknownReason, WITNESS_DIGEST_PROTOCOL,
+    WITNESS_SCHEMA, WitnessError, WitnessPackage, WorldConfig, eval_run_id, generate_all, reduce,
+    residue_drift, serialize_spec, shrink,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -434,7 +434,7 @@ pub fn run(config: &Config, spawn: Spawn) -> Result<Run, RunError> {
             profile_digest: profile_digest.clone(),
         },
         charges: &mut charges,
-        effects: ReplayEffects::new(MAX_OUTSTANDING_REPLAY_EFFECTS),
+        effects: ReplayEffects::default(),
         answered: BTreeMap::new(),
         expected_residue: residue(),
     };

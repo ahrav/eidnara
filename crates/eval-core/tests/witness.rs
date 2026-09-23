@@ -215,11 +215,17 @@ fn every_structural_refusal_names_its_cause() {
 
 #[test]
 fn one_minimality_needs_a_rejected_record_for_every_single_deletion() {
-    let package = package();
-    let element = package.minimized.elements()[0].clone();
-    let mut bare = package.clone();
-    bare.shrink.candidates.clear();
+    // A ledger-consistent report that replayed only the original and claims
+    // it 1-minimal: nothing was ever deleted, so no deletion was rejected.
+    let mut bare = package();
+    bare.minimized = scenario();
+    bare.shrink.candidates.truncate(1);
+    bare.shrink.minimized_digest = bare.shrink.original_digest.clone();
+    bare.shrink.deleted.clear();
+    bare.shrink.replays = 1;
+    bare.shrink.unknown_candidates = 0;
     bare.recipe = None;
+    let element = bare.minimized.elements()[0].clone();
     assert_eq!(
         bare.validate(),
         Err(WitnessError::MinimalityUnsupported {

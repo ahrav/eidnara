@@ -12,7 +12,7 @@ use serde_json::Value;
 use crate::census::EvaluatedSurface;
 use crate::event::{EventId, EventLog, Payload};
 use crate::failure_class::FailureClass;
-use crate::fault::FaultEpisode;
+use crate::fault::{EpisodeRefused, FaultEpisode, validate_episodes};
 use crate::manifest::Cut;
 use crate::pairs::{PairError, PairSet, PairSetInput, Task, compile_pair_set};
 use crate::reducer::Truth;
@@ -322,10 +322,10 @@ impl Oracle {
 
 /// Replay effects a shell has issued and not yet resolved, keyed by a receipt
 /// key. A retry keeps its key; a cancellation resolves to `Unknown`; reading
-/// an outstanding effect is refused.
-#[derive(Debug, Clone)]
+/// an outstanding effect is refused. The outstanding set is bounded at
+/// `MAX_OUTSTANDING_REPLAY_EFFECTS`; the bound is not configurable.
+#[derive(Debug, Clone, Default)]
 pub struct ReplayEffects {
-    bound: usize,
     outstanding: BTreeMap<String, u32>,
     resolved: BTreeMap<String, ReplayOutcome>,
 }
@@ -350,18 +350,12 @@ pub enum ReplayRefused {
 debug_display!(ReplayRefused);
 
 impl ReplayEffects {
-    pub fn new(bound: usize) -> Self {
-        Self {
-            bound,
-            outstanding: BTreeMap::new(),
-            resolved: BTreeMap::new(),
-        }
-    }
-
     pub fn issue(&mut self, key: &str) -> Result<(), ReplayRefused> {
         self.absent(key)?;
-        if self.outstanding.len() >= self.bound {
-            return Err(ReplayRefused::OutstandingBound { bound: self.bound });
+        if self.outstanding.len() >= MAX_OUTSTANDING_REPLAY_EFFECTS {
+            return Err(ReplayRefused::OutstandingBound {
+                bound: MAX_OUTSTANDING_REPLAY_EFFECTS,
+            });
         }
         self.outstanding.insert(key.to_string(), 1);
         Ok(())
@@ -494,13 +488,23 @@ pub struct ShrinkReport {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ShrinkReportError {
-    SchemaMismatch { found: String },
+    SchemaMismatch {
+        found: String,
+    },
     Oracle(OracleRefused),
+    /// The named field disagrees with the candidate ledger.
+    Inconsistent {
+        field: &'static str,
+    },
     Shape(String),
     Lossy,
 }
 
 impl ShrinkReport {
+    /// The schema, the pinned oracle, and the report's accounting against its
+    /// own candidate ledger: the first candidate is the reproduced original,
+    /// the last reproduced candidate is the minimized scenario, and the
+    /// counters agree with the distinct verdicts.
     pub fn validate(&self) -> Result<(), ShrinkReportError> {
         if self.schema != SHRINK_REPORT_SCHEMA {
             return Err(ShrinkReportError::SchemaMismatch {
@@ -510,7 +514,57 @@ impl ShrinkReport {
         self.predicate
             .oracle
             .validate()
-            .map_err(ShrinkReportError::Oracle)
+            .map_err(ShrinkReportError::Oracle)?;
+        let inconsistent = |field| Err(ShrinkReportError::Inconsistent { field });
+        let Some(first) = self.candidates.first() else {
+            return inconsistent("candidates");
+        };
+        if first.scenario_digest != self.original_digest
+            || !first.deleted.is_empty()
+            || first.verdict != CandidateVerdict::Reproduced
+        {
+            return inconsistent("candidates");
+        }
+        let last_reproduced = self
+            .candidates
+            .iter()
+            .rev()
+            .find(|record| record.verdict == CandidateVerdict::Reproduced)
+            .unwrap_or(first);
+        if last_reproduced.scenario_digest != self.minimized_digest {
+            return inconsistent("minimized_digest");
+        }
+        if last_reproduced.deleted != self.deleted {
+            return inconsistent("deleted");
+        }
+        let distinct: BTreeMap<&str, &CandidateVerdict> = self
+            .candidates
+            .iter()
+            .map(|record| (record.scenario_digest.as_str(), &record.verdict))
+            .collect();
+        let count = |keep: fn(&CandidateVerdict) -> bool| {
+            distinct.values().filter(|verdict| keep(verdict)).count() as u64
+        };
+        if self.unknown_candidates
+            != count(|verdict| matches!(verdict, CandidateVerdict::Unknown { .. }))
+        {
+            return inconsistent("unknown_candidates");
+        }
+        // Every completed verdict took a replay; an `InvalidPair` took none;
+        // an `Unknown` may be either (the budget refusal is issued without one).
+        let completed = count(|verdict| {
+            matches!(
+                verdict,
+                CandidateVerdict::Reproduced
+                    | CandidateVerdict::NotReproduced
+                    | CandidateVerdict::Slipped { .. }
+            )
+        });
+        let replayable = count(|verdict| !matches!(verdict, CandidateVerdict::InvalidPair { .. }));
+        if self.replays < completed || self.replays > replayable {
+            return inconsistent("replays");
+        }
+        Ok(())
     }
 }
 
@@ -530,6 +584,8 @@ pub fn parse_shrink_report(value: &Value) -> Result<ShrinkReport, ShrinkReportEr
 pub enum ShrinkRefused {
     /// The pinned oracle is not a valid configuration; nothing is replayed.
     InvalidOracle(OracleRefused),
+    /// The original's fault episodes are not a valid set; nothing is replayed.
+    InvalidEpisodes(EpisodeRefused),
     /// The original scenario itself did not reproduce the pinned predicate.
     OriginalNotReproduced { verdict: CandidateVerdict },
 }
@@ -572,7 +628,7 @@ impl Driver<'_> {
             Ok(set) => set,
             Err(error) => {
                 return CandidateVerdict::InvalidPair {
-                    refusal: refusal_name(&error),
+                    refusal: error.kind().to_string(),
                 };
             }
         };
@@ -598,20 +654,10 @@ impl Driver<'_> {
     }
 }
 
-/// The compiler's refusal by variant name: the closed vocabulary the wire
-/// carries, without the refusal's payload.
-fn refusal_name(error: &PairError) -> String {
-    let text = format!("{error:?}");
-    text.split(['{', '(', ' '])
-        .next()
-        .unwrap_or_default()
-        .to_string()
-}
-
 /// Shrinks `original` until no single deletion under any tried transformation
 /// still reproduces `predicate`, or the replay budget runs out. The returned
 /// scenario reproduced the predicate on its last replay. An invalid pinned
-/// oracle is refused before any replay.
+/// oracle or episode set is refused before any replay.
 pub fn shrink(
     original: &Scenario,
     fixture: &Value,
@@ -623,6 +669,7 @@ pub fn shrink(
         .oracle
         .validate()
         .map_err(ShrinkRefused::InvalidOracle)?;
+    validate_episodes(&original.episodes).map_err(ShrinkRefused::InvalidEpisodes)?;
     let mut driver = Driver {
         fixture,
         predicate,

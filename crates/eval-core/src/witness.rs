@@ -79,7 +79,8 @@ pub enum WitnessError {
     SchemaMismatch {
         found: String,
     },
-    /// The embedded report refuses on its own terms: schema or oracle.
+    /// The embedded report refuses on its own terms: schema, oracle, or its
+    /// accounting against its candidate ledger.
     ShrinkReport(ShrinkReportError),
     ClaimBoundaryMismatch,
     ForbiddenClaim {
@@ -129,7 +130,6 @@ impl WitnessPackage {
                 found: self.schema.clone(),
             });
         }
-        self.shrink.validate().map_err(WitnessError::ShrinkReport)?;
         if self.claim_boundary != ClaimBoundary::pinned() {
             return Err(WitnessError::ClaimBoundaryMismatch);
         }
@@ -152,6 +152,7 @@ impl WitnessPackage {
         }
         self.check_recipe()?;
         self.check_minimality()?;
+        self.shrink.validate().map_err(WitnessError::ShrinkReport)?;
         let value = serde_json::to_value(self).map_err(|e| WitnessError::Shape(e.to_string()))?;
         check_claims(&value, "")
     }

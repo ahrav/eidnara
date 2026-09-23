@@ -2074,8 +2074,9 @@ the fresh arm and the pair mapping are recomputed for every candidate and
 never carried over; both worlds are shrunk together because the fresh arm is
 derived from whatever survives in both. A candidate
 the compiler refuses (evidence deleted, a control class lost, an arm
-disagreeing) is `CandidateVerdict::InvalidPair { refusal }` carrying the
-`PairError` variant name, and no replay is issued for it.
+disagreeing) is `CandidateVerdict::InvalidPair { refusal }` carrying
+`PairError::kind`, the exhaustive wire name of the refusal, and no replay is
+issued for it.
 
 The failure is pinned before the first candidate as a `FailurePredicate`:
 the `Oracle` value itself (its kind and parameters, so a replay under other
@@ -2092,8 +2093,9 @@ though a failure remains; `Passed` is `NotReproduced`; and `Unknown` is
 replay receives carries the oracle, cut, and profile digest and withholds the
 expected witness class, so a replay cannot echo it.
 
-`shrink` refuses an invalid pinned oracle as `InvalidOracle` before any
-replay, then replays the original and refuses `OriginalNotReproduced` when
+`shrink` refuses an invalid pinned oracle as `InvalidOracle` and an invalid
+episode set (`validate_episodes`) as `InvalidEpisodes` before any replay,
+then replays the original and refuses `OriginalNotReproduced` when
 it does not reproduce the pinned predicate. It then runs Zeller's ddmin once
 per transformation in the parent's order, `Transformation::ORDER` (fault
 episode removal, then event deletion), holding earlier deletions fixed. Only
@@ -2117,8 +2119,8 @@ elements it deletes.
 
 Replays are effects a shell issues to fresh processes. `ReplayEffects` is
 the shell's ledger for them: it keys each by its receipt key (the candidate
-digest), bounds the outstanding set at `MAX_OUTSTANDING_REPLAY_EFFECTS` and
-refuses the effect issued at the bound, keeps the key across `retry`,
+digest), bounds the outstanding set at `MAX_OUTSTANDING_REPLAY_EFFECTS` (the
+bound is not configurable) and refuses the effect issued at the bound, keeps the key across `retry`,
 resolves `cancel` to `Unknown { cancelled }`, and refuses `outcome` on an
 outstanding key, so no verdict is reached before the replay answered. The
 in-core driver issues one replay at a time through its callback and does not
@@ -2132,9 +2134,16 @@ from it, so deleting one commit too many slips the class. `Oracle::validate`
 refuses `slipping_at` below `failing_at` as `InvertedThresholds`.
 
 A `ShrinkReport` is read back through `parse_shrink_report`, which, like the
-other report parsers, deserializes, runs `ShrinkReport::validate` (the
-`eval-shrink/v1` schema and a valid pinned oracle), and refuses a value that
-does not reserialize identically as `Lossy`.
+other report parsers, deserializes, runs `ShrinkReport::validate`, and
+refuses a value that does not reserialize identically as `Lossy`. `validate`
+checks the `eval-shrink/v1` schema, the pinned oracle, and the report's
+accounting against its own candidate ledger as `Inconsistent { field }`: the
+first candidate is the reproduced original with an empty deletion set, the
+last reproduced candidate's digest and deletion set are `minimized_digest`
+and `deleted`, `unknown_candidates` counts the distinct `Unknown` digests,
+and `replays` lies between the distinct completed verdicts (each took a
+replay) and the distinct non-`InvalidPair` digests (an `Unknown` may have
+been refused without one).
 
 ## Witness package `eval-witness/v1`
 
@@ -2149,9 +2158,7 @@ recorded `residue` entries, the `minimized` `Scenario`, an optional
 `MultiplicityRecipe`, the `ShrinkReport`, and the verbatim `claim_boundary`.
 
 `WitnessPackage::validate` refuses: a schema other than `eval-witness/v1`
-(`SchemaMismatch { found }`); an embedded shrink report that
-`ShrinkReport::validate` refuses, wrapped as `ShrinkReport(ShrinkReportError)`
-(its schema or an inverted oracle); a claim boundary other than `ClaimBoundary::pinned()`
+(`SchemaMismatch { found }`); a claim boundary other than `ClaimBoundary::pinned()`
 (`ClaimBoundaryMismatch`); a live slice labelled replayable
 (`LiveRelabelledReplayable`); a predicate that disagrees between the original
 and the shrink report; a minimized scenario whose digest is not the report's;
@@ -2180,6 +2187,9 @@ for every element of the minimized scenario, a candidate record whose deletion
 set is the final set plus that element and whose verdict is neither
 `Reproduced` nor `Unknown`; the first element without one is refused
 (`MinimalityUnsupported { element }`). `NotEstablished` owes no such records.
+After the package's own rules, the embedded report is checked on its own
+terms by `ShrinkReport::validate` (schema, oracle, and its accounting against
+the candidate ledger), wrapped as `ShrinkReport(ShrinkReportError)`.
 
 `serialize(redactor, artifact_bytes)` is the one serializer: `validate`, then
 one canonical encoding whose byte length is checked against the envelope's
