@@ -76,13 +76,23 @@ pub enum FaultAction {
 impl FaultAction {
     /// The heal each seam permits. A CAS storage failure that is not capacity
     /// exhaustion latches artifact ingestion closed until the store reopens,
-    /// so every ingest fault and the EIO deletion faults heal by reopen. R11
+    /// so the ingest faults that fail a write, sync, rename, or directory sync
+    /// and the EIO deletion faults heal by reopen; `reservation_commit` and
+    /// `after_events` fail their transaction and leave ingestion open. R11
     /// clears only when a reopen rebuilds the projection; R24's receipt
     /// charges are retained for the store incarnation, so nothing heals it.
     pub fn heal(&self) -> Heal {
         match self {
             Self::SearchEpisode { .. } | Self::EmbeddingPublication { .. } => Heal::Consumed,
-            Self::ArtifactIngest { .. } => Heal::Reopen,
+            Self::ArtifactIngest { fault } => match fault {
+                ArtifactIngestFaultKind::ReservationCommit
+                | ArtifactIngestFaultKind::AfterEvents => Heal::Consumed,
+                ArtifactIngestFaultKind::Write
+                | ArtifactIngestFaultKind::FileSync
+                | ArtifactIngestFaultKind::Rename
+                | ArtifactIngestFaultKind::AfterDirectorySync
+                | ArtifactIngestFaultKind::TakeoverBeforeCleanupUnlink => Heal::Reopen,
+            },
             Self::ArtifactDeletion { fault } => match fault {
                 ArtifactDeletionFaultKind::IntentAppend | ArtifactDeletionFaultKind::Unlink => {
                     Heal::Reopen

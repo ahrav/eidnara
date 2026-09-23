@@ -187,6 +187,16 @@ fn every_episode_is_a_named_action_with_the_heal_its_seam_permits() {
         Heal::Reopen,
         "an EIO in the CAS latches ingestion closed until reopen"
     );
+    for fault in [
+        ArtifactIngestFaultKind::ReservationCommit,
+        ArtifactIngestFaultKind::AfterEvents,
+    ] {
+        assert_eq!(
+            FaultAction::ArtifactIngest { fault }.heal(),
+            Heal::Consumed,
+            "{fault:?} fails its transaction and leaves ingestion open"
+        );
+    }
     assert_eq!(
         FaultAction::ArtifactDeletion {
             fault: ArtifactDeletionFaultKind::IntentStorageExhausted

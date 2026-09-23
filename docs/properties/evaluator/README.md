@@ -1281,7 +1281,9 @@ Fault contract (`crates/eval-core/tests/fault.rs`,
   episode's action is one closed variant mirroring a fault enum, hook, gate,
   lock holder, or kill at HEAD, or an expected refusal that injects no fault;
   one-shot enums heal by consumption, gates and lock holders by release,
-  kills, corruption, and R11 by reopen, and R24 is permanent; a wrong heal, an
+  kills, corruption, latching CAS faults, and R11 by reopen, the two
+  transaction-only ingest faults by consumption, and R24 is permanent; a wrong
+  heal, an
   empty layer contract, a kill label on a non-kill, and a duplicate id refuse;
   the tagged JSON form round-trips.
 - `a_power_loss_label_and_a_host_kill_are_refused` (marker

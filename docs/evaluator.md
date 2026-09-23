@@ -1677,7 +1677,10 @@ mirroring the fault enums and hooks that exist: `search_episode`
 fault: the runner drives production into a refusal it makes on purpose.
 `FaultAction::heal` is the heal each class permits: `consumed` for one-shot
 enums, `released` for gates and lock holders, `reopen` for kills, corruption,
-and R11 (the reopen's projection rebuild clears it), and `permanent` for R24,
+the CAS faults that latch ingestion closed (every ingest fault but
+`reservation_commit` and `after_events`, which fail their transaction and
+leave ingestion open, and the EIO deletion faults), and R11 (the reopen's
+projection rebuild clears it), and `permanent` for R24,
 whose retained receipt charges refuse admission for the rest of the store
 incarnation; a declared heal that differs is `HealMismatch`. A kill carries a
 `KillLabel` whose `crash_model` must be `application_crash` with
