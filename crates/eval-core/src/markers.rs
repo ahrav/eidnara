@@ -9,7 +9,7 @@ pub struct Marker {
 }
 
 /// Every marker the evaluator's suites may record, globally unique by name.
-pub const MARKERS: [Marker; 37] = [
+pub const MARKERS: [Marker; 51] = [
     Marker {
         name: "ing_four_seam_hold_correct_release_query",
         test: "crates/daemon/tests/eval_ingestion.rs::hold_embedding_commit_correction_release_query_makes_the_predecessor_obsolete",
@@ -157,6 +157,62 @@ pub const MARKERS: [Marker; 37] = [
     Marker {
         name: "wm_bulk_scaffold_presented_as_aged",
         test: "crates/eval-core/tests/manifest.rs::a_prefix_then_generate_run_is_replay_built_only",
+    },
+    Marker {
+        name: "flt_premature_success_fixture_refused",
+        test: "crates/eval-core/tests/fault.rs::a_premature_success_fixture_is_refused",
+    },
+    Marker {
+        name: "flt_incomplete_coverage_named_not_pass",
+        test: "crates/eval-core/tests/fault.rs::a_missing_receipt_is_incomplete_coverage_not_pass",
+    },
+    Marker {
+        name: "flt_crash_model_label_refused",
+        test: "crates/eval-core/tests/fault.rs::a_power_loss_label_and_a_host_kill_are_refused",
+    },
+    Marker {
+        name: "flt_liveness_unmet_named_at_bound",
+        test: "crates/eval-core/tests/fault.rs::liveness_is_unmet_at_the_bound_or_when_a_fault_healed",
+    },
+    Marker {
+        name: "flt_lost_reply_unknown_until_readback",
+        test: "crates/daemon/tests/eval_fault.rs::a_lost_reply_stays_unknown_until_readback_at_after_recovery",
+    },
+    Marker {
+        name: "flt_every_declared_cut_receipted",
+        test: "crates/daemon/tests/eval_fault.rs::the_fault_campaign_receipts_every_declared_cut",
+    },
+    Marker {
+        name: "flt_kill_barrier_read_before_kill",
+        test: "crates/daemon/tests/eval_fault.rs::a_test_binary_child_killed_at_a_named_cut_recovers",
+    },
+    Marker {
+        name: "flt_r11_recorded_as_expected_refusal",
+        test: "crates/daemon/tests/eval_fault.rs::deletion_bearing_catch_up_is_an_expected_refusal_and_a_permanent_stall",
+    },
+    Marker {
+        name: "flt_r24_recorded_as_expected_refusal",
+        test: "crates/daemon/tests/eval_fault.rs::receipt_quota_exhaustion_is_an_expected_refusal",
+    },
+    Marker {
+        name: "flt_liveness_bounds_met_with_faults_armed",
+        test: "crates/daemon/tests/eval_fault.rs::liveness_bounds_are_met_with_outside_core_faults_armed",
+    },
+    Marker {
+        name: "flt_corruption_detected_at_quiescence",
+        test: "crates/daemon/tests/eval_fault.rs::a_corrupted_quiescent_file_is_detected_before_any_store_opens",
+    },
+    Marker {
+        name: "flt_external_lock_holder_released",
+        test: "crates/daemon/tests/eval_fault.rs::an_external_lock_holder_blocks_then_releases",
+    },
+    Marker {
+        name: "flt_artifact_fault_named_errno",
+        test: "crates/daemon/tests/eval_fault.rs::artifact_faults_fail_with_their_named_errno_and_heal_by_reopen_or_consumption",
+    },
+    Marker {
+        name: "sls_embedding_publication_held_then_released",
+        test: "crates/daemon/tests/eval_fault.rs::a_held_publication_admits_once_and_publishes_on_release",
     },
 ];
 

@@ -1236,7 +1236,9 @@ Campaign (`crates/eval-core/tests/campaign.rs`):
   validates and round-trips; its only default is surface 1's window of 100;
   the three ceilings read as exact ratios; an unapproved profile refuses
   `approved` by name and an approved one returns its approver and a digest
-  that differs from the unapproved one; an approval with an empty approver or
+  that differs from the unapproved one; `fault_profile` refuses the unapproved
+  profile and carries the approved one's digest, liveness bounds, and
+  envelope; an approval with an empty approver or
   an upper-case run ID refuses; each scale names its budget variable or none.
 - `a_profile_refuses_every_absent_or_zero_setting_by_name`: every top-level
   field and every nested budget, envelope, statistics, and liveness field is
@@ -1548,6 +1550,119 @@ Checkpoint contract (`crates/eval-core/tests/checkpoint.rs`,
   `AgedArmNotReplayBuilt` naming the construction.
   `an_enumerate_run_records_its_mode_and_the_pinned_spec_digest` shows the mode
   enters the digest between two replay-built manifests.
+
+Fault contract (`crates/eval-core/tests/fault.rs`,
+`flt-fault-episode-contract-faithful`, `flt-process-kill-is-test-binary-child`,
+`flt-lost-ack-expected-is-admissible-set`,
+`flt-every-declared-cut-reached-per-campaign`,
+`flt-liveness-mode-bounded-progress-permanent-faults`):
+
+- `every_episode_is_a_named_action_with_the_heal_its_seam_permits`: an
+  episode's action is one closed variant mirroring a fault enum, hook, gate,
+  lock holder, or kill at HEAD; one-shot enums heal by consumption, gates and
+  lock holders by release, kills and corruption by reopen; the ingest faults
+  that latch the CAS heal by reopen while `reservation_commit` and
+  `after_events` heal by consumption; a wrong heal, an
+  empty layer contract, a kill label on a non-kill, and a duplicate id refuse;
+  the tagged JSON form round-trips.
+- `a_power_loss_label_and_a_host_kill_are_refused` (marker
+  `flt_crash_model_label_refused`): `power_loss`, `torn_write`,
+  `unsynced_reorder`, and an application crash without the page cache are
+  `CrashModelNotProved`; `eidnara_host` is `KilledProcessNotProved`; a kill
+  without a label refuses; a barrier receipt's last token must be its cut (a
+  suffix match and an empty cut refuse) and it must come from a signalled
+  child.
+- `a_missing_receipt_is_incomplete_coverage_not_pass` (marker
+  `flt_incomplete_coverage_named_not_pass`): a declared cut with no receipt is
+  `IncompleteCoverage` naming it; a receipt for an undeclared cut refuses;
+  oracle checkpoints resolve to `Reached` or `NotReached` from runner receipts.
+- `a_lost_reply_is_unknown_over_an_admissible_set_until_a_read_back_names_one_state`:
+  a lost reply expects `one_of {applied, not_applied}` with outcome `unknown`;
+  a read-back collapses it to one state and the counts that state proves; a
+  read-back outside the admissible set, or `not_applied` for an acknowledged
+  or otherwise observed effect (even after a lost reply), is
+  `ReadBackNotAdmissible` and changes nothing.
+- `a_premature_success_fixture_is_refused` (marker
+  `flt_premature_success_fixture_refused`): an applied outcome without a
+  read-back, an expectation collapsed without one, an acknowledged effect
+  recorded as not applied, and an identity violating
+  `acknowledged <= observed <= attempted` each refuse, including when the
+  aggregate totals hide the violation.
+- `liveness_is_unmet_at_the_bound_or_when_a_fault_healed` (marker
+  `flt_liveness_unmet_named_at_bound`): a healed outside-core fault, a fault
+  armed inside the core, no outside-core fault at all, an undriven core lane,
+  a bound that is not the profile's, a predicate that never held, held only
+  transiently, or stalled, a lane fed no fresh commits, or a lane stopped
+  short of its bound each refuse by name.
+- `a_fault_report_round_trips_and_refuses_what_it_cannot_prove`: the report
+  parses back equal; its result digest ignores barrier pids and envelope peaks
+  and changes with an effect outcome; a kill without a barrier, a kill whose
+  only barrier is at another cut, an armed outside-core fault that is not one
+  of the report's episodes, an unreceipted declared cut, zero safety checks
+  while armed, and a premature success refuse.
+- `a_parsed_report_cannot_claim_what_no_run_recorded`: a claim boundary that
+  is not the pinned one, a peak over its envelope bound, no episode at all, a
+  marker the registry does not know, an outside-core fault scoped to a
+  healthy-core family, and an outside-core fault whose heal is consumed each
+  refuse at the report; a blank episode id or operation refuses at the
+  episode; a parsed receipt for an undeclared cut refuses at the coverage
+  verdict; an effect whose outcome is not the state its expectation names, or
+  whose reply was never lost yet expects `not_applied`, is `OutcomeNotDerived`;
+  a healthy core with no family or no lane is `EmptyHealthyCore`; an applied
+  read-back never lowers an over-count below what `BoundsViolated` sees; an
+  `eval_run_id` or `profile_digest` that is not 64 lowercase hex is
+  `MalformedDigest`; `claim_materialization` encodes the materializer's
+  acknowledgement faults, heals by consumption, and is a kernel fault; a CAS
+  fault scoped to another family is `ScopeMismatch` while a lock holder names
+  its own store; a barrier signal other than `SIGKILL` is `NotSigkill`; a
+  recorded refusal or permanent stall naming an episode the report lacks is
+  `UnknownEpisode`, and one whose error text does not name its production
+  variant is `RefusalNotEvidenced`; a barrier no kill episode declares at its
+  cut is `BarrierWithoutKill`; a `Cut` receipted twice is `DuplicateCut`; an
+  effect entry with zero attempts is `NeverAttempted`; an integer outside the
+  canonical safe range is `NotCanonical` at `serialize` and at parse; a lane
+  that met its bound yet records a `blocked` stop is `LivenessUnmet`; envelope
+  bounds other than the profile's limits are `EnvelopeDisagreesWithProfile`;
+  an observed effect read back or parsed as `not_applied` is
+  `ReadBackNotAdmissible`; each effect's `lost_by` names the episodes that
+  lost its replies: a reply-losing episode (`loses_reply` names which) with no
+  effect naming it is `LostReplyUnrecorded`, an effect naming an episode that
+  loses none is `LostByNonLosingEpisode`, and one naming an episode the
+  report lacks is `UnknownEpisode`; an observation resolves a lost reply to
+  applied, and a parsed entry observed yet still `unknown` is
+  `ObservedWithoutReadBack`; a barrier with pid 0 is `NoPid`; a second
+  barrier for one kill is `DuplicateBarrier`; a kill at a cut the coverage
+  never declared is `UndeclaredCut`; `embedding_dispatch`, `artifact_gc`, and
+  `kernel_restore` encode the remaining seams at HEAD with their heal, family,
+  and reply-loss classification; a bare cut with no prefix token is
+  `LineDoesNotNameCut`; a lost reply whose every attempt was acknowledged is
+  `LostReplyAcknowledged`; dispatch's `refuse_ledger_read` loses no reply; an
+  episode id missing from `coverage.declared` is `UndeclaredCut`, so the
+  declared cut set derives from the episodes rather than the report's word;
+  `projection_batch` encodes the retrieval batch seam; a restore fault the
+  handle rolls back itself is `consumed` while `recovery_failure` needs a
+  reopen; a blank effect key is `EmptyIdentity`; a `profile_digest` other than
+  the supplied `FaultProfile`'s is `ProfileDigestMismatch`; a retry observed
+  after a `not_applied` read-back lands as applied; an `applied` outcome with
+  no observation behind it, an attempt alone included, is `OutcomeNotDerived`;
+  `backup_before_rename` encodes the backup hook; `fail_acknowledgement` loses
+  no reply; a GC fault that raises the writer fence heals by reopen; `lost_by`
+  is a set, so a retried identity keeps every losing episode; every oracle
+  checkpoint needs a receipt (`MissingCut`); a lane driven past its bound is
+  `LivenessUnmet`; a kill with a zero process peak is `KilledChildNotCounted`;
+  `lost_by` may not name more episodes than unacknowledged attempts; `attempt`
+  after a `not_applied` read-back reopens the identity as `unknown` (a valid
+  pending state) and an observation or acknowledgement then resolves it to
+  applied; a lost reply on a retry of an already-observed identity is recorded
+  without doubting the applied state; `FaultProfile` has private fields and
+  `RunProfile::fault_profile` as its only constructor, so the fixture holds an
+  approved `RunProfile` and derives the report's `profile_digest` from it;
+  `kernel_commit_fail_after_events`, `message_cleanup_lose_write_reply`, and
+  `identity_sweep_lose_reclaim_reply` encode the last reply-loss and
+  transaction seams; `unknown` after a read-back is `OutcomeNotDerived`; a
+  refusal's error text must be the production variant as printed, not a word
+  containing it; one losing episode named by two effects is
+  `LostReplyClaimedTwice`.
 
 Aging drive (`crates/daemon/tests/eval_aging.rs`, `--all-features`):
 

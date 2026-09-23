@@ -30,6 +30,7 @@ mod decimal;
 mod eligibility;
 mod event;
 mod failure_class;
+mod fault;
 mod generator;
 mod governance;
 mod identity;
@@ -84,6 +85,16 @@ pub use event::*;
 pub use failure_class::{
     Cell, Delivery, DurableState, FAILURE_CLASS_TABLE_DIGEST, FAILURE_CLASS_TABLE_PROTOCOL,
     FailureClass, Outcome, Slice, cells, classify, serialize_table, table_digest,
+};
+pub use fault::{
+    APPLICATION_CRASH, ArtifactDeletionFaultKind, ArtifactGcFaultKind, ArtifactIngestFaultKind,
+    BarrierReceipt, BarrierRefused, BatchFaultKind, CoverageRefused, CutCoverage,
+    DispatchFaultKind, Effect, EffectLedger, EffectOutcome, EffectRefused, EffectState,
+    EpisodeRefused, Expected, ExpectedRefusal, FAULT_REPORT_SCHEMA, FaultAction, FaultEpisode,
+    FaultProfile, FaultReport, FaultReportError, FaultScope, Heal, HealthyCore, KillLabel, Lane,
+    LaneProgress, LivenessRefused, LivenessReport, MaterializationFaultKind, PublicationFaultKind,
+    RecordedRefusal, RestoreFaultKind, SIGKILL, SearchEpisodeFault, TEST_BINARY_CHILD,
+    cut_receipts, parse_fault_report, validate_episodes,
 };
 pub use generator::*;
 pub use governance::{ArmError, ArmRecord, GovernanceArms, HistoryPolicy, pair_set_digest};
