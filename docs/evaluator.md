@@ -2882,8 +2882,8 @@ single deletion, over the final deletion set, was recorded `Slipped` or
 event whose deletion is `InvalidPair` (the evidence) does not count, and
 neither does a record under a foreign digest. `count_triggered` returns those kinds with their counts. A
 scenario whose minimality is `OneMinimal` and has a count-triggered kind must
-carry the compact form (`RecipeRequired`); a scenario without one carries
-none (`RecipeWithoutMultiplicity`); the form's `multiplicities` must equal
+carry the compact form (`RecipeRequired`); a scenario without one, or whose
+minimality is not established, carries none (`RecipeWithoutMultiplicity`); the form's `multiplicities` must equal
 `count_triggered` (`RecipeMultiplicitiesDisagree`); and each `Generation`
 (config and root seed) must regenerate exactly the minimized log once the
 report's deletions for that history are applied (`RecipeDisagrees {

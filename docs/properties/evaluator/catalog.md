@@ -303,8 +303,8 @@ Guarantee: A witness package carries the original failure (RunId, decision tape,
   multiplicity recipe required when the scenario is 1-minimal and a count
   triggers the failure; the recipe regenerates the minimized logs.
 Check: `always` - `WitnessPackage::validate` refuses a recipe missing when
-  required (`RecipeRequired`), present without a count-triggered kind
-  (`RecipeWithoutMultiplicity`), counting other kinds
+  required (`RecipeRequired`), present without a count-triggered kind or
+  without established minimality (`RecipeWithoutMultiplicity`), counting other kinds
   (`RecipeMultiplicitiesDisagree`), or not regenerating the minimized logs
   (`RecipeDisagrees { history }`); a kind is count-triggered when more than one
   aged event of it survives and each one's single deletion was recorded

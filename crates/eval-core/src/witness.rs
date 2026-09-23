@@ -259,15 +259,18 @@ impl WitnessPackage {
     /// A kind is count-triggered when the minimized scenario keeps more than
     /// one aged event of it and deleting any one alone changed the outcome
     /// (`Slipped` or `NotReproduced`). A 1-minimal scenario with such a kind
-    /// carries the compact form; one without carries none; the form must
-    /// regenerate exactly the minimized logs.
+    /// carries the compact form; one without, or one whose minimality is not
+    /// established, carries none; the form must regenerate exactly the
+    /// minimized logs.
     fn check_recipe(&self) -> Result<(), WitnessError> {
         let triggered = self.count_triggered();
         let minimal = matches!(self.shrink.minimality, Minimality::OneMinimal { .. });
         match &self.recipe {
             None if minimal && !triggered.is_empty() => Err(WitnessError::RecipeRequired),
             None => Ok(()),
-            Some(_) if triggered.is_empty() => Err(WitnessError::RecipeWithoutMultiplicity),
+            Some(_) if !minimal || triggered.is_empty() => {
+                Err(WitnessError::RecipeWithoutMultiplicity)
+            }
             Some(recipe) if recipe.multiplicities != triggered => {
                 Err(WitnessError::RecipeMultiplicitiesDisagree)
             }

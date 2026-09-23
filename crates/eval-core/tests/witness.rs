@@ -122,6 +122,11 @@ fn the_package_round_trips_and_carries_the_recipe_for_a_count_triggered_failure(
         reason: eval_core::NotEstablishedReason::ReplayBudgetExhausted,
     };
     not_minimal.shrink.max_replays = not_minimal.shrink.replays;
+    assert_eq!(
+        not_minimal.validate(),
+        Err(WitnessError::RecipeWithoutMultiplicity),
+        "the compact form belongs to a 1-minimal scenario; a budget claim carries none"
+    );
     not_minimal.recipe = None;
     not_minimal.validate().unwrap();
     let mut no_trigger = package.clone();
