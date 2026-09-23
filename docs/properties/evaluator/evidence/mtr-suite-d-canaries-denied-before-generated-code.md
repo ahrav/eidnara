@@ -21,7 +21,9 @@ disabled must report `allowed` for each".
   (`escapee_ready`), writes `../escaped.write`, runs `umount` on the private
   directory, and reads the secret again; `run_canaries` refuses when
   `escapee_ready`, `umount_ran`, or `proc_namespaced` (the PID `/proc/self`
-  names is the canary's own) is false, then samples the alive file twice, 300 ms apart,
+  names is the canary's own) is false, when the contained canary connects to
+  the runner's Unix socket under `$XDG_RUNTIME_DIR` or the control cannot,
+  or when all 200 of the contained canary's forks succeed, then samples the alive file twice, 300 ms apart,
   after the child exited. The escapee exits on its own after three seconds.
 - `crates/eval-core/src/task.rs` `ContainmentReport::validate` over the six
   `Canary` variants.

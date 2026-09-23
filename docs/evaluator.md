@@ -2310,7 +2310,9 @@ canaries and the hidden-test adequacy run are recorded as the self-tests, and
 Containment is `unshare --user --map-root-user --mount --pid --net --fork
 --kill-child --mount-proc`, so `/proc` inside lists the namespace's own
 processes, not the host's; the canary refuses a run whose `/proc/self` names
-a PID other than its own. The script run inside before the agent covers the runner's
+a PID other than its own, one that can connect to a socket the runner
+listens on under the host's runtime directory, or one whose 200 forks all
+succeed. The script run inside before the agent covers the runner's
 private directory with an empty read-only tmpfs, binds the workspace
 writable, then remounts every other mount in the namespace read-only (one
 that refuses, such as a locked autofs, is covered by an empty read-only tmpfs
@@ -2387,8 +2389,11 @@ manifest turned into a directory, say), and the hidden tests from the corpus.
 Nothing in the agent's workspace is executed or written through, so a
 `Cargo.toml` the agent replaced with a symlink or a directory, two
 hidden-test paths it hard-linked together, or a `.cargo/` it made undeletable
-cannot reach the oracle; the agent's versions of those paths are recorded in
-`oracle_tamper` and never honoured. The manifest's `component_versions.judge`
+cannot reach the oracle; the agent's versions of those paths, and a file over
+the read cap at one of them, are recorded in `oracle_tamper` and never
+honoured. The manifest is published before the report, and a report that
+fails to publish takes its manifest back, so a directory holds both or
+neither. The manifest's `component_versions.judge`
 names this judge, `eval-suite-d-hidden-tests/v1`.
 The agent script prints a start line first; stdout without it means the
 containment's own `unshare` or `exec` failed, and the run refuses instead of
