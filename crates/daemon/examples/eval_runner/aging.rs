@@ -861,6 +861,14 @@ impl Copied {
             files,
         })?;
         let corpus = Corpus::open(&self.root);
+        // The prefix projection's source hold rides along in the copy, bound
+        // to a lease epoch this open has advanced past; it is released before
+        // the rebuilt projection captures its own, as the daemon's replacement
+        // cleanup does after a restart.
+        corpus
+            .kernel
+            .reconcile_source_holds(&corpus.binding().consumer_id, now)
+            .unwrap();
         let memory = MemoryStore::open(&daemon::store_descriptor_in(&self.root)).unwrap();
         let copied = SearchProjection::open(&self.root).unwrap();
         copied.verify_connection().unwrap();
@@ -1318,13 +1326,6 @@ fn resumed_life(
 }
 
 pub fn run(config: &Config) -> Result<Run, RunError> {
-    let started_at_ms = i64::try_from(
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_millis(),
-    )
-    .unwrap();
     let profile = profile(
         config.scale,
         config.messages,
@@ -1333,6 +1334,14 @@ pub fn run(config: &Config) -> Result<Run, RunError> {
     );
     profile.approved()?;
     prepare_publish(&config.publish, &[REPORT_FILE, MANIFEST_FILE]).map_err(publish_refused)?;
+    // The manifest's clock and the envelope's start together, as Suite B's do.
+    let started_at_ms = i64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis(),
+    )
+    .unwrap();
     let mut charges = Charges::new(profile.envelope.clone());
     let mut coverage = Coverage::default();
     // Planning runs under the clock: the elapsed bound covers the whole run.

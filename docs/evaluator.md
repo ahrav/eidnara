@@ -2044,7 +2044,11 @@ programming error it panics on), then re-hashes every copied file and refuses an
 malformed copy would otherwise fail its first query), reads each copy's
 integrity on its own
 connection, accepts them against the checkpoint, and reopens the kernel and
-the memory store as they were. The resumed driver's lineage state (each
+the memory store as they were. Before the projection is rebuilt, the prefix
+projection's source hold, which rode along in the copy bound to a lease epoch
+the reopen has advanced past, is released through `reconcile_source_holds`,
+as the daemon's replacement cleanup does after a restart, so the rebuilt
+projection's hold is the only live one. The resumed driver's lineage state (each
 lineage's published objects in commit order, and the objects retired outright)
 is rebuilt from the copied kernel's `object_registry`, not inherited from the
 prefix driver, as a fresh process would have to rebuild it. A copy of another store therefore reads as
@@ -2079,8 +2083,9 @@ store opens (the profile's event bound is the generator's, `messages.max(64)
 the roots, store bytes, elapsed time, and artifact bytes to the envelope, and
 publishes `suite-c-aging-report.json` and `manifest.json` write-then-rename;
 a manifest the directory refuses takes the report back out with it, so a
-reader finds both files or none, as in Suite B. The build identity is frozen
-after planning and before the first life runs.
+reader finds both files or none, as in Suite B. The manifest's clock and the
+envelope's start together after the publish directory is prepared, and the
+build identity is frozen after planning and before the first life runs.
 The manifest carries the aging shell's own root seed and the running binary's
 digest in its identity, says `prefix_then_generate` (the whole history is
 drawn by the seeded generator before the run, so the checkpoint step can be

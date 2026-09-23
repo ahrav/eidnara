@@ -1636,6 +1636,9 @@ bound because it finishes inside the daemon suite's wall clock):
 - `a_copied_root_holding_a_file_the_checkpoint_does_not_list_is_refused_at_reopen`:
   a stray `memory.sqlite-wal` in the copied root panics before any store
   opens.
+- `a_reopened_copy_holds_one_live_source_hold_for_the_projection`: after the
+  reopen the copied kernel holds one live `source_hold` pin, the rebuilt
+  projection's; the prefix projection's stale hold was released.
 - `a_copy_missing_a_store_file_is_refused_at_reopen`: a copy missing
   `kernel/kernel.sqlite`, `memory.sqlite`, or `search/search.sqlite` is
   `FileMissing` naming it, before any store opens.
