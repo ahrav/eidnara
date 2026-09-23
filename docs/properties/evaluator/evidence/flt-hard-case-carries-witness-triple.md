@@ -6,17 +6,22 @@ safety check active while faults are armed, and a bounded healthy-progress
 check; a missing entry is `IncompleteCoverage`, not `Pass`."
 
 ## Evidence trail
-- `crates/eval-core/src/fault.rs:641` `safety_checks_while_armed`; `:683`
-  `validate` refuses `SafetyNeverChecked` when it is zero.
-- `crates/eval-core/src/fault.rs:549` `LivenessReport` and its `verdict`.
-- `crates/eval-core/src/markers.rs:299` `Coverage::complete` refuses
+- `crates/eval-core/src/fault.rs` `FaultReport::safety_checks_while_armed`;
+  `FaultReport::validate` refuses `SafetyNeverChecked` when it is zero.
+- `crates/eval-core/src/fault.rs` `LivenessReport` and its `verdict`;
+  `FaultReport::validate` evaluates it only `if let Some(liveness)`, and
+  `crates/eval-core/tests/fault.rs` validates a report with `liveness: None`,
+  so the progress member is asserted by the drive rather than refused by the
+  report.
+- `crates/eval-core/src/markers.rs` `Coverage::complete` refuses
   `Incomplete { missing }`.
-- `crates/eval-core/tests/fault.rs:297` a missing receipt is incomplete
-  coverage, not a pass.
-- `crates/daemon/tests/eval_fault.rs:512` liveness bounds met with outside-core
-  faults armed.
-- `crates/daemon/examples/eval_runner/fault.rs:154` `Witness::safety_check`
-  counts checks while armed.
+- `crates/eval-core/tests/fault.rs`
+  `a_missing_receipt_is_incomplete_coverage_not_pass`.
+- `crates/daemon/tests/eval_fault.rs`
+  `liveness_bounds_are_met_with_outside_core_faults_armed`.
+- `crates/daemon/examples/eval_runner/fault.rs`
+  `Witness::safety_check_while_armed` counts checks while armed;
+  `Witness::safety_check` after an episode does not.
 
 ## Failure scenario
 A campaign arms a fault, heals it, and only then checks store integrity; the

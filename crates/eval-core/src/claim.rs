@@ -7,6 +7,8 @@ use std::collections::BTreeSet;
 use context_core::canonical_json::is_lower_hex;
 use serde::{Deserialize, Serialize};
 
+use crate::blank;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ClaimClass {
@@ -67,17 +69,26 @@ pub struct TransferCriterion {
 }
 
 impl TransferCriterion {
-    /// A criterion nobody approved (no approver, or no run id of the run it
-    /// was approved at), or one every anchor set would meet, is not a
-    /// criterion.
+    /// A criterion nobody approved, or one every anchor set would meet, is
+    /// not a criterion; both faults are named when both hold. The approving
+    /// run is an `eval-run-id` (64 lowercase hex), not any text; a blank
+    /// family is no family, so requiring one is no floor.
+    pub fn unmet(&self) -> Vec<UnmetClause> {
+        let mut unmet = Vec::new();
+        if blank(&self.approved_by) || !is_lower_hex(&self.approved_at_run_id, 64) {
+            unmet.push(UnmetClause::CriterionNotApproved);
+        }
+        if self.min_valid_tasks == 0
+            || self.required_families.is_empty()
+            || self.required_families.iter().any(|f| blank(f))
+        {
+            unmet.push(UnmetClause::CriterionHasNoFloor);
+        }
+        unmet
+    }
+
     pub fn validate(&self) -> Result<(), UnmetClause> {
-        if self.approved_by.trim().is_empty() || !is_lower_hex(&self.approved_at_run_id, 64) {
-            return Err(UnmetClause::CriterionNotApproved);
-        }
-        if self.min_valid_tasks == 0 || self.required_families.is_empty() {
-            return Err(UnmetClause::CriterionHasNoFloor);
-        }
-        Ok(())
+        self.unmet().into_iter().next().map_or(Ok(()), Err)
     }
 }
 
@@ -89,11 +100,24 @@ pub enum UnmetClause {
     NoAnchorSet,
     AnchorSetIsPilot,
     AnchorTaskNotValid,
+    EmptyAnchorTaskId,
+    /// A task from no named family (blank or whitespace) proves no family
+    /// and is not a task.
+    EmptyAnchorTaskFamily,
+    /// One ID listed twice is one task, whatever its verdicts.
+    DuplicateAnchorTask {
+        id: String,
+    },
     NoTransferCriterion,
     CriterionNotApproved,
     CriterionHasNoFloor,
-    TooFewValidTasks { required: u32, valid: u32 },
-    FamilyMissing { family: String },
+    TooFewValidTasks {
+        required: u32,
+        valid: u32,
+    },
+    FamilyMissing {
+        family: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -124,6 +148,17 @@ pub fn derive_claim_class(
         .into_iter()
         .flat_map(|set| set.tasks.iter())
         .partition(|task| task.verdict == AnchorVerdict::Valid);
+    // The floor counts tasks, not list entries: a repeated, blank, or
+    // family-less ID is one task or none, so a padded list cannot meet it.
+    let valid: Vec<&AnchorTask> = {
+        let mut seen = BTreeSet::new();
+        valid
+            .into_iter()
+            .filter(|task| {
+                !blank(&task.id) && !blank(&task.family) && seen.insert(task.id.as_str())
+            })
+            .collect()
+    };
     match anchor_set {
         None => unmet.push(UnmetClause::NoAnchorSet),
         Some(set) => {
@@ -133,14 +168,30 @@ pub fn derive_claim_class(
             if !skipped.is_empty() {
                 unmet.push(UnmetClause::AnchorTaskNotValid);
             }
+            if set.tasks.iter().any(|task| blank(&task.id)) {
+                unmet.push(UnmetClause::EmptyAnchorTaskId);
+            }
+            if set.tasks.iter().any(|task| blank(&task.family)) {
+                unmet.push(UnmetClause::EmptyAnchorTaskFamily);
+            }
+            let mut ids = BTreeSet::new();
+            let mut duplicates = BTreeSet::new();
+            for task in &set.tasks {
+                if !ids.insert(task.id.as_str()) {
+                    duplicates.insert(task.id.as_str());
+                }
+            }
+            unmet.extend(
+                duplicates
+                    .into_iter()
+                    .map(|id| UnmetClause::DuplicateAnchorTask { id: id.to_string() }),
+            );
         }
     }
     match criterion {
         None => unmet.push(UnmetClause::NoTransferCriterion),
         Some(criterion) => {
-            if let Err(clause) = criterion.validate() {
-                unmet.push(clause);
-            }
+            unmet.extend(criterion.unmet());
             let count = u32::try_from(valid.len()).unwrap_or(u32::MAX);
             if count < criterion.min_valid_tasks {
                 unmet.push(UnmetClause::TooFewValidTasks {

@@ -29,10 +29,11 @@ use std::time::Duration;
 
 use eval_core::{
     Approval, AxisValue, Canary, CanaryVerdict, Carrier, CensorReason, HiddenOutcome, Oracle,
-    ProfileError, Scale, SkipReason, Terminal, WitnessError,
+    ProfileError, Scale, WitnessError,
 };
 use suite_d::{
     CanaryArgs, Config, Containment, Fix, Host, MANIFEST_FILE, REPORT_FILE, RunError, Script,
+    SuiteDSkip, TaskTerminal,
 };
 
 const HOST: Host = Host {
@@ -257,7 +258,7 @@ fn a_mask_removal_probe_that_never_ran_umount_refuses_the_canaries() {
 fn grading_ignores_symlinked_hard_linked_and_undeletable_workspace_entries() {
     use std::os::unix::fs::PermissionsExt;
     let root = tempfile::tempdir().unwrap();
-    let corpus = eval_core::generate_tasks(suite_d::SEED, 1);
+    let corpus = eval_core::generate_tasks(suite_d::SEED, std::num::NonZeroU32::new(1).unwrap());
     let task = &corpus.tasks[0];
     let wrong = task
         .wrong_fixes
@@ -429,7 +430,7 @@ fn reading_the_workspace_skips_fifos_and_oversized_files() {
 #[test]
 fn materializing_ignores_the_host_git_configuration_and_refuses_a_failed_commit() {
     let root = tempfile::tempdir().unwrap();
-    let corpus = eval_core::generate_tasks(suite_d::SEED, 1);
+    let corpus = eval_core::generate_tasks(suite_d::SEED, std::num::NonZeroU32::new(1).unwrap());
     let mut task = corpus.tasks[0].clone();
     // A host that signs every commit but holds no key would fail the
     // initial commit; the fixture must not read that configuration.
@@ -555,7 +556,7 @@ fn a_contained_task_is_judged_by_hidden_tests_the_agent_never_sees() {
     for task in &report.tasks {
         assert_eq!(
             task.terminal,
-            Terminal::Pass,
+            TaskTerminal::Pass,
             "{}: the correct fix passes",
             task.id
         );
@@ -564,11 +565,13 @@ fn a_contained_task_is_judged_by_hidden_tests_the_agent_never_sees() {
             task.oracle_tamper,
             vec![
                 "Cargo.toml".to_string(),
+                "build.rs".to_string(),
                 "tests/hidden_oversized.rs".to_string(),
                 "tests/hidden_sum_of_positives.rs".to_string()
             ],
-            "the planted hidden test, the oversized one, and the symlinked manifest are recorded \
-             and never honoured; nothing copied from a grading tree beside the workspace"
+            "the planted hidden test, the oversized one, the build script, and the symlinked \
+             manifest are recorded and never honoured; nothing copied from a grading tree \
+             beside the workspace"
         );
         assert!(
             task.adequacy
@@ -728,7 +731,7 @@ fn a_wrong_fix_fails_a_no_fix_stays_failed_and_an_exhausted_budget_is_censored()
     let run = suite_d::run(&wrong, HOST).unwrap();
     let wrong_run_id = run.report.eval_run_id.clone();
     for task in &run.report.tasks {
-        assert_eq!(task.terminal, Terminal::Fail);
+        assert_eq!(task.terminal, TaskTerminal::Fail);
         assert_eq!(
             task.hidden["sum_of_positives"],
             HiddenOutcome::Failed,
@@ -739,9 +742,10 @@ fn a_wrong_fix_fails_a_no_fix_stays_failed_and_an_exhausted_budget_is_censored()
             task.oracle_tamper,
             vec![
                 "Cargo.toml/x".to_string(),
+                "build.rs".to_string(),
                 "tests/hidden_sum_of_positives.rs".to_string()
             ],
-            "the manifest directory and the planted test are recorded"
+            "the manifest directory, the build script, and the planted test are recorded"
         );
         let memory = task
             .injection
@@ -775,7 +779,7 @@ fn a_wrong_fix_fails_a_no_fix_stays_failed_and_an_exhausted_budget_is_censored()
         "a different scripted agent is a different run identity"
     );
     for task in &run.report.tasks {
-        assert_eq!(task.terminal, Terminal::Fail, "no fix stays failing");
+        assert_eq!(task.terminal, TaskTerminal::Fail, "no fix stays failing");
         assert_eq!(task.usage.no_progress_iterations, 1);
         assert_eq!(
             task.oracle_tamper,
@@ -797,7 +801,7 @@ fn a_wrong_fix_fails_a_no_fix_stays_failed_and_an_exhausted_budget_is_censored()
     for task in &run.report.tasks {
         assert_eq!(
             task.terminal,
-            Terminal::Censored {
+            TaskTerminal::Censored {
                 reason: CensorReason::MaxToolCalls
             },
             "the budget censors before any hidden test runs"
@@ -846,7 +850,7 @@ fn a_wrong_fix_fails_a_no_fix_stays_failed_and_an_exhausted_budget_is_censored()
     for task in &run.report.tasks {
         assert_eq!(
             task.terminal,
-            Terminal::Censored {
+            TaskTerminal::Censored {
                 reason: CensorReason::HardDeadlineMs
             }
         );
@@ -882,11 +886,14 @@ fn a_host_without_namespaces_skips_every_task_with_no_containment() {
     assert_eq!(
         run.report.containment,
         Containment::Skipped {
-            reason: SkipReason::NoContainment
+            reason: SuiteDSkip::NoContainment
         }
     );
     for task in &run.report.tasks {
-        assert_eq!(task.terminal, Terminal::Skipped(SkipReason::NoContainment));
+        assert_eq!(
+            task.terminal,
+            TaskTerminal::Skipped(SuiteDSkip::NoContainment)
+        );
         assert!(task.hidden.is_empty(), "no agent ran uncontained");
         assert_eq!(
             task.injection.len(),

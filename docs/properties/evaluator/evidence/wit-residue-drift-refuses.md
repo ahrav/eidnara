@@ -6,7 +6,7 @@ a drift gate modelled on the existing cross-root clock-column rule)";
 redaction policy "refuse the frame; never substitute a placeholder".
 
 ## Evidence trail
-- `crates/eval-core/src/witness.rs` `residue_drift` and `check_residue`.
+- `crates/eval-core/src/witness.rs` `residue_drift`.
 - `crates/eval-core/src/witness.rs` `serialize` encodes once, bounds the
   canonical bytes, and scans them; the canonical text is what the shell
   publishes.
@@ -21,7 +21,7 @@ redaction policy "refuse the frame; never substitute a placeholder".
   drops one entry refuses the run with one missing entry and no file
   published.
 - `crates/daemon/tests/eval_shrink.rs` `a_fresh_process_reproduces_the_predicate_and_the_minimized_witness_is_published`:
-  `check_residue` against a fresh child's report passes.
+  `residue_drift` against a fresh child's report passes.
 
 ## Failure scenario
 A later build reclassifies `pid` as `Keep`; without the gate the replay's

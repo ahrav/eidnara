@@ -256,7 +256,24 @@ mod unix {
     fn scripted_summary(prompt: &str) -> Option<String> {
         let (_, body) = prompt.split_once("<new_messages>")?;
         let (body, _) = body.split_once("</new_messages>")?;
-        let lines: Vec<(u64, u64, String)> = body.lines().filter_map(presented_line).collect();
+        // The transcript renders its records in ordinal order, so a header
+        // starts a record only when it continues the sequence; every other
+        // line, including one shaped like a header, is the text of the message
+        // before it, which keeps its newlines.
+        let mut lines: Vec<(u64, u64, String)> = Vec::new();
+        for line in body.lines() {
+            let next = lines.last().map(|(_, end, _)| end + 1);
+            match (presented_line(line), lines.last_mut()) {
+                (Some(presented), _) if next.is_none_or(|next| presented.0 == next) => {
+                    lines.push(presented)
+                }
+                (_, Some((_, _, text))) if !line.trim().is_empty() => {
+                    text.push(' ');
+                    text.push_str(line.trim());
+                }
+                _ => {}
+            }
+        }
         if lines.is_empty() {
             return None;
         }
@@ -264,11 +281,16 @@ mod unix {
         for group in lines.chunks(SUMMARY_CHUNK) {
             let start = group[0].0;
             let end = group[group.len() - 1].1;
+            // Escaped as element content, so a message saying `<T> & B`
+            // leaves the document well-formed; the validator unescapes it.
             let text = group
                 .iter()
                 .map(|(_, _, text)| text.as_str())
                 .collect::<Vec<_>>()
-                .join("; ");
+                .join("; ")
+                .replace('&', "&amp;")
+                .replace('<', "&lt;")
+                .replace('>', "&gt;");
             segments.push_str(&format!(
                 r#"<history_segment start="{start}" end="{end}" title="messages {start} to {end}" episode_type="feature" importance="50"><p1>{text}</p1><p2>{text}</p2><p3>messages {start} to {end}</p3><p4 /></history_segment>"#
             ));
@@ -352,7 +374,7 @@ mod unix {
                                 // the counters.
                                 let _ = ack.send(());
                                 events.emit(BackendEvent::AssistantText {
-                                    text: "fixture-released".to_owned(),
+                                    text: summary.unwrap_or_else(|| "fixture-released".to_owned()),
                                     finish_reason: None,
                                 });
                                 counters.completed.fetch_add(1, Ordering::SeqCst);
@@ -844,22 +866,17 @@ mod unix {
     pub async fn run() -> Result<(), Box<dyn Error + Send + Sync>> {
         let Args { root, cassette } = parse_args()?;
         prepare_state_root(&root)?;
-        let control_path = root.join(CONTROL_FILE);
-        // The lifecycle transaction lock serializes the stale-check, unlink, and bind against another fixture starting on the same root, so two fixtures cannot both read a refused connection and replace each other's socket.
-        let (listener, own_socket) = {
-            let _transaction =
-                host_runtime::LifecycleTransactionLock::acquire_exclusive(Some(&root))?;
-            let listener = Arc::new(bind_control_socket(&control_path)?);
-            let own_socket = socket_identity(&control_path)?;
-            (listener, own_socket)
-        };
-
         let shutdown = CancellationToken::new();
         let backend = ControlledBackend::new(shutdown.clone());
         let mut recording: Option<(Arc<CassetteBackend>, PathBuf)> = None;
         let model_backend: Arc<dyn LlmExecutionBackend> = match &cassette {
             CassetteMode::Off => Arc::clone(&backend) as Arc<dyn LlmExecutionBackend>,
             CassetteMode::Record { path, namespace } => {
+                // The recording is renamed into place at exit; a file already
+                // there is a cassette someone trusts, never replaced.
+                if path.symlink_metadata().is_ok() {
+                    return Err(format!("cassette destination exists: {}", path.display()).into());
+                }
                 let recorder = CassetteBackend::recording(
                     namespace,
                     Arc::clone(&backend) as Arc<dyn LlmExecutionBackend>,
@@ -872,6 +889,17 @@ mod unix {
                 CassetteBackend::replaying(namespace, &file)
                     .map_err(|error| format!("cassette replay refused: {error:?}"))?
             }
+        };
+        // The cassette is checked and loaded above, before the socket is bound:
+        // a refused start returns before there is a socket to leave behind.
+        let control_path = root.join(CONTROL_FILE);
+        // The lifecycle transaction lock serializes the stale-check, unlink, and bind against another fixture starting on the same root, so two fixtures cannot both read a refused connection and replace each other's socket.
+        let (listener, own_socket) = {
+            let _transaction =
+                host_runtime::LifecycleTransactionLock::acquire_exclusive(Some(&root))?;
+            let listener = Arc::new(bind_control_socket(&control_path)?);
+            let own_socket = socket_identity(&control_path)?;
+            (listener, own_socket)
         };
         let publication =
             host_runtime::runtime_dir_path(Some(&root))?.join(host_runtime::CONNECTION_FILE_NAME);

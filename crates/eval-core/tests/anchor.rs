@@ -9,9 +9,10 @@ use eval_core::{
     AnchorVerdict, ClaimClass, ClassifiedControl, Contamination, ControlRefused, ControlVerdict,
     CutoffAudit, CutoffRefused, DisabledReason, Family, HiddenOutcome, InsufficiencyProof,
     InsufficiencyRefused, NoRepositoryControl, PILOT_COMPOSITION, Preparation, ProviderProfile,
-    RealHistorySettings, RepositoryComparison, SettingsRefused, SkipReason, TIME_STUDY_TASKS,
-    Terminal, TimeStudyRefused, TransferCriterion, UnmetClause, UnsupportedReason, WorldProvenance,
-    anchor_set, classify_control, derive_claim_class, future_answers, time_study,
+    RealHistorySettings, RealHistorySkip, RealHistoryUnsupported, RepositoryComparison,
+    SettingsRefused, SkipReason, TIME_STUDY_TASKS, Terminal, TimeStudyRefused, TransferCriterion,
+    UnmetClause, UnsupportedReason, WorldProvenance, anchor_set, classify_control,
+    derive_claim_class, future_answers, time_study,
 };
 use serde_json::json;
 
@@ -415,8 +416,8 @@ fn a_control_marks_memorized_tasks_and_detects_seeded_contamination() {
     );
     for terminal in [
         Terminal::Indeterminate,
-        Terminal::Skipped(SkipReason::MissingCutoffEvidence),
-        Terminal::Unsupported(UnsupportedReason::SourceUnavailable),
+        Terminal::Skipped(SkipReason::CassetteMiss),
+        Terminal::Unsupported(UnsupportedReason::NoMediationBoundary),
         Terminal::Disabled(DisabledReason::FeatureOff),
     ] {
         assert_eq!(
@@ -793,21 +794,19 @@ fn settings_refuse_before_execution_and_reasons_are_typed() {
         Err(SettingsRefused::NoPreparationBound)
     );
     assert_eq!(
-        serde_json::to_value(Terminal::Skipped(SkipReason::MissingCutoffEvidence)).unwrap(),
-        json!({"kind": "skipped", "reason": "missing_cutoff_evidence"})
+        serde_json::to_value(RealHistorySkip::MissingCutoffEvidence).unwrap(),
+        json!({"reason": "missing_cutoff_evidence"})
     );
     assert_eq!(
-        serde_json::to_value(Terminal::Unsupported(UnsupportedReason::SourceUnavailable)).unwrap(),
-        json!({"kind": "unsupported", "reason": "source_unavailable"})
+        serde_json::to_value(RealHistoryUnsupported::SourceUnavailable).unwrap(),
+        json!({"reason": "source_unavailable"})
     );
     assert_eq!(
-        serde_json::to_value(Terminal::Unsupported(
-            UnsupportedReason::UnsupportedRuntime {
-                family: Family::Django
-            }
-        ))
+        serde_json::to_value(RealHistoryUnsupported::UnsupportedRuntime {
+            family: Family::Django
+        })
         .unwrap(),
-        json!({"kind": "unsupported", "reason": "unsupported_runtime", "family": "django"})
+        json!({"reason": "unsupported_runtime", "family": "django"})
     );
 }
 
@@ -839,8 +838,8 @@ fn a_control_needs_a_comparison_that_ran() {
     let ran = control("cargo-0", Terminal::Fail);
     for terminal in [
         Terminal::Indeterminate,
-        Terminal::Skipped(SkipReason::MissingCutoffEvidence),
-        Terminal::Unsupported(UnsupportedReason::SourceUnavailable),
+        Terminal::Skipped(SkipReason::CassetteMiss),
+        Terminal::Unsupported(UnsupportedReason::NoMediationBoundary),
         Terminal::Disabled(DisabledReason::FeatureOff),
     ] {
         assert!(

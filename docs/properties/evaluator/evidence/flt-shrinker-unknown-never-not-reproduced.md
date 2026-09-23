@@ -7,13 +7,13 @@ as `NotReproduced`; outstanding replay effects are bounded." Ticket #765:
 deliberately premature classification fails."
 
 ## Evidence trail
-- `crates/eval-core/src/shrink.rs:107` `classify_replay` maps every
+- `crates/eval-core/src/shrink.rs` `classify_replay` maps every
   `Unknown { reason }` to `CandidateVerdict::Unknown { reason }`.
-- `crates/eval-core/src/shrink.rs:287` `ReplayEffects`: `issue` refuses at
+- `crates/eval-core/src/shrink.rs` `ReplayEffects`: `issue` refuses at
   the bound and on a resolved or outstanding key; `retry` keeps the key;
   `cancel` resolves `Unknown { cancelled }`; `outcome` refuses an outstanding
   key.
-- `crates/eval-core/src/shrink.rs:592` ddmin shrinks only on `Reproduced`;
+- `crates/eval-core/src/shrink.rs` `ddmin` shrinks only on `Reproduced`;
   `one_minimality` counts `Unknown` single deletions and refuses to certify.
 - `crates/daemon/examples/eval_runner/shrink.rs` `Replayer::replay` issues,
   retries once on an exit before the barrier, resolves, and reads the outcome
