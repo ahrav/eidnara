@@ -1207,6 +1207,7 @@ fn the_audit_needs_well_formed_tree_digests() {
     let mut git_tree = audit("cargo-0");
     git_tree.snapshot_digest = "ab".repeat(20);
     git_tree.base_tree_digest = "ab".repeat(20);
+    git_tree.fix_tree_digest = "ef".repeat(20);
     git_tree.validate().unwrap();
 }
 
@@ -1583,4 +1584,31 @@ fn a_proof_ran_over_the_audited_snapshot() {
         InsufficiencyRefused::TreeMismatch,
         "a failing run over another tree proves nothing about the audited snapshot"
     );
+}
+
+#[test]
+fn tree_digests_share_one_format() {
+    let mut mixed = audit("cargo-0");
+    mixed.fix_tree_digest = "ab".repeat(20);
+    assert!(mixed.validate().is_err());
+}
+
+#[test]
+fn with_is_not_chained() {
+    let mut entry = entry("cargo-0", Family::Cargo, 0x10);
+    entry.license = "MIT WITH LLVM-exception WITH GCC-exception".to_string();
+    assert!(entry.validate().is_err());
+}
+
+#[test]
+fn a_hashtag_pull_request_is_found_beside_a_word() {
+    let mut entry = entry("cargo-0", Family::Cargo, 0x10);
+    entry.pull_request = Some(2016);
+    for output in ["PR#2016", "rust-lang/cargo#2016 fixed it"] {
+        assert_eq!(
+            future_answers(&entry, output),
+            vec!["pull_request:2016"],
+            "{output}"
+        );
+    }
 }

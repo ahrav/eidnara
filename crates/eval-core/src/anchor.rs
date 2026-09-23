@@ -230,7 +230,9 @@ fn is_spdx_expression(text: &str) -> bool {
                 // side is a group.
                 OPERATORS.contains(token)
                     && (*token != "WITH"
-                        || (!tokens[i - 1].ends_with(')') && !tokens[i + 1].starts_with('(')))
+                        || (!tokens[i - 1].ends_with(')')
+                            && !tokens[i + 1].starts_with('(')
+                            && tokens.get(i + 2) != Some(&"WITH")))
             } else {
                 let core = token.trim_start_matches('(').trim_end_matches(')');
                 !OPERATORS.contains(token)
@@ -467,7 +469,8 @@ pub enum CutoffRefused {
     FixChangesNothing,
     SnapshotDigestMissing,
     /// A tree digest that is neither a git object id (forty hex) nor a
-    /// protocol digest (sixty-four hex) names no tree.
+    /// protocol digest (sixty-four hex), is all zeroes, or is not in the
+    /// same format as the snapshot digest names no comparable tree.
     MalformedDigest,
     /// The snapshot's tree is not the base commit's tree.
     SnapshotNotBaseTree,
@@ -503,12 +506,14 @@ impl CutoffAudit {
         if self.snapshot_digest.is_empty() {
             return Err(CutoffRefused::SnapshotDigestMissing);
         }
+        let width = self.snapshot_digest.len();
         for digest in [
             &self.snapshot_digest,
             &self.base_tree_digest,
             &self.fix_tree_digest,
         ] {
-            if (!is_lower_hex(digest, 40) && !is_lower_hex(digest, 64))
+            if (width != 40 && width != 64)
+                || !is_lower_hex(digest, width)
                 || digest.bytes().all(|b| b == b'0')
             {
                 return Err(CutoffRefused::MalformedDigest);
@@ -803,15 +808,18 @@ pub fn future_answers(entry: &AnchorEntry, output: &str) -> Vec<String> {
     found
 }
 
-/// `needle` occurs in `output` as a whole token: not followed by a digit,
-/// and not preceded by a name character, so `notexample.invalid/...` does
-/// not name `example.invalid/...` (a `.` before it may, as in `www.`).
+/// `needle` occurs in `output` as a whole number: not followed by a digit,
+/// and, when it begins with a host name rather than `#`, not preceded by a
+/// name character, so `notexample.invalid/...` does not name
+/// `example.invalid/...` (a `.` before it may, as in `www.`) while
+/// `PR#2016` still names `#2016`.
 fn names_whole_number(output: &str, needle: &str) -> bool {
     let bytes = output.as_bytes();
+    let bounded_left = !needle.starts_with('#');
     output.match_indices(needle).any(|(at, _)| {
         let before = at.checked_sub(1).map(|i| bytes[i]);
         let after = bytes.get(at + needle.len());
-        !before.is_some_and(|b| b.is_ascii_alphanumeric() || b == b'-')
+        !(bounded_left && before.is_some_and(|b| b.is_ascii_alphanumeric() || b == b'-'))
             && !after.is_some_and(u8::is_ascii_digit)
     })
 }

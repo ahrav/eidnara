@@ -2469,7 +2469,8 @@ the `/pull/` URLs
 from the URL itself), a `license` that is not an SPDX expression by shape (identifiers of SPDX
 characters, each holding a letter or digit, joined by `AND`, `OR`, or
 `WITH`, with balanced parentheses at operand edges only and `WITH` joining
-one simple license to one exception; not checked against the SPDX list)
+one simple license to one exception, never a group or a second `WITH`; not
+checked against the SPDX list)
 (`TextPersisted`), a
 malformed or all-zero SHA, a fix commit that is the base commit
 (`FixIsBase`), an
@@ -2506,8 +2507,8 @@ from the repository's own commit times and the issue: `task`,
 creation when never edited), `snapshot_digest`, `base_tree_digest`,
 `fix_tree_digest`, `fix_paths_present`, and `fix_descends_from_base`.
 `validate` refuses, in order, a missing snapshot digest,
-a tree digest that is neither forty nor sixty-four lowercase hex or is
-all zeroes (`MalformedDigest`), a base committed after the cutoff, a fix not strictly after it, an issue
+a tree digest that is neither forty nor sixty-four lowercase hex, is all
+zeroes, or differs in format from the snapshot digest (`MalformedDigest`), a base committed after the cutoff, a fix not strictly after it, an issue
 filed after it, issue text edited after it or dated before the issue
 (`IssueTextBeforeIssue`), a snapshot whose digest is not
 the base commit's tree, a fix-added path in the snapshot, a fix that does
@@ -2552,9 +2553,9 @@ control is eligible. `future_answers(entry, output)` names the fix commit
 when any run of hex digits of seven or more, in either case, is a prefix of
 `fix_sha` (the run is taken whole, so `a0123456` does not name
 `0123456…`), and the pull request as `#<n>` or the repository's `/pull/<n>`
-URL as a whole token (not preceded by a name character, so another host
-ending in this one does not match; not followed by a digit), in any letter
-case.
+URL as a whole number (a URL not preceded by a name character, so another
+host ending in this one does not match; `#<n>` beside a word, as in
+`PR#2016`, does; neither followed by a digit), in any letter case.
 
 **Anchor set.** `anchor_set(corpus, role, audits, proofs, controls,
 provider)` folds one pair's evidence into `(AnchorSet, PairAccounting)`. It
