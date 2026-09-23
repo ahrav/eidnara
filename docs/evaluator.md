@@ -1838,28 +1838,34 @@ copied two stores.
 ## Fault shell
 
 `crates/daemon/examples/eval_runner/fault.rs` is the Suite C fault campaign.
-It drives the aging shell's `Stores` through a healthy prefix, a fault phase,
-a recovery by reopen with read-back, and the rest of the history, and records
-every observation in a `Witness` (episodes, cut coverage, effect ledger,
-expected refusals, oracle checkpoints, safety checks) that `FaultReport`
-judges. Every episode is declared before it runs, with the seam's own contract
-sentence, and receipted by what the runner observed, never by the fault it
-meant to inject.
+It drives the aging shell's `Stores` through a healthy prefix, a fault phase
+with a recovery by reopen and read-back after each lost reply, and the rest of
+the history, and records every observation in a `Witness` (episodes, cut
+coverage, effect ledger, expected refusals, oracle checkpoints, safety checks)
+that `FaultReport` judges. Every episode is declared before it runs, with the
+seam's own contract sentence, and receipted by what the runner observed, never
+by the fault it meant to inject.
 
-The fault phase, in order, on one root: a catch-up episode under
-`LoseLocalCommitReply` and one under `LoseAcknowledgementReply` (the effect
-`search_commit:<through>` or `search_ack:<through>` is attempted when the
-drive's observer sees `LocalStaged` or `AcknowledgementRequested` and left
-`Unknown` when the episode ends; the observer events `local_staged`,
-`local_released`, `acknowledgement_requested`, and `acknowledged` are the
-receipts); an external `BEGIN IMMEDIATE` holder on the projection, whose
-episode ends `Blocked(LocalCommitUnresolved)` and whose release lets the next
-episode reach the target; a quiescent copy whose kernel file has one page
-overwritten, refused `IntegrityCheck { kernel }` by `Copied::reopen` before
-any store opens, after which the original reopens in place; the four CAS
-ingest faults (`write`, `file_sync`, `rename`, `after_directory_sync`), each
-refused `IngestionFailClosed` or `ReferenceCommit`, each healed by close and
-reopen and a fresh ingest; two purge-intent deletion faults,
+The fault phase, in order, on one root: an external `BEGIN IMMEDIATE` holder
+on the projection, whose episode ends `Blocked(LocalCommitUnresolved)` and
+whose release lets the next episode reach the target; two healthy steps; then
+a catch-up episode under `LoseLocalCommitReply` and one under
+`LoseAcknowledgementReply`, each followed at once by a recovery (below). The
+production drive reconciles a lost reply and carries on, so a reply-loss
+episode must end `ReachedTarget`; any other end is a failed reconciliation and
+refuses the run. The fault stays armed for the whole episode, so every
+window's effect (`search_commit:<through>` or `search_ack:<through>`) is
+attempted when the drive's observer sees `LocalStaged` or
+`AcknowledgementRequested` and left `Unknown` when the episode ends, and the
+seam's contract fixes `applied` as its expected state before any read-back.
+The observer events `local_staged`, `local_released`,
+`acknowledgement_requested`, and `acknowledged` are the receipts. Next, a
+quiescent copy whose kernel file has one page overwritten, refused
+`IntegrityCheck { kernel }` by `Copied::reopen` before any store opens, after
+which the original reopens in place; the four CAS ingest faults (`write`,
+`file_sync`, `rename`, `after_directory_sync`), each refused
+`IngestionFailClosed` or `ReferenceCommit`, each healed by close and reopen
+and a fresh ingest; two purge-intent deletion faults,
 `intent_storage_exhausted` (`StorageExhausted`, consumed; a plain ingest
 succeeds without a reopen) and `intent_append` (`PurgeIntent`, healed by
 reopen). After every EIO, before its reopen, a plain ingest must be refused
@@ -1881,21 +1887,29 @@ of the ingested evidence leaves the next catch-up episode
 R11 and R24 are declared `expected_refusal` episodes, with heals `reopen` and
 `permanent`, and recorded as expected refusals.
 
-Recovery closes the stores, reads every lost reply back by its identity from
+A recovery closes the stores, reads every lost reply back by its identity from
 the closed files (`projection_checkpoint.checkpoint_commit_seq` for a local
 commit, `outbox_consumers.checkpoint_commit_seq` for an acknowledgement,
-`embedding_jobs.state` for a publication), and only then reopens; the
+`embedding_jobs.state` for a publication), and only then reopens. Both
+checkpoints only advance, so any catch-up between a reply-loss episode and its
+read-back would make every read-back `applied`; the runner records where the
+faulted episode left the checkpoint and refuses a read-back that finds it
+further on (`ReadBackMasked`), leaving the ledger untouched. That is why each
+reply-loss episode recovers at once, and why the publication faults are read
+back by the recovery that ends the fault phase, right after R11: the
 committed-then-lost publication reads back `applied` and the rolled-back one
-`not_applied`, and the run refuses if either expectation differs. The reopen
+`not_applied`. Before publishing, the run refuses unless every lost reply has
+exactly one fixed expectation and its read-back matches it. The reopen
 rebuilds the projection at the kernel tip, which is also what clears the R11
 stall: the stall is production's refusal, the rebuild is production's heal,
 and the report records both. The rest of the history then runs on the
-reopened stores. `AtQuiescence`, `AfterFaultPhase`, `AfterRecovery`, and
-`EndOfRun` are receipted where the runner reached them. A safety check runs
-after every episode on the aging drive's stores while its fault is armed (the
-R24 episode's memory store is not one of them): the projection connection
-verifies, no descriptor claims a commit past the tip or an invalidation before
-its creation, and the projection never runs ahead of the kernel.
+reopened stores. `AtQuiescence`, `AfterFaultPhase`, `AfterRecovery` (reached
+three times), and `EndOfRun` are receipted where the runner reached them. A
+safety check runs after every episode on the aging drive's stores while its
+fault is armed and after every reopen (the R24 episode's memory store is not
+one of them): the projection connection verifies, no descriptor claims a
+commit past the tip or an invalidation before its creation, and the
+projection never runs ahead of the kernel.
 
 Not in this shell: a process kill at a named cut, a held publication through
 the dispatcher gate, and the liveness mode; the run publishes `liveness:
