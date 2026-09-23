@@ -261,11 +261,27 @@ pub enum CutoffRefused {
     IssueAfterCutoff,
     FutureContentInSnapshot,
     SnapshotDigestMissing,
+    AuditForOtherTask,
+    /// The audit judged a cutoff other than the corpus row's, so its
+    /// timestamps say nothing about the row's cutoff.
+    CutoffMismatch,
 }
 
 debug_display!(CutoffRefused);
 
 impl CutoffAudit {
+    /// Validates the audit as evidence for `entry`: it must name the entry's
+    /// task and judge the entry's cutoff before its own timestamps count.
+    pub fn validate_for(&self, entry: &AnchorEntry) -> Result<(), CutoffRefused> {
+        if self.task != entry.id {
+            return Err(CutoffRefused::AuditForOtherTask);
+        }
+        if self.cutoff_ms != entry.cutoff_ms {
+            return Err(CutoffRefused::CutoffMismatch);
+        }
+        self.validate()
+    }
+
     pub fn validate(&self) -> Result<(), CutoffRefused> {
         if self.snapshot_digest.is_empty() {
             return Err(CutoffRefused::SnapshotDigestMissing);
@@ -289,9 +305,12 @@ impl CutoffAudit {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "reason", rename_all = "snake_case", deny_unknown_fields)]
 pub enum InsufficiencyRefused {
-    /// The tree at the cutoff already passes: there is nothing to fix.
+    /// Every hidden test that reached a verdict passed at the cutoff.
     TreeAlreadyPasses,
+    /// No hidden test reached a verdict: the run is empty or every test
+    /// errored.
     NothingExecuted,
+    ProofForOtherTask,
 }
 
 debug_display!(InsufficiencyRefused);
@@ -306,14 +325,26 @@ pub struct InsufficiencyProof {
 }
 
 impl InsufficiencyProof {
+    /// A proof needs at least one hidden test that ran and failed; an
+    /// `errored` test never reached a verdict and proves nothing.
     pub fn validate(&self) -> Result<(), InsufficiencyRefused> {
-        if self.hidden.is_empty() {
-            return Err(InsufficiencyRefused::NothingExecuted);
+        if self.hidden.values().any(|o| *o == HiddenOutcome::Failed) {
+            return Ok(());
         }
-        if self.hidden.values().all(|o| *o == HiddenOutcome::Passed) {
-            return Err(InsufficiencyRefused::TreeAlreadyPasses);
+        Err(
+            if self.hidden.values().any(|o| *o == HiddenOutcome::Passed) {
+                InsufficiencyRefused::TreeAlreadyPasses
+            } else {
+                InsufficiencyRefused::NothingExecuted
+            },
+        )
+    }
+
+    pub fn validate_for(&self, entry: &AnchorEntry) -> Result<(), InsufficiencyRefused> {
+        if self.task != entry.id {
+            return Err(InsufficiencyRefused::ProofForOtherTask);
         }
-        Ok(())
+        self.validate()
     }
 }
 
@@ -375,19 +406,31 @@ pub enum ControlVerdict {
     Excluded { contamination: Contamination },
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ClassifiedControl {
+    pub task: String,
+    pub provider: ProviderProfile,
+    pub verdict: ControlVerdict,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ControlRefused {
     /// The control and its comparison differ in image, identity, or rules.
     NotComparable { field: &'static str },
+    /// The control did not run, so it cannot show the statement alone was
+    /// insufficient.
+    NotRun { terminal: Terminal },
 }
 
 debug_display!(ControlRefused);
 
-/// Classifies one control against the comparison it must match.
+/// Classifies comparable controls with terminal `Pass`, `Fail`, or
+/// `Censored`.
 pub fn classify_control(
     control: &NoRepositoryControl,
     comparison: &NoRepositoryControl,
-) -> Result<ControlVerdict, ControlRefused> {
+) -> Result<ClassifiedControl, ControlRefused> {
     for (field, same) in [
         ("task", control.task == comparison.task),
         ("provider", control.provider == comparison.provider),
@@ -404,7 +447,15 @@ pub fn classify_control(
             return Err(ControlRefused::NotComparable { field });
         }
     }
-    Ok(if !control.repository_access.is_empty() {
+    if !matches!(
+        control.terminal,
+        Terminal::Pass | Terminal::Fail | Terminal::Censored { .. }
+    ) {
+        return Err(ControlRefused::NotRun {
+            terminal: control.terminal,
+        });
+    }
+    let verdict = if !control.repository_access.is_empty() {
         ControlVerdict::Excluded {
             contamination: Contamination::RepositoryAccess {
                 evidence: control.repository_access.clone(),
@@ -422,22 +473,55 @@ pub fn classify_control(
         }
     } else {
         ControlVerdict::Eligible
+    };
+    Ok(ClassifiedControl {
+        task: control.task.clone(),
+        provider: control.provider.clone(),
+        verdict,
     })
 }
 
 /// Names the fix commit and pull request a control's output must not know.
+/// A pull request counts as `#<n>` or as the repository's `/pull/<n>` URL,
+/// each as a whole number, so `#20` is not found inside `#2016`.
 pub fn future_answers(entry: &AnchorEntry, output: &str) -> Vec<String> {
     let mut found = Vec::new();
-    if output.contains(&entry.fix_sha[..12]) {
+    if entry
+        .fix_sha
+        .get(..12)
+        .is_some_and(|prefix| output.contains(prefix))
+    {
         found.push(format!("fix_sha:{}", entry.fix_sha));
     }
-    if let Some(pr) = entry
-        .pull_request
-        .filter(|pr| output.contains(&format!("#{pr}")))
-    {
+    if let Some(pr) = entry.pull_request.filter(|pr| {
+        names_whole_number(output, &format!("#{pr}"))
+            || names_whole_number(
+                output,
+                &format!("{}/pull/{pr}", repository_web_path(&entry.repository)),
+            )
+    }) {
         found.push(format!("pull_request:{pr}"));
     }
     found
+}
+
+fn names_whole_number(output: &str, needle: &str) -> bool {
+    output.match_indices(needle).any(|(at, _)| {
+        !output
+            .as_bytes()
+            .get(at + needle.len())
+            .is_some_and(u8::is_ascii_digit)
+    })
+}
+
+/// The clone URL without its scheme, trailing slash, or `.git` suffix,
+/// which prefixes pull-request URLs for the repository.
+fn repository_web_path(repository: &str) -> &str {
+    let path = repository
+        .split_once("://")
+        .map_or(repository, |(_, rest)| rest)
+        .trim_end_matches('/');
+    path.strip_suffix(".git").unwrap_or(path)
 }
 
 /// One provider pair's anchor accounting: every task keeps its row and its
@@ -450,19 +534,22 @@ pub struct PairAccounting {
     pub excluded: BTreeMap<String, Contamination>,
     pub cutoff_invalid: BTreeMap<String, CutoffRefused>,
     pub insufficiency_missing: BTreeSet<String>,
+    pub insufficiency_refused: BTreeMap<String, InsufficiencyRefused>,
+    pub control_missing: BTreeSet<String>,
 }
 
 /// Folds audits, insufficiency proofs, and controls for one provider pair
-/// into the anchor set `derive_claim_class` judges: a task is `valid` only
-/// with a passing cutoff audit, an insufficiency proof, and an eligible
-/// control; a memorized or contaminated task is `residue`; a failed audit is
-/// `cutoff_invalid`.
+/// into the anchor set `derive_claim_class` judges. A task is `valid` only
+/// when its audit and proof name it and pass, and its control was classified
+/// for it under `provider` as eligible; a failed audit is `cutoff_invalid`
+/// and every other task is `residue`. Each task lands in exactly one
+/// accounting set, at its first failing gate.
 pub fn anchor_set(
     corpus: &AnchorCorpus,
     role: AnchorRole,
     audits: &BTreeMap<String, CutoffAudit>,
     proofs: &BTreeMap<String, InsufficiencyProof>,
-    controls: &BTreeMap<String, ControlVerdict>,
+    controls: &BTreeMap<String, ClassifiedControl>,
     provider: &ProviderProfile,
 ) -> (AnchorSet, PairAccounting) {
     let mut accounting = PairAccounting {
@@ -471,6 +558,8 @@ pub fn anchor_set(
         excluded: BTreeMap::new(),
         cutoff_invalid: BTreeMap::new(),
         insufficiency_missing: BTreeSet::new(),
+        insufficiency_refused: BTreeMap::new(),
+        control_missing: BTreeSet::new(),
     };
     let tasks = corpus
         .entries
@@ -478,13 +567,32 @@ pub fn anchor_set(
         .map(|entry| {
             let audit = audits
                 .get(&entry.id)
-                .map(CutoffAudit::validate)
-                .unwrap_or(Err(CutoffRefused::SnapshotDigestMissing));
-            let proof = proofs.get(&entry.id).map(InsufficiencyProof::validate);
-            let verdict = match (audit, proof, controls.get(&entry.id)) {
+                .map_or(Err(CutoffRefused::SnapshotDigestMissing), |audit| {
+                    audit.validate_for(entry)
+                });
+            let proof = proofs.get(&entry.id).map(|proof| proof.validate_for(entry));
+            let control = controls
+                .get(&entry.id)
+                .filter(|c| c.task == entry.id && c.provider == *provider)
+                .map(|c| &c.verdict);
+            let verdict = match (audit, proof, control) {
                 (Err(refused), _, _) => {
                     accounting.cutoff_invalid.insert(entry.id.clone(), refused);
                     AnchorVerdict::CutoffInvalid
+                }
+                (Ok(()), None, _) => {
+                    accounting.insufficiency_missing.insert(entry.id.clone());
+                    AnchorVerdict::Residue
+                }
+                (Ok(()), Some(Err(refused)), _) => {
+                    accounting
+                        .insufficiency_refused
+                        .insert(entry.id.clone(), refused);
+                    AnchorVerdict::Residue
+                }
+                (Ok(()), Some(Ok(())), None) => {
+                    accounting.control_missing.insert(entry.id.clone());
+                    AnchorVerdict::Residue
                 }
                 (Ok(()), Some(Ok(())), Some(ControlVerdict::Eligible)) => {
                     accounting.eligible.insert(entry.id.clone());
@@ -494,10 +602,6 @@ pub fn anchor_set(
                     accounting
                         .excluded
                         .insert(entry.id.clone(), contamination.clone());
-                    AnchorVerdict::Residue
-                }
-                _ => {
-                    accounting.insufficiency_missing.insert(entry.id.clone());
                     AnchorVerdict::Residue
                 }
             };

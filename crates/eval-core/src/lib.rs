@@ -49,10 +49,11 @@ mod witness;
 
 pub use anchor::{
     ANCHOR_CORPUS_DIGEST_PROTOCOL, ANCHOR_CORPUS_SCHEMA, Affordability, AnchorCorpus, AnchorEntry,
-    AnchorError, Contamination, ControlRefused, ControlVerdict, CutoffAudit, CutoffRefused, Family,
-    InsufficiencyProof, InsufficiencyRefused, NoRepositoryControl, PILOT_COMPOSITION,
-    PairAccounting, Preparation, ProviderProfile, RealHistorySettings, SettingsRefused,
-    TIME_STUDY_TASKS, TimeStudyRefused, anchor_set, classify_control, future_answers, time_study,
+    AnchorError, ClassifiedControl, Contamination, ControlRefused, ControlVerdict, CutoffAudit,
+    CutoffRefused, Family, InsufficiencyProof, InsufficiencyRefused, NoRepositoryControl,
+    PILOT_COMPOSITION, PairAccounting, Preparation, ProviderProfile, RealHistorySettings,
+    SettingsRefused, TIME_STUDY_TASKS, TimeStudyRefused, anchor_set, classify_control,
+    future_answers, time_study,
 };
 pub use campaign::{
     Approval, Ceilings, DisabledReason, Envelope, EnvelopeExceeded, ProfileError,
