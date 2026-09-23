@@ -2381,6 +2381,58 @@ with no `sleep` left behind; a host seam without namespaces skips every
 task; an unaccepted witness, a missing one, and an unapproved profile refuse
 before anything is published.
 
+## Anchor shell
+
+`crates/daemon/examples/eval_runner/anchor.rs` runs real-history anchors
+through two host seams: `Host::clone` puts a repository at its clone URL into
+a directory, and `Host::fetch` returns the issue text and creation time at
+run time; neither is persisted. No subcommand exists yet; the daemon test
+drives the shell against local repositories. `run` approves the profile
+(Suite D's budgets), validates the settings and the corpus, accepts the
+Phase 5 witness, freezes the analysis family, and then prepares every entry,
+measuring each preparation: clone, `git show -s --format=%ct` for the base
+and fix commits, `git archive` of the base into the snapshot, the fix's
+added paths and its added `tests/*.rs` files (the task's hidden tests) and
+its other changed files (what a memorizing control reproduces), the snapshot
+digest, and the `CutoffAudit`. After the first five preparations
+`time_study` projects the pilot; `StopForApproval` returns
+`RunError::StopForApproval` and nothing is published.
+
+Per task: a clone, fetch, or commit that is missing is
+`Unsupported(SourceUnavailable)`; a Django task is
+`Unsupported(UnsupportedRuntime { django })`; a failed audit is
+`Skipped(MissingCutoffEvidence)` with the refusal recorded and no run. An
+audited task gets the current-tree-only run: the snapshot copied into a fresh
+tree and its hidden tests run with no agent through `run_hidden`; the
+`InsufficiencyProof` must fail. Then, per provider profile, the
+no-repository control: an otherwise empty workspace holding `STATEMENT.md`,
+the scripted control agent inside the Suite D containment (`memorize`
+reproduces the fix's changed files into `patch/`, `reach_repository` reads the
+snapshot it was not given, `cite_future` names the pull request), each tool
+call announced on an `eval-anchor-tool` line; the announced calls naming the
+repository or snapshot roots are `repository_access`, the outputs are
+scanned with `future_answers`, and the patch is graded on a fresh copy of the
+snapshot with the hidden tests. `classify_control` judges the control against
+its own descriptor (task, provider, execution image, family digest).
+`anchor_set` folds audits, proofs, and verdicts per provider pair into the
+anchor set (role `pilot`) and `derive_claim_class` derives one claim per
+pair with the settings' criterion.
+
+The report `eval-anchor-report/v1` carries the corpus digest, the role, the
+time study, one `TaskOutcome` per entry (terminal, measured preparation, the
+audit and any refusal, the proof, the controls and verdicts per pair), the
+per-pair accounting, and the claims. `crates/daemon/tests/eval_anchor.rs`
+builds five Cargo-family repositories from generated tasks (the base commit
+holds the defect, the fix commit adds the correct body and the tests): three
+tasks audited, proven insufficient, and eligible under two provider pairs;
+one early fix skipped with `fix_not_after_cutoff`; one unfetchable issue
+`source_unavailable`; every claim `generated_phase1` with `AnchorSetIsPilot`;
+issue text absent from the report; a memorizing script excluded on every
+task for both pairs with its reason kept; a contaminated script's repository
+read and pull-request citation detected; an unaffordable time study stopping
+for approval with nothing published; missing settings and a missing witness
+refusing before execution.
+
 ## Coverage markers
 
 `MARKERS` is the evaluator-owned registry: constant, globally unique names,

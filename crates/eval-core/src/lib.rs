@@ -22,7 +22,7 @@ mod censoring;
 mod census;
 mod checkpoint;
 mod claim;
-mod decimal;
+pub mod decimal;
 mod eligibility;
 mod event;
 mod failure_class;

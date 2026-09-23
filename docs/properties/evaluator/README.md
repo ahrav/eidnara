@@ -1570,6 +1570,13 @@ The METHOD-ordered records are in [`catalog.md`](catalog.md).
 - `the_corpus_is_deterministic_valid_and_carries_every_carrier`, `a_task_refuses_a_missing_or_visible_oracle_and_a_text_only_fix`, `adequacy_needs_fail_to_pass_and_every_wrong_fix_killed_by_its_named_test`, `the_terminal_comes_from_the_hidden_tests_after_the_budget`, `an_agent_cannot_select_modify_or_replace_the_oracle`, `injection_effects_are_observed_independently_and_echo_alone_is_exposure`, `every_canary_must_be_denied_inside_and_allowed_under_the_inverted_control`, `admission_refuses_until_witness_self_tests_and_frozen_family_are_present`, `wire_names_are_pinned` (`crates/eval-core/tests/task.rs`).
 - `a_contained_task_is_judged_by_hidden_tests_the_agent_never_sees`, `a_wrong_fix_fails_a_no_fix_stays_failed_and_an_exhausted_budget_is_censored`, `a_host_without_namespaces_skips_every_task_with_no_containment`, `admission_refuses_without_an_accepted_witness_or_an_approved_profile`, `the_suite_d_flags_are_parsed` (`crates/daemon/tests/eval_suite_d.rs`; `xc-suite-d-task-outcome-from-hidden-test`, `mtr-hidden-test-adequacy-kills-wrong-fix`, `mtr-suite-d-canaries-denied-before-generated-code`, `mtr-injection-cases-present-and-scored-per-stage`). Real namespaces where the host has them, real `cargo test` for the hidden tests; markers `xc_suite_d_task_outcome_from_hidden_test`, `mtr_hidden_test_adequacy_kills_wrong_fix`, `mtr_suite_d_canaries_denied_before_generated_code`, `mtr_suite_d_no_containment_skips`.
 
+## Phase 6 executed checks: real-history anchors
+
+The METHOD-ordered records are in [`catalog.md`](catalog.md).
+
+- `the_corpus_persists_identifiers_only_and_is_the_pilot_composition`, `the_time_study_projects_the_pilot_and_stops_for_approval_past_the_bound`, `the_cutoff_audit_excludes_future_code_and_future_issue_knowledge`, `the_insufficiency_proof_is_an_executed_failing_run`, `a_control_marks_memorized_tasks_and_detects_seeded_contamination`, `the_pilot_alone_never_transfers_and_exclusions_keep_their_accounting`, `settings_refuse_before_execution_and_reasons_are_typed` (`crates/eval-core/tests/anchor.rs`).
+- `every_anchor_task_has_an_audit_a_proof_and_a_control_and_the_pilot_never_transfers`, `a_memorizing_provider_is_excluded_for_its_pair_and_seeded_contamination_is_detected`, `an_unaffordable_time_study_stops_for_approval_before_the_pilot_is_paid_for`, `missing_settings_and_an_unaccepted_witness_refuse_before_execution` (`crates/daemon/tests/eval_anchor.rs`; `mtr-anchor-task-cutoff-snapshot-and-insufficiency-proof`, `mtr-generated-world-claims-phase1-only`, `mtr-skipped-cases-carry-closed-vocabulary-reason`). Local repositories built from generated tasks; real clones, snapshots, audits, and controls inside the Suite D containment.
+
 ## Gaps recorded here
 
 - `sls-liveness-memory-reviewer-work-bounded`: the fault campaign's liveness
@@ -1677,6 +1684,11 @@ The METHOD-ordered records are in [`catalog.md`](catalog.md).
   (`ing-adapter-ingested-no-production-caller` in `catalog.md`). The Pi
   adapter (`pi_units`) has no evaluator arm at all
   (`ing-pi-adapter-unexercised-by-evaluator`).
+- No Cargo, Tokio, or Django upstream task has been prepared: the anchor
+  shell has run only against local repositories built from generated tasks,
+  so the pilot's measured preparation time and its affordability are not yet
+  recorded, Django tasks are `unsupported_runtime`, and no subcommand drives
+  the shell.
 - Suite D's agent is scripted by the runner; no live model or OpenCode
   session runs a generated task yet, so `retrieved` and `packed` are
   `not_measurable` and the empirical Suite D acceptance waits on a live

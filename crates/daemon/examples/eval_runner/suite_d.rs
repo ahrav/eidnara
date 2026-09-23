@@ -259,7 +259,7 @@ done && shift 2 && exec "$@""#;
 
 /// `unshare` with user, mount, PID, and network namespaces, killed with the
 /// namespace init. Only `PATH`, `HOME`, and `inner`'s own variables cross.
-fn contain(private: &Path, workspace: &Path, inner: &Command) -> Command {
+pub fn contain(private: &Path, workspace: &Path, inner: &Command) -> Command {
     let mut command = Command::new("unshare");
     command
         .args([
@@ -317,7 +317,7 @@ pub fn namespaces_available() -> bool {
 
 /// Runs `command` within `deadline`; past it the child, and everything in its
 /// namespace, is killed and reaped, and `None` is returned.
-fn run_bounded(
+pub fn run_bounded(
     mut command: Command,
     deadline: Duration,
 ) -> Result<Option<(ExitStatus, String)>, RunError> {
@@ -411,7 +411,7 @@ fn run_canaries(
     ]))
 }
 
-fn write_files(root: &Path, files: &Files) -> std::io::Result<()> {
+pub fn write_files(root: &Path, files: &Files) -> std::io::Result<()> {
     for (path, content) in files {
         let target = root.join(path);
         std::fs::create_dir_all(target.parent().unwrap())?;
@@ -421,7 +421,7 @@ fn write_files(root: &Path, files: &Files) -> std::io::Result<()> {
 }
 
 /// Every regular file under `root` except `.git`; symlinks are not followed.
-fn read_files(root: &Path) -> std::io::Result<Files> {
+pub fn read_files(root: &Path) -> std::io::Result<Files> {
     fn walk(root: &Path, dir: &Path, out: &mut Files) -> std::io::Result<()> {
         for entry in std::fs::read_dir(dir)? {
             let entry = entry?;
@@ -477,21 +477,40 @@ fn hidden_results(
     charges: &mut Charges,
 ) -> Result<HiddenResults, RunError> {
     std::fs::write(workspace.join("Cargo.toml"), &task.files["Cargo.toml"])?;
+    let tests: Vec<(String, String)> = task
+        .hidden_tests
+        .iter()
+        .map(|test| (test.name.clone(), test.content.clone()))
+        .collect();
+    run_hidden(workspace, &tests, target, deadline, charges)
+}
+
+/// Writes `tests` as `tests/hidden_<name>.rs` over whatever the workspace
+/// holds (a `tests` entry that is not a directory and a symlink at a test's
+/// path are removed first, `.cargo/` is dropped) and runs each under the
+/// runner's own authority, outside any containment, within `deadline`.
+pub fn run_hidden(
+    workspace: &Path,
+    tests: &[(String, String)],
+    target: &Path,
+    deadline: Duration,
+    charges: &mut Charges,
+) -> Result<HiddenResults, RunError> {
     let _ = std::fs::remove_dir_all(workspace.join(".cargo"));
-    let tests = workspace.join("tests");
-    if std::fs::symlink_metadata(&tests).is_ok_and(|meta| !meta.is_dir()) {
-        std::fs::remove_file(&tests)?;
+    let dir = workspace.join("tests");
+    if std::fs::symlink_metadata(&dir).is_ok_and(|meta| !meta.is_dir()) {
+        std::fs::remove_file(&dir)?;
     }
-    for test in &task.hidden_tests {
-        let path = workspace.join(test.path());
+    std::fs::create_dir_all(&dir)?;
+    for (name, content) in tests {
+        let path = dir.join(format!("hidden_{name}.rs"));
         if std::fs::symlink_metadata(&path).is_ok_and(|m| m.is_symlink()) {
             std::fs::remove_file(&path)?;
         }
-        std::fs::create_dir_all(&tests)?;
-        std::fs::write(path, &test.content)?;
+        std::fs::write(path, content)?;
     }
     let mut results = HiddenResults::new();
-    for test in &task.hidden_tests {
+    for (name, _) in tests {
         let mut command = Command::new("cargo");
         command
             .args([
@@ -499,7 +518,7 @@ fn hidden_results(
                 "--offline",
                 "--quiet",
                 "--test",
-                &format!("hidden_{}", test.name),
+                &format!("hidden_{name}"),
             ])
             .current_dir(workspace)
             .env("CARGO_TARGET_DIR", target)
@@ -523,7 +542,7 @@ fn hidden_results(
             }
             _ => HiddenOutcome::Errored,
         };
-        results.insert(test.name.clone(), outcome);
+        results.insert(name.clone(), outcome);
     }
     Ok(results)
 }
