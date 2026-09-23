@@ -7,7 +7,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use context_core::canonical_json::protocol_digest;
+use context_core::canonical_json::{is_lower_hex, protocol_digest};
 use serde::{Deserialize, Serialize};
 
 use crate::anchor::ProviderProfile;
@@ -35,6 +35,19 @@ pub struct JudgeIdentity {
     pub provider: ProviderProfile,
     pub prompt_digest: String,
     pub rubric_digest: String,
+}
+
+impl JudgeIdentity {
+    /// The first digest that is not 64 lowercase hex characters, by field.
+    fn malformed_digest(&self) -> Option<&'static str> {
+        [
+            ("prompt_digest", &self.prompt_digest),
+            ("rubric_digest", &self.rubric_digest),
+        ]
+        .into_iter()
+        .find(|(_, digest)| !is_lower_hex(digest, 64))
+        .map(|(field, _)| field)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -78,6 +91,14 @@ impl CalibrationSet {
     }
 
     pub fn validate(&self) -> Result<(), CalibrationRefused> {
+        if self.schema != JUDGE_SCHEMA {
+            return Err(CalibrationRefused::SchemaMismatch {
+                found: self.schema.clone(),
+            });
+        }
+        if let Some(field) = self.judge.malformed_digest() {
+            return Err(CalibrationRefused::MalformedDigest { field });
+        }
         if self.human_labels.is_empty() {
             return Err(CalibrationRefused::EmptyCalibrationSet);
         }
@@ -105,6 +126,14 @@ pub enum CalibrationRefused {
         planned: u32,
     },
     EmptyCalibrationSet,
+    SchemaMismatch {
+        found: String,
+    },
+    /// A judge digest is not 64 lowercase hex characters, so two prompts or
+    /// rubrics could share it.
+    MalformedDigest {
+        field: &'static str,
+    },
     /// The calibration set was frozen with another judge, so it anchors
     /// nothing this judge scored.
     CalibrationJudgeDiffers,
@@ -321,6 +350,9 @@ pub enum JudgeRefused {
         pair: String,
         order: Order,
     },
+    MalformedDigest {
+        field: &'static str,
+    },
     Blinding(BlindingRefused),
 }
 
@@ -342,6 +374,9 @@ pub fn judge_pairs(
     calls: &[JudgeCall],
     canaries: &[String],
 ) -> Result<Vec<PairJudgment>, JudgeRefused> {
+    if let Some(field) = judge.malformed_digest() {
+        return Err(JudgeRefused::MalformedDigest { field });
+    }
     let mut known = BTreeSet::new();
     for pair in pairs {
         if !known.insert(pair.id.as_str()) {
@@ -591,10 +626,19 @@ pub enum LiveSliceRefused {
     /// A recorded live run presented as deterministic evidence.
     RelabelledReplayable,
     NoTasks,
+    /// One task reported twice would be weighted twice.
+    DuplicateTask {
+        task: String,
+    },
     /// A task's summary is not what its attempts and the slice's `k` give.
     InconsistentTask {
         task: String,
     },
+    /// The provider profile is not one of the two approved by the settings.
+    UnapprovedProvider {
+        provider: String,
+    },
+    Settings(LiveSettingsRefused),
     Statistics(StatisticsError),
 }
 
@@ -606,17 +650,33 @@ fn summarize(attempts: &[ArmResult], k: u32) -> Result<(PassK, bool), LiveSliceR
     Ok((pass_k, indeterminate))
 }
 
+fn first_duplicate_task<'a>(mut tasks: impl Iterator<Item = &'a str>) -> Option<String> {
+    let mut seen = BTreeSet::new();
+    tasks.find(|t| !seen.insert(*t)).map(str::to_string)
+}
+
 /// Summarizes the live slice with the inherited conservative rules: pass@1,
 /// the repeat counts, the censoring rate, and pass^k as an interval; all
-/// attempts censored is `indeterminate`.
+/// attempts censored is `indeterminate`. Only validated settings and one of
+/// their two approved profiles construct a report; `k` is the settings'.
 pub fn live_slice(
+    settings: &LiveSettings,
     provider: &ProviderProfile,
-    k: u32,
     tasks: &[LiveTask],
 ) -> Result<LiveSliceReport, LiveSliceRefused> {
+    settings.validate().map_err(LiveSliceRefused::Settings)?;
+    if !settings.providers.contains(provider) {
+        return Err(LiveSliceRefused::UnapprovedProvider {
+            provider: provider.key(),
+        });
+    }
     if tasks.is_empty() {
         return Err(LiveSliceRefused::NoTasks);
     }
+    if let Some(task) = first_duplicate_task(tasks.iter().map(|t| t.task.as_str())) {
+        return Err(LiveSliceRefused::DuplicateTask { task });
+    }
+    let k = settings.k;
     let reports = tasks
         .iter()
         .map(|task| {
@@ -650,6 +710,9 @@ impl LiveSliceReport {
         }
         if self.tasks.is_empty() {
             return Err(LiveSliceRefused::NoTasks);
+        }
+        if let Some(task) = first_duplicate_task(self.tasks.iter().map(|t| t.task.as_str())) {
+            return Err(LiveSliceRefused::DuplicateTask { task });
         }
         for task in &self.tasks {
             let (pass_k, indeterminate) = summarize(&task.attempts, self.k)?;

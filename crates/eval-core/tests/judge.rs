@@ -89,6 +89,18 @@ fn report(
     }
 }
 
+fn settings(k: u32) -> LiveSettings {
+    LiveSettings {
+        providers: vec![provider("live-1"), provider("live-2")],
+        k,
+        calibration: Some(calibration()),
+        sampling: Some(SamplingPlan {
+            pairs: 40,
+            human_sample: 20,
+        }),
+    }
+}
+
 #[test]
 fn blinding_refuses_a_canary_or_an_arm_name_and_shows_both_orders() {
     let pair = &pairs()[0];
@@ -378,7 +390,7 @@ fn the_live_slice_reports_trials_intervals_and_censoring_and_is_never_replayable
             ],
         },
     ];
-    let report = live_slice(&provider("live-1"), 2, &tasks).unwrap();
+    let report = live_slice(&settings(2), &provider("live-1"), &tasks).unwrap();
     report.validate().unwrap();
     assert!(!report.replayable);
     const { assert!(!LIVE_REPLAYABLE) };
@@ -403,28 +415,20 @@ fn the_live_slice_reports_trials_intervals_and_censoring_and_is_never_replayable
     );
     assert!(
         matches!(
-            live_slice(&provider("live-1"), 4, &tasks),
+            live_slice(&settings(4), &provider("live-1"), &tasks),
             Err(LiveSliceRefused::Statistics(_))
         ),
         "k past the repeats refuses"
     );
     assert_eq!(
-        live_slice(&provider("live-1"), 2, &[]),
+        live_slice(&settings(2), &provider("live-1"), &[]),
         Err(LiveSliceRefused::NoTasks)
     );
 }
 
 #[test]
 fn live_settings_refuse_until_two_profiles_a_calibration_set_and_a_plan_exist() {
-    let settings = LiveSettings {
-        providers: vec![provider("live-1"), provider("live-2")],
-        k: 3,
-        calibration: Some(calibration()),
-        sampling: Some(SamplingPlan {
-            pairs: 40,
-            human_sample: 20,
-        }),
-    };
+    let settings = settings(3);
     settings.validate().unwrap();
     let mut one = settings.clone();
     one.providers.pop();
@@ -686,7 +690,7 @@ fn live_slice_validation_recomputes_each_task_and_checks_the_schema() {
             ArmResult::Censored(CensorReason::Timeout),
         ],
     }];
-    let report = live_slice(&provider("live-1"), 2, &tasks).unwrap();
+    let report = live_slice(&settings(2), &provider("live-1"), &tasks).unwrap();
     report.validate().unwrap();
     let mut schema = report.clone();
     schema.schema = "eval-live-slice/v999".to_string();
@@ -723,5 +727,103 @@ fn live_slice_validation_recomputes_each_task_and_checks_the_schema() {
         fabricated.validate(),
         inconsistent,
         "bounds the attempts do not give"
+    );
+}
+
+#[test]
+fn calibration_refuses_a_foreign_schema_and_a_malformed_judge_digest() {
+    let mut old = calibration();
+    old.schema = "eval-judge/v0".to_string();
+    assert_eq!(
+        old.validate(),
+        Err(CalibrationRefused::SchemaMismatch {
+            found: "eval-judge/v0".to_string()
+        })
+    );
+    let mut short = calibration();
+    short.judge.prompt_digest = "abc".to_string();
+    assert_eq!(
+        short.validate(),
+        Err(CalibrationRefused::MalformedDigest {
+            field: "prompt_digest"
+        })
+    );
+    let mut upper = calibration();
+    upper.judge.rubric_digest = "AA".repeat(32);
+    assert_eq!(
+        upper.validate(),
+        Err(CalibrationRefused::MalformedDigest {
+            field: "rubric_digest"
+        })
+    );
+    let mut unbound = judge();
+    unbound.prompt_digest = String::new();
+    let both = [
+        call("pair-0", Order::AThenB, RawVerdict::First),
+        call("pair-0", Order::BThenA, RawVerdict::Second),
+    ];
+    assert_eq!(
+        judge_pairs(&pairs()[..1], &unbound, &both, &[]),
+        Err(JudgeRefused::MalformedDigest {
+            field: "prompt_digest"
+        }),
+        "an empty digest is not a judge identity"
+    );
+}
+
+#[test]
+fn the_live_slice_refuses_a_repeated_task() {
+    let task = LiveTask {
+        task: "t".to_string(),
+        attempts: vec![ArmResult::Pass, ArmResult::Fail],
+    };
+    assert_eq!(
+        live_slice(
+            &settings(1),
+            &provider("live-1"),
+            &[task.clone(), task.clone()]
+        ),
+        Err(LiveSliceRefused::DuplicateTask {
+            task: "t".to_string()
+        })
+    );
+    let mut report = live_slice(&settings(1), &provider("live-1"), &[task]).unwrap();
+    report.tasks.push(report.tasks[0].clone());
+    assert_eq!(
+        report.validate(),
+        Err(LiveSliceRefused::DuplicateTask {
+            task: "t".to_string()
+        })
+    );
+}
+
+#[test]
+fn the_live_slice_is_constructed_only_from_validated_settings_and_an_approved_profile() {
+    let tasks = vec![LiveTask {
+        task: "t".to_string(),
+        attempts: vec![ArmResult::Pass],
+    }];
+    assert_eq!(
+        live_slice(&settings(1), &provider("live-3"), &tasks),
+        Err(LiveSliceRefused::UnapprovedProvider {
+            provider: "anthropic/live-3@tp-1".to_string()
+        }),
+        "a third profile is not one of the two approved"
+    );
+    let mut no_plan = settings(1);
+    no_plan.sampling = None;
+    assert_eq!(
+        live_slice(&no_plan, &provider("live-1"), &tasks),
+        Err(LiveSliceRefused::Settings(
+            LiveSettingsRefused::NoSamplingPlan
+        )),
+        "unvalidated settings construct no live evidence"
+    );
+    assert_eq!(
+        live_slice(&settings(1), &provider("live-1"), &tasks)
+            .unwrap()
+            .k,
+        1,
+        "k is the settings' repeat count"
     );
 }

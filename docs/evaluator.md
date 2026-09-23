@@ -2433,6 +2433,57 @@ read and pull-request citation detected; an unaffordable time study stopping
 for approval with nothing published; missing settings and a missing witness
 refusing before execution.
 
+## Residual judge and the live slice
+
+`crates/eval-core/src/judge.rs` is the contract for what the deterministic
+oracles leave open. No shell calls a judge or a live provider yet; the module
+fixes the types, the refusals, and the firewall, so the evidence a later
+shell produces is checked before it is believed.
+
+A judge is a versioned dependency. `JudgeIdentity` is a `ProviderProfile`
+(tokenizer profile included) with the prompt digest and the `Rubric` digest
+(`eval-judge-rubric/v1`), each 64 lowercase hex. `CalibrationSet`
+(`eval-judge/v1`) freezes that identity with the human labels over anchor
+pairs before any judging and digests into every report
+(`eval-judge-calibration/v1`); it refuses another schema, a malformed digest,
+and an empty label map. `SamplingPlan::validate` refuses fewer than 20 pairs
+and a human sample below ten percent rounded up or below 20 pairs; a campaign
+under the floor cannot claim calibrated acceptance.
+
+`blind` presents one `Pair` in one `Order`, refusing a planted canary in
+either response and any arm name matched as whole words after folding case,
+full width, and separators (`ARM_TOKENS`); the judge's view serializes only
+`first` and `second`. `judge_pairs` needs both orders of every pair under one
+judge, unswaps the positional verdicts, marks orders that disagree
+`Inconsistent`, records each arm's length, and refuses an omitted order, a
+call from another judge, an unknown or duplicated pair, a second call for one
+pair and order (no rerolls), and a judge whose digests are malformed.
+`PermutationCheck::validate` refuses arm identification above
+`ARM_IDENTIFICATION_CEILING_PERCENT` in either direction: naming the arm
+wrong consistently identifies it too.
+
+`ResidualReport` (`eval-residual-report/v1`) records every identity, never a
+name alone: the judge, the calibration digest, the live provider, the plan,
+the permutation check, and the judgments. `validate` reconciles the plan, the
+permutation check, and the calibration set (same judge, same digest) and
+refuses duplicated or miscounted judgments. `comparable` refuses cross-run
+`residual.*` comparison (`ReanchorRequired`) until the anchor set is re-scored
+when the judge, the live provider or its tokenizer profile, or the
+calibration digest changes. The gates take only oracle inputs: `analyze`'s
+signature is pinned in the tests, and the residual report carries no gate
+field.
+
+`LiveSettings::validate` refuses without exactly two distinct approved
+provider profiles, a repeat count, a calibration set, and a plan above the
+floor. `live_slice` constructs a `LiveSliceReport` (`eval-live-slice/v1`)
+only from validated settings and one of their two profiles, with the
+settings' `k`; it refuses no tasks and a repeated task id. Each task keeps
+its attempts beside pass@1, the repeat counts, the censoring rate, and the
+pass^k interval through `pass_k`; every attempt censored is `indeterminate`,
+never zero. `replayable` is `LIVE_REPLAYABLE = false`; `validate` refuses a
+relabelled report, another schema, a repeated task, and a summary the
+attempts do not give. Tests: `crates/eval-core/tests/judge.rs`.
+
 ## Coverage markers
 
 `MARKERS` is the evaluator-owned registry: constant, globally unique names,
