@@ -557,7 +557,7 @@ fn an_exhausted_replay_budget_stops_the_pass_and_keeps_the_last_reproduced_scena
 }
 
 #[test]
-fn a_zero_replay_budget_issues_no_replay_and_refuses_the_original() {
+fn a_zero_replay_budget_issues_no_replay_and_refuses_the_original_scenario() {
     let original = scenario();
     let expected = predicate(FailureClass::Interference);
     let mut issued = 0u32;
