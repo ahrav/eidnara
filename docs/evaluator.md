@@ -2011,8 +2011,9 @@ kernel, R11 is the projection's refusal and R24 the memory store's, and a lock
 holder, a kill, or a corrupted file names its own store; a scope on another
 family is `ScopeMismatch`. `FaultAction::loses_reply` names the actions that
 leave an operation's outcome unknown to its caller: the search-episode reply
-losses, `embedding_publication`'s `lose_local_commit_reply`, and the
-materializer's `lose_acknowledgement_reply` and `fail_acknowledgement`; a
+losses, `embedding_publication`'s `lose_local_commit_reply`, the
+materializer's `lose_acknowledgement_reply` and `fail_acknowledgement`, and a
+process kill, whose reply dies with the child; a
 rolled-back commit, a skipped acknowledgement, and an expected refusal are
 known, not lost.
 `FaultAction::heal` is the heal each class permits: `consumed` for one-shot
@@ -2043,14 +2044,18 @@ the kill. Barrier lines are `<prefix> <cut>`, so the line's last
 whitespace-separated token must equal the cut (`LineDoesNotNameCut`); a suffix
 match is not enough, and no line names an empty cut. The child must have died
 by signal (`ExitedWithStatus`), and the signal must be `SIGKILL` (`NotSigkill`),
-the one the runner sends and the one the kill label describes. A report with a
+the one the runner sends and the one the kill label describes, from a child
+with a pid (`NoPid`). A report with a
 kill episode and no barrier for
 that episode at the episode's declared `process_kill` cut is
 `KillWithoutBarrier { episode, cut }`: a kill without a barrier at its cut is a
 kill at an unknown point. The other direction holds too: a barrier whose
 episode is not a `process_kill` declared at that cut is
-`BarrierWithoutKill { episode, cut }`, and a `Cut` receipted twice in `cuts`
-is `DuplicateCut`, because two outcomes for one checkpoint is no outcome.
+`BarrierWithoutKill { episode, cut }`, a second barrier for one kill is
+`DuplicateBarrier` (one kill, one child, one barrier), a kill whose cut the
+campaign's coverage never declared is `UndeclaredCut`, and a `Cut` receipted
+twice in `cuts` is `DuplicateCut`, because two outcomes for one checkpoint is
+no outcome.
 
 `CutCoverage` holds the cuts a campaign declares (barrier names, fault
 variants, gate release points) and how many receipts each earned; a receipt
@@ -2062,7 +2067,9 @@ a checkpoint receipted at least once is `Reached`, every other declared one is
 `NotReached`.
 
 `EffectLedger` counts each effect identity's `attempted`, `observed`, and
-`acknowledged` and holds what the oracle may expect of it. `lose_reply` sets
+`acknowledged` and holds what the oracle may expect of it.
+`lose_reply(identity, episode)` records the episode whose fault lost the reply
+in `lost_by`, sets
 the expectation to `one_of {applied, not_applied}` and the outcome to
 `unknown`; `read_back(identity, state)` collapses it to `exactly { state }`
 and the matching outcome, adding the observation an applied read-back proves.
@@ -2073,7 +2080,9 @@ already observed, which would be a lost write that was seen.
 `validate` refuses, per identity, `NeverAttempted` at zero attempts (an entry
 `attempt` never created), `BoundsViolated` unless `acknowledged <=
 observed <= attempted`, `ReadBackNotAdmissible` for an observed effect
-whose outcome is `not_applied`, `PrematureSuccess` for a lost reply whose
+whose outcome is `not_applied`, `ObservedWithoutReadBack` for a lost reply
+observed but never read back (the observation is the read-back the ledger
+must record), `PrematureSuccess` for a lost reply whose
 outcome is not `unknown` without a read-back, and
 `ExpectationCollapsedWithoutReadBack` for a lost reply expecting fewer than two
 states, and `OutcomeNotDerived` when the outcome is not the state the
@@ -2135,8 +2144,10 @@ refusal above, and also refuses
 profile's limits, `EnvelopeExceeded` when any recorded peak is over its
 bound, `NoEpisode` when no fault was armed (so no safety check ran while one
 was), `UnregisteredMarker` for a marker `MARKERS` does not register,
-`LostReplyUnrecorded` when the ledger holds fewer lost replies than the
-episodes that lose one,
+`LostReplyUnrecorded { episode }` for an episode that loses a reply with no
+effect naming it in `lost_by`, `LostByNonLosingEpisode` for an effect naming
+an episode that loses none, `UnknownEpisode` for one naming an episode the
+report lacks,
 `UnknownEpisode` for a liveness outside-core episode that is not one of the
 report's episodes, `CoreFamilyFaulted` for one scoped to a family the healthy
 core names, and `ConsumedFaultArmed` for one whose heal is `consumed`: a
@@ -2308,8 +2319,11 @@ reopen). After every EIO, before its reopen, a plain ingest must be refused
 (below) and two publication faults follow, each on an open embedding job: the drive applies the next planned
 steps, catching up after each, until a job is open, because a retirement opens
 none, and refuses a history that runs out first. `LoseLocalCommitReply` (the
-publisher returns `Embedded`) and `LoseLocalCommit` (`LocalCommitUnresolved`)
-each leave `embedding:<occurrence>` `Unknown`, and each must show the
+publisher returns `Embedded`) leaves `embedding:<occurrence>` `Unknown` in the
+ledger; `LoseLocalCommit` (`LocalCommitUnresolved`) rolled back, which the
+seam's contract fixes, so the outcome is known, the job's row is read at once
+and must not say `embedded`, and no ledger entry is made
+(`FaultAction::loses_reply` names only the first). Each must show the
 publisher's `Reconciling` then `ReconciliationRead` events (receipted
 `reconciling` and `reconciliation_read`), since a publication the fault never
 reached returns `Embedded` too. The receipt quota (R24) runs on a memory store
@@ -2330,14 +2344,17 @@ checkpoints only advance, so any catch-up between a reply-loss episode and its
 read-back would make every read-back `applied`; the runner records where the
 faulted episode left the checkpoint and refuses a read-back that finds it
 further on (`ReadBackMasked`), leaving the ledger untouched. That is why each
-reply-loss episode recovers at once, and why the publication faults are read
-back by the recovery that ends the fault phase, right after R11: the
-committed-then-lost publication reads back `applied` and the rolled-back one
-`not_applied`. Before publishing, the run refuses unless every lost reply has
-exactly one fixed expectation and its read-back matches it. The reopen
-rebuilds the projection at the kernel tip, which is also what clears the R11
-stall: the stall is production's refusal, the rebuild is production's heal,
-and the report records both. The rest of the history then runs on the
+reply-loss episode recovers at once, and why the committed-then-lost
+publication is read back by the recovery that ends the fault phase, right
+after R11, where it reads back `applied`. Before publishing, the run refuses
+unless every lost reply has exactly one fixed expectation and its read-back
+matches it. Each ledger entry is the faulted attempt and its durable state at
+read-back, before the reopen: the reopen rebuilds the projection at the kernel
+tip and embeds every pending job, so it re-applies the lost search commits and
+embeds the rolled-back publication as production's recovery would, and the
+ledger does not count that heal as an attempt. The rebuild is also what clears
+the R11 stall: the stall is production's refusal, the rebuild is production's
+heal, and the report records both. The rest of the history then runs on the
 reopened stores. `AtQuiescence`, `AfterFaultPhase`, `AfterRecovery` (reached
 three times), and `EndOfRun` are receipted where the runner reached them. The
 safety invariants (no descriptor claims a commit past the tip or an

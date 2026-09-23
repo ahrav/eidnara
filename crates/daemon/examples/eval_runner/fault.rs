@@ -432,7 +432,7 @@ pub fn receipt_lost_reply_episode(
     let mut fixed = BTreeMap::new();
     for identity in lost {
         witness.effects.attempt(&identity);
-        witness.effects.lose_reply(&identity).unwrap();
+        witness.effects.lose_reply(&identity, id).unwrap();
         witness
             .left_at
             .insert(identity.clone(), report.acknowledged_through);
@@ -784,6 +784,7 @@ pub fn r11_episode(
         },
         "search_catchup::Blocked::DeletionUnpropagated: a plain deletion puts a deletion in the next window, which is refused so the barrier stays unsatisfied while the projection serves the text; production heals it by rebuilding the projection",
     ));
+    let before = stores.projection_rows();
     stores
         .corpus
         .kernel
@@ -804,6 +805,17 @@ pub fn r11_episode(
     let again = stores.episode(now, None, &mut |_| {});
     if again.end != report.end || again.acknowledged_through != report.acknowledged_through {
         return Err(unexpected(&r11, "a permanent stall", &again));
+    }
+    // The refused window applied nothing: the rows the projection served
+    // before the deletion are the rows it serves while stalled, and nothing
+    // was tombstoned on the way to the refusal.
+    let after = stores.projection_rows();
+    if after != before {
+        return Err(unexpected(
+            &r11,
+            "the projection's rows unchanged by the refused window",
+            (&before, &after),
+        ));
     }
     witness.receipt("deletion_unpropagated");
     witness.receipt(&r11);
@@ -1004,8 +1016,12 @@ pub fn corruption_episode(
     Ok(stores)
 }
 
-/// One pending embedding job published under a publication fault; its
-/// identity stays `Unknown` until the durable row is read back after reopen.
+/// One pending embedding job published under a publication fault. Under
+/// `LoseLocalCommitReply` the outcome is unknown to the caller, so the job's
+/// identity enters the ledger as a lost reply and is returned for the
+/// read-back after reopen. Under `LoseLocalCommit` the commit rolled back,
+/// which the seam's contract fixes, so the row is read at once and nothing is
+/// returned.
 pub fn publication_episode(
     stores: &mut Stores,
     witness: &mut Witness,
@@ -1013,7 +1029,7 @@ pub fn publication_episode(
     step: u32,
     now: i64,
     fault: PublicationFaultKind,
-) -> Result<String, RunError> {
+) -> Result<Option<String>, RunError> {
     let (production, contract) = match fault {
         PublicationFaultKind::LoseLocalCommitReply => (
             PublicationFault::LoseLocalCommitReply,
@@ -1021,7 +1037,7 @@ pub fn publication_episode(
         ),
         PublicationFaultKind::LoseLocalCommit => (
             PublicationFault::LoseLocalCommit,
-            "embedding_publication::PublicationFault::LoseLocalCommit: the commit rolls back and the reply is lost; the durable rows say it did not land",
+            "embedding_publication::PublicationFault::LoseLocalCommit: the commit rolls back and the reply arrives as a store failure; the durable rows say it did not land",
         ),
     };
     witness.declare(episode(
@@ -1048,7 +1064,10 @@ pub fn publication_episode(
     let project = ProjectScope::new(PROJECT).unwrap();
     let vector = TestEngine::vector_for(row.text.as_deref().unwrap_or_default());
     let identity = format!("embedding:{occurrence}@{id}");
-    witness.effects.attempt(&identity);
+    let lost = FaultAction::EmbeddingPublication { fault }.loses_reply();
+    if lost {
+        witness.effects.attempt(&identity);
+    }
     let mut events = Vec::new();
     let stores = &*stores;
     let mut publisher = EmbeddingPublisher::new(&stores.corpus.kernel, &stores.projection);
@@ -1108,11 +1127,31 @@ pub fn publication_episode(
             ));
         }
     }
-    witness.effects.lose_reply(&identity).unwrap();
+    let job_state = || -> Result<String, RunError> {
+        read_only(&search_file(stores.root()))
+            .query_row(
+                "SELECT state FROM embedding_jobs WHERE occurrence_id=?1",
+                [&occurrence],
+                |row| row.get(0),
+            )
+            .map_err(|e| unexpected(id, "the job's row", e))
+    };
+    let lost = if lost {
+        witness.effects.lose_reply(&identity, id).unwrap();
+        Some(identity)
+    } else {
+        // The rollback is the contract's fixed outcome, so the row is read
+        // now: it must not say the vector landed.
+        let state = job_state()?;
+        if state == "embedded" {
+            return Err(unexpected(id, "a job the rollback left open", state));
+        }
+        None
+    };
     witness.receipt("publication_reconciled");
     witness.receipt(id);
     witness.safety_check(stores);
-    Ok(identity)
+    Ok(lost)
 }
 
 /// Applies planned steps from `next`, catching up after each, until an
@@ -1272,22 +1311,23 @@ pub fn campaign(
     let mut next = 5;
     let at = open_embedding_job(&mut stores, steps, &mut next, "publication-held-at-gate")?;
     held_publication_episode(&mut stores, witness, step(at), steps[at].now_ms)?;
-    for (id, fault, state) in [
+    for (id, fault) in [
         (
             "publication-commit-reply-lost",
             PublicationFaultKind::LoseLocalCommitReply,
-            EffectState::Applied,
         ),
         (
             "publication-commit-lost",
             PublicationFaultKind::LoseLocalCommit,
-            EffectState::NotApplied,
         ),
     ] {
         let at = open_embedding_job(&mut stores, steps, &mut next, id)?;
-        let identity =
-            publication_episode(&mut stores, witness, id, step(at), steps[at].now_ms, fault)?;
-        expected.insert(identity, state);
+        if let Some(lost) =
+            publication_episode(&mut stores, witness, id, step(at), steps[at].now_ms, fault)?
+        {
+            // The vector and completion committed before the reply was lost.
+            expected.insert(lost, EffectState::Applied);
+        }
     }
     let rest = next;
     let resumed = steps
@@ -1345,7 +1385,7 @@ pub fn check_expectations(
     let lost: BTreeSet<&String> = effects
         .effects
         .iter()
-        .filter(|(_, effect)| effect.reply_lost)
+        .filter(|(_, effect)| effect.reply_lost())
         .map(|(identity, _)| identity)
         .collect();
     let fixed: BTreeSet<&String> = expected.keys().collect();
@@ -1799,7 +1839,7 @@ pub fn kill_episode(
         signal,
     });
     for (effect, _) in &effects {
-        witness.effects.lose_reply(effect).unwrap();
+        witness.effects.lose_reply(effect, &id).unwrap();
         // The killed window is the last the child reached, so a crashed
         // file's checkpoint past it would be masking, as for a reply loss.
         witness.left_at.insert(effect.clone(), through);

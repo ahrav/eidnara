@@ -1627,9 +1627,14 @@ Fault contract (`crates/eval-core/tests/fault.rs`,
   that met its bound yet records a `blocked` stop is `LivenessUnmet`; envelope
   bounds other than the profile's limits are `EnvelopeDisagreesWithProfile`;
   an observed effect read back or parsed as `not_applied` is
-  `ReadBackNotAdmissible`; a report whose lost-reply episodes outnumber the
-  ledger's lost replies is `LostReplyUnrecorded`, and `loses_reply` names
-  which actions count.
+  `ReadBackNotAdmissible`; each effect's `lost_by` names the episode that
+  lost its reply: a reply-losing episode (`loses_reply` names which) with no
+  effect naming it is `LostReplyUnrecorded`, an effect naming an episode that
+  loses none is `LostByNonLosingEpisode`, and one naming an episode the
+  report lacks is `UnknownEpisode`; a lost reply observed without a read-back
+  is `ObservedWithoutReadBack`; a barrier with pid 0 is `NoPid`; a second
+  barrier for one kill is `DuplicateBarrier`; a kill at a cut the coverage
+  never declared is `UndeclaredCut`.
 
 Fault shell (`crates/daemon/tests/eval_fault.rs`, `--all-features`; the
 default shards run the campaign once with every scenario asserted over it,
@@ -1648,14 +1653,15 @@ job under `EIDNARA_EVAL_S0_BUDGET_MS`):
   `generate`.
 - `a_lost_reply_stays_unknown_until_readback_at_after_recovery`
   (`flt-lost-ack-expected-is-admissible-set`; marker
-  `flt_lost_reply_unknown_until_readback`): four lost replies (a local
-  commit, an acknowledgement, two publications) are `unknown` until the closed
-  files are read back by identity before reopen; the local commit and the
-  acknowledgement are read back in a recovery that follows each reply-loss
-  episode before any later catch-up, and each reads back `applied`, the state
-  the seam's contract fixed before the read-back; the committed-then-lost
-  publication reads back `applied` and the rolled-back one `not_applied`;
-  every identity satisfies `acknowledged <= observed <= attempted` with one
+  `flt_lost_reply_unknown_until_readback`): three lost replies (a local
+  commit, an acknowledgement, a committed-then-lost publication) are
+  `unknown` until the closed files are read back by identity before reopen;
+  the local commit and the acknowledgement are read back in a recovery that
+  follows each reply-loss episode before any later catch-up, and each reads
+  back `applied`, the state the seam's contract fixed before the read-back;
+  the committed-then-lost publication reads back `applied`; the rolled-back
+  publication is known, not lost, and enters no ledger entry; every identity
+  satisfies `acknowledged <= observed <= attempted` with one
   attempt; each publication episode's observer saw `Reconciling` and
   `ReconciliationRead`. The campaign runs a 24-message history whose fifth
   step after the checkpoint opens no embedding job, so the publication phase
