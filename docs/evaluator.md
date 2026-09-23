@@ -2468,8 +2468,9 @@ the `/pull/` URLs
 `future_answers` matches derive
 from the URL itself), a `license` that is not an SPDX expression by shape (identifiers of SPDX
 characters, each holding a letter or digit, joined by `AND`, `OR`, or
-`WITH`, with balanced parentheses at operand edges only; not checked
-against the SPDX list) (`TextPersisted`), a
+`WITH`, with balanced parentheses at operand edges only and `WITH` joining
+one simple license to one exception; not checked against the SPDX list)
+(`TextPersisted`), a
 malformed or all-zero SHA, a fix commit that is the base commit
 (`FixIsBase`), an
 `issue` or `pull_request` of zero (`ZeroNumber`), a duplicate id, and one
@@ -2502,15 +2503,16 @@ from the repository's own commit times and the issue: `task`,
 `entry_digest`, `cutoff_ms`,
 `base_committed_ms`, `fix_committed_ms`, `issue_created_ms`,
 `issue_text_ms` (the last edit of the issue text the task is given, or its
-creation when never edited), `snapshot_digest`, `base_tree_digest`, and
-`fix_paths_present`, and `fix_descends_from_base`. `validate` refuses, in
-order, a missing snapshot digest,
+creation when never edited), `snapshot_digest`, `base_tree_digest`,
+`fix_tree_digest`, `fix_paths_present`, and `fix_descends_from_base`.
+`validate` refuses, in order, a missing snapshot digest,
 a tree digest that is neither forty nor sixty-four lowercase hex or is
 all zeroes (`MalformedDigest`), a base committed after the cutoff, a fix not strictly after it, an issue
 filed after it, issue text edited after it or dated before the issue
 (`IssueTextBeforeIssue`), a snapshot whose digest is not
-the base commit's tree, a fix-added path in the snapshot, and a fix that
-does not descend from the base (`FixNotFromBase`); each is one
+the base commit's tree, a fix-added path in the snapshot, a fix that does
+not descend from the base (`FixNotFromBase`), and a fix whose tree is the
+base tree (`FixChangesNothing`); each is one
 `CutoffRefused` reason (`reason` on the wire). `validate_for(entry)` first
 requires the audit to name the entry's task (`AuditForOtherTask`) and the
 entry's row by digest (`RowMismatch`, when any field of the row changed
@@ -2518,14 +2520,16 @@ since the audit) and to judge its cutoff (`CutoffMismatch`), so timestamps
 judged against another cutoff or another version of the row say nothing
 about it.
 
-**Insufficiency proof.** `InsufficiencyProof {task, entry_digest, hidden}`
-is the
+**Insufficiency proof.** `InsufficiencyProof {task, entry_digest,
+snapshot_digest, hidden}` is the
 current-tree-only run: the hidden tests over the snapshot with no agent.
 `validate` needs at least one hidden test that ran and `failed`; every
 verdict passing is `TreeAlreadyPasses`, and no verdict at all (an empty run
 or every test `errored`) is `NothingExecuted`. A corpus row without a
 recorded run is not a proof. `validate_for` refuses a proof naming another
-task or another version of the row (`RowMismatch`).
+task or another version of the row (`RowMismatch`), and `anchor_set`
+refuses one whose `snapshot_digest` is not the audit's (`TreeMismatch`): a
+failing run over another tree proves nothing about the audited snapshot.
 
 **No-repository control.** `NoRepositoryControl` is the statement-only run
 for one `ProviderProfile {provider, model, tokenizer_profile}`, compared
