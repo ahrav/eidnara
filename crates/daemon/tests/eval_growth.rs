@@ -741,3 +741,20 @@ fn a_manifest_the_directory_refuses_takes_the_report_back_out() {
         "a reader finds both files or none"
     );
 }
+
+#[test]
+fn the_artifact_store_is_bounded_by_the_ledger_not_charged_to_the_envelope() {
+    // The envelope's artifact bytes are the published files; the artifact
+    // store a sample measures is judged by `GrowthBounds::artifact_bytes`.
+    let plan = aging::plan(MESSAGES).unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let mut profile = growth::profile(Scale::S0, 128, 600_000, None);
+    profile.envelope.artifact_bytes = 1;
+    let mut charges = Charges::new(profile.envelope);
+    let mut live = Campaign::open(root.path(), plan, GrowthMode::NeverRestored);
+    for _ in 0..4 {
+        live.step(&mut charges).unwrap();
+    }
+    assert!(live.ledger.samples.last().unwrap().artifact_bytes > 1);
+    assert_eq!(charges.envelope.peaks.artifact_bytes, 0);
+}

@@ -2697,8 +2697,9 @@ peak is the pressure the envelope judges, not the closed size; a bound
 crossed stops the run with `EnvelopeExceeded { resource, bound, observed }`
 and nothing is published. The campaign root is released with
 `Charges::release`, not `Charges::vacate`: the samples already charged its
-store bytes, and a whole-root walk would also count the artifact objects the
-samples charge as artifact bytes. `Campaign::finish` reads the headroom from
+store bytes, and a whole-root walk would also count the artifact objects as
+store bytes, which the ledger bounds as `artifact_bytes` instead; the
+envelope's artifact bytes are the published files. `Campaign::finish` reads the headroom from
 the live memory store, closes the stores, which truncates every WAL, and takes
 the final sample from the closed files. No store is opened again before the
 files are measured: an open commits a new fence epoch and runs startup

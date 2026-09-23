@@ -406,8 +406,9 @@ impl Campaign {
     /// pressure it shows.
     pub fn sample(&mut self, step: u32, charges: &mut Charges) -> Result<(), RunError> {
         let sample = self.sample_at(step, charges);
+        // The envelope's artifact bytes are the published files; the artifact
+        // store the sample measures is judged by `GrowthBounds::artifact_bytes`.
         charges.observe(eval_core::Resource::StoreBytes, sample.store_total())?;
-        charges.observe(eval_core::Resource::ArtifactBytes, sample.artifact_bytes)?;
         charges.elapsed()?;
         self.ledger.record(sample)?;
         *self.checkpoints.entry(Cut::AtQuiescence).or_insert(0) += 1;
