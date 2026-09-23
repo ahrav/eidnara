@@ -8,12 +8,12 @@ use std::collections::BTreeSet;
 use eval_core::{
     APPLICATION_CRASH, CandidateVerdict, Cut, Destination, Element, EpisodeRefused,
     EvaluatedSurface, EventId, EventLog, FailureClass, FailurePredicate, FaultAction, FaultEpisode,
-    FaultScope, History, KillLabel, Lane, MAX_OUTSTANDING_REPLAY_EFFECTS, MAX_VALID_TIME_MS,
-    Minimality, Mode, NotEstablishedReason, Oracle, OracleRefused, Payload, Query, ReplayEffects,
-    ReplayOutcome, ReplayRefused, ReplayRequest, RepositorySpec, Scenario, Sensitivity,
-    ServedClass, SessionSpec, ShrinkRefused, ShrinkReportError, StoreFamily, TEST_BINARY_CHILD,
-    Task, TaskRole, Transformation, UnknownReason, Visibility, WitnessClass, WorldConfig,
-    classify_replay, parse_shrink_report, reduce, serialize_spec, shrink,
+    FaultScope, History, KillLabel, Lane, MAX_OUTSTANDING_REPLAY_EFFECTS, MAX_REPLAY_ATTEMPTS,
+    MAX_VALID_TIME_MS, Minimality, Mode, NotEstablishedReason, Oracle, OracleRefused, Payload,
+    Query, ReplayEffects, ReplayOutcome, ReplayRefused, ReplayRequest, RepositorySpec, Scenario,
+    Sensitivity, ServedClass, SessionSpec, ShrinkRefused, ShrinkReportError, StoreFamily,
+    TEST_BINARY_CHILD, Task, TaskRole, Transformation, UnknownReason, Visibility, WitnessClass,
+    WorldConfig, classify_replay, parse_shrink_report, reduce, serialize_spec, shrink,
 };
 use serde_json::{Value, json};
 use support::{WORLD_EPOCH_MS, WORLD_SEED, world_config};
@@ -667,7 +667,7 @@ fn the_shrinker_invariants_hold_under_arbitrary_replay_answers() {
         let (minimized, report) =
             shrink(&original, &fixture(), &expected, BUDGET, &mut replay).unwrap();
         report
-            .validate()
+            .verify(&original)
             .unwrap_or_else(|e| panic!("seed {seed}: the report accounts for itself: {e}"));
         let recorded = |digest: &str| {
             report
@@ -742,6 +742,7 @@ fn replay_effects_are_bounded_and_a_premature_verdict_is_refused() {
     effects
         .resolve(
             &key(0),
+            2,
             ReplayOutcome::Failed {
                 predicate: predicate(FailureClass::Interference),
             },
@@ -784,7 +785,7 @@ fn replay_effects_are_bounded_and_a_premature_verdict_is_refused() {
         );
     }
     assert_eq!(
-        effects.resolve("never-issued", ReplayOutcome::Passed),
+        effects.resolve("never-issued", 1, ReplayOutcome::Passed),
         Err(ReplayRefused::UnknownKey {
             key: "never-issued".to_string()
         })
@@ -1202,4 +1203,117 @@ fn a_budget_outside_the_canonical_range_is_refused_and_so_is_such_a_report() {
         report.serialize(),
         Err(ShrinkReportError::NotCanonical(_))
     ));
+}
+
+#[test]
+fn a_ledger_that_contradicts_itself_about_one_candidate_is_refused() {
+    let (_, report) = shrink(
+        &scenario(),
+        &fixture(),
+        &predicate(FailureClass::Interference),
+        BUDGET,
+        &mut evaluate,
+    )
+    .unwrap();
+    let mut value = serde_json::to_value(&report).unwrap();
+    let records = value["candidates"].as_array().unwrap();
+    let repeated = records
+        .iter()
+        .enumerate()
+        .find(|(index, record)| {
+            records[index + 1..]
+                .iter()
+                .any(|later| later["scenario_digest"] == record["scenario_digest"])
+                && record["verdict"]["kind"] == "slipped"
+        })
+        .map(|(index, _)| index)
+        .expect("the final pass re-records a candidate ddmin already answered");
+    value["candidates"][repeated]["verdict"] =
+        json!({"kind": "unknown", "reason": "effect_unanswered"});
+    assert_eq!(
+        parse_shrink_report(&value),
+        Err(ShrinkReportError::Inconsistent {
+            field: "candidates"
+        }),
+        "one digest was answered once and has one verdict"
+    );
+}
+
+#[test]
+fn a_report_verifies_against_the_scenario_it_shrank() {
+    let original = scenario();
+    let expected = predicate(FailureClass::Interference);
+    let (minimized, report) =
+        shrink(&original, &fixture(), &expected, BUDGET, &mut evaluate).unwrap();
+    report.verify(&original).unwrap();
+    assert_eq!(original.without(&report.deleted), minimized);
+
+    let mut truncated = report.clone();
+    let last = truncated
+        .candidates
+        .iter()
+        .rposition(|record| record.verdict == CandidateVerdict::Reproduced)
+        .unwrap();
+    truncated.candidates.truncate(last + 1);
+    truncated.remaining = 0;
+    let distinct: BTreeSet<&str> = truncated
+        .candidates
+        .iter()
+        .filter(|record| !matches!(record.verdict, CandidateVerdict::InvalidPair { .. }))
+        .map(|record| record.scenario_digest.as_str())
+        .collect();
+    truncated.replays = distinct.len() as u64;
+    truncated.unknown_candidates = 0;
+    truncated.validate().unwrap();
+    assert_eq!(
+        truncated.verify(&original),
+        Err(ShrinkReportError::Inconsistent { field: "remaining" }),
+        "the scenario, not the report, says how many elements remain"
+    );
+
+    let mut other = original.clone();
+    other.episodes.pop();
+    assert_eq!(
+        report.verify(&other),
+        Err(ShrinkReportError::Inconsistent {
+            field: "original_digest"
+        }),
+        "a report does not verify against a scenario it did not shrink"
+    );
+}
+
+#[test]
+fn replay_attempts_are_bounded_and_a_stale_attempt_cannot_resolve() {
+    let mut effects = ReplayEffects::default();
+    assert_eq!(effects.issue("candidate"), Ok(1));
+    for attempt in 2..=MAX_REPLAY_ATTEMPTS {
+        assert_eq!(effects.retry("candidate"), Ok(attempt));
+    }
+    assert_eq!(
+        effects.retry("candidate"),
+        Err(ReplayRefused::AttemptsExhausted {
+            key: "candidate".to_string(),
+            attempts: MAX_REPLAY_ATTEMPTS,
+        }),
+        "a retry past the bound is refused, not launched"
+    );
+    assert_eq!(
+        effects.resolve("candidate", 1, ReplayOutcome::Passed),
+        Err(ReplayRefused::StaleAttempt {
+            key: "candidate".to_string(),
+            attempt: 1,
+            current: MAX_REPLAY_ATTEMPTS,
+        }),
+        "a superseded attempt's answer is fenced"
+    );
+    assert_eq!(
+        effects.outcome("candidate"),
+        Err(ReplayRefused::Outstanding {
+            key: "candidate".to_string()
+        })
+    );
+    effects
+        .resolve("candidate", MAX_REPLAY_ATTEMPTS, ReplayOutcome::Passed)
+        .unwrap();
+    assert_eq!(effects.outcome("candidate"), Ok(&ReplayOutcome::Passed));
 }

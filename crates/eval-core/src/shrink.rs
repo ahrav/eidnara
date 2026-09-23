@@ -22,6 +22,10 @@ pub const SCENARIO_DIGEST_PROTOCOL: &str = "eval-scenario/v1";
 /// Replay effects a shell may leave unresolved at once. The effect issued at
 /// the bound is refused, never silently dropped.
 pub const MAX_OUTSTANDING_REPLAY_EFFECTS: usize = 4;
+/// Fresh processes one budgeted replay may launch, the first attempt
+/// included; the retry past it is refused. A shell therefore launches at
+/// most `max_replays * MAX_REPLAY_ATTEMPTS` processes.
+pub const MAX_REPLAY_ATTEMPTS: u32 = 3;
 
 /// What a failure is, pinned before the first candidate is tried. A candidate
 /// reproduces only when the replay reports this value field by field.
@@ -332,9 +336,11 @@ impl Oracle {
 }
 
 /// Replay effects a shell has issued and not yet resolved, keyed by a receipt
-/// key. A retry keeps its key; a cancellation resolves to `Unknown`; reading
-/// an outstanding effect is refused. The outstanding set is bounded at
-/// `MAX_OUTSTANDING_REPLAY_EFFECTS`; the bound is not configurable.
+/// key. A retry keeps its key and advances its attempt; only the current
+/// attempt may resolve, so a superseded process's late answer is refused; a
+/// cancellation resolves to `Unknown`; reading an outstanding effect is
+/// refused. The outstanding set is bounded at `MAX_OUTSTANDING_REPLAY_EFFECTS`
+/// and attempts per key at `MAX_REPLAY_ATTEMPTS`; neither is configurable.
 #[derive(Debug, Clone, Default)]
 pub struct ReplayEffects {
     outstanding: BTreeMap<String, u32>,
@@ -356,12 +362,24 @@ pub enum ReplayRefused {
     AlreadyResolved {
         key: String,
     },
+    /// The key has used every attempt `MAX_REPLAY_ATTEMPTS` allows.
+    AttemptsExhausted {
+        key: String,
+        attempts: u32,
+    },
+    /// The answer came from an attempt a retry superseded.
+    StaleAttempt {
+        key: String,
+        attempt: u32,
+        current: u32,
+    },
 }
 
 debug_display!(ReplayRefused);
 
 impl ReplayEffects {
-    pub fn issue(&mut self, key: &str) -> Result<(), ReplayRefused> {
+    /// Issues the first attempt and returns its number, `1`.
+    pub fn issue(&mut self, key: &str) -> Result<u32, ReplayRefused> {
         self.absent(key)?;
         if self.outstanding.len() >= MAX_OUTSTANDING_REPLAY_EFFECTS {
             return Err(ReplayRefused::OutstandingBound {
@@ -369,28 +387,54 @@ impl ReplayEffects {
             });
         }
         self.outstanding.insert(key.to_string(), 1);
-        Ok(())
+        Ok(1)
     }
 
-    /// Another attempt under the same key; returns the attempt count.
+    /// Another attempt under the same key; returns its number. The attempt
+    /// it supersedes can no longer resolve the key.
     pub fn retry(&mut self, key: &str) -> Result<u32, ReplayRefused> {
         self.present(key)?;
         let attempts = self.outstanding.get_mut(key).expect("checked present");
+        if *attempts >= MAX_REPLAY_ATTEMPTS {
+            return Err(ReplayRefused::AttemptsExhausted {
+                key: key.to_string(),
+                attempts: *attempts,
+            });
+        }
         *attempts += 1;
         Ok(*attempts)
     }
 
+    /// Resolves the current attempt to `Unknown { cancelled }`.
     pub fn cancel(&mut self, key: &str) -> Result<(), ReplayRefused> {
+        self.present(key)?;
+        let current = self.outstanding[key];
         self.resolve(
             key,
+            current,
             ReplayOutcome::Unknown {
                 reason: UnknownReason::Cancelled,
             },
         )
     }
 
-    pub fn resolve(&mut self, key: &str, outcome: ReplayOutcome) -> Result<(), ReplayRefused> {
+    /// Resolves the key with `attempt`'s answer; an attempt a retry
+    /// superseded is refused so the newest process's answer is the one read.
+    pub fn resolve(
+        &mut self,
+        key: &str,
+        attempt: u32,
+        outcome: ReplayOutcome,
+    ) -> Result<(), ReplayRefused> {
         self.present(key)?;
+        let current = self.outstanding[key];
+        if attempt != current {
+            return Err(ReplayRefused::StaleAttempt {
+                key: key.to_string(),
+                attempt,
+                current,
+            });
+        }
         self.outstanding.remove(key);
         self.resolved.insert(key.to_string(), outcome);
         Ok(())
@@ -557,11 +601,16 @@ impl ShrinkReport {
         if last_reproduced.deleted != self.deleted {
             return inconsistent("deleted");
         }
-        let distinct: BTreeMap<&str, &CandidateVerdict> = self
-            .candidates
-            .iter()
-            .map(|record| (record.scenario_digest.as_str(), &record.verdict))
-            .collect();
+        // A digest is answered once; a later record repeats its cached verdict.
+        let mut distinct: BTreeMap<&str, &CandidateVerdict> = BTreeMap::new();
+        for record in &self.candidates {
+            let verdict = distinct
+                .entry(record.scenario_digest.as_str())
+                .or_insert(&record.verdict);
+            if **verdict != record.verdict {
+                return inconsistent("candidates");
+            }
+        }
         let count = |keep: fn(&CandidateVerdict) -> bool| {
             distinct.values().filter(|verdict| keep(verdict)).count() as u64
         };
@@ -627,6 +676,52 @@ impl ShrinkReport {
 }
 
 impl ShrinkReport {
+    /// `validate`, then bind the report to the scenario it claims to have
+    /// shrunk: its digest, the minimized scenario's digest, the elements that
+    /// remain, and that the final pass's single deletions are exactly those
+    /// elements. A report alone can only be self-consistent; with the
+    /// original it is checked against the thing it describes.
+    pub fn verify(&self, original: &Scenario) -> Result<(), ShrinkReportError> {
+        self.validate()?;
+        let inconsistent = |field| Err(ShrinkReportError::Inconsistent { field });
+        if self.original_digest != original.digest() {
+            return inconsistent("original_digest");
+        }
+        let minimized = original.without(&self.deleted);
+        if self.minimized_digest != minimized.digest() {
+            return inconsistent("minimized_digest");
+        }
+        let elements: BTreeSet<Element> = minimized.elements().into_iter().collect();
+        if self.remaining != elements.len() as u64 {
+            return inconsistent("remaining");
+        }
+        let last = self
+            .candidates
+            .iter()
+            .rposition(|record| record.verdict == CandidateVerdict::Reproduced)
+            .unwrap_or(0);
+        let mut tried = BTreeSet::new();
+        for record in &self.candidates[last + 1..] {
+            let extra: Vec<&Element> = record.deleted.difference(&self.deleted).collect();
+            if let [element] = extra.as_slice() {
+                if !elements.contains(element) {
+                    return inconsistent("candidates");
+                }
+                tried.insert((*element).clone());
+            }
+        }
+        let full_pass = !matches!(
+            self.minimality,
+            Minimality::NotEstablished {
+                reason: NotEstablishedReason::ReplayBudgetExhausted
+            }
+        );
+        if full_pass && tried != elements {
+            return inconsistent("minimality");
+        }
+        Ok(())
+    }
+
     /// Digestible on both runtimes: no integer may leave the canonical safe
     /// range, or a Bun reader would corrupt it.
     pub fn serialize(&self) -> Result<Value, ShrinkReportError> {

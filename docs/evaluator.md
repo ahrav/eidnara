@@ -2798,12 +2798,16 @@ elements it deletes.
 
 Replays are effects a shell issues to fresh processes. `ReplayEffects` is
 the shell's ledger for them: it keys each by its receipt key (the candidate
-digest), bounds the outstanding set at `MAX_OUTSTANDING_REPLAY_EFFECTS` (the
-bound is not configurable) and refuses the effect issued at the bound, keeps the key across `retry`,
-resolves `cancel` to `Unknown { cancelled }`, and refuses `outcome` on an
-outstanding key, so no verdict is reached before the replay answered. The
-in-core driver issues one replay at a time through its callback and does not
-need the ledger.
+digest), bounds the outstanding set at `MAX_OUTSTANDING_REPLAY_EFFECTS` and
+attempts per key at `MAX_REPLAY_ATTEMPTS` (neither is configurable), refusing
+the effect issued at the bound and the retry past it, so one budgeted replay
+launches at most `MAX_REPLAY_ATTEMPTS` processes. `issue` and `retry` return
+the attempt number; `resolve` takes it and refuses a `StaleAttempt`, so a
+superseded process's late answer cannot resolve the key under the newer
+attempt. `cancel` resolves the current attempt to `Unknown { cancelled }`, and
+`outcome` is refused on an outstanding key, so no verdict is reached before
+the replay answered. The in-core driver issues one replay at a time through
+its callback and does not need the ledger.
 
 `Oracle::RequiredCommits` is the evaluator's own planted defect for
 exercising the shrinker end to end: over the compiled pair set and the aged
@@ -2819,7 +2823,8 @@ an integer outside the canonical safe range as `NotCanonical`, run
 reserialize identically as `Lossy`. `validate`
 checks the `eval-shrink/v1` schema, the pinned oracle, and the report's
 accounting against its own candidate ledger as `Inconsistent { field }`: the
-first candidate is the reproduced original with an empty deletion set; the
+first candidate is the reproduced original with an empty deletion set; every
+record sharing a digest carries the same verdict; the
 last reproduced candidate's digest and deletion set are `minimized_digest`
 and `deleted`; `unknown_candidates` counts the distinct `Unknown` digests;
 `replays` equals the distinct non-`InvalidPair` digests (the driver checks
@@ -2832,7 +2837,12 @@ with the single deletions among them, the final 1-minimality pass.
 `Unknown` and transformations listed in the parent's order;
 `unknown_candidates { count }` needs the same coverage with exactly `count`
 unknown single deletions; `replay_budget_exhausted` needs `replays` equal to
-`max_replays`.
+`max_replays`. A report alone can only be self-consistent.
+`ShrinkReport::verify(&original)` binds it to the scenario it claims to have
+shrunk: the original's digest, the digest of `original.without(&deleted)`,
+its element count as `remaining`, and, for a completed pass, that the single
+deletions after the last reproduction are exactly those elements. A shell
+that holds the scenario verifies rather than merely validates.
 
 ## Coverage markers
 
