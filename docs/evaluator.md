@@ -2944,8 +2944,8 @@ with `tasks_per_world: 2`, the two tasks the scenario carries; its digest is
 pinned into every predicate. `run` refuses an inverted oracle
 (`InvalidOracle`) before anything else, approves the profile, prepares the
 publish directory, freezes the run identity (its scenario names the commit
-count, the oracle, and the replay timeout in milliseconds, since the wait a
-child is allowed decides its verdict) before the first child runs,
+count, the oracle, and the replay timeout as whole seconds and nanoseconds,
+since the wait a child is allowed decides its verdict) before the first child runs,
 occupies one temp root for the candidate file, replays the original, and
 refuses `NoFailure` unless the child reports `Failed`, verifies the returned
 report against the original (`ShrinkReport::verify`, refused as `Report`); the reported predicate

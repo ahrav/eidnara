@@ -497,7 +497,10 @@ pub fn run(config: &Config, spawn: Spawn) -> Result<Run, RunError> {
         json!({
             "commits": config.commits,
             "oracle": config.oracle,
-            "replay_timeout_ms": u64::try_from(config.replay_timeout.as_millis()).unwrap(),
+            "replay_timeout": {
+                "secs": config.replay_timeout.as_secs(),
+                "nanos": config.replay_timeout.subsec_nanos(),
+            },
         }),
         &[std::env::current_exe().unwrap()],
     );
