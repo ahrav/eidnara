@@ -2579,8 +2579,8 @@ prefix of `fix_sha` (the word is taken whole between non-alphanumerics, so
 neither `a0123456` nor `g0123456` names
 `0123456…`), and the pull request as `#<n>`, `GH-<n>`, or the repository's
 `/pull/<n>` URL, or the words `PR <n>`, `pull request <n>`, or
-`pull-request <n>`, as a whole number (a URL, `GH-`, or a word form not
-preceded by a name character, so another host ending in this one does not match; `#<n>` beside
+`pull-request <n>` (any whitespace between the words), as a whole number (a
+URL, `GH-`, or a word form not preceded by a name character, so another host ending in this one does not match; `#<n>` beside
 a word, as in `PR#2016`, does; none followed by a letter or digit, so
 `#2016ff` is a colour), in any letter case.
 

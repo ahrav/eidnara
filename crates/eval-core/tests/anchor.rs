@@ -1715,3 +1715,20 @@ fn an_abbreviated_fix_sha_is_a_whole_word() {
         vec![format!("fix_sha:{}", entry.fix_sha)]
     );
 }
+
+#[test]
+fn a_textual_pull_request_reference_survives_odd_whitespace() {
+    let mut entry = entry("cargo-0", Family::Cargo, 0x10);
+    entry.pull_request = Some(2016);
+    for output in [
+        "fixed in PR\t2016",
+        "pull request\n2016",
+        "pull  request 2016",
+    ] {
+        assert_eq!(
+            future_answers(&entry, output),
+            vec!["pull_request:2016"],
+            "{output:?}"
+        );
+    }
+}

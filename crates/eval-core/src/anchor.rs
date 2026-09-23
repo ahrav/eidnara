@@ -808,7 +808,13 @@ const SHA_ABBREV: usize = 7;
 /// repository's `/pull/<n>` URL in any letter case, each as a whole number,
 /// so `#20` is not found inside `#2016`.
 pub fn future_answers(entry: &AnchorEntry, output: &str) -> Vec<String> {
-    let output = output.to_ascii_lowercase();
+    // Lowercased, with every run of whitespace one space, so `PR\t2016` and
+    // `pull request\n2016` read as their single-spaced forms.
+    let output = output
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_ascii_lowercase();
     let mut found = Vec::new();
     if is_lower_hex(&entry.fix_sha, 40)
         && output
