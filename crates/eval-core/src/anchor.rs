@@ -235,11 +235,12 @@ fn is_spdx_expression(text: &str) -> bool {
                             && tokens.get(i + 2) != Some(&"WITH")))
             } else {
                 let core = token.trim_start_matches('(').trim_end_matches(')');
+                let id = core.strip_suffix('+').unwrap_or(core);
                 !OPERATORS.contains(&core)
-                    && core.chars().any(|c| c.is_ascii_alphanumeric())
-                    && core
+                    && id.chars().any(|c| c.is_ascii_alphanumeric())
+                    && id
                         .chars()
-                        .all(|c| c.is_ascii_alphanumeric() || "-.+".contains(c))
+                        .all(|c| c.is_ascii_alphanumeric() || "-.".contains(c))
             }
         })
 }
@@ -427,6 +428,12 @@ pub struct CutoffAudit {
     pub base_committed_ms: i64,
     #[serde(with = "crate::decimal")]
     pub fix_committed_ms: i64,
+    /// When the repair first became public: the earliest of the pull
+    /// request's creation and the commit times of the fix-side commits not
+    /// reachable from the base. A merge committed after the cutoff can merge
+    /// work that was public before it.
+    #[serde(with = "crate::decimal")]
+    pub repair_public_ms: i64,
     #[serde(with = "crate::decimal")]
     pub issue_created_ms: i64,
     /// When the issue text the task is given was written: its last edit, or
@@ -453,6 +460,9 @@ pub struct CutoffAudit {
 pub enum CutoffRefused {
     BaseAfterCutoff,
     FixNotAfterCutoff,
+    /// The repair (its pull request or its commits) was public at or before
+    /// the cutoff, whatever the fix commit's own time.
+    RepairPublicBeforeCutoff,
     /// The issue was filed after the cutoff, so its text is future knowledge.
     IssueAfterCutoff,
     /// The issue text was edited after the cutoff; the edit can describe the
@@ -523,6 +533,9 @@ impl CutoffAudit {
         }
         if self.fix_committed_ms <= self.cutoff_ms {
             return Err(CutoffRefused::FixNotAfterCutoff);
+        }
+        if self.repair_public_ms <= self.cutoff_ms {
+            return Err(CutoffRefused::RepairPublicBeforeCutoff);
         }
         if self.issue_created_ms > self.cutoff_ms {
             return Err(CutoffRefused::IssueAfterCutoff);
@@ -780,9 +793,9 @@ const SHA_ABBREV: usize = 7;
 /// The fix commit counts as any run of hexadecimal digits, in either case,
 /// that is at least `SHA_ABBREV` long and a prefix of it; the run is taken
 /// whole, so `a0123456` does not name `0123456...`. A pull request counts as
-/// `#<n>`, GitHub's `GH-<n>`, or the repository's `/pull/<n>` URL in any
-/// letter case, each as a whole number, so `#20` is not found inside
-/// `#2016`.
+/// `#<n>`, GitHub's `GH-<n>`, `PR <n>`, `pull request <n>`, or the
+/// repository's `/pull/<n>` URL in any letter case, each as a whole number,
+/// so `#20` is not found inside `#2016`.
 pub fn future_answers(entry: &AnchorEntry, output: &str) -> Vec<String> {
     let output = output.to_ascii_lowercase();
     let mut found = Vec::new();
@@ -794,12 +807,16 @@ pub fn future_answers(entry: &AnchorEntry, output: &str) -> Vec<String> {
         found.push(format!("fix_sha:{}", entry.fix_sha));
     }
     if let Some(pr) = entry.pull_request.filter(|pr| {
-        names_whole_number(&output, &format!("#{pr}"))
-            || names_whole_number(&output, &format!("gh-{pr}"))
-            || names_whole_number(
-                &output,
-                &format!("{}/pull/{pr}", repository_web_path(&entry.repository)),
-            )
+        [
+            format!("#{pr}"),
+            format!("gh-{pr}"),
+            format!("pr {pr}"),
+            format!("pull request {pr}"),
+            format!("pull-request {pr}"),
+            format!("{}/pull/{pr}", repository_web_path(&entry.repository)),
+        ]
+        .iter()
+        .any(|needle| names_whole_number(&output, needle))
     }) {
         found.push(format!("pull_request:{pr}"));
     }

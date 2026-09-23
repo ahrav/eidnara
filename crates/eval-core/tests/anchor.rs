@@ -82,6 +82,7 @@ fn audit(task: &str) -> CutoffAudit {
         cutoff_ms: CUTOFF,
         base_committed_ms: CUTOFF - 86_400_000,
         fix_committed_ms: CUTOFF + 3_600_000,
+        repair_public_ms: CUTOFF + 1_800_000,
         issue_created_ms: CUTOFF - 7_200_000,
         issue_text_ms: CUTOFF - 3_600_000,
         snapshot_digest: "ab".repeat(32),
@@ -253,7 +254,7 @@ fn the_time_study_projects_the_pilot_and_stops_for_approval_past_the_bound() {
 fn the_cutoff_audit_excludes_future_code_and_future_issue_knowledge() {
     let good = audit("cargo-0");
     good.validate().unwrap();
-    let cases: [(Mutate, CutoffRefused); 8] = [
+    let cases: [(Mutate, CutoffRefused); 9] = [
         (
             |a| a.base_committed_ms = a.cutoff_ms + 1,
             CutoffRefused::BaseAfterCutoff,
@@ -261,6 +262,10 @@ fn the_cutoff_audit_excludes_future_code_and_future_issue_knowledge() {
         (
             |a| a.fix_committed_ms = a.cutoff_ms,
             CutoffRefused::FixNotAfterCutoff,
+        ),
+        (
+            |a| a.repair_public_ms = a.cutoff_ms,
+            CutoffRefused::RepairPublicBeforeCutoff,
         ),
         (
             |a| a.issue_created_ms = a.cutoff_ms + 1,
@@ -562,6 +567,7 @@ fn evidence_counts_only_for_the_corpus_task_and_cutoff_it_names() {
     later.cutoff_ms = CUTOFF + 36_000_000;
     later.base_committed_ms = CUTOFF + 3_600_000;
     later.fix_committed_ms = CUTOFF + 72_000_000;
+    later.repair_public_ms = CUTOFF + 70_000_000;
     later
         .validate()
         .expect("the audit passes against its own later cutoff");
@@ -1628,4 +1634,36 @@ fn a_parenthesized_operator_is_not_a_license() {
         entry.license = license.to_string();
         assert!(entry.validate().is_err(), "{license}");
     }
+}
+
+#[test]
+fn a_textual_pull_request_reference_is_a_future_answer() {
+    let mut entry = entry("cargo-0", Family::Cargo, 0x10);
+    entry.pull_request = Some(2016);
+    for output in [
+        "fixed in PR 2016",
+        "see pull request 2016.",
+        "Pull-Request 2016",
+    ] {
+        assert_eq!(
+            future_answers(&entry, output),
+            vec!["pull_request:2016"],
+            "{output}"
+        );
+    }
+    for output in ["in 2016", "PR 20160", "expr 2016"] {
+        assert!(future_answers(&entry, output).is_empty(), "{output}");
+    }
+}
+
+#[test]
+fn a_plus_is_one_trailing_suffix() {
+    for license in ["MI+T", "MIT++", "+MIT"] {
+        let mut entry = entry("cargo-0", Family::Cargo, 0x10);
+        entry.license = license.to_string();
+        assert!(entry.validate().is_err(), "{license}");
+    }
+    let mut entry = entry("cargo-0", Family::Cargo, 0x10);
+    entry.license = "GPL-2.0+".to_string();
+    entry.validate().unwrap();
 }
