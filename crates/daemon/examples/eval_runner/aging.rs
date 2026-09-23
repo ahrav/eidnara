@@ -118,22 +118,21 @@ fn deaths(log: &EventLog, steps: &[Planned]) -> Vec<Option<(usize, Died)>> {
             _ => event.id.clone(),
         }
     };
-    let mut born: BTreeMap<EventId, usize> = BTreeMap::new();
+    // The step that created each lineage's live object, as the stores see it:
+    // a publish supersedes the live object or, after a retirement, starts a
+    // new life; a retirement kills the live object once.
+    let mut live: BTreeMap<EventId, usize> = BTreeMap::new();
     steps
         .iter()
         .enumerate()
-        .map(|(index, planned)| {
-            let (id, death) = match &planned.step {
-                Step::Publish(id) => (id, Died::Supersession),
-                Step::Retire(id) => (id, Died::Retirement),
-            };
-            let lineage = lineage_of(id);
-            match born.get(&lineage) {
-                Some(&at) => Some((at, death)),
-                None => {
-                    born.insert(lineage, index);
-                    None
-                }
+        .map(|(index, planned)| match &planned.step {
+            Step::Publish(id) => {
+                let born = live.insert(lineage_of(id), index);
+                born.map(|at| (at, Died::Supersession))
+            }
+            Step::Retire(id) => {
+                let born = live.remove(&lineage_of(id));
+                born.map(|at| (at, Died::Retirement))
             }
         })
         .collect()
@@ -785,4 +784,98 @@ pub fn full_life(plan: &Plan, charges: &mut Charges) -> Result<Full, RunError> {
         rows,
         against_bulk,
     })
+}
+
+#[cfg(test)]
+mod deaths_tests {
+    use eval_core::{Event, StreamLabel};
+
+    use super::*;
+
+    fn log(events: &[(&str, Payload)]) -> EventLog {
+        EventLog {
+            schema: String::new(),
+            linearization_rule_version: String::new(),
+            events: events
+                .iter()
+                .enumerate()
+                .map(|(seq, (id, payload))| Event {
+                    id: EventId(id.to_string()),
+                    stream: StreamLabel::Session,
+                    entity_id: SESSION.to_string(),
+                    local_seq: seq as u32,
+                    valid_time_ms: 0,
+                    observation_time_ms: 0,
+                    causal_depth: 0,
+                    payload: payload.clone(),
+                })
+                .collect(),
+            causal_edges: Vec::new(),
+        }
+    }
+
+    fn message() -> Payload {
+        Payload::Message {
+            message_id: String::new(),
+            role: String::new(),
+            text: String::new(),
+            cites: None,
+        }
+    }
+
+    fn correction(target: &str) -> Payload {
+        Payload::Correction {
+            target: EventId(target.to_string()),
+            text: String::new(),
+        }
+    }
+
+    fn step(step: Step) -> Planned {
+        Planned { step, now_ms: 0 }
+    }
+
+    fn publish(id: &str) -> Planned {
+        step(Step::Publish(EventId(id.to_string())))
+    }
+
+    fn retire(id: &str) -> Planned {
+        step(Step::Retire(EventId(id.to_string())))
+    }
+
+    /// A death is the live object's: a repeated retirement retires nothing, a
+    /// correction after a retirement is a birth, and a supersession kills the
+    /// object the previous publish created, not the lineage's first.
+    #[test]
+    fn deaths_follow_the_live_object_as_the_stores_do() {
+        let log = log(&[
+            ("m0", message()),
+            ("m1", message()),
+            ("c0", correction("m0")),
+            ("c1", correction("m1")),
+            ("c2", correction("m1")),
+        ]);
+        let steps = [
+            publish("m0"),
+            publish("m1"),
+            retire("m0"),
+            retire("m0"),
+            publish("c0"),
+            retire("m0"),
+            publish("c1"),
+            publish("c2"),
+        ];
+        assert_eq!(
+            deaths(&log, &steps),
+            vec![
+                None,
+                None,
+                Some((0, Died::Retirement)),
+                None,
+                None,
+                Some((4, Died::Retirement)),
+                Some((1, Died::Supersession)),
+                Some((6, Died::Supersession)),
+            ]
+        );
+    }
 }
