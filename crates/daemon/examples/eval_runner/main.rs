@@ -510,9 +510,8 @@ fn run_suite_d(args: impl Iterator<Item = String>) -> io::Result<()> {
         "report": config.publish.join(suite_d::REPORT_FILE),
         "manifest": config.publish.join(suite_d::MANIFEST_FILE),
         "eval_run_id": run.manifest.eval_run_id,
-        "containment": run.report.containment,
         "terminals": run.report.tasks.iter().map(|t| t.terminal).collect::<Vec<_>>(),
-        "markers": run.coverage.fired(),
+        "markers": run.report.markers,
     });
     println!("{summary}");
     Ok(())
