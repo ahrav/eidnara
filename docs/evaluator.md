@@ -2000,21 +2000,32 @@ mirroring the fault enums and hooks that exist: `search_episode`
 (`search_catchup::EpisodeFault`), `embedding_publication`
 (`PublicationFault`), `held_publication` (the embedding fixture's gate),
 `claim_materialization` (`claim_sources::EpisodeFault`),
+`embedding_dispatch` (`embedding_dispatch::DispatchFault`),
 `artifact_ingest` and `artifact_deletion` (the kernel CAS enums, including
-`after_directory_sync`, the approved directory-fsync hook),
+`after_directory_sync`, the approved directory-fsync hook), `artifact_gc`
+(`cas::gc::ArtifactGcFault`), `kernel_restore` (`backup::RestoreFault`),
+`projection_batch` (`retrieval::batch::BatchFault`),
 `external_lock_holder` (an external `BEGIN IMMEDIATE`), `process_kill { cut }`,
 and `corrupt_quiescent_file`. `FaultAction::family` is the store the seam
-lives in: catch-up and publication write the search projection, the CAS and
+lives in: catch-up, publication, dispatch, and a projection batch write the
+search projection, the CAS, its GC, a restore, and
 the materializer's outbox are the kernel, and a lock holder, a kill, or a
 corrupted file names its own store; a scope on another family is
 `ScopeMismatch`. `FaultAction::loses_reply` names the actions that leave an
 operation's outcome unknown to its caller: the search-episode reply losses,
-`embedding_publication`'s `lose_local_commit_reply`, and the materializer's
-`lose_acknowledgement_reply` and `fail_acknowledgement`; a rolled-back commit
-or a skipped acknowledgement is known, not lost.
+`embedding_publication`'s `lose_local_commit_reply`, the materializer's
+`lose_acknowledgement_reply` and `fail_acknowledgement`, dispatch's
+`lose_charge_reply` and `lose_obsoletion_reply`, and
+GC's `after_reclaiming` and `after_unlink`; a rolled-back commit, a refused
+statement, or a skipped acknowledgement is known, not lost, and dispatch's
+`refuse_ledger_read` loses none itself: it blocks the read-back of a reply
+`lose_charge_reply` lost.
 `FaultAction::heal` is the heal each class permits: `consumed` for one-shot
 enums, `released` for gates and lock holders, `reopen` for kills and
-corruption. The CAS faults split by whether they latch ingestion closed: the
+corruption. A restore interrupted `before_displace` or `after_displace` is
+rolled back by the handle before the fault returns and is `consumed`; only
+`recovery_failure` leaves the store for a `reopen`. A projection batch fault
+rolls its transaction back and is `consumed`. The CAS faults split by whether they latch ingestion closed: the
 ingest faults `write`, `file_sync`, `rename`, `after_directory_sync`, and
 `takeover_before_cleanup_unlink` and the EIO deletion faults `intent_append`
 and `unlink` heal by `reopen`; `reservation_commit` and `after_events` abort a
@@ -2022,7 +2033,9 @@ SQLite transaction and leave the store usable, and they and the ENOSPC and
 commit-point deletion faults heal by `consumed`. The kernel's
 `return_value_fault_table_latches_eio_and_never_publishes_a_reference` asserts
 that `reservation_commit` and `after_events` leave the store usable and the
-other ingest faults it drives fail closed. A
+other ingest faults it drives fail closed. GC's `unlink` latches GC closed
+(`latch_gc_failure`) and heals by `reopen`; its other three fail one pass and
+are `consumed`. A
 declared heal that differs is `HealMismatch`. A kill carries a
 `KillLabel` whose `crash_model` must be `application_crash` with
 `page_cache_intact` and whose `killed_process` must be `test_binary_child`;
@@ -2035,8 +2048,10 @@ refuse.
 
 A `BarrierReceipt` is the line a killed child printed at its cut, read before
 the kill. Barrier lines are `<prefix> <cut>`, so the line's last
-whitespace-separated token must equal the cut (`LineDoesNotNameCut`); a suffix
-match is not enough, and no line names an empty cut. The child must have died
+whitespace-separated token must equal the cut and must not be the only token
+(`LineDoesNotNameCut`); a suffix
+match is not enough, a bare cut is not a line the child printed, and no line
+names an empty cut. The child must have died
 by signal (`ExitedWithStatus`), and the signal must be `SIGKILL` (`NotSigkill`),
 the one the runner sends and the one the kill label describes, from a child
 with a pid (`NoPid`). A report with a
@@ -2056,6 +2071,10 @@ variants, gate release points) and how many receipts each earned; a receipt
 for an undeclared cut is `UndeclaredCut`, whether it arrives through
 `receipt` or in a parsed report, and the verdict is
 `IncompleteCoverage { missing }` whenever a declared cut has no receipt. The
+declared set is not the report's to shrink: every episode's id is a cut (the
+fault's firing point) and every kill's barrier cut is one too, and a report
+whose `declared` lacks either is `UndeclaredCut`, so each fault the campaign
+ran must be receipted as fired. The
 oracle checkpoints (`Cut`) resolve to runner receipts through `cut_receipts`:
 a checkpoint receipted at least once is `Reached`, every other declared one is
 `NotReached`.
@@ -2067,21 +2086,25 @@ in `lost_by`, sets
 the expectation to `one_of {applied, not_applied}` and the outcome to
 `unknown`; `read_back(identity, state)` collapses it to `exactly { state }`
 and the matching outcome, adding the observation an applied read-back proves.
+An observation (`observe`, `acknowledge`) after a `not_applied` read-back is
+the retry landing, and moves the identity to `exactly { applied }`.
 A read-back is refused as `ReadBackNotAdmissible { identity, state }` and
 changes nothing when `state` is outside the admissible set (a reply that was
 not lost admits only `applied`) or when it is `not_applied` for an effect
 already observed, which would be a lost write that was seen.
 `validate` refuses, per identity, `NeverAttempted` at zero attempts (an entry
-`attempt` never created), `BoundsViolated` unless `acknowledged <=
+`attempt` never created), `EmptyIdentity` for a blank key, `BoundsViolated` unless `acknowledged <=
 observed <= attempted`, `ReadBackNotAdmissible` for an observed effect
 whose outcome is `not_applied`, `ObservedWithoutReadBack` for a lost reply
 observed but never read back (the observation is the read-back the ledger
-must record), `PrematureSuccess` for a lost reply whose
+must record), `LostReplyAcknowledged` for a lost reply whose every attempt was
+acknowledged (nothing was lost), `PrematureSuccess` for a lost reply whose
 outcome is not `unknown` without a read-back, and
 `ExpectationCollapsedWithoutReadBack` for a lost reply expecting fewer than two
 states, and `OutcomeNotDerived` when the outcome is not the state the
-expectation names or an effect whose reply was never lost expects anything but
-`applied`, the only state the API ever admits for it. A read-back that finds the
+expectation names, an effect whose reply was never lost expects anything but
+`applied`, the only state the API ever admits for it, or an applied read-back
+recorded with no observation. A read-back that finds the
 effect applied counts as its one observation, the only one a lost reply
 leaves; it raises `observed` to at least one and never lowers it, so an
 over-count stays visible to the bounds check. Aggregate totals are never
@@ -2125,10 +2148,13 @@ publishes: identity, profile digest, claim boundary, the episodes, barrier
 receipts, cut receipts, cut coverage, the effect ledger, expected refusals,
 the count of safety checks made while faults were armed (`SafetyNeverChecked`
 at zero), the optional liveness report, markers, and envelope. `validate`
-takes the profile's liveness bounds and resource limits and runs every
+takes a `FaultProfile`, the approved profile's digest, liveness bounds, and
+resource limits (`RunProfile::fault_profile` builds one and refuses an
+unapproved profile), and runs every
 refusal above, and also refuses
 `ClaimBoundaryMismatch`, `MalformedDigest` for an `eval_run_id` or
-`profile_digest` that is not 64 lowercase hex digits,
+`profile_digest` that is not 64 lowercase hex digits, `ProfileDigestMismatch`
+when `profile_digest` is not the supplied profile's,
 `EnvelopeDisagreesWithProfile` when the envelope's bounds are not the
 profile's limits, `EnvelopeExceeded` when any recorded peak is over its
 bound, `NoEpisode` when no fault was armed (so no safety check ran while one

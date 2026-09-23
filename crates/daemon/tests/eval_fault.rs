@@ -82,7 +82,7 @@ fn budget_or_panic() -> u64 {
 fn the_fault_campaign_receipts_every_declared_cut_scenario(campaign: &Campaign) {
     let (run, out) = (&campaign.run, &campaign.out);
     let report = &run.report;
-    report.validate(&run.bounds, &run.limits).unwrap();
+    report.validate(&run.profile).unwrap();
     assert_eq!(
         report.coverage.declared.len(),
         report.coverage.receipted.len()
@@ -127,7 +127,7 @@ fn the_fault_campaign_receipts_every_declared_cut_scenario(campaign: &Campaign) 
 
     let published = serde_json::from_slice(&std::fs::read(out.join(REPORT_FILE)).unwrap()).unwrap();
     assert_eq!(
-        parse_fault_report(&published, &run.bounds, &run.limits).unwrap(),
+        parse_fault_report(&published, &run.profile).unwrap(),
         *report
     );
     let manifest = parse_manifest(

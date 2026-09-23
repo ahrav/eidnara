@@ -1236,7 +1236,9 @@ Campaign (`crates/eval-core/tests/campaign.rs`):
   validates and round-trips; its only default is surface 1's window of 100;
   the three ceilings read as exact ratios; an unapproved profile refuses
   `approved` by name and an approved one returns its approver and a digest
-  that differs from the unapproved one; an approval with an empty approver or
+  that differs from the unapproved one; `fault_profile` refuses the unapproved
+  profile and carries the approved one's digest, liveness bounds, and
+  envelope; an approval with an empty approver or
   an upper-case run ID refuses; each scale names its budget variable or none.
 - `a_profile_refuses_every_absent_or_zero_setting_by_name`: every top-level
   field and every nested budget, envelope, statistics, and liveness field is
@@ -1629,7 +1631,19 @@ Fault contract (`crates/eval-core/tests/fault.rs`,
   report lacks is `UnknownEpisode`; a lost reply observed without a read-back
   is `ObservedWithoutReadBack`; a barrier with pid 0 is `NoPid`; a second
   barrier for one kill is `DuplicateBarrier`; a kill at a cut the coverage
-  never declared is `UndeclaredCut`.
+  never declared is `UndeclaredCut`; `embedding_dispatch`, `artifact_gc`, and
+  `kernel_restore` encode the remaining seams at HEAD with their heal, family,
+  and reply-loss classification; a bare cut with no prefix token is
+  `LineDoesNotNameCut`; a lost reply whose every attempt was acknowledged is
+  `LostReplyAcknowledged`; dispatch's `refuse_ledger_read` loses no reply; an
+  episode id missing from `coverage.declared` is `UndeclaredCut`, so the
+  declared cut set derives from the episodes rather than the report's word;
+  `projection_batch` encodes the retrieval batch seam; a restore fault the
+  handle rolls back itself is `consumed` while `recovery_failure` needs a
+  reopen; a blank effect key is `EmptyIdentity`; a `profile_digest` other than
+  the supplied `FaultProfile`'s is `ProfileDigestMismatch`; a retry observed
+  after a `not_applied` read-back lands as applied; an applied read-back with
+  no observation is `OutcomeNotDerived`.
 
 Fault shell (`crates/daemon/tests/eval_fault.rs`, `--all-features`; the
 default shards run the campaign once with every scenario asserted over it,

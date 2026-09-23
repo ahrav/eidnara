@@ -9,7 +9,7 @@ use daemon::search_catchup::{Blocked, EpisodeEnd, EpisodeEvent, EpisodeFault, Ep
 use eval_core::{
     APPLICATION_CRASH, Approval, ClaimBoundary, Coverage, Cut, CutCoverage, EffectLedger,
     EffectState, EnvelopeExceeded, ExecutionMode, FAULT_REPORT_SCHEMA, FaultAction, FaultEpisode,
-    FaultReport, FaultReportError, FaultScope, KillLabel, LivenessBounds, ProfileError,
+    FaultProfile, FaultReport, FaultReportError, FaultScope, KillLabel, ProfileError,
     RecordedRefusal, RunProfile, Scale, SearchEpisodeFault, StoreFamily, TEST_BINARY_CHILD,
     WorkCounter, cut_receipts, eval_run_id,
 };
@@ -100,9 +100,8 @@ pub struct Run {
     pub report_bytes: Vec<u8>,
     pub manifest: eval_core::Manifest,
     pub manifest_bytes: Vec<u8>,
-    pub bounds: LivenessBounds,
-    /// The approved profile's limits the report was validated against.
-    pub limits: eval_core::ResourceLimits,
+    /// The approved profile the report was validated against.
+    pub profile: FaultProfile,
     pub coverage: Coverage,
 }
 
@@ -606,7 +605,7 @@ pub fn run(config: &Config) -> Result<Run, RunError> {
         config.elapsed_bound_ms,
         config.approval.clone(),
     );
-    profile.approved()?;
+    let fault_profile = profile.fault_profile()?;
     prepare_publish(&config.publish, &[REPORT_FILE, MANIFEST_FILE]).map_err(publish_refused)?;
     let mut charges = Charges::new(profile.envelope.clone());
     let mut witness = Witness::new();
@@ -640,7 +639,6 @@ pub fn run(config: &Config) -> Result<Run, RunError> {
         Cut::AfterRecovery,
         Cut::EndOfRun,
     ];
-    let bounds = profile.statistics.liveness_bounds.clone();
     let mut report = FaultReport {
         schema: FAULT_REPORT_SCHEMA.to_string(),
         eval_run_id: eval_run_id(&identity).unwrap(),
@@ -665,8 +663,7 @@ pub fn run(config: &Config) -> Result<Run, RunError> {
     charges.retain_publish_root()?;
     let bytes = loop {
         report.envelope = charges.envelope.clone();
-        let bytes =
-            serde_json::to_vec_pretty(&report.serialize(&bounds, &profile.envelope)?).unwrap();
+        let bytes = serde_json::to_vec_pretty(&report.serialize(&fault_profile)?).unwrap();
         let peak = charges.envelope.peaks.artifact_bytes;
         charges.observe(eval_core::Resource::ArtifactBytes, bytes.len() as u64)?;
         if charges.envelope.peaks.artifact_bytes == peak {
@@ -699,8 +696,7 @@ pub fn run(config: &Config) -> Result<Run, RunError> {
         report_bytes: bytes,
         manifest,
         manifest_bytes,
-        bounds,
-        limits: profile.envelope,
+        profile: fault_profile,
         coverage: witness.coverage,
     })
 }
