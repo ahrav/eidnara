@@ -214,6 +214,13 @@ const HOST: Host = Host {
     namespaces: suite_d::namespaces_available,
 };
 
+/// For runs that refuse before any tree is graded: preparation never enters
+/// the containment, so these tests hold on a host without namespaces too.
+const PREPARING_HOST: Host = Host {
+    namespaces: || true,
+    ..HOST
+};
+
 fn provider(model: &str) -> ProviderProfile {
     ProviderProfile {
         provider: "scripted".to_string(),
@@ -718,7 +725,7 @@ fn an_unaffordable_time_study_stops_for_approval_before_the_pilot_is_paid_for() 
     let dir = tempfile::tempdir().unwrap();
     let corpus = corpus(dir.path(), &PLAIN);
     let config = config(dir.path(), corpus, ControlScript::default(), 1);
-    match anchor::run(&config, HOST) {
+    match anchor::run(&config, PREPARING_HOST) {
         Err(RunError::StopForApproval(Affordability::StopForApproval {
             projected_ms,
             bound_ms,
@@ -741,7 +748,7 @@ fn the_store_is_charged_while_preparing_not_after_the_pilot() {
     let corpus = corpus(dir.path(), &PLAIN);
     let mut config = config(dir.path(), corpus, ControlScript::default(), 1);
     config.store_bound_bytes = 1;
-    match anchor::run(&config, HOST) {
+    match anchor::run(&config, PREPARING_HOST) {
         Err(RunError::Envelope(exceeded)) => {
             assert_eq!(exceeded.resource, Resource::StoreBytes);
             assert_eq!(exceeded.bound, 1);
@@ -767,7 +774,7 @@ fn the_clone_is_charged_before_it_is_removed() {
     config.store_bound_bytes = 2 << 20;
     let host = Host {
         clone: bulky_clone,
-        ..HOST
+        ..PREPARING_HOST
     };
     match anchor::run(&config, host) {
         Err(RunError::Envelope(exceeded)) => {
@@ -799,7 +806,7 @@ fn every_extracted_tree_is_charged_while_the_clone_still_exists() {
     config.store_bound_bytes = 7 << 19;
     let host = Host {
         clone: counted_clone,
-        ..HOST
+        ..PREPARING_HOST
     };
     match anchor::run(&config, host) {
         Err(RunError::Envelope(exceeded)) => {
@@ -828,7 +835,7 @@ fn the_elapsed_bound_is_charged_while_preparing() {
     config.elapsed_bound_ms = 1;
     let host = Host {
         clone: counted_clone,
-        ..HOST
+        ..PREPARING_HOST
     };
     match anchor::run(&config, host) {
         Err(RunError::Envelope(exceeded)) => {
