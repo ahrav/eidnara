@@ -2170,8 +2170,9 @@ indices in the path).
 The recipe rule reads the shrink report. A payload kind is count-triggered
 when the minimized aged log keeps more than one event of it and each one's
 single deletion, over the final deletion set, was recorded `Slipped` or
-`NotReproduced`; an event whose deletion is `InvalidPair` (the evidence) does
-not count. `count_triggered` returns those kinds with their counts. A
+`NotReproduced` under the digest of the scenario that deletion produces; an
+event whose deletion is `InvalidPair` (the evidence) does not count, and
+neither does a record under a foreign digest. `count_triggered` returns those kinds with their counts. A
 scenario whose minimality is `OneMinimal` and has a count-triggered kind must
 carry the compact form (`RecipeRequired`); a scenario without one carries
 none (`RecipeWithoutMultiplicity`); the form's `multiplicities` must equal
@@ -2221,7 +2222,10 @@ with `tasks_per_world: 2`, the two tasks the scenario carries; its digest is
 pinned into every predicate. `run` approves it, prepares the publish directory,
 occupies one temp root for the candidate file, replays the original, and
 refuses `NoFailure` unless the child reports `Failed`; the reported predicate
-is the pinned one. It then drives `eval_core::shrink` with `Replayer::replay`
+is the pinned one, and refuses `ForeignPredicate` when the child's oracle,
+cut, or profile digest is not the one it was sent. A `Config` whose commit
+count the aged world cannot carry is refused (`Commits`) before the publish
+root exists. It then drives `eval_core::shrink` with `Replayer::replay`
 as the callback. The callback cannot fail, so the first refusal (drift, an
 envelope breach, an I/O error) is kept, every later request is answered
 `Unknown { effect_unanswered }` without a replay, and the run returns that

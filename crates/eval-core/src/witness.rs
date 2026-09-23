@@ -223,17 +223,24 @@ impl WitnessPackage {
         }
     }
 
-    /// The kinds a compact recipe must count, with their counts.
+    /// The kinds a compact recipe must count, with their counts. A record
+    /// counts only under the digest of the scenario its deletion produces.
     pub fn count_triggered(&self) -> BTreeMap<String, u64> {
         let mut counts: BTreeMap<String, u64> = BTreeMap::new();
         for event in &self.minimized.aged.events {
-            let mut deleted = self.shrink.deleted.clone();
-            deleted.insert(Element::Event {
+            let element = Element::Event {
                 history: History::Aged,
                 id: event.id.clone(),
-            });
+            };
+            let digest = self
+                .minimized
+                .without(&BTreeSet::from([element.clone()]))
+                .digest();
+            let mut deleted = self.shrink.deleted.clone();
+            deleted.insert(element);
             let changed = self.shrink.candidates.iter().any(|record| {
                 record.deleted == deleted
+                    && record.scenario_digest == digest
                     && matches!(
                         record.verdict,
                         CandidateVerdict::Slipped { .. } | CandidateVerdict::NotReproduced

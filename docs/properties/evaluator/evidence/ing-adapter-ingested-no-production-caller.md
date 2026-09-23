@@ -9,9 +9,12 @@ making an adapter production-live is outside this specification."
 - `crates/eval-core/src/manifest.rs:137` the variant and its wire name.
 - `docs/properties/evaluator/README.md` "Gaps recorded here": every
   ingestion entry point lacks a production caller.
-- Every shell manifest sets `ingestion:
-  Ingestion::AdapterIngestedNoProductionCaller`
-  (`crates/daemon/examples/eval_runner/aging.rs` `suite_c_manifest`).
+- Every Suite C shell manifest (aging, fault, growth, shrink) sets
+  `ingestion: Ingestion::AdapterIngestedNoProductionCaller`
+  (`crates/daemon/examples/eval_runner/aging.rs` `suite_c_manifest`). The
+  Suite B shell labels its arm `Ingestion::TransformRouteTurnByTurn`
+  (`crates/daemon/examples/eval_runner/campaign.rs` `manifest`): the
+  daemon's own route, not an adapter, and still no production caller.
 
 ## Failure scenario
 A report is cited as evidence that production ingestion preserves knowledge

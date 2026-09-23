@@ -8,8 +8,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use context_core::redaction::{RedactionErrorKind, Redactor};
 use eval_core::{
-    CandidateVerdict, ClaimBoundary, Cut, FailureClass, Generation, History, Minimality, Mode,
-    MultiplicityRecipe, Oracle, OracleRefused, OriginalFailure, ShrinkReportError, Slice,
+    CandidateVerdict, ClaimBoundary, Cut, Element, FailureClass, Generation, History, Minimality,
+    Mode, MultiplicityRecipe, Oracle, OracleRefused, OriginalFailure, ShrinkReportError, Slice,
     WITNESS_SCHEMA, WitnessError, WitnessPackage, parse_witness, residue_drift, shrink,
 };
 use serde_json::Value;
@@ -260,6 +260,54 @@ fn one_minimality_needs_a_rejected_record_for_every_single_deletion() {
     assert_eq!(
         forged.validate(),
         Err(WitnessError::MinimalityUnsupported { element })
+    );
+}
+
+#[test]
+fn a_multiplicity_record_counts_only_under_its_own_scenario_digest() {
+    let package = package();
+    let counted = package.count_triggered();
+    assert_eq!(counted["commit"], 5);
+    // Forge the digest on one counted commit's single-deletion records: the
+    // deletion set and verdict still match, the scenario they name does not.
+    let mut forged = package.clone();
+    let commit = forged
+        .minimized
+        .aged
+        .events
+        .iter()
+        .filter(|event| matches!(event.payload, eval_core::Payload::Commit { .. }))
+        .map(|event| Element::Event {
+            history: History::Aged,
+            id: event.id.clone(),
+        })
+        .find(|element| {
+            let mut deleted = forged.shrink.deleted.clone();
+            deleted.insert(element.clone());
+            forged.shrink.candidates.iter().any(|record| {
+                record.deleted == deleted
+                    && matches!(
+                        record.verdict,
+                        CandidateVerdict::Slipped { .. } | CandidateVerdict::NotReproduced
+                    )
+            })
+        })
+        .expect("a counted commit");
+    let mut deleted = forged.shrink.deleted.clone();
+    deleted.insert(commit);
+    for record in &mut forged.shrink.candidates {
+        if record.deleted == deleted {
+            record.scenario_digest = "00".repeat(32);
+        }
+    }
+    assert_eq!(
+        forged.count_triggered()["commit"],
+        4,
+        "a record under a foreign digest is not evidence for this deletion"
+    );
+    assert_eq!(
+        forged.validate(),
+        Err(WitnessError::RecipeMultiplicitiesDisagree)
     );
 }
 

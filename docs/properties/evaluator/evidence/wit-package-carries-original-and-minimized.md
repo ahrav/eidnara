@@ -11,8 +11,9 @@ compact recipe form when multiplicity is the trigger."
   `MultiplicityRecipe` (two `Generation`s and the counted kinds).
 - `crates/eval-core/src/witness.rs` `count_triggered` reads the shrink
   report: a surviving aged event whose single deletion (over the final
-  deletion set) was recorded `Slipped` or `NotReproduced` counts toward its
-  kind; kinds with one such event are dropped.
+  deletion set, under the digest of the scenario it produces) was recorded
+  `Slipped` or `NotReproduced` counts toward its kind; kinds with one such
+  event are dropped.
 - `crates/eval-core/src/witness.rs` `regenerates` compares the declared event
   count with the minimized log plus that history's deletions before calling
   `generate_all`, then applies the deletions and compares logs.
@@ -34,6 +35,9 @@ compact recipe form when multiplicity is the trigger."
   a report that replayed only the original refuses a `OneMinimal` claim and
   passes a `NotEstablished` one; a rejection record under a foreign digest is
   no record.
+- `crates/eval-core/tests/witness.rs` `a_multiplicity_record_counts_only_under_its_own_scenario_digest`:
+  a counted commit's records under a foreign digest drop out of the count
+  and the recipe disagrees.
 - `crates/eval-core/tests/witness.rs` `the_coverage_signature_names_only_registered_markers`:
   an unregistered name refuses through `validate` and `serialize`.
 - `crates/daemon/tests/eval_shrink.rs` `a_fresh_process_reproduces_the_predicate_and_the_minimized_witness_is_published`:

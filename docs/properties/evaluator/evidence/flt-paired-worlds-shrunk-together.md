@@ -5,14 +5,15 @@ Parent specification C-DST: "both worlds of a pair are shrunk together with
 the pair mapping recomputed per candidate."
 
 ## Evidence trail
-- `crates/eval-core/src/shrink.rs:136` `History` names the log an event is
+- `crates/eval-core/src/shrink.rs` `History` names the log an event is
   deleted from; the two generated histories share raw ids such as
   `session:session-0:0`.
-- `crates/eval-core/src/shrink.rs:192` `Scenario::without` deletes from the
+- `crates/eval-core/src/shrink.rs` `Scenario::without` deletes from the
   named log only.
-- `crates/eval-core/src/shrink.rs:211` `Scenario::compile` calls
+- `crates/eval-core/src/shrink.rs` `Scenario::compile` calls
   `compile_pair_set` over the candidate's own logs.
-- `crates/eval-core/src/shrink.rs:498` a compiler refusal is `InvalidPair`
+- `crates/eval-core/src/shrink.rs` `Driver::replay_candidate`: a compiler
+  refusal is `InvalidPair`
   before any replay is issued and consumes no budget.
 - `crates/eval-core/tests/shrink.rs` `pair_validity_is_recomputed_and_both_worlds_are_shrunk_together`
   asserts the shared-id deletions, `InvalidPair` iff the compiler refuses, no

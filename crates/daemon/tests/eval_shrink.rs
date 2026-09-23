@@ -140,6 +140,34 @@ fn shrink_child_reports_a_drifted_residue() {
     println!("{BARRIER} {}", serde_json::to_string(&replayed).unwrap());
 }
 
+/// Every child answers `Failed` under a predicate pinned at another cut.
+fn spawn_foreign_predicate(_: &ChildArgs) -> Command {
+    reexec("shrink_child_reports_a_foreign_predicate")
+}
+
+#[test]
+#[ignore = "re-executed by the foreign-predicate test"]
+fn shrink_child_reports_a_foreign_predicate() {
+    let Some(args) = ChildArgs::from_env() else {
+        return;
+    };
+    let replayed = Replayed {
+        outcome: ReplayOutcome::Failed {
+            predicate: eval_core::FailurePredicate {
+                oracle: args.oracle,
+                checkpoint: Cut::EndOfRun,
+                profile_digest: args.profile_digest,
+                witness_class: WitnessClass::Failure {
+                    class: FailureClass::Interference,
+                },
+            },
+        },
+        trace_digest: "ab".repeat(32),
+        residue: shrink::residue(),
+    };
+    println!("{BARRIER} {}", serde_json::to_string(&replayed).unwrap());
+}
+
 fn approval() -> Approval {
     Approval {
         approved_by: "maintainer".to_string(),
@@ -480,6 +508,36 @@ fn a_child_whose_residue_drifted_refuses_the_run() {
         other => panic!("expected residue drift, got {other:?}"),
     }
     assert!(!config.publish.join(WITNESS_FILE).exists());
+}
+
+#[test]
+fn a_child_predicate_pinned_elsewhere_is_refused_and_nothing_is_published() {
+    let publish = tempfile::tempdir().unwrap();
+    let config = config(publish.path().join("out"));
+    let refused = shrink::run(&config, spawn_foreign_predicate).err().unwrap();
+    assert!(
+        matches!(refused, RunError::ForeignPredicate { .. }),
+        "the child's cut is not the pinned one: {refused:?}"
+    );
+    assert!(!config.publish.join(WITNESS_FILE).exists());
+}
+
+#[test]
+fn a_commit_count_the_scenario_cannot_carry_is_refused_before_anything_runs() {
+    let publish = tempfile::tempdir().unwrap();
+    for commits in [0, 1, 78] {
+        let mut config = config(publish.path().join(format!("commits-{commits}")));
+        config.commits = commits;
+        let refused = shrink::run(&config, spawn_child).err().unwrap();
+        assert!(
+            matches!(refused, RunError::Commits(_)),
+            "{commits} commits: {refused:?}"
+        );
+        assert!(
+            !config.publish.exists(),
+            "{commits} commits published a root"
+        );
+    }
 }
 
 #[test]

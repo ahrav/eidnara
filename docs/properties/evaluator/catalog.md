@@ -282,6 +282,7 @@ Exercised: yes -
   `crates/eval-core/tests/witness.rs::every_structural_refusal_names_its_cause`,
   `crates/eval-core/tests/witness.rs::one_minimality_needs_a_rejected_record_for_every_single_deletion`,
   `crates/eval-core/tests/witness.rs::the_coverage_signature_names_only_registered_markers`,
+  `crates/eval-core/tests/witness.rs::a_multiplicity_record_counts_only_under_its_own_scenario_digest`,
   and
   `crates/daemon/tests/eval_shrink.rs::a_fresh_process_reproduces_the_predicate_and_the_minimized_witness_is_published`
 Guarantee: A witness package carries the original failure (RunId, decision tape,
@@ -295,7 +296,7 @@ Check: `always` - `WitnessPackage::validate` refuses a recipe missing when
   (`RecipeMultiplicitiesDisagree`), or not regenerating the minimized logs
   (`RecipeDisagrees { history }`); a kind is count-triggered when more than one
   aged event of it survives and each one's single deletion was recorded
-  `Slipped` or `NotReproduced`; a `OneMinimal` claim without a rejected
+  `Slipped` or `NotReproduced` under the deleted scenario's digest; a `OneMinimal` claim without a rejected
   record, under the digest of the scenario that deletion produces, for some
   single deletion from the minimized scenario is refused
   (`MinimalityUnsupported { element }`); a coverage name outside the
@@ -426,10 +427,11 @@ Exercised: partial -
 Guarantee: Every manifest names how its worlds were ingested; no world is
   labelled "validated real ingestion" until an ingestion entry point has a
   production caller.
-Check: `always` - every manifest carries `ingestion` and every generated-world
-  manifest at HEAD carries `adapter-ingested, production caller: none`; a
-  manifest claiming validated real ingestion is refused until a production
-  caller exists.
+Check: `always` - every manifest carries `ingestion`; every Suite C shell
+  manifest at HEAD carries `adapter-ingested, production caller: none` and the
+  Suite B shell's carries `transform-route, turn by turn`, the daemon's own
+  route; no manifest claims validated real ingestion until a production caller
+  exists.
 Fault/timing angle: None.
 Required faults and enabling state: A manifest; the ingestion label.
 Confidence: medium -

@@ -71,8 +71,12 @@ pub enum RunError {
     Profile(#[from] ProfileError),
     #[error("envelope exceeded: {0:?}")]
     Envelope(#[from] EnvelopeExceeded),
+    #[error("commits: {0}")]
+    Commits(String),
     #[error("the original scenario did not fail: {outcome:?}")]
     NoFailure { outcome: ReplayOutcome },
+    #[error("the child pinned another oracle, cut, or profile: {predicate:?}")]
+    ForeignPredicate { predicate: FailurePredicate },
     #[error("shrink refused: {0}")]
     Shrink(#[from] ShrinkRefused),
     #[error("replay effect refused: {0}")]
@@ -420,6 +424,7 @@ pub fn run(config: &Config, spawn: Spawn) -> Result<Run, RunError> {
             .as_millis(),
     )
     .unwrap();
+    commits(u64::from(config.commits)).map_err(RunError::Commits)?;
     let profile = profile(
         config.scale,
         config.elapsed_bound_ms,
@@ -452,6 +457,14 @@ pub fn run(config: &Config, spawn: Spawn) -> Result<Run, RunError> {
             outcome: first.outcome,
         });
     };
+    if predicate.oracle != config.oracle
+        || predicate.checkpoint != CUT
+        || predicate.profile_digest != profile_digest
+    {
+        return Err(RunError::ForeignPredicate {
+            predicate: predicate.clone(),
+        });
+    }
     let predicate: FailurePredicate = predicate.clone();
     let fixture = serialize_spec();
     // The shrinker's callback cannot fail, so the first refusal is kept and
@@ -571,6 +584,19 @@ pub fn run(config: &Config, spawn: Spawn) -> Result<Run, RunError> {
     })
 }
 
+/// At least two commits, so a rename exists, and an aged world within the
+/// event bound; `run` refuses a `Config` built directly the same way.
+fn commits(commits: u64) -> Result<u32, String> {
+    let commits = match commits {
+        commits @ 2.. => u32::try_from(commits).map_err(|error| error.to_string())?,
+        _ => return Err("needs at least two, so a rename exists".to_string()),
+    };
+    aged_config(commits)
+        .validate()
+        .map_err(|error| format!("{error:?}"))?;
+    Ok(commits)
+}
+
 pub fn config_from_args(args: impl IntoIterator<Item = String>) -> Result<Config, String> {
     let values = parse_flags(args, &FLAGS, USAGE)?;
     let take = |name: &str| values[name].clone();
@@ -583,17 +609,7 @@ pub fn config_from_args(args: impl IntoIterator<Item = String>) -> Result<Config
     };
     Ok(Config {
         scale,
-        commits: match number("commits")? {
-            commits @ 2.. => {
-                let commits =
-                    u32::try_from(commits).map_err(|error| format!("--commits: {error}"))?;
-                aged_config(commits)
-                    .validate()
-                    .map_err(|error| format!("--commits: {error:?}"))?;
-                commits
-            }
-            _ => return Err("--commits needs at least two, so a rename exists".to_string()),
-        },
+        commits: commits(number("commits")?).map_err(|error| format!("--commits: {error}"))?,
         elapsed_bound_ms: number("elapsed-bound-ms")?,
         approval: Some(Approval {
             approved_by: take("approved-by"),
