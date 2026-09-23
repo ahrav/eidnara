@@ -954,3 +954,49 @@ fn an_armed_safety_check_runs_after_the_faulted_effect_is_durable() {
         );
     }
 }
+
+/// A descriptor whose invalidation names a commit past the kernel tip claims
+/// a commit that has not happened, as one created past the tip does; the
+/// safety invariants refuse both.
+#[test]
+fn a_descriptor_invalidated_past_the_tip_fails_the_safety_check() {
+    let plan = aging::plan(MESSAGES).unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let mut stores = aging::Stores::open(root.path(), &plan);
+    aging::live(&mut stores, &plan.steps[..4]);
+    let mut witness = Witness::new();
+    witness.safety_check(&stores);
+    let tip = stores.tip();
+    let kernel = rusqlite::Connection::open(aging::kernel_file(root.path())).unwrap();
+    kernel.execute_batch("PRAGMA foreign_keys = OFF").unwrap();
+    // The registry is append-only by trigger; the corruption this check must
+    // catch is written underneath that guard.
+    let guards: Vec<String> = kernel
+        .prepare("SELECT name FROM sqlite_master WHERE type = 'trigger' AND tbl_name = 'object_registry'")
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    for guard in &guards {
+        kernel
+            .execute_batch(&format!("DROP TRIGGER {guard}"))
+            .unwrap();
+    }
+    let changed = kernel
+        .execute(
+            "UPDATE object_registry SET invalidated_commit_seq = ?1 \
+             WHERE object_id GLOB 'srcdesc:*' AND invalidated_commit_seq IS NOT NULL",
+            [tip + 100],
+        )
+        .unwrap();
+    assert!(changed > 0, "the prefix retires or supersedes a descriptor");
+    drop(kernel);
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        witness.safety_check(&stores)
+    }));
+    assert!(
+        outcome.is_err(),
+        "an invalidation past the tip fails the safety check"
+    );
+}

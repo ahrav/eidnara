@@ -2397,10 +2397,10 @@ heal, and the report records both. The rest of the history then runs on the
 reopened stores. `AtQuiescence`, `AfterFaultPhase`, `AfterRecovery` (reached
 three times), and `EndOfRun` are receipted where the runner reached them, and
 `AfterAtomicTransition`, which this campaign has no transition to reach, is
-receipted `not_reached`. The safety invariants (no descriptor claims a commit
-past the tip or an invalidation before its creation, and the projection never
-runs ahead of the kernel) are checked while each fault is armed, and only
-those checks count as
+receipted `not_reached`. The safety invariants (no descriptor claims a
+creation or an invalidation past the tip or an invalidation before its
+creation, and the projection never runs ahead of the kernel) are checked while
+each fault is armed, and only those checks count as
 `safety_checks_while_armed`: for the lock holder, while the holder still holds
 the projection; for a reply-loss fault, from the episode's observer at the
 first cut after the faulted operation's effect is durable and before the drive

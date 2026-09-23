@@ -216,7 +216,8 @@ impl Witness {
     }
 }
 
-/// No descriptor claims a commit past the tip or an invalidation before its
+/// No descriptor claims a creation or an invalidation past the tip or an
+/// invalidation before its
 /// creation, and the projection never runs ahead of the kernel.
 fn safety_invariants(stores: &Stores) {
     let snapshot = stores.snapshot();
@@ -229,6 +230,10 @@ fn safety_invariants(stores: &Stores) {
             assert!(
                 invalidated > descriptor.created_commit_seq,
                 "{object_id} invalidated before it was created"
+            );
+            assert!(
+                invalidated <= snapshot.commit_seq,
+                "{object_id} invalidated after the tip"
             );
         }
     }
@@ -1410,13 +1415,6 @@ pub fn check_expectations(
 }
 
 pub fn run(config: &Config) -> Result<Run, RunError> {
-    let started_at_ms = i64::try_from(
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_millis(),
-    )
-    .unwrap();
     let profile = profile(
         config.scale,
         config.messages,
@@ -1425,6 +1423,16 @@ pub fn run(config: &Config) -> Result<Run, RunError> {
     );
     let fault_profile = profile.fault_profile()?;
     prepare_publish(&config.publish, &[REPORT_FILE, MANIFEST_FILE]).map_err(publish_refused)?;
+    // The manifest's clock and the envelope's start at the same boundary, as
+    // Suite B's do, so `end_ms` is `start_ms` plus the elapsed time measured
+    // from `start_ms`.
+    let started_at_ms = i64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis(),
+    )
+    .unwrap();
     let mut charges = Charges::new(profile.envelope.clone());
     let mut witness = Witness::new();
     // Planning runs under the clock: the elapsed bound covers the whole run.
