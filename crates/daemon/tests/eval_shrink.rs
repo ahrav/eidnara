@@ -28,15 +28,16 @@ use std::time::Duration;
 use context_core::canonical_json::protocol_digest;
 use eval_core::{
     Approval, CandidateVerdict, Cut, CutOutcome, Element, EventId, FailureClass, History,
-    Minimality, NotEstablishedReason, Oracle, ProfileError, ReplayOutcome, Scale, Scenario,
-    Transformation, UnknownReason, WITNESS_DIGEST_PROTOCOL, WitnessClass, WitnessError,
-    parse_manifest, parse_witness, residue_drift,
+    Minimality, NotEstablishedReason, Oracle, OracleRefused, ProfileError, ReplayOutcome, Scale,
+    Scenario, ShrinkRefused, Transformation, UnknownReason, WITNESS_DIGEST_PROTOCOL, WitnessClass,
+    WitnessError, parse_manifest, parse_witness, residue_drift,
 };
-use serde_json::Value;
+use serde_json::{Value, json};
 use shrink::{BARRIER, ChildArgs, Config, MANIFEST_FILE, Replayed, RunError, WITNESS_FILE};
 
 const COMMITS: u32 = 8;
 const STUBBORN: &str = "repository:repository-0:2";
+const SUITE: &str = "crates/daemon/tests/eval_shrink.rs::";
 
 fn reexec(entrypoint: &str) -> Command {
     let mut command = Command::new(std::env::current_exe().unwrap());
@@ -100,6 +101,13 @@ fn spawn_sleeping_without_stubborn(args: &ChildArgs) -> Command {
     reexec("shrink_child_sleeps_past_the_timeout")
 }
 
+/// The digest of the scenario the parent sent: the key it reads answers under.
+fn scenario_digest(args: &ChildArgs) -> String {
+    let scenario: Scenario =
+        serde_json::from_slice(&std::fs::read(&args.scenario).unwrap()).unwrap();
+    scenario.digest()
+}
+
 fn has_stubborn(args: &ChildArgs) -> bool {
     let scenario: Scenario =
         serde_json::from_slice(&std::fs::read(&args.scenario).unwrap()).unwrap();
@@ -126,17 +134,102 @@ fn spawn_drifting(_: &ChildArgs) -> Command {
 #[test]
 #[ignore = "re-executed by the drift test"]
 fn shrink_child_reports_a_drifted_residue() {
-    if std::env::var(shrink::CHILD_ARGS).is_err() {
+    let Some(args) = ChildArgs::from_env() else {
         return;
-    }
+    };
     let mut residue = shrink::residue();
     residue.pop_first();
+    let scenario_digest = scenario_digest(&args);
+    let outcome = ReplayOutcome::Passed;
     let replayed = Replayed {
-        outcome: ReplayOutcome::Passed,
-        trace_digest: String::new(),
+        trace_digest: shrink::trace_digest(&scenario_digest, &outcome, 0),
+        scenario_digest,
+        outcome,
         residue,
     };
     println!("{BARRIER} {}", serde_json::to_string(&replayed).unwrap());
+}
+
+/// Every child answers honestly but under a trace digest of its own choosing.
+fn spawn_forged_trace(_: &ChildArgs) -> Command {
+    reexec("shrink_child_reports_a_forged_trace")
+}
+
+#[test]
+#[ignore = "re-executed by the forged-trace test"]
+fn shrink_child_reports_a_forged_trace() {
+    let Some(args) = ChildArgs::from_env() else {
+        return;
+    };
+    let mut replayed = shrink::replayed(&args);
+    replayed.trace_digest = "ab".repeat(32);
+    println!("{BARRIER} {}", serde_json::to_string(&replayed).unwrap());
+}
+
+/// Every child answers `Failed` under a predicate pinned at another cut.
+fn spawn_foreign_predicate(_: &ChildArgs) -> Command {
+    reexec("shrink_child_reports_a_foreign_predicate")
+}
+
+/// The original is answered honestly; every candidate answers `Failed` under
+/// a predicate pinned at another cut.
+fn spawn_foreign_predicate_for_candidates(args: &ChildArgs) -> Command {
+    if scenario_digest(args) == shrink::scenario(COMMITS).0.digest() {
+        return spawn_child(args);
+    }
+    reexec("shrink_child_reports_a_foreign_predicate")
+}
+
+#[test]
+#[ignore = "re-executed by the foreign-predicate test"]
+fn shrink_child_reports_a_foreign_predicate() {
+    let Some(args) = ChildArgs::from_env() else {
+        return;
+    };
+    let scenario_digest = scenario_digest(&args);
+    let outcome = ReplayOutcome::Failed {
+        predicate: eval_core::FailurePredicate {
+            oracle: args.oracle,
+            checkpoint: Cut::EndOfRun,
+            profile_digest: args.profile_digest,
+            witness_class: WitnessClass::Failure {
+                task: "first-commit".to_string(),
+                class: FailureClass::Interference,
+            },
+        },
+    };
+    let replayed = Replayed {
+        trace_digest: shrink::trace_digest(&scenario_digest, &outcome, 0),
+        scenario_digest,
+        outcome,
+        residue: shrink::residue(),
+    };
+    println!("{BARRIER} {}", serde_json::to_string(&replayed).unwrap());
+}
+
+/// Every child evaluates the original scenario, whatever candidate it was
+/// sent: a structurally valid answer for the wrong scenario.
+fn spawn_answering_for_the_original(_: &ChildArgs) -> Command {
+    reexec("shrink_child_answers_about_the_original_scenario")
+}
+
+#[test]
+#[ignore = "re-executed by the misdirected-child test"]
+fn shrink_child_answers_about_the_original_scenario() {
+    let Some(args) = ChildArgs::from_env() else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("original.json");
+    std::fs::write(
+        &path,
+        serde_json::to_vec(&shrink::scenario(COMMITS).0).unwrap(),
+    )
+    .unwrap();
+    shrink::child_main(&ChildArgs {
+        scenario: path,
+        ..args
+    });
 }
 
 fn approval() -> Approval {
@@ -199,6 +292,7 @@ fn a_fresh_process_reproduces_the_predicate_and_the_minimized_witness_is_publish
     let run = shrink::run(&config, spawn_child).unwrap();
 
     let expected = WitnessClass::Failure {
+        task: "first-commit".to_string(),
         class: FailureClass::Interference,
     };
     let ReplayOutcome::Failed { predicate } = &run.original.outcome else {
@@ -206,7 +300,7 @@ fn a_fresh_process_reproduces_the_predicate_and_the_minimized_witness_is_publish
     };
     assert_eq!(predicate.witness_class, expected);
     assert_eq!(predicate.checkpoint, Cut::AtQuiescence);
-    assert_eq!(predicate.oracle, "planted:required-commits");
+    assert_eq!(predicate.oracle, config.oracle);
     let witness = &run.witness;
     assert_eq!(witness.original.predicate, *predicate);
     assert_eq!(
@@ -293,6 +387,34 @@ fn a_fresh_process_reproduces_the_predicate_and_the_minimized_witness_is_publish
         protocol_digest(WITNESS_DIGEST_PROTOCOL, &value).unwrap()
     );
     assert_eq!(manifest.eval_run_id, witness.original.eval_run_id);
+    assert_eq!(
+        manifest.component_versions.task_corpus,
+        format!("generated:{:#x}", shrink::SEED),
+        "the corpus names the seed the run identity was built from"
+    );
+    assert_eq!(manifest.component_versions.execution_image, "fresh-process");
+    assert_eq!(
+        manifest.run_identity.config["tasks_per_world"],
+        json!(witness.minimized.tasks.len()),
+        "the pinned profile describes the workload the scenario carries"
+    );
+    assert_eq!(
+        manifest.run_identity.config["name"],
+        json!("s0-suite-c-shrink")
+    );
+    assert_eq!(
+        manifest.residue,
+        shrink::residue(),
+        "the manifest declares the residue the replays and the witness declare"
+    );
+    assert_eq!(
+        manifest.run_identity.scenario["replay_timeout"],
+        json!({
+            "secs": config.replay_timeout.as_secs(),
+            "nanos": config.replay_timeout.subsec_nanos(),
+        }),
+        "the wait a child is allowed decides its verdict, so the identity pins it whole"
+    );
     assert_eq!(
         manifest.cut_receipts,
         vec![eval_core::CutReceipt {
@@ -400,6 +522,9 @@ fn a_child_that_dies_before_its_barrier_is_retried_then_unknown_and_kept() {
             .contains("flt_shrink_slipped_candidate_rejected"),
         "candidates that answered still slipped"
     );
+    run.coverage
+        .complete(SUITE)
+        .expect("this run fires every marker the suite owns");
     assert!(witness.recipe.is_none(), "no 1-minimality, no recipe");
     let _ = std::fs::remove_file(death_log());
 }
@@ -464,6 +589,134 @@ fn a_child_whose_residue_drifted_refuses_the_run() {
 }
 
 #[test]
+fn a_child_predicate_pinned_elsewhere_is_refused_and_nothing_is_published() {
+    let publish = tempfile::tempdir().unwrap();
+    let config = config(publish.path().join("out"));
+    let refused = shrink::run(&config, spawn_foreign_predicate).err().unwrap();
+    assert!(
+        matches!(refused, RunError::ForeignPredicate { .. }),
+        "the child's cut is not the pinned one: {refused:?}"
+    );
+    assert!(!config.publish.join(WITNESS_FILE).exists());
+}
+
+#[test]
+fn a_commit_count_the_scenario_cannot_carry_is_refused_before_anything_runs() {
+    let publish = tempfile::tempdir().unwrap();
+    for commits in [0, 1, 78] {
+        let mut config = config(publish.path().join(format!("commits-{commits}")));
+        config.commits = commits;
+        let refused = shrink::run(&config, spawn_child).err().unwrap();
+        assert!(
+            matches!(refused, RunError::Commits(_)),
+            "{commits} commits: {refused:?}"
+        );
+        assert!(
+            !config.publish.exists(),
+            "{commits} commits published a root"
+        );
+    }
+}
+
+#[test]
+fn an_answer_for_another_scenario_is_unknown_and_shrinks_nothing() {
+    let publish = tempfile::tempdir().unwrap();
+    let config = config(publish.path().join("out"));
+    let run = shrink::run(&config, spawn_answering_for_the_original).unwrap();
+    let witness = &run.witness;
+    assert!(
+        witness.shrink.deleted.is_empty(),
+        "an answer for the original is no evidence about a candidate: {:?}",
+        witness.shrink.deleted
+    );
+    for record in &witness.shrink.candidates[1..] {
+        assert!(
+            matches!(
+                record.verdict,
+                CandidateVerdict::Unknown {
+                    reason: UnknownReason::ReadBackFailed
+                } | CandidateVerdict::InvalidPair { .. }
+            ),
+            "{:?}",
+            record.verdict
+        );
+    }
+    assert!(matches!(
+        witness.shrink.minimality,
+        Minimality::NotEstablished {
+            reason: NotEstablishedReason::UnknownCandidates { .. }
+        }
+    ));
+}
+
+#[test]
+fn a_candidate_answered_under_a_foreign_predicate_is_unknown_not_slipped() {
+    let publish = tempfile::tempdir().unwrap();
+    let config = config(publish.path().join("out"));
+    let run = shrink::run(&config, spawn_foreign_predicate_for_candidates).unwrap();
+    let witness = &run.witness;
+    assert!(witness.shrink.deleted.is_empty());
+    for record in &witness.shrink.candidates[1..] {
+        assert!(
+            matches!(
+                record.verdict,
+                CandidateVerdict::Unknown {
+                    reason: UnknownReason::ReadBackFailed
+                } | CandidateVerdict::InvalidPair { .. }
+            ),
+            "a foreign predicate is no rejection: {:?}",
+            record.verdict
+        );
+    }
+    assert!(matches!(
+        witness.shrink.minimality,
+        Minimality::NotEstablished {
+            reason: NotEstablishedReason::UnknownCandidates { .. }
+        }
+    ));
+}
+
+#[test]
+fn a_trace_digest_that_is_not_the_observation_s_is_no_answer() {
+    let publish = tempfile::tempdir().unwrap();
+    let config = config(publish.path().join("out"));
+    let refused = shrink::run(&config, spawn_forged_trace).err().unwrap();
+    assert!(
+        matches!(
+            refused,
+            RunError::NoFailure {
+                outcome: ReplayOutcome::Unknown {
+                    reason: UnknownReason::ReadBackFailed
+                }
+            }
+        ),
+        "{refused:?}"
+    );
+    assert!(!config.publish.join(WITNESS_FILE).exists());
+}
+
+#[test]
+fn an_inverted_oracle_is_refused_before_the_original_is_replayed() {
+    let publish = tempfile::tempdir().unwrap();
+    let mut config = config(publish.path().join("out"));
+    config.oracle = Oracle::RequiredCommits {
+        failing_at: 1_000,
+        slipping_at: 3,
+    };
+    let refused = shrink::run(&config, spawn_child).err().unwrap();
+    assert!(
+        matches!(
+            refused,
+            RunError::Shrink(ShrinkRefused::InvalidOracle(
+                OracleRefused::InvertedThresholds { .. }
+            ))
+        ),
+        "{refused:?}"
+    );
+    assert!(!config.publish.exists(), "refused before the publish root");
+}
+
+#[test]
 fn an_original_that_does_not_fail_or_an_unapproved_profile_is_refused() {
     let publish = tempfile::tempdir().unwrap();
     let mut config = config(publish.path().join("passing"));
@@ -490,45 +743,36 @@ fn an_original_that_does_not_fail_or_an_unapproved_profile_is_refused() {
 
 #[test]
 fn the_shrink_flags_are_parsed_and_the_child_needs_its_environment() {
-    let config = shrink::config_from_args(
+    let run_id = "ab".repeat(32);
+    let flags = |commits: &str| {
         [
             "--scale",
             "s0",
             "--commits",
-            "8",
+            commits,
             "--elapsed-bound-ms",
             "1000",
             "--approved-by",
             "m",
             "--approval-run-id",
-            &"ab".repeat(32),
+            &run_id,
             "--publish",
             "/tmp/x",
         ]
-        .map(String::from),
-    )
-    .unwrap();
+        .map(String::from)
+    };
+    let config = shrink::config_from_args(flags("8")).unwrap();
     assert_eq!(config.commits, 8);
     assert_eq!(config.replay_timeout, Duration::from_secs(120));
     assert!(shrink::config_from_args(["--scale".to_string(), "s0".to_string()]).is_err());
-    let one_commit = [
-        "--scale",
-        "s0",
-        "--commits",
-        "1",
-        "--elapsed-bound-ms",
-        "1000",
-        "--approved-by",
-        "m",
-        "--approval-run-id",
-        &"ab".repeat(32),
-        "--publish",
-        "/tmp/x",
-    ]
-    .map(String::from);
     assert!(
-        shrink::config_from_args(one_commit).is_err(),
+        shrink::config_from_args(flags("1")).is_err(),
         "a rename needs two commits"
     );
+    let largest = shrink::config_from_args(flags("77")).unwrap();
+    shrink::scenario(largest.commits);
+    let refused = shrink::config_from_args(flags("78"))
+        .expect_err("78 commits exceed the aged world's 128-event bound");
+    assert!(refused.starts_with("--commits:"), "{refused}");
     assert!(ChildArgs::from_env().is_none());
 }

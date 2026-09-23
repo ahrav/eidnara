@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use context_core::canonical_json::protocol_digest;
+use context_core::canonical_json::{is_lower_hex, protocol_digest};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -83,6 +83,11 @@ pub enum CheckpointRefused {
         family: StoreFamily,
         counter: WorkCounter,
     },
+    /// A counter outside the family's declared set.
+    UndeclaredCounter {
+        family: StoreFamily,
+        counter: WorkCounter,
+    },
     PendingWork {
         family: StoreFamily,
         counter: WorkCounter,
@@ -101,6 +106,10 @@ pub enum CheckpointRefused {
     },
     MalformedIncarnation(String),
     NoFiles,
+    /// An empty path or a digest that is not 64 lowercase hex digits.
+    MalformedFile {
+        path: String,
+    },
     Shape(String),
 }
 
@@ -151,20 +160,10 @@ pub enum RestoreRefused {
     },
 }
 
-fn is_incarnation_id(text: &str) -> bool {
-    text.len() == 32
-        && text
-            .bytes()
-            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-}
-
-impl Checkpoint {
-    pub fn admit(
-        receipt: &QuiescenceReceipt,
-        incarnation_id: &str,
-    ) -> Result<(), CheckpointRefused> {
+impl QuiescenceReceipt {
+    pub fn check(&self) -> Result<(), CheckpointRefused> {
         for family in StoreFamily::ALL {
-            let store = receipt
+            let store = self
                 .stores
                 .get(&family)
                 .ok_or(CheckpointRefused::MissingStoreEvidence { family })?;
@@ -186,6 +185,16 @@ impl Checkpoint {
                     }
                 }
             }
+            if let Some(counter) = store
+                .pending
+                .keys()
+                .find(|counter| !family.counters().contains(counter))
+            {
+                return Err(CheckpointRefused::UndeclaredCounter {
+                    family,
+                    counter: *counter,
+                });
+            }
             if !store.wal.is_truncated() {
                 return Err(CheckpointRefused::WalNotTruncated {
                     family,
@@ -202,7 +211,17 @@ impl Checkpoint {
                 return Err(CheckpointRefused::HandleOpen { family });
             }
         }
-        if !is_incarnation_id(incarnation_id) {
+        Ok(())
+    }
+}
+
+impl Checkpoint {
+    pub fn admit(
+        receipt: &QuiescenceReceipt,
+        incarnation_id: &str,
+    ) -> Result<(), CheckpointRefused> {
+        receipt.check()?;
+        if !is_lower_hex(incarnation_id, 32) {
             return Err(CheckpointRefused::MalformedIncarnation(
                 incarnation_id.to_string(),
             ));
@@ -218,6 +237,12 @@ impl Checkpoint {
         Self::admit(&receipt, &incarnation_id)?;
         if files.is_empty() {
             return Err(CheckpointRefused::NoFiles);
+        }
+        if let Some((path, _)) = files
+            .iter()
+            .find(|(path, digest)| path.is_empty() || !is_lower_hex(digest, 64))
+        {
+            return Err(CheckpointRefused::MalformedFile { path: path.clone() });
         }
         Ok(Self {
             receipt,
@@ -342,6 +367,7 @@ pub enum Unenumerated {
     TombstoneOnlyInLater { occurrence_id: String },
     TombstoneDiffers { occurrence_id: String },
     CreatedDiffers { occurrence_id: String },
+    OrphanTombstone { occurrence_id: String },
     Shape(String),
 }
 
@@ -361,6 +387,17 @@ pub fn historical_diff(
         });
     }
     let (a, b) = (&earlier.historical, &later.historical);
+    for rows in [a, b] {
+        if let Some(id) = rows
+            .tombstones
+            .keys()
+            .find(|id| !rows.occurrences.contains_key(*id))
+        {
+            return Err(Unenumerated::OrphanTombstone {
+                occurrence_id: id.clone(),
+            });
+        }
+    }
     let mut divergences = Vec::new();
     for (occurrence_id, created) in &a.occurrences {
         let occurrence_id = occurrence_id.clone();
@@ -497,8 +534,18 @@ impl StateSnapshot {
             });
         }
         for (object_id, descriptor) in &resumed.kernel {
-            let known = reopened.kernel.contains_key(object_id);
-            if !known && descriptor.created_commit_seq <= reopened.commit_seq {
+            // The kernel's append-only triggers refuse every other rewrite of a
+            // known row; a backdated creation or death is what they cannot see.
+            let backdated = match reopened.kernel.get(object_id) {
+                None => descriptor.created_commit_seq <= reopened.commit_seq,
+                Some(before) => {
+                    before.invalidated_commit_seq.is_none()
+                        && descriptor
+                            .invalidated_commit_seq
+                            .is_some_and(|at| at <= reopened.commit_seq)
+                }
+            };
+            if backdated {
                 return Err(PrefixRefused::HistoryRewritten {
                     object_id: object_id.clone(),
                 });
@@ -578,7 +625,32 @@ impl GuardComparison {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AgingReportError {
-    SchemaMismatch { found: String },
+    SchemaMismatch {
+        found: String,
+    },
+    ClaimBoundaryMismatch,
+    MalformedDigest {
+        field: &'static str,
+    },
+    CheckpointStepMismatch {
+        checkpoint_step: u32,
+        receipt_step: u32,
+    },
+    /// The checkpoint step must leave a prefix and a remainder: `0 < step < steps`.
+    CheckpointStepOutOfRange {
+        checkpoint_step: u32,
+        steps: u32,
+    },
+    CommitSeqNotMonotonic {
+        at_checkpoint: i64,
+        at_end: i64,
+    },
+    /// The guard passed without the situation it exists for.
+    WindowDeathsIncomplete {
+        supersessions: u64,
+        retirements: u64,
+    },
+    Receipt(CheckpointRefused),
     Shape(String),
     Lossy,
 }
@@ -612,7 +684,45 @@ impl AgingReport {
                 found: self.schema.clone(),
             });
         }
-        Ok(())
+        if self.claim_boundary != crate::ClaimBoundary::pinned() {
+            return Err(AgingReportError::ClaimBoundaryMismatch);
+        }
+        for (field, digest) in [
+            ("eval_run_id", &self.eval_run_id),
+            ("profile_digest", &self.profile_digest),
+            ("checkpoint_digest", &self.checkpoint_digest),
+            ("full_guard_digest", &self.full_guard_digest),
+            ("resumed_guard_digest", &self.resumed_guard_digest),
+        ] {
+            if !is_lower_hex(digest, 64) {
+                return Err(AgingReportError::MalformedDigest { field });
+            }
+        }
+        if self.receipt.step != self.checkpoint_step {
+            return Err(AgingReportError::CheckpointStepMismatch {
+                checkpoint_step: self.checkpoint_step,
+                receipt_step: self.receipt.step,
+            });
+        }
+        if self.checkpoint_step == 0 || self.checkpoint_step >= self.steps {
+            return Err(AgingReportError::CheckpointStepOutOfRange {
+                checkpoint_step: self.checkpoint_step,
+                steps: self.steps,
+            });
+        }
+        if self.commit_seq_at_end <= self.commit_seq_at_checkpoint {
+            return Err(AgingReportError::CommitSeqNotMonotonic {
+                at_checkpoint: self.commit_seq_at_checkpoint,
+                at_end: self.commit_seq_at_end,
+            });
+        }
+        if self.window_deaths.supersessions == 0 || self.window_deaths.retirements == 0 {
+            return Err(AgingReportError::WindowDeathsIncomplete {
+                supersessions: self.window_deaths.supersessions,
+                retirements: self.window_deaths.retirements,
+            });
+        }
+        self.receipt.check().map_err(AgingReportError::Receipt)
     }
 
     pub fn serialize(&self) -> Result<Value, AgingReportError> {

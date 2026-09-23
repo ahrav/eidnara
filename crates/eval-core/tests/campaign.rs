@@ -3,6 +3,7 @@
 
 use std::collections::BTreeMap;
 
+use context_core::canonical_json::ContractError;
 use eval_core::{
     Approval, ArmKind, CampaignProfile, CensorReason, Cut, DisabledReason, Envelope,
     EnvelopeExceeded, EvaluatedSurface, HistoryPolicy, LivenessBounds, PairError, ProfileError,
@@ -11,6 +12,10 @@ use eval_core::{
     Terminal, UnsupportedReason, parse_run_profile,
 };
 use serde_json::{Value, json};
+
+fn ratio(numerator: i64, denominator: u64) -> Ratio {
+    Ratio::try_new(i128::from(numerator), i128::from(denominator)).unwrap()
+}
 
 type Mutate<T> = Box<dyn Fn(&mut T)>;
 
@@ -92,7 +97,7 @@ fn a_profile_pins_every_number_and_runs_only_once_approved() {
             ceilings.censoring,
             ceilings.redaction_refusals
         ),
-        (Ratio::new(1, 10), Ratio::new(1, 5), Ratio::ZERO)
+        (ratio(1, 10), ratio(1, 5), Ratio::ZERO)
     );
     assert_eq!(
         profile.approved(),
@@ -108,14 +113,31 @@ fn a_profile_pins_every_number_and_runs_only_once_approved() {
     });
     assert_eq!(approved.approved().unwrap().approved_by, "maintainer");
     assert_eq!(approved.digest().unwrap().len(), 64);
-    assert_ne!(approved.digest().unwrap(), profile.digest().unwrap());
-    approved.approval.as_mut().unwrap().approved_by.clear();
-    assert_eq!(
-        approved.validate(),
-        Err(ProfileError::Empty {
-            field: "approval.approved_by",
-        })
+    assert!(
+        matches!(
+            profile.fault_profile(),
+            Err(ProfileError::NotApproved { .. })
+        ),
+        "a fault campaign runs only under an approved profile"
     );
+    let fault_profile = approved.fault_profile().unwrap();
+    assert_eq!(fault_profile.digest(), approved.digest().unwrap());
+    assert_eq!(
+        *fault_profile.liveness(),
+        approved.statistics.liveness_bounds
+    );
+    assert_eq!(*fault_profile.envelope(), approved.envelope);
+    assert_ne!(approved.digest().unwrap(), profile.digest().unwrap());
+    for nobody in ["", " \t"] {
+        approved.approval.as_mut().unwrap().approved_by = nobody.to_string();
+        assert_eq!(
+            approved.validate(),
+            Err(ProfileError::Empty {
+                field: "approval.approved_by",
+            }),
+            "{nobody:?}"
+        );
+    }
     approved.approval = Some(Approval {
         approved_by: "maintainer".to_string(),
         approved_at_run_id: "AB".repeat(32),
@@ -156,6 +178,70 @@ fn a_profile_refuses_every_absent_or_zero_setting_by_name() {
         parse_run_profile(&extra),
         Err(ProfileError::Shape(_))
     ));
+    // Every nested setting is required too, and every zero names its field
+    // at its own nesting: the twenty settings a zero would make "unbounded".
+    for parent in [
+        "budgets",
+        "envelope",
+        "statistics",
+        "statistics.liveness_bounds",
+    ] {
+        let keys: Vec<String> = full
+            .pointer(&format!("/{}", parent.replace('.', "/")))
+            .unwrap()
+            .as_object()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect();
+        for key in keys {
+            let mut missing = full.clone();
+            missing
+                .pointer_mut(&format!("/{}", parent.replace('.', "/")))
+                .unwrap()
+                .as_object_mut()
+                .unwrap()
+                .remove(&key);
+            assert!(
+                matches!(parse_run_profile(&missing), Err(ProfileError::Shape(_))),
+                "{parent}.{key} is required"
+            );
+        }
+    }
+    let zeros = [
+        "worlds",
+        "tasks_per_world",
+        "max_events_per_log",
+        "budgets.max_model_calls",
+        "budgets.max_tool_calls",
+        "budgets.max_tokens_in",
+        "budgets.max_tokens_out",
+        "budgets.hard_deadline_ms",
+        "budgets.max_no_progress_iterations",
+        "envelope.elapsed_ms",
+        "envelope.store_bytes",
+        "envelope.cassette_bytes",
+        "envelope.artifact_bytes",
+        "envelope.temp_roots",
+        "envelope.retained_artifacts",
+        "envelope.processes",
+        "statistics.liveness_bounds.catch_up_episodes",
+        "statistics.liveness_bounds.embedding_passes",
+        "statistics.liveness_bounds.materialization_episodes",
+        "statistics.liveness_bounds.reviewer_coordinator_passes",
+    ];
+    assert_eq!(zeros.len(), 20);
+    for field in zeros {
+        let mut zeroed = full.clone();
+        *zeroed
+            .pointer_mut(&format!("/{}", field.replace('.', "/")))
+            .unwrap() = json!(0);
+        assert_eq!(
+            parse_run_profile(&zeroed),
+            Err(ProfileError::Zero { field }),
+            "{field}"
+        );
+    }
 
     let mutations: Vec<(&str, Mutate<RunProfile>, ProfileError)> = vec![
         (
@@ -168,6 +254,11 @@ fn a_profile_refuses_every_absent_or_zero_setting_by_name() {
         (
             "no name",
             Box::new(|p| p.name.clear()),
+            ProfileError::Empty { field: "name" },
+        ),
+        (
+            "a blank name",
+            Box::new(|p| p.name = " \t".into()),
             ProfileError::Empty { field: "name" },
         ),
         (
@@ -294,6 +385,13 @@ fn a_profile_refuses_every_absent_or_zero_setting_by_name() {
             ProfileError::Statistics(StatisticsError::MalformedDecimal {
                 field: "noninferiority_margin",
             }),
+        ),
+        (
+            "a budget past the canonical safe range",
+            Box::new(|p| p.budgets.max_tokens_in = 9_007_199_254_740_993),
+            ProfileError::NotCanonical(ContractError::NotCanonical(
+                "number 9007199254740993 is not a safe integer".into(),
+            )),
         ),
     ];
     for (name, mutate, expected) in mutations {
@@ -425,13 +523,13 @@ fn every_sample_ends_in_exactly_one_closed_vocabulary_terminal() {
     let ledger = ledger(&terminals);
     let rates = ledger.rates().unwrap();
     assert_eq!(rates.samples, 8);
-    assert_eq!(rates.passed, Ratio::new(1, 4));
-    assert_eq!(rates.failed, Ratio::new(1, 8));
-    assert_eq!(rates.censored, Ratio::new(1, 8));
-    assert_eq!(rates.indeterminate, Ratio::new(1, 8));
-    assert_eq!(rates.skipped, Ratio::new(1, 8));
-    assert_eq!(rates.unsupported, Ratio::new(1, 8));
-    assert_eq!(rates.disabled, Ratio::new(1, 8));
+    assert_eq!(rates.passed, ratio(1, 4));
+    assert_eq!(rates.failed, ratio(1, 8));
+    assert_eq!(rates.censored, ratio(1, 8));
+    assert_eq!(rates.indeterminate, ratio(1, 8));
+    assert_eq!(rates.skipped, ratio(1, 8));
+    assert_eq!(rates.unsupported, ratio(1, 8));
+    assert_eq!(rates.disabled, ratio(1, 8));
     let round: SampleLedger =
         serde_json::from_value(serde_json::to_value(&ledger).unwrap()).unwrap();
     assert_eq!(round, ledger);
@@ -559,6 +657,27 @@ fn every_sample_ends_in_exactly_one_closed_vocabulary_terminal() {
             },
         ),
         (
+            "a blank sample id",
+            Box::new(|l| {
+                let mut record = l.samples.remove("s1").unwrap();
+                record.id = " ".into();
+                l.samples.insert(" ".into(), record);
+                l.order = l.samples.keys().cloned().collect();
+            }),
+            SampleError::Blank {
+                sample: " ".into(),
+                field: "id",
+            },
+        ),
+        (
+            "a blank task",
+            Box::new(|l| l.samples.get_mut("s1").unwrap().task = " \t".into()),
+            SampleError::Blank {
+                sample: "s1".into(),
+                field: "task",
+            },
+        ),
+        (
             "a lineage entry that is not a run id",
             Box::new(|l| l.samples.get_mut("s2").unwrap().lineage = vec!["retry-1".into()]),
             SampleError::MalformedLineage {
@@ -617,8 +736,28 @@ fn the_envelope_records_the_peak_that_crossed_it_and_refuses_from_that_reading()
         envelope.peaks.processes, 7,
         "the crossing reading is on record"
     );
+    // A later reading within the bound does not unlatch the breach: the peak
+    // is what is over, and the peak is what the refusal names.
+    assert_eq!(
+        envelope.observe(Resource::Processes, 3),
+        Err(EnvelopeExceeded {
+            resource: Resource::Processes,
+            bound: 6,
+            observed: 7,
+        })
+    );
     assert_eq!(
         envelope.check(),
+        Err(EnvelopeExceeded {
+            resource: Resource::Processes,
+            bound: 6,
+            observed: 7,
+        })
+    );
+    // A breach stays latched across resources: an in-bound reading elsewhere
+    // is refused with the breach still on record.
+    assert_eq!(
+        envelope.observe(Resource::StoreBytes, 10 << 20),
         Err(EnvelopeExceeded {
             resource: Resource::Processes,
             bound: 6,

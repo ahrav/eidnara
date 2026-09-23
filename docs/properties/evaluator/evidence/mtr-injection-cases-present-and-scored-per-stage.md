@@ -47,7 +47,8 @@ A scripted agent whose echoes and effects are chosen per carrier.
 ## Investigation log
 ### Q: Which stages can Suite D score today?
 - Sources examined: `observe_agent`.
-- Findings: ingestion is `yes` by construction, obedience, write-back, and
-  exposure are observed; retrieval and packing are `not_measurable`.
+- Findings: obedience, write-back, and exposure are observed; ingestion,
+  retrieval, and packing are `not_reached`, since the scripted agent makes no
+  model request and there is no stage ledger to read.
 - Missing evidence: a retrieval stage in the Suite D agent.
 - Conclusion: unresolved, needs human input.

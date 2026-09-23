@@ -75,6 +75,8 @@ pub struct Peer {
     pub respond_after: Duration,
     /// Splits the response at a byte offset and pauses between the two halves, so a test can stall a body mid-transfer.
     pub stall: Option<(usize, Duration)>,
+    /// How long a scripted or keyed peer waits for each next connection before it reports the turns it served; a keyed replay whose reviewer calls are far apart raises it to the run's own deadline.
+    pub idle: Duration,
 }
 
 /// What the peer saw; every judgement is made by the test, not inside the peer task.
@@ -125,6 +127,7 @@ impl Peer {
             acceptor: TlsAcceptor::from(Arc::new(config)),
             respond_after: Duration::ZERO,
             stall: None,
+            idle: Duration::from_secs(5),
         }
     }
 
@@ -238,10 +241,11 @@ impl Peer {
         let listener = self.listener.take().unwrap();
         let acceptor = self.acceptor.clone();
         let connections = self.connections.clone();
+        let idle = self.idle;
         tokio::spawn(async move {
             let mut observations = Vec::with_capacity(turns.len());
             for (index, turn) in turns.into_iter().enumerate() {
-                let Some(tcp) = accept(&listener, &connections).await else {
+                let Some(tcp) = accept(&listener, &connections, idle).await else {
                     return observations;
                 };
                 let response = match turn {
@@ -274,10 +278,11 @@ impl Peer {
         let listener = self.listener.take().unwrap();
         let acceptor = self.acceptor.clone();
         let connections = self.connections.clone();
+        let idle = self.idle;
         tokio::spawn(async move {
             let mut observations = Vec::with_capacity(turns);
             for _ in 0..turns {
-                let Some(tcp) = accept(&listener, &connections).await else {
+                let Some(tcp) = accept(&listener, &connections, idle).await else {
                     return observations;
                 };
                 let Some((mut tls, observed)) = handshake_and_read(&acceptor, tcp).await else {
@@ -293,9 +298,13 @@ impl Peer {
     }
 }
 
-/// One accepted connection within the five-second turn window, counted.
-async fn accept(listener: &TcpListener, connections: &AtomicUsize) -> Option<TcpStream> {
-    let (tcp, _) = tokio::time::timeout(Duration::from_secs(5), listener.accept())
+/// One accepted connection within the peer's `idle` window, counted.
+async fn accept(
+    listener: &TcpListener,
+    connections: &AtomicUsize,
+    idle: Duration,
+) -> Option<TcpStream> {
+    let (tcp, _) = tokio::time::timeout(idle, listener.accept())
         .await
         .ok()?
         .ok()?;

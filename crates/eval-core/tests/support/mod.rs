@@ -209,7 +209,7 @@ pub mod shrink {
     use super::{WORLD_EPOCH_MS, WORLD_SEED, world_config};
 
     pub const FRESH_SEED: u64 = WORLD_SEED ^ 0xABCD;
-    pub const PROFILE: &str = "profile-digest";
+    pub const PROFILE: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
     pub const CUT: Cut = Cut::AtQuiescence;
     pub const BUDGET: u64 = 400;
 
@@ -325,10 +325,13 @@ pub mod shrink {
 
     pub fn predicate(class: FailureClass) -> FailurePredicate {
         FailurePredicate {
-            oracle: oracle().name().to_string(),
+            oracle: oracle(),
             checkpoint: CUT,
             profile_digest: PROFILE.to_string(),
-            witness_class: WitnessClass::Failure { class },
+            witness_class: WitnessClass::Failure {
+                task: "early-commit".to_string(),
+                class,
+            },
         }
     }
 
@@ -341,8 +344,9 @@ pub mod shrink {
             &request.set.pairs[0].task.query,
         )
         .unwrap();
-        oracle().evaluate(
+        request.oracle.evaluate(
             request.set,
+            &request.set.pairs[0].task.id,
             &truth,
             request.checkpoint,
             request.profile_digest,
