@@ -2438,9 +2438,9 @@ is not here; this module only judges the evidence it records.
 `pull_request`, and `cutoff_ms`. The issue and pull-request text is fetched
 at run time and never written into a corpus, report, or witness; `validate`
 refuses an empty field, an `id` with whitespace, a `repository` that is not
-a scheme URL with a bare host (so `git@host:path`, a user, a port, an
-empty scheme, or an empty host other than `file://`'s refuses, and the
-`/pull/` URLs `future_answers` matches derive
+an `https://` URL with a bare host (so `git@host:path`, `ssh://`, `file://`,
+a user, a port, or an empty host refuses, and the `/pull/` URLs
+`future_answers` matches derive
 from the URL itself), a `license` that is not an SPDX expression by shape (identifiers of
 SPDX characters joined by `AND`, `OR`, or `WITH`; not checked against the
 SPDX list) (`TextPersisted`), a
@@ -2455,7 +2455,8 @@ exactly `PILOT_COMPOSITION`: eight Cargo, eight Tokio, four Django.
 
 **Time study.** `time_study(corpus, measured, bound_ms)` projects the pilot's
 preparation cost from exactly `TIME_STUDY_TASKS` (five) measured
-`Preparation {task, prepare_ms}` rows of distinct corpus tasks, scaled in
+`Preparation {task, prepare_ms}` rows of distinct tasks of the pilot corpus
+(any other composition refuses `NotThePilot`), scaled in
 128-bit arithmetic and clamped at `u64::MAX` to the
 twenty-task pilot: `Affordable {projected_ms}` within the bound, else
 `StopForApproval {projected_ms, bound_ms}`, which stops for the maintainer
@@ -2469,7 +2470,8 @@ from the repository's own commit times and the issue: `task`,
 `issue_text_ms` (the last edit of the issue text the task is given, or its
 creation when never edited), `snapshot_digest`, `base_tree_digest`, and
 `fix_paths_present`. `validate` refuses, in order, a missing snapshot digest,
-a base committed after the cutoff, a fix not strictly after it, an issue
+a tree digest that is neither forty nor sixty-four lowercase hex
+(`MalformedDigest`), a base committed after the cutoff, a fix not strictly after it, an issue
 filed after it, issue text edited after it, a snapshot whose digest is not
 the base commit's tree, and a fix-added path in the snapshot; each is one
 `CutoffRefused` reason (`reason` on the wire). `validate_for(entry)` first
@@ -2494,12 +2496,12 @@ for one `ProviderProfile {provider, model, tokenizer_profile}` (key
 `execution_image`,
 `analysis_family_digest`, `terminal`, the `repository_access` it reached, and
 the `future_answers` its output named. `RepositoryComparison` is the
-repository-bearing run it is judged against (`task`, `provider`,
-`execution_image`, `analysis_family_digest`, `terminal`); a control is never
-its own comparison. `classify_control(control,
+repository-bearing run it is judged against (`task`, `entry_digest`,
+`provider`, `execution_image`, `analysis_family_digest`, `terminal`); a
+control is never its own comparison. `classify_control(control,
 comparison)` refuses `MalformedDigest` unless the analysis digest is
-sixty-four lowercase hex, `NotComparable {field}` unless task, provider, image,
-and analysis digest match the comparison, `NotRun` when
+sixty-four lowercase hex, `NotComparable {field}` unless task, row digest,
+provider, image, and analysis digest match the comparison, `NotRun` when
 the control's terminal is not `pass`, `fail`, or `censored`, and
 `ComparisonNotRun` when the comparison's is not; then the pair is
 `Excluded` as `repository_access`, `future_answer`, or `memorized` (the

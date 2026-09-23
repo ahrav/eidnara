@@ -150,21 +150,16 @@ fn is_token(text: &str) -> bool {
     !text.contains(char::is_whitespace)
 }
 
-/// A clone URL with a scheme and a bare host: no user or port in the
+/// An `https://` clone URL with a bare host: no user or port in the
 /// authority, so the web path `repository_web_path` derives is the URL
-/// itself. `git@host:path`, `ssh://git@host:22/path`, and `https:///path`
-/// are not accepted; `file:///path` is, its authority being empty by design.
+/// itself and the repository's `/pull/` URLs are recognizable from the row
+/// alone. `git@host:path`, `ssh://git@host:22/path`, `https:///path`, and
+/// `file:///path` are not accepted.
 fn is_url(text: &str) -> bool {
     is_token(text)
-        && text.split_once("://").is_some_and(|(scheme, rest)| {
+        && text.strip_prefix("https://").is_some_and(|rest| {
             let authority = rest.split('/').next().unwrap_or(rest);
-            !scheme.is_empty()
-                && scheme
-                    .chars()
-                    .all(|c| c.is_ascii_alphanumeric() || "+-.".contains(c))
-                && (!authority.is_empty() || scheme == "file")
-                && !authority.contains('@')
-                && !authority.contains(':')
+            !authority.is_empty() && !authority.contains('@') && !authority.contains(':')
         })
 }
 
@@ -281,6 +276,10 @@ pub enum Affordability {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TimeStudyRefused {
+    /// The study projects the pilot's cost from the pilot's own tasks.
+    NotThePilot {
+        found: BTreeMap<Family, u32>,
+    },
     WrongTaskCount {
         measured: usize,
     },
@@ -302,6 +301,9 @@ pub fn time_study(
     measured: &[Preparation],
     bound_ms: u64,
 ) -> Result<Affordability, TimeStudyRefused> {
+    if let Err(AnchorError::NotPilotComposition { found }) = corpus.is_pilot() {
+        return Err(TimeStudyRefused::NotThePilot { found });
+    }
     if measured.len() != TIME_STUDY_TASKS {
         return Err(TimeStudyRefused::WrongTaskCount {
             measured: measured.len(),
@@ -376,6 +378,9 @@ pub enum CutoffRefused {
     IssueTextAfterCutoff,
     FutureContentInSnapshot,
     SnapshotDigestMissing,
+    /// A tree digest that is neither a git object id (forty hex) nor a
+    /// protocol digest (sixty-four hex) names no tree.
+    MalformedDigest,
     /// The snapshot's tree is not the base commit's tree.
     SnapshotNotBaseTree,
     AuditForOtherTask,
@@ -409,6 +414,11 @@ impl CutoffAudit {
     pub fn validate(&self) -> Result<(), CutoffRefused> {
         if self.snapshot_digest.is_empty() {
             return Err(CutoffRefused::SnapshotDigestMissing);
+        }
+        for digest in [&self.snapshot_digest, &self.base_tree_digest] {
+            if !is_lower_hex(digest, 40) && !is_lower_hex(digest, 64) {
+                return Err(CutoffRefused::MalformedDigest);
+            }
         }
         if self.base_committed_ms > self.cutoff_ms {
             return Err(CutoffRefused::BaseAfterCutoff);
@@ -532,6 +542,8 @@ pub struct NoRepositoryControl {
 #[serde(deny_unknown_fields)]
 pub struct RepositoryComparison {
     pub task: String,
+    /// `AnchorEntry::digest` of the row the run was over.
+    pub entry_digest: String,
     pub provider: ProviderProfile,
     pub execution_image: String,
     pub analysis_family_digest: String,
@@ -605,6 +617,10 @@ pub fn classify_control(
     }
     for (field, same) in [
         ("task", control.task == comparison.task),
+        (
+            "entry_digest",
+            control.entry_digest == comparison.entry_digest,
+        ),
         ("provider", control.provider == comparison.provider),
         (
             "execution_image",

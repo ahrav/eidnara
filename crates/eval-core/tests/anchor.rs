@@ -117,6 +117,7 @@ fn control(task: &str, terminal: Terminal) -> NoRepositoryControl {
 fn comparison(task: &str, terminal: Terminal) -> RepositoryComparison {
     RepositoryComparison {
         task: task.to_string(),
+        entry_digest: corpus_entry(task).digest().unwrap(),
         provider: provider(),
         execution_image: "image-1".to_string(),
         analysis_family_digest: "cd".repeat(32),
@@ -1017,8 +1018,6 @@ fn pull_request_urls_derive_from_a_bare_host_clone_url() {
         future_answers(&entry, "https://example.invalid/cargo/repo/pull/2016"),
         vec!["pull_request:2016"]
     );
-    entry.repository = "file:///srv/cargo/repo".to_string();
-    entry.validate().unwrap();
 }
 
 #[test]
@@ -1179,4 +1178,57 @@ fn a_clone_url_needs_a_scheme_and_a_host() {
         entry.repository = repository.to_string();
         assert!(entry.validate().is_err(), "{repository}");
     }
+}
+
+#[test]
+fn a_comparison_names_the_row_it_ran_over() {
+    let mut stale = comparison("cargo-0", Terminal::Fail);
+    stale.entry_digest = "00".repeat(32);
+    assert_eq!(
+        classify_control(&control("cargo-0", Terminal::Fail), &stale),
+        Err(ControlRefused::NotComparable {
+            field: "entry_digest"
+        })
+    );
+}
+
+#[test]
+fn a_clone_url_is_an_https_url() {
+    let mut entry = entry("cargo-0", Family::Cargo, 0x10);
+    entry.repository = "file:///srv/cargo/repo.git".to_string();
+    assert!(entry.validate().is_err());
+    entry.repository = "http://example.invalid/cargo/repo.git".to_string();
+    assert!(entry.validate().is_err());
+}
+
+#[test]
+fn the_audit_needs_well_formed_tree_digests() {
+    let mut malformed = audit("cargo-0");
+    malformed.snapshot_digest = "not-a-digest".to_string();
+    malformed.base_tree_digest = "not-a-digest".to_string();
+    assert!(malformed.validate().is_err());
+    assert_eq!(malformed.validate(), Err(CutoffRefused::MalformedDigest));
+    let mut git_tree = audit("cargo-0");
+    git_tree.snapshot_digest = "ab".repeat(20);
+    git_tree.base_tree_digest = "ab".repeat(20);
+    git_tree.validate().unwrap();
+}
+
+#[test]
+fn the_time_study_measures_the_pilot_and_nothing_else() {
+    let corpus = full();
+    let measured: Vec<Preparation> = corpus.entries[..TIME_STUDY_TASKS]
+        .iter()
+        .map(|e| Preparation {
+            task: e.id.clone(),
+            prepare_ms: 1,
+        })
+        .collect();
+    assert!(time_study(&corpus, &measured, u64::MAX).is_err());
+    assert_eq!(
+        time_study(&corpus, &measured, u64::MAX),
+        Err(TimeStudyRefused::NotThePilot {
+            found: corpus.composition()
+        })
+    );
 }
