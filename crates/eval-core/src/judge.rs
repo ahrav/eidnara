@@ -690,10 +690,16 @@ pub enum LiveSliceRefused {
     UnapprovedProvider {
         provider: String,
     },
-    /// The report's repeat count is not the settings'.
-    RepeatCountDiffers {
+    /// The report's pass^k exponent is not the settings'.
+    KDiffers {
         report: u32,
         settings: u32,
+    },
+    /// A task ran other than the planned number of attempts.
+    AttemptCountDiffers {
+        task: String,
+        planned: u32,
+        observed: usize,
     },
     /// The report ran under other settings than the ones supplied.
     SettingsDigestMismatch,
@@ -705,8 +711,20 @@ pub enum LiveSliceRefused {
 
 debug_display!(LiveSliceRefused);
 
-fn summarize(attempts: &[ArmResult], k: u32) -> Result<(PassK, bool), LiveSliceRefused> {
-    let pass_k = pass_k(attempts, k).map_err(LiveSliceRefused::Statistics)?;
+/// Exactly the planned attempts, then the inherited pass^k summary.
+fn summarize(
+    task: &str,
+    attempts: &[ArmResult],
+    settings: &LiveSettings,
+) -> Result<(PassK, bool), LiveSliceRefused> {
+    if attempts.len() as u64 != u64::from(settings.repeats) {
+        return Err(LiveSliceRefused::AttemptCountDiffers {
+            task: task.to_string(),
+            planned: settings.repeats,
+            observed: attempts.len(),
+        });
+    }
+    let pass_k = pass_k(attempts, settings.k).map_err(LiveSliceRefused::Statistics)?;
     let indeterminate = pass_k.pass_k == PassKBounds::Indeterminate;
     Ok((pass_k, indeterminate))
 }
@@ -759,11 +777,10 @@ pub fn live_slice(
         return Err(LiveSliceRefused::NoTasks);
     }
     check_task_set(settings, tasks.iter().map(|t| t.task.as_str()))?;
-    let k = settings.k;
     let reports = tasks
         .iter()
         .map(|task| {
-            let (pass_k, indeterminate) = summarize(&task.attempts, k)?;
+            let (pass_k, indeterminate) = summarize(&task.task, &task.attempts, settings)?;
             Ok(LiveTaskReport {
                 task: task.task.clone(),
                 attempts: task.attempts.clone(),
@@ -776,7 +793,7 @@ pub fn live_slice(
         schema: LIVE_SLICE_SCHEMA.to_string(),
         settings_digest: settings.digest(),
         provider: provider.clone(),
-        k,
+        k: settings.k,
         replayable: LIVE_REPLAYABLE,
         tasks: reports,
     })
@@ -793,7 +810,7 @@ impl LiveSliceReport {
         }
         approve(settings, &self.provider)?;
         if self.k != settings.k {
-            return Err(LiveSliceRefused::RepeatCountDiffers {
+            return Err(LiveSliceRefused::KDiffers {
                 report: self.k,
                 settings: settings.k,
             });
@@ -809,7 +826,7 @@ impl LiveSliceReport {
         }
         check_task_set(settings, self.tasks.iter().map(|t| t.task.as_str()))?;
         for task in &self.tasks {
-            let (pass_k, indeterminate) = summarize(&task.attempts, self.k)?;
+            let (pass_k, indeterminate) = summarize(&task.task, &task.attempts, settings)?;
             if pass_k != task.pass_k || indeterminate != task.indeterminate {
                 return Err(LiveSliceRefused::InconsistentTask {
                     task: task.task.clone(),
@@ -827,7 +844,10 @@ impl LiveSliceReport {
 #[serde(deny_unknown_fields)]
 pub struct LiveSettings {
     pub providers: Vec<ProviderProfile>,
+    /// The pass^k exponent.
     pub k: u32,
+    /// The planned attempts per task; every task runs exactly this many.
+    pub repeats: u32,
     /// The held-out task ids, frozen before any run.
     pub tasks: BTreeSet<String>,
     pub calibration: Option<CalibrationSet>,
@@ -840,7 +860,12 @@ pub enum LiveSettingsRefused {
     ProviderCount {
         found: usize,
     },
+    ZeroK,
     ZeroRepeats,
+    KExceedsRepeats {
+        k: u32,
+        repeats: u32,
+    },
     NoTasks,
     NoCalibrationSet,
     NoSamplingPlan,
@@ -863,7 +888,16 @@ impl LiveSettings {
             });
         }
         if self.k == 0 {
+            return Err(LiveSettingsRefused::ZeroK);
+        }
+        if self.repeats == 0 {
             return Err(LiveSettingsRefused::ZeroRepeats);
+        }
+        if self.k > self.repeats {
+            return Err(LiveSettingsRefused::KExceedsRepeats {
+                k: self.k,
+                repeats: self.repeats,
+            });
         }
         if self.tasks.is_empty() {
             return Err(LiveSettingsRefused::NoTasks);

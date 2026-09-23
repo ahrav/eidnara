@@ -16,7 +16,8 @@ tokenizer accounting profiles rather than treating names as interchangeable."
   judge and digest to match.
 - `crates/eval-core/src/judge.rs` `approve`, `live_slice`,
   `LiveSliceReport::validate`: validated `LiveSettings`, a provider among the
-  settings' two, and the settings' `k`.
+  settings' two, the settings' `k`, exactly `repeats` attempts per task, and
+  the settings' task set.
 - `crates/eval-core/tests/judge.rs`
   `a_changed_judge_provider_or_tokenizer_refuses_cross_run_residual_comparison`:
   a changed judge model, live model, tokenizer profile, or calibration digest

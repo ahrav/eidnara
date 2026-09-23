@@ -844,20 +844,22 @@ Guarantee: Every residual report records the judge identity, the live provider
   profile with its tokenizer accounting profile, and the calibration digest;
   two runs' `residual.*` metrics compare only when all three are equal, and a
   live slice is constructed and validated only against the settings that
-  approved its provider profile, repeat count, and held-out task set.
+  approved its provider profile, pass^k exponent, planned attempts per task,
+  and held-out task set.
 Check: `always` - `ResidualReport::comparable` refuses `SchemaMismatch` or a
   `MalformedDigest` (judge or calibration) on either report and returns `ReanchorRequired` naming
   `judge`,
   `live_provider`, or `calibration_digest` on the first inequality, with `tokenizer_profile` part of `ProviderProfile` equality;
   `ResidualReport::validate` refuses `CalibrationJudgeDiffers` and
   `DigestMismatch`; `live_slice` and `LiveSliceReport::validate` refuse
-  `UnapprovedProvider`, `RepeatCountDiffers`, `SettingsDigestMismatch`,
-  `TaskSetDiffers`, and `Settings`. Must hold on
+  `UnapprovedProvider`, `KDiffers`, `AttemptCountDiffers`,
+  `SettingsDigestMismatch`, `TaskSetDiffers`, and `Settings`. Must hold on
   every comparison and validation, so `always`.
 Fault/timing angle: None.
 Required faults and enabling state: Two reports differing in one identity
   component; a report whose calibration digest is not the supplied set's; a
-  live report naming a third profile or another `k`.
+  live report naming a third profile, another `k`, or a task with extra or
+  missing attempts.
 Confidence: medium -
   [evidence](evidence/rid-tokenizer-accounting-profile-bound-per-run.md). Ran
   the cited tests at HEAD; the tokenizer identity is compared as a string.
