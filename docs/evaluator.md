@@ -2381,6 +2381,110 @@ with no `sleep` left behind; a host seam without namespaces skips every
 task; an unaccepted witness, a missing one, and an unapproved profile refuse
 before anything is published.
 
+## Real-history anchors
+
+`crates/eval-core/src/anchor.rs` is the anchor-task contract: what a
+real-history task persists, what makes it eligible, and how one provider
+pair's evidence folds into the `AnchorSet` the claim class judges. The shell
+that builds snapshots and runs the proofs and controls is part 2 of #767 and
+is not here; this module only judges the evidence it records.
+
+**Corpus.** `AnchorCorpus` (`eval-anchor-corpus/v1`, digest protocol
+`eval-anchor-corpus-digest/v1`) holds `AnchorEntry` rows of identifiers only:
+`id`, `family` (`cargo`, `tokio`, `django`), the clone `repository` and its
+`license`, `base_sha` and `fix_sha` (forty lowercase hex), `issue`,
+`pull_request`, and `cutoff_ms`. The issue and pull-request text is fetched
+at run time and never written into a corpus, report, or witness; `validate`
+refuses an empty field, a field holding a newline or more than three words
+(`TextPersisted`), a malformed SHA, and a duplicate id. `is_pilot` accepts
+exactly `PILOT_COMPOSITION`: eight Cargo, eight Tokio, four Django.
+
+**Time study.** `time_study(corpus, measured, bound_ms)` projects the pilot's
+preparation cost from exactly `TIME_STUDY_TASKS` (five) measured
+`Preparation {task, prepare_ms}` rows of distinct corpus tasks, scaled to the
+twenty-task pilot: `Affordable {projected_ms}` within the bound, else
+`StopForApproval {projected_ms, bound_ms}`, which stops for the maintainer
+rather than shrinking the pilot. A wrong count, a task outside the corpus,
+or the same task measured twice refuses.
+
+**Cutoff audit.** `CutoffAudit` is what the snapshot builder established
+from the repository's own commit times and the issue: `task`, `cutoff_ms`,
+`base_committed_ms`, `fix_committed_ms`, `issue_created_ms`,
+`issue_text_ms` (the last edit of the issue text the task is given, or its
+creation when never edited), `snapshot_digest`, `base_tree_digest`, and
+`fix_paths_present`. `validate` refuses, in order, a missing snapshot digest,
+a base committed after the cutoff, a fix not strictly after it, an issue
+filed after it, issue text edited after it, a snapshot whose digest is not
+the base commit's tree, and a fix-added path in the snapshot; each is one
+`CutoffRefused` reason (`reason` on the wire). `validate_for(entry)` first
+requires the audit to name the entry's task (`AuditForOtherTask`) and judge
+its cutoff (`CutoffMismatch`), so timestamps judged against another cutoff
+say nothing about the row.
+
+**Insufficiency proof.** `InsufficiencyProof {task, hidden}` is the
+current-tree-only run: the hidden tests over the snapshot with no agent.
+`validate` needs at least one hidden test that ran and `failed`; every
+verdict passing is `TreeAlreadyPasses`, and no verdict at all (an empty run
+or every test `errored`) is `NothingExecuted`. A corpus row without a
+recorded run is not a proof. `validate_for` refuses a proof naming another
+task.
+
+**No-repository control.** `NoRepositoryControl` is the statement-only run
+for one `ProviderProfile {provider, model, tokenizer_profile}` (key
+`provider/model@tokenizer_profile`): `task`, `provider`, `execution_image`,
+`analysis_family_digest`, `terminal`, the `repository_access` it reached, and
+the `future_answers` its output named. `classify_control(control,
+comparison)` refuses `NotComparable {field}` unless task, provider, image,
+and analysis digest match the repository-bearing comparison, `NotRun` when
+the control's terminal is not `pass`, `fail`, or `censored`, and
+`ComparisonNotRun` when the comparison's is not; then the pair is
+`Excluded` as `repository_access`, `future_answer`, or `memorized` (the
+control passed from the statement alone), else `Eligible`; a censored
+control is eligible. `future_answers(entry, output)` names the fix commit
+when any run of hex digits of seven or more, in either case, is a prefix of
+`fix_sha` (the run is taken whole, so `a0123456` does not name
+`0123456…`), and the pull request as `#<n>` or the repository's `/pull/<n>`
+URL as a whole number.
+
+**Anchor set.** `anchor_set(corpus, role, audits, proofs, controls,
+provider)` folds one pair's evidence into `(AnchorSet, PairAccounting)`.
+Every task keeps its row: a failed audit is `cutoff_invalid`; a missing or
+refused proof, a missing control, a control classified for another task or
+provider, and an excluded control are each `residue`; only a task whose
+audit and proof name it and pass and whose control was classified for it
+under `provider` as eligible is `valid`. `PairAccounting` keeps each task in
+exactly one set at its first failing gate: `eligible`, `excluded` (with the
+contamination), `cutoff_invalid`, `insufficiency_missing`,
+`insufficiency_refused`, `control_missing`. The set feeds
+`derive_claim_class`, so the pilot alone derives `generated_phase1` with
+`anchor_set_is_pilot`, and a memorized task excludes itself from that pair's
+transfer evidence without leaving the report.
+
+**Settings and terminals.** `RealHistorySettings {providers,
+execution_image, preparation_bound_ms, transfer_criterion}` refuses before
+execution: no providers, a provider profile with a blank field, no execution
+image, no preparation bound, or a criterion `TransferCriterion::validate`
+would refuse (`SettingsRefused::TransferCriterion(clause)`); the criterion
+may be absent, in which case every claim derives as `generated_phase1`. The
+terminals a real-history task can end in add `skipped (missing_cutoff_evidence)`,
+`unsupported (source_unavailable)`, and `unsupported (unsupported_runtime
+{family})` to the closed vocabulary; budget exhaustion stays censored.
+
+`crates/eval-core/tests/anchor.rs` is the evidence: the corpus serializes no
+text field and refuses prose, a short SHA, a duplicate, and a non-pilot
+composition; the time study projects twenty tasks from five and stops past
+the bound, refusing a wrong count, a stranger, and a repeated task; every
+cutoff refusal by one mutation; the proof refuses an unexecuted row and a
+passing tree; controls eligible, memorized, contaminated by access or a
+future answer (twelve-character, seven-character, and upper-case fix SHAs and
+`#pr` detected; six characters and a longer run not), not comparable, not
+run on either side, censored stays eligible; the pilot with one memorized,
+one cutoff-invalid, and one unproven task keeps twenty rows with seventeen
+eligible and derives `generated_phase1`; a transfer-role set excludes the
+memorized task for that pair and transfers once its control is eligible;
+evidence naming another task or cutoff is refused; settings refusals and
+wire names.
+
 ## Coverage markers
 
 `MARKERS` is the evaluator-owned registry: constant, globally unique names,

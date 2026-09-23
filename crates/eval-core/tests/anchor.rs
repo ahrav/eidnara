@@ -67,7 +67,9 @@ fn audit(task: &str) -> CutoffAudit {
         base_committed_ms: CUTOFF - 86_400_000,
         fix_committed_ms: CUTOFF + 3_600_000,
         issue_created_ms: CUTOFF - 7_200_000,
+        issue_text_ms: CUTOFF - 3_600_000,
         snapshot_digest: "ab".repeat(32),
+        base_tree_digest: "ab".repeat(32),
         fix_paths_present: false,
     }
 }
@@ -217,7 +219,7 @@ fn the_time_study_projects_the_pilot_and_stops_for_approval_past_the_bound() {
 fn the_cutoff_audit_excludes_future_code_and_future_issue_knowledge() {
     let good = audit("cargo-0");
     good.validate().unwrap();
-    let cases: [(Mutate, CutoffRefused); 5] = [
+    let cases: [(Mutate, CutoffRefused); 7] = [
         (
             |a| a.base_committed_ms = a.cutoff_ms + 1,
             CutoffRefused::BaseAfterCutoff,
@@ -231,12 +233,20 @@ fn the_cutoff_audit_excludes_future_code_and_future_issue_knowledge() {
             CutoffRefused::IssueAfterCutoff,
         ),
         (
+            |a| a.issue_text_ms = a.cutoff_ms + 1,
+            CutoffRefused::IssueTextAfterCutoff,
+        ),
+        (
             |a| a.fix_paths_present = true,
             CutoffRefused::FutureContentInSnapshot,
         ),
         (
             |a| a.snapshot_digest.clear(),
             CutoffRefused::SnapshotDigestMissing,
+        ),
+        (
+            |a| a.base_tree_digest = "cd".repeat(32),
+            CutoffRefused::SnapshotNotBaseTree,
         ),
     ];
     for (mutate, expected) in cases {
@@ -720,4 +730,107 @@ fn settings_refuse_before_execution_and_reasons_are_typed() {
         json!({"kind": "unsupported", "reason": "unsupported_runtime", "family": "django"})
     );
     assert_eq!(provider().key(), "anthropic/claude-x@tp-1");
+}
+
+#[test]
+fn the_time_study_needs_five_distinct_tasks() {
+    let corpus = pilot();
+    let same_task = vec![
+        Preparation {
+            task: "cargo-0".to_string(),
+            prepare_ms: 600_000,
+        };
+        TIME_STUDY_TASKS
+    ];
+    assert!(
+        time_study(&corpus, &same_task, u64::MAX).is_err(),
+        "one task measured five times is not a five-task study"
+    );
+    assert_eq!(
+        time_study(&corpus, &same_task, u64::MAX),
+        Err(TimeStudyRefused::DuplicateTask {
+            task: "cargo-0".to_string()
+        })
+    );
+}
+
+#[test]
+fn a_control_needs_a_comparison_that_ran() {
+    let ran = control("cargo-0", Terminal::Fail);
+    for terminal in [
+        Terminal::Indeterminate,
+        Terminal::Skipped(SkipReason::MissingCutoffEvidence),
+        Terminal::Unsupported(UnsupportedReason::SourceUnavailable),
+        Terminal::Disabled(DisabledReason::FeatureOff),
+    ] {
+        assert!(
+            classify_control(&ran, &control("cargo-0", terminal)).is_err(),
+            "a comparison that never ran compares nothing: {terminal:?}"
+        );
+        assert_eq!(
+            classify_control(&ran, &control("cargo-0", terminal)),
+            Err(ControlRefused::ComparisonNotRun { terminal })
+        );
+    }
+}
+
+#[test]
+fn future_answers_names_an_abbreviated_fix_sha() {
+    let mut entry = entry("cargo-0", Family::Cargo, 0x10);
+    entry.fix_sha = "0123456789abcdef0123456789abcdef01234567".to_string();
+    for output in [
+        "fixed upstream in 0123456",
+        "fixed upstream in 0123456789AB.",
+        "(0123456789abcdef0123456789abcdef01234567)",
+    ] {
+        assert_eq!(
+            future_answers(&entry, output),
+            vec![format!("fix_sha:{}", entry.fix_sha)],
+            "{output}"
+        );
+    }
+    for output in [
+        "012345",
+        "a0123456",
+        "0123456789abcdef0123456789abcdef012345678",
+    ] {
+        assert!(future_answers(&entry, output).is_empty(), "{output}");
+    }
+}
+
+#[test]
+fn settings_refuse_an_incomplete_provider_and_an_unmet_criterion() {
+    let settings = RealHistorySettings {
+        providers: vec![provider()],
+        execution_image: "image-1".to_string(),
+        preparation_bound_ms: Some(1),
+        transfer_criterion: None,
+    };
+    let mut blank_model = settings.clone();
+    blank_model.providers[0].model = " ".to_string();
+    assert!(
+        blank_model.validate().is_err(),
+        "a provider profile with a blank field names no pair"
+    );
+    assert_eq!(
+        blank_model.validate(),
+        Err(SettingsRefused::EmptyProviderField { field: "model" })
+    );
+    let mut floorless = settings;
+    floorless.transfer_criterion = Some(TransferCriterion {
+        approved_by: "maintainer".to_string(),
+        approved_at_run_id: "ab".repeat(32),
+        min_valid_tasks: 0,
+        required_families: BTreeSet::new(),
+    });
+    assert!(
+        floorless.validate().is_err(),
+        "a criterion the claim will refuse is refused before execution"
+    );
+    assert_eq!(
+        floorless.validate(),
+        Err(SettingsRefused::TransferCriterion(
+            UnmetClause::CriterionHasNoFloor
+        ))
+    );
 }

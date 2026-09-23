@@ -10,7 +10,9 @@ use context_core::canonical_json::{is_lower_hex, protocol_digest};
 use serde::{Deserialize, Serialize};
 
 use crate::campaign::Terminal;
-use crate::claim::{AnchorRole, AnchorSet, AnchorTask, AnchorVerdict, TransferCriterion};
+use crate::claim::{
+    AnchorRole, AnchorSet, AnchorTask, AnchorVerdict, TransferCriterion, UnmetClause,
+};
 use crate::task::{HiddenOutcome, HiddenResults};
 
 pub const ANCHOR_CORPUS_SCHEMA: &str = "eval-anchor-corpus/v1";
@@ -193,8 +195,16 @@ pub enum Affordability {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TimeStudyRefused {
-    WrongTaskCount { measured: usize },
-    NotFromCorpus { task: String },
+    WrongTaskCount {
+        measured: usize,
+    },
+    NotFromCorpus {
+        task: String,
+    },
+    /// One task measured twice is one task, not two.
+    DuplicateTask {
+        task: String,
+    },
 }
 
 debug_display!(TimeStudyRefused);
@@ -217,6 +227,12 @@ pub fn time_study(
     {
         return Err(TimeStudyRefused::NotFromCorpus {
             task: stranger.task.clone(),
+        });
+    }
+    let mut tasks = BTreeSet::new();
+    if let Some(repeat) = measured.iter().find(|p| !tasks.insert(p.task.as_str())) {
+        return Err(TimeStudyRefused::DuplicateTask {
+            task: repeat.task.clone(),
         });
     }
     let total: u64 = measured.iter().map(|p| p.prepare_ms).sum();
@@ -246,8 +262,16 @@ pub struct CutoffAudit {
     pub fix_committed_ms: i64,
     #[serde(with = "crate::decimal")]
     pub issue_created_ms: i64,
+    /// When the issue text the task is given was written: its last edit, or
+    /// its creation when it was never edited. An edit after the cutoff can
+    /// name the fix.
+    #[serde(with = "crate::decimal")]
+    pub issue_text_ms: i64,
     /// The digest of the tree the snapshot holds.
     pub snapshot_digest: String,
+    /// The digest of `base_sha`'s tree, read from the repository the same
+    /// way; the snapshot is that tree and nothing else.
+    pub base_tree_digest: String,
     /// Whether the snapshot holds any path the fix commit added.
     pub fix_paths_present: bool,
 }
@@ -259,8 +283,13 @@ pub enum CutoffRefused {
     FixNotAfterCutoff,
     /// The issue was filed after the cutoff, so its text is future knowledge.
     IssueAfterCutoff,
+    /// The issue text was edited after the cutoff; the edit can describe the
+    /// fix.
+    IssueTextAfterCutoff,
     FutureContentInSnapshot,
     SnapshotDigestMissing,
+    /// The snapshot's tree is not the base commit's tree.
+    SnapshotNotBaseTree,
     AuditForOtherTask,
     /// The audit judged a cutoff other than the corpus row's, so its
     /// timestamps say nothing about the row's cutoff.
@@ -294,6 +323,12 @@ impl CutoffAudit {
         }
         if self.issue_created_ms > self.cutoff_ms {
             return Err(CutoffRefused::IssueAfterCutoff);
+        }
+        if self.issue_text_ms > self.cutoff_ms {
+            return Err(CutoffRefused::IssueTextAfterCutoff);
+        }
+        if self.snapshot_digest != self.base_tree_digest {
+            return Err(CutoffRefused::SnapshotNotBaseTree);
         }
         if self.fix_paths_present {
             return Err(CutoffRefused::FutureContentInSnapshot);
@@ -421,12 +456,23 @@ pub enum ControlRefused {
     /// The control did not run, so it cannot show the statement alone was
     /// insufficient.
     NotRun { terminal: Terminal },
+    /// The repository-bearing comparison did not run, so there is nothing to
+    /// compare the control with.
+    ComparisonNotRun { terminal: Terminal },
 }
 
 debug_display!(ControlRefused);
 
-/// Classifies comparable controls with terminal `Pass`, `Fail`, or
-/// `Censored`.
+/// A terminal a run reached, not one it never started.
+fn ran(terminal: Terminal) -> bool {
+    matches!(
+        terminal,
+        Terminal::Pass | Terminal::Fail | Terminal::Censored { .. }
+    )
+}
+
+/// Classifies comparable controls whose control and comparison both ran to
+/// `Pass`, `Fail`, or `Censored`.
 pub fn classify_control(
     control: &NoRepositoryControl,
     comparison: &NoRepositoryControl,
@@ -447,12 +493,14 @@ pub fn classify_control(
             return Err(ControlRefused::NotComparable { field });
         }
     }
-    if !matches!(
-        control.terminal,
-        Terminal::Pass | Terminal::Fail | Terminal::Censored { .. }
-    ) {
+    if !ran(control.terminal) {
         return Err(ControlRefused::NotRun {
             terminal: control.terminal,
+        });
+    }
+    if !ran(comparison.terminal) {
+        return Err(ControlRefused::ComparisonNotRun {
+            terminal: comparison.terminal,
         });
     }
     let verdict = if !control.repository_access.is_empty() {
@@ -481,15 +529,22 @@ pub fn classify_control(
     })
 }
 
+/// The shortest abbreviation of a commit that names it: what `git log
+/// --oneline` prints.
+const SHA_ABBREV: usize = 7;
+
 /// Names the fix commit and pull request a control's output must not know.
-/// A pull request counts as `#<n>` or as the repository's `/pull/<n>` URL,
-/// each as a whole number, so `#20` is not found inside `#2016`.
+/// The fix commit counts as any run of hexadecimal digits, in either case,
+/// that is at least `SHA_ABBREV` long and a prefix of it; the run is taken
+/// whole, so `a0123456` does not name `0123456...`. A pull request counts as
+/// `#<n>` or as the repository's `/pull/<n>` URL, each as a whole number, so
+/// `#20` is not found inside `#2016`.
 pub fn future_answers(entry: &AnchorEntry, output: &str) -> Vec<String> {
     let mut found = Vec::new();
-    if entry
-        .fix_sha
-        .get(..12)
-        .is_some_and(|prefix| output.contains(prefix))
+    if is_lower_hex(&entry.fix_sha, 40)
+        && output.split(|c: char| !c.is_ascii_hexdigit()).any(|run| {
+            run.len() >= SHA_ABBREV && entry.fix_sha.starts_with(&run.to_ascii_lowercase())
+        })
     {
         found.push(format!("fix_sha:{}", entry.fix_sha));
     }
@@ -629,8 +684,14 @@ pub struct RealHistorySettings {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SettingsRefused {
     NoProviders,
+    /// A provider profile with a blank field names no pair.
+    EmptyProviderField {
+        field: &'static str,
+    },
     NoExecutionImage,
     NoPreparationBound,
+    /// The criterion is one the claim would refuse.
+    TransferCriterion(UnmetClause),
 }
 
 debug_display!(SettingsRefused);
@@ -642,11 +703,27 @@ impl RealHistorySettings {
         if self.providers.is_empty() {
             return Err(SettingsRefused::NoProviders);
         }
+        for profile in &self.providers {
+            for (field, text) in [
+                ("provider", &profile.provider),
+                ("model", &profile.model),
+                ("tokenizer_profile", &profile.tokenizer_profile),
+            ] {
+                if text.trim().is_empty() {
+                    return Err(SettingsRefused::EmptyProviderField { field });
+                }
+            }
+        }
         if self.execution_image.trim().is_empty() {
             return Err(SettingsRefused::NoExecutionImage);
         }
         if self.preparation_bound_ms.is_none() {
             return Err(SettingsRefused::NoPreparationBound);
+        }
+        if let Some(criterion) = &self.transfer_criterion {
+            criterion
+                .validate()
+                .map_err(SettingsRefused::TransferCriterion)?;
         }
         Ok(())
     }
