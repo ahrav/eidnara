@@ -340,9 +340,21 @@ pub struct BarrierReceipt {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BarrierRefused {
-    LineDoesNotNameCut { episode: String, line: String },
-    ExitedWithStatus { episode: String },
-    NotSigkill { episode: String, signal: i32 },
+    LineDoesNotNameCut {
+        episode: String,
+        line: String,
+    },
+    ExitedWithStatus {
+        episode: String,
+    },
+    NotSigkill {
+        episode: String,
+        signal: i32,
+    },
+    /// No spawned child has pid 0.
+    NoPid {
+        episode: String,
+    },
 }
 
 impl BarrierReceipt {
@@ -353,6 +365,11 @@ impl BarrierReceipt {
             return Err(BarrierRefused::LineDoesNotNameCut {
                 episode: self.episode.clone(),
                 line: self.line.clone(),
+            });
+        }
+        if self.pid == 0 {
+            return Err(BarrierRefused::NoPid {
+                episode: self.episode.clone(),
             });
         }
         if self.signal == 0 {
@@ -467,10 +484,18 @@ pub struct Effect {
     pub attempted: u64,
     pub observed: u64,
     pub acknowledged: u64,
-    pub reply_lost: bool,
+    /// The episode whose fault lost this effect's reply; `None` when no reply
+    /// was lost.
+    pub lost_by: Option<String>,
     pub read_back: bool,
     pub expected: Expected,
     pub outcome: EffectOutcome,
+}
+
+impl Effect {
+    pub fn reply_lost(&self) -> bool {
+        self.lost_by.is_some()
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -520,6 +545,11 @@ pub enum EffectRefused {
     OutcomeNotDerived {
         identity: String,
     },
+    /// A lost reply was observed applied yet never read back; the observation
+    /// is the read-back the ledger must record.
+    ObservedWithoutReadBack {
+        identity: String,
+    },
 }
 
 impl EffectLedger {
@@ -531,7 +561,7 @@ impl EffectLedger {
                 attempted: 0,
                 observed: 0,
                 acknowledged: 0,
-                reply_lost: false,
+                lost_by: None,
                 read_back: false,
                 expected: Expected::Exactly {
                     state: EffectState::Applied,
@@ -564,9 +594,12 @@ impl EffectLedger {
 
     /// The reply was lost: the oracle expects either state and records nothing
     /// stronger than `Unknown` until a read-back names one.
-    pub fn lose_reply(&mut self, identity: &str) -> Result<(), EffectRefused> {
+    /// The reply was lost to `episode`'s fault: the oracle expects either
+    /// state and records nothing stronger than `Unknown` until a read-back
+    /// names one.
+    pub fn lose_reply(&mut self, identity: &str, episode: &str) -> Result<(), EffectRefused> {
         let effect = self.effect(identity)?;
-        effect.reply_lost = true;
+        effect.lost_by = Some(episode.to_string());
         effect.read_back = false;
         effect.expected = Expected::OneOf {
             states: [EffectState::Applied, EffectState::NotApplied]
@@ -620,7 +653,10 @@ impl EffectLedger {
                     state: EffectState::NotApplied,
                 });
             }
-            if effect.reply_lost && !effect.read_back {
+            if effect.reply_lost() && !effect.read_back {
+                if effect.observed > 0 {
+                    return Err(EffectRefused::ObservedWithoutReadBack { identity });
+                }
                 if effect.outcome != EffectOutcome::Unknown {
                     return Err(EffectRefused::PrematureSuccess { identity });
                 }
@@ -642,7 +678,7 @@ impl EffectLedger {
                 } => effect.outcome == EffectOutcome::Applied,
                 Expected::Exactly {
                     state: EffectState::NotApplied,
-                } => effect.reply_lost && effect.outcome == EffectOutcome::NotApplied,
+                } => effect.reply_lost() && effect.outcome == EffectOutcome::NotApplied,
                 Expected::OneOf { .. } => false,
             };
             if !derived {
@@ -878,6 +914,11 @@ pub enum FaultReportError {
         episode: String,
         cut: String,
     },
+    /// One kill, one child, one barrier.
+    DuplicateBarrier {
+        episode: String,
+        cut: String,
+    },
     /// One cut receipted twice; two outcomes for one checkpoint is no outcome.
     DuplicateCut {
         cut: Cut,
@@ -909,8 +950,12 @@ pub enum FaultReportError {
     },
     /// Fewer lost replies in the ledger than episodes that lose one.
     LostReplyUnrecorded {
-        episodes: usize,
-        recorded: usize,
+        episode: String,
+    },
+    /// An effect names an episode that loses no reply as the one that lost its.
+    LostByNonLosingEpisode {
+        identity: String,
+        episode: String,
     },
     SafetyNeverChecked,
     Shape(String),
@@ -968,6 +1013,11 @@ impl FaultReport {
             let Some(cut) = episode.action.kill_cut() else {
                 continue;
             };
+            if !self.coverage.declared.contains(cut) {
+                return Err(FaultReportError::Coverage(CoverageRefused::UndeclaredCut {
+                    cut: cut.to_string(),
+                }));
+            }
             if !self
                 .barriers
                 .iter()
@@ -979,7 +1029,14 @@ impl FaultReport {
                 });
             }
         }
+        let mut seen_barriers = BTreeSet::new();
         for barrier in &self.barriers {
+            if !seen_barriers.insert((&barrier.episode, &barrier.cut)) {
+                return Err(FaultReportError::DuplicateBarrier {
+                    episode: barrier.episode.clone(),
+                    cut: barrier.cut.clone(),
+                });
+            }
             if !self
                 .episodes
                 .iter()
@@ -999,21 +1056,35 @@ impl FaultReport {
             .verdict()
             .map_err(FaultReportError::Coverage)?;
         self.effects.validate().map_err(FaultReportError::Effect)?;
-        let lost = self
-            .episodes
-            .iter()
-            .filter(|e| e.action.loses_reply())
-            .count();
-        let recorded = self
-            .effects
-            .effects
-            .values()
-            .filter(|e| e.reply_lost)
-            .count();
-        if recorded < lost {
+        for (identity, effect) in &self.effects.effects {
+            let Some(episode) = &effect.lost_by else {
+                continue;
+            };
+            match self.episodes.iter().find(|e| &e.id == episode) {
+                None => {
+                    return Err(FaultReportError::UnknownEpisode {
+                        episode: episode.clone(),
+                    });
+                }
+                Some(e) if !e.action.loses_reply() => {
+                    return Err(FaultReportError::LostByNonLosingEpisode {
+                        identity: identity.clone(),
+                        episode: episode.clone(),
+                    });
+                }
+                Some(_) => {}
+            }
+        }
+        if let Some(episode) = self.episodes.iter().find(|e| {
+            e.action.loses_reply()
+                && !self
+                    .effects
+                    .effects
+                    .values()
+                    .any(|effect| effect.lost_by.as_deref() == Some(e.id.as_str()))
+        }) {
             return Err(FaultReportError::LostReplyUnrecorded {
-                episodes: lost,
-                recorded,
+                episode: episode.id.clone(),
             });
         }
         let stalls = self.liveness.iter().flat_map(|l| &l.permanent_stalls);

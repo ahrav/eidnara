@@ -131,7 +131,7 @@ fn liveness() -> LivenessReport {
 fn report() -> FaultReport {
     let mut effects = EffectLedger::default();
     effects.attempt("ack:1");
-    effects.lose_reply("ack:1").unwrap();
+    effects.lose_reply("ack:1", "lost-ack").unwrap();
     effects.read_back("ack:1", EffectState::Applied).unwrap();
     FaultReport {
         schema: FAULT_REPORT_SCHEMA.to_string(),
@@ -166,7 +166,7 @@ fn report() -> FaultReport {
             .into_iter()
             .collect(),
         ),
-        coverage: coverage(&["lost-ack", "kill", "r11"]),
+        coverage: coverage(&["lost-ack", "kill", "acknowledged", "r11"]),
         effects,
         expected_refusals: vec![RecordedRefusal {
             episode: "r11".to_string(),
@@ -429,7 +429,7 @@ fn a_lost_reply_is_unknown_over_an_admissible_set_until_a_read_back_names_one_st
     ledger.attempt("commit:5");
     ledger.acknowledge("commit:5").unwrap();
     ledger.attempt("commit:6");
-    ledger.lose_reply("commit:6").unwrap();
+    ledger.lose_reply("commit:6", "lost-ack").unwrap();
     let lost = &ledger.effects["commit:6"];
     assert_eq!(lost.outcome, EffectOutcome::Unknown);
     assert_eq!(
@@ -480,7 +480,7 @@ fn a_lost_reply_is_unknown_over_an_admissible_set_until_a_read_back_names_one_st
     );
     assert_eq!(ledger, before, "a refused read-back changes nothing");
     let mut acked_then_lost = ledger.clone();
-    acked_then_lost.lose_reply("commit:5").unwrap();
+    acked_then_lost.lose_reply("commit:5", "lost-ack").unwrap();
     assert!(matches!(
         acked_then_lost.read_back("commit:5", EffectState::NotApplied),
         Err(EffectRefused::ReadBackNotAdmissible { .. })
@@ -507,7 +507,7 @@ fn a_premature_success_fixture_is_refused() {
     let mut coverage = Coverage::default();
     let mut ledger = EffectLedger::default();
     ledger.attempt("ack:2");
-    ledger.lose_reply("ack:2").unwrap();
+    ledger.lose_reply("ack:2", "lost-ack").unwrap();
     ledger.effects.get_mut("ack:2").unwrap().outcome = EffectOutcome::Applied;
     assert_eq!(
         ledger.validate(),
@@ -517,7 +517,7 @@ fn a_premature_success_fixture_is_refused() {
     );
     let mut collapsed = EffectLedger::default();
     collapsed.attempt("ack:3");
-    collapsed.lose_reply("ack:3").unwrap();
+    collapsed.lose_reply("ack:3", "lost-ack").unwrap();
     collapsed.effects.get_mut("ack:3").unwrap().expected = Expected::Exactly {
         state: EffectState::NotApplied,
     };
@@ -778,7 +778,7 @@ fn a_fault_report_round_trips_and_refuses_what_it_cannot_prove() {
     );
     let mut premature = report.clone();
     premature.effects.attempt("ack:9");
-    premature.effects.lose_reply("ack:9").unwrap();
+    premature.effects.lose_reply("ack:9", "lost-ack").unwrap();
     premature.effects.effects.get_mut("ack:9").unwrap().outcome = EffectOutcome::Applied;
     assert!(matches!(
         premature.validate(&bounds(), &limits()),
@@ -940,7 +940,7 @@ fn a_parsed_report_cannot_claim_what_no_run_recorded() {
     let mut claimed = ok.effects.clone();
     let effect = claimed.effects.get_mut("ack:1").unwrap();
     effect.observed = 0;
-    effect.reply_lost = false;
+    effect.lost_by = None;
     effect.read_back = false;
     effect.expected = Expected::Exactly {
         state: EffectState::NotApplied,
@@ -985,7 +985,7 @@ fn a_parsed_report_cannot_claim_what_no_run_recorded() {
     overcounted.attempt("dup");
     overcounted.observe("dup").unwrap();
     overcounted.observe("dup").unwrap();
-    overcounted.lose_reply("dup").unwrap();
+    overcounted.lose_reply("dup", "lost-ack").unwrap();
     overcounted.read_back("dup", EffectState::Applied).unwrap();
     assert_eq!(overcounted.effects["dup"].observed, 2);
     assert!(
@@ -1127,7 +1127,7 @@ fn a_parsed_report_cannot_claim_what_no_run_recorded() {
     let effect = untried.effects.get_mut("ack:1").unwrap();
     effect.attempted = 0;
     effect.observed = 0;
-    effect.reply_lost = false;
+    effect.lost_by = None;
     effect.read_back = false;
     assert_eq!(
         untried.validate(),
@@ -1193,7 +1193,7 @@ fn a_parsed_report_cannot_claim_what_no_run_recorded() {
     let mut observed = EffectLedger::default();
     observed.attempt("seen");
     observed.observe("seen").unwrap();
-    observed.lose_reply("seen").unwrap();
+    observed.lose_reply("seen", "lost-ack").unwrap();
     assert!(matches!(
         observed.read_back("seen", EffectState::NotApplied),
         Err(EffectRefused::ReadBackNotAdmissible { .. })
@@ -1203,10 +1203,83 @@ fn a_parsed_report_cannot_claim_what_no_run_recorded() {
     assert_eq!(
         unledgered.validate(&b, &limits()),
         Err(FaultReportError::LostReplyUnrecorded {
-            episodes: 1,
-            recorded: 0,
+            episode: "lost-ack".to_string()
         }),
         "a lost reply nobody ledgered left no evidence of what it did"
+    );
+    let mut misattributed = ok.clone();
+    misattributed.effects = EffectLedger::default();
+    misattributed.effects.attempt("unrelated");
+    misattributed
+        .effects
+        .lose_reply("unrelated", "ingest-write")
+        .unwrap();
+    misattributed
+        .effects
+        .read_back("unrelated", EffectState::Applied)
+        .unwrap();
+    assert_eq!(
+        misattributed.validate(&b, &limits()),
+        Err(FaultReportError::LostByNonLosingEpisode {
+            identity: "unrelated".to_string(),
+            episode: "ingest-write".to_string(),
+        }),
+        "a CAS write fault loses no reply; the lost reply is still lost-ack's"
+    );
+    let mut ghost_loser = ok.clone();
+    ghost_loser
+        .effects
+        .effects
+        .get_mut("ack:1")
+        .unwrap()
+        .lost_by = Some("ghost".to_string());
+    assert_eq!(
+        ghost_loser.validate(&b, &limits()),
+        Err(FaultReportError::UnknownEpisode {
+            episode: "ghost".to_string()
+        })
+    );
+    let mut seen_pending = EffectLedger::default();
+    seen_pending.attempt("x");
+    seen_pending.lose_reply("x", "lost-ack").unwrap();
+    seen_pending.observe("x").unwrap();
+    assert_eq!(
+        seen_pending.validate(),
+        Err(EffectRefused::ObservedWithoutReadBack {
+            identity: "x".to_string()
+        }),
+        "an observed lost reply is known applied; the ledger must say so through a read-back"
+    );
+    let mut no_pid = barrier("kill");
+    no_pid.pid = 0;
+    assert_eq!(
+        no_pid.validate(),
+        Err(BarrierRefused::NoPid {
+            episode: "kill".to_string()
+        })
+    );
+    let mut two_children = ok.clone();
+    two_children.barriers.push(BarrierReceipt {
+        pid: 4243,
+        ..barrier("kill")
+    });
+    assert_eq!(
+        two_children.validate(&b, &limits()),
+        Err(FaultReportError::DuplicateBarrier {
+            episode: "kill".to_string(),
+            cut: "acknowledged".to_string(),
+        }),
+        "one kill, one child, one barrier"
+    );
+    let mut invented_cut = ok.clone();
+    invented_cut.coverage.declared.remove("acknowledged");
+    invented_cut.coverage.receipted.remove("acknowledged");
+    assert_eq!(
+        invented_cut.validate(&b, &limits()),
+        Err(FaultReportError::Coverage(CoverageRefused::UndeclaredCut {
+            cut: "acknowledged".to_string()
+        })),
+        "a kill's cut is one the campaign declared, so coverage must receipt it"
     );
     assert!(
         FaultAction::ClaimMaterialization {
