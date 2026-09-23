@@ -142,11 +142,6 @@ fn report() -> FaultReport {
     effects.attempt("ack:1");
     effects.lose_reply("ack:1", "lost-ack").unwrap();
     effects.read_back("ack:1", EffectState::Applied).unwrap();
-    effects.attempt("commit:1@kill");
-    effects.lose_reply("commit:1@kill", "kill").unwrap();
-    effects
-        .read_back("commit:1@kill", EffectState::NotApplied)
-        .unwrap();
     FaultReport {
         schema: FAULT_REPORT_SCHEMA.to_string(),
         eval_run_id: "ab".repeat(32),
@@ -1307,8 +1302,8 @@ fn a_parsed_report_cannot_claim_what_no_run_recorded() {
         "a rolled-back commit whose reply says so is known, not lost"
     );
     assert!(
-        kill().loses_reply(),
-        "a kill takes the reply with the process"
+        !kill().loses_reply(),
+        "a kill's cut fixes what committed before it"
     );
     for (action, heal, family, loses) in [
         (

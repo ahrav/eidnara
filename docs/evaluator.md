@@ -2018,10 +2018,9 @@ operation's outcome unknown to its caller: the search-episode reply losses,
 `embedding_publication`'s `lose_local_commit_reply`, the materializer's
 `lose_acknowledgement_reply` and `fail_acknowledgement`, dispatch's
 `lose_charge_reply` and `lose_obsoletion_reply`, and
-GC's `after_reclaiming` and `after_unlink`, and a process kill, whose reply
-dies with the child; a rolled-back commit, a refused
-statement, a skipped acknowledgement, or an expected refusal is known, not
-lost, and dispatch's `refuse_ledger_read` loses none itself: it blocks the
+GC's `after_reclaiming` and `after_unlink`; a rolled-back commit, a refused
+statement, a skipped acknowledgement, an expected refusal, or a process kill,
+whose cut fixes what committed, is known, not lost, and dispatch's `refuse_ledger_read` loses none itself: it blocks the
 read-back of a reply `lose_charge_reply` lost.
 `FaultAction::heal` is the heal each class permits: `consumed` for one-shot
 enums, `released` for gates and lock holders, `reopen` for kills, corruption,
@@ -2415,23 +2414,25 @@ invariants, prints `eval-fault-safety-checked <cut>` and then
 `eval-fault-barrier <through> <cut>`, and parks. The parent refuses a barrier
 without the safety line and counts that check as one made while armed, and it
 charges the kill root while its stores are open, including the crashed files
-with the child's WAL. The parent reads the barrier, attempts every effect the
-episode had reached by the cut, sends `SIGKILL`, waits for the signal, and
-records the `BarrierReceipt`. Each effect identity carries its episode id
-(`search_commit:<through>@<episode>`), because a kill root's windows repeat
-the campaign's, and the killed window is where the episode left the
-checkpoint, so a crashed checkpoint past it refuses as `ReadBackMasked`. The
-kill's expected states join the campaign's fixed expectations. Each effect is
-`Unknown` until the crashed files are read back: at `local_staged` the batch
-is `not_applied`; at `acknowledgement_requested` the local batch is `applied`
-and its acknowledgement `not_applied`. `Stores::reconstruct` then reopens the
-root, which deletes the crashed projection and bootstraps a new one at the
-kernel tip, so the committed but unacknowledged batch is discarded rather than
-resumed; the drain after it checks that the rebuilt stores reach the tip. The
-label is `application_crash` with the page cache intact and
-`test_binary_child`, which is all a kill of a parked child proves. The
-manifest's witness digest covers the barrier receipts without their `pid`,
-because the OS assigns it and two identical runs differ in it.
+with the child's WAL. The parent reads the barrier, sends `SIGKILL`, waits for
+the signal, and records the `BarrierReceipt`. The child parks inside the
+observer, which runs before the call it names, so the cut fixes what the
+crashed files hold and the kill loses no reply (`FaultAction::loses_reply` is
+false for it): at `local_staged` the commit's transaction is open and the kill
+rolls it back, and at `acknowledgement_requested` the local batch has
+committed and the acknowledgement was never called. The parent reads both
+checkpoints from the crashed files and refuses the episode unless the local
+batch is `not_applied` at `local_staged` and `applied` at
+`acknowledgement_requested` and no acknowledgement reached the kernel at
+either cut; these known states enter no ledger entry, as the rolled-back
+publication enters none. `Stores::reconstruct` then reopens the root, which
+deletes the crashed projection and bootstraps a new one at the kernel tip, so
+the committed but unacknowledged batch is discarded rather than resumed; the
+drain after it checks that the rebuilt stores reach the tip. The label is
+`application_crash` with the page cache intact and `test_binary_child`, which
+is all a kill of a parked child proves. The manifest's witness digest covers
+the barrier receipts without their `pid`, because the OS assigns it and two
+identical runs differ in it.
 
 The held publication runs a real dispatcher pass with inference held behind
 the embedding fixture's gate on a multi-thread Tokio runtime: the job is
@@ -2461,11 +2462,12 @@ still inside its bound takes one unit of work with a logical `now`:
 `run_episode` until `acknowledged_through` reaches the current tip, dispatcher
 `run_pass` until no embedding job is open, `ClaimMaterializer::run_episode`
 until it acknowledges the tip with exactly the newest decision's two
-`canonical_claims` descriptors live in the kernel, a descriptor being that
-decision's when it was created after the decision committed (each such step
-receipts `claims_materialized`); the lane records the step the predicate first
-held, the first stall after that, and whether it held at the bound, and a
-stalled lane is unmet. A catch-up hold admits evidence references for its
+`canonical_claims` descriptors live in the kernel, matched by descriptor id
+from the kernel's identity encoding of the decision's object id and revision,
+so a predecessor's descriptor published late is not the newest's (each such
+step receipts `claims_materialized`); the lane records the step the predicate
+first held, the first stall after that, and whether it held at the bound, and
+a stalled lane is unmet. A catch-up hold admits evidence references for its
 whole window, retired ones included; the drive's hold bounds, raised to every
 unit its plan publishes (`DriveBounds`), cover it. A CAS ingest fault cannot
 be the permanent outside-core fault here: its latch refuses the kernel

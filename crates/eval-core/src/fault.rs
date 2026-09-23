@@ -193,13 +193,11 @@ impl FaultAction {
     }
 
     /// The action leaves an operation's outcome unknown to its caller: the
-    /// work may have committed while the reply said otherwise. A process kill
-    /// takes the reply with the process, so its effects are unknown until the
-    /// crashed files are read back. `LoseLocalCommit` rolls back and
-    /// `SkipAcknowledgement` never acknowledges, which are known.
+    /// work may have committed while the reply said otherwise. `LoseLocalCommit`
+    /// rolls back and `SkipAcknowledgement` never acknowledges, which are
+    /// known, and a process kill's cut fixes what committed before it.
     pub fn loses_reply(&self) -> bool {
         match self {
-            Self::ProcessKill { .. } => true,
             Self::SearchEpisode { fault } => {
                 *fault != SearchEpisodeFault::AcknowledgeInsideLocalTransaction
             }
@@ -223,6 +221,7 @@ impl FaultAction {
             | Self::KernelRestore { .. }
             | Self::ProjectionBatch { .. }
             | Self::ExternalLockHolder
+            | Self::ProcessKill { .. }
             | Self::CorruptQuiescentFile
             | Self::ExpectedRefusal { .. } => false,
         }

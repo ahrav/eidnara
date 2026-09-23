@@ -230,7 +230,7 @@ fn a_lost_reply_stays_unknown_until_readback_at_after_recovery_scenario(campaign
     let run = &campaign.run;
     let effects = &run.report.effects.effects;
     let lost: Vec<_> = effects.iter().filter(|(_, e)| e.reply_lost()).collect();
-    assert_eq!(lost.len(), 6, "{effects:?}");
+    assert_eq!(lost.len(), 3, "{effects:?}");
     for (identity, effect) in &lost {
         assert!(
             effect.read_back,
@@ -245,22 +245,10 @@ fn a_lost_reply_stays_unknown_until_readback_at_after_recovery_scenario(campaign
         .filter(|(id, _)| id.starts_with("search_commit:") || id.starts_with("search_ack:"))
         .map(|(_, e)| e.outcome)
         .collect();
-    assert_eq!(search.len(), 5, "two lost replies and three killed effects");
     assert_eq!(
-        search
-            .iter()
-            .filter(|o| **o == EffectOutcome::Applied)
-            .count(),
-        3,
-        "the lost replies and the acknowledgement kill's local commit committed: {search:?}"
-    );
-    assert_eq!(
-        search
-            .iter()
-            .filter(|o| **o == EffectOutcome::NotApplied)
-            .count(),
-        2,
-        "the killed steps never committed their effect: {search:?}"
+        search,
+        [EffectOutcome::Applied; 2],
+        "the two lost replies committed; a kill loses none"
     );
     let embeddings: Vec<_> = lost
         .iter()
@@ -436,27 +424,13 @@ fn a_test_binary_child_killed_at_a_named_cut_recovers_scenario(campaign: &Campai
         assert!(barrier.line.ends_with(cut), "{barrier:?}");
         assert_eq!(barrier.signal, 9, "SIGKILL, not an exit status");
         assert!(barrier.pid > 0);
-        let suffix = format!("@{}", episode.id);
-        let effects: BTreeMap<&str, EffectOutcome> = run
-            .report
-            .effects
-            .effects
-            .iter()
-            .filter(|(identity, _)| identity.ends_with(&suffix))
-            .map(|(identity, effect)| (identity.split_once(':').unwrap().0, effect.outcome))
-            .collect();
-        let expected: BTreeMap<&str, EffectOutcome> = match cut.as_str() {
-            "local_staged" => [("search_commit", EffectOutcome::NotApplied)].into(),
-            "acknowledgement_requested" => [
-                ("search_commit", EffectOutcome::Applied),
-                ("search_ack", EffectOutcome::NotApplied),
-            ]
-            .into(),
-            other => panic!("no kill cut {other}"),
-        };
-        assert_eq!(
-            effects, expected,
-            "{}: the crashed files hold exactly what committed before the cut",
+        assert!(
+            !run.report
+                .effects
+                .effects
+                .keys()
+                .any(|identity| identity.ends_with(&format!("@{}", episode.id))),
+            "{}: the cut fixes what committed, so the kill loses no reply",
             episode.id
         );
     }
@@ -1307,4 +1281,77 @@ fn the_kill_and_liveness_roots_are_charged_while_their_stores_are_open() {
         peak > open_enough,
         "liveness: peak {peak}, open {open}, closed {closed}"
     );
+}
+
+/// The child parks inside the observer, which runs before the call it names:
+/// at `acknowledgement_requested` the acknowledgement was never called, and
+/// neither cut leaves an outcome the kill made unknown, so the episode checks
+/// the crashed files itself and enters nothing in the ledger.
+#[test]
+fn a_kill_records_no_uncalled_operation_and_loses_no_reply() {
+    let plan = fault::plan(MESSAGES).unwrap();
+    let profile = fault::profile(Scale::S0, MESSAGES, 600_000, None);
+    for cut in fault::KillCut::ALL {
+        let mut charges = campaign::Charges::new(profile.envelope.clone());
+        let mut witness = Witness::new();
+        fault::kill_episode(
+            &plan,
+            MESSAGES,
+            &mut charges,
+            &mut witness,
+            spawn_child,
+            cut,
+        )
+        .unwrap();
+        assert!(
+            witness.effects.effects.is_empty(),
+            "{cut:?}: the cut fixes what committed, so nothing is unknown: {:?}",
+            witness.effects.effects
+        );
+    }
+}
+
+/// A materializer one page behind publishes decision 0's claims after
+/// decision 1 has committed, so ordering alone would take them for decision
+/// 1's; only their descriptor identity says whose they are.
+#[test]
+fn a_lagging_predecessors_claims_are_not_the_newest_decisions() {
+    let root = tempfile::tempdir().unwrap();
+    let (plan, mut stores, _fresh) = liveness_window_stores(root.path());
+    let now = plan.steps.last().unwrap().now_ms;
+    let kernel = Arc::clone(&stores.corpus.kernel);
+    let mut materializer =
+        daemon::claim_sources::ClaimMaterializer::new(&kernel, kernel::ProviderEgress::LocalOnly);
+    let page = |commits: usize| kernel::CommitPageBounds {
+        max_commits: commits.try_into().unwrap(),
+        max_rows: 1024.try_into().unwrap(),
+        max_payload_bytes: (1u64 << 20).try_into().unwrap(),
+    };
+    stores.publish_outbox();
+    for _ in 0..64 {
+        let report = materializer.run_episode(page(64), now).unwrap();
+        if report.acknowledged_through >= stores.tip() {
+            break;
+        }
+    }
+    fault::feed(&mut stores, None, 1, 64);
+    fault::feed(&mut stores, None, 1 + 4, 64);
+    stores.publish_outbox();
+    // One page: decision 0's commit publishes its claims, then the
+    // acknowledgement fails, so its retirement and decision 1 wait.
+    let _ = materializer.run_episode_with_fault_for_test(
+        page(1),
+        now,
+        daemon::claim_sources::EpisodeFault::FailAcknowledgement,
+    );
+    assert!(
+        fault::newest_claims_live(root.path(), 0),
+        "the live claims are decision 0's"
+    );
+    assert!(
+        !fault::newest_claims_live(root.path(), 1),
+        "decision 0's claims, published after decision 1 committed, are not its"
+    );
+    drop(kernel);
+    drop(stores.close());
 }

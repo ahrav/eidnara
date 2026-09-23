@@ -1194,20 +1194,7 @@ fn open_embedding_job(
 /// An embedding job's row names its own state, so it is read directly.
 pub fn read_back(root: &Path, witness: &mut Witness) -> Result<(), RunError> {
     let search = read_only(&search_file(root));
-    let projection: i64 = search
-        .query_row(
-            "SELECT checkpoint_commit_seq FROM projection_checkpoint",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap();
-    let kernel: i64 = read_only(&kernel_file(root))
-        .query_row(
-            "SELECT checkpoint_commit_seq FROM outbox_consumers WHERE consumer_id=?1",
-            [CONSUMER],
-            |row| row.get(0),
-        )
-        .unwrap();
+    let (projection, kernel) = checkpoints(root);
     let mut states = Vec::new();
     for identity in witness.effects.unknown() {
         let (effect, _episode) = identity.split_once('@').unwrap();
@@ -1243,6 +1230,26 @@ pub fn read_back(root: &Path, witness: &mut Witness) -> Result<(), RunError> {
         witness.effects.read_back(&identity, state).unwrap();
     }
     Ok(())
+}
+
+/// The projection's local checkpoint and the kernel's acknowledged one, read
+/// from the closed or crashed files.
+fn checkpoints(root: &Path) -> (i64, i64) {
+    let projection = read_only(&search_file(root))
+        .query_row(
+            "SELECT checkpoint_commit_seq FROM projection_checkpoint",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let kernel = read_only(&kernel_file(root))
+        .query_row(
+            "SELECT checkpoint_commit_seq FROM outbox_consumers WHERE consumer_id=?1",
+            [CONSUMER],
+            |row| row.get(0),
+        )
+        .unwrap();
+    (projection, kernel)
 }
 
 fn applied(is: bool) -> EffectState {
@@ -1461,16 +1468,15 @@ pub fn run(config: &Config, spawn: Spawn) -> Result<Run, RunError> {
         &[std::env::current_exe().unwrap()],
     );
     let expected = campaign(&plan, &mut charges, &mut witness)?;
-    let mut expected = expected;
     for cut in KillCut::ALL {
-        expected.extend(kill_episode(
+        kill_episode(
             &plan,
             config.messages,
             &mut charges,
             &mut witness,
             spawn,
             cut,
-        )?);
+        )?;
     }
     let liveness = liveness(&plan, &mut charges, &mut witness, &fault_profile.liveness)?;
     check_expectations(&expected, &witness.effects)?;
@@ -1580,9 +1586,12 @@ use std::sync::mpsc;
 
 use daemon::claim_sources::{ClaimMaterializer, MaterializationEnd};
 use daemon::embedding_dispatch::{DispatchBounds, DispatchEvent, EmbeddingDispatcher};
+use daemon::harness_sources::Representation;
 use eval_core::{BarrierReceipt, HealthyCore, Lane, LaneProgress, LivenessBounds, LivenessReport};
 use host_runtime::local_embeddings::{LocalEmbeddingsComponent, LocalEmbeddingsLimits};
 use kernel::CommitPageBounds;
+use kernel::descriptor_object_id;
+use kernel::source_identity::{Occurrence, OccurrenceClass, encode_preserving_span};
 
 use super::aging::memory_file;
 use super::support::embedding_fixtures::{
@@ -1675,19 +1684,15 @@ impl KillCut {
         }
     }
 
-    /// At `acknowledgement_requested` the local batch has committed and its
-    /// acknowledgement has not, so the crashed files hold one and not the other.
-    fn effects(self, through: i64, episode: &str) -> Vec<(String, EffectState)> {
-        let commit = format!("search_commit:{through}@{episode}");
+    /// The local commit's state in the crashed files. The child parks inside
+    /// the observer, which runs before the call it names: at `local_staged`
+    /// the commit's transaction is open and the kill rolls it back; at
+    /// `acknowledgement_requested` it has committed and the acknowledgement
+    /// was never called. The cut fixes both, so the kill loses no reply.
+    fn commit_state(self) -> EffectState {
         match self {
-            KillCut::LocalStaged => vec![(commit, EffectState::NotApplied)],
-            KillCut::AcknowledgementRequested => vec![
-                (commit, EffectState::Applied),
-                (
-                    format!("search_ack:{through}@{episode}"),
-                    EffectState::NotApplied,
-                ),
-            ],
+            KillCut::LocalStaged => EffectState::NotApplied,
+            KillCut::AcknowledgementRequested => EffectState::Applied,
         }
     }
 }
@@ -1772,7 +1777,7 @@ pub fn kill_episode(
     witness: &mut Witness,
     spawn: Spawn,
     cut: KillCut,
-) -> Result<BTreeMap<String, EffectState>, RunError> {
+) -> Result<(), RunError> {
     let id = format!("kill-at-{}", cut.name());
     witness.declare(episode(
         &id,
@@ -1831,10 +1836,6 @@ pub fn kill_episode(
         .nth(1)
         .and_then(|t| t.parse().ok())
         .ok_or_else(|| unexpected(&id, "a barrier naming the window", &line))?;
-    let effects = cut.effects(through, &id);
-    for (effect, _) in &effects {
-        witness.effects.attempt(effect);
-    }
     child.0.kill().unwrap();
     let status = child.0.wait().unwrap();
     let signal = {
@@ -1850,27 +1851,27 @@ pub fn kill_episode(
         line,
         signal,
     });
-    for (effect, _) in &effects {
-        witness.effects.lose_reply(effect, &id).unwrap();
-        // The killed window is the last the child reached, so a crashed
-        // file's checkpoint past it would be masking, as for a reply loss.
-        witness.left_at.insert(effect.clone(), through);
-    }
     witness.receipt(cut.name());
-    read_back(root.path(), witness)?;
-    for (effect, expected) in &effects {
-        let outcome = witness.effects.effects[effect].outcome;
-        let expected_outcome = match expected {
-            EffectState::Applied => eval_core::EffectOutcome::Applied,
-            EffectState::NotApplied => eval_core::EffectOutcome::NotApplied,
-        };
-        if outcome != expected_outcome {
-            return Err(unexpected(
-                &id,
-                &format!("{effect} read back {expected:?} from the crashed files"),
-                outcome,
-            ));
-        }
+    // The cut fixes both states, so they are checked here and enter no
+    // ledger entry, as a rolled-back publication enters none.
+    let (projection, acknowledged) = checkpoints(root.path());
+    let state = applied(projection >= through);
+    if state != cut.commit_state() {
+        return Err(unexpected(
+            &id,
+            &format!(
+                "the local commit through {through} {:?} in the crashed files",
+                cut.commit_state()
+            ),
+            state,
+        ));
+    }
+    if acknowledged >= through {
+        return Err(unexpected(
+            &id,
+            "no acknowledgement in the crashed files",
+            acknowledged,
+        ));
     }
     // The crashed files hold the child's WAL: its open footprint.
     charges.store_bytes(root.path())?;
@@ -1887,7 +1888,7 @@ pub fn kill_episode(
     charges.store_bytes(stores.root())?;
     drop(stores.close());
     charges.vacate(root)?;
-    Ok(effects.into_iter().collect())
+    Ok(())
 }
 
 /// A dispatcher pass with inference held behind the fixture gate admits the
@@ -1979,7 +1980,8 @@ pub fn held_publication_episode(
     Ok(())
 }
 
-const CLAIMS_PER_DECISION: u64 = 2;
+/// Every liveness decision is revision 1: none is corrected.
+const DECISION_REVISION: i64 = 1;
 
 /// Each claim publication ingests evidence and commits, so the window feeds a
 /// decision every fourth step rather than every step.
@@ -2006,7 +2008,7 @@ fn decide(kernel: &kernel::KernelStore, n: u64) {
         },
         source_kind: "assistant".to_string(),
         source_id: object_id.clone(),
-        source_revision: 1,
+        source_revision: DECISION_REVISION,
         sensitivity: Sensitivity::Normal,
     };
     let admission = AdmissionRequest {
@@ -2041,23 +2043,46 @@ fn retire_decision(kernel: &kernel::KernelStore, n: u64) {
         .unwrap();
 }
 
+/// Decision `n`'s `canonical_claims` descriptor ids: the kernel's identity
+/// encoding of its object id and revision, one per representation the
+/// materializer publishes for the class.
+fn claim_descriptors(n: u64) -> BTreeSet<String> {
+    let object_id = decision_object(n);
+    let revision = DECISION_REVISION.to_string();
+    let class = OccurrenceClass::CanonicalClaims;
+    [Representation::DecisionSummary, Representation::Rationale]
+        .into_iter()
+        .map(|representation| {
+            let encoded = encode_preserving_span(&Occurrence {
+                class: class.code(),
+                identity: &[(class.identity_fields()[0], &object_id)],
+                revision: &revision,
+                representation: representation.as_str(),
+                span: None,
+            })
+            .unwrap();
+            descriptor_object_id(&encoded.lineage_id, &revision)
+        })
+        .collect()
+}
+
 /// Whether the live `canonical_claims` descriptors are exactly decision
-/// `n`'s. Only the materializer publishes that class and `n` is the newest
-/// decision, so a descriptor is `n`'s exactly when it was created after `n`
-/// committed; a stale predecessor's descriptor, or no decision `n`, fails.
+/// `n`'s, by descriptor identity: a predecessor's descriptor fails whenever
+/// it was published.
 pub fn newest_claims_live(root: &Path, n: u64) -> bool {
-    let (live, of_n): (i64, i64) = read_only(&kernel_file(root))
-        .query_row(
-            "SELECT COUNT(*), COUNT(*) FILTER (WHERE o.created_commit_seq > \
-             (SELECT created_commit_seq FROM object_registry WHERE object_id=?1)) \
-             FROM object_registry o WHERE o.object_id GLOB 'srcdesc:*' \
-             AND o.source_kind='canonical_claims' AND o.invalidated_commit_seq IS NULL",
-            [decision_object(n)],
-            |row| Ok((row.get(0)?, row.get(1)?)),
+    let kernel = read_only(&kernel_file(root));
+    let mut live = kernel
+        .prepare(
+            "SELECT object_id FROM object_registry WHERE object_id GLOB 'srcdesc:*' \
+             AND source_kind='canonical_claims' AND invalidated_commit_seq IS NULL",
         )
         .unwrap();
-    let want = i64::try_from(CLAIMS_PER_DECISION).unwrap();
-    live == want && of_n == want
+    let live: BTreeSet<String> = live
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    live == claim_descriptors(n)
 }
 
 /// Feeds window step `step`: the next fresh planned step, kernel only, and on
