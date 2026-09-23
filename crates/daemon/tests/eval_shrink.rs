@@ -153,6 +153,15 @@ fn spawn_foreign_predicate(_: &ChildArgs) -> Command {
     reexec("shrink_child_reports_a_foreign_predicate")
 }
 
+/// The original is answered honestly; every candidate answers `Failed` under
+/// a predicate pinned at another cut.
+fn spawn_foreign_predicate_for_candidates(args: &ChildArgs) -> Command {
+    if scenario_digest(args) == shrink::scenario(COMMITS).0.digest() {
+        return spawn_child(args);
+    }
+    reexec("shrink_child_reports_a_foreign_predicate")
+}
+
 #[test]
 #[ignore = "re-executed by the foreign-predicate test"]
 fn shrink_child_reports_a_foreign_predicate() {
@@ -372,6 +381,11 @@ fn a_fresh_process_reproduces_the_predicate_and_the_minimized_witness_is_publish
     assert_eq!(
         manifest.run_identity.config["name"],
         json!("s0-suite-c-shrink")
+    );
+    assert_eq!(
+        manifest.residue,
+        shrink::residue(),
+        "the manifest declares the residue the replays and the witness declare"
     );
     assert_eq!(
         manifest.cut_receipts,
@@ -596,6 +610,33 @@ fn an_answer_for_another_scenario_is_unknown_and_shrinks_nothing() {
                 } | CandidateVerdict::InvalidPair { .. }
             ),
             "{:?}",
+            record.verdict
+        );
+    }
+    assert!(matches!(
+        witness.shrink.minimality,
+        Minimality::NotEstablished {
+            reason: NotEstablishedReason::UnknownCandidates { .. }
+        }
+    ));
+}
+
+#[test]
+fn a_candidate_answered_under_a_foreign_predicate_is_unknown_not_slipped() {
+    let publish = tempfile::tempdir().unwrap();
+    let config = config(publish.path().join("out"));
+    let run = shrink::run(&config, spawn_foreign_predicate_for_candidates).unwrap();
+    let witness = &run.witness;
+    assert!(witness.shrink.deleted.is_empty());
+    for record in &witness.shrink.candidates[1..] {
+        assert!(
+            matches!(
+                record.verdict,
+                CandidateVerdict::Unknown {
+                    reason: UnknownReason::ReadBackFailed
+                } | CandidateVerdict::InvalidPair { .. }
+            ),
+            "a foreign predicate is no rejection: {:?}",
             record.verdict
         );
     }

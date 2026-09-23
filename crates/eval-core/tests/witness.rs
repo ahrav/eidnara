@@ -421,6 +421,36 @@ fn a_residue_that_no_schema_could_declare_is_refused() {
 }
 
 #[test]
+fn a_minimized_scenario_that_cannot_compile_is_refused() {
+    // A budget claim over a scenario with no tasks: every digest agrees, the
+    // ledger is consistent, and no child could ever replay it.
+    let mut package = package();
+    package.minimized = scenario();
+    package.minimized.tasks.clear();
+    let digest = package.minimized.digest();
+    package.shrink.original_digest = digest.clone();
+    package.shrink.minimized_digest = digest.clone();
+    package.shrink.candidates.truncate(1);
+    package.shrink.candidates[0].scenario_digest = digest;
+    package.shrink.deleted.clear();
+    package.shrink.remaining = package.minimized.elements().len() as u64;
+    package.shrink.replays = 1;
+    package.shrink.max_replays = 1;
+    package.shrink.unknown_candidates = 0;
+    package.shrink.minimality = Minimality::NotEstablished {
+        reason: eval_core::NotEstablishedReason::ReplayBudgetExhausted,
+    };
+    package.recipe = None;
+    assert!(
+        matches!(
+            package.validate(),
+            Err(WitnessError::MinimizedNotReplayable { .. })
+        ),
+        "a minimized scenario the compiler refuses is not replayable"
+    );
+}
+
+#[test]
 fn the_coverage_signature_names_only_registered_markers() {
     let mut package = package();
     package

@@ -294,6 +294,7 @@ Exercised: yes -
   `crates/eval-core/tests/witness.rs::a_one_minimal_claim_names_exactly_the_transformations_the_scenario_held`,
   `crates/eval-core/tests/witness.rs::the_remaining_count_is_the_minimized_scenario_s_element_count`,
   `crates/eval-core/tests/witness.rs::a_residue_that_no_schema_could_declare_is_refused`,
+  `crates/eval-core/tests/witness.rs::a_minimized_scenario_that_cannot_compile_is_refused`,
   and
   `crates/daemon/tests/eval_shrink.rs::a_fresh_process_reproduces_the_predicate_and_the_minimized_witness_is_published`
 Guarantee: A witness package carries the original failure (RunId, decision tape,
@@ -316,6 +317,8 @@ Check: `always` - `WitnessPackage::validate` refuses a recipe missing when
   the minimized scenario's element count is refused
   (`ShrinkReport(Inconsistent { remaining })`); a residue holding a `Keep`
   rule or two rules for one field is refused (`ResidueContradiction`); a
+  minimized scenario the pair compiler or episode validator refuses is
+  refused (`MinimizedNotReplayable`); a
   coverage name outside the registry is refused (`UnregisteredMarker { name }`); an embedded report that
   `ShrinkReport::validate` refuses is refused (`ShrinkReport(..)`);
   `parse_witness(serialize(package)) == package`; the published bytes parse

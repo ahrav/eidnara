@@ -2865,7 +2865,9 @@ recorded `residue` entries, the `minimized` `Scenario`, an optional
 
 `WitnessPackage::validate` refuses: a schema other than `eval-witness/v1`
 (`SchemaMismatch { found }`); a claim boundary other than `ClaimBoundary::pinned()`
-(`ClaimBoundaryMismatch`); a live slice labelled replayable
+(`ClaimBoundaryMismatch`); a minimized scenario whose episodes are not a
+valid set or that the pair compiler refuses, so no child could replay it
+(`MinimizedNotReplayable { refusal }`); a live slice labelled replayable
 (`LiveRelabelledReplayable`); a predicate that disagrees between the original
 and the shrink report; a minimized scenario whose digest is not the report's;
 a run id or trace digest that is not 64 lowercase hex; and any string leaf
@@ -2939,7 +2941,11 @@ occupies one temp root for the candidate file, replays the original, and
 refuses `NoFailure` unless the child reports `Failed`, verifies the returned
 report against the original (`ShrinkReport::verify`, refused as `Report`); the reported predicate
 is the pinned one, and refuses `ForeignPredicate` when the child's oracle,
-cut, or profile digest is not the one it was sent. A `Config` whose commit
+cut, or profile digest is not the one it was sent; a candidate answered
+under a foreign predicate is `Unknown { read_back_failed }`, never a
+rejection. After the shrink the executable is read again and a digest other
+than the identity's refuses `BinaryChanged`; the elapsed bound is charged once
+more before the manifest is built, so a run past it publishes nothing. A `Config` whose commit
 count the aged world cannot carry is refused (`Commits`) before the publish
 root exists. It then drives `eval_core::shrink` with `Replayer::replay`
 as the callback. The callback cannot fail, so the first refusal (drift, an
@@ -2949,7 +2955,8 @@ refusal. The witness is validated once without a recipe; `RecipeRequired`
 adds the compact form from `count_triggered`. The temp root is vacated before
 the manifest is built, so the envelope it records is final. `witness.json`
 holds the canonical bytes `serialize` returned and `manifest.json` the
-manifest, each published with `publish_file`; a witness whose manifest could
+manifest, whose `residue` is the same union the replays and the witness
+declare, each published with `publish_file`; a witness whose manifest could
 not follow it is removed again, so a reader finds both files or none.
 
 The child (`shrink-child`, or the daemon test's re-executed entrypoint) reads

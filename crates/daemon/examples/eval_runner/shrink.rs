@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 use context_core::canonical_json::protocol_digest;
 use context_core::redaction::Redactor;
 use eval_core::{
-    Approval, CandidateVerdict, ClaimBoundary, Coverage, Cut, CutOutcome, CutReceipt,
+    Approval, BinaryDigest, CandidateVerdict, ClaimBoundary, Coverage, Cut, CutOutcome, CutReceipt,
     EnvelopeExceeded, EvaluatedSurface, EventId, ExecutionMode, FailurePredicate, FaultAction,
     Generation, Manifest, Mode, MultiplicityRecipe, ObservationSchema, Oracle, OriginalFailure,
     Payload, ProfileError, ReplayEffects, ReplayOutcome, ReplayRefused, ReplayRequest,
@@ -82,6 +82,8 @@ pub enum RunError {
     Shrink(#[from] ShrinkRefused),
     #[error("shrink report refused against its scenario: {0}")]
     Report(#[from] ShrinkReportError),
+    #[error("the executable changed while the replays ran")]
+    BinaryChanged,
     #[error("replay effect refused: {0}")]
     Replay(#[from] ReplayRefused),
     #[error("witness refused: {0}")]
@@ -139,6 +141,14 @@ impl ChildArgs {
 
     pub fn env(&self, command: &mut Command) {
         command.env(CHILD_ARGS, serde_json::to_string(self).unwrap());
+    }
+
+    /// `true` when a reported failure names the oracle, cut, and profile the
+    /// child was sent; only its witness class is the child's to report.
+    pub fn pins(&self, predicate: &FailurePredicate) -> bool {
+        predicate.oracle == self.oracle
+            && predicate.checkpoint == self.checkpoint
+            && predicate.profile_digest == self.profile_digest
     }
 }
 
@@ -494,10 +504,7 @@ pub fn run(config: &Config, spawn: Spawn) -> Result<Run, RunError> {
             outcome: first.outcome,
         });
     };
-    if predicate.oracle != config.oracle
-        || predicate.checkpoint != CUT
-        || predicate.profile_digest != profile_digest
-    {
+    if !replayer.args.pins(predicate) {
         return Err(RunError::ForeignPredicate {
             predicate: predicate.clone(),
         });
@@ -516,6 +523,14 @@ pub fn run(config: &Config, spawn: Spawn) -> Result<Run, RunError> {
             return unanswered;
         }
         match replayer.replay(request.key, request.scenario) {
+            // A failure pinned elsewhere is no observation of this predicate,
+            // so it cannot stand as a rejection: it is unknown, and kept.
+            Ok(Replayed {
+                outcome: ReplayOutcome::Failed { predicate },
+                ..
+            }) if !replayer.args.pins(&predicate) => ReplayOutcome::Unknown {
+                reason: UnknownReason::ReadBackFailed,
+            },
             Ok(replayed) => replayed.outcome,
             Err(error) => {
                 refused = Some(error);
@@ -531,6 +546,16 @@ pub fn run(config: &Config, spawn: Spawn) -> Result<Run, RunError> {
     // The shell holds the original, so it verifies the report against it
     // rather than trusting the shrinker's bookkeeping.
     report.verify(&original)?;
+    // Every child ran from this executable's path; a rebuild under the run
+    // would have answered from another build than the identity names.
+    let binary = std::fs::read(std::env::current_exe().unwrap())?;
+    if run_identity.build.binary_digest
+        != (BinaryDigest::Present {
+            sha256: super::campaign::sha256_hex(&binary),
+        })
+    {
+        return Err(RunError::BinaryChanged);
+    }
     let mut coverage = Coverage::default();
     coverage
         .record("flt_shrink_fresh_process_reproduced")
@@ -586,6 +611,9 @@ pub fn run(config: &Config, spawn: Spawn) -> Result<Run, RunError> {
     let (value, text) = witness.serialize(&redactor, profile.envelope.artifact_bytes)?;
     let witness_bytes = charges.publish_bytes(|_| text.clone().into_bytes())?;
     let report_value = serde_json::to_value(&witness.shrink).unwrap();
+    // The last elapsed charge before anything is published: a run past its
+    // bound here refuses rather than publishing a manifest that says otherwise.
+    charges.elapsed()?;
     let mut manifest = suite_c_manifest(ManifestInputs {
         identity: run_identity,
         eval_run_id: witness.original.eval_run_id.clone(),
@@ -604,6 +632,7 @@ pub fn run(config: &Config, spawn: Spawn) -> Result<Run, RunError> {
     // run generated its worlds from `SEED` and replayed each in a fresh child.
     manifest.component_versions.task_corpus = format!("generated:{SEED:#x}");
     manifest.component_versions.execution_image = "fresh-process".to_string();
+    manifest.residue = residue();
     let manifest_bytes = serde_json::to_vec_pretty(&manifest.to_value()).unwrap();
     // A reader finds both files or none: a witness whose manifest could not
     // follow it is taken back out, as the other shells do.

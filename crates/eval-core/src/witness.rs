@@ -10,8 +10,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::cassette::scan_for_secrets;
+use crate::eligibility::serialize_spec;
 use crate::event::{CausalEdge, EventId, EventLog};
 use crate::failure_class::Slice;
+use crate::fault::validate_episodes;
 use crate::generator::{Mode, WorldConfig, generate_all};
 use crate::manifest::{CLAIM_BOUNDARY_EXCLUSIONS, ClaimBoundary};
 use crate::markers::MARKERS;
@@ -91,6 +93,11 @@ pub enum WitnessError {
     LiveRelabelledReplayable,
     PredicateDisagrees,
     MinimizedDigestMismatch,
+    /// The minimized scenario is not one a child could replay: its episodes
+    /// are not a valid set or the pair compiler refuses it.
+    MinimizedNotReplayable {
+        refusal: String,
+    },
     /// The minimized scenario still fails only in multiplicity, so the
     /// compact form is required; or it carries one it does not need.
     RecipeRequired,
@@ -158,6 +165,19 @@ impl WitnessPackage {
         if self.minimized.digest() != self.shrink.minimized_digest {
             return Err(WitnessError::MinimizedDigestMismatch);
         }
+        // A replayable witness is one a child can replay: the minimized
+        // scenario compiles under the pinned fixture and its episodes are a
+        // valid set, as the shrinker required of every accepted candidate.
+        validate_episodes(&self.minimized.episodes).map_err(|refusal| {
+            WitnessError::MinimizedNotReplayable {
+                refusal: format!("{refusal:?}"),
+            }
+        })?;
+        self.minimized
+            .compile(&serialize_spec())
+            .map_err(|refusal| WitnessError::MinimizedNotReplayable {
+                refusal: refusal.kind().to_string(),
+            })?;
         if let Some(entry) = residue_contradiction(&self.residue) {
             return Err(WitnessError::ResidueContradiction {
                 type_name: entry.type_name.clone(),
