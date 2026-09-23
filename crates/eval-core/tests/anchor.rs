@@ -1518,3 +1518,29 @@ fn spdx_parentheses_group_operands_only() {
         assert!(entry.validate().is_err(), "{license}");
     }
 }
+
+#[test]
+fn a_pull_request_url_on_another_host_is_not_this_repository() {
+    let mut entry = entry("cargo-0", Family::Cargo, 0x10);
+    entry.pull_request = Some(20);
+    assert!(future_answers(&entry, "https://notexample.invalid/cargo/repo/pull/20").is_empty());
+    assert_eq!(
+        future_answers(&entry, "https://www.example.invalid/cargo/repo/pull/20"),
+        vec!["pull_request:20"]
+    );
+}
+
+#[test]
+fn the_time_study_refuses_a_corpus_that_has_no_digest() {
+    let mut corpus = pilot();
+    corpus.entries[19].issue = 1 << 53;
+    let measured: Vec<Preparation> = corpus.entries[..TIME_STUDY_TASKS]
+        .iter()
+        .map(|e| Preparation {
+            task: e.id.clone(),
+            entry_digest: e.digest().unwrap(),
+            prepare_ms: 1,
+        })
+        .collect();
+    assert!(time_study(&corpus, &measured, u64::MAX).is_err());
+}

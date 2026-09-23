@@ -366,7 +366,7 @@ pub fn time_study(
     measured: &[Preparation],
     bound_ms: u64,
 ) -> Result<Affordability, TimeStudyRefused> {
-    corpus.validate().map_err(TimeStudyRefused::Corpus)?;
+    corpus.digest().map_err(TimeStudyRefused::Corpus)?;
     if let Err(AnchorError::NotPilotComposition { found }) = corpus.is_pilot() {
         return Err(TimeStudyRefused::NotThePilot { found });
     }
@@ -782,12 +782,16 @@ pub fn future_answers(entry: &AnchorEntry, output: &str) -> Vec<String> {
     found
 }
 
+/// `needle` occurs in `output` as a whole token: not followed by a digit,
+/// and not preceded by a name character, so `notexample.invalid/...` does
+/// not name `example.invalid/...` (a `.` before it may, as in `www.`).
 fn names_whole_number(output: &str, needle: &str) -> bool {
+    let bytes = output.as_bytes();
     output.match_indices(needle).any(|(at, _)| {
-        !output
-            .as_bytes()
-            .get(at + needle.len())
-            .is_some_and(u8::is_ascii_digit)
+        let before = at.checked_sub(1).map(|i| bytes[i]);
+        let after = bytes.get(at + needle.len());
+        !before.is_some_and(|b| b.is_ascii_alphanumeric() || b == b'-')
+            && !after.is_some_and(u8::is_ascii_digit)
     })
 }
 

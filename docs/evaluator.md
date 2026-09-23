@@ -2486,7 +2486,7 @@ exactly `PILOT_COMPOSITION`: eight Cargo, eight Tokio, four Django.
 **Time study.** `time_study(corpus, measured, bound_ms)` projects the pilot's
 preparation cost from exactly `TIME_STUDY_TASKS` (five) measured
 `Preparation {task, entry_digest, prepare_ms}` rows of distinct tasks of a
-valid pilot corpus (an invalid corpus refuses `Corpus(..)`, any other
+pilot corpus that validates and digests (otherwise `Corpus(..)`, any other
 composition `NotThePilot`, a measurement of another version of a row
 `RowMismatch`), scaled in
 128-bit arithmetic to the
@@ -2548,7 +2548,9 @@ control is eligible. `future_answers(entry, output)` names the fix commit
 when any run of hex digits of seven or more, in either case, is a prefix of
 `fix_sha` (the run is taken whole, so `a0123456` does not name
 `0123456…`), and the pull request as `#<n>` or the repository's `/pull/<n>`
-URL as a whole number, in any letter case.
+URL as a whole token (not preceded by a name character, so another host
+ending in this one does not match; not followed by a digit), in any letter
+case.
 
 **Anchor set.** `anchor_set(corpus, role, audits, proofs, controls,
 provider)` folds one pair's evidence into `(AnchorSet, PairAccounting)`. It
