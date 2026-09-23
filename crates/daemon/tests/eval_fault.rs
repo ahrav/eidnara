@@ -759,3 +759,88 @@ fn fault_markers_each_name_a_scenario_here() {
         state: eval_core::EffectState::Applied,
     };
 }
+
+/// A liveness window's stores before the window opens: the healthy prefix
+/// lived, the claim materializer registered, and the backlog half applied.
+fn liveness_window_stores(
+    root: &std::path::Path,
+) -> (aging::Plan, aging::Stores, Vec<aging::Planned>) {
+    let plan = aging::plan(MESSAGES).unwrap();
+    let mut stores = aging::Stores::open(root, plan.rendering.clone());
+    let k = plan.checkpoint_step as usize;
+    aging::live(&mut stores, &plan.steps[..k]);
+    daemon::claim_sources::ClaimMaterializer::register(&stores.corpus.kernel, plan.steps[k].now_ms)
+        .unwrap();
+    let (backlog, fresh) = plan.steps[k..].split_at((plan.steps.len() - k) / 2);
+    for planned in backlog {
+        stores.apply(planned);
+    }
+    let fresh = fresh.to_vec();
+    (plan, stores, fresh)
+}
+
+#[test]
+fn a_fed_window_step_counts_the_kernel_commits_it_made() {
+    let root = tempfile::tempdir().unwrap();
+    let (_plan, mut stores, fresh) = liveness_window_stores(root.path());
+    for (i, planned) in fresh.iter().enumerate() {
+        let step = i as u64 + 1;
+        let before = stores.tip();
+        let fed = fault::feed(&mut stores, Some(planned), step, 64);
+        assert_eq!(
+            fed,
+            u64::try_from(stores.tip() - before).unwrap(),
+            "window step {step} fed {planned:?}"
+        );
+    }
+    drop(stores.close());
+}
+
+#[test]
+fn only_the_newest_decisions_claims_satisfy_the_materialization_lane() {
+    let root = tempfile::tempdir().unwrap();
+    let (plan, mut stores, _fresh) = liveness_window_stores(root.path());
+    let now = plan.steps.last().unwrap().now_ms;
+    fault::feed(&mut stores, None, 1, 64);
+    stores.publish_outbox();
+    let kernel = Arc::clone(&stores.corpus.kernel);
+    let mut materializer =
+        daemon::claim_sources::ClaimMaterializer::new(&kernel, kernel::ProviderEgress::LocalOnly);
+    let page = kernel::CommitPageBounds {
+        max_commits: 64.try_into().unwrap(),
+        max_rows: 1024.try_into().unwrap(),
+        max_payload_bytes: (1u64 << 20).try_into().unwrap(),
+    };
+    let materialize = |materializer: &mut daemon::claim_sources::ClaimMaterializer, tip: i64| {
+        for _ in 0..64 {
+            let report = materializer.run_episode(page, now).unwrap();
+            if matches!(
+                report.end,
+                daemon::claim_sources::MaterializationEnd::ReachedTarget
+            ) && report.acknowledged_through >= tip
+            {
+                return;
+            }
+        }
+        panic!("the materializer never reached the tip {tip}");
+    };
+    materialize(&mut materializer, stores.tip());
+    assert!(
+        fault::newest_claims_live(root.path(), 0),
+        "decision 0 was fed and materialized"
+    );
+    assert!(
+        !fault::newest_claims_live(root.path(), 1),
+        "decision 1 was never fed, so decision 0's claims are not its claims"
+    );
+    fault::feed(&mut stores, None, 1 + 4, 64);
+    stores.publish_outbox();
+    assert!(
+        !fault::newest_claims_live(root.path(), 1),
+        "decision 0's two claims are still live and decision 1's are unpublished"
+    );
+    materialize(&mut materializer, stores.tip());
+    assert!(fault::newest_claims_live(root.path(), 1));
+    drop(kernel);
+    drop(stores.close());
+}

@@ -1923,42 +1923,46 @@ because the OS assigns it and two identical runs differ in it.
 
 The held publication runs a real dispatcher pass with inference held behind
 the embedding fixture's gate on a multi-thread Tokio runtime: the job is
-admitted and nothing is published, a second pass re-admits nothing, and the
-release publishes it. Eligibility names the local destination, because the
-drive publishes its rows `LocalOnly`. The gate, runtime, and lane live in one
-`GatedLane` whose gate drops before its runtime, so an episode that fails
-while inference is held reports the failure; a runtime dropped first waits
-forever for the blocked inference.
+admitted and nothing is published, a second pass re-admits nothing, the safety
+check runs while the gate still holds, and the release publishes it.
+Eligibility names the local destination, because the drive publishes its rows
+`LocalOnly`. The gate, runtime, and lane live in one `GatedLane` whose gate
+drops before its runtime, so an episode that fails while inference is held
+reports the failure; a runtime dropped first waits forever for the blocked
+inference.
 
 Liveness runs on a root of its own after the fault phase. The healthy core is
-the kernel, the projection, the catch-up driver, the dispatcher, and the
-claim materializer; outside it, an external `BEGIN IMMEDIATE` on the memory
-store stays armed for the whole window and is probed again at the bound (a
-second `BEGIN IMMEDIATE` fails). Half the remaining history is the backlog
-the window opens with; the other half is fed in one commit per step as fresh
+the kernel, the projection, the catch-up driver, the dispatcher, and the claim
+materializer; outside it, an external `BEGIN IMMEDIATE` on the memory store
+stays armed for the whole window and is probed again at the bound (a second
+`BEGIN IMMEDIATE` fails). Half the remaining history is the backlog the window
+opens with; the other half is fed one planned step per window step as fresh
 kernel-only work (`Stores::apply_kernel_only`, which leaves the memory store
 untouched because it is outside the core), so every lane's predicate is
-re-established against new commits rather than held by idling. Every fourth
-step inside the materialization lane's bound also commits one scoped decision
-and retires the one before it, so the materializer publishes and retires
-claims inside the window. In one window loop each lane still inside its bound
-takes one unit of work with a logical `now`: `run_episode` until
-`acknowledged_through` reaches the current tip, dispatcher `run_pass` until no
-embedding job is open, `ClaimMaterializer::run_episode` until it acknowledges
-the tip with exactly the newest decision's two `canonical_claims` descriptors
-live in the kernel (each such step receipts `claims_materialized`); the lane
-records the step the predicate first held, the first stall after that, and
-whether it held at the bound, and a stalled lane is unmet. A catch-up hold
-admits evidence references for its whole window, retired ones included, so
-the drive's episode bounds admit 256 rather than the fixture's 64. A CAS
-ingest fault cannot be the permanent outside-core fault here: its latch
-refuses the kernel ingestion the fresh publishes need, which would put the
-fault inside the core. The reviewer coordinator lane
-is outside this campaign's core (its scripted model peer is not in the drive),
-so the report declares three lanes and `verdict` judges those; the R11 stall
-is listed under `permanent_stalls`. The evaluator drives every lane directly
-and the claim boundary says so: the lifecycle owner's wall-clock reads are
-outside the core.
+re-established against new commits rather than held by idling. A lane's
+`fresh_commits` is the kernel tip's advance across each feed, because a
+publish commits once per unit and a retirement of a dead lineage commits
+nothing. Every fourth step inside the materialization lane's bound also
+commits one scoped decision and retires the one before it, so the materializer
+publishes and retires claims inside the window. In one window loop each lane
+still inside its bound takes one unit of work with a logical `now`:
+`run_episode` until `acknowledged_through` reaches the current tip, dispatcher
+`run_pass` until no embedding job is open, `ClaimMaterializer::run_episode`
+until it acknowledges the tip with exactly the newest decision's two
+`canonical_claims` descriptors live in the kernel, a descriptor being that
+decision's when it was created after the decision committed (each such step
+receipts `claims_materialized`); the lane records the step the predicate first
+held, the first stall after that, and whether it held at the bound, and a
+stalled lane is unmet. A catch-up hold admits evidence references for its
+whole window, retired ones included, so the drive's episode bounds admit 256
+rather than the fixture's 64. A CAS ingest fault cannot be the permanent
+outside-core fault here: its latch refuses the kernel ingestion the fresh
+publishes need, which would put the fault inside the core. The reviewer
+coordinator lane is outside this campaign's core (its scripted model peer is
+not in the drive), so the report declares three lanes and `verdict` judges
+those; the R11 stall is listed under `permanent_stalls`. The evaluator drives
+every lane directly and the claim boundary says so: the lifecycle owner's
+wall-clock reads are outside the core.
 
 The `fault` subcommand takes the same flags as `aging` and answers with one
 JSON line; `fault-child` is its kill child. The CI `eval-campaign` job runs

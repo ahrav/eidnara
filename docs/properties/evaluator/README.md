@@ -1381,7 +1381,7 @@ job under `EIDNARA_EVAL_S0_BUDGET_MS`):
   (`sls-liveness-embedding-completion-bounded`; marker
   `sls_embedding_publication_held_then_released`): a dispatcher pass behind
   the fixture gate admits once and publishes nothing, a second pass re-admits
-  nothing, the release publishes.
+  nothing, the safety check runs while held, the release publishes.
 - `liveness_bounds_are_met_with_outside_core_faults_armed`
   (`flt-liveness-mode-bounded-progress-permanent-faults`,
   `sls-liveness-projection-catchup-bounded`,
@@ -1392,8 +1392,10 @@ job under `EIDNARA_EVAL_S0_BUDGET_MS`):
   holding at the bound, with the memory-store lock still armed at the bound
   as the only outside-core fault; every fourth materialization step feeds a
   decision and retires the one before it, and the materialization lane holds
-  only when exactly the newest decision's two `canonical_claims` descriptors
-  are live (`claims_materialized` receipted once per materialization step);
+  only when exactly the newest decision's two `canonical_claims` descriptors,
+  created after it committed, are live (`claims_materialized` receipted once
+  per materialization step); `fresh_commits` is the kernel tip's advance
+  across each feed;
   the reviewer coordinator lane is declared outside the core
   (`sls-liveness-memory-reviewer-work-bounded` is not exercised here); R11 is
   listed as the permanent stall.

@@ -1660,6 +1660,7 @@ pub fn held_publication_episode(
         return Err(unexpected(&id, "no re-admission while held", &again));
     }
     witness.receipt("publication_held");
+    witness.safety_check(stores);
     TestEngine::release(&lane.gate.0);
     let released = pass(&dispatch_bounds());
     if published(&released) == 0 {
@@ -1668,7 +1669,6 @@ pub fn held_publication_episode(
     witness.receipt("publication_released");
     aging::embed_pending(&stores.corpus, &stores.projection, stores.root(), now);
     witness.receipt(&id);
-    witness.safety_check(stores);
     witness
         .coverage
         .record("sls_embedding_publication_held_then_released")
@@ -1738,16 +1738,47 @@ fn retire_decision(kernel: &kernel::KernelStore, n: u64) {
         .unwrap();
 }
 
-fn live_claims(root: &Path) -> u64 {
-    read_only(&kernel_file(root))
+/// Whether the live `canonical_claims` descriptors are exactly decision
+/// `n`'s. Only the materializer publishes that class and `n` is the newest
+/// decision, so a descriptor is `n`'s exactly when it was created after `n`
+/// committed; a stale predecessor's descriptor, or no decision `n`, fails.
+pub fn newest_claims_live(root: &Path, n: u64) -> bool {
+    let (live, of_n): (i64, i64) = read_only(&kernel_file(root))
         .query_row(
-            "SELECT COUNT(*) FROM object_registry WHERE object_id GLOB 'srcdesc:*' \
-             AND source_kind='canonical_claims' AND invalidated_commit_seq IS NULL",
-            [],
-            |row| row.get::<_, i64>(0),
+            "SELECT COUNT(*), COUNT(*) FILTER (WHERE o.created_commit_seq > \
+             (SELECT created_commit_seq FROM object_registry WHERE object_id=?1)) \
+             FROM object_registry o WHERE o.object_id GLOB 'srcdesc:*' \
+             AND o.source_kind='canonical_claims' AND o.invalidated_commit_seq IS NULL",
+            [decision_object(n)],
+            |row| Ok((row.get(0)?, row.get(1)?)),
         )
-        .map(|n| u64::try_from(n).unwrap())
-        .unwrap()
+        .unwrap();
+    let want = i64::try_from(CLAIMS_PER_DECISION).unwrap();
+    live == want && of_n == want
+}
+
+/// Feeds window step `step`: the next fresh planned step, kernel only, and on
+/// a decision step the next decision after retiring the one before it.
+/// Returns the kernel commits the feed made, read from the tip: a publish
+/// commits once per unit and a retire of a dead lineage commits nothing.
+pub fn feed(
+    stores: &mut Stores,
+    planned: Option<&Planned>,
+    step: u64,
+    materialization_bound: u64,
+) -> u64 {
+    let before = stores.tip();
+    if let Some(planned) = planned {
+        stores.apply_kernel_only(planned);
+    }
+    if step <= materialization_bound && step % DECISION_PERIOD == 1 {
+        let n = step / DECISION_PERIOD;
+        if n > 0 {
+            retire_decision(&stores.corpus.kernel, n - 1);
+        }
+        decide(&stores.corpus.kernel, n);
+    }
+    u64::try_from(stores.tip() - before).unwrap()
 }
 
 /// Liveness mode on its own root: the healthy core is the kernel, the
@@ -1834,20 +1865,12 @@ pub fn liveness(
     .collect();
     let window = lanes.values().map(|p| p.bound).max().unwrap_or(0);
     for step in 1..=window {
-        let mut fed = 0;
-        if let Some(planned) = fresh.next() {
-            stores.apply_kernel_only(planned);
-            fed += 1;
-        }
-        if step <= bounds.materialization_episodes && step % DECISION_PERIOD == 1 {
-            let n = step / DECISION_PERIOD;
-            if n > 0 {
-                retire_decision(&stores.corpus.kernel, n - 1);
-                fed += 1;
-            }
-            decide(&stores.corpus.kernel, n);
-            fed += 1;
-        }
+        let fed = feed(
+            &mut stores,
+            fresh.next(),
+            step,
+            bounds.materialization_episodes,
+        );
         stores.publish_outbox();
         let tip = stores.tip();
         for (lane, progress) in lanes.iter_mut() {
@@ -1899,7 +1922,8 @@ pub fn liveness(
                         MaterializationEnd::Blocked(b) => Some(format!("{b:?}")),
                         MaterializationEnd::ReachedTarget => None,
                     };
-                    let materialized = live_claims(stores.root()) == CLAIMS_PER_DECISION;
+                    let materialized =
+                        newest_claims_live(stores.root(), (step - 1) / DECISION_PERIOD);
                     if materialized {
                         witness.receipt("claims_materialized");
                     }
