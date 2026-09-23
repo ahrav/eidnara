@@ -16,12 +16,12 @@ use context_core::redaction::Redactor;
 use eval_core::{
     Approval, CandidateVerdict, ClaimBoundary, Coverage, Cut, CutOutcome, CutReceipt,
     EnvelopeExceeded, EvaluatedSurface, EventId, ExecutionMode, FailurePredicate, FaultAction,
-    Generation, MAX_OUTSTANDING_REPLAY_EFFECTS, Manifest, Mode, MultiplicityRecipe,
-    ObservationSchema, Oracle, OriginalFailure, Payload, ProfileError, ReplayEffects,
-    ReplayOutcome, ReplayRefused, ReplayRequest, RepositorySpec, ResidueEntry, Rule, RunProfile,
-    Scale, Scenario, SemanticTrace, SessionSpec, ShrinkRefused, Slice, StoreFamily, Task, TaskRole,
-    UnknownReason, WITNESS_DIGEST_PROTOCOL, WITNESS_SCHEMA, WitnessError, WitnessPackage,
-    WorldConfig, eval_run_id, generate_all, reduce, residue_drift, serialize_spec, shrink,
+    Generation, Manifest, Mode, MultiplicityRecipe, ObservationSchema, Oracle, OriginalFailure,
+    Payload, ProfileError, ReplayEffects, ReplayOutcome, ReplayRefused, ReplayRequest,
+    RepositorySpec, ResidueEntry, Rule, RunProfile, Scale, Scenario, SemanticTrace, SessionSpec,
+    ShrinkRefused, Slice, StoreFamily, Task, TaskRole, UnknownReason, WITNESS_DIGEST_PROTOCOL,
+    WITNESS_SCHEMA, WitnessError, WitnessPackage, WorldConfig, eval_run_id, generate_all, reduce,
+    residue_drift, serialize_spec, shrink,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -39,7 +39,8 @@ pub const SEED: u64 = 0x5EED_5000_0000_0005;
 const FRESH_SEED: u64 = SEED ^ 0xABCD;
 const CUT: Cut = Cut::AtQuiescence;
 const REPLAY_TIMEOUT: Duration = Duration::from_secs(120);
-/// Attempts under one receipt key when the child exits before its barrier.
+/// Attempts under one receipt key when the child exits before its barrier;
+/// within the ledger's `MAX_REPLAY_ATTEMPTS`.
 const REPLAY_ATTEMPTS: u32 = 2;
 const MAX_REPLAYS: u64 = 400;
 const EPOCH_MS: i64 = 1_700_000_000_000;
@@ -71,8 +72,12 @@ pub enum RunError {
     Profile(#[from] ProfileError),
     #[error("envelope exceeded: {0:?}")]
     Envelope(#[from] EnvelopeExceeded),
+    #[error("commits: {0}")]
+    Commits(String),
     #[error("the original scenario did not fail: {outcome:?}")]
     NoFailure { outcome: ReplayOutcome },
+    #[error("the child pinned another oracle, cut, or profile: {predicate:?}")]
+    ForeignPredicate { predicate: FailurePredicate },
     #[error("shrink refused: {0}")]
     Shrink(#[from] ShrinkRefused),
     #[error("replay effect refused: {0}")]
@@ -165,11 +170,17 @@ pub fn child_main(args: &ChildArgs) -> ! {
         .and_then(|bytes| serde_json::from_slice::<Scenario>(&bytes).ok())
         .and_then(|scenario| {
             let set = scenario.compile(&fixture).ok()?;
-            let truth = reduce(&set.aged, &fixture, &set.pairs.first()?.task.query).ok()?;
+            let task = &set.pairs.first()?.task;
+            let truth = reduce(&set.aged, &fixture, &task.query).ok()?;
             Some((
                 scenario.digest(),
-                args.oracle
-                    .evaluate(&set, &truth, args.checkpoint, &args.profile_digest),
+                args.oracle.evaluate(
+                    &set,
+                    &task.id,
+                    &truth,
+                    args.checkpoint,
+                    &args.profile_digest,
+                ),
             ))
         });
     let (scenario_digest, outcome) = outcome.unwrap_or_else(|| {
@@ -227,16 +238,16 @@ impl Replayer<'_> {
             return Ok(answered.clone());
         }
         std::fs::write(&self.args.scenario, serde_json::to_vec(scenario).unwrap())?;
-        self.effects.issue(key)?;
-        let mut attempts = 1;
+        let mut attempt = self.effects.issue(key)?;
         let mut replayed = loop {
             match self.attempt()? {
                 Some(replayed) => break replayed,
-                None if attempts < REPLAY_ATTEMPTS => attempts = self.effects.retry(key)?,
+                None if attempt < REPLAY_ATTEMPTS => attempt = self.effects.retry(key)?,
                 None => break self.unanswered(UnknownReason::ChildExitedBeforeBarrier),
             }
         };
-        self.effects.resolve(key, replayed.outcome.clone())?;
+        self.effects
+            .resolve(key, attempt, replayed.outcome.clone())?;
         replayed.outcome = self.effects.outcome(key)?.clone();
         residue_drift(&self.expected_residue, &replayed.residue)?;
         self.answered.insert(key.to_string(), replayed.clone());
@@ -400,6 +411,15 @@ pub fn scenario(commits: u32) -> (Scenario, eval_core::Tape) {
     (scenario, world.tape)
 }
 
+/// The Suite B profile renamed for this suite, with the two tasks `scenario`
+/// carries: the profile's digest is pinned into every failure predicate.
+pub fn profile(scale: Scale, elapsed_ms: u64, approval: Option<Approval>) -> RunProfile {
+    let mut profile = super::campaign::profile(scale, 128, elapsed_ms, approval);
+    profile.name = profile.name.replace("surface1-raw", "suite-c-shrink");
+    profile.tasks_per_world = 2;
+    profile
+}
+
 /// Replays the original in a fresh process, pins its failure, shrinks it with
 /// every candidate replayed the same way, and publishes the witness package
 /// with its manifest.
@@ -411,9 +431,9 @@ pub fn run(config: &Config, spawn: Spawn) -> Result<Run, RunError> {
             .as_millis(),
     )
     .unwrap();
-    let profile: RunProfile = super::campaign::profile(
+    commits(u64::from(config.commits)).map_err(RunError::Commits)?;
+    let profile = profile(
         config.scale,
-        128,
         config.elapsed_bound_ms,
         config.approval.clone(),
     );
@@ -434,7 +454,7 @@ pub fn run(config: &Config, spawn: Spawn) -> Result<Run, RunError> {
             profile_digest: profile_digest.clone(),
         },
         charges: &mut charges,
-        effects: ReplayEffects::new(MAX_OUTSTANDING_REPLAY_EFFECTS),
+        effects: ReplayEffects::default(),
         answered: BTreeMap::new(),
         expected_residue: residue(),
     };
@@ -444,6 +464,14 @@ pub fn run(config: &Config, spawn: Spawn) -> Result<Run, RunError> {
             outcome: first.outcome,
         });
     };
+    if predicate.oracle != config.oracle
+        || predicate.checkpoint != CUT
+        || predicate.profile_digest != profile_digest
+    {
+        return Err(RunError::ForeignPredicate {
+            predicate: predicate.clone(),
+        });
+    }
     let predicate: FailurePredicate = predicate.clone();
     let fixture = serialize_spec();
     // The shrinker's callback cannot fail, so the first refusal is kept and
@@ -493,7 +521,7 @@ pub fn run(config: &Config, spawn: Spawn) -> Result<Run, RunError> {
         SIMULATOR_VERSION,
         SEED,
         json!({"commits": config.commits, "oracle": config.oracle}),
-        &std::env::current_exe().unwrap(),
+        &[std::env::current_exe().unwrap()],
     );
     let mut witness = WitnessPackage {
         schema: WITNESS_SCHEMA.to_string(),
@@ -532,7 +560,7 @@ pub fn run(config: &Config, spawn: Spawn) -> Result<Run, RunError> {
     let (value, text) = witness.serialize(&redactor, profile.envelope.artifact_bytes)?;
     let witness_bytes = charges.publish_bytes(|_| text.clone().into_bytes())?;
     let report_value = serde_json::to_value(&witness.shrink).unwrap();
-    let manifest = suite_c_manifest(ManifestInputs {
+    let mut manifest = suite_c_manifest(ManifestInputs {
         identity: run_identity,
         eval_run_id: witness.original.eval_run_id.clone(),
         sample: format!("shrink:{}", witness.shrink.minimized_digest),
@@ -546,6 +574,10 @@ pub fn run(config: &Config, spawn: Spawn) -> Result<Run, RunError> {
         envelope: charges.envelope.clone(),
         started_at_ms,
     });
+    // The Suite C builder names the aging corpus and an in-process image; this
+    // run generated its worlds from `SEED` and replayed each in a fresh child.
+    manifest.component_versions.task_corpus = format!("generated:{SEED:#x}");
+    manifest.component_versions.execution_image = "fresh-process".to_string();
     let manifest_bytes = serde_json::to_vec_pretty(&manifest.to_value()).unwrap();
     publish_file(&config.publish.join(WITNESS_FILE), &witness_bytes).map_err(publish_refused)?;
     publish_file(&config.publish.join(MANIFEST_FILE), &manifest_bytes).map_err(publish_refused)?;
@@ -557,6 +589,19 @@ pub fn run(config: &Config, spawn: Spawn) -> Result<Run, RunError> {
         coverage,
         original: first,
     })
+}
+
+/// At least two commits, so a rename exists, and an aged world within the
+/// event bound; `run` refuses a `Config` built directly the same way.
+fn commits(commits: u64) -> Result<u32, String> {
+    let commits = match commits {
+        commits @ 2.. => u32::try_from(commits).map_err(|error| error.to_string())?,
+        _ => return Err("needs at least two, so a rename exists".to_string()),
+    };
+    aged_config(commits)
+        .validate()
+        .map_err(|error| format!("{error:?}"))?;
+    Ok(commits)
 }
 
 pub fn config_from_args(args: impl IntoIterator<Item = String>) -> Result<Config, String> {
@@ -571,12 +616,7 @@ pub fn config_from_args(args: impl IntoIterator<Item = String>) -> Result<Config
     };
     Ok(Config {
         scale,
-        commits: match number("commits")? {
-            commits @ 2.. => {
-                u32::try_from(commits).map_err(|error| format!("--commits: {error}"))?
-            }
-            _ => return Err("--commits needs at least two, so a rename exists".to_string()),
-        },
+        commits: commits(number("commits")?).map_err(|error| format!("--commits: {error}"))?,
         elapsed_bound_ms: number("elapsed-bound-ms")?,
         approval: Some(Approval {
             approved_by: take("approved-by"),

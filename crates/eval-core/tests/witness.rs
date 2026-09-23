@@ -8,9 +8,9 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use context_core::redaction::{RedactionErrorKind, Redactor};
 use eval_core::{
-    CandidateVerdict, ClaimBoundary, Cut, FailureClass, Generation, History, Minimality, Mode,
-    MultiplicityRecipe, OriginalFailure, Slice, WITNESS_SCHEMA, WitnessError, WitnessPackage,
-    parse_witness, residue_drift, shrink,
+    CandidateVerdict, ClaimBoundary, Cut, Element, FailureClass, Generation, History, Minimality,
+    Mode, MultiplicityRecipe, Oracle, OracleRefused, OriginalFailure, ShrinkReportError, Slice,
+    WITNESS_SCHEMA, WitnessError, WitnessPackage, parse_witness, residue_drift, shrink,
 };
 use serde_json::Value;
 use support::shrink::{BUDGET, FRESH_SEED, evaluate, fixture, fresh_config, predicate, scenario};
@@ -115,10 +115,12 @@ fn the_package_round_trips_and_carries_the_recipe_for_a_count_triggered_failure(
         wrong_counts.validate(),
         Err(WitnessError::RecipeMultiplicitiesDisagree)
     );
+    // A ledger-consistent budget claim: the run spent exactly its budget.
     let mut not_minimal = package.clone();
     not_minimal.shrink.minimality = Minimality::NotEstablished {
-        reason: eval_core::NotEstablishedReason::UnknownCandidates { count: 1 },
+        reason: eval_core::NotEstablishedReason::ReplayBudgetExhausted,
     };
+    not_minimal.shrink.max_replays = not_minimal.shrink.replays;
     not_minimal.recipe = None;
     not_minimal.validate().unwrap();
     let mut no_trigger = package.clone();
@@ -160,6 +162,27 @@ fn every_structural_refusal_names_its_cause() {
             },
         ),
         (
+            |p| p.shrink.schema = "eval-shrink/v0".to_string(),
+            WitnessError::ShrinkReport(ShrinkReportError::SchemaMismatch {
+                found: "eval-shrink/v0".to_string(),
+            }),
+        ),
+        (
+            |p| {
+                p.shrink.predicate.oracle = Oracle::RequiredCommits {
+                    failing_at: 6,
+                    slipping_at: 3,
+                };
+                p.original.predicate.oracle = p.shrink.predicate.oracle.clone();
+            },
+            WitnessError::ShrinkReport(ShrinkReportError::Oracle(
+                OracleRefused::InvertedThresholds {
+                    failing_at: 6,
+                    slipping_at: 3,
+                },
+            )),
+        ),
+        (
             |p| p.original.eval_run_id = "nope".to_string(),
             WitnessError::NotHex {
                 field: "eval_run_id",
@@ -193,6 +216,125 @@ fn every_structural_refusal_names_its_cause() {
 }
 
 #[test]
+fn one_minimality_needs_a_rejected_record_for_every_single_deletion() {
+    // A ledger-consistent report that replayed only the original and claims
+    // it 1-minimal: nothing was ever deleted, so no deletion was rejected.
+    let mut bare = package();
+    bare.minimized = scenario();
+    bare.shrink.candidates.truncate(1);
+    bare.shrink.minimized_digest = bare.shrink.original_digest.clone();
+    bare.shrink.deleted.clear();
+    bare.shrink.replays = 1;
+    bare.shrink.max_replays = 1;
+    bare.shrink.unknown_candidates = 0;
+    bare.recipe = None;
+    let element = bare.minimized.elements()[0].clone();
+    assert_eq!(
+        bare.validate(),
+        Err(WitnessError::MinimalityUnsupported {
+            element: element.clone()
+        }),
+        "a 1-minimal claim with no candidate records has no evidence"
+    );
+    assert_eq!(
+        bare.serialize(&redactor(), ARTIFACT_BYTES).err(),
+        Some(WitnessError::MinimalityUnsupported { element })
+    );
+    bare.shrink.minimality = Minimality::NotEstablished {
+        reason: eval_core::NotEstablishedReason::ReplayBudgetExhausted,
+    };
+    bare.validate()
+        .expect("a report that claims no minimality owes no rejection records");
+
+    // A rejection record is evidence only for the scenario it names: the
+    // same deletion set under a foreign digest is no record at all.
+    let mut forged = package();
+    let element = forged.minimized.elements()[0].clone();
+    let mut deleted = forged.shrink.deleted.clone();
+    deleted.insert(element.clone());
+    let mut hit = 0;
+    for record in &mut forged.shrink.candidates {
+        if record.deleted == deleted {
+            record.scenario_digest = "00".repeat(32);
+            hit += 1;
+        }
+    }
+    assert!(hit > 0, "the final pass recorded this deletion");
+    assert_eq!(
+        forged.validate(),
+        Err(WitnessError::MinimalityUnsupported { element })
+    );
+}
+
+#[test]
+fn a_multiplicity_record_counts_only_under_its_own_scenario_digest() {
+    let package = package();
+    let counted = package.count_triggered();
+    assert_eq!(counted["commit"], 5);
+    // Forge the digest on one counted commit's single-deletion records: the
+    // deletion set and verdict still match, the scenario they name does not.
+    let mut forged = package.clone();
+    let commit = forged
+        .minimized
+        .aged
+        .events
+        .iter()
+        .filter(|event| matches!(event.payload, eval_core::Payload::Commit { .. }))
+        .map(|event| Element::Event {
+            history: History::Aged,
+            id: event.id.clone(),
+        })
+        .find(|element| {
+            let mut deleted = forged.shrink.deleted.clone();
+            deleted.insert(element.clone());
+            forged.shrink.candidates.iter().any(|record| {
+                record.deleted == deleted
+                    && matches!(
+                        record.verdict,
+                        CandidateVerdict::Slipped { .. } | CandidateVerdict::NotReproduced
+                    )
+            })
+        })
+        .expect("a counted commit");
+    let mut deleted = forged.shrink.deleted.clone();
+    deleted.insert(commit);
+    for record in &mut forged.shrink.candidates {
+        if record.deleted == deleted {
+            record.scenario_digest = "00".repeat(32);
+        }
+    }
+    assert_eq!(
+        forged.count_triggered()["commit"],
+        4,
+        "a record under a foreign digest is not evidence for this deletion"
+    );
+    assert_eq!(
+        forged.validate(),
+        Err(WitnessError::RecipeMultiplicitiesDisagree)
+    );
+}
+
+#[test]
+fn the_coverage_signature_names_only_registered_markers() {
+    let mut package = package();
+    package
+        .original
+        .coverage
+        .insert("flt_shrink_marker_nobody_registered".to_string());
+    assert_eq!(
+        package.validate(),
+        Err(WitnessError::UnregisteredMarker {
+            name: "flt_shrink_marker_nobody_registered".to_string()
+        }),
+        "an unregistered marker is not a behaviour the run showed"
+    );
+    assert!(matches!(
+        package.serialize(&redactor(), ARTIFACT_BYTES),
+        Err(WitnessError::UnregisteredMarker { .. })
+    ));
+}
+
+#[test]
 fn live_model_evidence_is_never_relabelled_replayable() {
     let mut witness = package();
     witness.slice = Slice::Live;
@@ -218,12 +360,12 @@ fn the_serializer_requires_the_verbatim_claim_boundary_and_rejects_forbidden_cla
     );
 
     let mut claims = package();
-    claims.original.predicate.oracle = "proves live-model quality".to_string();
-    claims.shrink.predicate.oracle = claims.original.predicate.oracle.clone();
+    claims.original.predicate.profile_digest = "proves live-model quality".to_string();
+    claims.shrink.predicate.profile_digest = claims.original.predicate.profile_digest.clone();
     assert_eq!(
         claims.serialize(&redactor(), ARTIFACT_BYTES).err(),
         Some(WitnessError::ForbiddenClaim {
-            path: "/original/predicate/oracle".to_string(),
+            path: "/original/predicate/profile_digest".to_string(),
             phrase: "live-model quality".to_string(),
         })
     );
@@ -261,9 +403,9 @@ fn residue_drift_refuses_and_limits_apply_before_publication() {
         Err(WitnessError::TooLarge { bound: 16, .. })
     ));
     let mut leaking = package.clone();
-    leaking.original.coverage.insert(
-        "Authorization: Bearer sk-ant-api03-ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcd".to_string(),
-    );
+    leaking.original.predicate.profile_digest =
+        "Authorization: Bearer sk-ant-api03-ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcd".to_string();
+    leaking.shrink.predicate.profile_digest = leaking.original.predicate.profile_digest.clone();
     assert_eq!(
         leaking.serialize(&redactor(), ARTIFACT_BYTES).err(),
         Some(WitnessError::RedactionRefused(

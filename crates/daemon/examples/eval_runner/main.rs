@@ -113,14 +113,15 @@ enum Reply {
 
 /// Every refusal the oracle reports. `kind` is the wire contract; `detail` is
 /// only ever the oracle's own values (paths, namespaces, digests, variant
-/// text), never request content, because a serde message can quote input.
+/// text), never request content; see `CassetteError::detail`.
+#[derive(Clone)]
 enum OracleError {
     NoOpenCassette,
     AlreadyOpen,
     LineTooLong,
     Json,
     UnsafePath(PathBuf),
-    Io(io::Error),
+    Io(io::ErrorKind),
     Cassette(CassetteError),
 }
 
@@ -140,8 +141,8 @@ impl OracleError {
     fn detail(&self) -> String {
         match self {
             Self::UnsafePath(path) => path.display().to_string(),
-            Self::Io(error) => error.kind().to_string(),
-            Self::Cassette(error) => error.to_string(),
+            Self::Io(kind) => kind.to_string(),
+            Self::Cassette(error) => error.detail(),
             _ => String::new(),
         }
     }
@@ -155,7 +156,7 @@ impl From<CassetteError> for OracleError {
 
 impl From<io::Error> for OracleError {
     fn from(error: io::Error) -> Self {
-        Self::Io(error)
+        Self::Io(error.kind())
     }
 }
 
@@ -163,6 +164,10 @@ struct Open {
     cassette: Cassette,
     /// The file `close` writes; `None` for a replay, which never writes.
     write_to: Option<PathBuf>,
+    /// The first refusal while this recording was open: a `record` that
+    /// failed, or a line the oracle could not read (it may have been a
+    /// `record`). `close` reports it and writes nothing.
+    refused: Option<OracleError>,
 }
 
 #[derive(Default)]
@@ -176,6 +181,16 @@ impl Oracle {
             .as_mut()
             .map(|open| &mut open.cassette)
             .ok_or(OracleError::NoOpenCassette)
+    }
+
+    /// Latches `error` as the open recording's first refusal, if any is open.
+    fn refuse(&mut self, error: OracleError) -> OracleError {
+        if let Some(open) = &mut self.open
+            && open.write_to.is_some()
+        {
+            open.refused.get_or_insert_with(|| error.clone());
+        }
+        error
     }
 
     fn apply(&mut self, op: Op) -> Result<Reply, OracleError> {
@@ -198,7 +213,11 @@ impl Oracle {
                     }
                 };
                 let cases = cassette.cases().len();
-                self.open = Some(Open { cassette, write_to });
+                self.open = Some(Open {
+                    cassette,
+                    write_to,
+                    refused: None,
+                });
                 Ok(Reply::Open { cases })
             }
             Op::Lookup { namespace, request } => {
@@ -219,20 +238,30 @@ impl Oracle {
                 request,
                 response,
             } => {
-                let covered = covered(request)?;
-                let entry =
-                    self.cassette()?
-                        .record(&namespace, Boundary::Opencode, covered, response)?;
-                Ok(Reply::Record {
-                    request_digest: entry.request_digest.clone(),
-                })
+                let cassette = self.cassette()?;
+                let recorded = covered(request).and_then(|covered| {
+                    let entry =
+                        cassette.record(&namespace, Boundary::Opencode, covered, response)?;
+                    Ok(entry.request_digest.clone())
+                });
+                match recorded {
+                    Ok(request_digest) => Ok(Reply::Record { request_digest }),
+                    // The exchange is in no file, so the recording has no file form.
+                    Err(error) => Err(self.refuse(error.into())),
+                }
             }
             Op::Close => {
-                let Open { cassette, write_to } =
-                    self.open.take().ok_or(OracleError::NoOpenCassette)?;
+                let Open {
+                    cassette,
+                    write_to,
+                    refused,
+                } = self.open.take().ok_or(OracleError::NoOpenCassette)?;
                 let mut input_sha256 = None;
                 if let Some(path) = write_to {
-                    // A refused cassette has no file form, so nothing is written for it.
+                    // A refused recording has no file form, so nothing is written for it.
+                    if let Some(error) = refused {
+                        return Err(error);
+                    }
                     let file = cassette.to_file()?;
                     input_sha256 = Some(file.provenance.input_sha256.clone());
                     write_then_rename(&path, &format!("{}\n", serde_json::to_string(&file)?))?;
@@ -271,7 +300,8 @@ fn safe_path(path: PathBuf) -> Result<PathBuf, OracleError> {
 /// Publication is write-then-rename. Every entry was admitted before this
 /// point, so the temporary file never holds an unscanned byte; it is created
 /// fresh and owner-only, so a pre-existing sibling is an error rather than a
-/// followed link.
+/// followed link. A temporary file this attempt created is removed when a
+/// later step fails, so it cannot block the next recording to the same path.
 fn write_then_rename(path: &Path, text: &str) -> io::Result<()> {
     use std::os::unix::fs::OpenOptionsExt;
     let temp = path.with_extension("json.tmp");
@@ -280,9 +310,14 @@ fn write_then_rename(path: &Path, text: &str) -> io::Result<()> {
         .create_new(true)
         .mode(0o600)
         .open(&temp)?;
-    file.write_all(text.as_bytes())?;
-    file.sync_all()?;
-    fs::rename(&temp, path)
+    let published = file
+        .write_all(text.as_bytes())
+        .and_then(|()| file.sync_all())
+        .and_then(|()| fs::rename(&temp, path));
+    if published.is_err() {
+        let _ = fs::remove_file(&temp);
+    }
+    published
 }
 
 fn covered(request: RawRequest) -> Result<Value, CassetteError> {
@@ -300,12 +335,14 @@ fn serve(input: impl BufRead, mut output: impl Write) -> io::Result<()> {
         if line.trim().is_empty() {
             continue;
         }
-        let outcome = if line.len() > MAX_LINE_BYTES {
+        let parsed = if line.len() > MAX_LINE_BYTES {
             Err(OracleError::LineTooLong)
         } else {
-            serde_json::from_str::<Op>(&line)
-                .map_err(|_| OracleError::Json)
-                .and_then(|op| oracle.apply(op))
+            serde_json::from_str::<Op>(&line).map_err(|_| OracleError::Json)
+        };
+        let outcome = match parsed {
+            Ok(op) => oracle.apply(op),
+            Err(error) => Err(oracle.refuse(error)),
         };
         let reply = match outcome {
             Ok(reply) => json!({"ok": reply}),
@@ -468,6 +505,7 @@ fn run_shrink(args: impl Iterator<Item = String>) -> io::Result<()> {
         "witness": config.publish.join(shrink::WITNESS_FILE),
         "witness_file_sha256": digest(&run.witness_bytes),
         "manifest": config.publish.join(shrink::MANIFEST_FILE),
+        "manifest_digest": digest(&run.manifest_bytes),
         "eval_run_id": run.manifest.eval_run_id,
         "minimality": run.witness.shrink.minimality,
         "markers": run.coverage.fired(),
@@ -520,4 +558,119 @@ fn campaign_usage() -> String {
 #[cfg(not(unix))]
 fn campaign_usage() -> String {
     "campaign | aging | fault | growth | shrink (unix only)".to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A fresh directory under the system temp dir; the file names inside are
+    /// absolute, as the oracle requires.
+    fn scratch(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("eval-runner-{}-{name}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// Runs `lines` through the oracle and returns one parsed reply per line.
+    fn oracle(lines: &[Value]) -> Vec<Value> {
+        let input: String = lines.iter().map(|line| format!("{line}\n")).collect();
+        let mut output = Vec::new();
+        serve(input.as_bytes(), &mut output).unwrap();
+        String::from_utf8(output)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect()
+    }
+
+    fn open(path: &Path) -> Value {
+        json!({"op": "open", "mode": "record", "namespace": "eval-run:fresh:0", "path": path})
+    }
+
+    fn record(body: Value) -> Value {
+        json!({"op": "record", "namespace": "eval-run:fresh:0",
+            "request": {"path": "/messages", "headers": {}, "body_text": body.to_string()},
+            "response": {"status": 200, "frames": []}})
+    }
+
+    #[test]
+    fn a_record_the_oracle_cannot_project_leaves_close_with_no_file() {
+        let dir = scratch("unprojectable");
+        let path = dir.join("cassette.json");
+        let lines = [
+            open(&path).to_string(),
+            record(json!({"model": "m"})).to_string(),
+            record(json!({"model": "m", "metadata": {"user_id": "u1"}})).to_string(),
+            // A later unreadable line does not replace the first refusal.
+            "{not json".to_string(),
+            json!({"op": "close"}).to_string(),
+        ];
+        let input: String = lines.iter().map(|line| format!("{line}\n")).collect();
+        let mut output = Vec::new();
+        serve(input.as_bytes(), &mut output).unwrap();
+        let replies: Vec<Value> = String::from_utf8(output)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(replies[0], json!({"ok": {"open": {"cases": 0}}}));
+        assert!(replies[1]["ok"]["record"]["request_digest"].is_string());
+        assert_eq!(replies[2]["error"]["kind"], json!("UnknownRequestField"));
+        assert_eq!(replies[2]["error"]["detail"], json!(""));
+        assert_eq!(replies[3]["error"]["kind"], json!("Json"));
+        assert_eq!(replies[4]["error"]["kind"], json!("UnknownRequestField"));
+        assert!(!path.exists(), "a partial recording is never published");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_unreadable_line_while_recording_leaves_close_with_no_file() {
+        for (label, unreadable) in [
+            ("LineTooLong", "x".repeat(MAX_LINE_BYTES + 1)),
+            ("Json", "{not json".to_string()),
+        ] {
+            let dir = scratch(label);
+            let path = dir.join("cassette.json");
+            let lines = [
+                open(&path).to_string(),
+                record(json!({"model": "m"})).to_string(),
+                unreadable,
+                json!({"op": "close"}).to_string(),
+            ];
+            let input: String = lines.iter().map(|line| format!("{line}\n")).collect();
+            let mut output = Vec::new();
+            serve(input.as_bytes(), &mut output).unwrap();
+            let replies: Vec<Value> = String::from_utf8(output)
+                .unwrap()
+                .lines()
+                .map(|line| serde_json::from_str(line).unwrap())
+                .collect();
+            assert_eq!(replies[2]["error"]["kind"], json!(label));
+            assert_eq!(replies[3]["error"]["kind"], json!(label), "{label}");
+            assert!(!path.exists(), "{label}: the line may have been a record");
+            let _ = fs::remove_dir_all(&dir);
+        }
+    }
+
+    #[test]
+    fn a_failed_publication_removes_the_temp_file_it_created() {
+        let dir = scratch("publication");
+        // A directory at the target path makes the rename fail after the
+        // temporary file exists.
+        let path = dir.join("cassette.json");
+        fs::create_dir(&path).unwrap();
+        let replies = oracle(&[
+            open(&path),
+            record(json!({"model": "m"})),
+            json!({"op": "close"}),
+        ]);
+        assert_eq!(replies[2]["error"]["kind"], json!("Io"));
+        assert!(
+            !dir.join("cassette.json.tmp").exists(),
+            "the attempt's temporary file is gone"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
 }

@@ -7,13 +7,13 @@ rejected; reports state 1-minimality under named transformations." Phase 5
 acceptance: "a slipped shrink candidate is rejected".
 
 ## Evidence trail
-- `crates/eval-core/src/shrink.rs:30` `FailurePredicate` pins the four fields.
-- `crates/eval-core/src/shrink.rs:107` `classify_replay`: an equal predicate is
+- `crates/eval-core/src/shrink.rs` `FailurePredicate` pins the four fields.
+- `crates/eval-core/src/shrink.rs` `classify_replay`: an equal predicate is
   `Reproduced`; any difference is `Slipped { observed }`; `Passed` is
   `NotReproduced`; `Unknown` stays `Unknown`.
-- `crates/eval-core/src/shrink.rs:533` `shrink` replays the original first and
+- `crates/eval-core/src/shrink.rs` `shrink` replays the original first and
   refuses `OriginalNotReproduced`; ddmin accepts only `Reproduced`.
-- `crates/eval-core/src/shrink.rs:644` `one_minimality` tries every single
+- `crates/eval-core/src/shrink.rs` `one_minimality` tries every single
   deletion until a full pass rejects them all and names the tried
   transformations; an `Unknown` or an exhausted budget is `NotEstablished`.
 - `crates/eval-core/tests/shrink.rs` `shrink_preserves_the_predicate_and_rejects_slipped_candidates`

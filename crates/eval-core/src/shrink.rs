@@ -5,14 +5,14 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::num::NonZeroU32;
 
-use context_core::canonical_json::protocol_digest;
+use context_core::canonical_json::{ContractError, canonical_json_encode, protocol_digest};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::census::EvaluatedSurface;
 use crate::event::{EventId, EventLog, Payload};
 use crate::failure_class::FailureClass;
-use crate::fault::FaultEpisode;
+use crate::fault::{EpisodeRefused, FaultEpisode, Lane, validate_episodes};
 use crate::manifest::Cut;
 use crate::pairs::{PairError, PairSet, PairSetInput, Task, compile_pair_set};
 use crate::reducer::Truth;
@@ -22,29 +22,38 @@ pub const SCENARIO_DIGEST_PROTOCOL: &str = "eval-scenario/v1";
 /// Replay effects a shell may leave unresolved at once. The effect issued at
 /// the bound is refused, never silently dropped.
 pub const MAX_OUTSTANDING_REPLAY_EFFECTS: usize = 4;
+/// Fresh processes one budgeted replay may launch, the first attempt
+/// included; the retry past it is refused. A shell therefore launches at
+/// most `max_replays * MAX_REPLAY_ATTEMPTS` processes.
+pub const MAX_REPLAY_ATTEMPTS: u32 = 3;
 
 /// What a failure is, pinned before the first candidate is tried. A candidate
 /// reproduces only when the replay reports this value field by field.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FailurePredicate {
-    pub oracle: String,
+    pub oracle: Oracle,
     pub checkpoint: Cut,
     pub profile_digest: String,
     pub witness_class: WitnessClass,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// What failed, and to what. Each variant names its subject, so a candidate
+/// under which the original subject passes and another fails the same way
+/// is a different predicate.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum WitnessClass {
-    /// A task failed at its cut; the class comes from the pinned truth table.
-    Failure { class: FailureClass },
-    /// An effect's outcome disagreed with its expectation after recovery.
-    Recovery,
-    /// A lane missed its bound while the healthy core was declared.
-    Liveness,
-    /// A never-restored resource grew past its bound.
-    Sustainability,
+    /// The named task failed at its cut; the class comes from the pinned
+    /// truth table.
+    Failure { task: String, class: FailureClass },
+    /// The keyed effect's outcome disagreed with its expectation after
+    /// recovery.
+    Recovery { effect: String },
+    /// The lane missed its bound while the healthy core was declared.
+    Liveness { lane: Lane },
+    /// The never-restored resource grew past its bound.
+    Sustainability { resource: String },
 }
 
 /// What one replay of a candidate reported.
@@ -189,20 +198,38 @@ impl Scenario {
             .collect()
     }
 
+    /// Applies the whole deletion set with one pass over each list, so a
+    /// candidate costs the same whether it deletes one element or most.
     pub fn without(&self, deleted: &BTreeSet<Element>) -> Self {
-        let mut candidate = self.clone();
+        let mut episodes = BTreeSet::new();
+        let mut aged = BTreeSet::new();
+        let mut natural_fresh = BTreeSet::new();
         for element in deleted {
             match element {
-                Element::Episode { id } => candidate.episodes.retain(|episode| episode.id != *id),
+                Element::Episode { id } => episodes.insert(id),
                 Element::Event {
                     history: History::Aged,
                     id,
-                } => candidate.aged = candidate.aged.without(id),
+                } => aged.insert(id),
                 Element::Event {
                     history: History::NaturalFresh,
                     id,
-                } => candidate.natural_fresh = candidate.natural_fresh.without(id),
-            }
+                } => natural_fresh.insert(id),
+            };
+        }
+        let mut candidate = self.clone();
+        if !episodes.is_empty() {
+            candidate
+                .episodes
+                .retain(|episode| !episodes.contains(&episode.id));
+        }
+        if !aged.is_empty() {
+            candidate.aged.remove_where(|id| aged.contains(id));
+        }
+        if !natural_fresh.is_empty() {
+            candidate
+                .natural_fresh
+                .remove_where(|id| natural_fresh.contains(id));
         }
         candidate
     }
@@ -226,14 +253,23 @@ impl Scenario {
 }
 
 /// An oracle a replay evaluates over the compiled pair set and the aged truth
-/// at the pinned cut. `RequiredCommits` is the evaluator's own planted defect:
-/// it fails from `failing_at` required commits and changes class from
-/// `slipping_at`, which must not be below `failing_at`.
+/// at the pinned cut. The predicate pins the whole value, parameters included,
+/// so a replay under other parameters is a different predicate.
+/// `RequiredCommits` is the evaluator's own planted defect: it fails from
+/// `failing_at` required commits and changes class from `slipping_at`, which
+/// must not be below `failing_at`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Oracle {
     RequiredCommits { failing_at: u32, slipping_at: u32 },
 }
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OracleRefused {
+    InvertedThresholds { failing_at: u32, slipping_at: u32 },
+}
+
+debug_display!(OracleRefused);
 
 impl Oracle {
     pub fn name(&self) -> &'static str {
@@ -242,9 +278,25 @@ impl Oracle {
         }
     }
 
+    pub fn validate(&self) -> Result<(), OracleRefused> {
+        match *self {
+            Self::RequiredCommits {
+                failing_at,
+                slipping_at,
+            } if slipping_at < failing_at => Err(OracleRefused::InvertedThresholds {
+                failing_at,
+                slipping_at,
+            }),
+            Self::RequiredCommits { .. } => Ok(()),
+        }
+    }
+
+    /// Evaluates over the aged arm and the truth reduced for `task`; a
+    /// failure names that task.
     pub fn evaluate(
         &self,
         set: &PairSet,
+        task: &str,
         truth: &Truth,
         checkpoint: Cut,
         profile_digest: &str,
@@ -271,21 +323,26 @@ impl Oracle {
         };
         ReplayOutcome::Failed {
             predicate: FailurePredicate {
-                oracle: self.name().to_string(),
+                oracle: self.clone(),
                 checkpoint,
                 profile_digest: profile_digest.to_string(),
-                witness_class: WitnessClass::Failure { class },
+                witness_class: WitnessClass::Failure {
+                    task: task.to_string(),
+                    class,
+                },
             },
         }
     }
 }
 
 /// Replay effects a shell has issued and not yet resolved, keyed by a receipt
-/// key. A retry keeps its key; a cancellation resolves to `Unknown`; reading
-/// an outstanding effect is refused.
-#[derive(Debug, Clone)]
+/// key. A retry keeps its key and advances its attempt; only the current
+/// attempt may resolve, so a superseded process's late answer is refused; a
+/// cancellation resolves to `Unknown`; reading an outstanding effect is
+/// refused. The outstanding set is bounded at `MAX_OUTSTANDING_REPLAY_EFFECTS`
+/// and attempts per key at `MAX_REPLAY_ATTEMPTS`; neither is configurable.
+#[derive(Debug, Clone, Default)]
 pub struct ReplayEffects {
-    bound: usize,
     outstanding: BTreeMap<String, u32>,
     resolved: BTreeMap<String, ReplayOutcome>,
 }
@@ -305,47 +362,79 @@ pub enum ReplayRefused {
     AlreadyResolved {
         key: String,
     },
+    /// The key has used every attempt `MAX_REPLAY_ATTEMPTS` allows.
+    AttemptsExhausted {
+        key: String,
+        attempts: u32,
+    },
+    /// The answer came from an attempt a retry superseded.
+    StaleAttempt {
+        key: String,
+        attempt: u32,
+        current: u32,
+    },
 }
 
 debug_display!(ReplayRefused);
 
 impl ReplayEffects {
-    pub fn new(bound: usize) -> Self {
-        Self {
-            bound,
-            outstanding: BTreeMap::new(),
-            resolved: BTreeMap::new(),
-        }
-    }
-
-    pub fn issue(&mut self, key: &str) -> Result<(), ReplayRefused> {
+    /// Issues the first attempt and returns its number, `1`.
+    pub fn issue(&mut self, key: &str) -> Result<u32, ReplayRefused> {
         self.absent(key)?;
-        if self.outstanding.len() >= self.bound {
-            return Err(ReplayRefused::OutstandingBound { bound: self.bound });
+        if self.outstanding.len() >= MAX_OUTSTANDING_REPLAY_EFFECTS {
+            return Err(ReplayRefused::OutstandingBound {
+                bound: MAX_OUTSTANDING_REPLAY_EFFECTS,
+            });
         }
         self.outstanding.insert(key.to_string(), 1);
-        Ok(())
+        Ok(1)
     }
 
-    /// Another attempt under the same key; returns the attempt count.
+    /// Another attempt under the same key; returns its number. The attempt
+    /// it supersedes can no longer resolve the key.
     pub fn retry(&mut self, key: &str) -> Result<u32, ReplayRefused> {
         self.present(key)?;
         let attempts = self.outstanding.get_mut(key).expect("checked present");
+        if *attempts >= MAX_REPLAY_ATTEMPTS {
+            return Err(ReplayRefused::AttemptsExhausted {
+                key: key.to_string(),
+                attempts: *attempts,
+            });
+        }
         *attempts += 1;
         Ok(*attempts)
     }
 
+    /// Resolves the current attempt to `Unknown { cancelled }`.
     pub fn cancel(&mut self, key: &str) -> Result<(), ReplayRefused> {
+        self.present(key)?;
+        let current = self.outstanding[key];
         self.resolve(
             key,
+            current,
             ReplayOutcome::Unknown {
                 reason: UnknownReason::Cancelled,
             },
         )
     }
 
-    pub fn resolve(&mut self, key: &str, outcome: ReplayOutcome) -> Result<(), ReplayRefused> {
+    /// Resolves the key with `attempt`'s answer; an attempt a retry
+    /// superseded is refused so the newest process's answer is the one read.
+    pub fn resolve(
+        &mut self,
+        key: &str,
+        attempt: u32,
+        outcome: ReplayOutcome,
+    ) -> Result<(), ReplayRefused> {
         self.present(key)?;
+        let current = self.outstanding[key];
+        if attempt != current {
+            return Err(ReplayRefused::StaleAttempt {
+                key: key.to_string(),
+                attempt,
+                current,
+            });
+        }
         self.outstanding.remove(key);
         self.resolved.insert(key.to_string(), outcome);
         Ok(())
@@ -399,7 +488,7 @@ pub struct ReplayRequest<'a> {
     pub key: &'a str,
     pub scenario: &'a Scenario,
     pub set: &'a PairSet,
-    pub oracle: &'a str,
+    pub oracle: &'a Oracle,
     pub checkpoint: Cut,
     pub profile_digest: &'a str,
 }
@@ -443,22 +532,233 @@ pub struct ShrinkReport {
     pub original_digest: String,
     pub minimized_digest: String,
     pub deleted: BTreeSet<Element>,
+    /// Elements the minimized scenario still holds: the single deletions a
+    /// completed 1-minimality pass tried.
+    pub remaining: u64,
     /// Every attempt in order; a digest answered earlier is recorded again
     /// with its cached verdict.
     pub candidates: Vec<CandidateRecord>,
+    /// Replays issued, the original's included; every distinct candidate the
+    /// compiler accepted took exactly one.
     pub replays: u64,
+    pub max_replays: u64,
     /// Distinct candidates whose replay answered `Unknown`.
     pub unknown_candidates: u64,
     pub minimality: Minimality,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ShrinkReportError {
+    SchemaMismatch {
+        found: String,
+    },
+    Oracle(OracleRefused),
+    /// The named field disagrees with the candidate ledger.
+    Inconsistent {
+        field: &'static str,
+    },
+    /// An integer left the range both runtimes represent exactly.
+    NotCanonical(ContractError),
+    Shape(String),
+    Lossy,
+}
+
+impl ShrinkReport {
+    /// The schema, the pinned oracle, and the report's accounting against its
+    /// own candidate ledger: the first candidate is the reproduced original,
+    /// the last reproduced candidate is the minimized scenario, the counters
+    /// agree with the distinct verdicts, and the minimality claim agrees with
+    /// the single deletions tried after the last reproduction.
+    pub fn validate(&self) -> Result<(), ShrinkReportError> {
+        if self.schema != SHRINK_REPORT_SCHEMA {
+            return Err(ShrinkReportError::SchemaMismatch {
+                found: self.schema.clone(),
+            });
+        }
+        self.predicate
+            .oracle
+            .validate()
+            .map_err(ShrinkReportError::Oracle)?;
+        let inconsistent = |field| Err(ShrinkReportError::Inconsistent { field });
+        let Some(first) = self.candidates.first() else {
+            return inconsistent("candidates");
+        };
+        if first.scenario_digest != self.original_digest
+            || !first.deleted.is_empty()
+            || first.verdict != CandidateVerdict::Reproduced
+        {
+            return inconsistent("candidates");
+        }
+        let last = self
+            .candidates
+            .iter()
+            .rposition(|record| record.verdict == CandidateVerdict::Reproduced)
+            .unwrap_or(0);
+        let last_reproduced = &self.candidates[last];
+        if last_reproduced.scenario_digest != self.minimized_digest {
+            return inconsistent("minimized_digest");
+        }
+        if last_reproduced.deleted != self.deleted {
+            return inconsistent("deleted");
+        }
+        // A digest is answered once; a later record repeats its cached verdict.
+        let mut distinct: BTreeMap<&str, &CandidateVerdict> = BTreeMap::new();
+        for record in &self.candidates {
+            let verdict = distinct
+                .entry(record.scenario_digest.as_str())
+                .or_insert(&record.verdict);
+            if **verdict != record.verdict {
+                return inconsistent("candidates");
+            }
+        }
+        let count = |keep: fn(&CandidateVerdict) -> bool| {
+            distinct.values().filter(|verdict| keep(verdict)).count() as u64
+        };
+        if self.unknown_candidates
+            != count(|verdict| matches!(verdict, CandidateVerdict::Unknown { .. }))
+        {
+            return inconsistent("unknown_candidates");
+        }
+        // Every distinct candidate the compiler accepted took one replay: the
+        // driver checks the budget before each test, so the budget refusal
+        // never reaches a returned report.
+        if self.replays != count(|verdict| !matches!(verdict, CandidateVerdict::InvalidPair { .. }))
+            || self.replays > self.max_replays
+        {
+            return inconsistent("replays");
+        }
+        // Everything after the last reproduction deletes strictly more than the
+        // minimized scenario; the single deletions among it are the final
+        // 1-minimality pass, the only evidence the minimality claim rests on.
+        let mut singles: BTreeMap<&str, (&CandidateVerdict, Transformation)> = BTreeMap::new();
+        for record in &self.candidates[last + 1..] {
+            if !record.deleted.is_superset(&self.deleted)
+                || record.deleted.len() == self.deleted.len()
+            {
+                return inconsistent("candidates");
+            }
+            if record.deleted.len() == self.deleted.len() + 1 {
+                let Some(extra) = record.deleted.difference(&self.deleted).next() else {
+                    return inconsistent("candidates");
+                };
+                singles.insert(
+                    record.scenario_digest.as_str(),
+                    (&record.verdict, extra.transformation()),
+                );
+            }
+        }
+        let unknown_singles = singles
+            .values()
+            .filter(|(verdict, _)| matches!(verdict, CandidateVerdict::Unknown { .. }))
+            .count() as u64;
+        let full_pass = singles.len() as u64 == self.remaining;
+        let claim_holds = match &self.minimality {
+            Minimality::OneMinimal { transformations } => {
+                full_pass
+                    && unknown_singles == 0
+                    && transformations.windows(2).all(|pair| pair[0] < pair[1])
+                    && singles
+                        .values()
+                        .all(|(_, transformation)| transformations.contains(transformation))
+            }
+            Minimality::NotEstablished {
+                reason: NotEstablishedReason::UnknownCandidates { count },
+            } => full_pass && *count == unknown_singles && *count > 0,
+            Minimality::NotEstablished {
+                reason: NotEstablishedReason::ReplayBudgetExhausted,
+            } => self.replays == self.max_replays,
+        };
+        if !claim_holds {
+            return inconsistent("minimality");
+        }
+        Ok(())
+    }
+}
+
+impl ShrinkReport {
+    /// `validate`, then bind the report to the scenario it claims to have
+    /// shrunk: its digest, the minimized scenario's digest, the elements that
+    /// remain, and that the final pass's single deletions are exactly those
+    /// elements. A report alone can only be self-consistent; with the
+    /// original it is checked against the thing it describes.
+    pub fn verify(&self, original: &Scenario) -> Result<(), ShrinkReportError> {
+        self.validate()?;
+        let inconsistent = |field| Err(ShrinkReportError::Inconsistent { field });
+        if self.original_digest != original.digest() {
+            return inconsistent("original_digest");
+        }
+        let minimized = original.without(&self.deleted);
+        if self.minimized_digest != minimized.digest() {
+            return inconsistent("minimized_digest");
+        }
+        let elements: BTreeSet<Element> = minimized.elements().into_iter().collect();
+        if self.remaining != elements.len() as u64 {
+            return inconsistent("remaining");
+        }
+        let last = self
+            .candidates
+            .iter()
+            .rposition(|record| record.verdict == CandidateVerdict::Reproduced)
+            .unwrap_or(0);
+        let mut tried = BTreeSet::new();
+        for record in &self.candidates[last + 1..] {
+            let extra: Vec<&Element> = record.deleted.difference(&self.deleted).collect();
+            if let [element] = extra.as_slice() {
+                if !elements.contains(element) {
+                    return inconsistent("candidates");
+                }
+                tried.insert((*element).clone());
+            }
+        }
+        let full_pass = !matches!(
+            self.minimality,
+            Minimality::NotEstablished {
+                reason: NotEstablishedReason::ReplayBudgetExhausted
+            }
+        );
+        if full_pass && tried != elements {
+            return inconsistent("minimality");
+        }
+        Ok(())
+    }
+
+    /// Digestible on both runtimes: no integer may leave the canonical safe
+    /// range, or a Bun reader would corrupt it.
+    pub fn serialize(&self) -> Result<Value, ShrinkReportError> {
+        let value =
+            serde_json::to_value(self).map_err(|e| ShrinkReportError::Shape(e.to_string()))?;
+        canonical_json_encode(&value).map_err(ShrinkReportError::NotCanonical)?;
+        self.validate()?;
+        Ok(value)
+    }
+}
+
+pub fn parse_shrink_report(value: &Value) -> Result<ShrinkReport, ShrinkReportError> {
+    canonical_json_encode(value).map_err(ShrinkReportError::NotCanonical)?;
+    let report =
+        ShrinkReport::deserialize(value).map_err(|e| ShrinkReportError::Shape(e.to_string()))?;
+    report.validate()?;
+    let again =
+        serde_json::to_value(&report).map_err(|e| ShrinkReportError::Shape(e.to_string()))?;
+    if again != *value {
+        return Err(ShrinkReportError::Lossy);
+    }
+    Ok(report)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ShrinkRefused {
+    /// The pinned oracle is not a valid configuration; nothing is replayed.
+    InvalidOracle(OracleRefused),
+    /// The original's fault episodes are not a valid set; nothing is replayed.
+    InvalidEpisodes(EpisodeRefused),
+    /// The budget would leave the report's canonical integer range.
+    BudgetNotCanonical { max_replays: u64 },
     /// The original scenario itself did not reproduce the pinned predicate.
     OriginalNotReproduced { verdict: CandidateVerdict },
 }
 
-debug_display!(ShrinkRefused);
+debug_display!(ShrinkRefused, ShrinkReportError);
 
 struct Driver<'a> {
     fixture: &'a Value,
@@ -472,7 +772,7 @@ struct Driver<'a> {
 
 impl Driver<'_> {
     /// Tries the candidate; a digest already answered is not replayed twice.
-    /// Callers check `exhausted` first, so the budget is never overrun.
+    /// `replay_candidate` refuses a replay past the budget for every caller.
     fn test(&mut self, candidate: &Scenario, deleted: &BTreeSet<Element>) -> CandidateVerdict {
         let digest = candidate.digest();
         let verdict = match self.verdicts.get(&digest) {
@@ -496,10 +796,15 @@ impl Driver<'_> {
             Ok(set) => set,
             Err(error) => {
                 return CandidateVerdict::InvalidPair {
-                    refusal: refusal_name(&error),
+                    refusal: error.kind().to_string(),
                 };
             }
         };
+        if self.exhausted() {
+            return CandidateVerdict::Unknown {
+                reason: UnknownReason::ReplayBudgetExhausted,
+            };
+        }
         self.replays += 1;
         let outcome = (self.replay)(ReplayRequest {
             key,
@@ -517,19 +822,10 @@ impl Driver<'_> {
     }
 }
 
-/// The compiler's refusal by variant name: the closed vocabulary the wire
-/// carries, without the refusal's payload.
-fn refusal_name(error: &PairError) -> String {
-    let text = format!("{error:?}");
-    text.split(['{', '(', ' '])
-        .next()
-        .unwrap_or_default()
-        .to_string()
-}
-
 /// Shrinks `original` until no single deletion under any tried transformation
 /// still reproduces `predicate`, or the replay budget runs out. The returned
-/// scenario reproduced the predicate on its last replay.
+/// scenario reproduced the predicate on its last replay. An invalid pinned
+/// oracle, episode set, or budget is refused before any replay.
 pub fn shrink(
     original: &Scenario,
     fixture: &Value,
@@ -537,6 +833,14 @@ pub fn shrink(
     max_replays: u64,
     replay: &mut dyn FnMut(ReplayRequest<'_>) -> ReplayOutcome,
 ) -> Result<(Scenario, ShrinkReport), ShrinkRefused> {
+    predicate
+        .oracle
+        .validate()
+        .map_err(ShrinkRefused::InvalidOracle)?;
+    validate_episodes(&original.episodes).map_err(ShrinkRefused::InvalidEpisodes)?;
+    if canonical_json_encode(&Value::from(max_replays)).is_err() {
+        return Err(ShrinkRefused::BudgetNotCanonical { max_replays });
+    }
     let mut driver = Driver {
         fixture,
         predicate,
@@ -578,8 +882,10 @@ pub fn shrink(
         original_digest: original.digest(),
         minimized_digest: minimized.digest(),
         deleted,
+        remaining: minimized.elements().len() as u64,
         candidates: driver.candidates,
         replays: driver.replays,
+        max_replays,
         unknown_candidates,
         minimality,
     };

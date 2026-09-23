@@ -280,6 +280,9 @@ Status: active
 Exercised: yes -
   `crates/eval-core/tests/witness.rs::the_package_round_trips_and_carries_the_recipe_for_a_count_triggered_failure`,
   `crates/eval-core/tests/witness.rs::every_structural_refusal_names_its_cause`,
+  `crates/eval-core/tests/witness.rs::one_minimality_needs_a_rejected_record_for_every_single_deletion`,
+  `crates/eval-core/tests/witness.rs::the_coverage_signature_names_only_registered_markers`,
+  `crates/eval-core/tests/witness.rs::a_multiplicity_record_counts_only_under_its_own_scenario_digest`,
   and
   `crates/daemon/tests/eval_shrink.rs::a_fresh_process_reproduces_the_predicate_and_the_minimized_witness_is_published`
 Guarantee: A witness package carries the original failure (RunId, decision tape,
@@ -293,8 +296,14 @@ Check: `always` - `WitnessPackage::validate` refuses a recipe missing when
   (`RecipeMultiplicitiesDisagree`), or not regenerating the minimized logs
   (`RecipeDisagrees { history }`); a kind is count-triggered when more than one
   aged event of it survives and each one's single deletion was recorded
-  `Slipped` or `NotReproduced`; `parse_witness(serialize(package)) == package`;
-  the published bytes parse back to the run's package.
+  `Slipped` or `NotReproduced` under the deleted scenario's digest; a `OneMinimal` claim without a rejected
+  record, under the digest of the scenario that deletion produces, for some
+  single deletion from the minimized scenario is refused
+  (`MinimalityUnsupported { element }`); a coverage name outside the
+  registry is refused (`UnregisteredMarker { name }`); an embedded report that
+  `ShrinkReport::validate` refuses is refused (`ShrinkReport(..)`);
+  `parse_witness(serialize(package)) == package`; the published bytes parse
+  back to the run's package.
 Fault/timing angle: None.
 Required faults and enabling state: A shrink whose minimized scenario keeps six
   commits, and a recipe with a wrong seed, an oversized declared world, or a
@@ -304,7 +313,8 @@ Confidence: high -
   tests at HEAD.
 Existing check: `crates/eval-core/src/witness.rs` `WitnessPackage`,
   `OriginalFailure`, `MultiplicityRecipe`, `check_recipe`, `count_triggered`,
-  `regenerates`, `parse_witness`; shell `run` assembles and publishes it.
+  `regenerates`, `check_minimality`, `parse_witness`; shell `run` assembles
+  and publishes it.
 Impact: A witness without its original identity or with a recipe that
   regenerates a different world could not be replayed against the failure it
   claims.
@@ -397,7 +407,7 @@ Confidence: high - [evidence](evidence/wit-residue-drift-refuses.md). Ran the
   three tests at HEAD; the drifting child is a re-executed entrypoint that drops
   one entry.
 Existing check: `crates/eval-core/src/witness.rs` `residue_drift`,
-  `check_residue`, `serialize`; shell `Replayer::replay` refuses drift;
+  `serialize`; shell `Replayer::replay` refuses drift;
   `crates/eval-core/src/cassette.rs` `scan_for_secrets`.
 Impact: A replay under different residue rules would compare digests computed
   over different fields and report drift or agreement for the wrong reason; a
@@ -417,10 +427,11 @@ Exercised: partial -
 Guarantee: Every manifest names how its worlds were ingested; no world is
   labelled "validated real ingestion" until an ingestion entry point has a
   production caller.
-Check: `always` - every manifest carries `ingestion` and every generated-world
-  manifest at HEAD carries `adapter-ingested, production caller: none`; a
-  manifest claiming validated real ingestion is refused until a production
-  caller exists.
+Check: `always` - every manifest carries `ingestion`; every Suite C shell
+  manifest at HEAD carries `adapter-ingested, production caller: none` and the
+  Suite B shell's carries `transform-route, turn by turn`, the daemon's own
+  route; no manifest claims validated real ingestion until a production caller
+  exists.
 Fault/timing angle: None.
 Required faults and enabling state: A manifest; the ingestion label.
 Confidence: medium -
@@ -480,8 +491,9 @@ Check: `always` - `flt_shrink_slipped_candidate_rejected` fires only when a
   `Slipped` record exists, `flt_shrink_unknown_effect_preserved` only when
   `unknown_candidates > 0`, `flt_shrink_fresh_process_reproduced` only after the
   original replayed `Failed`; a run without unknown candidates does not fire the
-  unknown marker; `Coverage::record` refuses an unregistered name; the registry
-  has no duplicate names.
+  unknown marker; the dying-child run passes `Coverage::complete` for the
+  suite, so every marker the suite owns fired; `Coverage::record` refuses an
+  unregistered name; the registry has no duplicate names.
 Fault/timing angle: None.
 Required faults and enabling state: A shrink run with and without slipped and
   unknown candidates.
