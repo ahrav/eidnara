@@ -555,12 +555,17 @@ pub enum ResidualRefused {
 debug_display!(ResidualRefused);
 
 impl ResidualReport {
-    pub fn validate(&self, calibration: &CalibrationSet) -> Result<(), ResidualRefused> {
+    fn check_schema(&self) -> Result<(), ResidualRefused> {
         if self.schema != RESIDUAL_REPORT_SCHEMA {
             return Err(ResidualRefused::SchemaMismatch {
                 found: self.schema.clone(),
             });
         }
+        Ok(())
+    }
+
+    pub fn validate(&self, calibration: &CalibrationSet) -> Result<(), ResidualRefused> {
+        self.check_schema()?;
         self.sampling
             .validate()
             .map_err(ResidualRefused::Calibration)?;
@@ -599,9 +604,12 @@ impl ResidualReport {
         Ok(())
     }
 
-    /// Two runs' `residual.*` metrics compare only under the same judge,
-    /// live provider, tokenizer accounting profile, and calibration digest.
+    /// Two runs' `residual.*` metrics compare only under this contract and
+    /// the same judge, live provider, tokenizer accounting profile, and
+    /// calibration digest.
     pub fn comparable(&self, other: &ResidualReport) -> Result<(), ResidualRefused> {
+        self.check_schema()?;
+        other.check_schema()?;
         for (field, same) in [
             ("judge", self.judge == other.judge),
             ("live_provider", self.live_provider == other.live_provider),

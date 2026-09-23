@@ -321,6 +321,17 @@ fn a_changed_judge_provider_or_tokenizer_refuses_cross_run_residual_comparison()
             changed: "calibration_digest"
         })
     );
+    let mut foreign = base.clone();
+    foreign.schema = "eval-residual-report/v999".to_string();
+    let foreign_schema = Err(ResidualRefused::SchemaMismatch {
+        found: "eval-residual-report/v999".to_string(),
+    });
+    assert_eq!(
+        base.comparable(&foreign),
+        foreign_schema,
+        "a report under another contract compares with nothing"
+    );
+    assert_eq!(foreign.comparable(&base), foreign_schema);
     let mut leaked = base.clone();
     leaked.permutation.correct = 40;
     assert!(matches!(
