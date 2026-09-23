@@ -355,28 +355,20 @@ impl TaskCorpus {
     }
 }
 
-/// The canonical spelling of a workspace-relative path: `.` and empty
-/// components dropped and a `..` consuming the component before it, so
-/// `./x//y` is `x/y` and `tmp/../z` is `z`. A path that is absolute or
-/// climbs above the workspace has no canonical form inside it and is
-/// returned as written.
+/// The canonical spelling of a resolved workspace-relative path: `.` and
+/// empty components dropped, so `./x//y` is `x/y`. A path that is absolute
+/// or still holds `..` was not resolved by the boundary; it is returned as
+/// written and matches no workspace oracle. `..` is not reduced here: with
+/// a symlink before it, `alias/../x` is not the write of `x`, and only the
+/// filesystem knows which.
 fn canonical_path(path: &str) -> String {
-    if path.starts_with('/') {
+    if path.starts_with('/') || path.split('/').any(|part| part == "..") {
         return path.to_string();
     }
-    let mut parts: Vec<&str> = Vec::new();
-    for part in path.split('/') {
-        match part {
-            "" | "." => {}
-            ".." => {
-                if parts.pop().is_none() {
-                    return path.to_string();
-                }
-            }
-            _ => parts.push(part),
-        }
-    }
-    parts.join("/")
+    path.split('/')
+        .filter(|part| !part.is_empty() && *part != ".")
+        .collect::<Vec<_>>()
+        .join("/")
 }
 
 /// Canonical workspace-relative form: `/`-separated components, none empty,
@@ -622,9 +614,13 @@ pub struct AgentTrace {
     /// Shell commands the agent ran, as `name` and its argument text.
     pub commands: Vec<(String, String)>,
     pub outputs: Vec<String>,
-    /// Every file the containment boundary saw the agent write, by path, with
-    /// the content last written. A write the agent later undid is still here;
-    /// this is not a snapshot of the workspace after the run.
+    /// Every file the containment boundary saw the agent write, by the
+    /// resolved destination relative to the workspace root (symlinks
+    /// followed and `..` resolved by the filesystem, not by spelling), with
+    /// the content last written. A write the agent later undid is still
+    /// here; this is not a snapshot of the workspace after the run. A
+    /// destination outside the workspace is reported as written and matches
+    /// no workspace oracle.
     pub written: Files,
     /// The stored content (`payload.summary`) of every memory write the
     /// boundary saw the agent make.
@@ -632,8 +628,8 @@ pub struct AgentTrace {
 }
 
 /// The effects an agent's run had, observed independently of anything the
-/// agent said: a file write is a path in the workspace (in canonical
-/// spelling, so `./x` is the write of `x`), a tool call is a command the
+/// agent said: a file write is the boundary's resolved destination in the
+/// workspace (in canonical spelling, so `./x` is the write of `x`), a tool call is a command the
 /// runner saw, a memory write-back is the content it stored. `stages` are
 /// the stage ledger's readings for `ingested`, `retrieved`, and `packed`, in
 /// that order; the trace itself carries no ledger. `later` is a second
