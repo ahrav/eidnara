@@ -2004,28 +2004,31 @@ mirroring the fault enums and hooks that exist: `search_episode`
 `artifact_ingest` and `artifact_deletion` (the kernel CAS enums, including
 `after_directory_sync`, the approved directory-fsync hook), `artifact_gc`
 (`cas::gc::ArtifactGcFault`), `kernel_restore` (`backup::RestoreFault`),
-`projection_batch` (`retrieval::batch::BatchFault`),
+`projection_batch` (`retrieval::batch::BatchFault`), `backup_before_rename`
+(the kernel's `backup_with_fault_before_rename_for_test` hook),
 `external_lock_holder` (an external `BEGIN IMMEDIATE`), `process_kill { cut }`,
 and `corrupt_quiescent_file`. `FaultAction::family` is the store the seam
 lives in: catch-up, publication, dispatch, and a projection batch write the
-search projection, the CAS, its GC, a restore, and
+search projection, the CAS, its GC, a restore, a backup, and
 the materializer's outbox are the kernel, and a lock holder, a kill, or a
 corrupted file names its own store; a scope on another family is
 `ScopeMismatch`. `FaultAction::loses_reply` names the actions that leave an
 operation's outcome unknown to its caller: the search-episode reply losses,
 `embedding_publication`'s `lose_local_commit_reply`, the materializer's
-`lose_acknowledgement_reply` and `fail_acknowledgement`, dispatch's
+`lose_acknowledgement_reply`, dispatch's
 `lose_charge_reply` and `lose_obsoletion_reply`, and
 GC's `after_reclaiming` and `after_unlink`; a rolled-back commit, a refused
-statement, or a skipped acknowledgement is known, not lost, and dispatch's
-`refuse_ledger_read` loses none itself: it blocks the read-back of a reply
-`lose_charge_reply` lost.
+statement, a skipped acknowledgement, or the materializer's
+`fail_acknowledgement` (which never calls the kernel) is known, not lost, and
+dispatch's `refuse_ledger_read` loses none itself: it blocks the read-back of
+a reply `lose_charge_reply` lost.
 `FaultAction::heal` is the heal each class permits: `consumed` for one-shot
 enums, `released` for gates and lock holders, `reopen` for kills and
 corruption. A restore interrupted `before_displace` or `after_displace` is
 rolled back by the handle before the fault returns and is `consumed`; only
 `recovery_failure` leaves the store for a `reopen`. A projection batch fault
-rolls its transaction back and is `consumed`. The CAS faults split by whether they latch ingestion closed: the
+rolls its transaction back and is `consumed`, as is a backup that fails
+before its rename. The CAS faults split by whether they latch ingestion closed: the
 ingest faults `write`, `file_sync`, `rename`, `after_directory_sync`, and
 `takeover_before_cleanup_unlink` and the EIO deletion faults `intent_append`
 and `unlink` heal by `reopen`; `reservation_commit` and `after_events` abort a
@@ -2034,8 +2037,9 @@ commit-point deletion faults heal by `consumed`. The kernel's
 `return_value_fault_table_latches_eio_and_never_publishes_a_reference` asserts
 that `reservation_commit` and `after_events` leave the store usable and the
 other ingest faults it drives fail closed. GC's `unlink` latches GC closed
-(`latch_gc_failure`) and heals by `reopen`; its other three fail one pass and
-are `consumed`. A
+(`latch_gc_failure`) and `fence_raised_before_unlink` leaves the lease stale
+(`FenceLost`); both heal by `reopen`. Its other two fail one pass and are
+`consumed`. A
 declared heal that differs is `HealMismatch`. A kill carries a
 `KillLabel` whose `crash_model` must be `application_crash` with
 `page_cache_intact` and whose `killed_process` must be `test_binary_child`;
@@ -2064,7 +2068,9 @@ episode is not a `process_kill` declared at that cut is
 `DuplicateBarrier` (one kill, one child, one barrier), a kill whose cut the
 campaign's coverage never declared is `UndeclaredCut`, and a `Cut` receipted
 twice in `cuts` is `DuplicateCut`, because two outcomes for one checkpoint is
-no outcome.
+no outcome, and every oracle checkpoint must be receipted, reached or not
+(`MissingCut`). A kill episode killed a child, so a process peak of zero is
+`KilledChildNotCounted`.
 
 `CutCoverage` holds the cuts a campaign declares (barrier names, fault
 variants, gate release points) and how many receipts each earned; a receipt
@@ -2081,8 +2087,8 @@ a checkpoint receipted at least once is `Reached`, every other declared one is
 
 `EffectLedger` counts each effect identity's `attempted`, `observed`, and
 `acknowledged` and holds what the oracle may expect of it.
-`lose_reply(identity, episode)` records the episode whose fault lost the reply
-in `lost_by`, sets
+`lose_reply(identity, episode)` adds the episode whose fault lost the reply
+to `lost_by` (a retried identity can lose one reply per attempt), sets
 the expectation to `one_of {applied, not_applied}` and the outcome to
 `unknown`; `read_back(identity, state)` collapses it to `exactly { state }`
 and the matching outcome, adding the observation an applied read-back proves.
@@ -2103,8 +2109,9 @@ outcome is not `unknown` without a read-back, and
 `ExpectationCollapsedWithoutReadBack` for a lost reply expecting fewer than two
 states, and `OutcomeNotDerived` when the outcome is not the state the
 expectation names, an effect whose reply was never lost expects anything but
-`applied`, the only state the API ever admits for it, or an applied read-back
-recorded with no observation. A read-back that finds the
+`applied`, the only state the API ever admits for it, or an `applied`
+outcome with no observation behind it: an attempt alone establishes nothing,
+an observation, an acknowledgement, or an applied read-back does. A read-back that finds the
 effect applied counts as its one observation, the only one a lost reply
 leaves; it raises `observed` to at least one and never lowers it, so an
 over-count stays visible to the bounds check. Aggregate totals are never
@@ -2140,7 +2147,8 @@ not the profile's (a bound fitted to the observed progress is not a bound),
 and `LivenessUnmet { lane, progress_at_bound, blocked }` when the predicate
 never held, held only transiently, stalled after it first held, the lane was
 fed no fresh commits (an idle lane meets its predicate trivially), the lane
-stopped before the bound, or the lane records the `blocked` stop that a met
+stopped short of the bound or was driven past it (`steps` must equal the
+bound), or the lane records the `blocked` stop that a met
 predicate contradicts.
 
 `FaultReport` (`eval-suite-c-fault-report/v1`) is what one fault campaign
@@ -2159,8 +2167,8 @@ when `profile_digest` is not the supplied profile's,
 profile's limits, `EnvelopeExceeded` when any recorded peak is over its
 bound, `NoEpisode` when no fault was armed (so no safety check ran while one
 was), `UnregisteredMarker` for a marker `MARKERS` does not register,
-`LostReplyUnrecorded { episode }` for an episode that loses a reply with no
-effect naming it in `lost_by`, `LostByNonLosingEpisode` for an effect naming
+`LostReplyUnrecorded { episode }` for an episode that loses a reply that no
+effect's `lost_by` names, `LostByNonLosingEpisode` for an effect naming
 an episode that loses none, `UnknownEpisode` for one naming an episode the
 report lacks,
 `UnknownEpisode` for a liveness outside-core episode that is not one of the

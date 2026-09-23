@@ -17,6 +17,14 @@ use context_core::canonical_json::{
 
 pub const FAULT_REPORT_SCHEMA: &str = "eval-suite-c-fault-report/v1";
 const FAULT_RESULT_DIGEST_PROTOCOL: &str = "eval-suite-c-fault-report-result/v1";
+/// Every oracle checkpoint a report receipts, reached or not.
+const ORACLE_CUTS: [Cut; 5] = [
+    Cut::AfterAtomicTransition,
+    Cut::AtQuiescence,
+    Cut::AfterRecovery,
+    Cut::AfterFaultPhase,
+    Cut::EndOfRun,
+];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -118,18 +126,41 @@ pub enum ArtifactDeletionFaultKind {
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum FaultAction {
-    SearchEpisode { fault: SearchEpisodeFault },
-    EmbeddingPublication { fault: PublicationFaultKind },
+    SearchEpisode {
+        fault: SearchEpisodeFault,
+    },
+    EmbeddingPublication {
+        fault: PublicationFaultKind,
+    },
     HeldPublication,
-    ClaimMaterialization { fault: MaterializationFaultKind },
-    EmbeddingDispatch { fault: DispatchFaultKind },
-    ArtifactGc { fault: ArtifactGcFaultKind },
-    KernelRestore { fault: RestoreFaultKind },
-    ProjectionBatch { fault: BatchFaultKind },
-    ArtifactIngest { fault: ArtifactIngestFaultKind },
-    ArtifactDeletion { fault: ArtifactDeletionFaultKind },
+    ClaimMaterialization {
+        fault: MaterializationFaultKind,
+    },
+    EmbeddingDispatch {
+        fault: DispatchFaultKind,
+    },
+    ArtifactGc {
+        fault: ArtifactGcFaultKind,
+    },
+    KernelRestore {
+        fault: RestoreFaultKind,
+    },
+    /// `backup_with_fault_before_rename_for_test`: the backup fails after its
+    /// staged copy is synced and before it is published.
+    BackupBeforeRename,
+    ProjectionBatch {
+        fault: BatchFaultKind,
+    },
+    ArtifactIngest {
+        fault: ArtifactIngestFaultKind,
+    },
+    ArtifactDeletion {
+        fault: ArtifactDeletionFaultKind,
+    },
     ExternalLockHolder,
-    ProcessKill { cut: String },
+    ProcessKill {
+        cut: String,
+    },
     CorruptQuiescentFile,
 }
 
@@ -162,10 +193,12 @@ impl FaultAction {
             Self::HeldPublication | Self::ExternalLockHolder => Heal::Released,
             Self::EmbeddingDispatch { .. } => Heal::Consumed,
             Self::ArtifactGc { fault } => match fault {
-                ArtifactGcFaultKind::Unlink => Heal::Reopen,
-                ArtifactGcFaultKind::AfterReclaiming
-                | ArtifactGcFaultKind::FenceRaisedBeforeUnlink
-                | ArtifactGcFaultKind::AfterUnlink => Heal::Consumed,
+                ArtifactGcFaultKind::Unlink | ArtifactGcFaultKind::FenceRaisedBeforeUnlink => {
+                    Heal::Reopen
+                }
+                ArtifactGcFaultKind::AfterReclaiming | ArtifactGcFaultKind::AfterUnlink => {
+                    Heal::Consumed
+                }
             },
             Self::KernelRestore { fault } => match fault {
                 RestoreFaultKind::BeforeDisplace | RestoreFaultKind::AfterDisplace => {
@@ -173,7 +206,7 @@ impl FaultAction {
                 }
                 RestoreFaultKind::RecoveryFailure => Heal::Reopen,
             },
-            Self::ProjectionBatch { .. } => Heal::Consumed,
+            Self::ProjectionBatch { .. } | Self::BackupBeforeRename => Heal::Consumed,
             Self::ProcessKill { .. } | Self::CorruptQuiescentFile => Heal::Reopen,
         }
     }
@@ -194,7 +227,7 @@ impl FaultAction {
                 *fault == PublicationFaultKind::LoseLocalCommitReply
             }
             Self::ClaimMaterialization { fault } => {
-                *fault != MaterializationFaultKind::SkipAcknowledgement
+                *fault == MaterializationFaultKind::LoseAcknowledgementReply
             }
             Self::EmbeddingDispatch { fault } => matches!(
                 fault,
@@ -209,6 +242,7 @@ impl FaultAction {
             | Self::ArtifactDeletion { .. }
             | Self::KernelRestore { .. }
             | Self::ProjectionBatch { .. }
+            | Self::BackupBeforeRename
             | Self::ExternalLockHolder
             | Self::ProcessKill { .. }
             | Self::CorruptQuiescentFile => false,
@@ -229,7 +263,8 @@ impl FaultAction {
             | Self::ArtifactIngest { .. }
             | Self::ArtifactDeletion { .. }
             | Self::ArtifactGc { .. }
-            | Self::KernelRestore { .. } => Some(StoreFamily::Kernel),
+            | Self::KernelRestore { .. }
+            | Self::BackupBeforeRename => Some(StoreFamily::Kernel),
             Self::ExternalLockHolder | Self::ProcessKill { .. } | Self::CorruptQuiescentFile => {
                 None
             }
@@ -548,9 +583,9 @@ pub struct Effect {
     pub attempted: u64,
     pub observed: u64,
     pub acknowledged: u64,
-    /// The episode whose fault lost this effect's reply; `None` when no reply
-    /// was lost.
-    pub lost_by: Option<String>,
+    /// The episodes whose faults lost this effect's replies; a retried
+    /// identity can lose one per attempt. Empty when no reply was lost.
+    pub lost_by: BTreeSet<String>,
     pub read_back: bool,
     pub expected: Expected,
     pub outcome: EffectOutcome,
@@ -558,7 +593,7 @@ pub struct Effect {
 
 impl Effect {
     pub fn reply_lost(&self) -> bool {
-        self.lost_by.is_some()
+        !self.lost_by.is_empty()
     }
 
     /// An observation after a `not_applied` read-back is the retry landing:
@@ -642,7 +677,7 @@ impl EffectLedger {
                 attempted: 0,
                 observed: 0,
                 acknowledged: 0,
-                lost_by: None,
+                lost_by: BTreeSet::new(),
                 read_back: false,
                 expected: Expected::Exactly {
                     state: EffectState::Applied,
@@ -683,7 +718,7 @@ impl EffectLedger {
     /// names one.
     pub fn lose_reply(&mut self, identity: &str, episode: &str) -> Result<(), EffectRefused> {
         let effect = self.effect(identity)?;
-        effect.lost_by = Some(episode.to_string());
+        effect.lost_by.insert(episode.to_string());
         effect.read_back = false;
         effect.expected = Expected::OneOf {
             states: [EffectState::Applied, EffectState::NotApplied]
@@ -766,8 +801,10 @@ impl EffectLedger {
                 Expected::Exactly {
                     state: EffectState::Applied,
                 } => {
-                    effect.outcome == EffectOutcome::Applied
-                        && (!effect.read_back || effect.observed > 0)
+                    // Applied is what an observation, an acknowledgement, or
+                    // an applied read-back establishes; an attempt alone
+                    // establishes nothing.
+                    effect.outcome == EffectOutcome::Applied && effect.observed > 0
                 }
                 Expected::Exactly {
                     state: EffectState::NotApplied,
@@ -946,7 +983,7 @@ impl LivenessReport {
                 && progress.stalled_at.is_none()
                 && progress.blocked.is_none()
                 && progress.fresh_commits > 0;
-            if !met || progress.steps < progress.bound {
+            if !met || progress.steps != progress.bound {
                 return Err(LivenessRefused::LivenessUnmet {
                     lane: *lane,
                     progress_at_bound: progress.steps,
@@ -1039,6 +1076,12 @@ pub enum FaultReportError {
     DuplicateCut {
         cut: Cut,
     },
+    /// An oracle checkpoint with no receipt at all, reached or not.
+    MissingCut {
+        cut: Cut,
+    },
+    /// A kill episode killed a child, so the process peak cannot be zero.
+    KilledChildNotCounted,
     UnknownEpisode {
         episode: String,
     },
@@ -1098,6 +1141,9 @@ impl FaultReport {
         }
         if self.envelope.bounds != *limits {
             return Err(FaultReportError::EnvelopeDisagreesWithProfile);
+        }
+        if self.envelope.peaks.processes == 0 && self.episodes.iter().any(|e| e.action.is_kill()) {
+            return Err(FaultReportError::KilledChildNotCounted);
         }
         self.envelope
             .check()
@@ -1168,27 +1214,29 @@ impl FaultReport {
         if let Some(receipt) = self.cuts.iter().find(|r| !cuts.insert(r.cut)) {
             return Err(FaultReportError::DuplicateCut { cut: receipt.cut });
         }
+        if let Some(cut) = ORACLE_CUTS.iter().find(|cut| !cuts.contains(cut)) {
+            return Err(FaultReportError::MissingCut { cut: *cut });
+        }
         self.coverage
             .verdict()
             .map_err(FaultReportError::Coverage)?;
         self.effects.validate().map_err(FaultReportError::Effect)?;
         for (identity, effect) in &self.effects.effects {
-            let Some(episode) = &effect.lost_by else {
-                continue;
-            };
-            match self.episodes.iter().find(|e| &e.id == episode) {
-                None => {
-                    return Err(FaultReportError::UnknownEpisode {
-                        episode: episode.clone(),
-                    });
+            for episode in &effect.lost_by {
+                match self.episodes.iter().find(|e| &e.id == episode) {
+                    None => {
+                        return Err(FaultReportError::UnknownEpisode {
+                            episode: episode.clone(),
+                        });
+                    }
+                    Some(e) if !e.action.loses_reply() => {
+                        return Err(FaultReportError::LostByNonLosingEpisode {
+                            identity: identity.clone(),
+                            episode: episode.clone(),
+                        });
+                    }
+                    Some(_) => {}
                 }
-                Some(e) if !e.action.loses_reply() => {
-                    return Err(FaultReportError::LostByNonLosingEpisode {
-                        identity: identity.clone(),
-                        episode: episode.clone(),
-                    });
-                }
-                Some(_) => {}
             }
         }
         if let Some(episode) = self.episodes.iter().find(|e| {
@@ -1197,7 +1245,7 @@ impl FaultReport {
                     .effects
                     .effects
                     .values()
-                    .any(|effect| effect.lost_by.as_deref() == Some(e.id.as_str()))
+                    .any(|effect| effect.lost_by.contains(&e.id))
         }) {
             return Err(FaultReportError::LostReplyUnrecorded {
                 episode: episode.id.clone(),
