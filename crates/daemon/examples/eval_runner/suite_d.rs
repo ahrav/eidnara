@@ -14,9 +14,9 @@ use eval_core::{
     CanaryVerdict, Carrier, ClaimBoundary, ContainmentRefused, ContainmentReport, Coverage, Cut,
     CutOutcome, CutReceipt, EnvelopeExceeded, ExecutionMode, Files, FrozenFamily, GeneratedTask,
     HiddenOutcome, HiddenResults, InjectionScore, LaterSession, ProfileError, RunProfile, Scale,
-    SkipReason, SuiteDAdmission, TaskBudgets, TaskCorpus, TaskError, TaskUsage, Terminal,
-    WitnessError, check_adequacy, eval_run_id, generate_tasks, observe_agent, parse_witness,
-    score_injection, task_terminal,
+    SkipReason, SuiteDAdmission, TASK_GENERATOR_VERSION, TaskBudgets, TaskCorpus, TaskError,
+    TaskUsage, Terminal, WitnessError, check_adequacy, eval_run_id, generate_tasks, observe_agent,
+    parse_witness, score_injection, task_terminal,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -1010,7 +1010,7 @@ pub fn run(config: &Config, host: Host) -> Result<Run, RunError> {
         &profile,
         SIMULATOR_VERSION,
         SEED,
-        json!({"tasks": config.tasks}),
+        json!({"tasks": config.tasks, "task_generator_version": TASK_GENERATOR_VERSION}),
         &std::env::current_exe().unwrap(),
     );
     charges.vacate(root)?;

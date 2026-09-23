@@ -607,6 +607,11 @@ fn a_contained_task_is_judged_by_hidden_tests_the_agent_never_sees() {
         format!("generated:{:#x}", suite_d::SEED),
         "the manifest names Suite D's corpus, not aging's"
     );
+    assert_eq!(
+        manifest.run_identity.scenario["task_generator_version"],
+        eval_core::TASK_GENERATOR_VERSION,
+        "the identity names the generator that produced the tasks, not the world generator"
+    );
     // The peaks and the elapsed times are measurements; two runs of one
     // identity must agree on the result digest without them.
     let mut remeasured = published.clone();
