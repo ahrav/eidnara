@@ -131,7 +131,16 @@ fn report() -> FaultReport {
         eval_run_id: "ab".repeat(32),
         profile_digest: "cd".repeat(32),
         claim_boundary: ClaimBoundary::pinned(),
-        episodes: vec![episode("lost-ack", lost_ack()), episode("kill", kill())],
+        episodes: vec![
+            episode("lost-ack", lost_ack()),
+            episode("kill", kill()),
+            episode(
+                "ingest-write",
+                FaultAction::ArtifactIngest {
+                    fault: ArtifactIngestFaultKind::Write,
+                },
+            ),
+        ],
         barriers: vec![barrier("kill")],
         cuts: cut_receipts(
             &[Cut::AtQuiescence, Cut::AfterRecovery, Cut::EndOfRun],
@@ -177,6 +186,32 @@ fn every_episode_is_a_named_action_with_the_heal_its_seam_permits() {
         Heal::Reopen,
         "an EIO in the CAS latches ingestion closed until reopen"
     );
+    for fault in [
+        ArtifactIngestFaultKind::ReservationCommit,
+        ArtifactIngestFaultKind::AfterEvents,
+    ] {
+        let action = FaultAction::ArtifactIngest { fault };
+        assert_eq!(
+            action.heal(),
+            Heal::Consumed,
+            "{fault:?} fails a transaction without latching, so the store stays usable"
+        );
+        let mut consumed = episode("ingest-transaction", action);
+        consumed.heal = Heal::Consumed;
+        consumed.validate().unwrap();
+    }
+    for fault in [
+        ArtifactIngestFaultKind::Write,
+        ArtifactIngestFaultKind::FileSync,
+        ArtifactIngestFaultKind::Rename,
+        ArtifactIngestFaultKind::TakeoverBeforeCleanupUnlink,
+    ] {
+        assert_eq!(
+            FaultAction::ArtifactIngest { fault }.heal(),
+            Heal::Reopen,
+            "{fault:?} latches ingestion closed"
+        );
+    }
     assert_eq!(
         FaultAction::ArtifactDeletion {
             fault: ArtifactDeletionFaultKind::IntentStorageExhausted
@@ -285,6 +320,24 @@ fn a_power_loss_label_and_a_host_kill_are_refused() {
         other_cut.validate(),
         Err(BarrierRefused::LineDoesNotNameCut { .. })
     ));
+    let mut suffix = barrier("kill");
+    suffix.line = "barrier unacknowledged".to_string();
+    assert!(
+        matches!(
+            suffix.validate(),
+            Err(BarrierRefused::LineDoesNotNameCut { .. })
+        ),
+        "the cut is the line's last token, not a suffix of it"
+    );
+    let mut empty = barrier("kill");
+    empty.cut = String::new();
+    assert!(
+        matches!(
+            empty.validate(),
+            Err(BarrierRefused::LineDoesNotNameCut { .. })
+        ),
+        "no line names an empty cut"
+    );
     let mut exited = barrier("kill");
     exited.signal = 0;
     assert!(matches!(
@@ -388,6 +441,31 @@ fn a_lost_reply_is_unknown_over_an_admissible_set_until_a_read_back_names_one_st
     assert_eq!((e.attempted, e.observed, e.acknowledged), (1, 0, 0));
     not_applied.validate().unwrap();
 
+    let before = ledger.clone();
+    assert_eq!(
+        ledger.read_back("commit:5", EffectState::NotApplied),
+        Err(EffectRefused::ReadBackNotAdmissible {
+            identity: "commit:5".to_string(),
+            state: EffectState::NotApplied,
+        }),
+        "an acknowledged effect read back as not applied is a lost acknowledged write"
+    );
+    assert_eq!(ledger, before, "a refused read-back changes nothing");
+    let mut acked_then_lost = ledger.clone();
+    acked_then_lost.lose_reply("commit:5").unwrap();
+    assert!(matches!(
+        acked_then_lost.read_back("commit:5", EffectState::NotApplied),
+        Err(EffectRefused::ReadBackNotAdmissible { .. })
+    ));
+    ledger.attempt("commit:7");
+    assert!(
+        matches!(
+            ledger.read_back("commit:7", EffectState::NotApplied),
+            Err(EffectRefused::ReadBackNotAdmissible { .. })
+        ),
+        "a reply that was not lost admits only the applied state"
+    );
+
     assert_eq!(
         ledger.observe("commit:9"),
         Err(EffectRefused::UnknownIdentity {
@@ -420,6 +498,23 @@ fn a_premature_success_fixture_is_refused() {
         Err(EffectRefused::ExpectationCollapsedWithoutReadBack {
             identity: "ack:3".to_string()
         })
+    );
+    let mut rewritten = EffectLedger::default();
+    rewritten.attempt("ack:6");
+    rewritten.acknowledge("ack:6").unwrap();
+    let e = rewritten.effects.get_mut("ack:6").unwrap();
+    e.read_back = true;
+    e.expected = Expected::Exactly {
+        state: EffectState::NotApplied,
+    };
+    e.outcome = EffectOutcome::NotApplied;
+    assert_eq!(
+        rewritten.validate(),
+        Err(EffectRefused::ReadBackNotAdmissible {
+            identity: "ack:6".to_string(),
+            state: EffectState::NotApplied,
+        }),
+        "a parsed ledger cannot record an acknowledged effect as not applied"
     );
     let mut inflated = EffectLedger::default();
     inflated.attempt("ack:4");
@@ -522,6 +617,29 @@ fn liveness_is_unmet_at_the_bound_or_when_a_fault_healed() {
         ),
         "a predicate that held, failed, and held again at the bound is not sustained progress"
     );
+    let mut idle = ok.clone();
+    idle.lanes
+        .get_mut(&Lane::EmbeddingPasses)
+        .unwrap()
+        .fresh_commits = 0;
+    assert!(
+        matches!(
+            idle.verdict(&bounds()),
+            Err(LivenessRefused::LivenessUnmet {
+                lane: Lane::EmbeddingPasses,
+                ..
+            })
+        ),
+        "a lane fed no fresh work meets its predicate trivially and proves no progress"
+    );
+    let mut unarmed = ok.clone();
+    unarmed.outside_core.clear();
+    unarmed.armed_at_bound.clear();
+    assert_eq!(
+        unarmed.verdict(&bounds()),
+        Err(LivenessRefused::NoOutsideCoreFault),
+        "the liveness mode runs with outside-core faults armed, so none is no run"
+    );
     let mut short = ok.clone();
     short.lanes.get_mut(&Lane::CatchUpEpisodes).unwrap().steps = 10;
     assert!(
@@ -584,8 +702,34 @@ fn a_fault_report_round_trips_and_refuses_what_it_cannot_prove() {
     assert_eq!(
         no_barrier.validate(&bounds()),
         Err(FaultReportError::KillWithoutBarrier {
-            episode: "kill".to_string()
+            episode: "kill".to_string(),
+            cut: "acknowledged".to_string(),
         })
+    );
+    let mut wrong_cut = report.clone();
+    wrong_cut.barriers = vec![BarrierReceipt {
+        cut: "staged".to_string(),
+        line: "barrier staged".to_string(),
+        ..barrier("kill")
+    }];
+    assert_eq!(
+        wrong_cut.validate(&bounds()),
+        Err(FaultReportError::KillWithoutBarrier {
+            episode: "kill".to_string(),
+            cut: "acknowledged".to_string(),
+        }),
+        "a barrier from another cut does not place the kill at its declared cut"
+    );
+    let mut ghost = report.clone();
+    let live = ghost.liveness.as_mut().unwrap();
+    live.outside_core.insert("ghost".to_string());
+    live.armed_at_bound.insert("ghost".to_string());
+    assert_eq!(
+        ghost.validate(&bounds()),
+        Err(FaultReportError::UnknownEpisode {
+            episode: "ghost".to_string()
+        }),
+        "an armed outside-core fault the campaign never ran is not evidence"
     );
     let mut unreceipted = report.clone();
     unreceipted.coverage.declare("unlink");

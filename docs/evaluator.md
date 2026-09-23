@@ -1676,7 +1676,16 @@ mirroring the fault enums and hooks that exist: `search_episode`
 and `corrupt_quiescent_file`.
 `FaultAction::heal` is the heal each class permits: `consumed` for one-shot
 enums, `released` for gates and lock holders, `reopen` for kills and
-corruption; a declared heal that differs is `HealMismatch`. A kill carries a
+corruption. The CAS faults split by whether they latch ingestion closed: the
+ingest faults `write`, `file_sync`, `rename`, `after_directory_sync`, and
+`takeover_before_cleanup_unlink` and the EIO deletion faults `intent_append`
+and `unlink` heal by `reopen`; `reservation_commit` and `after_events` abort a
+SQLite transaction and leave the store usable, and they and the ENOSPC and
+commit-point deletion faults heal by `consumed`. The kernel's
+`return_value_fault_table_latches_eio_and_never_publishes_a_reference` asserts
+that `reservation_commit` and `after_events` leave the store usable and the
+other ingest faults it drives fail closed. A
+declared heal that differs is `HealMismatch`. A kill carries a
 `KillLabel` whose `crash_model` must be `application_crash` with
 `page_cache_intact` and whose `killed_process` must be `test_binary_child`;
 `power_loss`, `torn_write`, `unsynced_reorder`, and `eidnara_host` are
@@ -1686,9 +1695,12 @@ page cache intact and nothing else. A kill without a label, a label on a
 non-kill, an empty contract sentence, and a duplicate id refuse.
 
 A `BarrierReceipt` is the line a killed child printed at its cut, read before
-the kill: it must end with the cut's name (`LineDoesNotNameCut`) and the child
-must have died by signal (`ExitedWithStatus`). A report with a kill episode
-and no barrier for it is `KillWithoutBarrier`: a kill without a barrier is a
+the kill. Barrier lines are `<prefix> <cut>`, so the line's last
+whitespace-separated token must equal the cut (`LineDoesNotNameCut`); a suffix
+match is not enough, and no line names an empty cut. The child must have died
+by signal (`ExitedWithStatus`). A report with a kill episode and no barrier for
+that episode at the episode's declared `process_kill` cut is
+`KillWithoutBarrier { episode, cut }`: a kill without a barrier at its cut is a
 kill at an unknown point.
 
 `CutCoverage` holds the cuts a campaign declares (barrier names, fault
@@ -1704,10 +1716,16 @@ a checkpoint receipted at least once is `Reached`, every other declared one is
 the expectation to `one_of {applied, not_applied}` and the outcome to
 `unknown`; `read_back(identity, state)` collapses it to `exactly { state }`
 and the matching outcome, adding the observation an applied read-back proves.
+A read-back is refused as `ReadBackNotAdmissible { identity, state }` and
+changes nothing when `state` is outside the admissible set (a reply that was
+not lost admits only `applied`) or when it is `not_applied` for an acknowledged
+effect, which would be a lost acknowledged write.
 `validate` refuses, per identity, `BoundsViolated` unless `acknowledged <=
-observed <= attempted`, `PrematureSuccess` for a lost reply whose outcome is
-not `unknown` without a read-back, `ExpectationCollapsedWithoutReadBack` for
-a lost reply expecting fewer than two states. A read-back that finds the
+observed <= attempted`, `ReadBackNotAdmissible` for an acknowledged effect
+whose outcome is `not_applied`, `PrematureSuccess` for a lost reply whose
+outcome is not `unknown` without a read-back, and
+`ExpectationCollapsedWithoutReadBack` for a lost reply expecting fewer than two
+states. A read-back that finds the
 effect applied counts as its one observation, the only one a lost reply
 leaves. Aggregate totals are never consulted: a fixture whose totals satisfy the
 inequality while one identity violates it is refused.
@@ -1726,12 +1744,15 @@ lane's own unit (`catch_up_episodes`, `embedding_passes`,
 steps driven, the step the predicate first held, the first step after that at
 which it did not, whether it held at the bound, the fresh commits the window
 fed the lane, and the block that stopped it. `verdict(bounds)` takes the approved
-profile's `LivenessBounds` and refuses `FaultHealed` for an outside-core
+profile's `LivenessBounds` and refuses `NoOutsideCoreFault` when no
+outside-core episode is declared (the mode runs with outside-core faults
+armed), `FaultHealed` for an outside-core
 episode not armed at the bound, `ArmedInsideCore`, `LaneNotDriven` for a core
 lane with no progress record, `BoundMismatch` when a lane's declared bound is
 not the profile's (a bound fitted to the observed progress is not a bound),
 and `LivenessUnmet { lane, progress_at_bound, blocked }` when the predicate
-never held, held only transiently, stalled after it first held, or the lane
+never held, held only transiently, stalled after it first held, the lane was
+fed no fresh commits (an idle lane meets its predicate trivially), or the lane
 stopped before the bound.
 
 `FaultReport` (`eval-suite-c-fault-report/v1`) is what one fault campaign
@@ -1739,7 +1760,9 @@ publishes: identity, profile digest, claim boundary, the episodes, barrier
 receipts, cut receipts, cut coverage, the effect ledger, expected refusals,
 the count of safety checks made while faults were armed (`SafetyNeverChecked`
 at zero), the optional liveness report, markers, and envelope. `validate`
-takes the profile's bounds and runs every refusal above; `parse_fault_report`
+takes the profile's bounds and runs every refusal above, and refuses
+`UnknownEpisode` for a liveness outside-core episode that is not one of the
+report's episodes; `parse_fault_report`
 reads a report back losslessly; `result_digest` drops barrier pids and
 envelope peaks under `eval-suite-c-fault-report-result/v1`.
 

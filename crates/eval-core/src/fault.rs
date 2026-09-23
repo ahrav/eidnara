@@ -70,13 +70,20 @@ pub enum FaultAction {
 }
 
 impl FaultAction {
-    /// The heal each seam permits. A CAS storage failure that is not capacity
-    /// exhaustion latches artifact ingestion closed until the store reopens,
-    /// so every ingest fault and the EIO deletion faults heal by reopen.
+    /// `ReservationCommit` and `AfterEvents` abort a SQLite transaction and are
+    /// consumed; the other ingest faults latch CAS ingestion closed until reopen.
     pub fn heal(&self) -> Heal {
         match self {
             Self::SearchEpisode { .. } | Self::EmbeddingPublication { .. } => Heal::Consumed,
-            Self::ArtifactIngest { .. } => Heal::Reopen,
+            Self::ArtifactIngest { fault } => match fault {
+                ArtifactIngestFaultKind::ReservationCommit
+                | ArtifactIngestFaultKind::AfterEvents => Heal::Consumed,
+                ArtifactIngestFaultKind::Write
+                | ArtifactIngestFaultKind::FileSync
+                | ArtifactIngestFaultKind::Rename
+                | ArtifactIngestFaultKind::AfterDirectorySync
+                | ArtifactIngestFaultKind::TakeoverBeforeCleanupUnlink => Heal::Reopen,
+            },
             Self::ArtifactDeletion { fault } => match fault {
                 ArtifactDeletionFaultKind::IntentAppend | ArtifactDeletionFaultKind::Unlink => {
                     Heal::Reopen
@@ -93,6 +100,14 @@ impl FaultAction {
 
     pub fn is_kill(&self) -> bool {
         matches!(self, Self::ProcessKill { .. })
+    }
+
+    /// The cut a kill is declared at; `None` for every other action.
+    pub fn kill_cut(&self) -> Option<&str> {
+        match self {
+            Self::ProcessKill { cut } => Some(cut),
+            _ => None,
+        }
     }
 }
 
@@ -232,8 +247,10 @@ pub enum BarrierRefused {
 }
 
 impl BarrierReceipt {
+    /// Barrier lines are `<prefix> <cut>`, so the cut must be the last token;
+    /// a suffix match would let `unacknowledged` name `acknowledged`.
     pub fn validate(&self) -> Result<(), BarrierRefused> {
-        if !self.line.trim_end().ends_with(&self.cut) {
+        if self.line.split_whitespace().next_back() != Some(self.cut.as_str()) {
             return Err(BarrierRefused::LineDoesNotNameCut {
                 episode: self.episode.clone(),
                 line: self.line.clone(),
@@ -349,6 +366,18 @@ pub struct EffectLedger {
     pub effects: BTreeMap<String, Effect>,
 }
 
+impl Effect {
+    fn admits(&self, state: EffectState) -> bool {
+        if state == EffectState::NotApplied && self.acknowledged > 0 {
+            return false;
+        }
+        match &self.expected {
+            Expected::Exactly { state: expected } => *expected == state,
+            Expected::OneOf { states } => states.contains(&state),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EffectRefused {
     UnknownIdentity {
@@ -365,6 +394,10 @@ pub enum EffectRefused {
     },
     ExpectationCollapsedWithoutReadBack {
         identity: String,
+    },
+    ReadBackNotAdmissible {
+        identity: String,
+        state: EffectState,
     },
 }
 
@@ -423,11 +456,15 @@ impl EffectLedger {
         Ok(())
     }
 
-    /// A durable read-back by identity collapses the admissible set. A
-    /// read-back that finds the effect applied is an observation of it, the
-    /// only one a lost reply leaves.
+    /// Refuses states outside the admissible set, leaving the entry unchanged.
     pub fn read_back(&mut self, identity: &str, state: EffectState) -> Result<(), EffectRefused> {
         let effect = self.effect(identity)?;
+        if !effect.admits(state) {
+            return Err(EffectRefused::ReadBackNotAdmissible {
+                identity: identity.to_string(),
+                state,
+            });
+        }
         effect.read_back = true;
         effect.expected = Expected::Exactly { state };
         effect.outcome = match state {
@@ -449,6 +486,12 @@ impl EffectLedger {
                     attempted: effect.attempted,
                     observed: effect.observed,
                     acknowledged: effect.acknowledged,
+                });
+            }
+            if effect.acknowledged > 0 && effect.outcome == EffectOutcome::NotApplied {
+                return Err(EffectRefused::ReadBackNotAdmissible {
+                    identity,
+                    state: EffectState::NotApplied,
                 });
             }
             if effect.reply_lost && !effect.read_back {
@@ -575,13 +618,17 @@ pub enum LivenessRefused {
         progress_at_bound: u64,
         blocked: Option<String>,
     },
+    NoOutsideCoreFault,
 }
 
 impl LivenessReport {
-    /// Every in-core lane was driven to its profile bound, met its target at
-    /// some step and again at the bound, and every outside-core fault was
-    /// still armed when the bound was reached.
+    /// Every in-core lane was fed fresh work and driven to its profile bound,
+    /// and its predicate held from `met_at` through that bound with no stall.
+    /// At least one outside-core fault is declared, and each stayed armed.
     pub fn verdict(&self, bounds: &LivenessBounds) -> Result<(), LivenessRefused> {
+        if self.outside_core.is_empty() {
+            return Err(LivenessRefused::NoOutsideCoreFault);
+        }
         for episode in &self.outside_core {
             if !self.armed_at_bound.contains(episode) {
                 return Err(LivenessRefused::FaultHealed {
@@ -612,7 +659,8 @@ impl LivenessReport {
             let met = progress
                 .met_at
                 .is_some_and(|k| k <= progress.bound && progress.holds_at_bound)
-                && progress.stalled_at.is_none();
+                && progress.stalled_at.is_none()
+                && progress.fresh_commits > 0;
             if !met || progress.steps < progress.bound {
                 return Err(LivenessRefused::LivenessUnmet {
                     lane: *lane,
@@ -652,7 +700,8 @@ pub enum FaultReportError {
     Coverage(CoverageRefused),
     Effect(EffectRefused),
     Liveness(LivenessRefused),
-    KillWithoutBarrier { episode: String },
+    KillWithoutBarrier { episode: String, cut: String },
+    UnknownEpisode { episode: String },
     SafetyNeverChecked,
     Shape(String),
     Lossy,
@@ -669,10 +718,18 @@ impl FaultReport {
         for barrier in &self.barriers {
             barrier.validate().map_err(FaultReportError::Barrier)?;
         }
-        for episode in self.episodes.iter().filter(|e| e.action.is_kill()) {
-            if !self.barriers.iter().any(|b| b.episode == episode.id) {
+        for episode in &self.episodes {
+            let Some(cut) = episode.action.kill_cut() else {
+                continue;
+            };
+            if !self
+                .barriers
+                .iter()
+                .any(|b| b.episode == episode.id && b.cut == cut)
+            {
                 return Err(FaultReportError::KillWithoutBarrier {
                     episode: episode.id.clone(),
+                    cut: cut.to_string(),
                 });
             }
         }
@@ -684,6 +741,15 @@ impl FaultReport {
             return Err(FaultReportError::SafetyNeverChecked);
         }
         if let Some(liveness) = &self.liveness {
+            if let Some(unknown) = liveness
+                .outside_core
+                .iter()
+                .find(|id| !self.episodes.iter().any(|e| &e.id == *id))
+            {
+                return Err(FaultReportError::UnknownEpisode {
+                    episode: unknown.clone(),
+                });
+            }
             liveness
                 .verdict(bounds)
                 .map_err(FaultReportError::Liveness)?;
