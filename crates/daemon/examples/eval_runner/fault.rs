@@ -36,7 +36,7 @@ use rusqlite::{Connection, OpenFlags};
 use serde_json::json;
 
 use super::aging::{
-    self, ManifestInputs, Plan, Planned, Stores, kernel_file, live, read_only, search_file,
+    self, ManifestInputs, Plan, Planned, Step, Stores, kernel_file, live, read_only, search_file,
     suite_c_manifest,
 };
 use super::campaign::{Charges, identity, prepare_publish, publish_file};
@@ -60,7 +60,7 @@ pub enum RunError {
     #[error("plan refused: {0}")]
     Plan(#[from] aging::RunError),
     #[error(
-        "history leaves {after_checkpoint} steps after the checkpoint; the fault phase drives {FAULT_PHASE_STEPS}"
+        "history leaves {after_checkpoint} steps after the checkpoint; the fault phase drives {FAULT_PHASE_STEPS}, then a publish step for the held publication and each of two publication faults and a step to live after recovery"
     )]
     HistoryTooShort { after_checkpoint: usize },
     #[error("report refused: {0}")]
@@ -91,17 +91,29 @@ fn publish_refused((path, kind): (PathBuf, std::io::ErrorKind)) -> RunError {
 }
 
 /// The steps the fault phase drives after the checkpoint: a lock-holder
-/// episode, two healthy steps, two reply-loss episodes, then at least one
-/// step each to open a job for the held publication and the two publication
-/// faults, and one step left to live after recovery.
-const FAULT_PHASE_STEPS: usize = 9;
+/// episode, two healthy steps, and two reply-loss episodes, then the
+/// corruption and CAS episodes at the sixth step's time.
+const FAULT_PHASE_STEPS: usize = 6;
+
+/// From the sixth step on, the held publication and each publication fault
+/// apply steps until a publish opens an embedding job (a retirement opens
+/// none), and recovery needs a step left to live after the third.
+fn publication_probes_fit(steps: &[Planned]) -> bool {
+    let mut publishes =
+        (FAULT_PHASE_STEPS - 1..steps.len()).filter(|i| matches!(steps[*i].step, Step::Publish(_)));
+    publishes
+        .nth(2)
+        .is_some_and(|third| third + 1 < steps.len())
+}
 
 /// The aging plan, refused before any store opens when its checkpoint leaves
-/// fewer steps than the fault phase drives.
+/// fewer steps than the fault phase drives or too few publishes for the
+/// publication faults.
 pub fn plan(messages: u32) -> Result<Plan, RunError> {
     let plan = aging::plan(messages)?;
-    let after_checkpoint = plan.steps.len() - plan.checkpoint_step as usize;
-    if after_checkpoint < FAULT_PHASE_STEPS {
+    let k = plan.checkpoint_step as usize;
+    let after_checkpoint = plan.steps.len() - k;
+    if after_checkpoint < FAULT_PHASE_STEPS || !publication_probes_fit(&plan.steps[k..]) {
         return Err(RunError::HistoryTooShort { after_checkpoint });
     }
     Ok(plan)
@@ -534,8 +546,10 @@ fn observe_latched(stores: &Stores, witness: &mut Witness, id: &str) -> Result<(
 }
 
 /// Closes and reopens the stores: the heal every latched CAS fault permits.
-fn reopen(stores: Stores, now: i64) -> Stores {
-    stores.close().reopen(now)
+/// Closing checkpoints the WALs away, so the footprint is charged first.
+fn reopen(stores: Stores, charges: &mut Charges, now: i64) -> Result<Stores, RunError> {
+    charges.store_bytes(stores.root())?;
+    Ok(stores.close().reopen(now))
 }
 
 /// Every CAS ingest fault fails closed with its named kind, latches ingestion
@@ -544,6 +558,7 @@ fn reopen(stores: Stores, now: i64) -> Stores {
 pub fn artifact_ingest_episodes(
     mut stores: Stores,
     witness: &mut Witness,
+    charges: &mut Charges,
     step: u32,
     now: i64,
 ) -> Result<(Stores, String), RunError> {
@@ -582,7 +597,7 @@ pub fn artifact_ingest_episodes(
             StoreFamily::Kernel,
             "ingest_artifact",
             FaultAction::ArtifactIngest { fault: kind },
-            &format!("kernel::ArtifactIngestFault: {contract}; the ingest fails closed, publishes no reference, and latches CAS ingestion closed until the store reopens"),
+            &format!("kernel::ArtifactIngestFault: {contract}; the ingest is refused IngestionFailClosed, publishes no reference, and latches CAS ingestion closed until the store reopens"),
         ));
         let payload = format!("fault payload {id} {now}");
         let request = ingest_request(&id, payload.as_bytes());
@@ -594,16 +609,8 @@ pub fn artifact_ingest_episodes(
             .err()
             .ok_or_else(|| unexpected(&id, "an ingest refusal", "Ok"))?;
         let named = artifact_error_text(&error);
-        if !matches!(
-            error.kind(),
-            kernel::ArtifactErrorKind::IngestionFailClosed
-                | kernel::ArtifactErrorKind::ReferenceCommit
-        ) {
-            return Err(unexpected(
-                &id,
-                "IngestionFailClosed | ReferenceCommit",
-                named,
-            ));
+        if error.kind() != kernel::ArtifactErrorKind::IngestionFailClosed {
+            return Err(unexpected(&id, "IngestionFailClosed", named));
         }
         let references: i64 = read_only(&kernel_file(stores.root()))
             .query_row(
@@ -623,7 +630,7 @@ pub fn artifact_ingest_episodes(
         witness.receipt("artifact_fault_named");
         // The latch holds until the reopen, so the fault is still armed here.
         witness.safety_check_while_armed(&stores);
-        stores = reopen(stores, now);
+        stores = reopen(stores, charges, now)?;
         let healed = stores
             .corpus
             .kernel
@@ -675,6 +682,7 @@ fn deletion_request(
 pub fn artifact_deletion_episodes(
     mut stores: Stores,
     witness: &mut Witness,
+    charges: &mut Charges,
     evidence_id: &str,
     step: u32,
     now: i64,
@@ -729,7 +737,7 @@ pub fn artifact_deletion_episodes(
             // The latch holds until the reopen, so the fault is still armed here.
             witness.safety_check_while_armed(&stores);
             observe_latched(&stores, witness, &id)?;
-            stores = reopen(stores, now);
+            stores = reopen(stores, charges, now)?;
         } else {
             witness.safety_check(&stores);
         }
@@ -948,6 +956,7 @@ pub fn corruption_episode(
         FaultAction::CorruptQuiescentFile,
         "Copied::reopen: a copied file whose bytes no longer match the checkpoint's digest is refused FileDiffers before any store opens; the corruption is detected, not repaired",
     ));
+    charges.store_bytes(stores.root())?;
     let mut closed = stores.close();
     let copy_root = charges.occupy()?;
     let (checkpoint, copied) = closed
@@ -1242,9 +1251,16 @@ pub fn campaign(
     let stores = recover(stores, witness, charges, steps[5].now_ms)?;
 
     let stores = corruption_episode(stores, witness, charges, step(5), steps[5].now_ms)?;
-    let (stores, evidence) = artifact_ingest_episodes(stores, witness, step(5), steps[5].now_ms)?;
-    let mut stores =
-        artifact_deletion_episodes(stores, witness, &evidence, step(5), steps[5].now_ms)?;
+    let (stores, evidence) =
+        artifact_ingest_episodes(stores, witness, charges, step(5), steps[5].now_ms)?;
+    let mut stores = artifact_deletion_episodes(
+        stores,
+        witness,
+        charges,
+        &evidence,
+        step(5),
+        steps[5].now_ms,
+    )?;
     stores.drain(steps[5].now_ms);
 
     let mut next = 5;

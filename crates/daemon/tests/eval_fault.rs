@@ -988,28 +988,29 @@ fn a_read_back_after_later_catch_up_is_refused_as_masked() {
     );
 }
 
-/// A 12-message plan leaves seven steps after the checkpoint: enough for a
-/// six-step fault phase, not for the nine the held publication needs.
+/// A 13-message plan's suffix ends at its third publish (the sixth, seventh,
+/// and eighth steps after the checkpoint): room for two publication probes
+/// and a step to live after, not for the held publication's probe ahead.
 #[test]
 fn a_plan_too_short_for_the_fault_phase_is_refused() {
     let publish = tempfile::tempdir().unwrap();
     let mut config = config(publish.path().join("out"), 600_000);
-    config.messages = 12;
+    config.messages = 13;
     match fault::run(&config, spawn_child) {
-        Err(RunError::HistoryTooShort { after_checkpoint }) => assert!(after_checkpoint < 9),
+        Err(RunError::HistoryTooShort { .. }) => {}
         Err(other) => panic!("refused by the wrong error: {other}"),
-        Ok(_) => panic!("a 12-message plan ran the fault phase"),
+        Ok(_) => panic!("a 13-message plan ran the fault phase"),
     }
 }
 
-/// `--messages 7` plans a history whose checkpoint leaves fewer than the nine
+/// `--messages 7` plans a history whose checkpoint leaves fewer than the six
 /// suffix steps the fault phase drives. The run refuses it as a `RunError`
 /// before any store opens; it does not panic on accepted numeric input.
 #[test]
 fn a_history_too_short_for_the_fault_phase_is_refused_not_panicked() {
     let plan = aging::plan(7).unwrap();
     assert!(
-        plan.steps.len() - (plan.checkpoint_step as usize) < 9,
+        plan.steps.len() - (plan.checkpoint_step as usize) < 6,
         "the case needs a short suffix: {} steps, checkpoint {}",
         plan.steps.len(),
         plan.checkpoint_step
@@ -1024,6 +1025,35 @@ fn a_history_too_short_for_the_fault_phase_is_refused_not_panicked() {
     assert!(
         refused.to_string().contains("after the checkpoint"),
         "{refused}"
+    );
+    assert!(
+        !publish.path().join("out").join(REPORT_FILE).exists(),
+        "nothing is published"
+    );
+}
+
+/// The publication probes apply steps until a publish opens an embedding job,
+/// and recovery needs a step left to live; a history the probes would exhaust
+/// is refused by the same planning check, before any store opens, rather
+/// than by the campaign after it has opened and mutated its stores.
+#[test]
+fn a_history_the_publication_probes_would_exhaust_is_refused_before_any_store_opens() {
+    let plan = aging::plan(9).unwrap();
+    assert!(
+        plan.steps.len() - (plan.checkpoint_step as usize) >= 6,
+        "the case needs a suffix the six-step check accepts: {} steps, checkpoint {}",
+        plan.steps.len(),
+        plan.checkpoint_step
+    );
+    let publish = tempfile::tempdir().unwrap();
+    let mut config = config(publish.path().join("out"), 600_000);
+    config.messages = 9;
+    let refused = fault::run(&config, spawn_child)
+        .err()
+        .expect("the history is refused");
+    assert!(
+        matches!(refused, RunError::HistoryTooShort { .. }),
+        "refused at planning, not by the campaign: {refused}"
     );
     assert!(
         !publish.path().join("out").join(REPORT_FILE).exists(),
@@ -1110,6 +1140,35 @@ fn the_campaign_charges_the_stores_before_each_recovery_closes_them() {
     assert!(
         peak > (before_recovery + end_open) / 2,
         "the peak charged is the footprint before the recovery: peak {peak}, before {before_recovery}, end {end_open}"
+    );
+}
+
+/// Every CAS episode's reopen closes the stores, which checkpoints the WALs
+/// away, so the footprint is charged before each of those closes too, as the
+/// recoveries charge it before theirs.
+#[test]
+fn the_cas_episodes_charge_the_stores_before_each_reopen_closes_them() {
+    let plan = aging::plan(MESSAGES).unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let mut stores = aging::Stores::open(root.path(), &plan);
+    aging::live(&mut stores, &plan.steps[..3]);
+    let open = campaign::root_bytes(root.path());
+    let profile = fault::profile(Scale::S0, MESSAGES, 600_000, None);
+    let mut charges = campaign::Charges::new(profile.envelope);
+    let mut witness = Witness::new();
+    let (stores, _) = fault::artifact_ingest_episodes(
+        stores,
+        &mut witness,
+        &mut charges,
+        3,
+        plan.steps[3].now_ms,
+    )
+    .unwrap();
+    drop(stores.close());
+    let peak = charges.envelope.peaks.store_bytes;
+    assert!(
+        peak >= open,
+        "the footprint before each CAS reopen is charged: peak {peak}, open before the episodes {open}"
     );
 }
 

@@ -2093,9 +2093,10 @@ report lists them apart from safety failures. The report refuses a record
 (an expected refusal or a liveness permanent stall) whose episode is not one
 of its episodes (`UnknownEpisode`) or whose error text does not name the
 variant's production type, `DeletionUnpropagated` or `MetadataQuota`
-(`RefusalNotEvidenced`). A recorded refusal whose episode is not a declared
-`expected_refusal` of the same refusal is `RefusalNotDeclared`: it would
-attribute the refusal to a fault that never ran. An `expected_refusal`
+(`RefusalNotEvidenced`). A recorded refusal or permanent stall whose episode
+is not a declared `expected_refusal` of the same refusal is
+`RefusalNotDeclared`: it would attribute the refusal to a fault that never
+ran. An `expected_refusal`
 episode with no recorded refusal of its own is `RefusalNotRecorded`: it would
 claim a refusal the run never observed.
 
@@ -2297,29 +2298,29 @@ quiescent copy whose kernel file has one page overwritten, refused
 match the checkpoint's digest) before any store opens, after which the
 original reopens in place; the four CAS ingest faults (`write`,
 `file_sync`, `rename`, `after_directory_sync`), each refused
-`IngestionFailClosed` or `ReferenceCommit` with no `evidence_meta` row for its
-evidence id, each healed by close and reopen and a fresh ingest; two
-purge-intent deletion faults, `intent_storage_exhausted` (`StorageExhausted`,
-consumed; a plain ingest succeeds without a reopen) and `intent_append`
-(`PurgeIntent`, healed by reopen). After every EIO, before its reopen, a plain
-ingest must be refused `IngestionFailClosed`, receipted `ingestion_latched`.
-The held publication (below) and two publication faults follow, each on an
-open embedding job: the drive applies the next planned steps, catching up
-after each, until a job is open, because a retirement opens none, and refuses
-a history that runs out first. `LoseLocalCommitReply` (the publisher returns
-`Embedded`) and `LoseLocalCommit` (`LocalCommitUnresolved`) each leave
-`embedding:<occurrence>` `Unknown`, and each must show the publisher's
-`Reconciling` then `ReconciliationRead` events (receipted `reconciling` and
-`reconciliation_read`), since a publication the fault never reached returns
-`Embedded` too. The receipt quota (R24) runs on a memory store of its own: one
-reserved job is given a receipt charge one receipt short of the project quota
-through the store's test-support connection and then closed, so no allowance
-is left to release; `reserve_memory_reviewer_job` then refuses `MetadataQuota`
-and the headroom shows nothing deleted. Last, a plain deletion of the ingested
-evidence leaves the next catch-up episode `Blocked(DeletionUnpropagated)` and
-a second episode with no progress (R11). R11 and R24 are declared
-`expected_refusal` episodes, with heals `reopen` and `permanent`, and recorded
-as expected refusals.
+`IngestionFailClosed` with no `evidence_meta` row for its evidence id, each
+healed by close and reopen and a fresh ingest; two purge-intent deletion
+faults,
+`intent_storage_exhausted` (`StorageExhausted`, consumed; a plain ingest
+succeeds without a reopen) and `intent_append` (`PurgeIntent`, healed by
+reopen). After every EIO, before its reopen, a plain ingest must be refused
+`IngestionFailClosed`, receipted `ingestion_latched`. The held publication
+(below) and two publication faults follow, each on an open embedding job: the drive applies the next planned
+steps, catching up after each, until a job is open, because a retirement opens
+none, and refuses a history that runs out first. `LoseLocalCommitReply` (the
+publisher returns `Embedded`) and `LoseLocalCommit` (`LocalCommitUnresolved`)
+each leave `embedding:<occurrence>` `Unknown`, and each must show the
+publisher's `Reconciling` then `ReconciliationRead` events (receipted
+`reconciling` and `reconciliation_read`), since a publication the fault never
+reached returns `Embedded` too. The receipt quota (R24) runs on a memory store
+of its own: one reserved job is given a receipt charge one receipt short of
+the project quota through the store's test-support connection and then closed,
+so no allowance is left to release; `reserve_memory_reviewer_job` then refuses
+`MetadataQuota` and the headroom shows nothing deleted. Last, a plain deletion
+of the ingested evidence leaves the next catch-up episode
+`Blocked(DeletionUnpropagated)` and a second episode with no progress (R11).
+R11 and R24 are declared `expected_refusal` episodes, with heals `reopen` and
+`permanent`, and recorded as expected refusals.
 
 A recovery closes the stores, reads every lost reply back by its identity from
 the closed files (`projection_checkpoint.checkpoint_commit_seq` for a local
@@ -2429,13 +2430,14 @@ lifecycle owner's wall-clock reads are outside the core.
 
 The `fault` subcommand takes the same flags as `aging` and answers with one
 JSON line; `fault-child` is its kill child. A history whose checkpoint leaves
-fewer than the nine steps the fault phase drives is refused
-(`HistoryTooShort`) before any store opens, and the run freezes its build
-identity, charges the stores at their open footprint, and takes the report
-back out when the manifest cannot follow it, as the aging shell does; the CI
-`eval-campaign` job runs `eval_fault` under `EIDNARA_EVAL_S0_BUDGET_MS` with
-the ignored scenarios, and the default shards run the campaign once with every
-scenario asserted over it.
+fewer than the six steps the fault phase drives, or too few publishes after
+them for the held publication, the two publication faults, and a step to live
+after recovery, is refused (`HistoryTooShort`) before any store opens, and the
+run freezes its build identity, charges the stores at their open footprint,
+and takes the report back out when the manifest cannot follow it, as the aging
+shell does; the CI `eval-campaign` job runs `eval_fault` under
+`EIDNARA_EVAL_S0_BUDGET_MS` with the ignored scenarios, and the default shards
+run the campaign once with every scenario asserted over it.
 
 ## Coverage markers
 

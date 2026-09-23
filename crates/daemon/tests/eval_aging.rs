@@ -348,6 +348,33 @@ fn work_enqueued_between_the_close_and_the_copy_is_refused() {
     );
 }
 
+/// The copy releases the projection lease and seals the receipt, so a second
+/// copy of the same closed root would probe nothing and copy under whatever
+/// took the lease since; the closed root is copied once, then reopened.
+#[test]
+fn a_closed_root_is_copied_once() {
+    let plan = plan(MESSAGES).unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let mut stores = Stores::open(root.path(), &plan);
+    live(&mut stores, &plan.steps[..3]);
+    let mut closed = stores.close();
+    let first = tempfile::tempdir().unwrap();
+    closed.copy(first.path()).unwrap();
+    let second = tempfile::tempdir().unwrap();
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        closed.copy(second.path()).is_ok()
+    }));
+    assert!(
+        outcome.is_err(),
+        "a second copy of a closed root is refused"
+    );
+    assert_eq!(
+        std::fs::read_dir(second.path()).unwrap().count(),
+        0,
+        "nothing was copied"
+    );
+}
+
 #[test]
 fn a_copy_into_a_root_that_is_not_empty_is_refused_before_any_byte_is_copied() {
     let plan = plan(MESSAGES).unwrap();
