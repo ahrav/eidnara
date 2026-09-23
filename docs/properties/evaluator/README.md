@@ -1606,7 +1606,8 @@ Fault contract (`crates/eval-core/tests/fault.rs`,
   `expected_refusal` episode with no recorded refusal or permanent stall
   (`RefusalNotRecorded`) refuse.
 - `a_parsed_report_cannot_claim_what_no_run_recorded`: a claim boundary that
-  is not the pinned one, a peak over its envelope bound, no episode at all, a
+  is not the pinned one, a peak over its envelope bound, no episode that
+  injects a fault (none at all, or expected refusals alone), a
   marker the registry does not know, an outside-core fault scoped to a
   healthy-core family, and an outside-core fault whose heal is consumed each
   refuse at the report; a blank episode id or operation refuses at the

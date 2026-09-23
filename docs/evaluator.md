@@ -2198,8 +2198,8 @@ refusal above, and also refuses
 when `profile_digest` is not the supplied profile's,
 `EnvelopeDisagreesWithProfile` when the envelope's bounds are not the
 profile's limits, `EnvelopeExceeded` when any recorded peak is over its
-bound, `NoEpisode` when no fault was armed (so no safety check ran while one
-was), `UnregisteredMarker` for a marker `MARKERS` does not register,
+bound, `NoEpisode` when no episode injects a fault (expected refusals alone
+arm nothing, so no safety check ran while a fault was), `UnregisteredMarker` for a marker `MARKERS` does not register,
 `LostReplyUnrecorded { episode }` for an episode that loses a reply that no
 effect's `lost_by` names, `LostReplyClaimedTwice` for one that two effects
 name (an episode fires once and loses one reply), `LostByNonLosingEpisode` for an effect naming

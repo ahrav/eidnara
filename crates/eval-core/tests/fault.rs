@@ -941,6 +941,17 @@ fn a_parsed_report_cannot_claim_what_no_run_recorded() {
         Err(FaultReportError::NoEpisode),
         "nothing was armed, so no safety check ran while a fault was"
     );
+    let mut refusal_only = ok.clone();
+    refusal_only.episodes.retain(|e| e.id == "r11");
+    refusal_only.barriers.clear();
+    refusal_only.coverage = coverage(&["r11"]);
+    refusal_only.effects = EffectLedger::default();
+    refusal_only.liveness = None;
+    assert_eq!(
+        refusal_only.validate(&p),
+        Err(FaultReportError::NoEpisode),
+        "an expected refusal injects no fault, so a report of refusals alone armed nothing"
+    );
     let mut invented = ok.clone();
     invented.markers.insert("flt_never_registered".to_string());
     assert_eq!(

@@ -1160,6 +1160,7 @@ pub enum FaultReportError {
     EnvelopeExceeded(crate::EnvelopeExceeded),
     /// The report's envelope bounds are not the approved profile's limits.
     EnvelopeDisagreesWithProfile,
+    /// No episode injects a fault; expected refusals alone arm nothing.
     NoEpisode,
     UnregisteredMarker {
         marker: String,
@@ -1271,7 +1272,13 @@ impl FaultReport {
         self.envelope
             .check()
             .map_err(FaultReportError::EnvelopeExceeded)?;
-        if self.episodes.is_empty() {
+        // An expected refusal injects no fault, so a report of refusals alone
+        // armed nothing.
+        if !self
+            .episodes
+            .iter()
+            .any(|e| !matches!(e.action, FaultAction::ExpectedRefusal { .. }))
+        {
             return Err(FaultReportError::NoEpisode);
         }
         if let Some(marker) = self
