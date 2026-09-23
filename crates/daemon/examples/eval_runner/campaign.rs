@@ -9,7 +9,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use daemon::transform::UserHintPass;
 use eval_core::{
@@ -757,6 +757,12 @@ impl Charges {
     pub fn elapsed(&mut self) -> Result<(), EnvelopeExceeded> {
         let elapsed = u64::try_from(self.started.elapsed().as_millis()).unwrap();
         self.observe(Resource::ElapsedMs, elapsed)
+    }
+
+    /// The campaign time left under the elapsed bound; zero once it is spent.
+    pub fn remaining(&self) -> Duration {
+        Duration::from_millis(self.envelope.bounds.elapsed_ms)
+            .saturating_sub(self.started.elapsed())
     }
 
     /// Charges the publish directory as one more root and one retained
