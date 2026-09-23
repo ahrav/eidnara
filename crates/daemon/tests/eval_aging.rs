@@ -19,13 +19,17 @@ use campaign::Charges;
 use eval_core::{
     AgingReport, Approval, CheckpointRefused, Construction, ConstructionKind, Coverage, Divergence,
     ExecutionMode, GuardComparison, MARKERS, PrefixRefused, ProfileError, RestoreRefused, Scale,
-    StateSnapshot, StoreFamily, WindowDeaths, WorkCounter, parse_aging_report, parse_manifest,
+    StateSnapshot, StoreFamily, WindowDeaths, WorkCounter, WorldError, parse_aging_report,
+    parse_manifest,
 };
 use memory_store::MemoryStore;
+use memory_store::memory_capture::CaptureSource;
 use rusqlite::{Connection, OpenFlags};
 use support::direct_host::example_binary;
+use support::embedding_fixtures::{batch_bounds, hold_admission};
 
 const MESSAGES: u32 = 40;
+const LONG_MESSAGES: u32 = 100;
 const SUITE: &str = "crates/daemon/tests/eval_aging.rs::";
 
 fn budget() -> Option<u64> {
@@ -151,10 +155,10 @@ fn a_quiescent_copy_resumes_the_full_replay_in_one_incarnation_scenario(coverage
 fn a_copy_with_pending_work_is_refused_by_the_counter_it_left_scenario(coverage: &mut Coverage) {
     let plan = plan(MESSAGES).unwrap();
     let root = tempfile::tempdir().unwrap();
-    let mut stores = Stores::open(root.path(), plan.rendering.clone());
+    let mut stores = Stores::open(root.path(), &plan);
     live(&mut stores, &plan.steps[..3]);
     stores.apply(&plan.steps[3]);
-    let mut closed = stores.close();
+    let closed = stores.close();
     assert_eq!(closed.receipt.step, 4);
     assert!(
         closed.receipt.stores[&StoreFamily::Kernel].pending[&WorkCounter::OutboxUnpublished] > 0,
@@ -180,7 +184,7 @@ fn a_copy_with_pending_work_is_refused_by_the_counter_it_left_scenario(coverage:
 fn a_reader_holding_the_projection_leaves_the_checkpoint_busy_scenario(coverage: &mut Coverage) {
     let plan = plan(MESSAGES).unwrap();
     let root = tempfile::tempdir().unwrap();
-    let mut stores = Stores::open(root.path(), plan.rendering.clone());
+    let mut stores = Stores::open(root.path(), &plan);
     live(&mut stores, &plan.steps[..3]);
     let reader =
         Connection::open_with_flags(stores.projection_path(), OpenFlags::SQLITE_OPEN_READ_ONLY)
@@ -189,7 +193,7 @@ fn a_reader_holding_the_projection_leaves_the_checkpoint_busy_scenario(coverage:
     let _held: i64 = reader
         .query_row("SELECT COUNT(*) FROM occurrences", [], |row| row.get(0))
         .unwrap();
-    let mut closed = stores.close();
+    let closed = stores.close();
     let wal = closed.receipt.stores[&StoreFamily::SearchProjection].wal;
     assert_ne!(wal.busy, 0, "{wal:?}");
     coverage.record("flt_checkpoint_observed_busy").unwrap();
@@ -207,9 +211,9 @@ fn a_reader_holding_the_projection_leaves_the_checkpoint_busy_scenario(coverage:
 fn a_copy_beside_a_live_memory_store_handle_is_refused_scenario(coverage: &mut Coverage) {
     let plan = plan(MESSAGES).unwrap();
     let root = tempfile::tempdir().unwrap();
-    let mut stores = Stores::open(root.path(), plan.rendering.clone());
+    let mut stores = Stores::open(root.path(), &plan);
     live(&mut stores, &plan.steps[..3]);
-    let mut closed = stores.close();
+    let closed = stores.close();
     let live_handle = MemoryStore::open(&daemon::store_descriptor_in(closed.root())).unwrap();
     coverage
         .record("sls_memstore_copy_refused_live_handle")
@@ -228,10 +232,10 @@ fn a_foreign_incarnation_is_refused_at_reopen_scenario(coverage: &mut Coverage) 
     let plan = plan(MESSAGES).unwrap();
     let k = plan.checkpoint_step as usize;
     let one = tempfile::tempdir().unwrap();
-    let mut first = Stores::open(one.path(), plan.rendering.clone());
+    let mut first = Stores::open(one.path(), &plan);
     live(&mut first, &plan.steps[..k]);
     let other = tempfile::tempdir().unwrap();
-    let mut second = Stores::open(other.path(), plan.rendering.clone());
+    let mut second = Stores::open(other.path(), &plan);
     live(&mut second, &plan.steps[..k]);
     assert_ne!(first.incarnation(), second.incarnation());
     coverage
@@ -241,13 +245,17 @@ fn a_foreign_incarnation_is_refused_at_reopen_scenario(coverage: &mut Coverage) 
     let (checkpoint, _) = first.close().copy(first_copy.path()).unwrap();
     let into = tempfile::tempdir().unwrap();
     let (_, copied) = second.close().copy(into.path()).unwrap();
-    assert!(matches!(
+    // The persisted incarnation id lives in the kernel file, so a foreign
+    // copy's bytes differ there before the identity check reads them.
+    assert_eq!(
         copied
             .reopen(&checkpoint, plan.steps[k].now_ms)
             .err()
             .unwrap(),
-        RestoreRefused::ForeignIncarnation { .. }
-    ));
+        RestoreRefused::FileDiffers {
+            path: "kernel/kernel.sqlite".to_string(),
+        }
+    );
     let (own, copied, _kept) = plan_copy(&plan, k);
     let object = own
         .files
@@ -267,7 +275,7 @@ fn plan_copy(
     k: usize,
 ) -> (eval_core::Checkpoint, aging::Copied, tempfile::TempDir) {
     let root = tempfile::tempdir().unwrap();
-    let mut stores = Stores::open(root.path(), plan.rendering.clone());
+    let mut stores = Stores::open(root.path(), plan);
     live(&mut stores, &plan.steps[..k]);
     let into = tempfile::tempdir().unwrap();
     let (checkpoint, copied) = stores.close().copy(into.path()).unwrap();
@@ -275,10 +283,184 @@ fn plan_copy(
 }
 
 #[test]
+fn a_copy_beside_a_live_kernel_handle_is_refused() {
+    let plan = plan(MESSAGES).unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let mut stores = Stores::open(root.path(), &plan);
+    live(&mut stores, &plan.steps[..3]);
+    let closed = stores.close();
+    assert!(closed.receipt.stores[&StoreFamily::Kernel].handles_closed);
+    let live_handle = kernel::KernelStore::open(closed.root().join("kernel")).unwrap();
+    let into = tempfile::tempdir().unwrap();
+    assert_eq!(
+        closed.copy(into.path()).err().unwrap(),
+        CheckpointRefused::HandleOpen {
+            family: StoreFamily::Kernel,
+        }
+    );
+    assert!(
+        std::fs::read_dir(into.path()).unwrap().next().is_none(),
+        "a refused copy writes nothing"
+    );
+    drop(live_handle);
+}
+
+#[test]
+fn work_enqueued_between_the_close_and_the_copy_is_refused() {
+    let plan = plan(MESSAGES).unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let mut stores = Stores::open(root.path(), &plan);
+    live(&mut stores, &plan.steps[..3]);
+    let closed = stores.close();
+    assert_eq!(
+        closed.receipt.stores[&StoreFamily::Memory].pending[&WorkCounter::CaptureJobsPending],
+        0
+    );
+    // Another holder takes the released lease, leaves work, and lets go
+    // before the copy's probe runs.
+    let holder = MemoryStore::open(&daemon::store_descriptor_in(closed.root())).unwrap();
+    holder
+        .enqueue_memory_capture(
+            CaptureSource {
+                project: "project-0",
+                harness: "pi",
+                session_id: "session-0",
+                message_id: "message-0",
+                role: "user",
+                text: "left behind",
+            },
+            0,
+        )
+        .unwrap();
+    drop(holder);
+    let into = tempfile::tempdir().unwrap();
+    assert!(matches!(
+        closed.copy(into.path()).err().unwrap(),
+        CheckpointRefused::PendingWork {
+            family: StoreFamily::Memory,
+            counter: WorkCounter::CaptureJobsPending,
+            observed: 1,
+        }
+    ));
+    assert!(
+        std::fs::read_dir(into.path()).unwrap().next().is_none(),
+        "a refused copy writes nothing"
+    );
+}
+
+#[test]
+fn a_copy_into_a_root_that_is_not_empty_is_refused_before_any_byte_is_copied() {
+    let plan = plan(MESSAGES).unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let mut stores = Stores::open(root.path(), &plan);
+    live(&mut stores, &plan.steps[..3]);
+    let closed = stores.close();
+    let into = tempfile::tempdir().unwrap();
+    // An unlisted sidecar would be read by SQLite beside the verified copy.
+    std::fs::write(into.path().join("memory.sqlite-wal"), b"").unwrap();
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        closed.copy(into.path()).is_ok()
+    }));
+    assert!(outcome.is_err(), "a copy into a non-empty root is refused");
+    assert_eq!(
+        std::fs::read_dir(into.path()).unwrap().count(),
+        1,
+        "nothing was copied beside the stray file"
+    );
+}
+
+#[test]
+fn a_copied_root_holding_a_file_the_checkpoint_does_not_list_is_refused_at_reopen() {
+    let plan = plan(MESSAGES).unwrap();
+    let (checkpoint, copied, _kept) = plan_copy(&plan, 3);
+    // A sidecar left by a later opener would be read beside the verified
+    // files without appearing in any recorded digest.
+    std::fs::write(copied.root().join("memory.sqlite-wal"), b"").unwrap();
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        copied.reopen(&checkpoint, plan.steps[3].now_ms).is_ok()
+    }));
+    assert!(
+        outcome.is_err(),
+        "an unlisted file in the copied root is refused"
+    );
+}
+
+#[test]
+fn a_copy_missing_a_store_file_is_refused_at_reopen() {
+    let plan = plan(MESSAGES).unwrap();
+    for file in [
+        "kernel/kernel.sqlite",
+        "memory.sqlite",
+        "search/search.sqlite",
+    ] {
+        let (checkpoint, copied, _kept) = plan_copy(&plan, 3);
+        assert!(checkpoint.files.contains_key(file), "{file}");
+        std::fs::remove_file(copied.root().join(file)).unwrap();
+        assert_eq!(
+            copied
+                .reopen(&checkpoint, plan.steps[3].now_ms)
+                .err()
+                .unwrap(),
+            RestoreRefused::FileMissing {
+                path: file.to_string(),
+            }
+        );
+    }
+}
+
+#[test]
+fn a_copy_with_a_modified_store_file_is_refused_at_reopen() {
+    let plan = plan(MESSAGES).unwrap();
+    for file in [
+        "kernel/kernel.sqlite",
+        "memory.sqlite",
+        "search/search.sqlite",
+    ] {
+        let (checkpoint, copied, _kept) = plan_copy(&plan, 3);
+        std::fs::write(copied.root().join(file), b"not a database").unwrap();
+        assert_eq!(
+            copied
+                .reopen(&checkpoint, plan.steps[3].now_ms)
+                .err()
+                .unwrap(),
+            RestoreRefused::FileDiffers {
+                path: file.to_string(),
+            }
+        );
+    }
+}
+
+#[test]
+fn a_wal_sidecar_whose_metadata_cannot_be_read_is_not_recorded_as_empty() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("store.sqlite");
+    std::fs::write(&file, b"").unwrap();
+    let wal = dir.path().join("store.sqlite-wal");
+    // A self-referential symlink makes `metadata` fail with ELOOP, an error
+    // that is not `NotFound`.
+    std::os::unix::fs::symlink(&wal, &wal).unwrap();
+    assert!(std::fs::metadata(&wal).is_err());
+    assert!(
+        std::panic::catch_unwind(|| aging::sidecar_len(&file)).is_err(),
+        "an unreadable sidecar must not be recorded as empty"
+    );
+}
+
+#[test]
+fn a_history_the_generator_refuses_is_a_run_error_not_a_panic() {
+    assert!(matches!(
+        plan(0).err().unwrap(),
+        RunError::World(WorldError::InvalidField("entities"))
+    ));
+}
+
+#[test]
 fn an_unapproved_profile_refuses_before_any_store_opens() {
     let publish = tempfile::tempdir().unwrap();
     let mut config = config(publish.path().join("out"), 600_000);
     config.approval = None;
+    // A history this long is never generated: the refusal comes first.
+    config.messages = u32::MAX;
     assert!(matches!(
         aging::run(&config).err().unwrap(),
         RunError::Profile(ProfileError::NotApproved { .. })
@@ -456,14 +638,31 @@ fn the_aged_arm_is_built_by_replay_and_matches_the_bulk_scaffold_only_by_enumera
         full.against_bulk.earlier.snapshot_commit_seq < full.against_bulk.later.snapshot_commit_seq
     );
     assert!(full.against_bulk.live_digests_equal);
-    assert!(
-        full.against_bulk
-            .divergences
-            .iter()
-            .any(|d| matches!(d, Divergence::TombstonedBeforeSnapshot { .. }))
-    );
+    assert!(full.rows.live.pending_embedding.is_empty());
+    // Every death the kernel recorded is one divergence: a dead row that
+    // vanished from both projections would leave the live digests equal and
+    // the enumeration short.
+    let mut enumerated: Vec<i64> = full
+        .against_bulk
+        .divergences
+        .iter()
+        .map(|d| match d {
+            Divergence::TombstonedBeforeSnapshot { death, .. } => death.invalidated_commit_seq,
+            other => panic!("the bulk scaffold diverges only by deaths: {other:?}"),
+        })
+        .collect();
+    let mut recorded: Vec<i64> = full
+        .state
+        .kernel
+        .values()
+        .filter_map(|d| d.invalidated_commit_seq)
+        .collect();
+    enumerated.sort_unstable();
+    recorded.sort_unstable();
+    assert!(!recorded.is_empty());
+    assert_eq!(enumerated, recorded);
     let root = tempfile::tempdir().unwrap();
-    let mut prefix = Stores::open(root.path(), plan.rendering.clone());
+    let mut prefix = Stores::open(root.path(), &plan);
     live(&mut prefix, &plan.steps[..plan.checkpoint_step as usize]);
     let checkpoint_tip = prefix.tip();
     assert!(checkpoint_tip < full.state.commit_seq);
@@ -497,7 +696,7 @@ fn two_lives_of_one_history_share_a_guard_digest_and_a_slipped_family_is_named()
     assert!(both.divergences.is_empty());
 
     let root = tempfile::tempdir().unwrap();
-    let mut short = Stores::open(root.path(), plan.rendering.clone());
+    let mut short = Stores::open(root.path(), &plan);
     live(&mut short, &plan.steps[..plan.checkpoint_step as usize]);
     let prefix = short.snapshot();
     assert_eq!(
@@ -518,6 +717,39 @@ fn two_lives_of_one_history_share_a_guard_digest_and_a_slipped_family_is_named()
 }
 
 #[test]
+fn a_history_beyond_the_fixture_bounds_is_lived_and_matches_the_bulk_scaffold() {
+    let plan = plan(LONG_MESSAGES).unwrap();
+    assert!(plan.bounds.hold.admission.max_references > hold_admission().max_references);
+    let mut charges = charges();
+    let full = full_life(&plan, &mut charges).unwrap();
+    assert!(full.rows.live.occurrences.len() > batch_bounds().max_local_mutations.get());
+    assert!(full.against_bulk.live_digests_equal);
+    assert!(full.rows.live.pending_embedding.is_empty());
+}
+
+#[test]
 fn a_history_too_short_to_straddle_a_death_is_refused() {
     assert!(matches!(plan(2), Err(RunError::NoStraddlingStep)));
+}
+
+#[test]
+fn the_store_is_charged_at_its_open_footprint_not_after_the_checkpoint() {
+    let plan = straddling_plan();
+    let root = tempfile::tempdir().unwrap();
+    let mut stores = Stores::open(root.path(), &plan);
+    live(&mut stores, &plan.steps);
+    let open = campaign::root_bytes(root.path());
+    drop(stores);
+    let closed = campaign::root_bytes(root.path());
+    assert!(
+        open > closed,
+        "closing checkpoints the WAL away: {open} vs {closed}"
+    );
+    let mut charges = charges();
+    full_life(&plan, &mut charges).unwrap();
+    let peak = charges.envelope.peaks.store_bytes;
+    assert!(
+        peak > (open + closed) / 2,
+        "the peak charged is the open footprint: peak {peak}, open {open}, closed {closed}"
+    );
 }

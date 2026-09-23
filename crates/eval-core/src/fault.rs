@@ -10,7 +10,9 @@ use serde_json::Value;
 use crate::checkpoint::StoreFamily;
 use crate::manifest::{Cut, CutOutcome, CutReceipt};
 use crate::statistics::LivenessBounds;
-use context_core::canonical_json::protocol_digest;
+use context_core::canonical_json::{
+    ContractError, canonical_json_encode, is_lower_hex, protocol_digest,
+};
 
 pub const FAULT_REPORT_SCHEMA: &str = "eval-suite-c-fault-report/v1";
 const FAULT_RESULT_DIGEST_PROTOCOL: &str = "eval-suite-c-fault-report-result/v1";
@@ -29,6 +31,15 @@ pub enum SearchEpisodeFault {
 pub enum PublicationFaultKind {
     LoseLocalCommitReply,
     LoseLocalCommit,
+}
+
+/// `claim_sources::EpisodeFault`: the claim materializer's acknowledgement seam.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MaterializationFaultKind {
+    LoseAcknowledgementReply,
+    SkipAcknowledgement,
+    FailAcknowledgement,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -62,6 +73,7 @@ pub enum FaultAction {
     SearchEpisode { fault: SearchEpisodeFault },
     EmbeddingPublication { fault: PublicationFaultKind },
     HeldPublication,
+    ClaimMaterialization { fault: MaterializationFaultKind },
     ArtifactIngest { fault: ArtifactIngestFaultKind },
     ArtifactDeletion { fault: ArtifactDeletionFaultKind },
     ExternalLockHolder,
@@ -70,13 +82,22 @@ pub enum FaultAction {
 }
 
 impl FaultAction {
-    /// The heal each seam permits. A CAS storage failure that is not capacity
-    /// exhaustion latches artifact ingestion closed until the store reopens,
-    /// so every ingest fault and the EIO deletion faults heal by reopen.
+    /// `ReservationCommit` and `AfterEvents` abort a SQLite transaction and are
+    /// consumed; the other ingest faults latch CAS ingestion closed until reopen.
     pub fn heal(&self) -> Heal {
         match self {
-            Self::SearchEpisode { .. } | Self::EmbeddingPublication { .. } => Heal::Consumed,
-            Self::ArtifactIngest { .. } => Heal::Reopen,
+            Self::SearchEpisode { .. }
+            | Self::EmbeddingPublication { .. }
+            | Self::ClaimMaterialization { .. } => Heal::Consumed,
+            Self::ArtifactIngest { fault } => match fault {
+                ArtifactIngestFaultKind::ReservationCommit
+                | ArtifactIngestFaultKind::AfterEvents => Heal::Consumed,
+                ArtifactIngestFaultKind::Write
+                | ArtifactIngestFaultKind::FileSync
+                | ArtifactIngestFaultKind::Rename
+                | ArtifactIngestFaultKind::AfterDirectorySync
+                | ArtifactIngestFaultKind::TakeoverBeforeCleanupUnlink => Heal::Reopen,
+            },
             Self::ArtifactDeletion { fault } => match fault {
                 ArtifactDeletionFaultKind::IntentAppend | ArtifactDeletionFaultKind::Unlink => {
                     Heal::Reopen
@@ -93,6 +114,31 @@ impl FaultAction {
 
     pub fn is_kill(&self) -> bool {
         matches!(self, Self::ProcessKill { .. })
+    }
+
+    /// The store the action's seam lives in: catch-up and publication write the
+    /// search projection, the CAS and the materializer's outbox are the kernel.
+    /// A lock holder, a kill, and a corrupted file name their own store.
+    pub fn family(&self) -> Option<StoreFamily> {
+        match self {
+            Self::SearchEpisode { .. }
+            | Self::EmbeddingPublication { .. }
+            | Self::HeldPublication => Some(StoreFamily::SearchProjection),
+            Self::ClaimMaterialization { .. }
+            | Self::ArtifactIngest { .. }
+            | Self::ArtifactDeletion { .. } => Some(StoreFamily::Kernel),
+            Self::ExternalLockHolder | Self::ProcessKill { .. } | Self::CorruptQuiescentFile => {
+                None
+            }
+        }
+    }
+
+    /// The cut a kill is declared at; `None` for every other action.
+    pub fn kill_cut(&self) -> Option<&str> {
+        match self {
+            Self::ProcessKill { cut } => Some(cut),
+            _ => None,
+        }
     }
 }
 
@@ -122,6 +168,8 @@ pub struct KillLabel {
 
 pub const APPLICATION_CRASH: &str = "application_crash";
 pub const TEST_BINARY_CHILD: &str = "test_binary_child";
+/// The one signal the runner sends; nothing else is the kill the label describes.
+pub const SIGKILL: i32 = 9;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -142,6 +190,11 @@ pub enum EpisodeRefused {
         declared: Heal,
         required: Heal,
     },
+    ScopeMismatch {
+        id: String,
+        declared: StoreFamily,
+        required: StoreFamily,
+    },
     CrashModelNotProved {
         id: String,
         crash_model: String,
@@ -159,6 +212,10 @@ pub enum EpisodeRefused {
     EmptyLayerContract {
         id: String,
     },
+    EmptyId,
+    EmptyOperation {
+        id: String,
+    },
     DuplicateEpisode {
         id: String,
     },
@@ -166,7 +223,13 @@ pub enum EpisodeRefused {
 
 impl FaultEpisode {
     pub fn validate(&self) -> Result<(), EpisodeRefused> {
+        if crate::blank(&self.id) {
+            return Err(EpisodeRefused::EmptyId);
+        }
         let id = self.id.clone();
+        if crate::blank(&self.scope.operation) {
+            return Err(EpisodeRefused::EmptyOperation { id });
+        }
         let required = self.action.heal();
         if self.heal != required {
             return Err(EpisodeRefused::HealMismatch {
@@ -175,7 +238,16 @@ impl FaultEpisode {
                 required,
             });
         }
-        if self.layer_contract.trim().is_empty() {
+        if let Some(required) = self.action.family()
+            && self.scope.store != required
+        {
+            return Err(EpisodeRefused::ScopeMismatch {
+                id,
+                declared: self.scope.store,
+                required,
+            });
+        }
+        if crate::blank(&self.layer_contract) {
             return Err(EpisodeRefused::EmptyLayerContract { id });
         }
         match (&self.kill, self.action.is_kill()) {
@@ -229,11 +301,14 @@ pub struct BarrierReceipt {
 pub enum BarrierRefused {
     LineDoesNotNameCut { episode: String, line: String },
     ExitedWithStatus { episode: String },
+    NotSigkill { episode: String, signal: i32 },
 }
 
 impl BarrierReceipt {
+    /// Barrier lines are `<prefix> <cut>`, so the cut must be the last token;
+    /// a suffix match would let `unacknowledged` name `acknowledged`.
     pub fn validate(&self) -> Result<(), BarrierRefused> {
-        if !self.line.trim_end().ends_with(&self.cut) {
+        if self.line.split_whitespace().next_back() != Some(self.cut.as_str()) {
             return Err(BarrierRefused::LineDoesNotNameCut {
                 episode: self.episode.clone(),
                 line: self.line.clone(),
@@ -242,6 +317,12 @@ impl BarrierReceipt {
         if self.signal == 0 {
             return Err(BarrierRefused::ExitedWithStatus {
                 episode: self.episode.clone(),
+            });
+        }
+        if self.signal != SIGKILL {
+            return Err(BarrierRefused::NotSigkill {
+                episode: self.episode.clone(),
+                signal: self.signal,
             });
         }
         Ok(())
@@ -277,7 +358,15 @@ impl CutCoverage {
         Ok(())
     }
 
+    /// A receipt for a cut nobody declared is refused whichever way it arrived.
     pub fn verdict(&self) -> Result<(), CoverageRefused> {
+        if let Some(cut) = self
+            .receipted
+            .keys()
+            .find(|cut| !self.declared.contains(*cut))
+        {
+            return Err(CoverageRefused::UndeclaredCut { cut: cut.clone() });
+        }
         let missing: BTreeSet<String> = self
             .declared
             .iter()
@@ -349,9 +438,25 @@ pub struct EffectLedger {
     pub effects: BTreeMap<String, Effect>,
 }
 
+impl Effect {
+    fn admits(&self, state: EffectState) -> bool {
+        if state == EffectState::NotApplied && self.acknowledged > 0 {
+            return false;
+        }
+        match &self.expected {
+            Expected::Exactly { state: expected } => *expected == state,
+            Expected::OneOf { states } => states.contains(&state),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EffectRefused {
     UnknownIdentity {
+        identity: String,
+    },
+    /// An entry `attempt` never created: nothing was tried under this identity.
+    NeverAttempted {
         identity: String,
     },
     BoundsViolated {
@@ -364,6 +469,14 @@ pub enum EffectRefused {
         identity: String,
     },
     ExpectationCollapsedWithoutReadBack {
+        identity: String,
+    },
+    ReadBackNotAdmissible {
+        identity: String,
+        state: EffectState,
+    },
+    /// The outcome or expectation is not the one the recorded events derive.
+    OutcomeNotDerived {
         identity: String,
     },
 }
@@ -423,16 +536,22 @@ impl EffectLedger {
         Ok(())
     }
 
-    /// A durable read-back by identity collapses the admissible set. A
-    /// read-back that finds the effect applied is an observation of it, the
-    /// only one a lost reply leaves.
+    /// Refuses states outside the admissible set, leaving the entry unchanged.
+    /// An applied read-back is one observation; it never lowers a count the
+    /// bounds check must still see.
     pub fn read_back(&mut self, identity: &str, state: EffectState) -> Result<(), EffectRefused> {
         let effect = self.effect(identity)?;
+        if !effect.admits(state) {
+            return Err(EffectRefused::ReadBackNotAdmissible {
+                identity: identity.to_string(),
+                state,
+            });
+        }
         effect.read_back = true;
         effect.expected = Expected::Exactly { state };
         effect.outcome = match state {
             EffectState::Applied => {
-                effect.observed = effect.observed.max(1).min(effect.attempted);
+                effect.observed = effect.observed.max(1);
                 EffectOutcome::Applied
             }
             EffectState::NotApplied => EffectOutcome::NotApplied,
@@ -443,12 +562,21 @@ impl EffectLedger {
     pub fn validate(&self) -> Result<(), EffectRefused> {
         for (identity, effect) in &self.effects {
             let identity = identity.clone();
+            if effect.attempted == 0 {
+                return Err(EffectRefused::NeverAttempted { identity });
+            }
             if !(effect.acknowledged <= effect.observed && effect.observed <= effect.attempted) {
                 return Err(EffectRefused::BoundsViolated {
                     identity,
                     attempted: effect.attempted,
                     observed: effect.observed,
                     acknowledged: effect.acknowledged,
+                });
+            }
+            if effect.acknowledged > 0 && effect.outcome == EffectOutcome::NotApplied {
+                return Err(EffectRefused::ReadBackNotAdmissible {
+                    identity,
+                    state: EffectState::NotApplied,
                 });
             }
             if effect.reply_lost && !effect.read_back {
@@ -463,6 +591,21 @@ impl EffectLedger {
                         });
                     }
                 }
+                continue;
+            }
+            // Without a lost reply only `Applied` was ever admissible; after a
+            // read-back the outcome is exactly the state it named.
+            let derived = match &effect.expected {
+                Expected::Exactly {
+                    state: EffectState::Applied,
+                } => effect.outcome == EffectOutcome::Applied,
+                Expected::Exactly {
+                    state: EffectState::NotApplied,
+                } => effect.reply_lost && effect.outcome == EffectOutcome::NotApplied,
+                Expected::OneOf { .. } => false,
+            };
+            if !derived {
+                return Err(EffectRefused::OutcomeNotDerived { identity });
             }
         }
         Ok(())
@@ -484,6 +627,16 @@ impl EffectLedger {
 pub enum ExpectedRefusal {
     R11DeletionBearingCatchUp,
     R24ReceiptQuotaExhausted,
+}
+
+impl ExpectedRefusal {
+    /// The production variant whose text a record must carry as evidence.
+    pub fn production_variant(self) -> &'static str {
+        match self {
+            Self::R11DeletionBearingCatchUp => "DeletionUnpropagated",
+            Self::R24ReceiptQuotaExhausted => "MetadataQuota",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -575,13 +728,21 @@ pub enum LivenessRefused {
         progress_at_bound: u64,
         blocked: Option<String>,
     },
+    NoOutsideCoreFault,
+    EmptyHealthyCore,
 }
 
 impl LivenessReport {
-    /// Every in-core lane was driven to its profile bound, met its target at
-    /// some step and again at the bound, and every outside-core fault was
-    /// still armed when the bound was reached.
+    /// Every in-core lane was fed fresh work and driven to its profile bound,
+    /// and its predicate held from `met_at` through that bound with no stall.
+    /// At least one outside-core fault is declared, and each stayed armed.
     pub fn verdict(&self, bounds: &LivenessBounds) -> Result<(), LivenessRefused> {
+        if self.core.families.is_empty() || self.core.lanes.is_empty() {
+            return Err(LivenessRefused::EmptyHealthyCore);
+        }
+        if self.outside_core.is_empty() {
+            return Err(LivenessRefused::NoOutsideCoreFault);
+        }
         for episode in &self.outside_core {
             if !self.armed_at_bound.contains(episode) {
                 return Err(LivenessRefused::FaultHealed {
@@ -612,7 +773,9 @@ impl LivenessReport {
             let met = progress
                 .met_at
                 .is_some_and(|k| k <= progress.bound && progress.holds_at_bound)
-                && progress.stalled_at.is_none();
+                && progress.stalled_at.is_none()
+                && progress.blocked.is_none()
+                && progress.fresh_commits > 0;
             if !met || progress.steps < progress.bound {
                 return Err(LivenessRefused::LivenessUnmet {
                     lane: *lane,
@@ -646,15 +809,56 @@ pub struct FaultReport {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FaultReportError {
-    SchemaMismatch { found: String },
+    SchemaMismatch {
+        found: String,
+    },
+    ClaimBoundaryMismatch,
+    MalformedDigest {
+        field: &'static str,
+    },
+    EnvelopeExceeded(crate::EnvelopeExceeded),
+    NoEpisode,
+    UnregisteredMarker {
+        marker: String,
+    },
     Episode(EpisodeRefused),
     Barrier(BarrierRefused),
     Coverage(CoverageRefused),
     Effect(EffectRefused),
     Liveness(LivenessRefused),
-    KillWithoutBarrier { episode: String },
+    KillWithoutBarrier {
+        episode: String,
+        cut: String,
+    },
+    /// A barrier no kill episode declares at that cut.
+    BarrierWithoutKill {
+        episode: String,
+        cut: String,
+    },
+    /// One cut receipted twice; two outcomes for one checkpoint is no outcome.
+    DuplicateCut {
+        cut: Cut,
+    },
+    UnknownEpisode {
+        episode: String,
+    },
+    /// An outside-core fault scoped to a family the healthy core names.
+    CoreFamilyFaulted {
+        episode: String,
+        store: StoreFamily,
+    },
+    /// A one-shot fault is consumed or never fired; neither is armed at the bound.
+    ConsumedFaultArmed {
+        episode: String,
+    },
+    /// A recorded refusal whose production error does not name its variant.
+    RefusalNotEvidenced {
+        episode: String,
+        refusal: ExpectedRefusal,
+    },
     SafetyNeverChecked,
     Shape(String),
+    NotCanonical(ContractError),
     Lossy,
 }
 
@@ -665,25 +869,110 @@ impl FaultReport {
                 found: self.schema.clone(),
             });
         }
+        if self.claim_boundary != crate::ClaimBoundary::pinned() {
+            return Err(FaultReportError::ClaimBoundaryMismatch);
+        }
+        for (field, digest) in [
+            ("eval_run_id", &self.eval_run_id),
+            ("profile_digest", &self.profile_digest),
+        ] {
+            if !is_lower_hex(digest, 64) {
+                return Err(FaultReportError::MalformedDigest { field });
+            }
+        }
+        self.envelope
+            .check()
+            .map_err(FaultReportError::EnvelopeExceeded)?;
+        if self.episodes.is_empty() {
+            return Err(FaultReportError::NoEpisode);
+        }
+        if let Some(marker) = self
+            .markers
+            .iter()
+            .find(|marker| !crate::MARKERS.iter().any(|m| m.name == marker.as_str()))
+        {
+            return Err(FaultReportError::UnregisteredMarker {
+                marker: marker.clone(),
+            });
+        }
         validate_episodes(&self.episodes).map_err(FaultReportError::Episode)?;
         for barrier in &self.barriers {
             barrier.validate().map_err(FaultReportError::Barrier)?;
         }
-        for episode in self.episodes.iter().filter(|e| e.action.is_kill()) {
-            if !self.barriers.iter().any(|b| b.episode == episode.id) {
+        for episode in &self.episodes {
+            let Some(cut) = episode.action.kill_cut() else {
+                continue;
+            };
+            if !self
+                .barriers
+                .iter()
+                .any(|b| b.episode == episode.id && b.cut == cut)
+            {
                 return Err(FaultReportError::KillWithoutBarrier {
                     episode: episode.id.clone(),
+                    cut: cut.to_string(),
                 });
             }
+        }
+        for barrier in &self.barriers {
+            if !self
+                .episodes
+                .iter()
+                .any(|e| e.id == barrier.episode && e.action.kill_cut() == Some(&barrier.cut))
+            {
+                return Err(FaultReportError::BarrierWithoutKill {
+                    episode: barrier.episode.clone(),
+                    cut: barrier.cut.clone(),
+                });
+            }
+        }
+        let mut cuts = BTreeSet::new();
+        if let Some(receipt) = self.cuts.iter().find(|r| !cuts.insert(r.cut)) {
+            return Err(FaultReportError::DuplicateCut { cut: receipt.cut });
         }
         self.coverage
             .verdict()
             .map_err(FaultReportError::Coverage)?;
         self.effects.validate().map_err(FaultReportError::Effect)?;
+        let stalls = self.liveness.iter().flat_map(|l| &l.permanent_stalls);
+        for recorded in self.expected_refusals.iter().chain(stalls) {
+            if !self.episodes.iter().any(|e| e.id == recorded.episode) {
+                return Err(FaultReportError::UnknownEpisode {
+                    episode: recorded.episode.clone(),
+                });
+            }
+            if !recorded
+                .production_error
+                .contains(recorded.refusal.production_variant())
+            {
+                return Err(FaultReportError::RefusalNotEvidenced {
+                    episode: recorded.episode.clone(),
+                    refusal: recorded.refusal,
+                });
+            }
+        }
         if self.safety_checks_while_armed == 0 {
             return Err(FaultReportError::SafetyNeverChecked);
         }
         if let Some(liveness) = &self.liveness {
+            for id in &liveness.outside_core {
+                let Some(episode) = self.episodes.iter().find(|e| &e.id == id) else {
+                    return Err(FaultReportError::UnknownEpisode {
+                        episode: id.clone(),
+                    });
+                };
+                if liveness.core.families.contains(&episode.scope.store) {
+                    return Err(FaultReportError::CoreFamilyFaulted {
+                        episode: id.clone(),
+                        store: episode.scope.store,
+                    });
+                }
+                if episode.action.heal() == Heal::Consumed {
+                    return Err(FaultReportError::ConsumedFaultArmed {
+                        episode: id.clone(),
+                    });
+                }
+            }
             liveness
                 .verdict(bounds)
                 .map_err(FaultReportError::Liveness)?;
@@ -691,9 +980,14 @@ impl FaultReport {
         Ok(())
     }
 
+    /// Digestible on both runtimes: no integer may leave the canonical safe
+    /// range, or `result_digest` would refuse the value `validate` accepted.
     pub fn serialize(&self, bounds: &LivenessBounds) -> Result<Value, FaultReportError> {
         self.validate(bounds)?;
-        serde_json::to_value(self).map_err(|e| FaultReportError::Shape(e.to_string()))
+        let value =
+            serde_json::to_value(self).map_err(|e| FaultReportError::Shape(e.to_string()))?;
+        canonical_json_encode(&value).map_err(FaultReportError::NotCanonical)?;
+        Ok(value)
     }
 
     pub fn result_digest(report: &Value) -> Result<String, FaultReportError> {
@@ -721,6 +1015,7 @@ pub fn parse_fault_report(
     let report =
         FaultReport::deserialize(value).map_err(|e| FaultReportError::Shape(e.to_string()))?;
     report.validate(bounds)?;
+    canonical_json_encode(value).map_err(FaultReportError::NotCanonical)?;
     let again =
         serde_json::to_value(&report).map_err(|e| FaultReportError::Shape(e.to_string()))?;
     if again != *value {

@@ -6,8 +6,9 @@ use eval_core::{
     EffectLedger, EffectOutcome, EffectRefused, EffectState, Envelope, EpisodeRefused, Expected,
     ExpectedRefusal, FAULT_REPORT_SCHEMA, FaultAction, FaultEpisode, FaultReport, FaultReportError,
     FaultScope, Heal, HealthyCore, KillLabel, Lane, LaneProgress, LivenessBounds, LivenessRefused,
-    LivenessReport, PublicationFaultKind, RecordedRefusal, ResourceLimits, SearchEpisodeFault,
-    StoreFamily, TEST_BINARY_CHILD, cut_receipts, parse_fault_report, validate_episodes,
+    LivenessReport, MaterializationFaultKind, PublicationFaultKind, RecordedRefusal,
+    ResourceLimits, SIGKILL, SearchEpisodeFault, StoreFamily, TEST_BINARY_CHILD, cut_receipts,
+    parse_fault_report, validate_episodes,
 };
 
 const SUITE: &str = "crates/eval-core/tests/fault.rs::";
@@ -74,7 +75,7 @@ fn barrier(episode: &str) -> BarrierReceipt {
         cut: "acknowledged".to_string(),
         pid: 4242,
         line: "barrier acknowledged".to_string(),
-        signal: 9,
+        signal: SIGKILL,
     }
 }
 
@@ -102,7 +103,7 @@ fn lane(bound: u64, met_at: Option<u64>, holds: bool) -> LaneProgress {
 fn liveness() -> LivenessReport {
     LivenessReport {
         core: HealthyCore {
-            families: [StoreFamily::Kernel, StoreFamily::SearchProjection]
+            families: [StoreFamily::Memory, StoreFamily::SearchProjection]
                 .into_iter()
                 .collect(),
             lanes: [Lane::CatchUpEpisodes, Lane::EmbeddingPasses]
@@ -131,7 +132,22 @@ fn report() -> FaultReport {
         eval_run_id: "ab".repeat(32),
         profile_digest: "cd".repeat(32),
         claim_boundary: ClaimBoundary::pinned(),
-        episodes: vec![episode("lost-ack", lost_ack()), episode("kill", kill())],
+        episodes: vec![
+            episode("lost-ack", lost_ack()),
+            episode("kill", kill()),
+            FaultEpisode {
+                scope: FaultScope {
+                    store: StoreFamily::Kernel,
+                    operation: "write".to_string(),
+                },
+                ..episode(
+                    "ingest-write",
+                    FaultAction::ArtifactIngest {
+                        fault: ArtifactIngestFaultKind::Write,
+                    },
+                )
+            },
+        ],
         barriers: vec![barrier("kill")],
         cuts: cut_receipts(
             &[Cut::AtQuiescence, Cut::AfterRecovery, Cut::EndOfRun],
@@ -146,7 +162,7 @@ fn report() -> FaultReport {
         coverage: coverage(&["lost-ack", "kill"]),
         effects,
         expected_refusals: vec![RecordedRefusal {
-            episode: "r11".to_string(),
+            episode: "lost-ack".to_string(),
             refusal: ExpectedRefusal::R11DeletionBearingCatchUp,
             production_error: "DeletionUnpropagated { commit_seq: 7 }".to_string(),
         }],
@@ -177,6 +193,33 @@ fn every_episode_is_a_named_action_with_the_heal_its_seam_permits() {
         Heal::Reopen,
         "an EIO in the CAS latches ingestion closed until reopen"
     );
+    for fault in [
+        ArtifactIngestFaultKind::ReservationCommit,
+        ArtifactIngestFaultKind::AfterEvents,
+    ] {
+        let action = FaultAction::ArtifactIngest { fault };
+        assert_eq!(
+            action.heal(),
+            Heal::Consumed,
+            "{fault:?} fails a transaction without latching, so the store stays usable"
+        );
+        let mut consumed = episode("ingest-transaction", action);
+        consumed.scope.store = StoreFamily::Kernel;
+        consumed.heal = Heal::Consumed;
+        consumed.validate().unwrap();
+    }
+    for fault in [
+        ArtifactIngestFaultKind::Write,
+        ArtifactIngestFaultKind::FileSync,
+        ArtifactIngestFaultKind::Rename,
+        ArtifactIngestFaultKind::TakeoverBeforeCleanupUnlink,
+    ] {
+        assert_eq!(
+            FaultAction::ArtifactIngest { fault }.heal(),
+            Heal::Reopen,
+            "{fault:?} latches ingestion closed"
+        );
+    }
     assert_eq!(
         FaultAction::ArtifactDeletion {
             fault: ArtifactDeletionFaultKind::IntentStorageExhausted
@@ -285,6 +328,24 @@ fn a_power_loss_label_and_a_host_kill_are_refused() {
         other_cut.validate(),
         Err(BarrierRefused::LineDoesNotNameCut { .. })
     ));
+    let mut suffix = barrier("kill");
+    suffix.line = "barrier unacknowledged".to_string();
+    assert!(
+        matches!(
+            suffix.validate(),
+            Err(BarrierRefused::LineDoesNotNameCut { .. })
+        ),
+        "the cut is the line's last token, not a suffix of it"
+    );
+    let mut empty = barrier("kill");
+    empty.cut = String::new();
+    assert!(
+        matches!(
+            empty.validate(),
+            Err(BarrierRefused::LineDoesNotNameCut { .. })
+        ),
+        "no line names an empty cut"
+    );
     let mut exited = barrier("kill");
     exited.signal = 0;
     assert!(matches!(
@@ -388,6 +449,31 @@ fn a_lost_reply_is_unknown_over_an_admissible_set_until_a_read_back_names_one_st
     assert_eq!((e.attempted, e.observed, e.acknowledged), (1, 0, 0));
     not_applied.validate().unwrap();
 
+    let before = ledger.clone();
+    assert_eq!(
+        ledger.read_back("commit:5", EffectState::NotApplied),
+        Err(EffectRefused::ReadBackNotAdmissible {
+            identity: "commit:5".to_string(),
+            state: EffectState::NotApplied,
+        }),
+        "an acknowledged effect read back as not applied is a lost acknowledged write"
+    );
+    assert_eq!(ledger, before, "a refused read-back changes nothing");
+    let mut acked_then_lost = ledger.clone();
+    acked_then_lost.lose_reply("commit:5").unwrap();
+    assert!(matches!(
+        acked_then_lost.read_back("commit:5", EffectState::NotApplied),
+        Err(EffectRefused::ReadBackNotAdmissible { .. })
+    ));
+    ledger.attempt("commit:7");
+    assert!(
+        matches!(
+            ledger.read_back("commit:7", EffectState::NotApplied),
+            Err(EffectRefused::ReadBackNotAdmissible { .. })
+        ),
+        "a reply that was not lost admits only the applied state"
+    );
+
     assert_eq!(
         ledger.observe("commit:9"),
         Err(EffectRefused::UnknownIdentity {
@@ -420,6 +506,23 @@ fn a_premature_success_fixture_is_refused() {
         Err(EffectRefused::ExpectationCollapsedWithoutReadBack {
             identity: "ack:3".to_string()
         })
+    );
+    let mut rewritten = EffectLedger::default();
+    rewritten.attempt("ack:6");
+    rewritten.acknowledge("ack:6").unwrap();
+    let e = rewritten.effects.get_mut("ack:6").unwrap();
+    e.read_back = true;
+    e.expected = Expected::Exactly {
+        state: EffectState::NotApplied,
+    };
+    e.outcome = EffectOutcome::NotApplied;
+    assert_eq!(
+        rewritten.validate(),
+        Err(EffectRefused::ReadBackNotAdmissible {
+            identity: "ack:6".to_string(),
+            state: EffectState::NotApplied,
+        }),
+        "a parsed ledger cannot record an acknowledged effect as not applied"
     );
     let mut inflated = EffectLedger::default();
     inflated.attempt("ack:4");
@@ -522,6 +625,29 @@ fn liveness_is_unmet_at_the_bound_or_when_a_fault_healed() {
         ),
         "a predicate that held, failed, and held again at the bound is not sustained progress"
     );
+    let mut idle = ok.clone();
+    idle.lanes
+        .get_mut(&Lane::EmbeddingPasses)
+        .unwrap()
+        .fresh_commits = 0;
+    assert!(
+        matches!(
+            idle.verdict(&bounds()),
+            Err(LivenessRefused::LivenessUnmet {
+                lane: Lane::EmbeddingPasses,
+                ..
+            })
+        ),
+        "a lane fed no fresh work meets its predicate trivially and proves no progress"
+    );
+    let mut unarmed = ok.clone();
+    unarmed.outside_core.clear();
+    unarmed.armed_at_bound.clear();
+    assert_eq!(
+        unarmed.verdict(&bounds()),
+        Err(LivenessRefused::NoOutsideCoreFault),
+        "the liveness mode runs with outside-core faults armed, so none is no run"
+    );
     let mut short = ok.clone();
     short.lanes.get_mut(&Lane::CatchUpEpisodes).unwrap().steps = 10;
     assert!(
@@ -584,8 +710,34 @@ fn a_fault_report_round_trips_and_refuses_what_it_cannot_prove() {
     assert_eq!(
         no_barrier.validate(&bounds()),
         Err(FaultReportError::KillWithoutBarrier {
-            episode: "kill".to_string()
+            episode: "kill".to_string(),
+            cut: "acknowledged".to_string(),
         })
+    );
+    let mut wrong_cut = report.clone();
+    wrong_cut.barriers = vec![BarrierReceipt {
+        cut: "staged".to_string(),
+        line: "barrier staged".to_string(),
+        ..barrier("kill")
+    }];
+    assert_eq!(
+        wrong_cut.validate(&bounds()),
+        Err(FaultReportError::KillWithoutBarrier {
+            episode: "kill".to_string(),
+            cut: "acknowledged".to_string(),
+        }),
+        "a barrier from another cut does not place the kill at its declared cut"
+    );
+    let mut ghost = report.clone();
+    let live = ghost.liveness.as_mut().unwrap();
+    live.outside_core.insert("ghost".to_string());
+    live.armed_at_bound.insert("ghost".to_string());
+    assert_eq!(
+        ghost.validate(&bounds()),
+        Err(FaultReportError::UnknownEpisode {
+            episode: "ghost".to_string()
+        }),
+        "an armed outside-core fault the campaign never ran is not evidence"
     );
     let mut unreceipted = report.clone();
     unreceipted.coverage.declare("unlink");
@@ -623,6 +775,319 @@ fn a_fault_report_round_trips_and_refuses_what_it_cannot_prove() {
     let _ = (
         PublicationFaultKind::LoseLocalCommit,
         BTreeMap::<String, u64>::new(),
+    );
+}
+
+#[test]
+fn a_parsed_report_cannot_claim_what_no_run_recorded() {
+    let ok = report();
+    let b = bounds();
+
+    let mut boundary = ok.clone();
+    boundary.claim_boundary.exclusions.clear();
+    assert_eq!(
+        boundary.validate(&b),
+        Err(FaultReportError::ClaimBoundaryMismatch)
+    );
+    let mut over = ok.clone();
+    over.envelope.peaks.processes = limits().processes + 1;
+    assert!(matches!(
+        over.validate(&b),
+        Err(FaultReportError::EnvelopeExceeded(_))
+    ));
+    let mut no_fault = ok.clone();
+    no_fault.episodes.clear();
+    no_fault.barriers.clear();
+    no_fault.coverage = CutCoverage::default();
+    no_fault.liveness = None;
+    assert_eq!(
+        no_fault.validate(&b),
+        Err(FaultReportError::NoEpisode),
+        "nothing was armed, so no safety check ran while a fault was"
+    );
+    let mut invented = ok.clone();
+    invented.markers.insert("flt_never_registered".to_string());
+    assert_eq!(
+        invented.validate(&b),
+        Err(FaultReportError::UnregisteredMarker {
+            marker: "flt_never_registered".to_string()
+        })
+    );
+    let mut in_core = ok.clone();
+    in_core.episodes[2].action = FaultAction::ExternalLockHolder;
+    in_core.episodes[2].heal = Heal::Released;
+    in_core.episodes[2].scope.store = StoreFamily::SearchProjection;
+    assert_eq!(
+        in_core.validate(&b),
+        Err(FaultReportError::CoreFamilyFaulted {
+            episode: "ingest-write".to_string(),
+            store: StoreFamily::SearchProjection,
+        }),
+        "a fault scoped to a healthy-core family is not outside the core"
+    );
+    let mut consumed = ok.clone();
+    consumed.episodes[2].action = FaultAction::ArtifactIngest {
+        fault: ArtifactIngestFaultKind::ReservationCommit,
+    };
+    consumed.episodes[2].heal = Heal::Consumed;
+    assert_eq!(
+        consumed.validate(&b),
+        Err(FaultReportError::ConsumedFaultArmed {
+            episode: "ingest-write".to_string()
+        }),
+        "a one-shot fault is consumed or never fired; neither is armed at the bound"
+    );
+
+    let mut unnamed = ok.episodes[0].clone();
+    unnamed.id = " ".to_string();
+    assert_eq!(
+        unnamed.validate(),
+        Err(EpisodeRefused::EmptyId),
+        "an episode nobody can name is not a named, scoped action"
+    );
+    let mut unscoped = ok.episodes[0].clone();
+    unscoped.scope.operation = String::new();
+    assert_eq!(
+        unscoped.validate(),
+        Err(EpisodeRefused::EmptyOperation {
+            id: "lost-ack".to_string()
+        })
+    );
+
+    let mut stray = coverage(&["kill"]);
+    stray.receipted.insert("unlink".to_string(), 1);
+    assert_eq!(
+        stray.verdict(),
+        Err(CoverageRefused::UndeclaredCut {
+            cut: "unlink".to_string()
+        }),
+        "a parsed receipt for an undeclared cut is the receipt the API refuses"
+    );
+
+    let mut claimed = ok.effects.clone();
+    let effect = claimed.effects.get_mut("ack:1").unwrap();
+    effect.reply_lost = false;
+    effect.read_back = false;
+    effect.expected = Expected::Exactly {
+        state: EffectState::NotApplied,
+    };
+    effect.outcome = EffectOutcome::NotApplied;
+    assert_eq!(
+        claimed.validate(),
+        Err(EffectRefused::OutcomeNotDerived {
+            identity: "ack:1".to_string()
+        }),
+        "a reply that was not lost derives applied; nothing else was observed"
+    );
+    let mut contradicted = ok.effects.clone();
+    contradicted.effects.get_mut("ack:1").unwrap().outcome = EffectOutcome::NotApplied;
+    assert_eq!(
+        contradicted.validate(),
+        Err(EffectRefused::OutcomeNotDerived {
+            identity: "ack:1".to_string()
+        }),
+        "an outcome must be the state its expectation names"
+    );
+
+    let mut laneless = liveness();
+    laneless.core.lanes.clear();
+    assert_eq!(
+        laneless.verdict(&b),
+        Err(LivenessRefused::EmptyHealthyCore),
+        "a core with no lane to drive proves no liveness"
+    );
+    let mut familyless = liveness();
+    familyless.core.families.clear();
+    assert_eq!(
+        familyless.verdict(&b),
+        Err(LivenessRefused::EmptyHealthyCore)
+    );
+
+    let mut overcounted = EffectLedger::default();
+    overcounted.attempt("dup");
+    overcounted.observe("dup").unwrap();
+    overcounted.observe("dup").unwrap();
+    overcounted.lose_reply("dup").unwrap();
+    overcounted.read_back("dup", EffectState::Applied).unwrap();
+    assert_eq!(overcounted.effects["dup"].observed, 2);
+    assert!(
+        matches!(
+            overcounted.validate(),
+            Err(EffectRefused::BoundsViolated {
+                attempted: 1,
+                observed: 2,
+                ..
+            })
+        ),
+        "an applied read-back adds evidence; it never erases an over-count"
+    );
+
+    let mut no_run = ok.clone();
+    no_run.eval_run_id = String::new();
+    assert_eq!(
+        no_run.validate(&b),
+        Err(FaultReportError::MalformedDigest {
+            field: "eval_run_id"
+        })
+    );
+    let mut no_profile = ok.clone();
+    no_profile.profile_digest = "ZZ".repeat(32);
+    assert_eq!(
+        no_profile.validate(&b),
+        Err(FaultReportError::MalformedDigest {
+            field: "profile_digest"
+        })
+    );
+
+    let materializer = FaultAction::ClaimMaterialization {
+        fault: MaterializationFaultKind::SkipAcknowledgement,
+    };
+    assert_eq!(materializer.heal(), Heal::Consumed);
+    assert_eq!(materializer.family(), Some(StoreFamily::Kernel));
+    assert_eq!(
+        serde_json::to_value(&materializer).unwrap(),
+        serde_json::json!({"kind": "claim_materialization", "fault": "skip_acknowledgement"})
+    );
+    let mut mislabelled = ok.episodes[2].clone();
+    mislabelled.scope.store = StoreFamily::Memory;
+    assert_eq!(
+        mislabelled.validate(),
+        Err(EpisodeRefused::ScopeMismatch {
+            id: "ingest-write".to_string(),
+            declared: StoreFamily::Memory,
+            required: StoreFamily::Kernel,
+        }),
+        "a CAS fault is a kernel fault whatever the episode says"
+    );
+    assert_eq!(FaultAction::ExternalLockHolder.family(), None);
+
+    for signal in [-1, 15, 999] {
+        let mut not_killed = barrier("kill");
+        not_killed.signal = signal;
+        assert_eq!(
+            not_killed.validate(),
+            Err(BarrierRefused::NotSigkill {
+                episode: "kill".to_string(),
+                signal,
+            }),
+            "only SIGKILL is the application crash the label describes"
+        );
+    }
+
+    let mut ghost_refusal = ok.clone();
+    ghost_refusal.expected_refusals[0].episode = "ghost".to_string();
+    assert_eq!(
+        ghost_refusal.validate(&b),
+        Err(FaultReportError::UnknownEpisode {
+            episode: "ghost".to_string()
+        })
+    );
+    let mut unevidenced = ok.clone();
+    unevidenced.expected_refusals[0].production_error = String::new();
+    assert_eq!(
+        unevidenced.validate(&b),
+        Err(FaultReportError::RefusalNotEvidenced {
+            episode: "lost-ack".to_string(),
+            refusal: ExpectedRefusal::R11DeletionBearingCatchUp,
+        })
+    );
+    let mut stalled_ghost = ok.clone();
+    stalled_ghost
+        .liveness
+        .as_mut()
+        .unwrap()
+        .permanent_stalls
+        .push(RecordedRefusal {
+            episode: "ghost".to_string(),
+            refusal: ExpectedRefusal::R24ReceiptQuotaExhausted,
+            production_error: "MetadataQuota".to_string(),
+        });
+    assert_eq!(
+        stalled_ghost.validate(&b),
+        Err(FaultReportError::UnknownEpisode {
+            episode: "ghost".to_string()
+        }),
+        "a permanent stall is a recorded refusal too"
+    );
+
+    let mut orphan_barrier = ok.clone();
+    orphan_barrier.barriers.push(barrier("ingest-write"));
+    assert_eq!(
+        orphan_barrier.validate(&b),
+        Err(FaultReportError::BarrierWithoutKill {
+            episode: "ingest-write".to_string(),
+            cut: "acknowledged".to_string(),
+        }),
+        "a barrier claims a kill; only a kill episode at that cut backs it"
+    );
+    let mut other_cut = ok.clone();
+    other_cut.barriers.push(BarrierReceipt {
+        cut: "staged".to_string(),
+        line: "barrier staged".to_string(),
+        ..barrier("kill")
+    });
+    assert_eq!(
+        other_cut.validate(&b),
+        Err(FaultReportError::BarrierWithoutKill {
+            episode: "kill".to_string(),
+            cut: "staged".to_string(),
+        })
+    );
+    let mut twice = ok.clone();
+    twice.cuts.push(eval_core::CutReceipt {
+        cut: Cut::AtQuiescence,
+        outcome: CutOutcome::NotReached,
+    });
+    assert_eq!(
+        twice.validate(&b),
+        Err(FaultReportError::DuplicateCut {
+            cut: Cut::AtQuiescence
+        }),
+        "two outcomes for one checkpoint is no outcome"
+    );
+    let mut untried = ok.effects.clone();
+    let effect = untried.effects.get_mut("ack:1").unwrap();
+    effect.attempted = 0;
+    effect.observed = 0;
+    effect.reply_lost = false;
+    effect.read_back = false;
+    assert_eq!(
+        untried.validate(),
+        Err(EffectRefused::NeverAttempted {
+            identity: "ack:1".to_string()
+        })
+    );
+    let mut unsafe_int = ok.clone();
+    unsafe_int.safety_checks_while_armed = 9_007_199_254_740_992;
+    assert!(
+        matches!(
+            unsafe_int.serialize(&b),
+            Err(FaultReportError::NotCanonical(_))
+        ),
+        "a report the result digest refuses is not serialized as valid"
+    );
+    let mut unsafe_value = ok.serialize(&b).unwrap();
+    unsafe_value["safety_checks_while_armed"] = serde_json::json!(9_007_199_254_740_992u64);
+    assert!(matches!(
+        parse_fault_report(&unsafe_value, &b),
+        Err(FaultReportError::NotCanonical(_))
+    ));
+    let mut met_but_blocked = liveness();
+    met_but_blocked
+        .lanes
+        .get_mut(&Lane::CatchUpEpisodes)
+        .unwrap()
+        .blocked = Some("DeletionUnpropagated { commit_seq: 9 }".to_string());
+    assert!(
+        matches!(
+            met_but_blocked.verdict(&b),
+            Err(LivenessRefused::LivenessUnmet {
+                lane: Lane::CatchUpEpisodes,
+                blocked: Some(_),
+                ..
+            })
+        ),
+        "a lane that records the block that stopped it did not meet its bound"
     );
 }
 

@@ -65,11 +65,11 @@ fn publish_refused((path, kind): (PathBuf, std::io::ErrorKind)) -> RunError {
 
 pub fn profile(
     scale: Scale,
-    steps: u32,
+    messages: u32,
     elapsed_ms: u64,
     approval: Option<Approval>,
 ) -> RunProfile {
-    let mut profile = aging::profile(scale, steps, elapsed_ms, approval);
+    let mut profile = aging::profile(scale, messages, elapsed_ms, approval);
     profile.name = profile.name.replace("suite-c-aging", "suite-c-fault");
     profile.envelope.temp_roots = 6;
     profile
@@ -431,7 +431,7 @@ pub fn campaign(
 ) -> Result<BTreeMap<String, EffectState>, RunError> {
     let k = plan.checkpoint_step as usize;
     let root = charges.occupy()?;
-    let mut stores = Stores::open(root.path(), plan.rendering.clone());
+    let mut stores = Stores::open(root.path(), plan);
     live(&mut stores, &plan.steps[..k]);
     witness.checkpoint(Cut::AtQuiescence);
     let steps = &plan.steps[k..];
@@ -544,7 +544,7 @@ pub fn run(config: &Config) -> Result<Run, RunError> {
     let steps = plan.steps.len() as u32;
     let profile = profile(
         config.scale,
-        steps,
+        config.messages,
         config.elapsed_bound_ms,
         config.approval.clone(),
     );
@@ -574,7 +574,7 @@ pub fn run(config: &Config) -> Result<Run, RunError> {
             "fault_phase_step": plan.checkpoint_step,
             "messages": config.messages,
         }),
-        &std::env::current_exe().unwrap(),
+        &[std::env::current_exe().unwrap()],
     );
     let bounds = profile.statistics.liveness_bounds.clone();
     let mut report = FaultReport {

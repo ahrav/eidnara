@@ -44,12 +44,8 @@ describe.skipIf(!rustPrereqs.ok)("incident pool baseline-green wrappers (rust)",
     let workspaceParentDir: string;
 
     beforeAll(() => {
-        if (!process.env.EIDNARA_E2E_DIRECT_HOST_FIXTURE_BIN) {
-            const prereqs = detectRustPrerequisites({ allowBuild: true });
-            if (prereqs.fixtureBin) {
-                process.env.EIDNARA_E2E_DIRECT_HOST_FIXTURE_BIN = prereqs.fixtureBin;
-            }
-        }
+        const prereqs = detectRustPrerequisites({ allowBuild: true });
+        for (const [name, path] of Object.entries(prereqs.binaries)) process.env[name] ??= path;
         // Each case already owns and removes its nonce-named directory. An extra
         // parent pushes the fixture's Unix socket past SUN_LEN with disk-backed TMPDIR.
         workspaceParentDir = tmpdir();

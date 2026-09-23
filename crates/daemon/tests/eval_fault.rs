@@ -367,11 +367,16 @@ fn a_lost_reply_without_a_matching_fixed_expectation_refuses_the_run() {
         check_expectations(&fixed, &effects).is_err(),
         "read back not applied"
     );
-    effects.read_back(identity, EffectState::Applied).unwrap();
-    check_expectations(&fixed, &effects).unwrap();
+    // A read-back fixes the expectation, so the applied case is a second
+    // ledger, not a second read-back of the same effect.
+    let mut applied = EffectLedger::default();
+    applied.attempt(identity);
+    applied.lose_reply(identity).unwrap();
+    applied.read_back(identity, EffectState::Applied).unwrap();
+    check_expectations(&fixed, &applied).unwrap();
     let stray = BTreeMap::from([("search_ack:9".to_string(), EffectState::Applied)]);
     assert!(
-        check_expectations(&stray, &effects).is_err(),
+        check_expectations(&stray, &applied).is_err(),
         "an expectation for an effect the campaign never lost"
     );
 }
@@ -380,7 +385,7 @@ fn a_lost_reply_without_a_matching_fixed_expectation_refuses_the_run() {
 fn a_read_back_after_later_catch_up_is_refused_as_masked() {
     let plan = aging::plan(MESSAGES).unwrap();
     let root = tempfile::tempdir().unwrap();
-    let mut stores = aging::Stores::open(root.path(), plan.rendering.clone());
+    let mut stores = aging::Stores::open(root.path(), &plan);
     aging::live(&mut stores, &plan.steps[..3]);
     let mut witness = Witness::new();
     stores.apply(&plan.steps[3]);
