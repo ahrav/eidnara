@@ -2069,9 +2069,10 @@ authored apart and their raw event ids overlap, so an event is named by its
 history; `Scenario::without` applies a deletion set to the named log only,
 removing each deleted event and its incident edges and leaving payloads that
 name it untouched, as `EventLog::without` does for one event.
-`Scenario::compile` recompiles the pair set from the candidate's own logs, so the fresh arm and the pair mapping are recomputed
-for every candidate and never carried over; both worlds are shrunk together
-because the fresh arm is derived from whatever survives in both. A candidate
+`Scenario::compile` recompiles the pair set from the candidate's own logs, so
+the fresh arm and the pair mapping are recomputed for every candidate and
+never carried over; both worlds are shrunk together because the fresh arm is
+derived from whatever survives in both. A candidate
 the compiler refuses (evidence deleted, a control class lost, an arm
 disagreeing) is `CandidateVerdict::InvalidPair { refusal }` carrying the
 `PairError` variant name, and no replay is issued for it.
