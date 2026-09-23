@@ -408,6 +408,11 @@ fn a_fresh_process_reproduces_the_predicate_and_the_minimized_witness_is_publish
         "the manifest declares the residue the replays and the witness declare"
     );
     assert_eq!(
+        manifest.run_identity.scenario["replay_timeout_ms"],
+        json!(config.replay_timeout.as_millis() as u64),
+        "the wait a child is allowed decides its verdict, so the identity pins it"
+    );
+    assert_eq!(
         manifest.cut_receipts,
         vec![eval_core::CutReceipt {
             cut: Cut::AtQuiescence,

@@ -494,7 +494,11 @@ pub fn run(config: &Config, spawn: Spawn) -> Result<Run, RunError> {
         &profile,
         SIMULATOR_VERSION,
         SEED,
-        json!({"commits": config.commits, "oracle": config.oracle}),
+        json!({
+            "commits": config.commits,
+            "oracle": config.oracle,
+            "replay_timeout_ms": u64::try_from(config.replay_timeout.as_millis()).unwrap(),
+        }),
         &[std::env::current_exe().unwrap()],
     );
     let root = charges.occupy()?;
