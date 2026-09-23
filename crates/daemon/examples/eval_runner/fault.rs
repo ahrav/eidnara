@@ -6,7 +6,8 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use daemon::embedding_publication::{
-    EmbeddingPublisher, Publication, PublicationError, PublicationFault, VectorPublication,
+    EmbeddingPublisher, Publication, PublicationError, PublicationEvent, PublicationFault,
+    VectorPublication,
 };
 use daemon::search_catchup::{Blocked, EpisodeEnd, EpisodeEvent, EpisodeFault, EpisodeReport};
 use eval_core::{
@@ -27,13 +28,15 @@ use memory_store::MemoryStore;
 use memory_store::memory_reviewer_jobs::{
     CausalInputs, EvidenceAvailability, MAX_MEMORY_REVIEWER_METADATA_BYTES_PER_PROJECT,
     MEMORY_REVIEWER_JOB_ALLOWANCE_BYTES, MEMORY_REVIEWER_RECEIPT_CHARGE_BYTES,
-    MemoryReviewerJobError, MemoryReviewerJobRefusal, ProducerBinding, ReviewTarget,
+    MemoryReviewerJobError, MemoryReviewerJobOutcome, MemoryReviewerJobRefusal, ProducerBinding,
+    ReviewTarget,
 };
 use rusqlite::{Connection, OpenFlags};
 use serde_json::json;
 
 use super::aging::{
-    self, ManifestInputs, Plan, Stores, kernel_file, live, read_only, search_file, suite_c_manifest,
+    self, ManifestInputs, Plan, Planned, Stores, kernel_file, live, read_only, search_file,
+    suite_c_manifest,
 };
 use super::campaign::{Charges, identity, prepare_publish, publish_file};
 use super::support::embedding_fixtures::{PROJECT, TestEngine, generation, intent};
@@ -170,7 +173,7 @@ impl Witness {
     }
 }
 
-const EVENT_CUTS: [&str; 11] = [
+const EVENT_CUTS: [&str; 14] = [
     "local_staged",
     "local_released",
     "acknowledgement_requested",
@@ -181,7 +184,10 @@ const EVENT_CUTS: [&str; 11] = [
     "deletion_unpropagated",
     "quota_refused",
     "publication_reconciled",
+    "reconciling",
+    "reconciliation_read",
     "artifact_fault_named",
+    "ingestion_latched",
 ];
 
 fn episode(
@@ -378,6 +384,26 @@ fn artifact_error_text(error: &ArtifactError) -> String {
     format!("{:?}: {error}", error.kind())
 }
 
+/// A plain ingest after a CAS EIO must be refused `IngestionFailClosed`: the
+/// runner observes the latch before the reopen that heals it.
+fn observe_latched(stores: &Stores, witness: &mut Witness, id: &str) -> Result<(), RunError> {
+    let latched = stores
+        .corpus
+        .kernel
+        .ingest_artifact(ingest_request(&format!("{id}-latched"), id.as_bytes()))
+        .err()
+        .ok_or_else(|| unexpected(id, "ingestion latched closed", "Ok"))?;
+    if latched.kind() != kernel::ArtifactErrorKind::IngestionFailClosed {
+        return Err(unexpected(
+            id,
+            "IngestionFailClosed while latched",
+            artifact_error_text(&latched),
+        ));
+    }
+    witness.receipt("ingestion_latched");
+    Ok(())
+}
+
 /// Closes and reopens the stores: the heal every latched CAS fault permits.
 fn reopen(stores: Stores, now: i64) -> Stores {
     stores.close().reopen(now)
@@ -448,19 +474,7 @@ pub fn artifact_ingest_episodes(
                 named,
             ));
         }
-        let latched = stores
-            .corpus
-            .kernel
-            .ingest_artifact(ingest_request(&format!("{id}-latched"), payload.as_bytes()))
-            .err()
-            .ok_or_else(|| unexpected(&id, "ingestion latched closed", "Ok"))?;
-        if latched.kind() != kernel::ArtifactErrorKind::IngestionFailClosed {
-            return Err(unexpected(
-                &id,
-                "IngestionFailClosed while latched",
-                artifact_error_text(&latched),
-            ));
-        }
+        observe_latched(&stores, witness, &id)?;
         witness.receipt("artifact_fault_named");
         witness.safety_check(&stores);
         stores = reopen(stores, now);
@@ -567,6 +581,7 @@ pub fn artifact_deletion_episodes(
         witness.receipt("artifact_fault_named");
         witness.safety_check(&stores);
         if heal == Heal::Reopen {
+            observe_latched(&stores, witness, &id)?;
             stores = reopen(stores, now);
         }
         let probe = stores
@@ -601,10 +616,10 @@ pub fn r11_episode(
         step,
         StoreFamily::SearchProjection,
         "acknowledge",
-        FaultAction::ArtifactDeletion {
-            fault: ArtifactDeletionFaultKind::AfterCommit,
+        FaultAction::ExpectedRefusal {
+            refusal: ExpectedRefusal::R11DeletionBearingCatchUp,
         },
-        "search_catchup::Blocked::DeletionUnpropagated: a window holding a deletion is refused so the barrier stays unsatisfied while the projection serves the text; production heals it by rebuilding the projection",
+        "search_catchup::Blocked::DeletionUnpropagated: a plain deletion puts a deletion in the next window, which is refused so the barrier stays unsatisfied while the projection serves the text; production heals it by rebuilding the projection",
     ));
     stores
         .corpus
@@ -642,32 +657,16 @@ pub fn r11_episode(
     Ok(())
 }
 
-/// The receipt quota refuses new reviewer work by name and deletes nothing.
-pub fn quota_episode(
-    root: &Path,
-    witness: &mut Witness,
-    step: u32,
-    now: i64,
-) -> Result<(), RunError> {
-    let id = witness.declare(FaultEpisode {
-        id: "r24-receipt-quota".to_string(),
-        trigger_step: step,
-        scope: FaultScope {
-            store: StoreFamily::Memory,
-            operation: "reserve_memory_reviewer_job".to_string(),
-        },
-        action: FaultAction::ExternalLockHolder,
-        heal: Heal::Released,
-        layer_contract: "memory_reviewer_jobs::MemoryReviewerJobRefusal::MetadataQuota: a receipt charge at the project quota refuses new admissions and deletes no receipt; the quota is permanent and this run releases nothing".to_string(),
-        kill: None,
-    });
-    let store = MemoryStore::open(&daemon::store_descriptor_in(root)).unwrap();
-    let producer = |firing: &str| ProducerBinding {
+pub fn reviewer_producer(firing: &str) -> ProducerBinding {
+    ProducerBinding {
         producer: "history-summarizer".to_string(),
         firing_id: firing.to_string(),
         ordinal: 0,
-    };
-    let inputs = |candidate: &str| CausalInputs {
+    }
+}
+
+pub fn reviewer_inputs(candidate: &str) -> CausalInputs {
+    CausalInputs {
         target: ReviewTarget::StagedSubject {
             kernel_incarnation: "0a".repeat(16),
             candidate_id: candidate.to_string(),
@@ -680,31 +679,75 @@ pub fn quota_episode(
             available: true,
         }],
         policy_versions: BTreeMap::from([("disclosure".to_string(), "3".to_string())]),
-    };
+    }
+}
+
+/// The receipt quota refuses new reviewer work by name and deletes nothing.
+pub fn quota_episode(
+    root: &Path,
+    witness: &mut Witness,
+    step: u32,
+    now: i64,
+) -> Result<(), RunError> {
+    let id = witness.declare(episode(
+        "r24-receipt-quota",
+        step,
+        StoreFamily::Memory,
+        "reserve_memory_reviewer_job",
+        FaultAction::ExpectedRefusal {
+            refusal: ExpectedRefusal::R24ReceiptQuotaExhausted,
+        },
+        "memory_reviewer_jobs::MemoryReviewerJobRefusal::MetadataQuota: receipt charges retained by a terminal job leave less than one admission's charge and allowance under the project quota, so admission refuses with no allowance left to release and deletes no receipt",
+    ));
+    let store = MemoryStore::open(&daemon::store_descriptor_in(root)).unwrap();
     let reserved = store
-        .reserve_memory_reviewer_job(PROJECT, &producer("f1"), &inputs("cand-1"), now)
+        .reserve_memory_reviewer_job(
+            PROJECT,
+            &reviewer_producer("f1"),
+            &reviewer_inputs("cand-1"),
+            now,
+        )
         .unwrap();
     let causal_identity = match reserved {
         memory_store::memory_reviewer_jobs::ReserveOutcome::Reserved(job) => job.causal_identity,
         other => return Err(unexpected(&id, "a fresh reservation", other)),
     };
-    let near_quota = i64::try_from(
-        MAX_MEMORY_REVIEWER_METADATA_BYTES_PER_PROJECT
-            - MEMORY_REVIEWER_JOB_ALLOWANCE_BYTES
-            - MEMORY_REVIEWER_RECEIPT_CHARGE_BYTES,
+    let retained = i64::try_from(
+        MAX_MEMORY_REVIEWER_METADATA_BYTES_PER_PROJECT - MEMORY_REVIEWER_RECEIPT_CHARGE_BYTES,
     )
     .unwrap();
     store
         .with_fenced_conn_for_test(|conn| {
             conn.execute(
                 "UPDATE memory_reviewer_jobs SET receipt_charge_bytes = ?1 WHERE causal_identity = ?2",
-                rusqlite::params![near_quota, causal_identity],
+                rusqlite::params![retained, causal_identity],
             )
         })
         .unwrap();
+    store
+        .finish_memory_reviewer_job(
+            PROJECT,
+            &causal_identity,
+            MemoryReviewerJobOutcome::Failed,
+            now,
+        )
+        .map_err(|e| unexpected(&id, "the planted job closed", e))?;
     let before = store.memory_reviewer_headroom(PROJECT).unwrap();
+    let admission = MEMORY_REVIEWER_RECEIPT_CHARGE_BYTES + MEMORY_REVIEWER_JOB_ALLOWANCE_BYTES;
+    if before.pending_jobs != 0 || before.project_metadata_remaining >= admission {
+        return Err(unexpected(
+            &id,
+            "no open allowance and less than one admission's headroom",
+            before,
+        ));
+    }
     let error = store
-        .reserve_memory_reviewer_job(PROJECT, &producer("f2"), &inputs("cand-2"), now)
+        .reserve_memory_reviewer_job(
+            PROJECT,
+            &reviewer_producer("f2"),
+            &reviewer_inputs("cand-2"),
+            now,
+        )
         .err()
         .ok_or_else(|| unexpected(&id, "MetadataQuota", "Ok"))?;
     let refusal = match error {
@@ -730,7 +773,6 @@ pub fn quota_episode(
         refusal: ExpectedRefusal::R24ReceiptQuotaExhausted,
         production_error: refusal,
     });
-    witness.safety_checks += 1;
     witness
         .coverage
         .record("flt_r24_recorded_as_expected_refusal")
@@ -838,6 +880,7 @@ pub fn publication_episode(
     let vector = TestEngine::vector_for(row.text.as_deref().unwrap_or_default());
     let identity = format!("embedding:{occurrence}");
     witness.effects.attempt(&identity);
+    let mut events = Vec::new();
     let mut publisher = EmbeddingPublisher::new(&stores.corpus.kernel, &stores.projection);
     let result = publisher.publish_with_fault_for_test(
         &VectorPublication {
@@ -860,7 +903,7 @@ pub fn publication_episode(
         },
         Instant::now() + Duration::from_secs(10),
         now,
-        &mut |_| {},
+        &mut |event| events.push(event),
         production,
     );
     match (fault, &result) {
@@ -869,11 +912,50 @@ pub fn publication_episode(
         }
         _ => return Err(unexpected(id, "the fault's documented outcome", &result)),
     }
+    let reconciling = events
+        .iter()
+        .position(|e| *e == PublicationEvent::Reconciling);
+    let read = events
+        .iter()
+        .rposition(|e| *e == PublicationEvent::ReconciliationRead);
+    match (reconciling, read) {
+        (Some(started), Some(read)) if started < read => {
+            witness.receipt("reconciling");
+            witness.receipt("reconciliation_read");
+        }
+        _ => {
+            return Err(unexpected(
+                id,
+                "Reconciling then ReconciliationRead",
+                &events,
+            ));
+        }
+    }
     witness.effects.lose_reply(&identity).unwrap();
     witness.receipt("publication_reconciled");
     witness.receipt(id);
     witness.safety_check(stores);
     Ok(identity)
+}
+
+/// Applies planned steps from `next`, catching up after each, until an
+/// embedding job is open, and returns the index of the last step applied; a
+/// retirement opens none, so a history that runs out first is refused.
+fn open_embedding_job(
+    stores: &mut Stores,
+    steps: &[Planned],
+    next: &mut usize,
+    id: &str,
+) -> Result<usize, RunError> {
+    while stores.pending(WorkCounter::EmbeddingOpen) == 0 {
+        let planned = steps
+            .get(*next)
+            .ok_or_else(|| unexpected(id, "a planned step that opens an embedding job", *next))?;
+        stores.apply(planned);
+        stores.catch_up(planned.now_ms);
+        *next += 1;
+    }
+    Ok(*next - 1)
 }
 
 /// Reads every lost reply back by its identity from the closed files.
@@ -986,31 +1068,45 @@ pub fn campaign(
         artifact_deletion_episodes(stores, witness, &evidence, step(3), steps[3].now_ms)?;
     stores.drain(steps[3].now_ms);
 
-    stores.apply(&steps[3]);
-    stores.catch_up(steps[3].now_ms);
-    let applied_id = publication_episode(
-        &mut stores,
-        witness,
-        "publication-commit-reply-lost",
-        step(3),
-        steps[3].now_ms,
-        PublicationFaultKind::LoseLocalCommitReply,
-    )?;
-    stores.apply(&steps[4]);
-    stores.catch_up(steps[4].now_ms);
-    let rolled_back_id = publication_episode(
-        &mut stores,
-        witness,
-        "publication-commit-lost",
-        step(4),
-        steps[4].now_ms,
-        PublicationFaultKind::LoseLocalCommit,
-    )?;
+    let mut next = 3;
+    let mut publications = Vec::new();
+    for (id, fault) in [
+        (
+            "publication-commit-reply-lost",
+            PublicationFaultKind::LoseLocalCommitReply,
+        ),
+        (
+            "publication-commit-lost",
+            PublicationFaultKind::LoseLocalCommit,
+        ),
+    ] {
+        let at = open_embedding_job(&mut stores, steps, &mut next, id)?;
+        publications.push(publication_episode(
+            &mut stores,
+            witness,
+            id,
+            step(at),
+            steps[at].now_ms,
+            fault,
+        )?);
+    }
+    let [applied_id, rolled_back_id]: [String; 2] = publications.try_into().unwrap();
+    let rest = next;
+    let resumed = steps
+        .get(rest)
+        .ok_or_else(|| {
+            unexpected(
+                "r11-deletion-bearing-catch-up",
+                "a step left to live after recovery",
+                rest,
+            )
+        })?
+        .now_ms;
 
     let quota_root = charges.occupy()?;
-    quota_episode(quota_root.path(), witness, step(5), steps[5].now_ms)?;
+    quota_episode(quota_root.path(), witness, step(rest), resumed)?;
     charges.vacate(quota_root)?;
-    r11_episode(&mut stores, witness, &evidence, step(5), steps[5].now_ms)?;
+    r11_episode(&mut stores, witness, &evidence, step(rest), resumed)?;
     witness.checkpoint(Cut::AfterFaultPhase);
 
     let closed = stores.close();
@@ -1021,14 +1117,14 @@ pub fn campaign(
     ]
     .into_iter()
     .collect();
-    let mut stores = closed.reopen(steps[5].now_ms);
+    let mut stores = closed.reopen(resumed);
     witness.checkpoint(Cut::AfterRecovery);
     witness
         .coverage
         .record("flt_lost_reply_unknown_until_readback")
         .unwrap();
     witness.safety_check(&stores);
-    live(&mut stores, &steps[5..]);
+    live(&mut stores, &steps[rest..]);
     witness.checkpoint(Cut::EndOfRun);
     drop(stores.close());
     charges.vacate(root)?;

@@ -62,6 +62,12 @@ fn lost_ack() -> FaultAction {
     }
 }
 
+fn r11() -> FaultAction {
+    FaultAction::ExpectedRefusal {
+        refusal: ExpectedRefusal::R11DeletionBearingCatchUp,
+    }
+}
+
 fn kill() -> FaultAction {
     FaultAction::ProcessKill {
         cut: "acknowledged".to_string(),
@@ -131,7 +137,11 @@ fn report() -> FaultReport {
         eval_run_id: "ab".repeat(32),
         profile_digest: "cd".repeat(32),
         claim_boundary: ClaimBoundary::pinned(),
-        episodes: vec![episode("lost-ack", lost_ack()), episode("kill", kill())],
+        episodes: vec![
+            episode("lost-ack", lost_ack()),
+            episode("kill", kill()),
+            episode("r11", r11()),
+        ],
         barriers: vec![barrier("kill")],
         cuts: cut_receipts(
             &[Cut::AtQuiescence, Cut::AfterRecovery, Cut::EndOfRun],
@@ -143,7 +153,7 @@ fn report() -> FaultReport {
             .into_iter()
             .collect(),
         ),
-        coverage: coverage(&["lost-ack", "kill"]),
+        coverage: coverage(&["lost-ack", "kill", "r11"]),
         effects,
         expected_refusals: vec![RecordedRefusal {
             episode: "r11".to_string(),
@@ -191,6 +201,19 @@ fn every_episode_is_a_named_action_with_the_heal_its_seam_permits() {
         }
         .heal(),
         Heal::Reopen
+    );
+    assert_eq!(
+        r11().heal(),
+        Heal::Reopen,
+        "the reopen's projection rebuild clears a deletion-bearing stall"
+    );
+    assert_eq!(
+        FaultAction::ExpectedRefusal {
+            refusal: ExpectedRefusal::R24ReceiptQuotaExhausted
+        }
+        .heal(),
+        Heal::Permanent,
+        "retained receipt charges refuse admission for the rest of the store incarnation"
     );
     let mut healed_wrong = ok.clone();
     healed_wrong.heal = Heal::Reopen;
@@ -611,6 +634,34 @@ fn a_fault_report_round_trips_and_refuses_what_it_cannot_prove() {
             EffectRefused::PrematureSuccess { .. }
         ))
     ));
+    let mut borrowed = report.clone();
+    borrowed.episodes[2].action = FaultAction::ArtifactDeletion {
+        fault: ArtifactDeletionFaultKind::AfterCommit,
+    };
+    borrowed.episodes[2].heal = Heal::Consumed;
+    assert_eq!(
+        borrowed.validate(&bounds()),
+        Err(FaultReportError::RefusalNotDeclared {
+            episode: "r11".to_string()
+        }),
+        "a refusal recorded against an injected fault's label claims a fault that never ran"
+    );
+    let mut mislabelled = report.clone();
+    mislabelled.expected_refusals[0].refusal = ExpectedRefusal::R24ReceiptQuotaExhausted;
+    assert_eq!(
+        mislabelled.validate(&bounds()),
+        Err(FaultReportError::RefusalNotDeclared {
+            episode: "r11".to_string()
+        })
+    );
+    let mut undeclared = report.clone();
+    undeclared.expected_refusals[0].episode = "r24".to_string();
+    assert_eq!(
+        undeclared.validate(&bounds()),
+        Err(FaultReportError::RefusalNotDeclared {
+            episode: "r24".to_string()
+        })
+    );
     let mut extra = value.clone();
     extra["surprise"] = serde_json::json!(1);
     assert!(matches!(

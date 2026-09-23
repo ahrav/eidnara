@@ -1673,10 +1673,13 @@ mirroring the fault enums and hooks that exist: `search_episode`
 `artifact_ingest` and `artifact_deletion` (the kernel CAS enums, including
 `after_directory_sync`, the approved directory-fsync hook),
 `external_lock_holder` (an external `BEGIN IMMEDIATE`), `process_kill { cut }`,
-and `corrupt_quiescent_file`.
+`corrupt_quiescent_file`, and `expected_refusal { refusal }`, which injects no
+fault: the runner drives production into a refusal it makes on purpose.
 `FaultAction::heal` is the heal each class permits: `consumed` for one-shot
-enums, `released` for gates and lock holders, `reopen` for kills and
-corruption; a declared heal that differs is `HealMismatch`. A kill carries a
+enums, `released` for gates and lock holders, `reopen` for kills, corruption,
+and R11 (the reopen's projection rebuild clears it), and `permanent` for R24,
+whose retained receipt charges refuse admission for the rest of the store
+incarnation; a declared heal that differs is `HealMismatch`. A kill carries a
 `KillLabel` whose `crash_model` must be `application_crash` with
 `page_cache_intact` and whose `killed_process` must be `test_binary_child`;
 `power_loss`, `torn_write`, `unsynced_reorder`, and `eidnara_host` are
@@ -1716,7 +1719,9 @@ inequality while one identity violates it is refused.
 `R11DeletionBearingCatchUp` (`Blocked::DeletionUnpropagated`) and
 `R24ReceiptQuotaExhausted` (`MemoryReviewerJobRefusal::MetadataQuota`); a
 `RecordedRefusal` carries the episode and the production error text, and the
-report lists them apart from safety failures.
+report lists them apart from safety failures. A recorded refusal whose episode
+is not a declared `expected_refusal` of the same refusal is
+`RefusalNotDeclared`: it would attribute the refusal to a fault that never ran.
 
 `LivenessReport` is the separate liveness mode: a `HealthyCore` (families and
 `Lane`s that must progress), the outside-core episodes, the set still armed
@@ -1853,20 +1858,28 @@ episode reach the target; a quiescent copy whose kernel file has one page
 overwritten, refused `IntegrityCheck { kernel }` by `Copied::reopen` before
 any store opens, after which the original reopens in place; the four CAS
 ingest faults (`write`, `file_sync`, `rename`, `after_directory_sync`), each
-refused `IngestionFailClosed` or `ReferenceCommit`, each proved to have
-latched ingestion closed (a plain ingest is refused until the store reopens),
-each healed by close and reopen and a fresh ingest; two purge-intent
-deletion faults, `intent_storage_exhausted` (`StorageExhausted`, consumed) and
-`intent_append` (`PurgeIntent`, latched, healed by reopen); two publication
-faults on a pending embedding job, `LoseLocalCommitReply` (the publisher
-returns `Embedded`) and `LoseLocalCommit` (`LocalCommitUnresolved`), each
-leaving `embedding:<occurrence>` `Unknown`; the receipt quota (R24) on a
-memory store of its own, a receipt charge planted at the project quota
-through the store's test-support connection so `reserve_memory_reviewer_job`
-refuses `MetadataQuota` and the headroom shows nothing deleted; and last the
-healed deletion of the ingested evidence, after which the next catch-up
-episode ends `Blocked(DeletionUnpropagated)` and a second episode makes no
-progress (R11), recorded as an expected refusal and a permanent stall.
+refused `IngestionFailClosed` or `ReferenceCommit`, each healed by close and
+reopen and a fresh ingest; two purge-intent deletion faults,
+`intent_storage_exhausted` (`StorageExhausted`, consumed; a plain ingest
+succeeds without a reopen) and `intent_append` (`PurgeIntent`, healed by
+reopen). After every EIO, before its reopen, a plain ingest must be refused
+`IngestionFailClosed`, receipted `ingestion_latched`. Two publication faults
+follow, each on an open embedding job: the drive applies the next planned
+steps, catching up after each, until a job is open, because a retirement opens
+none, and refuses a history that runs out first. `LoseLocalCommitReply` (the
+publisher returns `Embedded`) and `LoseLocalCommit` (`LocalCommitUnresolved`)
+each leave `embedding:<occurrence>` `Unknown`, and each must show the
+publisher's `Reconciling` then `ReconciliationRead` events (receipted
+`reconciling` and `reconciliation_read`), since a publication the fault never
+reached returns `Embedded` too. The receipt quota (R24) runs on a memory store
+of its own: one reserved job is given a receipt charge one receipt short of
+the project quota through the store's test-support connection and then closed,
+so no allowance is left to release; `reserve_memory_reviewer_job` then refuses
+`MetadataQuota` and the headroom shows nothing deleted. Last, a plain deletion
+of the ingested evidence leaves the next catch-up episode
+`Blocked(DeletionUnpropagated)` and a second episode with no progress (R11).
+R11 and R24 are declared `expected_refusal` episodes, with heals `reopen` and
+`permanent`, and recorded as expected refusals.
 
 Recovery closes the stores, reads every lost reply back by its identity from
 the closed files (`projection_checkpoint.checkpoint_commit_seq` for a local
@@ -1879,7 +1892,8 @@ stall: the stall is production's refusal, the rebuild is production's heal,
 and the report records both. The rest of the history then runs on the
 reopened stores. `AtQuiescence`, `AfterFaultPhase`, `AfterRecovery`, and
 `EndOfRun` are receipted where the runner reached them. A safety check runs
-after every episode while its fault is armed: the projection connection
+after every episode on the aging drive's stores while its fault is armed (the
+R24 episode's memory store is not one of them): the projection connection
 verifies, no descriptor claims a commit past the tip or an invalidation before
 its creation, and the projection never runs ahead of the kernel.
 

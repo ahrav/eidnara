@@ -20,9 +20,15 @@ use eval_core::{
     FaultAction, FaultReport, Heal, MARKERS, ProfileError, Scale, StoreFamily, parse_fault_report,
     parse_manifest,
 };
-use fault::{Config, MANIFEST_FILE, REPORT_FILE, Run, RunError};
+use fault::{Config, MANIFEST_FILE, REPORT_FILE, Run, RunError, Witness};
+use memory_store::MemoryStore;
+use memory_store::memory_reviewer_jobs::{
+    MemoryReviewerJobError, MemoryReviewerJobOutcome, MemoryReviewerJobRefusal,
+};
+use support::embedding_fixtures::PROJECT;
 
-const MESSAGES: u32 = 40;
+const MESSAGES: u32 = 24;
+const QUOTA_NOW_MS: i64 = 1_000;
 const SUITE: &str = "crates/daemon/tests/eval_fault.rs::";
 
 fn budget() -> Option<u64> {
@@ -117,6 +123,7 @@ fn the_fault_campaign_receipts_every_declared_cut_scenario(campaign: &Campaign) 
         "artifact_deletion",
         "corrupt_quiescent_file",
         "embedding_publication",
+        "expected_refusal",
     ] {
         assert!(actions.contains(kind), "{actions:?} lacks {kind}");
     }
@@ -125,7 +132,15 @@ fn the_fault_campaign_receipts_every_declared_cut_scenario(campaign: &Campaign) 
         assert!(!episode.layer_contract.is_empty());
         assert!(episode.kill.is_none(), "no kill episode in this campaign");
     }
-    assert!(report.safety_checks_while_armed >= report.episodes.len() as u64);
+    let on_the_drive = report
+        .episodes
+        .iter()
+        .filter(|e| e.scope.store != StoreFamily::Memory)
+        .count();
+    assert!(
+        report.safety_checks_while_armed >= on_the_drive as u64,
+        "every episode on the aging drive's stores is followed by a safety check"
+    );
     assert!(report.liveness.is_none(), "liveness is a separate mode");
 
     let published = serde_json::from_slice(&std::fs::read(out.join(REPORT_FILE)).unwrap()).unwrap();
@@ -193,6 +208,13 @@ fn a_lost_reply_stays_unknown_until_readback_at_after_recovery_scenario(campaign
         vec![EffectOutcome::Applied, EffectOutcome::NotApplied],
         "a committed-then-lost reply reads back applied; a rolled-back one reads back not applied"
     );
+    for cut in ["reconciling", "reconciliation_read"] {
+        assert_eq!(
+            run.report.coverage.receipted.get(cut),
+            Some(&2),
+            "each publication episode's observer saw {cut}"
+        );
+    }
     assert!(run.report.effects.unknown().is_empty());
 }
 
@@ -217,6 +239,14 @@ fn deletion_bearing_catch_up_is_an_expected_refusal_and_a_permanent_stall_scenar
         .find(|e| e.id == r11.episode)
         .unwrap();
     assert_eq!(episode.scope.store, StoreFamily::SearchProjection);
+    assert_eq!(
+        episode.action,
+        FaultAction::ExpectedRefusal {
+            refusal: ExpectedRefusal::R11DeletionBearingCatchUp
+        },
+        "a plain deletion provokes R11; no deletion fault is injected"
+    );
+    assert_eq!(episode.heal, Heal::Reopen);
     assert!(episode.layer_contract.contains("rebuilding"));
 }
 
@@ -239,7 +269,14 @@ fn receipt_quota_exhaustion_is_an_expected_refusal_scenario(campaign: &Campaign)
         .find(|e| e.id == r24.episode)
         .unwrap();
     assert_eq!(episode.scope.store, StoreFamily::Memory);
-    assert_eq!(episode.heal, Heal::Released);
+    assert_eq!(
+        episode.action,
+        FaultAction::ExpectedRefusal {
+            refusal: ExpectedRefusal::R24ReceiptQuotaExhausted
+        },
+        "a planted receipt charge provokes R24; no lock is held"
+    );
+    assert_eq!(episode.heal, Heal::Permanent);
 }
 
 fn a_corrupted_quiescent_file_is_detected_before_any_store_opens_scenario(campaign: &Campaign) {
@@ -275,8 +312,13 @@ fn artifact_faults_fail_with_their_named_errno_and_heal_by_reopen_or_consumption
             )
         })
         .collect();
-    assert_eq!(artifact.len(), 7, "{artifact:?}");
+    assert_eq!(artifact.len(), 6, "{artifact:?}");
     assert_eq!(run.report.coverage.receipted["artifact_fault_named"], 6);
+    assert_eq!(
+        run.report.coverage.receipted.get("ingestion_latched"),
+        Some(&5),
+        "a plain ingest is refused after every EIO and before its reopen"
+    );
     let heals: Vec<Heal> = artifact.iter().map(|e| e.heal).collect();
     assert_eq!(
         heals.iter().filter(|h| **h == Heal::Reopen).count(),
@@ -285,8 +327,8 @@ fn artifact_faults_fail_with_their_named_errno_and_heal_by_reopen_or_consumption
     );
     assert_eq!(
         heals.iter().filter(|h| **h == Heal::Consumed).count(),
-        2,
-        "ENOSPC and the healed deletion are consumed: {heals:?}"
+        1,
+        "ENOSPC is consumed: {heals:?}"
     );
 }
 
@@ -385,6 +427,69 @@ fn every_fault_marker_fires_across_the_scenarios() {
     assert_eq!(
         missing, pending,
         "every marker this suite owns fires here except the kill and liveness markers, which their scenarios record"
+    );
+}
+
+fn quota_episode_on_a_fresh_root() -> (tempfile::TempDir, Witness) {
+    let root = tempfile::tempdir().unwrap();
+    let mut witness = Witness::new();
+    fault::quota_episode(root.path(), &mut witness, 1, QUOTA_NOW_MS).unwrap();
+    (root, witness)
+}
+
+#[test]
+fn the_receipt_quota_refusal_outlives_every_released_allowance() {
+    let (root, _) = quota_episode_on_a_fresh_root();
+    let store = MemoryStore::open(&daemon::store_descriptor_in(root.path())).unwrap();
+    let open: Vec<String> = store
+        .with_fenced_conn_for_test(|conn| {
+            conn.prepare(
+                "SELECT causal_identity FROM memory_reviewer_jobs WHERE state <> 'terminal'",
+            )?
+            .query_map([], |row| row.get(0))?
+            .collect()
+        })
+        .unwrap();
+    for identity in open {
+        store
+            .finish_memory_reviewer_job(
+                PROJECT,
+                &identity,
+                MemoryReviewerJobOutcome::Failed,
+                QUOTA_NOW_MS,
+            )
+            .unwrap();
+    }
+    assert_eq!(
+        store
+            .memory_reviewer_headroom(PROJECT)
+            .unwrap()
+            .pending_jobs,
+        0
+    );
+    let again = store.reserve_memory_reviewer_job(
+        PROJECT,
+        &fault::reviewer_producer("f3"),
+        &fault::reviewer_inputs("cand-3"),
+        QUOTA_NOW_MS,
+    );
+    assert!(
+        matches!(
+            again,
+            Err(MemoryReviewerJobError::Refused(
+                MemoryReviewerJobRefusal::MetadataQuota
+            ))
+        ),
+        "R24 names a permanent refusal, not one a released allowance clears: {again:?}"
+    );
+}
+
+#[test]
+fn the_receipt_quota_episode_claims_no_projection_safety_check() {
+    let (_root, witness) = quota_episode_on_a_fresh_root();
+    assert_eq!(
+        witness.safety_checks, 0,
+        "the quota episode runs on a memory store of its own; no projection check ran"
     );
 }
 
