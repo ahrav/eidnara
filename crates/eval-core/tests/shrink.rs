@@ -7,10 +7,10 @@ use std::collections::BTreeSet;
 
 use eval_core::{
     CandidateVerdict, Cut, Element, EpisodeRefused, EventId, EventLog, FailureClass,
-    FailurePredicate, History, MAX_OUTSTANDING_REPLAY_EFFECTS, Minimality, NotEstablishedReason,
-    Oracle, OracleRefused, Payload, ReplayEffects, ReplayOutcome, ReplayRefused, ReplayRequest,
-    Scenario, ShrinkRefused, ShrinkReportError, Transformation, UnknownReason, WitnessClass,
-    classify_replay, parse_shrink_report, reduce, shrink,
+    FailurePredicate, History, Lane, MAX_OUTSTANDING_REPLAY_EFFECTS, Minimality,
+    NotEstablishedReason, Oracle, OracleRefused, Payload, ReplayEffects, ReplayOutcome,
+    ReplayRefused, ReplayRequest, Scenario, ShrinkRefused, ShrinkReportError, Transformation,
+    UnknownReason, WitnessClass, classify_replay, parse_shrink_report, reduce, shrink,
 };
 use serde_json::{Value, json};
 use support::shrink::{
@@ -63,7 +63,7 @@ fn classify_keeps_unknown_unknown_for_every_reason() {
         ),
         CandidateVerdict::Reproduced
     );
-    let slips: [fn(&mut FailurePredicate); 4] = [
+    let slips: [fn(&mut FailurePredicate); 5] = [
         |p| {
             p.oracle = Oracle::RequiredCommits {
                 failing_at: 1,
@@ -74,7 +74,14 @@ fn classify_keeps_unknown_unknown_for_every_reason() {
         |p| p.profile_digest = "other-profile".to_string(),
         |p| {
             p.witness_class = WitnessClass::Failure {
+                task: "early-commit".to_string(),
                 class: FailureClass::DurableState,
+            }
+        },
+        |p| {
+            p.witness_class = WitnessClass::Failure {
+                task: "last-rename".to_string(),
+                class: FailureClass::Interference,
             }
         },
     ];
@@ -123,7 +130,7 @@ fn shrink_preserves_the_predicate_and_rejects_slipped_candidates() {
         .expect("the minimized pair is valid");
     let truth = reduce(&set.aged, &fixture(), &set.pairs[0].task.query).unwrap();
     assert_eq!(
-        oracle().evaluate(&set, &truth, CUT, PROFILE),
+        oracle().evaluate(&set, "early-commit", &truth, CUT, PROFILE),
         ReplayOutcome::Failed {
             predicate: expected.clone()
         },
@@ -143,6 +150,7 @@ fn shrink_preserves_the_predicate_and_rejects_slipped_candidates() {
         assert_eq!(
             observed.witness_class,
             WitnessClass::Failure {
+                task: "early-commit".to_string(),
                 class: FailureClass::DurableState
             }
         );
@@ -413,7 +421,7 @@ fn an_exhausted_replay_budget_stops_the_pass_and_keeps_the_last_reproduced_scena
     let set = minimized.compile(&fixture()).unwrap();
     let truth = reduce(&set.aged, &fixture(), &set.pairs[0].task.query).unwrap();
     assert_eq!(
-        oracle().evaluate(&set, &truth, CUT, PROFILE),
+        oracle().evaluate(&set, "early-commit", &truth, CUT, PROFILE),
         ReplayOutcome::Failed {
             predicate: expected
         }
@@ -654,7 +662,7 @@ fn wire_names_are_pinned() {
             "oracle": {"kind": "required_commits", "failing_at": 3, "slipping_at": 6},
             "checkpoint": "AtQuiescence",
             "profile_digest": PROFILE,
-            "witness_class": {"kind": "failure", "class": "interference"},
+            "witness_class": {"kind": "failure", "task": "early-commit", "class": "interference"},
         })
     );
     assert_eq!(
@@ -676,8 +684,18 @@ fn wire_names_are_pinned() {
         json!({"kind": "not_established", "reason": {"reason": "unknown_candidates", "count": 2}})
     );
     assert_eq!(
-        serde_json::to_value(WitnessClass::Recovery).unwrap(),
-        json!({"kind": "recovery"})
+        serde_json::to_value(WitnessClass::Recovery {
+            effect: "effect-1".to_string()
+        })
+        .unwrap(),
+        json!({"kind": "recovery", "effect": "effect-1"})
+    );
+    assert_eq!(
+        serde_json::to_value(WitnessClass::Liveness {
+            lane: Lane::CatchUpEpisodes
+        })
+        .unwrap(),
+        json!({"kind": "liveness", "lane": "catch_up_episodes"})
     );
     let (_, report) = shrink(&scenario(), &fixture(), &predicate, 3, &mut evaluate).unwrap();
     let value = serde_json::to_value(&report).unwrap();
@@ -708,6 +726,7 @@ fn a_replay_under_other_thresholds_slips_even_when_it_fails_the_same_class() {
         .unwrap();
         other.evaluate(
             request.set,
+            &request.set.pairs[0].task.id,
             &truth,
             request.checkpoint,
             request.profile_digest,
@@ -855,4 +874,186 @@ fn invalid_episodes_are_refused_before_any_replay() {
         ))
     );
     assert_eq!(issued, 0, "nothing is replayed under invalid episodes");
+}
+
+#[test]
+fn a_report_that_understates_its_replays_or_overstates_its_minimality_is_refused() {
+    let expected = predicate(FailureClass::Interference);
+    let stubborn = aged_event("repository:repository-0:2");
+    let mut unknown_replay = |request: ReplayRequest<'_>| {
+        if !has(request.scenario, &stubborn) {
+            return ReplayOutcome::Unknown {
+                reason: UnknownReason::ChildExitedBeforeBarrier,
+            };
+        }
+        evaluate(request)
+    };
+    let (_, unknown) = shrink(
+        &scenario(),
+        &fixture(),
+        &expected,
+        BUDGET,
+        &mut unknown_replay,
+    )
+    .unwrap();
+    let (_, exhausted) = shrink(&scenario(), &fixture(), &expected, 5, &mut evaluate).unwrap();
+    let (_, minimal) = shrink(&scenario(), &fixture(), &expected, BUDGET, &mut evaluate).unwrap();
+    assert!(matches!(
+        unknown.minimality,
+        Minimality::NotEstablished {
+            reason: NotEstablishedReason::UnknownCandidates { .. }
+        }
+    ));
+    assert!(matches!(
+        exhausted.minimality,
+        Minimality::NotEstablished {
+            reason: NotEstablishedReason::ReplayBudgetExhausted
+        }
+    ));
+    assert!(matches!(minimal.minimality, Minimality::OneMinimal { .. }));
+    for report in [&unknown, &exhausted, &minimal] {
+        let value = serde_json::to_value(report).unwrap();
+        assert_eq!(parse_shrink_report(&value).unwrap(), *report);
+    }
+
+    let completed = unknown
+        .candidates
+        .iter()
+        .filter(|record| {
+            matches!(
+                record.verdict,
+                CandidateVerdict::Reproduced
+                    | CandidateVerdict::NotReproduced
+                    | CandidateVerdict::Slipped { .. }
+            )
+        })
+        .map(|record| record.scenario_digest.as_str())
+        .collect::<BTreeSet<_>>()
+        .len() as u64;
+    assert!(
+        completed < unknown.replays,
+        "the unknown replays were issued too"
+    );
+    let mut understated = serde_json::to_value(&unknown).unwrap();
+    understated["replays"] = json!(completed);
+    assert_eq!(
+        parse_shrink_report(&understated),
+        Err(ShrinkReportError::Inconsistent { field: "replays" }),
+        "every unknown answer in a returned report took a replay"
+    );
+
+    let one_minimal = json!({"kind": "one_minimal", "transformations": []});
+    let mut claimed = serde_json::to_value(&exhausted).unwrap();
+    claimed["minimality"] = one_minimal.clone();
+    assert_eq!(
+        parse_shrink_report(&claimed),
+        Err(ShrinkReportError::Inconsistent {
+            field: "minimality"
+        }),
+        "a budget-exhausted run cannot claim 1-minimality"
+    );
+    let mut claimed = serde_json::to_value(&unknown).unwrap();
+    claimed["minimality"] = one_minimal;
+    assert_eq!(
+        parse_shrink_report(&claimed),
+        Err(ShrinkReportError::Inconsistent {
+            field: "minimality"
+        }),
+        "an unknown single deletion cannot claim 1-minimality"
+    );
+    let mut miscounted = serde_json::to_value(&unknown).unwrap();
+    miscounted["minimality"]["reason"]["count"] = json!(9);
+    assert_eq!(
+        parse_shrink_report(&miscounted),
+        Err(ShrinkReportError::Inconsistent {
+            field: "minimality"
+        })
+    );
+    let mut disproved = serde_json::to_value(&minimal).unwrap();
+    disproved["minimality"] =
+        json!({"kind": "not_established", "reason": {"reason": "replay_budget_exhausted"}});
+    assert_eq!(
+        parse_shrink_report(&disproved),
+        Err(ShrinkReportError::Inconsistent {
+            field: "minimality"
+        }),
+        "a run that stopped short of its budget did not exhaust it"
+    );
+    let mut reordered = serde_json::to_value(&minimal).unwrap();
+    reordered["minimality"]["transformations"] = json!(["event_deletion", "fault_episode_removal"]);
+    assert_eq!(
+        parse_shrink_report(&reordered),
+        Err(ShrinkReportError::Inconsistent {
+            field: "minimality"
+        })
+    );
+}
+
+#[test]
+fn a_candidate_that_moves_the_failure_to_another_task_slips() {
+    // The replay reports the pinned class, but for the positive control
+    // rather than the falsification task the original failed on.
+    let original = scenario();
+    let expected = predicate(FailureClass::Interference);
+    let mut replay = |request: ReplayRequest<'_>| {
+        if request.scenario.digest() == original.digest() {
+            return evaluate(request);
+        }
+        ReplayOutcome::Failed {
+            predicate: FailurePredicate {
+                witness_class: WitnessClass::Failure {
+                    task: "last-rename".to_string(),
+                    class: FailureClass::Interference,
+                },
+                ..expected.clone()
+            },
+        }
+    };
+    let (minimized, report) =
+        shrink(&original, &fixture(), &expected, BUDGET, &mut replay).unwrap();
+    assert_eq!(minimized, original, "no candidate was accepted");
+    assert!(report.candidates.len() > 1);
+    for record in &report.candidates[1..] {
+        assert!(
+            matches!(
+                record.verdict,
+                CandidateVerdict::Slipped { .. } | CandidateVerdict::InvalidPair { .. }
+            ),
+            "another task's failure is a different predicate: {:?}",
+            record.verdict
+        );
+    }
+}
+
+#[test]
+fn a_budget_outside_the_canonical_range_is_refused_and_so_is_such_a_report() {
+    let expected = predicate(FailureClass::Interference);
+    let mut issued = 0u32;
+    let mut replay = |request: ReplayRequest<'_>| {
+        issued += 1;
+        evaluate(request)
+    };
+    let refused = shrink(&scenario(), &fixture(), &expected, u64::MAX, &mut replay);
+    assert_eq!(
+        refused.err(),
+        Some(ShrinkRefused::BudgetNotCanonical {
+            max_replays: u64::MAX
+        })
+    );
+    assert_eq!(issued, 0);
+
+    let (_, mut report) = shrink(&scenario(), &fixture(), &expected, 3, &mut evaluate).unwrap();
+    let value = report.serialize().unwrap();
+    assert_eq!(parse_shrink_report(&value).unwrap(), report);
+    let mut huge = value;
+    huge["max_replays"] = json!(9_007_199_254_740_992u64);
+    assert!(matches!(
+        parse_shrink_report(&huge),
+        Err(ShrinkReportError::NotCanonical(_))
+    ));
+    report.max_replays = 9_007_199_254_740_992;
+    assert!(matches!(
+        report.serialize(),
+        Err(ShrinkReportError::NotCanonical(_))
+    ));
 }

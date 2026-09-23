@@ -17,7 +17,7 @@ use support::{OBSERVATION_TYPE, build, identity, manifest, observation, observat
 /// Frozen so a field-set or encoding change forces a reviewed schema bump.
 const FIXTURE_RUN_ID: &str = "e9f412ed2ad627c5801959c2c459bbb764bf45443a7774d02ac74a97f41832c9";
 const FIXTURE_MANIFEST_DIGEST: &str =
-    "5564944aec17842946ffbf1050f56ba7d2158efe8629efc50423629c0044bd9c";
+    "e92583b1e50a10dce5ad6ebcdb0dbbeec96e01483dd5a9bd61dd186851117edd";
 
 #[test]
 fn required_fields_are_sorted_and_equal_the_struct_field_set() {
@@ -94,7 +94,7 @@ fn evaluator_document_agrees_with_the_manifest_constants() {
         assert_eq!(stated, version, "stale manifest literal `{literal}`");
     }
     row(&format!(
-        "version {version} added the `transform-route, turn by turn` ingestion"
+        "version {version} added the `prefix_then_generate`\nexecution mode"
     ));
 }
 
@@ -131,15 +131,15 @@ fn unknown_field_wrong_schema_and_non_object_are_refused() {
         Err(ManifestError::UnknownField("extra".to_string()))
     );
     let mut next = valid.clone();
-    next["schema"] = json!("eval-manifest/v9");
+    next["schema"] = json!("eval-manifest/v10");
     assert_eq!(
         parse_manifest(&next),
         Err(ManifestError::SchemaMismatch {
-            found: "eval-manifest/v9".to_string()
+            found: "eval-manifest/v10".to_string()
         })
     );
     assert_eq!(parse_manifest(&json!([])), Err(ManifestError::NotAnObject));
-    assert_eq!(MANIFEST_SCHEMA, "eval-manifest/v8");
+    assert_eq!(MANIFEST_SCHEMA, "eval-manifest/v9");
 }
 
 #[test]
@@ -206,7 +206,14 @@ fn every_kept_field_enters_the_digest_and_every_dropped_field_leaves_it() {
         ),
         (
             "analysis_family_digest",
-            Box::new(|m| m.analysis_family_digest = Some("ab".repeat(32))),
+            Box::new(|m| {
+                // A paired report must also record its baseline.
+                m.analysis_family_digest = Some("ab".repeat(32));
+                m.recency_baseline = Some(eval_core::RecencyBaseline {
+                    version: eval_core::RECENCY_BASELINE_VERSION.to_string(),
+                    bounds: BTreeMap::from([(eval_core::EvaluatedSurface::Surface1, 100)]),
+                });
+            }),
         ),
         (
             "recency_baseline",
@@ -666,11 +673,11 @@ fn residue_declarations_are_non_keep_and_one_rule_per_field() {
 #[test]
 fn validate_refuses_what_parse_and_digest_refuse() {
     let mut schema = manifest();
-    schema.schema = "eval-manifest/v9".to_string();
+    schema.schema = "eval-manifest/v10".to_string();
     assert_eq!(
         schema.validate(),
         Err(ManifestError::SchemaMismatch {
-            found: "eval-manifest/v9".to_string()
+            found: "eval-manifest/v10".to_string()
         })
     );
     let mut table = manifest();
@@ -756,6 +763,20 @@ fn a_recorded_recency_baseline_must_be_the_one_the_compiler_enforces() {
             "{name}"
         );
     }
+    // A run that reports paired statistics compiled pairs, so it must say
+    // which baseline judged them; a baseline without paired statistics is a
+    // run stop condition (b) blocked.
+    let mut paired = manifest();
+    paired.analysis_family_digest = Some("ab".repeat(32));
+    assert_eq!(
+        paired.validate(),
+        Err(ManifestError::RecencyBaselineMismatch {
+            field: "recency_baseline"
+        })
+    );
+    paired.recency_baseline = good.recency_baseline.clone();
+    paired.validate().unwrap();
+    good.validate().unwrap();
 }
 
 #[test]
@@ -1054,18 +1075,22 @@ fn an_enumerate_run_records_its_mode_and_the_pinned_spec_digest() {
     for mode in [
         eval_core::ExecutionMode::Generate,
         eval_core::ExecutionMode::ReplayTape,
-        eval_core::ExecutionMode::PrefixThenGenerate,
     ] {
         let mut other = enumerate.clone();
         other.execution_mode = mode;
         assert_ne!(other.digest().unwrap(), enumerate.digest().unwrap());
     }
+    let mut replayed = enumerate.clone();
+    replayed.construction = eval_core::Construction::Replay;
+    let mut resumed = replayed.clone();
+    resumed.execution_mode = eval_core::ExecutionMode::PrefixThenGenerate;
+    assert_ne!(resumed.digest().unwrap(), replayed.digest().unwrap());
 }
 
-/// A run resumed from a quiescent checkpoint copy of a replayed prefix says so
-/// in its mode; a bulk construction under that mode is a contradiction.
+/// A run resumed from a quiescent checkpoint copy of a replayed prefix must be
+/// constructed with `replay`.
 #[test]
-fn a_prefix_then_generate_run_cannot_claim_a_bulk_construction() {
+fn a_prefix_then_generate_run_is_replay_built_only() {
     let mut resumed = manifest();
     resumed.execution_mode = eval_core::ExecutionMode::PrefixThenGenerate;
     resumed.construction = eval_core::Construction::Replay;
@@ -1085,11 +1110,21 @@ fn a_prefix_then_generate_run_cannot_claim_a_bulk_construction() {
         .unwrap();
     assert_eq!(
         bulk.validate(),
-        Err(ManifestError::BulkScaffoldPresentedAsAged)
+        Err(ManifestError::AgedArmNotReplayBuilt {
+            construction: eval_core::Construction::Bulk,
+        })
     );
     coverage
         .complete("crates/eval-core/tests/manifest.rs::")
         .unwrap();
+    let mut hand_built = resumed.clone();
+    hand_built.construction = eval_core::Construction::HandBuilt;
+    assert_eq!(
+        hand_built.validate(),
+        Err(ManifestError::AgedArmNotReplayBuilt {
+            construction: eval_core::Construction::HandBuilt,
+        })
+    );
     let mut generated_bulk = manifest();
     generated_bulk.construction = eval_core::Construction::Bulk;
     generated_bulk.execution_mode = eval_core::ExecutionMode::Generate;

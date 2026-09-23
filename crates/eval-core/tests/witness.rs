@@ -115,10 +115,12 @@ fn the_package_round_trips_and_carries_the_recipe_for_a_count_triggered_failure(
         wrong_counts.validate(),
         Err(WitnessError::RecipeMultiplicitiesDisagree)
     );
+    // A ledger-consistent budget claim: the run spent exactly its budget.
     let mut not_minimal = package.clone();
     not_minimal.shrink.minimality = Minimality::NotEstablished {
-        reason: eval_core::NotEstablishedReason::UnknownCandidates { count: 1 },
+        reason: eval_core::NotEstablishedReason::ReplayBudgetExhausted,
     };
+    not_minimal.shrink.max_replays = not_minimal.shrink.replays;
     not_minimal.recipe = None;
     not_minimal.validate().unwrap();
     let mut no_trigger = package.clone();
@@ -223,6 +225,7 @@ fn one_minimality_needs_a_rejected_record_for_every_single_deletion() {
     bare.shrink.minimized_digest = bare.shrink.original_digest.clone();
     bare.shrink.deleted.clear();
     bare.shrink.replays = 1;
+    bare.shrink.max_replays = 1;
     bare.shrink.unknown_candidates = 0;
     bare.recipe = None;
     let element = bare.minimized.elements()[0].clone();

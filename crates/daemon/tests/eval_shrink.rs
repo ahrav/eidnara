@@ -158,6 +158,7 @@ fn shrink_child_reports_a_foreign_predicate() {
                 checkpoint: Cut::EndOfRun,
                 profile_digest: args.profile_digest,
                 witness_class: WitnessClass::Failure {
+                    task: "first-commit".to_string(),
                     class: FailureClass::Interference,
                 },
             },
@@ -228,6 +229,7 @@ fn a_fresh_process_reproduces_the_predicate_and_the_minimized_witness_is_publish
     let run = shrink::run(&config, spawn_child).unwrap();
 
     let expected = WitnessClass::Failure {
+        task: "first-commit".to_string(),
         class: FailureClass::Interference,
     };
     let ReplayOutcome::Failed { predicate } = &run.original.outcome else {

@@ -10,7 +10,7 @@ use serde_json::Value;
 
 use crate::census::{EvaluatedSurface, SURFACE1_HINT_BOUNDS};
 use crate::eligibility::Verdict;
-use crate::event::{EventId, EventLog, LogError, Payload};
+use crate::event::{Event, EventId, EventLog, LogError, Payload};
 use crate::reducer::{Query, ReduceError, Truth, reduce};
 
 pub const PAIRING_POLICY_VERSION: &str = "eval-pairing/v1";
@@ -86,18 +86,12 @@ pub enum ArmKind {
 #[serde(deny_unknown_fields)]
 pub struct Pair {
     pub task: Task,
-    /// The task's query with the control's entities added to its scope, so
-    /// the control competes on the fresh arm instead of being out of scope.
-    pub fresh_query: Query,
     pub fresh: EventLog,
     pub fresh_minimal: EventLog,
-    /// The versioned baseline's delivery on the aged arm at the task's cut:
-    /// the window's eligible units, most recent first.
-    pub recency_window: Vec<EventId>,
 }
 
 /// One pair per input task, in input order, over one aged history and one
-/// cut.
+/// shared query.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PairSet {
@@ -109,6 +103,10 @@ pub struct PairSet {
     /// precedes it.
     #[serde(with = "crate::decimal")]
     pub aged_median_ms: i64,
+    /// The task query with the control's entities in scope.
+    pub fresh_query: Query,
+    /// Eligible units of the aged arm inside the window, most recent first.
+    pub recency_window: Vec<EventId>,
     pub pairs: Vec<Pair>,
 }
 
@@ -153,9 +151,9 @@ pub enum PairError {
     DuplicateTask {
         task: String,
     },
-    /// Every task in a set shares one cut; a control at its own cut could
-    /// make its evidence recent by choice.
-    MixedCuts {
+    /// A task query that differs from the set's. A task-specific query picks
+    /// the units eligible for that task alone, which defeats the control.
+    MixedQueries {
         task: String,
     },
     EmptyEvidence {
@@ -191,8 +189,9 @@ pub enum PairError {
     },
     NoFalsificationPair,
     NoPositiveControl,
-    /// A deserialized set whose recorded version, bound, or window disagrees
-    /// with what the compiler would have produced.
+    /// A deserialized set whose recorded version, bound, median, window,
+    /// widened query, or pairs disagree with the compiler's recomputation
+    /// from the set's own parts.
     Tampered {
         field: &'static str,
     },
@@ -216,7 +215,7 @@ impl PairError {
             Self::AgedHistoryTooShort { .. } => "AgedHistoryTooShort",
             Self::NoTasks => "NoTasks",
             Self::DuplicateTask { .. } => "DuplicateTask",
-            Self::MixedCuts { .. } => "MixedCuts",
+            Self::MixedQueries { .. } => "MixedQueries",
             Self::EmptyEvidence { .. } => "EmptyEvidence",
             Self::EvidenceNotRequired { .. } => "EvidenceNotRequired",
             Self::EvidenceNotRequiredOnArm { .. } => "EvidenceNotRequiredOnArm",
@@ -244,7 +243,7 @@ fn minimal_closure(aged: &EventLog, evidence: &BTreeSet<EventId>) -> EventLog {
     let mut supersessions: BTreeMap<&EventId, Vec<&EventId>> = BTreeMap::new();
     let mut references: BTreeMap<&EventId, &EventId> = BTreeMap::new();
     for event in &aged.events {
-        if let Some(target) = event.payload.supersedes() {
+        if let Some((_, target)) = event.payload.supersedes() {
             supersessions.entry(target).or_default().push(&event.id);
         }
         if let Some(target) = event.payload.reference() {
@@ -338,7 +337,7 @@ fn check_falsifier(task: &Task, aged: &EventLog, median: i64) -> Result<(), Pair
         }
     }
     for event in &aged.events {
-        if let Some(target) = event.payload.supersedes()
+        if let Some((_, target)) = event.payload.supersedes()
             && task.evidence.contains(target)
         {
             return Err(PairError::SupersededFalsifier {
@@ -351,66 +350,120 @@ fn check_falsifier(task: &Task, aged: &EventLog, median: i64) -> Result<(), Pair
     Ok(())
 }
 
-fn content(log: &EventLog) -> Vec<(i64, u32, Payload)> {
-    log.events
-        .iter()
+fn content<'a>(events: impl IntoIterator<Item = &'a Event>) -> Vec<(i64, u32, Payload)> {
+    events
+        .into_iter()
         .map(|e| (e.valid_time_ms, e.local_seq, e.payload.content()))
         .collect()
 }
 
-/// The bound, the two histories' independence, and the aged history's span.
-fn admit(input: &PairSetInput<'_>) -> Result<(u32, i64), PairError> {
-    let bound = recency_bound(input.surface, input.declared_bound)?;
-    if input.aged.events.is_empty() {
-        return Err(PairError::EmptyAged);
-    }
-    if input.natural_fresh.events.is_empty() {
+/// Refuses an independent history that does not validate on its own, one
+/// with nothing to compete, and one whose events, compared by content, are
+/// a contiguous run of the aged ones.
+fn independent_of(aged: &EventLog, fresh: &EventLog, max_events: u32) -> Result<(), PairError> {
+    fresh
+        .validate(max_events as usize)
+        .map_err(PairError::Log)?;
+    let fresh = content(&fresh.events);
+    if fresh.is_empty() {
         return Err(PairError::EmptyNaturalFresh);
     }
-    let (aged, fresh) = (content(input.aged), content(input.natural_fresh));
-    if let Some(at) = aged
+    if let Some(at) = content(&aged.events)
         .windows(fresh.len())
         .position(|window| window == fresh.as_slice())
     {
         return Err(PairError::NaturalFreshCopiedFromAged { at });
     }
-    let events = &input.aged.events;
+    Ok(())
+}
+
+/// The aged history's upper-median valid time. Refuses an empty history and
+/// one whose earliest time is its median, where "early" would be vacuous.
+fn aged_median(aged: &EventLog) -> Result<i64, PairError> {
+    let events = &aged.events;
+    if events.is_empty() {
+        return Err(PairError::EmptyAged);
+    }
     let median_ms = events[events.len() / 2].valid_time_ms;
     if events[0].valid_time_ms == median_ms {
         return Err(PairError::AgedHistoryTooShort { median_ms });
     }
-    Ok((bound, median_ms))
+    Ok(median_ms)
 }
 
-fn compile_one(
-    input: &PairSetInput<'_>,
-    independent: &EventLog,
-    task: &Task,
-    bound: u32,
-    median_ms: i64,
-) -> Result<Pair, PairError> {
+/// The one query every task shares. Refuses no tasks, a repeated task ID,
+/// and a task whose query differs from the first's.
+fn shared_query<'a>(tasks: impl IntoIterator<Item = &'a Task>) -> Result<&'a Query, PairError> {
+    let mut tasks = tasks.into_iter();
+    let first = tasks.next().ok_or(PairError::NoTasks)?;
+    let mut seen = BTreeSet::from([first.id.as_str()]);
+    for task in tasks {
+        if !seen.insert(task.id.as_str()) {
+            return Err(PairError::DuplicateTask {
+                task: task.id.clone(),
+            });
+        }
+        if task.query != first.query {
+            return Err(PairError::MixedQueries {
+                task: task.id.clone(),
+            });
+        }
+    }
+    Ok(&first.query)
+}
+
+/// The evidence is non-empty and required on the aged arm; a falsification
+/// claim is also early and never superseded.
+fn aged_arm(task: &Task, aged: &EventLog, truth: &Truth, median_ms: i64) -> Result<(), PairError> {
     if task.evidence.is_empty() {
         return Err(PairError::EmptyEvidence {
             task: task.id.clone(),
         });
     }
-    let aged_truth = reduce(input.aged, input.fixture, &task.query).map_err(PairError::Reduce)?;
     if let Some(id) = task
         .evidence
         .iter()
-        .find(|id| !aged_truth.required.contains(*id))
+        .find(|id| !truth.required.contains(*id))
     {
         return Err(PairError::EvidenceNotRequired {
             task: task.id.clone(),
             id: id.clone(),
-            verdict: aged_truth.units.get(id).map(|unit| unit.verdict),
+            verdict: truth.units.get(id).map(|unit| unit.verdict),
         });
     }
     if task.role == TaskRole::Falsification {
-        check_falsifier(task, input.aged, median_ms)?;
+        check_falsifier(task, aged, median_ms)?;
     }
-    let recency_window = recency_baseline(input.aged, &aged_truth, bound);
-    let fresh_minimal = minimal_closure(input.aged, &task.evidence);
+    Ok(())
+}
+
+/// The query with the independent history's entities added to its scope.
+fn widen(query: &Query, independent: &EventLog) -> Query {
+    let mut fresh_query = query.clone();
+    fresh_query
+        .scope
+        .extend(independent.events.iter().map(|e| e.entity_id.clone()));
+    fresh_query
+}
+
+fn ids_of(log: &EventLog) -> BTreeSet<&EventId> {
+    log.events.iter().map(|e| &e.id).collect()
+}
+
+/// Both fresh arms keep the task's evidence required and judge every unit
+/// they share with the aged arm as it does, and the control competes: some
+/// unit of the independent history is required on the fresh arm.
+fn compile_one(
+    aged: &EventLog,
+    independent: &EventLog,
+    fixture: &Value,
+    fresh_query: &Query,
+    aged_truth: &Truth,
+    task: &Task,
+    median_ms: i64,
+) -> Result<Pair, PairError> {
+    aged_arm(task, aged, aged_truth, median_ms)?;
+    let fresh_minimal = minimal_closure(aged, &task.evidence);
     let fresh = EventLog::new(
         [independent.events.clone(), fresh_minimal.events.clone()].concat(),
         [
@@ -419,15 +472,10 @@ fn compile_one(
         ]
         .concat(),
     );
-    let mut fresh_query = task.query.clone();
-    fresh_query
-        .scope
-        .extend(independent.events.iter().map(|e| e.entity_id.clone()));
-    let minimal_truth =
-        reduce(&fresh_minimal, input.fixture, &task.query).map_err(PairError::Reduce)?;
-    required_set(task, ArmKind::FreshMinimal, &minimal_truth, &aged_truth)?;
-    let fresh_truth = reduce(&fresh, input.fixture, &fresh_query).map_err(PairError::Reduce)?;
-    required_set(task, ArmKind::Fresh, &fresh_truth, &aged_truth)?;
+    let minimal_truth = reduce(&fresh_minimal, fixture, &task.query).map_err(PairError::Reduce)?;
+    required_set(task, ArmKind::FreshMinimal, &minimal_truth, aged_truth)?;
+    let fresh_truth = reduce(&fresh, fixture, fresh_query).map_err(PairError::Reduce)?;
+    required_set(task, ArmKind::Fresh, &fresh_truth, aged_truth)?;
     if !independent
         .events
         .iter()
@@ -439,58 +487,85 @@ fn compile_one(
     }
     Ok(Pair {
         task: task.clone(),
-        fresh_query,
         fresh,
         fresh_minimal,
-        recency_window,
     })
 }
 
-/// Compiles one pair per task. Refuses an empty or copied natural-fresh
-/// history, an aged history too short for "early" to mean anything, tasks at
-/// different cuts, evidence the reducer does not require, a falsification
-/// claim the aged history contradicts, an arm that judges a shared unit
-/// differently, and a set missing either control class.
-pub fn compile_pair_set(input: PairSetInput<'_>) -> Result<PairSet, PairError> {
-    let (bound, aged_median_ms) = admit(&input)?;
-    let first = input.tasks.first().ok_or(PairError::NoTasks)?;
-    let independent = input
-        .natural_fresh
-        .on_distinct_entities(NATURAL_FRESH_ENTITY_TAG)
-        .map_err(PairError::Log)?;
-    let mut seen = BTreeSet::new();
-    let mut pairs = Vec::with_capacity(input.tasks.len());
-    for task in input.tasks {
-        if !seen.insert(task.id.as_str()) {
-            return Err(PairError::DuplicateTask {
-                task: task.id.clone(),
-            });
-        }
-        if (task.query.valid_time_ms, task.query.observation_time_ms)
-            != (first.query.valid_time_ms, first.query.observation_time_ms)
-        {
-            return Err(PairError::MixedCuts {
-                task: task.id.clone(),
-            });
-        }
-        pairs.push(compile_one(
-            &input,
-            &independent,
-            task,
-            bound,
-            aged_median_ms,
-        )?);
+/// The set the compiler produces from an aged history, an independent
+/// history already on its own entities, and the tasks; `validate` produces
+/// it again from a set's own parts.
+fn assemble(
+    surface: EvaluatedSurface,
+    bound: u32,
+    aged: &EventLog,
+    independent: &EventLog,
+    fixture: &Value,
+    tasks: &[Task],
+) -> Result<PairSet, PairError> {
+    let query = shared_query(tasks)?;
+    if aged.events.is_empty() {
+        return Err(PairError::EmptyAged);
     }
+    independent_of(aged, independent, query.max_events_per_log)?;
+    let aged_median_ms = aged_median(aged)?;
+    let aged_truth = reduce(aged, fixture, query).map_err(PairError::Reduce)?;
+    let fresh_query = widen(query, independent);
+    let pairs = tasks
+        .iter()
+        .map(|task| {
+            compile_one(
+                aged,
+                independent,
+                fixture,
+                &fresh_query,
+                &aged_truth,
+                task,
+                aged_median_ms,
+            )
+        })
+        .collect::<Result<Vec<_>, _>>()?;
     let set = PairSet {
         pairing_policy_version: PAIRING_POLICY_VERSION.to_string(),
-        surface: input.surface,
+        surface,
         recency_bound: bound,
-        aged: input.aged.clone(),
+        aged: aged.clone(),
         aged_median_ms,
+        fresh_query,
+        recency_window: recency_baseline(aged, &aged_truth, bound),
         pairs,
     };
     set.roles_present()?;
     Ok(set)
+}
+
+/// Compiles one pair per task. Refuses an empty or copied natural-fresh
+/// history, an aged history too short for "early" to mean anything, tasks
+/// whose queries differ, evidence the reducer does not require, a
+/// falsification claim the aged history contradicts, an arm that judges a
+/// shared unit differently, and a set missing either control class. The
+/// natural-fresh history is validated as supplied: `on_distinct_entities`
+/// sorts and re-derives, so a shuffled slice of the aged history would
+/// otherwise pass the copy check and be normalized back into the copy.
+pub fn compile_pair_set(input: PairSetInput<'_>) -> Result<PairSet, PairError> {
+    let query = shared_query(input.tasks)?;
+    let bound = recency_bound(input.surface, input.declared_bound)?;
+    input
+        .natural_fresh
+        .validate(query.max_events_per_log as usize)
+        .map_err(PairError::Log)?;
+    let independent = input
+        .natural_fresh
+        .on_distinct_entities(NATURAL_FRESH_ENTITY_TAG)
+        .map_err(PairError::Log)?;
+    assemble(
+        input.surface,
+        bound,
+        input.aged,
+        &independent,
+        input.fixture,
+        input.tasks,
+    )
 }
 
 impl PairSet {
@@ -505,10 +580,44 @@ impl PairSet {
         Ok(())
     }
 
-    /// A set read back from the wire must still be one the compiler could
-    /// have produced: the policy version, the surface's bound, both control
-    /// classes, non-empty evidence, and a window no wider than the bound.
-    pub fn validate(&self) -> Result<(), PairError> {
+    /// The independent history every pair's fresh arm carries: its units and
+    /// edges the aged history lacks. Pairs that disagree are `Tampered`.
+    fn independent(&self) -> Result<EventLog, PairError> {
+        let aged_ids = ids_of(&self.aged);
+        let project = |pair: &Pair| {
+            EventLog::new(
+                pair.fresh
+                    .events
+                    .iter()
+                    .filter(|e| !aged_ids.contains(&e.id))
+                    .cloned()
+                    .collect(),
+                pair.fresh
+                    .causal_edges
+                    .iter()
+                    .filter(|edge| !aged_ids.contains(&edge.from) || !aged_ids.contains(&edge.to))
+                    .cloned()
+                    .collect(),
+            )
+        };
+        let common = self
+            .pairs
+            .first()
+            .map(project)
+            .unwrap_or_else(|| EventLog::new(vec![], vec![]));
+        if self.pairs.iter().any(|pair| project(pair) != common) {
+            return Err(PairError::Tampered { field: "pairs" });
+        }
+        Ok(common)
+    }
+
+    /// A set read back from the wire must be the one the compiler produces
+    /// from the set's own parts: the policy version, the surface's bound,
+    /// and `assemble` over its aged history, the independent history common
+    /// to every pair's fresh arm, and its tasks under `fixture`. Every
+    /// compile-time refusal applies again, and `Tampered {field}` names the
+    /// recorded field that differs from the recomputation.
+    pub fn validate(&self, fixture: &Value) -> Result<(), PairError> {
         if self.pairing_policy_version != PAIRING_POLICY_VERSION {
             return Err(PairError::Tampered {
                 field: "pairing_policy_version",
@@ -520,20 +629,32 @@ impl PairSet {
                 field: "recency_bound",
             });
         }
-        self.roles_present()?;
-        for pair in &self.pairs {
-            if pair.task.evidence.is_empty() {
-                return Err(PairError::EmptyEvidence {
-                    task: pair.task.id.clone(),
-                });
-            }
-            if pair.recency_window.len() > self.recency_bound as usize {
-                return Err(PairError::Tampered {
-                    field: "recency_window",
-                });
-            }
+        let tasks: Vec<Task> = self.pairs.iter().map(|p| p.task.clone()).collect();
+        let independent = self.independent()?;
+        let expected = assemble(
+            self.surface,
+            self.recency_bound,
+            &self.aged,
+            &independent,
+            fixture,
+            &tasks,
+        )?;
+        let differing = [
+            (
+                "aged_median_ms",
+                expected.aged_median_ms != self.aged_median_ms,
+            ),
+            (
+                "recency_window",
+                expected.recency_window != self.recency_window,
+            ),
+            ("fresh_query", expected.fresh_query != self.fresh_query),
+            ("pairs", expected.pairs != self.pairs),
+        ];
+        match differing.into_iter().find(|(_, differs)| *differs) {
+            Some((field, _)) => Err(PairError::Tampered { field }),
+            None => Ok(()),
         }
-        Ok(())
     }
 }
 
@@ -606,33 +727,39 @@ pub enum BaselineVerdict {
     },
 }
 
-/// Stop condition (b). `deliver` is the baseline under test, given each pair;
-/// the compiled `recency_window` is the versioned one, and a negative control
-/// substitutes an always-empty baseline. Vacuity is decided first over both
-/// classes, then every falsification pair must be missed, then every
-/// positive control must be delivered.
+/// The baseline under test. The versioned one is the set's compiled
+/// `recency_window`, so an `Established` contrast is always stamped with
+/// the window it was judged on; the negative control delivers nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Baseline {
+    Versioned,
+    AlwaysEmpty,
+}
+
+/// Stop condition (b). The window is shared across every pair because the
+/// tasks share one query. Vacuity is decided first over both classes, then
+/// every falsification pair must be missed, then every positive control must
+/// be delivered.
 pub fn check_recency_baseline(
     set: &PairSet,
-    deliver: impl Fn(&Pair) -> Vec<EventId>,
+    fixture: &Value,
+    baseline: Baseline,
 ) -> Result<BaselineVerdict, PairError> {
-    set.validate()?;
+    set.validate(fixture)?;
     let blocked = |failure| {
         Ok(BaselineVerdict::Blocked {
             condition: StopCondition::B,
             failure,
         })
     };
-    let judged: Vec<(&Pair, BTreeSet<EventId>)> = set
-        .pairs
-        .iter()
-        .filter(|pair| pair.task.role != TaskRole::Plain)
-        .map(|pair| (pair, deliver(pair).into_iter().collect()))
-        .collect();
-    let delivered: BTreeSet<&EventId> = judged.iter().flat_map(|(_, ids)| ids).collect();
+    let delivered: BTreeSet<&EventId> = match baseline {
+        Baseline::Versioned => set.recency_window.iter().collect(),
+        Baseline::AlwaysEmpty => BTreeSet::new(),
+    };
     if delivered.is_empty() {
         return blocked(BaselineFailure::Vacuous);
     }
-    let superset = |pair: &Pair, ids: &BTreeSet<EventId>| pair.task.evidence.is_subset(ids);
+    let superset = |pair: &Pair| pair.task.evidence.iter().all(|id| delivered.contains(id));
     let mut contrast = BaselineContrast {
         baseline_version: RECENCY_BASELINE_VERSION.to_string(),
         surface: set.surface,
@@ -641,22 +768,17 @@ pub fn check_recency_baseline(
         positive_controls_passed: 0,
         delivered_ids: u32::try_from(delivered.len()).expect("bounded by the log"),
     };
-    for (pair, ids) in judged
-        .iter()
-        .filter(|(p, _)| p.task.role == TaskRole::Falsification)
-    {
-        if superset(pair, ids) {
+    let of = |role| set.pairs.iter().filter(move |p| p.task.role == role);
+    for pair in of(TaskRole::Falsification) {
+        if superset(pair) {
             return blocked(BaselineFailure::DeliveredFalsifier {
                 task: pair.task.id.clone(),
             });
         }
         contrast.falsification_pairs_failed += 1;
     }
-    for (pair, ids) in judged
-        .iter()
-        .filter(|(p, _)| p.task.role == TaskRole::PositiveControl)
-    {
-        if !superset(pair, ids) {
+    for pair in of(TaskRole::PositiveControl) {
+        if !superset(pair) {
             return blocked(BaselineFailure::MissedPositiveControl {
                 task: pair.task.id.clone(),
             });

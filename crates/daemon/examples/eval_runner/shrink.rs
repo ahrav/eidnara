@@ -169,11 +169,17 @@ pub fn child_main(args: &ChildArgs) -> ! {
         .and_then(|bytes| serde_json::from_slice::<Scenario>(&bytes).ok())
         .and_then(|scenario| {
             let set = scenario.compile(&fixture).ok()?;
-            let truth = reduce(&set.aged, &fixture, &set.pairs.first()?.task.query).ok()?;
+            let task = &set.pairs.first()?.task;
+            let truth = reduce(&set.aged, &fixture, &task.query).ok()?;
             Some((
                 scenario.digest(),
-                args.oracle
-                    .evaluate(&set, &truth, args.checkpoint, &args.profile_digest),
+                args.oracle.evaluate(
+                    &set,
+                    &task.id,
+                    &truth,
+                    args.checkpoint,
+                    &args.profile_digest,
+                ),
             ))
         });
     let (scenario_digest, outcome) = outcome.unwrap_or_else(|| {
@@ -514,7 +520,7 @@ pub fn run(config: &Config, spawn: Spawn) -> Result<Run, RunError> {
         SIMULATOR_VERSION,
         SEED,
         json!({"commits": config.commits, "oracle": config.oracle}),
-        &std::env::current_exe().unwrap(),
+        &[std::env::current_exe().unwrap()],
     );
     let mut witness = WitnessPackage {
         schema: WITNESS_SCHEMA.to_string(),

@@ -328,7 +328,10 @@ pub mod shrink {
             oracle: oracle(),
             checkpoint: CUT,
             profile_digest: PROFILE.to_string(),
-            witness_class: WitnessClass::Failure { class },
+            witness_class: WitnessClass::Failure {
+                task: "early-commit".to_string(),
+                class,
+            },
         }
     }
 
@@ -343,6 +346,7 @@ pub mod shrink {
         .unwrap();
         request.oracle.evaluate(
             request.set,
+            &request.set.pairs[0].task.id,
             &truth,
             request.checkpoint,
             request.profile_digest,
