@@ -327,6 +327,16 @@ pub fn store_file(root: &Path, family: StoreFamily) -> PathBuf {
     }
 }
 
+/// What one applied step did to the kernel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Applied {
+    Published,
+    Corrected,
+    Retired,
+    /// The lineage had no live tip to retire.
+    RetireSkipped,
+}
+
 pub struct Stores {
     root: PathBuf,
     pub corpus: Corpus,
@@ -397,28 +407,28 @@ impl Stores {
         kernel_incarnation_id(&self.root)
     }
 
-    pub fn apply(&mut self, planned: &Planned) {
-        match &planned.step {
+    pub fn apply(&mut self, planned: &Planned) -> Applied {
+        let applied = match &planned.step {
             Step::Publish(id) => self.publish(id),
             Step::Retire(id) => self.retire(id),
-        }
+        };
         self.applied += 1;
+        applied
     }
 
     /// Applies the step to the kernel only: the memory store is left
     /// untouched, for a window in which it is outside the healthy core.
-    pub fn apply_kernel_only(&mut self, planned: &Planned) {
-        match &planned.step {
-            Step::Publish(id) => {
-                self.publish_kernel(id);
-            }
+    pub fn apply_kernel_only(&mut self, planned: &Planned) -> Applied {
+        let applied = match &planned.step {
+            Step::Publish(id) => self.publish_kernel(id).1,
             Step::Retire(id) => self.retire(id),
-        }
+        };
         self.applied += 1;
+        applied
     }
 
-    fn publish(&mut self, id: &EventId) {
-        let ordinal = self.publish_kernel(id);
+    fn publish(&mut self, id: &EventId) -> Applied {
+        let (ordinal, applied) = self.publish_kernel(id);
         let message = &self.rendering.messages[ordinal];
         let ordinal = ordinal as i64 + 1;
         let text = message.message["parts"][0]["text"].as_str().unwrap();
@@ -441,11 +451,12 @@ impl Stores {
                 }],
             )
             .unwrap();
+        applied
     }
 
     /// Publishes the message's units through the real source publisher and
-    /// returns the message's ordinal in the rendering.
-    fn publish_kernel(&mut self, id: &EventId) -> usize {
+    /// returns the message's ordinal in the rendering with what the kernel did.
+    fn publish_kernel(&mut self, id: &EventId) -> (usize, Applied) {
         let ordinal = self
             .rendering
             .messages
@@ -462,6 +473,7 @@ impl Stores {
         };
         let units = opencode_units(&session(), &message.message).unwrap();
         assert_eq!(units.len(), message.expected.len(), "{}", message.message);
+        let mut replaced_any = false;
         for (unit, expected) in units.iter().zip(&message.expected) {
             let published = publisher
                 .publish(unit, message.observation_time_ms)
@@ -473,13 +485,21 @@ impl Stores {
                 .or_default();
             if let Some(replaced) = &published.replaced_object_id {
                 assert_eq!(chain.last(), Some(replaced));
+                replaced_any = true;
             }
             chain.push(published.object_id);
         }
-        ordinal
+        (
+            ordinal,
+            if replaced_any {
+                Applied::Corrected
+            } else {
+                Applied::Published
+            },
+        )
     }
 
-    fn retire(&mut self, target: &EventId) {
+    fn retire(&mut self, target: &EventId) -> Applied {
         let message = self
             .rendering
             .messages
@@ -488,10 +508,10 @@ impl Stores {
             .expect("an invalidation targets a rendered message");
         let lineage = &message.expected[0].identity.lineage_id;
         let Some(object) = self.chains.get(lineage).and_then(|chain| chain.last()) else {
-            return;
+            return Applied::RetireSkipped;
         };
         if !self.dead.insert(object.clone()) {
-            return;
+            return Applied::RetireSkipped;
         }
         let object = object.clone();
         self.corpus
@@ -501,6 +521,7 @@ impl Stores {
                 Ok(String::new())
             })
             .unwrap();
+        Applied::Retired
     }
 
     pub fn publish_outbox(&self) {

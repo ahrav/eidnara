@@ -21,6 +21,10 @@ mod campaign;
 #[cfg(unix)]
 #[allow(dead_code)]
 mod fault;
+/// The growth shell is shared with the daemon's growth test the same way.
+#[cfg(unix)]
+#[allow(dead_code)]
+mod growth;
 /// The fixture and surface helpers are shared with the evaluator tests, which
 /// use more of them than the campaign does.
 #[cfg(unix)]
@@ -447,6 +451,30 @@ fn run_fault(args: impl Iterator<Item = String>) -> io::Result<()> {
     Ok(())
 }
 
+/// Runs the growth campaign and prints one JSON line naming what was published.
+#[cfg(unix)]
+fn run_growth(args: impl Iterator<Item = String>) -> io::Result<()> {
+    let config = growth::config_from_args(args).map_err(io::Error::other)?;
+    let run = growth::run(&config).map_err(io::Error::other)?;
+    let digest = |bytes: &[u8]| format!("{:x}", sha2::Sha256::digest(bytes));
+    let summary = json!({
+        "report": config.publish.join(growth::REPORT_FILE),
+        "report_digest": digest(&run.report_bytes),
+        "manifest": config.publish.join(growth::MANIFEST_FILE),
+        "manifest_digest": digest(&run.manifest_bytes),
+        "eval_run_id": run.manifest.eval_run_id,
+        "status": run.manifest.status,
+        "mode": run.report.ledger.mode,
+        "samples": run.report.ledger.samples.len(),
+        "peak_store_bytes": run.report.ledger.peak_store_bytes(),
+        "mix": run.report.mix,
+        "headroom": run.report.ledger.samples.last().map(|s| s.headroom.clone()),
+        "markers": run.report.markers,
+    });
+    println!("{summary}");
+    Ok(())
+}
+
 fn main() {
     let mut args = std::env::args().skip(1);
     let outcome = match args.next().as_deref() {
@@ -459,6 +487,8 @@ fn main() {
         Some("fault") => run_fault(args),
         #[cfg(unix)]
         Some("fault-child") => run_fault_child(),
+        #[cfg(unix)]
+        Some("growth") => run_growth(args),
         other => Err(io::Error::other(format!(
             "{USAGE}{} (got {other:?})",
             campaign_usage()
@@ -473,16 +503,17 @@ fn main() {
 #[cfg(unix)]
 fn campaign_usage() -> String {
     format!(
-        "{} | eval_runner {} | eval_runner {}",
+        "{} | eval_runner {} | eval_runner {} | eval_runner {}",
         campaign::USAGE,
         aging::USAGE,
-        fault::USAGE
+        fault::USAGE,
+        growth::USAGE
     )
 }
 
 #[cfg(not(unix))]
 fn campaign_usage() -> String {
-    "campaign | aging | fault (unix only)".to_string()
+    "campaign | aging | fault | growth (unix only)".to_string()
 }
 
 #[cfg(test)]
