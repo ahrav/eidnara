@@ -578,19 +578,17 @@ fn a_shared_root_namespace_or_port_is_refused() {
         }),
         "one campaign's root must not be another's publish directory"
     );
-    let mut slashed = a.clone();
-    slashed.roots = ["/tmp/a/".to_string()].into_iter().collect();
-    let mut nested_under_slashed = b.clone();
-    nested_under_slashed
-        .roots
-        .insert("/tmp/a/nested".to_string());
-    assert_eq!(
-        isolated(&slashed, &nested_under_slashed),
-        Err(IsolationRefused::SharedRoot {
-            path: "/tmp/a/".to_string()
-        }),
-        "a trailing separator does not hide a nested root"
-    );
+    for alias in ["/tmp/a/", "/tmp/./a", "/tmp/x/../a", "tmp/a", "/tmp//a", ""] {
+        let mut aliased = b.clone();
+        aliased.roots.insert(alias.to_string());
+        assert_eq!(
+            isolated(&a, &aliased),
+            Err(IsolationRefused::NonCanonicalPath {
+                path: alias.to_string()
+            }),
+            "a second spelling of a directory is refused, not compared: {alias:?}"
+        );
+    }
     let mut fs_root = b.clone();
     fs_root.roots.insert("/".to_string());
     assert_eq!(

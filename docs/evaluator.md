@@ -2208,8 +2208,9 @@ never exercised, so a run that skipped a kind cannot report sustainability.
 by the shared value (a root and a publish directory are one filesystem
 resource, so one campaign's root equal to another's publish directory is
 refused too, and so is a path inside another campaign's path, since it
-writes into it; paths are compared by `/`-separated components as given,
-ignoring trailing separators, not canonicalized), and `digests_match_serial` refuses
+writes into it; paths must be canonical, absolute with plain components and
+no `.`, `..`, empty component, or trailing separator, else
+`NonCanonicalPath`, since a value-level check cannot resolve aliases), and `digests_match_serial` refuses
 `DigestDiffersFromSerial { campaign }` when a concurrent run's result digest
 differs from its serial one and `TooFewCampaigns` below two, since isolation
 is a claim about at least two.

@@ -575,6 +575,13 @@ pub enum IsolationRefused {
     SharedPort {
         port: u16,
     },
+    /// A path that is not absolute with plain components (no `.`, `..`,
+    /// empty component, or trailing separator); two spellings of one
+    /// directory would defeat the comparison, so the caller names each as
+    /// the filesystem does.
+    NonCanonicalPath {
+        path: String,
+    },
     /// Isolation is a claim about at least two campaigns.
     TooFewCampaigns {
         campaigns: usize,
@@ -588,9 +595,17 @@ pub enum IsolationRefused {
 /// concurrent result digests equal their serial ones. A root and a publish
 /// directory are the same filesystem resource, so they are compared across
 /// the two kinds, and a path inside another campaign's path writes into it,
-/// so ancestors count as shared. Paths are compared as given, not
-/// canonicalized: the caller names the directories it created.
+/// so ancestors count as shared. Paths are compared as given and must be
+/// canonical; the caller names the directories it created as the filesystem
+/// does, since this value-level check cannot resolve aliases.
 pub fn isolated(a: &CampaignResources, b: &CampaignResources) -> Result<(), IsolationRefused> {
+    if let Some(path) = [a, b]
+        .iter()
+        .flat_map(|c| c.roots.iter().chain(&c.publish_dirs))
+        .find(|p| !canonical(p))
+    {
+        return Err(IsolationRefused::NonCanonicalPath { path: path.clone() });
+    }
     let overlaps = |p: &String| {
         b.roots
             .iter()
@@ -618,12 +633,20 @@ pub fn isolated(a: &CampaignResources, b: &CampaignResources) -> Result<(), Isol
     Ok(())
 }
 
-/// `path` is `dir` or lies inside it, by `/`-separated components; trailing
-/// separators do not count, so `/` (trimmed to nothing) contains every
-/// absolute path.
+/// Absolute, with every component a plain name: no `.`, `..`, empty
+/// component, or trailing separator. `/` alone is canonical.
+fn canonical(path: &str) -> bool {
+    path == "/"
+        || path
+            .strip_prefix('/')
+            .is_some_and(|rest| rest.split('/').all(|c| !matches!(c, "" | "." | "..")))
+}
+
+/// `path` is `dir` or lies inside it, by `/`-separated components of two
+/// canonical paths; `/` contains every other.
 fn under(path: &str, dir: &str) -> bool {
-    let (path, dir) = (path.trim_end_matches('/'), dir.trim_end_matches('/'));
     path == dir
+        || dir == "/"
         || path
             .strip_prefix(dir)
             .is_some_and(|rest| rest.starts_with('/'))

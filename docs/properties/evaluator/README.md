@@ -1668,8 +1668,9 @@ Growth contract (`crates/eval-core/tests/growth.rs`,
   `xc_shared_fixture_refused`): a shared root, publish directory, cassette
   namespace, or port is refused by value, as is one campaign's root equal to
   another's publish directory or a path inside another campaign's root or
-  publish directory, whatever the trailing separators, with `/` containing
-  every campaign; a concurrent digest that differs
+  publish directory, with `/` containing every campaign; a path that is not
+  canonical (`/tmp/a/`, `/tmp/./a`, `/tmp/x/../a`, `tmp/a`, `/tmp//a`, empty)
+  is `NonCanonicalPath`; a concurrent digest that differs
   from its serial run is refused by campaign index, and fewer than two
   campaigns are `TooFewCampaigns`.
 - `a_growth_report_round_trips_and_its_digest_ignores_measurements`: the
