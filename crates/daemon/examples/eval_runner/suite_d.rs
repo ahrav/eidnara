@@ -1424,6 +1424,9 @@ pub fn run(config: &Config, host: Host) -> Result<Run, RunError> {
         serde_json::to_vec_pretty(&serde_json::to_value(&report).unwrap()).unwrap()
     })?;
     let published: Value = serde_json::from_slice(&report_bytes).unwrap();
+    // Serializing the report is inside the bound too, and the manifest's
+    // interval ends after it; the two file publishes are all that follows.
+    charges.elapsed()?;
     let manifest = suite_c_manifest(ManifestInputs {
         identity: run_identity,
         eval_run_id: report.eval_run_id.clone(),
@@ -1435,12 +1438,13 @@ pub fn run(config: &Config, host: Host) -> Result<Run, RunError> {
             outcome: CutOutcome::Reached,
         }],
         execution_mode: ExecutionMode::Generate,
-        envelope: report.envelope.clone(),
+        envelope: charges.envelope.clone(),
         started_at_ms,
         task_corpus: format!("generated:{SEED:#x}"),
         judge: JUDGE_VERSION.to_string(),
     });
     let manifest_bytes = serde_json::to_vec_pretty(&manifest.to_value()).unwrap();
+    charges.elapsed()?;
     // The manifest lands first; a report without one is never visible, and a
     // manifest whose report failed is taken back.
     let manifest_path = config.publish.join(MANIFEST_FILE);
