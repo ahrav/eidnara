@@ -2445,7 +2445,8 @@ or an empty host refuses, and the `/pull/` URLs
 from the URL itself), a `license` that is not an SPDX expression by shape (identifiers of
 SPDX characters joined by `AND`, `OR`, or `WITH`; not checked against the
 SPDX list) (`TextPersisted`), a
-malformed SHA, a duplicate id, and one fix commit of one repository under
+malformed SHA, a fix commit that is the base commit (`FixIsBase`), a
+duplicate id, and one fix commit of one repository under
 two ids (`DuplicateTask`). `digest` validates first and refuses a
 row JSON cannot carry exactly (`NotCanonical`) instead of panicking.
 `AnchorEntry::digest` (`eval-anchor-entry-digest/v1`) is the identity every
@@ -2474,7 +2475,8 @@ creation when never edited), `snapshot_digest`, `base_tree_digest`, and
 `fix_paths_present`. `validate` refuses, in order, a missing snapshot digest,
 a tree digest that is neither forty nor sixty-four lowercase hex
 (`MalformedDigest`), a base committed after the cutoff, a fix not strictly after it, an issue
-filed after it, issue text edited after it, a snapshot whose digest is not
+filed after it, issue text edited after it or dated before the issue
+(`IssueTextBeforeIssue`), a snapshot whose digest is not
 the base commit's tree, and a fix-added path in the snapshot; each is one
 `CutoffRefused` reason (`reason` on the wire). `validate_for(entry)` first
 requires the audit to name the entry's task (`AuditForOtherTask`) and the

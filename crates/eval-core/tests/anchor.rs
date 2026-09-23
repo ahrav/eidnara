@@ -1276,3 +1276,27 @@ fn a_criterion_approved_by_whitespace_is_unapproved() {
     };
     assert!(settings.validate().is_err());
 }
+
+#[test]
+fn a_row_whose_fix_is_its_base_names_no_fix() {
+    let mut entry = entry("cargo-0", Family::Cargo, 0x10);
+    entry.fix_sha = entry.base_sha.clone();
+    assert!(entry.validate().is_err());
+    assert_eq!(
+        entry.validate(),
+        Err(AnchorError::FixIsBase {
+            id: "cargo-0".to_string()
+        })
+    );
+}
+
+#[test]
+fn issue_text_cannot_predate_the_issue() {
+    let mut impossible = audit("cargo-0");
+    impossible.issue_text_ms = impossible.issue_created_ms - 1;
+    assert!(impossible.validate().is_err());
+    assert_eq!(
+        impossible.validate(),
+        Err(CutoffRefused::IssueTextBeforeIssue)
+    );
+}

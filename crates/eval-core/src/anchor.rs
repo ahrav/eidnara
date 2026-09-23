@@ -79,6 +79,11 @@ pub enum AnchorError {
         id: String,
         field: &'static str,
     },
+    /// The fix commit is the base commit, so nothing was fixed after the
+    /// cutoff.
+    FixIsBase {
+        id: String,
+    },
     /// A field holds text, not the identifier it names: an id or URL with
     /// whitespace, a URL without a scheme, or a license that is not an SPDX
     /// expression.
@@ -128,6 +133,9 @@ impl AnchorEntry {
             if !is_lower_hex(sha, 40) {
                 return Err(AnchorError::NotASha { id: id(), field });
             }
+        }
+        if self.fix_sha == self.base_sha {
+            return Err(AnchorError::FixIsBase { id: id() });
         }
         Ok(())
     }
@@ -382,6 +390,9 @@ pub enum CutoffRefused {
     /// The issue text was edited after the cutoff; the edit can describe the
     /// fix.
     IssueTextAfterCutoff,
+    /// The issue text is dated before the issue was filed, so the audit is
+    /// not evidence of anything.
+    IssueTextBeforeIssue,
     FutureContentInSnapshot,
     SnapshotDigestMissing,
     /// A tree digest that is neither a git object id (forty hex) nor a
@@ -437,6 +448,9 @@ impl CutoffAudit {
         }
         if self.issue_text_ms > self.cutoff_ms {
             return Err(CutoffRefused::IssueTextAfterCutoff);
+        }
+        if self.issue_text_ms < self.issue_created_ms {
+            return Err(CutoffRefused::IssueTextBeforeIssue);
         }
         if self.snapshot_digest != self.base_tree_digest {
             return Err(CutoffRefused::SnapshotNotBaseTree);
