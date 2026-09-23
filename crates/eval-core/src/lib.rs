@@ -48,6 +48,7 @@ mod residue;
 mod shrink;
 mod statistics;
 mod stream;
+mod task;
 mod witness;
 
 pub use campaign::{
@@ -165,6 +166,13 @@ pub use statistics::{
     pair_table_digest, parse_analysis_family, parse_campaign_profile, run_icc_pilot,
 };
 pub use stream::*;
+pub use task::{
+    AdequacyEvidence, AdequacyRefused, AdmissionRefused, AgentTrace, Canary, CanaryVerdict,
+    ContainmentRefused, ContainmentReport, Files, GeneratedTask, HIDDEN_TEST_PREFIX, HiddenOutcome,
+    HiddenResults, HiddenTest, SuiteDAdmission, TASK_DIGEST_PROTOCOL, TASK_GENERATOR_VERSION,
+    TASK_MANIFEST, TASK_SCHEMA, TOOL_OUTPUT_ENV, TOOL_SCRIPT, TaskCorpus, TaskError, WrongFix,
+    check_adequacy, generate_tasks, observe_agent, task_terminal,
+};
 pub use witness::{
     Generation, MultiplicityRecipe, OriginalFailure, WITNESS_DIGEST_PROTOCOL, WITNESS_SCHEMA,
     WitnessError, WitnessPackage, parse_witness, residue_drift,
