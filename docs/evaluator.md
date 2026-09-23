@@ -2894,7 +2894,10 @@ for every element of the minimized scenario, a candidate record whose deletion
 set is the final set plus that element, whose `scenario_digest` is the digest
 of the minimized scenario without that element, and whose verdict is neither
 `Reproduced` nor `Unknown`; the first element without one is refused
-(`MinimalityUnsupported { element }`). `NotEstablished` owes no such records.
+(`MinimalityUnsupported { element }`), and the claim's `transformations`
+must be exactly those the original held elements for, in the shrinker's
+order (`TransformationsDisagree { expected }`). `NotEstablished` owes no such
+records.
 After the claim scan, every name in `original.coverage` must be a registered
 marker (`UnregisteredMarker { name }`).
 After the package's own rules, the embedded report is checked on its own
@@ -2950,9 +2953,10 @@ The child (`shrink-child`, or the daemon test's re-executed entrypoint) reads
 `Oracle`, the cut, and the profile digest. It compiles the pair set, reduces
 the aged truth at the first task's cut, evaluates the oracle, records one
 `shrink_replay` observation (`scenario_digest` and `outcome` kept, `pid`
-dropped), and prints `eval-shrink-barrier <json>` carrying the
-`ReplayOutcome`, the trace digest of that observation, and the residue this
-build declares (the replay schema's entries and the manifest schema's). An
+dropped), and prints `eval-shrink-barrier <json>` carrying the scenario's
+digest, the `ReplayOutcome`, the trace digest of that observation, and the
+residue this build declares (the replay schema's entries and the manifest
+schema's). An
 unreadable scenario or a refused compile or reduce is
 `Unknown { read_back_failed }`. The cut is the label the oracle is evaluated
 under: the reducer takes the query's cut, and a pure evaluation over the
@@ -2964,8 +2968,10 @@ which is how the shrinker's second replay of the original resolves. Each
 issue writes the candidate to the one scenario file, spawns the child with
 piped stdout, charges a process, and waits for the barrier line up to the
 configured replay timeout capped by what remains of the profile's elapsed
-bound: a line resolves the effect with the child's outcome (a malformed line
-is `Unknown { read_back_failed }`); an exit before the line is retried once
+bound, a deadline measured from the envelope's own clock so no wait outlives
+it: a line resolves the effect with the child's outcome (a malformed line, or
+one whose digest names another scenario than the key, is
+`Unknown { read_back_failed }`); an exit before the line is retried once
 under the same key (`ReplayEffects::retry`) and then resolved
 `Unknown { child_exited_before_barrier }`; a timeout kills the child and
 resolves `Unknown { cancelled }`. The process charge is released however the

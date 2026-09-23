@@ -107,10 +107,13 @@ pub struct Run {
     pub original: Replayed,
 }
 
-/// What a child reports over its barrier line.
+/// What a child reports over its barrier line. `scenario_digest` names the
+/// scenario the answer is about; the parent reads an answer only under the
+/// key it issued.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Replayed {
+    pub scenario_digest: String,
     pub outcome: ReplayOutcome,
     pub trace_digest: String,
     pub residue: BTreeSet<ResidueEntry>,
@@ -203,6 +206,7 @@ pub fn child_main(args: &ChildArgs) -> ! {
         )
         .unwrap();
     let replayed = Replayed {
+        scenario_digest,
         outcome,
         trace_digest: trace.digest().unwrap(),
         residue: residue(),
@@ -240,7 +244,7 @@ impl Replayer<'_> {
         std::fs::write(&self.args.scenario, serde_json::to_vec(scenario).unwrap())?;
         let mut attempt = self.effects.issue(key)?;
         let mut replayed = loop {
-            match self.attempt()? {
+            match self.attempt(key)? {
                 Some(replayed) => break replayed,
                 None if attempt < REPLAY_ATTEMPTS => attempt = self.effects.retry(key)?,
                 None => break self.unanswered(UnknownReason::ChildExitedBeforeBarrier),
@@ -257,6 +261,7 @@ impl Replayer<'_> {
     /// The reason, no trace, and this build's own residue.
     fn unanswered(&self, reason: UnknownReason) -> Replayed {
         Replayed {
+            scenario_digest: String::new(),
             outcome: ReplayOutcome::Unknown { reason },
             trace_digest: String::new(),
             residue: self.expected_residue.clone(),
@@ -265,17 +270,24 @@ impl Replayer<'_> {
 
     /// `None` when the child exited before its barrier; a timeout answers
     /// `Unknown { cancelled }`. The process charge is released either way.
-    fn attempt(&mut self) -> Result<Option<Replayed>, RunError> {
+    fn attempt(&mut self, key: &str) -> Result<Option<Replayed>, RunError> {
         let mut command = (self.spawn)(&self.args);
         self.args.env(&mut command);
         self.charges.process_started()?;
-        let outcome = self.wait_for_barrier(command);
+        let outcome = self.wait_for_barrier(command, key);
         self.charges.process_ended();
         self.charges.elapsed()?;
         outcome
     }
 
-    fn wait_for_barrier(&self, mut command: Command) -> Result<Option<Replayed>, RunError> {
+    /// An answer that names another scenario than `key` is no answer to this
+    /// key: it reads back as `Unknown { read_back_failed }`, like a line the
+    /// type cannot carry.
+    fn wait_for_barrier(
+        &self,
+        mut command: Command,
+        key: &str,
+    ) -> Result<Option<Replayed>, RunError> {
         let mut child = ChildGuard(
             command
                 .stdout(Stdio::piped())
@@ -299,7 +311,9 @@ impl Replayer<'_> {
                 let json = &line[line.find(BARRIER).unwrap() + BARRIER.len()..];
                 Some(
                     serde_json::from_str::<Replayed>(json.trim())
-                        .unwrap_or_else(|_| self.unanswered(UnknownReason::ReadBackFailed)),
+                        .ok()
+                        .filter(|replayed| replayed.scenario_digest == key)
+                        .unwrap_or_else(|| self.unanswered(UnknownReason::ReadBackFailed)),
                 )
             }
             Ok(None) | Err(RecvTimeoutError::Disconnected) => None,
@@ -460,7 +474,7 @@ pub fn run(config: &Config, spawn: Spawn) -> Result<Run, RunError> {
     let mut replayer = Replayer {
         spawn,
         timeout: config.replay_timeout,
-        deadline: Instant::now() + Duration::from_millis(config.elapsed_bound_ms),
+        deadline: charges.deadline(),
         args: ChildArgs {
             scenario: root.path().join("candidate.json"),
             oracle: config.oracle.clone(),

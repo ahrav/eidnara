@@ -18,7 +18,7 @@ use crate::markers::MARKERS;
 use crate::residue::ResidueEntry;
 use crate::shrink::{
     CandidateVerdict, Element, FailurePredicate, History, Minimality, Scenario, ShrinkReport,
-    ShrinkReportError,
+    ShrinkReportError, Transformation,
 };
 use crate::stream::Tape;
 
@@ -106,6 +106,11 @@ pub enum WitnessError {
     MinimalityUnsupported {
         element: Element,
     },
+    /// The 1-minimality claim names other transformations than the ones the
+    /// original held elements for.
+    TransformationsDisagree {
+        expected: Vec<Transformation>,
+    },
     /// The coverage signature names a marker the registry does not have.
     UnregisteredMarker {
         name: String,
@@ -170,12 +175,27 @@ impl WitnessPackage {
 
     /// `OneMinimal` claims every single deletion from the minimized scenario
     /// was replayed and rejected; the report must carry that record for each,
-    /// under the digest of the scenario that deletion produces.
+    /// under the digest of the scenario that deletion produces, and name
+    /// exactly the transformations the original held elements for, in the
+    /// shrinker's order.
     fn check_minimality(&self) -> Result<(), WitnessError> {
-        if !matches!(self.shrink.minimality, Minimality::OneMinimal { .. }) {
+        let Minimality::OneMinimal { transformations } = &self.shrink.minimality else {
             return Ok(());
+        };
+        let elements = self.minimized.elements();
+        let held: BTreeSet<Transformation> = elements
+            .iter()
+            .chain(&self.shrink.deleted)
+            .map(Element::transformation)
+            .collect();
+        let expected: Vec<Transformation> = Transformation::ORDER
+            .into_iter()
+            .filter(|transformation| held.contains(transformation))
+            .collect();
+        if *transformations != expected {
+            return Err(WitnessError::TransformationsDisagree { expected });
         }
-        for element in self.minimized.elements() {
+        for element in elements {
             let mut deleted = self.shrink.deleted.clone();
             deleted.insert(element.clone());
             let digest = self

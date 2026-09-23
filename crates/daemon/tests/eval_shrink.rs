@@ -101,6 +101,13 @@ fn spawn_sleeping_without_stubborn(args: &ChildArgs) -> Command {
     reexec("shrink_child_sleeps_past_the_timeout")
 }
 
+/// The digest of the scenario the parent sent: the key it reads answers under.
+fn scenario_digest(args: &ChildArgs) -> String {
+    let scenario: Scenario =
+        serde_json::from_slice(&std::fs::read(&args.scenario).unwrap()).unwrap();
+    scenario.digest()
+}
+
 fn has_stubborn(args: &ChildArgs) -> bool {
     let scenario: Scenario =
         serde_json::from_slice(&std::fs::read(&args.scenario).unwrap()).unwrap();
@@ -127,12 +134,13 @@ fn spawn_drifting(_: &ChildArgs) -> Command {
 #[test]
 #[ignore = "re-executed by the drift test"]
 fn shrink_child_reports_a_drifted_residue() {
-    if std::env::var(shrink::CHILD_ARGS).is_err() {
+    let Some(args) = ChildArgs::from_env() else {
         return;
-    }
+    };
     let mut residue = shrink::residue();
     residue.pop_first();
     let replayed = Replayed {
+        scenario_digest: scenario_digest(&args),
         outcome: ReplayOutcome::Passed,
         trace_digest: String::new(),
         residue,
@@ -152,6 +160,7 @@ fn shrink_child_reports_a_foreign_predicate() {
         return;
     };
     let replayed = Replayed {
+        scenario_digest: scenario_digest(&args),
         outcome: ReplayOutcome::Failed {
             predicate: eval_core::FailurePredicate {
                 oracle: args.oracle,
@@ -167,6 +176,31 @@ fn shrink_child_reports_a_foreign_predicate() {
         residue: shrink::residue(),
     };
     println!("{BARRIER} {}", serde_json::to_string(&replayed).unwrap());
+}
+
+/// Every child evaluates the original scenario, whatever candidate it was
+/// sent: a structurally valid answer for the wrong scenario.
+fn spawn_answering_for_the_original(_: &ChildArgs) -> Command {
+    reexec("shrink_child_answers_for_the_original")
+}
+
+#[test]
+#[ignore = "re-executed by the misdirected-child test"]
+fn shrink_child_answers_for_the_original() {
+    let Some(args) = ChildArgs::from_env() else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("original.json");
+    std::fs::write(
+        &path,
+        serde_json::to_vec(&shrink::scenario(COMMITS).0).unwrap(),
+    )
+    .unwrap();
+    shrink::child_main(&ChildArgs {
+        scenario: path,
+        ..args
+    });
 }
 
 fn approval() -> Approval {
@@ -540,6 +574,37 @@ fn a_commit_count_the_scenario_cannot_carry_is_refused_before_anything_runs() {
             "{commits} commits published a root"
         );
     }
+}
+
+#[test]
+fn an_answer_for_another_scenario_is_unknown_and_shrinks_nothing() {
+    let publish = tempfile::tempdir().unwrap();
+    let config = config(publish.path().join("out"));
+    let run = shrink::run(&config, spawn_answering_for_the_original).unwrap();
+    let witness = &run.witness;
+    assert!(
+        witness.shrink.deleted.is_empty(),
+        "an answer for the original is no evidence about a candidate: {:?}",
+        witness.shrink.deleted
+    );
+    for record in &witness.shrink.candidates[1..] {
+        assert!(
+            matches!(
+                record.verdict,
+                CandidateVerdict::Unknown {
+                    reason: UnknownReason::ReadBackFailed
+                } | CandidateVerdict::InvalidPair { .. }
+            ),
+            "{:?}",
+            record.verdict
+        );
+    }
+    assert!(matches!(
+        witness.shrink.minimality,
+        Minimality::NotEstablished {
+            reason: NotEstablishedReason::UnknownCandidates { .. }
+        }
+    ));
 }
 
 #[test]

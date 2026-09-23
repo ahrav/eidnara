@@ -38,6 +38,8 @@ compact recipe form when multiplicity is the trigger."
 - `crates/eval-core/tests/witness.rs` `a_multiplicity_record_counts_only_under_its_own_scenario_digest`:
   a counted commit's records under a foreign digest drop out of the count
   and the recipe disagrees.
+- `crates/eval-core/tests/witness.rs` `a_one_minimal_claim_names_exactly_the_transformations_the_scenario_held`:
+  a dropped or padded transformation list is refused.
 - `crates/eval-core/tests/witness.rs` `the_coverage_signature_names_only_registered_markers`:
   an unregistered name refuses through `validate` and `serialize`.
 - `crates/daemon/tests/eval_shrink.rs` `a_fresh_process_reproduces_the_predicate_and_the_minimized_witness_is_published`:

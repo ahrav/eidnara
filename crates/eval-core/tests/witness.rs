@@ -10,8 +10,8 @@ use context_core::redaction::{RedactionErrorKind, Redactor};
 use eval_core::{
     CandidateVerdict, ClaimBoundary, Cut, Element, FailureClass, Generation, History, Minimality,
     Mode, MultiplicityRecipe, Oracle, OracleRefused, OriginalFailure, ShrinkReportError, Slice,
-    WITNESS_SCHEMA, WitnessClass, WitnessError, WitnessPackage, parse_witness, residue_drift,
-    shrink,
+    Transformation, WITNESS_SCHEMA, WitnessClass, WitnessError, WitnessPackage, parse_witness,
+    residue_drift, shrink,
 };
 use serde_json::Value;
 use support::shrink::{BUDGET, FRESH_SEED, evaluate, fixture, fresh_config, predicate, scenario};
@@ -323,6 +323,47 @@ fn a_parsed_package_holds_every_integer_to_the_canonical_range() {
     assert!(
         matches!(parse_witness(&huge), Err(WitnessError::Shape(_))),
         "a budget Bun cannot represent exactly is refused at the parser, as the serializer refuses it"
+    );
+}
+
+#[test]
+fn a_one_minimal_claim_names_exactly_the_transformations_the_scenario_held() {
+    let package = package();
+    let Minimality::OneMinimal { transformations } = &package.shrink.minimality else {
+        panic!("the fixture shrinks to a 1-minimal scenario");
+    };
+    assert_eq!(
+        *transformations,
+        vec![
+            Transformation::FaultEpisodeRemoval,
+            Transformation::EventDeletion
+        ],
+        "the original holds episodes and events"
+    );
+    let mut dropped = package.clone();
+    dropped.shrink.minimality = Minimality::OneMinimal {
+        transformations: vec![Transformation::EventDeletion],
+    };
+    let expected = transformations.clone();
+    assert_eq!(
+        dropped.validate(),
+        Err(WitnessError::TransformationsDisagree {
+            expected: expected.clone()
+        }),
+        "a claim that omits a tried transformation is refused"
+    );
+    let mut padded = package.clone();
+    padded.shrink.minimality = Minimality::OneMinimal {
+        transformations: vec![
+            Transformation::FaultEpisodeRemoval,
+            Transformation::EventDeletion,
+            Transformation::EventDeletion,
+        ],
+    };
+    assert_eq!(
+        padded.validate(),
+        Err(WitnessError::TransformationsDisagree { expected }),
+        "a claim padded past the transformations held is refused"
     );
 }
 
