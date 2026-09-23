@@ -29,7 +29,8 @@ fn judge() -> JudgeIdentity {
             schema: JUDGE_SCHEMA.to_string(),
             criteria: vec!["correctness".to_string(), "uses the history".to_string()],
         }
-        .digest(),
+        .digest()
+        .unwrap(),
     }
 }
 
@@ -777,6 +778,17 @@ fn calibration_refuses_a_foreign_schema_and_a_malformed_judge_digest() {
         Err(CalibrationRefused::SchemaMismatch {
             found: "eval-judge/v0".to_string()
         })
+    );
+    assert_eq!(
+        Rubric {
+            schema: "eval-judge/v0".to_string(),
+            criteria: vec!["correctness".to_string()],
+        }
+        .digest(),
+        Err(CalibrationRefused::SchemaMismatch {
+            found: "eval-judge/v0".to_string()
+        }),
+        "a rubric under another schema has no digest to bind a judge to"
     );
     let mut short = calibration();
     short.judge.prompt_digest = "abc".to_string();

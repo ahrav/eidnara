@@ -2442,7 +2442,8 @@ shell produces is checked before it is believed.
 
 A judge is a versioned dependency. `JudgeIdentity` is a `ProviderProfile`
 (tokenizer profile included) with the prompt digest and the `Rubric` digest
-(`eval-judge-rubric/v1`), each 64 lowercase hex. `CalibrationSet`
+(`eval-judge-rubric/v1`; a rubric under another schema has no digest), each
+64 lowercase hex. `CalibrationSet`
 (`eval-judge/v1`) freezes that identity with the human labels over anchor
 pairs before any judging and digests into every report
 (`eval-judge-calibration/v1`); it refuses another schema, a malformed digest,

@@ -58,9 +58,16 @@ pub struct Rubric {
 }
 
 impl Rubric {
-    pub fn digest(&self) -> String {
+    /// A rubric under another schema has no digest: nothing downstream keeps
+    /// the rubric, so this is the only point that can refuse it.
+    pub fn digest(&self) -> Result<String, CalibrationRefused> {
+        if self.schema != JUDGE_SCHEMA {
+            return Err(CalibrationRefused::SchemaMismatch {
+                found: self.schema.clone(),
+            });
+        }
         let value = serde_json::to_value(self).expect("rubric serializes");
-        protocol_digest(RUBRIC_DIGEST_PROTOCOL, &value).expect("rubric is canonical")
+        Ok(protocol_digest(RUBRIC_DIGEST_PROTOCOL, &value).expect("rubric is canonical"))
     }
 }
 
