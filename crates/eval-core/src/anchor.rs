@@ -172,7 +172,7 @@ fn is_url(text: &str) -> bool {
         .is_some_and(|(host, path)| {
             !host.is_empty()
                 && !host.contains(|c: char| c.is_ascii_uppercase())
-                && !path.is_empty()
+                && !path.trim_matches('/').is_empty()
                 && [host, path]
                     .concat()
                     .chars()
@@ -223,7 +223,10 @@ impl AnchorCorpus {
                 });
             }
             if let Some(of) = fixes.insert(
-                (entry.repository.as_str(), entry.fix_sha.as_str()),
+                (
+                    repository_web_path(&entry.repository),
+                    entry.fix_sha.as_str(),
+                ),
                 &entry.id,
             ) {
                 return Err(AnchorError::DuplicateTask {
@@ -270,6 +273,8 @@ impl AnchorCorpus {
 #[serde(deny_unknown_fields)]
 pub struct Preparation {
     pub task: String,
+    /// `AnchorEntry::digest` of the row that was prepared.
+    pub entry_digest: String,
     #[serde(with = "crate::decimal")]
     pub prepare_ms: u64,
 }
@@ -305,6 +310,10 @@ pub enum TimeStudyRefused {
     NotFromCorpus {
         task: String,
     },
+    /// The task was prepared as another version of its row.
+    RowMismatch {
+        task: String,
+    },
     /// One task measured twice is one task, not two.
     DuplicateTask {
         task: String,
@@ -329,13 +338,17 @@ pub fn time_study(
             measured: measured.len(),
         });
     }
-    if let Some(stranger) = measured
-        .iter()
-        .find(|p| !corpus.entries.iter().any(|e| e.id == p.task))
-    {
-        return Err(TimeStudyRefused::NotFromCorpus {
-            task: stranger.task.clone(),
-        });
+    for p in measured {
+        let Some(entry) = corpus.entries.iter().find(|e| e.id == p.task) else {
+            return Err(TimeStudyRefused::NotFromCorpus {
+                task: p.task.clone(),
+            });
+        };
+        if entry.digest().map_err(TimeStudyRefused::Corpus)? != p.entry_digest {
+            return Err(TimeStudyRefused::RowMismatch {
+                task: p.task.clone(),
+            });
+        }
     }
     let mut tasks = BTreeSet::new();
     if let Some(repeat) = measured.iter().find(|p| !tasks.insert(p.task.as_str())) {

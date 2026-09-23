@@ -4,6 +4,7 @@
 
 use std::collections::BTreeSet;
 
+use context_core::canonical_json::is_lower_hex;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -66,10 +67,11 @@ pub struct TransferCriterion {
 }
 
 impl TransferCriterion {
-    /// A criterion nobody approved, or one every anchor set would meet, is
-    /// not a criterion.
+    /// A criterion nobody approved (no approver, or no run id of the run it
+    /// was approved at), or one every anchor set would meet, is not a
+    /// criterion.
     pub fn validate(&self) -> Result<(), UnmetClause> {
-        if self.approved_by.trim().is_empty() || self.approved_at_run_id.trim().is_empty() {
+        if self.approved_by.trim().is_empty() || !is_lower_hex(&self.approved_at_run_id, 64) {
             return Err(UnmetClause::CriterionNotApproved);
         }
         if self.min_valid_tasks == 0 || self.required_families.is_empty() {

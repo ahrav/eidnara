@@ -215,6 +215,7 @@ fn the_time_study_projects_the_pilot_and_stops_for_approval_past_the_bound() {
         .iter()
         .map(|e| Preparation {
             task: e.id.clone(),
+            entry_digest: e.digest().unwrap(),
             prepare_ms: 600_000,
         })
         .collect();
@@ -803,6 +804,7 @@ fn the_time_study_needs_five_distinct_tasks() {
     let same_task = vec![
         Preparation {
             task: "cargo-0".to_string(),
+            entry_digest: corpus_entry("cargo-0").digest().unwrap(),
             prepare_ms: 600_000,
         };
         TIME_STUDY_TASKS
@@ -933,6 +935,7 @@ fn the_time_study_saturates_instead_of_wrapping() {
         .iter()
         .map(|e| Preparation {
             task: e.id.clone(),
+            entry_digest: e.digest().unwrap(),
             prepare_ms: 1,
         })
         .collect();
@@ -1027,6 +1030,7 @@ fn the_time_study_projection_does_not_lose_magnitude_to_saturation() {
         .iter()
         .map(|e| Preparation {
             task: e.id.clone(),
+            entry_digest: e.digest().unwrap(),
             prepare_ms: u64::MAX / 10,
         })
         .collect();
@@ -1221,6 +1225,7 @@ fn the_time_study_measures_the_pilot_and_nothing_else() {
         .iter()
         .map(|e| Preparation {
             task: e.id.clone(),
+            entry_digest: e.digest().unwrap(),
             prepare_ms: 1,
         })
         .collect();
@@ -1253,6 +1258,7 @@ fn the_time_study_validates_the_corpus_it_measures() {
         .iter()
         .map(|e| Preparation {
             task: e.id.clone(),
+            entry_digest: e.digest().unwrap(),
             prepare_ms: 1,
         })
         .collect();
@@ -1312,4 +1318,54 @@ fn a_clone_url_has_a_lowercase_host_and_a_repository_path() {
         entry.repository = repository.to_string();
         assert!(entry.validate().is_err(), "{repository}");
     }
+}
+
+#[test]
+fn one_repository_spelled_two_ways_is_one_duplicate_task_key() {
+    let mut corpus = pilot();
+    let mut alias = corpus.entries[0].clone();
+    alias.id = "cargo-0-again".to_string();
+    alias.repository = alias.repository.trim_end_matches(".git").to_string();
+    corpus.entries.push(alias);
+    assert!(corpus.validate().is_err());
+}
+
+#[test]
+fn a_clone_url_path_is_more_than_separators() {
+    let mut entry = entry("cargo-0", Family::Cargo, 0x10);
+    entry.repository = "https://example.invalid//".to_string();
+    assert!(entry.validate().is_err());
+}
+
+#[test]
+fn a_criterion_needs_a_run_id_for_its_approval() {
+    let short = TransferCriterion {
+        approved_by: "maintainer".to_string(),
+        approved_at_run_id: "x".to_string(),
+        min_valid_tasks: 1,
+        required_families: BTreeSet::from(["cargo".to_string()]),
+    };
+    assert!(short.validate().is_err());
+    assert_eq!(short.validate(), Err(UnmetClause::CriterionNotApproved));
+}
+
+#[test]
+fn a_preparation_measures_the_row_it_names() {
+    let corpus = pilot();
+    let mut measured: Vec<Preparation> = corpus.entries[..TIME_STUDY_TASKS]
+        .iter()
+        .map(|e| Preparation {
+            task: e.id.clone(),
+            entry_digest: e.digest().unwrap(),
+            prepare_ms: 1,
+        })
+        .collect();
+    measured[2].entry_digest = "00".repeat(32);
+    assert_eq!(
+        time_study(&corpus, &measured, u64::MAX),
+        Err(TimeStudyRefused::RowMismatch {
+            task: "cargo-2".to_string()
+        }),
+        "a measurement of another version of the row says nothing about this one"
+    );
 }

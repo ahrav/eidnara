@@ -1173,7 +1173,9 @@ every failing `UnmetClause` named in declaration order: `generated_world`
 (the twenty-task pilot exists to populate the pilot and calibrate the
 generator and never derives `transfer` on its own), `anchor_task_not_valid`
 (a `residue` or `cutoff_invalid` task, also listed in `skipped`),
-`no_transfer_criterion`, `criterion_not_approved`, `criterion_has_no_floor`
+`no_transfer_criterion`, `criterion_not_approved` (a blank approver, or an
+`approved_at_run_id` that is not a sixty-four-hex run id),
+`criterion_has_no_floor`
 (a zero task floor or no required family would make any set pass),
 `too_few_valid_tasks {required, valid}`, and `family_missing {family}`. The
 `TransferCriterion {approved_by, approved_at_run_id, min_valid_tasks,
@@ -2440,15 +2442,15 @@ at run time and never written into a corpus, report, or witness; `validate`
 refuses an empty field, an `id` with whitespace, a `repository` that is not
 an `https://` URL of a lowercase host and a repository path in unreserved
 characters (so `git@host:path`, `ssh://`, `file://`, a user, a port, a
-query, a fragment, an upper-case host, an empty host, or an empty path
-refuses, and the `/pull/` URLs
+query, a fragment, an upper-case host, an empty host, or a path of nothing
+but separators refuses, and the `/pull/` URLs
 `future_answers` matches derive
 from the URL itself), a `license` that is not an SPDX expression by shape (identifiers of
 SPDX characters joined by `AND`, `OR`, or `WITH`; not checked against the
 SPDX list) (`TextPersisted`), a
 malformed SHA, a fix commit that is the base commit (`FixIsBase`), a
-duplicate id, and one fix commit of one repository under
-two ids (`DuplicateTask`). `digest` validates first and refuses a
+duplicate id, and one fix commit of one repository (by web path, so
+`repo` and `repo.git` are one repository) under two ids (`DuplicateTask`). `digest` validates first and refuses a
 row JSON cannot carry exactly (`NotCanonical`) instead of panicking.
 `AnchorEntry::digest` (`eval-anchor-entry-digest/v1`) is the identity every
 piece of evidence names: an audit, a proof, or a control produced for one
@@ -2458,9 +2460,10 @@ exactly `PILOT_COMPOSITION`: eight Cargo, eight Tokio, four Django.
 
 **Time study.** `time_study(corpus, measured, bound_ms)` projects the pilot's
 preparation cost from exactly `TIME_STUDY_TASKS` (five) measured
-`Preparation {task, prepare_ms}` rows of distinct tasks of a valid pilot
-corpus (an invalid corpus refuses `Corpus(..)`, any other composition
-`NotThePilot`), scaled in
+`Preparation {task, entry_digest, prepare_ms}` rows of distinct tasks of a
+valid pilot corpus (an invalid corpus refuses `Corpus(..)`, any other
+composition `NotThePilot`, a measurement of another version of a row
+`RowMismatch`), scaled in
 128-bit arithmetic and clamped at `u64::MAX` to the
 twenty-task pilot: `Affordable {projected_ms}` within the bound, else
 `StopForApproval {projected_ms, bound_ms}`, which stops for the maintainer
