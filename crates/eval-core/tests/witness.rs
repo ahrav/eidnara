@@ -538,6 +538,19 @@ fn the_recipe_regenerates_the_original_tape_too() {
 }
 
 #[test]
+fn the_recipe_regenerates_the_original_causal_trace_too() {
+    let mut package = package();
+    package.original.causal_trace.clear();
+    assert_eq!(
+        package.validate(),
+        Err(WitnessError::RecipeDisagrees {
+            history: History::Aged
+        }),
+        "the aged generation's edges are the causal trace the failure recorded"
+    );
+}
+
+#[test]
 fn the_coverage_signature_names_only_registered_markers() {
     let mut package = package();
     package

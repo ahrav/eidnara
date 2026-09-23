@@ -370,9 +370,12 @@ impl WitnessPackage {
         }
         let world = generate_all(generation.root_seed, &generation.config, Mode::Generate)
             .map_err(|_| disagrees())?;
-        // The aged generation is the original's world: its decision tape is
-        // the one the failure recorded, not just its log.
-        if history == History::Aged && world.tape != self.original.tape {
+        // The aged generation is the original's world: its decision tape and
+        // its causal edges are the ones the failure recorded, not just its log.
+        if history == History::Aged
+            && (world.tape != self.original.tape
+                || world.log.causal_edges != self.original.causal_trace)
+        {
             return Err(disagrees());
         }
         let mut log = world.log;

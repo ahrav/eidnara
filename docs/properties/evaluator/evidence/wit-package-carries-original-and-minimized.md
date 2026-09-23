@@ -49,9 +49,10 @@ compact recipe form when multiplicity is the trigger."
   a taskless minimized scenario with every digest agreeing is refused.
 - `crates/eval-core/tests/witness.rs` `a_deleted_element_cannot_also_survive`,
   `the_failure_predicate_names_the_task_the_replay_evaluates`,
-  `the_recipe_regenerates_the_original_tape_too`: a survivor named as
+  `the_recipe_regenerates_the_original_tape_too`,
+  `the_recipe_regenerates_the_original_causal_trace_too`: a survivor named as
   deleted, a predicate over a task the scenario lacks, and an original tape
-  the aged generation does not produce are refused.
+  or causal trace the aged generation does not produce are refused.
 - `crates/eval-core/tests/witness.rs` `the_coverage_signature_names_only_registered_markers`:
   an unregistered name refuses through `validate` and `serialize`.
 - `crates/daemon/tests/eval_shrink.rs` `a_fresh_process_reproduces_the_predicate_and_the_minimized_witness_is_published`:

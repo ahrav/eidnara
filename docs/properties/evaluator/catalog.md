@@ -298,6 +298,7 @@ Exercised: yes -
   `crates/eval-core/tests/witness.rs::a_deleted_element_cannot_also_survive`,
   `crates/eval-core/tests/witness.rs::the_failure_predicate_names_the_task_the_replay_evaluates`,
   `crates/eval-core/tests/witness.rs::the_recipe_regenerates_the_original_tape_too`,
+  `crates/eval-core/tests/witness.rs::the_recipe_regenerates_the_original_causal_trace_too`,
   and
   `crates/daemon/tests/eval_shrink.rs::a_fresh_process_reproduces_the_predicate_and_the_minimized_witness_is_published`
 Guarantee: A witness package carries the original failure (RunId, decision tape,
@@ -325,7 +326,8 @@ Check: `always` - `WitnessPackage::validate` refuses a recipe missing when
   than the first pair's is refused (`PredicateNamesAnotherTask`); a deleted
   element the minimized scenario still holds is refused
   (`ShrinkReport(Inconsistent { deleted })`); the aged generation must
-  regenerate the original's decision tape (`RecipeDisagrees`); a
+  regenerate the original's decision tape and causal trace
+  (`RecipeDisagrees`); a
   coverage name outside the registry is refused (`UnregisteredMarker { name }`); an embedded report that
   `ShrinkReport::validate` refuses is refused (`ShrinkReport(..)`);
   `parse_witness(serialize(package)) == package`; the published bytes parse

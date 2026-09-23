@@ -2891,7 +2891,8 @@ minimality is not established, carries none (`RecipeWithoutMultiplicity`); the f
 `count_triggered` (`RecipeMultiplicitiesDisagree`); and each `Generation`
 (config and root seed) must regenerate exactly the minimized log once the
 report's deletions for that history are applied, and the aged generation's
-decision tape must be the original's (`RecipeDisagrees { history }`). The declared event count is compared with the minimized log plus
+decision tape and causal edges must be the original's (`RecipeDisagrees {
+history }`). The declared event count is compared with the minimized log plus
 the deletions before anything is generated, so a parsed package cannot demand
 an unbounded regeneration.
 
