@@ -1671,6 +1671,78 @@ Fault contract (`crates/eval-core/tests/fault.rs`,
   containing it; one losing episode named by two effects is
   `LostReplyClaimedTwice`.
 
+Growth contract (`crates/eval-core/tests/growth.rs`,
+`flt-never-restored-leak-campaign-separate`,
+`flt-memory-reviewer-quota-refusal-expected`,
+`xc-campaign-resource-envelope-declared-and-enforced`,
+`xc-parallel-campaigns-isolated-on-shared-checkout`):
+
+- `headroom_is_accounted_from_the_constants_read_not_a_slot_count`: expected
+  project bytes are the receipt charge per terminal job or page plus receipt
+  and allowance per pending job or frozen page, from the constants the store
+  declares; admissions remaining is derived from those constants; a sample
+  whose bytes differ is `HeadroomMismatch`, and one whose remaining bytes are
+  not the quota less those bytes is `RemainingMismatch`; job counts the
+  constants cannot multiply within `u64` are `HeadroomOverflow`, not a wrap,
+  held bytes above the project quota are `HeadroomOverQuota`, not an
+  exhausted quota, and a charge past `u64` admits nothing rather than
+  panicking.
+- `a_never_restored_ledger_passes_only_when_the_final_sample_holds_nothing_transient`:
+  a final sample with WAL bytes, a temporary artifact entry, or a temp root
+  is a named `Leak`; a counter over its bound is `BoundExceeded`; main-file
+  store bytes growing faster than the per-commit allowance are
+  `GrowthRateExceeded` even under the size bound, and a WAL-heavy first sample
+  does not mask that growth, and file bytes added with no commit between the
+  samples have no allowance; a sample that omits a store family is
+  `StoreMissing`; a single sample is `NoBaseline`; a negative commit sequence
+  is `CommitSeqNegative`; store bytes past `u64` saturate, never a panic; an
+  empty ledger, a repeated step, a receding
+  commit sequence, a receding commit-log row, terminal-job, page, or R24
+  count, an `admitted_total`
+  that is not pending plus terminal, or a sequence advance the commit log did
+  not retain (`CommitRowsDisagree`) refuse, including in a ledger
+  assembled without `record`;
+  the peak store total is the transient middle sample.
+- `a_restore_under_never_restored_is_refused_and_a_restoring_ledger_gives_no_leak_verdict`
+  (marker `flt_restore_under_never_restored_refused`): a restore is refused
+  and counted under `never_restored`; a `restoring` ledger's verdict is
+  `NotALeakVerdict` whatever its samples show.
+- `a_mix_missing_an_operation_is_not_sustainability_success` (marker
+  `flt_incomplete_mix_not_success`): a mix that never exercised a kind is
+  `MixIncomplete` naming the kinds, and the report refuses it.
+- `a_shared_root_namespace_or_port_is_refused` (marker
+  `xc_shared_fixture_refused`): a shared root, publish directory, cassette
+  namespace, or port is refused by value, as is one campaign's root equal to
+  another's publish directory or a path inside another campaign's root or
+  publish directory, with `/` containing every campaign; a path that is not
+  canonical (`/tmp/a/`, `/tmp/./a`, `/tmp/x/../a`, `tmp/a`, `/tmp//a`, empty)
+  is `NonCanonicalPath`; a concurrent digest that differs
+  from its serial run is refused by campaign index, and fewer than two
+  campaigns are `TooFewCampaigns`.
+- `a_growth_report_round_trips_and_its_digest_ignores_measurements`: the
+  report parses back equal; its digest ignores per-sample byte measurements
+  and envelope peaks, and changes with the quota constants, the commit
+  sequence and row counts, and the headroom; a restoring report with no
+  samples, out-of-order samples, a headroom that does not follow from the
+  constants, or a nonzero refused-restore count, faults with no safety check (whether the
+  episode count or the mix records them), a fault-episode count that differs
+  from the mix (`FaultEpisodesDisagree`), a frozen page the constants do not
+  account for, a reordered report read back, a
+  leaked final sample, an envelope whose peaks crossed a bound, a sample the
+  envelope peak never saw (`EnvelopeNotCharged`; artifact-store bytes are
+  not the published bytes the envelope charges), embedded bounds that differ
+  from the `GrowthContract` passed to `validate` (`BoundsNotApproved`, after
+  which the approved bounds judge the sample), quota constants that differ
+  from the ones the caller read (`QuotaMismatch`), envelope bounds that differ
+  from the approved limits (`EnvelopeBoundsNotApproved`), a claim boundary
+  other than the pinned one (`ClaimBoundaryMismatch`), a run id or profile
+  digest that is not 64 lowercase hex digits (`MalformedDigest`), and a final R24 count that
+  disagrees with the recorded R24 refusals (`R24Unreconciled`; an R11 entry
+  is not counted), a recorded refusal whose production error does not name
+  its variant (`RefusalNotEvidenced`), a marker no suite owns
+  (`UnregisteredMarker`), and an integer past the canonical safe range on
+  serialize or parse (`NotCanonical`) refuse.
+
 Fault shell (`crates/daemon/tests/eval_fault.rs`, `--all-features`; the
 default shards run the campaign once with every scenario asserted over it,
 the named scenarios and the completeness proof run in the `eval-campaign` CI

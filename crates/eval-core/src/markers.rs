@@ -9,7 +9,7 @@ pub struct Marker {
 }
 
 /// Every marker the evaluator's suites may record, globally unique by name.
-pub const MARKERS: [Marker; 51] = [
+pub const MARKERS: [Marker; 59] = [
     Marker {
         name: "ing_four_seam_hold_correct_release_query",
         test: "crates/daemon/tests/eval_ingestion.rs::hold_embedding_commit_correction_release_query_makes_the_predecessor_obsolete",
@@ -213,6 +213,38 @@ pub const MARKERS: [Marker; 51] = [
     Marker {
         name: "sls_embedding_publication_held_then_released",
         test: "crates/daemon/tests/eval_fault.rs::a_held_publication_admits_once_and_publishes_on_release",
+    },
+    Marker {
+        name: "flt_leak_ledger_sampled_before_reopen",
+        test: "crates/daemon/tests/eval_growth.rs::a_never_restored_campaign_samples_every_quiescence_and_refuses_a_restore",
+    },
+    Marker {
+        name: "flt_restore_under_never_restored_refused",
+        test: "crates/eval-core/tests/growth.rs::a_restore_under_never_restored_is_refused_and_a_restoring_ledger_gives_no_leak_verdict",
+    },
+    Marker {
+        name: "flt_headroom_accounted_from_store_constants",
+        test: "crates/daemon/tests/eval_growth.rs::reviewer_headroom_is_accounted_from_the_stores_own_constants",
+    },
+    Marker {
+        name: "xc_envelope_breach_stops_the_run",
+        test: "crates/daemon/tests/eval_growth.rs::a_deliberate_envelope_breach_names_the_resource_and_publishes_nothing",
+    },
+    Marker {
+        name: "xc_parallel_campaigns_isolated",
+        test: "crates/daemon/tests/eval_growth.rs::two_concurrent_campaigns_on_one_checkout_match_their_serial_digests",
+    },
+    Marker {
+        name: "xc_shared_fixture_refused",
+        test: "crates/eval-core/tests/growth.rs::a_shared_root_namespace_or_port_is_refused",
+    },
+    Marker {
+        name: "flt_swarm_mix_complete",
+        test: "crates/daemon/tests/eval_growth.rs::the_swarm_mix_exercises_every_operation_kind",
+    },
+    Marker {
+        name: "flt_incomplete_mix_not_success",
+        test: "crates/eval-core/tests/growth.rs::a_mix_missing_an_operation_is_not_sustainability_success",
     },
 ];
 

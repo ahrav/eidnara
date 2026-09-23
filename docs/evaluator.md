@@ -2217,6 +2217,127 @@ outside the canonical safe range, which `result_digest` could not encode;
 reads a report back losslessly; `result_digest` drops barrier pids and
 envelope peaks under `eval-suite-c-fault-report-result/v1`.
 
+## Growth ledger, reviewer headroom, swarm mix, and isolation
+
+`growth` holds the value-level contract of a sustainability campaign.
+`ReviewerQuota` carries the reviewer quota constants as the memory store
+declares them (`receipt_charge_bytes`, `job_allowance_bytes`,
+`page_receipt_bytes`, `page_allowance_bytes`, the project and
+host metadata quotas); the shell reads them from the store, and the report
+carries what it read, never a figure copied from a document.
+`expected_project_bytes(headroom)` is the receipt charge per terminal job or
+page plus the receipt charge and the allowance per open job or frozen page,
+so no byte figure in a sample is taken on trust; `admissions_remaining` divides the remaining bytes by one admission's
+charge as a report figure, not an acceptance count. Reaching the quota is R24,
+recorded as an expected refusal, and the report does not judge whether
+permanent exhaustion is intended.
+
+A `ResourceSample` is everything a campaign holds at one quiescent point: per
+store family the file, `-wal`, and `-shm` bytes; artifact objects, temporary
+entries, and bytes; cassette bytes; temp roots and processes;
+commit-log and projection rows; open holds; and a `HeadroomSample` (pending
+and terminal jobs, frozen and terminal pages, project bytes and remaining,
+admissions, R24
+refusals). A `GrowthLedger` records samples under a `GrowthMode`
+(`never_restored` or `restoring`) with monotonic steps and commit sequence;
+`restore_attempted` under `never_restored` is `RestoreUnderNeverRestored` and
+counted. `verdict(quota, bounds)` is a leak verdict only for a never-restored
+ledger (`NotALeakVerdict` otherwise) with a baseline and a final sample
+(`NoBaseline` for one sample, which has no interval to judge growth over):
+every sample must carry every store
+family (`StoreMissing { step, family }`, so an omitted store cannot hide its
+bytes), its project bytes must equal `expected_project_bytes`
+(`HeadroomMismatch`; `HeadroomOverflow` when the counts do not fit in `u64`,
+since a report is read from disk and never trusted to be small;
+`HeadroomOverQuota` when they exceed the project quota, which admission never
+lets happen) and its
+remaining bytes the quota less that figure
+(`RemainingMismatch`), the final sample must hold no
+temporary artifact entry, no WAL bytes, no temp root, and no process (`Leak {
+resource, step, observed }`), and its store total, artifact objects and bytes, commit
+and projection rows, and open holds must be within the declared
+`GrowthBounds` (`BoundExceeded`); the main-file store bytes added between the
+first and the last sample must not exceed `store_bytes_per_commit` times the
+commits between them (`GrowthRateExceeded`; zero commits allow no growth),
+and the commit-log rows added between them must equal those commits
+(`CommitRowsDisagree`, since the log is append-only and a rolled-back commit
+reverts its sequence), so a leak proportional to the
+history is refused even under the size bound. The rate excludes `-wal` and
+`-shm` bytes, so a WAL-heavy first sample cannot cancel the file bytes the
+history retained; byte totals saturate, so a reading past `u64` is a refusal,
+not a panic. `verdict` and `validate` re-check the step, commit, and R24
+ordering over the whole ledger, with every cumulative count
+(`commit_log_rows`, `terminal_jobs`, `admitted_total`, `r24_refusals`, and
+frozen plus terminal pages) never receding (`CountNotMonotonic { step,
+field }`, the commit log being append-only and job and page rows permanent
+receipts) and `admitted_total` equal to pending plus terminal jobs
+(`AdmittedMismatch`), and refuse a negative
+commit sequence (`CommitSeqNegative`, since a negative baseline would buy
+allowance for commits that never happened), because a deserialized
+ledger never passed
+through `record`. `peak_store_bytes` is the largest total any
+sample saw, the transient pressure the envelope must also be charged with.
+
+`SwarmMix` counts the seven `Operation` kinds a growth campaign must exercise
+(`publish`, `correct`, `retire`, `query`, `fault_episode`, `quota_pressure`,
+`store_growth`); `complete` is `MixIncomplete { missing }` when any kind was
+never exercised, so a run that skipped a kind cannot report sustainability.
+
+`CampaignResources` names what two campaigns on one checkout must not share
+(roots, publish directories, cassette namespaces, ports); `isolated` refuses
+`SharedRoot`, `SharedPublishDir`, `SharedCassetteNamespace`, or `SharedPort`
+by the shared value (a root and a publish directory are one filesystem
+resource, so one campaign's root equal to another's publish directory is
+refused too, and so is a path inside another campaign's path, since it
+writes into it; paths must be canonical, absolute with plain components and
+no `.`, `..`, empty component, or trailing separator, else
+`NonCanonicalPath`; the caller passes each directory as the filesystem
+resolves it, since eval-core has no filesystem and cannot see symlinks or
+mounts), and `digests_match_serial` refuses
+`DigestDiffersFromSerial { campaign }` when a concurrent run's result digest
+differs from its serial one and `TooFewCampaigns` below two, since isolation
+is a claim about at least two.
+
+`GrowthReport` (`eval-suite-c-growth-report/v1`) is what one campaign
+publishes: identity, profile digest, claim boundary, the quota read, the
+bounds, the ledger, the mix, expected refusals, fault-episode and
+safety-check counts (`SafetyNeverChecked` when either the fault-episode count
+or the mix records a fault episode and no safety check ran while armed;
+`FaultEpisodesDisagree` when the count and the mix's `fault_episode` tally
+differ),
+markers, and envelope. `validate(contract)` requires `eval_run_id` and
+`profile_digest` to be 64 lowercase hex digits (`MalformedDigest { field }`),
+as the Suite B report does; the manifest derives the run id and names the
+report by a result digest that covers both fields. It takes a `GrowthContract`, what
+the caller knows independently of the report: the quota constants it read
+from the store, the bounds the manifest declares, and the approved profile's
+envelope; an embedded copy that differs is refused (`QuotaMismatch`,
+`BoundsNotApproved`, `EnvelopeBoundsNotApproved`), as the fault
+report takes its liveness bounds, so a producer cannot widen what it is
+judged by, and refuses a claim boundary other than the pinned one
+(`ClaimBoundaryMismatch`), as the manifest does; it runs the mix and ledger
+refusals (a `restoring` ledger keeps `check_samples`, the order, store, and
+headroom evidence, drops only the leak verdict, and must have refused no
+restore, `RestoresRefusedUnderRestoring`), refuses
+an envelope whose peaks crossed a bound (`EnvelopeNotHonoured`) or that a
+sample's store total, cassette bytes, temp roots, or processes
+exceed (`EnvelopeNotCharged { resource, step, peak, observed }`; the
+envelope's artifact bytes and retained artifacts are the published files, not
+the artifact store a sample measures), and refuses
+a final R24 count that differs from the R24 entries in `expected_refusals`
+(`R24Unreconciled { counted, recorded }`), a recorded refusal whose
+production error does not name its variant (`RefusalNotEvidenced`), and a
+marker no registered suite owns (`UnregisteredMarker`), as the fault report
+does; `serialize` and `parse_growth_report` refuse an integer outside the
+canonical safe range (`NotCanonical`), so a value `validate` accepts is one
+`result_digest` can digest;
+`parse_growth_report(value, contract)` reads a report back losslessly; `result_digest` drops
+each sample's byte measurements (`stores`, `artifact_bytes`,
+`cassette_bytes`) and the envelope peaks, which name one machine's bytes, and
+keeps steps, commit sequence, row and object counts, and headroom, so a
+concurrent campaign that saw another campaign's commits does not match its
+serial digest; the digest protocol is `eval-suite-c-growth-report-result/v1`.
+
 ## Aging shell
 
 `crates/daemon/examples/eval_runner/aging.rs` is the Suite C aging shell. It
@@ -2568,7 +2689,14 @@ the checkpoint and window markers (`flt_quiescence_receipt_all_zero`,
 marker `wm_bulk_scaffold_presented_as_aged` is recorded by the eval-core
 manifest suite, and the pure fault-contract markers (`flt_premature_success_fixture_refused`,
 `flt_incomplete_coverage_named_not_pass`, `flt_crash_model_label_refused`,
-`flt_liveness_unmet_named_at_bound`) by the eval-core fault suite; `eval_fault.rs`
+`flt_liveness_unmet_named_at_bound`) by the eval-core fault suite, the pure
+growth markers (`flt_restore_under_never_restored_refused`,
+`xc_shared_fixture_refused`, `flt_incomplete_mix_not_success`) by the eval-core
+growth suite, and `eval_growth.rs`, the campaign shell that lands with the
+second half of this change, owns the growth-campaign markers
+(`flt_leak_ledger_sampled_before_reopen`, `flt_headroom_accounted_from_store_constants`,
+`xc_envelope_breach_stops_the_run`, `xc_parallel_campaigns_isolated`,
+`flt_swarm_mix_complete`); `eval_fault.rs`
 owns the fault-campaign markers (`flt_lost_reply_unknown_until_readback`,
 `flt_every_declared_cut_receipted`, `flt_kill_barrier_read_before_kill`,
 `flt_r11_recorded_as_expected_refusal`, `flt_r24_recorded_as_expected_refusal`,
