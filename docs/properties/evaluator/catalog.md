@@ -846,11 +846,11 @@ Guarantee: Every residual report records the judge identity, the live provider
   live slice is constructed and validated only against the settings that
   approved its provider profile, pass^k exponent, planned attempts per task,
   and held-out task set.
-Check: `always` - `ResidualReport::comparable` refuses `SchemaMismatch` or a
-  `MalformedDigest` (judge or calibration) on either report and returns
-  `ReanchorRequired` naming `judge`, `live_provider`, or `calibration_digest`
-  on the first inequality, with `tokenizer_profile` part of `ProviderProfile`
-  equality;
+Check: `always` - `ResidualReport::comparable` runs every calibration-free
+  check of `validate` (schema, digest form, plan, permutation, judgments) on
+  either report and returns `ReanchorRequired` naming `judge`,
+  `live_provider`, or `calibration_digest` on the first inequality, with
+  `tokenizer_profile` part of `ProviderProfile` equality;
   `ResidualReport::validate` refuses `CalibrationJudgeDiffers` and
   `DigestMismatch`; `live_slice` and `LiveSliceReport::validate` refuse
   `UnapprovedProvider`, `KDiffers`, `AttemptCountDiffers`,

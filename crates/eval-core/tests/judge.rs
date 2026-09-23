@@ -364,6 +364,22 @@ fn a_changed_judge_provider_or_tokenizer_refuses_cross_run_residual_comparison()
         leaked.validate(&calibration),
         Err(ResidualRefused::Permutation(_))
     ));
+    assert!(
+        matches!(
+            base.comparable(&leaked),
+            Err(ResidualRefused::Permutation(_))
+        ),
+        "a report validate refuses compares with nothing"
+    );
+    let mut miscounted = base.clone();
+    miscounted.judgments.pop();
+    assert_eq!(
+        miscounted.comparable(&base),
+        Err(ResidualRefused::JudgmentCountMismatch {
+            declared: 40,
+            judged: 39
+        })
+    );
     let mut under = base;
     under.sampling.human_sample = 1;
     assert!(matches!(

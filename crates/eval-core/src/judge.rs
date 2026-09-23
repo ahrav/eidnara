@@ -561,8 +561,8 @@ pub enum ResidualRefused {
 debug_display!(ResidualRefused);
 
 impl ResidualReport {
-    /// What a report must satisfy on its own, before any calibration set or
-    /// other report is consulted.
+    /// Everything a report must satisfy on its own, before any calibration
+    /// set or other report is consulted; `validate` and `comparable` share it.
     fn check_form(&self) -> Result<(), ResidualRefused> {
         if self.schema != RESIDUAL_REPORT_SCHEMA {
             return Err(ResidualRefused::SchemaMismatch {
@@ -577,30 +577,12 @@ impl ResidualReport {
                 CalibrationRefused::MalformedDigest { field },
             ));
         }
-        Ok(())
-    }
-
-    pub fn validate(&self, calibration: &CalibrationSet) -> Result<(), ResidualRefused> {
-        self.check_form()?;
         self.sampling
             .validate()
             .map_err(ResidualRefused::Calibration)?;
         self.permutation
             .validate()
             .map_err(ResidualRefused::Permutation)?;
-        calibration
-            .validate()
-            .map_err(ResidualRefused::Calibration)?;
-        if calibration.judge != self.judge {
-            return Err(ResidualRefused::Calibration(
-                CalibrationRefused::CalibrationJudgeDiffers,
-            ));
-        }
-        if calibration.digest() != self.calibration_digest {
-            return Err(ResidualRefused::Calibration(
-                CalibrationRefused::DigestMismatch,
-            ));
-        }
         let mut judged = BTreeSet::new();
         if let Some(duplicate) = self
             .judgments
@@ -620,9 +602,27 @@ impl ResidualReport {
         Ok(())
     }
 
-    /// Two runs' `residual.*` metrics compare only under this contract, with
-    /// well-formed judge identities, and the same judge, live provider,
-    /// tokenizer accounting profile, and calibration digest.
+    pub fn validate(&self, calibration: &CalibrationSet) -> Result<(), ResidualRefused> {
+        self.check_form()?;
+        calibration
+            .validate()
+            .map_err(ResidualRefused::Calibration)?;
+        if calibration.judge != self.judge {
+            return Err(ResidualRefused::Calibration(
+                CalibrationRefused::CalibrationJudgeDiffers,
+            ));
+        }
+        if calibration.digest() != self.calibration_digest {
+            return Err(ResidualRefused::Calibration(
+                CalibrationRefused::DigestMismatch,
+            ));
+        }
+        Ok(())
+    }
+
+    /// Two runs' `residual.*` metrics compare only when each report passes
+    /// every check that needs no calibration set, and under the same judge,
+    /// live provider, tokenizer accounting profile, and calibration digest.
     pub fn comparable(&self, other: &ResidualReport) -> Result<(), ResidualRefused> {
         self.check_form()?;
         other.check_form()?;
