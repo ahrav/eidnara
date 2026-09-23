@@ -2078,9 +2078,10 @@ final tip from the snapshot export and embedded to quiescence has the full
 life's live digest and differs historically by every death in the history.
 
 The run refuses an unapproved profile before the history is generated or any
-store opens (the profile's event bound is the generator's, `messages.max(64)
-* 2`, so it needs no plan), starts the envelope's clock before planning, charges
-the roots, store bytes, elapsed time, and artifact bytes to the envelope, and
+store opens (the profile's event bound is the generator's,
+`messages.max(64) * 2`, so it needs no plan), starts the envelope's clock
+before planning, charges the roots, store bytes, elapsed time, and artifact
+bytes to the envelope, and
 publishes `suite-c-aging-report.json` and `manifest.json` write-then-rename;
 a manifest the directory refuses takes the report back out with it, so a
 reader finds both files or none, as in Suite B. The manifest's clock and the

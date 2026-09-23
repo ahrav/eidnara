@@ -102,6 +102,11 @@ pub fn profile(
     approval: Option<Approval>,
 ) -> RunProfile {
     let mut profile = suite_b(scale, event_bound(messages), elapsed_ms, approval);
+    assert!(
+        profile.name.contains("surface1-raw"),
+        "the Suite B profile name {:?} carries the segment Suite C renames",
+        profile.name
+    );
     profile.name = profile.name.replace("surface1-raw", "suite-c-aging");
     profile.tasks_per_world = 1;
     profile.envelope.temp_roots = 4;
