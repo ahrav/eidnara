@@ -23,8 +23,7 @@ pub const RUBRIC_DIGEST_PROTOCOL: &str = "eval-judge-rubric/v1";
 /// pairs than the minimum.
 pub const HUMAN_SAMPLE_FLOOR_PERCENT: u32 = 10;
 pub const HUMAN_SAMPLE_MIN_PAIRS: u32 = 20;
-/// The arm-identification check: a judge naming the arm from a blinded
-/// presentation must stay at chance; above this share the blinding leaked.
+/// Maximum blinded-trial arm-identification rate, correct or inverted.
 pub const ARM_IDENTIFICATION_CEILING_PERCENT: u32 = 60;
 /// Live runs are trials of a nondeterministic model; nothing replays them.
 pub const LIVE_REPLAYABLE: bool = false;
@@ -77,6 +76,13 @@ impl CalibrationSet {
         let value = serde_json::to_value(self).expect("calibration serializes");
         protocol_digest(CALIBRATION_DIGEST_PROTOCOL, &value).expect("calibration is canonical")
     }
+
+    pub fn validate(&self) -> Result<(), CalibrationRefused> {
+        if self.human_labels.is_empty() {
+            return Err(CalibrationRefused::EmptyCalibrationSet);
+        }
+        Ok(())
+    }
 }
 
 /// How many pairs are judged and how many humans review.
@@ -99,7 +105,11 @@ pub enum CalibrationRefused {
         planned: u32,
     },
     EmptyCalibrationSet,
+    /// The calibration set was frozen with another judge, so it anchors
+    /// nothing this judge scored.
     CalibrationJudgeDiffers,
+    /// The recorded digest is not the digest of the calibration set supplied.
+    DigestMismatch,
 }
 
 debug_display!(CalibrationRefused);
@@ -152,11 +162,14 @@ pub struct Pair {
     pub b: String,
 }
 
-/// What the judge sees: two texts in one order, no arm names.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+/// The judge sees only the serialized form, which omits `pair` and `order`;
+/// the struct retains them to identify the pair and map positions back to A
+/// and B.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct BlindedPrompt {
+    #[serde(skip)]
     pub pair: String,
+    #[serde(skip)]
     pub order: Order,
     pub first: String,
     pub second: String,
@@ -172,7 +185,7 @@ pub enum BlindingRefused {
 
 debug_display!(BlindingRefused);
 
-/// Words a response may not carry: they name the arm.
+/// Word sequences that name an arm, in the form `fold_words` produces.
 pub const ARM_TOKENS: [&str; 6] = [
     "aged arm",
     "fresh arm",
@@ -182,12 +195,39 @@ pub const ARM_TOKENS: [&str; 6] = [
     "control arm",
 ];
 
-/// Blinds one pair in one order, refusing a canary or an arm name.
-pub fn blind(
-    pair: &Pair,
-    order: Order,
-    canaries: &[String],
-) -> Result<BlindedPrompt, BlindingRefused> {
+/// Lowercase words joined by single spaces, padded with one space at each
+/// end. Full-width ASCII folds to ASCII and every non-alphanumeric character
+/// separates words, so `fresh-arm` and `fresh\narm` both read `fresh arm`.
+fn fold_words(text: &str) -> String {
+    let mut folded = String::with_capacity(text.len() + 2);
+    folded.push(' ');
+    for c in text.chars() {
+        let c = match c {
+            '\u{ff01}'..='\u{ff5e}' => char::from_u32(u32::from(c) - 0xfee0).unwrap_or(c),
+            _ => c,
+        };
+        if c.is_alphanumeric() {
+            folded.extend(c.to_lowercase());
+        } else if !folded.ends_with(' ') {
+            folded.push(' ');
+        }
+    }
+    if !folded.ends_with(' ') {
+        folded.push(' ');
+    }
+    folded
+}
+
+/// Whole-word match: `harm bound` does not contain `arm b`. The leading pad
+/// keeps every match index at one or more.
+fn contains_words(folded: &str, token: &str) -> bool {
+    let bytes = folded.as_bytes();
+    folded
+        .match_indices(token)
+        .any(|(at, _)| bytes[at - 1] == b' ' && bytes.get(at + token.len()) == Some(&b' '))
+}
+
+fn screen(pair: &Pair, canaries: &[String]) -> Result<(), BlindingRefused> {
     for text in [&pair.a, &pair.b] {
         if let Some(canary) = canaries
             .iter()
@@ -198,14 +238,24 @@ pub fn blind(
                 canary: canary.clone(),
             });
         }
-        let lowered = text.to_ascii_lowercase();
-        if let Some(token) = ARM_TOKENS.iter().find(|t| lowered.contains(*t)) {
+        let folded = fold_words(text);
+        if let Some(token) = ARM_TOKENS.iter().find(|t| contains_words(&folded, t)) {
             return Err(BlindingRefused::ArmIdentifiable {
                 pair: pair.id.clone(),
                 token: (*token).to_string(),
             });
         }
     }
+    Ok(())
+}
+
+/// Blinds one pair in one order, refusing a canary or an arm name.
+pub fn blind(
+    pair: &Pair,
+    order: Order,
+    canaries: &[String],
+) -> Result<BlindedPrompt, BlindingRefused> {
+    screen(pair, canaries)?;
     let (first, second) = match order {
         Order::AThenB => (pair.a.clone(), pair.b.clone()),
         Order::BThenA => (pair.b.clone(), pair.a.clone()),
@@ -261,6 +311,17 @@ pub enum JudgeRefused {
     UnknownPair {
         pair: String,
     },
+    /// Two pairs share an id, so one pair's calls would judge both.
+    DuplicatePair {
+        pair: String,
+    },
+    /// Keeping either of two calls for one pair and order hides the other
+    /// verdict.
+    DuplicateCall {
+        pair: String,
+        order: Order,
+    },
+    Blinding(BlindingRefused),
 }
 
 debug_display!(JudgeRefused);
@@ -273,41 +334,59 @@ fn unswap(order: Order, verdict: RawVerdict) -> Preference {
     }
 }
 
-/// Folds the executed calls into one judgment per pair: both orders under one
-/// judge, unswapped, disagreeing orders `Inconsistent`.
+/// `JudgeCall` does not retain the `blind` result, so `judge_pairs` screens
+/// each pair.
 pub fn judge_pairs(
     pairs: &[Pair],
     judge: &JudgeIdentity,
     calls: &[JudgeCall],
+    canaries: &[String],
 ) -> Result<Vec<PairJudgment>, JudgeRefused> {
-    let known: BTreeSet<&str> = pairs.iter().map(|p| p.id.as_str()).collect();
-    if let Some(call) = calls.iter().find(|c| !known.contains(c.pair.as_str())) {
-        return Err(JudgeRefused::UnknownPair {
-            pair: call.pair.clone(),
-        });
+    let mut known = BTreeSet::new();
+    for pair in pairs {
+        if !known.insert(pair.id.as_str()) {
+            return Err(JudgeRefused::DuplicatePair {
+                pair: pair.id.clone(),
+            });
+        }
+        screen(pair, canaries).map_err(JudgeRefused::Blinding)?;
+    }
+    let mut unswapped = BTreeMap::new();
+    for call in calls {
+        if !known.contains(call.pair.as_str()) {
+            return Err(JudgeRefused::UnknownPair {
+                pair: call.pair.clone(),
+            });
+        }
+        if call.judge != *judge {
+            return Err(JudgeRefused::JudgeDiffers {
+                pair: call.pair.clone(),
+            });
+        }
+        let preference = unswap(call.order, call.verdict);
+        if unswapped
+            .insert((call.pair.as_str(), call.order), preference)
+            .is_some()
+        {
+            return Err(JudgeRefused::DuplicateCall {
+                pair: call.pair.clone(),
+                order: call.order,
+            });
+        }
     }
     pairs
         .iter()
         .map(|pair| {
-            let mut by_order = BTreeMap::new();
-            for call in calls.iter().filter(|c| c.pair == pair.id) {
-                if call.judge != *judge {
-                    return Err(JudgeRefused::JudgeDiffers {
-                        pair: pair.id.clone(),
-                    });
-                }
-                by_order.insert(call.order, unswap(call.order, call.verdict));
-            }
-            let mut unswapped = Order::BOTH.iter().map(|order| {
-                by_order
-                    .get(order)
+            let [first, second] = Order::BOTH.map(|order| {
+                unswapped
+                    .get(&(pair.id.as_str(), order))
                     .copied()
-                    .ok_or(JudgeRefused::OrderMissing {
+                    .ok_or_else(|| JudgeRefused::OrderMissing {
                         pair: pair.id.clone(),
-                        order: *order,
+                        order,
                     })
             });
-            let (first, second) = (unswapped.next().unwrap()?, unswapped.next().unwrap()?);
+            let (first, second) = (first?, second?);
             Ok(PairJudgment {
                 pair: pair.id.clone(),
                 preference: if first == second {
@@ -334,7 +413,12 @@ pub struct PermutationCheck {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PermutationRefused {
     NoTrials,
-    /// The judge told the arms apart: the blinding leaked.
+    CorrectExceedsTrials {
+        trials: u32,
+        correct: u32,
+    },
+    /// The judge identified the arms by naming them correctly or
+    /// consistently incorrectly.
     ArmsIdentifiable {
         trials: u32,
         correct: u32,
@@ -348,7 +432,14 @@ impl PermutationCheck {
         if self.trials == 0 {
             return Err(PermutationRefused::NoTrials);
         }
-        if u64::from(self.correct) * 100
+        if self.correct > self.trials {
+            return Err(PermutationRefused::CorrectExceedsTrials {
+                trials: self.trials,
+                correct: self.correct,
+            });
+        }
+        let identified = self.correct.max(self.trials - self.correct);
+        if u64::from(identified) * 100
             > u64::from(self.trials) * u64::from(ARM_IDENTIFICATION_CEILING_PERCENT)
         {
             return Err(PermutationRefused::ArmsIdentifiable {
@@ -380,6 +471,13 @@ pub enum ResidualRefused {
     },
     Calibration(CalibrationRefused),
     Permutation(PermutationRefused),
+    JudgmentCountMismatch {
+        declared: u32,
+        judged: usize,
+    },
+    DuplicateJudgment {
+        pair: String,
+    },
     /// The compared run scored under another judge, provider, tokenizer, or
     /// calibration set; `residual.*` metrics do not compare until the anchor
     /// set is re-scored under the new identities.
@@ -391,7 +489,7 @@ pub enum ResidualRefused {
 debug_display!(ResidualRefused);
 
 impl ResidualReport {
-    pub fn validate(&self) -> Result<(), ResidualRefused> {
+    pub fn validate(&self, calibration: &CalibrationSet) -> Result<(), ResidualRefused> {
         if self.schema != RESIDUAL_REPORT_SCHEMA {
             return Err(ResidualRefused::SchemaMismatch {
                 found: self.schema.clone(),
@@ -403,6 +501,35 @@ impl ResidualReport {
         self.permutation
             .validate()
             .map_err(ResidualRefused::Permutation)?;
+        calibration
+            .validate()
+            .map_err(ResidualRefused::Calibration)?;
+        if calibration.judge != self.judge {
+            return Err(ResidualRefused::Calibration(
+                CalibrationRefused::CalibrationJudgeDiffers,
+            ));
+        }
+        if calibration.digest() != self.calibration_digest {
+            return Err(ResidualRefused::Calibration(
+                CalibrationRefused::DigestMismatch,
+            ));
+        }
+        let mut judged = BTreeSet::new();
+        if let Some(duplicate) = self
+            .judgments
+            .iter()
+            .find(|j| !judged.insert(j.pair.as_str()))
+        {
+            return Err(ResidualRefused::DuplicateJudgment {
+                pair: duplicate.pair.clone(),
+            });
+        }
+        if self.judgments.len() as u64 != u64::from(self.sampling.pairs) {
+            return Err(ResidualRefused::JudgmentCountMismatch {
+                declared: self.sampling.pairs,
+                judged: self.judgments.len(),
+            });
+        }
         Ok(())
     }
 
@@ -437,6 +564,9 @@ pub struct LiveTask {
 #[serde(deny_unknown_fields)]
 pub struct LiveTaskReport {
     pub task: String,
+    /// The recorded trials, retained so validation recomputes the summary
+    /// instead of trusting it.
+    pub attempts: Vec<ArmResult>,
     pub pass_k: PassK,
     /// Every attempt censored: nothing is known, and nothing is zero.
     pub indeterminate: bool,
@@ -455,13 +585,26 @@ pub struct LiveSliceReport {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LiveSliceRefused {
+    SchemaMismatch {
+        found: String,
+    },
     /// A recorded live run presented as deterministic evidence.
     RelabelledReplayable,
     NoTasks,
+    /// A task's summary is not what its attempts and the slice's `k` give.
+    InconsistentTask {
+        task: String,
+    },
     Statistics(StatisticsError),
 }
 
 debug_display!(LiveSliceRefused);
+
+fn summarize(attempts: &[ArmResult], k: u32) -> Result<(PassK, bool), LiveSliceRefused> {
+    let pass_k = pass_k(attempts, k).map_err(LiveSliceRefused::Statistics)?;
+    let indeterminate = pass_k.pass_k == PassKBounds::Indeterminate;
+    Ok((pass_k, indeterminate))
+}
 
 /// Summarizes the live slice with the inherited conservative rules: pass@1,
 /// the repeat counts, the censoring rate, and pass^k as an interval; all
@@ -477,11 +620,12 @@ pub fn live_slice(
     let reports = tasks
         .iter()
         .map(|task| {
-            let pass_k = pass_k(&task.attempts, k).map_err(LiveSliceRefused::Statistics)?;
+            let (pass_k, indeterminate) = summarize(&task.attempts, k)?;
             Ok(LiveTaskReport {
                 task: task.task.clone(),
-                indeterminate: pass_k.pass_k == PassKBounds::Indeterminate,
+                attempts: task.attempts.clone(),
                 pass_k,
+                indeterminate,
             })
         })
         .collect::<Result<Vec<_>, _>>()?;
@@ -496,11 +640,24 @@ pub fn live_slice(
 
 impl LiveSliceReport {
     pub fn validate(&self) -> Result<(), LiveSliceRefused> {
+        if self.schema != LIVE_SLICE_SCHEMA {
+            return Err(LiveSliceRefused::SchemaMismatch {
+                found: self.schema.clone(),
+            });
+        }
         if self.replayable {
             return Err(LiveSliceRefused::RelabelledReplayable);
         }
         if self.tasks.is_empty() {
             return Err(LiveSliceRefused::NoTasks);
+        }
+        for task in &self.tasks {
+            let (pass_k, indeterminate) = summarize(&task.attempts, self.k)?;
+            if pass_k != task.pass_k || indeterminate != task.indeterminate {
+                return Err(LiveSliceRefused::InconsistentTask {
+                    task: task.task.clone(),
+                });
+            }
         }
         Ok(())
     }
@@ -546,11 +703,9 @@ impl LiveSettings {
             .calibration
             .as_ref()
             .ok_or(LiveSettingsRefused::NoCalibrationSet)?;
-        if calibration.human_labels.is_empty() {
-            return Err(LiveSettingsRefused::Calibration(
-                CalibrationRefused::EmptyCalibrationSet,
-            ));
-        }
+        calibration
+            .validate()
+            .map_err(LiveSettingsRefused::Calibration)?;
         self.sampling
             .ok_or(LiveSettingsRefused::NoSamplingPlan)?
             .validate()

@@ -5,16 +5,13 @@
 use std::collections::BTreeMap;
 
 use eval_core::{
-    ANALYSIS_FAMILY_SCHEMA, AnalysisFamily, ArmRates, ArmResult, BlindingRefused,
-    CalibrationRefused, CalibrationSet, CampaignProfile, CensorReason, ClusterKey, ClusteringUnit,
-    FrozenFamily, HUMAN_SAMPLE_MIN_PAIRS, ITEM_COUNT_THRESHOLD, IccPilot, IntervalMethod,
-    JUDGE_SCHEMA, JudgeCall, JudgeIdentity, JudgeRefused, JudgedPair, LIVE_REPLAYABLE,
-    LiveSettings, LiveSettingsRefused, LiveSliceRefused, LiveTask, LivenessBounds,
-    MultiplicityCorrection, Order, PairOutcome, PassKBounds, PermutationCheck, PermutationRefused,
-    Preference, ProviderProfile, RESIDUAL_REPORT_SCHEMA, Ratio, RawVerdict, ResidualRefused,
-    ResidualReport, Rubric, SamplingPlan, StoppingRule, analyze, blind, judge_pairs, live_slice,
+    AnalysisFamily, ArmRates, ArmResult, BlindingRefused, CalibrationRefused, CalibrationSet,
+    CensorReason, ClusterKey, FrozenFamily, HUMAN_SAMPLE_MIN_PAIRS, JUDGE_SCHEMA, JudgeCall,
+    JudgeIdentity, JudgeRefused, JudgedPair, LIVE_REPLAYABLE, LiveSettings, LiveSettingsRefused,
+    LiveSliceRefused, LiveTask, Order, PairJudgment, PairOutcome, PassKBounds, PermutationCheck,
+    PermutationRefused, Preference, ProviderProfile, RESIDUAL_REPORT_SCHEMA, Ratio, RawVerdict,
+    ResidualRefused, ResidualReport, Rubric, SamplingPlan, analyze, blind, judge_pairs, live_slice,
 };
-use serde_json::json;
 
 fn provider(model: &str) -> ProviderProfile {
     ProviderProfile {
@@ -81,7 +78,14 @@ fn report(
             trials: 40,
             correct: 21,
         },
-        judgments: Vec::new(),
+        judgments: (0..40)
+            .map(|i| PairJudgment {
+                pair: format!("pair-{i}"),
+                preference: Preference::Tie,
+                length_a: 1,
+                length_b: 1,
+            })
+            .collect(),
     }
 }
 
@@ -131,7 +135,7 @@ fn a_judgment_needs_both_orders_under_one_judge_and_records_lengths() {
         call("pair-2", Order::AThenB, RawVerdict::Tie),
         call("pair-2", Order::BThenA, RawVerdict::Tie),
     ];
-    let judged = judge_pairs(&pairs, &judge(), &calls).unwrap();
+    let judged = judge_pairs(&pairs, &judge(), &calls, &[]).unwrap();
     assert_eq!(
         judged[0].preference,
         Preference::A,
@@ -150,7 +154,7 @@ fn a_judgment_needs_both_orders_under_one_judge_and_records_lengths() {
 
     let one_order = vec![call("pair-0", Order::AThenB, RawVerdict::First)];
     assert_eq!(
-        judge_pairs(&pairs[..1], &judge(), &one_order),
+        judge_pairs(&pairs[..1], &judge(), &one_order, &[]),
         Err(JudgeRefused::OrderMissing {
             pair: "pair-0".to_string(),
             order: Order::BThenA
@@ -160,7 +164,12 @@ fn a_judgment_needs_both_orders_under_one_judge_and_records_lengths() {
     let mut other_judge = call("pair-0", Order::BThenA, RawVerdict::Second);
     other_judge.judge.prompt_digest = "bb".repeat(32);
     assert_eq!(
-        judge_pairs(&pairs[..1], &judge(), &[one_order[0].clone(), other_judge]),
+        judge_pairs(
+            &pairs[..1],
+            &judge(),
+            &[one_order[0].clone(), other_judge],
+            &[]
+        ),
         Err(JudgeRefused::JudgeDiffers {
             pair: "pair-0".to_string()
         })
@@ -169,7 +178,8 @@ fn a_judgment_needs_both_orders_under_one_judge_and_records_lengths() {
         judge_pairs(
             &pairs[..1],
             &judge(),
-            &[call("pair-9", Order::AThenB, RawVerdict::Tie)]
+            &[call("pair-9", Order::AThenB, RawVerdict::Tie)],
+            &[]
         ),
         Err(JudgeRefused::UnknownPair {
             pair: "pair-9".to_string()
@@ -251,7 +261,7 @@ fn the_permutation_check_and_the_human_floor_gate_calibrated_acceptance() {
 fn a_changed_judge_provider_or_tokenizer_refuses_cross_run_residual_comparison() {
     let calibration = calibration();
     let base = report(judge(), provider("live-1"), &calibration);
-    base.validate().unwrap();
+    base.validate(&calibration).unwrap();
     base.comparable(&base).unwrap();
     let mut other_judge = base.clone();
     other_judge.judge.provider.model = "judge-2".to_string();
@@ -289,109 +299,66 @@ fn a_changed_judge_provider_or_tokenizer_refuses_cross_run_residual_comparison()
     let mut leaked = base.clone();
     leaked.permutation.correct = 40;
     assert!(matches!(
-        leaked.validate(),
+        leaked.validate(&calibration),
         Err(ResidualRefused::Permutation(_))
     ));
     let mut under = base;
     under.sampling.human_sample = 1;
     assert!(matches!(
-        under.validate(),
+        under.validate(&calibration),
         Err(ResidualRefused::Calibration(_))
     ));
 }
 
-/// The gates take pair outcomes and arm rates; no judge type reaches them, so
-/// a poisoned judge cannot change a byte of their output.
+/// Coercing `analyze` to this pointer type stops compiling if the gates gain
+/// an input, so a judge verdict can reach them only through a `PairOutcome`
+/// or the arm rates, whose serialized fields are pinned here beside the
+/// residual report's.
 #[test]
-fn the_gates_take_no_judge_verdict_and_are_byte_identical_under_a_poisoned_judge() {
-    let ratio = |n: i64, d: u64| Ratio::new(n, d);
-    let family = AnalysisFamily {
-        schema: ANALYSIS_FAMILY_SCHEMA.to_string(),
-        endpoints: vec!["quality_loss".into(), "harm".into(), "floor".into()],
-        families: vec!["cargo".into(), "tokio".into()],
-        exclusions: vec![],
-        stopping_rule: StoppingRule::FixedN,
-        multiplicity_correction: MultiplicityCorrection::Holm,
-        profile: CampaignProfile {
-            noninferiority_margin: "0.02".to_string(),
-            harm_bound: "0.1".to_string(),
-            floor_threshold: "0.7".to_string(),
-            miss_asymmetry_bound: "0.05".to_string(),
-            liveness_bounds: LivenessBounds {
-                catch_up_episodes: 64,
-                embedding_passes: 32,
-                materialization_episodes: 16,
-                reviewer_coordinator_passes: 8,
-            },
-        },
-        interval_method: IntervalMethod::ClusterBootstrap,
-        item_count_threshold: ITEM_COUNT_THRESHOLD,
-        bootstrap_replicates: 400,
-        bootstrap_seed: 7,
-        trials_k: 3,
-        icc_pilot: IccPilot {
-            pilot_run_id: "ab".repeat(32),
-            n_items: 360,
-            n_families: 6,
-            n_worlds: 120,
-            icc_family: ratio(1, 4),
-            icc_world_seed: ratio(0, 1),
-            clustering_unit: ClusteringUnit::Family,
-            max_affordable_worlds: 60,
-            effective_n_at_max: ratio(400, 1),
-            required_n_for_margin: 385,
-        },
-        transfer_criterion: None,
+fn the_gates_take_only_oracle_inputs_and_the_residual_report_carries_no_gate_field() {
+    let _gates: fn(
+        &FrozenFamily,
+        &AnalysisFamily,
+        &[PairOutcome],
+        &BTreeMap<String, ArmRates>,
+    ) -> _ = analyze;
+    let keys = |value: serde_json::Value| -> Vec<String> {
+        value.as_object().unwrap().keys().cloned().collect()
     };
-    let frozen = FrozenFamily::freeze(&family).unwrap();
-    let families = ["cargo", "tokio", "django", "git", "docs", "tests"];
-    let pairs: Vec<PairOutcome> = families
-        .iter()
-        .enumerate()
-        .flat_map(|(f, family)| {
-            (0..50u64).map(move |seed| PairOutcome {
-                pair_id: format!("{family}-{seed}"),
-                cluster: ClusterKey {
-                    family: family.to_string(),
-                    world_seed: seed,
-                },
-                fresh: ArmResult::Pass,
-                aged: if (f as u64 * 7 + seed * 13).is_multiple_of(20) {
-                    ArmResult::Fail
-                } else {
-                    ArmResult::Pass
-                },
-            })
-        })
-        .collect();
-    let rates: BTreeMap<String, ArmRates> = ["fresh", "aged"]
-        .iter()
-        .map(|arm| {
-            (
-                arm.to_string(),
-                ArmRates {
-                    miss_rate: "0.01".to_string(),
-                    refusal_rate: "0.01".to_string(),
-                },
-            )
-        })
-        .collect();
-    let honest = serde_json::to_vec(&analyze(&frozen, &family, &pairs, &rates).unwrap()).unwrap();
-    // A judge that prefers the aged arm everywhere, or is inconsistent
-    // everywhere, exists beside the analysis and reaches nothing in it.
-    for poison in [Preference::A, Preference::Inconsistent] {
-        let _judged: Vec<Preference> = pairs.iter().map(|_| poison).collect();
-        let again =
-            serde_json::to_vec(&analyze(&frozen, &family, &pairs, &rates).unwrap()).unwrap();
-        assert_eq!(
-            honest, again,
-            "the gates' bytes do not depend on any judge verdict"
-        );
-    }
+    let outcome = PairOutcome {
+        pair_id: "cargo-0".to_string(),
+        cluster: ClusterKey {
+            family: "cargo".to_string(),
+            world_seed: 0,
+        },
+        fresh: ArmResult::Pass,
+        aged: ArmResult::Fail,
+    };
     assert_eq!(
-        json!({"residual": "preference"}).get("gate"),
-        None,
-        "a residual is a separate record, never a gate field"
+        keys(serde_json::to_value(outcome).unwrap()),
+        ["aged", "cluster", "fresh", "pair_id"]
+    );
+    let rates = ArmRates {
+        miss_rate: "0.01".to_string(),
+        refusal_rate: "0.01".to_string(),
+    };
+    assert_eq!(
+        keys(serde_json::to_value(rates).unwrap()),
+        ["miss_rate", "refusal_rate"]
+    );
+    let residual = report(judge(), provider("live-1"), &calibration());
+    assert_eq!(
+        keys(serde_json::to_value(residual).unwrap()),
+        [
+            "calibration_digest",
+            "judge",
+            "judgments",
+            "live_provider",
+            "permutation",
+            "sampling",
+            "schema"
+        ],
+        "a residual is a separate record with no gate field"
     );
 }
 
@@ -500,4 +467,261 @@ fn live_settings_refuse_until_two_profiles_a_calibration_set_and_a_plan_exist() 
         thin.validate(),
         Err(LiveSettingsRefused::Calibration(_))
     ));
+}
+
+#[test]
+fn the_judge_view_serializes_only_the_two_texts() {
+    let pair = &pairs()[0];
+    for order in Order::BOTH {
+        let prompt = blind(pair, order, &[]).unwrap();
+        let shown = serde_json::to_value(&prompt).unwrap();
+        let keys: Vec<&str> = shown
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(keys, ["first", "second"], "no order and no pair id");
+        assert_eq!((prompt.pair.as_str(), prompt.order), ("pair-0", order));
+    }
+}
+
+#[test]
+fn arm_names_match_as_whole_words_after_folding_case_width_and_separators() {
+    let refused = |text: &str| {
+        let mut pair = pairs()[0].clone();
+        pair.b = text.to_string();
+        blind(&pair, Order::AThenB, &[])
+    };
+    for (leaked, token) in [
+        ("as the fresh-arm I answer", "fresh arm"),
+        ("as the fresh\narm I answer", "fresh arm"),
+        ("as the fresh\u{a0}arm I answer", "fresh arm"),
+        ("as the Fresh  Arm I answer", "fresh arm"),
+        (
+            "as the \u{ff26}\u{ff32}\u{ff25}\u{ff33}\u{ff28} \u{ff21}\u{ff32}\u{ff2d} I answer",
+            "fresh arm",
+        ),
+        ("this is arm_a speaking", "arm a"),
+        ("ARM B.", "arm b"),
+    ] {
+        assert_eq!(
+            refused(leaked),
+            Err(BlindingRefused::ArmIdentifiable {
+                pair: "pair-0".to_string(),
+                token: token.to_string()
+            }),
+            "{leaked:?}"
+        );
+    }
+    for benign in [
+        "the harm bound holds",
+        "warm bread",
+        "the alarm appears",
+        "ARM and x86",
+        "a firearm aside",
+    ] {
+        assert!(refused(benign).is_ok(), "{benign:?} names no arm");
+    }
+}
+
+#[test]
+fn judge_pairs_refuses_duplicate_calls_duplicate_pairs_and_unblinded_pairs() {
+    let pairs = pairs();
+    let rerolled = [
+        call("pair-0", Order::AThenB, RawVerdict::First),
+        call("pair-0", Order::BThenA, RawVerdict::First),
+        call("pair-0", Order::BThenA, RawVerdict::Second),
+    ];
+    assert_eq!(
+        judge_pairs(&pairs[..1], &judge(), &rerolled, &[]),
+        Err(JudgeRefused::DuplicateCall {
+            pair: "pair-0".to_string(),
+            order: Order::BThenA
+        }),
+        "a rerolled call cannot replace an inconsistent verdict"
+    );
+    let both = [
+        call("pair-0", Order::AThenB, RawVerdict::First),
+        call("pair-0", Order::BThenA, RawVerdict::Second),
+    ];
+    assert_eq!(
+        judge_pairs(&[pairs[0].clone(), pairs[0].clone()], &judge(), &both, &[]),
+        Err(JudgeRefused::DuplicatePair {
+            pair: "pair-0".to_string()
+        }),
+        "one pair's calls cannot judge two pairs"
+    );
+    let mut named = pairs[0].clone();
+    named.b = "as the fresh arm I answer".to_string();
+    assert_eq!(
+        judge_pairs(&[named], &judge(), &both, &[]),
+        Err(JudgeRefused::Blinding(BlindingRefused::ArmIdentifiable {
+            pair: "pair-0".to_string(),
+            token: "fresh arm".to_string()
+        }))
+    );
+    assert_eq!(
+        judge_pairs(&pairs[..1], &judge(), &both, &["rename".to_string()]),
+        Err(JudgeRefused::Blinding(BlindingRefused::CanaryInPrompt {
+            pair: "pair-0".to_string(),
+            canary: "rename".to_string()
+        }))
+    );
+}
+
+#[test]
+fn the_permutation_check_is_two_sided() {
+    for correct in [16, 24] {
+        PermutationCheck {
+            trials: 40,
+            correct,
+        }
+        .validate()
+        .unwrap();
+    }
+    for correct in [0, 15] {
+        assert_eq!(
+            PermutationCheck {
+                trials: 40,
+                correct
+            }
+            .validate(),
+            Err(PermutationRefused::ArmsIdentifiable {
+                trials: 40,
+                correct
+            }),
+            "naming the arm wrong {correct} of 40 times identifies it"
+        );
+    }
+    assert_eq!(
+        PermutationCheck {
+            trials: 40,
+            correct: 41
+        }
+        .validate(),
+        Err(PermutationRefused::CorrectExceedsTrials {
+            trials: 40,
+            correct: 41
+        })
+    );
+}
+
+#[test]
+fn a_residual_report_reconciles_its_judgments_and_its_calibration_set() {
+    let calibration = calibration();
+    let base = report(judge(), provider("live-1"), &calibration);
+    base.validate(&calibration).unwrap();
+
+    let mut empty = base.clone();
+    empty.judgments.clear();
+    assert_eq!(
+        empty.validate(&calibration),
+        Err(ResidualRefused::JudgmentCountMismatch {
+            declared: 40,
+            judged: 0
+        })
+    );
+    let mut understated = base.clone();
+    understated
+        .judgments
+        .extend((40..1000).map(|i| PairJudgment {
+            pair: format!("pair-{i}"),
+            preference: Preference::A,
+            length_a: 1,
+            length_b: 1,
+        }));
+    assert_eq!(
+        understated.validate(&calibration),
+        Err(ResidualRefused::JudgmentCountMismatch {
+            declared: 40,
+            judged: 1000
+        }),
+        "1000 judgments cannot claim the 40-pair human floor"
+    );
+    let mut repeated = base.clone();
+    repeated.judgments[1].pair = "pair-0".to_string();
+    assert_eq!(
+        repeated.validate(&calibration),
+        Err(ResidualRefused::DuplicateJudgment {
+            pair: "pair-0".to_string()
+        })
+    );
+
+    let mut other_judge = judge();
+    other_judge.provider.model = "judge-2".to_string();
+    let uncalibrated = report(other_judge, provider("live-1"), &calibration);
+    assert_eq!(
+        uncalibrated.validate(&calibration),
+        Err(ResidualRefused::Calibration(
+            CalibrationRefused::CalibrationJudgeDiffers
+        ))
+    );
+    let mut relabelled = calibration.clone();
+    relabelled
+        .human_labels
+        .insert("anchor-2".to_string(), Preference::B);
+    assert_eq!(
+        base.validate(&relabelled),
+        Err(ResidualRefused::Calibration(
+            CalibrationRefused::DigestMismatch
+        ))
+    );
+    let mut unlabelled = calibration;
+    unlabelled.human_labels.clear();
+    assert_eq!(
+        base.validate(&unlabelled),
+        Err(ResidualRefused::Calibration(
+            CalibrationRefused::EmptyCalibrationSet
+        ))
+    );
+}
+
+#[test]
+fn live_slice_validation_recomputes_each_task_and_checks_the_schema() {
+    let tasks = vec![LiveTask {
+        task: "t".to_string(),
+        attempts: vec![
+            ArmResult::Censored(CensorReason::Timeout),
+            ArmResult::Censored(CensorReason::Timeout),
+        ],
+    }];
+    let report = live_slice(&provider("live-1"), 2, &tasks).unwrap();
+    report.validate().unwrap();
+    let mut schema = report.clone();
+    schema.schema = "eval-live-slice/v999".to_string();
+    assert_eq!(
+        schema.validate(),
+        Err(LiveSliceRefused::SchemaMismatch {
+            found: "eval-live-slice/v999".to_string()
+        })
+    );
+    let inconsistent = Err(LiveSliceRefused::InconsistentTask {
+        task: "t".to_string(),
+    });
+    let mut k = report.clone();
+    k.k = 1;
+    assert_eq!(
+        k.validate(),
+        inconsistent,
+        "outer k disagrees with the task"
+    );
+    let mut flipped = report.clone();
+    flipped.tasks[0].indeterminate = false;
+    assert_eq!(
+        flipped.validate(),
+        inconsistent,
+        "all censored is indeterminate"
+    );
+    let mut fabricated = report;
+    fabricated.tasks[0].indeterminate = false;
+    fabricated.tasks[0].pass_k.pass_k = PassKBounds::Bounds {
+        censored_as_fail: Ratio::ONE,
+        censored_excluded: Ratio::ONE,
+    };
+    assert_eq!(
+        fabricated.validate(),
+        inconsistent,
+        "bounds the attempts do not give"
+    );
 }
