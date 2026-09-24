@@ -209,10 +209,25 @@ pub struct Run {
 /// elapsed bound checked before and after. `None` when it failed or timed
 /// out.
 fn git(dir: &Path, args: &[&str], charges: &mut Charges) -> Result<Option<String>, RunError> {
-    let mut command = Command::new("git");
-    command.args(args).current_dir(dir);
-    let (status, out) = charged_run(command, GIT_TIMEOUT, charges)?;
+    let (status, out) = charged_run(git_command(dir, args), GIT_TIMEOUT, charges)?;
     Ok(status.filter(ExitStatus::success).map(|_| out))
+}
+
+/// `git` in `dir` and nowhere else: the repository-selection variables an
+/// outer process may carry (`GIT_DIR`, `GIT_WORK_TREE`, `GIT_INDEX_FILE`)
+/// are dropped, so `read-tree` writes the clone's index and no other, and
+/// the user's and system's configuration are not read.
+fn git_command(dir: &Path, args: &[&str]) -> Command {
+    let mut command = Command::new("git");
+    command
+        .args(args)
+        .current_dir(dir)
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_INDEX_FILE")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_NOSYSTEM", "1");
+    command
 }
 
 /// The paths `git diff` reports between two commits, added or changed
@@ -263,11 +278,8 @@ fn materialize(
     }
     let mut prefix = into.as_os_str().to_owned();
     prefix.push("/");
-    let mut command = Command::new("git");
-    command
-        .args(["checkout-index", "-a", "-f", "--prefix"])
-        .arg(prefix)
-        .current_dir(repo);
+    let mut command = git_command(repo, &["checkout-index", "-a", "-f", "--prefix"]);
+    command.arg(prefix);
     let (status, _) = charged_run(command, GIT_TIMEOUT, charges)?;
     Ok(status.is_some_and(|status| status.success()))
 }
@@ -554,22 +566,28 @@ fn prepare(
         // The patch and the hidden tests are what the fix commit itself
         // changed against its parent; intervening history is not the fix.
         let added = diff_paths(&repo, "A", &parent_sha, &entry.fix_sha, charges)?;
-        // Every regular file the fix added under `tests/` is test material
-        // and goes with the hidden tests into both graded trees: a test
-        // target directly under `tests/` by name, anything deeper (a module,
-        // a fixture a test includes) by path, so a test never errors on the
-        // base tree for want of its own input. A symlink at such a path is
-        // not read through and stays in the fix tree.
+        let modified = diff_paths(&repo, "M", &parent_sha, &entry.fix_sha, charges)?;
+        // Every regular file the fix added or changed under `tests/` is test
+        // material and goes with the hidden tests into both graded trees: an
+        // added test target directly under `tests/` by name, everything else
+        // (a module, a fixture a test includes, an existing test the fix
+        // edited) by path in the fix's version, so a test never fails or
+        // errors on the base tree because its own input differs. A symlink
+        // at such a path is not read through and stays in the fix tree.
         let mut hidden = Vec::new();
         let mut support = Vec::new();
-        for path in &added {
+        for (path, was_added) in added
+            .iter()
+            .map(|p| (p, true))
+            .chain(modified.iter().map(|p| (p, false)))
+        {
             let file = fix.join(path);
             if !path.starts_with("tests/")
                 || !std::fs::symlink_metadata(&file).is_ok_and(|meta| meta.is_file())
             {
                 continue;
             }
-            match hidden_test_name(path) {
+            match hidden_test_name(path).filter(|_| was_added) {
                 Some(name) => {
                     if let Ok(content) = std::fs::read_to_string(&file) {
                         std::fs::remove_file(&file)?;
@@ -832,6 +850,7 @@ fn control(run: &ControlRun<'_>, charges: &mut Charges) -> Result<NoRepositoryCo
         fresh_dir(&layout.tree)?;
         copy_tree(&prepared.snapshot, &layout.tree)?;
         overlay_patch(&workspace.join("patch"), &layout.tree)?;
+        charges.store_bytes(&layout.root)?;
         grade(
             &layout.tree,
             &prepared.hidden,
@@ -993,6 +1012,7 @@ pub fn run(config: &Config, host: Host) -> Result<Run, RunError> {
         fresh_dir(&layout.target)?;
         fresh_dir(&layout.tree)?;
         copy_tree(&ready.snapshot, &layout.tree)?;
+        charges.store_bytes(&layout.root)?;
         let hidden = grade(
             &layout.tree,
             &ready.hidden,
@@ -1003,6 +1023,7 @@ pub fn run(config: &Config, host: Host) -> Result<Run, RunError> {
         )?;
         fresh_dir(&layout.tree)?;
         copy_tree(&ready.fix, &layout.tree)?;
+        charges.store_bytes(&layout.root)?;
         let reference = grade(
             &layout.tree,
             &ready.hidden,

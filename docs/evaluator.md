@@ -3516,7 +3516,9 @@ measuring each preparation: clone, the store and the elapsed bound charged
 after the clone and after each extracted tree while all of them still exist
 (every git child runs under `charged_run`: counted in the process
 envelope, the elapsed bound checked before and after it, its deadline the
-campaign time left as it stands then, at most two minutes), `git show -s
+campaign time left as it stands then, at most two minutes; each drops
+`GIT_DIR`, `GIT_WORK_TREE`, and `GIT_INDEX_FILE` and reads no user or
+system configuration, so it acts on the clone and nothing else), `git show -s
 --format=%ct` for the base and fix commits, the fix's first parent, `git merge-base --is-ancestor` for
 `fix_descends_from_base`, the earliest fix-side commit time (and the pull
 request's creation, when fetched) for `repair_public_ms`, the base
@@ -3532,13 +3534,16 @@ cannot carry stay two entries; the parent archived into a scratch directory
 and discarded), and the `CutoffAudit` with the row's `entry_digest`. The patch
 and the hidden tests are what the fix commit changed against its parent,
 `git diff -z --no-renames` from `fix_sha^` to `fix_sha`, not against the
-base, so intervening history is never the fix: every regular file the fix added under
-`tests/` is test material and is removed from the fix tree: a file directly
-under `tests/` is a hidden test target by name, anything deeper (a module,
-a fixture a test includes) is support by path, and both are written into
-every graded tree, base and fix alike, so a test never errors on the base
-tree for want of its own input (a symlink at such a path is not read
-through and stays where it is); every other file of the fix tree, a
+base, so intervening history is never the fix: every regular file the fix added or changed under
+`tests/` is test material and is removed from the fix tree: an added file
+directly under `tests/` is a hidden test target by name, everything else (a
+module, a fixture a test includes, an existing test the fix edited) is
+support by path in the fix's version, and both are written into every
+graded tree, base and fix alike, so a test never fails or errors on the
+base tree because its own input differs (a symlink at such a path is not
+read through and stays where it is); a submodule pointer is a gitlink the
+index checkout does not materialize, so a fix that only moves one changes
+nothing the audit can see and is refused as `fix_changes_nothing`; every other file of the fix tree, a
 deletion included, is what a memorizing control reproduces. The clone is
 removed once the snapshot and fix tree are extracted, and the store is
 charged again after every preparation and every task. After the first five
@@ -3562,8 +3567,9 @@ and a reference run, in a build cache of its own (the writable mount is
 emptied before each task, so what one task's build scripts and tests left
 there reaches no other): the snapshot copied into a fresh tree and its
 hidden tests run with no agent, then the fix tree copied into a fresh tree
-and the tests run again; the store is charged after every grade, so what a
-build wrote into the cache is bounded before the next one. Both go through Suite D's `run_hidden` inside the
+and the tests run again; the store is charged after every copy and every
+grade, so a tree copy and what a build wrote into the cache are bounded
+before the next step. Both go through Suite D's `run_hidden` inside the
 containment (`contain`), with the tree read-only, the build cache the only
 writable mount, and `tasks/` (every clone, snapshot, and fix tree) covered
 by an empty tmpfs, so a build script or test in the graded tree reads no
@@ -3644,9 +3650,11 @@ it is removed, four extracted trees refusing while the first clone still
 exists, and an exhausted campaign clock refusing before the second clone; a base whose failing build script the fix deletes
 proven insufficient because the reference is the fix commit's whole tree,
 a test file an intervening commit added kept out of the fix's hidden tests,
-a symlink the fix added under `tests/` not read as one, and a fixture the
+a symlink the fix added under `tests/` not read as one, a fixture the
 fix added under `tests/` beside every hidden test on both trees, with
-`tests/` marked `export-ignore`; five rows that fail their fetch fast not
+`tests/` marked `export-ignore`, and a fixture the fix edited read in the
+fix's version on both trees so a test of nothing but the fixture proves
+no defect; five rows that fail their fetch fast not
 counted as the time study's sample; preparation's git children in the
 process envelope; the host seams
 given the campaign time left and a named pull request without its creation

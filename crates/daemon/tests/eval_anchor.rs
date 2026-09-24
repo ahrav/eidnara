@@ -91,6 +91,9 @@ enum Variant {
     /// The fix adds `tests/fixture.txt`, which every hidden test includes,
     /// and marks `tests/` `export-ignore`.
     TestSupportFile,
+    /// The base commit carries `tests/fixture.txt` with other contents; the
+    /// fix edits it, and the only hidden test reads it and nothing else.
+    ModifiedTestSupport,
 }
 
 fn git(dir: &Path, args: &[&str], seconds: i64) -> String {
@@ -136,6 +139,10 @@ fn history(dir: &Path, index: u32, variant: Variant) -> (String, String) {
     if variant == Variant::BulkyTree {
         std::fs::write(dir.join("assets/bulk.bin"), vec![0u8; 1 << 20]).unwrap();
     }
+    if variant == Variant::ModifiedTestSupport {
+        std::fs::create_dir_all(dir.join("tests")).unwrap();
+        std::fs::write(dir.join("tests/fixture.txt"), "before the fix").unwrap();
+    }
     if variant == Variant::DeletesBuildScript {
         std::fs::write(
             dir.join("build.rs"),
@@ -176,15 +183,21 @@ fn history(dir: &Path, index: u32, variant: Variant) -> (String, String) {
     for test in &task.hidden_tests {
         let path = dir.join(test.path());
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        let support = if variant == Variant::TestSupportFile {
-            SUPPORT_TEST
-        } else {
-            ""
+        let content = match variant {
+            Variant::TestSupportFile => format!("{}{ASSETS_TEST}{SUPPORT_TEST}", test.content),
+            // The test judges nothing but its fixture.
+            Variant::ModifiedTestSupport => SUPPORT_TEST.to_string(),
+            _ => format!("{}{ASSETS_TEST}", test.content),
         };
-        std::fs::write(path, format!("{}{ASSETS_TEST}{support}", test.content)).unwrap();
+        std::fs::write(path, content).unwrap();
+    }
+    if matches!(
+        variant,
+        Variant::TestSupportFile | Variant::ModifiedTestSupport
+    ) {
+        std::fs::write(dir.join("tests/fixture.txt"), "included").unwrap();
     }
     if variant == Variant::TestSupportFile {
-        std::fs::write(dir.join("tests/fixture.txt"), "included").unwrap();
         std::fs::write(dir.join(".gitattributes"), "tests/ export-ignore\n").unwrap();
     }
     if variant == Variant::NestedTestFile {
@@ -895,6 +908,7 @@ fn the_fix_is_its_own_diff_and_its_whole_tree() {
             Variant::IntermediateCommit,
             Variant::SymlinkedHiddenTest,
             Variant::TestSupportFile,
+            Variant::ModifiedTestSupport,
         ],
     );
     let mut config = config(dir.path(), corpus, ControlScript::default(), u64::MAX);
@@ -949,6 +963,15 @@ fn the_fix_is_its_own_diff_and_its_whole_tree() {
         AnchorTerminal::Fail,
         "a tests/ directory marked export-ignore is still in the snapshot and the fix tree"
     );
+    let edited = by_id("cargo-4");
+    let proof = edited.insufficiency.as_ref().unwrap();
+    assert_eq!(
+        proof.validate(),
+        Err(InsufficiencyRefused::TreeAlreadyPasses),
+        "a test that reads only a fixture the fix edited sees the fix's fixture on the base tree too, so it proves no defect: {:?}",
+        proof.hidden
+    );
+    assert_eq!(edited.terminal, AnchorTerminal::Indeterminate);
 }
 
 #[test]
