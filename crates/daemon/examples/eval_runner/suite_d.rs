@@ -1129,7 +1129,7 @@ fn agent_run(
     // never grows further than that.
     for _ in 0..script
         .extra_tool_calls
-        .min(config.budgets.max_tool_calls + 1)
+        .min(config.budgets.max_tool_calls.saturating_add(1))
     {
         lines.push(tool("true", "", "true"));
     }
