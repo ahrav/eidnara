@@ -613,7 +613,7 @@ fn prepare(
         // A `tests/` entry the fix deleted is deleted from every graded
         // tree, the base one included, so a test cannot fail on the base
         // tree merely because the entry is still there.
-        let removed: Vec<String> = deleted
+        let mut removed: Vec<String> = deleted
             .into_iter()
             .filter(|path| path.starts_with("tests/"))
             .collect();
@@ -639,8 +639,12 @@ fn prepare(
                 continue;
             };
             if !meta.is_file() {
+                // A symlink reaches neither tree: removed from the fix tree
+                // here and, since the base tree may hold the entry it
+                // replaced, from every graded tree too.
                 if meta.is_symlink() {
                     std::fs::remove_file(&file)?;
+                    removed.push(path.clone());
                 }
                 continue;
             }

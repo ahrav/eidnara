@@ -3554,8 +3554,9 @@ fix edited, a test-named file that is not UTF-8) is support by path in the
 fix's version, and both are written into every
 graded tree, base and fix alike, so a test never fails or errors on the
 base tree because its own input differs (a symlink at such a path is never
-read through and reaches neither tree; a `tests/` entry the fix deleted is
-deleted from every graded tree too, and a support path at the very name a
+read through and reaches neither tree, the entry it may have replaced
+removed from the base graded tree as well; a `tests/` entry the fix deleted
+is deleted from every graded tree too, and a support path at the very name a
 hidden test is written under, `tests/hidden_<name>.rs`, which would
 overwrite the test it is graded as, makes the row `source_unavailable`); a file the fix added outside
 `tests/`, a fixture a test reaches by `../` included, is the repair by this
