@@ -3514,8 +3514,8 @@ prepared: every proof and control runs inside the containment, so a host
 without it would only error every test. Then it prepares every entry,
 measuring each preparation: clone, the store and the elapsed bound charged
 after the clone and after each extracted tree while all of them still exist
-(every git child's deadline is the campaign time left, at most two
-minutes), `git show -s --format=%ct` for the base and fix
+(the elapsed bound is checked again before every git child, whose deadline
+is the campaign time left as it stands then, at most two minutes), `git show -s --format=%ct` for the base and fix
 commits, the fix's first parent, `git merge-base --is-ancestor` for
 `fix_descends_from_base`, the earliest fix-side commit time (and the pull
 request's creation, when fetched) for `repair_public_ms`, `git archive` of

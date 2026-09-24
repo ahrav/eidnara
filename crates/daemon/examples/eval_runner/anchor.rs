@@ -509,9 +509,14 @@ fn prepare(
         if entry.pull_request.is_some() && fetched.pull_request_created_ms.is_none() {
             return unavailable();
         }
-        charges.elapsed()?;
-        let deadline = GIT_TIMEOUT.min(remaining(charges));
-        let committed = |sha: &str| -> std::io::Result<Option<i64>> {
+        // Every git child gets the time left as it stands when it starts,
+        // after the elapsed bound has been checked once more.
+        let bounded = |charges: &mut Charges| -> Result<Duration, RunError> {
+            charges.elapsed()?;
+            Ok(GIT_TIMEOUT.min(remaining(charges)))
+        };
+        let mut committed = |sha: &str| -> Result<Option<i64>, RunError> {
+            let deadline = bounded(charges)?;
             Ok(git(&repo, &["show", "-s", "--format=%ct", sha], deadline)?
                 .and_then(|out| out.trim().parse::<i64>().ok())
                 .map(|seconds| seconds * 1_000))
@@ -522,7 +527,12 @@ fn prepare(
             return unavailable();
         };
         let parent = format!("{}^", entry.fix_sha);
-        let Some(parent_sha) = git(&repo, &["rev-parse", "--verify", &parent], deadline)? else {
+        let Some(parent_sha) = git(
+            &repo,
+            &["rev-parse", "--verify", &parent],
+            bounded(charges)?,
+        )?
+        else {
             return unavailable();
         };
         let parent_sha = parent_sha.trim().to_string();
@@ -534,13 +544,13 @@ fn prepare(
                 &entry.base_sha,
                 &entry.fix_sha,
             ],
-            deadline,
+            bounded(charges)?,
         )?
         .is_some();
         // The repair became public no later than the earliest fix-side
         // commit and, when known, the pull request's creation.
         let range = format!("{}..{}", entry.base_sha, entry.fix_sha);
-        let fix_side_ms = git(&repo, &["log", "--format=%ct", &range], deadline)?
+        let fix_side_ms = git(&repo, &["log", "--format=%ct", &range], bounded(charges)?)?
             .unwrap_or_default()
             .lines()
             .filter_map(|line| line.trim().parse::<i64>().ok())
@@ -552,19 +562,19 @@ fn prepare(
             .map_or(fix_side_ms, |pr_ms| pr_ms.min(fix_side_ms));
         let snapshot = tasks.join("snapshots").join(&entry.id);
         fresh_dir(&snapshot)?;
-        if !archive(&repo, &entry.base_sha, &snapshot, deadline)? {
+        if !archive(&repo, &entry.base_sha, &snapshot, bounded(charges)?)? {
             return unavailable();
         }
         charges.store_bytes(store_root)?;
         let fix = tasks.join("fixes").join(&entry.id);
         fresh_dir(&fix)?;
-        if !archive(&repo, &entry.fix_sha, &fix, deadline)? {
+        if !archive(&repo, &entry.fix_sha, &fix, bounded(charges)?)? {
             return unavailable();
         }
         charges.store_bytes(store_root)?;
         let fix_tree_digest = tree_digest(&fix)?;
         let Some(fix_parent_tree_digest) =
-            revision_tree_digest(&repo, &parent_sha, &scratch, deadline)?
+            revision_tree_digest(&repo, &parent_sha, &scratch, bounded(charges)?)?
         else {
             return unavailable();
         };
@@ -572,7 +582,7 @@ fn prepare(
         charges.elapsed()?;
         // The patch and the hidden tests are what the fix commit itself
         // changed against its parent; intervening history is not the fix.
-        let added = diff_paths(&repo, "A", &parent_sha, &entry.fix_sha, deadline)?;
+        let added = diff_paths(&repo, "A", &parent_sha, &entry.fix_sha, bounded(charges)?)?;
         let mut hidden = Vec::new();
         for path in &added {
             let Some(name) = hidden_test_name(path) else {
