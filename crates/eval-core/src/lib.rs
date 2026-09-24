@@ -27,7 +27,7 @@ mod censoring;
 mod census;
 mod checkpoint;
 mod claim;
-mod decimal;
+pub mod decimal;
 mod eligibility;
 mod event;
 mod failure_class;
@@ -181,7 +181,7 @@ pub use task::{
     ContainmentRefused, ContainmentReport, Files, GeneratedTask, HIDDEN_TEST_PREFIX, HiddenOutcome,
     HiddenResults, HiddenTest, SuiteDAdmission, TASK_DIGEST_PROTOCOL, TASK_GENERATOR_VERSION,
     TASK_MANIFEST, TASK_SCHEMA, TOOL_OUTPUT_ENV, TOOL_SCRIPT, TaskCorpus, TaskError, WrongFix,
-    check_adequacy, generate_tasks, observe_agent, task_terminal,
+    check_adequacy, generate_tasks, hidden_terminal, observe_agent, task_terminal,
 };
 pub use witness::{
     Generation, MultiplicityRecipe, OriginalFailure, WITNESS_DIGEST_PROTOCOL, WITNESS_SCHEMA,

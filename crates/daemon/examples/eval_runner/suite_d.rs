@@ -57,14 +57,14 @@ pub const SEED: u64 = 0x5EED_D000_0000_0006;
 /// Names the hanging agent's sleeper on the process table.
 pub const HANG_MARKER: &str = "eidnara-eval-suite-d-hang";
 const SETUP_TIMEOUT: Duration = Duration::from_secs(60);
-const STDOUT_CAP: usize = 4 * 1024 * 1024;
+pub const STDOUT_CAP: usize = 4 * 1024 * 1024;
 pub const FILE_CAP: u64 = 4 * 1024 * 1024;
 const READER_GRACE: Duration = Duration::from_secs(2);
 const ESCAPEE_LIFETIME: Duration = Duration::from_secs(3);
 /// How long the canary child waits for the escapee's first write.
 const ESCAPEE_READY_TIMEOUT: Duration = Duration::from_secs(5);
 /// The mount script exits with this when a mount is refused.
-const MOUNT_REFUSED: i32 = 97;
+pub const MOUNT_REFUSED: i32 = 97;
 pub const USAGE: &str = "suite-d --scale <s0|s1|s2> --tasks <n> --elapsed-bound-ms <n> \
 --approved-by <name> --approval-run-id <hex64> --witness <phase5-witness.json> --publish <dir>";
 const FLAGS: [&str; 7] = [
@@ -431,9 +431,13 @@ pub fn escapee_main() -> ! {
 /// is covered by an empty tmpfs; a socket elsewhere on the host stays
 /// reachable. The process limit (`prlimit`, since `ulimit -u` is not POSIX
 /// `sh`) bounds every descendant, fork bombs included, since `RLIMIT_NPROC`
-/// counts per user namespace. A pre-mount
-/// working directory still resolves to the writable mount, so `cd`
-/// re-resolves the working directory (`$3`, or `$2` itself) after mounting.
+/// counts per user namespace. The namespace's own loopback is brought up,
+/// so graded code can listen and connect to itself and nothing else, and a
+/// host that cannot refuses the containment (`namespaces_available` probes
+/// the same command first). A
+/// pre-mount working directory still resolves to the writable mount, so
+/// `cd` re-resolves the working directory (`$3`, or `$2` itself) after
+/// mounting.
 const MOUNTS: &str = r#"{ mount --make-rprivate / &&
 { [ -z "$1" ] || mount -t tmpfs -o ro,size=1k tmpfs "$1"; } && mount --bind "$2" "$2"; } || exit 97
 unescape='{ gsub(/\\040/, " ", $5); gsub(/\\011/, "\t", $5); gsub(/\\012/, "\n", $5); gsub(/\\134/, "\\", $5) }'
@@ -442,6 +446,7 @@ awk "$unescape { print \$5 }" /proc/self/mountinfo | while read -r m; do
 done
 awk -v rw="$2" "$unescape { top[\$5] = \$6 } END { for (m in top) if (m != rw && top[m] !~ /(^|,)ro(,|\$)/) exit 1 }" /proc/self/mountinfo || exit 97
 { [ ! -d /run ] || mount -t tmpfs -o ro,size=1k tmpfs /run; } || exit 97
+ip link set lo up 2>/dev/null || exit 97
 cd "${3:-$2}" || exit 97
 shift 3
 exec prlimit --nproc=128:128 setpriv --no-new-privs --inh-caps=-all --ambient-caps=-all --bounding-set=-all -- "$@""#;
@@ -452,7 +457,7 @@ exec prlimit --nproc=128:128 setpriv --no-new-privs --inh-caps=-all --ambient-ca
 /// is the one writable tree, and everything else is read-only; `inner`'s
 /// working directory is kept (the writable tree when it has none). Only
 /// `PATH`, `HOME`, `RUSTUP_HOME`, and `inner`'s own variables cross.
-fn contain(mask: Option<&Path>, writable: &Path, inner: &Command) -> Command {
+pub fn contain(mask: Option<&Path>, writable: &Path, inner: &Command) -> Command {
     let mut command = Command::new("unshare");
     command
         .args([
@@ -492,7 +497,36 @@ fn contain(mask: Option<&Path>, writable: &Path, inner: &Command) -> Command {
     command
 }
 
-/// Whether this host can create the four namespaces at all.
+/// Reads a witness file as JSON. A witness is a published artifact, so it is
+/// held to the artifact bound by size before anything of it is read or
+/// parsed. Opened non-blocking (a FIFO would otherwise block the open), then
+/// the descriptor itself is checked to be a regular file within the bound,
+/// and read through that bound so a file that grows meanwhile cannot exceed
+/// it.
+pub fn read_witness(path: &Path, artifact_bound: u64) -> std::io::Result<Value> {
+    let file = std::fs::File::from(rustix::fs::open(
+        path,
+        rustix::fs::OFlags::RDONLY | rustix::fs::OFlags::NONBLOCK | rustix::fs::OFlags::CLOEXEC,
+        rustix::fs::Mode::empty(),
+    )?);
+    let meta = file.metadata()?;
+    if !meta.is_file() {
+        return Err(std::io::Error::other("the witness is not a regular file"));
+    }
+    let bytes = meta.len();
+    if bytes > artifact_bound {
+        return Err(std::io::Error::other(format!(
+            "the witness is {bytes} bytes; the envelope's artifact bound is {artifact_bound}"
+        )));
+    }
+    let mut raw = Vec::new();
+    std::io::Read::read_to_end(&mut std::io::Read::take(file, artifact_bound), &mut raw)?;
+    serde_json::from_slice(&raw).map_err(std::io::Error::other)
+}
+
+/// Whether this host can create the namespaces at all, and bring the new
+/// network namespace's loopback up inside them, as the containment does
+/// for graded code; a host that cannot is a host without containment.
 pub fn namespaces_available() -> bool {
     let mut command = Command::new("unshare");
     command.args([
@@ -504,7 +538,11 @@ pub fn namespaces_available() -> bool {
         "--ipc",
         "--fork",
         "--mount-proc",
-        "true",
+        "ip",
+        "link",
+        "set",
+        "lo",
+        "up",
     ]);
     // Bounded like every other child: a host whose mount state stalls the
     // probe is a host without containment, not a hung run.
@@ -580,7 +618,7 @@ fn read_capped(mut reader: impl std::io::Read, cap: usize) -> std::io::Result<St
 
 /// `run_bounded` under the campaign's charges: the deadline is clamped to the
 /// campaign time left, and the elapsed bound is checked once the process ends.
-fn charged_run(
+pub fn charged_run(
     command: Command,
     deadline: Duration,
     charges: &mut Charges,
@@ -762,7 +800,7 @@ pub fn run_canaries(
     ]))
 }
 
-fn write_files(root: &Path, files: &Files) -> std::io::Result<()> {
+pub fn write_files(root: &Path, files: &Files) -> std::io::Result<()> {
     for (path, content) in files {
         let target = root.join(path);
         std::fs::create_dir_all(target.parent().unwrap())?;
@@ -896,86 +934,171 @@ pub fn hidden_results(
     std::fs::create_dir_all(&tmp)?;
     let cargo_home = root.join("cargo-home");
     std::fs::create_dir_all(&cargo_home)?;
-    let toolchain = grading_toolchain(charges)?;
     // The oracle workspace carries only the candidate's `src/` writes over
     // the task's files and the hidden tests; a manifest, `.cargo/`, a build
     // script, or a path colliding with a task file never reaches it.
     write_files(&grade, &task.oracle_workspace(agent_files))?;
+    let names: Vec<String> = task.hidden_tests.iter().map(|t| t.name.clone()).collect();
+    let cache = GradeCache {
+        target: &target,
+        cargo_home: &cargo_home,
+        tmp: &tmp,
+        mask: None,
+        store_root: root,
+    };
+    run_hidden(&grade, &names, cache, false, contained, deadline, charges)?
+        .ok_or_else(|| {
+            RunError::from(std::io::Error::other(
+                "the grade tree's lockfile was not written",
+            ))
+        })
+        .and_then(|results| {
+            if results.mount_refused {
+                Err(RunError::MountRefused {
+                    task: task.id.clone(),
+                })
+            } else {
+                Ok(results.hidden)
+            }
+        })
+}
+
+/// The directories a grade needs besides the tree: the build cache, Cargo's
+/// home, and the linker's temporary directory, all outside the graded tree,
+/// and the one path the containment covers with an empty tmpfs while
+/// grading (material the graded code must not read).
+#[derive(Debug, Clone, Copy)]
+pub struct GradeCache<'a> {
+    pub target: &'a Path,
+    pub cargo_home: &'a Path,
+    pub tmp: &'a Path,
+    pub mask: Option<&'a Path>,
+    /// The root whose bytes the store envelope counts; charged once the
+    /// runner's lockfile is written, before any repository code runs.
+    pub store_root: &'a Path,
+}
+
+/// What a grade produced: one outcome per hidden test, and whether some
+/// containment refused to mount (its tests are `Errored`; the caller decides
+/// whether that refuses the run).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Graded {
+    pub hidden: HiddenResults,
+    pub mount_refused: bool,
+}
+
+/// Runs `tests/hidden_<name>.rs` for each of `tests` in the tree at `grade`,
+/// each as its own `cargo test --offline --locked` invocation with the
+/// working directory at the tree's parent, so a `.cargo/config.toml` in the
+/// tree is not read. The lockfile is written by the runner first, resolving
+/// nothing but the manifest and running no code, unless `keep_lockfile` says
+/// the tree carries its own; `None` when it could not be written. Under
+/// `contained`, only `cache.target` is writable and `cache.mask` is
+/// covered: the grade tree, hidden tests included, is read-only to whatever
+/// the graded code does.
+pub fn run_hidden(
+    grade: &Path,
+    tests: &[String],
+    cache: GradeCache<'_>,
+    keep_lockfile: bool,
+    contained: bool,
+    deadline: Duration,
+    charges: &mut Charges,
+) -> Result<Option<Graded>, RunError> {
+    let toolchain = grading_toolchain(charges)?;
+    let manifest = grade.join("Cargo.toml");
+    let cwd = grade.parent().unwrap_or(grade);
+    // The graded code gets a throwaway home, not the runner's; rustup still
+    // finds its toolchains through an explicit `RUSTUP_HOME`.
+    let home = cache.target.join("home");
+    std::fs::create_dir_all(&home)?;
+    let rustup_home = std::env::var_os("RUSTUP_HOME").or_else(|| {
+        let default = PathBuf::from(std::env::var_os("HOME")?).join(".rustup");
+        default.is_dir().then(|| default.into_os_string())
+    });
     let cargo = |args: &[&str]| {
         let mut command = Command::new("cargo");
         command
             .args(args)
-            .current_dir(root)
-            .env("CARGO_TARGET_DIR", &target)
-            .env("CARGO_HOME", &cargo_home)
-            .env("TMPDIR", &tmp);
+            .arg("--manifest-path")
+            .arg(&manifest)
+            .current_dir(cwd)
+            .env("HOME", &home)
+            .env("CARGO_TARGET_DIR", cache.target)
+            .env("CARGO_HOME", cache.cargo_home)
+            .env("TMPDIR", cache.tmp);
+        if let Some(rustup_home) = &rustup_home {
+            command.env("RUSTUP_HOME", rustup_home);
+        }
         if let Some(toolchain) = &toolchain {
             command.env("RUSTUP_TOOLCHAIN", toolchain);
         }
         command
     };
-    // The lockfile is written by the runner, resolving nothing but the
-    // dependency-free manifest and running no code, so the grade tree can be
-    // read-only under the containment and `--locked` holds it to that.
-    let locked = charged_run(
-        cargo(&[
-            "generate-lockfile",
-            "--offline",
-            "--quiet",
-            "--manifest-path",
-            "grade/Cargo.toml",
-        ]),
-        deadline,
-        charges,
-    )?;
-    if !locked.0.is_some_and(|status| status.success()) {
-        return Err(std::io::Error::other("the grade tree's lockfile was not written").into());
+    if !keep_lockfile {
+        let locked = charged_run(
+            cargo(&["generate-lockfile", "--offline", "--quiet"]),
+            deadline,
+            charges,
+        )?;
+        // The lockfile the runner wrote is on disk either way.
+        charges.store_bytes(cache.store_root)?;
+        if !locked.0.is_some_and(|status| status.success()) {
+            return Ok(None);
+        }
     }
-    let mut results = HiddenResults::new();
-    for test in &task.hidden_tests {
+    let mut graded = Graded {
+        hidden: HiddenResults::new(),
+        mount_refused: false,
+    };
+    for name in tests {
         let command = cargo(&[
             "test",
             "--offline",
             "--locked",
             "--quiet",
-            "--manifest-path",
-            "grade/Cargo.toml",
             "--test",
-            &format!("hidden_{}", test.name),
+            &format!("hidden_{name}"),
         ]);
-        // Only the build cache is writable; the grade tree, hidden tests
-        // included, is read-only to whatever the candidate's code does.
         let command = if contained {
-            contain(None, &target, &command)
+            contain(cache.mask, cache.target, &command)
         } else {
             command
         };
-        let output = charged_run(command, deadline, charges)?;
-        if let (Some(status), _) = &output
-            && status.code() == Some(MOUNT_REFUSED)
-        {
-            return Err(RunError::MountRefused {
-                task: task.id.clone(),
-            });
+        let (status, stdout) = charged_run(command, deadline, charges)?;
+        if status.is_some_and(|status| status.code() == Some(MOUNT_REFUSED)) {
+            graded.mount_refused = true;
         }
-        // The harness summary is the runner's evidence that the assertions
-        // ran; an exit code alone is not.
-        let outcome = match output {
-            (Some(status), stdout)
-                if status.success() && stdout.contains("test result: ok. 1 passed") =>
-            {
-                HiddenOutcome::Passed
-            }
-            (Some(status), stdout)
-                if status.code() == Some(101) && stdout.contains("test result: FAILED") =>
-            {
-                HiddenOutcome::Failed
-            }
-            _ => HiddenOutcome::Errored,
-        };
-        results.insert(test.name.clone(), outcome);
+        graded
+            .hidden
+            .insert(name.clone(), harness_outcome(status, &stdout));
     }
-    Ok(results)
+    Ok(Some(graded))
+}
+
+/// The outcome from the harness summaries, which are the runner's evidence
+/// that the assertions ran; an exit code alone is not. A target passes when
+/// every summary is `ok` and at least one test passed.
+fn harness_outcome(status: Option<ExitStatus>, stdout: &str) -> HiddenOutcome {
+    let summaries: Vec<&str> = stdout
+        .lines()
+        .filter_map(|line| line.trim().strip_prefix("test result: "))
+        .collect();
+    let passed: u64 = summaries
+        .iter()
+        .filter_map(|summary| summary.strip_prefix("ok. "))
+        .filter_map(|rest| rest.split(' ').next()?.parse::<u64>().ok())
+        .sum();
+    let all_ok = !summaries.is_empty() && summaries.iter().all(|s| s.starts_with("ok. "));
+    match status {
+        Some(status) if status.success() && all_ok && passed > 0 => HiddenOutcome::Passed,
+        Some(status)
+            if status.code() == Some(101) && summaries.iter().any(|s| s.starts_with("FAILED")) =>
+        {
+            HiddenOutcome::Failed
+        }
+        _ => HiddenOutcome::Errored,
+    }
 }
 
 /// The toolchain the checkout pins, for a `cargo` run from a directory where
@@ -1364,38 +1487,7 @@ pub fn run(config: &Config, host: Host) -> Result<Run, RunError> {
     // The elapsed bound runs from the same instant the manifest's start
     // names, so reading and freezing the witness is inside it.
     let mut charges = Charges::new(profile.envelope.clone());
-    // A witness is a published artifact, so it is held to the artifact bound
-    // by size before anything of it is read or parsed.
-    // Opened non-blocking (a FIFO would otherwise block the open), then the
-    // descriptor itself is checked to be a regular file within the bound, and
-    // read through that bound so a file that grows meanwhile cannot exceed it.
-    let witness_file = std::fs::File::from(
-        rustix::fs::open(
-            &config.witness,
-            rustix::fs::OFlags::RDONLY | rustix::fs::OFlags::NONBLOCK | rustix::fs::OFlags::CLOEXEC,
-            rustix::fs::Mode::empty(),
-        )
-        .map_err(std::io::Error::from)?,
-    );
-    let witness_meta = witness_file.metadata()?;
-    if !witness_meta.is_file() {
-        return Err(std::io::Error::other("the witness is not a regular file").into());
-    }
-    let witness_bytes = witness_meta.len();
-    let artifact_bound = profile.envelope.artifact_bytes;
-    if witness_bytes > artifact_bound {
-        return Err(std::io::Error::other(format!(
-            "the witness is {witness_bytes} bytes; the envelope's artifact bound is {artifact_bound}"
-        ))
-        .into());
-    }
-    let mut witness_raw = Vec::new();
-    std::io::Read::read_to_end(
-        &mut std::io::Read::take(witness_file, artifact_bound),
-        &mut witness_raw,
-    )?;
-    let witness_value: Value =
-        serde_json::from_slice(&witness_raw).map_err(std::io::Error::other)?;
+    let witness_value = read_witness(&config.witness, profile.envelope.artifact_bytes)?;
     parse_witness(&witness_value)?;
     let frozen = FrozenFamily::freeze(&super::campaign::family(&profile))
         .map_err(|e| std::io::Error::other(format!("{e:?}")))?;

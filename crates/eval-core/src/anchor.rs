@@ -97,6 +97,11 @@ pub enum AnchorError {
     DuplicateId {
         id: String,
     },
+    /// The id names clone and snapshot directories; it must be one plain path
+    /// component to remain under the runner root.
+    NotAPathComponent {
+        id: String,
+    },
     /// Two rows name one fix commit, or one issue, of one repository: one
     /// historical task under two ids.
     DuplicateTask {
@@ -136,6 +141,13 @@ impl AnchorEntry {
             if !is_lower_hex(sha, 40) || sha.bytes().all(|b| b == b'0') {
                 return Err(AnchorError::NotASha { id: id(), field });
             }
+        }
+        let plain = self
+            .id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'));
+        if !plain || self.id == "." || self.id == ".." {
+            return Err(AnchorError::NotAPathComponent { id: id() });
         }
         if self.fix_sha == self.base_sha {
             return Err(AnchorError::FixIsBase { id: id() });
@@ -572,11 +584,14 @@ impl CutoffAudit {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "reason", rename_all = "snake_case", deny_unknown_fields)]
 pub enum InsufficiencyRefused {
-    /// Every hidden test that reached a verdict passed at the cutoff.
+    /// Every hidden test passed at the cutoff: there is nothing to fix.
     TreeAlreadyPasses,
-    /// No hidden test reached a verdict: the run is empty or every test
-    /// errored.
+    /// No hidden test ran.
     NothingExecuted,
+    /// Some hidden test does not pass on the fix tree, so the runner's
+    /// environment is not shown to build and run the tests, and a failure or
+    /// error on the base tree says nothing.
+    ReferenceDoesNotPass,
     ProofForOtherTask,
     /// The proof ran over a row with this id that has since changed.
     RowMismatch,
@@ -587,7 +602,8 @@ pub enum InsufficiencyRefused {
 debug_display!(InsufficiencyRefused);
 
 /// The current-tree-only run: the hidden tests over the snapshot with no
-/// agent. A recorded result is the proof; a corpus row without one is not.
+/// agent, next to the same tests over the snapshot with the fix applied. A
+/// recorded pair of results is the proof; a corpus row without one is not.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct InsufficiencyProof {
@@ -598,22 +614,32 @@ pub struct InsufficiencyProof {
     /// to be the audited snapshot.
     pub snapshot_digest: String,
     pub hidden: HiddenResults,
+    /// The hidden tests over the fix tree. A base-tree failure or error
+    /// counts only when every test passes here, because then the runner's
+    /// environment is shown to build and run them.
+    pub reference: HiddenResults,
 }
 
 impl InsufficiencyProof {
-    /// A proof needs at least one hidden test that ran and failed; an
-    /// `errored` test never reached a verdict and proves nothing.
+    /// A proof needs every hidden test to pass on the fix tree and at least
+    /// one not to pass on the base tree. An `errored` base-tree test counts
+    /// once the reference shows the runner can run it: a test that needs the
+    /// fix to compile is insufficiency too.
     pub fn validate(&self) -> Result<(), InsufficiencyRefused> {
-        if self.hidden.values().any(|o| *o == HiddenOutcome::Failed) {
-            return Ok(());
+        if self.hidden.is_empty() {
+            return Err(InsufficiencyRefused::NothingExecuted);
         }
-        Err(
-            if self.hidden.values().any(|o| *o == HiddenOutcome::Passed) {
-                InsufficiencyRefused::TreeAlreadyPasses
-            } else {
-                InsufficiencyRefused::NothingExecuted
-            },
-        )
+        let reference_passes = self
+            .hidden
+            .keys()
+            .all(|name| self.reference.get(name) == Some(&HiddenOutcome::Passed));
+        if !reference_passes {
+            return Err(InsufficiencyRefused::ReferenceDoesNotPass);
+        }
+        if self.hidden.values().all(|o| *o == HiddenOutcome::Passed) {
+            return Err(InsufficiencyRefused::TreeAlreadyPasses);
+        }
+        Ok(())
     }
 
     pub fn validate_for(&self, entry: &AnchorEntry) -> Result<(), InsufficiencyRefused> {
@@ -1022,6 +1048,11 @@ pub enum SettingsRefused {
     EmptyProviderField {
         field: &'static str,
     },
+    /// One pair listed twice is one pair; a second run of it has no
+    /// identity of its own and would overwrite the first.
+    DuplicateProvider {
+        provider: ProviderProfile,
+    },
     NoExecutionImage,
     NoPreparationBound,
 }
@@ -1036,6 +1067,7 @@ impl RealHistorySettings {
         if self.providers.is_empty() {
             return Err(SettingsRefused::NoProviders);
         }
+        let mut seen = BTreeSet::new();
         for profile in &self.providers {
             for (field, text) in [
                 ("provider", &profile.provider),
@@ -1045,6 +1077,11 @@ impl RealHistorySettings {
                 if text.trim().is_empty() {
                     return Err(SettingsRefused::EmptyProviderField { field });
                 }
+            }
+            if !seen.insert(profile) {
+                return Err(SettingsRefused::DuplicateProvider {
+                    provider: profile.clone(),
+                });
             }
         }
         if self.execution_image.trim().is_empty() {

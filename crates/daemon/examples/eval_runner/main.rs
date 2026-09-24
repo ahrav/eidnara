@@ -15,6 +15,11 @@
 #[cfg(unix)]
 #[allow(dead_code)]
 mod aging;
+/// The anchor shell is driven through its host seams by the daemon's anchor
+/// test; no subcommand exists until real repositories are wired.
+#[cfg(unix)]
+#[allow(dead_code)]
+mod anchor;
 #[cfg(unix)]
 mod campaign;
 /// The fault shell is shared with the daemon's fault test the same way.
