@@ -68,6 +68,7 @@ fn report(
 ) -> ResidualReport {
     ResidualReport {
         schema: RESIDUAL_REPORT_SCHEMA.to_string(),
+        settings_digest: residual_settings(calibration).digest(),
         judge,
         calibration_digest: calibration.digest().unwrap(),
         live_provider: live,
@@ -449,7 +450,8 @@ fn the_gates_take_only_oracle_inputs_and_the_residual_report_carries_no_gate_fie
             "live_provider",
             "permutation",
             "sampling",
-            "schema"
+            "schema",
+            "settings_digest"
         ],
         "a residual is a separate record with no gate field"
     );
@@ -758,6 +760,26 @@ fn a_residual_report_reconciles_its_judgments_and_its_calibration_set() {
             judged: 1000
         }),
         "1000 judgments cannot claim the 40-pair human floor"
+    );
+    let reattached = calibrated(calibration.clone(), 1, 2, &["t"]);
+    assert_eq!(
+        base.validate(&reattached, &provider("live-1")),
+        Err(ResidualRefused::SettingsDigestMismatch),
+        "a report scored under one preregistration does not validate under another"
+    );
+    let mut unbound = base.clone();
+    unbound.settings_digest = "not-hex".to_string();
+    assert_eq!(
+        unbound.validate(&residual_settings(&calibration), &provider("live-1")),
+        Err(ResidualRefused::Settings(
+            LiveSettingsRefused::MalformedDigest
+        ))
+    );
+    assert_eq!(
+        unbound.comparable(&base),
+        Err(ResidualRefused::Settings(
+            LiveSettingsRefused::MalformedDigest
+        ))
     );
     let mut anonymous = base.clone();
     anonymous.judgments[1].pair = " ".to_string();

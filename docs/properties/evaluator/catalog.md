@@ -989,8 +989,9 @@ Check: `always` - `ResidualReport::comparable` runs every calibration-free
   `live_provider`, or `calibration_digest` on the first inequality, with
   `tokenizer_profile` part of `ProviderProfile` equality;
   `ResidualReport::validate` refuses `Settings` (including
-  `UnapprovedProvider`), `ProviderDiffers`, `SamplingPlanDiffers`,
-  `CalibrationJudgeDiffers`, and `DigestMismatch`; `live_slice` and
+  `UnapprovedProvider` and a malformed settings digest), `ProviderDiffers`,
+  `SamplingPlanDiffers`, `CalibrationJudgeDiffers`, `DigestMismatch`, and
+  `SettingsDigestMismatch`; `live_slice` and
   `LiveSliceReport::validate` refuse `Settings`, `ProviderDiffers`,
   `KDiffers`, `AttemptCountDiffers`, `SettingsDigestMismatch`, and
   `TaskSetDiffers`. Must hold on

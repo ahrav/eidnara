@@ -578,6 +578,9 @@ impl PermutationCheck {
 #[serde(deny_unknown_fields)]
 pub struct ResidualReport {
     pub schema: String,
+    /// The pre-registered settings this report was scored under, so a report
+    /// cannot be reattached to another preregistration after the fact.
+    pub settings_digest: String,
     pub judge: JudgeIdentity,
     pub calibration_digest: String,
     pub live_provider: ProviderProfile,
@@ -609,6 +612,9 @@ pub enum ResidualRefused {
         changed: &'static str,
     },
     Settings(LiveSettingsRefused),
+    /// The report was scored under other pre-registered settings than the
+    /// ones it is checked against.
+    SettingsDigestMismatch,
     /// The report's plan is not the pre-registered one.
     SamplingPlanDiffers {
         report: SamplingPlan,
@@ -643,6 +649,11 @@ impl ResidualReport {
                 CalibrationRefused::MalformedDigest {
                     field: "calibration_digest",
                 },
+            ));
+        }
+        if !is_lower_hex(&self.settings_digest, 64) {
+            return Err(ResidualRefused::Settings(
+                LiveSettingsRefused::MalformedDigest,
             ));
         }
         if let Some(field) = blank_profile_field(&self.live_provider) {
@@ -715,6 +726,11 @@ impl ResidualReport {
             return Err(ResidualRefused::Calibration(
                 CalibrationRefused::DigestMismatch,
             ));
+        }
+        // Last, so a plan, judge, or calibration difference names itself
+        // before the digest over all of them does.
+        if self.settings_digest != settings.digest() {
+            return Err(ResidualRefused::SettingsDigestMismatch);
         }
         Ok(())
     }
@@ -990,6 +1006,8 @@ pub enum LiveSettingsRefused {
     EmptyProviderField {
         field: &'static str,
     },
+    /// A report's settings digest is not the lowercase hex a digest has.
+    MalformedDigest,
 }
 
 debug_display!(LiveSettingsRefused);

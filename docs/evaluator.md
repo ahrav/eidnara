@@ -3702,17 +3702,20 @@ for one pair and order (no rerolls), and a judge whose digests are malformed.
 consistently identifies it too.
 
 `ResidualReport` (`eval-residual-report/v1`) records every identity, never a
-name alone: the judge, the calibration digest, the live provider, the plan,
-the permutation check, and the judgments. `validate` takes the pre-registered
-`LiveSettings` and the live provider the run was approved for: it refuses
-another provider, a plan other than the settings', and a calibration set under
-another judge or digest, and reconciles the plan, the permutation check, and
-blank, duplicated, or miscounted judgments. `comparable` runs every check that
-needs no calibration set on both reports, and refuses cross-run `residual.*`
-comparison (`ReanchorRequired`) until the anchor set is re-scored when the
-judge, the live provider or its tokenizer profile, or the calibration digest
-changes. The gates take only oracle inputs: `analyze`'s signature is pinned in
-the tests, and the residual report carries no gate field.
+name alone: the settings digest, the judge, the calibration digest, the live
+provider, the plan, the permutation check, and the judgments. `validate` takes
+the pre-registered `LiveSettings` and the live provider the run was approved
+for: it refuses another provider, a plan other than the settings', a
+calibration set under another judge or digest, and a settings digest other
+than the supplied settings' (`SettingsDigestMismatch`), so a report cannot be
+reattached to another preregistration, and reconciles the plan, the
+permutation check, and blank, duplicated, or miscounted judgments.
+`comparable` runs every check that needs no calibration set on both reports,
+and refuses cross-run `residual.*` comparison (`ReanchorRequired`) until the
+anchor set is re-scored when the judge, the live provider or its tokenizer
+profile, or the calibration digest changes. The gates take only oracle inputs:
+`analyze`'s signature is pinned in the tests, and the residual report carries
+no gate field.
 
 `LiveSettings::validate` refuses without exactly two distinct approved
 provider profiles with no blank component, a pass^k exponent `k`, a planned
