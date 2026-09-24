@@ -31,7 +31,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use anchor::{
     AnchorTerminal, Config, ControlScript, Fetched, Host, MANIFEST_FILE, REPORT_FILE, RunError,
@@ -61,6 +61,13 @@ fn base_assets_survive_the_snapshot() {
 }
 "#;
 
+const SUPPORT_TEST: &str = r#"
+#[test]
+fn the_fixture_the_fix_added_is_beside_the_test() {
+    assert_eq!(include_str!("fixture.txt"), "included");
+}
+"#;
+
 /// How one fixture repository departs from a plain real-history task.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Variant {
@@ -81,6 +88,9 @@ enum Variant {
     /// The fix adds `tests/planted.rs` as a symlink to a file outside the
     /// repository.
     SymlinkedHiddenTest,
+    /// The fix adds `tests/fixture.txt`, which every hidden test includes,
+    /// and marks `tests/` `export-ignore`.
+    TestSupportFile,
 }
 
 fn git(dir: &Path, args: &[&str], seconds: i64) -> String {
@@ -166,7 +176,16 @@ fn history(dir: &Path, index: u32, variant: Variant) -> (String, String) {
     for test in &task.hidden_tests {
         let path = dir.join(test.path());
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(path, format!("{}{ASSETS_TEST}", test.content)).unwrap();
+        let support = if variant == Variant::TestSupportFile {
+            SUPPORT_TEST
+        } else {
+            ""
+        };
+        std::fs::write(path, format!("{}{ASSETS_TEST}{support}", test.content)).unwrap();
+    }
+    if variant == Variant::TestSupportFile {
+        std::fs::write(dir.join("tests/fixture.txt"), "included").unwrap();
+        std::fs::write(dir.join(".gitattributes"), "tests/ export-ignore\n").unwrap();
     }
     if variant == Variant::NestedTestFile {
         let helper = dir.join("tests/nested/helper.rs");
@@ -875,6 +894,7 @@ fn the_fix_is_its_own_diff_and_its_whole_tree() {
             Variant::DeletesBuildScript,
             Variant::IntermediateCommit,
             Variant::SymlinkedHiddenTest,
+            Variant::TestSupportFile,
         ],
     );
     let mut config = config(dir.path(), corpus, ControlScript::default(), u64::MAX);
@@ -911,6 +931,24 @@ fn the_fix_is_its_own_diff_and_its_whole_tree() {
         "a symlink at a fix-added tests/ path is not a hidden test and is never read through"
     );
     assert_eq!(proof.hidden.len(), 2);
+    let supported = by_id("cargo-3");
+    let proof = supported.insufficiency.as_ref().unwrap();
+    assert!(
+        proof.hidden.values().all(|o| *o == HiddenOutcome::Failed),
+        "the fixture the fix added is beside the test on the base tree too, so the test fails on the defect rather than erroring for want of its input: {:?}",
+        proof.hidden
+    );
+    assert!(
+        proof
+            .reference
+            .values()
+            .all(|o| *o == HiddenOutcome::Passed)
+    );
+    assert_eq!(
+        supported.terminal,
+        AnchorTerminal::Fail,
+        "a tests/ directory marked export-ignore is still in the snapshot and the fix tree"
+    );
 }
 
 #[test]
@@ -959,6 +997,10 @@ fn the_host_seams_are_given_the_campaign_time_left_and_a_named_pull_request_need
         by_id("cargo-1").terminal,
         AnchorTerminal::Skipped(RealHistorySkip::MissingCutoffEvidence),
         "a row whose pull request time is known is audited"
+    );
+    assert!(
+        run.report.envelope.peaks.processes >= 1,
+        "preparation's git children are counted in the process envelope even when nothing is graded"
     );
 }
 
@@ -1110,6 +1152,7 @@ fn isolated() {{
     let results = anchor::grade(
         &workspace,
         &[("probe".to_string(), probe)],
+        &[],
         &layout,
         "probe",
         &mut charges,
@@ -1121,28 +1164,4 @@ fn isolated() {{
         "the runner's home, its loopback listener, and the task material are out of reach; the test's own loopback works"
     );
     drop(listener);
-}
-
-#[test]
-fn the_archive_pipeline_is_bounded_and_both_ends_are_reaped() {
-    let dir = tempfile::tempdir().unwrap();
-    let out = dir.path().join("out.txt");
-    let mut producer = Command::new("printf");
-    producer.arg("archived");
-    let mut consumer = Command::new("sh");
-    consumer.args(["-c", "cat > \"$1\"", "sh"]).arg(&out);
-    assert_eq!(
-        anchor::pipe_bounded(producer, consumer, Duration::from_secs(30)).unwrap(),
-        Some(true)
-    );
-    assert_eq!(std::fs::read_to_string(&out).unwrap(), "archived");
-
-    let mut stalled = Command::new("sh");
-    stalled.args(["-c", "exec sleep 30"]);
-    let started = Instant::now();
-    assert_eq!(
-        anchor::pipe_bounded(stalled, Command::new("cat"), Duration::from_millis(300)).unwrap(),
-        None
-    );
-    assert!(started.elapsed() < Duration::from_secs(10));
 }

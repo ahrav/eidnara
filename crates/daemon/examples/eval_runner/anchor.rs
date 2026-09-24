@@ -6,7 +6,7 @@
 use std::collections::BTreeMap;
 use std::io::Read;
 use std::path::{Component, Path, PathBuf};
-use std::process::{Command, ExitStatus, Stdio};
+use std::process::{Command, ExitStatus};
 use std::time::{Duration, Instant};
 
 use context_core::canonical_json::protocol_digest;
@@ -26,8 +26,7 @@ use sha2::{Digest, Sha256};
 
 use super::aging::{ManifestInputs, suite_c_manifest};
 use super::campaign::{Charges, identity, prepare_publish, publish_file, sha256_hex};
-use super::fault::ChildGuard;
-use super::suite_d::{self, GradeCache, charged_run, contain, run_bounded, run_hidden};
+use super::suite_d::{self, GradeCache, charged_run, contain, run_hidden};
 
 pub const SIMULATOR_VERSION: &str = "eval-anchor-shell/v1";
 pub const ANCHOR_REPORT_SCHEMA: &str = "eval-anchor-report/v1";
@@ -205,11 +204,14 @@ pub struct Run {
     pub manifest_bytes: Vec<u8>,
 }
 
-fn git(dir: &Path, args: &[&str], deadline: Duration) -> std::io::Result<Option<String>> {
+/// One git child under the campaign's charges: counted in the process
+/// envelope, its deadline the campaign time left within `GIT_TIMEOUT`, the
+/// elapsed bound checked before and after. `None` when it failed or timed
+/// out.
+fn git(dir: &Path, args: &[&str], charges: &mut Charges) -> Result<Option<String>, RunError> {
     let mut command = Command::new("git");
-    command.args(args).current_dir(dir).stderr(Stdio::null());
-    let (status, out) =
-        run_bounded(command, deadline).map_err(|e| std::io::Error::other(e.to_string()))?;
+    command.args(args).current_dir(dir);
+    let (status, out) = charged_run(command, GIT_TIMEOUT, charges)?;
     Ok(status.filter(ExitStatus::success).map(|_| out))
 }
 
@@ -221,8 +223,8 @@ fn diff_paths(
     filter: &str,
     from: &str,
     to: &str,
-    deadline: Duration,
-) -> std::io::Result<Vec<String>> {
+    charges: &mut Charges,
+) -> Result<Vec<String>, RunError> {
     let filter = format!("--diff-filter={filter}");
     let out = git(
         repo,
@@ -235,7 +237,7 @@ fn diff_paths(
             from,
             to,
         ],
-        deadline,
+        charges,
     )?
     .unwrap_or_default();
     Ok(out
@@ -245,51 +247,29 @@ fn diff_paths(
         .collect())
 }
 
-pub fn pipe_bounded(
-    mut producer: Command,
-    mut consumer: Command,
-    deadline: Duration,
-) -> std::io::Result<Option<bool>> {
-    let started = Instant::now();
-    let mut first = ChildGuard(
-        producer
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()?,
-    );
-    let pipe = first.0.stdout.take().unwrap();
-    let mut second = ChildGuard(
-        consumer
-            .stdin(Stdio::from(pipe))
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()?,
-    );
-    let (mut a, mut b) = (None, None);
-    while a.is_none() || b.is_none() {
-        if a.is_none() {
-            a = first.0.try_wait()?;
-        }
-        if b.is_none() {
-            b = second.0.try_wait()?;
-        }
-        if started.elapsed() >= deadline && (a.is_none() || b.is_none()) {
-            return Ok(None);
-        }
-        std::thread::sleep(Duration::from_millis(10));
+/// Writes `rev`'s whole tree into `into` through the clone's index
+/// (`read-tree`, then `checkout-index --prefix`), so `export-ignore`
+/// attributes, which `git archive` would honour, leave nothing out: the tree
+/// is the commit's, bytes, symlinks, and modes kept. The clone's index is
+/// overwritten; the clone is discarded once preparation ends.
+fn materialize(
+    repo: &Path,
+    rev: &str,
+    into: &Path,
+    charges: &mut Charges,
+) -> Result<bool, RunError> {
+    if git(repo, &["read-tree", rev], charges)?.is_none() {
+        return Ok(false);
     }
-    Ok(Some(a.unwrap().success() && b.unwrap().success()))
-}
-
-fn archive(repo: &Path, rev: &str, into: &Path, deadline: Duration) -> std::io::Result<bool> {
-    let mut producer = Command::new("git");
-    producer
-        .args(["archive", "--format=tar", rev])
+    let mut prefix = into.as_os_str().to_owned();
+    prefix.push("/");
+    let mut command = Command::new("git");
+    command
+        .args(["checkout-index", "-a", "-f", "--prefix"])
+        .arg(prefix)
         .current_dir(repo);
-    let mut consumer = Command::new("tar");
-    consumer.args(["-x", "-f", "-", "-C"]).arg(into);
-    Ok(pipe_bounded(producer, consumer, deadline)? == Some(true))
+    let (status, _) = charged_run(command, GIT_TIMEOUT, charges)?;
+    Ok(status.is_some_and(|status| status.success()))
 }
 
 /// `cp -RP` keeps bytes, symlinks, and modes but not timestamps: a file's
@@ -447,23 +427,26 @@ fn sh_quote(text: &str) -> String {
 
 struct Prepared {
     snapshot: PathBuf,
-    /// The fix commit's whole tree, its hidden tests removed.
+    /// The fix commit's whole tree, its test material removed.
     fix: PathBuf,
     audit: CutoffAudit,
+    /// The hidden test targets, by name.
     hidden: Vec<(String, String)>,
+    /// The other files the fix added under `tests/`, by path.
+    support: Vec<(String, Vec<u8>)>,
     fetched: Fetched,
 }
 
-/// The digest of `rev`'s tree read the same way as the snapshot's: archived
-/// into `scratch` and digested file by file.
+/// The digest of `rev`'s tree read the same way as the snapshot's:
+/// materialized into `scratch` and digested file by file.
 fn revision_tree_digest(
     repo: &Path,
     rev: &str,
     scratch: &Path,
-    deadline: Duration,
-) -> std::io::Result<Option<String>> {
+    charges: &mut Charges,
+) -> Result<Option<String>, RunError> {
     fresh_dir(scratch)?;
-    let digest = if archive(repo, rev, scratch, deadline)? {
+    let digest = if materialize(repo, rev, scratch, charges)? {
         Some(tree_digest(scratch)?)
     } else {
         None
@@ -509,15 +492,8 @@ fn prepare(
         if entry.pull_request.is_some() && fetched.pull_request_created_ms.is_none() {
             return unavailable();
         }
-        // Every git child gets the time left as it stands when it starts,
-        // after the elapsed bound has been checked once more.
-        let bounded = |charges: &mut Charges| -> Result<Duration, RunError> {
-            charges.elapsed()?;
-            Ok(GIT_TIMEOUT.min(remaining(charges)))
-        };
         let mut committed = |sha: &str| -> Result<Option<i64>, RunError> {
-            let deadline = bounded(charges)?;
-            Ok(git(&repo, &["show", "-s", "--format=%ct", sha], deadline)?
+            Ok(git(&repo, &["show", "-s", "--format=%ct", sha], charges)?
                 .and_then(|out| out.trim().parse::<i64>().ok())
                 .map(|seconds| seconds * 1_000))
         };
@@ -527,12 +503,7 @@ fn prepare(
             return unavailable();
         };
         let parent = format!("{}^", entry.fix_sha);
-        let Some(parent_sha) = git(
-            &repo,
-            &["rev-parse", "--verify", &parent],
-            bounded(charges)?,
-        )?
-        else {
+        let Some(parent_sha) = git(&repo, &["rev-parse", "--verify", &parent], charges)? else {
             return unavailable();
         };
         let parent_sha = parent_sha.trim().to_string();
@@ -544,13 +515,13 @@ fn prepare(
                 &entry.base_sha,
                 &entry.fix_sha,
             ],
-            bounded(charges)?,
+            charges,
         )?
         .is_some();
         // The repair became public no later than the earliest fix-side
         // commit and, when known, the pull request's creation.
         let range = format!("{}..{}", entry.base_sha, entry.fix_sha);
-        let fix_side_ms = git(&repo, &["log", "--format=%ct", &range], bounded(charges)?)?
+        let fix_side_ms = git(&repo, &["log", "--format=%ct", &range], charges)?
             .unwrap_or_default()
             .lines()
             .filter_map(|line| line.trim().parse::<i64>().ok())
@@ -562,19 +533,19 @@ fn prepare(
             .map_or(fix_side_ms, |pr_ms| pr_ms.min(fix_side_ms));
         let snapshot = tasks.join("snapshots").join(&entry.id);
         fresh_dir(&snapshot)?;
-        if !archive(&repo, &entry.base_sha, &snapshot, bounded(charges)?)? {
+        if !materialize(&repo, &entry.base_sha, &snapshot, charges)? {
             return unavailable();
         }
         charges.store_bytes(store_root)?;
         let fix = tasks.join("fixes").join(&entry.id);
         fresh_dir(&fix)?;
-        if !archive(&repo, &entry.fix_sha, &fix, bounded(charges)?)? {
+        if !materialize(&repo, &entry.fix_sha, &fix, charges)? {
             return unavailable();
         }
         charges.store_bytes(store_root)?;
         let fix_tree_digest = tree_digest(&fix)?;
         let Some(fix_parent_tree_digest) =
-            revision_tree_digest(&repo, &parent_sha, &scratch, bounded(charges)?)?
+            revision_tree_digest(&repo, &parent_sha, &scratch, charges)?
         else {
             return unavailable();
         };
@@ -582,20 +553,33 @@ fn prepare(
         charges.elapsed()?;
         // The patch and the hidden tests are what the fix commit itself
         // changed against its parent; intervening history is not the fix.
-        let added = diff_paths(&repo, "A", &parent_sha, &entry.fix_sha, bounded(charges)?)?;
+        let added = diff_paths(&repo, "A", &parent_sha, &entry.fix_sha, charges)?;
+        // Every regular file the fix added under `tests/` is test material
+        // and goes with the hidden tests into both graded trees: a test
+        // target directly under `tests/` by name, anything deeper (a module,
+        // a fixture a test includes) by path, so a test never errors on the
+        // base tree for want of its own input. A symlink at such a path is
+        // not read through and stays in the fix tree.
         let mut hidden = Vec::new();
+        let mut support = Vec::new();
         for path in &added {
-            let Some(name) = hidden_test_name(path) else {
-                continue;
-            };
-            // A symlink at the path is not a test file the fix added; it
-            // is left in the fix tree and never read through.
             let file = fix.join(path);
-            if std::fs::symlink_metadata(&file).is_ok_and(|meta| meta.is_file())
-                && let Ok(content) = std::fs::read_to_string(&file)
+            if !path.starts_with("tests/")
+                || !std::fs::symlink_metadata(&file).is_ok_and(|meta| meta.is_file())
             {
-                std::fs::remove_file(&file)?;
-                hidden.push((name.to_string(), content));
+                continue;
+            }
+            match hidden_test_name(path) {
+                Some(name) => {
+                    if let Ok(content) = std::fs::read_to_string(&file) {
+                        std::fs::remove_file(&file)?;
+                        hidden.push((name.to_string(), content));
+                    }
+                }
+                None => {
+                    support.push((path.clone(), std::fs::read(&file)?));
+                    std::fs::remove_file(&file)?;
+                }
             }
         }
         let snapshot_digest = tree_digest(&snapshot)?;
@@ -619,6 +603,7 @@ fn prepare(
             fix,
             audit,
             hidden,
+            support,
             fetched,
         }))
     })();
@@ -637,6 +622,7 @@ fn prepare(
 pub fn grade(
     tree: &Path,
     tests: &[(String, String)],
+    support: &[(String, Vec<u8>)],
     layout: &Layout,
     task: &str,
     charges: &mut Charges,
@@ -647,12 +633,33 @@ pub fn grade(
         std::fs::remove_file(&dir)?;
     }
     std::fs::create_dir_all(&dir)?;
-    for (name, content) in tests {
-        let path = dir.join(format!("hidden_{name}.rs"));
+    let files = tests
+        .iter()
+        .map(|(name, content)| (format!("tests/hidden_{name}.rs"), content.as_bytes()))
+        .chain(
+            support
+                .iter()
+                .map(|(path, bytes)| (path.clone(), bytes.as_slice())),
+        );
+    for (relative, bytes) in files {
+        let path = tree.join(&relative);
+        // Never written through a symlinked directory or over a symlink.
+        let mut dir = tree.to_path_buf();
+        for component in Path::new(&relative)
+            .parent()
+            .into_iter()
+            .flat_map(Path::components)
+        {
+            dir.push(component);
+            if std::fs::symlink_metadata(&dir).is_ok_and(|m| m.is_symlink()) {
+                std::fs::remove_file(&dir)?;
+            }
+        }
+        std::fs::create_dir_all(&dir)?;
         if std::fs::symlink_metadata(&path).is_ok_and(|m| m.is_symlink()) {
             std::fs::remove_file(&path)?;
         }
-        std::fs::write(path, content)?;
+        std::fs::write(path, bytes)?;
     }
     let names: Vec<String> = tests.iter().map(|(name, _)| name.clone()).collect();
     let tmp = layout.target.join("tmp");
@@ -668,7 +675,7 @@ pub fn grade(
     // A repository's own lockfile is kept and held to; a tree without one
     // gets one written by the runner.
     let keep_lockfile = tree.join("Cargo.lock").is_file();
-    match run_hidden(
+    let graded = run_hidden(
         tree,
         &names,
         cache,
@@ -676,7 +683,11 @@ pub fn grade(
         true,
         GRADE_TIMEOUT,
         charges,
-    )? {
+    )?;
+    // What the build wrote into the cache and the linker's directory is
+    // charged before the next grade, not after the task.
+    charges.store_bytes(&layout.root)?;
+    match graded {
         Some(graded) if graded.mount_refused => Err(RunError::MountRefused {
             task: task.to_string(),
         }),
@@ -821,7 +832,14 @@ fn control(run: &ControlRun<'_>, charges: &mut Charges) -> Result<NoRepositoryCo
         fresh_dir(&layout.tree)?;
         copy_tree(&prepared.snapshot, &layout.tree)?;
         overlay_patch(&workspace.join("patch"), &layout.tree)?;
-        grade(&layout.tree, &prepared.hidden, layout, &entry.id, charges)?
+        grade(
+            &layout.tree,
+            &prepared.hidden,
+            &prepared.support,
+            layout,
+            &entry.id,
+            charges,
+        )?
     };
     let terminal = hidden_terminal(
         prepared.hidden.iter().map(|(name, _)| name.as_str()),
@@ -978,6 +996,7 @@ pub fn run(config: &Config, host: Host) -> Result<Run, RunError> {
         let hidden = grade(
             &layout.tree,
             &ready.hidden,
+            &ready.support,
             &layout,
             &entry.id,
             &mut charges,
@@ -987,6 +1006,7 @@ pub fn run(config: &Config, host: Host) -> Result<Run, RunError> {
         let reference = grade(
             &layout.tree,
             &ready.hidden,
+            &ready.support,
             &layout,
             &entry.id,
             &mut charges,

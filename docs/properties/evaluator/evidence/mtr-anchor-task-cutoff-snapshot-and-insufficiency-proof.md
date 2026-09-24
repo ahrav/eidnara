@@ -13,9 +13,11 @@ run." Ticket #767 acceptance.
   host seam with the store charged while the clone exists, `git show -s
   --format=%ct` for both commits, `git merge-base --is-ancestor` for the
   descent, the earliest fix-side commit for the repair's publication,
-  `git archive` of the base and of the whole fix commit piped into `tar` under
-  `pipe_bounded`, `git diff -z --no-renames` from the fix's parent to the fix
-  for the added paths, `hidden_test_name` for files directly under `tests/`,
+  the base and the whole fix commit materialized through the clone's index
+  (`git read-tree`, `git checkout-index --prefix`), `git diff -z --no-renames`
+  from the fix's parent to the fix for the added paths, `hidden_test_name`
+  for files directly under `tests/` and every other fix-added `tests/` file
+  as support written into both graded trees,
   `tree_digest` over bytes, executable bits, and symlink targets for the
   snapshot, the fix tree, and the fix's parent; `run` copies the snapshot into
   a fresh tree with `cp -RP`, runs the hidden tests, copies the fix tree into a

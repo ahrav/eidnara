@@ -3514,14 +3514,17 @@ prepared: every proof and control runs inside the containment, so a host
 without it would only error every test. Then it prepares every entry,
 measuring each preparation: clone, the store and the elapsed bound charged
 after the clone and after each extracted tree while all of them still exist
-(the elapsed bound is checked again before every git child, whose deadline
-is the campaign time left as it stands then, at most two minutes), `git show -s --format=%ct` for the base and fix
-commits, the fix's first parent, `git merge-base --is-ancestor` for
+(every git child runs under `charged_run`: counted in the process
+envelope, the elapsed bound checked before and after it, its deadline the
+campaign time left as it stands then, at most two minutes), `git show -s
+--format=%ct` for the base and fix commits, the fix's first parent, `git merge-base --is-ancestor` for
 `fix_descends_from_base`, the earliest fix-side commit time (and the pull
-request's creation, when fetched) for `repair_public_ms`, `git archive` of
-the base into the snapshot and of the whole fix commit into the fix tree,
-each piped into `tar` under a deadline (bytes, symlinks, and executable
-modes kept), the snapshot, fix, and fix-parent tree digests
+request's creation, when fetched) for `repair_public_ms`, the base
+materialized into the snapshot and the whole fix commit into the fix tree
+through the clone's index (`git read-tree`, then `git checkout-index -a -f
+--prefix`, so an `export-ignore` attribute, which `git archive` would
+honour, leaves nothing out; bytes, symlinks, and executable modes kept),
+the snapshot, fix, and fix-parent tree digests
 (`eval-anchor-snapshot/v3`: each file's bytes and executable bit and each
 symlink's target, keyed by path bytes losslessly, UTF-8 as `u:<path>` and
 anything else as `b:<hex>`, so two names that differ only in bytes UTF-8
@@ -3529,10 +3532,13 @@ cannot carry stay two entries; the parent archived into a scratch directory
 and discarded), and the `CutoffAudit` with the row's `entry_digest`. The patch
 and the hidden tests are what the fix commit changed against its parent,
 `git diff -z --no-renames` from `fix_sha^` to `fix_sha`, not against the
-base, so intervening history is never the fix: a fix-added regular file directly
-under `tests/` is a hidden test and is removed from the fix tree (a symlink
-at such a path is not read through and stays where it is); every
-other file of the fix tree, a module under a `tests/` subdirectory and a
+base, so intervening history is never the fix: every regular file the fix added under
+`tests/` is test material and is removed from the fix tree: a file directly
+under `tests/` is a hidden test target by name, anything deeper (a module,
+a fixture a test includes) is support by path, and both are written into
+every graded tree, base and fix alike, so a test never errors on the base
+tree for want of its own input (a symlink at such a path is not read
+through and stays where it is); every other file of the fix tree, a
 deletion included, is what a memorizing control reproduces. The clone is
 removed once the snapshot and fix tree are extracted, and the store is
 charged again after every preparation and every task. After the first five
@@ -3556,7 +3562,8 @@ and a reference run, in a build cache of its own (the writable mount is
 emptied before each task, so what one task's build scripts and tests left
 there reaches no other): the snapshot copied into a fresh tree and its
 hidden tests run with no agent, then the fix tree copied into a fresh tree
-and the tests run again. Both go through Suite D's `run_hidden` inside the
+and the tests run again; the store is charged after every grade, so what a
+build wrote into the cache is bounded before the next one. Both go through Suite D's `run_hidden` inside the
 containment (`contain`), with the tree read-only, the build cache the only
 writable mount, and `tasks/` (every clone, snapshot, and fix tree) covered
 by an empty tmpfs, so a build script or test in the graded tree reads no
@@ -3618,7 +3625,7 @@ and an executable script; the fix commit adds the correct body and hidden
 test files with two tests each, one of which needs those base files), the
 rows a test does not look at being early fixes that are prepared but never
 graded: three tasks audited, proven insufficient, and eligible under two
-provider pairs, one of them with a fix-added module under `tests/nested/`,
+provider pairs, one of them with a fix-added module under `tests/nested/` carried as support, not as a test target,
 each audit naming a fix tree unlike its parent's; one early fix skipped
 with `fix_not_after_cutoff`; one unfetchable issue `source_unavailable` and
 the Django rows in `cutoff_missing`, not `cutoff_invalid`; one base commit
@@ -3637,15 +3644,17 @@ it is removed, four extracted trees refusing while the first clone still
 exists, and an exhausted campaign clock refusing before the second clone; a base whose failing build script the fix deletes
 proven insufficient because the reference is the fix commit's whole tree,
 a test file an intervening commit added kept out of the fix's hidden tests,
-and a symlink the fix added under `tests/` not read as one; five rows that
-fail their fetch fast not counted as the time study's sample; the host seams
+a symlink the fix added under `tests/` not read as one, and a fixture the
+fix added under `tests/` beside every hidden test on both trees, with
+`tests/` marked `export-ignore`; five rows that fail their fetch fast not
+counted as the time study's sample; preparation's git children in the
+process envelope; the host seams
 given the campaign time left and a named pull request without its creation
 time `source_unavailable`; two paths that differ only in bytes UTF-8 cannot
 carry digesting apart; missing settings, a missing witness, a climbing id, and a host
-without namespaces refusing before execution; the contained grading reaching
-neither the runner's `HOME`, its loopback listener, nor the task material
-under `tasks/` while the test's own loopback works; and the archive pipeline returning within its deadline with
-both ends reaped.
+without namespaces refusing before execution; and the contained grading
+reaching neither the runner's `HOME`, its loopback listener, nor the task
+material under `tasks/` while the test's own loopback works.
 
 ## Coverage markers
 
