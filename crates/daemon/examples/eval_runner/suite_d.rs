@@ -346,18 +346,25 @@ pub fn canary_main(args: &CanaryArgs) -> ! {
         }
     });
     // Descendants are bounded by a process limit, or they are not bounded.
+    // The children are held alive together so the limit can bite, then
+    // killed and reaped, so the control leaves none on the host.
     const FORKS: usize = 200;
-    let forked = (0..FORKS)
-        .filter(|_| {
+    let mut children: Vec<std::process::Child> = (0..FORKS)
+        .filter_map(|_| {
             Command::new("sleep")
-                .arg("1")
+                .arg("30")
                 .stdin(Stdio::null())
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
                 .spawn()
-                .is_ok()
+                .ok()
         })
-        .count();
+        .collect();
+    let forked = children.len();
+    for child in &mut children {
+        let _ = child.kill();
+        let _ = child.wait();
+    }
     let ipc_namespace = std::fs::read_link("/proc/self/ns/ipc")
         .map(|link| link.to_string_lossy().into_owned())
         .unwrap_or_default();
@@ -1548,7 +1555,13 @@ pub fn run(config: &Config, host: Host) -> Result<Run, RunError> {
         task_corpus: format!("generated:{SEED:#x}"),
         judge: JUDGE_VERSION.to_string(),
     });
-    let manifest_bytes = serde_json::to_vec_pretty(&manifest.to_value()).unwrap();
+    // The manifest is an artifact too, charged like the report until its own
+    // recorded peak stops moving.
+    let manifest_bytes = charges.publish_bytes(|envelope| {
+        let mut manifest = manifest.clone();
+        manifest.envelope_peaks = envelope.peaks.clone();
+        serde_json::to_vec_pretty(&manifest.to_value()).unwrap()
+    })?;
     charges.elapsed()?;
     // The manifest lands first; a report without one is never visible, and a
     // manifest whose report failed is taken back.
