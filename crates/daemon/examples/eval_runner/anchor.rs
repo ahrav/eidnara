@@ -213,33 +213,37 @@ fn git(dir: &Path, args: &[&str], charges: &mut Charges) -> Result<Option<String
     Ok(status.filter(ExitStatus::success).map(|_| out))
 }
 
-/// `git` in `dir` and nowhere else: the repository-selection variables an
-/// outer process may carry (`GIT_DIR`, `GIT_WORK_TREE`, `GIT_INDEX_FILE`)
-/// are dropped, so `read-tree` writes the clone's index and no other, and
-/// the user's and system's configuration are not read.
+/// `git` in `dir` and nowhere else, under no configuration but its own: the
+/// environment is cleared (only `PATH` crosses), so no repository-selection
+/// variable (`GIT_DIR`, `GIT_WORK_TREE`, `GIT_INDEX_FILE`) redirects it, no
+/// `GIT_CONFIG_*` injection reshapes a checkout, and the user's and
+/// system's configuration are not read.
 fn git_command(dir: &Path, args: &[&str]) -> Command {
     let mut command = Command::new("git");
     command
         .args(args)
         .current_dir(dir)
-        .env_remove("GIT_DIR")
-        .env_remove("GIT_WORK_TREE")
-        .env_remove("GIT_INDEX_FILE")
+        .env_clear()
         .env("GIT_CONFIG_GLOBAL", "/dev/null")
         .env("GIT_CONFIG_NOSYSTEM", "1");
+    if let Some(path) = std::env::var_os("PATH") {
+        command.env("PATH", path);
+    }
     command
 }
 
 /// The paths `git diff` reports between two commits, added or changed
 /// according to `filter`; `-z` preserves unusual paths without Git's
-/// line-oriented quoting.
+/// line-oriented quoting. The child's output crosses as text, so a path
+/// that is not UTF-8 cannot be carried and the fix cannot be prepared:
+/// `None`, which the caller reports as `source_unavailable`.
 fn diff_paths(
     repo: &Path,
     filter: &str,
     from: &str,
     to: &str,
     charges: &mut Charges,
-) -> Result<Vec<String>, RunError> {
+) -> Result<Option<Vec<String>>, RunError> {
     let filter = format!("--diff-filter={filter}");
     let out = git(
         repo,
@@ -255,11 +259,15 @@ fn diff_paths(
         charges,
     )?
     .unwrap_or_default();
-    Ok(out
-        .split('\0')
-        .filter(|p| !p.is_empty())
-        .map(str::to_string)
-        .collect())
+    if out.contains('\u{fffd}') {
+        return Ok(None);
+    }
+    Ok(Some(
+        out.split('\0')
+            .filter(|p| !p.is_empty())
+            .map(str::to_string)
+            .collect(),
+    ))
 }
 
 /// Writes `rev`'s whole tree into `into` through the clone's index
@@ -491,10 +499,13 @@ fn prepare(
         charges.elapsed()?;
         let remaining =
             |charges: &Charges| charges.deadline().saturating_duration_since(Instant::now());
-        if (host.clone)(entry, &repo, remaining(charges)).is_err() {
+        // Whatever the clone left behind is charged before it is removed,
+        // a failed clone's residue included.
+        let cloned = (host.clone)(entry, &repo, remaining(charges));
+        charges.store_bytes(store_root)?;
+        if cloned.is_err() {
             return unavailable();
         }
-        charges.store_bytes(store_root)?;
         charges.elapsed()?;
         let Some(fetched) = (host.fetch)(entry, remaining(charges)) else {
             return unavailable();
@@ -565,8 +576,12 @@ fn prepare(
         charges.elapsed()?;
         // The patch and the hidden tests are what the fix commit itself
         // changed against its parent; intervening history is not the fix.
-        let added = diff_paths(&repo, "A", &parent_sha, &entry.fix_sha, charges)?;
-        let modified = diff_paths(&repo, "M", &parent_sha, &entry.fix_sha, charges)?;
+        let (Some(added), Some(modified)) = (
+            diff_paths(&repo, "A", &parent_sha, &entry.fix_sha, charges)?,
+            diff_paths(&repo, "M", &parent_sha, &entry.fix_sha, charges)?,
+        ) else {
+            return unavailable();
+        };
         // Every regular file the fix added or changed under `tests/` is test
         // material and goes with the hidden tests into both graded trees: an
         // added test target directly under `tests/` by name, everything else
@@ -686,6 +701,9 @@ pub fn grade(
         }
         std::fs::write(path, bytes)?;
     }
+    // The test material just written is charged before any repository code
+    // runs.
+    charges.store_bytes(&layout.root)?;
     let names: Vec<String> = tests.iter().map(|(name, _)| name.clone()).collect();
     let tmp = layout.target.join("tmp");
     let cargo_home = layout.private.join("cargo-home");
@@ -698,8 +716,18 @@ pub fn grade(
         mask: Some(&layout.tasks),
     };
     // A repository's own lockfile is kept and held to; a tree without one
-    // gets one written by the runner.
-    let keep_lockfile = tree.join("Cargo.lock").is_file();
+    // gets one written by the runner. A symlink at the lockfile's path is
+    // removed first, so the lock the runner writes lands in the tree and
+    // nowhere the link pointed.
+    let lockfile = tree.join("Cargo.lock");
+    let keep_lockfile = match std::fs::symlink_metadata(&lockfile) {
+        Ok(meta) if meta.is_symlink() => {
+            std::fs::remove_file(&lockfile)?;
+            false
+        }
+        Ok(meta) => meta.is_file(),
+        Err(_) => false,
+    };
     let graded = run_hidden(
         tree,
         &names,

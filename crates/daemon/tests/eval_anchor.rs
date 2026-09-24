@@ -1143,6 +1143,10 @@ fn grading_runs_repository_code_without_the_runners_home_or_network() {
     )
     .unwrap();
     std::fs::write(workspace.join("src/lib.rs"), "").unwrap();
+    // A lockfile that is a dangling symlink out of the tree: the lock the
+    // runner writes must land in the tree, not where the link points.
+    let planted = dir.path().join("planted.lock");
+    std::os::unix::fs::symlink(&planted, workspace.join("Cargo.lock")).unwrap();
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
     let home = std::env::var("HOME").unwrap();
@@ -1186,5 +1190,10 @@ fn isolated() {{
         HiddenOutcome::Passed,
         "the runner's home, its loopback listener, and the task material are out of reach; the test's own loopback works"
     );
+    assert!(
+        !planted.exists(),
+        "the runner's lockfile was written into the tree, not through the symlink"
+    );
+    assert!(std::fs::symlink_metadata(workspace.join("Cargo.lock")).is_ok_and(|m| m.is_file()));
     drop(listener);
 }

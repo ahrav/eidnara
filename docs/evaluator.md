@@ -3513,12 +3513,14 @@ host without namespaces (`RunError::NoContainment`) before anything is
 prepared: every proof and control runs inside the containment, so a host
 without it would only error every test. Then it prepares every entry,
 measuring each preparation: clone, the store and the elapsed bound charged
-after the clone and after each extracted tree while all of them still exist
+after the clone (a failed clone's residue included) and after each
+extracted tree while all of them still exist
 (every git child runs under `charged_run`: counted in the process
 envelope, the elapsed bound checked before and after it, its deadline the
-campaign time left as it stands then, at most two minutes; each drops
-`GIT_DIR`, `GIT_WORK_TREE`, and `GIT_INDEX_FILE` and reads no user or
-system configuration, so it acts on the clone and nothing else), `git show -s
+campaign time left as it stands then, at most two minutes; each runs
+under a cleared environment, `PATH` alone crossing, with no user or system
+configuration, so no `GIT_DIR`, `GIT_INDEX_FILE`, or `GIT_CONFIG_*` an
+outer process carries redirects or reshapes it), `git show -s
 --format=%ct` for the base and fix commits, the fix's first parent, `git merge-base --is-ancestor` for
 `fix_descends_from_base`, the earliest fix-side commit time (and the pull
 request's creation, when fetched) for `repair_public_ms`, the base
@@ -3534,7 +3536,9 @@ cannot carry stay two entries; the parent archived into a scratch directory
 and discarded), and the `CutoffAudit` with the row's `entry_digest`. The patch
 and the hidden tests are what the fix commit changed against its parent,
 `git diff -z --no-renames` from `fix_sha^` to `fix_sha`, not against the
-base, so intervening history is never the fix: every regular file the fix added or changed under
+base, so intervening history is never the fix (a changed path that is not
+UTF-8 cannot cross the child's text output, and such a row is
+`source_unavailable`): every regular file the fix added or changed under
 `tests/` is test material and is removed from the fix tree: an added file
 directly under `tests/` is a hidden test target by name, everything else (a
 module, a fixture a test includes, an existing test the fix edited) is
@@ -3582,7 +3586,10 @@ patch is graded in the same place. Cargo's home sits under the private
 directory, the working directory at the tree's parent so no
 `.cargo/config.toml` in the tree is read, a throwaway `HOME`, the
 namespace's own loopback up, and the checkout's toolchain; a repository's own `Cargo.lock` is kept and held to
-with `--locked`, a tree without one gets one written by the runner, and a
+with `--locked`, a tree without one gets one written by the runner (a
+symlink at that path is removed first, so the lock lands in the tree and
+nowhere the link pointed), the test material written into the tree is
+charged before any repository code runs, and a
 manifest that does not resolve offline errors every test. Each target
 passes when every harness summary is `ok` with at least one test passed.
 `InsufficiencyProof::validate` needs every hidden test to pass on the fix
@@ -3667,7 +3674,9 @@ time `source_unavailable`; two paths that differ only in bytes UTF-8 cannot
 carry digesting apart; missing settings, a missing witness, a climbing id, and a host
 without namespaces refusing before execution; and the contained grading
 reaching neither the runner's `HOME`, its loopback listener, nor the task
-material under `tasks/` while the test's own loopback works.
+material under `tasks/` while the test's own loopback works, and writing
+its lockfile into the tree rather than through a dangling `Cargo.lock`
+symlink.
 
 ## Coverage markers
 
