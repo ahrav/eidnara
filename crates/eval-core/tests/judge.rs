@@ -138,6 +138,16 @@ fn blinding_refuses_a_canary_or_an_arm_name_and_shows_both_orders() {
             canary: "rename".to_string()
         })
     );
+    let mut obscured = pair.clone();
+    obscured.b = "the fresh answer 0 cites CAN\u{200b}ARY-1 too".to_string();
+    assert_eq!(
+        blind(&obscured, Order::AThenB, &["CANARY-1".to_string()]),
+        Err(BlindingRefused::CanaryInPrompt {
+            pair: "pair-0".to_string(),
+            canary: "CANARY-1".to_string()
+        }),
+        "an invisible character inside a canary does not hide it"
+    );
     let mut named = pair.clone();
     named.b = "as the Fresh Arm I answer".to_string();
     assert_eq!(

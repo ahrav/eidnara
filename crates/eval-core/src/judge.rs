@@ -357,18 +357,19 @@ fn contains_words(folded: &str, token: &str) -> bool {
         .any(|(at, _)| bytes[at - 1] == b' ' && bytes.get(at + token.len()) == Some(&b' '))
 }
 
+/// A canary matches as the raw substring or, so an invisible character or a
+/// width or case change inside it does not hide it, as the same folded words.
 fn screen(pair: &Pair, canaries: &[String]) -> Result<(), BlindingRefused> {
     for text in [&pair.a, &pair.b] {
-        if let Some(canary) = canaries
-            .iter()
-            .find(|c| !c.is_empty() && text.contains(c.as_str()))
-        {
+        let folded = fold_words(text);
+        if let Some(canary) = canaries.iter().find(|c| {
+            !c.is_empty() && (text.contains(c.as_str()) || folded.contains(fold_words(c).as_str()))
+        }) {
             return Err(BlindingRefused::CanaryInPrompt {
                 pair: pair.id.clone(),
                 canary: canary.clone(),
             });
         }
-        let folded = fold_words(text);
         if let Some(token) = ARM_TOKENS.iter().find(|t| contains_words(&folded, t)) {
             return Err(BlindingRefused::ArmIdentifiable {
                 pair: pair.id.clone(),
