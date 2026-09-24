@@ -3669,8 +3669,9 @@ script.
 The manifest is an artifact like the report, charged through the envelope
 until its own recorded peak stops moving, and the report is serialized once
 more with the final peaks; its `result_digest` is the published report less
-its envelope peaks under `eval-anchor-result/v1`, so two runs of one
-identity agree on it. The manifest is published before the report, a report that fails to
+its measurements (the envelope peaks, the time study, each task's
+`prepare_ms`, and each control's `usage.elapsed_ms`) under
+`eval-anchor-result/v1`, so two runs of one identity agree on it. The manifest is published before the report, a report that fails to
 publish takes its manifest back, and a run that crossed the elapsed bound
 while publishing takes both back, so a directory holds both or neither and
 nothing published outlived the bound. The

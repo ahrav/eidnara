@@ -1489,14 +1489,35 @@ fn the_manifest_is_charged_as_an_artifact_and_the_result_digest_leaves_the_peaks
     );
     let published: serde_json::Value =
         serde_json::from_slice(&std::fs::read(config.publish.join(REPORT_FILE)).unwrap()).unwrap();
-    // The peaks are measurements; two runs of one identity must agree on the
-    // result digest without them.
+    // The peaks, the preparation times, the time study projected from them,
+    // and the controls' elapsed times are measurements; two runs of one
+    // identity must agree on the result digest without them.
     let mut remeasured = published.clone();
     remeasured["envelope"]["peaks"]["elapsed_ms"] = serde_json::json!(999_999);
-    assert_eq!(anchor::result_digest(&remeasured), manifest.result_digest);
+    remeasured["time_study"]["projected_ms"] = serde_json::json!(424_242);
+    for task in remeasured["tasks"].as_array_mut().unwrap() {
+        task["prepare_ms"] = serde_json::json!(31_337);
+    }
+    assert_eq!(
+        anchor::result_digest(&remeasured),
+        manifest.result_digest,
+        "measurements do not reach the result digest"
+    );
+    // No control ran here; the rule holds on a control's usage all the same.
+    let mut slow = published.clone();
+    slow["tasks"][0]["controls"] =
+        serde_json::json!([{ "usage": { "elapsed_ms": 1, "tool_calls": 2 } }]);
+    let mut fast = published.clone();
+    fast["tasks"][0]["controls"] =
+        serde_json::json!([{ "usage": { "elapsed_ms": 900, "tool_calls": 2 } }]);
+    assert_eq!(anchor::result_digest(&slow), anchor::result_digest(&fast));
     let mut changed = published.clone();
     changed["tasks"][0]["terminal"] = serde_json::json!("fail");
-    assert_ne!(anchor::result_digest(&changed), manifest.result_digest);
+    assert_ne!(
+        anchor::result_digest(&changed),
+        manifest.result_digest,
+        "an outcome does"
+    );
 }
 
 #[test]

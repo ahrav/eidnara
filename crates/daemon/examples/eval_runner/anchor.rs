@@ -1373,12 +1373,37 @@ pub fn run(config: &Config, host: Host) -> Result<Run, RunError> {
     })
 }
 
-/// The published report less its envelope peaks under `eval-anchor-result/v1`:
-/// the peaks are measurements, so two runs of one identity agree on it.
+/// The published report less its measurements under `eval-anchor-result/v1`,
+/// so two runs of one identity agree on it: the envelope peaks, the time
+/// study (projected from the measured preparations), each task's
+/// `prepare_ms`, and each control's `usage.elapsed_ms`.
 pub fn result_digest(report: &Value) -> String {
     let mut value = report.clone();
+    if let Some(report) = value.as_object_mut() {
+        report.remove("time_study");
+    }
     if let Some(envelope) = value.get_mut("envelope").and_then(Value::as_object_mut) {
         envelope.remove("peaks");
+    }
+    for task in value
+        .get_mut("tasks")
+        .and_then(Value::as_array_mut)
+        .into_iter()
+        .flatten()
+    {
+        if let Some(task) = task.as_object_mut() {
+            task.remove("prepare_ms");
+        }
+        for control in task
+            .get_mut("controls")
+            .and_then(Value::as_array_mut)
+            .into_iter()
+            .flatten()
+        {
+            if let Some(usage) = control.get_mut("usage").and_then(Value::as_object_mut) {
+                usage.remove("elapsed_ms");
+            }
+        }
     }
     protocol_digest("eval-anchor-result/v1", &value).expect("the report is canonical")
 }
