@@ -3552,7 +3552,7 @@ removed from the fix tree: an added
 UTF-8 file directly under `tests/` is a hidden test target by name,
 everything else (a module, a fixture a test includes, an existing test the
 fix edited, a test-named file that is not UTF-8) is support by path in the
-fix's version, and both are written into every
+fix's version, its executable bit kept, and both are written into every
 graded tree, base and fix alike, so a test never fails or errors on the
 base tree because its own input differs (a symlink at such a path is never
 read through and reaches neither tree, the entry it may have replaced
@@ -3626,7 +3626,10 @@ private root, which the control sees as an empty tmpfs. The announced calls
 that climb out of the workspace or name the private root are
 `repository_access`, the outputs are scanned with `future_answers`, and the
 trace printed before a deadline kill is kept. A control past its deadline is
-`Censored { hard_deadline_ms }` and is not graded; a control that exits
+`Censored { hard_deadline_ms }` and is not graded, and one censored before
+its start line was printed is recorded as not `started`, so
+`classify_control` refuses it as `NotRun` rather than counting it eligible;
+a control that exits
 non-zero refuses the run (`RunError::ControlExited`). Otherwise the patch's
 regular files are copied over a fresh copy of the snapshot, never through a
 symlinked directory (the patch is the files the control wrote: an agent

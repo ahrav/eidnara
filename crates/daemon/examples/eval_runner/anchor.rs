@@ -460,6 +460,26 @@ fn sh_quote(text: &str) -> String {
     format!("'{}'", text.replace('\'', r"'\''"))
 }
 
+/// One test-support file: its path under the tree, its bytes, and whether
+/// it is executable.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Support {
+    pub path: String,
+    pub bytes: Vec<u8>,
+    pub executable: bool,
+}
+
+impl Support {
+    fn read(path: &str, file: &Path) -> std::io::Result<Self> {
+        use std::os::unix::fs::PermissionsExt;
+        Ok(Self {
+            path: path.to_string(),
+            bytes: std::fs::read(file)?,
+            executable: std::fs::metadata(file)?.permissions().mode() & 0o111 != 0,
+        })
+    }
+}
+
 struct Prepared {
     snapshot: PathBuf,
     /// The fix commit's whole tree, its test material removed.
@@ -467,8 +487,9 @@ struct Prepared {
     audit: CutoffAudit,
     /// The hidden test targets, by name.
     hidden: Vec<(String, String)>,
-    /// The other files the fix added or changed under `tests/`, by path.
-    support: Vec<(String, Vec<u8>)>,
+    /// The other files the fix added or changed under `tests/`, by path,
+    /// with their executable bit.
+    support: Vec<Support>,
     /// The `tests/` entries the fix deleted, absent from every graded tree.
     removed: Vec<String>,
     fetched: Fetched,
@@ -654,22 +675,22 @@ fn prepare(
                     // is still test material, carried by path like a fixture.
                     match std::fs::read_to_string(&file) {
                         Ok(content) => hidden.push((name.to_string(), content)),
-                        Err(_) => support.push((path.clone(), std::fs::read(&file)?)),
+                        Err(_) => support.push(Support::read(path, &file)?),
                     }
                     std::fs::remove_file(&file)?;
                 }
                 None => {
-                    support.push((path.clone(), std::fs::read(&file)?));
+                    support.push(Support::read(path, &file)?);
                     std::fs::remove_file(&file)?;
                 }
             }
         }
         // A support path at the name a hidden test is written under would
         // overwrite the test it is graded as; such a fix cannot be graded.
-        if support.iter().any(|(path, _)| {
+        if support.iter().any(|s| {
             hidden
                 .iter()
-                .any(|(name, _)| *path == format!("tests/hidden_{name}.rs"))
+                .any(|(name, _)| s.path == format!("tests/hidden_{name}.rs"))
         }) {
             return unavailable();
         }
@@ -714,7 +735,7 @@ fn prepare(
 pub fn grade(
     tree: &Path,
     tests: &[(String, String)],
-    support: &[(String, Vec<u8>)],
+    support: &[Support],
     removed: &[String],
     layout: &Layout,
     task: &str,
@@ -736,13 +757,13 @@ pub fn grade(
     std::fs::create_dir_all(&dir)?;
     let files = tests
         .iter()
-        .map(|(name, content)| (format!("tests/hidden_{name}.rs"), content.as_bytes()))
+        .map(|(name, content)| (format!("tests/hidden_{name}.rs"), content.as_bytes(), false))
         .chain(
             support
                 .iter()
-                .map(|(path, bytes)| (path.clone(), bytes.as_slice())),
+                .map(|s| (s.path.clone(), s.bytes.as_slice(), s.executable)),
         );
-    for (relative, bytes) in files {
+    for (relative, bytes, executable) in files {
         let path = tree.join(&relative);
         // Never written through a symlinked directory or over a symlink.
         let mut dir = tree.to_path_buf();
@@ -760,7 +781,11 @@ pub fn grade(
         if std::fs::symlink_metadata(&path).is_ok_and(|m| m.is_symlink()) {
             std::fs::remove_file(&path)?;
         }
-        std::fs::write(path, bytes)?;
+        std::fs::write(&path, bytes)?;
+        if executable {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))?;
+        }
     }
     // The test material just written is charged before any repository code
     // runs.
@@ -901,6 +926,7 @@ fn control(run: &ControlRun<'_>, charges: &mut Charges) -> Result<NoRepositoryCo
         lines.push(format!("exit {code}"));
     }
     std::fs::write(workspace.join(".agent.sh"), lines.join("\n") + "\n")?;
+    charges.store_bytes(&layout.root)?;
     let mut inner = Command::new("sh");
     inner.arg(".agent.sh").current_dir(&workspace);
     let deadline = config.budgets.hard_deadline_ms;
@@ -958,6 +984,7 @@ fn control(run: &ControlRun<'_>, charges: &mut Charges) -> Result<NoRepositoryCo
     } else {
         fresh_dir(&layout.tree)?;
         copy_tree(&prepared.snapshot, &layout.tree, charges)?;
+        charges.store_bytes(&layout.root)?;
         overlay_patch(&workspace.join("patch"), &layout.tree)?;
         charges.store_bytes(&layout.root)?;
         grade(
@@ -983,7 +1010,7 @@ fn control(run: &ControlRun<'_>, charges: &mut Charges) -> Result<NoRepositoryCo
         execution_image: config.settings.execution_image.clone(),
         analysis_family_digest: digest.to_string(),
         terminal,
-        started: true,
+        started: agent_started,
         repository_access,
         future_answers: future_answers(entry, &outputs.join("\n")),
     })
