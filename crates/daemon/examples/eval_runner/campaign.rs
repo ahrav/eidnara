@@ -273,7 +273,7 @@ fn ratio(numerator: i128, denominator: i128) -> Ratio {
 /// the two histories' tasks, one world each, with no correlation at either
 /// level, so the affordable worlds' items are its effective N and the
 /// required N, which the plan meets exactly.
-fn family(profile: &RunProfile) -> AnalysisFamily {
+pub fn family(profile: &RunProfile) -> AnalysisFamily {
     let families: Vec<String> = TASK_FAMILIES.iter().map(|f| f.to_string()).collect();
     let n_families = u32::try_from(TASK_FAMILIES.len()).unwrap();
     let pairs = profile.worlds * profile.tasks_per_world;

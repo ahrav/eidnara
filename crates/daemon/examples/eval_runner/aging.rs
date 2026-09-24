@@ -1590,6 +1590,9 @@ fn manifest(
         execution_mode: ExecutionMode::PrefixThenGenerate,
         envelope: report.envelope.clone(),
         started_at_ms,
+        task_corpus: suite_c_task_corpus(),
+        judge: "none".to_string(),
+        execution_image: "in-process".to_string(),
     }))
 }
 
@@ -1604,6 +1607,18 @@ pub struct ManifestInputs {
     pub execution_mode: ExecutionMode,
     pub envelope: eval_core::Envelope,
     pub started_at_ms: i64,
+    /// `component_versions.task_corpus`: which corpus the run executed.
+    pub task_corpus: String,
+    /// `component_versions.judge`: what decided the terminals, `none` where
+    /// the oracle is the reducer's own.
+    pub judge: String,
+    /// `component_versions.execution_image`: where the measured code ran.
+    pub execution_image: String,
+}
+
+/// The task corpus every Suite C shell reads: the aging world under `SEED`.
+pub fn suite_c_task_corpus() -> String {
+    format!("generated:{SEED:#x}")
 }
 
 pub fn suite_c_manifest(inputs: ManifestInputs) -> Manifest {
@@ -1643,9 +1658,9 @@ pub fn suite_c_manifest(inputs: ManifestInputs) -> Manifest {
             event_schema: EVENT_SCHEMA_VERSION.to_string(),
             reducer: REDUCER_VERSION.to_string(),
             oracles: PAIRING_POLICY_VERSION.to_string(),
-            execution_image: "in-process".to_string(),
-            task_corpus: format!("generated:{SEED:#x}"),
-            judge: "none".to_string(),
+            execution_image: inputs.execution_image,
+            task_corpus: inputs.task_corpus,
+            judge: inputs.judge,
         },
         envelope_bounds: inputs.envelope.bounds.clone(),
         envelope_peaks: inputs.envelope.peaks,

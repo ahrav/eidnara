@@ -26,7 +26,7 @@ use eval_core::{
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use super::aging::{ManifestInputs, suite_c_manifest};
+use super::aging::{ManifestInputs, suite_c_manifest, suite_c_task_corpus};
 use super::campaign::{Charges, identity, parse_flags, prepare_publish, publish_file};
 use super::fault::ChildGuard;
 
@@ -650,6 +650,9 @@ pub fn run(config: &Config, spawn: Spawn) -> Result<Run, RunError> {
         execution_mode: ExecutionMode::Generate,
         envelope: charges.envelope.clone(),
         started_at_ms,
+        task_corpus: suite_c_task_corpus(),
+        judge: "none".to_string(),
+        execution_image: "in-process".to_string(),
     });
     // The Suite C builder names the aging corpus and an in-process image; this
     // run generated its worlds from `SEED` and replayed each in a fresh child.
