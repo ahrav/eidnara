@@ -125,9 +125,12 @@ pub struct CalibrationSet {
 }
 
 impl CalibrationSet {
-    pub fn digest(&self) -> String {
+    /// Only a valid calibration set has a digest, so no report can carry the
+    /// digest of a set that would not validate.
+    pub fn digest(&self) -> Result<String, CalibrationRefused> {
+        self.validate()?;
         let value = serde_json::to_value(self).expect("calibration serializes");
-        protocol_digest(CALIBRATION_DIGEST_PROTOCOL, &value).expect("calibration is canonical")
+        Ok(protocol_digest(CALIBRATION_DIGEST_PROTOCOL, &value).expect("calibration is canonical"))
     }
 
     pub fn validate(&self) -> Result<(), CalibrationRefused> {
@@ -142,6 +145,9 @@ impl CalibrationSet {
         )?;
         if self.human_labels.is_empty() {
             return Err(CalibrationRefused::EmptyCalibrationSet);
+        }
+        if self.human_labels.keys().any(|pair| pair.trim().is_empty()) {
+            return Err(CalibrationRefused::BlankPair);
         }
         if let Some((pair, _)) = self
             .human_labels
@@ -189,6 +195,8 @@ pub enum CalibrationRefused {
     InconsistentHumanLabel {
         pair: String,
     },
+    /// A blank anchor-pair id labels nothing.
+    BlankPair,
     /// A judge digest is not 64 lowercase hex characters, so two prompts or
     /// rubrics could share it.
     MalformedDigest {
@@ -692,7 +700,8 @@ impl ResidualReport {
                 CalibrationRefused::CalibrationJudgeDiffers,
             ));
         }
-        if calibration.digest() != self.calibration_digest {
+        let digest = calibration.digest().map_err(ResidualRefused::Calibration)?;
+        if digest != self.calibration_digest {
             return Err(ResidualRefused::Calibration(
                 CalibrationRefused::DigestMismatch,
             ));

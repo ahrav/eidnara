@@ -3681,9 +3681,10 @@ A judge is a versioned dependency. `JudgeIdentity` is a `ProviderProfile`
 (`eval-judge-rubric/v1`; a rubric under another schema has no digest), each 64
 lowercase hex. `CalibrationSet` (`eval-judge/v1`) freezes that identity with
 the human labels over anchor pairs before any judging and digests into every
-report (`eval-judge-calibration/v1`); it refuses another schema, a malformed
-digest, a blank provider, model, or tokenizer profile, an empty label map, and
-an `Inconsistent` label, which only two disagreeing judge orders produce.
+report (`eval-judge-calibration/v1`); only a set that validates has a digest,
+and validation refuses another schema, a malformed digest, a blank provider,
+model, or tokenizer profile, an empty label map, a blank anchor id, and an
+`Inconsistent` label, which only two disagreeing judge orders produce.
 `SamplingPlan::validate` refuses fewer than 20 pairs and a human sample below
 ten percent rounded up or below 20 pairs, or above the pair count; a campaign
 under the floor cannot claim calibrated acceptance.

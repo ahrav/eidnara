@@ -69,7 +69,7 @@ fn report(
     ResidualReport {
         schema: RESIDUAL_REPORT_SCHEMA.to_string(),
         judge,
-        calibration_digest: calibration.digest(),
+        calibration_digest: calibration.digest().unwrap(),
         live_provider: live,
         sampling: SamplingPlan {
             pairs: 40,
@@ -326,7 +326,7 @@ fn a_changed_judge_provider_or_tokenizer_refuses_cross_run_residual_comparison()
     let mut rescored = calibration.clone();
     rescored.judge.prompt_digest = "bb".repeat(32);
     let mut other_anchor = base.clone();
-    other_anchor.calibration_digest = rescored.digest();
+    other_anchor.calibration_digest = rescored.digest().unwrap();
     assert_eq!(
         base.comparable(&other_anchor),
         Err(ResidualRefused::ReanchorRequired {
@@ -969,6 +969,13 @@ fn calibration_refuses_a_foreign_schema_and_a_malformed_judge_digest() {
         })
     );
     assert_eq!(
+        old.digest(),
+        Err(CalibrationRefused::SchemaMismatch {
+            found: "eval-judge/v0".to_string()
+        }),
+        "a calibration set that does not validate has no digest to anchor a report"
+    );
+    assert_eq!(
         Rubric {
             schema: "eval-judge/v0".to_string(),
             criteria: vec!["correctness".to_string()],
@@ -1014,6 +1021,15 @@ fn calibration_refuses_a_foreign_schema_and_a_malformed_judge_digest() {
             pair: "anchor-2".to_string()
         }),
         "a human labels A, B, or a tie; only two judge orders are inconsistent"
+    );
+    let mut unlabelled_pair = calibration();
+    unlabelled_pair
+        .human_labels
+        .insert(" ".to_string(), Preference::A);
+    assert_eq!(
+        unlabelled_pair.validate(),
+        Err(CalibrationRefused::BlankPair),
+        "a blank anchor id labels nothing"
     );
     let mut nameless = calibration();
     nameless.judge.provider.model = "  ".to_string();

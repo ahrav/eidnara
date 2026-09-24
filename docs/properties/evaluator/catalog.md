@@ -944,8 +944,9 @@ Check: `always` - `blind` refuses `CanaryInPrompt` and `ArmIdentifiable` and
   `Preference`; `PermutationCheck::validate` refuses `ArmsIdentifiable` when
   `max(correct, trials - correct)` exceeds 60 percent of the trials;
   `CalibrationSet::validate` refuses `SchemaMismatch`, `MalformedDigest`,
-  `EmptyProviderField`, and `InconsistentHumanLabel`. Must hold on every
-  call, so `always`.
+  `EmptyProviderField`, `BlankPair`, and `InconsistentHumanLabel`, and
+  `CalibrationSet::digest` runs it first. Must hold on every call, so
+  `always`.
 Fault/timing angle: None.
 Required faults and enabling state: A pair whose text names its arm or carries
   a canary; a call set missing one order, from another judge, or repeated for
