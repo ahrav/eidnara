@@ -792,9 +792,12 @@ pub fn grade(
             _ => {}
         }
         std::fs::write(&path, bytes)?;
-        if executable {
+        // The mode is the fix's, set on both trees: a base-tree file the
+        // write truncated would otherwise keep its executable bit.
+        {
             use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))?;
+            let mode = if executable { 0o755 } else { 0o644 };
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode))?;
         }
     }
     // The test material just written is charged before any repository code

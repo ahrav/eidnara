@@ -89,6 +89,17 @@ fn passes_once_an_earlier_grade_left_its_marker() {
 }
 "#;
 
+/// Judges nothing but the mode of a support file the fix edited.
+const MODE_TEST: &str = r#"
+#[test]
+fn the_fixture_is_not_executable() {
+    use std::os::unix::fs::PermissionsExt;
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mode = std::fs::metadata(root.join("tests/fixture.sh")).unwrap().permissions().mode();
+    assert_eq!(mode & 0o111, 0, "the fix made the fixture a plain file");
+}
+"#;
+
 /// A commit time git holds and `i64` milliseconds cannot: past
 /// `i64::MAX / 1000`, below git's own `TIME_MAX`.
 const OVERFLOWING_SECONDS: i64 = 9_300_000_000_000_000;
@@ -131,6 +142,10 @@ enum Variant {
     /// The only hidden test fails on the first run in a build cache and
     /// passes on every later one.
     StatefulHiddenTest,
+    /// The base commit carries an executable `tests/fixture.sh`; the fix
+    /// clears its executable bit and changes nothing else about it, and the
+    /// only hidden test asserts the bit is clear.
+    SupportLosesExecutableBit,
 }
 
 fn git(dir: &Path, args: &[&str], seconds: i64) -> String {
@@ -186,6 +201,12 @@ fn history(dir: &Path, index: u32, variant: Variant) -> (String, String) {
         std::fs::create_dir_all(dir.join("tests/helper")).unwrap();
         std::fs::write(dir.join("tests/helper/a"), "a file in the directory").unwrap();
     }
+    if variant == Variant::SupportLosesExecutableBit {
+        std::fs::create_dir_all(dir.join("tests")).unwrap();
+        let fixture = dir.join("tests/fixture.sh");
+        std::fs::write(&fixture, "#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(&fixture, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
     if variant == Variant::IdentAttribute {
         std::fs::write(dir.join(".gitattributes"), "*.txt ident\n").unwrap();
     }
@@ -228,6 +249,13 @@ fn history(dir: &Path, index: u32, variant: Variant) -> (String, String) {
     if variant == Variant::SupportReplacesDirectory {
         std::fs::remove_dir_all(dir.join("tests/helper")).unwrap();
     }
+    if variant == Variant::SupportLosesExecutableBit {
+        std::fs::set_permissions(
+            dir.join("tests/fixture.sh"),
+            std::fs::Permissions::from_mode(0o644),
+        )
+        .unwrap();
+    }
     suite_d::write_files(dir, &task.correct_fix).unwrap();
     for test in &task.hidden_tests {
         let path = dir.join(test.path());
@@ -245,6 +273,7 @@ fn history(dir: &Path, index: u32, variant: Variant) -> (String, String) {
             Variant::ModifiedTestSupport => SUPPORT_TEST.to_string(),
             Variant::IdentAttribute => IDENT_TEST.to_string(),
             Variant::StatefulHiddenTest => STATEFUL_TEST.to_string(),
+            Variant::SupportLosesExecutableBit => MODE_TEST.to_string(),
             _ => format!("{}{ASSETS_TEST}", test.content),
         };
         std::fs::write(path, content).unwrap();
@@ -1337,4 +1366,25 @@ fn a_hidden_test_cannot_carry_state_from_the_snapshot_grade_into_the_reference_g
         proof.reference
     );
     assert_eq!(stateful.terminal, AnchorTerminal::Indeterminate);
+}
+
+#[test]
+fn a_support_file_that_lost_its_executable_bit_loses_it_in_every_graded_tree() {
+    if !suite_d::namespaces_available() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = corpus(dir.path(), &[Variant::SupportLosesExecutableBit]);
+    let mut config = config(dir.path(), corpus, ControlScript::default(), u64::MAX);
+    config.settings.providers.truncate(1);
+    let run = anchor::run(&config, HOST).unwrap();
+    let plain = run.report.tasks.iter().find(|t| t.id == "cargo-0").unwrap();
+    let proof = plain.insufficiency.as_ref().unwrap();
+    assert_eq!(
+        proof.validate(),
+        Err(InsufficiencyRefused::TreeAlreadyPasses),
+        "the support file is written with the fix's mode over the base tree's executable one, so a test that reads only that mode passes on both trees: {:?}",
+        proof.hidden
+    );
+    assert_eq!(plain.terminal, AnchorTerminal::Indeterminate);
 }

@@ -3553,8 +3553,10 @@ removed from the fix tree: an added
 UTF-8 file directly under `tests/` is a hidden test target by name,
 everything else (a module, a fixture a test includes, an existing test the
 fix edited, a test-named file that is not UTF-8) is support by path in the
-fix's version, its executable bit kept, and both are written into every
-graded tree, base and fix alike, whatever sat at the path giving way (a
+fix's version, and both are written into every
+graded tree, base and fix alike, with the fix's mode (executable or not,
+set after every write, so a base-tree file the write truncated does not keep
+its bit), whatever sat at the path giving way (a
 symlink, or a directory the fix replaced with a file), so a test never fails or errors on the
 base tree because its own input differs (a symlink at such a path is never
 read through and reaches neither tree, the entry it may have replaced
