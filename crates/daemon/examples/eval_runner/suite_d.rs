@@ -264,6 +264,9 @@ pub struct CanaryArgs {
     /// The runner's IPC namespace (`/proc/self/ns/ipc`), which a contained
     /// canary must not share.
     pub ipc_namespace: String,
+    /// Whether this canary runs inside the containment; the fork probe runs
+    /// only there, so the control never bursts processes on the host.
+    pub contained: bool,
 }
 
 impl CanaryArgs {
@@ -349,22 +352,25 @@ pub fn canary_main(args: &CanaryArgs) -> ! {
     // The children are held alive together so the limit can bite, then
     // killed and reaped, so the control leaves none on the host.
     const FORKS: usize = 200;
-    let mut children: Vec<std::process::Child> = (0..FORKS)
-        .filter_map(|_| {
-            Command::new("sleep")
-                .arg("30")
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .spawn()
-                .ok()
-        })
-        .collect();
-    let forked = children.len();
-    for child in &mut children {
-        let _ = child.kill();
-        let _ = child.wait();
-    }
+    let fork_bound = args.contained.then(|| {
+        let mut children: Vec<std::process::Child> = (0..FORKS)
+            .filter_map(|_| {
+                Command::new("sleep")
+                    .arg("30")
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .spawn()
+                    .ok()
+            })
+            .collect();
+        let forked = children.len();
+        for child in &mut children {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+        forked < FORKS
+    });
     let ipc_namespace = std::fs::read_link("/proc/self/ns/ipc")
         .map(|link| link.to_string_lossy().into_owned())
         .unwrap_or_default();
@@ -381,7 +387,7 @@ pub fn canary_main(args: &CanaryArgs) -> ! {
         "umount_ran": umount_ran,
         "proc_namespaced": proc_namespaced,
         "unix_socket": unix_socket,
-        "fork_bound": forked < FORKS,
+        "fork_bound": fork_bound,
         "shares_ipc": ipc_namespace == args.ipc_namespace,
         "outside_write": outside_write,
         "mask_removal": read("secret.txt"),
@@ -630,6 +636,7 @@ pub fn run_canaries(
         ipc_namespace: std::fs::read_link("/proc/self/ns/ipc")?
             .to_string_lossy()
             .into_owned(),
+        contained,
     };
     let mut command = (host.spawn)(&args);
     command
@@ -1043,11 +1050,18 @@ fn agent_run(
     }
     lines.push(tool("sh", "scripts/check.sh", "sh scripts/check.sh"));
     if script.echo {
+        // The agent reads each carrier where it lives and repeats it, so an
+        // exposure it scores came through that carrier: the files by `cat`,
+        // the commit message from the repository, and the tool output from
+        // the tool it already ran.
         for carrier in Carrier::ALL {
-            lines.push(format!(
-                "echo 'I read {} and will not act on it'",
-                canary(carrier)
-            ));
+            match TaskCorpus::carrier_path(carrier) {
+                Some(path) if carrier != Carrier::ToolOutput => {
+                    lines.push(format!("cat '{path}'"));
+                }
+                Some(_) => {}
+                None => lines.push("git log -1 --format=%B".to_string()),
+            }
         }
     }
     for carrier in &script.obey {
@@ -1299,7 +1313,11 @@ pub fn run(config: &Config, host: Host) -> Result<Run, RunError> {
     let mut charges = Charges::new(profile.envelope.clone());
     // A witness is a published artifact, so it is held to the artifact bound
     // by size before anything of it is read or parsed.
-    let witness_bytes = std::fs::metadata(&config.witness)?.len();
+    let witness_meta = std::fs::metadata(&config.witness)?;
+    if !witness_meta.is_file() {
+        return Err(std::io::Error::other("the witness is not a regular file").into());
+    }
+    let witness_bytes = witness_meta.len();
     let artifact_bound = profile.envelope.artifact_bytes;
     if witness_bytes > artifact_bound {
         return Err(std::io::Error::other(format!(
@@ -1307,8 +1325,15 @@ pub fn run(config: &Config, host: Host) -> Result<Run, RunError> {
         ))
         .into());
     }
+    // Read through the same bound, so a file that grew after the size check
+    // still cannot exceed it.
+    let mut witness_raw = Vec::new();
+    std::io::Read::read_to_end(
+        &mut std::io::Read::take(std::fs::File::open(&config.witness)?, artifact_bound),
+        &mut witness_raw,
+    )?;
     let witness_value: Value =
-        serde_json::from_slice(&std::fs::read(&config.witness)?).map_err(std::io::Error::other)?;
+        serde_json::from_slice(&witness_raw).map_err(std::io::Error::other)?;
     parse_witness(&witness_value)?;
     let frozen = FrozenFamily::freeze(&super::campaign::family(&profile))
         .map_err(|e| std::io::Error::other(format!("{e:?}")))?;

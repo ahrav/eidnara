@@ -979,6 +979,16 @@ fn admission_refuses_without_an_accepted_witness_or_an_approved_profile() {
     ));
     config.witness = dir.path().join("missing.json");
     assert!(matches!(suite_d::run(&config, HOST), Err(RunError::Io(_))));
+    // A device or a FIFO reports no size; only a regular file is a witness.
+    config.witness = PathBuf::from("/dev/null");
+    let refused = suite_d::run(&config, HOST)
+        .err()
+        .map(|e| e.to_string())
+        .unwrap_or_default();
+    assert!(
+        refused.contains("regular file"),
+        "a witness that is not a regular file is refused before it is read: {refused}"
+    );
     // A witness past the envelope's artifact bound is refused by its size,
     // before it is read or parsed.
     let oversized = dir.path().join("oversized.json");
