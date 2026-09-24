@@ -401,8 +401,11 @@ pub fn canary_main(args: &CanaryArgs) -> ! {
 pub fn escapee_main() -> ! {
     let alive = PathBuf::from(std::env::var_os(ALIVE_FILE).expect("the canary names the file"));
     let started = Instant::now();
+    let pid = std::process::id();
     while started.elapsed() < ESCAPEE_LIFETIME {
-        let _ = std::fs::write(&alive, started.elapsed().as_nanos().to_string());
+        // Its PID first, so the runner can end a control escapee that would
+        // otherwise outlive the canary run.
+        let _ = std::fs::write(&alive, format!("{pid} {}", started.elapsed().as_nanos()));
         std::thread::sleep(Duration::from_millis(50));
     }
     std::process::exit(0)
@@ -481,23 +484,24 @@ fn contain(mask: Option<&Path>, writable: &Path, inner: &Command) -> Command {
 
 /// Whether this host can create the four namespaces at all.
 pub fn namespaces_available() -> bool {
-    Command::new("unshare")
-        .args([
-            "--user",
-            "--map-root-user",
-            "--mount",
-            "--pid",
-            "--net",
-            "--ipc",
-            "--fork",
-            "--mount-proc",
-            "true",
-        ])
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .is_ok_and(|status| status.success())
+    let mut command = Command::new("unshare");
+    command.args([
+        "--user",
+        "--map-root-user",
+        "--mount",
+        "--pid",
+        "--net",
+        "--ipc",
+        "--fork",
+        "--mount-proc",
+        "true",
+    ]);
+    // Bounded like every other child: a host whose mount state stalls the
+    // probe is a host without containment, not a hung run.
+    matches!(
+        run_bounded(command, SETUP_TIMEOUT),
+        Ok((Some(status), _)) if status.success()
+    )
 }
 
 /// Runs `command` as leader of a new process group. On deadline, sends
@@ -717,6 +721,18 @@ pub fn run_canaries(
     } else {
         CanaryVerdict::Denied
     };
+    // The control's escapee has proved its point; it does not get to outlive
+    // the canary run on the host. Inside the namespace the PID is not ours
+    // to signal and the init's death already took it.
+    if !contained
+        && let Some(pid) = second
+            .split_whitespace()
+            .next()
+            .and_then(|pid| pid.parse::<i32>().ok())
+            .and_then(rustix::process::Pid::from_raw)
+    {
+        let _ = rustix::process::kill_process(pid, rustix::process::Signal::KILL);
+    }
     let _ = std::fs::remove_file(&alive);
     let _ = std::fs::remove_file(&outside);
     Ok(BTreeMap::from([
@@ -1388,7 +1404,11 @@ pub fn run(config: &Config, host: Host) -> Result<Run, RunError> {
         .into());
     }
     let mut coverage = Coverage::default();
+    // The probe is a child like any other, charged and inside the bound.
+    charges.process_started()?;
     let contained = (host.namespaces)();
+    charges.process_ended();
+    charges.elapsed()?;
 
     // Self-tests before any agent: the canaries, then adequacy for every task.
     let containment = if contained {
