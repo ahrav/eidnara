@@ -29,6 +29,9 @@ pub const SIMULATOR_VERSION: &str = "eval-suite-d-shell/v1";
 /// The most tasks one run generates: the corpus is built whole before the
 /// envelope charges anything, so the count is bounded at the flag.
 pub const MAX_TASKS: u32 = 256;
+/// The most extra tool calls the scripted agent's script is ever built with,
+/// whatever the budget; the script is text built before anything is charged.
+pub const MAX_EXTRA_TOOL_CALLS: u32 = 4096;
 /// The judge every Suite D terminal comes from: `hidden_results` running the
 /// corpus's hidden tests in a tree the runner builds.
 pub const JUDGE_VERSION: &str = "eval-suite-d-hidden-tests/v1";
@@ -840,7 +843,14 @@ pub fn materialize(root: &Path, task: &GeneratedTask, patch: &Files) -> std::io:
         git.env(format!("GIT_CONFIG_KEY_{index}"), key)
             .env(format!("GIT_CONFIG_VALUE_{index}"), value);
     }
-    if !git.status()?.success() {
+    // Bounded like every other child; a stalled Git is a failed fixture, not
+    // a hung run.
+    let committed = match run_bounded(git, SETUP_TIMEOUT) {
+        Ok((status, _)) => status.is_some_and(|status| status.success()),
+        Err(RunError::Io(error)) => return Err(error),
+        Err(other) => return Err(std::io::Error::other(other.to_string())),
+    };
+    if !committed {
         return Err(std::io::Error::other("the fixture's initial commit failed"));
     }
     Ok(workspace)
@@ -1154,10 +1164,12 @@ fn agent_run(
         ));
     }
     // One call past the budget is as censored as any number; the script
-    // never grows further than that.
+    // never grows further than that, nor past a cap of its own under a budget
+    // that would let it.
     for _ in 0..script
         .extra_tool_calls
         .min(config.budgets.max_tool_calls.saturating_add(1))
+        .min(MAX_EXTRA_TOOL_CALLS)
     {
         lines.push(tool("true", "", "true"));
     }
@@ -1501,7 +1513,12 @@ pub fn run(config: &Config, host: Host) -> Result<Run, RunError> {
             });
             continue;
         }
+        // The fixture's Git is a child like the others: charged and inside
+        // the bound.
+        charges.process_started()?;
         let workspace = materialize(root.path(), task, &Files::new())?;
+        charges.process_ended();
+        charges.elapsed()?;
         let Session {
             trace,
             linked_oracle,

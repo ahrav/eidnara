@@ -1434,7 +1434,7 @@ budget.
 **Terminals.** Every sample ends in exactly one `Terminal`: `pass`, `fail`,
 `censored {reason}`, `indeterminate`, `skipped` (`profile_not_approved`,
 `stop_condition {condition}`, `envelope_exceeded {resource, bound,
-observed}`, `cassette_miss`, `redaction_refused`, `no_containment`), `unsupported`
+observed}`, `cassette_miss`, `redaction_refused`), `unsupported`
 (`surface_not_activated {surface}`, `no_mediation_boundary`,
 `packing_has_no_caller`, `policy_not_on_surface {policy, surface}`), or `disabled` (`scale_not_budgeted {scale}`,
 `feature_off`). The reasons are closed vocabularies; a reason outside them
