@@ -675,6 +675,11 @@ fn a_contained_task_is_judged_by_hidden_tests_the_agent_never_sees() {
         "the returned manifest carries the peaks the published one does"
     );
     assert_eq!(
+        manifest.component_versions.execution_image,
+        suite_d::EXECUTION_IMAGE_CONTAINED,
+        "the manifest says the agents ran under unshare"
+    );
+    assert_eq!(
         manifest.component_versions.judge,
         suite_d::JUDGE_VERSION,
         "the manifest names the hidden-test judge that decided every terminal"
@@ -943,6 +948,10 @@ fn a_host_without_namespaces_skips_every_task_with_no_containment() {
         run.manifest.run_identity.scenario["contained"],
         serde_json::json!(false),
         "a skipped run is not the same identity as a contained one"
+    );
+    assert_eq!(
+        run.manifest.component_versions.execution_image,
+        suite_d::EXECUTION_IMAGE_NO_CONTAINMENT
     );
     assert!(
         !run.report

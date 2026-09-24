@@ -35,6 +35,11 @@ pub const MAX_EXTRA_TOOL_CALLS: u32 = 4096;
 /// The judge every Suite D terminal comes from: `hidden_results` running the
 /// corpus's hidden tests in a tree the runner builds.
 pub const JUDGE_VERSION: &str = "eval-suite-d-hidden-tests/v1";
+/// Where the agents and the hidden tests ran: inside `unshare` with user,
+/// mount, PID, network, and IPC namespaces, or nowhere, on a host without
+/// them (no agent runs; adequacy runs in-process).
+pub const EXECUTION_IMAGE_CONTAINED: &str = "eval-suite-d-unshare/v1";
+pub const EXECUTION_IMAGE_NO_CONTAINMENT: &str = "eval-suite-d-no-containment/v1";
 pub const SUITE_D_REPORT_SCHEMA: &str = "eval-suite-d-report/v1";
 pub const REPORT_FILE: &str = "suite-d-report.json";
 pub const MANIFEST_FILE: &str = "manifest.json";
@@ -1651,6 +1656,12 @@ pub fn run(config: &Config, host: Host) -> Result<Run, RunError> {
         started_at_ms,
         task_corpus: format!("generated:{SEED:#x}"),
         judge: JUDGE_VERSION.to_string(),
+        execution_image: if contained {
+            EXECUTION_IMAGE_CONTAINED
+        } else {
+            EXECUTION_IMAGE_NO_CONTAINMENT
+        }
+        .to_string(),
     });
     // The manifest is an artifact too, charged like the report until its own
     // recorded peak stops moving.

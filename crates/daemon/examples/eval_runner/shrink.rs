@@ -652,6 +652,7 @@ pub fn run(config: &Config, spawn: Spawn) -> Result<Run, RunError> {
         started_at_ms,
         task_corpus: suite_c_task_corpus(),
         judge: "none".to_string(),
+        execution_image: "in-process".to_string(),
     });
     // The Suite C builder names the aging corpus and an in-process image; this
     // run generated its worlds from `SEED` and replayed each in a fresh child.

@@ -602,6 +602,7 @@ pub fn run(config: &Config) -> Result<Run, RunError> {
         started_at_ms,
         task_corpus: aging::suite_c_task_corpus(),
         judge: "none".to_string(),
+        execution_image: "in-process".to_string(),
     });
     let manifest_bytes = serde_json::to_vec_pretty(&manifest.to_value()).unwrap();
     // A manifest the directory then refuses to take takes the report back out
