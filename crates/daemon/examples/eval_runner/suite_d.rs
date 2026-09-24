@@ -1104,7 +1104,12 @@ fn agent_run(
             "rm -f Cargo.toml && mkdir Cargo.toml && echo x > Cargo.toml/x",
         ));
     }
-    for _ in 0..script.extra_tool_calls {
+    // One call past the budget is as censored as any number; the script
+    // never grows further than that.
+    for _ in 0..script
+        .extra_tool_calls
+        .min(config.budgets.max_tool_calls + 1)
+    {
         lines.push(tool("true", "", "true"));
     }
     if script.tests_file {
@@ -1285,6 +1290,16 @@ pub fn run(config: &Config, host: Host) -> Result<Run, RunError> {
     // The elapsed bound runs from the same instant the manifest's start
     // names, so reading and freezing the witness is inside it.
     let mut charges = Charges::new(profile.envelope.clone());
+    // A witness is a published artifact, so it is held to the artifact bound
+    // by size before anything of it is read or parsed.
+    let witness_bytes = std::fs::metadata(&config.witness)?.len();
+    let artifact_bound = profile.envelope.artifact_bytes;
+    if witness_bytes > artifact_bound {
+        return Err(std::io::Error::other(format!(
+            "the witness is {witness_bytes} bytes; the envelope's artifact bound is {artifact_bound}"
+        ))
+        .into());
+    }
     let witness_value: Value =
         serde_json::from_slice(&std::fs::read(&config.witness)?).map_err(std::io::Error::other)?;
     parse_witness(&witness_value)?;

@@ -964,6 +964,20 @@ fn admission_refuses_without_an_accepted_witness_or_an_approved_profile() {
     ));
     config.witness = dir.path().join("missing.json");
     assert!(matches!(suite_d::run(&config, HOST), Err(RunError::Io(_))));
+    // A witness past the envelope's artifact bound is refused by its size,
+    // before it is read or parsed.
+    let oversized = dir.path().join("oversized.json");
+    let bound = suite_d::profile(&config).envelope.artifact_bytes;
+    std::fs::write(&oversized, vec![b'['; usize::try_from(bound).unwrap() + 1]).unwrap();
+    config.witness = oversized;
+    let refused = suite_d::run(&config, HOST)
+        .err()
+        .map(|e| e.to_string())
+        .unwrap_or_default();
+    assert!(
+        refused.contains("artifact bound"),
+        "an oversized witness is refused by size, not by parse: {refused}"
+    );
     config.approval = None;
     assert!(matches!(
         suite_d::run(&config, HOST),
