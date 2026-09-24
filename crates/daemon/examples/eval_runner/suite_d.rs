@@ -1575,7 +1575,7 @@ pub fn run(config: &Config, host: Host) -> Result<Run, RunError> {
     // Serializing the report is inside the bound too, and the manifest's
     // interval ends after it; the two file publishes are all that follows.
     charges.elapsed()?;
-    let manifest = suite_c_manifest(ManifestInputs {
+    let mut manifest = suite_c_manifest(ManifestInputs {
         identity: run_identity,
         eval_run_id: report.eval_run_id.clone(),
         sample: format!("suite-d:{}", config.tasks),
@@ -1598,6 +1598,9 @@ pub fn run(config: &Config, host: Host) -> Result<Run, RunError> {
         manifest.envelope_peaks = envelope.peaks.clone();
         serde_json::to_vec_pretty(&manifest.to_value()).unwrap()
     })?;
+    // The loop ends when the peak stops moving, so these are the peaks the
+    // published bytes carry.
+    manifest.envelope_peaks = charges.envelope.peaks.clone();
     charges.elapsed()?;
     // The manifest lands first; a report without one is never visible, and a
     // manifest whose report failed is taken back.
