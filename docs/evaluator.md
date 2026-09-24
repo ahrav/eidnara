@@ -3545,14 +3545,19 @@ base, so intervening history is never the fix (a changed path that is not
 UTF-8 cannot cross the child's text output, and such a row is
 `source_unavailable`): every regular file the fix added or changed under
 `tests/` (`git diff --diff-filter=A` and `MT`, a changed blob or a changed
-kind alike) is test material and is removed from the fix tree: an added
+kind alike; a diff the child's output cap may have cut short, like one
+that failed, makes the row `source_unavailable`) is test material and is
+removed from the fix tree: an added
 UTF-8 file directly under `tests/` is a hidden test target by name,
 everything else (a module, a fixture a test includes, an existing test the
 fix edited, a test-named file that is not UTF-8) is support by path in the
 fix's version, and both are written into every
 graded tree, base and fix alike, so a test never fails or errors on the
 base tree because its own input differs (a symlink at such a path is never
-read through and reaches neither tree); a file the fix added outside
+read through and reaches neither tree; a `tests/` entry the fix deleted is
+deleted from every graded tree too, and a support path at the very name a
+hidden test is written under, `tests/hidden_<name>.rs`, which would
+overwrite the test it is graded as, makes the row `source_unavailable`); a file the fix added outside
 `tests/`, a fixture a test reaches by `../` included, is the repair by this
 boundary, so a test that needs it is insufficiency the way a test that needs
 a new module is, and a corpus row whose tests depend on such a file is one
@@ -3597,8 +3602,9 @@ host stays readable, as under Suite D's containment: what is masked is the
 task material, not the filesystem); a repository's own `Cargo.lock` is kept and held to
 with `--locked`, a tree without one gets one written by the runner (a
 symlink at that path is removed first, so the lock lands in the tree and
-nowhere the link pointed), the test material written into the tree is
-charged before any repository code runs, and a
+nowhere the link pointed, and the lock is charged once written), the test
+material written into the tree is charged before any repository code
+runs, and a
 manifest that does not resolve offline errors every test. Each target
 passes when every harness summary is `ok` with at least one test passed.
 `InsufficiencyProof::validate` needs every hidden test to pass on the fix

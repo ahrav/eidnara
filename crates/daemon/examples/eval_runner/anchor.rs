@@ -259,11 +259,12 @@ fn diff_paths(
         ],
         charges,
     )?;
-    // A diff that failed or timed out is no diff, not an empty one.
+    // A diff that failed or timed out is no diff, not an empty one, and one
+    // the child's output cap may have cut short is no diff either.
     let Some(out) = out else {
         return Ok(None);
     };
-    if out.contains('\u{fffd}') {
+    if out.contains('\u{fffd}') || out.len() >= suite_d::STDOUT_CAP {
         return Ok(None);
     }
     Ok(Some(
@@ -466,8 +467,10 @@ struct Prepared {
     audit: CutoffAudit,
     /// The hidden test targets, by name.
     hidden: Vec<(String, String)>,
-    /// The other files the fix added under `tests/`, by path.
+    /// The other files the fix added or changed under `tests/`, by path.
     support: Vec<(String, Vec<u8>)>,
+    /// The `tests/` entries the fix deleted, absent from every graded tree.
+    removed: Vec<String>,
     fetched: Fetched,
 }
 
@@ -598,14 +601,22 @@ fn prepare(
         charges.elapsed()?;
         // The patch and the hidden tests are what the fix commit itself
         // changed against its parent; intervening history is not the fix.
-        let (Some(added), Some(modified)) = (
+        let (Some(added), Some(modified), Some(deleted)) = (
             diff_paths(&repo, "A", &parent_sha, &entry.fix_sha, charges)?,
             // `M` a changed blob, `T` a changed kind (a file that became a
             // symlink or the reverse): both are the fix's version of a path.
             diff_paths(&repo, "MT", &parent_sha, &entry.fix_sha, charges)?,
+            diff_paths(&repo, "D", &parent_sha, &entry.fix_sha, charges)?,
         ) else {
             return unavailable();
         };
+        // A `tests/` entry the fix deleted is deleted from every graded
+        // tree, the base one included, so a test cannot fail on the base
+        // tree merely because the entry is still there.
+        let removed: Vec<String> = deleted
+            .into_iter()
+            .filter(|path| path.starts_with("tests/"))
+            .collect();
         // Every regular file the fix added or changed under `tests/` is test
         // material and goes with the hidden tests into both graded trees: an
         // added test target directly under `tests/` by name, everything else
@@ -649,6 +660,15 @@ fn prepare(
                 }
             }
         }
+        // A support path at the name a hidden test is written under would
+        // overwrite the test it is graded as; such a fix cannot be graded.
+        if support.iter().any(|(path, _)| {
+            hidden
+                .iter()
+                .any(|(name, _)| *path == format!("tests/hidden_{name}.rs"))
+        }) {
+            return unavailable();
+        }
         let snapshot_digest = tree_digest(&snapshot)?;
         let audit = CutoffAudit {
             task: entry.id.clone(),
@@ -671,6 +691,7 @@ fn prepare(
             audit,
             hidden,
             support,
+            removed,
             fetched,
         }))
     })();
@@ -690,11 +711,20 @@ pub fn grade(
     tree: &Path,
     tests: &[(String, String)],
     support: &[(String, Vec<u8>)],
+    removed: &[String],
     layout: &Layout,
     task: &str,
     charges: &mut Charges,
 ) -> Result<HiddenResults, RunError> {
     let _ = std::fs::remove_dir_all(tree.join(".cargo"));
+    for path in removed {
+        let path = tree.join(path);
+        match std::fs::symlink_metadata(&path) {
+            Ok(meta) if meta.is_dir() => std::fs::remove_dir_all(&path)?,
+            Ok(_) => std::fs::remove_file(&path)?,
+            Err(_) => {}
+        }
+    }
     let dir = tree.join("tests");
     if std::fs::symlink_metadata(&dir).is_ok_and(|meta| !meta.is_dir()) {
         std::fs::remove_file(&dir)?;
@@ -741,6 +771,7 @@ pub fn grade(
         cargo_home: &cargo_home,
         tmp: &tmp,
         mask: Some(&layout.tasks),
+        store_root: &layout.root,
     };
     // A repository's own lockfile is kept and held to; a tree without one
     // gets one written by the runner. A symlink at the lockfile's path is
@@ -920,6 +951,7 @@ fn control(run: &ControlRun<'_>, charges: &mut Charges) -> Result<NoRepositoryCo
             &layout.tree,
             &prepared.hidden,
             &prepared.support,
+            &prepared.removed,
             layout,
             &entry.id,
             charges,
@@ -1085,6 +1117,7 @@ pub fn run(config: &Config, host: Host) -> Result<Run, RunError> {
             &layout.tree,
             &ready.hidden,
             &ready.support,
+            &ready.removed,
             &layout,
             &entry.id,
             &mut charges,
@@ -1096,6 +1129,7 @@ pub fn run(config: &Config, host: Host) -> Result<Run, RunError> {
             &layout.tree,
             &ready.hidden,
             &ready.support,
+            &ready.removed,
             &layout,
             &entry.id,
             &mut charges,

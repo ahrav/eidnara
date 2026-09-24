@@ -46,7 +46,7 @@ pub const SEED: u64 = 0x5EED_D000_0000_0006;
 /// Names the hanging agent's sleeper on the process table.
 pub const HANG_MARKER: &str = "eidnara-eval-suite-d-hang";
 const SETUP_TIMEOUT: Duration = Duration::from_secs(60);
-const STDOUT_CAP: usize = 4 * 1024 * 1024;
+pub const STDOUT_CAP: usize = 4 * 1024 * 1024;
 pub const FILE_CAP: u64 = 4 * 1024 * 1024;
 const READER_GRACE: Duration = Duration::from_secs(2);
 const ESCAPEE_LIFETIME: Duration = Duration::from_secs(3);
@@ -855,6 +855,7 @@ pub fn hidden_results(
         cargo_home: &cargo_home,
         tmp: &tmp,
         mask: None,
+        store_root: root,
     };
     run_hidden(&grade, &names, cache, false, contained, deadline, charges)?
         .ok_or_else(|| {
@@ -883,6 +884,9 @@ pub struct GradeCache<'a> {
     pub cargo_home: &'a Path,
     pub tmp: &'a Path,
     pub mask: Option<&'a Path>,
+    /// The root whose bytes the store envelope counts; charged once the
+    /// runner's lockfile is written, before any repository code runs.
+    pub store_root: &'a Path,
 }
 
 /// What a grade produced: one outcome per hidden test, and whether some
@@ -948,6 +952,8 @@ pub fn run_hidden(
             deadline,
             charges,
         )?;
+        // The lockfile the runner wrote is on disk either way.
+        charges.store_bytes(cache.store_root)?;
         if !locked.0.is_some_and(|status| status.success()) {
             return Ok(None);
         }

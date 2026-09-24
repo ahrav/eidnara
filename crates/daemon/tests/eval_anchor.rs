@@ -1206,6 +1206,7 @@ fn isolated() {{
         &workspace,
         &[("probe".to_string(), probe)],
         &[],
+        &[],
         &layout,
         "probe",
         &mut charges,
