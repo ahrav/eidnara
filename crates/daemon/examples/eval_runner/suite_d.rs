@@ -338,8 +338,6 @@ pub fn canary_main(args: &CanaryArgs) -> ! {
         .stderr(Stdio::null())
         .status()
         .is_ok();
-    // `/proc` must be the PID namespace's own: through the host's, `self`
-    // names the host PID and every host process is listed.
     // A network namespace does not reach pathname sockets; the mounts must.
     let unix_socket = args.socket.as_ref().map(|path| {
         if std::os::unix::net::UnixStream::connect(path).is_ok() {
@@ -374,10 +372,14 @@ pub fn canary_main(args: &CanaryArgs) -> ! {
     let ipc_namespace = std::fs::read_link("/proc/self/ns/ipc")
         .map(|link| link.to_string_lossy().into_owned())
         .unwrap_or_default();
-    let proc_namespaced = std::fs::read_to_string("/proc/self/stat")
+    // The exec chain from the namespace init keeps its PID, so a contained
+    // canary is PID 1 by its own count (a PID namespace exists) and by
+    // `/proc/self` (that `/proc` is the namespace's own). On the host neither
+    // holds and the probe is not required.
+    let proc_self_pid = std::fs::read_to_string("/proc/self/stat")
         .ok()
-        .and_then(|stat| stat.split_whitespace().next()?.parse::<u32>().ok())
-        == Some(std::process::id());
+        .and_then(|stat| stat.split_whitespace().next()?.parse::<u32>().ok());
+    let proc_namespaced = std::process::id() == 1 && proc_self_pid == Some(1);
     let verdicts = json!({
         "parent_file_read": parent_file_read,
         "parent_file_write": parent_file_write,
@@ -680,8 +682,11 @@ pub fn run_canaries(
     if verdicts.get("umount_ran") != Some(&Value::Bool(true)) {
         return Err(std::io::Error::other("the mask-removal probe never ran umount").into());
     }
-    if verdicts.get("proc_namespaced") != Some(&Value::Bool(true)) {
-        return Err(std::io::Error::other("the canary saw the host's /proc").into());
+    if contained && verdicts.get("proc_namespaced") != Some(&Value::Bool(true)) {
+        return Err(std::io::Error::other(
+            "the canary is not PID 1 of a namespace with its own /proc",
+        )
+        .into());
     }
     let unix_socket = verdicts
         .get("unix_socket")
