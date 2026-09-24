@@ -68,6 +68,13 @@ fn the_fixture_the_fix_added_is_beside_the_test() {
 }
 "#;
 
+const IDENT_TEST: &str = r#"
+#[test]
+fn the_fixture_holds_the_committed_bytes() {
+    assert_eq!(include_str!("fixture.txt"), "$Id$");
+}
+"#;
+
 /// How one fixture repository departs from a plain real-history task.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Variant {
@@ -94,6 +101,9 @@ enum Variant {
     /// The base commit carries `tests/fixture.txt` with other contents; the
     /// fix edits it, and the only hidden test reads it and nothing else.
     ModifiedTestSupport,
+    /// `.gitattributes` marks `*.txt` `ident`; the fix adds `tests/fixture.txt`
+    /// holding a literal `$Id$`, and the only hidden test reads it.
+    IdentAttribute,
 }
 
 fn git(dir: &Path, args: &[&str], seconds: i64) -> String {
@@ -143,6 +153,9 @@ fn history(dir: &Path, index: u32, variant: Variant) -> (String, String) {
         std::fs::create_dir_all(dir.join("tests")).unwrap();
         std::fs::write(dir.join("tests/fixture.txt"), "before the fix").unwrap();
     }
+    if variant == Variant::IdentAttribute {
+        std::fs::write(dir.join(".gitattributes"), "*.txt ident\n").unwrap();
+    }
     if variant == Variant::DeletesBuildScript {
         std::fs::write(
             dir.join("build.rs"),
@@ -187,6 +200,7 @@ fn history(dir: &Path, index: u32, variant: Variant) -> (String, String) {
             Variant::TestSupportFile => format!("{}{ASSETS_TEST}{SUPPORT_TEST}", test.content),
             // The test judges nothing but its fixture.
             Variant::ModifiedTestSupport => SUPPORT_TEST.to_string(),
+            Variant::IdentAttribute => IDENT_TEST.to_string(),
             _ => format!("{}{ASSETS_TEST}", test.content),
         };
         std::fs::write(path, content).unwrap();
@@ -199,6 +213,9 @@ fn history(dir: &Path, index: u32, variant: Variant) -> (String, String) {
     }
     if variant == Variant::TestSupportFile {
         std::fs::write(dir.join(".gitattributes"), "tests/ export-ignore\n").unwrap();
+    }
+    if variant == Variant::IdentAttribute {
+        std::fs::write(dir.join("tests/fixture.txt"), "$Id$").unwrap();
     }
     if variant == Variant::NestedTestFile {
         let helper = dir.join("tests/nested/helper.rs");
@@ -909,6 +926,7 @@ fn the_fix_is_its_own_diff_and_its_whole_tree() {
             Variant::SymlinkedHiddenTest,
             Variant::TestSupportFile,
             Variant::ModifiedTestSupport,
+            Variant::IdentAttribute,
         ],
     );
     let mut config = config(dir.path(), corpus, ControlScript::default(), u64::MAX);
@@ -972,6 +990,14 @@ fn the_fix_is_its_own_diff_and_its_whole_tree() {
         proof.hidden
     );
     assert_eq!(edited.terminal, AnchorTerminal::Indeterminate);
+    let ident = by_id("cargo-5");
+    let proof = ident.insufficiency.as_ref().unwrap();
+    assert_eq!(
+        proof.validate(),
+        Err(InsufficiencyRefused::TreeAlreadyPasses),
+        "an `ident` attribute does not rewrite the committed bytes on either tree: {:?}",
+        proof.hidden
+    );
 }
 
 #[test]

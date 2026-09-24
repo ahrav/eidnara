@@ -3526,8 +3526,10 @@ outer process carries redirects or reshapes it), `git show -s
 request's creation, when fetched) for `repair_public_ms`, the base
 materialized into the snapshot and the whole fix commit into the fix tree
 through the clone's index (`git read-tree`, then `git checkout-index -a -f
---prefix`, so an `export-ignore` attribute, which `git archive` would
-honour, leaves nothing out; bytes, symlinks, and executable modes kept),
+--prefix` with the empty tree as `--attr-source`, so no attribute leaves
+anything out as `export-ignore` would under `git archive` or rewrites a
+blob as `ident`, `eol`, or a filter would; the tree is the committed
+bytes, symlinks, and executable modes),
 the snapshot, fix, and fix-parent tree digests
 (`eval-anchor-snapshot/v3`: each file's bytes and executable bit and each
 symlink's target, keyed by path bytes losslessly, UTF-8 as `u:<path>` and
@@ -3539,10 +3541,12 @@ and the hidden tests are what the fix commit changed against its parent,
 base, so intervening history is never the fix (a changed path that is not
 UTF-8 cannot cross the child's text output, and such a row is
 `source_unavailable`): every regular file the fix added or changed under
-`tests/` is test material and is removed from the fix tree: an added file
-directly under `tests/` is a hidden test target by name, everything else (a
-module, a fixture a test includes, an existing test the fix edited) is
-support by path in the fix's version, and both are written into every
+`tests/` (`git diff --diff-filter=A` and `MT`, a changed blob or a changed
+kind alike) is test material and is removed from the fix tree: an added
+UTF-8 file directly under `tests/` is a hidden test target by name,
+everything else (a module, a fixture a test includes, an existing test the
+fix edited, a test-named file that is not UTF-8) is support by path in the
+fix's version, and both are written into every
 graded tree, base and fix alike, so a test never fails or errors on the
 base tree because its own input differs (a symlink at such a path is never
 read through and reaches neither tree); a file the fix added outside
@@ -3585,7 +3589,9 @@ other task and no fix; the fix tree copy is removed before the control's
 patch is graded in the same place. Cargo's home sits under the private
 directory, the working directory at the tree's parent so no
 `.cargo/config.toml` in the tree is read, a throwaway `HOME`, the
-namespace's own loopback up, and the checkout's toolchain; a repository's own `Cargo.lock` is kept and held to
+namespace's own loopback up, and the checkout's toolchain (the rest of the
+host stays readable, as under Suite D's containment: what is masked is the
+task material, not the filesystem); a repository's own `Cargo.lock` is kept and held to
 with `--locked`, a tree without one gets one written by the runner (a
 symlink at that path is removed first, so the lock lands in the tree and
 nowhere the link pointed), the test material written into the tree is
@@ -3664,9 +3670,10 @@ proven insufficient because the reference is the fix commit's whole tree,
 a test file an intervening commit added kept out of the fix's hidden tests,
 a symlink the fix added under `tests/` not read as one, a fixture the
 fix added under `tests/` beside every hidden test on both trees, with
-`tests/` marked `export-ignore`, and a fixture the fix edited read in the
+`tests/` marked `export-ignore`, a fixture the fix edited read in the
 fix's version on both trees so a test of nothing but the fixture proves
-no defect; five rows that fail their fetch fast not
+no defect, and a fixture under an `ident` attribute read as its committed
+bytes on both; five rows that fail their fetch fast not
 counted as the time study's sample; preparation's git children in the
 process envelope; the host seams
 given the campaign time left and a named pull request without its creation

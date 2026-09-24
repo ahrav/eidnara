@@ -270,11 +270,17 @@ fn diff_paths(
     ))
 }
 
+/// The empty tree: read as the attribute source, it turns every
+/// `.gitattributes` rule off (`export-ignore`, `ident`, `eol`, filters), so a
+/// checkout is the committed bytes.
+const EMPTY_TREE: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
+
 /// Writes `rev`'s whole tree into `into` through the clone's index
-/// (`read-tree`, then `checkout-index --prefix`), so `export-ignore`
-/// attributes, which `git archive` would honour, leave nothing out: the tree
-/// is the commit's, bytes, symlinks, and modes kept. The clone's index is
-/// overwritten; the clone is discarded once preparation ends.
+/// (`read-tree`, then `checkout-index --prefix` with the empty tree as the
+/// attribute source), so no attribute leaves anything out or rewrites a
+/// blob: the tree is the commit's, bytes, symlinks, and modes kept. The
+/// clone's index is overwritten; the clone is discarded once preparation
+/// ends.
 fn materialize(
     repo: &Path,
     rev: &str,
@@ -286,7 +292,11 @@ fn materialize(
     }
     let mut prefix = into.as_os_str().to_owned();
     prefix.push("/");
-    let mut command = git_command(repo, &["checkout-index", "-a", "-f", "--prefix"]);
+    let attr_source = format!("--attr-source={EMPTY_TREE}");
+    let mut command = git_command(
+        repo,
+        &[&attr_source, "checkout-index", "-a", "-f", "--prefix"],
+    );
     command.arg(prefix);
     let (status, _) = charged_run(command, GIT_TIMEOUT, charges)?;
     Ok(status.is_some_and(|status| status.success()))
@@ -578,7 +588,9 @@ fn prepare(
         // changed against its parent; intervening history is not the fix.
         let (Some(added), Some(modified)) = (
             diff_paths(&repo, "A", &parent_sha, &entry.fix_sha, charges)?,
-            diff_paths(&repo, "M", &parent_sha, &entry.fix_sha, charges)?,
+            // `M` a changed blob, `T` a changed kind (a file that became a
+            // symlink or the reverse): both are the fix's version of a path.
+            diff_paths(&repo, "MT", &parent_sha, &entry.fix_sha, charges)?,
         ) else {
             return unavailable();
         };
@@ -611,10 +623,13 @@ fn prepare(
             }
             match hidden_test_name(path).filter(|_| was_added) {
                 Some(name) => {
-                    if let Ok(content) = std::fs::read_to_string(&file) {
-                        std::fs::remove_file(&file)?;
-                        hidden.push((name.to_string(), content));
+                    // A test target that is not UTF-8 is no test target; it
+                    // is still test material, carried by path like a fixture.
+                    match std::fs::read_to_string(&file) {
+                        Ok(content) => hidden.push((name.to_string(), content)),
+                        Err(_) => support.push((path.clone(), std::fs::read(&file)?)),
                     }
+                    std::fs::remove_file(&file)?;
                 }
                 None => {
                     support.push((path.clone(), std::fs::read(&file)?));
