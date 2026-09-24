@@ -618,6 +618,10 @@ fn arm_names_match_as_whole_words_after_folding_case_width_and_separators() {
         ),
         ("this is arm_a speaking", "arm a"),
         ("ARM B.", "arm b"),
+        ("as the fr\u{200b}esh arm I answer", "fresh arm"),
+        ("as the fre\u{2060}sh a\u{feff}rm I answer", "fresh arm"),
+        ("as the fresh a\u{ad}rm I answer", "fresh arm"),
+        ("this is a\u{301}rm\u{fe0f} a speaking", "arm a"),
     ] {
         assert_eq!(
             refused(leaked),

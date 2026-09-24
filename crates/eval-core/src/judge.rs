@@ -302,13 +302,36 @@ pub const ARM_TOKENS: [&str; 6] = [
     "control arm",
 ];
 
+/// Characters that render as nothing, so `fr\u{200b}esh` shows as `fresh`:
+/// the soft hyphen, zero-width and bidirectional format characters, word and
+/// byte-order joiners, variation selectors, and combining marks.
+// ponytail: fixed ranges, not full NFKC; add the unicode-normalization crate
+// if a leak shows up outside them.
+fn is_invisible(c: char) -> bool {
+    matches!(
+        c,
+        '\u{ad}'
+            | '\u{300}'..='\u{36f}'
+            | '\u{200b}'..='\u{200f}'
+            | '\u{202a}'..='\u{202e}'
+            | '\u{2060}'..='\u{2064}'
+            | '\u{2066}'..='\u{206f}'
+            | '\u{fe00}'..='\u{fe0f}'
+            | '\u{feff}'
+    )
+}
+
 /// Lowercase words joined by single spaces, padded with one space at each
-/// end. Full-width ASCII folds to ASCII and every non-alphanumeric character
-/// separates words, so `fresh-arm` and `fresh\narm` both read `fresh arm`.
+/// end. Full-width ASCII folds to ASCII, invisible characters vanish, and
+/// every other non-alphanumeric character separates words, so `fresh-arm`,
+/// `fresh\narm`, and `fr\u{200b}esh arm` all read `fresh arm`.
 fn fold_words(text: &str) -> String {
     let mut folded = String::with_capacity(text.len() + 2);
     folded.push(' ');
     for c in text.chars() {
+        if is_invisible(c) {
+            continue;
+        }
         let c = match c {
             '\u{ff01}'..='\u{ff5e}' => char::from_u32(u32::from(c) - 0xfee0).unwrap_or(c),
             _ => c,

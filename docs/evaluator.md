@@ -3691,15 +3691,16 @@ under the floor cannot claim calibrated acceptance.
 
 `blind` presents one `Pair` in one `Order`, refusing a planted canary in
 either response and any arm name matched as whole words after folding case,
-full width, and separators (`ARM_TOKENS`); the judge's view serializes only
-`first` and `second`. `judge_pairs` needs both orders of every pair under one
-judge, unswaps the positional verdicts, marks orders that disagree
-`Inconsistent`, records each arm's length, and refuses an omitted order, a
-call from another judge, a blank, unknown, or duplicated pair, a second call
-for one pair and order (no rerolls), and a judge whose digests are malformed.
-`PermutationCheck::validate` refuses arm identification above
-`ARM_IDENTIFICATION_CEILING_PERCENT` in either direction: naming the arm wrong
-consistently identifies it too.
+full width, and separators and dropping invisible characters such as
+zero-width spaces, soft hyphens, and combining marks (`ARM_TOKENS`); the
+judge's view serializes only `first` and `second`. `judge_pairs` needs both
+orders of every pair under one judge, unswaps the positional verdicts, marks
+orders that disagree `Inconsistent`, records each arm's length, and refuses an
+omitted order, a call from another judge, a blank, unknown, or duplicated
+pair, a second call for one pair and order (no rerolls), and a judge whose
+digests are malformed. `PermutationCheck::validate` refuses arm identification
+above `ARM_IDENTIFICATION_CEILING_PERCENT` in either direction: naming the arm
+wrong consistently identifies it too.
 
 `ResidualReport` (`eval-residual-report/v1`) records every identity, never a
 name alone: the settings digest, the judge, the calibration digest, the live
