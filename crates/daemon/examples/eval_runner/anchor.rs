@@ -234,9 +234,10 @@ fn git_command(dir: &Path, args: &[&str]) -> Command {
 
 /// The paths `git diff` reports between two commits, added or changed
 /// according to `filter`; `-z` preserves unusual paths without Git's
-/// line-oriented quoting. The child's output crosses as text, so a path
-/// that is not UTF-8 cannot be carried and the fix cannot be prepared:
-/// `None`, which the caller reports as `source_unavailable`.
+/// line-oriented quoting. A diff that failed or timed out, or one holding a
+/// path that is not UTF-8 (the child's output crosses as text, so such a
+/// path cannot be carried), is `None`, which the caller reports as
+/// `source_unavailable`; it is never an empty diff.
 fn diff_paths(
     repo: &Path,
     filter: &str,
@@ -257,8 +258,11 @@ fn diff_paths(
             to,
         ],
         charges,
-    )?
-    .unwrap_or_default();
+    )?;
+    // A diff that failed or timed out is no diff, not an empty one.
+    let Some(out) = out else {
+        return Ok(None);
+    };
     if out.contains('\u{fffd}') {
         return Ok(None);
     }
