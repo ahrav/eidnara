@@ -370,10 +370,15 @@ fn a_changed_judge_provider_or_tokenizer_refuses_cross_run_residual_comparison()
     );
     let mut leaked = base.clone();
     leaked.permutation.correct = 40;
-    assert!(matches!(
+    assert_eq!(
         leaked.validate(&residual_settings(&calibration), &provider("live-1")),
-        Err(ResidualRefused::Permutation(_))
-    ));
+        Err(ResidualRefused::Permutation(
+            PermutationRefused::ArmsIdentifiable {
+                trials: 40,
+                correct: 40
+            }
+        ))
+    );
     assert!(
         matches!(
             base.comparable(&leaked),
@@ -392,10 +397,15 @@ fn a_changed_judge_provider_or_tokenizer_refuses_cross_run_residual_comparison()
     );
     let mut under = base;
     under.sampling.human_sample = 1;
-    assert!(matches!(
+    assert_eq!(
         under.validate(&residual_settings(&calibration), &provider("live-1")),
-        Err(ResidualRefused::Calibration(_))
-    ));
+        Err(ResidualRefused::Calibration(
+            CalibrationRefused::HumanSampleBelowFloor {
+                required: 20,
+                planned: 1
+            }
+        ))
+    );
 }
 
 /// Coercing `analyze` to this pointer type stops compiling if the gates gain
@@ -560,10 +570,15 @@ fn live_settings_refuse_until_two_profiles_a_calibration_set_and_a_plan_exist() 
         pairs: 40,
         human_sample: 3,
     });
-    assert!(matches!(
+    assert_eq!(
         thin.validate(),
-        Err(LiveSettingsRefused::Calibration(_))
-    ));
+        Err(LiveSettingsRefused::Calibration(
+            CalibrationRefused::HumanSampleBelowFloor {
+                required: 20,
+                planned: 3
+            }
+        ))
+    );
 }
 
 #[test]
@@ -1080,11 +1095,15 @@ fn the_live_slice_is_constructed_only_from_validated_settings_and_an_approved_pr
         )),
         "unvalidated settings construct no live evidence"
     );
+    let two_attempts = vec![LiveTask {
+        task: "t".to_string(),
+        attempts: vec![ArmResult::Pass, ArmResult::Fail],
+    }];
     assert_eq!(
-        live_slice(&settings(1, 1, &["t"]), &provider("live-1"), &tasks)
+        live_slice(&settings(1, 2, &["t"]), &provider("live-1"), &two_attempts)
             .unwrap()
             .k,
         1,
-        "k is the settings' repeat count"
+        "k is the settings' pass^k exponent, not the planned attempts"
     );
 }

@@ -1045,5 +1045,7 @@ Open questions:
   were not attempted.
 - `mtr-judge-calls-blinded-order-swapped-versioned` produces the judgments
   `rid-tokenizer-accounting-profile-bound-per-run` binds to their identities;
-  neither feeds `mtr-judge-output-never-feeds-control-or-floor`'s gates, and
-  the live slice inherits `rid-live-runs-labeled-nondeterministic-pass-k`.
+  neither feeds the gates of `mtr-judge-output-never-feeds-control-or-floor`,
+  and the live slice inherits `rid-live-runs-labeled-nondeterministic-pass-k`.
+  Those two ids have executed checks listed in [`README.md`](README.md) and no
+  record in this catalog yet.
