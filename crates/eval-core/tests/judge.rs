@@ -521,6 +521,13 @@ fn live_settings_refuse_until_two_profiles_a_calibration_set_and_a_plan_exist() 
     let mut none = settings.clone();
     none.repeats = 0;
     assert_eq!(none.validate(), Err(LiveSettingsRefused::ZeroRepeats));
+    let mut blank = settings.clone();
+    blank.providers[1].provider = String::new();
+    assert_eq!(
+        blank.validate(),
+        Err(LiveSettingsRefused::EmptyProviderField { field: "provider" }),
+        "two profiles that differ only by a blank are not two approved models"
+    );
     let mut no_tasks = settings.clone();
     no_tasks.tasks.clear();
     assert_eq!(no_tasks.validate(), Err(LiveSettingsRefused::NoTasks));
@@ -986,6 +993,13 @@ fn calibration_refuses_a_foreign_schema_and_a_malformed_judge_digest() {
         }),
         "a human labels A, B, or a tie; only two judge orders are inconsistent"
     );
+    let mut nameless = calibration();
+    nameless.judge.provider.model = "  ".to_string();
+    assert_eq!(
+        nameless.validate(),
+        Err(CalibrationRefused::EmptyProviderField { field: "model" }),
+        "a judge with a blank model names no judge"
+    );
     let mut unbound = judge();
     unbound.prompt_digest = String::new();
     let both = [
@@ -998,6 +1012,14 @@ fn calibration_refuses_a_foreign_schema_and_a_malformed_judge_digest() {
             field: "prompt_digest"
         }),
         "an empty digest is not a judge identity"
+    );
+    let mut unnamed = judge();
+    unnamed.provider.tokenizer_profile = String::new();
+    assert_eq!(
+        judge_pairs(&pairs()[..1], &unnamed, &both, &[]),
+        Err(JudgeRefused::EmptyProviderField {
+            field: "tokenizer_profile"
+        })
     );
 }
 

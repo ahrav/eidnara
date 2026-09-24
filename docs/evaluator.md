@@ -3678,16 +3678,15 @@ shell produces is checked before it is believed.
 
 A judge is a versioned dependency. `JudgeIdentity` is a `ProviderProfile`
 (tokenizer profile included) with the prompt digest and the `Rubric` digest
-(`eval-judge-rubric/v1`; a rubric under another schema has no digest), each
-64 lowercase hex. `CalibrationSet`
-(`eval-judge/v1`) freezes that identity with the human labels over anchor
-pairs before any judging and digests into every report
-(`eval-judge-calibration/v1`); it refuses another schema, a malformed digest,
-an empty label map, and an `Inconsistent` label, which only two disagreeing
-judge orders produce. `SamplingPlan::validate` refuses fewer than 20 pairs
-and a human sample below ten percent rounded up or below 20 pairs, or above
-the pair count; a campaign under the floor cannot claim calibrated
-acceptance.
+(`eval-judge-rubric/v1`; a rubric under another schema has no digest), each 64
+lowercase hex. `CalibrationSet` (`eval-judge/v1`) freezes that identity with
+the human labels over anchor pairs before any judging and digests into every
+report (`eval-judge-calibration/v1`); it refuses another schema, a malformed
+digest, a blank provider, model, or tokenizer profile, an empty label map, and
+an `Inconsistent` label, which only two disagreeing judge orders produce.
+`SamplingPlan::validate` refuses fewer than 20 pairs and a human sample below
+ten percent rounded up or below 20 pairs, or above the pair count; a campaign
+under the floor cannot claim calibrated acceptance.
 
 `blind` presents one `Pair` in one `Order`, refusing a planted canary in
 either response and any arm name matched as whole words after folding case,
@@ -3715,22 +3714,22 @@ changes. The gates take only oracle inputs: `analyze`'s signature is pinned in
 the tests, and the residual report carries no gate field.
 
 `LiveSettings::validate` refuses without exactly two distinct approved
-provider profiles, a pass^k exponent `k`, a planned attempt count `repeats` at
-least `k`, a frozen held-out task set, a calibration set, and a plan above the
-floor. `live_slice` constructs a `LiveSliceReport` (`eval-live-slice/v1`) only
-from validated settings and one of their two profiles, with the settings' `k`;
-it refuses no tasks, a repeated task id, a task set that is not exactly the
-settings', and a task with other than `repeats` attempts. Each task keeps its
-attempts beside pass@1, the repeat counts, the censoring rate, and the pass^k
-interval through `pass_k`; every attempt censored is `indeterminate`, never
-zero. The report carries the settings' digest (`eval-live-settings/v1`).
-`replayable` is `LIVE_REPLAYABLE = false`; `validate` takes the same settings
-and the profile the run was approved for and refuses a relabelled report,
-another schema, an unapproved or other profile, another `k`, another settings
-digest, a repeated task, another task set, a task with other than the planned
-attempts, and a summary the attempts do not give, so a deserialized report is
-held to the pre-registration a constructed one ran under. Tests:
-`crates/eval-core/tests/judge.rs`.
+provider profiles with no blank component, a pass^k exponent `k`, a planned
+attempt count `repeats` at least `k`, a frozen held-out task set, a
+calibration set, and a plan above the floor. `live_slice` constructs a
+`LiveSliceReport` (`eval-live-slice/v1`) only from validated settings and one
+of their two profiles, with the settings' `k`; it refuses no tasks, a repeated
+task id, a task set that is not exactly the settings', and a task with other
+than `repeats` attempts. Each task keeps its attempts beside pass@1, the
+repeat counts, the censoring rate, and the pass^k interval through `pass_k`;
+every attempt censored is `indeterminate`, never zero. The report carries the
+settings' digest (`eval-live-settings/v1`). `replayable` is `LIVE_REPLAYABLE =
+false`; `validate` takes the same settings and the profile the run was
+approved for and refuses a relabelled report, another schema, an unapproved or
+other profile, another `k`, another settings digest, a repeated task, another
+task set, a task with other than the planned attempts, and a summary the
+attempts do not give, so a deserialized report is held to the pre-registration
+a constructed one ran under. Tests: `crates/eval-core/tests/judge.rs`.
 
 ## Coverage markers
 

@@ -38,7 +38,35 @@ pub struct JudgeIdentity {
     pub rubric_digest: String,
 }
 
+/// The first blank component of a provider profile, by field; a profile with
+/// one names no model. The same rule the real-history settings apply.
+fn blank_profile_field(profile: &ProviderProfile) -> Option<&'static str> {
+    [
+        ("provider", &profile.provider),
+        ("model", &profile.model),
+        ("tokenizer_profile", &profile.tokenizer_profile),
+    ]
+    .into_iter()
+    .find(|(_, text)| text.trim().is_empty())
+    .map(|(field, _)| field)
+}
+
 impl JudgeIdentity {
+    /// Refuses a blank provider component or a malformed digest.
+    fn check_form<E>(
+        &self,
+        blank: impl FnOnce(&'static str) -> E,
+        malformed: impl FnOnce(&'static str) -> E,
+    ) -> Result<(), E> {
+        if let Some(field) = blank_profile_field(&self.provider) {
+            return Err(blank(field));
+        }
+        if let Some(field) = self.malformed_digest() {
+            return Err(malformed(field));
+        }
+        Ok(())
+    }
+
     /// The first digest that is not 64 lowercase hex characters, by field.
     fn malformed_digest(&self) -> Option<&'static str> {
         [
@@ -108,9 +136,10 @@ impl CalibrationSet {
                 found: self.schema.clone(),
             });
         }
-        if let Some(field) = self.judge.malformed_digest() {
-            return Err(CalibrationRefused::MalformedDigest { field });
-        }
+        self.judge.check_form(
+            |field| CalibrationRefused::EmptyProviderField { field },
+            |field| CalibrationRefused::MalformedDigest { field },
+        )?;
         if self.human_labels.is_empty() {
             return Err(CalibrationRefused::EmptyCalibrationSet);
         }
@@ -163,6 +192,10 @@ pub enum CalibrationRefused {
     /// A judge digest is not 64 lowercase hex characters, so two prompts or
     /// rubrics could share it.
     MalformedDigest {
+        field: &'static str,
+    },
+    /// The judge's provider profile has a blank component: no judge is named.
+    EmptyProviderField {
         field: &'static str,
     },
     /// The calibration set was frozen with another judge, so it anchors
@@ -390,6 +423,9 @@ pub enum JudgeRefused {
     MalformedDigest {
         field: &'static str,
     },
+    EmptyProviderField {
+        field: &'static str,
+    },
     Blinding(BlindingRefused),
 }
 
@@ -411,9 +447,10 @@ pub fn judge_pairs(
     calls: &[JudgeCall],
     canaries: &[String],
 ) -> Result<Vec<PairJudgment>, JudgeRefused> {
-    if let Some(field) = judge.malformed_digest() {
-        return Err(JudgeRefused::MalformedDigest { field });
-    }
+    judge.check_form(
+        |field| JudgeRefused::EmptyProviderField { field },
+        |field| JudgeRefused::MalformedDigest { field },
+    )?;
     let mut known = BTreeSet::new();
     for pair in pairs {
         if !known.insert(pair.id.as_str()) {
@@ -580,12 +617,22 @@ impl ResidualReport {
                 found: self.schema.clone(),
             });
         }
-        let malformed = self.judge.malformed_digest().or_else(|| {
-            (!is_lower_hex(&self.calibration_digest, 64)).then_some("calibration_digest")
-        });
-        if let Some(field) = malformed {
+        self.judge
+            .check_form(
+                |field| CalibrationRefused::EmptyProviderField { field },
+                |field| CalibrationRefused::MalformedDigest { field },
+            )
+            .map_err(ResidualRefused::Calibration)?;
+        if !is_lower_hex(&self.calibration_digest, 64) {
             return Err(ResidualRefused::Calibration(
-                CalibrationRefused::MalformedDigest { field },
+                CalibrationRefused::MalformedDigest {
+                    field: "calibration_digest",
+                },
+            ));
+        }
+        if let Some(field) = blank_profile_field(&self.live_provider) {
+            return Err(ResidualRefused::Settings(
+                LiveSettingsRefused::EmptyProviderField { field },
             ));
         }
         self.sampling
@@ -918,6 +965,10 @@ pub enum LiveSettingsRefused {
     UnapprovedProvider {
         provider: ProviderProfile,
     },
+    /// An approved profile has a blank component: no model is named.
+    EmptyProviderField {
+        field: &'static str,
+    },
 }
 
 debug_display!(LiveSettingsRefused);
@@ -945,6 +996,9 @@ impl LiveSettings {
             return Err(LiveSettingsRefused::ProviderCount {
                 found: self.providers.len(),
             });
+        }
+        if let Some(field) = self.providers.iter().find_map(blank_profile_field) {
+            return Err(LiveSettingsRefused::EmptyProviderField { field });
         }
         if self.k == 0 {
             return Err(LiveSettingsRefused::ZeroK);
