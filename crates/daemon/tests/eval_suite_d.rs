@@ -166,7 +166,9 @@ fn the_containment_denies_relative_writes_and_mask_removal_that_the_control_allo
     }
     let root = tempfile::tempdir().unwrap();
     let private = root.path().join("private");
-    let workspace = root.path().join("workspace");
+    // A space in the path: mountinfo escapes it, and the mounts must still
+    // find their own writable tree.
+    let workspace = root.path().join("work space");
     std::fs::create_dir_all(&private).unwrap();
     std::fs::create_dir_all(&workspace).unwrap();
     let profile = campaign::profile(Scale::S0, 128, 600_000, Some(approval()));

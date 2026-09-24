@@ -423,10 +423,11 @@ pub fn escapee_main() -> ! {
 /// re-resolves the working directory (`$3`, or `$2` itself) after mounting.
 const MOUNTS: &str = r#"{ mount --make-rprivate / &&
 { [ -z "$1" ] || mount -t tmpfs -o ro,size=1k tmpfs "$1"; } && mount --bind "$2" "$2"; } || exit 97
-awk '{ print $5 }' /proc/self/mountinfo | while read -r m; do
+unescape='{ gsub(/\\040/, " ", $5); gsub(/\\011/, "\t", $5); gsub(/\\012/, "\n", $5); gsub(/\\134/, "\\", $5) }'
+awk "$unescape { print \$5 }" /proc/self/mountinfo | while read -r m; do
   [ "$m" = "$2" ] || mount -o remount,ro,bind "$m" 2>/dev/null || mount -t tmpfs -o ro,size=1k tmpfs "$m" 2>/dev/null
 done
-awk -v rw="$2" '{ top[$5] = $6 } END { for (m in top) if (m != rw && top[m] !~ /(^|,)ro(,|$)/) exit 1 }' /proc/self/mountinfo || exit 97
+awk -v rw="$2" "$unescape { top[\$5] = \$6 } END { for (m in top) if (m != rw && top[m] !~ /(^|,)ro(,|\$)/) exit 1 }" /proc/self/mountinfo || exit 97
 { [ ! -d /run ] || mount -t tmpfs -o ro,size=1k tmpfs /run; } || exit 97
 cd "${3:-$2}" || exit 97
 shift 3
@@ -1313,7 +1314,18 @@ pub fn run(config: &Config, host: Host) -> Result<Run, RunError> {
     let mut charges = Charges::new(profile.envelope.clone());
     // A witness is a published artifact, so it is held to the artifact bound
     // by size before anything of it is read or parsed.
-    let witness_meta = std::fs::metadata(&config.witness)?;
+    // Opened non-blocking (a FIFO would otherwise block the open), then the
+    // descriptor itself is checked to be a regular file within the bound, and
+    // read through that bound so a file that grows meanwhile cannot exceed it.
+    let witness_file = std::fs::File::from(
+        rustix::fs::open(
+            &config.witness,
+            rustix::fs::OFlags::RDONLY | rustix::fs::OFlags::NONBLOCK | rustix::fs::OFlags::CLOEXEC,
+            rustix::fs::Mode::empty(),
+        )
+        .map_err(std::io::Error::from)?,
+    );
+    let witness_meta = witness_file.metadata()?;
     if !witness_meta.is_file() {
         return Err(std::io::Error::other("the witness is not a regular file").into());
     }
@@ -1325,11 +1337,9 @@ pub fn run(config: &Config, host: Host) -> Result<Run, RunError> {
         ))
         .into());
     }
-    // Read through the same bound, so a file that grew after the size check
-    // still cannot exceed it.
     let mut witness_raw = Vec::new();
     std::io::Read::read_to_end(
-        &mut std::io::Read::take(std::fs::File::open(&config.witness)?, artifact_bound),
+        &mut std::io::Read::take(witness_file, artifact_bound),
         &mut witness_raw,
     )?;
     let witness_value: Value =
@@ -1599,16 +1609,31 @@ pub fn run(config: &Config, host: Host) -> Result<Run, RunError> {
         serde_json::to_vec_pretty(&manifest.to_value()).unwrap()
     })?;
     // The loop ends when the peak stops moving, so these are the peaks the
-    // published bytes carry.
+    // published bytes carry. The manifest's own charge may have raised the
+    // artifact peak past the report's, so the report is serialized once more
+    // with it; the peaks are outside the result digest, so the manifest's
+    // `result_digest` still names these bytes.
     manifest.envelope_peaks = charges.envelope.peaks.clone();
+    let report_bytes = charges.publish_bytes(|envelope| {
+        report.envelope = envelope.clone();
+        serde_json::to_vec_pretty(&serde_json::to_value(&report).unwrap()).unwrap()
+    })?;
     charges.elapsed()?;
     // The manifest lands first; a report without one is never visible, and a
     // manifest whose report failed is taken back.
     let manifest_path = config.publish.join(MANIFEST_FILE);
     publish_file(&manifest_path, &manifest_bytes).map_err(publish_refused)?;
-    if let Err(refused) = publish_file(&config.publish.join(REPORT_FILE), &report_bytes) {
+    let report_path = config.publish.join(REPORT_FILE);
+    if let Err(refused) = publish_file(&report_path, &report_bytes) {
         let _ = std::fs::remove_file(&manifest_path);
         return Err(publish_refused(refused));
+    }
+    // The durable writes are the last work inside the bound; a run that
+    // crossed it while publishing is refused and leaves nothing behind.
+    if let Err(exceeded) = charges.elapsed() {
+        let _ = std::fs::remove_file(&report_path);
+        let _ = std::fs::remove_file(&manifest_path);
+        return Err(exceeded.into());
     }
     Ok(Run {
         report,
