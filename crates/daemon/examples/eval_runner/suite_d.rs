@@ -403,7 +403,9 @@ pub fn escapee_main() -> ! {
 /// reachable. The process limit (`prlimit`, since `ulimit -u` is not POSIX
 /// `sh`) bounds every descendant, fork bombs included, since `RLIMIT_NPROC`
 /// counts per user namespace. The namespace's own loopback is brought up,
-/// so graded code can listen and connect to itself and nothing else. A
+/// so graded code can listen and connect to itself and nothing else, and a
+/// host that cannot refuses the containment (`namespaces_available` probes
+/// the same command first). A
 /// pre-mount working directory still resolves to the writable mount, so
 /// `cd` re-resolves the working directory (`$3`, or `$2` itself) after
 /// mounting.
@@ -414,7 +416,7 @@ awk '{ print $5 }' /proc/self/mountinfo | while read -r m; do
 done
 awk -v rw="$2" '{ top[$5] = $6 } END { for (m in top) if (m != rw && top[m] !~ /(^|,)ro(,|$)/) exit 1 }' /proc/self/mountinfo || exit 97
 { [ ! -d /run ] || mount -t tmpfs -o ro,size=1k tmpfs /run; } || exit 97
-ip link set lo up 2>/dev/null
+ip link set lo up 2>/dev/null || exit 97
 cd "${3:-$2}" || exit 97
 shift 3
 exec prlimit --nproc=128:128 setpriv --no-new-privs --inh-caps=-all --ambient-caps=-all --bounding-set=-all -- "$@""#;
@@ -465,7 +467,9 @@ pub fn contain(mask: Option<&Path>, writable: &Path, inner: &Command) -> Command
     command
 }
 
-/// Whether this host can create the four namespaces at all.
+/// Whether this host can create the namespaces at all, and bring the new
+/// network namespace's loopback up inside them, as the containment does
+/// for graded code; a host that cannot is a host without containment.
 pub fn namespaces_available() -> bool {
     Command::new("unshare")
         .args([
@@ -477,7 +481,11 @@ pub fn namespaces_available() -> bool {
             "--ipc",
             "--fork",
             "--mount-proc",
-            "true",
+            "ip",
+            "link",
+            "set",
+            "lo",
+            "up",
         ])
         .stdin(Stdio::null())
         .stdout(Stdio::null())

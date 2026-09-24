@@ -552,15 +552,23 @@ fn prepare(
         )?
         .is_some();
         // The repair became public no later than the earliest fix-side
-        // commit and, when known, the pull request's creation.
+        // commit and, when known, the pull request's creation. The commit
+        // times cross as text under the child's output cap, so the count is
+        // read separately and a scan that did not see every commit is no
+        // scan.
         let range = format!("{}..{}", entry.base_sha, entry.fix_sha);
-        let fix_side_ms = git(&repo, &["log", "--format=%ct", &range], charges)?
+        let fix_side: Vec<i64> = git(&repo, &["log", "--format=%ct", &range], charges)?
             .unwrap_or_default()
             .lines()
             .filter_map(|line| line.trim().parse::<i64>().ok())
             .map(|seconds| seconds * 1_000)
-            .min()
-            .unwrap_or(fix_ms);
+            .collect();
+        let counted = git(&repo, &["rev-list", "--count", &range], charges)?
+            .and_then(|out| out.trim().parse::<usize>().ok());
+        if counted != Some(fix_side.len()) {
+            return unavailable();
+        }
+        let fix_side_ms = fix_side.into_iter().min().unwrap_or(fix_ms);
         let repair_public_ms = fetched
             .pull_request_created_ms
             .map_or(fix_side_ms, |pr_ms| pr_ms.min(fix_side_ms));
@@ -804,6 +812,8 @@ fn control(run: &ControlRun<'_>, charges: &mut Charges) -> Result<NoRepositoryCo
     fresh_dir(&workspace)?;
     std::fs::create_dir_all(workspace.join("patch"))?;
     std::fs::write(workspace.join("STATEMENT.md"), &prepared.fetched.issue_text)?;
+    // The statement is the host's text, charged as soon as it is on disk.
+    charges.store_bytes(&layout.root)?;
     let tool = |name: &str, argument: &str, command: &str| {
         format!(
             "echo {}\n{command}",

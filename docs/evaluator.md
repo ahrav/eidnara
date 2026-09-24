@@ -3178,7 +3178,9 @@ anything writable. Any mount that fails exits 97 and the run is refused as
 namespace init and with it everything the agent started. A bounded child's
 stdout is read under a cap and its stderr is discarded, so nothing it prints
 reaches the runner's own log. `Host::namespaces`
-says whether the host can create the four namespaces; when it cannot, the
+says whether the host can create the namespaces and bring the new network
+namespace's loopback up inside them (the containment does the same for
+graded code, and refuses to mount when it cannot); when it cannot, the
 run records `Containment::Skipped { no_containment }`, every task terminal is
 the Suite D report's own `TaskTerminal::Skipped(SuiteDSkip::NoContainment)`
 (the shared v1 `SkipReason` stays closed; `TaskTerminal` otherwise carries
@@ -3604,8 +3606,8 @@ base tree; a task without a valid proof is `Indeterminate` and runs no
 control. Then, per provider profile, the no-repository control: an
 otherwise empty workspace holding `STATEMENT.md`, the scripted control agent
 inside the Suite D containment with the private directory masked
-(`memorize` reproduces the fix tree into `patch/`, the store charged once
-the copy exists, `reach_repository` reads
+(`memorize` reproduces the fix tree into `patch/`, the statement and the
+copy each charged to the store once on disk, `reach_repository` reads
 the snapshot by a path relative to its workspace, `cite_future` names the
 pull request), each tool call announced on an `eval-anchor-tool` line. Every
 snapshot, fix tree, graded tree, and the target directory live under the
@@ -3673,7 +3675,8 @@ fix added under `tests/` beside every hidden test on both trees, with
 `tests/` marked `export-ignore`, a fixture the fix edited read in the
 fix's version on both trees so a test of nothing but the fixture proves
 no defect, and a fixture under an `ident` attribute read as its committed
-bytes on both; five rows that fail their fetch fast not
+bytes on both; a repair-history scan whose commit count the child's output
+did not carry whole refused as `source_unavailable`; five rows that fail their fetch fast not
 counted as the time study's sample; preparation's git children in the
 process envelope; the host seams
 given the campaign time left and a named pull request without its creation
