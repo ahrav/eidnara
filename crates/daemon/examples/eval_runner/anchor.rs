@@ -553,10 +553,12 @@ fn prepare(
         if entry.pull_request.is_some() && fetched.pull_request_created_ms.is_none() {
             return unavailable();
         }
+        // A commit time git accepts but milliseconds cannot hold is no time.
+        let to_ms = |seconds: i64| seconds.checked_mul(1_000);
         let mut committed = |sha: &str| -> Result<Option<i64>, RunError> {
             Ok(git(&repo, &["show", "-s", "--format=%ct", sha], charges)?
                 .and_then(|out| out.trim().parse::<i64>().ok())
-                .map(|seconds| seconds * 1_000))
+                .and_then(to_ms))
         };
         let (Some(base_ms), Some(fix_ms)) =
             (committed(&entry.base_sha)?, committed(&entry.fix_sha)?)
@@ -588,8 +590,7 @@ fn prepare(
         let fix_side: Vec<i64> = git(&repo, &["log", "--format=%ct", &range], charges)?
             .unwrap_or_default()
             .lines()
-            .filter_map(|line| line.trim().parse::<i64>().ok())
-            .map(|seconds| seconds * 1_000)
+            .filter_map(|line| line.trim().parse::<i64>().ok().and_then(to_ms))
             .collect();
         let counted = git(&repo, &["rev-list", "--count", &range], charges)?
             .and_then(|out| out.trim().parse::<usize>().ok());
@@ -778,8 +779,12 @@ pub fn grade(
             }
         }
         std::fs::create_dir_all(&dir)?;
-        if std::fs::symlink_metadata(&path).is_ok_and(|m| m.is_symlink()) {
-            std::fs::remove_file(&path)?;
+        // Whatever sits at the path (a symlink, a directory the fix replaced
+        // with a file) gives way to the test material.
+        match std::fs::symlink_metadata(&path) {
+            Ok(meta) if meta.is_dir() => std::fs::remove_dir_all(&path)?,
+            Ok(meta) if !meta.is_file() => std::fs::remove_file(&path)?,
+            _ => {}
         }
         std::fs::write(&path, bytes)?;
         if executable {
@@ -1311,11 +1316,20 @@ pub fn run(config: &Config, host: Host) -> Result<Run, RunError> {
     let manifest_bytes = serde_json::to_vec_pretty(&manifest.to_value()).unwrap();
     // The manifest first, then the report; a manifest whose report failed is
     // taken back, so a reader finds both files or neither.
+    charges.elapsed()?;
     let manifest_path = config.publish.join(MANIFEST_FILE);
     publish_file(&manifest_path, &manifest_bytes).map_err(publish_refused)?;
-    if let Err(refused) = publish_file(&config.publish.join(REPORT_FILE), &report_bytes) {
+    let report_path = config.publish.join(REPORT_FILE);
+    if let Err(refused) = publish_file(&report_path, &report_bytes) {
         let _ = std::fs::remove_file(&manifest_path);
         return Err(publish_refused(refused));
+    }
+    // The durable writes are the last work inside the bound; a run that
+    // crossed it while publishing is refused and leaves nothing behind.
+    if let Err(exceeded) = charges.elapsed() {
+        let _ = std::fs::remove_file(&report_path);
+        let _ = std::fs::remove_file(&manifest_path);
+        return Err(exceeded.into());
     }
     Ok(Run {
         report,

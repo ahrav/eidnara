@@ -3525,7 +3525,8 @@ campaign time left as it stands then, at most two minutes; each runs
 under a cleared environment, `PATH` alone crossing, with no user or system
 configuration, so no `GIT_DIR`, `GIT_INDEX_FILE`, or `GIT_CONFIG_*` an
 outer process carries redirects or reshapes it), `git show -s
---format=%ct` for the base and fix commits, the fix's first parent, `git merge-base --is-ancestor` for
+--format=%ct` for the base and fix commits (a time milliseconds cannot
+hold makes the row `source_unavailable`), the fix's first parent, `git merge-base --is-ancestor` for
 `fix_descends_from_base`, the earliest fix-side commit time (and the pull
 request's creation, when fetched) for `repair_public_ms`, the base
 materialized into the snapshot and the whole fix commit into the fix tree
@@ -3652,8 +3653,10 @@ each carry their `ProviderProfile`. The run identity carries the corpus
 digest, a digest of the settings, the transfer criterion, and the control
 script.
 
-The manifest is published before the report, and a report that fails to
-publish takes its manifest back, so a directory holds both or neither. The
+The manifest is published before the report, a report that fails to
+publish takes its manifest back, and a run that crossed the elapsed bound
+while publishing takes both back, so a directory holds both or neither and
+nothing published outlived the bound. The
 report `eval-anchor-report/v1` carries the corpus digest, the role, the
 time study, one `TaskOutcome` per entry (terminal, measured preparation, the
 audit and any refusal, the proof with its reference, the controls and
