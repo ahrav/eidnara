@@ -1050,13 +1050,18 @@ pub fn run(config: &Config, host: Host) -> Result<Run, RunError> {
     profile.envelope.store_bytes = config.store_bound_bytes;
     profile.approved()?;
     let profile_digest = profile.digest()?;
+    // The elapsed bound runs from here, as in Suite D: reading the witness,
+    // freezing the family, and probing the containment are inside it.
+    let mut charges = Charges::new(profile.envelope.clone());
     config.settings.validate()?;
     config.corpus.validate()?;
     // The shell runs the pilot and nothing else; a corpus of another
     // composition is refused before a single clone.
     config.corpus.is_pilot()?;
-    let witness_value: Value =
-        serde_json::from_slice(&std::fs::read(&config.witness)?).map_err(std::io::Error::other)?;
+    // Held to the artifact bound by size and read through it, so a witness
+    // that is not a regular file or is larger than the bound is refused
+    // before any of it is read or parsed.
+    let witness_value = suite_d::read_witness(&config.witness, profile.envelope.artifact_bytes)?;
     parse_witness(&witness_value)?;
     let mut family = super::campaign::family(&profile);
     family.transfer_criterion = config.transfer_criterion.clone();
@@ -1068,11 +1073,15 @@ pub fn run(config: &Config, host: Host) -> Result<Run, RunError> {
         .preparation_bound_ms
         .ok_or(SettingsRefused::NoPreparationBound)?;
     // Every proof and control runs inside the containment; a host without
-    // it grades nothing, and says so instead of erroring every test.
-    if !(host.namespaces)() {
+    // it grades nothing, and says so instead of erroring every test. The
+    // probe is a child like any other, charged and inside the bound.
+    charges.process_started()?;
+    let contained = (host.namespaces)();
+    charges.process_ended();
+    charges.elapsed()?;
+    if !contained {
         return Err(RunError::NoContainment);
     }
-    let mut charges = Charges::new(profile.envelope.clone());
     prepare_publish(&config.publish, &[REPORT_FILE, MANIFEST_FILE]).map_err(publish_refused)?;
     let root = charges.occupy()?;
     let private = root.path().join("private");
@@ -1299,11 +1308,11 @@ pub fn run(config: &Config, host: Host) -> Result<Run, RunError> {
         serde_json::to_vec_pretty(&serde_json::to_value(&report).unwrap()).unwrap()
     })?;
     let published: Value = serde_json::from_slice(&report_bytes).unwrap();
-    let manifest = suite_c_manifest(ManifestInputs {
+    let mut manifest = suite_c_manifest(ManifestInputs {
         identity: run_identity,
         eval_run_id: report.eval_run_id.clone(),
         sample: format!("anchor:{}", config.corpus.entries.len()),
-        result_digest: protocol_digest("eval-anchor-result/v1", &published).unwrap(),
+        result_digest: result_digest(&published),
         witness_digest: protocol_digest(eval_core::WITNESS_DIGEST_PROTOCOL, &witness_value)
             .unwrap(),
         cut_receipts: vec![eval_core::CutReceipt {
@@ -1318,7 +1327,21 @@ pub fn run(config: &Config, host: Host) -> Result<Run, RunError> {
         // Every proof and control ran inside the Suite D containment.
         execution_image: suite_d::EXECUTION_IMAGE_CONTAINED.to_string(),
     });
-    let manifest_bytes = serde_json::to_vec_pretty(&manifest.to_value()).unwrap();
+    // The manifest is an artifact too, charged like the report until its own
+    // recorded peak stops moving; its charge may have raised the artifact
+    // peak past the report's, so the report is serialized once more with the
+    // final peaks. The peaks are outside the result digest, so the manifest's
+    // `result_digest` still names these bytes.
+    let manifest_bytes = charges.publish_bytes(|envelope| {
+        let mut manifest = manifest.clone();
+        manifest.envelope_peaks = envelope.peaks.clone();
+        serde_json::to_vec_pretty(&manifest.to_value()).unwrap()
+    })?;
+    manifest.envelope_peaks = charges.envelope.peaks.clone();
+    let report_bytes = charges.publish_bytes(|envelope| {
+        report.envelope = envelope.clone();
+        serde_json::to_vec_pretty(&serde_json::to_value(&report).unwrap()).unwrap()
+    })?;
     // The manifest first, then the report; a manifest whose report failed is
     // taken back, so a reader finds both files or neither.
     charges.elapsed()?;
@@ -1342,6 +1365,16 @@ pub fn run(config: &Config, host: Host) -> Result<Run, RunError> {
         manifest,
         manifest_bytes,
     })
+}
+
+/// The published report less its envelope peaks under `eval-anchor-result/v1`:
+/// the peaks are measurements, so two runs of one identity agree on it.
+pub fn result_digest(report: &Value) -> String {
+    let mut value = report.clone();
+    if let Some(envelope) = value.get_mut("envelope").and_then(Value::as_object_mut) {
+        envelope.remove("peaks");
+    }
+    protocol_digest("eval-anchor-result/v1", &value).expect("the report is canonical")
 }
 
 fn publish_refused((path, kind): (PathBuf, std::io::ErrorKind)) -> RunError {

@@ -497,6 +497,33 @@ pub fn contain(mask: Option<&Path>, writable: &Path, inner: &Command) -> Command
     command
 }
 
+/// Reads a witness file as JSON. A witness is a published artifact, so it is
+/// held to the artifact bound by size before anything of it is read or
+/// parsed. Opened non-blocking (a FIFO would otherwise block the open), then
+/// the descriptor itself is checked to be a regular file within the bound,
+/// and read through that bound so a file that grows meanwhile cannot exceed
+/// it.
+pub fn read_witness(path: &Path, artifact_bound: u64) -> std::io::Result<Value> {
+    let file = std::fs::File::from(rustix::fs::open(
+        path,
+        rustix::fs::OFlags::RDONLY | rustix::fs::OFlags::NONBLOCK | rustix::fs::OFlags::CLOEXEC,
+        rustix::fs::Mode::empty(),
+    )?);
+    let meta = file.metadata()?;
+    if !meta.is_file() {
+        return Err(std::io::Error::other("the witness is not a regular file"));
+    }
+    let bytes = meta.len();
+    if bytes > artifact_bound {
+        return Err(std::io::Error::other(format!(
+            "the witness is {bytes} bytes; the envelope's artifact bound is {artifact_bound}"
+        )));
+    }
+    let mut raw = Vec::new();
+    std::io::Read::read_to_end(&mut std::io::Read::take(file, artifact_bound), &mut raw)?;
+    serde_json::from_slice(&raw).map_err(std::io::Error::other)
+}
+
 /// Whether this host can create the namespaces at all, and bring the new
 /// network namespace's loopback up inside them, as the containment does
 /// for graded code; a host that cannot is a host without containment.
@@ -1460,38 +1487,7 @@ pub fn run(config: &Config, host: Host) -> Result<Run, RunError> {
     // The elapsed bound runs from the same instant the manifest's start
     // names, so reading and freezing the witness is inside it.
     let mut charges = Charges::new(profile.envelope.clone());
-    // A witness is a published artifact, so it is held to the artifact bound
-    // by size before anything of it is read or parsed.
-    // Opened non-blocking (a FIFO would otherwise block the open), then the
-    // descriptor itself is checked to be a regular file within the bound, and
-    // read through that bound so a file that grows meanwhile cannot exceed it.
-    let witness_file = std::fs::File::from(
-        rustix::fs::open(
-            &config.witness,
-            rustix::fs::OFlags::RDONLY | rustix::fs::OFlags::NONBLOCK | rustix::fs::OFlags::CLOEXEC,
-            rustix::fs::Mode::empty(),
-        )
-        .map_err(std::io::Error::from)?,
-    );
-    let witness_meta = witness_file.metadata()?;
-    if !witness_meta.is_file() {
-        return Err(std::io::Error::other("the witness is not a regular file").into());
-    }
-    let witness_bytes = witness_meta.len();
-    let artifact_bound = profile.envelope.artifact_bytes;
-    if witness_bytes > artifact_bound {
-        return Err(std::io::Error::other(format!(
-            "the witness is {witness_bytes} bytes; the envelope's artifact bound is {artifact_bound}"
-        ))
-        .into());
-    }
-    let mut witness_raw = Vec::new();
-    std::io::Read::read_to_end(
-        &mut std::io::Read::take(witness_file, artifact_bound),
-        &mut witness_raw,
-    )?;
-    let witness_value: Value =
-        serde_json::from_slice(&witness_raw).map_err(std::io::Error::other)?;
+    let witness_value = read_witness(&config.witness, profile.envelope.artifact_bytes)?;
     parse_witness(&witness_value)?;
     let frozen = FrozenFamily::freeze(&super::campaign::family(&profile))
         .map_err(|e| std::io::Error::other(format!("{e:?}")))?;

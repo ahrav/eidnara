@@ -1206,6 +1206,32 @@ fn missing_settings_and_an_unaccepted_witness_refuse_before_execution() {
         anchor::run(&bad_witness, HOST),
         Err(RunError::Io(_))
     ));
+    // A device or a FIFO reports no size; only a regular file is a witness.
+    bad_witness.witness = PathBuf::from("/dev/null");
+    let refused = anchor::run(&bad_witness, HOST)
+        .err()
+        .map(|e| e.to_string())
+        .unwrap_or_default();
+    assert!(
+        refused.contains("regular file"),
+        "a witness that is not a regular file is refused before it is read: {refused}"
+    );
+    // A witness past the envelope's artifact bound is refused by its size,
+    // before it is read or parsed.
+    let oversized = dir.path().join("oversized.json");
+    let bound = campaign::profile(Scale::S0, 128, 600_000, None)
+        .envelope
+        .artifact_bytes;
+    std::fs::write(&oversized, vec![b'['; usize::try_from(bound).unwrap() + 1]).unwrap();
+    bad_witness.witness = oversized;
+    let refused = anchor::run(&bad_witness, HOST)
+        .err()
+        .map(|e| e.to_string())
+        .unwrap_or_default();
+    assert!(
+        refused.contains("artifact bound"),
+        "an oversized witness is refused by size, not by parse: {refused}"
+    );
     let mut climbing = config.clone();
     climbing.settings = settings(1);
     climbing.corpus.entries[0].id = "../escape".to_string();
@@ -1387,4 +1413,84 @@ fn a_support_file_that_lost_its_executable_bit_loses_it_in_every_graded_tree() {
         proof.hidden
     );
     assert_eq!(plain.terminal, AnchorTerminal::Indeterminate);
+}
+
+#[test]
+fn the_manifest_is_charged_as_an_artifact_and_the_result_digest_leaves_the_peaks_out() {
+    let dir = tempfile::tempdir().unwrap();
+    // Every row an early fix: prepared, never graded, so the report is small.
+    let corpus = corpus(dir.path(), &[]);
+    let mut config = config(dir.path(), corpus, ControlScript::default(), u64::MAX);
+    // The criterion is in the run identity and nowhere in the report, so a
+    // long approver makes the manifest the larger artifact.
+    config.transfer_criterion.as_mut().unwrap().approved_by = "m".repeat(256 << 10);
+    let run = anchor::run(&config, PREPARING_HOST).unwrap();
+    assert!(
+        run.manifest_bytes.len() > run.report_bytes.len(),
+        "the manifest is the larger artifact here"
+    );
+    assert!(
+        run.report.envelope.peaks.artifact_bytes >= run.manifest_bytes.len() as u64,
+        "the manifest's bytes are charged to the artifact peak: peak {} for a manifest of {}",
+        run.report.envelope.peaks.artifact_bytes,
+        run.manifest_bytes.len()
+    );
+    let manifest = eval_core::parse_manifest(
+        &serde_json::from_slice(&std::fs::read(config.publish.join(MANIFEST_FILE)).unwrap())
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        run.manifest.envelope_peaks, manifest.envelope_peaks,
+        "the returned manifest carries the peaks the published one does"
+    );
+    assert_eq!(
+        manifest.envelope_peaks, run.report.envelope.peaks,
+        "the report and the manifest carry the same final peaks"
+    );
+    let published: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(config.publish.join(REPORT_FILE)).unwrap()).unwrap();
+    // The peaks are measurements; two runs of one identity must agree on the
+    // result digest without them.
+    let mut remeasured = published.clone();
+    remeasured["envelope"]["peaks"]["elapsed_ms"] = serde_json::json!(999_999);
+    assert_eq!(anchor::result_digest(&remeasured), manifest.result_digest);
+    let mut changed = published.clone();
+    changed["tasks"][0]["terminal"] = serde_json::json!("fail");
+    assert_ne!(anchor::result_digest(&changed), manifest.result_digest);
+}
+
+#[test]
+fn the_containment_probe_runs_inside_the_elapsed_bound() {
+    static CLONES: AtomicUsize = AtomicUsize::new(0);
+    fn counted_clone(entry: &AnchorEntry, into: &Path, deadline: Duration) -> std::io::Result<()> {
+        CLONES.fetch_add(1, Ordering::SeqCst);
+        clone_local(entry, into, deadline)
+    }
+    fn slow_probe() -> bool {
+        std::thread::sleep(Duration::from_millis(1_500));
+        true
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = corpus(dir.path(), &PLAIN);
+    let mut config = config(dir.path(), corpus, ControlScript::default(), u64::MAX);
+    config.elapsed_bound_ms = 1_000;
+    let host = Host {
+        clone: counted_clone,
+        namespaces: slow_probe,
+        ..PREPARING_HOST
+    };
+    match anchor::run(&config, host) {
+        Err(RunError::Envelope(exceeded)) => {
+            assert_eq!(exceeded.resource, Resource::ElapsedMs);
+        }
+        Err(other) => panic!("expected the elapsed bound after the probe, got {other:?}"),
+        Ok(_) => panic!("expected the elapsed bound after the probe, got a run"),
+    }
+    assert_eq!(
+        CLONES.load(Ordering::SeqCst),
+        0,
+        "a probe that outlasts the bound is charged to it, so nothing is cloned after it"
+    );
+    assert!(!config.publish.join(REPORT_FILE).exists());
 }

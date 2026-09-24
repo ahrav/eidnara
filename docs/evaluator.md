@@ -3509,12 +3509,17 @@ is then unestablished. No subcommand exists
 yet; the daemon test drives the shell against local repositories.
 `AnchorEntry::validate` refuses an id that is not one plain path component
 (`NotAPathComponent`), because the id names the task's directories. `run`
-approves the profile (the configured control budgets and store bound),
-validates the settings and the corpus and refuses one that is not the pilot
-composition before a single clone, accepts the Phase 5 witness, freezes
+approves the profile (the configured control budgets and store bound) and
+starts the elapsed bound there, as Suite D does, so what follows is inside
+it: it validates the settings and the corpus and refuses one that is not the pilot
+composition before a single clone, accepts the Phase 5 witness (read through
+Suite D's `read_witness`: opened non-blocking, required to be a regular file
+no larger than the artifact bound, and read through that bound, so a FIFO,
+a device, or an oversized file is refused before any of it is parsed), freezes
 the analysis family with `Config::transfer_criterion` in it, and refuses a
 host without namespaces (`RunError::NoContainment`) before anything is
-prepared: every proof and control runs inside the containment, so a host
+prepared, the probe itself a charged child inside the bound: every proof and
+control runs inside the containment, so a host
 without it would only error every test. Then it prepares every entry,
 measuring each preparation: clone, the store and the elapsed bound charged
 after the clone (a failed clone's residue included) and after each
@@ -3657,7 +3662,11 @@ each carry their `ProviderProfile`. The run identity carries the corpus
 digest, a digest of the settings, the transfer criterion, and the control
 script.
 
-The manifest is published before the report, a report that fails to
+The manifest is an artifact like the report, charged through the envelope
+until its own recorded peak stops moving, and the report is serialized once
+more with the final peaks; its `result_digest` is the published report less
+its envelope peaks under `eval-anchor-result/v1`, so two runs of one
+identity agree on it. The manifest is published before the report, a report that fails to
 publish takes its manifest back, and a run that crossed the elapsed bound
 while publishing takes both back, so a directory holds both or neither and
 nothing published outlived the bound. The
