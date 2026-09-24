@@ -664,6 +664,13 @@ fn judge_pairs_refuses_duplicate_calls_duplicate_pairs_and_unblinded_pairs() {
         }),
         "one pair's calls cannot judge two pairs"
     );
+    let mut nameless = pairs[0].clone();
+    nameless.id = String::new();
+    assert_eq!(
+        judge_pairs(&[nameless], &judge(), &both, &[]),
+        Err(JudgeRefused::BlankPair),
+        "a blank pair id identifies nothing to judge"
+    );
     let mut named = pairs[0].clone();
     named.b = "as the fresh arm I answer".to_string();
     assert_eq!(
@@ -751,6 +758,17 @@ fn a_residual_report_reconciles_its_judgments_and_its_calibration_set() {
             judged: 1000
         }),
         "1000 judgments cannot claim the 40-pair human floor"
+    );
+    let mut anonymous = base.clone();
+    anonymous.judgments[1].pair = " ".to_string();
+    assert_eq!(
+        anonymous.validate(&residual_settings(&calibration), &provider("live-1")),
+        Err(ResidualRefused::BlankJudgment),
+        "a blank pair id leaves a judgment unidentifiable"
+    );
+    assert_eq!(
+        anonymous.comparable(&base),
+        Err(ResidualRefused::BlankJudgment)
     );
     let mut repeated = base.clone();
     repeated.judgments[1].pair = "pair-0".to_string();

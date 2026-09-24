@@ -3695,11 +3695,11 @@ full width, and separators (`ARM_TOKENS`); the judge's view serializes only
 `first` and `second`. `judge_pairs` needs both orders of every pair under one
 judge, unswaps the positional verdicts, marks orders that disagree
 `Inconsistent`, records each arm's length, and refuses an omitted order, a
-call from another judge, an unknown or duplicated pair, a second call for one
-pair and order (no rerolls), and a judge whose digests are malformed.
+call from another judge, a blank, unknown, or duplicated pair, a second call
+for one pair and order (no rerolls), and a judge whose digests are malformed.
 `PermutationCheck::validate` refuses arm identification above
-`ARM_IDENTIFICATION_CEILING_PERCENT` in either direction: naming the arm
-wrong consistently identifies it too.
+`ARM_IDENTIFICATION_CEILING_PERCENT` in either direction: naming the arm wrong
+consistently identifies it too.
 
 `ResidualReport` (`eval-residual-report/v1`) records every identity, never a
 name alone: the judge, the calibration digest, the live provider, the plan,
@@ -3707,8 +3707,8 @@ the permutation check, and the judgments. `validate` takes the pre-registered
 `LiveSettings` and the live provider the run was approved for: it refuses
 another provider, a plan other than the settings', and a calibration set under
 another judge or digest, and reconciles the plan, the permutation check, and
-duplicated or miscounted judgments. `comparable` runs every check that needs
-no calibration set on both reports, and refuses cross-run `residual.*`
+blank, duplicated, or miscounted judgments. `comparable` runs every check that
+needs no calibration set on both reports, and refuses cross-run `residual.*`
 comparison (`ReanchorRequired`) until the anchor set is re-scored when the
 judge, the live provider or its tokenizer profile, or the calibration digest
 changes. The gates take only oracle inputs: `analyze`'s signature is pinned in

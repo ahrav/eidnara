@@ -422,6 +422,8 @@ pub enum JudgeRefused {
     DuplicatePair {
         pair: String,
     },
+    /// A blank pair id identifies nothing to judge.
+    BlankPair,
     /// Keeping either of two calls for one pair and order hides the other
     /// verdict.
     DuplicateCall {
@@ -461,6 +463,9 @@ pub fn judge_pairs(
     )?;
     let mut known = BTreeSet::new();
     for pair in pairs {
+        if pair.id.trim().is_empty() {
+            return Err(JudgeRefused::BlankPair);
+        }
         if !known.insert(pair.id.as_str()) {
             return Err(JudgeRefused::DuplicatePair {
                 pair: pair.id.clone(),
@@ -595,6 +600,8 @@ pub enum ResidualRefused {
     DuplicateJudgment {
         pair: String,
     },
+    /// A blank pair id leaves a judgment unidentifiable.
+    BlankJudgment,
     /// The compared run scored under another judge, provider, tokenizer, or
     /// calibration set; `residual.*` metrics do not compare until the anchor
     /// set is re-scored under the new identities.
@@ -649,6 +656,9 @@ impl ResidualReport {
         self.permutation
             .validate()
             .map_err(ResidualRefused::Permutation)?;
+        if self.judgments.iter().any(|j| j.pair.trim().is_empty()) {
+            return Err(ResidualRefused::BlankJudgment);
+        }
         let mut judged = BTreeSet::new();
         if let Some(duplicate) = self
             .judgments

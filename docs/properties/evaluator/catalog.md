@@ -939,8 +939,8 @@ Guarantee: A judge sees two texts and nothing else; a canary or an arm name in
   malformed digest or foreign schema refuses.
 Check: `always` - `blind` refuses `CanaryInPrompt` and `ArmIdentifiable` and
   serializes only `first` and `second`; `judge_pairs` refuses `OrderMissing`,
-  `JudgeDiffers`, `UnknownPair`, `DuplicatePair`, `DuplicateCall`,
-  `MalformedDigest`, and `Blinding`, and unswaps both orders into one
+  `JudgeDiffers`, `BlankPair`, `UnknownPair`, `DuplicatePair`,
+  `DuplicateCall`, `MalformedDigest`, and `Blinding`, and unswaps both orders into one
   `Preference`; `PermutationCheck::validate` refuses `ArmsIdentifiable` when
   `max(correct, trials - correct)` exceeds 60 percent of the trials;
   `CalibrationSet::validate` refuses `SchemaMismatch`, `MalformedDigest`,
