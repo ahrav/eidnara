@@ -873,7 +873,7 @@ pub fn hidden_results(
     std::fs::create_dir_all(&tmp)?;
     let cargo_home = root.join("cargo-home");
     std::fs::create_dir_all(&cargo_home)?;
-    let toolchain = grading_toolchain();
+    let toolchain = grading_toolchain(charges)?;
     // The oracle workspace carries only the candidate's `src/` writes over
     // the task's files and the hidden tests; a manifest, `.cargo/`, a build
     // script, or a path colliding with a task file never reaches it.
@@ -959,19 +959,25 @@ pub fn hidden_results(
 /// the rustup proxy would not find `rust-toolchain.toml`: the override an
 /// outer `cargo +<channel>` already exported, else what rustup resolves at
 /// the workspace root. `None` without rustup, where there is one toolchain.
-fn grading_toolchain() -> Option<String> {
+fn grading_toolchain(charges: &mut Charges) -> Result<Option<String>, RunError> {
     if let Some(toolchain) = std::env::var_os("RUSTUP_TOOLCHAIN") {
-        return Some(toolchain.to_string_lossy().into_owned());
+        return Ok(Some(toolchain.to_string_lossy().into_owned()));
     }
-    let output = Command::new("rustup")
+    // A child like the others: bounded, charged, and a `rustup` that is not
+    // there or does not answer in time pins nothing.
+    let mut command = Command::new("rustup");
+    command
         .args(["show", "active-toolchain"])
-        .current_dir(super::support::direct_host::workspace_root())
-        .stdin(Stdio::null())
-        .stderr(Stdio::null())
-        .output()
-        .ok()?;
-    let text = String::from_utf8(output.stdout).ok()?;
-    text.split_whitespace().next().map(str::to_string)
+        .current_dir(super::support::direct_host::workspace_root());
+    let (status, stdout) = match charged_run(command, SETUP_TIMEOUT, charges) {
+        Ok(output) => output,
+        Err(RunError::Io(_)) => return Ok(None),
+        Err(other) => return Err(other),
+    };
+    if !status.is_some_and(|status| status.success()) {
+        return Ok(None);
+    }
+    Ok(stdout.split_whitespace().next().map(str::to_string))
 }
 
 fn oracle_owned(path: &str) -> bool {
