@@ -15,8 +15,9 @@ gaps the ticket names (ingestion reachability, the Pi adapter, coverage
 witnesses). Phase 6, Suite D: contained generated tasks, hidden-test
 authority, adequacy, and injection scoring. Phase 6, real history: cutoff
 audits, insufficiency proofs, no-repository controls, and the claim class.
-Each record names the entry point that reaches it in its `Reachability`
-field.
+Phase 6, residual judge: blinded, order-swapped, versioned judge calls and
+identity-bound residual comparison. Each record names the entry point that
+reaches it in its `Reachability` field.
 
 ## Part artifacts
 
@@ -51,6 +52,8 @@ the verified trail is short; none was padded.
 | [`mtr-anchor-task-cutoff-snapshot-and-insufficiency-proof`](#mtr-anchor-task-cutoff-snapshot-and-insufficiency-proof) | safety | `always` | partial |
 | [`mtr-generated-world-claims-phase1-only`](#mtr-generated-world-claims-phase1-only) | safety | `always` | yes |
 | [`mtr-skipped-cases-carry-closed-vocabulary-reason`](#mtr-skipped-cases-carry-closed-vocabulary-reason) | safety | `always` | yes |
+| [`mtr-judge-calls-blinded-order-swapped-versioned`](#mtr-judge-calls-blinded-order-swapped-versioned) | safety | `always` | yes |
+| [`rid-tokenizer-accounting-profile-bound-per-run`](#rid-tokenizer-accounting-profile-bound-per-run) | safety | `always` | partial |
 
 ## Records
 
@@ -915,6 +918,106 @@ Impact: A task skipped for a missing audit would be indistinguishable from one
   approved.
 Open questions: None.
 
+### mtr-judge-calls-blinded-order-swapped-versioned
+
+Type: safety
+Reachability: test-only - `crates/eval-core/tests/judge.rs`; no shell calls a
+  judge yet
+Status: active
+Exercised: yes -
+  `crates/eval-core/tests/judge.rs::blinding_refuses_a_canary_or_an_arm_name_and_shows_both_orders`,
+  `crates/eval-core/tests/judge.rs::arm_names_match_as_whole_words_after_folding_case_width_and_separators`,
+  `crates/eval-core/tests/judge.rs::the_judge_view_serializes_only_the_two_texts`,
+  `crates/eval-core/tests/judge.rs::a_judgment_needs_both_orders_under_one_judge_and_records_lengths`,
+  `crates/eval-core/tests/judge.rs::judge_pairs_refuses_duplicate_calls_duplicate_pairs_and_unblinded_pairs`,
+  `crates/eval-core/tests/judge.rs::the_permutation_check_is_two_sided`,
+  `crates/eval-core/tests/judge.rs::calibration_refuses_a_foreign_schema_and_a_malformed_judge_digest`
+Guarantee: A judge sees two texts and nothing else; a canary or an arm name in
+  either response refuses the pair; a judgment exists only when both
+  presentation orders were executed under one versioned judge identity, with
+  disagreeing orders recorded `Inconsistent` and per-arm lengths kept; a
+  permutation check identifying the arms above the ceiling in either direction
+  refuses; the judge identity, rubric, and calibration set are digested and a
+  malformed digest or foreign schema refuses.
+Check: `always` - `blind` refuses `CanaryInPrompt` and `ArmIdentifiable` and
+  serializes only `first` and `second`; `judge_pairs` refuses `OrderMissing`,
+  `JudgeDiffers`, `BlankPair`, `UnknownPair`, `DuplicatePair`,
+  `DuplicateCall`, `MalformedDigest`, and `Blinding`, and unswaps both orders into one
+  `Preference`; `PermutationCheck::validate` refuses `ArmsIdentifiable` when
+  `max(correct, trials - correct)` exceeds 60 percent of the trials;
+  `CalibrationSet::validate` refuses `SchemaMismatch`, `MalformedDigest`,
+  `EmptyProviderField`, `BlankPair`, and `InconsistentHumanLabel`, and
+  `CalibrationSet::digest` runs it first. Must hold on every call, so
+  `always`.
+Fault/timing angle: None.
+Required faults and enabling state: A pair whose text names its arm or carries
+  a canary; a call set missing one order, from another judge, or repeated for
+  one order; a calibration set under another schema or with a non-hex digest.
+Confidence: high -
+  [evidence](evidence/mtr-judge-calls-blinded-order-swapped-versioned.md). Ran
+  the cited tests at HEAD.
+Existing check: `crates/eval-core/src/judge.rs` `screen`, `blind`,
+  `judge_pairs`, `PermutationCheck::validate`, `CalibrationSet::validate`.
+Impact: A judge that can tell the arms apart, or a verdict taken from one
+  presentation order, would enter a residual report as a blinded judgment.
+Open questions:
+- The 60 percent ceiling and the absence of a trial-count floor stand in for a
+  pre-registered bound; a two-trial check validates today (needs human input).
+- `ARM_TOKENS` screens the runner's arm vocabulary only; natural-language
+  role descriptions are left to the permutation check (needs human input).
+
+### rid-tokenizer-accounting-profile-bound-per-run
+
+Type: safety
+Reachability: test-only - `crates/eval-core/tests/judge.rs`; no shell produces
+  a residual report yet
+Status: active
+Exercised: partial - identity equality and re-anchoring refusals are executed by
+  `crates/eval-core/tests/judge.rs::a_changed_judge_provider_or_tokenizer_refuses_cross_run_residual_comparison`,
+  `crates/eval-core/tests/judge.rs::a_residual_report_reconciles_its_judgments_and_its_calibration_set`,
+  `crates/eval-core/tests/judge.rs::the_live_slice_is_constructed_only_from_validated_settings_and_an_approved_profile`,
+  `crates/eval-core/tests/judge.rs::live_slice_validation_recomputes_each_task_and_checks_the_schema`;
+  the tokenizer profile is a name, not a versioned digest
+Guarantee: Every residual report records the judge identity, the live provider
+  profile with its tokenizer accounting profile, and the calibration digest;
+  two runs' `residual.*` metrics compare only when all three are equal; a
+  residual report validates only against the pre-registered settings and the
+  provider its run was approved for, and a live slice is constructed and
+  validated only against the settings that approved its provider profile,
+  pass^k exponent, planned attempts per task, and held-out task set.
+Check: `always` - `ResidualReport::comparable` runs every calibration-free
+  check of `validate` (schema, digest form, plan, permutation, judgments) on
+  either report and returns `ReanchorRequired` naming `judge`,
+  `live_provider`, or `calibration_digest` on the first inequality, with
+  `tokenizer_profile` part of `ProviderProfile` equality;
+  `ResidualReport::validate` refuses `Settings` (including
+  `UnapprovedProvider` and a malformed settings digest), `ProviderDiffers`,
+  `SamplingPlanDiffers`, `CalibrationJudgeDiffers`, `DigestMismatch`, and
+  `SettingsDigestMismatch`; `live_slice` and
+  `LiveSliceReport::validate` refuse `Settings`, `ProviderDiffers`,
+  `KDiffers`, `AttemptCountDiffers`, `SettingsDigestMismatch`, and
+  `TaskSetDiffers`. Must hold on
+  every comparison and validation, so `always`.
+Fault/timing angle: None.
+Required faults and enabling state: Two reports differing in one identity
+  component; a report whose calibration digest is not the supplied set's; a
+  live report naming a third profile, another `k`, or a task with extra or
+  missing attempts.
+Confidence: medium -
+  [evidence](evidence/rid-tokenizer-accounting-profile-bound-per-run.md). Ran
+  the cited tests at HEAD; the tokenizer identity is compared as a string.
+Existing check: `crates/eval-core/src/judge.rs` `ResidualReport::comparable`,
+  `ResidualReport::validate`, `approve`, `live_slice`,
+  `LiveSliceReport::validate`; `crates/eval-core/src/anchor.rs`
+  `ProviderProfile`.
+Impact: Residual metrics from two tokenizer accountings or two judges would be
+  compared as one series.
+Open questions:
+- `ProviderProfile::tokenizer_profile` is a free string; an in-place tokenizer
+  change under the same name compares as equal. `manifest::TokenizerProfile`
+  carries name, revision, and digest and is the candidate replacement, in the
+  anchor shell that defines the type (needs human input).
+
 ## Relationship map
 
 - `flt-shrink-preserves-precise-failure-predicate` depends on
@@ -944,3 +1047,9 @@ Open questions: None.
   real-history tasks `mtr-generated-world-claims-phase1-only` may count, and
   `mtr-skipped-cases-carry-closed-vocabulary-reason` names why the others
   were not attempted.
+- `mtr-judge-calls-blinded-order-swapped-versioned` produces the judgments
+  `rid-tokenizer-accounting-profile-bound-per-run` binds to their identities;
+  neither feeds the gates of `mtr-judge-output-never-feeds-control-or-floor`,
+  and the live slice inherits `rid-live-runs-labeled-nondeterministic-pass-k`.
+  Those two ids have executed checks listed in [`README.md`](README.md) and no
+  record in this catalog yet.

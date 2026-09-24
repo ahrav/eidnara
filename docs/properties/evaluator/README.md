@@ -2058,6 +2058,56 @@ The METHOD-ordered records are in [`catalog.md`](catalog.md).
 - `the_corpus_persists_identifiers_only_and_is_the_pilot_composition`, `the_time_study_projects_the_pilot_and_stops_for_approval_past_the_bound`, `the_cutoff_audit_excludes_future_code_and_future_issue_knowledge`, `the_insufficiency_proof_is_an_executed_failing_run`, `a_control_marks_memorized_tasks_and_detects_seeded_contamination`, `the_pilot_alone_never_transfers_and_exclusions_keep_their_accounting`, `settings_refuse_before_execution_and_reasons_are_typed` (`crates/eval-core/tests/anchor.rs`).
 - `every_anchor_task_has_an_audit_a_proof_and_a_control_and_the_pilot_never_transfers`, `a_memorizing_provider_is_excluded_for_its_pair_and_seeded_contamination_is_detected`, `a_control_past_its_deadline_is_censored_with_its_trace_and_a_failed_control_refuses`, `an_unaffordable_time_study_stops_for_approval_before_the_pilot_is_paid_for`, `the_store_is_charged_while_preparing_not_after_the_pilot`, `missing_settings_and_an_unaccepted_witness_refuse_before_execution`, `grading_runs_repository_code_without_the_runners_home_or_network`, `the_clone_is_charged_before_it_is_removed`, `every_extracted_tree_is_charged_while_the_clone_still_exists`, `the_elapsed_bound_is_charged_while_preparing`, `the_fix_is_its_own_diff_and_its_whole_tree`, `the_host_seams_are_given_the_campaign_time_left_and_a_named_pull_request_needs_its_time`, `the_time_study_measures_five_preparations_that_produced_a_snapshot`, `the_tree_digest_keeps_paths_that_only_differ_in_bytes_apart`, `a_commit_time_milliseconds_cannot_hold_is_an_unavailable_source`, `a_directory_the_fix_replaced_with_test_support_gives_way_in_the_graded_tree`, `a_hidden_test_cannot_carry_state_from_the_snapshot_grade_into_the_reference_grade`, `a_support_file_that_lost_its_executable_bit_loses_it_in_every_graded_tree`, `the_manifest_is_charged_as_an_artifact_and_the_result_digest_leaves_the_peaks_out`, `the_containment_probe_runs_inside_the_elapsed_bound`, `a_finished_controls_workspace_is_not_readable_from_a_later_grade`, `a_git_the_clone_carries_is_never_the_one_run` (`crates/daemon/tests/eval_anchor.rs`; `mtr-anchor-task-cutoff-snapshot-and-insufficiency-proof`, `mtr-generated-world-claims-phase1-only`, `mtr-skipped-cases-carry-closed-vocabulary-reason`). The pilot composition over local repositories built from generated tasks; real clones, byte-exact snapshots, audits, fix-tree reference runs, and controls inside the Suite D containment; hidden tests graded inside the same containment with the task material masked.
 
+## Phase 6 executed checks: residual judge and the live slice
+
+The METHOD-ordered records for `mtr-judge-calls-blinded-order-swapped-versioned`
+and `rid-tokenizer-accounting-profile-bound-per-run` are in
+[`catalog.md`](catalog.md). Residual judging (`crates/eval-core/tests/judge.rs`):
+
+- `blinding_refuses_a_canary_or_an_arm_name_and_shows_both_orders`,
+  `arm_names_match_as_whole_words_after_folding_case_width_and_separators`,
+  `the_judge_view_serializes_only_the_two_texts`
+  (`mtr-judge-calls-blinded-order-swapped-versioned`): a planted canary and a
+  whole-word arm name in either response refuse; case, full width, and
+  separators fold before matching and `harm bound` names no arm; both orders
+  are presented and the judge's view carries only the two texts.
+- `a_judgment_needs_both_orders_under_one_judge_and_records_lengths`,
+  `judge_pairs_refuses_duplicate_calls_duplicate_pairs_and_unblinded_pairs`,
+  `calibration_refuses_a_foreign_schema_and_a_malformed_judge_digest`: a
+  judgment needs both orders under one judge; position-following orders are
+  `Inconsistent`; per-arm lengths are recorded; an omitted order, another
+  judge, an unknown pair, a duplicated pair, a rerolled call, an unblinded
+  pair, a foreign calibration schema, a digest that is not 64 lowercase hex,
+  a blank provider component, and an `Inconsistent` human label refuse.
+- `the_permutation_check_and_the_human_floor_gate_calibrated_acceptance`,
+  `the_permutation_check_is_two_sided`: 25 of 40 correct refuses and 24 does
+  not; 0 and 15 of 40 refuse as consistently wrong; 250 pairs need 25 human
+  reviews and 251 need 26; 19 pairs cannot be calibrated; 21 reviews of 20
+  pairs refuse.
+- `a_changed_judge_provider_or_tokenizer_refuses_cross_run_residual_comparison`,
+  `a_residual_report_reconciles_its_judgments_and_its_calibration_set`
+  (`rid-tokenizer-accounting-profile-bound-per-run`): a changed judge, live
+  provider, tokenizer profile, or calibration digest is `ReanchorRequired`; a
+  report refuses a leaked permutation check, a human sample under the floor,
+  miscounted or duplicated judgments, a calibration set frozen under another
+  judge, and a relabelled or empty calibration set.
+- `the_gates_take_only_oracle_inputs_and_the_residual_report_carries_no_gate_field`
+  (`mtr-judge-output-never-feeds-control-or-floor`): `analyze` is coerced to
+  a pointer type naming only oracle inputs, and the residual report's
+  serialized keys hold no gate field.
+- `the_live_slice_reports_trials_intervals_and_censoring_and_is_never_replayable`,
+  `live_slice_validation_recomputes_each_task_and_checks_the_schema`,
+  `the_live_slice_refuses_a_repeated_task`,
+  `the_live_slice_is_constructed_only_from_validated_settings_and_an_approved_profile`,
+  `live_settings_refuse_until_two_profiles_a_calibration_set_and_a_plan_exist`
+  (`rid-live-runs-labeled-nondeterministic-pass-k`): pass^k intervals per
+  task, an all-censored task `indeterminate` with censoring rate one,
+  `replayable = false` with a relabelled report refused, `k` past the repeats
+  refused, a repeated task refused at construction and validation, a third
+  profile or unvalidated settings constructing nothing, a deserialized report
+  held to the settings' profiles, `k`, planned attempts, task set, and digest,
+  and settings refusing each missing value.
+
 ## Gaps recorded here
 
 - `sls-liveness-memory-reviewer-work-bounded`: the fault campaign's liveness

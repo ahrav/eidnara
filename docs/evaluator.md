@@ -3726,6 +3726,74 @@ material under `tasks/` while the test's own loopback works, and writing
 its lockfile into the tree rather than through a dangling `Cargo.lock`
 symlink.
 
+## Residual judge and the live slice
+
+`crates/eval-core/src/judge.rs` is the contract for what the deterministic
+oracles leave open. No shell calls a judge or a live provider yet; the module
+fixes the types, the refusals, and the firewall, so the evidence a later
+shell produces is checked before it is believed.
+
+A judge is a versioned dependency. `JudgeIdentity` is a `ProviderProfile`
+(tokenizer profile included) with the prompt digest and the `Rubric` digest
+(`eval-judge-rubric/v1`; a rubric under another schema has no digest), each 64
+lowercase hex. `CalibrationSet` (`eval-judge/v1`) freezes that identity with
+the human labels over anchor pairs before any judging and digests into every
+report (`eval-judge-calibration/v1`); only a set that validates has a digest,
+and validation refuses another schema, a malformed digest, a blank provider,
+model, or tokenizer profile, an empty label map, a blank anchor id, and an
+`Inconsistent` label, which only two disagreeing judge orders produce.
+`SamplingPlan::validate` refuses fewer than 20 pairs and a human sample below
+ten percent rounded up or below 20 pairs, or above the pair count; a campaign
+under the floor cannot claim calibrated acceptance.
+
+`blind` presents one `Pair` in one `Order`, refusing a planted canary in
+either response (matched raw or after the same folding) and any arm name
+matched as whole words after folding case, full width, and separators and
+dropping invisible characters such as zero-width spaces, soft hyphens, and
+combining marks (`ARM_TOKENS`); the judge's view serializes only `first` and
+`second`. `judge_pairs` needs both orders of every pair under one judge,
+unswaps the positional verdicts, marks orders that disagree `Inconsistent`,
+records each arm's length, and refuses an omitted order, a call from another
+judge, a blank, unknown, or duplicated pair, a second call for one pair and
+order (no rerolls), and a judge whose digests are malformed.
+`PermutationCheck::validate` refuses arm identification above
+`ARM_IDENTIFICATION_CEILING_PERCENT` in either direction: naming the arm wrong
+consistently identifies it too.
+
+`ResidualReport` (`eval-residual-report/v1`) records every identity, never a
+name alone: the settings digest, the judge, the calibration digest, the live
+provider, the plan, the permutation check, and the judgments. `validate` takes
+the pre-registered `LiveSettings` and the live provider the run was approved
+for: it refuses another provider, a plan other than the settings', a
+calibration set under another judge or digest, and a settings digest other
+than the supplied settings' (`SettingsDigestMismatch`), so a report cannot be
+reattached to another preregistration, and reconciles the plan, the
+permutation check, and blank, duplicated, or miscounted judgments.
+`comparable` runs every check that needs no calibration set on both reports,
+and refuses cross-run `residual.*` comparison (`ReanchorRequired`) until the
+anchor set is re-scored when the judge, the live provider or its tokenizer
+profile, or the calibration digest changes. The gates take only oracle inputs:
+`analyze`'s signature is pinned in the tests, and the residual report carries
+no gate field.
+
+`LiveSettings::validate` refuses without exactly two distinct approved
+provider profiles with no blank component, a pass^k exponent `k`, a planned
+attempt count `repeats` at least `k`, a frozen held-out task set with no blank
+id, a calibration set, and a plan above the floor. `live_slice` constructs a
+`LiveSliceReport` (`eval-live-slice/v1`) only from validated settings and one
+of their two profiles, with the settings' `k`; it refuses no tasks, a repeated
+task id, a task set that is not exactly the settings', and a task with other
+than `repeats` attempts. Each task keeps its attempts beside pass@1, the
+repeat counts, the censoring rate, and the pass^k interval through `pass_k`;
+every attempt censored is `indeterminate`, never zero. The report carries the
+settings' digest (`eval-live-settings/v1`). `replayable` is `LIVE_REPLAYABLE =
+false`; `validate` takes the same settings and the profile the run was
+approved for and refuses a relabelled report, another schema, an unapproved or
+other profile, another `k`, another settings digest, a repeated task, another
+task set, a task with other than the planned attempts, and a summary the
+attempts do not give, so a deserialized report is held to the pre-registration
+a constructed one ran under. Tests: `crates/eval-core/tests/judge.rs`.
+
 ## Coverage markers
 
 `MARKERS` is the evaluator-owned registry: constant, globally unique names,

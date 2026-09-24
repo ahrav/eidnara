@@ -37,6 +37,7 @@ mod governance;
 mod growth;
 mod identity;
 mod injection;
+mod judge;
 mod ledger;
 mod manifest;
 mod markers;
@@ -126,6 +127,16 @@ pub use injection::{
     AxisValue, Carrier, INJECTION_CANARY_PROTOCOL, InjectionCase, InjectionError,
     InjectionObservation, InjectionScore, LaterSession, SideEffect, StageValue, TaskSet,
     plan_injection_cases, score_injection,
+};
+pub use judge::{
+    ARM_IDENTIFICATION_CEILING_PERCENT, ARM_TOKENS, BlindedPrompt, BlindingRefused,
+    CALIBRATION_DIGEST_PROTOCOL, CalibrationRefused, CalibrationSet, HUMAN_SAMPLE_FLOOR_PERCENT,
+    HUMAN_SAMPLE_MIN_PAIRS, JUDGE_SCHEMA, JudgeCall, JudgeIdentity, JudgeRefused, LIVE_REPLAYABLE,
+    LIVE_SETTINGS_DIGEST_PROTOCOL, LIVE_SLICE_SCHEMA, LiveSettings, LiveSettingsRefused,
+    LiveSliceRefused, LiveSliceReport, LiveTask, LiveTaskReport, Order, Pair as JudgedPair,
+    PairJudgment, PermutationCheck, PermutationRefused, Preference, RESIDUAL_REPORT_SCHEMA,
+    RUBRIC_DIGEST_PROTOCOL, RawVerdict, ResidualRefused, ResidualReport, Rubric, SamplingPlan,
+    blind, judge_pairs, live_slice,
 };
 pub use ledger::{
     CHAIN_STAGES, ChainStage, Completed, Evidence, Ledger, LedgerError,
