@@ -3618,7 +3618,9 @@ inside the Suite D containment with the private directory masked
 (`memorize` reproduces the fix tree into `patch/`, the statement and the
 copy each charged to the store once on disk, `reach_repository` reads
 the snapshot by a path relative to its workspace, `cite_future` names the
-pull request), each tool call announced on an `eval-anchor-tool` line. Every
+pull request), each tool call announced on an `eval-anchor-tool` line, after Suite D's
+start line, so an exit status without it is the containment's own
+(`RunError::MountRefused`), not the control's. Every
 snapshot, fix tree, graded tree, and the target directory live under the
 private root, which the control sees as an empty tmpfs. The announced calls
 that climb out of the workspace or name the private root are

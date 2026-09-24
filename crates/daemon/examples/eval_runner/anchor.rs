@@ -859,8 +859,11 @@ fn control(run: &ControlRun<'_>, charges: &mut Charges) -> Result<NoRepositoryCo
             sh_quote(&format!("{TOOL_LINE} {name} {argument}"))
         )
     };
+    // The start line first: stdout without it means the containment itself
+    // did not run the script, and its exit status is the containment's.
     let mut lines = vec![
         "set -e".to_string(),
+        format!("echo '{}'", suite_d::AGENT_START_LINE),
         tool("cat", "STATEMENT.md", "cat STATEMENT.md >/dev/null"),
     ];
     if config.control.memorize {
@@ -913,8 +916,14 @@ fn control(run: &ControlRun<'_>, charges: &mut Charges) -> Result<NoRepositoryCo
         elapsed_ms: u64::try_from(started.elapsed().as_millis()).unwrap(),
         ..TaskUsage::default()
     };
+    let agent_started = stdout.lines().next() == Some(suite_d::AGENT_START_LINE);
     match status {
         None => usage.elapsed_ms = usage.elapsed_ms.max(deadline),
+        Some(status) if !agent_started && status.code() == Some(suite_d::MOUNT_REFUSED) => {
+            return Err(RunError::MountRefused {
+                task: entry.id.clone(),
+            });
+        }
         Some(status) if !status.success() => {
             return Err(RunError::ControlExited {
                 task: entry.id.clone(),
@@ -927,7 +936,7 @@ fn control(run: &ControlRun<'_>, charges: &mut Charges) -> Result<NoRepositoryCo
     let mut calls = 0u32;
     let mut repository_access = Vec::new();
     let mut outputs = Vec::new();
-    for line in stdout.lines() {
+    for line in stdout.lines().filter(|l| *l != suite_d::AGENT_START_LINE) {
         match line.strip_prefix(TOOL_LINE) {
             Some(call) => {
                 calls += 1;

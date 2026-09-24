@@ -64,7 +64,7 @@ const ESCAPEE_LIFETIME: Duration = Duration::from_secs(3);
 /// How long the canary child waits for the escapee's first write.
 const ESCAPEE_READY_TIMEOUT: Duration = Duration::from_secs(5);
 /// The mount script exits with this when a mount is refused.
-const MOUNT_REFUSED: i32 = 97;
+pub const MOUNT_REFUSED: i32 = 97;
 pub const USAGE: &str = "suite-d --scale <s0|s1|s2> --tasks <n> --elapsed-bound-ms <n> \
 --approved-by <name> --approval-run-id <hex64> --witness <phase5-witness.json> --publish <dir>";
 const FLAGS: [&str; 7] = [
