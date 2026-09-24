@@ -730,9 +730,12 @@ pub fn run_canaries(
         CanaryVerdict::Denied
     };
     // The control's escapee has proved its point; it does not get to outlive
-    // the canary run on the host. Inside the namespace the PID is not ours
-    // to signal and the init's death already took it.
+    // the canary run on the host. Only one seen alive a moment ago is
+    // signalled, so a PID the kernel has since reused is left alone. Inside
+    // the namespace the PID is not ours to signal and the init's death
+    // already took it.
     if !contained
+        && escape == CanaryVerdict::Allowed
         && let Some(pid) = second
             .split_whitespace()
             .next()
