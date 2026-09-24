@@ -267,7 +267,8 @@ fn grading_ignores_symlinked_hard_linked_and_undeletable_workspace_entries() {
         .iter()
         .find(|fix| fix.fails == "sum_of_positives")
         .unwrap();
-    let workspace = suite_d::materialize(root.path(), task, &wrong.patch).unwrap();
+    let workspace =
+        suite_d::materialize(root.path(), task, &wrong.patch, Duration::from_secs(60)).unwrap();
     let host_file = root.path().join("host-file");
     std::fs::write(&host_file, "the host's own contents").unwrap();
     std::fs::remove_file(workspace.join("Cargo.toml")).unwrap();
@@ -451,10 +452,20 @@ fn materializing_ignores_the_host_git_configuration_and_refuses_a_failed_commit(
     // env-var change; the value is restored below before any other test
     // reads it.
     unsafe { std::env::set_var("GIT_CONFIG_GLOBAL", &global) };
-    let materialized = suite_d::materialize(root.path(), &task, &eval_core::Files::new());
+    let materialized = suite_d::materialize(
+        root.path(),
+        &task,
+        &eval_core::Files::new(),
+        Duration::from_secs(60),
+    );
     task.commit_message = String::new();
     let other = tempfile::tempdir().unwrap();
-    let refused = suite_d::materialize(other.path(), &task, &eval_core::Files::new());
+    let refused = suite_d::materialize(
+        other.path(),
+        &task,
+        &eval_core::Files::new(),
+        Duration::from_secs(60),
+    );
     match previous {
         Some(value) => unsafe { std::env::set_var("GIT_CONFIG_GLOBAL", value) },
         None => unsafe { std::env::remove_var("GIT_CONFIG_GLOBAL") },

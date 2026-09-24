@@ -818,7 +818,12 @@ pub fn read_files(root: &Path) -> std::io::Result<Files> {
 
 /// A fresh workspace holding the visible repository with `patch` applied and
 /// the initial commit carrying the task's commit message.
-pub fn materialize(root: &Path, task: &GeneratedTask, patch: &Files) -> std::io::Result<PathBuf> {
+pub fn materialize(
+    root: &Path,
+    task: &GeneratedTask,
+    patch: &Files,
+    deadline: Duration,
+) -> std::io::Result<PathBuf> {
     let workspace = root.join("workspace");
     remove_tree(&workspace)?;
     std::fs::create_dir_all(&workspace)?;
@@ -851,9 +856,9 @@ pub fn materialize(root: &Path, task: &GeneratedTask, patch: &Files) -> std::io:
         git.env(format!("GIT_CONFIG_KEY_{index}"), key)
             .env(format!("GIT_CONFIG_VALUE_{index}"), value);
     }
-    // Bounded like every other child; a stalled Git is a failed fixture, not
-    // a hung run.
-    let committed = match run_bounded(git, SETUP_TIMEOUT) {
+    // Bounded like every other child, by the time the caller has left; a
+    // stalled Git is a failed fixture, not a hung run.
+    let committed = match run_bounded(git, deadline) {
         Ok((status, _)) => status.is_some_and(|status| status.success()),
         Err(RunError::Io(error)) => return Err(error),
         Err(other) => return Err(std::io::Error::other(other.to_string())),
@@ -1524,7 +1529,13 @@ pub fn run(config: &Config, host: Host) -> Result<Run, RunError> {
         // The fixture's Git is a child like the others: charged and inside
         // the bound.
         charges.process_started()?;
-        let workspace = materialize(root.path(), task, &Files::new())?;
+        let remaining = charges.deadline().saturating_duration_since(Instant::now());
+        let workspace = materialize(
+            root.path(),
+            task,
+            &Files::new(),
+            SETUP_TIMEOUT.min(remaining),
+        )?;
         charges.process_ended();
         charges.elapsed()?;
         let Session {
