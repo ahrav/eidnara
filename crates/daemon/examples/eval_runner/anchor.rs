@@ -309,22 +309,22 @@ fn materialize(
 /// `cp -RP` keeps bytes, symlinks, and modes but not timestamps: a file's
 /// mtime must be newer than the build artifacts in the shared target
 /// directory, or Cargo reuses a build of the tree it replaced.
-fn copy_tree(from: &Path, into: &Path) -> std::io::Result<()> {
+fn copy_tree(from: &Path, into: &Path, charges: &mut Charges) -> Result<(), RunError> {
     std::fs::create_dir_all(into)?;
-    let status = Command::new("cp")
-        .arg("-RP")
-        .arg("--")
-        .arg(from.join("."))
-        .arg(into)
-        .status()?;
-    if status.success() {
+    let mut command = Command::new("cp");
+    command.arg("-RP").arg("--").arg(from.join(".")).arg(into);
+    // Under the campaign's charges like every other child: counted, the
+    // elapsed bound checked around it, its deadline the time left.
+    let (status, _) = charged_run(command, GIT_TIMEOUT, charges)?;
+    if status.is_some_and(|status| status.success()) {
         Ok(())
     } else {
         Err(std::io::Error::other(format!(
             "cp -RP {} {} failed",
             from.display(),
             into.display()
-        )))
+        ))
+        .into())
     }
 }
 
@@ -829,7 +829,7 @@ fn control(run: &ControlRun<'_>, charges: &mut Charges) -> Result<NoRepositoryCo
         tool("cat", "STATEMENT.md", "cat STATEMENT.md >/dev/null"),
     ];
     if config.control.memorize {
-        copy_tree(&prepared.fix, &workspace.join(".memory"))?;
+        copy_tree(&prepared.fix, &workspace.join(".memory"), charges)?;
         charges.store_bytes(&layout.root)?;
         for path in regular_files(&prepared.fix)? {
             lines.push(tool("write", &format!("patch/{}", path.display()), "true"));
@@ -913,7 +913,7 @@ fn control(run: &ControlRun<'_>, charges: &mut Charges) -> Result<NoRepositoryCo
         HiddenResults::new()
     } else {
         fresh_dir(&layout.tree)?;
-        copy_tree(&prepared.snapshot, &layout.tree)?;
+        copy_tree(&prepared.snapshot, &layout.tree, charges)?;
         overlay_patch(&workspace.join("patch"), &layout.tree)?;
         charges.store_bytes(&layout.root)?;
         grade(
@@ -967,6 +967,9 @@ pub fn run(config: &Config, host: Host) -> Result<Run, RunError> {
     let profile_digest = profile.digest()?;
     config.settings.validate()?;
     config.corpus.validate()?;
+    // The shell runs the pilot and nothing else; a corpus of another
+    // composition is refused before a single clone.
+    config.corpus.is_pilot()?;
     let witness_value: Value =
         serde_json::from_slice(&std::fs::read(&config.witness)?).map_err(std::io::Error::other)?;
     parse_witness(&witness_value)?;
@@ -1076,7 +1079,7 @@ pub fn run(config: &Config, host: Host) -> Result<Run, RunError> {
         // scripts and tests left in the writable mount reaches no other.
         fresh_dir(&layout.target)?;
         fresh_dir(&layout.tree)?;
-        copy_tree(&ready.snapshot, &layout.tree)?;
+        copy_tree(&ready.snapshot, &layout.tree, &mut charges)?;
         charges.store_bytes(&layout.root)?;
         let hidden = grade(
             &layout.tree,
@@ -1087,7 +1090,7 @@ pub fn run(config: &Config, host: Host) -> Result<Run, RunError> {
             &mut charges,
         )?;
         fresh_dir(&layout.tree)?;
-        copy_tree(&ready.fix, &layout.tree)?;
+        copy_tree(&ready.fix, &layout.tree, &mut charges)?;
         charges.store_bytes(&layout.root)?;
         let reference = grade(
             &layout.tree,
@@ -1230,8 +1233,14 @@ pub fn run(config: &Config, host: Host) -> Result<Run, RunError> {
         judge: suite_d::JUDGE_VERSION.to_string(),
     });
     let manifest_bytes = serde_json::to_vec_pretty(&manifest.to_value()).unwrap();
-    publish_file(&config.publish.join(REPORT_FILE), &report_bytes).map_err(publish_refused)?;
-    publish_file(&config.publish.join(MANIFEST_FILE), &manifest_bytes).map_err(publish_refused)?;
+    // The manifest first, then the report; a manifest whose report failed is
+    // taken back, so a reader finds both files or neither.
+    let manifest_path = config.publish.join(MANIFEST_FILE);
+    publish_file(&manifest_path, &manifest_bytes).map_err(publish_refused)?;
+    if let Err(refused) = publish_file(&config.publish.join(REPORT_FILE), &report_bytes) {
+        let _ = std::fs::remove_file(&manifest_path);
+        return Err(publish_refused(refused));
+    }
     Ok(Run {
         report,
         report_bytes,

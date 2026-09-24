@@ -3509,7 +3509,8 @@ yet; the daemon test drives the shell against local repositories.
 `AnchorEntry::validate` refuses an id that is not one plain path component
 (`NotAPathComponent`), because the id names the task's directories. `run`
 approves the profile (the configured control budgets and store bound),
-validates the settings and the corpus, accepts the Phase 5 witness, freezes
+validates the settings and the corpus and refuses one that is not the pilot
+composition before a single clone, accepts the Phase 5 witness, freezes
 the analysis family with `Config::transfer_criterion` in it, and refuses a
 host without namespaces (`RunError::NoContainment`) before anything is
 prepared: every proof and control runs inside the containment, so a host
@@ -3579,10 +3580,10 @@ missing is `unsupported (source_unavailable)`; a Django task is
 the refusal recorded and no run. An audited task gets the current-tree-only run
 and a reference run, in a build cache of its own (the writable mount is
 emptied before each task, so what one task's build scripts and tests left
-there reaches no other): the snapshot copied into a fresh tree and its
-hidden tests run with no agent, then the fix tree copied into a fresh tree
-and the tests run again; the store is charged after every copy and every
-grade, so a tree copy and what a build wrote into the cache are bounded
+there reaches no other): the snapshot copied into a fresh tree (every `cp -RP` a charged child
+like the git ones) and its hidden tests run with no agent, then the fix
+tree copied into a fresh tree and the tests run again; the store is charged
+after every copy and every grade, so a tree copy and what a build wrote into the cache are bounded
 before the next step. Both go through Suite D's `run_hidden` inside the
 containment (`contain`), with the tree read-only, the build cache the only
 writable mount, and `tasks/` (every clone, snapshot, and fix tree) covered
@@ -3638,7 +3639,9 @@ each carry their `ProviderProfile`. The run identity carries the corpus
 digest, a digest of the settings, the transfer criterion, and the control
 script.
 
-The report `eval-anchor-report/v1` carries the corpus digest, the role, the
+The manifest is published before the report, and a report that fails to
+publish takes its manifest back, so a directory holds both or neither. The
+report `eval-anchor-report/v1` carries the corpus digest, the role, the
 time study, one `TaskOutcome` per entry (terminal, measured preparation, the
 audit and any refusal, the proof with its reference, the controls and
 classified verdicts per pair), the per-pair accounting, and the claims; the
