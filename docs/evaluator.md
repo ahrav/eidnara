@@ -3527,7 +3527,9 @@ extracted tree while all of them still exist
 (every git child runs under `charged_run`: counted in the process
 envelope, the elapsed bound checked before and after it, its deadline the
 campaign time left as it stands then, at most two minutes; each runs
-under a cleared environment, `PATH` alone crossing, with no user or system
+under a cleared environment, `PATH` alone crossing and only its absolute
+entries, so an empty or relative entry cannot make the `git` run inside the
+clone one the clone carries, with no user or system
 configuration, so no `GIT_DIR`, `GIT_INDEX_FILE`, or `GIT_CONFIG_*` an
 outer process carries redirects or reshapes it), `git show -s
 --format=%ct` for the base and fix commits (a time milliseconds cannot
@@ -3646,7 +3648,9 @@ symlinked directory (the patch is the files the control wrote: an agent
 without the repository deletes nothing and its symlinks are not honoured),
 and graded with the hidden tests under the fixed
 per-invocation `GRADE_TIMEOUT` (ten minutes: the agent's deadline bounds
-the agent, not the runner's grading of a real repository); the terminal is
+the agent, not the runner's grading of a real repository), and the
+workspace is removed once that grade is done, since it sits outside the
+private root where a later grade could read the patch it held; the terminal is
 `hidden_terminal`, the budget-first rule `task_terminal` also uses.
 `classify_control` judges the control against a `RepositoryComparison`
 naming the task, its row digest, the provider, the execution image, the

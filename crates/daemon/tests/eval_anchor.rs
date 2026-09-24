@@ -100,6 +100,22 @@ fn the_fixture_is_not_executable() {
 }
 "#;
 
+/// Judges nothing but whether a control workspace is reachable from the tree.
+const WORKSPACE_TEST: &str = r#"
+#[test]
+fn no_control_workspace_is_readable() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    assert!(
+        !root.join("../../control").exists(),
+        "a control workspace is readable from the graded tree"
+    );
+}
+"#;
+
+/// The marker a `git` carried by a fixture repository leaves when it is the
+/// one run, beside the fixture repositories.
+const GIT_RAN: &str = "git-ran";
+
 /// A commit time git holds and `i64` milliseconds cannot: past
 /// `i64::MAX / 1000`, below git's own `TIME_MAX`.
 const OVERFLOWING_SECONDS: i64 = 9_300_000_000_000_000;
@@ -146,6 +162,13 @@ enum Variant {
     /// clears its executable bit and changes nothing else about it, and the
     /// only hidden test asserts the bit is clear.
     SupportLosesExecutableBit,
+    /// The only hidden test asserts no control workspace is reachable from
+    /// the graded tree.
+    ReadsControlWorkspace,
+    /// The base commit carries an executable named `git` at the repository
+    /// root that leaves `GIT_RAN` beside the fixtures, then runs the real
+    /// one; the fix is early, so the row is prepared and never graded.
+    CarriesAGitExecutable,
 }
 
 fn git(dir: &Path, args: &[&str], seconds: i64) -> String {
@@ -200,6 +223,21 @@ fn history(dir: &Path, index: u32, variant: Variant) -> (String, String) {
     if variant == Variant::SupportReplacesDirectory {
         std::fs::create_dir_all(dir.join("tests/helper")).unwrap();
         std::fs::write(dir.join("tests/helper/a"), "a file in the directory").unwrap();
+    }
+    if variant == Variant::CarriesAGitExecutable {
+        let marker = dir.parent().unwrap().join(GIT_RAN);
+        let trusted = std::env::var("PATH").unwrap();
+        let fake = dir.join("git");
+        std::fs::write(
+            &fake,
+            format!(
+                "#!/bin/sh\ntouch {}\nPATH={} exec git \"$@\"\n",
+                marker.display(),
+                trusted
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
     }
     if variant == Variant::SupportLosesExecutableBit {
         std::fs::create_dir_all(dir.join("tests")).unwrap();
@@ -274,6 +312,7 @@ fn history(dir: &Path, index: u32, variant: Variant) -> (String, String) {
             Variant::IdentAttribute => IDENT_TEST.to_string(),
             Variant::StatefulHiddenTest => STATEFUL_TEST.to_string(),
             Variant::SupportLosesExecutableBit => MODE_TEST.to_string(),
+            Variant::ReadsControlWorkspace => WORKSPACE_TEST.to_string(),
             _ => format!("{}{ASSETS_TEST}", test.content),
         };
         std::fs::write(path, content).unwrap();
@@ -302,7 +341,7 @@ fn history(dir: &Path, index: u32, variant: Variant) -> (String, String) {
         std::os::unix::fs::symlink("/etc/hostname", dir.join("tests/planted.rs")).unwrap();
     }
     let fix_seconds = match variant {
-        Variant::EarlyFix => CUTOFF_SECONDS - 60,
+        Variant::EarlyFix | Variant::CarriesAGitExecutable => CUTOFF_SECONDS - 60,
         Variant::OverflowingFixTime => OVERFLOWING_SECONDS,
         _ => FIX_SECONDS,
     };
@@ -1493,4 +1532,101 @@ fn the_containment_probe_runs_inside_the_elapsed_bound() {
         "a probe that outlasts the bound is charged to it, so nothing is cloned after it"
     );
     assert!(!config.publish.join(REPORT_FILE).exists());
+}
+
+#[test]
+fn a_finished_controls_workspace_is_not_readable_from_a_later_grade() {
+    if !suite_d::namespaces_available() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    // The first task runs its control; the second task's only hidden test
+    // looks for that control's workspace.
+    let corpus = corpus(
+        dir.path(),
+        &[Variant::Plain, Variant::ReadsControlWorkspace],
+    );
+    let mut config = config(dir.path(), corpus, ControlScript::default(), u64::MAX);
+    config.settings.providers.truncate(1);
+    let run = anchor::run(&config, HOST).unwrap();
+    let by_id = |id: &str| run.report.tasks.iter().find(|t| t.id == id).unwrap();
+    assert_eq!(by_id("cargo-0").terminal, AnchorTerminal::Fail);
+    assert_eq!(
+        by_id("cargo-0").controls.len(),
+        1,
+        "the first task's control ran"
+    );
+    let proof = by_id("cargo-1").insufficiency.as_ref().unwrap();
+    assert!(
+        proof
+            .reference
+            .values()
+            .all(|o| *o == HiddenOutcome::Passed),
+        "the first task's control workspace is gone before the next grade: {:?}",
+        proof.reference
+    );
+    assert_eq!(
+        proof.validate(),
+        Err(InsufficiencyRefused::TreeAlreadyPasses)
+    );
+}
+
+/// Re-executed by `a_git_the_clone_carries_is_never_the_one_run` with `PATH`
+/// holding an empty entry, which resolves against a child's working
+/// directory: the clone, for every git child preparation runs.
+#[test]
+#[ignore = "re-executed with a poisoned PATH by a_git_the_clone_carries_is_never_the_one_run"]
+fn git_children_run_in_the_clone_with_an_empty_path_entry() {
+    let Some(dir) = std::env::var_os("EIDNARA_ANCHOR_GIT_PROBE") else {
+        return;
+    };
+    let dir = PathBuf::from(dir);
+    assert!(
+        std::env::split_paths(&std::env::var_os("PATH").unwrap()).any(|p| !p.is_absolute()),
+        "the probe runs with a relative PATH entry"
+    );
+    let corpus: AnchorCorpus =
+        serde_json::from_slice(&std::fs::read(dir.join("corpus.json")).unwrap()).unwrap();
+    let config = config(&dir, corpus, ControlScript::default(), u64::MAX);
+    let run = anchor::run(&config, PREPARING_HOST).unwrap();
+    let carrier = run.report.tasks.iter().find(|t| t.id == "cargo-0").unwrap();
+    assert_eq!(
+        carrier.terminal,
+        AnchorTerminal::Skipped(RealHistorySkip::MissingCutoffEvidence),
+        "the row was prepared, so git children ran inside its clone"
+    );
+    assert!(
+        !dir.join(GIT_RAN).exists(),
+        "the git the clone carries was run from inside the clone"
+    );
+}
+
+#[test]
+fn a_git_the_clone_carries_is_never_the_one_run() {
+    let dir = tempfile::tempdir().unwrap();
+    // Built here, under the test's own PATH, so the fixture's git does not
+    // run while the fixture is made; the probe below only prepares it.
+    let corpus = corpus(dir.path(), &[Variant::CarriesAGitExecutable]);
+    std::fs::write(
+        dir.path().join("corpus.json"),
+        serde_json::to_vec(&corpus).unwrap(),
+    )
+    .unwrap();
+    witness(dir.path());
+    assert!(!dir.path().join(GIT_RAN).exists());
+    let mut poisoned = std::ffi::OsString::from(":");
+    poisoned.push(std::env::var_os("PATH").unwrap());
+    let status = Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "git_children_run_in_the_clone_with_an_empty_path_entry",
+            "--ignored",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env("PATH", poisoned)
+        .env("EIDNARA_ANCHOR_GIT_PROBE", dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success(), "the probe failed: {status}");
 }

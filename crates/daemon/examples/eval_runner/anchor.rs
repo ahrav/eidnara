@@ -214,8 +214,10 @@ fn git(dir: &Path, args: &[&str], charges: &mut Charges) -> Result<Option<String
 }
 
 /// `git` in `dir` and nowhere else, under no configuration but its own: the
-/// environment is cleared (only `PATH` crosses), so no repository-selection
-/// variable (`GIT_DIR`, `GIT_WORK_TREE`, `GIT_INDEX_FILE`) redirects it, no
+/// environment is cleared (only `PATH` crosses, its absolute entries alone,
+/// so a `git` the clone itself carries is never the one run from inside it
+/// through an empty or relative entry), so no repository-selection variable
+/// (`GIT_DIR`, `GIT_WORK_TREE`, `GIT_INDEX_FILE`) redirects it, no
 /// `GIT_CONFIG_*` injection reshapes a checkout, and the user's and
 /// system's configuration are not read.
 fn git_command(dir: &Path, args: &[&str]) -> Command {
@@ -227,7 +229,8 @@ fn git_command(dir: &Path, args: &[&str]) -> Command {
         .env("GIT_CONFIG_GLOBAL", "/dev/null")
         .env("GIT_CONFIG_NOSYSTEM", "1");
     if let Some(path) = std::env::var_os("PATH") {
-        command.env("PATH", path);
+        let absolute = std::env::split_paths(&path).filter(|entry| entry.is_absolute());
+        command.env("PATH", std::env::join_paths(absolute).unwrap_or_default());
     }
     command
 }
@@ -1010,6 +1013,9 @@ fn control(run: &ControlRun<'_>, charges: &mut Charges) -> Result<NoRepositoryCo
             charges,
         )?
     };
+    // The workspace sits outside the private root, where a later grade could
+    // read the patch it holds; it is gone before anything else is graded.
+    std::fs::remove_dir_all(&workspace)?;
     let terminal = hidden_terminal(
         prepared.hidden.iter().map(|(name, _)| name.as_str()),
         &hidden,
