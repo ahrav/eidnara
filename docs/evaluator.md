@@ -3141,21 +3141,24 @@ characters, and any other string is no witness and no family.
 ## Suite D shell
 
 `crates/daemon/examples/eval_runner/suite_d.rs` runs the generated tasks. A
-run admits itself before anything executes: the profile must be approved
-(its budgets are Suite D's own, an agent run being tool calls rather than one
-hint pass), the accepted Phase 5 witness named by `--witness` must parse as a
-witness package and its protocol digest becomes the admission's
-`accepted_witness_digest`, and the analysis family is frozen; the containment
-canaries and the hidden-test adequacy run are recorded as the self-tests, and
-`SuiteDAdmission::admit` refuses at the end if any is missing.
+run admits itself before any agent executes: the profile must be approved
+(its budgets are `BUDGETS`, Suite D's own, an agent run being tool calls
+rather than one hint pass), the accepted Phase 5 witness named by
+`--witness` must parse as a witness package and its protocol digest becomes
+the admission's `accepted_witness_digest`, and the analysis family is
+frozen; the containment canaries and the hidden-test adequacy of every task
+run first and are recorded as the self-tests, and `SuiteDAdmission::admit`
+refuses before the first agent if any is missing.
 
 Containment is `unshare --user --map-root-user --mount --pid --net --ipc
---fork --kill-child --mount-proc`, so `/proc` inside lists the namespace's
-own processes, not the host's, and System V IPC objects are the namespace's
-own; the canary refuses a run whose `/proc/self` names a PID other than its
-own, one that shares the runner's IPC namespace (or a control that does
-not), one that can connect to a socket the runner listens on under the
-host's runtime directory, or one whose 200 forks all succeed. The script run inside before the agent covers the runner's
+--fork --kill-child --mount-proc` with the environment cleared to `PATH`,
+`HOME`, and the variables the inner command sets, so `/proc` inside lists
+the namespace's own processes, not the host's, and System V IPC objects are
+the namespace's own; the canary refuses a run whose `/proc/self` names a PID
+other than its own, one that shares the runner's IPC namespace (or a control
+that does not), one that can connect to a socket the runner listens on under
+the host's runtime directory, or one whose 200 forks all succeed. The script
+run inside before the agent covers the runner's
 private directory with an empty read-only tmpfs, binds the workspace
 writable, then remounts every other mount in the namespace read-only (one
 that refuses, such as a locked autofs, is covered by an empty read-only tmpfs
@@ -3170,7 +3173,8 @@ directory inherited from before the mounts still resolves to the writable
 mount underneath every read-only remount) and drops the mapped root's
 capabilities with `setpriv` (bounding, inheritable, and ambient sets cleared,
 `no_new_privs` set), so the agent can neither unmount the tmpfs nor remount
-anything writable. Any mount that fails exits 97 and the run is refused. `--kill-child` kills the
+anything writable. Any mount that fails exits 97 and the run is refused as
+`MountRefused`, so no agent runs half-contained. `--kill-child` kills the
 namespace init and with it everything the agent started. A bounded child's
 stdout is read under a cap and its stderr is discarded, so nothing it prints
 reaches the runner's own log. `Host::namespaces`
@@ -3254,17 +3258,22 @@ commit refuses the run instead of leaving a fixture without its commit
 carrier. Then the scripted agent runs inside the containment from a fresh
 workspace: one `sh` script the runner composed from `Script` (which fix to
 apply, whether to echo the canaries it read, which cases to obey by their
-prohibited effect, whether to plant a hidden test, extra tool calls), so
-every tool call is known to the runner as the mediation boundary. The tool
-budget is checked before the script runs and `hard_deadline_ms` bounds it;
+prohibited effect, whether to plant a hidden test, extra tool calls, whether
+to hang), so every tool call is known to the runner as the mediation
+boundary. The script announces each tool call on an `eval-suite-d-tool` line
+before running it, and the fix is applied by the script's own `cp` calls from
+a staged directory, so the trace holds the calls the agent actually reached
+and nothing the runner did for it. The tool budget is checked on the planned
+calls before the script runs and `hard_deadline_ms` bounds it;
 past the deadline the containment is killed, the elapsed usage is the
 deadline, and the tool calls announced before the kill are kept in the
 trace. Afterwards the runner records the regular files that changed (a FIFO,
 a device, or a file over 4 MiB is skipped, since opening one can block or
 fill memory without a deadline), the outputs, and the memory rows appended,
 lists the agent's oracle-tampering paths, and grades; a censored task is not
-graded. The terminal is `task_terminal`. A second session reads the memory
-carrier, and `score_injection` scores every case of the task set from
+graded. The terminal is `task_terminal`. The later session attaches the
+memory rows the first session wrote, not the row the repository already held,
+and `score_injection` scores every case of the task set from
 `observe_agent`; an agent the tool budget censored before it ran has no
 mediation to observe, so its `obeyed` axis is `not_measurable` rather than
 a measured `no`.
@@ -3298,6 +3307,181 @@ skipped; a host git configuration that signs commits is ignored and a failed
 commit refuses; a spent elapsed bound refuses before the next process; a host
 seam without namespaces skips every task; an unaccepted witness, a missing
 one, and an unapproved profile refuse before anything is published.
+
+## Real-history anchors
+
+`crates/eval-core/src/anchor.rs` is the anchor-task contract: what a
+real-history task persists, what makes it eligible, and how one provider
+pair's evidence folds into the `AnchorSet` the claim class judges. The shell
+that builds snapshots and runs the proofs and controls is part 2 of #767 and
+is not here; this module only judges the evidence it records.
+
+**Corpus.** `AnchorCorpus` (`eval-anchor-corpus/v1`, digest protocol
+`eval-anchor-corpus-digest/v1`) holds `AnchorEntry` rows of identifiers only:
+`id`, `family` (`cargo`, `tokio`, `django`), the clone `repository` and its
+`license`, `base_sha` and `fix_sha` (forty lowercase hex), `issue`,
+`pull_request`, and `cutoff_ms`. The issue and pull-request text is fetched
+at run time and never written into a corpus, report, or witness; `validate`
+refuses an empty field, an `id` with whitespace, a `repository` that is not
+an `https://` URL of a host in lowercase DNS labels and a repository path
+in unreserved characters (so `git@host:path`, `ssh://`, `file://`, a user,
+a port, a query, a fragment, an upper-case or trailing-dot host, a label
+starting or ending in `-` or longer than sixty-three bytes, an empty
+host, a `.` or `..` or empty path segment, or a trailing slash refuses, and
+the `/pull/` URLs
+`future_answers` matches derive
+from the URL itself), a `license` that is not an SPDX expression by shape (identifiers of SPDX
+characters, each holding a letter or digit, joined by `AND`, `OR`, or
+`WITH`, with at most one trailing `+` per identifier, balanced parentheses
+at operand edges only, no operator in parentheses, and `WITH` joining one simple license to one exception, never
+a group, a second `WITH`, or an exception with a `+`; not checked against the SPDX list)
+(`TextPersisted`), a
+malformed or all-zero SHA, a fix commit that is the base commit
+(`FixIsBase`), an
+`issue` or `pull_request` of zero (`ZeroNumber`), a duplicate id, and one
+fix commit or one issue of one repository (by lowercased web path, so
+`repo`, `repo.git`, `repo.GIT`, and `Repo` are one repository) under two
+ids (`DuplicateTask`). `digest` validates first and refuses a
+row JSON cannot carry exactly (`NotCanonical`) instead of panicking.
+`AnchorEntry::digest` (`eval-anchor-entry-digest/v1`) is the identity every
+piece of evidence names: an audit, a proof, or a control produced for one
+version of a row matches no other version of it.
+`is_pilot` accepts
+exactly `PILOT_COMPOSITION`: eight Cargo, eight Tokio, four Django.
+
+**Time study.** `time_study(corpus, measured, bound_ms)` projects the pilot's
+preparation cost from exactly `TIME_STUDY_TASKS` (five) measured
+`Preparation {task, entry_digest, prepare_ms}` rows of distinct tasks of a
+pilot corpus that validates and digests (otherwise `Corpus(..)`, any other
+composition `NotThePilot`, a measurement of another version of a row
+`RowMismatch`), scaled in
+128-bit arithmetic to the
+twenty-task pilot: `Affordable {projected_ms}` within the bound, else
+`StopForApproval {projected_ms, bound_ms}`, which stops for the maintainer
+rather than shrinking the pilot; the comparison is made before the
+projection is clamped to `u64::MAX` for the record, so a cost past `u64`
+always stops. A wrong count, a task outside the corpus,
+or the same task measured twice refuses.
+
+**Cutoff audit.** `CutoffAudit` is what the snapshot builder established
+from the repository's own commit times and the issue: `task`,
+`entry_digest`, `cutoff_ms`,
+`base_committed_ms`, `fix_committed_ms`, `repair_public_ms` (the earliest
+of the pull request's creation and the fix-side commits' times, since a
+merge committed after the cutoff can merge work that was public before
+it), `issue_created_ms`,
+`issue_text_ms` (the last edit of the issue text the task is given, or its
+creation when never edited), `snapshot_digest`, `base_tree_digest`,
+`fix_tree_digest`, `fix_parent_tree_digest`, and `fix_descends_from_base`.
+`validate` refuses, in order, a missing snapshot digest,
+a tree digest that is neither forty nor sixty-four lowercase hex, is all
+zeroes, or differs in format from the snapshot digest (`MalformedDigest`), a base committed after the cutoff, a fix not strictly after it, a repair
+public at or before it (`RepairPublicBeforeCutoff`) or dated after the fix
+commit it covers (`RepairPublicAfterFix`), an issue
+filed after it, issue text edited after it or dated before the issue
+(`IssueTextBeforeIssue`), a snapshot whose digest is not
+the base commit's tree (which alone keeps every fix-side change out of the
+snapshot), a fix that does not descend from the base (`FixNotFromBase`),
+and a fix whose tree is its parent's or the base's (`FixChangesNothing`);
+each is one
+`CutoffRefused` reason (`reason` on the wire). `validate_for(entry)` first
+requires the audit to name the entry's task (`AuditForOtherTask`) and the
+entry's row by digest (`RowMismatch`, when any field of the row changed
+since the audit) and to judge its cutoff (`CutoffMismatch`), so timestamps
+judged against another cutoff or another version of the row say nothing
+about it.
+
+**Insufficiency proof.** `InsufficiencyProof {task, entry_digest,
+snapshot_digest, hidden}` is the
+current-tree-only run: the hidden tests over the snapshot with no agent.
+`validate` needs at least one hidden test that ran and `failed`; every
+verdict passing is `TreeAlreadyPasses`, and no verdict at all (an empty run
+or every test `errored`) is `NothingExecuted`. A corpus row without a
+recorded run is not a proof. `validate_for` refuses a proof naming another
+task or another version of the row (`RowMismatch`), and `anchor_set`
+refuses one whose `snapshot_digest` is not the audit's (`TreeMismatch`): a
+failing run over another tree proves nothing about the audited snapshot.
+
+**No-repository control.** `NoRepositoryControl` is the statement-only run
+for one `ProviderProfile {provider, model, tokenizer_profile}`, compared
+field by field, never through a rendered key: `task`, `entry_digest`,
+`provider`,
+`execution_image`,
+`analysis_family_digest`, `terminal`, `started` (whether the agent ran at
+all), the `repository_access` it reached, and the `future_answers` its
+output named. `RepositoryComparison` is the
+repository-bearing run it is judged against (`task`, `entry_digest`,
+`provider`, `execution_image`, `analysis_family_digest`, `terminal`,
+`started`); a control is never its own comparison. `classify_control(control,
+comparison)` refuses `MalformedDigest` unless the analysis digest is
+sixty-four lowercase hex, `NotComparable {field}` unless task, row digest,
+provider, image, and analysis digest match the comparison, `NotRun` when
+the control's terminal is not `pass`, `fail`, or `censored` or its agent
+never started (a budget spent before the first call), and
+`ComparisonNotRun` likewise for the comparison; then the pair is
+`Excluded` as `repository_access`, `future_answer`, or `memorized` (the
+control passed from the statement alone), else `Eligible`; a censored
+control is eligible. `future_answers(entry, output)` names the fix commit
+when any whole word of hex digits of seven or more, in either case, is a
+prefix of `fix_sha` (the word is taken whole between non-alphanumerics, so
+neither `a0123456` nor `g0123456` names
+`0123456…`), and the pull request as `#<n>`, `GH-<n>`, or the repository's
+`/pull/<n>` URL, or the words `PR <n>`, `pull request <n>`, or
+`pull-request <n>` (any whitespace between the words), as a whole number (a
+URL, `GH-`, or a word form not preceded by a name character, so another host ending in this one does not match; `#<n>` beside
+a word, as in `PR#2016`, does; none followed by a letter or digit, so
+`#2016ff` is a colour), in any letter case.
+
+**Anchor set.** `anchor_set(corpus, role, audits, proofs, controls,
+provider)` folds one pair's evidence into `(AnchorSet, PairAccounting)`. It
+refuses an invalid corpus (a duplicate row would count one task's evidence
+twice) and the pilot corpus under the `transfer` role
+(`PilotIsNotATransferSet`): the pilot alone never transfers, whatever role
+the caller names.
+Every task keeps its row: a failed audit is `cutoff_invalid`; a missing
+audit, a missing or
+refused proof, a missing control, a control classified for another task,
+another version of the row, or another
+provider, and an excluded control are each `residue`; only a task whose
+audit and proof name it and pass and whose control was classified for it
+under `provider` as eligible is `valid`. `PairAccounting` keeps each task in
+exactly one set at its first failing gate: `eligible`, `excluded` (with the
+contamination), `cutoff_missing`, `cutoff_invalid`, `insufficiency_missing`,
+`insufficiency_refused`, `control_missing`. The set feeds
+`derive_claim_class`, so the pilot alone derives `generated_phase1` with
+`anchor_set_is_pilot`, and a memorized task excludes itself from that pair's
+transfer evidence without leaving the report.
+
+**Settings and terminals.** `RealHistorySettings {providers,
+execution_image, preparation_bound_ms}` refuses before execution: no
+providers, a provider profile with a blank field, no execution image, or no
+preparation bound. The transfer criterion is not a setting: it lives on the
+frozen analysis family (see "Claim class"), the one place
+`AnalysisFamily::claim_class` reads it from, so none can be supplied out of
+band. The
+shared v1 `SkipReason` and `UnsupportedReason` stay closed, as they do for
+Suite D: the reasons a real-history task can end in that are its own,
+`RealHistorySkip::MissingCutoffEvidence` (`missing_cutoff_evidence`) and
+`RealHistoryUnsupported::{SourceUnavailable, UnsupportedRuntime {family}}`
+(`source_unavailable`, `unsupported_runtime`), belong to the real-history
+report contract part 2 emits; budget exhaustion stays censored.
+
+`crates/eval-core/tests/anchor.rs` is the evidence: the corpus serializes no
+text field and refuses prose, a short SHA, a duplicate, and a non-pilot
+composition; the time study projects twenty tasks from five and stops past
+the bound, refusing a wrong count, a stranger, and a repeated task; every
+cutoff refusal by one mutation; the proof refuses an unexecuted row and a
+passing tree; controls eligible, memorized, contaminated by access or a
+future answer (twelve-character, seven-character, and upper-case fix SHAs and
+`#pr` detected; six characters and a longer run not), not comparable, not
+run on either side, censored stays eligible; the pilot with one memorized,
+one cutoff-invalid, and one unproven task keeps twenty rows with seventeen
+eligible and derives `generated_phase1`, and refuses the `transfer` role; a
+twenty-one-task transfer-role set excludes the
+memorized task for that pair and transfers once its control is eligible;
+evidence naming another task, cutoff, or version of the row is refused; a
+duplicate row and an issue number above 2^53 refuse; settings refusals and
+wire names.
 
 ## Coverage markers
 

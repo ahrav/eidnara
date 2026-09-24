@@ -711,6 +711,9 @@ Open questions:
 - `$HOME` is read-only inside, not masked: the agent can read the host user's
   files under it (dotfiles, credentials) even though it cannot write them or
   reach the network. A masked home needs its own tmpfs. (needs human input)
+- The escape verdict is two 300 ms samples of the alive file after the canary
+  child exited; a slow host could read a live escapee as denied. (needs human
+  input)
 
 ### mtr-injection-cases-present-and-scored-per-stage
 

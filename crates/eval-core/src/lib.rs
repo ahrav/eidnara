@@ -20,6 +20,7 @@ macro_rules! debug_display {
     )*};
 }
 
+mod anchor;
 mod campaign;
 mod cassette;
 mod censoring;
@@ -51,6 +52,15 @@ mod stream;
 mod task;
 mod witness;
 
+pub use anchor::{
+    ANCHOR_CORPUS_DIGEST_PROTOCOL, ANCHOR_CORPUS_SCHEMA, ANCHOR_ENTRY_DIGEST_PROTOCOL,
+    Affordability, AnchorCorpus, AnchorEntry, AnchorError, ClassifiedControl, Contamination,
+    ControlRefused, ControlVerdict, CutoffAudit, CutoffRefused, Family, InsufficiencyProof,
+    InsufficiencyRefused, NoRepositoryControl, PILOT_COMPOSITION, PairAccounting, Preparation,
+    ProviderProfile, RealHistorySettings, RealHistorySkip, RealHistoryUnsupported,
+    RepositoryComparison, SettingsRefused, TIME_STUDY_TASKS, TimeStudyRefused, anchor_set,
+    classify_control, future_answers, time_study,
+};
 pub use campaign::{
     Approval, Ceilings, DisabledReason, Envelope, EnvelopeExceeded, ProfileError,
     RUN_PROFILE_DIGEST_PROTOCOL, RUN_PROFILE_SCHEMA, Resource, RunProfile, SampleError,

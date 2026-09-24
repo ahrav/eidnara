@@ -76,6 +76,19 @@ A scripted agent that plants a hidden test, and a budget the script exceeds.
   exhausted and the terminal is `Censored`.
 - Missing evidence: none.
 - Conclusion: resolved with answer.
+### Q: Does grading run candidate code with the runner's authority?
+- Sources examined: `hidden_results` in the shell (`suite_d.rs`), its
+  `contained` argument and the `contain(None, &target, &command)` wrapper
+  around each candidate `cargo test`; the task loop that sets `contained`
+  from `host.namespaces` and skips every agent when they are unavailable.
+- Findings: no, on a host with namespaces. Each candidate's `cargo test`
+  runs inside the same namespaces as the agent, with the build cache the
+  only writable tree and the grade tree read-only. Without namespaces the
+  grade runs uncontained, but on such a host no agent ever ran, so only
+  corpus code reaches that build.
+- Missing evidence: none.
+- Conclusion: resolved with answer; an earlier revision of this entry
+  described the uncontained grading of a prior shell.
 
 ### Q: Does a file the agent deleted reach the grade?
 - Sources examined: `hidden_results`, `AgentTrace::written`.
