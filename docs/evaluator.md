@@ -3536,9 +3536,14 @@ other file of the fix tree, a module under a `tests/` subdirectory and a
 deletion included, is what a memorizing control reproduces. The clone is
 removed once the snapshot and fix tree are extracted, and the store is
 charged again after every preparation and every task. After the first five
-preparations `time_study` projects the pilot; the corpus must be the pilot
+preparations that produced a snapshot (a clone or fetch that failed fast
+says nothing about the pilot's cost, so `source_unavailable` rows are not
+measured, and fewer than five usable preparations refuse the study with the
+count) `time_study` projects the pilot; the corpus must be the pilot
 composition for the study to say anything, and `StopForApproval` returns
-`RunError::StopForApproval` with nothing published.
+`RunError::StopForApproval` with nothing published. The commit times are the
+repository's own: the corpus is maintainer-curated identifiers of trusted
+upstreams, and a forge-side timestamp is not yet a seam.
 
 Per task (an `AnchorTerminal`: the graded outcomes plus the real-history
 contract's own `RealHistorySkip` and `RealHistoryUnsupported`, the shared
@@ -3547,9 +3552,11 @@ missing is `unsupported (source_unavailable)`; a Django task is
 `unsupported (unsupported_runtime { django })`; an audit that
 `validate_for(entry)` refuses is `skipped (missing_cutoff_evidence)` with
 the refusal recorded and no run. An audited task gets the current-tree-only run
-and a reference run: the snapshot copied into a fresh tree and its hidden
-tests run with no agent, then the fix tree copied into a fresh tree and the
-tests run again. Both go through Suite D's `run_hidden` inside the
+and a reference run, in a build cache of its own (the writable mount is
+emptied before each task, so what one task's build scripts and tests left
+there reaches no other): the snapshot copied into a fresh tree and its
+hidden tests run with no agent, then the fix tree copied into a fresh tree
+and the tests run again. Both go through Suite D's `run_hidden` inside the
 containment (`contain`), with the tree read-only, the build cache the only
 writable mount, and `tasks/` (every clone, snapshot, and fix tree) covered
 by an empty tmpfs, so a build script or test in the graded tree reads no
@@ -3630,7 +3637,8 @@ it is removed, four extracted trees refusing while the first clone still
 exists, and an exhausted campaign clock refusing before the second clone; a base whose failing build script the fix deletes
 proven insufficient because the reference is the fix commit's whole tree,
 a test file an intervening commit added kept out of the fix's hidden tests,
-and a symlink the fix added under `tests/` not read as one; the host seams
+and a symlink the fix added under `tests/` not read as one; five rows that
+fail their fetch fast not counted as the time study's sample; the host seams
 given the campaign time left and a named pull request without its creation
 time `source_unavailable`; two paths that differ only in bytes UTF-8 cannot
 carry digesting apart; missing settings, a missing witness, a climbing id, and a host

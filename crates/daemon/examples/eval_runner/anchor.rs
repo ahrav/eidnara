@@ -896,7 +896,9 @@ pub fn run(config: &Config, host: Host) -> Result<Run, RunError> {
     std::fs::create_dir_all(&layout.tasks)?;
 
     // The time study: prepare the first tasks, measure, project, and stop
-    // for approval before the rest is paid for.
+    // for approval before the rest is paid for. Only a preparation that
+    // produced a snapshot is a measurement; a clone or fetch that failed fast
+    // says nothing about what the pilot costs.
     let mut prepared: BTreeMap<String, Result<Prepared, AnchorTerminal>> = BTreeMap::new();
     let mut measured = Vec::new();
     let mut tasks = Vec::new();
@@ -906,7 +908,8 @@ pub fn run(config: &Config, host: Host) -> Result<Run, RunError> {
         let prepare_ms = u64::try_from(started.elapsed().as_millis()).unwrap();
         charges.store_bytes(&layout.root)?;
         charges.elapsed()?;
-        if measured.len() < eval_core::TIME_STUDY_TASKS {
+        let sampling = measured.len() < eval_core::TIME_STUDY_TASKS;
+        if sampling && outcome.is_ok() {
             measured.push(Preparation {
                 task: entry.id.clone(),
                 entry_digest: entry.digest()?,
@@ -915,14 +918,16 @@ pub fn run(config: &Config, host: Host) -> Result<Run, RunError> {
         }
         prepared.insert(entry.id.clone(), outcome);
         tasks.push((entry, prepare_ms));
-        if measured.len() == eval_core::TIME_STUDY_TASKS
-            && prepared.len() == eval_core::TIME_STUDY_TASKS
+        if sampling
+            && measured.len() == eval_core::TIME_STUDY_TASKS
             && let projected @ Affordability::StopForApproval { .. } =
                 time_study(&config.corpus, &measured, bound)?
         {
             return Err(RunError::StopForApproval(projected));
         }
     }
+    // Fewer than five usable preparations is a study that says nothing;
+    // `time_study` refuses it with the count.
     let affordability = time_study(&config.corpus, &measured, bound)?;
 
     let mut audits = BTreeMap::new();
@@ -965,6 +970,9 @@ pub fn run(config: &Config, host: Host) -> Result<Run, RunError> {
             outcomes.push(outcome);
             continue;
         }
+        // Each task builds in a cache of its own: what one task's build
+        // scripts and tests left in the writable mount reaches no other.
+        fresh_dir(&layout.target)?;
         fresh_dir(&layout.tree)?;
         copy_tree(&ready.snapshot, &layout.tree)?;
         let hidden = grade(

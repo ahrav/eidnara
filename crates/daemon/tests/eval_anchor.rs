@@ -924,15 +924,20 @@ fn the_host_seams_are_given_the_campaign_time_left_and_a_named_pull_request_need
         DEADLINES.fetch_add(1, Ordering::SeqCst);
         clone_local(entry, into, deadline)
     }
+    /// The first row's pull request has no creation time; the others do.
     fn no_pull_request_time(entry: &AnchorEntry, deadline: Duration) -> Option<Fetched> {
         assert!(deadline <= Duration::from_millis(90_000));
+        let fetched = fetch_issue(entry, deadline)?;
         Some(Fetched {
-            pull_request_created_ms: None,
-            ..fetch_issue(entry, deadline)?
+            pull_request_created_ms: fetched
+                .pull_request_created_ms
+                .filter(|_| entry.issue != 100),
+            ..fetched
         })
     }
     let dir = tempfile::tempdir().unwrap();
-    let corpus = corpus(dir.path(), &PLAIN);
+    // Every row an early fix: prepared, never graded.
+    let corpus = corpus(dir.path(), &[]);
     let mut config = config(dir.path(), corpus, ControlScript::default(), u64::MAX);
     config.elapsed_bound_ms = 90_000;
     let host = Host {
@@ -942,15 +947,47 @@ fn the_host_seams_are_given_the_campaign_time_left_and_a_named_pull_request_need
     };
     let run = anchor::run(&config, host).unwrap();
     assert_eq!(DEADLINES.load(Ordering::SeqCst), 20);
-    for task in &run.report.tasks {
-        assert_eq!(
-            task.terminal,
-            AnchorTerminal::Unsupported(RealHistoryUnsupported::SourceUnavailable),
-            "{}: a named pull request without its creation time leaves the repair's publication unestablished",
-            task.id
-        );
-        assert!(task.audit.is_none());
+    let by_id = |id: &str| run.report.tasks.iter().find(|t| t.id == id).unwrap();
+    let unpublished = by_id("cargo-0");
+    assert_eq!(
+        unpublished.terminal,
+        AnchorTerminal::Unsupported(RealHistoryUnsupported::SourceUnavailable),
+        "a named pull request without its creation time leaves the repair's publication unestablished"
+    );
+    assert!(unpublished.audit.is_none());
+    assert_eq!(
+        by_id("cargo-1").terminal,
+        AnchorTerminal::Skipped(RealHistorySkip::MissingCutoffEvidence),
+        "a row whose pull request time is known is audited"
+    );
+}
+
+#[test]
+fn the_time_study_measures_five_preparations_that_produced_a_snapshot() {
+    static CLONES: AtomicUsize = AtomicUsize::new(0);
+    fn counted_clone(entry: &AnchorEntry, into: &Path, deadline: Duration) -> std::io::Result<()> {
+        CLONES.fetch_add(1, Ordering::SeqCst);
+        clone_local(entry, into, deadline)
     }
+    let dir = tempfile::tempdir().unwrap();
+    // The first five rows fail their fetch fast; the study must look past
+    // them before it projects the pilot's cost.
+    let corpus = corpus(dir.path(), &[Variant::MissingIssue; 5]);
+    let config = config(dir.path(), corpus, ControlScript::default(), 1);
+    let host = Host {
+        clone: counted_clone,
+        ..PREPARING_HOST
+    };
+    match anchor::run(&config, host) {
+        Err(RunError::StopForApproval(Affordability::StopForApproval { .. })) => {}
+        Err(other) => panic!("expected a stop for approval, got {other:?}"),
+        Ok(_) => panic!("expected a stop for approval, got a run"),
+    }
+    assert_eq!(
+        CLONES.load(Ordering::SeqCst),
+        10,
+        "five unavailable rows are not a sample; the study stops after the fifth row that prepared"
+    );
 }
 
 #[test]
