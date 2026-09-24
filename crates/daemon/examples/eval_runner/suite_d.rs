@@ -1324,6 +1324,15 @@ pub fn run(config: &Config, host: Host) -> Result<Run, RunError> {
     let private = root.path().join("private");
     std::fs::create_dir_all(&private)?;
     let deadline = Duration::from_millis(config.budgets.hard_deadline_ms);
+    // The corpus is generated whole, so the count is bounded before that,
+    // for a `Config` built in code as for the flag.
+    if config.tasks > MAX_TASKS {
+        return Err(std::io::Error::other(format!(
+            "{} tasks is over the limit of {MAX_TASKS}",
+            config.tasks
+        ))
+        .into());
+    }
     let tasks = std::num::NonZeroU32::new(config.tasks)
         .expect("the approved profile refuses zero tasks per world");
     let corpus = generate_tasks(SEED, tasks);
@@ -1515,6 +1524,8 @@ pub fn run(config: &Config, host: Host) -> Result<Run, RunError> {
             "tasks": config.tasks,
             "task_generator_version": TASK_GENERATOR_VERSION,
             "script": config.script,
+            "witness": admission.accepted_witness_digest,
+            "contained": contained,
         }),
         &[std::env::current_exe().unwrap()],
     );

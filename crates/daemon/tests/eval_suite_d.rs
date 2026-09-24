@@ -678,6 +678,16 @@ fn a_contained_task_is_judged_by_hidden_tests_the_agent_never_sees() {
         eval_core::TASK_GENERATOR_VERSION,
         "the identity names the generator that produced the tasks, not the world generator"
     );
+    assert_eq!(
+        manifest.run_identity.scenario["witness"],
+        report.admission.accepted_witness_digest.clone().unwrap(),
+        "the identity binds the accepted witness"
+    );
+    assert_eq!(
+        manifest.run_identity.scenario["contained"],
+        serde_json::json!(true),
+        "the identity says the agents ran contained"
+    );
     // The peaks and the elapsed times are measurements; two runs of one
     // identity must agree on the result digest without them.
     let mut remeasured = published.clone();
@@ -923,6 +933,11 @@ fn a_host_without_namespaces_skips_every_task_with_no_containment() {
             .markers
             .contains("mtr_suite_d_no_containment_skips")
     );
+    assert_eq!(
+        run.manifest.run_identity.scenario["contained"],
+        serde_json::json!(false),
+        "a skipped run is not the same identity as a contained one"
+    );
     assert!(
         !run.report
             .markers
@@ -1058,6 +1073,20 @@ fn a_wrong_fix_the_task_does_not_have_refuses_before_anything_runs() {
         started.elapsed() < Duration::from_secs(5),
         "refused before adequacy ran"
     );
+    // The same bound the flag applies, for a `Config` built in code.
+    let mut too_many = config.clone();
+    too_many.script = Script::default();
+    too_many.tasks = suite_d::MAX_TASKS + 1;
+    too_many.publish = dir.path().join("too-many");
+    let started = std::time::Instant::now();
+    let refused = suite_d::run(&too_many, NO_NAMESPACES)
+        .err()
+        .map(|e| e.to_string());
+    assert!(
+        refused.as_deref().is_some_and(|m| m.contains("tasks")),
+        "a corpus over the limit is refused before it is generated: {refused:?}"
+    );
+    assert!(started.elapsed() < Duration::from_secs(5));
 }
 
 #[test]
