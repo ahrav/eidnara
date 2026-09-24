@@ -3496,9 +3496,13 @@ wire names.
 `crates/daemon/examples/eval_runner/anchor.rs` runs real-history anchors
 through three host seams: `Host::clone` puts a repository at its clone URL
 into a directory, `Host::fetch` returns the issue text, its creation and
-last-edit times, and the pull request's creation time when known, at run
-time, and `Host::namespaces` says whether the host can create the
-containment's namespaces; nothing fetched is persisted. No subcommand exists
+last-edit times, and the pull request's creation time, at run time, and
+`Host::namespaces` says whether the host can create the containment's
+namespaces; nothing fetched is persisted. The clone and the fetch are given
+the campaign time left and must return within it (the shell cannot
+interrupt them); a row that names a pull request whose creation time the
+host did not supply is `source_unavailable`, since the repair's publication
+is then unestablished. No subcommand exists
 yet; the daemon test drives the shell against local repositories.
 `AnchorEntry::validate` refuses an id that is not one plain path component
 (`NotAPathComponent`), because the id names the task's directories. `run`
@@ -3518,13 +3522,16 @@ request's creation, when fetched) for `repair_public_ms`, `git archive` of
 the base into the snapshot and of the whole fix commit into the fix tree,
 each piped into `tar` under a deadline (bytes, symlinks, and executable
 modes kept), the snapshot, fix, and fix-parent tree digests
-(`eval-anchor-snapshot/v2`: each file's bytes and executable bit and each
-symlink's target, the parent archived into a scratch directory and
-discarded), and the `CutoffAudit` with the row's `entry_digest`. The patch
+(`eval-anchor-snapshot/v3`: each file's bytes and executable bit and each
+symlink's target, keyed by path bytes losslessly, UTF-8 as `u:<path>` and
+anything else as `b:<hex>`, so two names that differ only in bytes UTF-8
+cannot carry stay two entries; the parent archived into a scratch directory
+and discarded), and the `CutoffAudit` with the row's `entry_digest`. The patch
 and the hidden tests are what the fix commit changed against its parent,
 `git diff -z --no-renames` from `fix_sha^` to `fix_sha`, not against the
-base, so intervening history is never the fix: a fix-added file directly
-under `tests/` is a hidden test and is removed from the fix tree; every
+base, so intervening history is never the fix: a fix-added regular file directly
+under `tests/` is a hidden test and is removed from the fix tree (a symlink
+at such a path is not read through and stays where it is); every
 other file of the fix tree, a module under a `tests/` subdirectory and a
 deletion included, is what a memorizing control reproduces. The clone is
 removed once the snapshot and fix tree are extracted, and the store is
@@ -3622,8 +3629,11 @@ refusing during preparation, a clone larger than the bound refusing before
 it is removed, four extracted trees refusing while the first clone still
 exists, and an exhausted campaign clock refusing before the second clone; a base whose failing build script the fix deletes
 proven insufficient because the reference is the fix commit's whole tree,
-and a test file an intervening commit added kept out of the fix's hidden
-tests; missing settings, a missing witness, a climbing id, and a host
+a test file an intervening commit added kept out of the fix's hidden tests,
+and a symlink the fix added under `tests/` not read as one; the host seams
+given the campaign time left and a named pull request without its creation
+time `source_unavailable`; two paths that differ only in bytes UTF-8 cannot
+carry digesting apart; missing settings, a missing witness, a climbing id, and a host
 without namespaces refusing before execution; the contained grading reaching
 neither the runner's `HOME`, its loopback listener, nor the task material
 under `tasks/` while the test's own loopback works; and the archive pipeline returning within its deadline with

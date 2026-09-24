@@ -796,8 +796,9 @@ Check: `always` - `CutoffAudit::validate_for` refuses an audit for another
   `InsufficiencyProof::validate` refuses `NothingExecuted`,
   `ReferenceDoesNotPass` (some hidden test does not pass on the fix tree), and
   `TreeAlreadyPasses`; a task without a valid proof is `Indeterminate` and runs
-  no control; the snapshot digest (`eval-anchor-snapshot/v2`) covers each
-  file's bytes and executable bit and each symlink's target, and the same
+  no control; the snapshot digest (`eval-anchor-snapshot/v3`) covers each
+  file's bytes and executable bit and each symlink's target by lossless path
+  key, and the same
   digest is read for the fix and its parent; the hidden tests run through
   Suite D's `run_hidden` inside the containment, the tree read-only. Must hold
   for every task, so `always`.

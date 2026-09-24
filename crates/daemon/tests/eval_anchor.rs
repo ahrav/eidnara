@@ -78,6 +78,9 @@ enum Variant {
     /// The tree carries a megabyte that git stores in a few bytes, so every
     /// extracted tree is large and the clone is not.
     BulkyTree,
+    /// The fix adds `tests/planted.rs` as a symlink to a file outside the
+    /// repository.
+    SymlinkedHiddenTest,
 }
 
 fn git(dir: &Path, args: &[&str], seconds: i64) -> String {
@@ -170,6 +173,9 @@ fn history(dir: &Path, index: u32, variant: Variant) -> (String, String) {
         std::fs::create_dir_all(helper.parent().unwrap()).unwrap();
         std::fs::write(helper, "pub fn helper() {}\n").unwrap();
     }
+    if variant == Variant::SymlinkedHiddenTest {
+        std::os::unix::fs::symlink("/etc/hostname", dir.join("tests/planted.rs")).unwrap();
+    }
     let fix_seconds = if variant == Variant::EarlyFix {
         CUTOFF_SECONDS - 60
     } else {
@@ -185,7 +191,7 @@ fn history(dir: &Path, index: u32, variant: Variant) -> (String, String) {
 /// to the fixture directory it names under `LOCAL_HOST`.
 const LOCAL_HOST: &str = "https://local.invalid";
 
-fn clone_local(entry: &AnchorEntry, into: &Path) -> std::io::Result<()> {
+fn clone_local(entry: &AnchorEntry, into: &Path, _deadline: Duration) -> std::io::Result<()> {
     let local = entry
         .repository
         .strip_prefix(LOCAL_HOST)
@@ -201,7 +207,7 @@ fn clone_local(entry: &AnchorEntry, into: &Path) -> std::io::Result<()> {
     }
 }
 
-fn fetch_issue(entry: &AnchorEntry) -> Option<Fetched> {
+fn fetch_issue(entry: &AnchorEntry, _deadline: Duration) -> Option<Fetched> {
     (entry.issue != 404).then(|| Fetched {
         issue_text: format!(
             "`sum` is wrong for task {}; make it return the sum.",
@@ -209,7 +215,8 @@ fn fetch_issue(entry: &AnchorEntry) -> Option<Fetched> {
         ),
         issue_created_ms: (CUTOFF_SECONDS - 7_200) * 1_000,
         issue_text_ms: (CUTOFF_SECONDS - 7_200) * 1_000,
-        pull_request_created_ms: None,
+        // Opened after the cutoff and before the fix landed.
+        pull_request_created_ms: Some((CUTOFF_SECONDS + 1_800) * 1_000),
     })
 }
 
@@ -767,9 +774,9 @@ fn the_store_is_charged_while_preparing_not_after_the_pilot() {
 #[test]
 fn the_clone_is_charged_before_it_is_removed() {
     static CLONES: AtomicUsize = AtomicUsize::new(0);
-    fn bulky_clone(entry: &AnchorEntry, into: &Path) -> std::io::Result<()> {
+    fn bulky_clone(entry: &AnchorEntry, into: &Path, deadline: Duration) -> std::io::Result<()> {
         CLONES.fetch_add(1, Ordering::SeqCst);
-        clone_local(entry, into)?;
+        clone_local(entry, into, deadline)?;
         // Untracked, so no snapshot or fix tree holds it: only the clone does.
         std::fs::write(into.join("bulk.bin"), vec![0u8; 4 << 20])
     }
@@ -799,9 +806,9 @@ fn the_clone_is_charged_before_it_is_removed() {
 #[test]
 fn every_extracted_tree_is_charged_while_the_clone_still_exists() {
     static CLONES: AtomicUsize = AtomicUsize::new(0);
-    fn counted_clone(entry: &AnchorEntry, into: &Path) -> std::io::Result<()> {
+    fn counted_clone(entry: &AnchorEntry, into: &Path, deadline: Duration) -> std::io::Result<()> {
         CLONES.fetch_add(1, Ordering::SeqCst);
-        clone_local(entry, into)
+        clone_local(entry, into, deadline)
     }
     let dir = tempfile::tempdir().unwrap();
     let corpus = corpus(dir.path(), &[Variant::BulkyTree; 5]);
@@ -830,9 +837,9 @@ fn every_extracted_tree_is_charged_while_the_clone_still_exists() {
 #[test]
 fn the_elapsed_bound_is_charged_while_preparing() {
     static CLONES: AtomicUsize = AtomicUsize::new(0);
-    fn counted_clone(entry: &AnchorEntry, into: &Path) -> std::io::Result<()> {
+    fn counted_clone(entry: &AnchorEntry, into: &Path, deadline: Duration) -> std::io::Result<()> {
         CLONES.fetch_add(1, Ordering::SeqCst);
-        clone_local(entry, into)
+        clone_local(entry, into, deadline)
     }
     let dir = tempfile::tempdir().unwrap();
     let corpus = corpus(dir.path(), &PLAIN);
@@ -864,7 +871,11 @@ fn the_fix_is_its_own_diff_and_its_whole_tree() {
     let dir = tempfile::tempdir().unwrap();
     let corpus = corpus(
         dir.path(),
-        &[Variant::DeletesBuildScript, Variant::IntermediateCommit],
+        &[
+            Variant::DeletesBuildScript,
+            Variant::IntermediateCommit,
+            Variant::SymlinkedHiddenTest,
+        ],
     );
     let mut config = config(dir.path(), corpus, ControlScript::default(), u64::MAX);
     config.settings.providers.truncate(1);
@@ -893,6 +904,78 @@ fn the_fix_is_its_own_diff_and_its_whole_tree() {
     );
     assert!(!proof.hidden.contains_key("unrelated"));
     assert_eq!(intermediate.terminal, AnchorTerminal::Fail);
+    let planted = by_id("cargo-2");
+    let proof = planted.insufficiency.as_ref().unwrap();
+    assert!(
+        !proof.hidden.contains_key("planted"),
+        "a symlink at a fix-added tests/ path is not a hidden test and is never read through"
+    );
+    assert_eq!(proof.hidden.len(), 2);
+}
+
+#[test]
+fn the_host_seams_are_given_the_campaign_time_left_and_a_named_pull_request_needs_its_time() {
+    static DEADLINES: AtomicUsize = AtomicUsize::new(0);
+    fn timed_clone(entry: &AnchorEntry, into: &Path, deadline: Duration) -> std::io::Result<()> {
+        assert!(
+            deadline <= Duration::from_millis(90_000),
+            "the clone is given the campaign time left, got {deadline:?}"
+        );
+        DEADLINES.fetch_add(1, Ordering::SeqCst);
+        clone_local(entry, into, deadline)
+    }
+    fn no_pull_request_time(entry: &AnchorEntry, deadline: Duration) -> Option<Fetched> {
+        assert!(deadline <= Duration::from_millis(90_000));
+        Some(Fetched {
+            pull_request_created_ms: None,
+            ..fetch_issue(entry, deadline)?
+        })
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = corpus(dir.path(), &PLAIN);
+    let mut config = config(dir.path(), corpus, ControlScript::default(), u64::MAX);
+    config.elapsed_bound_ms = 90_000;
+    let host = Host {
+        clone: timed_clone,
+        fetch: no_pull_request_time,
+        ..PREPARING_HOST
+    };
+    let run = anchor::run(&config, host).unwrap();
+    assert_eq!(DEADLINES.load(Ordering::SeqCst), 20);
+    for task in &run.report.tasks {
+        assert_eq!(
+            task.terminal,
+            AnchorTerminal::Unsupported(RealHistoryUnsupported::SourceUnavailable),
+            "{}: a named pull request without its creation time leaves the repair's publication unestablished",
+            task.id
+        );
+        assert!(task.audit.is_none());
+    }
+}
+
+#[test]
+fn the_tree_digest_keeps_paths_that_only_differ_in_bytes_apart() {
+    use std::os::unix::ffi::OsStrExt;
+    let dir = tempfile::tempdir().unwrap();
+    let a = dir.path().join("a");
+    let b = dir.path().join("b");
+    std::fs::create_dir_all(&a).unwrap();
+    std::fs::create_dir_all(&b).unwrap();
+    std::fs::write(a.join(std::ffi::OsStr::from_bytes(b"x\x80")), "same").unwrap();
+    std::fs::write(b.join(std::ffi::OsStr::from_bytes(b"x\x81")), "same").unwrap();
+    assert_ne!(
+        anchor::tree_digest(&a).unwrap(),
+        anchor::tree_digest(&b).unwrap(),
+        "two names that differ only in bytes UTF-8 cannot carry are two entries"
+    );
+    let mut both = a.clone();
+    both.push(std::ffi::OsStr::from_bytes(b"x\x81"));
+    std::fs::write(&both, "same").unwrap();
+    assert_ne!(
+        anchor::tree_digest(&a).unwrap(),
+        anchor::tree_digest(&b).unwrap(),
+        "a tree with both names is not a tree with one"
+    );
 }
 
 #[test]

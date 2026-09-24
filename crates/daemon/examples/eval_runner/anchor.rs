@@ -31,7 +31,7 @@ use super::suite_d::{self, GradeCache, charged_run, contain, run_bounded, run_hi
 
 pub const SIMULATOR_VERSION: &str = "eval-anchor-shell/v1";
 pub const ANCHOR_REPORT_SCHEMA: &str = "eval-anchor-report/v1";
-pub const SNAPSHOT_DIGEST_PROTOCOL: &str = "eval-anchor-snapshot/v2";
+pub const SNAPSHOT_DIGEST_PROTOCOL: &str = "eval-anchor-snapshot/v3";
 pub const REPORT_FILE: &str = "anchor-report.json";
 pub const MANIFEST_FILE: &str = "manifest.json";
 const TOOL_LINE: &str = "eval-anchor-tool";
@@ -52,11 +52,13 @@ pub struct Fetched {
 }
 
 /// The host seams: how a repository is cloned, how an issue is fetched, and
-/// whether the host can create the containment's namespaces.
+/// whether the host can create the containment's namespaces. The clone and
+/// the fetch are given the campaign time left and must return within it;
+/// the shell cannot interrupt them.
 #[derive(Debug, Clone, Copy)]
 pub struct Host {
-    pub clone: fn(&AnchorEntry, &Path) -> std::io::Result<()>,
-    pub fetch: fn(&AnchorEntry) -> Option<Fetched>,
+    pub clone: fn(&AnchorEntry, &Path, Duration) -> std::io::Result<()>,
+    pub fetch: fn(&AnchorEntry, Duration) -> Option<Fetched>,
     pub namespaces: fn() -> bool,
 }
 
@@ -367,27 +369,40 @@ fn overlay_patch(patch: &Path, into: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
-fn tree_digest(root: &Path) -> std::io::Result<String> {
+/// A path's bytes as one JSON key, losslessly: UTF-8 under `u:`, anything
+/// else as hex under `b:`, so two names that differ only in bytes UTF-8
+/// cannot carry stay two keys.
+fn path_key(path: &Path) -> String {
+    use std::os::unix::ffi::OsStrExt;
+    let bytes = path.as_os_str().as_bytes();
+    match std::str::from_utf8(bytes) {
+        Ok(text) => format!("u:{text}"),
+        Err(_) => {
+            let hex: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+            format!("b:{hex}")
+        }
+    }
+}
+
+/// The digest of every regular file (bytes and executable bit) and symlink
+/// (target) under `root`, by path, `.git` excepted.
+pub fn tree_digest(root: &Path) -> std::io::Result<String> {
     use std::os::unix::fs::PermissionsExt;
     fn walk(root: &Path, dir: &Path, out: &mut BTreeMap<String, Value>) -> std::io::Result<()> {
         for entry in std::fs::read_dir(dir)? {
             let entry = entry?;
             let path = entry.path();
-            let relative = path
-                .strip_prefix(root)
-                .unwrap()
-                .to_string_lossy()
-                .to_string();
+            let relative = path.strip_prefix(root).unwrap();
             let kind = entry.file_type()?;
             if kind.is_dir() {
-                if relative != ".git" {
+                if relative != Path::new(".git") {
                     walk(root, &path, out)?;
                 }
             } else if kind.is_symlink() {
                 let target = std::fs::read_link(&path)?;
                 out.insert(
-                    relative,
-                    json!({"kind": "symlink", "target": target.to_string_lossy()}),
+                    path_key(relative),
+                    json!({"kind": "symlink", "target": path_key(&target)}),
                 );
             } else {
                 let mut hasher = Sha256::new();
@@ -402,7 +417,7 @@ fn tree_digest(root: &Path) -> std::io::Result<String> {
                 }
                 let executable = entry.metadata()?.permissions().mode() & 0o111 != 0;
                 out.insert(
-                    relative,
+                    path_key(relative),
                     json!({
                         "kind": "file",
                         "executable": executable,
@@ -479,16 +494,23 @@ fn prepare(
     fresh_dir(&repo)?;
     let prepared = (|| -> Result<Result<Prepared, AnchorTerminal>, RunError> {
         charges.elapsed()?;
-        if (host.clone)(entry, &repo).is_err() {
+        let remaining =
+            |charges: &Charges| charges.deadline().saturating_duration_since(Instant::now());
+        if (host.clone)(entry, &repo, remaining(charges)).is_err() {
             return unavailable();
         }
         charges.store_bytes(store_root)?;
         charges.elapsed()?;
-        let deadline =
-            GIT_TIMEOUT.min(charges.deadline().saturating_duration_since(Instant::now()));
-        let Some(fetched) = (host.fetch)(entry) else {
+        let Some(fetched) = (host.fetch)(entry, remaining(charges)) else {
             return unavailable();
         };
+        // A named pull request whose creation time the host did not supply
+        // leaves the repair's publication unestablished.
+        if entry.pull_request.is_some() && fetched.pull_request_created_ms.is_none() {
+            return unavailable();
+        }
+        charges.elapsed()?;
+        let deadline = GIT_TIMEOUT.min(remaining(charges));
         let committed = |sha: &str| -> std::io::Result<Option<i64>> {
             Ok(git(&repo, &["show", "-s", "--format=%ct", sha], deadline)?
                 .and_then(|out| out.trim().parse::<i64>().ok())
@@ -556,8 +578,13 @@ fn prepare(
             let Some(name) = hidden_test_name(path) else {
                 continue;
             };
-            if let Ok(content) = std::fs::read_to_string(fix.join(path)) {
-                std::fs::remove_file(fix.join(path))?;
+            // A symlink at the path is not a test file the fix added; it
+            // is left in the fix tree and never read through.
+            let file = fix.join(path);
+            if std::fs::symlink_metadata(&file).is_ok_and(|meta| meta.is_file())
+                && let Ok(content) = std::fs::read_to_string(&file)
+            {
+                std::fs::remove_file(&file)?;
                 hidden.push((name.to_string(), content));
             }
         }
