@@ -10,10 +10,12 @@ use serde_json::Value;
 use crate::census::{Construction, EvaluatedSurface, Reachability};
 use crate::identity::{IdentityError, RunIdentity, eval_run_id};
 use crate::pairs::{RECENCY_BASELINE_VERSION, recency_bound};
-use crate::residue::{ObservationSchema, RelativeDomains, ResidueEntry, ResidueError, Rule};
+use crate::residue::{
+    ObservationSchema, RelativeDomains, ResidueEntry, ResidueError, Rule, residue_contradiction,
+};
 
-pub const MANIFEST_SCHEMA: &str = "eval-manifest/v8";
-pub const MANIFEST_DIGEST_PROTOCOL: &str = "eval-manifest-digest/v8";
+pub const MANIFEST_SCHEMA: &str = "eval-manifest/v9";
+pub const MANIFEST_DIGEST_PROTOCOL: &str = "eval-manifest-digest/v9";
 
 /// Sorted; a field added to [`Manifest`] without a schema version bump fails the closure test.
 pub const REQUIRED_FIELDS: [&str; 30] = [
@@ -272,9 +274,10 @@ pub enum ManifestError {
         found: String,
     },
     DirectDatabaseAged,
-    /// A run from a checkpoint copy of a replayed prefix cannot also claim a
-    /// bulk construction.
-    BulkScaffoldPresentedAsAged,
+    /// Checkpoint copies of replayed prefixes must use `replay` construction.
+    AgedArmNotReplayBuilt {
+        construction: Construction,
+    },
     ResidueIncomplete {
         field: String,
     },
@@ -297,7 +300,8 @@ pub enum ManifestError {
     EmptyComponent {
         field: String,
     },
-    /// The recorded recency baseline is not the one the compiler enforces.
+    /// The recorded recency baseline is not the one the compiler enforces,
+    /// or a run that reports paired statistics recorded none.
     RecencyBaselineMismatch {
         field: &'static str,
     },
@@ -403,26 +407,22 @@ impl Manifest {
             return Err(ManifestError::DirectDatabaseAged);
         }
         if self.execution_mode == ExecutionMode::PrefixThenGenerate
-            && self.construction == Construction::Bulk
+            && self.construction != Construction::Replay
         {
-            return Err(ManifestError::BulkScaffoldPresentedAsAged);
+            return Err(ManifestError::AgedArmNotReplayBuilt {
+                construction: self.construction,
+            });
         }
         for entry in Self::field_schema().residue() {
             if !self.residue.contains(&entry) {
                 return Err(ManifestError::ResidueIncomplete { field: entry.field });
             }
         }
-        // Residue lists only non-`Keep` rules, one per `(type_name, field)`.
-        let mut classified = BTreeSet::new();
-        for entry in &self.residue {
-            if entry.rule == Rule::Keep
-                || !classified.insert((entry.type_name.as_str(), entry.field.as_str()))
-            {
-                return Err(ManifestError::ResidueContradiction {
-                    type_name: entry.type_name.clone(),
-                    field: entry.field.clone(),
-                });
-            }
+        if let Some(entry) = residue_contradiction(&self.residue) {
+            return Err(ManifestError::ResidueContradiction {
+                type_name: entry.type_name.clone(),
+                field: entry.field.clone(),
+            });
         }
         let ids: BTreeSet<&str> = self.sample_ids.iter().map(String::as_str).collect();
         let ordered: BTreeSet<&str> = self.sample_order.iter().map(String::as_str).collect();
@@ -508,6 +508,11 @@ impl Manifest {
                     field: field.to_string(),
                 });
             }
+        }
+        if self.analysis_family_digest.is_some() && self.recency_baseline.is_none() {
+            return Err(ManifestError::RecencyBaselineMismatch {
+                field: "recency_baseline",
+            });
         }
         if let Some(baseline) = &self.recency_baseline {
             if baseline.version != RECENCY_BASELINE_VERSION {

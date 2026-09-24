@@ -6,11 +6,13 @@ use std::path::{Path, PathBuf};
 
 use eval_core::{
     Approval, CampaignResources, ClaimBoundary, Coverage, Cut, EnvelopeExceeded, ExecutionMode,
-    GROWTH_REPORT_SCHEMA, GrowthBounds, GrowthLedger, GrowthMode, GrowthRefused, GrowthReport,
-    GrowthReportError, HeadroomSample, Operation, ProfileError, ResourceSample, ReviewerQuota,
-    RunProfile, Scale, SearchEpisodeFault, StoreBytes, StoreFamily, SwarmMix, eval_run_id,
+    ExpectedRefusal, GROWTH_REPORT_SCHEMA, GrowthBounds, GrowthContract, GrowthLedger, GrowthMode,
+    GrowthRefused, GrowthReport, GrowthReportError, HeadroomSample, Operation, ProfileError,
+    RecordedRefusal, ResourceSample, ReviewerQuota, RunProfile, Scale, SearchEpisodeFault,
+    StoreBytes, StoreFamily, SwarmMix, eval_run_id,
 };
 use memory_store::memory_reviewer_jobs::{
+    FROZEN_PAGE_RECEIPT_CHARGE_BYTES, FROZEN_SELECTION_ALLOWANCE_BYTES,
     MAX_MEMORY_REVIEWER_METADATA_BYTES_PER_HOST, MAX_MEMORY_REVIEWER_METADATA_BYTES_PER_PROJECT,
     MAX_PENDING_MEMORY_REVIEWER_JOBS_PER_PROJECT, MEMORY_REVIEWER_JOB_ALLOWANCE_BYTES,
     MEMORY_REVIEWER_RECEIPT_CHARGE_BYTES, MemoryReviewerJobRefusal,
@@ -72,11 +74,11 @@ fn publish_refused((path, kind): (PathBuf, std::io::ErrorKind)) -> RunError {
 
 pub fn profile(
     scale: Scale,
-    steps: u32,
+    messages: u32,
     elapsed_ms: u64,
     approval: Option<Approval>,
 ) -> RunProfile {
-    let mut profile = aging::profile(scale, steps, elapsed_ms, approval);
+    let mut profile = aging::profile(scale, messages, elapsed_ms, approval);
     profile.name = profile.name.replace("suite-c-aging", "suite-c-growth");
     profile
 }
@@ -86,6 +88,8 @@ pub fn quota() -> ReviewerQuota {
     ReviewerQuota {
         receipt_charge_bytes: MEMORY_REVIEWER_RECEIPT_CHARGE_BYTES,
         job_allowance_bytes: MEMORY_REVIEWER_JOB_ALLOWANCE_BYTES,
+        page_receipt_bytes: FROZEN_PAGE_RECEIPT_CHARGE_BYTES,
+        page_allowance_bytes: FROZEN_SELECTION_ALLOWANCE_BYTES,
         project_metadata_bytes: MAX_MEMORY_REVIEWER_METADATA_BYTES_PER_PROJECT,
         host_metadata_bytes: MAX_MEMORY_REVIEWER_METADATA_BYTES_PER_HOST,
     }
@@ -122,8 +126,14 @@ pub struct Run {
     pub coverage: Coverage,
 }
 
+/// A file's bytes; a missing file is zero bytes, any other failure to read
+/// it refuses the sample rather than reporting zero.
 fn file_len(path: &Path) -> u64 {
-    std::fs::metadata(path).map(|m| m.len()).unwrap_or(0)
+    match std::fs::symlink_metadata(path) {
+        Ok(m) => m.len(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => 0,
+        Err(e) => panic!("{}: {e}", path.display()),
+    }
 }
 
 fn sidecar(path: &Path, suffix: &str) -> PathBuf {
@@ -132,26 +142,39 @@ fn sidecar(path: &Path, suffix: &str) -> PathBuf {
     PathBuf::from(name)
 }
 
-fn count_entries(dir: &Path) -> u64 {
-    std::fs::read_dir(dir)
-        .map(|entries| entries.filter_map(Result::ok).count() as u64)
-        .unwrap_or(0)
+/// A directory's entries; a missing directory is empty, any other failure to
+/// read it refuses the sample rather than reporting nothing.
+fn entries(dir: &Path) -> Vec<std::fs::DirEntry> {
+    match std::fs::read_dir(dir) {
+        Ok(entries) => entries
+            .map(|e| e.unwrap_or_else(|e| panic!("{}: {e}", dir.display())))
+            .collect(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(e) => panic!("{}: {e}", dir.display()),
+    }
 }
 
+fn count_entries(dir: &Path) -> u64 {
+    entries(dir).len() as u64
+}
+
+/// Regular files under `dir` and their bytes; a symlink is neither followed
+/// nor counted.
 fn walk_objects(dir: &Path) -> (u64, u64) {
     let mut count = 0;
     let mut bytes = 0;
-    if let Ok(entries) = std::fs::read_dir(dir) {
-        for entry in entries.filter_map(Result::ok) {
-            let path = entry.path();
-            if path.is_dir() {
-                let (c, b) = walk_objects(&path);
-                count += c;
-                bytes += b;
-            } else if path.is_file() {
-                count += 1;
-                bytes += file_len(&path);
-            }
+    for entry in entries(dir) {
+        let path = entry.path();
+        let kind = entry
+            .metadata()
+            .unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+        if kind.is_dir() {
+            let (c, b) = walk_objects(&path);
+            count += c;
+            bytes += b;
+        } else if kind.is_file() {
+            count += 1;
+            bytes += kind.len();
         }
     }
     (count, bytes)
@@ -181,7 +204,7 @@ pub struct Campaign {
 
 impl Campaign {
     pub fn open(root: &Path, plan: Plan, mode: GrowthMode) -> Self {
-        let stores = Stores::open(root, plan.rendering.clone());
+        let stores = Stores::open(root, &plan);
         let generation = activate_module_authority(&stores.memory, root);
         commit_memory_domain(&stores.corpus.kernel);
         Self {
@@ -213,7 +236,8 @@ impl Campaign {
         let i = self.next_step;
         let planned = self.plan.steps[i].clone();
         let now = planned.now_ms;
-        match self.stores.apply(&planned) {
+        let applied = self.stores.apply(&planned);
+        match applied {
             Applied::Published => self.mix.record(Operation::Publish),
             Applied::Corrected => self.mix.record(Operation::Correct),
             Applied::Retired => self.mix.record(Operation::Retire),
@@ -225,7 +249,8 @@ impl Campaign {
             assert!(rows.snapshot_commit_seq >= 0);
             self.mix.record(Operation::Query);
         }
-        if i % 5 == 4 {
+        // A lost reply needs a commit to acknowledge; a skipped retire left none.
+        if i % 5 == 4 && applied != Applied::RetireSkipped {
             lost_reply_episode(
                 &mut self.stores,
                 &mut self.witness,
@@ -249,7 +274,8 @@ impl Campaign {
     /// Admits one reviewer job. Admissions at `i % 8 == 3` abstain; once
     /// pending jobs reach the cap, every admission abstains so the next
     /// reservation still has a slot. A reservation refused by the permanent
-    /// receipt quota is R24: counted, with nothing admitted.
+    /// receipt quota is R24: counted, recorded as the expected refusal the
+    /// report reconciles the count against, with nothing admitted.
     pub fn quota_pressure(&mut self, i: usize, now: i64) -> Result<(), RunError> {
         self.mix.record(Operation::QuotaPressure);
         let incarnation = reviewer::kernel_incarnation(&self.stores.corpus.kernel);
@@ -264,8 +290,15 @@ impl Campaign {
             now,
         ) {
             Ok(begun) => begun,
-            Err(MemoryReviewerJobRefusal::MetadataQuota) => {
+            Err(refusal @ MemoryReviewerJobRefusal::MetadataQuota) => {
                 self.r24_refusals += 1;
+                self.witness.refusals.push(RecordedRefusal {
+                    episode: format!("growth-r24-{i}"),
+                    refusal: ExpectedRefusal::R24ReceiptQuotaExhausted,
+                    // The variant as production prints it, which the report's
+                    // evidence check reads.
+                    production_error: format!("{refusal:?}"),
+                });
                 return Ok(());
             }
             Err(refusal) => return Err(RunError::Admission(refusal)),
@@ -293,10 +326,15 @@ impl Campaign {
             &memory_file(self.root()),
             "SELECT COUNT(*) FROM memory_reviewer_jobs WHERE state='terminal'",
         );
+        let terminal_pages = count(
+            &memory_file(self.root()),
+            "SELECT COUNT(*) FROM memory_reviewer_frozen_selections WHERE state<>'frozen'",
+        );
         HeadroomSample {
             pending_jobs: headroom.pending_jobs as u64,
             terminal_jobs: terminal,
-            page_bytes: 0,
+            frozen_pages: headroom.frozen_pages as u64,
+            terminal_pages,
             project_metadata_bytes: headroom.project_metadata_bytes,
             project_metadata_remaining: headroom.project_metadata_remaining,
             admitted_total: self.admitted_total,
@@ -368,8 +406,9 @@ impl Campaign {
     /// pressure it shows.
     pub fn sample(&mut self, step: u32, charges: &mut Charges) -> Result<(), RunError> {
         let sample = self.sample_at(step, charges);
+        // The envelope's artifact bytes are the published files; the artifact
+        // store the sample measures is judged by `GrowthBounds::artifact_bytes`.
         charges.observe(eval_core::Resource::StoreBytes, sample.store_total())?;
-        charges.observe(eval_core::Resource::ArtifactBytes, sample.artifact_bytes)?;
         charges.elapsed()?;
         self.ledger.record(sample)?;
         *self.checkpoints.entry(Cut::AtQuiescence).or_insert(0) += 1;
@@ -449,18 +488,9 @@ impl Campaign {
 }
 
 pub fn run(config: &Config) -> Result<Run, RunError> {
-    let started_at_ms = i64::try_from(
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_millis(),
-    )
-    .unwrap();
-    let plan = aging::plan(config.messages)?;
-    let steps = plan.steps.len() as u32;
     let profile = profile(
         config.scale,
-        steps,
+        config.messages,
         config.elapsed_bound_ms,
         config.approval.clone(),
     );
@@ -470,7 +500,19 @@ pub fn run(config: &Config) -> Result<Run, RunError> {
         envelope.store_bytes = bound;
     }
     prepare_publish(&config.publish, &[REPORT_FILE, MANIFEST_FILE]).map_err(publish_refused)?;
+    // The manifest's clock and the envelope's start together, as the aging
+    // and fault shells' do.
+    let started_at_ms = i64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis(),
+    )
+    .unwrap();
     let mut charges = Charges::new(envelope);
+    // Planning runs under the clock: the elapsed bound covers the whole run.
+    let plan = aging::plan(config.messages)?;
+    let steps = plan.steps.len() as u32;
     let bounds = bounds(&profile, config.messages);
     let root = charges.occupy()?;
     let root_path = root.path().display().to_string();
@@ -494,7 +536,8 @@ pub fn run(config: &Config) -> Result<Run, RunError> {
             .unwrap();
     }
     if ledger.samples.iter().all(|sample| {
-        sample.headroom.project_metadata_bytes == quota.expected_project_bytes(&sample.headroom)
+        quota.expected_project_bytes(&sample.headroom)
+            == Some(sample.headroom.project_metadata_bytes)
     }) {
         coverage
             .record("flt_headroom_accounted_from_store_constants")
@@ -511,8 +554,13 @@ pub fn run(config: &Config) -> Result<Run, RunError> {
             "messages": config.messages,
             "mode": config.mode,
         }),
-        &std::env::current_exe().unwrap(),
+        &[std::env::current_exe().unwrap()],
     );
+    let contract = GrowthContract {
+        quota: quota.clone(),
+        bounds: bounds.clone(),
+        envelope: profile.envelope.clone(),
+    };
     let mut report = GrowthReport {
         schema: GROWTH_REPORT_SCHEMA.to_string(),
         eval_run_id: eval_run_id(&identity).unwrap(),
@@ -529,7 +577,7 @@ pub fn run(config: &Config) -> Result<Run, RunError> {
         envelope: charges.envelope.clone(),
     };
     charges.retain_publish_root()?;
-    report.validate()?;
+    report.validate(&contract)?;
     let bytes = charges.publish_bytes(|envelope| {
         report.envelope = envelope.clone();
         serde_json::to_vec_pretty(&serde_json::to_value(&report).unwrap()).unwrap()
@@ -552,10 +600,18 @@ pub fn run(config: &Config) -> Result<Run, RunError> {
         execution_mode: ExecutionMode::Generate,
         envelope: report.envelope.clone(),
         started_at_ms,
+        task_corpus: aging::suite_c_task_corpus(),
+        judge: "none".to_string(),
     });
     let manifest_bytes = serde_json::to_vec_pretty(&manifest.to_value()).unwrap();
-    publish_file(&config.publish.join(REPORT_FILE), &bytes).map_err(publish_refused)?;
-    publish_file(&config.publish.join(MANIFEST_FILE), &manifest_bytes).map_err(publish_refused)?;
+    // A manifest the directory then refuses to take takes the report back out
+    // with it, as the aging and fault shells do: a reader finds both files or none.
+    let report_path = config.publish.join(REPORT_FILE);
+    publish_file(&report_path, &bytes).map_err(publish_refused)?;
+    if let Err(error) = publish_file(&config.publish.join(MANIFEST_FILE), &manifest_bytes) {
+        let _ = std::fs::remove_file(&report_path);
+        return Err(publish_refused(error));
+    }
     Ok(Run {
         report,
         report_bytes: bytes,

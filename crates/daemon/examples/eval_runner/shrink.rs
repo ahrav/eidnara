@@ -14,19 +14,19 @@ use std::time::{Duration, Instant};
 use context_core::canonical_json::protocol_digest;
 use context_core::redaction::Redactor;
 use eval_core::{
-    Approval, CandidateVerdict, ClaimBoundary, Coverage, Cut, CutOutcome, CutReceipt,
+    Approval, BinaryDigest, CandidateVerdict, ClaimBoundary, Coverage, Cut, CutOutcome, CutReceipt,
     EnvelopeExceeded, EvaluatedSurface, EventId, ExecutionMode, FailurePredicate, FaultAction,
-    Generation, MAX_OUTSTANDING_REPLAY_EFFECTS, Manifest, Mode, MultiplicityRecipe,
-    ObservationSchema, Oracle, OriginalFailure, Payload, ProfileError, ReplayEffects,
-    ReplayOutcome, ReplayRefused, ReplayRequest, RepositorySpec, ResidueEntry, Rule, RunProfile,
-    Scale, Scenario, SemanticTrace, SessionSpec, ShrinkRefused, Slice, StoreFamily, Task, TaskRole,
-    UnknownReason, WITNESS_DIGEST_PROTOCOL, WITNESS_SCHEMA, WitnessError, WitnessPackage,
-    WorldConfig, eval_run_id, generate_all, reduce, residue_drift, serialize_spec, shrink,
+    Generation, Manifest, Mode, MultiplicityRecipe, ObservationSchema, Oracle, OriginalFailure,
+    Payload, ProfileError, ReplayEffects, ReplayOutcome, ReplayRefused, ReplayRequest,
+    RepositorySpec, ResidueEntry, Rule, RunProfile, Scale, Scenario, SemanticTrace, SessionSpec,
+    ShrinkRefused, ShrinkReportError, Slice, StoreFamily, Task, TaskRole, UnknownReason,
+    WITNESS_DIGEST_PROTOCOL, WITNESS_SCHEMA, WitnessError, WitnessPackage, WorldConfig,
+    eval_run_id, generate_all, reduce, residue_drift, serialize_spec, shrink,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use super::aging::{ManifestInputs, suite_c_manifest};
+use super::aging::{ManifestInputs, suite_c_manifest, suite_c_task_corpus};
 use super::campaign::{Charges, identity, parse_flags, prepare_publish, publish_file};
 use super::fault::ChildGuard;
 
@@ -39,7 +39,8 @@ pub const SEED: u64 = 0x5EED_5000_0000_0005;
 const FRESH_SEED: u64 = SEED ^ 0xABCD;
 const CUT: Cut = Cut::AtQuiescence;
 const REPLAY_TIMEOUT: Duration = Duration::from_secs(120);
-/// Attempts under one receipt key when the child exits before its barrier.
+/// Attempts under one receipt key when the child exits before its barrier;
+/// within the ledger's `MAX_REPLAY_ATTEMPTS`.
 const REPLAY_ATTEMPTS: u32 = 2;
 const MAX_REPLAYS: u64 = 400;
 const EPOCH_MS: i64 = 1_700_000_000_000;
@@ -71,10 +72,18 @@ pub enum RunError {
     Profile(#[from] ProfileError),
     #[error("envelope exceeded: {0:?}")]
     Envelope(#[from] EnvelopeExceeded),
+    #[error("commits: {0}")]
+    Commits(String),
     #[error("the original scenario did not fail: {outcome:?}")]
     NoFailure { outcome: ReplayOutcome },
+    #[error("the child pinned another oracle, cut, or profile: {predicate:?}")]
+    ForeignPredicate { predicate: FailurePredicate },
     #[error("shrink refused: {0}")]
     Shrink(#[from] ShrinkRefused),
+    #[error("shrink report refused against its scenario: {0}")]
+    Report(#[from] ShrinkReportError),
+    #[error("the executable changed while the replays ran")]
+    BinaryChanged,
     #[error("replay effect refused: {0}")]
     Replay(#[from] ReplayRefused),
     #[error("witness refused: {0}")]
@@ -102,10 +111,13 @@ pub struct Run {
     pub original: Replayed,
 }
 
-/// What a child reports over its barrier line.
+/// What a child reports over its barrier line. `scenario_digest` names the
+/// scenario the answer is about; the parent reads an answer only under the
+/// key it issued.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Replayed {
+    pub scenario_digest: String,
     pub outcome: ReplayOutcome,
     pub trace_digest: String,
     pub residue: BTreeSet<ResidueEntry>,
@@ -129,6 +141,14 @@ impl ChildArgs {
 
     pub fn env(&self, command: &mut Command) {
         command.env(CHILD_ARGS, serde_json::to_string(self).unwrap());
+    }
+
+    /// `true` when a reported failure names the oracle, cut, and profile the
+    /// child was sent; only its witness class is the child's to report.
+    pub fn pins(&self, predicate: &FailurePredicate) -> bool {
+        predicate.oracle == self.oracle
+            && predicate.checkpoint == self.checkpoint
+            && predicate.profile_digest == self.profile_digest
     }
 }
 
@@ -155,21 +175,45 @@ pub fn residue() -> BTreeSet<ResidueEntry> {
         .collect()
 }
 
-/// The child: evaluates the oracle over the scenario at the cut and prints
-/// it over the barrier line with the trace digest of the one observation and
-/// the residue this build declares, then exits.
-pub fn child_main(args: &ChildArgs) -> ! {
+/// The digest of the one `shrink_replay` observation a replay records: the
+/// scenario and what the oracle said of it. `pid` is dropped by the schema,
+/// so the parent recomputes the same digest from the reply alone.
+pub fn trace_digest(scenario_digest: &str, outcome: &ReplayOutcome, pid: u32) -> String {
+    let mut trace = SemanticTrace::new([replay_schema()]).unwrap();
+    trace
+        .record(
+            "shrink_replay",
+            &json!({
+                "scenario_digest": scenario_digest,
+                "outcome": outcome,
+                "pid": pid,
+            }),
+        )
+        .unwrap();
+    trace.digest().unwrap()
+}
+
+/// What the child answers for `args`: the oracle over the scenario at the
+/// cut, the trace digest of that observation, and the residue this build
+/// declares.
+pub fn replayed(args: &ChildArgs) -> Replayed {
     let fixture = serialize_spec();
     let outcome = std::fs::read(&args.scenario)
         .ok()
         .and_then(|bytes| serde_json::from_slice::<Scenario>(&bytes).ok())
         .and_then(|scenario| {
             let set = scenario.compile(&fixture).ok()?;
-            let truth = reduce(&set.aged, &fixture, &set.pairs.first()?.task.query).ok()?;
+            let task = &set.pairs.first()?.task;
+            let truth = reduce(&set.aged, &fixture, &task.query).ok()?;
             Some((
                 scenario.digest(),
-                args.oracle
-                    .evaluate(&set, &truth, args.checkpoint, &args.profile_digest),
+                args.oracle.evaluate(
+                    &set,
+                    &task.id,
+                    &truth,
+                    args.checkpoint,
+                    &args.profile_digest,
+                ),
             ))
         });
     let (scenario_digest, outcome) = outcome.unwrap_or_else(|| {
@@ -180,22 +224,17 @@ pub fn child_main(args: &ChildArgs) -> ! {
             },
         )
     });
-    let mut trace = SemanticTrace::new([replay_schema()]).unwrap();
-    trace
-        .record(
-            "shrink_replay",
-            &json!({
-                "scenario_digest": scenario_digest,
-                "outcome": outcome,
-                "pid": std::process::id(),
-            }),
-        )
-        .unwrap();
-    let replayed = Replayed {
+    Replayed {
+        trace_digest: trace_digest(&scenario_digest, &outcome, std::process::id()),
+        scenario_digest,
         outcome,
-        trace_digest: trace.digest().unwrap(),
         residue: residue(),
-    };
+    }
+}
+
+/// The child: prints `replayed(args)` over the barrier line, then exits.
+pub fn child_main(args: &ChildArgs) -> ! {
+    let replayed = replayed(args);
     let mut stdout = std::io::stdout().lock();
     writeln!(
         stdout,
@@ -227,16 +266,16 @@ impl Replayer<'_> {
             return Ok(answered.clone());
         }
         std::fs::write(&self.args.scenario, serde_json::to_vec(scenario).unwrap())?;
-        self.effects.issue(key)?;
-        let mut attempts = 1;
+        let mut attempt = self.effects.issue(key)?;
         let mut replayed = loop {
-            match self.attempt()? {
+            match self.attempt(key)? {
                 Some(replayed) => break replayed,
-                None if attempts < REPLAY_ATTEMPTS => attempts = self.effects.retry(key)?,
+                None if attempt < REPLAY_ATTEMPTS => attempt = self.effects.retry(key)?,
                 None => break self.unanswered(UnknownReason::ChildExitedBeforeBarrier),
             }
         };
-        self.effects.resolve(key, replayed.outcome.clone())?;
+        self.effects
+            .resolve(key, attempt, replayed.outcome.clone())?;
         replayed.outcome = self.effects.outcome(key)?.clone();
         residue_drift(&self.expected_residue, &replayed.residue)?;
         self.answered.insert(key.to_string(), replayed.clone());
@@ -246,6 +285,7 @@ impl Replayer<'_> {
     /// The reason, no trace, and this build's own residue.
     fn unanswered(&self, reason: UnknownReason) -> Replayed {
         Replayed {
+            scenario_digest: String::new(),
             outcome: ReplayOutcome::Unknown { reason },
             trace_digest: String::new(),
             residue: self.expected_residue.clone(),
@@ -254,17 +294,25 @@ impl Replayer<'_> {
 
     /// `None` when the child exited before its barrier; a timeout answers
     /// `Unknown { cancelled }`. The process charge is released either way.
-    fn attempt(&mut self) -> Result<Option<Replayed>, RunError> {
+    fn attempt(&mut self, key: &str) -> Result<Option<Replayed>, RunError> {
         let mut command = (self.spawn)(&self.args);
         self.args.env(&mut command);
         self.charges.process_started()?;
-        let outcome = self.wait_for_barrier(command);
+        let outcome = self.wait_for_barrier(command, key);
         self.charges.process_ended();
         self.charges.elapsed()?;
         outcome
     }
 
-    fn wait_for_barrier(&self, mut command: Command) -> Result<Option<Replayed>, RunError> {
+    /// An answer that names another scenario than `key`, or whose trace
+    /// digest is not the digest of the observation it reports, is no answer
+    /// to this key: it reads back as `Unknown { read_back_failed }`, like a
+    /// line the type cannot carry.
+    fn wait_for_barrier(
+        &self,
+        mut command: Command,
+        key: &str,
+    ) -> Result<Option<Replayed>, RunError> {
         let mut child = ChildGuard(
             command
                 .stdout(Stdio::piped())
@@ -288,7 +336,12 @@ impl Replayer<'_> {
                 let json = &line[line.find(BARRIER).unwrap() + BARRIER.len()..];
                 Some(
                     serde_json::from_str::<Replayed>(json.trim())
-                        .unwrap_or_else(|_| self.unanswered(UnknownReason::ReadBackFailed)),
+                        .ok()
+                        .filter(|replayed| {
+                            replayed.scenario_digest == key
+                                && replayed.trace_digest == trace_digest(key, &replayed.outcome, 0)
+                        })
+                        .unwrap_or_else(|| self.unanswered(UnknownReason::ReadBackFailed)),
                 )
             }
             Ok(None) | Err(RecvTimeoutError::Disconnected) => None,
@@ -400,6 +453,15 @@ pub fn scenario(commits: u32) -> (Scenario, eval_core::Tape) {
     (scenario, world.tape)
 }
 
+/// The Suite B profile renamed for this suite, with the two tasks `scenario`
+/// carries: the profile's digest is pinned into every failure predicate.
+pub fn profile(scale: Scale, elapsed_ms: u64, approval: Option<Approval>) -> RunProfile {
+    let mut profile = super::campaign::profile(scale, 128, elapsed_ms, approval);
+    profile.name = profile.name.replace("surface1-raw", "suite-c-shrink");
+    profile.tasks_per_world = 2;
+    profile
+}
+
 /// Replays the original in a fresh process, pins its failure, shrinks it with
 /// every candidate replayed the same way, and publishes the witness package
 /// with its manifest.
@@ -411,9 +473,13 @@ pub fn run(config: &Config, spawn: Spawn) -> Result<Run, RunError> {
             .as_millis(),
     )
     .unwrap();
-    let profile: RunProfile = super::campaign::profile(
+    commits(u64::from(config.commits)).map_err(RunError::Commits)?;
+    config
+        .oracle
+        .validate()
+        .map_err(ShrinkRefused::InvalidOracle)?;
+    let profile = profile(
         config.scale,
-        128,
         config.elapsed_bound_ms,
         config.approval.clone(),
     );
@@ -421,12 +487,29 @@ pub fn run(config: &Config, spawn: Spawn) -> Result<Run, RunError> {
     let profile_digest = profile.digest()?;
     let mut charges = Charges::new(profile.envelope.clone());
     prepare_publish(&config.publish, &[WITNESS_FILE, MANIFEST_FILE]).map_err(publish_refused)?;
+    // The build identity is frozen before the first child runs: the
+    // checkout, the lockfile, and the executable the outcomes come from,
+    // not whatever the tree holds once the shrink has finished.
+    let run_identity = identity(
+        &profile,
+        SIMULATOR_VERSION,
+        SEED,
+        json!({
+            "commits": config.commits,
+            "oracle": config.oracle,
+            "replay_timeout": {
+                "secs": config.replay_timeout.as_secs(),
+                "nanos": config.replay_timeout.subsec_nanos(),
+            },
+        }),
+        &[std::env::current_exe().unwrap()],
+    );
     let root = charges.occupy()?;
     let (original, tape) = scenario(config.commits);
     let mut replayer = Replayer {
         spawn,
         timeout: config.replay_timeout,
-        deadline: Instant::now() + Duration::from_millis(config.elapsed_bound_ms),
+        deadline: charges.deadline(),
         args: ChildArgs {
             scenario: root.path().join("candidate.json"),
             oracle: config.oracle.clone(),
@@ -434,7 +517,7 @@ pub fn run(config: &Config, spawn: Spawn) -> Result<Run, RunError> {
             profile_digest: profile_digest.clone(),
         },
         charges: &mut charges,
-        effects: ReplayEffects::new(MAX_OUTSTANDING_REPLAY_EFFECTS),
+        effects: ReplayEffects::default(),
         answered: BTreeMap::new(),
         expected_residue: residue(),
     };
@@ -444,6 +527,11 @@ pub fn run(config: &Config, spawn: Spawn) -> Result<Run, RunError> {
             outcome: first.outcome,
         });
     };
+    if !replayer.args.pins(predicate) {
+        return Err(RunError::ForeignPredicate {
+            predicate: predicate.clone(),
+        });
+    }
     let predicate: FailurePredicate = predicate.clone();
     let fixture = serialize_spec();
     // The shrinker's callback cannot fail, so the first refusal is kept and
@@ -458,6 +546,14 @@ pub fn run(config: &Config, spawn: Spawn) -> Result<Run, RunError> {
             return unanswered;
         }
         match replayer.replay(request.key, request.scenario) {
+            // A failure pinned elsewhere is no observation of this predicate,
+            // so it cannot stand as a rejection: it is unknown, and kept.
+            Ok(Replayed {
+                outcome: ReplayOutcome::Failed { predicate },
+                ..
+            }) if !replayer.args.pins(&predicate) => ReplayOutcome::Unknown {
+                reason: UnknownReason::ReadBackFailed,
+            },
             Ok(replayed) => replayed.outcome,
             Err(error) => {
                 refused = Some(error);
@@ -470,6 +566,19 @@ pub fn run(config: &Config, spawn: Spawn) -> Result<Run, RunError> {
         return Err(error);
     }
     let (minimized, report) = shrunk?;
+    // The shell holds the original, so it verifies the report against it
+    // rather than trusting the shrinker's bookkeeping.
+    report.verify(&original)?;
+    // Every child ran from this executable's path; a rebuild under the run
+    // would have answered from another build than the identity names.
+    let binary = std::fs::read(std::env::current_exe().unwrap())?;
+    if run_identity.build.binary_digest
+        != (BinaryDigest::Present {
+            sha256: super::campaign::sha256_hex(&binary),
+        })
+    {
+        return Err(RunError::BinaryChanged);
+    }
     let mut coverage = Coverage::default();
     coverage
         .record("flt_shrink_fresh_process_reproduced")
@@ -488,13 +597,6 @@ pub fn run(config: &Config, spawn: Spawn) -> Result<Run, RunError> {
             .record("flt_shrink_unknown_effect_preserved")
             .unwrap();
     }
-    let run_identity = identity(
-        &profile,
-        SIMULATOR_VERSION,
-        SEED,
-        json!({"commits": config.commits, "oracle": config.oracle}),
-        &std::env::current_exe().unwrap(),
-    );
     let mut witness = WitnessPackage {
         schema: WITNESS_SCHEMA.to_string(),
         original: OriginalFailure {
@@ -532,7 +634,10 @@ pub fn run(config: &Config, spawn: Spawn) -> Result<Run, RunError> {
     let (value, text) = witness.serialize(&redactor, profile.envelope.artifact_bytes)?;
     let witness_bytes = charges.publish_bytes(|_| text.clone().into_bytes())?;
     let report_value = serde_json::to_value(&witness.shrink).unwrap();
-    let manifest = suite_c_manifest(ManifestInputs {
+    // The last elapsed charge before anything is published: a run past its
+    // bound here refuses rather than publishing a manifest that says otherwise.
+    charges.elapsed()?;
+    let mut manifest = suite_c_manifest(ManifestInputs {
         identity: run_identity,
         eval_run_id: witness.original.eval_run_id.clone(),
         sample: format!("shrink:{}", witness.shrink.minimized_digest),
@@ -545,10 +650,23 @@ pub fn run(config: &Config, spawn: Spawn) -> Result<Run, RunError> {
         execution_mode: ExecutionMode::Generate,
         envelope: charges.envelope.clone(),
         started_at_ms,
+        task_corpus: suite_c_task_corpus(),
+        judge: "none".to_string(),
     });
+    // The Suite C builder names the aging corpus and an in-process image; this
+    // run generated its worlds from `SEED` and replayed each in a fresh child.
+    manifest.component_versions.task_corpus = format!("generated:{SEED:#x}");
+    manifest.component_versions.execution_image = "fresh-process".to_string();
+    manifest.residue = residue();
     let manifest_bytes = serde_json::to_vec_pretty(&manifest.to_value()).unwrap();
-    publish_file(&config.publish.join(WITNESS_FILE), &witness_bytes).map_err(publish_refused)?;
-    publish_file(&config.publish.join(MANIFEST_FILE), &manifest_bytes).map_err(publish_refused)?;
+    // A reader finds both files or none: a witness whose manifest could not
+    // follow it is taken back out, as the other shells do.
+    let witness_path = config.publish.join(WITNESS_FILE);
+    publish_file(&witness_path, &witness_bytes).map_err(publish_refused)?;
+    if let Err(error) = publish_file(&config.publish.join(MANIFEST_FILE), &manifest_bytes) {
+        let _ = std::fs::remove_file(&witness_path);
+        return Err(publish_refused(error));
+    }
     Ok(Run {
         witness,
         witness_bytes,
@@ -557,6 +675,19 @@ pub fn run(config: &Config, spawn: Spawn) -> Result<Run, RunError> {
         coverage,
         original: first,
     })
+}
+
+/// At least two commits, so a rename exists, and an aged world within the
+/// event bound; `run` refuses a `Config` built directly the same way.
+fn commits(commits: u64) -> Result<u32, String> {
+    let commits = match commits {
+        commits @ 2.. => u32::try_from(commits).map_err(|error| error.to_string())?,
+        _ => return Err("needs at least two, so a rename exists".to_string()),
+    };
+    aged_config(commits)
+        .validate()
+        .map_err(|error| format!("{error:?}"))?;
+    Ok(commits)
 }
 
 pub fn config_from_args(args: impl IntoIterator<Item = String>) -> Result<Config, String> {
@@ -571,12 +702,7 @@ pub fn config_from_args(args: impl IntoIterator<Item = String>) -> Result<Config
     };
     Ok(Config {
         scale,
-        commits: match number("commits")? {
-            commits @ 2.. => {
-                u32::try_from(commits).map_err(|error| format!("--commits: {error}"))?
-            }
-            _ => return Err("--commits needs at least two, so a rename exists".to_string()),
-        },
+        commits: commits(number("commits")?).map_err(|error| format!("--commits: {error}"))?,
         elapsed_bound_ms: number("elapsed-bound-ms")?,
         approval: Some(Approval {
             approved_by: take("approved-by"),

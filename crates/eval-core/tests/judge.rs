@@ -6,9 +6,9 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use eval_core::{
     AnalysisFamily, ArmRates, ArmResult, BlindingRefused, CalibrationRefused, CalibrationSet,
-    CensorReason, ClusterKey, FrozenFamily, HUMAN_SAMPLE_MIN_PAIRS, JUDGE_SCHEMA, JudgeCall,
-    JudgeIdentity, JudgeRefused, JudgedPair, LIVE_REPLAYABLE, LiveSettings, LiveSettingsRefused,
-    LiveSliceRefused, LiveTask, Order, PairJudgment, PairOutcome, PassKBounds, PermutationCheck,
+    CensorReason, ClusterKey, HUMAN_SAMPLE_MIN_PAIRS, JUDGE_SCHEMA, JudgeCall, JudgeIdentity,
+    JudgeRefused, JudgedPair, LIVE_REPLAYABLE, LiveSettings, LiveSettingsRefused, LiveSliceRefused,
+    LiveTask, Manifest, Order, PairJudgment, PairOutcome, PassKBounds, PermutationCheck,
     PermutationRefused, Preference, ProviderProfile, RESIDUAL_REPORT_SCHEMA, Ratio, RawVerdict,
     ResidualRefused, ResidualReport, Rubric, SamplingPlan, analyze, blind, judge_pairs, live_slice,
 };
@@ -404,12 +404,7 @@ fn a_changed_judge_provider_or_tokenizer_refuses_cross_run_residual_comparison()
 /// residual report's.
 #[test]
 fn the_gates_take_only_oracle_inputs_and_the_residual_report_carries_no_gate_field() {
-    let _gates: fn(
-        &FrozenFamily,
-        &AnalysisFamily,
-        &[PairOutcome],
-        &BTreeMap<String, ArmRates>,
-    ) -> _ = analyze;
+    let _gates: fn(&Manifest, &AnalysisFamily, &[PairOutcome]) -> _ = analyze;
     let keys = |value: serde_json::Value| -> Vec<String> {
         value.as_object().unwrap().keys().cloned().collect()
     };
@@ -783,8 +778,8 @@ fn a_residual_report_reconciles_its_judgments_and_its_calibration_set() {
     assert_eq!(
         base.validate(&residual_settings(&calibration), &provider("live-2")),
         Err(ResidualRefused::ProviderDiffers {
-            report: "anthropic/live-1@tp-1".to_string(),
-            expected: "anthropic/live-2@tp-1".to_string()
+            report: Box::new(provider("live-1")),
+            expected: Box::new(provider("live-2"))
         }),
         "a residual is checked as the run it came from"
     );
@@ -792,7 +787,7 @@ fn a_residual_report_reconciles_its_judgments_and_its_calibration_set() {
         base.validate(&residual_settings(&calibration), &provider("live-3")),
         Err(ResidualRefused::Settings(
             LiveSettingsRefused::UnapprovedProvider {
-                provider: "anthropic/live-3@tp-1".to_string()
+                provider: provider("live-3")
             }
         ))
     );
@@ -844,7 +839,7 @@ fn live_slice_validation_recomputes_each_task_and_checks_the_schema() {
         foreign.validate(&settings(2, 2, &["t"]), &provider("live-3")),
         Err(LiveSliceRefused::Settings(
             LiveSettingsRefused::UnapprovedProvider {
-                provider: "anthropic/live-3@tp-1".to_string()
+                provider: provider("live-3")
             }
         )),
         "a deserialized report names an approved profile"
@@ -854,8 +849,8 @@ fn live_slice_validation_recomputes_each_task_and_checks_the_schema() {
     assert_eq!(
         relabelled.validate(&settings(2, 2, &["t"]), &provider("live-1")),
         Err(LiveSliceRefused::ProviderDiffers {
-            report: "anthropic/live-2@tp-1".to_string(),
-            expected: "anthropic/live-1@tp-1".to_string()
+            report: Box::new(provider("live-2")),
+            expected: Box::new(provider("live-1"))
         }),
         "trials are not reattributed to the other approved profile"
     );
@@ -1042,7 +1037,7 @@ fn the_live_slice_is_constructed_only_from_validated_settings_and_an_approved_pr
         live_slice(&settings(1, 1, &["t"]), &provider("live-3"), &tasks),
         Err(LiveSliceRefused::Settings(
             LiveSettingsRefused::UnapprovedProvider {
-                provider: "anthropic/live-3@tp-1".to_string()
+                provider: provider("live-3")
             }
         )),
         "a third profile is not one of the two approved"

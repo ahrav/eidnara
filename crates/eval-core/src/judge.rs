@@ -564,8 +564,8 @@ pub enum ResidualRefused {
     },
     /// The report names another live provider than the run it is checked as.
     ProviderDiffers {
-        report: String,
-        expected: String,
+        report: Box<ProviderProfile>,
+        expected: Box<ProviderProfile>,
     },
 }
 
@@ -627,8 +627,8 @@ impl ResidualReport {
             .map_err(ResidualRefused::Settings)?;
         if self.live_provider != *live_provider {
             return Err(ResidualRefused::ProviderDiffers {
-                report: self.live_provider.key(),
-                expected: live_provider.key(),
+                report: Box::new(self.live_provider.clone()),
+                expected: Box::new(live_provider.clone()),
             });
         }
         let (Some(calibration), Some(sampling)) = (&settings.calibration, settings.sampling) else {
@@ -727,8 +727,8 @@ pub enum LiveSliceRefused {
     },
     /// The report names another profile than the run it is checked as.
     ProviderDiffers {
-        report: String,
-        expected: String,
+        report: Box<ProviderProfile>,
+        expected: Box<ProviderProfile>,
     },
     /// The report's pass^k exponent is not the settings'.
     KDiffers {
@@ -849,8 +849,8 @@ impl LiveSliceReport {
             .map_err(LiveSliceRefused::Settings)?;
         if self.provider != *provider {
             return Err(LiveSliceRefused::ProviderDiffers {
-                report: self.provider.key(),
-                expected: provider.key(),
+                report: Box::new(self.provider.clone()),
+                expected: Box::new(provider.clone()),
             });
         }
         if self.k != settings.k {
@@ -916,7 +916,7 @@ pub enum LiveSettingsRefused {
     Calibration(CalibrationRefused),
     /// The provider profile is not one of the two approved.
     UnapprovedProvider {
-        provider: String,
+        provider: ProviderProfile,
     },
 }
 
@@ -928,7 +928,7 @@ impl LiveSettings {
         self.validate()?;
         if !self.providers.contains(provider) {
             return Err(LiveSettingsRefused::UnapprovedProvider {
-                provider: provider.key(),
+                provider: provider.clone(),
             });
         }
         Ok(())

@@ -9,12 +9,12 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use daemon::transform::UserHintPass;
 use eval_core::{
     ANALYSIS_FAMILY_SCHEMA, Analysis, AnalysisFamily, Approval, ArmKind, ArmRates, ArmRecord,
-    ArmResult, Attestation, AxisValue, BaselineVerdict, BinaryDigest, BuildRecord, CampaignGates,
+    ArmResult, Attestation, Baseline, BaselineVerdict, BinaryDigest, BuildRecord, CampaignGates,
     CampaignProfile, Carrier, ClaimBoundary, Claims, ClusterKey, ClusteringUnit, ComponentVersions,
     Construction, Cut, CutOutcome, CutReceipt, Destination, ELIGIBILITY_SPEC_DIGEST,
     EVENT_SCHEMA_VERSION, Envelope, EnvelopeExceeded, Established, EvaluatedSurface, EventId,
@@ -27,10 +27,11 @@ use eval_core::{
     Ratio, Reachability, RecencyBaseline, RenderConfig, RenderedMessage, ReportOutcome,
     RepositorySpec, Required, Resource, ResourceLimits, RunIdentity, RunProfile, RunStatus,
     SUITE_B_REPORT_SCHEMA, SampleLedger, SampleRecord, Scale, Sensitivity, ServedClass,
-    SessionSpec, SkipReason, StageVerdict, StoppingRule, SuiteBReport, Surface1Stage, Task,
-    TaskBudgets, TaskRole, TaskUsage, Terminal, TokenizerProfile, UnsupportedReason, Visibility,
-    WorldConfig, WorldProvenance, analyze, check_recency_baseline, compile_pair_set, eval_run_id,
-    generate_all, plan_injection_cases, render, score_injection, serialize_spec, text_decision,
+    SessionSpec, SkipReason, StageValue, StageVerdict, StoppingRule, SuiteBReport, Surface1Stage,
+    Task, TaskBudgets, TaskRole, TaskUsage, Terminal, TokenizerProfile, UnsupportedReason,
+    Visibility, WorldConfig, WorldProvenance, analyze, check_recency_baseline, compile_pair_set,
+    eval_run_id, generate_all, pair_table_digest, plan_injection_cases, render, score_injection,
+    serialize_spec, text_decision,
 };
 use memory_store::{MemoryStore, StoredHistorySegment};
 use serde_json::{Value, json};
@@ -38,11 +39,16 @@ use sha2::{Digest, Sha256};
 
 use super::support::direct_host::{Backend, Launch, fixture_binary};
 use super::support::eval_surface::{
-    EPOCH_MS, Knobs, Pass, SurfaceLedger, World, block_on, lifecycle, observe_rendered, pass, text,
+    EPOCH_MS, Knobs, Pass, SurfaceLedger, World, block_on, drain, lifecycle, observe_rendered,
+    pass, text,
 };
 use super::support::publish::{staged_path, write_then_rename};
 
 pub const SEED: u64 = 0x5EED_B000_0000_0002;
+/// The campaign's one world, as its pairs' cluster key names it: a canonical
+/// JSON number cannot carry the generator's 64-bit seed, so the world is
+/// named by ordinal, and the manifest carries the seed itself.
+const WORLD: u64 = 0;
 const PROJECT: &str = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
 const SESSION: &str = "session-0";
 /// Messages in the natural-fresh control: long enough that the hint scorer's
@@ -73,6 +79,11 @@ pub enum RunError {
     AgedHistoryTooShort {
         aged_messages: u32,
         window: u32,
+    },
+    /// Twice the message count, the event bound the profile declares, does
+    /// not fit a `u32`.
+    AgedHistoryTooLong {
+        aged_messages: u32,
     },
     /// The publish directory could not be created, or a staged file already
     /// sits where the create-new publisher stages its own.
@@ -182,11 +193,14 @@ fn planted(cases: &[InjectionCase]) -> Vec<Planted> {
                 Carrier::CommitMessage => ("repository-0", PLANTED_COMMIT_SLOT),
                 Carrier::IssueText | Carrier::Memory => return None,
             };
+            // The whole intervention is planted, instruction and canary, as
+            // the case defines it; the canary alone is what the scorer looks
+            // for.
             Some(Planted {
                 carrier: case.carrier,
                 entity: entity.to_string(),
                 slot,
-                canary: case.canary.clone(),
+                canary: case.planted_text(),
             })
         })
         .collect()
@@ -243,14 +257,33 @@ pub fn profile(
     }
 }
 
+/// The task families the analysis registers: the campaign's two generated
+/// histories, sorted as the family lists them. Every task is drawn from the
+/// aged one, so every pair lies in `TASK_FAMILY`; the fresh control is
+/// registered because a pilot samples at least two families.
+const TASK_FAMILIES: [&str; 2] = ["generated/aged", "generated/fresh"];
+const TASK_FAMILY: &str = TASK_FAMILIES[0];
+
+fn ratio(numerator: i128, denominator: i128) -> Ratio {
+    Ratio::try_new(numerator, denominator).unwrap()
+}
+
+/// The frozen family the campaign is read under: its table is the profile's
+/// tasks over its worlds, one pair each, and its pilot is declared, not run:
+/// the two histories' tasks, one world each, with no correlation at either
+/// level, so the affordable worlds' items are its effective N and the
+/// required N, which the plan meets exactly.
 pub fn family(profile: &RunProfile) -> AnalysisFamily {
+    let families: Vec<String> = TASK_FAMILIES.iter().map(|f| f.to_string()).collect();
+    let n_families = u32::try_from(TASK_FAMILIES.len()).unwrap();
+    let pairs = profile.worlds * profile.tasks_per_world;
     AnalysisFamily {
         schema: ANALYSIS_FAMILY_SCHEMA.to_string(),
         endpoints: vec!["quality_loss".into(), "harm".into(), "floor".into()],
-        families: vec!["generated".into()],
+        families: families.clone(),
         exclusions: vec![],
-        stopping_rule: StoppingRule::FixedN,
-        multiplicity_correction: MultiplicityCorrection::Holm,
+        stopping_rule: StoppingRule::FixedN { pairs },
+        multiplicity_correction: MultiplicityCorrection::None,
         profile: profile.statistics.clone(),
         interval_method: IntervalMethod::ClusterBootstrap,
         item_count_threshold: 300,
@@ -259,15 +292,19 @@ pub fn family(profile: &RunProfile) -> AnalysisFamily {
         trials_k: 3,
         icc_pilot: IccPilot {
             pilot_run_id: "ab".repeat(32),
-            n_items: 360,
-            n_families: 6,
-            n_worlds: 120,
-            icc_family: Ratio::new(1, 4),
-            icc_world_seed: Ratio::new(0, 1),
+            families,
+            n_items: n_families * profile.tasks_per_world,
+            n_families,
+            n_worlds: n_families,
+            icc_family: Ratio::ZERO,
+            icc_world_seed: Ratio::ZERO,
             clustering_unit: ClusteringUnit::WorldSeed,
-            max_affordable_worlds: 60,
-            effective_n_at_max: Ratio::new(400, 1),
-            required_n_for_margin: 385,
+            max_affordable_worlds: profile.worlds,
+            effective_n_at_max: ratio(
+                i128::from(n_families * profile.tasks_per_world * profile.worlds),
+                i128::from(n_families),
+            ),
+            required_n_for_margin: pairs,
         },
         transfer_criterion: None,
     }
@@ -433,6 +470,9 @@ enum Replacement {
 struct Lived {
     segments: Vec<StoredHistorySegment>,
     pass: Pass,
+    /// The task turn's own duration, from its request to its response: the
+    /// life before it builds the treatment and is not the task's spend.
+    task_ms: u64,
     counters: Value,
     firings: u32,
     refusals: u32,
@@ -471,11 +511,20 @@ fn live(
         usage: usage(world.messages.len() + 1),
         ..Knobs::default()
     };
-    let (turns, pass) = block_on(async {
+    let (turns, pass, task_ms) = block_on(async {
         let turns = lifecycle(&fixture, world, usage).await;
+        let attempt = Instant::now();
         let pass = pass(&fixture, world, prompt, &knobs).await;
-        (turns, pass)
+        let task_ms = u64::try_from(attempt.elapsed().as_millis()).unwrap();
+        (turns, pass, task_ms)
     });
+    // The task turn drains like every lifecycle turn: a firing it spawned
+    // finishes before its diagnostics, the counters, and the store are read.
+    drain(&fixture);
+    // The store is read while the fixture holds it: closing the last
+    // connection checkpoints the WAL away, so the root after shutdown is the
+    // smaller reading.
+    charges.store_bytes(root.path())?;
     let mut firings: u32 = 0;
     let mut failures_seen = false;
     for diagnostics in turns
@@ -511,10 +560,12 @@ fn live(
             assert_eq!(backend_calls, 0, "{counters}");
         }
     }
-    assert_eq!(
-        refusals > 0,
-        failures_seen,
-        "the daemon reports a failure exactly when the cassette refused a frame: {counters}"
+    // A turn's diagnostics describe the firings before it, so a refusal on
+    // the last firing is in the cassette's counter and in no snapshot; a
+    // failure the snapshots do show must be a refusal the counter has.
+    assert!(
+        !failures_seen || refusals > 0,
+        "the daemon reports a refused frame only when the cassette refused one: {counters}"
     );
     let (status, output) = fixture.shutdown_with_status();
     // A recording fixture refuses to write a cassette holding a refused
@@ -544,6 +595,7 @@ fn live(
     Ok(Lived {
         segments,
         pass,
+        task_ms,
         counters,
         firings,
         refusals,
@@ -656,7 +708,7 @@ fn decision(message: &RenderedMessage) -> &str {
 
 /// Every regular file under the arm's root: the kernel store with its WAL and
 /// shm, and the fixture's own files beside it; the control socket has no size.
-fn root_bytes(root: &Path) -> u64 {
+pub fn root_bytes(root: &Path) -> u64 {
     fn walk(path: &Path) -> u64 {
         let Ok(kind) = std::fs::symlink_metadata(path) else {
             return 0;
@@ -715,10 +767,17 @@ impl Charges {
         Ok(root)
     }
 
+    /// Charges the store's bytes under `root` as they stand now: read while
+    /// the store is open, since closing it checkpoints the WAL away.
+    pub fn store_bytes(&mut self, root: &Path) -> Result<(), EnvelopeExceeded> {
+        self.observe(Resource::StoreBytes, root_bytes(root))
+    }
+
     /// Releases a root after its fixture exited: the store's bytes are charged
-    /// as they peaked, then the root goes, and the run's elapsed time is read.
+    /// once more as the checkpoint left them, then the root goes, and the
+    /// run's elapsed time is read.
     pub fn vacate(&mut self, root: tempfile::TempDir) -> Result<(), EnvelopeExceeded> {
-        self.observe(Resource::StoreBytes, root_bytes(root.path()))?;
+        self.store_bytes(root.path())?;
         self.release(root)
     }
 
@@ -759,6 +818,12 @@ impl Charges {
         self.observe(Resource::ElapsedMs, elapsed)
     }
 
+    /// When the elapsed bound falls, measured from the clock `elapsed`
+    /// charges against, so no wait outlives the envelope.
+    pub fn deadline(&self) -> Instant {
+        self.started + Duration::from_millis(self.envelope.bounds.elapsed_ms)
+    }
+
     /// Charges the publish directory as one more root and one retained
     /// artifact, held for the rest of the run.
     pub fn retain_publish_root(&mut self) -> Result<(), EnvelopeExceeded> {
@@ -781,8 +846,9 @@ struct ArmRun {
 
 /// Lives the arm's world through one fixture process under its replacement
 /// and reads delivered evidence from the host's own selection on the task's
-/// turn. The attempt is timed against the task budgets; the roots, the
-/// process, and the store's bytes are charged to the envelope as they peak;
+/// turn. The task turn alone is timed against the task budgets; the roots,
+/// the process, and the store's bytes are charged to the envelope as they
+/// peak;
 /// the fixture's backend counters prove the task's turn made no model call
 /// and a replayed summarizer never reached the controlled backend. A segment
 /// stands for every message it covers at every stage up to render; at render
@@ -802,10 +868,11 @@ fn run_arm(
         .iter()
         .find(|m| m.event_id == *evidence)
         .expect("the evidence is a rendered message");
-    let attempt = Instant::now();
     let lived = live(world, replacement, &prompt(message), charges)?;
+    // The attempt timed against the deadline is the task turn; the life
+    // before it is the treatment's, charged to the envelope, not the task.
     let usage = TaskUsage {
-        elapsed_ms: u64::try_from(attempt.elapsed().as_millis()).unwrap(),
+        elapsed_ms: lived.task_ms,
         ..TaskUsage::default()
     };
     assert_eq!(
@@ -926,24 +993,30 @@ fn injection_scores(
                             .filter(|segment| run.selected.contains(&segment.sequence))
                             .any(carries)
                     });
-                    let yes_no = |held: bool| if held { AxisValue::Yes } else { AxisValue::No };
+                    let yes_no = |held: bool| {
+                        if held {
+                            StageValue::Yes
+                        } else {
+                            StageValue::No
+                        }
+                    };
                     // Retrieval is judged only where a structured aged arm ran a
                     // task with the canary already in its store.
                     let retrieval = if ingested && !structured_aged.is_empty() {
                         yes_no(retrieved)
                     } else {
-                        AxisValue::NotReached
+                        StageValue::NotReached
                     };
                     (yes_no(ingested), retrieval)
                 }
-                _ => (AxisValue::NotReached, AxisValue::NotReached),
+                _ => (StageValue::NotReached, StageValue::NotReached),
             };
             score_injection(
                 case,
                 &InjectionObservation {
                     ingested,
                     retrieved,
-                    packed: AxisValue::NotReached,
+                    packed: StageValue::NotReached,
                     mediation: None,
                     outputs: Vec::new(),
                     later_session: None,
@@ -1047,6 +1120,14 @@ pub fn prepare_publish(
             }
         }
     }
+    // The directory must take a staged file now, not after every life has
+    // run: a probe at the first file's staged path is created and removed, so
+    // a permission publication would hit refuses before a fixture starts.
+    if let Some(file) = files.first() {
+        let probe = staged_path(&publish.join(file));
+        std::fs::File::create_new(&probe).map_err(|error| refused(&probe, error))?;
+        std::fs::remove_file(&probe).map_err(|error| refused(&probe, error))?;
+    }
     Ok(())
 }
 
@@ -1069,14 +1150,10 @@ pub fn run(config: &Config) -> Result<Run, RunError> {
         publish,
     } = config;
     let (scale, aged_messages, elapsed_ms) = (*scale, *aged_messages, *elapsed_bound_ms);
-    let started_at_ms = i64::try_from(
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_millis(),
-    )
-    .unwrap();
-    let max_events_per_log = aged_messages.max(64) * 2;
+    let max_events_per_log = aged_messages
+        .max(64)
+        .checked_mul(2)
+        .ok_or(RunError::AgedHistoryTooLong { aged_messages })?;
     let profile = profile(scale, max_events_per_log, elapsed_ms, approval.clone());
     profile.approved()?;
     let window = profile.baseline_bounds[&EvaluatedSurface::Surface1];
@@ -1088,6 +1165,17 @@ pub fn run(config: &Config) -> Result<Run, RunError> {
         });
     }
     prepare_publish(publish, &[REPORT_FILE, MANIFEST_FILE]).map_err(publish_refused)?;
+    // The fixture is built before the envelope is held: compiling it is the
+    // harness's work, and its processes and time are not the campaign's.
+    fixture_binary();
+    // The manifest's clock and the envelope's start together, after the build.
+    let started_at_ms = i64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis(),
+    )
+    .unwrap();
     let mut charges = Charges::new(profile.envelope.clone());
 
     let task_set = plan_injection_cases(SEED, &TASK_IDS.iter().map(|id| id.to_string()).collect());
@@ -1122,10 +1210,26 @@ pub fn run(config: &Config) -> Result<Run, RunError> {
     })
     .unwrap();
     let BaselineVerdict::Established { contrast } =
-        check_recency_baseline(&set, |pair| pair.recency_window.clone()).unwrap()
+        check_recency_baseline(&set, &serialize_spec(), Baseline::Versioned).unwrap()
     else {
         panic!("{aged_messages} messages push the third one out of a window of {window}");
     };
+
+    // The build identity is frozen before the first arm runs: the checkout,
+    // the lockfile, and the binaries the outcomes come from, not whatever the
+    // tree holds when the report is written.
+    let identity = identity(
+        &profile,
+        "eval-campaign-shell/v1",
+        SEED,
+        json!({
+            "surface": EvaluatedSurface::Surface1,
+            "tasks": set.pairs.iter().map(|p| p.task.id.clone()).collect::<Vec<_>>(),
+            "aged_events": set.aged.events.len(),
+        }),
+        &[fixture_binary(), std::env::current_exe().unwrap()],
+    );
+    let eval_run_id = eval_run_id(&identity).unwrap();
 
     let aged_world = world(&set.aged);
     assert_eq!(aged_world.messages.len(), aged_messages as usize);
@@ -1266,8 +1370,8 @@ pub fn run(config: &Config) -> Result<Run, RunError> {
             structured_outcomes.push(PairOutcome {
                 pair_id: pair.task.id.clone(),
                 cluster: ClusterKey {
-                    family: "generated".to_string(),
-                    world_seed: SEED,
+                    family: TASK_FAMILY.to_string(),
+                    world_seed: WORLD,
                 },
                 fresh: fresh.result,
                 aged: aged.result,
@@ -1279,8 +1383,8 @@ pub fn run(config: &Config) -> Result<Run, RunError> {
         outcomes.push(PairOutcome {
             pair_id: pair.task.id.clone(),
             cluster: ClusterKey {
-                family: "generated".to_string(),
-                world_seed: SEED,
+                family: TASK_FAMILY.to_string(),
+                world_seed: WORLD,
             },
             fresh: fresh_run.result,
             aged: aged_run.result,
@@ -1293,6 +1397,7 @@ pub fn run(config: &Config) -> Result<Run, RunError> {
     let aged_structured_covered = covered(&aged_recording.segments, &aged_world);
     let arms = GovernanceArms {
         control_run_id: "ee".repeat(32),
+        pair_set_digest: eval_core::pair_set_digest(&set).unwrap(),
         task_ids: set.pairs.iter().map(|p| p.task.id.clone()).collect(),
         evidence_ids: set
             .pairs
@@ -1323,7 +1428,7 @@ pub fn run(config: &Config) -> Result<Run, RunError> {
             ),
         ]),
     };
-    arms.validate(&set).unwrap();
+    arms.validate(&set, &serialize_spec()).unwrap();
 
     let ledger = SampleLedger {
         epoch: 1,
@@ -1352,8 +1457,25 @@ pub fn run(config: &Config) -> Result<Run, RunError> {
         .collect();
     let family = family(&profile);
     let frozen = FrozenFamily::freeze(&family).unwrap();
-    let Analysis::Report(analysis) = analyze(&frozen, &family, &outcomes, &arm_rates).unwrap()
-    else {
+    // The manifest is the run's record and the analysis reads the table under
+    // it: it names the pairs as its samples, binds the completed table by
+    // digest, carries the frozen family and the arm rates, and says how the
+    // world reached the store: every arm was lived through the daemon's own
+    // transform route one turn at a time in one store incarnation, so the run
+    // is `replay` over `transform-route, turn by turn`.
+    charges.elapsed()?;
+    let mut manifest = manifest(
+        identity,
+        &eval_run_id,
+        &set,
+        &profile,
+        &frozen,
+        &outcomes,
+        &arm_rates,
+        &charges.envelope,
+        started_at_ms,
+    );
+    let Analysis::Report(analysis) = analyze(&manifest, &family, &outcomes).unwrap() else {
         panic!("a pair set with pairs reports");
     };
     let ceilings = profile.ceilings().unwrap();
@@ -1373,20 +1495,9 @@ pub fn run(config: &Config) -> Result<Run, RunError> {
     {
         established.push(Established::TaskOraclePasses);
     }
-    let identity = identity(
-        &profile,
-        "eval-campaign-shell/v1",
-        SEED,
-        json!({
-            "surface": EvaluatedSurface::Surface1,
-            "tasks": set.pairs.iter().map(|p| p.task.id.clone()).collect::<Vec<_>>(),
-            "aged_events": set.aged.events.len(),
-        }),
-        &fixture_binary(),
-    );
     let mut report = SuiteBReport {
         schema: SUITE_B_REPORT_SCHEMA.to_string(),
-        eval_run_id: eval_run_id(&identity).unwrap(),
+        eval_run_id,
         profile: profile.clone(),
         profile_digest: profile.digest().unwrap(),
         surface: EvaluatedSurface::Surface1,
@@ -1394,7 +1505,9 @@ pub fn run(config: &Config) -> Result<Run, RunError> {
         claims: Claims {
             boundary: ClaimBoundary::pinned(),
             established,
-            derivation: family.claim_class(WorldProvenance::Generated, None),
+            derivation: family
+                .claim_class(&frozen, WorldProvenance::Generated, None)
+                .unwrap(),
             provenance: WorldProvenance::Generated,
             anchor_set: None,
         },
@@ -1430,15 +1543,24 @@ pub fn run(config: &Config) -> Result<Run, RunError> {
             break bytes;
         }
     };
-    // The manifest beside the report says how the world reached the store:
-    // every arm was lived through the daemon's own transform route one turn
-    // at a time in one store incarnation, so the run is `replay` over
-    // `transform-route, turn by turn`. It is built before either file is
-    // renamed into place, so a report is never published without it.
-    let manifest = manifest(identity, &set, &report, &bytes, &frozen, started_at_ms);
+    // The manifest carries the envelope the report was published under: the
+    // peaks and the clock are measurements outside its digest, so refreshing
+    // them changes nothing the analysis read it for.
+    manifest.envelope_peaks = charges.envelope.peaks.clone();
+    manifest.end_ms = started_at_ms + i64::try_from(charges.envelope.peaks.elapsed_ms).unwrap();
+    // The manifest's bytes are ready before either file is linked into place,
+    // so a report is never published without it, and a manifest the directory
+    // then refuses to take (out of space, a file that arrived meanwhile)
+    // takes the report back out with it: a reader finds both files or none.
+    // A process killed between the two links still leaves the report alone;
+    // the next run into the directory is refused rather than mixed.
     let manifest_bytes = serde_json::to_vec_pretty(&manifest.to_value()).unwrap();
-    publish_file(&publish.join(REPORT_FILE), &bytes).map_err(publish_refused)?;
-    publish_file(&publish.join(MANIFEST_FILE), &manifest_bytes).map_err(publish_refused)?;
+    let report_path = publish.join(REPORT_FILE);
+    publish_file(&report_path, &bytes).map_err(publish_refused)?;
+    if let Err(error) = publish_file(&publish.join(MANIFEST_FILE), &manifest_bytes) {
+        let _ = std::fs::remove_file(&report_path);
+        return Err(publish_refused(error));
+    }
     Ok(Run {
         report,
         report_bytes: bytes,
@@ -1454,22 +1576,6 @@ pub fn run(config: &Config) -> Result<Run, RunError> {
             covered: aged_structured_covered,
         },
     })
-}
-
-/// The protocol the manifest's `result_digest` is taken under.
-pub const RESULT_DIGEST_PROTOCOL: &str = "eval-suite-b-report-result/v1";
-
-/// The digest the manifest names the report by: the published report with
-/// its envelope peaks removed, since the peaks are a measurement and a clock
-/// must not reach a digest. Two runs of one identity agree on it.
-pub fn result_digest(report_bytes: &[u8]) -> String {
-    let mut value: Value = serde_json::from_slice(report_bytes).expect("the report is JSON");
-    value["envelope"]
-        .as_object_mut()
-        .expect("the report carries its envelope")
-        .remove("peaks");
-    context_core::canonical_json::protocol_digest(RESULT_DIGEST_PROTOCOL, &value)
-        .expect("the report is canonical")
 }
 
 /// The report's file name under the publish directory.
@@ -1588,7 +1694,7 @@ pub fn identity(
     simulator_version: &str,
     root_seed: u64,
     scenario: Value,
-    binary: &Path,
+    binaries: &[PathBuf],
 ) -> RunIdentity {
     let dirty = !command("git", &["status", "--porcelain"]).is_empty();
     let lockfile =
@@ -1605,8 +1711,16 @@ pub fn identity(
                 .find_map(|line| line.strip_prefix("host: "))
                 .expect("rustc names its host")
                 .to_string(),
+            // The fixture and the executable driving it: a dirty tree that
+            // changes only the shell changes this digest too.
             binary_digest: BinaryDigest::Present {
-                sha256: sha256_hex(&std::fs::read(binary).unwrap()),
+                sha256: sha256_hex(
+                    &binaries
+                        .iter()
+                        .map(|binary| std::fs::read(binary).unwrap())
+                        .collect::<Vec<_>>()
+                        .concat(),
+                ),
             },
         },
         simulator_version: simulator_version.to_string(),
@@ -1620,28 +1734,33 @@ pub fn identity(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn manifest(
     identity: RunIdentity,
+    eval_run_id: &str,
     set: &PairSet,
-    report: &SuiteBReport,
-    report_bytes: &[u8],
+    profile: &RunProfile,
     frozen: &FrozenFamily,
+    outcomes: &[PairOutcome],
+    arm_rates: &BTreeMap<String, ArmRates>,
+    envelope: &Envelope,
     started_at_ms: i64,
 ) -> Manifest {
     let set_value = serde_json::to_value(set).unwrap();
+    let sample_order: Vec<String> = outcomes.iter().map(|pair| pair.pair_id.clone()).collect();
     Manifest {
         schema: MANIFEST_SCHEMA.to_string(),
-        eval_run_id: report.eval_run_id.clone(),
+        eval_run_id: eval_run_id.to_string(),
         run_identity: identity,
         start_ms: started_at_ms,
-        end_ms: started_at_ms + i64::try_from(report.envelope.peaks.elapsed_ms).unwrap(),
+        end_ms: started_at_ms + i64::try_from(envelope.peaks.elapsed_ms).unwrap(),
         status: RunStatus::Completed,
         error: None,
-        sample_ids: report.samples.samples.keys().cloned().collect(),
-        sample_order: report.samples.order.clone(),
-        sample_epoch: report.samples.epoch,
+        sample_ids: sample_order.clone(),
+        sample_order,
+        sample_epoch: 1,
         retry_lineage: Vec::new(),
-        result_digest: result_digest(report_bytes),
+        result_digest: pair_table_digest(outcomes).unwrap(),
         witness_digest: context_core::canonical_json::protocol_digest(
             "eval-campaign-witness/v1",
             &set_value,
@@ -1666,7 +1785,7 @@ fn manifest(
         analysis_family_digest: Some(frozen.analysis_family_digest.clone()),
         recency_baseline: Some(RecencyBaseline {
             version: eval_core::RECENCY_BASELINE_VERSION.to_string(),
-            bounds: report.profile.baseline_bounds.clone(),
+            bounds: profile.baseline_bounds.clone(),
         }),
         reachability: Reachability::DefaultProduction,
         claim_boundary: ClaimBoundary::pinned(),
@@ -1679,9 +1798,9 @@ fn manifest(
             task_corpus: format!("generated:{SEED:#x}"),
             judge: "none".to_string(),
         },
-        envelope_bounds: report.envelope.bounds.clone(),
-        envelope_peaks: report.envelope.peaks.clone(),
-        arm_rates: report.arm_rates.clone(),
+        envelope_bounds: envelope.bounds.clone(),
+        envelope_peaks: envelope.peaks.clone(),
+        arm_rates: arm_rates.clone(),
     }
 }
 

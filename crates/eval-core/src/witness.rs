@@ -10,13 +10,17 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::cassette::scan_for_secrets;
+use crate::eligibility::serialize_spec;
 use crate::event::{CausalEdge, EventId, EventLog};
 use crate::failure_class::Slice;
+use crate::fault::validate_episodes;
 use crate::generator::{Mode, WorldConfig, generate_all};
 use crate::manifest::{CLAIM_BOUNDARY_EXCLUSIONS, ClaimBoundary};
-use crate::residue::ResidueEntry;
+use crate::markers::MARKERS;
+use crate::residue::{ResidueEntry, residue_contradiction};
 use crate::shrink::{
     CandidateVerdict, Element, FailurePredicate, History, Minimality, Scenario, ShrinkReport,
+    ShrinkReportError, Transformation, WitnessClass,
 };
 use crate::stream::Tape;
 
@@ -78,6 +82,9 @@ pub enum WitnessError {
     SchemaMismatch {
         found: String,
     },
+    /// The embedded report refuses on its own terms: schema, oracle, or its
+    /// accounting against its candidate ledger.
+    ShrinkReport(ShrinkReportError),
     ClaimBoundaryMismatch,
     ForbiddenClaim {
         path: String,
@@ -86,6 +93,16 @@ pub enum WitnessError {
     LiveRelabelledReplayable,
     PredicateDisagrees,
     MinimizedDigestMismatch,
+    /// The minimized scenario is not one a child could replay: its episodes
+    /// are not a valid set or the pair compiler refuses it.
+    MinimizedNotReplayable {
+        refusal: String,
+    },
+    /// The failure predicate names a task other than the one a replay
+    /// evaluates, the minimized scenario's first pair.
+    PredicateNamesAnotherTask {
+        task: String,
+    },
     /// The minimized scenario still fails only in multiplicity, so the
     /// compact form is required; or it carries one it does not need.
     RecipeRequired,
@@ -96,9 +113,29 @@ pub enum WitnessError {
     RecipeDisagrees {
         history: History,
     },
+    /// The report claims 1-minimality without a rejected replay record for
+    /// this single deletion from the minimized scenario.
+    MinimalityUnsupported {
+        element: Element,
+    },
+    /// The 1-minimality claim names other transformations than the ones the
+    /// original held elements for.
+    TransformationsDisagree {
+        expected: Vec<Transformation>,
+    },
+    /// The coverage signature names a marker the registry does not have.
+    UnregisteredMarker {
+        name: String,
+    },
     ResidueDrift {
         missing: BTreeSet<ResidueEntry>,
         unexpected: BTreeSet<ResidueEntry>,
+    },
+    /// The recorded residue holds a `Keep` rule or two rules for one field,
+    /// which no schema declares; no replay could ever match it.
+    ResidueContradiction {
+        type_name: String,
+        field: String,
     },
     NotHex {
         field: &'static str,
@@ -133,6 +170,46 @@ impl WitnessPackage {
         if self.minimized.digest() != self.shrink.minimized_digest {
             return Err(WitnessError::MinimizedDigestMismatch);
         }
+        // A replayable witness is one a child can replay: the minimized
+        // scenario compiles under the pinned fixture and its episodes are a
+        // valid set, as the shrinker required of every accepted candidate.
+        validate_episodes(&self.minimized.episodes).map_err(|refusal| {
+            WitnessError::MinimizedNotReplayable {
+                refusal: format!("{refusal:?}"),
+            }
+        })?;
+        let set = self
+            .minimized
+            .compile(&serialize_spec())
+            .map_err(|refusal| WitnessError::MinimizedNotReplayable {
+                refusal: refusal.kind().to_string(),
+            })?;
+        // A child evaluates the first pair's task; a failure's subject is that
+        // task or the predicate cannot be reproduced, only slipped from.
+        if let WitnessClass::Failure { task, .. } = &self.original.predicate.witness_class {
+            let evaluated = set.pairs.first().map(|pair| pair.task.id.as_str());
+            if evaluated != Some(task.as_str()) {
+                return Err(WitnessError::PredicateNamesAnotherTask { task: task.clone() });
+            }
+        }
+        // What the report deleted is gone from the minimized scenario.
+        let elements = self.minimized.elements();
+        if self
+            .shrink
+            .deleted
+            .iter()
+            .any(|element| elements.contains(element))
+        {
+            return Err(WitnessError::ShrinkReport(
+                ShrinkReportError::Inconsistent { field: "deleted" },
+            ));
+        }
+        if let Some(entry) = residue_contradiction(&self.residue) {
+            return Err(WitnessError::ResidueContradiction {
+                type_name: entry.type_name.clone(),
+                field: entry.field.clone(),
+            });
+        }
         for (field, text, len) in [
             ("eval_run_id", &self.original.eval_run_id, 64),
             ("trace_digest", &self.original.trace_digest, 64),
@@ -142,22 +219,88 @@ impl WitnessPackage {
             }
         }
         self.check_recipe()?;
+        self.check_minimality()?;
+        // The report's own accounting, then what only the package can check:
+        // the survivors it declares are the minimized scenario's elements.
+        self.shrink.validate().map_err(WitnessError::ShrinkReport)?;
+        if self.shrink.remaining != self.minimized.elements().len() as u64 {
+            return Err(WitnessError::ShrinkReport(
+                ShrinkReportError::Inconsistent { field: "remaining" },
+            ));
+        }
         let value = serde_json::to_value(self).map_err(|e| WitnessError::Shape(e.to_string()))?;
-        check_claims(&value, "")
+        check_claims(&value, "")?;
+        for name in &self.original.coverage {
+            if !MARKERS.iter().any(|marker| marker.name == name) {
+                return Err(WitnessError::UnregisteredMarker { name: name.clone() });
+            }
+        }
+        Ok(())
+    }
+
+    /// `OneMinimal` claims every single deletion from the minimized scenario
+    /// was replayed and rejected; the report must carry that record for each,
+    /// under the digest of the scenario that deletion produces, and name
+    /// exactly the transformations the original held elements for, in the
+    /// shrinker's order.
+    fn check_minimality(&self) -> Result<(), WitnessError> {
+        let Minimality::OneMinimal { transformations } = &self.shrink.minimality else {
+            return Ok(());
+        };
+        let elements = self.minimized.elements();
+        let held: BTreeSet<Transformation> = elements
+            .iter()
+            .chain(&self.shrink.deleted)
+            .map(Element::transformation)
+            .collect();
+        let expected: Vec<Transformation> = Transformation::ORDER
+            .into_iter()
+            .filter(|transformation| held.contains(transformation))
+            .collect();
+        if *transformations != expected {
+            return Err(WitnessError::TransformationsDisagree { expected });
+        }
+        let fixture = serialize_spec();
+        for element in elements {
+            let mut deleted = self.shrink.deleted.clone();
+            deleted.insert(element.clone());
+            let candidate = self.minimized.without(&BTreeSet::from([element.clone()]));
+            let digest = candidate.digest();
+            // An `InvalidPair` is a rejection only if the compiler makes it:
+            // the candidate is rebuilt and must refuse with the recorded kind.
+            let rejected = self.shrink.candidates.iter().any(|record| {
+                record.deleted == deleted
+                    && record.scenario_digest == digest
+                    && match &record.verdict {
+                        CandidateVerdict::Reproduced | CandidateVerdict::Unknown { .. } => false,
+                        CandidateVerdict::InvalidPair { refusal } => candidate
+                            .compile(&fixture)
+                            .is_err_and(|error| error.kind() == refusal),
+                        _ => true,
+                    }
+            });
+            if !rejected {
+                return Err(WitnessError::MinimalityUnsupported { element });
+            }
+        }
+        Ok(())
     }
 
     /// A kind is count-triggered when the minimized scenario keeps more than
     /// one aged event of it and deleting any one alone changed the outcome
     /// (`Slipped` or `NotReproduced`). A 1-minimal scenario with such a kind
-    /// carries the compact form; one without carries none; the form must
-    /// regenerate exactly the minimized logs.
+    /// carries the compact form; one without, or one whose minimality is not
+    /// established, carries none; the form must regenerate exactly the
+    /// minimized logs.
     fn check_recipe(&self) -> Result<(), WitnessError> {
         let triggered = self.count_triggered();
         let minimal = matches!(self.shrink.minimality, Minimality::OneMinimal { .. });
         match &self.recipe {
             None if minimal && !triggered.is_empty() => Err(WitnessError::RecipeRequired),
             None => Ok(()),
-            Some(_) if triggered.is_empty() => Err(WitnessError::RecipeWithoutMultiplicity),
+            Some(_) if !minimal || triggered.is_empty() => {
+                Err(WitnessError::RecipeWithoutMultiplicity)
+            }
             Some(recipe) if recipe.multiplicities != triggered => {
                 Err(WitnessError::RecipeMultiplicitiesDisagree)
             }
@@ -172,17 +315,24 @@ impl WitnessPackage {
         }
     }
 
-    /// The kinds a compact recipe must count, with their counts.
+    /// The kinds a compact recipe must count, with their counts. A record
+    /// counts only under the digest of the scenario its deletion produces.
     pub fn count_triggered(&self) -> BTreeMap<String, u64> {
         let mut counts: BTreeMap<String, u64> = BTreeMap::new();
         for event in &self.minimized.aged.events {
-            let mut deleted = self.shrink.deleted.clone();
-            deleted.insert(Element::Event {
+            let element = Element::Event {
                 history: History::Aged,
                 id: event.id.clone(),
-            });
+            };
+            let digest = self
+                .minimized
+                .without(&BTreeSet::from([element.clone()]))
+                .digest();
+            let mut deleted = self.shrink.deleted.clone();
+            deleted.insert(element);
             let changed = self.shrink.candidates.iter().any(|record| {
                 record.deleted == deleted
+                    && record.scenario_digest == digest
                     && matches!(
                         record.verdict,
                         CandidateVerdict::Slipped { .. } | CandidateVerdict::NotReproduced
@@ -222,9 +372,17 @@ impl WitnessPackage {
         if generation.config.declared_events() != (minimized.events.len() + deleted.len()) as u64 {
             return Err(disagrees());
         }
-        let mut log = generate_all(generation.root_seed, &generation.config, Mode::Generate)
-            .map_err(|_| disagrees())?
-            .log;
+        let world = generate_all(generation.root_seed, &generation.config, Mode::Generate)
+            .map_err(|_| disagrees())?;
+        // The aged generation is the original's world: its decision tape and
+        // its causal edges are the ones the failure recorded, not just its log.
+        if history == History::Aged
+            && (world.tape != self.original.tape
+                || world.log.causal_edges != self.original.causal_trace)
+        {
+            return Err(disagrees());
+        }
+        let mut log = world.log;
         for id in deleted {
             log = log.without(id);
         }
@@ -300,9 +458,10 @@ fn check_claims(value: &Value, path: &str) -> Result<(), WitnessError> {
     }
 }
 
-/// Refuses a missing block by name, a field the type would drop, then
-/// everything `validate` refuses.
+/// Refuses an integer outside the canonical range, a missing block by name,
+/// a field the type would drop, then everything `validate` refuses.
 pub fn parse_witness(value: &Value) -> Result<WitnessPackage, WitnessError> {
+    canonical_json_encode(value).map_err(|e| WitnessError::Shape(e.to_string()))?;
     let package =
         WitnessPackage::deserialize(value).map_err(|e| WitnessError::Shape(e.to_string()))?;
     package.validate()?;
