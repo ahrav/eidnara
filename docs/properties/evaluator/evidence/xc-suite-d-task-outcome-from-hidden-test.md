@@ -35,15 +35,16 @@ attempt is rejected."
 - `crates/daemon/tests/eval_suite_d.rs` `a_contained_task_is_judged_by_hidden_tests_the_agent_never_sees`:
   the agent plants `tests/hidden_sum_of_positives.rs`, replaces
   `Cargo.toml` with a symlink, copies whatever `../grade/tests` holds, and
-  adds a `build.rs` that writes outside the run root and under
-  `$XDG_RUNTIME_DIR`; `oracle_tamper` records the plant and the link and
-  nothing copied; neither of the build script's files exists; the terminal
-  is `Pass` from the corpus's tests.
+  adds a `build.rs` that would write outside the run root and under
+  `$XDG_RUNTIME_DIR`; `oracle_tamper` records the plant, the link, and the
+  build script, and nothing copied; the build script never reaches the
+  grade tree, so neither of its files exists; the terminal is `Pass` from
+  the corpus's tests.
 - `crates/daemon/tests/eval_suite_d.rs` `a_wrong_fix_fails_a_no_fix_stays_failed_and_an_exhausted_budget_is_censored`:
-  a wrong fix is `Fail` with its named test failed, although the agent's
-  `build.rs` tried to rewrite that test and to plant a `rustc-wrapper` in
-  Cargo's home and under the build cache, and its manifest became a
-  directory (`Cargo.toml/x` recorded, the run not aborted); no fix stays `Fail`; 100
+  a wrong fix is `Fail` with its named test failed, although the agent left
+  a `build.rs` (recorded, never run) that would rewrite that test and plant
+  a `rustc-wrapper` in Cargo's home and under the build cache, and its
+  manifest became a directory (`Cargo.toml/x` recorded, the run not aborted); no fix stays `Fail`; 100
   extra tool calls are `Censored { max_tool_calls }` with no hidden test run.
 - `crates/eval-core/tests/task.rs` `the_terminal_comes_from_the_hidden_tests_after_the_budget` and
   `an_agent_cannot_select_modify_or_replace_the_oracle`.

@@ -166,7 +166,9 @@ fn the_containment_denies_relative_writes_and_mask_removal_that_the_control_allo
     }
     let root = tempfile::tempdir().unwrap();
     let private = root.path().join("private");
-    let workspace = root.path().join("workspace");
+    // A space in the path: mountinfo escapes it, and the mounts must still
+    // find their own writable tree.
+    let workspace = root.path().join("work space");
     std::fs::create_dir_all(&private).unwrap();
     std::fs::create_dir_all(&workspace).unwrap();
     let profile = campaign::profile(Scale::S0, 128, 600_000, Some(approval()));
@@ -265,7 +267,8 @@ fn grading_ignores_symlinked_hard_linked_and_undeletable_workspace_entries() {
         .iter()
         .find(|fix| fix.fails == "sum_of_positives")
         .unwrap();
-    let workspace = suite_d::materialize(root.path(), task, &wrong.patch).unwrap();
+    let workspace =
+        suite_d::materialize(root.path(), task, &wrong.patch, Duration::from_secs(60)).unwrap();
     let host_file = root.path().join("host-file");
     std::fs::write(&host_file, "the host's own contents").unwrap();
     std::fs::remove_file(workspace.join("Cargo.toml")).unwrap();
@@ -449,10 +452,20 @@ fn materializing_ignores_the_host_git_configuration_and_refuses_a_failed_commit(
     // env-var change; the value is restored below before any other test
     // reads it.
     unsafe { std::env::set_var("GIT_CONFIG_GLOBAL", &global) };
-    let materialized = suite_d::materialize(root.path(), &task, &eval_core::Files::new());
+    let materialized = suite_d::materialize(
+        root.path(),
+        &task,
+        &eval_core::Files::new(),
+        Duration::from_secs(60),
+    );
     task.commit_message = String::new();
     let other = tempfile::tempdir().unwrap();
-    let refused = suite_d::materialize(other.path(), &task, &eval_core::Files::new());
+    let refused = suite_d::materialize(
+        other.path(),
+        &task,
+        &eval_core::Files::new(),
+        Duration::from_secs(60),
+    );
     match previous {
         Some(value) => unsafe { std::env::set_var("GIT_CONFIG_GLOBAL", value) },
         None => unsafe { std::env::remove_var("GIT_CONFIG_GLOBAL") },
@@ -669,6 +682,15 @@ fn a_contained_task_is_judged_by_hidden_tests_the_agent_never_sees() {
         "the manifest names Suite D's corpus, not aging's"
     );
     assert_eq!(
+        run.manifest.envelope_peaks, manifest.envelope_peaks,
+        "the returned manifest carries the peaks the published one does"
+    );
+    assert_eq!(
+        manifest.component_versions.execution_image,
+        suite_d::EXECUTION_IMAGE_CONTAINED,
+        "the manifest says the agents ran under unshare"
+    );
+    assert_eq!(
         manifest.component_versions.judge,
         suite_d::JUDGE_VERSION,
         "the manifest names the hidden-test judge that decided every terminal"
@@ -677,6 +699,16 @@ fn a_contained_task_is_judged_by_hidden_tests_the_agent_never_sees() {
         manifest.run_identity.scenario["task_generator_version"],
         eval_core::TASK_GENERATOR_VERSION,
         "the identity names the generator that produced the tasks, not the world generator"
+    );
+    assert_eq!(
+        manifest.run_identity.scenario["witness"],
+        report.admission.accepted_witness_digest.clone().unwrap(),
+        "the identity binds the accepted witness"
+    );
+    assert_eq!(
+        manifest.run_identity.scenario["contained"],
+        serde_json::json!(true),
+        "the identity says the agents ran contained"
     );
     // The peaks and the elapsed times are measurements; two runs of one
     // identity must agree on the result digest without them.
@@ -923,6 +955,15 @@ fn a_host_without_namespaces_skips_every_task_with_no_containment() {
             .markers
             .contains("mtr_suite_d_no_containment_skips")
     );
+    assert_eq!(
+        run.manifest.run_identity.scenario["contained"],
+        serde_json::json!(false),
+        "a skipped run is not the same identity as a contained one"
+    );
+    assert_eq!(
+        run.manifest.component_versions.execution_image,
+        suite_d::EXECUTION_IMAGE_NO_CONTAINMENT
+    );
     assert!(
         !run.report
             .markers
@@ -964,6 +1005,30 @@ fn admission_refuses_without_an_accepted_witness_or_an_approved_profile() {
     ));
     config.witness = dir.path().join("missing.json");
     assert!(matches!(suite_d::run(&config, HOST), Err(RunError::Io(_))));
+    // A device or a FIFO reports no size; only a regular file is a witness.
+    config.witness = PathBuf::from("/dev/null");
+    let refused = suite_d::run(&config, HOST)
+        .err()
+        .map(|e| e.to_string())
+        .unwrap_or_default();
+    assert!(
+        refused.contains("regular file"),
+        "a witness that is not a regular file is refused before it is read: {refused}"
+    );
+    // A witness past the envelope's artifact bound is refused by its size,
+    // before it is read or parsed.
+    let oversized = dir.path().join("oversized.json");
+    let bound = suite_d::profile(&config).envelope.artifact_bytes;
+    std::fs::write(&oversized, vec![b'['; usize::try_from(bound).unwrap() + 1]).unwrap();
+    config.witness = oversized;
+    let refused = suite_d::run(&config, HOST)
+        .err()
+        .map(|e| e.to_string())
+        .unwrap_or_default();
+    assert!(
+        refused.contains("artifact bound"),
+        "an oversized witness is refused by size, not by parse: {refused}"
+    );
     config.approval = None;
     assert!(matches!(
         suite_d::run(&config, HOST),
@@ -997,6 +1062,67 @@ fn the_suite_d_flags_are_parsed() {
     assert_eq!(config.tasks, 2);
     assert_eq!(config.script, Script::default());
     assert!(suite_d::config_from_args(["--scale".to_string(), "s0".to_string()]).is_err());
+    // A corpus is generated whole before anything is charged, so the count
+    // is bounded at the flag, not by the envelope afterwards.
+    let too_many = suite_d::config_from_args(
+        [
+            "--scale",
+            "s0",
+            "--tasks",
+            &(suite_d::MAX_TASKS + 1).to_string(),
+            "--elapsed-bound-ms",
+            "1000",
+            "--approved-by",
+            "m",
+            "--approval-run-id",
+            &"ab".repeat(32),
+            "--witness",
+            "/tmp/w.json",
+            "--publish",
+            "/tmp/x",
+        ]
+        .map(String::from),
+    );
+    assert!(
+        matches!(&too_many, Err(message) if message.contains("--tasks")),
+        "{too_many:?}"
+    );
+}
+
+#[test]
+fn a_wrong_fix_the_task_does_not_have_refuses_before_anything_runs() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = config(
+        dir.path(),
+        Script {
+            fix: Fix::Wrong(99),
+            ..Script::default()
+        },
+    );
+    let started = std::time::Instant::now();
+    let refused = suite_d::run(&config, NO_NAMESPACES).err();
+    assert!(
+        matches!(refused, Some(RunError::Io(_))),
+        "a fix the corpus does not hold is not the no-fix scenario: {refused:?}"
+    );
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "refused before adequacy ran"
+    );
+    // The same bound the flag applies, for a `Config` built in code.
+    let mut too_many = config.clone();
+    too_many.script = Script::default();
+    too_many.tasks = suite_d::MAX_TASKS + 1;
+    too_many.publish = dir.path().join("too-many");
+    let started = std::time::Instant::now();
+    let refused = suite_d::run(&too_many, NO_NAMESPACES)
+        .err()
+        .map(|e| e.to_string());
+    assert!(
+        refused.as_deref().is_some_and(|m| m.contains("tasks")),
+        "a corpus over the limit is refused before it is generated: {refused:?}"
+    );
+    assert!(started.elapsed() < Duration::from_secs(5));
 }
 
 #[test]

@@ -1434,7 +1434,7 @@ budget.
 **Terminals.** Every sample ends in exactly one `Terminal`: `pass`, `fail`,
 `censored {reason}`, `indeterminate`, `skipped` (`profile_not_approved`,
 `stop_condition {condition}`, `envelope_exceeded {resource, bound,
-observed}`, `cassette_miss`, `redaction_refused`, `no_containment`), `unsupported`
+observed}`, `cassette_miss`, `redaction_refused`), `unsupported`
 (`surface_not_activated {surface}`, `no_mediation_boundary`,
 `packing_has_no_caller`, `policy_not_on_surface {policy, surface}`), or `disabled` (`scale_not_budgeted {scale}`,
 `feature_off`). The reasons are closed vocabularies; a reason outside them
@@ -3224,8 +3224,9 @@ unfixed, under the correct fix, and under every wrong fix, and runs
 `cargo test --offline --locked --test hidden_<name>` for each under its own
 authority and, where the host has namespaces, inside the same containment the
 agent gets, with the build cache the only writable tree and the grade tree
-itself read-only, so a `build.rs` or test the candidate wrote can neither
-reach the host nor rewrite a hidden test before it compiles; Cargo's home and
+itself read-only, so code the candidate wrote under `src/` (the only agent
+writes the oracle workspace carries; a `build.rs` is recorded and never
+built) can neither reach the host nor rewrite a hidden test; Cargo's home and
 its working directory are read-only paths under the private directory, so
 no `.cargo/config.toml` a build script plants is read by the next
 invocation, and `RUSTUP_TOOLCHAIN` names the checkout's toolchain because
@@ -3500,7 +3501,7 @@ through three host seams: `Host::clone` puts a repository at its clone URL
 into a directory, `Host::fetch` returns the issue text, its creation and
 last-edit times, and the pull request's creation time, at run time, and
 `Host::namespaces` says whether the host can create the containment's
-namespaces; nothing fetched is persisted. The clone and the fetch are given
+namespaces (the probe is bounded like every other child); nothing fetched is persisted. The clone and the fetch are given
 the campaign time left and must return within it (the shell cannot
 interrupt them); a row that names a pull request whose creation time the
 host did not supply is `source_unavailable`, since the repair's publication
@@ -3652,8 +3653,9 @@ report `eval-anchor-report/v1` carries the corpus digest, the role, the
 time study, one `TaskOutcome` per entry (terminal, measured preparation, the
 audit and any refusal, the proof with its reference, the controls and
 classified verdicts per pair), the per-pair accounting, and the claims; the
-manifest's `component_versions.task_corpus` names the corpus digest and its
-`judge` the Suite D hidden-test judge.
+manifest's `component_versions.task_corpus` names the corpus digest, its
+`judge` the Suite D hidden-test judge, and its `execution_image` the Suite D
+containment, where every proof and control ran.
 `crates/daemon/tests/eval_anchor.rs` builds the pilot composition (eight
 Cargo, eight Tokio, four Django rows, every one a local Cargo crate) from
 generated tasks (the base commit holds the defect, a binary file, a symlink,

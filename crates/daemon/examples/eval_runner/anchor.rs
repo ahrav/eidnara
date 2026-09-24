@@ -1269,6 +1269,8 @@ pub fn run(config: &Config, host: Host) -> Result<Run, RunError> {
         started_at_ms,
         task_corpus: format!("anchor:{}", report.corpus_digest),
         judge: suite_d::JUDGE_VERSION.to_string(),
+        // Every proof and control ran inside the Suite D containment.
+        execution_image: suite_d::EXECUTION_IMAGE_CONTAINED.to_string(),
     });
     let manifest_bytes = serde_json::to_vec_pretty(&manifest.to_value()).unwrap();
     // The manifest first, then the report; a manifest whose report failed is
