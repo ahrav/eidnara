@@ -953,6 +953,8 @@ pub enum LiveSettingsRefused {
     },
     ZeroK,
     ZeroRepeats,
+    /// A blank task id identifies nothing in the held-out set.
+    BlankTask,
     KExceedsRepeats {
         k: u32,
         repeats: u32,
@@ -1014,6 +1016,9 @@ impl LiveSettings {
         }
         if self.tasks.is_empty() {
             return Err(LiveSettingsRefused::NoTasks);
+        }
+        if self.tasks.iter().any(|t| t.trim().is_empty()) {
+            return Err(LiveSettingsRefused::BlankTask);
         }
         let calibration = self
             .calibration

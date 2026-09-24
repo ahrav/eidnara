@@ -3715,8 +3715,8 @@ the tests, and the residual report carries no gate field.
 
 `LiveSettings::validate` refuses without exactly two distinct approved
 provider profiles with no blank component, a pass^k exponent `k`, a planned
-attempt count `repeats` at least `k`, a frozen held-out task set, a
-calibration set, and a plan above the floor. `live_slice` constructs a
+attempt count `repeats` at least `k`, a frozen held-out task set with no blank
+id, a calibration set, and a plan above the floor. `live_slice` constructs a
 `LiveSliceReport` (`eval-live-slice/v1`) only from validated settings and one
 of their two profiles, with the settings' `k`; it refuses no tasks, a repeated
 task id, a task set that is not exactly the settings', and a task with other

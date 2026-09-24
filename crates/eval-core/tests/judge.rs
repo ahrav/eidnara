@@ -528,6 +528,13 @@ fn live_settings_refuse_until_two_profiles_a_calibration_set_and_a_plan_exist() 
         Err(LiveSettingsRefused::EmptyProviderField { field: "provider" }),
         "two profiles that differ only by a blank are not two approved models"
     );
+    let mut placeholder = settings.clone();
+    placeholder.tasks.insert(" ".to_string());
+    assert_eq!(
+        placeholder.validate(),
+        Err(LiveSettingsRefused::BlankTask),
+        "a whitespace id is not a held-out task"
+    );
     let mut no_tasks = settings.clone();
     no_tasks.tasks.clear();
     assert_eq!(no_tasks.validate(), Err(LiveSettingsRefused::NoTasks));
