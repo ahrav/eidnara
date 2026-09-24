@@ -731,8 +731,8 @@ fn prepare(
 /// Writes `tests` as `tests/hidden_<name>.rs` into `tree` (a `tests` entry
 /// that is not a directory and a symlink at a test's path are removed first,
 /// `.cargo/` is dropped) and grades them inside the containment, the tree
-/// read-only, only `layout.target` writable, and `layout.tasks` (every
-/// snapshot and fix tree) covered by an empty tmpfs.
+/// read-only, only `layout.target` writable and emptied first, and
+/// `layout.tasks` (every snapshot and fix tree) covered by an empty tmpfs.
 pub fn grade(
     tree: &Path,
     tests: &[(String, String)],
@@ -742,6 +742,11 @@ pub fn grade(
     task: &str,
     charges: &mut Charges,
 ) -> Result<HiddenResults, RunError> {
+    // Each grade builds in a cache of its own: what one grade's build
+    // scripts and tests left in the writable mount reaches no other, so a
+    // test cannot fail on the snapshot and pass on the reference by what the
+    // first run left behind.
+    fresh_dir(&layout.target)?;
     let _ = std::fs::remove_dir_all(tree.join(".cargo"));
     for path in removed {
         let path = tree.join(path);
@@ -1152,9 +1157,6 @@ pub fn run(config: &Config, host: Host) -> Result<Run, RunError> {
             outcomes.push(outcome);
             continue;
         }
-        // Each task builds in a cache of its own: what one task's build
-        // scripts and tests left in the writable mount reaches no other.
-        fresh_dir(&layout.target)?;
         fresh_dir(&layout.tree)?;
         copy_tree(&ready.snapshot, &layout.tree, &mut charges)?;
         charges.store_bytes(&layout.root)?;

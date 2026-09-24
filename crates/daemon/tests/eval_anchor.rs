@@ -75,6 +75,24 @@ fn the_fixture_holds_the_committed_bytes() {
 }
 "#;
 
+/// Fails the first time it runs in a build cache and passes every time after:
+/// a test whose outcome is the cache's state, not the tree's.
+const STATEFUL_TEST: &str = r#"
+#[test]
+fn passes_once_an_earlier_grade_left_its_marker() {
+    let marker = std::env::temp_dir().join(concat!(env!("CARGO_CRATE_NAME"), ".marker"));
+    if marker.exists() {
+        return;
+    }
+    std::fs::write(&marker, b"seen").unwrap();
+    panic!("the first grade in this cache");
+}
+"#;
+
+/// A commit time git holds and `i64` milliseconds cannot: past
+/// `i64::MAX / 1000`, below git's own `TIME_MAX`.
+const OVERFLOWING_SECONDS: i64 = 9_300_000_000_000_000;
+
 /// How one fixture repository departs from a plain real-history task.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Variant {
@@ -104,10 +122,21 @@ enum Variant {
     /// `.gitattributes` marks `*.txt` `ident`; the fix adds `tests/fixture.txt`
     /// holding a literal `$Id$`, and the only hidden test reads it.
     IdentAttribute,
+    /// The fix commit's time is past what milliseconds in an `i64` can hold.
+    OverflowingFixTime,
+    /// The base commit carries the directory `tests/helper/` with a file in
+    /// it; the fix deletes that file and adds `tests/helper` as a regular
+    /// file every hidden test includes.
+    SupportReplacesDirectory,
+    /// The only hidden test fails on the first run in a build cache and
+    /// passes on every later one.
+    StatefulHiddenTest,
 }
 
 fn git(dir: &Path, args: &[&str], seconds: i64) -> String {
-    let stamp = format!("{seconds} +0000");
+    // The object-header form, so a time the calendar code cannot place still
+    // lands in the commit as git stores it.
+    let stamp = format!("@{seconds} +0000");
     let output = Command::new("git")
         .args(args)
         .current_dir(dir)
@@ -153,6 +182,10 @@ fn history(dir: &Path, index: u32, variant: Variant) -> (String, String) {
         std::fs::create_dir_all(dir.join("tests")).unwrap();
         std::fs::write(dir.join("tests/fixture.txt"), "before the fix").unwrap();
     }
+    if variant == Variant::SupportReplacesDirectory {
+        std::fs::create_dir_all(dir.join("tests/helper")).unwrap();
+        std::fs::write(dir.join("tests/helper/a"), "a file in the directory").unwrap();
+    }
     if variant == Variant::IdentAttribute {
         std::fs::write(dir.join(".gitattributes"), "*.txt ident\n").unwrap();
     }
@@ -192,15 +225,26 @@ fn history(dir: &Path, index: u32, variant: Variant) -> (String, String) {
     if variant == Variant::DeletesBuildScript {
         std::fs::remove_file(dir.join("build.rs")).unwrap();
     }
+    if variant == Variant::SupportReplacesDirectory {
+        std::fs::remove_dir_all(dir.join("tests/helper")).unwrap();
+    }
     suite_d::write_files(dir, &task.correct_fix).unwrap();
     for test in &task.hidden_tests {
         let path = dir.join(test.path());
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         let content = match variant {
             Variant::TestSupportFile => format!("{}{ASSETS_TEST}{SUPPORT_TEST}", test.content),
+            Variant::SupportReplacesDirectory => {
+                format!(
+                    "{}{}",
+                    test.content,
+                    SUPPORT_TEST.replace("fixture.txt", "helper")
+                )
+            }
             // The test judges nothing but its fixture.
             Variant::ModifiedTestSupport => SUPPORT_TEST.to_string(),
             Variant::IdentAttribute => IDENT_TEST.to_string(),
+            Variant::StatefulHiddenTest => STATEFUL_TEST.to_string(),
             _ => format!("{}{ASSETS_TEST}", test.content),
         };
         std::fs::write(path, content).unwrap();
@@ -210,6 +254,9 @@ fn history(dir: &Path, index: u32, variant: Variant) -> (String, String) {
         Variant::TestSupportFile | Variant::ModifiedTestSupport
     ) {
         std::fs::write(dir.join("tests/fixture.txt"), "included").unwrap();
+    }
+    if variant == Variant::SupportReplacesDirectory {
+        std::fs::write(dir.join("tests/helper"), "included").unwrap();
     }
     if variant == Variant::TestSupportFile {
         std::fs::write(dir.join(".gitattributes"), "tests/ export-ignore\n").unwrap();
@@ -225,10 +272,10 @@ fn history(dir: &Path, index: u32, variant: Variant) -> (String, String) {
     if variant == Variant::SymlinkedHiddenTest {
         std::os::unix::fs::symlink("/etc/hostname", dir.join("tests/planted.rs")).unwrap();
     }
-    let fix_seconds = if variant == Variant::EarlyFix {
-        CUTOFF_SECONDS - 60
-    } else {
-        FIX_SECONDS
+    let fix_seconds = match variant {
+        Variant::EarlyFix => CUTOFF_SECONDS - 60,
+        Variant::OverflowingFixTime => OVERFLOWING_SECONDS,
+        _ => FIX_SECONDS,
     };
     git(dir, &["add", "-A"], fix_seconds);
     git(dir, &["commit", "-q", "-m", "fix"], fix_seconds);
@@ -1223,4 +1270,71 @@ fn isolated() {{
     );
     assert!(std::fs::symlink_metadata(workspace.join("Cargo.lock")).is_ok_and(|m| m.is_file()));
     drop(listener);
+}
+
+#[test]
+fn a_commit_time_milliseconds_cannot_hold_is_an_unavailable_source() {
+    let dir = tempfile::tempdir().unwrap();
+    // Every other row an early fix: prepared, never graded.
+    let corpus = corpus(dir.path(), &[Variant::OverflowingFixTime]);
+    let config = config(dir.path(), corpus, ControlScript::default(), u64::MAX);
+    let run = anchor::run(&config, PREPARING_HOST).unwrap();
+    let overflowing = run.report.tasks.iter().find(|t| t.id == "cargo-0").unwrap();
+    assert_eq!(
+        overflowing.terminal,
+        AnchorTerminal::Unsupported(RealHistoryUnsupported::SourceUnavailable),
+        "a fix time past i64::MAX / 1000 is no time, not a wrapped one the audit accepts"
+    );
+    assert!(overflowing.audit.is_none());
+    for accounting in &run.report.accounting {
+        assert!(accounting.cutoff_missing.contains("cargo-0"));
+    }
+}
+
+#[test]
+fn a_directory_the_fix_replaced_with_test_support_gives_way_in_the_graded_tree() {
+    if !suite_d::namespaces_available() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = corpus(dir.path(), &[Variant::SupportReplacesDirectory]);
+    let mut config = config(dir.path(), corpus, ControlScript::default(), u64::MAX);
+    config.settings.providers.truncate(1);
+    let run = anchor::run(&config, HOST).unwrap();
+    let replaced = run.report.tasks.iter().find(|t| t.id == "cargo-0").unwrap();
+    let proof = replaced.insufficiency.as_ref().unwrap();
+    assert!(
+        proof.hidden.values().all(|o| *o == HiddenOutcome::Failed),
+        "the support file lands where the base tree's directory was, so the test fails on the defect: {:?}",
+        proof.hidden
+    );
+    assert!(
+        proof
+            .reference
+            .values()
+            .all(|o| *o == HiddenOutcome::Passed)
+    );
+    assert_eq!(replaced.terminal, AnchorTerminal::Fail);
+}
+
+#[test]
+fn a_hidden_test_cannot_carry_state_from_the_snapshot_grade_into_the_reference_grade() {
+    if !suite_d::namespaces_available() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = corpus(dir.path(), &[Variant::StatefulHiddenTest]);
+    let mut config = config(dir.path(), corpus, ControlScript::default(), u64::MAX);
+    config.settings.providers.truncate(1);
+    let run = anchor::run(&config, HOST).unwrap();
+    let stateful = run.report.tasks.iter().find(|t| t.id == "cargo-0").unwrap();
+    let proof = stateful.insufficiency.as_ref().unwrap();
+    assert!(proof.hidden.values().all(|o| *o == HiddenOutcome::Failed));
+    assert_eq!(
+        proof.validate(),
+        Err(InsufficiencyRefused::ReferenceDoesNotPass),
+        "the reference grades in a fresh cache, so a test that passes only after an earlier run in the same cache fails there too: {:?}",
+        proof.reference
+    );
+    assert_eq!(stateful.terminal, AnchorTerminal::Indeterminate);
 }

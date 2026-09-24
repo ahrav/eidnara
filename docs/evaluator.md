@@ -3554,7 +3554,8 @@ UTF-8 file directly under `tests/` is a hidden test target by name,
 everything else (a module, a fixture a test includes, an existing test the
 fix edited, a test-named file that is not UTF-8) is support by path in the
 fix's version, its executable bit kept, and both are written into every
-graded tree, base and fix alike, so a test never fails or errors on the
+graded tree, base and fix alike, whatever sat at the path giving way (a
+symlink, or a directory the fix replaced with a file), so a test never fails or errors on the
 base tree because its own input differs (a symlink at such a path is never
 read through and reaches neither tree, the entry it may have replaced
 removed from the base graded tree as well; a `tests/` entry the fix deleted
@@ -3586,9 +3587,10 @@ missing is `unsupported (source_unavailable)`; a Django task is
 `unsupported (unsupported_runtime { django })`; an audit that
 `validate_for(entry)` refuses is `skipped (missing_cutoff_evidence)` with
 the refusal recorded and no run. An audited task gets the current-tree-only run
-and a reference run, in a build cache of its own (the writable mount is
-emptied before each task, so what one task's build scripts and tests left
-there reaches no other): the snapshot copied into a fresh tree (every `cp -RP` a charged child
+and a reference run, each in a build cache of its own (the writable mount is
+emptied before each grade, so what one grade's build scripts and tests left
+there reaches no other, and a test cannot fail on the snapshot and pass on
+the reference by what the first run left behind): the snapshot copied into a fresh tree (every `cp -RP` a charged child
 like the git ones) and its hidden tests run with no agent, then the fix
 tree copied into a fresh tree and the tests run again; the store is charged
 after every copy and every grade, so a tree copy and what a build wrote into the cache are bounded
