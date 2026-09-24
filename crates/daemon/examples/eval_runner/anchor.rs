@@ -11,14 +11,14 @@ use std::time::{Duration, Instant};
 
 use context_core::canonical_json::protocol_digest;
 use eval_core::{
-    Affordability, AnchorCorpus, AnchorEntry, AnchorError, AnchorRole, Approval, ClaimBoundary,
-    ClaimDerivation, ClassifiedControl, ControlRefused, CutoffAudit, CutoffRefused, Family,
-    HiddenOutcome, HiddenResults, InsufficiencyProof, NoRepositoryControl, PairAccounting,
-    Preparation, ProfileError, ProviderProfile, RealHistorySettings, RepositoryComparison,
-    RunProfile, Scale, SettingsRefused, SkipReason, TaskBudgets, TaskUsage, Terminal,
-    TimeStudyRefused, TransferCriterion, UnsupportedReason, WitnessError, WorldProvenance,
-    anchor_set, classify_control, eval_run_id, future_answers, hidden_terminal, parse_witness,
-    time_study,
+    Affordability, AnchorCorpus, AnchorEntry, AnchorError, AnchorRole, Approval, CensorReason,
+    ClaimBoundary, ClaimDerivation, ClassifiedControl, ControlRefused, CutoffAudit, CutoffRefused,
+    Family, FrozenFamily, HiddenOutcome, HiddenResults, InsufficiencyProof, NoRepositoryControl,
+    PairAccounting, Preparation, ProfileError, ProviderProfile, RealHistorySettings,
+    RealHistorySkip, RealHistoryUnsupported, RepositoryComparison, RunProfile, Scale,
+    SettingsRefused, TaskBudgets, TaskUsage, Terminal, TimeStudyRefused, TransferCriterion,
+    WitnessError, WorldProvenance, anchor_set, classify_control, eval_run_id, future_answers,
+    hidden_terminal, parse_witness, time_study,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -128,11 +128,39 @@ pub enum RunError {
     Io(#[from] std::io::Error),
 }
 
+/// How a real-history task ended: the shared outcomes `hidden_terminal`
+/// yields, or a skip or unsupported reason of the real-history contract's
+/// own; the shared v1 `SkipReason` and `UnsupportedReason` stay closed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum AnchorTerminal {
+    Pass,
+    Fail,
+    Censored { reason: CensorReason },
+    Indeterminate,
+    Skipped(RealHistorySkip),
+    Unsupported(RealHistoryUnsupported),
+}
+
+impl AnchorTerminal {
+    /// The shared terminal a graded run yields; it never yields a skip, an
+    /// unsupported, or a disabled kind, so those are not representable.
+    fn judged(terminal: Terminal) -> Self {
+        match terminal {
+            Terminal::Pass => Self::Pass,
+            Terminal::Fail => Self::Fail,
+            Terminal::Censored { reason } => Self::Censored { reason },
+            Terminal::Indeterminate => Self::Indeterminate,
+            other => panic!("a graded run yields no {other:?}"),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TaskOutcome {
     pub id: String,
-    pub terminal: Terminal,
+    pub terminal: AnchorTerminal,
     #[serde(with = "eval_core::decimal")]
     pub prepare_ms: u64,
     pub audit: Option<CutoffAudit>,
@@ -440,23 +468,24 @@ fn prepare(
     tasks: &Path,
     charges: &mut Charges,
     store_root: &Path,
-) -> Result<Result<Prepared, Terminal>, RunError> {
+) -> Result<Result<Prepared, AnchorTerminal>, RunError> {
     let unavailable = || {
-        Ok(Err(Terminal::Unsupported(
-            UnsupportedReason::SourceUnavailable,
+        Ok(Err(AnchorTerminal::Unsupported(
+            RealHistoryUnsupported::SourceUnavailable,
         )))
     };
     let repo = tasks.join("repos").join(&entry.id);
     let scratch = tasks.join("scratch");
     fresh_dir(&repo)?;
-    let prepared = (|| -> Result<Result<Prepared, Terminal>, RunError> {
+    let prepared = (|| -> Result<Result<Prepared, AnchorTerminal>, RunError> {
         charges.elapsed()?;
         if (host.clone)(entry, &repo).is_err() {
             return unavailable();
         }
-        charges.charge_store(store_root)?;
+        charges.store_bytes(store_root)?;
         charges.elapsed()?;
-        let deadline = GIT_TIMEOUT.min(charges.remaining());
+        let deadline =
+            GIT_TIMEOUT.min(charges.deadline().saturating_duration_since(Instant::now()));
         let Some(fetched) = (host.fetch)(entry) else {
             return unavailable();
         };
@@ -504,20 +533,20 @@ fn prepare(
         if !archive(&repo, &entry.base_sha, &snapshot, deadline)? {
             return unavailable();
         }
-        charges.charge_store(store_root)?;
+        charges.store_bytes(store_root)?;
         let fix = tasks.join("fixes").join(&entry.id);
         fresh_dir(&fix)?;
         if !archive(&repo, &entry.fix_sha, &fix, deadline)? {
             return unavailable();
         }
-        charges.charge_store(store_root)?;
+        charges.store_bytes(store_root)?;
         let fix_tree_digest = tree_digest(&fix)?;
         let Some(fix_parent_tree_digest) =
             revision_tree_digest(&repo, &parent_sha, &scratch, deadline)?
         else {
             return unavailable();
         };
-        charges.charge_store(store_root)?;
+        charges.store_bytes(store_root)?;
         charges.elapsed()?;
         // The patch and the hidden tests are what the fix commit itself
         // changed against its parent; intervening history is not the fix.
@@ -804,9 +833,9 @@ pub fn run(config: &Config, host: Host) -> Result<Run, RunError> {
     parse_witness(&witness_value)?;
     let mut family = super::campaign::family(&profile);
     family.transfer_criterion = config.transfer_criterion.clone();
-    let family_digest = family
-        .digest()
-        .map_err(|e| std::io::Error::other(format!("{e:?}")))?;
+    let frozen =
+        FrozenFamily::freeze(&family).map_err(|e| std::io::Error::other(format!("{e:?}")))?;
+    let family_digest = frozen.analysis_family_digest.clone();
     let bound = config
         .settings
         .preparation_bound_ms
@@ -831,14 +860,14 @@ pub fn run(config: &Config, host: Host) -> Result<Run, RunError> {
 
     // The time study: prepare the first tasks, measure, project, and stop
     // for approval before the rest is paid for.
-    let mut prepared: BTreeMap<String, Result<Prepared, Terminal>> = BTreeMap::new();
+    let mut prepared: BTreeMap<String, Result<Prepared, AnchorTerminal>> = BTreeMap::new();
     let mut measured = Vec::new();
     let mut tasks = Vec::new();
     for entry in &config.corpus.entries {
         let started = Instant::now();
         let outcome = prepare(entry, host, &layout.tasks, &mut charges, &layout.root)?;
         let prepare_ms = u64::try_from(started.elapsed().as_millis()).unwrap();
-        charges.charge_store(&layout.root)?;
+        charges.store_bytes(&layout.root)?;
         charges.elapsed()?;
         if measured.len() < eval_core::TIME_STUDY_TASKS {
             measured.push(Preparation {
@@ -867,7 +896,7 @@ pub fn run(config: &Config, host: Host) -> Result<Run, RunError> {
     for (entry, prepare_ms) in tasks {
         let mut outcome = TaskOutcome {
             id: entry.id.clone(),
-            terminal: Terminal::Indeterminate,
+            terminal: AnchorTerminal::Indeterminate,
             prepare_ms,
             audit: None,
             audit_refused: None,
@@ -884,9 +913,10 @@ pub fn run(config: &Config, host: Host) -> Result<Run, RunError> {
             }
         };
         if entry.family == Family::Django {
-            outcome.terminal = Terminal::Unsupported(UnsupportedReason::UnsupportedRuntime {
-                family: entry.family,
-            });
+            outcome.terminal =
+                AnchorTerminal::Unsupported(RealHistoryUnsupported::UnsupportedRuntime {
+                    family: entry.family,
+                });
             outcomes.push(outcome);
             continue;
         }
@@ -894,7 +924,7 @@ pub fn run(config: &Config, host: Host) -> Result<Run, RunError> {
         audits.insert(entry.id.clone(), ready.audit.clone());
         if let Err(refused) = ready.audit.validate_for(entry) {
             outcome.audit_refused = Some(refused);
-            outcome.terminal = Terminal::Skipped(SkipReason::MissingCutoffEvidence);
+            outcome.terminal = AnchorTerminal::Skipped(RealHistorySkip::MissingCutoffEvidence);
             outcomes.push(outcome);
             continue;
         }
@@ -926,11 +956,12 @@ pub fn run(config: &Config, host: Host) -> Result<Run, RunError> {
             reference,
         };
         let proven = proof.validate().is_ok();
-        outcome.terminal = if proven {
+        let judged = if proven {
             Terminal::Fail
         } else {
             Terminal::Indeterminate
         };
+        outcome.terminal = AnchorTerminal::judged(judged);
         outcome.insufficiency = Some(proof.clone());
         proofs.insert(entry.id.clone(), proof);
         if proven {
@@ -955,7 +986,7 @@ pub fn run(config: &Config, host: Host) -> Result<Run, RunError> {
                     provider: provider.clone(),
                     execution_image: config.settings.execution_image.clone(),
                     analysis_family_digest: family_digest.clone(),
-                    terminal: outcome.terminal,
+                    terminal: judged,
                     started: true,
                 };
                 let classified = classify_control(&control, &expected).map_err(|refused| {
@@ -972,7 +1003,7 @@ pub fn run(config: &Config, host: Host) -> Result<Run, RunError> {
                 outcome.verdicts.push(classified);
             }
         }
-        charges.charge_store(&layout.root)?;
+        charges.store_bytes(&layout.root)?;
         outcomes.push(outcome);
     }
     let role = AnchorRole::Pilot;
@@ -990,7 +1021,9 @@ pub fn run(config: &Config, host: Host) -> Result<Run, RunError> {
         )?;
         claims.push(PairClaim {
             provider: provider.clone(),
-            claim: family.claim_class(WorldProvenance::RealHistory, Some(&set)),
+            claim: family
+                .claim_class(&frozen, WorldProvenance::RealHistory, Some(&set))
+                .map_err(|e| std::io::Error::other(format!("{e:?}")))?,
         });
         accounting.push(pair);
     }
@@ -1006,7 +1039,7 @@ pub fn run(config: &Config, host: Host) -> Result<Run, RunError> {
             "transfer_criterion": config.transfer_criterion,
             "control": config.control,
         }),
-        &std::env::current_exe().unwrap(),
+        &[std::env::current_exe().unwrap()],
     );
     charges.vacate(root)?;
     charges.retain_publish_root()?;

@@ -1009,6 +1009,27 @@ pub fn anchor_set(
     Ok((AnchorSet { role, tasks }, accounting))
 }
 
+/// Why a real-history task was never attempted. The shared v1 `SkipReason`
+/// stays closed; this reason belongs to the real-history report contract
+/// part 2 emits, as `SuiteDSkip` does for Suite D.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "reason", rename_all = "snake_case", deny_unknown_fields)]
+pub enum RealHistorySkip {
+    /// A task without a passing cutoff audit is never attempted.
+    MissingCutoffEvidence,
+}
+
+/// Why a real-history task cannot be measured on this host. The shared v1
+/// `UnsupportedReason` stays closed likewise.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "reason", rename_all = "snake_case", deny_unknown_fields)]
+pub enum RealHistoryUnsupported {
+    /// The task's source could not be fetched at its commit.
+    SourceUnavailable,
+    /// The task's family needs a runtime this host does not have.
+    UnsupportedRuntime { family: Family },
+}
+
 /// The settings a real-history campaign must hold before it executes; none
 /// defaults, and a pilot corpus is never a transfer set. The transfer
 /// criterion is the analysis family's, not a setting.

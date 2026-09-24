@@ -6,12 +6,12 @@ use std::collections::BTreeSet;
 use std::num::NonZeroU32;
 
 use eval_core::{
-    ArmKind, BaselineFailure, BaselineVerdict, Coverage, Destination, EvaluatedSurface, EventId,
-    EventLog, LogError, MAX_VALID_TIME_MS, Mode, NATURAL_FRESH_ENTITY_TAG, PAIRING_POLICY_VERSION,
-    Pair, PairError, PairSet, PairSetInput, Payload, Query, RECENCY_BASELINE_VERSION,
-    RepositorySpec, Sensitivity, ServedClass, SessionSpec, StopCondition, Suite, Task, TaskRole,
-    Verdict, Visibility, WorldConfig, check_recency_baseline, compile_pair_set, recency_bound,
-    reduce, serialize_spec,
+    ArmKind, Baseline, BaselineFailure, BaselineVerdict, CausalEdge, Coverage, Destination,
+    EvaluatedSurface, EventId, EventLog, LogError, MAX_VALID_TIME_MS, Mode,
+    NATURAL_FRESH_ENTITY_TAG, PAIRING_POLICY_VERSION, Pair, PairError, PairSet, PairSetInput,
+    Payload, Query, RECENCY_BASELINE_VERSION, RepositorySpec, Sensitivity, ServedClass,
+    SessionSpec, StopCondition, Suite, Task, TaskRole, Verdict, Visibility, WorldConfig,
+    check_recency_baseline, compile_pair_set, recency_bound, reduce, serialize_spec,
 };
 use serde_json::{Value, json};
 use support::{WORLD_EPOCH_MS as EPOCH_MS, WORLD_SEED as SEED, world_config as config};
@@ -144,8 +144,16 @@ fn ids(log: &EventLog) -> Vec<&str> {
     log.events.iter().map(|e| e.id.0.as_str()).collect()
 }
 
-fn versioned(pair: &Pair) -> Vec<EventId> {
-    pair.recency_window.clone()
+/// The fresh arm's units on the control's entities: the independent history.
+fn independent_of(pair: &Pair) -> Vec<&eval_core::Event> {
+    pair.fresh
+        .events
+        .iter()
+        .filter(|e| {
+            e.entity_id
+                .ends_with(&format!("~{NATURAL_FRESH_ENTITY_TAG}"))
+        })
+        .collect()
 }
 
 #[test]
@@ -182,7 +190,7 @@ fn a_pair_set_carries_a_falsification_pair_and_a_natural_fresh_control() {
             .iter()
             .all(|i| i.0.contains(NATURAL_FRESH_ENTITY_TAG))
     );
-    let fresh_truth = reduce(&falsifier.fresh, &fixture(), &falsifier.fresh_query).unwrap();
+    let fresh_truth = reduce(&falsifier.fresh, &fixture(), &set.fresh_query).unwrap();
     assert!(
         fresh_truth
             .required
@@ -190,7 +198,7 @@ fn a_pair_set_carries_a_falsification_pair_and_a_natural_fresh_control() {
     );
     assert!(control.iter().any(|i| fresh_truth.required.contains(i)));
     assert!(
-        falsifier.fresh_query.scope.len() > falsifier.task.query.scope.len(),
+        set.fresh_query.scope.len() > falsifier.task.query.scope.len(),
         "the control's entities join the scope"
     );
     falsifier.fresh.validate(64).unwrap();
@@ -212,7 +220,7 @@ fn a_pair_set_carries_a_falsification_pair_and_a_natural_fresh_control() {
     );
     mid.fresh_minimal.validate(64).unwrap();
     assert_eq!(
-        falsifier.recency_window,
+        set.recency_window,
         vec![
             id("repository:repository-0:11"),
             id("repository:repository-0:10"),
@@ -226,7 +234,7 @@ fn a_pair_set_carries_a_falsification_pair_and_a_natural_fresh_control() {
     );
     let round: PairSet = serde_json::from_value(serde_json::to_value(&set).unwrap()).unwrap();
     assert_eq!(round, set);
-    round.validate().unwrap();
+    round.validate(&fixture()).unwrap();
 }
 
 #[test]
@@ -254,7 +262,7 @@ fn the_window_breaks_equal_times_by_linearization_order() {
     );
     assert_eq!(
         set.unwrap_err(),
-        PairError::MixedCuts { task: "tie".into() }
+        PairError::MixedQueries { task: "tie".into() }
     );
     let mut tasks = vec![
         task(
@@ -281,11 +289,11 @@ fn the_window_breaks_equal_times_by_linearization_order() {
         .collect();
     assert_eq!(shared_time.len(), 4);
     assert_eq!(
-        set.pairs[1].recency_window,
+        set.recency_window,
         vec![id("session:session-0:6"), id("repository:repository-0:8")]
     );
     assert!(matches!(
-        check_recency_baseline(&set, versioned).unwrap(),
+        check_recency_baseline(&set, &fixture(), Baseline::Versioned).unwrap(),
         BaselineVerdict::Established { .. }
     ));
 }
@@ -303,7 +311,7 @@ fn the_recency_baseline_misses_every_falsifier_or_blocks_suite_b() {
         .record("wm_baseline_ran_on_falsification_pair")
         .unwrap();
     let BaselineVerdict::Established { contrast } =
-        check_recency_baseline(&set, versioned).unwrap()
+        check_recency_baseline(&set, &fixture(), Baseline::Versioned).unwrap()
     else {
         panic!("contrast established");
     };
@@ -323,7 +331,7 @@ fn the_recency_baseline_misses_every_falsifier_or_blocks_suite_b() {
     let short = compile(EvaluatedSurface::Surface1, None, &tasks()).unwrap();
     assert_eq!(short.recency_bound, 100);
     assert_eq!(
-        check_recency_baseline(&short, versioned).unwrap(),
+        check_recency_baseline(&short, &fixture(), Baseline::Versioned).unwrap(),
         BaselineVerdict::Blocked {
             condition: StopCondition::B,
             failure: BaselineFailure::DeliveredFalsifier {
@@ -354,13 +362,13 @@ fn the_recency_baseline_delivers_a_positive_control_or_is_vacuous() {
     let set = compile(EvaluatedSurface::QueryRoute, k(3), &tasks()).unwrap();
     let control = &set.pairs[1];
     assert_eq!(control.task.role, TaskRole::PositiveControl);
-    assert!(!control.recency_window.is_empty());
+    assert!(!set.recency_window.is_empty());
     let mut coverage = Coverage::default();
     coverage
         .record("wm_baseline_ran_on_positive_control_pair")
         .unwrap();
     assert!(matches!(
-        check_recency_baseline(&set, versioned).unwrap(),
+        check_recency_baseline(&set, &fixture(), Baseline::Versioned).unwrap(),
         BaselineVerdict::Established { .. }
     ));
 
@@ -368,7 +376,7 @@ fn the_recency_baseline_delivers_a_positive_control_or_is_vacuous() {
     // by the versioned baseline itself, from compiler output alone.
     let narrow = compile(EvaluatedSurface::QueryRoute, k(1), &tasks()).unwrap();
     assert!(matches!(
-        check_recency_baseline(&narrow, versioned).unwrap(),
+        check_recency_baseline(&narrow, &fixture(), Baseline::Versioned).unwrap(),
         BaselineVerdict::Established { .. }
     ));
     let mut tasks = tasks();
@@ -379,7 +387,7 @@ fn the_recency_baseline_delivers_a_positive_control_or_is_vacuous() {
     );
     let missed = compile(EvaluatedSurface::QueryRoute, k(1), &tasks).unwrap();
     assert_eq!(
-        check_recency_baseline(&missed, versioned).unwrap(),
+        check_recency_baseline(&missed, &fixture(), Baseline::Versioned).unwrap(),
         BaselineVerdict::Blocked {
             condition: StopCondition::B,
             failure: BaselineFailure::MissedPositiveControl {
@@ -391,7 +399,7 @@ fn the_recency_baseline_delivers_a_positive_control_or_is_vacuous() {
     // The negative control: an always-empty baseline misses every falsifier
     // for free, and both classes empty is a refusal, never a pass.
     assert_eq!(
-        check_recency_baseline(&set, |_| vec![]).unwrap(),
+        check_recency_baseline(&set, &fixture(), Baseline::AlwaysEmpty).unwrap(),
         BaselineVerdict::Blocked {
             condition: StopCondition::B,
             failure: BaselineFailure::Vacuous,
@@ -399,7 +407,7 @@ fn the_recency_baseline_delivers_a_positive_control_or_is_vacuous() {
     );
     // Vacuity is judged before the falsifiers, so an empty baseline never
     // reads as "missed positive control" either.
-    let verdict = check_recency_baseline(&missed, |_| vec![]).unwrap();
+    let verdict = check_recency_baseline(&missed, &fixture(), Baseline::AlwaysEmpty).unwrap();
     assert_eq!(
         serde_json::to_value(&verdict).unwrap(),
         json!({"kind": "blocked", "condition": "b", "failure": {"kind": "vacuous"}})
@@ -463,9 +471,9 @@ fn a_long_aged_history_pushes_the_falsifier_out_of_the_surface_1_window() {
         &tasks,
     )
     .unwrap();
-    assert_eq!(set.pairs[0].recency_window.len(), 100);
+    assert_eq!(set.recency_window.len(), 100);
     let BaselineVerdict::Established { contrast } =
-        check_recency_baseline(&set, versioned).unwrap()
+        check_recency_baseline(&set, &fixture(), Baseline::Versioned).unwrap()
     else {
         panic!("the epoch commit is outside a hundred more recent units");
     };
@@ -670,7 +678,7 @@ fn pair_validation_refuses_what_would_make_the_controls_vacuous() {
                 tasks[2].query.observation_time_ms = EPOCH_MS + 20_000;
                 compile(EvaluatedSurface::QueryRoute, k(3), &tasks)
             }),
-            PairError::MixedCuts {
+            PairError::MixedQueries {
                 task: "mid-message".to_string(),
             },
         ),
@@ -788,6 +796,77 @@ fn pair_validation_refuses_what_would_make_the_controls_vacuous() {
                 target: id("repository:repository-0:0"),
             }),
         ),
+        (
+            "a natural-fresh history with a causal edge to an event it does not hold",
+            Box::new(|| {
+                let mut dangling = fresh.clone();
+                dangling.causal_edges.push(CausalEdge {
+                    from: fresh.events[0].id.clone(),
+                    to: id("session:session-9:0"),
+                });
+                dangling.causal_edges.sort();
+                compile_with(EvaluatedSurface::QueryRoute, k(3), &aged, &dangling, &base)
+            }),
+            PairError::Log(LogError::DanglingEdge {
+                edge: CausalEdge {
+                    from: fresh.events[0].id.clone(),
+                    to: id("session:session-9:0"),
+                },
+            }),
+        ),
+        (
+            "a natural-fresh history under another schema",
+            Box::new(|| {
+                let stale = EventLog {
+                    schema: "eval-event/v0".to_string(),
+                    ..fresh.clone()
+                };
+                compile_with(EvaluatedSurface::QueryRoute, k(3), &aged, &stale, &base)
+            }),
+            PairError::Log(LogError::SchemaMismatch {
+                field: "schema",
+                found: "eval-event/v0".to_string(),
+            }),
+        ),
+        (
+            "a shuffled slice of the aged history posing as natural-fresh",
+            Box::new(|| {
+                // Normalization would sort it back into the copy the
+                // independence check refuses, so it is validated as supplied.
+                let mut shuffled = EventLog {
+                    events: aged.events[6..11].to_vec(),
+                    causal_edges: vec![],
+                    ..aged.clone()
+                };
+                shuffled.events.reverse();
+                compile_with(EvaluatedSurface::QueryRoute, k(3), &aged, &shuffled, &base)
+            }),
+            PairError::Log(LogError::NotLinearized { position: 1 }),
+        ),
+        (
+            "a control that narrows the scope to its own entity",
+            Box::new(|| {
+                // Under the shared scope the last session-0 message is behind a
+                // window of one; alone in its scope it is the window.
+                let mut tasks = vec![
+                    task(
+                        "early-commit",
+                        TaskRole::Falsification,
+                        &["repository:repository-0:0"],
+                    ),
+                    task(
+                        "own-scope",
+                        TaskRole::PositiveControl,
+                        &["session:session-0:10"],
+                    ),
+                ];
+                tasks[1].query.scope = BTreeSet::from(["session-0".to_string()]);
+                compile(EvaluatedSurface::QueryRoute, k(1), &tasks)
+            }),
+            PairError::MixedQueries {
+                task: "own-scope".to_string(),
+            },
+        ),
     ];
     for (name, run, expected) in cases {
         assert_eq!(run().unwrap_err(), expected, "{name}");
@@ -821,14 +900,117 @@ fn a_set_read_back_must_be_one_the_compiler_could_have_produced() {
         ),
         (
             "a window wider than the bound",
-            Box::new(|s| {
-                s.pairs[1]
-                    .recency_window
-                    .push(id("repository:repository-0:8"))
-            }),
+            Box::new(|s| s.recency_window.push(id("repository:repository-0:8"))),
             PairError::Tampered {
                 field: "recency_window",
             },
+        ),
+        (
+            "the widened query's scope cleared",
+            Box::new(|s| s.fresh_query.scope.clear()),
+            PairError::Tampered {
+                field: "fresh_query",
+            },
+        ),
+        (
+            "the widened query's cut moved",
+            Box::new(|s| s.fresh_query.valid_time_ms = EPOCH_MS),
+            PairError::Tampered {
+                field: "fresh_query",
+            },
+        ),
+        (
+            "the falsifier's evidence dropped from its fresh arm",
+            Box::new(|s| {
+                s.pairs[0].fresh = s.pairs[0].fresh.without(&id("repository:repository-0:0"))
+            }),
+            PairError::Tampered { field: "pairs" },
+        ),
+        (
+            "the control's evidence dropped from its ceiling",
+            Box::new(|s| {
+                s.pairs[1].fresh_minimal = s.pairs[1]
+                    .fresh_minimal
+                    .without(&id("repository:repository-0:11"))
+            }),
+            PairError::Tampered { field: "pairs" },
+        ),
+        (
+            "an eligible aged unit outside the closure added to one fresh arm",
+            Box::new(|s| {
+                let extra = s
+                    .aged
+                    .events
+                    .iter()
+                    .find(|e| e.id == id("session:session-1:4"))
+                    .unwrap()
+                    .clone();
+                assert!(!s.pairs[0].fresh.events.iter().any(|e| e.id == extra.id));
+                s.pairs[0].fresh.events.push(extra);
+                s.pairs[0]
+                    .fresh
+                    .events
+                    .sort_by(|a, b| a.key().cmp(&b.key()));
+            }),
+            PairError::Tampered { field: "pairs" },
+        ),
+        (
+            "one causal edge of the control dropped from one fresh arm",
+            Box::new(|s| {
+                let control = independent_of(&s.pairs[0])[0].entity_id.clone();
+                let edges = &mut s.pairs[0].fresh.causal_edges;
+                let at = edges
+                    .iter()
+                    .position(|e| e.from.0.contains(&control))
+                    .expect("the control has a causal edge");
+                edges.remove(at);
+            }),
+            PairError::Tampered { field: "pairs" },
+        ),
+        (
+            "one competitor dropped from one pair's fresh arm",
+            Box::new(|s| {
+                // The other pairs still hold it; the set no longer carries one
+                // independent history.
+                let competitor = independent_of(&s.pairs[0])[1].id.clone();
+                s.pairs[0].fresh = s.pairs[0].fresh.without(&competitor);
+            }),
+            PairError::Tampered { field: "pairs" },
+        ),
+        (
+            "the control emptied out of every fresh arm",
+            Box::new(|s| {
+                for pair in &mut s.pairs {
+                    pair.fresh = pair.fresh_minimal.clone();
+                }
+            }),
+            PairError::EmptyNaturalFresh,
+        ),
+        (
+            "a relabelled slice of the aged history as every pair's control",
+            Box::new(|s| {
+                let slice = EventLog {
+                    events: s.aged.events[6..11].to_vec(),
+                    causal_edges: vec![],
+                    ..s.aged.clone()
+                }
+                .on_distinct_entities(NATURAL_FRESH_ENTITY_TAG)
+                .unwrap();
+                for pair in &mut s.pairs {
+                    let mut events = pair.fresh_minimal.events.clone();
+                    events.extend(slice.events.iter().cloned());
+                    events.sort_by(|a, b| a.key().cmp(&b.key()));
+                    pair.fresh = EventLog {
+                        events,
+                        ..pair.fresh_minimal.clone()
+                    };
+                }
+                s.fresh_query.scope = s.pairs[0].task.query.scope.clone();
+                s.fresh_query
+                    .scope
+                    .extend(slice.events.iter().map(|e| e.entity_id.clone()));
+            }),
+            PairError::NaturalFreshCopiedFromAged { at: 6 },
         ),
         (
             "the positive control relabelled",
@@ -842,17 +1024,107 @@ fn a_set_read_back_must_be_one_the_compiler_could_have_produced() {
                 task: "mid-message".to_string(),
             },
         ),
+        (
+            "the median moved",
+            Box::new(|s| s.aged_median_ms = 0),
+            PairError::Tampered {
+                field: "aged_median_ms",
+            },
+        ),
+        (
+            "a duplicate task",
+            Box::new(|s| s.pairs[2].task.id = "early-commit".to_string()),
+            PairError::DuplicateTask {
+                task: "early-commit".to_string(),
+            },
+        ),
+        (
+            "a task at its own cut",
+            Box::new(|s| s.pairs[2].task.query.valid_time_ms = EPOCH_MS + 3_000),
+            PairError::MixedQueries {
+                task: "mid-message".to_string(),
+            },
+        ),
+        (
+            "evidence the aged history lacks",
+            Box::new(|s| s.pairs[2].task.evidence = BTreeSet::from([id("session:session-9:0")])),
+            PairError::EvidenceNotRequired {
+                task: "mid-message".to_string(),
+                id: id("session:session-9:0"),
+                verdict: None,
+            },
+        ),
+        (
+            "a falsifier's evidence moved late",
+            Box::new(|s| {
+                s.pairs[0].task.evidence = BTreeSet::from([id("repository:repository-0:11")])
+            }),
+            PairError::TruthNotEarly {
+                task: "early-commit".to_string(),
+                id: id("repository:repository-0:11"),
+                valid_time_ms: EPOCH_MS + 15_000,
+                median_ms: EPOCH_MS + 5_000,
+            },
+        ),
+        (
+            "a window naming an event the aged history lacks",
+            Box::new(|s| s.recency_window[0] = id("session:session-9:0")),
+            PairError::Tampered {
+                field: "recency_window",
+            },
+        ),
+        (
+            "a window out of order",
+            Box::new(|s| s.recency_window.reverse()),
+            PairError::Tampered {
+                field: "recency_window",
+            },
+        ),
+        (
+            "a window narrowed",
+            Box::new(|s| s.recency_window.truncate(1)),
+            PairError::Tampered {
+                field: "recency_window",
+            },
+        ),
     ];
     for (name, mutate, expected) in mutations {
         let mut tampered = set.clone();
         mutate(&mut tampered);
-        assert_eq!(tampered.validate(), Err(expected.clone()), "{name}");
         assert_eq!(
-            check_recency_baseline(&tampered, versioned),
+            tampered.validate(&fixture()),
+            Err(expected.clone()),
+            "{name}"
+        );
+        assert_eq!(
+            check_recency_baseline(&tampered, &fixture(), Baseline::Versioned),
             Err(expected),
             "{name}: the check refuses before judging"
         );
     }
+}
+
+#[test]
+fn a_window_edited_on_the_wire_cannot_manufacture_an_established_contrast() {
+    // Surface 1's window of 100 holds every eligible unit of the 34-event
+    // aged history, the epoch commit included, so the verdict is blocked.
+    let set = compile(EvaluatedSurface::Surface1, None, &tasks()).unwrap();
+    assert!(matches!(
+        check_recency_baseline(&set, &fixture(), Baseline::Versioned).unwrap(),
+        BaselineVerdict::Blocked { .. }
+    ));
+    // A window without the epoch commit misses the falsifier and delivers the
+    // control; `check_recency_baseline` must reject the edited set.
+    let mut edited: PairSet = serde_json::from_value(serde_json::to_value(&set).unwrap()).unwrap();
+    edited
+        .recency_window
+        .retain(|i| *i != id("repository:repository-0:0"));
+    assert_eq!(
+        check_recency_baseline(&edited, &fixture(), Baseline::Versioned),
+        Err(PairError::Tampered {
+            field: "recency_window",
+        })
+    );
 }
 
 #[test]
@@ -982,10 +1254,24 @@ fn an_independent_history_moves_onto_its_own_entities_with_every_reference() {
         };
         joined.validate(128).unwrap();
     }
+    // `:` would mint one derived ID for two entities; `#` would put the
+    // block-index separator into a harness message ID.
+    for tag in ["a:b", "a#b"] {
+        assert_eq!(
+            aged().on_distinct_entities(tag).unwrap_err(),
+            LogError::InvalidEntityTag {
+                tag: tag.to_string()
+            }
+        );
+    }
+    let mut dangling = aged();
+    let edge = CausalEdge {
+        from: dangling.events[0].id.clone(),
+        to: id("session:session-9:0"),
+    };
+    dangling.causal_edges.push(edge.clone());
     assert_eq!(
-        aged().on_distinct_entities("a:b").unwrap_err(),
-        LogError::InvalidEntityTag {
-            tag: "a:b".to_string()
-        }
+        dangling.on_distinct_entities("other").unwrap_err(),
+        LogError::DanglingEdge { edge }
     );
 }

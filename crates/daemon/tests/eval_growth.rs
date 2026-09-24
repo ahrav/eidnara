@@ -20,9 +20,9 @@ use std::path::PathBuf;
 
 use campaign::Charges;
 use eval_core::{
-    Approval, Coverage, EnvelopeExceeded, GrowthMode, GrowthRefused, GrowthReport, MARKERS,
-    Operation, ProfileError, Resource, Scale, StoreFamily, digests_match_serial, isolated,
-    parse_growth_report, parse_manifest,
+    Approval, Coverage, EnvelopeExceeded, ExpectedRefusal, GrowthContract, GrowthMode,
+    GrowthRefused, GrowthReport, MARKERS, Operation, ProfileError, Resource, Scale, StoreFamily,
+    digests_match_serial, isolated, parse_growth_report, parse_manifest,
 };
 use growth::{Campaign, Config, MANIFEST_FILE, REPORT_FILE, Run, RunError};
 use memory_store::memory_reviewer_jobs::{
@@ -68,6 +68,7 @@ fn config(publish: PathBuf, elapsed_bound_ms: u64, mode: GrowthMode) -> Config {
 
 struct Published {
     run: Run,
+    config: Config,
     out: PathBuf,
     _publish: tempfile::TempDir,
 }
@@ -75,14 +76,33 @@ struct Published {
 fn campaign(mode: GrowthMode, coverage: &mut Coverage) -> Published {
     let publish = tempfile::tempdir().unwrap();
     let out = publish.path().join("out");
-    let run = growth::run(&config(out.clone(), budget().unwrap_or(600_000), mode)).unwrap();
+    let config = config(out.clone(), budget().unwrap_or(600_000), mode);
+    let run = growth::run(&config).unwrap();
     for marker in run.coverage.fired() {
         coverage.record(marker).unwrap();
     }
     Published {
         run,
+        config,
         out,
         _publish: publish,
+    }
+}
+
+/// What the test holds the report to, derived from the config it ran and the
+/// store's constants, not read back from the report.
+fn contract(published: &Published) -> GrowthContract {
+    let config = &published.config;
+    let profile = growth::profile(
+        config.scale,
+        config.messages,
+        config.elapsed_bound_ms,
+        config.approval.clone(),
+    );
+    GrowthContract {
+        quota: growth::quota(),
+        bounds: growth::bounds(&profile, config.messages),
+        envelope: profile.envelope.clone(),
     }
 }
 
@@ -90,7 +110,8 @@ fn a_never_restored_campaign_samples_every_quiescence_and_refuses_a_restore_scen
     published: &Published,
 ) {
     let report = &published.run.report;
-    report.validate().unwrap();
+    let contract = contract(published);
+    report.validate(&contract).unwrap();
     assert_eq!(report.ledger.mode, GrowthMode::NeverRestored);
     assert_eq!(report.ledger.restores_refused, 0);
     let steps = aging::plan(MESSAGES).unwrap().steps.len();
@@ -127,6 +148,7 @@ fn a_never_restored_campaign_samples_every_quiescence_and_refuses_a_restore_scen
 
     let parsed = parse_growth_report(
         &serde_json::from_slice(&std::fs::read(published.out.join(REPORT_FILE)).unwrap()).unwrap(),
+        &contract,
     )
     .unwrap();
     assert_eq!(parsed, *report);
@@ -135,7 +157,7 @@ fn a_never_restored_campaign_samples_every_quiescence_and_refuses_a_restore_scen
             .unwrap(),
     )
     .unwrap();
-    let value = serde_json::to_value(report.serialize().unwrap()).unwrap();
+    let value = serde_json::to_value(report.serialize(&contract).unwrap()).unwrap();
     assert_eq!(
         manifest.result_digest,
         GrowthReport::result_digest(&value).unwrap()
@@ -190,7 +212,7 @@ fn reviewer_headroom_is_accounted_from_the_stores_own_constants_scenario(publish
     );
     for sample in &report.ledger.samples {
         assert_eq!(
-            sample.headroom.project_metadata_bytes,
+            Some(sample.headroom.project_metadata_bytes),
             report.quota.expected_project_bytes(&sample.headroom),
             "step {}: receipt charges and pending allowances account for every byte",
             sample.step
@@ -356,7 +378,7 @@ fn quota_pressure_past_the_pending_cap_settles_new_admissions_instead_of_panicki
     );
     assert_eq!(headroom.r24_refusals, 0);
     assert_eq!(
-        headroom.project_metadata_bytes,
+        Some(headroom.project_metadata_bytes),
         growth::quota().expected_project_bytes(&headroom)
     );
 }
@@ -396,6 +418,16 @@ fn a_receipt_quota_refusal_is_counted_as_r24_and_admits_nothing() {
     assert_eq!(headroom.r24_refusals, 1);
     assert_eq!(headroom.admitted_total, 1);
     assert_eq!(live.mix.counts[&Operation::QuotaPressure], 2);
+    // The count the report reconciles against: one recorded refusal per R24,
+    // carrying the variant as production prints it.
+    let recorded: Vec<_> = live
+        .witness
+        .refusals
+        .iter()
+        .filter(|r| r.refusal == ExpectedRefusal::R24ReceiptQuotaExhausted)
+        .collect();
+    assert_eq!(recorded.len(), 1, "{:?}", live.witness.refusals);
+    assert!(ExpectedRefusal::R24ReceiptQuotaExhausted.evidences(&recorded[0].production_error));
 }
 
 fn a_deliberate_envelope_breach_names_the_resource_and_publishes_nothing_scenario(
@@ -466,6 +498,15 @@ fn an_unapproved_profile_refuses_before_any_store_opens() {
         "{error}"
     );
     assert!(!out.exists());
+    // Refused before planning too: a history the generator would refuse does
+    // not get generated, or judged, for an unapproved run.
+    config.messages = 0;
+    assert!(aging::plan(0).is_err());
+    let error = growth::run(&config).err().unwrap();
+    assert!(
+        matches!(error, RunError::Profile(ProfileError::NotApproved { .. })),
+        "{error}"
+    );
 }
 
 /// The figures cross-talk between two campaigns would move.
@@ -601,4 +642,119 @@ fn growth_markers_each_name_a_scenario_here() {
         );
     }
     assert_eq!(mine.len(), 5);
+}
+
+#[test]
+fn the_profile_is_declared_from_the_message_count_not_the_step_count() {
+    // 48 messages plan more than 64 steps, so a profile built from the step
+    // count would declare a wider event bound than the generator used.
+    let publish = tempfile::tempdir().unwrap();
+    let mut config = config(
+        publish.path().join("out"),
+        600_000,
+        GrowthMode::NeverRestored,
+    );
+    config.messages = 48;
+    assert!(aging::plan(48).unwrap().steps.len() > 64);
+    let run = growth::run(&config).unwrap();
+    let declared = growth::profile(
+        config.scale,
+        config.messages,
+        config.elapsed_bound_ms,
+        config.approval.clone(),
+    );
+    assert_eq!(run.report.profile_digest, declared.digest().unwrap());
+}
+
+#[test]
+fn a_fifth_step_that_commits_nothing_runs_no_lost_reply_episode() {
+    let mut plan = aging::plan(MESSAGES).unwrap();
+    // The same retire twice in a row: the second finds its object already
+    // dead (or still unpublished) and commits nothing, on the step that would
+    // otherwise lose an acknowledgement reply.
+    let retire = plan
+        .steps
+        .iter()
+        .find(|p| matches!(p.step, aging::Step::Retire(_)))
+        .unwrap()
+        .step
+        .clone();
+    plan.steps[3].step = retire.clone();
+    plan.steps[4].step = retire;
+    let root = tempfile::tempdir().unwrap();
+    let mut charges = Charges::new(growth::profile(Scale::S0, 128, 600_000, None).envelope);
+    let mut live = Campaign::open(root.path(), plan, GrowthMode::NeverRestored);
+    for _ in 0..5 {
+        live.step(&mut charges).unwrap();
+    }
+    assert_eq!(live.mix.counts.get(&Operation::FaultEpisode), None);
+}
+
+#[test]
+fn a_symlink_under_the_artifact_objects_is_neither_an_object_nor_its_bytes() {
+    let plan = aging::plan(MESSAGES).unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let mut charges = Charges::new(growth::profile(Scale::S0, 128, 600_000, None).envelope);
+    let mut live = Campaign::open(root.path(), plan, GrowthMode::NeverRestored);
+    for _ in 0..4 {
+        live.step(&mut charges).unwrap();
+    }
+    let before = live.ledger.samples.last().unwrap().clone();
+    assert!(before.artifact_objects > 0);
+    let objects = root.path().join("kernel").join("artifacts").join("objects");
+    std::os::unix::fs::symlink(aging::kernel_file(root.path()), objects.join("link")).unwrap();
+    live.sample(before.step + 1, &mut charges).unwrap();
+    let after = live.ledger.samples.last().unwrap();
+    assert_eq!(after.artifact_objects, before.artifact_objects);
+    assert_eq!(after.artifact_bytes, before.artifact_bytes);
+}
+
+#[test]
+fn a_manifest_the_directory_refuses_takes_the_report_back_out() {
+    let publish = tempfile::tempdir().unwrap();
+    let out = publish.path().join("out");
+    let config = config(out.clone(), 600_000, GrowthMode::NeverRestored);
+    // Plant the manifest's name once the run has prepared its directory and
+    // is driving the campaign, which takes seconds; the report then publishes
+    // and the manifest cannot follow it.
+    let planted = out.join(MANIFEST_FILE);
+    let planter = std::thread::spawn({
+        let out = out.clone();
+        let planted = planted.clone();
+        move || {
+            while !out.is_dir() {
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            std::fs::write(&planted, b"not a manifest").unwrap();
+        }
+    });
+    let error = growth::run(&config).err().expect("the manifest is refused");
+    planter.join().unwrap();
+    let RunError::Publish { path, kind } = error else {
+        panic!("{error}");
+    };
+    assert_eq!(path, planted);
+    assert_eq!(kind, std::io::ErrorKind::AlreadyExists);
+    assert!(
+        !out.join(REPORT_FILE).exists(),
+        "a reader finds both files or none"
+    );
+}
+
+#[test]
+fn the_artifact_store_is_bounded_by_the_ledger_not_charged_to_the_envelope() {
+    // The envelope's artifact bytes are the published files; the artifact
+    // store a sample measures is judged by `GrowthBounds::artifact_bytes`.
+    let plan = aging::plan(MESSAGES).unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let mut profile = growth::profile(Scale::S0, 128, 600_000, None);
+    profile.envelope.artifact_bytes = 1;
+    let mut charges = Charges::new(profile.envelope);
+    let mut live = Campaign::open(root.path(), plan, GrowthMode::NeverRestored);
+    for _ in 0..4 {
+        live.step(&mut charges).unwrap();
+    }
+    assert!(live.ledger.samples.last().unwrap().artifact_bytes > 1);
+    assert_eq!(charges.envelope.peaks.artifact_bytes, 0);
 }

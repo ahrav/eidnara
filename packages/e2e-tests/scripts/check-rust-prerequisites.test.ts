@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it } from "bun:test";
 import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { DAEMON_EXAMPLES, DIRECT_HOST_FIXTURE } from "../src/rust-runner/daemon-examples";
 import { detectRustPrerequisites } from "./check-rust-prerequisites";
 
 const temporaryRoots: string[] = [];
@@ -11,7 +12,8 @@ afterEach(() => {
     for (const root of temporaryRoots.splice(0)) rmSync(root, { recursive: true, force: true });
 });
 
-function fakeWorkspace(withFixture = true): { root: string; bin: string } {
+/** A workspace whose fake `cargo` lists every daemon example except those named in `without`. */
+function fakeWorkspace(without: string[] = []): { root: string; bin: string } {
     const parent = mkdtempSync(join(tmpdir(), "eidnara-rust-prereq-"));
     temporaryRoots.push(parent);
     const root = join(parent, "repo");
@@ -22,7 +24,10 @@ function fakeWorkspace(withFixture = true): { root: string; bin: string } {
         packages: [
             {
                 name: "daemon",
-                targets: withFixture ? [{ name: "direct_host_fixture", kind: ["example"] }] : [],
+                targets: DAEMON_EXAMPLES.filter((e) => !without.includes(e.example)).map((e) => ({
+                    name: e.example,
+                    kind: ["example"],
+                })),
             },
         ],
     });
@@ -32,8 +37,14 @@ function fakeWorkspace(withFixture = true): { root: string; bin: string } {
     return { root, bin };
 }
 
+function executable(path: string): void {
+    mkdirSync(join(path, ".."), { recursive: true });
+    writeFileSync(path, "#!/bin/sh\nexit 0\n");
+    chmodSync(path, 0o755);
+}
+
 describe("Rust direct-host prerequisite detector", () => {
-    it("resolves a workspace that has the fixture target but no prebuilt binary", () => {
+    it("resolves a workspace that has every example target but no prebuilt binary", () => {
         const { root, bin } = fakeWorkspace();
 
         const result = detectRustPrerequisites({
@@ -42,16 +53,13 @@ describe("Rust direct-host prerequisite detector", () => {
             channelProbe: channelAvailable,
         });
 
-        expect(result).toEqual({ ok: true, missing: [] });
+        expect(result).toEqual({ ok: true, missing: [], binaries: {} });
     });
 
-    it("resolves a pre-built workspace fixture without building", () => {
+    it("resolves pre-built workspace binaries without building", () => {
         const { root, bin } = fakeWorkspace();
-        const examples = join(root, "target", "debug", "examples");
-        mkdirSync(examples, { recursive: true });
-        const fixture = join(examples, "direct_host_fixture");
-        writeFileSync(fixture, "#!/bin/sh\nexit 0\n");
-        chmodSync(fixture, 0o755);
+        const fixture = join(root, "target", "debug", "examples", "direct_host_fixture");
+        executable(fixture);
 
         const result = detectRustPrerequisites({
             repoRoot: root,
@@ -60,19 +68,53 @@ describe("Rust direct-host prerequisite detector", () => {
             channelProbe: channelAvailable,
         });
 
-        expect(result).toEqual({ ok: true, missing: [], fixtureBin: fixture });
+        expect(result).toEqual({
+            ok: true,
+            missing: [],
+            binaries: { [DIRECT_HOST_FIXTURE.prebuiltEnv]: fixture },
+        });
     });
 
-    it("rejects a workspace without the direct host fixture target", () => {
-        const { root, bin } = fakeWorkspace(false);
+    it("uses a valid prebuilt override as-is", () => {
+        const { root, bin } = fakeWorkspace();
+        const prebuilt = join(root, "elsewhere", "eval_runner");
+        executable(prebuilt);
+
+        const result = detectRustPrerequisites({
+            repoRoot: root,
+            env: { PATH: bin, EIDNARA_E2E_EVAL_RUNNER_BIN: prebuilt },
+            channelProbe: channelAvailable,
+        });
+
+        expect(result).toEqual({
+            ok: true,
+            missing: [],
+            binaries: { EIDNARA_E2E_EVAL_RUNNER_BIN: prebuilt },
+        });
+    });
+
+    it("rejects a workspace without an example target, naming the example", () => {
+        const { root, bin } = fakeWorkspace(["eval_runner"]);
         const result = detectRustPrerequisites({
             repoRoot: root,
             env: { PATH: bin },
             channelProbe: channelAvailable,
         });
         expect(result.ok).toBe(false);
+        expect(result.missing).toEqual(["cargo workspace: eval_runner example is unavailable"]);
+    });
+
+    it("reports a set but non-executable prebuilt override instead of ignoring it", () => {
+        const { root, bin } = fakeWorkspace();
+        const stale = join(root, "no-such-binary");
+        const result = detectRustPrerequisites({
+            repoRoot: root,
+            env: { PATH: bin, EIDNARA_E2E_DIRECT_HOST_FIXTURE_BIN: stale },
+            channelProbe: channelAvailable,
+        });
+        expect(result.ok).toBe(false);
         expect(result.missing).toContain(
-            "cargo workspace: direct_host_fixture example is unavailable",
+            `EIDNARA_E2E_DIRECT_HOST_FIXTURE_BIN=${stale} is not an executable file`,
         );
     });
 

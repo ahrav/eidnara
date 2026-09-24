@@ -219,6 +219,17 @@ pub struct ResidueEntry {
     pub rule: Rule,
 }
 
+/// The first entry a schema could not have declared: a `Keep` rule, or a
+/// second rule for a `(type_name, field)` already classified. `None` when the
+/// set is one non-`Keep` rule per field, which is what `residue()` produces.
+pub fn residue_contradiction(entries: &BTreeSet<ResidueEntry>) -> Option<&ResidueEntry> {
+    let mut classified = BTreeSet::new();
+    entries.iter().find(|entry| {
+        entry.rule == Rule::Keep
+            || !classified.insert((entry.type_name.as_str(), entry.field.as_str()))
+    })
+}
+
 /// Relative values are numbered by first appearance for each `(type, field)`.
 #[derive(Debug, Default, Clone)]
 pub(crate) struct RelativeDomains {

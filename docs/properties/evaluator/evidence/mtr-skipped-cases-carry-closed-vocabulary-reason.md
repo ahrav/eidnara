@@ -6,9 +6,11 @@ runtime, and budget exhaustion retain distinct typed reasons and censoring
 semantics. Missing explicit campaign settings refuse before execution."
 
 ## Evidence trail
-- `crates/eval-core/src/campaign.rs` `SkipReason::MissingCutoffEvidence`,
-  `UnsupportedReason::SourceUnavailable`,
-  `UnsupportedReason::UnsupportedRuntime { family }`.
+- `crates/eval-core/src/anchor.rs` `RealHistorySkip::MissingCutoffEvidence`,
+  `RealHistoryUnsupported::SourceUnavailable`,
+  `RealHistoryUnsupported::UnsupportedRuntime { family }`;
+  `crates/daemon/examples/eval_runner/anchor.rs` `AnchorTerminal` carries
+  them beside the graded outcomes, the shared v1 vocabulary staying closed.
 - `crates/eval-core/src/anchor.rs` `RealHistorySettings::validate`;
   `AnchorEntry::validate` refuses an id that is not one plain path component
   (`NotAPathComponent`).

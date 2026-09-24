@@ -928,12 +928,20 @@ jobs:
         # `check:repo` does not build it.
         # The Pi smoke fails if Node, the Pi package, or the built extension is
         # missing.
+        # Both daemon examples are built before the cassette suite runs so its
+        # oracle spawns a prebuilt binary instead of compiling within a test
+        # timeout. The paths are absolute because `bun run --cwd` changes the
+        # directory the variables are resolved from.
         env:
           EIDNARA_E2E_REQUIRE_PI: "1"
+          EIDNARA_E2E_DIRECT_HOST_FIXTURE_BIN: ${{ github.workspace }}/target/debug/examples/direct_host_fixture
+          EIDNARA_E2E_EVAL_RUNNER_BIN: ${{ github.workspace }}/target/debug/examples/eval_runner
         run: |
           npm install -g opencode-ai@1.18.22
           cargo +1.98 build -p daemon --example direct_host_fixture \
             --features direct-host-fixture --locked
+          cargo +1.98 build -p daemon --example eval_runner \
+            --features eval-runner --locked
           bun run --cwd packages/e2e-tests test:fixture-contract
           bun run --cwd packages/e2e-tests validate-mode-manifest
           bun run --cwd packages/e2e-tests test:rust

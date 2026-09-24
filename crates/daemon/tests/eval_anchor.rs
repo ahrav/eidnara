@@ -33,12 +33,14 @@ use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
-use anchor::{Config, ControlScript, Fetched, Host, MANIFEST_FILE, REPORT_FILE, RunError};
+use anchor::{
+    AnchorTerminal, Config, ControlScript, Fetched, Host, MANIFEST_FILE, REPORT_FILE, RunError,
+};
 use eval_core::{
     ANCHOR_CORPUS_SCHEMA, Affordability, AnchorCorpus, AnchorEntry, AnchorError, CensorReason,
     ClaimClass, Contamination, ControlVerdict, CutoffRefused, Family, HiddenOutcome,
-    InsufficiencyRefused, Oracle, ProviderProfile, RealHistorySettings, Resource, Scale,
-    SkipReason, TaskBudgets, Terminal, TransferCriterion, UnmetClause, UnsupportedReason,
+    InsufficiencyRefused, Oracle, ProviderProfile, RealHistorySettings, RealHistorySkip,
+    RealHistoryUnsupported, Resource, Scale, TaskBudgets, Terminal, TransferCriterion, UnmetClause,
     generate_tasks,
 };
 
@@ -104,7 +106,10 @@ fn git(dir: &Path, args: &[&str], seconds: i64) -> String {
 /// fix commit adds the correct body and the tests that catch the defect.
 /// Returns the two SHAs.
 fn history(dir: &Path, index: u32, variant: Variant) -> (String, String) {
-    let corpus = generate_tasks(0x5EED_D000_0000_0006, index + 1);
+    let corpus = generate_tasks(
+        0x5EED_D000_0000_0006,
+        std::num::NonZeroU32::new(index + 1).unwrap(),
+    );
     let task = &corpus.tasks[index as usize];
     std::fs::create_dir_all(dir).unwrap();
     suite_d::write_files(dir, &task.files).unwrap();
@@ -404,7 +409,7 @@ fn every_anchor_task_has_an_audit_a_proof_and_a_control_and_the_pilot_never_tran
     for task in report.tasks.iter().filter(|t| t.id.starts_with("django-")) {
         assert_eq!(
             task.terminal,
-            Terminal::Unsupported(UnsupportedReason::UnsupportedRuntime {
+            AnchorTerminal::Unsupported(RealHistoryUnsupported::UnsupportedRuntime {
                 family: Family::Django
             })
         );
@@ -415,7 +420,7 @@ fn every_anchor_task_has_an_audit_a_proof_and_a_control_and_the_pilot_never_tran
         let task = by_id(id);
         assert_eq!(
             task.terminal,
-            Terminal::Fail,
+            AnchorTerminal::Fail,
             "{id}: the tree alone is insufficient"
         );
         let audit = task.audit.as_ref().unwrap();
@@ -458,7 +463,7 @@ fn every_anchor_task_has_an_audit_a_proof_and_a_control_and_the_pilot_never_tran
     let early = by_id("cargo-3");
     assert_eq!(
         early.terminal,
-        Terminal::Skipped(SkipReason::MissingCutoffEvidence)
+        AnchorTerminal::Skipped(RealHistorySkip::MissingCutoffEvidence)
     );
     assert_eq!(early.audit_refused, Some(CutoffRefused::FixNotAfterCutoff));
     assert!(
@@ -469,13 +474,13 @@ fn every_anchor_task_has_an_audit_a_proof_and_a_control_and_the_pilot_never_tran
     let missing = by_id("cargo-4");
     assert_eq!(
         missing.terminal,
-        Terminal::Unsupported(UnsupportedReason::SourceUnavailable)
+        AnchorTerminal::Unsupported(RealHistoryUnsupported::SourceUnavailable)
     );
     assert!(missing.audit.is_none());
     let unbuildable = by_id("cargo-5");
     assert_eq!(
         unbuildable.terminal,
-        Terminal::Indeterminate,
+        AnchorTerminal::Indeterminate,
         "a tree the runner cannot build is not proven insufficient"
     );
     let proof = unbuildable.insufficiency.as_ref().unwrap();
@@ -878,7 +883,7 @@ fn the_fix_is_its_own_diff_and_its_whole_tree() {
             .all(|o| *o == HiddenOutcome::Passed),
         "the reference is the fix commit's tree, the deleted build script gone"
     );
-    assert_eq!(deletes.terminal, Terminal::Fail);
+    assert_eq!(deletes.terminal, AnchorTerminal::Fail);
     let intermediate = by_id("cargo-1");
     let proof = intermediate.insufficiency.as_ref().unwrap();
     assert_eq!(
@@ -887,7 +892,7 @@ fn the_fix_is_its_own_diff_and_its_whole_tree() {
         "a test file an intervening commit added is not one of the fix's hidden tests"
     );
     assert!(!proof.hidden.contains_key("unrelated"));
-    assert_eq!(intermediate.terminal, Terminal::Fail);
+    assert_eq!(intermediate.terminal, AnchorTerminal::Fail);
 }
 
 #[test]

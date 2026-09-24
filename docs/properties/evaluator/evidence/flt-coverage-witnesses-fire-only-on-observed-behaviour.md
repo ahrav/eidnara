@@ -32,7 +32,10 @@ absent marker as well as the present one.
 ## Investigation log
 ### Q: Is the completeness proof gated for the shrink markers?
 - Sources examined: `Coverage::complete`; the eval_shrink tests.
-- Findings: the three markers fire across two tests; no single run fires all
-  three, so `complete` is not asserted per run.
+- Findings: `flt_shrink_fresh_process_reproduced` fires on every run that
+  reaches the shrinker, so the dying-child run fires all three;
+  `a_child_that_dies_before_its_barrier_is_retried_then_unknown_and_kept`
+  asserts `Coverage::complete` over the suite prefix on that run, and the
+  clean run asserts the unknown marker absent.
 - Missing evidence: none.
-- Conclusion: resolved with answer - union across the suite.
+- Conclusion: resolved with answer - one run proves completeness.
