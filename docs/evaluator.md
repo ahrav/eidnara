@@ -3540,8 +3540,12 @@ directly under `tests/` is a hidden test target by name, everything else (a
 module, a fixture a test includes, an existing test the fix edited) is
 support by path in the fix's version, and both are written into every
 graded tree, base and fix alike, so a test never fails or errors on the
-base tree because its own input differs (a symlink at such a path is not
-read through and stays where it is); a submodule pointer is a gitlink the
+base tree because its own input differs (a symlink at such a path is never
+read through and reaches neither tree); a file the fix added outside
+`tests/`, a fixture a test reaches by `../` included, is the repair by this
+boundary, so a test that needs it is insufficiency the way a test that needs
+a new module is, and a corpus row whose tests depend on such a file is one
+for curation to leave out; a submodule pointer is a gitlink the
 index checkout does not materialize, so a fix that only moves one changes
 nothing the audit can see and is refused as `fix_changes_nothing`; every other file of the fix tree, a
 deletion included, is what a memorizing control reproduces. The clone is
@@ -3587,7 +3591,8 @@ base tree; a task without a valid proof is `Indeterminate` and runs no
 control. Then, per provider profile, the no-repository control: an
 otherwise empty workspace holding `STATEMENT.md`, the scripted control agent
 inside the Suite D containment with the private directory masked
-(`memorize` reproduces the fix tree into `patch/`, `reach_repository` reads
+(`memorize` reproduces the fix tree into `patch/`, the store charged once
+the copy exists, `reach_repository` reads
 the snapshot by a path relative to its workspace, `cite_future` names the
 pull request), each tool call announced on an `eval-anchor-tool` line. Every
 snapshot, fix tree, graded tree, and the target directory live under the

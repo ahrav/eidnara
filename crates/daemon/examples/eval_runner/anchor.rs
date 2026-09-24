@@ -573,7 +573,7 @@ fn prepare(
         // (a module, a fixture a test includes, an existing test the fix
         // edited) by path in the fix's version, so a test never fails or
         // errors on the base tree because its own input differs. A symlink
-        // at such a path is not read through and stays in the fix tree.
+        // at such a path is never read through and reaches neither tree.
         let mut hidden = Vec::new();
         let mut support = Vec::new();
         for (path, was_added) in added
@@ -581,10 +581,17 @@ fn prepare(
             .map(|p| (p, true))
             .chain(modified.iter().map(|p| (p, false)))
         {
+            if !path.starts_with("tests/") {
+                continue;
+            }
             let file = fix.join(path);
-            if !path.starts_with("tests/")
-                || !std::fs::symlink_metadata(&file).is_ok_and(|meta| meta.is_file())
-            {
+            let Ok(meta) = std::fs::symlink_metadata(&file) else {
+                continue;
+            };
+            if !meta.is_file() {
+                if meta.is_symlink() {
+                    std::fs::remove_file(&file)?;
+                }
                 continue;
             }
             match hidden_test_name(path).filter(|_| was_added) {
@@ -766,6 +773,7 @@ fn control(run: &ControlRun<'_>, charges: &mut Charges) -> Result<NoRepositoryCo
     ];
     if config.control.memorize {
         copy_tree(&prepared.fix, &workspace.join(".memory"))?;
+        charges.store_bytes(&layout.root)?;
         for path in regular_files(&prepared.fix)? {
             lines.push(tool("write", &format!("patch/{}", path.display()), "true"));
         }
