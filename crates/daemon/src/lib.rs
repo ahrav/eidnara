@@ -41257,6 +41257,25 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn a_publishing_firing_held_in_its_handoff_backoff_still_counts_as_a_live_run() {
+        let producer = Arc::new(ProducerState::default());
+        let (handler, store, _dir, _project) =
+            handler_with_store(Arc::clone(&producer), default_test_config());
+        seed_history_summarizer_phase(&store, HistorySummarizerPhase::Publishing);
+        let loaded = store.load("ses").unwrap();
+        let mut meta = loaded.meta.clone();
+        meta.history_summarizer.failure_backoff_at_ms = Some(now_ms() + 60_000);
+        meta.history_summarizer.last_failure = Some("memory_reviewer handoff failed".into());
+        store
+            .commit("ses", loaded.row_version, &loaded.core, &meta)
+            .unwrap();
+        // No in-process run holds the session; the durable phase alone keeps the veto in force.
+        assert!(handler.history_summarizer_active(&store, "ses", PassState::Reload));
+        let meta = store.load("ses").unwrap().meta;
+        assert!(handler.history_summarizer_active(&store, "ses", PassState::Loaded(&meta)));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn a_busy_pass_at_the_proactive_percentage_records_eligibility_once_and_publication_keeps_it()
      {
         let producer = Arc::new(ProducerState::default());

@@ -5729,9 +5729,11 @@ mod tests {
     fn epoch_mismatch_publish_abandons_to_idle_with_detail() {
         let dir = tempfile::tempdir().unwrap();
         let store = store(dir.path());
+        let mut publishing = publishing_state();
+        publishing.record_fire(FiringTrigger::default(), 1, None);
         let meta = ModuleMeta {
             revert_epoch: 1,
-            ..test_meta_with_history_summarizer(publishing_state())
+            ..test_meta_with_history_summarizer(publishing)
         };
         store
             .commit("ses", None, &CoreState::empty(), &meta)
@@ -5777,6 +5779,15 @@ mod tests {
             Some("publish rejected: revert epoch mismatch (session was re-cut mid-firing)")
         );
         assert!(store.load_history_segments("ses").unwrap().is_empty());
+        // The stale publication ends the attempt; nothing of it can ever activate.
+        let entry = &after.recent_firings[0];
+        assert_eq!(
+            entry.outcome,
+            Some(FiringOutcome::Abandoned {
+                class: AbandonClass::Invalidated
+            })
+        );
+        assert_eq!(entry.activated_at_ms, None);
     }
 
     #[test]

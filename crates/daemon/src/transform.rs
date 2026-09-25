@@ -2776,15 +2776,25 @@ fn apply_additive_only(
     }
     timings.decide = elapsed_ms(decide_scheduler_started_at);
 
-    let hard_fold_requested = scheduler_outcome.idle_ttl_fired
-        || external_revision_changed
-        || project_memory_epoch_hard_due;
-    let ordinary_history_summarizer_veto = ctx.history_summarizer_active
-        && scheduler_outcome.pass == scheduler::PassDecision::Execute
-        && !hard_fold_requested
-        && !loaded.meta.soft_refresh_pending
-        && !render_config_changed
-        && loaded.meta.initialized;
+    // This path feeds no first fold, recut, absorb, or reconcile, and its veto leaves the emergency arm out; each is `false` here.
+    let ActivationGates {
+        hard_fold_requested,
+        ordinary_history_summarizer_veto,
+    } = activation_gates(&ActivationGateInputs {
+        pass: scheduler_outcome.pass,
+        history_summarizer_active: ctx.history_summarizer_active,
+        initialized: loaded.meta.initialized,
+        soft_refresh_pending: loaded.meta.soft_refresh_pending,
+        render_config_changed,
+        first_fold_due: false,
+        boundary_divergence_recut: false,
+        idle_ttl_fired: scheduler_outcome.idle_ttl_fired,
+        system_absorb_hard_due: false,
+        external_revision_changed,
+        project_memory_epoch_hard_due,
+        emergency_arm_engaged: false,
+        reconcile_hard_due: false,
+    });
     let bust_opportunity = (scheduler_outcome.pass != scheduler::PassDecision::Defer
         && !ordinary_history_summarizer_veto)
         || loaded.meta.soft_refresh_pending
@@ -3870,24 +3880,27 @@ fn apply_once(
     } else {
         false
     };
-    let hard_fold_requested = first_fold_due
-        || boundary_divergence_recut.is_some()
-        || scheduler_outcome.idle_ttl_fired
-        || system_absorb_hard_due
-        || external_revision_changed
-        || project_memory_epoch_hard_due;
-    let emergency_arm_engaged = matches!(
-        scheduler_outcome.pass,
-        scheduler::PassDecision::Force85 | scheduler::PassDecision::Emergency95
-    ) || scheduler_outcome.drain_latch.is_active();
-    let ordinary_history_summarizer_veto = ctx.history_summarizer_active
-        && scheduler_outcome.pass == scheduler::PassDecision::Execute
-        && !hard_fold_requested
-        && !emergency_arm_engaged
-        && !loaded.meta.soft_refresh_pending
-        && !render_config_changed
-        && !reconcile_hard_due
-        && loaded.meta.initialized;
+    let ActivationGates {
+        hard_fold_requested,
+        ordinary_history_summarizer_veto,
+    } = activation_gates(&ActivationGateInputs {
+        pass: scheduler_outcome.pass,
+        history_summarizer_active: ctx.history_summarizer_active,
+        initialized: loaded.meta.initialized,
+        soft_refresh_pending: loaded.meta.soft_refresh_pending,
+        render_config_changed,
+        first_fold_due,
+        boundary_divergence_recut: boundary_divergence_recut.is_some(),
+        idle_ttl_fired: scheduler_outcome.idle_ttl_fired,
+        system_absorb_hard_due,
+        external_revision_changed,
+        project_memory_epoch_hard_due,
+        emergency_arm_engaged: matches!(
+            scheduler_outcome.pass,
+            scheduler::PassDecision::Force85 | scheduler::PassDecision::Emergency95
+        ) || scheduler_outcome.drain_latch.is_active(),
+        reconcile_hard_due,
+    });
     let supersession_ride_available = !loaded.meta.initialized
         || render_config_changed
         || hard_fold_requested
@@ -5797,6 +5810,51 @@ fn deferred_from_meta(state: &DeferredExecuteState) -> DeferredExecute {
 fn deferred_to_meta(state: DeferredExecute) -> DeferredExecuteState {
     DeferredExecuteState {
         reason: state.reason,
+    }
+}
+
+/// Everything that decides whether a pass must rebuild now and whether a live history_summarizer run may hold an ordinary Execute pass. Named fields and no `Default`: a path that does not compute a term says `false` where a reader can see it.
+struct ActivationGateInputs {
+    pass: scheduler::PassDecision,
+    history_summarizer_active: bool,
+    initialized: bool,
+    soft_refresh_pending: bool,
+    render_config_changed: bool,
+    first_fold_due: bool,
+    boundary_divergence_recut: bool,
+    idle_ttl_fired: bool,
+    system_absorb_hard_due: bool,
+    external_revision_changed: bool,
+    project_memory_epoch_hard_due: bool,
+    /// Force85, Emergency95, or the drain latch.
+    emergency_arm_engaged: bool,
+    reconcile_hard_due: bool,
+}
+
+struct ActivationGates {
+    hard_fold_requested: bool,
+    ordinary_history_summarizer_veto: bool,
+}
+
+/// The one definition of the must-not-wait set. A hard fold classifies `HARD` before the bust gate is read; the veto holds only an ordinary Execute pass while a run is live, never one a hard fold, an emergency arm, an explicit flush, a render-config change, a reconcile, or a first render forces.
+fn activation_gates(input: &ActivationGateInputs) -> ActivationGates {
+    let hard_fold_requested = input.first_fold_due
+        || input.boundary_divergence_recut
+        || input.idle_ttl_fired
+        || input.system_absorb_hard_due
+        || input.external_revision_changed
+        || input.project_memory_epoch_hard_due;
+    let ordinary_history_summarizer_veto = input.history_summarizer_active
+        && input.pass == scheduler::PassDecision::Execute
+        && !hard_fold_requested
+        && !input.emergency_arm_engaged
+        && !input.soft_refresh_pending
+        && !input.render_config_changed
+        && !input.reconcile_hard_due
+        && input.initialized;
+    ActivationGates {
+        hard_fold_requested,
+        ordinary_history_summarizer_veto,
     }
 }
 
@@ -12098,6 +12156,9 @@ mod aged_goldens;
 mod surface_census;
 
 #[cfg(test)]
+mod must_not_wait;
+
+#[cfg(test)]
 pub(crate) mod tests {
     use super::*;
     use storage::{Isolation, StorageBackend, StorageDescriptor};
@@ -12780,7 +12841,7 @@ pub(crate) mod tests {
         )
     }
 
-    fn item(id: &str, ordinal: u64, bytes: &str) -> IngressMessage {
+    pub(crate) fn item(id: &str, ordinal: u64, bytes: &str) -> IngressMessage {
         IngressMessage {
             mid: id.to_string(),
             ordinal,
@@ -13237,7 +13298,7 @@ pub(crate) mod tests {
         }
     }
 
-    fn system_item(id: &str, ordinal: u64, bytes: &str) -> IngressMessage {
+    pub(crate) fn system_item(id: &str, ordinal: u64, bytes: &str) -> IngressMessage {
         IngressMessage {
             mid: id.to_string(),
             ordinal,
@@ -13307,7 +13368,7 @@ pub(crate) mod tests {
         }
     }
 
-    fn req(session: &str, cfg: &str, messages: Vec<IngressMessage>) -> TransformRequest {
+    pub(crate) fn req(session: &str, cfg: &str, messages: Vec<IngressMessage>) -> TransformRequest {
         TransformRequest {
             cache_ttl: None,
             effective_execute_threshold: None,
@@ -13479,7 +13540,7 @@ pub(crate) mod tests {
     /// The producer context uses a throwaway project directory with no documentation files, so its docs are empty.
     /// Each test fixes `now_ms` instead of reading the wall clock, so expiry uses a deterministic cutoff.
     /// is deterministic.
-    fn pctx<'a>(project: &'a str, dir: &'a str, now_ms: i64) -> ProducerContext<'a> {
+    pub(crate) fn pctx<'a>(project: &'a str, dir: &'a str, now_ms: i64) -> ProducerContext<'a> {
         ProducerContext {
             project_memory: canonical_read(1, &[]),
             project_path: project,
@@ -13512,7 +13573,7 @@ pub(crate) mod tests {
     }
 
     /// A pinned canonical read with `(object_id, category, content)` rows.
-    fn canonical_read(
+    pub(crate) fn canonical_read(
         known_as_of: i64,
         rows: &[(&str, &str, &str)],
     ) -> Option<CanonicalMemoryRead> {
@@ -13681,7 +13742,7 @@ pub(crate) mod tests {
         assert!(!served_bytes(&withheld).contains("<project-memory>"));
     }
 
-    fn with_usage(
+    pub(crate) fn with_usage(
         mut request: TransformRequest,
         current_total_input_tokens: u64,
         context_limit_tokens: u64,
@@ -25848,7 +25909,11 @@ pub(crate) mod tests {
         r
     }
 
-    fn cc_req(session: &str, cfg: &str, messages: Vec<IngressMessage>) -> TransformRequest {
+    pub(crate) fn cc_req(
+        session: &str,
+        cfg: &str,
+        messages: Vec<IngressMessage>,
+    ) -> TransformRequest {
         profile_req(
             SerializerProfile::ClaudeCodeAnthropic,
             session,
