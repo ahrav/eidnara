@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { types } from "node:util";
 
 const TRANSFORM_CAPTURE_MAX_PASSES = 64;
@@ -27,6 +28,19 @@ const ARRAY_SYMBOLS = Object.getOwnPropertySymbols(Array.prototype).concat(
 
 export interface MessageContentSnapshot {
     fields: SnapshotField[];
+}
+
+/**
+ * A SHA-256 chain over the tapes of a run of leading messages, so a later pass can recognize the
+ * run unchanged without retaining its strings. Symbols other than the tape markers are kept for
+ * identity.
+ */
+export interface HistoryDigest {
+    readonly count: number;
+    readonly digest: string;
+    readonly symbols: readonly symbol[];
+    /** The walks' total spend on the run; walks over identical content spend exactly this. */
+    readonly bytes: number;
 }
 
 export interface ReferenceableRejection {
@@ -138,7 +152,11 @@ class ReferenceableWalk {
     private field?: (value: SnapshotField) => void;
     private readonly ancestors = new Set<object>();
 
-    constructor(private readonly maxBytes = TRANSFORM_CAPTURE_MAX_BYTES) {}
+    /** Only inspection reads `wireBytes`; capture and recheck walks skip the per-unit escape scan. */
+    constructor(
+        private readonly maxBytes = TRANSFORM_CAPTURE_MAX_BYTES,
+        private readonly estimateWire = true,
+    ) {}
 
     spend(bytes: number): void {
         if (!Number.isSafeInteger(bytes) || bytes < 0 || bytes > this.maxBytes - this.bytes) {
@@ -157,7 +175,7 @@ class ReferenceableWalk {
                   ? (value.description?.length ?? 0) * 2
                   : 0;
         this.spend(TAPE_SLOT_BYTES + retained);
-        if (typeof value === "string" && wireBytes > 0) {
+        if (typeof value === "string" && wireBytes > 0 && this.estimateWire) {
             for (let index = 0; index < value.length; index += 1) {
                 const unit = value.charCodeAt(index);
                 if (
@@ -211,6 +229,17 @@ class ReferenceableWalk {
             this.spend(ROOT_MEMBER_BYTES);
             visit(slot, Number(key));
         });
+    }
+
+    /** Hands each tape field to `sink` instead of recording it. */
+    stream(operation: () => void, sink: (value: SnapshotField) => void): void {
+        const outer = this.field;
+        this.field = sink;
+        try {
+            operation();
+        } finally {
+            this.field = outer;
+        }
     }
 
     recordOrCompare(
@@ -360,15 +389,23 @@ export interface ReferenceableInspection {
     estimatedBytes: number;
 }
 
-/** Byte-limit exhaustion throws CaptureBudgetExceeded. */
+/**
+ * Byte-limit exhaustion throws CaptureBudgetExceeded. The first `skip` members are left to a
+ * digest-verified capture: only their root slots are inspected, and their wire bounds read zero.
+ */
 export function inspectReferenceableMessages(
     messages: unknown,
     maxBytes = TRANSFORM_CAPTURE_MAX_BYTES,
+    skip = 0,
 ): ReferenceableInspection | { ok: false; rejection: ReferenceableRejection } {
     const walker = new ReferenceableWalk(maxBytes);
     const messageWireBytes: number[] = [];
     try {
         walker.members(messages, (slot, index) => {
+            if (index < skip) {
+                defineSlot(messageWireBytes, index, 0);
+                return;
+            }
             const wireBefore = walker.wireBytes;
             walker.walk(slot.value, `/${index}`);
             defineSlot(messageWireBytes, index, walker.wireBytes - wireBefore);
@@ -392,36 +429,227 @@ export function snapshotFieldsEqual(
     return true;
 }
 
-export interface CapturedMessages {
-    members: readonly unknown[];
-    snapshots: readonly MessageContentSnapshot[];
-    rootSnapshot: MessageContentSnapshot;
+/** Pending text is hashed in chunks of about this many UTF-16 units. */
+const HASH_CHUNK_UNITS = 1 << 16;
+
+/**
+ * Streams member tapes into one SHA-256 chain. Every token is self-delimiting: a string carries
+ * its UTF-16 length, a number ends at `;`, and a member ends at `|`. The text is hashed as
+ * UTF-16 code units, which keeps lone surrogates and makes the digest independent of chunking.
+ * Symbols other than the tape markers cannot be hashed by identity, so they are kept in order.
+ */
+class TapeHasher {
+    private readonly hash = createHash("sha256");
+    private text = "";
+    private readonly symbols: symbol[] = Object.setPrototypeOf([], null);
+    private count = 0;
+    private bytes = 0;
+
+    readonly push = (value: SnapshotField): void => {
+        if (typeof value === "string") this.text += `s${value.length}:${value}`;
+        else if (typeof value === "number") this.text += Object.is(value, -0) ? "-" : `n${value};`;
+        else if (typeof value === "boolean") this.text += value ? "t" : "f";
+        else if (value === null) this.text += "z";
+        else if (value === ARRAY) this.text += "[";
+        else if (value === END_ARRAY) this.text += "]";
+        else if (value === OBJECT) this.text += "{";
+        else if (value === END_OBJECT) this.text += "}";
+        else if (value === EXTRA_KEY) this.text += "+";
+        else {
+            this.text += "y";
+            this.symbols[this.symbols.length] = value;
+        }
+    };
+
+    /** Closes one member whose walk spent `bytes`. */
+    end(bytes: number): void {
+        this.text += "|";
+        this.count += 1;
+        this.bytes += bytes;
+        if (this.text.length >= HASH_CHUNK_UNITS) this.flush();
+    }
+
+    private flush(): void {
+        if (this.text.length === 0) return;
+        this.hash.update(this.text, "utf16le");
+        this.text = "";
+    }
+
+    add(snapshot: TapedMember): void {
+        for (let index = 0; index < snapshot.fields.length; index += 1)
+            this.push(snapshot.fields[index] as SnapshotField);
+        this.end(snapshot.bytes);
+    }
+
+    /** The chain so far; hashing may continue afterwards. */
+    digest(): HistoryDigest {
+        this.flush();
+        const symbols: symbol[] = [];
+        for (let index = 0; index < this.symbols.length; index += 1)
+            defineSlot(symbols, index, this.symbols[index] as symbol);
+        return {
+            count: this.count,
+            digest: this.hash.copy().digest("base64"),
+            symbols,
+            bytes: this.bytes,
+        };
+    }
 }
 
-/** The caller reserves the inspection charge before allocating retained capture state. */
-export function captureMessages(messages: unknown, lease: CaptureLease): CapturedMessages {
+interface TapedMember {
+    fields: readonly SnapshotField[];
+    bytes: number;
+}
+
+export function historyDigestsEqual(left: HistoryDigest, right: HistoryDigest): boolean {
+    if (left === right) return true;
+    if (
+        left.count !== right.count ||
+        left.digest !== right.digest ||
+        left.bytes !== right.bytes ||
+        left.symbols.length !== right.symbols.length
+    )
+        return false;
+    for (let index = 0; index < left.symbols.length; index += 1) {
+        if (left.symbols[index] !== right.symbols[index]) return false;
+    }
+    return true;
+}
+
+/**
+ * Walks the members of a digested prefix under the prefix's recorded spend, so a changed prefix
+ * costs no more than the original. Each walk is standalone; only its spend and hash are kept.
+ */
+class PrefixVerifier {
+    private readonly walker: ReferenceableWalk;
+    private readonly hasher = new TapeHasher();
+
+    constructor(readonly expected: HistoryDigest) {
+        this.walker = new ReferenceableWalk(expected.bytes, false);
+    }
+
+    /** Throws SourceRejected or CaptureBudgetExceeded when the member cannot match. */
+    walk(value: unknown, index: number): void {
+        const before = this.walker.bytes;
+        this.walker.stream(() => this.walker.walk(value, `/${index}`), this.hasher.push);
+        this.hasher.end(this.walker.bytes - before);
+    }
+
+    matches(): boolean {
+        return historyDigestsEqual(this.hasher.digest(), this.expected);
+    }
+
+    continueHashing(): TapeHasher {
+        return this.hasher;
+    }
+}
+
+export interface CapturedMessages {
+    members: readonly unknown[];
+    /** Members covered by `verified` have no tape; their recheck walks the digest. */
+    snapshots: readonly (MessageContentSnapshot | undefined)[];
+    rootSnapshot: MessageContentSnapshot;
+    /** The prior digest the leading members matched, when the capture was given one. */
+    verified?: HistoryDigest;
+    /** Every member but the last, and the last alone: what a later pass verifies against. */
+    history: HistoryDigest;
+    terminal?: HistoryDigest;
+    /** The first taped member alone, compared against a prior pass's terminal. */
+    boundary?: HistoryDigest;
+}
+
+const PREFIX_CHANGED = Symbol("prefix_changed");
+
+/**
+ * The caller reserves the inspection charge before allocating retained capture state. With a
+ * `prefix`, the leading members are hashed against that digest instead of taped, so the charge
+ * covers only the root and the members after it. A mismatch, or no member after the prefix,
+ * returns `undefined` and the caller falls back to a full inspection and capture.
+ */
+export function captureMessages(messages: unknown, lease: CaptureLease): CapturedMessages;
+export function captureMessages(
+    messages: unknown,
+    lease: CaptureLease,
+    prefix: HistoryDigest,
+): CapturedMessages | undefined;
+export function captureMessages(
+    messages: unknown,
+    lease: CaptureLease,
+    prefix?: HistoryDigest,
+): CapturedMessages | undefined {
     if (lease.signal.aborted || lease.chargedBytes < ROOT_CAPTURE_BYTES)
         throw new CaptureBudgetExceeded("capture requires a live reservation");
-    const walker = new ReferenceableWalk(Math.min(lease.chargedBytes, TRANSFORM_CAPTURE_MAX_BYTES));
+    const walker = new ReferenceableWalk(
+        Math.min(lease.chargedBytes, TRANSFORM_CAPTURE_MAX_BYTES),
+        false,
+    );
+    const verifier = prefix && new PrefixVerifier(prefix);
+    const verifiedCount = prefix?.count ?? 0;
     const members: unknown[] = [];
-    const snapshots: MessageContentSnapshot[] = [];
-    const rootSnapshot = walker.recordOrCompare(() => {
-        walker.members(messages, (slot, index) => {
-            defineSlot(
-                snapshots,
-                index,
-                walker.recordOrCompare(() => walker.walk(slot.value, `/${index}`)),
-            );
-            defineSlot(members, index, slot.value);
+    const snapshots: (MessageContentSnapshot | undefined)[] = [];
+    const taped: TapedMember[] = [];
+    try {
+        const rootSnapshot = walker.recordOrCompare(() => {
+            const count = walker.members(messages, (slot, index) => {
+                if (index < verifiedCount) {
+                    try {
+                        verifier?.walk(slot.value, index);
+                    } catch (error) {
+                        if (
+                            error instanceof SourceRejected ||
+                            error instanceof CaptureBudgetExceeded
+                        )
+                            throw PREFIX_CHANGED;
+                        throw error;
+                    }
+                    defineSlot(snapshots, index, undefined);
+                } else {
+                    if (index === verifiedCount && verifier && !verifier.matches())
+                        throw PREFIX_CHANGED;
+                    const before = walker.bytes;
+                    const snapshot = walker.recordOrCompare(() =>
+                        walker.walk(slot.value, `/${index}`),
+                    );
+                    defineSlot(snapshots, index, snapshot);
+                    defineSlot(taped, taped.length, {
+                        fields: snapshot.fields,
+                        bytes: walker.bytes - before,
+                    });
+                }
+                defineSlot(members, index, slot.value);
+            });
+            if (verifier && count <= verifiedCount) throw PREFIX_CHANGED;
         });
-    });
-    return { members, snapshots, rootSnapshot };
+        const hasher = verifier?.continueHashing() ?? new TapeHasher();
+        for (let index = 0; index < taped.length - 1; index += 1)
+            hasher.add(taped[index] as TapedMember);
+        const single = (member: TapedMember | undefined): HistoryDigest | undefined => {
+            if (!member) return undefined;
+            const alone = new TapeHasher();
+            alone.add(member);
+            return alone.digest();
+        };
+        const boundary = single(taped[0]);
+        return {
+            members,
+            snapshots,
+            rootSnapshot,
+            verified: prefix,
+            history: hasher.digest(),
+            terminal: taped.length > 1 ? single(taped[taped.length - 1]) : boundary,
+            boundary,
+        };
+    } catch (error) {
+        if (error === PREFIX_CHANGED) return undefined;
+        throw error;
+    }
 }
 
 /** Membership is checked through own descriptors; an accessor or inherited slot cannot match. */
 export function capturedMessagesUnchanged(live: unknown, captured: CapturedMessages): boolean {
     try {
-        const walker = new ReferenceableWalk();
+        const walker = new ReferenceableWalk(TRANSFORM_CAPTURE_MAX_BYTES, false);
+        const verifier = captured.verified && new PrefixVerifier(captured.verified);
         walker.recordOrCompare(() => {
             const count = walker.members(live, (slot, index) => {
                 if (
@@ -429,12 +657,18 @@ export function capturedMessagesUnchanged(live: unknown, captured: CapturedMessa
                     !Object.is(slot.value, captured.members[index])
                 )
                     throw CONTENT_CHANGED;
-                walker.recordOrCompare(
-                    () => walker.walk(slot.value, `/${index}`),
-                    captured.snapshots[index],
-                );
+                if (verifier && index < verifier.expected.count) {
+                    verifier.walk(slot.value, index);
+                    return;
+                }
+                // Bounds precede indexing so a short record cannot read an inherited slot.
+                const snapshot =
+                    index < captured.snapshots.length ? captured.snapshots[index] : undefined;
+                if (!snapshot) throw CONTENT_CHANGED;
+                walker.recordOrCompare(() => walker.walk(slot.value, `/${index}`), snapshot);
             });
             if (count !== captured.members.length) throw CONTENT_CHANGED;
+            if (verifier && !verifier.matches()) throw CONTENT_CHANGED;
         }, captured.rootSnapshot);
         return true;
     } catch (error) {

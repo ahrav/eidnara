@@ -59,12 +59,12 @@ import {
     capturedMessagesUnchanged,
     captureMessages,
     defaultTransformCaptureAdmission,
+    type HistoryDigest,
+    historyDigestsEqual,
     hostArrayReplacementRejection,
     inspectReferenceableMessages,
-    type MessageContentSnapshot,
     readOwnDataProperty,
     replaceHostArrayContents,
-    snapshotFieldsEqual,
     type TransformCaptureAdmission,
 } from "./transform-capture";
 import { logTransformTiming } from "./transform-stage-logger";
@@ -133,6 +133,10 @@ const WIRE_CACHE_SESSION_CAPACITY = 64;
 const OPTIONAL_OUTPUT_BUDGET_BYTES = 64 * 1024 * 1024;
 /** Each retained canonical length occupies one number slot. */
 const LENGTH_SLOT_BYTES = 8;
+/** Per-message history state kept between passes, budgeted across sessions like applied outputs. */
+const RETAINED_HISTORY_BUDGET_BYTES = 64 * 1024 * 1024;
+/** Each retained message keeps an input length and a wire bound; the history digest is fixed size. */
+const HISTORY_ENTRY_RETAINED_BYTES = 2 * LENGTH_SLOT_BYTES;
 
 /** One successfully applied output, eligible as the `previous` source of the next recipe. */
 interface AppliedOutput {
@@ -196,8 +200,13 @@ interface RustWireCache {
     rawCount: number;
     wireCount: number;
     rawLastVisible: boolean;
-    /** Each pass re-verifies reused messages so in-place edits cannot reuse a stale prefix. */
-    rawContentSnapshots: readonly MessageContentSnapshot[];
+    /** Digest of every submitted message but the last. Each pass re-verifies the messages it
+     * covers, so in-place edits cannot reuse a stale prefix. */
+    rawHistory: HistoryDigest;
+    /** The former terminal alone; the host may edit it in place, so it is compared separately. */
+    rawTerminal?: HistoryDigest;
+    /** Inspection wire bounds of the submitted messages, reused for the verified prefix. */
+    wireBytes: readonly number[];
     ckFingerprint: string;
     ckPrefixFingerprintBeforeLast: string;
     nativeFingerprint: string;
@@ -237,6 +246,8 @@ export interface RustModeTransformOptions {
     captureAdmission?: TransformCaptureAdmission;
     /** Retained applied-output budget across sessions; tests inject a smaller one. */
     optionalOutputBudgetBytes?: number;
+    /** Retained per-message history budget across sessions; tests inject a smaller one. */
+    retainedHistoryBudgetBytes?: number;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -286,31 +297,23 @@ interface WireDelta {
 }
 
 /**
- * Delta transport requires snapshots before the former terminal to equal
- * `previous.rawContentSnapshots`. The terminal is compared separately because an invisible
- * former terminal may have been edited in place while a message was appended.
+ * Delta transport requires the members before the former terminal to have verified against
+ * `previous.rawHistory`. The terminal is compared separately because an invisible former terminal
+ * may have been edited in place while a message was appended.
  */
 function computeWireDelta(
     previous: RustWireCache,
-    snapshots: readonly MessageContentSnapshot[],
+    captured: CapturedMessages,
 ): WireDelta | undefined {
-    if (snapshots.length < previous.rawCount) return undefined;
-    const appending = snapshots.length > previous.rawCount;
+    if (captured.members.length < previous.rawCount) return undefined;
+    if (!captured.verified || !historyDigestsEqual(captured.verified, previous.rawHistory))
+        return undefined;
+    const appending = captured.members.length > previous.rawCount;
     const formerTerminalIndex = previous.rawCount - 1;
-    const prefixIntact =
-        formerTerminalIndex <= previous.rawContentSnapshots.length &&
-        snapshots
-            .slice(0, Math.max(0, formerTerminalIndex))
-            .every((snapshot, index) =>
-                snapshotFieldsEqual(snapshot, previous.rawContentSnapshots[index]),
-            );
-    if (!prefixIntact) return undefined;
-    const formerTerminalSnapshot = previous.rawContentSnapshots[formerTerminalIndex];
     const lastChanged =
         formerTerminalIndex >= 0 &&
         !(appending && previous.rawLastVisible) &&
-        (formerTerminalSnapshot === undefined ||
-            !snapshotFieldsEqual(snapshots[formerTerminalIndex], formerTerminalSnapshot));
+        !formerTerminalUnchanged(previous, captured);
     const replaceExistingTail = lastChanged || (appending && previous.rawLastVisible);
     const rawStart = replaceExistingTail ? Math.max(0, previous.rawCount - 1) : previous.rawCount;
     const replaceExistingWireTail = previous.rawLastVisible && (lastChanged || appending);
@@ -338,15 +341,21 @@ function computeWireDelta(
  * its terminal included, is unchanged and in place. New messages may follow; an edit, removal,
  * revert, or reorder of an acknowledged message leaves the retained output stale.
  */
-function isAppendOnlyExtension(
-    previous: RustWireCache,
-    snapshots: readonly MessageContentSnapshot[],
-): boolean {
-    const acknowledged = previous.rawContentSnapshots;
+function isAppendOnlyExtension(previous: RustWireCache, captured: CapturedMessages): boolean {
     return (
-        acknowledged.length === previous.rawCount &&
-        snapshots.length >= acknowledged.length &&
-        acknowledged.every((snapshot, index) => snapshotFieldsEqual(snapshots[index], snapshot))
+        captured.members.length >= previous.rawCount &&
+        captured.verified !== undefined &&
+        historyDigestsEqual(captured.verified, previous.rawHistory) &&
+        (previous.rawCount === 0 || formerTerminalUnchanged(previous, captured))
+    );
+}
+
+/** A verified capture tapes the former terminal first, so its boundary is that member. */
+function formerTerminalUnchanged(previous: RustWireCache, captured: CapturedMessages): boolean {
+    return (
+        previous.rawTerminal !== undefined &&
+        captured.boundary !== undefined &&
+        historyDigestsEqual(captured.boundary, previous.rawTerminal)
     );
 }
 
@@ -354,11 +363,12 @@ function isAppendOnlyExtension(
 function buildWireCache(args: {
     messages: readonly MessageLike[];
     encoded: readonly { mid?: unknown }[];
-    snapshots: readonly MessageContentSnapshot[];
+    captured: CapturedMessages;
+    wireBytes: readonly number[];
     inputLengths: readonly number[];
     delta?: WireDelta;
 }): RustWireCache {
-    const { messages, encoded, snapshots, inputLengths, delta } = args;
+    const { messages, encoded, captured, wireBytes, inputLengths, delta } = args;
     const rawLast = messages.at(-1);
     const ck = buildWireFingerprint(encoded, delta?.ckAfter);
     const native = buildWireFingerprint(
@@ -374,7 +384,9 @@ function buildWireCache(args: {
         ckPrefixFingerprintBeforeLast: ck.prefixFingerprintBeforeLast,
         nativeFingerprint: native.fingerprint,
         nativePrefixFingerprintBeforeLast: native.prefixFingerprintBeforeLast,
-        rawContentSnapshots: snapshots,
+        rawHistory: captured.history,
+        ...(captured.terminal ? { rawTerminal: captured.terminal } : {}),
+        wireBytes,
         fingerprint: `${ck.fingerprint}|${native.fingerprint}`,
         inputLengths,
     };
@@ -882,11 +894,35 @@ export function createRustModeTransform(
             if (cache) cache.applied = undefined;
         },
     );
-    /** The session map evicts silently on count; its victim's applied charge is released here. */
+    /** A session whose history is evicted loses its wire cache and captures in full next pass. */
+    const retainedHistories = new AppliedOutputBudget(
+        options.retainedHistoryBudgetBytes ?? RETAINED_HISTORY_BUDGET_BYTES,
+        (sessionId) => {
+            wireCaches.delete(sessionId);
+            appliedOutputs.release(sessionId);
+        },
+    );
+    const releaseWireCache = (sessionId: string): void => {
+        wireCaches.delete(sessionId);
+        appliedOutputs.release(sessionId);
+        retainedHistories.release(sessionId);
+    };
+    /** The session map evicts silently on count; its victim's retained charges are released here. */
     const storeWireCache = (sessionId: string, cache: RustWireCache): void => {
         if (!wireCaches.has(sessionId) && wireCaches.size >= WIRE_CACHE_SESSION_CAPACITY) {
             const oldest = wireCaches.entries().next().value;
-            if (oldest) appliedOutputs.release(oldest[0]);
+            if (oldest) {
+                appliedOutputs.release(oldest[0]);
+                retainedHistories.release(oldest[0]);
+            }
+        }
+        const charge =
+            cache.rawCount * HISTORY_ENTRY_RETAINED_BYTES +
+            (cache.rawHistory.symbols.length + (cache.rawTerminal?.symbols.length ?? 0)) *
+                CANDIDATE_SLOT_BYTES;
+        if (!retainedHistories.retain(sessionId, charge)) {
+            releaseWireCache(sessionId);
+            return;
         }
         wireCaches.set(sessionId, cache);
     };
@@ -927,8 +963,7 @@ export function createRustModeTransform(
     };
 
     const invalidateWireState = (sessionId: string): void => {
-        wireCaches.delete(sessionId);
-        appliedOutputs.release(sessionId);
+        releaseWireCache(sessionId);
         captureAdmission.requestCancel(
             sessionId,
             `rust session ${sessionId} wire state invalidated`,
@@ -1095,7 +1130,7 @@ export function createRustModeTransform(
                     state.wireInvalidations !== wireInvalidationsAtRead ||
                     lease.signal.aborted ||
                     wireCaches.peek(sessionId) !== source.previous ||
-                    !isAppendOnlyExtension(source.previous, source.captured.snapshots) ||
+                    !isAppendOnlyExtension(source.previous, source.captured) ||
                     readOwnDataProperty(output, "messages") !== target ||
                     !capturedMessagesUnchanged(target, source.captured) ||
                     hostArrayReplacementRejection(target) !== null
@@ -1121,21 +1156,47 @@ export function createRustModeTransform(
         try {
             // Source domain is validated synchronously before any message read.
             const prefixGuardStartedAt = performance.now();
-            const inspection = inspectReferenceableMessages(target, lease.remainingBytes);
-            if (!inspection.ok) {
-                throw new PassDeclined(
-                    sessionId,
-                    "unsupported_source",
-                    `${inspection.rejection.reason} at ${inspection.rejection.path}`,
-                    inspection.rejection.reason === "prototype_accessor" ? "warn" : "debug",
-                );
+            const previousWireCache = wireCaches.get(sessionId);
+            const inspect = (skip: number): number[] => {
+                const inspection = inspectReferenceableMessages(target, lease.remainingBytes, skip);
+                if (!inspection.ok) {
+                    throw new PassDeclined(
+                        sessionId,
+                        "unsupported_source",
+                        `${inspection.rejection.reason} at ${inspection.rejection.path}`,
+                        inspection.rejection.reason === "prototype_accessor" ? "warn" : "debug",
+                    );
+                }
+                charge(inspection.estimatedBytes, `capture charge=${inspection.estimatedBytes}`);
+                return inspection.messageWireBytes;
+            };
+            /**
+             * The acknowledged history before the former terminal is matched against its digest
+             * rather than re-taped, so the charge covers the root and the messages after it. The
+             * former terminal is taped again because the host may still be editing it in place.
+             * Any prefix change falls back to a full inspection and capture.
+             */
+            const prefix = previousWireCache?.rawHistory;
+            let verified: CapturedMessages | undefined;
+            let messageWireBytes: number[] = [];
+            if (previousWireCache && prefix) {
+                messageWireBytes = inspect(prefix.count);
+                verified = captureMessages(target, lease, prefix);
+                for (let index = 0; verified && index < prefix.count; index += 1)
+                    messageWireBytes[index] = previousWireCache.wireBytes[index] ?? 0;
             }
-            inputCount = inspection.messageWireBytes.length;
-            charge(inspection.estimatedBytes, `capture charge=${inspection.estimatedBytes}`);
-            const captured = captureMessages(target, lease);
+            if (!verified) messageWireBytes = inspect(0);
+            const captured = verified ?? captureMessages(target, lease);
+            inputCount = messageWireBytes.length;
             // Later reads use the captured members; the live array is only rechecked against them.
             const messages = captured.members as MessageLike[];
-            logStage(sessionId, "prefixGuard", prefixGuardStartedAt, timings, "phase=capture");
+            logStage(
+                sessionId,
+                "prefixGuard",
+                prefixGuardStartedAt,
+                timings,
+                `phase=capture verified=${verified?.verified?.count ?? 0}`,
+            );
             const recheckCapture = (phase: string): void => {
                 assertCurrentPass();
                 const startedAt = performance.now();
@@ -1146,16 +1207,15 @@ export function createRustModeTransform(
                 if (!unchanged) throw new PassDeclined(sessionId, "source_changed", phase);
             };
             // The delta decision and the charges it implies derive from the capture, so byte pressure declines before the first await.
-            const previousWireCache = wireCaches.get(sessionId);
             if (previousWireCache) failOpenSource = { captured, previous: previousWireCache };
             let wireDelta =
                 !state.forceFullWire && previousWireCache
-                    ? computeWireDelta(previousWireCache, captured.snapshots)
+                    ? computeWireDelta(previousWireCache, captured)
                     : undefined;
             const reserveWire = (from: number, to: number): void => {
                 let bytes = 0;
                 for (let index = from; index < to; index += 1)
-                    bytes += WIRE_PROJECTION_FACTOR * inspection.messageWireBytes[index];
+                    bytes += WIRE_PROJECTION_FACTOR * (messageWireBytes[index] ?? 0);
                 charge(bytes, "wire projection");
             };
             reserveWire(wireDelta?.rawStart ?? 0, messages.length);
@@ -1381,7 +1441,8 @@ export function createRustModeTransform(
                     : buildWireCache({
                           messages,
                           encoded: encodedInput,
-                          snapshots: captured.snapshots,
+                          captured,
+                          wireBytes: messageWireBytes,
                           inputLengths,
                           delta: wireDelta,
                       });
@@ -1564,7 +1625,8 @@ export function createRustModeTransform(
                     pendingWireCache = buildWireCache({
                         messages,
                         encoded: retryEncodedInput,
-                        snapshots: captured.snapshots,
+                        captured,
+                        wireBytes: messageWireBytes,
                         inputLengths,
                     });
                     const retryWireBuildStartedAt = performance.now();
@@ -1720,6 +1782,13 @@ export function createRustModeTransform(
                     sessionId,
                     error instanceof Error ? error.message : String(error),
                 );
+                // Byte pressure recurs on every pass, so serving raw would send the whole history.
+                if (
+                    error instanceof PassDeclined &&
+                    error.reason === "capture_bytes" &&
+                    serveLastApplied()
+                )
+                    servedFrom = "last_applied";
             } else {
                 if (decision.toLowerCase() !== "need_full_sync") decision = "error";
                 const servedLastApplied = serveLastApplied();
@@ -1757,8 +1826,7 @@ export function createRustModeTransform(
                 options.projectRoot ??
                 knownSessionDirectory(deps, sessionId);
             states.delete(sessionId);
-            wireCaches.delete(sessionId);
-            appliedOutputs.release(sessionId);
+            releaseWireCache(sessionId);
             captureAdmission.requestCancel(sessionId, `rust session ${sessionId} cleared`);
             // Route close asks the host to settle active work within its close budget before deletion acquires the lane; cleanup closes the replacement route.
             options.moduleClient.closeSession?.(sessionId);

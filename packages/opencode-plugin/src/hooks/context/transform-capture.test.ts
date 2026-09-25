@@ -6,6 +6,8 @@ import {
     capturedMessagesUnchanged,
     captureMessages as captureWithLease,
     defaultTransformCaptureAdmission,
+    type HistoryDigest,
+    historyDigestsEqual,
     hostArrayReplacementRejection,
     inspectReferenceableMessages,
     type MessageContentSnapshot,
@@ -42,7 +44,7 @@ function captureMessages(messages: unknown): CapturedMessages {
 }
 
 function messageContentSnapshot(message: unknown): MessageContentSnapshot {
-    return captureMessages([message]).snapshots[0];
+    return captureMessages([message]).snapshots[0] as MessageContentSnapshot;
 }
 
 function messageMatchesContentSnapshot(
@@ -50,9 +52,9 @@ function messageMatchesContentSnapshot(
     snapshot: MessageContentSnapshot,
 ): boolean {
     return capturedMessagesUnchanged([message], {
+        ...captureMessages([null]),
         members: [message],
         snapshots: [snapshot],
-        rootSnapshot: captureMessages([null]).rootSnapshot,
     });
 }
 
@@ -776,6 +778,133 @@ describe("capture snapshots and rechecks", () => {
     });
 });
 
+describe("digest-verified prefix capture", () => {
+    const tail = { tail: true };
+
+    /** Digest of `[value]` as the prefix a later pass verifies. */
+    function digestOf(value: unknown): HistoryDigest {
+        return captureMessages([value, tail]).history;
+    }
+
+    function verifiesAgainst(value: unknown, digest: HistoryDigest): boolean {
+        const live = [value, tail];
+        const admitted = new TransformCaptureAdmission().admit("verify");
+        if (!("lease" in admitted)) throw new Error("admission refused");
+        try {
+            const inspection = inspectReferenceableMessages(live, undefined, digest.count);
+            if (!inspection.ok || !admitted.lease.reserve(inspection.estimatedBytes))
+                throw new Error("root inspection refused");
+            return captureWithLease(live, admitted.lease, digest) !== undefined;
+        } finally {
+            admitted.lease.release();
+        }
+    }
+
+    it("distinguishes generated scalar, string, container, key, and ordering cases", () => {
+        const symbol = Symbol("key");
+        const values: unknown[] = [
+            null,
+            true,
+            false,
+            0,
+            -0,
+            1,
+            1e21,
+            "",
+            "null",
+            "s",
+            "\ud800",
+            "\ufffd",
+            "\ud83d\ude00",
+            ["a", "b"],
+            ["ab"],
+            [],
+            {},
+            [null],
+            { a: 1 },
+            { b: 1 },
+            { a: undefined },
+            { a: 1, b: 2 },
+            { b: 2, a: 1 },
+            Object.create(null),
+            Object.defineProperty({}, "a", { value: 1, enumerable: false }),
+            { [symbol]: 1 },
+            { [Symbol("key")]: 1 },
+        ];
+        for (const left of values) {
+            const digest = digestOf(left);
+            for (const right of values) {
+                expect(verifiesAgainst(right, digest)).toBe(Object.is(left, right));
+            }
+            // A structural copy verifies exactly when its tape matches the original's.
+            const copy = structuredClone(left);
+            expect(verifiesAgainst(copy, digest)).toBe(
+                snapshotFieldsEqual(messageContentSnapshot(left), messageContentSnapshot(copy)),
+            );
+        }
+    });
+
+    it("tapes only the members after the prefix and charges only them", () => {
+        const first = [
+            message("m1", "x".repeat(4096)),
+            message("m2", "y".repeat(4096)),
+            message("m3"),
+        ];
+        const captured = captureMessages(first);
+        expect(captured.history.count).toBe(2);
+        const next = [...structuredClone(first), message("m4")];
+        const full = inspectReferenceableMessages(next);
+        const partial = inspectReferenceableMessages(next, undefined, 2);
+        if (!full.ok || !partial.ok) throw new Error("valid source rejected");
+        expect(partial.estimatedBytes).toBeLessThan(full.estimatedBytes - 16_384);
+        expect(partial.messageWireBytes.slice(0, 2)).toEqual([0, 0]);
+        expect(partial.messageWireBytes.slice(2)).toEqual(full.messageWireBytes.slice(2));
+        const admitted = new TransformCaptureAdmission().admit("prefix");
+        if (!("lease" in admitted)) throw new Error("admission refused");
+        try {
+            expect(admitted.lease.reserve(partial.estimatedBytes)).toBe(true);
+            const verified = captureWithLease(next, admitted.lease, captured.history);
+            if (!verified) throw new Error("unchanged prefix did not verify");
+            expect(verified.snapshots.slice(0, 2)).toEqual([undefined, undefined]);
+            expect(verified.snapshots[2]).toBeDefined();
+            expect(verified.verified).toBe(captured.history);
+            expect(
+                historyDigestsEqual(
+                    verified.boundary as HistoryDigest,
+                    captured.terminal as HistoryDigest,
+                ),
+            ).toBe(true);
+            expect(verified.history.count).toBe(3);
+            expect(historyDigestsEqual(verified.history, captureMessages(next).history)).toBe(true);
+            expect(capturedMessagesUnchanged(next, verified)).toBe(true);
+            // A verified member is still rechecked in full against the digest.
+            (next[1]?.parts as Array<{ text: string }>)[0].text = "edited";
+            expect(capturedMessagesUnchanged(next, verified)).toBe(false);
+            expect(captureWithLease(next, admitted.lease, captured.history)).toBeUndefined();
+            // The prefix alone, with nothing after it, does not verify.
+            expect(captureWithLease(first.slice(0, 2), admitted.lease, captured.history)).toBe(
+                undefined,
+            );
+        } finally {
+            admitted.lease.release();
+        }
+    });
+
+    it("refuses a hostile prefix member without invoking it", () => {
+        const counter = trapCounter();
+        const digest = digestOf(message("m1"));
+        const accessor = message("m1");
+        Object.defineProperty(accessor, "parts", { get: counter.trap, enumerable: true });
+        const cycle = message("m1");
+        (cycle.parts as unknown[]).push(cycle);
+        for (const hostile of [new Proxy(message("m1"), {}), accessor, cycle]) {
+            expect(verifiesAgainst(hostile, digest)).toBe(false);
+        }
+        expect(verifiesAgainst(message("m1"), digest)).toBe(true);
+        expect(counter.count).toBe(0);
+    });
+});
+
 describe("host array replacement contract", () => {
     it.each([
         { prototype: Array.prototype },
@@ -1150,15 +1279,15 @@ describe("bounded capture sizing", () => {
         const text = "x".repeat(20 * 1024 * 1024);
         const source = [{ text }, { text }];
         const snapshot = messageContentSnapshot(source[0]);
-        const rootSnapshot = captureMessages([null, null]).rootSnapshot;
+        const pair = captureMessages([null, null]);
         for (const member of source) expect(inspectReferenceableMessages([member]).ok).toBe(true);
         expect(() => inspectReferenceableMessages(source)).toThrow(CaptureBudgetExceeded);
         expect(() => captureMessages(source)).toThrow(CaptureBudgetExceeded);
         expect(
             capturedMessagesUnchanged(source, {
+                ...pair,
                 members: source,
                 snapshots: [snapshot, snapshot],
-                rootSnapshot,
             }),
         ).toBe(false);
     });
