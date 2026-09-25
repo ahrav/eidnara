@@ -1683,7 +1683,12 @@ impl TransformRequest {
     /// The request's host-resolved threshold overrides the caller's config.
     /// Omitting the field uses the caller's trusted config as the compatibility fallback.
     fn execute_threshold_or(&self, fallback: f64) -> f64 {
-        self.effective_execute_threshold.unwrap_or(fallback)
+        self.execute_threshold_or_else(|| fallback)
+    }
+
+    /// As [`Self::execute_threshold_or`], computing the fallback only when the request omits its threshold.
+    fn execute_threshold_or_else(&self, fallback: impl FnOnce() -> f64) -> f64 {
+        self.effective_execute_threshold.unwrap_or_else(fallback)
     }
 
     /// The estimate includes one ready snapshot's cache keys and `Arc`.
@@ -5510,7 +5515,7 @@ impl HandlerCore {
                             &session_id,
                             now + HISTORY_SUMMARIZER_FAILURE_BACKOFF_MS,
                         )?;
-                        match action {
+                        let (producer_session_id, producer_run_id) = match action {
                             history_summarizer::RestartAction::Done => {
                                 return Ok(history_summarizer::HistorySummarizerReattachOutcome::Done);
                             }
@@ -5536,8 +5541,12 @@ impl HandlerCore {
                                 )
                                 .map(history_summarizer::HistorySummarizerReattachOutcome::Republished);
                             }
-                            history_summarizer::RestartAction::ReattachProducer { .. } => {}
-                        }
+                            history_summarizer::RestartAction::ReattachProducer {
+                                producer_session_id,
+                                producer_run_id,
+                                ..
+                            } => (producer_session_id, producer_run_id),
+                        };
                         let mut producer = tokio::select! {
                             () = cancel.cancelled() => {
                                 return Err(history_summarizer::HistorySummarizerDriveError::Cancelled);
@@ -5547,7 +5556,12 @@ impl HandlerCore {
                                 &harness,
                                 &credential_fingerprints,
                             ) => connected.inspect_err(|_| {
-                                record_reattach_connect_failure(&store, &session_id);
+                                record_reattach_connect_failure(
+                                    &store,
+                                    &session_id,
+                                    &producer_session_id,
+                                    &producer_run_id,
+                                );
                             })?,
                         };
                         let reattach = reattach_history_summarizer_producer(
@@ -5708,8 +5722,8 @@ impl HandlerCore {
             last_failure: loaded.meta.history_summarizer.last_failure.clone(),
             project_memory: None,
         };
-        // Written once per pending eligibility, so the config is read only while none is recorded. A firing persisting its own transitions (entering awaiting, validating, publishing) would lose its row-version race to this write, so only an idle or awaiting row takes it.
-        let blocked = |reason: &str| {
+        // Branches that loaded the config pass it; the others read it only when the request omits its threshold. Only an idle or awaiting row takes the write, keeping it off a row in the Firing, Validating, or Publishing phase.
+        let blocked = |reason: &str, cfg: Option<&DaemonConfig>| {
             let history_summarizer = &loaded.meta.history_summarizer;
             history_summarizer.pending_eligibility.is_none()
                 && matches!(
@@ -5720,23 +5734,26 @@ impl HandlerCore {
                     &store,
                     parsed,
                     &loaded,
-                    parsed.execute_threshold_or(
-                        self.effective_config(&binding.project_root)
-                            .execute_threshold_percentage,
-                    ),
+                    parsed.execute_threshold_or_else(|| match cfg {
+                        Some(cfg) => cfg.execute_threshold_percentage,
+                        None => {
+                            self.effective_config(&binding.project_root)
+                                .execute_threshold_percentage
+                        }
+                    }),
                     now,
                     reason,
                 )
         };
         if loaded.meta.pending_rewrite.is_some() {
-            blocked("pending_rewrite");
+            blocked("pending_rewrite", None);
             return PreparedHistorySummarizerAction::Complete(HistorySummarizerDiagnostics {
                 no_fire: Some("pending_rewrite".to_string()),
                 ..not_fired
             });
         }
         if let Some(completion) = self.live_history_summarizer_completion_wait(&parsed.session_id) {
-            blocked("busy");
+            blocked("busy", None);
             return PreparedHistorySummarizerAction::Busy {
                 diagnostics: HistorySummarizerDiagnostics {
                     no_fire: Some("busy".to_string()),
@@ -5748,7 +5765,7 @@ impl HandlerCore {
         let cfg = self.effective_config(&binding.project_root);
         if loaded.meta.history_summarizer.state != HistorySummarizerPhase::Idle {
             // Before the spawn: the recovery task's own CAS must not race this write.
-            blocked("busy");
+            blocked("busy", Some(&cfg));
             let no_fire = self
                 .maybe_spawn_reattach(
                     Arc::clone(&store),
@@ -5908,7 +5925,7 @@ impl HandlerCore {
             .failure_backoff_at_ms
             .is_some_and(|backoff_at_ms| now < backoff_at_ms)
         {
-            if !blocked("backoff") {
+            if !blocked("backoff", Some(&cfg)) {
                 self.record_no_fire(&store, &parsed.session_id, &loaded, "backoff");
             }
             return PreparedHistorySummarizerAction::Complete(HistorySummarizerDiagnostics {
@@ -6000,7 +6017,7 @@ impl HandlerCore {
         let live_guard = match self.try_claim_live_history_summarizer_session(&parsed.session_id) {
             LiveHistorySummarizerSessionClaim::Acquired(live_guard) => live_guard,
             LiveHistorySummarizerSessionClaim::Busy(completion) => {
-                blocked("busy");
+                blocked("busy", Some(&cfg));
                 return PreparedHistorySummarizerAction::Busy {
                     diagnostics: HistorySummarizerDiagnostics {
                         reason: diagnostics.reason,
@@ -18117,12 +18134,21 @@ fn record_blocked_eligibility(
         .is_ok()
 }
 
-/// Marks a resumed firing's entry as unable to reach its producer and counts the failure, leaving the phase, backoff, and retry untouched: the run may still be executing. Best-effort; a lost CAS race drops the write.
-fn record_reattach_connect_failure(store: &MemoryStore, session_id: &str) {
+/// Marks the firing still awaiting this producer run as unable to reach it and counts the failure, leaving its phase, backoff, and retry untouched because the run may still be executing. A row awaiting another run is left alone. Best-effort; a lost CAS race drops the write.
+fn record_reattach_connect_failure(
+    store: &MemoryStore,
+    session_id: &str,
+    producer_session_id: &str,
+    producer_run_id: &str,
+) {
     let Ok(loaded) = store.load(session_id) else {
         return;
     };
-    if loaded.meta.history_summarizer.state != HistorySummarizerPhase::AwaitingProducer {
+    let history_summarizer = &loaded.meta.history_summarizer;
+    if history_summarizer.state != HistorySummarizerPhase::AwaitingProducer
+        || history_summarizer.producer_session_id.as_deref() != Some(producer_session_id)
+        || history_summarizer.producer_run_id.as_deref() != Some(producer_run_id)
+    {
         return;
     }
     let mut meta = loaded.meta.clone();
@@ -41116,6 +41142,61 @@ mod tests {
         assert_eq!(
             entry.outcome,
             Some(memory_store::summarizer_timeline::FiringOutcome::ReattachConnectFailed)
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_reattach_connect_failure_leaves_a_firing_that_replaced_its_run_untouched() {
+        let producer = Arc::new(ProducerState::default());
+        producer
+            .connect_errors
+            .lock()
+            .unwrap()
+            .push_back(HistorySummarizerProducerError::Client(
+                history_summarizer_producer::HistorySummarizerClientFailure {
+                    code: "dial_failed".to_owned(),
+                    message: "daemon dial failed".to_owned(),
+                },
+            ));
+        producer.block_connect.store(true, Ordering::SeqCst);
+        let (handler, store, _dir, _project) =
+            handler_with_store(Arc::clone(&producer), default_test_config());
+        seed_history_summarizer_phase(&store, HistorySummarizerPhase::AwaitingProducer);
+
+        let response = call_transform(&handler, big_messages()).await;
+        assert_eq!(response["history_summarizer"]["no_fire"], "reattaching");
+        wait_for_count(&producer.connects, 1).await;
+
+        // Firing 2, awaiting its own run, replaces firing 1 before the blocked reattach fails, so the stale failure must not mark or count firing 2.
+        let loaded = store.load("ses").unwrap();
+        let mut meta = loaded.meta.clone();
+        meta.history_summarizer.firing_seq = 2;
+        meta.history_summarizer.producer_session_id = Some("producer-session-2".to_string());
+        meta.history_summarizer.producer_run_id = Some("run-next".to_string());
+        meta.history_summarizer.record_fire(
+            memory_store::summarizer_timeline::FiringTrigger::default(),
+            2,
+            None,
+        );
+        store
+            .commit("ses", loaded.row_version, &loaded.core, &meta)
+            .unwrap();
+
+        producer.block_connect.store(false, Ordering::SeqCst);
+        producer.notify.notify_waiters();
+        wait_for_reattach_to_finish(&handler).await;
+
+        let state = store.load("ses").unwrap().meta.history_summarizer;
+        assert_eq!(state.firing_seq, 2);
+        assert_eq!(state.state, HistorySummarizerPhase::AwaitingProducer);
+        assert_eq!(state.counters.connect_failed, 0);
+        assert!(
+            state
+                .recent_firings
+                .iter()
+                .all(|entry| entry.outcome.is_none()),
+            "{:?}",
+            state.recent_firings
         );
     }
 
