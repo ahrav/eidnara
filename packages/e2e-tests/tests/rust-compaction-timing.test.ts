@@ -252,6 +252,8 @@ describe.skipIf(!rustPrereqs.ok)("rust compaction timing", () => {
             printReport(report);
             expect(report.passes).toBeGreaterThanOrEqual(SWEEP.turns);
             expect(report.pressure_path_firings).toBeGreaterThan(0);
+            // The workload reaches emergency pressure at the default lead; a candidate lead may remove it.
+            if (lead === undefined) expect(report.emergency_passes).toBeGreaterThan(0);
         },
         CASE_TIMEOUT_MS,
     );

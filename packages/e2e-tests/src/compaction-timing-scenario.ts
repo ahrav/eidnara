@@ -100,6 +100,7 @@ export class TimingSession {
     private pressureTokens = 0;
     private previousMainMessages = "";
     private contextLimit = 0;
+    private readonly configuredLimit: number;
     totalInputTokens = 0;
 
     private constructor(
@@ -107,7 +108,9 @@ export class TimingSession {
         sessionId: string,
         lead: number | undefined,
         pressure: Pressure,
+        configuredLimit: number,
     ) {
+        this.configuredLimit = configuredLimit;
         this.h = h;
         this.sessionId = sessionId;
         this.lead = lead;
@@ -119,8 +122,9 @@ export class TimingSession {
         lead: number | undefined,
         options: { pressure?: Pressure; modelContextLimit?: number } = {},
     ): Promise<TimingSession> {
+        const modelContextLimit = options.modelContextLimit ?? MODEL_CONTEXT_LIMIT;
         const h = await RustTestHarness.create({
-            modelContextLimit: options.modelContextLimit ?? MODEL_CONTEXT_LIMIT,
+            modelContextLimit,
             eidnaraConfig: {
                 execute_threshold_percentage: EXECUTE_THRESHOLD,
                 protected_tags: 1,
@@ -135,6 +139,7 @@ export class TimingSession {
                 await h.createSession(),
                 lead,
                 options.pressure ?? { kind: "scripted" },
+                modelContextLimit,
             );
             h.mock.addMatcher((body) => session.respond(body));
             return session;
@@ -178,7 +183,7 @@ export class TimingSession {
         if (this.contextLimit > 0) return this.contextLimit;
         const usage = (await this.status()).usage as { context_limit_tokens?: number } | undefined;
         this.contextLimit = usage?.context_limit_tokens ?? 0;
-        return this.contextLimit > 0 ? this.contextLimit : MODEL_CONTEXT_LIMIT;
+        return this.contextLimit > 0 ? this.contextLimit : this.configuredLimit;
     }
 
     /** Pressure the newest response reported, as a percentage of the plugin's limit; the next pass reads it. */
@@ -384,42 +389,51 @@ export async function runSweepArm(lead: number | undefined, runId: string): Prom
         pressure: { kind: "served" },
         modelContextLimit: SWEEP.modelContextLimit,
     });
+    // Re-arming only after the released run settles keeps one hold per firing.
+    const settleAndRearm = async () => {
+        await session.waitForFirings(
+            (firings) => !firings.some((firing) => firing.state === "in_flight"),
+            "released producer settles",
+        );
+        await session.h.host.blockNextBackendCall();
+    };
     try {
         await session.h.host.blockNextBackendCall();
-        let heldTurns: number | null = null;
+        let heldTurns = 0;
         for (let turn = 0; turn < SWEEP.turns; turn += 1) {
             const emergencyNext = (await session.reportedPercent()) >= SWEEP.emergencyPercent;
-            // An Emergency95 pass waits on a live run or fires inline; either way the held producer finishes into the wait.
+            // An Emergency95 pass waits on a live run or fires inline; either way the held producer finishes into the wait. The release retries because an inline firing's call can start after the delay.
+            let settled = false;
             const finish = emergencyNext
-                ? Bun.sleep(SWEEP.emergencyFinishMs).then(() =>
-                      session.h.host.releaseBlockedBackendCall(),
-                  )
+                ? (async () => {
+                      await Bun.sleep(SWEEP.emergencyFinishMs);
+                      while (!settled) {
+                          if (await session.h.host.releaseBlockedBackendCall()) return true;
+                          await Bun.sleep(100);
+                      }
+                      return false;
+                  })()
                 : Promise.resolve(false);
             let record: TurnRecord;
             try {
                 record = await session.turn();
             } finally {
-                await finish.catch(() => false);
+                settled = true;
             }
-            if (await finish) {
-                heldTurns = null;
-                await session.h.host.blockNextBackendCall();
+            if (await finish.catch(() => false)) {
+                heldTurns = 0;
+                await settleAndRearm();
                 continue;
             }
-            const inFlight = record.timing.firings.some((firing) => firing.state === "in_flight");
-            if (!inFlight) {
-                heldTurns = null;
+            if (!record.timing.firings.some((firing) => firing.state === "in_flight")) {
+                heldTurns = 0;
                 continue;
             }
-            heldTurns = (heldTurns ?? 0) + 1;
+            heldTurns += 1;
             if (heldTurns >= SWEEP.producerTurns) {
                 await session.h.host.releaseBlockedBackendCall();
-                await session.waitForFirings(
-                    (firings) => !firings.some((firing) => firing.state === "in_flight"),
-                    "held producer settles",
-                );
-                heldTurns = null;
-                await session.h.host.blockNextBackendCall();
+                heldTurns = 0;
+                await settleAndRearm();
             }
         }
         return await session.report(`rust-compaction-timing:sweep`, runId);
