@@ -1719,12 +1719,16 @@ pub(crate) fn parse_failure(harness: Harness, detail: &str) -> BackendTerminal {
 /// Authentication and context-overflow classes are checked first because their phrasing can also mention retries.
 pub(crate) fn classify_failure_text(text: &str) -> ErrorClass {
     let lower = text.to_ascii_lowercase();
-    const AUTH: [&str; 5] = [
+    // Bedrock reports denied, unrecognized, and expired credentials as HTTP 403 exceptions.
+    const AUTH: [&str; 8] = [
         "api key",
         "unauthorized",
         "authentication",
         "credential",
         "forbidden",
+        "accessdeniedexception",
+        "unrecognizedclientexception",
+        "expiredtokenexception",
     ];
     const AUTH_CODES: [&str; 2] = ["401", "403"];
     const OVERFLOW: [&str; 20] = [
@@ -1749,7 +1753,8 @@ pub(crate) fn classify_failure_text(text: &str) -> ErrorClass {
         "model_context_window_exceeded",
         "context size has been exceeded",
     ];
-    const TRANSIENT: [&str; 8] = [
+    // Bedrock names: ThrottlingException, ServiceUnavailableException, InternalServerException, ModelErrorException, ModelTimeoutException, ModelNotReadyException.
+    const TRANSIENT: [&str; 16] = [
         "rate limit",
         "rate_limit",
         "overloaded",
@@ -1757,9 +1762,17 @@ pub(crate) fn classify_failure_text(text: &str) -> ErrorClass {
         "timed out",
         "temporarily",
         "try again",
+        "trying again",
         "unavailable",
+        "throttl",
+        "too many requests",
+        "internal server error",
+        "internalserverexception",
+        "bad gateway",
+        "modelerrorexception",
+        "modelnotreadyexception",
     ];
-    const TRANSIENT_CODES: [&str; 3] = ["429", "503", "529"];
+    const TRANSIENT_CODES: [&str; 6] = ["429", "500", "502", "503", "504", "529"];
     // Explicit rate-limit evidence outranks the broad authentication phrases: "rate limit exceeded for this API key" is a retry-after condition, not a missing credential.
     if ["rate limit", "rate_limit"]
         .iter()
@@ -2648,6 +2661,83 @@ mod tests {
         CREDENTIAL_VALUE_CAP_BYTES, CREDENTIAL_VARIABLES, CredentialMechanism, CredentialRowError,
         EnvSnapshot, credential_variable_mechanism, provider_row_spec,
     };
+
+    #[test]
+    fn bedrock_failure_text_classifies_retryable_and_credential_errors() {
+        use super::super::backend::ErrorClass::{
+            AuthRequired, ContextOverflow, Permanent, Transient,
+        };
+        use super::classify_failure_text;
+        let cases = [
+            (
+                "An error occurred (ThrottlingException) when calling the Converse operation: Too many requests, please wait before trying again.",
+                Transient,
+            ),
+            (
+                "ThrottlingException: Too many tokens, please wait before trying again.",
+                Transient,
+            ),
+            (
+                "AI_APICallError: Too many requests, please wait before trying again.",
+                Transient,
+            ),
+            (
+                "An error occurred (ServiceUnavailableException) when calling the ConverseStream operation: Bedrock is unable to process your request.",
+                Transient,
+            ),
+            (
+                "An error occurred (InternalServerException) when calling the Converse operation: The server encountered an error processing your request.",
+                Transient,
+            ),
+            ("InternalServerException: Internal Server Error", Transient),
+            (
+                "An error occurred (ModelErrorException) when calling the InvokeModel operation: The system encountered an unexpected error during processing. Try your request again.",
+                Transient,
+            ),
+            (
+                "ModelTimeoutException: The request took too long to process. Processing time exceeded the model timeout length.",
+                Transient,
+            ),
+            (
+                "An error occurred (ModelNotReadyException) when calling the Converse operation: Model is not ready for inference.",
+                Transient,
+            ),
+            ("AI_APICallError: Bad Gateway", Transient),
+            ("provider returned status 500", Transient),
+            ("upstream error (502)", Transient),
+            ("HTTP 504: gateway request failed", Transient),
+            (
+                "An error occurred (AccessDeniedException) when calling the Converse operation: You don't have access to the model with the specified model ID.",
+                AuthRequired,
+            ),
+            (
+                "An error occurred (UnrecognizedClientException) when calling the Converse operation: The security token included in the request is invalid.",
+                AuthRequired,
+            ),
+            (
+                "ExpiredTokenException: The security token included in the request is expired",
+                AuthRequired,
+            ),
+            (
+                "An error occurred (ValidationException) when calling the Converse operation: The provided model identifier is invalid.",
+                Permanent,
+            ),
+            (
+                "An error occurred (ValidationException) when calling the Converse operation: Input is too long for requested model.",
+                ContextOverflow,
+            ),
+            (
+                "ResourceNotFoundException: Could not resolve the foundation model from the provided model identifier.",
+                Permanent,
+            ),
+            ("request req-5001 failed validation", Permanent),
+            ("model id x500abc is not supported", Permanent),
+            ("unsupported parameter at offset 15002", Permanent),
+        ];
+        for (text, expected) in cases {
+            assert_eq!(classify_failure_text(text), expected, "{text}");
+        }
+    }
 
     #[test]
     fn credential_variables_are_the_union_of_every_supported_row() {
