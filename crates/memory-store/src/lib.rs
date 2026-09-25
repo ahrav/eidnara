@@ -2001,6 +2001,9 @@ pub struct ModuleMeta {
     /// fall back to `folded_history_segment_seq`.
     #[serde(default)]
     pub coverage_history_segment_seq: Option<i64>,
+    /// `Some` when the served prefix renders below `rendered_history_segment_seq()`: an additive-only pass advanced that watermark without rendering history_segments.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub additive_served_history_segment_seq: Option<i64>,
     /// `Some` records either a pinned canonical snapshot or a withheld composition.
     /// `None` occurs before the first HARD, or when memory was disabled at the
     /// HARD and no canonical read was taken.
@@ -2198,11 +2201,17 @@ pub struct ModuleMeta {
 }
 
 impl ModuleMeta {
-    /// The highest history_segment sequence a served prefix renders, in m0 or m1: a published segment above it has not activated.
+    /// The highest history_segment sequence the m0 and m1 watermarks record.
     pub fn rendered_history_segment_seq(&self) -> i64 {
         self.m1_history_segment_seq
             .unwrap_or(0)
             .max(self.folded_history_segment_seq)
+    }
+
+    /// The highest history_segment sequence a served prefix renders, in m0 or m1: a published segment above it has not activated.
+    pub fn served_history_segment_seq(&self) -> i64 {
+        self.additive_served_history_segment_seq
+            .unwrap_or_else(|| self.rendered_history_segment_seq())
     }
 }
 
@@ -11379,7 +11388,7 @@ impl MemoryStore {
                 "SELECT COUNT(*) FROM history_segments WHERE session_id = ?1 AND sequence > ?2",
                 params![
                     session_id,
-                    keep_through_seq.max(meta.rendered_history_segment_seq())
+                    keep_through_seq.max(meta.served_history_segment_seq())
                 ],
                 |r| r.get(0),
             )?;
@@ -24141,6 +24150,49 @@ mod tests {
             3
         );
         assert_eq!(counters(&store).superseded_before_activation, 3);
+    }
+
+    #[test]
+    fn a_revert_counts_segments_an_additive_only_pass_acknowledged_without_serving() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
+        // The watermarks reach 3, but the served prefix renders only segment 1.
+        let mut meta = ModuleMeta {
+            folded_history_segment_seq: 3,
+            m1_history_segment_seq: Some(3),
+            additive_served_history_segment_seq: Some(1),
+            ..Default::default()
+        };
+        for sequence in [2, 3] {
+            meta.history_summarizer.firing_seq = sequence;
+            meta.history_summarizer
+                .record_fire(Default::default(), 1, None);
+            meta.history_summarizer
+                .record_outcome(summarizer_timeline::FiringOutcome::Published {
+                    sequence: Some(sequence as i64),
+                });
+        }
+        let rv = store
+            .commit("ses", None, &CoreState::empty(), &meta)
+            .unwrap();
+        store
+            .replace_history_segments(
+                "ses",
+                &[
+                    recut_comp(1, 1, 1, "a#0"),
+                    recut_comp(2, 2, 2, "b#0"),
+                    recut_comp(3, 3, 3, "c#0"),
+                ],
+            )
+            .unwrap();
+
+        let outcome = store
+            .truncate_history_segments_for_revert("ses", 1, Some(rv))
+            .unwrap();
+        let state = outcome.history_summarizer;
+        assert_eq!(state.counters.superseded_before_activation, 2);
+        assert!(state.recent_firings.iter().all(|entry| entry.outcome
+            == Some(summarizer_timeline::FiringOutcome::Published { sequence: None })));
     }
 
     #[test]

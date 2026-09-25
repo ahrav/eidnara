@@ -3026,7 +3026,10 @@ fn apply_additive_only(
         pass_action(&plan),
         materialize_reason,
     );
-    // This path renders no history segment, so it activates none.
+    // No history segment renders here, so this path activates none and keeps the served sequence.
+    let served = loaded.meta.served_history_segment_seq();
+    meta.additive_served_history_segment_seq =
+        (served != meta.rendered_history_segment_seq()).then_some(served);
     let state_changed = core != loaded.core || meta != loaded.meta;
     if state_changed {
         meta.last_committed_pass_at_ms = ctx.now_ms;
@@ -5199,8 +5202,15 @@ fn apply_once(
         pass_action(&plan),
         materialize_reason,
     );
+    // A HARD renders every stored segment, including those an additive-only pass never served; a SOFT renders only segments above the watermarks.
+    let previously_served = if matches!(plan, PassPlan::Hard | PassPlan::MigrateHard) {
+        meta.additive_served_history_segment_seq = None;
+        loaded.meta.served_history_segment_seq()
+    } else {
+        loaded.meta.rendered_history_segment_seq()
+    };
     meta.history_summarizer.record_activation(
-        loaded.meta.rendered_history_segment_seq(),
+        previously_served,
         meta.rendered_history_segment_seq(),
         ctx.now_ms,
     );
@@ -16006,6 +16016,72 @@ pub(crate) mod tests {
             folded,
             "a rejected pass records nothing"
         );
+    }
+
+    #[test]
+    fn a_hard_after_additive_only_passes_activates_what_they_acknowledged_without_serving() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = store(dir.path());
+        let mut additive = pctx("git:proj", "/nonexistent-docs", 0);
+        additive.compaction_enabled = false;
+        let messages = vec![item("a", 1, "x"), item("b", 2, "y")];
+        transform(
+            &s,
+            &req("toggle", "cfg0", vec![item("a", 1, "x")]),
+            &additive,
+        )
+        .unwrap();
+        let loaded = s.load("toggle").unwrap();
+        let mut meta = loaded.meta.clone();
+        meta.history_summarizer.firing_seq = 1;
+        meta.history_summarizer
+            .record_fire(Default::default(), 1, None);
+        meta.history_summarizer.record_outcome(
+            memory_store::summarizer_timeline::FiringOutcome::Published { sequence: Some(1) },
+        );
+        s.commit("toggle", loaded.row_version, &loaded.core, &meta)
+            .unwrap();
+        s.replace_history_segments("toggle", &[comp(1, 1, 1, "a", "S1 summary")])
+            .unwrap();
+        // A new render config forces an additive HARD, which acknowledges every stored segment.
+        let acknowledged =
+            transform(&s, &req("toggle", "cfg1", messages.clone()), &additive).unwrap();
+        assert_eq!(
+            (acknowledged.action.as_str(), acknowledged.committed),
+            ("HARD", true)
+        );
+        let meta = s.load("toggle").unwrap().meta;
+        assert_eq!(
+            meta.rendered_history_segment_seq(),
+            1,
+            "the additive path advances the render watermark without serving segment 1"
+        );
+        assert_eq!(
+            meta.history_summarizer.recent_firings[0].activated_at_ms,
+            None
+        );
+        assert_eq!(meta.served_history_segment_seq(), 0);
+        let row_version = s.load("toggle").unwrap().row_version;
+        let repeat = transform(&s, &req("toggle", "cfg1", messages.clone()), &additive).unwrap();
+        assert!(!repeat.committed, "a repeat additive pass stays write-free");
+        assert_eq!(s.load("toggle").unwrap().row_version, row_version);
+
+        let mut compaction = pctx("git:proj", "/nonexistent-docs", 0);
+        compaction.now_ms = 42;
+        let hard = transform(&s, &req("toggle", "cfg1", messages), &compaction).unwrap();
+        assert_eq!((hard.action.as_str(), hard.committed), ("HARD", true));
+        assert!(
+            serde_json::to_string(&hard.messages())
+                .unwrap()
+                .contains("S1 summary"),
+            "the HARD serves segment 1 for the first time"
+        );
+        let meta = s.load("toggle").unwrap().meta;
+        assert_eq!(
+            meta.history_summarizer.recent_firings[0].activated_at_ms,
+            Some(42)
+        );
+        assert_eq!(meta.additive_served_history_segment_seq, None);
     }
 
     #[test]
