@@ -12087,6 +12087,9 @@ mod aged_goldens;
 mod surface_census;
 
 #[cfg(test)]
+mod must_not_wait;
+
+#[cfg(test)]
 pub(crate) mod tests {
     use super::*;
     use storage::{Isolation, StorageBackend, StorageDescriptor};
@@ -12769,7 +12772,7 @@ pub(crate) mod tests {
         )
     }
 
-    fn item(id: &str, ordinal: u64, bytes: &str) -> IngressMessage {
+    pub(crate) fn item(id: &str, ordinal: u64, bytes: &str) -> IngressMessage {
         IngressMessage {
             mid: id.to_string(),
             ordinal,
@@ -13226,7 +13229,7 @@ pub(crate) mod tests {
         }
     }
 
-    fn system_item(id: &str, ordinal: u64, bytes: &str) -> IngressMessage {
+    pub(crate) fn system_item(id: &str, ordinal: u64, bytes: &str) -> IngressMessage {
         IngressMessage {
             mid: id.to_string(),
             ordinal,
@@ -13296,7 +13299,7 @@ pub(crate) mod tests {
         }
     }
 
-    fn req(session: &str, cfg: &str, messages: Vec<IngressMessage>) -> TransformRequest {
+    pub(crate) fn req(session: &str, cfg: &str, messages: Vec<IngressMessage>) -> TransformRequest {
         TransformRequest {
             cache_ttl: None,
             effective_execute_threshold: None,
@@ -13468,7 +13471,7 @@ pub(crate) mod tests {
     /// The producer context uses a throwaway project directory with no documentation files, so its docs are empty.
     /// Each test fixes `now_ms` instead of reading the wall clock, so expiry uses a deterministic cutoff.
     /// is deterministic.
-    fn pctx<'a>(project: &'a str, dir: &'a str, now_ms: i64) -> ProducerContext<'a> {
+    pub(crate) fn pctx<'a>(project: &'a str, dir: &'a str, now_ms: i64) -> ProducerContext<'a> {
         ProducerContext {
             project_memory: canonical_read(1, &[]),
             project_path: project,
@@ -13501,7 +13504,7 @@ pub(crate) mod tests {
     }
 
     /// A pinned canonical read with `(object_id, category, content)` rows.
-    fn canonical_read(
+    pub(crate) fn canonical_read(
         known_as_of: i64,
         rows: &[(&str, &str, &str)],
     ) -> Option<CanonicalMemoryRead> {
@@ -13670,7 +13673,7 @@ pub(crate) mod tests {
         assert!(!served_bytes(&withheld).contains("<project-memory>"));
     }
 
-    fn with_usage(
+    pub(crate) fn with_usage(
         mut request: TransformRequest,
         current_total_input_tokens: u64,
         context_limit_tokens: u64,
@@ -25756,7 +25759,11 @@ pub(crate) mod tests {
         r
     }
 
-    fn cc_req(session: &str, cfg: &str, messages: Vec<IngressMessage>) -> TransformRequest {
+    pub(crate) fn cc_req(
+        session: &str,
+        cfg: &str,
+        messages: Vec<IngressMessage>,
+    ) -> TransformRequest {
         profile_req(
             SerializerProfile::ClaudeCodeAnthropic,
             session,
