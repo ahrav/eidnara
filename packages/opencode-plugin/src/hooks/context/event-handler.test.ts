@@ -262,6 +262,45 @@ describe("createEventHandler — message.updated", () => {
         expect(entry?.usage.percentage).toBeCloseTo((32_000 / limit) * 100, 6);
     });
 
+    it("retains the reported cache counts beside the summed input, including genuine zeros", async () => {
+        const { deps, handle } = buildHarness();
+        await handle(
+            "message.updated",
+            assistantUpdated({ input: 1_000, cache: { read: 30_000, write: 1_000 } }),
+        );
+        expect(deps.contextUsageMap.get(SESSION)?.usage.cache).toEqual({
+            readTokens: 30_000,
+            writeTokens: 1_000,
+        });
+
+        await handle(
+            "message.updated",
+            assistantUpdated({ input: 2_000, cache: { read: 0, write: 0 } }),
+        );
+        expect(deps.contextUsageMap.get(SESSION)?.usage.cache).toEqual({
+            readTokens: 0,
+            writeTokens: 0,
+        });
+
+        await handle("message.updated", assistantUpdated({ input: 3_000 }));
+        expect(deps.contextUsageMap.get(SESSION)?.usage.cache).toBeUndefined();
+    });
+
+    it("keeps the newest response's cache counts when an older response is updated", async () => {
+        const { deps, handle } = buildHarness();
+        const newest = assistantUpdated({ input: 1_000, cache: { read: 30_000, write: 500 } });
+        newest.info.id = "msg-9";
+        await handle("message.updated", newest);
+
+        const older = assistantUpdated({ input: 1_000, cache: { read: 7, write: 7 } });
+        older.info.id = "msg-3";
+        await handle("message.updated", older);
+        expect(deps.contextUsageMap.get(SESSION)?.usage).toMatchObject({
+            inputTokens: 31_500,
+            cache: { readTokens: 30_000, writeTokens: 500 },
+        });
+    });
+
     it("records nothing when the update carries no usage tokens", async () => {
         const { deps, handle } = buildHarness();
         await handle("message.updated", assistantUpdated({ input: 0 }));

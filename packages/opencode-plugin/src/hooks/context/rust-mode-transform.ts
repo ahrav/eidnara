@@ -614,11 +614,22 @@ function resolveHistoryBudgetTokens(
 
 function passUsage(usage: ContextUsage, limit: number): Record<string, number> {
     return {
-        input_tokens: usage.inputTokens,
-        limit,
         current_total_input_tokens: usage.inputTokens,
         context_limit_tokens: limit,
     };
+}
+
+/** The previous response's reported cache counts, from the same snapshot as its pressure usage; absent until a response reports them. */
+function prevResponseCacheUsage(
+    usage: ContextUsage | undefined,
+): { cache_read_tokens: number; cache_write_tokens: number } | undefined {
+    const cache = usage?.cache;
+    if (!cache || !isCount(cache.readTokens) || !isCount(cache.writeTokens)) return undefined;
+    return { cache_read_tokens: cache.readTokens, cache_write_tokens: cache.writeTokens };
+}
+
+function isCount(value: number): boolean {
+    return Number.isSafeInteger(value) && value >= 0;
 }
 
 interface TransformGeometryWire {
@@ -695,6 +706,7 @@ function buildTransformBody(args: {
     nativeMessages: unknown[];
     passInputs: Record<string, unknown>;
     usage?: Record<string, number | boolean>;
+    prevResponseCacheUsage?: { cache_read_tokens: number; cache_write_tokens: number };
     geometry?: TransformGeometryWire;
     modelKey: string | null;
     providerId: string | null;
@@ -745,6 +757,9 @@ function buildTransformBody(args: {
               }
             : {}),
         ...(args.usage ? { usage: args.usage } : {}),
+        ...(args.prevResponseCacheUsage
+            ? { prev_response_cache_usage: args.prevResponseCacheUsage }
+            : {}),
         ...(args.geometry ? { geometry: args.geometry } : {}),
         mid_turn: args.midTurn,
         prev_response_completed_at_ms: args.prevResponseCompletedAtMs,
@@ -1337,6 +1352,7 @@ export function createRustModeTransform(
                 passInputs,
                 // The daemon keeps its persisted usage when the request carries none; a zero sample with a nonzero limit would replace it.
                 usage: usage ? passUsage(usage, contextLimit) : undefined,
+                prevResponseCacheUsage: prevResponseCacheUsage(usage),
                 geometry: transformGeometry,
                 modelKey: modelKey ?? null,
                 providerId: model?.providerID ?? null,

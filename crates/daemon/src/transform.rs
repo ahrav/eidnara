@@ -876,6 +876,9 @@ pub struct TransformRequest {
     pub tail_delta: Option<Value>,
     #[serde(default)]
     pub usage: Option<ModuleUsage>,
+    /// The previous response's actual provider cache counts, kept out of `usage` so pressure and fallback never read them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prev_response_cache_usage: Option<memory_store::ProviderCacheUsage>,
     /// Scheduler bands read `usage.context_limit_tokens` for compatibility.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub geometry: Option<TransformGeometry>,
@@ -1042,6 +1045,9 @@ struct TransformRequestWire {
     tail_delta: Option<Value>,
     #[serde(default)]
     usage: Option<ModuleUsage>,
+    /// A malformed or negative count is dropped instead of refusing the pass it rides on.
+    #[serde(default, deserialize_with = "admitted_cache_usage")]
+    prev_response_cache_usage: Option<memory_store::ProviderCacheUsage>,
     #[serde(default)]
     geometry: Option<TransformGeometry>,
     #[serde(default)]
@@ -1082,6 +1088,16 @@ struct TransformRequestWire {
     constituents: Vec<(String, String, u64)>,
     #[serde(default)]
     compaction_observed: bool,
+}
+
+fn admitted_cache_usage<'de, D>(
+    deserializer: D,
+) -> Result<Option<memory_store::ProviderCacheUsage>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(Option::<Value>::deserialize(deserializer)?
+        .and_then(|value| serde_json::from_value(value).ok()))
 }
 
 impl<'de> Deserialize<'de> for TransformRequest {
@@ -1126,6 +1142,7 @@ impl<'de> Deserialize<'de> for TransformRequest {
             messages,
             tail_delta: wire.tail_delta,
             usage: wire.usage,
+            prev_response_cache_usage: wire.prev_response_cache_usage,
             geometry: wire.geometry,
             provider_error: wire.provider_error,
             mid_turn: wire.mid_turn,
@@ -13270,6 +13287,7 @@ pub(crate) mod tests {
             new_epoch: 0,
             constituents: Vec::new(),
             compaction_observed: false,
+            prev_response_cache_usage: None,
         }
     }
 
@@ -15576,6 +15594,129 @@ pub(crate) mod tests {
                 "{name} frozen unit must preserve the tail identity, got {error:?}"
             );
         }
+    }
+
+    #[test]
+    fn prev_response_cache_usage_is_admitted_only_as_two_unsigned_counts() {
+        let body = |cache: Option<Value>| {
+            let mut body = json!({
+                "kind": "transform",
+                "v": 2,
+                "serializer_profile": "opencode-aisdk",
+                "session_id": "cache",
+                "render_config": "cfg0",
+                "messages": [],
+                // `input_tokens` and `limit` are unknown usage keys, which deserialization ignores.
+                "usage": {
+                    "input_tokens": 64_000,
+                    "limit": 128_000,
+                    "current_total_input_tokens": 64_000,
+                    "context_limit_tokens": 128_000
+                },
+            });
+            if let Some(cache) = cache {
+                body["prev_response_cache_usage"] = cache;
+            }
+            serde_json::from_value::<TransformRequest>(body).unwrap()
+        };
+        let pressure = Some(ModuleUsage {
+            current_total_input_tokens: 64_000,
+            context_limit_tokens: 128_000,
+            ..ModuleUsage::default()
+        });
+        let persisted = ModuleUsage {
+            current_total_input_tokens: 90_000,
+            ..ModuleUsage::default()
+        };
+        let without = body(None);
+        for (cache, expected) in [
+            (None, None),
+            (
+                Some(json!({"cache_read_tokens": 0, "cache_write_tokens": 0})),
+                Some((0, 0)),
+            ),
+            (
+                Some(json!({"cache_read_tokens": u64::MAX, "cache_write_tokens": 7})),
+                Some((u64::MAX, 7)),
+            ),
+            (
+                Some(json!({"cache_read_tokens": -1, "cache_write_tokens": 7})),
+                None,
+            ),
+            (
+                Some(json!({"cache_read_tokens": 1.5, "cache_write_tokens": 7})),
+                None,
+            ),
+            (Some(json!({"cache_read_tokens": 3})), None),
+            (Some(json!("3")), None),
+        ] {
+            let parsed = body(cache.clone());
+            assert_eq!(
+                parsed
+                    .prev_response_cache_usage
+                    .map(|usage| (usage.cache_read_tokens, usage.cache_write_tokens)),
+                expected,
+                "{cache:?}"
+            );
+            assert_eq!(parsed.usage, pressure, "{cache:?}");
+            for fallback in [None, Some(&persisted)] {
+                assert_eq!(
+                    effective_usage(parsed.usage.as_ref(), fallback),
+                    effective_usage(without.usage.as_ref(), fallback),
+                    "{cache:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn prev_response_cache_usage_changes_no_decision_bytes_or_persisted_state() {
+        let passes = |cache: Option<memory_store::ProviderCacheUsage>| {
+            let dir = tempfile::tempdir().unwrap();
+            let s = store(dir.path());
+            let mut observed = Vec::new();
+            for (tokens, messages) in [
+                (1_000, vec![item("a", 1, "x")]),
+                (140_000, vec![item("a", 1, "x"), item("b", 2, "y")]),
+                (0, vec![item("a", 1, "x"), item("b", 2, "y")]),
+            ] {
+                let mut request = req("cache", "cfg0", messages);
+                request.usage = Some(ModuleUsage {
+                    current_total_input_tokens: tokens,
+                    context_limit_tokens: 200_000,
+                    ..ModuleUsage::default()
+                });
+                request.prev_response_cache_usage = cache;
+                let response = run(&s, &request, &spine());
+                let loaded = s.load("cache").unwrap();
+                let mut response = serde_json::to_value(&response).unwrap();
+                response.as_object_mut().unwrap().remove("timings");
+                observed.push((
+                    response,
+                    serde_json::to_value(&loaded.core).unwrap(),
+                    serde_json::to_value(&loaded.meta).unwrap(),
+                ));
+            }
+            observed
+        };
+        let without = passes(None);
+        // The first pass folds and the 70% pass persists its pressure, so decisions and writes both ran.
+        let actions: Vec<_> = without
+            .iter()
+            .map(|(response, _, _)| response["action"].clone())
+            .collect();
+        assert_eq!(actions, [json!("HARD"), json!("SOFT+"), json!("SOFT+")]);
+        assert_eq!(
+            without[1].2["last_usage"]["current_total_input_tokens"],
+            json!(140_000)
+        );
+        assert_eq!(
+            without,
+            passes(Some(memory_store::ProviderCacheUsage {
+                cache_read_tokens: 90_000,
+                cache_write_tokens: 4_000,
+            }))
+        );
     }
 
     #[test]
