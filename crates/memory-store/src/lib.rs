@@ -17,6 +17,7 @@ pub mod memory_capture;
 pub mod memory_classifier_ledger;
 pub mod memory_reviewer_jobs;
 pub mod memory_reviewer_ledger;
+pub mod summarizer_timeline;
 pub(crate) mod task_lease;
 
 use cache_stability::{DurabilityClass, FrozenUnit};
@@ -968,6 +969,15 @@ pub struct HistorySummarizerDurableState {
     /// The reservation the current or last firing made for its accepted facts. Cleared when the publication that activates it commits; kept through abandonment so the reservation is never downgraded to a pre-reservation refusal.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub memory_reviewer_reservation: Option<MemoryReviewerReservation>,
+    /// The newest [`summarizer_timeline::RECENT_FIRINGS_CAPACITY`] firings, oldest first. Survives every transition.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub recent_firings: Vec<summarizer_timeline::RecentFiring>,
+    /// Survives every transition.
+    #[serde(default)]
+    pub counters: summarizer_timeline::FiringCounters,
+    /// Set by the first pass that could have fired while no run could start; the next pressure-path fire consumes it. Survives every other transition.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_eligibility: Option<summarizer_timeline::PendingEligibility>,
 }
 
 impl Default for HistorySummarizerDurableState {
@@ -990,17 +1000,52 @@ impl Default for HistorySummarizerDurableState {
             consecutive_publish_failures: 0,
             memory_reviewer_nonadmission: MemoryReviewerNonadmission::default(),
             memory_reviewer_reservation: None,
+            recent_firings: Vec::new(),
+            counters: summarizer_timeline::FiringCounters::default(),
+            pending_eligibility: None,
         }
     }
 }
 
 impl HistorySummarizerDurableState {
-    /// The idle state with everything in flight cleared; the sequence and the nonadmission facts survive.
+    /// The default state holding only what every reset, fire, and abandon keeps: the timeline, the counters, the pending eligibility, and the nonadmission facts. Each constructor sets its own other fields over it. The destructuring names every field, so a new one must be placed on one side.
+    pub fn carried_forward(&self) -> Self {
+        let HistorySummarizerDurableState {
+            state: _,
+            firing_seq: _,
+            chunk_range: _,
+            chunk_fingerprint: _,
+            selected_range_identities: _,
+            producer_session_id: _,
+            producer_run_id: _,
+            producer_harness: _,
+            fired_at_ms: _,
+            expected_revert_epoch: _,
+            history_segment_set_generation: _,
+            failure_backoff_at_ms: _,
+            last_failure: _,
+            last_no_fire: _,
+            consecutive_publish_failures: _,
+            memory_reviewer_nonadmission,
+            memory_reviewer_reservation: _,
+            recent_firings,
+            counters,
+            pending_eligibility,
+        } = self;
+        HistorySummarizerDurableState {
+            memory_reviewer_nonadmission: *memory_reviewer_nonadmission,
+            recent_firings: recent_firings.clone(),
+            counters: *counters,
+            pending_eligibility: pending_eligibility.clone(),
+            ..HistorySummarizerDurableState::default()
+        }
+    }
+
+    /// The idle state with everything in flight cleared; the sequence and the carried facts survive.
     pub fn cleared_of_in_flight_firing(&self) -> Self {
         HistorySummarizerDurableState {
             firing_seq: self.firing_seq,
-            memory_reviewer_nonadmission: self.memory_reviewer_nonadmission,
-            ..HistorySummarizerDurableState::default()
+            ..self.carried_forward()
         }
     }
 }
@@ -1249,6 +1294,8 @@ pub struct HistorySummarizerPublishRequest<'a> {
     pub memory_reviewer_nonadmission: Option<MemoryReviewerNonadmissionCode>,
     /// KTD3: the reserved MemoryReviewer job this publication activates with its reference-only input, in the same transaction as the history. A reservation past its queue deadline is finished as expired instead, and the publication still commits.
     pub memory_reviewer_activation: Option<MemoryReviewerActivation<'a>>,
+    /// The daemon clock sampled just before this publication; it stamps the firing's timeline entry and, when absent, `m1_pending_since_ms`.
+    pub published_at_ms: i64,
 }
 
 /// The reserved job a History Summarizer publication moves to `Ready`.
@@ -2035,6 +2082,15 @@ pub struct ModuleMeta {
     /// see one consistent state.
     #[serde(default)]
     pub shadow_acked_watermarks: Value,
+}
+
+impl ModuleMeta {
+    /// The highest history_segment sequence a served prefix renders, in m0 or m1: a published segment above it has not activated.
+    pub fn rendered_history_segment_seq(&self) -> i64 {
+        self.m1_history_segment_seq
+            .unwrap_or(0)
+            .max(self.folded_history_segment_seq)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -11240,6 +11296,19 @@ impl MemoryStore {
                 )
                 .optional()?;
 
+            let superseded: i64 = tx.query_row(
+                "SELECT COUNT(*) FROM history_segments WHERE session_id = ?1 AND sequence > ?2",
+                params![
+                    session_id,
+                    keep_through_seq.max(meta.rendered_history_segment_seq())
+                ],
+                |r| r.get(0),
+            )?;
+            meta.history_summarizer.counters.superseded_before_activation = meta
+                .history_summarizer
+                .counters
+                .superseded_before_activation
+                .saturating_add(superseded as u64);
             let next_epoch = meta.revert_epoch.saturating_add(1);
             let dropped_range = match (dropped_min, dropped_max) {
                 (Some(min), Some(max)) if min == max => min.to_string(),
@@ -11381,6 +11450,7 @@ impl MemoryStore {
         predicate: &HistorySummarizerPublishPredicate,
         failure_backoff_at_ms: Option<i64>,
         detail: Option<&str>,
+        class: summarizer_timeline::AbandonClass,
     ) -> Result<Option<u64>, MemoryStoreError> {
         self.abandon_history_summarizer_run_if_matching_with_publish_failure(
             session_id,
@@ -11388,6 +11458,7 @@ impl MemoryStore {
             failure_backoff_at_ms,
             detail,
             false,
+            class,
         )
     }
 
@@ -11401,6 +11472,7 @@ impl MemoryStore {
         failure_backoff_at_ms: Option<i64>,
         detail: Option<&str>,
         count_publish_failure: bool,
+        class: summarizer_timeline::AbandonClass,
     ) -> Result<Option<u64>, MemoryStoreError> {
         let mut write = PreparedWrite::new(DurableWriteFamily::HistorySummarizerSideChannels);
         write.domain_owner("session", session_id, "history_summarizer");
@@ -11468,10 +11540,11 @@ impl MemoryStore {
                 } else {
                     history_summarizer.consecutive_publish_failures
                 },
-                memory_reviewer_nonadmission: history_summarizer.memory_reviewer_nonadmission,
                 memory_reviewer_reservation: history_summarizer.memory_reviewer_reservation.clone(),
-                ..HistorySummarizerDurableState::default()
+                ..history_summarizer.carried_forward()
             };
+            meta.history_summarizer
+                .record_outcome(summarizer_timeline::FiringOutcome::Abandoned { class });
             let next = next_row_version(current)?;
             let meta_json = match serde_json::to_string(&meta) {
                 Ok(json) => json,
@@ -11904,6 +11977,15 @@ impl MemoryStore {
                 }
             }
             meta.history_summarizer = meta.history_summarizer.cleared_of_in_flight_firing();
+            let first_appended_sequence = next_history_segment_sequence_tx(tx, session_id)?;
+            let published_sequence = first_appended_sequence - 1 + history_segments.len() as i64;
+            meta.history_summarizer.current_firing_mut().published_at_ms =
+                Some(request.published_at_ms);
+            meta.history_summarizer
+                .record_outcome(summarizer_timeline::FiringOutcome::Published {
+                    sequence: published_sequence,
+                });
+            meta.m1_pending_since_ms.get_or_insert(request.published_at_ms);
             if let Some(code) = request.memory_reviewer_nonadmission {
                 let nonadmission = &mut meta.history_summarizer.memory_reviewer_nonadmission;
                 nonadmission.count = nonadmission.count.saturating_add(1);
@@ -11926,7 +12008,6 @@ impl MemoryStore {
             let meta_json = prepare_transaction_json_preserving_identities(&scanned_meta_json)
                 .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
 
-            let first_appended_sequence = next_history_segment_sequence_tx(tx, session_id)?;
             match append_history_segments_tx(tx, session_id, &history_segments)? {
                 AppendHistorySegmentsTxnOutcome::Appended => {}
                 AppendHistorySegmentsTxnOutcome::Overlap {
@@ -17370,6 +17451,7 @@ mod tests {
                 chunk_transcript: None,
                 memory_reviewer_nonadmission: None,
                 memory_reviewer_activation: None,
+                published_at_ms: 0,
             })
             .unwrap();
         let after_publish = scan_audit_rows(&store);
@@ -21079,6 +21161,9 @@ mod tests {
                 consecutive_publish_failures: 0,
                 memory_reviewer_nonadmission: MemoryReviewerNonadmission::default(),
                 memory_reviewer_reservation: None,
+                recent_firings: Vec::new(),
+                counters: Default::default(),
+                pending_eligibility: None,
             },
             ..Default::default()
         }
@@ -21109,6 +21194,7 @@ mod tests {
                     None,
                     Some("publication failed"),
                     true,
+                    summarizer_timeline::AbandonClass::Invalidated,
                 )
                 .unwrap();
             assert_eq!(
@@ -21195,6 +21281,7 @@ mod tests {
                 &publish_predicate(),
                 None,
                 Some("snapshot generation changed"),
+                summarizer_timeline::AbandonClass::Invalidated,
             )
             .unwrap();
         assert_eq!(first_abandoned, Some(first_before.row_version.unwrap() + 1));
@@ -21228,6 +21315,7 @@ mod tests {
                 &publish_predicate(),
                 Some(999),
                 Some("fingerprint or CAS conflict"),
+                summarizer_timeline::AbandonClass::Invalidated,
             )
             .unwrap();
         assert_eq!(
@@ -21291,6 +21379,7 @@ mod tests {
                 chunk_transcript: None,
                 memory_reviewer_nonadmission: None,
                 memory_reviewer_activation: None,
+                published_at_ms: 0,
             })
             .unwrap_err();
         assert!(matches!(
@@ -21356,6 +21445,7 @@ mod tests {
                     chunk_transcript: None,
                     memory_reviewer_nonadmission: None,
                     memory_reviewer_activation: None,
+                    published_at_ms: 0,
                 })
                 .unwrap();
 
@@ -21494,6 +21584,7 @@ mod tests {
                     chunk_transcript: None,
                     memory_reviewer_nonadmission: None,
                     memory_reviewer_activation: None,
+                    published_at_ms: 0,
                 })
                 .unwrap_err();
             assert!(
@@ -21571,6 +21662,7 @@ mod tests {
                 chunk_transcript: None,
                 memory_reviewer_nonadmission: None,
                 memory_reviewer_activation: None,
+                published_at_ms: 0,
             })
             .unwrap();
         assert_eq!(
@@ -21720,6 +21812,7 @@ mod tests {
                 chunk_transcript: None,
                 memory_reviewer_nonadmission: None,
                 memory_reviewer_activation: None,
+                published_at_ms: 0,
             })
             .unwrap();
         assert_eq!(
@@ -22005,6 +22098,7 @@ mod tests {
                     chunk_transcript: None,
                     memory_reviewer_nonadmission: code,
                     memory_reviewer_activation: None,
+                    published_at_ms: 0,
                 })
             };
         let nonadmission = || {
@@ -22140,6 +22234,7 @@ mod tests {
                 Some(5),
                 Some("fence"),
                 true,
+                summarizer_timeline::AbandonClass::Invalidated,
             )
             .unwrap()
             .expect("abandon applies");
@@ -22244,6 +22339,7 @@ mod tests {
                 chunk_transcript: Some("U: orphan"),
                 memory_reviewer_nonadmission: None,
                 memory_reviewer_activation: None,
+                published_at_ms: 0,
             })
             .unwrap_err();
         assert!(matches!(
@@ -22296,6 +22392,7 @@ mod tests {
                 chunk_transcript: Some(&transcript),
                 memory_reviewer_nonadmission: None,
                 memory_reviewer_activation: None,
+                published_at_ms: 0,
             })
             .unwrap_err();
         assert!(matches!(
@@ -22345,6 +22442,7 @@ mod tests {
                 chunk_transcript: Some("U: bounded row"),
                 memory_reviewer_nonadmission: None,
                 memory_reviewer_activation: None,
+                published_at_ms: 0,
             })
             .unwrap();
 
@@ -22408,6 +22506,7 @@ mod tests {
                 chunk_transcript: Some(&oversized),
                 memory_reviewer_nonadmission: None,
                 memory_reviewer_activation: None,
+                published_at_ms: 0,
             })
             .unwrap_err();
         assert!(matches!(
@@ -23631,6 +23730,7 @@ mod tests {
                 chunk_transcript: None,
                 memory_reviewer_nonadmission: None,
                 memory_reviewer_activation: None,
+                published_at_ms: 0,
             })
             .unwrap_err();
         assert!(
@@ -23652,6 +23752,160 @@ mod tests {
             importance: 50,
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn a_revert_counts_only_published_segments_no_pass_rendered_and_commits_the_count_with_the_revert()
+     {
+        let dir = tempfile::tempdir().unwrap();
+        let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
+        let meta = ModuleMeta {
+            folded_history_segment_seq: 1,
+            m1_history_segment_seq: Some(2),
+            ..Default::default()
+        };
+        let rv = store
+            .commit("ses", None, &CoreState::empty(), &meta)
+            .unwrap();
+        store
+            .replace_history_segments(
+                "ses",
+                &[
+                    recut_comp(1, 1, 1, "a#0"),
+                    recut_comp(2, 2, 2, "b#0"),
+                    recut_comp(3, 3, 3, "c#0"),
+                    recut_comp(4, 4, 4, "d#0"),
+                ],
+            )
+            .unwrap();
+
+        let counters =
+            |store: &MemoryStore| store.load("ses").unwrap().meta.history_summarizer.counters;
+        assert!(matches!(
+            store.truncate_history_segments_for_revert("ses", 1, Some(rv + 7)),
+            Err(MemoryStoreError::CasConflict { .. })
+        ));
+        assert_eq!(counters(&store).superseded_before_activation, 0);
+
+        store
+            .truncate_history_segments_for_revert("ses", 1, Some(rv))
+            .unwrap();
+        // Segment 2 is rendered by m1; 3 and 4 were published above both the kept prefix and the render.
+        assert_eq!(counters(&store).superseded_before_activation, 2);
+        assert_eq!(store.load_history_segments("ses").unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_publication_stamps_its_firing_counts_it_once_and_keeps_the_earliest_pending_start() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
+        let mut meta = publishing_meta();
+        meta.history_summarizer.record_fire(
+            summarizer_timeline::FiringTrigger::default(),
+            100,
+            None,
+        );
+        let rv = store
+            .commit("ses", None, &CoreState::empty(), &meta)
+            .unwrap();
+        let publish = |store: &MemoryStore,
+                       expected_row_version: u64,
+                       predicate: &HistorySummarizerPublishPredicate,
+                       segment: StoredHistorySegment,
+                       published_at_ms: i64| {
+            store.publish_history_summarizer_chunk(HistorySummarizerPublishRequest {
+                session_id: "ses",
+                expected_row_version: Some(expected_row_version),
+                expected_revert_epoch: 0,
+                predicate,
+                project_path: "git:proj",
+                history_segments: &[segment],
+                events: &[],
+                primer_candidates: &[],
+                user_memory_candidates: &[],
+                publication_floor_ordinal: 21,
+                chunk_transcript: None,
+                memory_reviewer_nonadmission: None,
+                memory_reviewer_activation: None,
+                published_at_ms,
+            })
+        };
+
+        // A refused publication changes no counter and records no outcome.
+        assert!(
+            publish(
+                &store,
+                rv + 1,
+                &publish_predicate(),
+                publish_history_segment(),
+                400
+            )
+            .is_err()
+        );
+        let refused = store.load("ses").unwrap().meta;
+        assert_eq!(refused.history_summarizer.counters.published, 0);
+        assert_eq!(refused.history_summarizer.recent_firings[0].outcome, None);
+        assert_eq!(refused.m1_pending_since_ms, None);
+
+        publish(
+            &store,
+            rv,
+            &publish_predicate(),
+            publish_history_segment(),
+            500,
+        )
+        .unwrap();
+        let first = store.load("ses").unwrap();
+        let entry = &first.meta.history_summarizer.recent_firings[0];
+        assert_eq!(entry.published_at_ms, Some(500));
+        assert_eq!(
+            entry.outcome,
+            Some(summarizer_timeline::FiringOutcome::Published { sequence: 1 })
+        );
+        assert_eq!(first.meta.history_summarizer.counters.published, 1);
+        assert_eq!(first.meta.m1_pending_since_ms, Some(500));
+
+        let generation = HistorySegmentSetGeneration {
+            max_sequence: 1,
+            count: 1,
+        };
+        let mut next = first.meta.clone();
+        next.history_summarizer = HistorySummarizerDurableState {
+            firing_seq: 8,
+            history_segment_set_generation: generation,
+            ..publishing_meta().history_summarizer
+        };
+        next.history_summarizer.recent_firings =
+            first.meta.history_summarizer.recent_firings.clone();
+        next.history_summarizer.counters = first.meta.history_summarizer.counters;
+        next.history_summarizer.record_fire(
+            summarizer_timeline::FiringTrigger::default(),
+            600,
+            None,
+        );
+        let rv = store
+            .commit("ses", first.row_version, &first.core, &next)
+            .unwrap();
+        let second_predicate = HistorySummarizerPublishPredicate {
+            firing_seq: 8,
+            history_segment_set_generation: generation,
+            ..publish_predicate()
+        };
+        let segment = StoredHistorySegment {
+            start_message: 21,
+            end_message: 30,
+            end_message_id: "m30".into(),
+            ..publish_history_segment()
+        };
+        publish(&store, rv, &second_predicate, segment, 900).unwrap();
+        let second = store.load("ses").unwrap().meta;
+        assert_eq!(second.m1_pending_since_ms, Some(500));
+        assert_eq!(second.history_summarizer.counters.published, 2);
+        assert_eq!(
+            second.history_summarizer.recent_firings[1].outcome,
+            Some(summarizer_timeline::FiringOutcome::Published { sequence: 2 })
+        );
+        assert_eq!(second.history_summarizer.counters.firings, 2);
     }
 
     #[test]
@@ -23834,6 +24088,7 @@ mod tests {
                 chunk_transcript: None,
                 memory_reviewer_nonadmission: None,
                 memory_reviewer_activation: None,
+                published_at_ms: 0,
             })
             .unwrap_err();
         assert!(matches!(

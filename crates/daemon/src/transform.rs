@@ -20321,6 +20321,7 @@ pub(crate) mod tests {
                             chunk_transcript: None,
                             memory_reviewer_nonadmission: None,
                             memory_reviewer_activation: None,
+                            published_at_ms: 0,
                         },
                     )
                     .unwrap();
@@ -20427,6 +20428,7 @@ pub(crate) mod tests {
                     chunk_transcript: None,
                     memory_reviewer_nonadmission: None,
                     memory_reviewer_activation: None,
+                    published_at_ms: 0,
                 })
                 .unwrap();
         }));
