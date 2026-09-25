@@ -5607,7 +5607,7 @@ pub(crate) fn effective_usage(
         .unwrap_or_default()
 }
 
-fn effective_context_limit_tokens(
+pub(crate) fn effective_context_limit_tokens(
     usage: &ModuleUsage,
     geometry: Option<&TransformGeometry>,
 ) -> f64 {

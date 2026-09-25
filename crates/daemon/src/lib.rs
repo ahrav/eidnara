@@ -180,7 +180,6 @@ use history_summarizer_producer::{
     HistorySummarizerSendOutcome, RunState,
 };
 use prompt_surface::{PromptSurfacePreset, PromptSurfaceSelection};
-use scheduler::MIN_PLAUSIBLE_CONTEXT_LIMIT;
 use selection::SelKind;
 #[cfg(test)]
 use session_resolver::ResolvedSession;
@@ -18004,22 +18003,20 @@ fn sel_kind_for_flat(block: &crate::wire::FlatBlock) -> SelKind<'_> {
     }
 }
 
+/// Uses `transform::effective_context_limit_tokens` so preparation and execution use the same context limit.
 fn usage_numbers(
     usage: Option<&memory_store::ModuleUsage>,
     geometry: Option<&crate::transform::TransformGeometry>,
 ) -> (f64, f64, f64) {
-    let input = usage
-        .map(|u| u.current_total_input_tokens as f64)
-        .unwrap_or(0.0);
-    let limit = usage
-        .map(|u| u.context_limit_tokens as f64)
-        .filter(|limit| *limit >= MIN_PLAUSIBLE_CONTEXT_LIMIT as f64)
-        .or_else(|| {
-            geometry
-                .map(|geometry| geometry.usable_soft as f64)
-                .filter(|soft| *soft >= MIN_PLAUSIBLE_CONTEXT_LIMIT as f64)
-        })
-        .unwrap_or(200_000.0);
+    const ABSENT: memory_store::ModuleUsage = memory_store::ModuleUsage {
+        current_total_input_tokens: 0,
+        context_limit_tokens: 0,
+        final_wire_input_tokens: 0,
+        final_wire_trusted: false,
+    };
+    let usage = usage.unwrap_or(&ABSENT);
+    let input = usage.current_total_input_tokens as f64;
+    let limit = transform::effective_context_limit_tokens(usage, geometry);
     let pct = if limit > 0.0 {
         input / limit * 100.0
     } else {
@@ -18902,16 +18899,33 @@ mod tests {
         zero["usage"] = json!({"current_total_input_tokens": 0, "context_limit_tokens": 0});
         let (_, _, pct) = scheduler_usage_numbers(&parsed(zero), Some(&persisted));
         assert!((pct - 70.0).abs() < 1e-9, "{pct}");
-        // An implausible persisted limit takes the same ladder as a request's.
+        // Compare scheduler_usage_numbers with the scheduler's resolved usage and limit for every request and persisted-usage combination.
+        let mut with_geometry = base.clone();
+        with_geometry["geometry"] =
+            json!({"usable_soft": 167_000, "usable_hard": 200_000, "derivation": "d"});
         let tiny = usage(50_000, 500);
-        assert_eq!(
-            scheduler_usage_numbers(&parsed(base.clone()), Some(&tiny)),
-            usage_numbers(Some(&tiny), None)
-        );
-        assert_eq!(
-            scheduler_usage_numbers(&parsed(base.clone()), None),
-            usage_numbers(None, None)
-        );
+        for (request, persisted) in [
+            (&base, Some(&persisted)),
+            (&base, Some(&tiny)),
+            (&with_geometry, Some(&tiny)),
+            (&with_geometry, Some(&persisted)),
+            (&with_geometry, None),
+            (&base, None),
+        ] {
+            let request = parsed(request.clone());
+            let scheduler_usage = transform::effective_usage(request.usage.as_ref(), persisted);
+            let limit = transform::effective_context_limit_tokens(
+                &scheduler_usage,
+                request.geometry.as_ref(),
+            );
+            let input = scheduler_usage.current_total_input_tokens as f64;
+            assert_eq!(
+                scheduler_usage_numbers(&request, persisted),
+                (limit, input, input / limit * 100.0),
+                "{persisted:?} {:?}",
+                request.geometry
+            );
+        }
 
         // Threshold: the request override, else the bound config, resolved and capped as the scheduler resolves it.
         let mut bound = default_test_config();
