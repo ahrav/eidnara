@@ -50,8 +50,10 @@ each carrying that message's `block_identities` from
   content is still current."
 - `:12085-12089` rejects outright when `predicate.selected_range_identities` is
   empty. This is a separate, earlier rejection from the per-mid comparison.
-- `:12090-12113` for each selected entry, compares against
-  `meta.block_identity_by_mid[mid]` and rejects with the offending mid named.
+- `:12090-12113` for each selected entry, reads the session's `block_identities`
+  row for that mid (the durable form of `meta.block_identity_by_mid`, written by
+  `sync_block_identities` at `:9611`), compares its `identities` against
+  `entry.block_identities`, and rejects with the offending mid named.
 
 Both rejections are `PublishTxnOutcome::FenceRejected`, which the module maps to
 `HistorySummarizerPublishError::FenceRejected` (`:9525-9527`) and then abandons **without**
