@@ -1276,6 +1276,8 @@ pub struct TruncateOutcome {
     pub revert_epoch: u64,
     pub last_recut: Option<String>,
     pub row_version: u64,
+    /// The session's count after this transaction; a caller that commits its own meta over the result carries it forward.
+    pub superseded_before_activation: u64,
 }
 
 pub struct HistorySummarizerPublishRequest<'a> {
@@ -11216,6 +11218,10 @@ impl MemoryStore {
                 revert_epoch: next_epoch,
                 last_recut: reset_meta.last_recut,
                 row_version: next_version,
+                superseded_before_activation: reset_meta
+                    .history_summarizer
+                    .counters
+                    .superseded_before_activation,
             }))
         })?;
         match outcome {
@@ -11274,6 +11280,10 @@ impl MemoryStore {
                     revert_epoch: meta.revert_epoch,
                     last_recut: meta.last_recut,
                     row_version: current.max(0) as u64,
+                    superseded_before_activation: meta
+                        .history_summarizer
+                        .counters
+                        .superseded_before_activation,
                 }));
             }
 
@@ -11389,6 +11399,10 @@ impl MemoryStore {
                 revert_epoch: next_epoch,
                 last_recut,
                 row_version: next,
+                superseded_before_activation: meta
+                    .history_summarizer
+                    .counters
+                    .superseded_before_activation,
             }))
         })?;
 
@@ -11978,7 +11992,8 @@ impl MemoryStore {
             }
             meta.history_summarizer = meta.history_summarizer.cleared_of_in_flight_firing();
             let first_appended_sequence = next_history_segment_sequence_tx(tx, session_id)?;
-            let published_sequence = first_appended_sequence - 1 + history_segments.len() as i64;
+            let published_sequence = (!history_segments.is_empty())
+                .then(|| first_appended_sequence - 1 + history_segments.len() as i64);
             meta.history_summarizer.current_firing_mut().published_at_ms =
                 Some(request.published_at_ms);
             meta.history_summarizer
@@ -23791,8 +23806,33 @@ mod tests {
             .truncate_history_segments_for_revert("ses", 1, Some(rv))
             .unwrap();
         // Segment 2 is rendered by m1; 3 and 4 were published above both the kept prefix and the render.
-        assert_eq!(counters(&store).superseded_before_activation, 2);
+        let outcome_count = counters(&store).superseded_before_activation;
+        assert_eq!(outcome_count, 2);
         assert_eq!(store.load_history_segments("ses").unwrap().len(), 1);
+
+        // A kept prefix above the render bounds the count too: only segment 4 is dropped.
+        let loaded = store.load("ses").unwrap();
+        let mut meta = loaded.meta.clone();
+        meta.folded_history_segment_seq = 0;
+        meta.m1_history_segment_seq = None;
+        let rv = store
+            .commit("ses", loaded.row_version, &loaded.core, &meta)
+            .unwrap();
+        store
+            .append_history_segments(
+                "ses",
+                &[
+                    recut_comp(2, 2, 2, "b#0"),
+                    recut_comp(3, 3, 3, "c#0"),
+                    recut_comp(4, 4, 4, "d#0"),
+                ],
+            )
+            .unwrap();
+        let outcome = store
+            .truncate_history_segments_for_revert("ses", 3, Some(rv))
+            .unwrap();
+        assert_eq!(outcome.superseded_before_activation, 3);
+        assert_eq!(counters(&store).superseded_before_activation, 3);
     }
 
     #[test]
@@ -23860,7 +23900,7 @@ mod tests {
         assert_eq!(entry.published_at_ms, Some(500));
         assert_eq!(
             entry.outcome,
-            Some(summarizer_timeline::FiringOutcome::Published { sequence: 1 })
+            Some(summarizer_timeline::FiringOutcome::Published { sequence: Some(1) })
         );
         assert_eq!(first.meta.history_summarizer.counters.published, 1);
         assert_eq!(first.meta.m1_pending_since_ms, Some(500));
@@ -23903,7 +23943,7 @@ mod tests {
         assert_eq!(second.history_summarizer.counters.published, 2);
         assert_eq!(
             second.history_summarizer.recent_firings[1].outcome,
-            Some(summarizer_timeline::FiringOutcome::Published { sequence: 2 })
+            Some(summarizer_timeline::FiringOutcome::Published { sequence: Some(2) })
         );
         assert_eq!(second.history_summarizer.counters.firings, 2);
     }

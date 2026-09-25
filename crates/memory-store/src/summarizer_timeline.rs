@@ -87,24 +87,12 @@ pub struct NoFire {
 }
 
 impl NoFire {
-    /// Classifies the text the daemon records in `last_no_fire`.
-    pub fn from_recorded(text: &str) -> Self {
-        let reason = match text {
-            "busy" | "reattaching" | "recovering" | "recovered" => NoFireReason::Busy,
-            "pending_rewrite" => NoFireReason::PendingRewrite,
-            "no_models" => NoFireReason::NoModels,
-            "missing_boundary" => NoFireReason::MissingBoundary,
-            "backoff" => NoFireReason::Backoff,
-            "continued_ordinal_offset_missing" => NoFireReason::ContinuedOrdinalOffsetMissing,
-            text if text.starts_with("trigger_false") => NoFireReason::TriggerFalse,
-            text if text.starts_with("assemble_failed:") => NoFireReason::AssembleFailed,
-            text if text.starts_with("assemble:") => NoFireReason::AssembleNoFire,
-            _ => NoFireReason::Other,
-        };
-        let cut = text.floor_char_boundary(NO_FIRE_DETAIL_MAX_BYTES);
+    /// Keeps at most [`NO_FIRE_DETAIL_MAX_BYTES`] of `detail`.
+    pub fn new(reason: NoFireReason, detail: &str) -> Self {
+        let cut = detail.floor_char_boundary(NO_FIRE_DETAIL_MAX_BYTES);
         NoFire {
             reason,
-            detail: text[..cut].to_string(),
+            detail: detail[..cut].to_string(),
         }
     }
 }
@@ -120,7 +108,7 @@ pub enum AbandonClass {
     Invalidated,
     /// The recomputed chunk differs from the fired one; a fresh firing observes the chunk it fired, so only a resumed one reaches this.
     FingerprintMismatch,
-    /// A retired transform snapshot refused; a fresh firing publishes without that fence, so only a resumed one reaches this.
+    /// A retired transform snapshot refused; a pressure-path firing publishes without that fence, so only a resumed or wrapup firing reaches this.
     CallerFenceRejected,
     /// The producer run was gone when a resumed firing asked for it.
     ProducerMissing,
@@ -137,21 +125,15 @@ pub enum AbandonClass {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum FiringOutcome {
-    /// `sequence` is the highest history_segment sequence the publication appended.
+    /// `sequence` is the highest history_segment sequence the publication appended; `None` when it appended none.
     Published {
-        sequence: i64,
+        sequence: Option<i64>,
     },
     Abandoned {
         class: AbandonClass,
     },
     /// A resumed firing could not reach the producer; the firing is still awaiting it.
     ReattachConnectFailed,
-}
-
-impl FiringOutcome {
-    pub fn is_terminal(&self) -> bool {
-        !matches!(self, FiringOutcome::ReattachConnectFailed)
-    }
 }
 
 /// One firing's durable record.
@@ -165,40 +147,29 @@ pub struct RecentFiring {
     pub usage: Option<FiringUsage>,
     pub clock: TimelineClock,
     /// The first pass that reached the proactive percentage while no run could start, or the fire instant when none did.
-    #[serde(default)]
     pub eligible_at_ms: Option<i64>,
     /// The last recorded reason a pass declined to fire before this one did.
-    #[serde(default)]
     pub last_no_fire: Option<NoFire>,
-    #[serde(default)]
+    /// The clock read when the attempt entered `Firing`, not the pass start the durable state's `fired_at_ms` keeps.
     pub fired_at_ms: Option<i64>,
-    #[serde(default)]
     pub producer_started_at_ms: Option<i64>,
-    #[serde(default)]
     pub output_received_at_ms: Option<i64>,
-    #[serde(default)]
     pub published_at_ms: Option<i64>,
-    #[serde(default)]
     pub outcome: Option<FiringOutcome>,
 }
 
 /// Per-session counts. `firings`, `published`, and `superseded_before_activation` commit with the transition they count; `validation_rejected`, `invalidated`, and `connect_failed` are written after the failure and can be lost to a crash in between.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct FiringCounters {
     /// Model attempts that advanced `firing_seq`.
-    #[serde(default)]
     pub firings: u64,
-    #[serde(default)]
     pub published: u64,
     /// Published segments a revert removed before any pass rendered them.
-    #[serde(default)]
     pub superseded_before_activation: u64,
-    #[serde(default)]
     pub validation_rejected: u64,
-    #[serde(default)]
     pub invalidated: u64,
     /// Producer connections that failed, whether or not a firing had started.
-    #[serde(default)]
     pub connect_failed: u64,
 }
 
@@ -206,7 +177,6 @@ pub struct FiringCounters {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PendingEligibility {
     pub eligible_at_ms: i64,
-    #[serde(default)]
     pub no_fire: Option<NoFire>,
 }
 
@@ -216,7 +186,7 @@ impl HistorySummarizerDurableState {
         &mut self,
         trigger: FiringTrigger,
         fired_at_ms: i64,
-        prior_no_fire: Option<&str>,
+        prior_no_fire: Option<NoFire>,
     ) {
         let pending = match trigger.source {
             FiringSource::PressurePath => self.pending_eligibility.take(),
@@ -231,7 +201,7 @@ impl HistorySummarizerDurableState {
             trigger_reason: trigger.reason,
             usage: trigger.usage,
             eligible_at_ms: Some(eligible_at_ms),
-            last_no_fire: prior_no_fire.map(NoFire::from_recorded).or(pending_no_fire),
+            last_no_fire: prior_no_fire.or(pending_no_fire),
             fired_at_ms: Some(fired_at_ms),
             ..RecentFiring::new(self.firing_seq, trigger.source)
         });
@@ -255,17 +225,14 @@ impl HistorySummarizerDurableState {
 
     /// The single writer of an entry's outcome: it records `outcome` on the entry `firing_seq` names unless that entry already ended, and counts what it records.
     pub fn record_outcome(&mut self, outcome: FiringOutcome) {
-        let firing_seq = self.firing_seq;
-        if let Some(entry) = self
-            .recent_firings
-            .iter_mut()
-            .find(|entry| entry.firing_seq == firing_seq)
+        let entry = self.current_firing_mut();
+        if entry
+            .outcome
+            .is_some_and(|recorded| recorded != FiringOutcome::ReattachConnectFailed)
         {
-            if entry.outcome.is_some_and(|recorded| recorded.is_terminal()) {
-                return;
-            }
-            entry.outcome = Some(outcome);
+            return;
         }
+        entry.outcome = Some(outcome);
         let counters = &mut self.counters;
         let counter = match outcome {
             FiringOutcome::Published { .. } => &mut counters.published,
@@ -346,7 +313,7 @@ mod tests {
         state.record_outcome(FiringOutcome::Abandoned {
             class: AbandonClass::ValidationRejected,
         });
-        state.record_outcome(FiringOutcome::Published { sequence: 4 });
+        state.record_outcome(FiringOutcome::Published { sequence: Some(4) });
         state.record_outcome(FiringOutcome::Abandoned {
             class: AbandonClass::Invalidated,
         });
@@ -405,7 +372,7 @@ mod tests {
         let mut state = HistorySummarizerDurableState {
             pending_eligibility: Some(PendingEligibility {
                 eligible_at_ms: 10,
-                no_fire: Some(NoFire::from_recorded("busy")),
+                no_fire: Some(NoFire::new(NoFireReason::Busy, "busy")),
             }),
             firing_seq: 1,
             ..Default::default()
@@ -416,7 +383,7 @@ mod tests {
                 ..Default::default()
             },
             20,
-            Some("busy"),
+            Some(NoFire::new(NoFireReason::Busy, "busy")),
         );
         assert_eq!(state.recent_firings[0].eligible_at_ms, Some(20));
         assert!(state.pending_eligibility.is_some(), "wrapup leaves it");
@@ -425,10 +392,14 @@ mod tests {
         without_prior.record_fire(FiringTrigger::default(), 30, None);
         assert_eq!(
             without_prior.recent_firings[1].last_no_fire,
-            Some(NoFire::from_recorded("busy"))
+            Some(NoFire::new(NoFireReason::Busy, "busy"))
         );
         state.firing_seq = 2;
-        state.record_fire(FiringTrigger::default(), 30, Some("backoff"));
+        state.record_fire(
+            FiringTrigger::default(),
+            30,
+            Some(NoFire::new(NoFireReason::Backoff, "backoff")),
+        );
         let entry = &state.recent_firings[1];
         assert_eq!(entry.eligible_at_ms, Some(10));
         assert_eq!(
@@ -439,32 +410,14 @@ mod tests {
     }
 
     #[test]
-    fn a_no_fire_detail_is_classified_and_cut_at_a_character_boundary() {
-        for (text, reason) in [
-            ("busy", NoFireReason::Busy),
-            ("recovering", NoFireReason::Busy),
-            ("pending_rewrite", NoFireReason::PendingRewrite),
-            ("trigger_false{eligible~3k}", NoFireReason::TriggerFalse),
-            ("no_models", NoFireReason::NoModels),
-            ("missing_boundary", NoFireReason::MissingBoundary),
-            ("backoff", NoFireReason::Backoff),
-            ("assemble:EmptyChunk", NoFireReason::AssembleNoFire),
-            ("assemble_failed:io", NoFireReason::AssembleFailed),
-            (
-                "continued_ordinal_offset_missing",
-                NoFireReason::ContinuedOrdinalOffsetMissing,
-            ),
-            ("state_load_failed:x", NoFireReason::Other),
-        ] {
-            assert_eq!(NoFire::from_recorded(text).reason, reason, "{text}");
-        }
+    fn a_no_fire_detail_is_cut_at_a_character_boundary() {
         // 127 ASCII bytes then a two-byte character straddling the cap.
         let text = format!("{}é tail", "a".repeat(NO_FIRE_DETAIL_MAX_BYTES - 1));
-        let detail = NoFire::from_recorded(&text).detail;
+        let detail = NoFire::new(NoFireReason::Other, &text).detail;
         assert_eq!(detail, "a".repeat(NO_FIRE_DETAIL_MAX_BYTES - 1));
         let exact = "b".repeat(NO_FIRE_DETAIL_MAX_BYTES + 40);
         assert_eq!(
-            NoFire::from_recorded(&exact).detail.len(),
+            NoFire::new(NoFireReason::Other, &exact).detail.len(),
             NO_FIRE_DETAIL_MAX_BYTES
         );
     }
@@ -531,6 +484,14 @@ mod tests {
             ..Default::default()
         };
         let bytes = serde_json::to_string(&meta).unwrap().len();
+        let empty = serde_json::to_string(&ModuleMeta::default()).unwrap().len();
+        assert!(
+            bytes - empty <= TIMELINE_WORST_CASE_BYTES,
+            "{bytes} - {empty}"
+        );
         assert!(bytes < MAX_DURABLE_TEXT_BYTES, "{bytes}");
     }
+
+    /// The timeline's share of the meta column: eight full entries whose details escape every byte, full counters, and a pending eligibility, well inside the 512 KiB durable-text bound the rest of the meta shares.
+    const TIMELINE_WORST_CASE_BYTES: usize = 16 * 1024;
 }

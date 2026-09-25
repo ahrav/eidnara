@@ -19,7 +19,7 @@ use memory_store::{
     HistorySummarizerSelectedMessageIdentity, HistorySummarizerUserMemoryCandidate, LoadedState,
     MemoryReviewerActivation, MemoryReviewerNonadmissionCode, MemoryStore, MemoryStoreError,
     PendingPublication, StoredHistorySegment,
-    summarizer_timeline::{AbandonClass, FiringOutcome, FiringTrigger},
+    summarizer_timeline::{AbandonClass, FiringOutcome, FiringTrigger, NoFire, NoFireReason},
 };
 
 use crate::history_summarizer_citations::{ExtractionOutcome, FrozenAliasTable};
@@ -428,17 +428,43 @@ pub fn persist_history_summarizer_state(
     let loaded = store.load(session_id)?;
     let mut meta = loaded.meta.clone();
     let durable = std::mem::replace(&mut meta.history_summarizer, next_state);
-    // A transform pass may record eligibility while a firing advances from its in-memory state; only a fire, which advances the sequence, consumes it.
-    if meta.history_summarizer.firing_seq == durable.firing_seq {
-        meta.history_summarizer.pending_eligibility = durable.pending_eligibility;
-    }
+    keep_fields_other_writers_own(&durable, &mut meta.history_summarizer);
     if meta == loaded.meta {
         return Ok(loaded.row_version.unwrap_or(0));
     }
     Ok(store.commit(session_id, loaded.row_version, &loaded.core, &meta)?)
 }
 
-/// Commits `next_state` only while the session row is still the one `loaded` observed. Another writer's commit in between wins: nothing is written over it and `None` is returned, so a check made against `loaded` cannot resurrect a state that writer already moved on from.
+/// A firing advances from an in-memory state while other writers commit: a transform pass records eligibility, and publish and revert transactions count. Their fields are taken from the stored row, except the eligibility a fire, which advances the sequence, consumes.
+fn keep_fields_other_writers_own(
+    durable: &HistorySummarizerDurableState,
+    next: &mut HistorySummarizerDurableState,
+) {
+    if next.firing_seq == durable.firing_seq {
+        next.pending_eligibility = durable.pending_eligibility.clone();
+    }
+    next.counters.published = durable.counters.published;
+    next.counters.superseded_before_activation = durable.counters.superseded_before_activation;
+}
+
+/// Classifies the text the daemon records in `last_no_fire`.
+pub(crate) fn classify_no_fire(text: &str) -> NoFire {
+    let reason = match text {
+        "busy" | "reattaching" | "recovering" | "recovered" => NoFireReason::Busy,
+        "pending_rewrite" => NoFireReason::PendingRewrite,
+        "no_models" => NoFireReason::NoModels,
+        "missing_boundary" => NoFireReason::MissingBoundary,
+        "backoff" => NoFireReason::Backoff,
+        "continued_ordinal_offset_missing" => NoFireReason::ContinuedOrdinalOffsetMissing,
+        text if text.starts_with("trigger_false") => NoFireReason::TriggerFalse,
+        text if text.starts_with("assemble_failed:") => NoFireReason::AssembleFailed,
+        text if text.starts_with("assemble:") => NoFireReason::AssembleNoFire,
+        _ => NoFireReason::Other,
+    };
+    NoFire::new(reason, text)
+}
+
+/// Commits `next_state` only while the session row is still the one `loaded` observed. Its callers build `next_state` from `loaded` itself, so no other writer's field needs keeping. Another writer's commit in between wins: nothing is written over it and `None` is returned, so a check made against `loaded` cannot resurrect a state that writer already moved on from.
 fn persist_history_summarizer_state_if_unmoved(
     store: &MemoryStore,
     session_id: &str,
@@ -1709,7 +1735,12 @@ where
                 state.record_fire(
                     request.trigger,
                     (request.completion_now_ms)(),
-                    loaded.meta.history_summarizer.last_no_fire.as_deref(),
+                    loaded
+                        .meta
+                        .history_summarizer
+                        .last_no_fire
+                        .as_deref()
+                        .map(classify_no_fire),
                 );
                 state
             }
@@ -3205,7 +3236,7 @@ mod tests {
             stored(),
             0,
             false,
-            Some(FiringOutcome::Published { sequence: 0 }),
+            Some(FiringOutcome::Published { sequence: None }),
         ));
         let row_version = seeded(&seed);
         db.reset_session_for_recomp("ses", Some(row_version))
@@ -3238,6 +3269,31 @@ mod tests {
         }
     }
 
+    #[test]
+    fn every_recorded_no_fire_text_has_a_closed_reason() {
+        for (text, reason) in [
+            ("busy", NoFireReason::Busy),
+            ("reattaching", NoFireReason::Busy),
+            ("recovering", NoFireReason::Busy),
+            ("pending_rewrite", NoFireReason::PendingRewrite),
+            ("trigger_false{eligible~3k}", NoFireReason::TriggerFalse),
+            ("no_models", NoFireReason::NoModels),
+            ("missing_boundary", NoFireReason::MissingBoundary),
+            ("backoff", NoFireReason::Backoff),
+            ("assemble:EmptyChunk", NoFireReason::AssembleNoFire),
+            ("assemble_failed:io", NoFireReason::AssembleFailed),
+            (
+                "continued_ordinal_offset_missing",
+                NoFireReason::ContinuedOrdinalOffsetMissing,
+            ),
+            ("state_load_failed:x", NoFireReason::Other),
+        ] {
+            let no_fire = classify_no_fire(text);
+            assert_eq!(no_fire.reason, reason, "{text}");
+            assert_eq!(no_fire.detail, text);
+        }
+    }
+
     static TICK_MS: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(1_000);
 
     fn ticking_clock() -> i64 {
@@ -3254,9 +3310,7 @@ mod tests {
         meta.history_summarizer.pending_eligibility =
             Some(memory_store::summarizer_timeline::PendingEligibility {
                 eligible_at_ms: 500,
-                no_fire: Some(memory_store::summarizer_timeline::NoFire::from_recorded(
-                    "busy",
-                )),
+                no_fire: Some(classify_no_fire("busy")),
             });
         store
             .commit("ses", loaded.row_version, &loaded.core, &meta)

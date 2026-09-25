@@ -5708,9 +5708,14 @@ impl HandlerCore {
             last_failure: loaded.meta.history_summarizer.last_failure.clone(),
             project_memory: None,
         };
-        // Written once per pending eligibility, so the config is read only while none is recorded.
+        // Written once per pending eligibility, so the config is read only while none is recorded. A firing persisting its own transitions (entering awaiting, validating, publishing) would lose its row-version race to this write, so only an idle or awaiting row takes it.
         let blocked = |reason: &str| {
-            loaded.meta.history_summarizer.pending_eligibility.is_none()
+            let history_summarizer = &loaded.meta.history_summarizer;
+            history_summarizer.pending_eligibility.is_none()
+                && matches!(
+                    history_summarizer.state,
+                    HistorySummarizerPhase::Idle | HistorySummarizerPhase::AwaitingProducer
+                )
                 && record_blocked_eligibility(
                     &store,
                     parsed,
@@ -6112,12 +6117,14 @@ impl HandlerCore {
             .cloned()
             .collect::<Vec<_>>();
         let project_slug = project_slug(&binding.project_root);
-        let trigger = firing_trigger(
+        let mut trigger = firing_trigger(
             FiringSource::Wrapup,
             None,
             usage_numbers(parsed.usage.as_ref(), parsed.geometry.as_ref()),
             parsed.execute_threshold_or(cfg.execute_threshold_percentage),
         );
+        // Wrapup evaluates no trigger, so a request without usage leaves nothing measured to record.
+        trigger.usage = trigger.usage.filter(|_| parsed.usage.is_some());
         let assemble = assemble_history_summarizer_firing(
             &store,
             &parsed.messages,
@@ -18102,9 +18109,7 @@ fn record_blocked_eligibility(
     meta.history_summarizer.pending_eligibility =
         Some(memory_store::summarizer_timeline::PendingEligibility {
             eligible_at_ms: now,
-            no_fire: Some(memory_store::summarizer_timeline::NoFire::from_recorded(
-                reason,
-            )),
+            no_fire: Some(history_summarizer::classify_no_fire(reason)),
         });
     meta.history_summarizer.last_no_fire = Some(reason.to_string());
     store
@@ -18121,7 +18126,6 @@ fn record_reattach_connect_failure(store: &MemoryStore, session_id: &str) {
         return;
     }
     let mut meta = loaded.meta.clone();
-    meta.history_summarizer.current_firing_mut();
     meta.history_summarizer
         .record_outcome(memory_store::summarizer_timeline::FiringOutcome::ReattachConnectFailed);
     let _ = store.commit(session_id, loaded.row_version, &loaded.core, &meta);
@@ -40163,6 +40167,25 @@ mod tests {
             before,
             "the generation fence must run before history_segments, transcripts, facts, or the publication floor change"
         );
+        // A wrapup firing is fresh yet publishes behind the snapshot fence, so it reaches this class.
+        let state = store.load("ses").unwrap().meta.history_summarizer;
+        let entry = state
+            .recent_firings
+            .last()
+            .expect("the wrapup firing's entry");
+        assert_eq!(
+            entry.source,
+            memory_store::summarizer_timeline::FiringSource::Wrapup
+        );
+        assert_eq!(
+            entry.outcome,
+            Some(
+                memory_store::summarizer_timeline::FiringOutcome::Abandoned {
+                    class: memory_store::summarizer_timeline::AbandonClass::CallerFenceRejected,
+                }
+            )
+        );
+        assert_eq!(state.counters.invalidated, 1);
     }
 
     #[tokio::test(flavor = "current_thread")]
