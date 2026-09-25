@@ -364,3 +364,88 @@ fn the_whole_hint_is_cut_at_eight_hundred_units() {
         short
     );
 }
+
+fn hint_fragment_lines(rendered: &str) -> Vec<&str> {
+    rendered
+        .lines()
+        .filter_map(|line| line.strip_prefix("- "))
+        .collect()
+}
+
+#[test]
+fn a_fragment_centers_on_evidence_deep_in_the_segment_body() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = store(dir.path());
+    let lead = [FILLER; 12].join(". ");
+    assert!(lead.len() > 500);
+    let mut deep = segment(1, FILLER);
+    deep.p2 = Some(format!(
+        "{lead}. The falsifier zephyrine fixed the cadence."
+    ));
+    let mut segments = vec![deep];
+    segments.extend((2..=6).map(|sequence| segment(sequence, FILLER)));
+    s.replace_history_segments(SESSION, &segments).unwrap();
+
+    let results = search(&s, "zephyrine filler").unwrap();
+    assert_eq!(sequences(&results), [1]);
+    let rendered = render_user_hint(&results).unwrap();
+    let lines = hint_fragment_lines(&rendered);
+    assert_eq!(lines.len(), 1);
+    assert!(
+        lines[0].contains("zephyrine"),
+        "the served fragment must carry the anchor, got {:?}",
+        lines[0]
+    );
+    assert!(
+        lines[0].starts_with('…'),
+        "the window starts past the title"
+    );
+    assert!(utf16_len(lines[0]) <= SURFACE1_HINT_BOUNDS.fragment_units);
+    assert!(utf16_len(rendered.trim_start()) <= SURFACE1_HINT_BOUNDS.total_units);
+    assert_eq!(search(&s, "zephyrine filler").unwrap(), results);
+}
+
+#[test]
+fn a_match_inside_the_prefix_keeps_the_prefix_fragment() {
+    let body = format!("C1 quasar nebula {}", [FILLER; 6].join(" "));
+    assert_eq!(user_hint_snippet(body.clone(), "quasar"), body);
+    let rendered = render_user_hint(&[hint_result(&user_hint_snippet(body.clone(), "nebula"))]);
+    let expected = render_user_hint(&[hint_result(&body)]);
+    assert_eq!(rendered, expected);
+    assert!(hint_fragment_lines(expected.as_deref().unwrap())[0].starts_with("C1 quasar nebula"));
+}
+
+#[test]
+fn the_anchor_window_respects_utf16_units_near_wide_characters() {
+    for pad in 0..8 {
+        for wide in ["😀", "界", "é"] {
+            let body = format!(
+                "C1 {} {}{} zephyrine {}",
+                "x".repeat(120),
+                "-".repeat(pad),
+                wide.repeat(40),
+                wide.repeat(40)
+            );
+            let snippet = user_hint_snippet(body.clone(), "zephyrine");
+            assert_ne!(snippet, body, "pad {pad} {wide}");
+            let rendered = render_user_hint(&[hint_result(&snippet)]).unwrap();
+            let line = hint_fragment_lines(&rendered)[0];
+            assert!(line.contains("zephyrine"), "pad {pad} {wide}: {line:?}");
+            assert!(utf16_len(line) <= SURFACE1_HINT_BOUNDS.fragment_units);
+        }
+    }
+}
+
+#[test]
+fn whole_word_lookup_matches_the_lexical_tokenizer() {
+    assert_eq!(
+        first_whole_word("zephyrines Zephyrine", "zephyrine"),
+        Some(11..20)
+    );
+    assert_eq!(first_whole_word("a_zephyrine", "zephyrine"), Some(2..11));
+    assert_eq!(first_whole_word("zephyrine2", "zephyrine"), None);
+    assert_eq!(
+        lexical_tokens("a_zephyrine").into_iter().next().as_deref(),
+        Some("zephyrine")
+    );
+}

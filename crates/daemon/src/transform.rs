@@ -8446,11 +8446,18 @@ fn run_user_hint_lexical_search(
                 })
                 .sum::<f64>();
             let normalized = score / total_query_weight.max(f64::EPSILON);
+            // The rarest matched token anchors the served fragment; ties keep the first token in sorted order.
+            let anchor = matched
+                .iter()
+                .min_by_key(|token| *document_frequency.get(**token).unwrap_or(&0))
+                .map(|token| (*token).clone())
+                .unwrap_or_default();
             Some((
                 normalized,
                 matched.len(),
                 candidate.recency,
                 candidate.result,
+                anchor,
             ))
         })
         .collect::<Vec<_>>();
@@ -8462,17 +8469,23 @@ fn run_user_hint_lexical_search(
             .then_with(|| right.2.cmp(&left.2))
             .then_with(|| left.3.id.cmp(&right.3.id))
     });
-    trace.matched = scored.iter().map(|(_, _, _, result)| result.id).collect();
+    trace.matched = scored
+        .iter()
+        .map(|(_, _, _, result, _)| result.id)
+        .collect();
     trace.threshold = scored
         .first()
-        .is_some_and(|(score, _, _, _)| *score >= score_threshold);
+        .is_some_and(|(score, _, _, _, _)| *score >= score_threshold);
     if !trace.threshold {
         return Ok(Vec::new());
     }
     let selected: Vec<_> = scored
         .into_iter()
         .take(USER_HINT_RESULT_LIMIT)
-        .map(|(_, _, _, result)| result)
+        .map(|(_, _, _, mut result, anchor)| {
+            result.snippet = user_hint_snippet(std::mem::take(&mut result.snippet), &anchor);
+            result
+        })
         .collect();
     trace.selected = selected.iter().map(|result| result.id).collect();
     Ok(selected)
@@ -8596,6 +8609,46 @@ pub(crate) fn utf16_prefix(text: &str, limit: usize) -> &str {
     &text[..end]
 }
 
+/// Returns the first whole-word, case-insensitive occurrence of a `lexical_tokens` token.
+fn first_whole_word(text: &str, token: &str) -> Option<std::ops::Range<usize>> {
+    let mut word_start = None;
+    for (index, character) in text.char_indices().chain([(text.len(), ' ')]) {
+        match (character.is_alphanumeric(), word_start) {
+            (true, None) => word_start = Some(index),
+            (false, Some(start)) => {
+                if text[start..index].to_lowercase() == token {
+                    return Some(start..index);
+                }
+                word_start = None;
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Keeps the segment body when its prefix fragment already shows the anchor token.
+/// Otherwise the snippet is a window around the anchor's first occurrence, so the evidence survives the fragment cap.
+fn user_hint_snippet(body: String, anchor: &str) -> String {
+    let Some(hit) = first_whole_word(&body, anchor) else {
+        return body;
+    };
+    if utf16_len(&body[..hit.end]) < USER_HINT_FRAGMENT_CHAR_CAP
+        || first_whole_word(&user_hint_fragment(&body), anchor).is_some()
+    {
+        return body;
+    }
+    crate::memory_tool::snippet_around_match(&body, hit, USER_HINT_FRAGMENT_CHAR_CAP / 2)
+}
+
+fn user_hint_fragment(snippet: &str) -> String {
+    let compressed = crate::terse_text_compression::compress(
+        snippet,
+        crate::terse_text_compression::TerseTextCompressionLevel::Ultra,
+    );
+    one_line_fragment(&compressed, USER_HINT_FRAGMENT_CHAR_CAP)
+}
+
 fn render_user_hint(results: &[crate::memory_tool::MemorySearchResult]) -> Option<String> {
     if results.is_empty() {
         return None;
@@ -8603,16 +8656,7 @@ fn render_user_hint(results: &[crate::memory_tool::MemorySearchResult]) -> Optio
     let lines = results
         .iter()
         .take(USER_HINT_RESULT_LIMIT)
-        .map(|result| {
-            let fragment = crate::terse_text_compression::compress(
-                &result.snippet,
-                crate::terse_text_compression::TerseTextCompressionLevel::Ultra,
-            );
-            format!(
-                "- {}",
-                one_line_fragment(&fragment, USER_HINT_FRAGMENT_CHAR_CAP)
-            )
-        })
+        .map(|result| format!("- {}", user_hint_fragment(&result.snippet)))
         .filter(|line| line.len() > 2)
         .collect::<Vec<_>>();
     if lines.is_empty() {

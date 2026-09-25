@@ -118,14 +118,14 @@ impl SearchCandidate {
                 let (source_kind, snippet) = if let Some(hit) = title_match {
                     (
                         MemorySearchSourceKind::HistorySegmentTitle,
-                        snippet_around_match(&row.title, hit),
+                        snippet_around_match(&row.title, hit, SEARCH_SNIPPET_CONTEXT),
                     )
                 } else {
                     let body = history_segment_body_text(&row);
                     let hit = first_match(&body, query)?;
                     (
                         MemorySearchSourceKind::HistorySegmentBody,
-                        snippet_around_match(&body, hit),
+                        snippet_around_match(&body, hit, SEARCH_SNIPPET_CONTEXT),
                     )
                 };
                 Some(MemorySearchResult {
@@ -149,7 +149,7 @@ impl SearchCandidate {
                 Some(MemorySearchResult {
                     source_kind: MemorySearchSourceKind::Note,
                     id: note.id,
-                    snippet: snippet_around_match(matched_text, hit),
+                    snippet: snippet_around_match(matched_text, hit, SEARCH_SNIPPET_CONTEXT),
                     category: None,
                     sequence: None,
                     title: None,
@@ -205,23 +205,25 @@ fn first_match(text: &str, query: &str) -> Option<Range<usize>> {
     Some(start..end)
 }
 
-fn snippet_around_match(text: &str, hit: Range<usize>) -> String {
-    const CONTEXT: usize = 100;
-    const MAX_CHARS: usize = 200;
+const SEARCH_SNIPPET_CONTEXT: usize = 100;
 
+/// Returns up to `context` bytes on each side of `hit`, capped at `2 * context` chars.
+///
+/// An ellipsis marks each side where the window cuts `text`.
+pub(crate) fn snippet_around_match(text: &str, hit: Range<usize>, context: usize) -> String {
     debug_assert!(hit.start <= hit.end && hit.end <= text.len());
     debug_assert!(text.is_char_boundary(hit.start) && text.is_char_boundary(hit.end));
 
-    let mut start = hit.start.saturating_sub(CONTEXT);
+    let mut start = hit.start.saturating_sub(context);
     while start > 0 && !text.is_char_boundary(start) {
         start -= 1;
     }
-    let mut end = (hit.end + CONTEXT).min(text.len());
+    let mut end = (hit.end + context).min(text.len());
     while end < text.len() && !text.is_char_boundary(end) {
         end += 1;
     }
 
-    let snippet: String = text[start..end].chars().take(MAX_CHARS).collect();
+    let snippet: String = text[start..end].chars().take(2 * context).collect();
     let prefix = if start > 0 { "…" } else { "" };
     let suffix = if end < text.len() { "…" } else { "" };
     format!("{prefix}{}{suffix}", snippet.trim())
@@ -305,7 +307,7 @@ mod tests {
         let text = format!("{}needle tail", "İ".repeat(40));
         let hit = first_match(&text, "NEEDLE").expect("match");
         assert_eq!(&text[hit.clone()], "needle");
-        let snippet = snippet_around_match(&text, hit);
+        let snippet = snippet_around_match(&text, hit, SEARCH_SNIPPET_CONTEXT);
         assert!(
             snippet.contains("needle tail"),
             "snippet must cover the real match, got {snippet:?}"
