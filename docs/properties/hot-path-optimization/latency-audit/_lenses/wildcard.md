@@ -73,8 +73,9 @@ only; no test ran and nothing outside this file changed.
 - Fault/timing angle: none; a coverage record.
 - Required faults and enabling state: A session at the production size class
   (the bench header's 1_400-message, 2 KiB mixed point, or the fixture's
-  2_500), reached by incremental growth because a first pass cannot commit
-  it; an ingress body through `Handler::handle`, not a typed request; a warm
+  2_500), reached by incremental growth or by history segments covering the
+  older messages, because an uncovered first pass cannot commit it; an
+  ingress body through `Handler::handle`, not a typed request; a warm
   store with an existing row for steady passes and a cold store for the first
   pass; a 64 MiB direction arena for the ring probes.
 - Reachability: test-only - benches need `--features bench-internals`

@@ -82,10 +82,11 @@ improvement look the same.
 
 ## Timing windows and dependencies
 
-None in time. The dependency is on reaching the state: a first pass cannot
-commit a 1_400-message session, so the production size class is reachable
-only by incremental growth across committing passes, with a warm store for
-steady passes and a cold store for the first pass.
+None in time. The dependency is on reaching the state: an uncovered first
+pass cannot commit a 1_400-message session, so the production size class is
+reachable by incremental growth across committing passes or by history
+segments covering the older messages, with a warm store for steady passes and
+a cold store for the first pass.
 
 ## What a test must construct
 
