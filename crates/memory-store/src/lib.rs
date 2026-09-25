@@ -1381,6 +1381,13 @@ impl From<StoreError> for HistorySummarizerPublishError {
 /// Persisted provider-usage ground truth used to keep pressure bands stable across
 /// retries and restarts. A request-supplied non-zero value replaces this value; an
 /// absent or all-zero request falls back to it.
+/// The previous provider response's reported prompt-cache reads and writes, as the host received them. Measurement only: no pressure, boundary, or scheduling input reads it, and nothing persisted stands in for it when a request omits it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProviderCacheUsage {
+    pub cache_read_tokens: u64,
+    pub cache_write_tokens: u64,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ModuleUsage {
     #[serde(default)]
