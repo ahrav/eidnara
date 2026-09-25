@@ -446,9 +446,9 @@ store mutation to `block_identity_by_mid` for one selected mid during the await,
 which `commit` writes to the `block_identities` table. The existing tests use a
 commit hook to do exactly this, which is the seam to reuse.
 Confidence: high - [evidence](evidence/publish-fence-rejects-selected-content-drift.md). Read the
-fence at `memory-store:9413-9425` and confirmed the empty-vector rejection is
+fence at `memory-store:12085-12113` and confirmed the empty-vector rejection is
 separate from and prior to the per-mid comparison, with the reasoning at
-`:9409-9412`.
+`:12081-12084`.
 Existing check: `history_summarizer.rs:2323`, `:2369`, `:2942`, `:3776`
 `reattach_fingerprint_mismatch_recovers_to_idle_and_releases_routes`. Status
 `unaudited`.
@@ -1442,7 +1442,7 @@ these records has an executing check.
   The commit point runs seven gates and these three records partition them. The
   fingerprint is deliberately blind to same-length content edits
   (`history_summarizer.rs:141-143`) and `selected_range_identities` is the compensating
-  fence (`memory-store:9413-9425`), so the fence record and the single-flight record
+  fence (`memory-store:12085-12113`), so the fence record and the single-flight record
   are testing different gates that happen to share one predicate struct.
   Constructing the fence record's drift mutation *hypothetically dominates* half
   of the single-flight record, because the same commit hook that mutates
