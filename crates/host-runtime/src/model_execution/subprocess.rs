@@ -2999,4 +2999,54 @@ mod tests {
             Err(CredentialRowError::CredentialValueTooLarge)
         ));
     }
+
+    #[test]
+    fn setup_and_supervision_failures_are_not_provider_reported() {
+        use std::io;
+
+        use crate::model_execution::backend::{
+            BackendTerminal, Harness, dispatch_closed, harness_mismatch,
+            is_provider_reported_failure,
+        };
+
+        let limits = super::SubprocessLimits::default();
+        let terminals = [
+            super::credential_failure(Harness::OpenCode, CredentialRowError::CredentialMissing),
+            super::harness_unavailable_failure(Harness::Pi, "closure_incomplete"),
+            super::spawn_failure(Harness::OpenCode, &io::Error::from(io::ErrorKind::NotFound)),
+            super::spawn_failure(
+                Harness::Pi,
+                &io::Error::from(io::ErrorKind::PermissionDenied),
+            ),
+            super::abnormal_end_terminal(
+                Harness::OpenCode,
+                super::SubprocessEnd::Signaled,
+                b"",
+                &limits,
+            )
+            .expect("a signal is a failure"),
+            super::abnormal_end_terminal(
+                Harness::Pi,
+                super::SubprocessEnd::Exited(1),
+                b"output blocked by the content filter",
+                &limits,
+            )
+            .expect("a nonzero exit is a failure"),
+            super::parse_failure(Harness::OpenCode, "line 3"),
+            dispatch_closed(Harness::Pi),
+            harness_mismatch(Harness::OpenCode, Harness::Pi),
+        ];
+        for terminal in terminals {
+            let (BackendTerminal::Failed(error) | BackendTerminal::FailedUnresolved(error)) =
+                terminal
+            else {
+                panic!("expected a failed terminal");
+            };
+            assert!(
+                !is_provider_reported_failure(&error.message),
+                "{}",
+                error.message
+            );
+        }
+    }
 }

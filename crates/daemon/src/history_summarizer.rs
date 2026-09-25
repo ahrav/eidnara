@@ -367,19 +367,24 @@ pub fn record_chunk_failure(
 }
 
 /// Whether a firing error says something about the chunk itself, so a retry of the same bytes would likely fail again.
-/// Transient, auth, cross-incarnation, and unclassified producer errors describe the provider or the transport and do not count.
+/// A permanent failure counts only when the model provider reported it. A host setup failure fails every chunk the same way, and counting it would publish placeholders over history a working model could summarize.
 pub fn is_chunk_failure(error: &HistorySummarizerDriveError) -> bool {
-    match error {
-        HistorySummarizerDriveError::Validation(_) => true,
-        HistorySummarizerDriveError::Producer(err) => {
-            !err.is_cross_incarnation_unknown()
-                && err.classification().is_some_and(|classification| {
-                    matches!(
-                        classification.class,
-                        ErrorClass::Permanent | ErrorClass::ContextOverflow
-                    )
-                })
-        }
+    let HistorySummarizerDriveError::Producer(err) = error else {
+        return matches!(error, HistorySummarizerDriveError::Validation(_));
+    };
+    if err.is_cross_incarnation_unknown() {
+        return false;
+    }
+    match err
+        .classification()
+        .map(|classification| classification.class)
+    {
+        Some(ErrorClass::ContextOverflow) => true,
+        Some(ErrorClass::Permanent) => matches!(
+            err,
+            HistorySummarizerProducerError::RunFailed { detail, .. }
+                if host_runtime::model_execution::backend::is_provider_reported_failure(detail)
+        ),
         _ => false,
     }
 }
@@ -2511,10 +2516,10 @@ mod tests {
             twice.chunk_retry
         );
 
-        let classified = |class| {
+        let failed = |class, detail: &str| {
             HistorySummarizerDriveError::Producer(HistorySummarizerProducerError::RunFailed {
                 run_id: "run".into(),
-                detail: "failed".into(),
+                detail: detail.into(),
                 classification: Some(ErrorClassification {
                     class,
                     retry_after_secs: None,
@@ -2522,10 +2527,42 @@ mod tests {
                 class_field_present: true,
             })
         };
-        assert!(is_chunk_failure(&classified(ErrorClass::Permanent)));
-        assert!(is_chunk_failure(&classified(ErrorClass::ContextOverflow)));
-        assert!(!is_chunk_failure(&classified(ErrorClass::Transient)));
-        assert!(!is_chunk_failure(&classified(ErrorClass::AuthRequired)));
+        let provider_refusal = "opencode provider reported an error (status 400)";
+        assert!(is_chunk_failure(&failed(
+            ErrorClass::Permanent,
+            provider_refusal
+        )));
+        assert!(is_chunk_failure(&failed(
+            ErrorClass::Permanent,
+            "pi assistant stopped with reason \"error\""
+        )));
+        assert!(is_chunk_failure(&failed(
+            ErrorClass::ContextOverflow,
+            "opencode backend exited with status 1"
+        )));
+        assert!(!is_chunk_failure(&failed(
+            ErrorClass::Transient,
+            provider_refusal
+        )));
+        assert!(!is_chunk_failure(&failed(
+            ErrorClass::AuthRequired,
+            provider_refusal
+        )));
+        // The host classes these permanent too, but they fail the same way for every chunk, so counting them would placeholder history during an environment outage.
+        for setup_failure in [
+            "opencode harness_unavailable: credential_missing",
+            "pi harness_unavailable: closure_incomplete",
+            "opencode backend run could not start (entity not found)",
+            "pi backend was terminated by a signal",
+            "opencode backend exited with status 1",
+            "opencode run closed before subprocess dispatch",
+            "pi assistant stopped with reason \"aborted\"",
+        ] {
+            assert!(
+                !is_chunk_failure(&failed(ErrorClass::Permanent, setup_failure)),
+                "{setup_failure}"
+            );
+        }
         assert!(!is_chunk_failure(&HistorySummarizerDriveError::Producer(
             HistorySummarizerProducerError::TimedOut
         )));

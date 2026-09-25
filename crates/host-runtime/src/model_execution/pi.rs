@@ -701,7 +701,10 @@ fn assistant_message_terminal(
                 BackendTerminal::Failed(BackendError {
                     class: subprocess::classify_failure_text(provider_text),
                     retry_after_secs: subprocess::retry_after_secs_in_text(provider_text),
-                    message: format!("pi assistant stopped with reason \"{reason}\""),
+                    message: match reason {
+                        "error" => backend::PI_PROVIDER_ERROR_MESSAGE.to_owned(),
+                        _ => format!("pi assistant stopped with reason \"{reason}\""),
+                    },
                     provider_code: None,
                 }),
             ))
@@ -746,4 +749,32 @@ fn message_requests_tools(message: &serde_json::Value) -> bool {
                 block.get("type").and_then(serde_json::Value::as_str) == Some("toolCall")
             })
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_a_provider_error_stop_is_provider_reported() {
+        for (stop_reason, reported) in [("error", true), ("aborted", false)] {
+            let message = serde_json::json!({
+                "role": "assistant",
+                "stopReason": stop_reason,
+                "errorMessage": "Output blocked by content filtering policy",
+                "content": [],
+            });
+            let Some((_, BackendTerminal::Failed(error))) =
+                assistant_message_terminal(&message, 1).expect("a known stop reason")
+            else {
+                panic!("expected a failed terminal for {stop_reason}");
+            };
+            assert_eq!(
+                backend::is_provider_reported_failure(&error.message),
+                reported,
+                "{}",
+                error.message
+            );
+        }
+    }
 }

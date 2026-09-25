@@ -8,8 +8,9 @@ use std::collections::{BTreeMap, HashMap};
 
 use chrono::{Local, TimeZone};
 use memory_store::{
-    BlockIdentity, HistorySegmentSetGeneration, HistorySummarizerSelectedMessageIdentity,
-    MemoryStore, ProjectMemoryComposition, StoredHistorySegment,
+    BlockIdentity, HistorySegmentSetGeneration, HistorySummarizerChunkRetry,
+    HistorySummarizerSelectedMessageIdentity, MemoryStore, ProjectMemoryComposition,
+    StoredHistorySegment,
 };
 use serde_json::Value;
 use tokenizer::estimate_tokens;
@@ -593,6 +594,22 @@ fn retry_token_budget(token_budget: usize, failures: u32) -> usize {
     (token_budget >> halvings).max(1)
 }
 
+pub fn chunk_failures(chunk_retry: Option<HistorySummarizerChunkRetry>, chunk_start: u64) -> u32 {
+    chunk_retry
+        .filter(|retry| retry.chunk_start == chunk_start)
+        .map_or(0, |retry| retry.failures)
+}
+
+/// The budget a firing on the chunk starting at `chunk_start` builds and presents its input under.
+/// A reattachment uses the same budget because an in-flight firing does not change the durable count.
+pub fn firing_token_budget(
+    configured_budget: usize,
+    chunk_retry: Option<HistorySummarizerChunkRetry>,
+    chunk_start: u64,
+) -> usize {
+    retry_token_budget(configured_budget, chunk_failures(chunk_retry, chunk_start))
+}
+
 /// One segment covering the whole chunk, so coverage stays contiguous past messages no model would summarize.
 fn placeholder_output(chunk: &HistorySummarizerChunk, failures: u32) -> String {
     let (start, end) = (chunk.start_index, chunk.end_index);
@@ -771,10 +788,7 @@ pub fn assemble_history_summarizer_firing(
             },
         ));
     }
-    let chunk_failures = snapshot
-        .chunk_retry
-        .filter(|retry| retry.chunk_start == chunk_start)
-        .map_or(0, |retry| retry.failures);
+    let chunk_failures = chunk_failures(snapshot.chunk_retry, chunk_start);
     let token_budget = retry_token_budget(config.token_budget, chunk_failures);
     let mut chunk =
         build_history_summarizer_chunk(messages, live, chunk_start, token_budget, eligible_end);

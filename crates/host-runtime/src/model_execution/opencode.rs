@@ -9,7 +9,7 @@ use tokio_util::sync::CancellationToken;
 use super::backend::{
     self, BackendError, BackendEvent, BackendFuture, BackendRequest, BackendTerminal,
     ContextCapabilities, ErrorClass, EventSink, FinishReason, Harness, LlmExecutionBackend,
-    OPENCODE_CONTEXT_CAPABILITIES,
+    OPENCODE_CONTEXT_CAPABILITIES, OPENCODE_PROVIDER_ERROR_MESSAGE,
 };
 use super::config::MAX_OPENCODE_CONFIG_BYTES;
 use super::subprocess::group_registry::StateRoot;
@@ -433,8 +433,8 @@ fn error_terminal(value: &serde_json::Value) -> BackendTerminal {
         class,
         // The provider text affects classification but is excluded from `BackendError::message`.
         message: match status_code {
-            Some(code) => format!("opencode provider reported an error (status {code})"),
-            None => "opencode provider reported an error".to_owned(),
+            Some(code) => format!("{OPENCODE_PROVIDER_ERROR_MESSAGE} (status {code})"),
+            None => OPENCODE_PROVIDER_ERROR_MESSAGE.to_owned(),
         },
         retry_after_secs,
         provider_code: name.and_then(subprocess::sanitized_provider_code),
@@ -472,5 +472,25 @@ mod tests {
         assert_eq!(limit["output"], 1);
         assert_eq!(limit["context"], OPENCODE_INLINE_CONTEXT_LIMIT);
         assert_eq!(decoded["compaction"]["auto"], false);
+    }
+
+    #[test]
+    fn provider_errors_are_provider_reported() {
+        for data in [
+            serde_json::json!({"message": "Output blocked by content filtering policy", "statusCode": 400}),
+            serde_json::json!({"message": "Output blocked by content filtering policy"}),
+        ] {
+            let terminal =
+                error_terminal(&serde_json::json!({"error": {"name": "APIError", "data": data}}));
+            let BackendTerminal::Failed(error) = terminal else {
+                panic!("expected a failed terminal");
+            };
+            assert_eq!(error.class, ErrorClass::Permanent);
+            assert!(
+                crate::model_execution::backend::is_provider_reported_failure(&error.message),
+                "{}",
+                error.message
+            );
+        }
     }
 }

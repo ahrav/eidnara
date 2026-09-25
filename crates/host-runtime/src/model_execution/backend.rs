@@ -122,6 +122,20 @@ impl std::fmt::Debug for BackendError {
     }
 }
 
+/// `BackendError::message` of an OpenCode run whose model provider rejected the request; a status code, when known, follows as ` (status N)`.
+pub(crate) const OPENCODE_PROVIDER_ERROR_MESSAGE: &str = "opencode provider reported an error";
+/// `BackendError::message` of a Pi run whose model provider rejected the request.
+pub(crate) const PI_PROVIDER_ERROR_MESSAGE: &str = "pi assistant stopped with reason \"error\"";
+
+/// Whether a `BackendError::message` names a failure the model provider reported for the request, as opposed to one the host raised while preparing, launching, or supervising the harness.
+/// `ErrorClass::Permanent` covers both kinds; a caller that reacts to the request's content needs this distinction, because a host failure recurs for any request until the environment changes.
+pub fn is_provider_reported_failure(message: &str) -> bool {
+    message == PI_PROVIDER_ERROR_MESSAGE
+        || message
+            .strip_prefix(OPENCODE_PROVIDER_ERROR_MESSAGE)
+            .is_some_and(|rest| rest.is_empty() || rest.starts_with(" (status "))
+}
+
 /// Every backend run resolves to exactly one terminal classification.
 #[derive(Debug, Clone, PartialEq)]
 pub enum BackendTerminal {

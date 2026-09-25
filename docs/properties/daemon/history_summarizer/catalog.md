@@ -715,8 +715,10 @@ Type: liveness
 Reachability: default-production
 Status: active
 Exercised: partial - `handler_chunk_that_always_fails_stops_stalling_folding`
-(`lib.rs:42175`) drives repeated permanent refusals of one chunk across firings;
-no test drives repeated validation rejections.
+(`lib.rs:42310`) drives repeated provider-reported refusals of one chunk across
+firings, and `handler_setup_failure_does_not_placeholder_the_chunk` (`:42367`)
+holds that repeated harness setup failures never advance the ladder; no test
+drives repeated validation rejections.
 Guarantee: After the fault-free window opens, a session whose producer keeps
 returning invalid output stops re-firing within a bounded number of attempts, or
 reports degraded publish health.
@@ -749,15 +751,22 @@ intra-firing fallback at `history_summarizer.rs:1440-1450` bounds attempts per f
 Existing check: `lib.rs:5042-5047` enforces the 60-second cooldown, and
 `lib.rs:6258-6261` reports degradation from a counter this path never increments.
 Since the chunk retry ladder landed, the backoff still does not escalate, but the
-live model attempts on one chunk are bounded. A validation rejection or a
-permanent or context-overflow producer failure increments the durable
-`chunk_retry` count for the chunk start (`lib.rs:6233`,
-`history_summarizer.rs:353-384`). Assembly varies the calibration seeds from
-`VARY_SEEDS_AFTER_FAILURES` failures, halves the chunk token budget per failure
-from `SHRINK_CHUNK_AFTER_FAILURES`, and from `PLACEHOLDER_AFTER_FAILURES`
+live model attempts on one chunk are bounded. A validation rejection, a
+context-overflow producer failure, or a permanent failure the model provider
+reported increments the durable `chunk_retry` count for the chunk start
+(`lib.rs:6239`, `history_summarizer.rs:352-390`). The host classes harness setup
+and supervision failures permanent too, such as a missing credential or a
+harness that cannot start; `is_provider_reported_failure`
+(`host-runtime/src/model_execution/backend.rs:130-137`) excludes them, because
+they fail every chunk alike and counting them would publish placeholders over
+history a working model could summarize. Assembly varies the calibration seeds
+from `VARY_SEEDS_AFTER_FAILURES` failures, halves the chunk token budget per
+failure from `SHRINK_CHUNK_AFTER_FAILURES`, and from `PLACEHOLDER_AFTER_FAILURES`
 publishes a daemon-authored placeholder segment for the shrunken chunk without a
-model call (`history_summarizer_chunk.rs:572-606`). A publish clears the count.
-Transient and auth failures do not count, so a chunk failing only with them
+model call (`history_summarizer_chunk.rs:572-623`). A reattachment presents the
+frozen range under the same reduced budget (`lib.rs:5488-5494`), so it withdraws
+the aliases the live prompt withdrew. A publish clears the count. Transient,
+auth, and host setup failures do not count, so a chunk failing only with them
 still retries every 60 seconds without bound.
 Impact: Unbounded live model spend and log noise, and a session that never
 compacts while its status block reports healthy publishing. Distinct from a bad
@@ -1115,7 +1124,7 @@ long span, which a campaign can miss entirely while executing those lines
 constantly.
 
 Two corrections are folded in. The semantics were `reachable`, which this record's
-own rationale defended as "this code location is attainable" — but the location is
+own rationale defended as "this code location is attainable", but the location is
 attained by every publish, so the old check could not fail. And the cited location
 was wrong: `history_summarizer.rs:1738` is inside `abandon_current_state`'s signature, and
 the secondary citation `:471-475` is the events projection. The only production
@@ -1548,7 +1557,7 @@ these records has an executing check.
   because each breaks a different signal. They are grouped because a single
   campaign observation, counting provider runs and rejections at a fake while
   polling the status block, would exercise all three at once, which makes this the
-  cheapest cluster in the part by leverage.
+  cheapest cluster in the part for what it covers.
 - **Bytes and numbers that only one consumer repairs.**
   [hv-control-characters-reach-durable-rows](#hv-control-characters-reach-durable-rows),
   [hv-unescape-xml-double-decodes-entities](#hv-unescape-xml-double-decodes-entities),
