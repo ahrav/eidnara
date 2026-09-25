@@ -4323,6 +4323,10 @@ fn apply_once(
                             commit_expected = Some(outcome.row_version);
                             meta.revert_epoch = outcome.revert_epoch;
                             meta.last_recut = outcome.last_recut;
+                            meta.history_summarizer
+                                .counters
+                                .superseded_before_activation =
+                                outcome.superseded_before_activation;
                             m1_signal = revision_signal_for_context(
                                 store,
                                 ctx.note_project_path,
@@ -19748,6 +19752,46 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn a_reconcile_recut_keeps_the_revert_count_through_the_pass_commit() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = store(dir.path());
+        s.replace_history_segments(
+            "ses",
+            &[comp(1, 1, 1, "a", "S0"), comp(2, 2, 2, "t2", "S1")],
+        )
+        .unwrap();
+        let live_full = vec![
+            item("a", 1, "raw"),
+            item("t2", 2, "turn two"),
+            item("t3", 3, "tail"),
+        ];
+        assert_eq!(
+            run(&s, &req("ses", "cfg0", live_full), &spine()).action,
+            "HARD"
+        );
+        // Published after the fold rendered segments 1 and 2, so no pass has rendered it.
+        s.append_history_segments("ses", &[comp(3, 3, 3, "t3", "S2")])
+            .unwrap();
+
+        let live_reverted = vec![item("a", 1, "raw"), item("t4", 2, "new turn")];
+        let observing = run(&s, &req("ses", "cfg0", live_reverted.clone()), &spine());
+        assert!(observing.reconcile_pending);
+        let remat = run(&s, &req("ses", "cfg0", live_reverted), &spine());
+        assert_eq!(remat.action, "HARD");
+        let loaded = s.load("ses").unwrap();
+        assert_eq!(loaded.meta.revert_epoch, 1);
+        assert_eq!(
+            loaded
+                .meta
+                .history_summarizer
+                .counters
+                .superseded_before_activation,
+            1,
+            "segment 2 was rendered; segment 3 was not"
+        );
+    }
+
+    #[test]
     fn reconcile_recut_nothing_survives_arms_pending_raw_without_truncate() {
         let dir = tempfile::tempdir().unwrap();
         let s = store(dir.path());
@@ -20321,6 +20365,7 @@ pub(crate) mod tests {
                             chunk_transcript: None,
                             memory_reviewer_nonadmission: None,
                             memory_reviewer_activation: None,
+                            published_at_ms: 0,
                         },
                     )
                     .unwrap();
@@ -20427,6 +20472,7 @@ pub(crate) mod tests {
                     chunk_transcript: None,
                     memory_reviewer_nonadmission: None,
                     memory_reviewer_activation: None,
+                    published_at_ms: 0,
                 })
                 .unwrap();
         }));

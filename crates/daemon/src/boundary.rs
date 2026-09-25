@@ -16,6 +16,7 @@ use std::collections::BTreeMap;
 use std::ops::Range;
 use std::sync::Arc;
 
+use memory_store::summarizer_timeline::FiringTriggerReason;
 use serde_json::Value;
 use tokenizer::estimate_tokens;
 
@@ -272,6 +273,15 @@ impl TriggerReason {
             TriggerReason::ForceBand => "force_band",
             TriggerReason::CommitClusters => "commit_clusters",
             TriggerReason::TailSize => "tail_size",
+        }
+    }
+
+    pub fn timeline(self) -> FiringTriggerReason {
+        match self {
+            TriggerReason::ProjectedHeadroom => FiringTriggerReason::ProjectedHeadroom,
+            TriggerReason::ForceBand => FiringTriggerReason::ForceBand,
+            TriggerReason::CommitClusters => FiringTriggerReason::CommitClusters,
+            TriggerReason::TailSize => FiringTriggerReason::TailSize,
         }
     }
 }
@@ -896,7 +906,9 @@ fn clamp_percentage(value: f64) -> f64 {
     value.clamp(0.0, 100.0)
 }
 
-fn get_proactive_history_segment_trigger_percentage(execute_threshold_percentage: f64) -> f64 {
+pub(crate) fn get_proactive_history_segment_trigger_percentage(
+    execute_threshold_percentage: f64,
+) -> f64 {
     (execute_threshold_percentage - PROACTIVE_TRIGGER_OFFSET_PERCENTAGE).max(0.0)
 }
 

@@ -123,6 +123,7 @@ use memory_store::memory_classifier_ledger::{
     MemoryClassifierReceiptKey, MemoryClassifierReceiptState, MemoryClassifierTerminalKind,
     MemoryClassifierTransition, memory_classifier_request_digest,
 };
+use memory_store::summarizer_timeline::{FiringSource, FiringTrigger, FiringUsage};
 use memory_store::{
     AuthoritySeedRow, DeferredExecuteState, FacadeMutationOutcome, HistorySummarizerPhase,
     MemoryStore, MemoryStoreError, ModuleDropSeedRow, ModuleMeta, ModuleStateSyncError,
@@ -1682,7 +1683,12 @@ impl TransformRequest {
     /// The request's host-resolved threshold overrides the caller's config.
     /// Omitting the field uses the caller's trusted config as the compatibility fallback.
     fn execute_threshold_or(&self, fallback: f64) -> f64 {
-        self.effective_execute_threshold.unwrap_or(fallback)
+        self.execute_threshold_or_else(|| fallback)
+    }
+
+    /// As [`Self::execute_threshold_or`], computing the fallback only when the request omits its threshold.
+    fn execute_threshold_or_else(&self, fallback: impl FnOnce() -> f64) -> f64 {
+        self.effective_execute_threshold.unwrap_or_else(fallback)
     }
 
     /// The estimate includes one ready snapshot's cache keys and `Arc`.
@@ -3564,6 +3570,7 @@ struct HistorySummarizerFiringTask {
     credential_fingerprints: std::collections::BTreeMap<String, String>,
     /// The MemoryReviewer handoff an accepted fact set is reserved and staged through; `None` when the Kernel is unavailable, which publication records as a nonadmission.
     memory_reviewer_handoff: Option<memory_reviewer::handoff::HandoffTarget>,
+    trigger: memory_store::summarizer_timeline::FiringTrigger,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -5508,7 +5515,7 @@ impl HandlerCore {
                             &session_id,
                             now + HISTORY_SUMMARIZER_FAILURE_BACKOFF_MS,
                         )?;
-                        match action {
+                        let (producer_session_id, producer_run_id) = match action {
                             history_summarizer::RestartAction::Done => {
                                 return Ok(history_summarizer::HistorySummarizerReattachOutcome::Done);
                             }
@@ -5534,8 +5541,12 @@ impl HandlerCore {
                                 )
                                 .map(history_summarizer::HistorySummarizerReattachOutcome::Republished);
                             }
-                            history_summarizer::RestartAction::ReattachProducer { .. } => {}
-                        }
+                            history_summarizer::RestartAction::ReattachProducer {
+                                producer_session_id,
+                                producer_run_id,
+                                ..
+                            } => (producer_session_id, producer_run_id),
+                        };
                         let mut producer = tokio::select! {
                             () = cancel.cancelled() => {
                                 return Err(history_summarizer::HistorySummarizerDriveError::Cancelled);
@@ -5544,7 +5555,14 @@ impl HandlerCore {
                                 &project_root,
                                 &harness,
                                 &credential_fingerprints,
-                            ) => connected?,
+                            ) => connected.inspect_err(|_| {
+                                record_reattach_connect_failure(
+                                    &store,
+                                    &session_id,
+                                    &producer_session_id,
+                                    &producer_run_id,
+                                );
+                            })?,
                         };
                         let reattach = reattach_history_summarizer_producer(
                             &mut *producer,
@@ -5704,13 +5722,38 @@ impl HandlerCore {
             last_failure: loaded.meta.history_summarizer.last_failure.clone(),
             project_memory: None,
         };
+        // Branches that loaded the config pass it; the others read it only when the request omits its threshold. Only an idle or awaiting row takes the write, keeping it off a row in the Firing, Validating, or Publishing phase.
+        let blocked = |reason: &str, cfg: Option<&DaemonConfig>| {
+            let history_summarizer = &loaded.meta.history_summarizer;
+            history_summarizer.pending_eligibility.is_none()
+                && matches!(
+                    history_summarizer.state,
+                    HistorySummarizerPhase::Idle | HistorySummarizerPhase::AwaitingProducer
+                )
+                && record_blocked_eligibility(
+                    &store,
+                    parsed,
+                    &loaded,
+                    parsed.execute_threshold_or_else(|| match cfg {
+                        Some(cfg) => cfg.execute_threshold_percentage,
+                        None => {
+                            self.effective_config(&binding.project_root)
+                                .execute_threshold_percentage
+                        }
+                    }),
+                    now,
+                    reason,
+                )
+        };
         if loaded.meta.pending_rewrite.is_some() {
+            blocked("pending_rewrite", None);
             return PreparedHistorySummarizerAction::Complete(HistorySummarizerDiagnostics {
                 no_fire: Some("pending_rewrite".to_string()),
                 ..not_fired
             });
         }
         if let Some(completion) = self.live_history_summarizer_completion_wait(&parsed.session_id) {
+            blocked("busy", None);
             return PreparedHistorySummarizerAction::Busy {
                 diagnostics: HistorySummarizerDiagnostics {
                     no_fire: Some("busy".to_string()),
@@ -5721,6 +5764,8 @@ impl HandlerCore {
         }
         let cfg = self.effective_config(&binding.project_root);
         if loaded.meta.history_summarizer.state != HistorySummarizerPhase::Idle {
+            // Before the spawn: the recovery task's own CAS must not race this write.
+            blocked("busy", Some(&cfg));
             let no_fire = self
                 .maybe_spawn_reattach(
                     Arc::clone(&store),
@@ -5785,6 +5830,8 @@ impl HandlerCore {
             input_tokens,
             context_limit,
         );
+        let execute_threshold_percentage =
+            parsed.execute_threshold_or(cfg.execute_threshold_percentage);
         let trigger_eval_started_at = Instant::now();
         let trigger = {
             let mut formatted_token_estimator =
@@ -5794,8 +5841,7 @@ impl HandlerCore {
                 &TriggerContext {
                     boundary: BoundaryContext {
                         context_limit,
-                        execute_threshold_percentage: parsed
-                            .execute_threshold_or(cfg.execute_threshold_percentage),
+                        execute_threshold_percentage,
                         usage_percentage,
                         usage_input_tokens: input_tokens,
                         last_history_segment_end_ordinal,
@@ -5879,7 +5925,9 @@ impl HandlerCore {
             .failure_backoff_at_ms
             .is_some_and(|backoff_at_ms| now < backoff_at_ms)
         {
-            self.record_no_fire(&store, &parsed.session_id, &loaded, "backoff");
+            if !blocked("backoff", Some(&cfg)) {
+                self.record_no_fire(&store, &parsed.session_id, &loaded, "backoff");
+            }
             return PreparedHistorySummarizerAction::Complete(HistorySummarizerDiagnostics {
                 reason: trigger_reason,
                 no_fire: Some("backoff".to_string()),
@@ -5969,6 +6017,7 @@ impl HandlerCore {
         let live_guard = match self.try_claim_live_history_summarizer_session(&parsed.session_id) {
             LiveHistorySummarizerSessionClaim::Acquired(live_guard) => live_guard,
             LiveHistorySummarizerSessionClaim::Busy(completion) => {
+                blocked("busy", Some(&cfg));
                 return PreparedHistorySummarizerAction::Busy {
                     diagnostics: HistorySummarizerDiagnostics {
                         reason: diagnostics.reason,
@@ -5995,6 +6044,12 @@ impl HandlerCore {
                 credential_fingerprints: binding.credential_fingerprints.clone(),
                 publication_fence: None,
                 memory_reviewer_handoff,
+                trigger: firing_trigger(
+                    FiringSource::PressurePath,
+                    trigger.reason,
+                    (context_limit, input_tokens, usage_percentage),
+                    execute_threshold_percentage,
+                ),
             },
         }))
     }
@@ -6079,6 +6134,14 @@ impl HandlerCore {
             .cloned()
             .collect::<Vec<_>>();
         let project_slug = project_slug(&binding.project_root);
+        let mut trigger = firing_trigger(
+            FiringSource::Wrapup,
+            None,
+            usage_numbers(parsed.usage.as_ref(), parsed.geometry.as_ref()),
+            parsed.execute_threshold_or(cfg.execute_threshold_percentage),
+        );
+        // Wrapup evaluates no trigger, so a request without usage leaves nothing measured to record.
+        trigger.usage = trigger.usage.filter(|_| parsed.usage.is_some());
         let assemble = assemble_history_summarizer_firing(
             &store,
             &parsed.messages,
@@ -6137,6 +6200,7 @@ impl HandlerCore {
             credential_fingerprints: binding.credential_fingerprints.clone(),
             publication_fence: None,
             memory_reviewer_handoff,
+            trigger,
         }))
     }
 
@@ -6189,6 +6253,7 @@ impl HandlerCore {
             publication_fence,
             credential_fingerprints,
             memory_reviewer_handoff,
+            trigger,
         } = task;
         let cancel = live_guard.cancel.clone();
         let _guard = live_guard;
@@ -6208,6 +6273,7 @@ impl HandlerCore {
                     &project_path,
                     &project_slug,
                     &harness,
+                    trigger,
                 );
                 request.publication_fence = publication_fence.as_deref();
                 request.memory_reviewer_handoff = memory_reviewer_handoff.as_ref();
@@ -18041,6 +18107,75 @@ fn project_slug(path: &Path) -> String {
         .to_string()
 }
 
+/// Records a pass that reached the proactive percentage while no run could start, with `reason`; the caller writes it only while none is pending, and the next pressure-path fire moves it into its timeline entry. Returns whether it wrote. A lost CAS race drops the write, as `record_no_fire` does.
+fn record_blocked_eligibility(
+    store: &MemoryStore,
+    parsed: &TransformRequest,
+    loaded: &memory_store::LoadedState,
+    execute_threshold_percentage: f64,
+    now: i64,
+    reason: &str,
+) -> bool {
+    let (_, _, usage_percentage) = usage_numbers(parsed.usage.as_ref(), parsed.geometry.as_ref());
+    if usage_percentage
+        < boundary::get_proactive_history_segment_trigger_percentage(execute_threshold_percentage)
+    {
+        return false;
+    }
+    let mut meta = loaded.meta.clone();
+    meta.history_summarizer.pending_eligibility =
+        Some(memory_store::summarizer_timeline::PendingEligibility {
+            eligible_at_ms: now,
+            no_fire: Some(history_summarizer::classify_no_fire(reason)),
+        });
+    meta.history_summarizer.last_no_fire = Some(reason.to_string());
+    store
+        .commit(&parsed.session_id, loaded.row_version, &loaded.core, &meta)
+        .is_ok()
+}
+
+/// Marks the firing still awaiting this producer run as unable to reach it and counts the failure, leaving its phase, backoff, and retry untouched because the run may still be executing. A row awaiting another run is left alone. Best-effort; a lost CAS race drops the write.
+fn record_reattach_connect_failure(
+    store: &MemoryStore,
+    session_id: &str,
+    producer_session_id: &str,
+    producer_run_id: &str,
+) {
+    let Ok(loaded) = store.load(session_id) else {
+        return;
+    };
+    let history_summarizer = &loaded.meta.history_summarizer;
+    if history_summarizer.state != HistorySummarizerPhase::AwaitingProducer
+        || history_summarizer.producer_session_id.as_deref() != Some(producer_session_id)
+        || history_summarizer.producer_run_id.as_deref() != Some(producer_run_id)
+    {
+        return;
+    }
+    let mut meta = loaded.meta.clone();
+    meta.history_summarizer
+        .record_outcome(memory_store::summarizer_timeline::FiringOutcome::ReattachConnectFailed);
+    let _ = store.commit(session_id, loaded.row_version, &loaded.core, &meta);
+}
+
+/// The timeline's view of one trigger evaluation; `usage` is `usage_numbers`' `(limit, input, percentage)`.
+fn firing_trigger(
+    source: FiringSource,
+    reason: Option<boundary::TriggerReason>,
+    (context_limit, input_tokens, usage_percentage): (f64, f64, f64),
+    execute_threshold_percentage: f64,
+) -> FiringTrigger {
+    FiringTrigger {
+        source,
+        reason: reason.map(boundary::TriggerReason::timeline),
+        usage: Some(FiringUsage {
+            input_tokens: input_tokens as u64,
+            context_limit_tokens: context_limit as u64,
+            usage_percentage: usage_percentage as u32,
+            execute_threshold_percentage: execute_threshold_percentage.round() as u32,
+        }),
+    }
+}
+
 fn record_history_summarizer_connect_failure(
     store: &MemoryStore,
     session_id: &str,
@@ -18054,11 +18189,14 @@ fn record_history_summarizer_connect_failure(
         if meta.history_summarizer.state == HistorySummarizerPhase::Idle {
             meta.history_summarizer.last_failure = Some(detail.to_string());
             meta.history_summarizer.failure_backoff_at_ms = Some(failure_backoff_at_ms);
+            let counters = &mut meta.history_summarizer.counters;
+            counters.connect_failed = counters.connect_failed.saturating_add(1);
         } else {
             meta.history_summarizer = history_summarizer::abandon_with_detail(
                 &meta.history_summarizer,
                 failure_backoff_at_ms,
                 Some(detail.to_string()),
+                memory_store::summarizer_timeline::AbandonClass::ConnectFailed,
             );
         }
         if let Some(hook) = before_commit
@@ -40055,6 +40193,25 @@ mod tests {
             before,
             "the generation fence must run before history_segments, transcripts, facts, or the publication floor change"
         );
+        // A wrapup firing is fresh yet publishes behind the snapshot fence, so it reaches this class.
+        let state = store.load("ses").unwrap().meta.history_summarizer;
+        let entry = state
+            .recent_firings
+            .last()
+            .expect("the wrapup firing's entry");
+        assert_eq!(
+            entry.source,
+            memory_store::summarizer_timeline::FiringSource::Wrapup
+        );
+        assert_eq!(
+            entry.outcome,
+            Some(
+                memory_store::summarizer_timeline::FiringOutcome::Abandoned {
+                    class: memory_store::summarizer_timeline::AbandonClass::CallerFenceRejected,
+                }
+            )
+        );
+        assert_eq!(state.counters.invalidated, 1);
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -40900,6 +41057,150 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn a_busy_pass_at_the_proactive_percentage_records_eligibility_once_and_publication_keeps_it()
+     {
+        let producer = Arc::new(ProducerState::default());
+        producer.block_output.store(true, Ordering::SeqCst);
+        let (handler, store, _dir, _project) =
+            handler_with_store(Arc::clone(&producer), default_test_config());
+        let messages = big_messages();
+        let pending = |store: &MemoryStore| {
+            store
+                .load("ses")
+                .unwrap()
+                .meta
+                .history_summarizer
+                .pending_eligibility
+        };
+
+        let first = call_transform(&handler, messages.clone()).await;
+        assert_eq!(first["history_summarizer"]["fired"], true);
+        wait_for_count(&producer.starts, 1).await;
+
+        // 62% is below the proactive 63% at execute 65: a busy pass there records nothing.
+        let below = call_transform_with_usage(&handler, messages.clone(), 124_000, 200_000).await;
+        assert_eq!(below["history_summarizer"]["no_fire"], "busy");
+        assert_eq!(pending(&store), None);
+
+        let eligible =
+            call_transform_with_usage(&handler, messages.clone(), 126_000, 200_000).await;
+        assert_eq!(eligible["history_summarizer"]["no_fire"], "busy");
+        let recorded = pending(&store).expect("the first eligible busy pass records it");
+        assert_eq!(
+            recorded
+                .no_fire
+                .as_ref()
+                .map(|no_fire| no_fire.detail.as_str()),
+            Some("busy")
+        );
+
+        call_transform_with_usage(&handler, messages, 130_000, 200_000).await;
+        assert_eq!(pending(&store).as_ref(), Some(&recorded), "recorded once");
+
+        producer.block_output.store(false, Ordering::SeqCst);
+        producer.notify.notify_waiters();
+        wait_for_idle(&store).await;
+        let state = store.load("ses").unwrap().meta.history_summarizer;
+        assert_eq!(state.pending_eligibility, Some(recorded));
+        assert!(matches!(
+            state.recent_firings[0].outcome,
+            Some(memory_store::summarizer_timeline::FiringOutcome::Published { .. })
+        ));
+        assert_eq!(state.counters.published, 1);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_reattach_connect_failure_is_counted_without_ending_or_backing_off_the_firing() {
+        let producer = Arc::new(ProducerState::default());
+        producer
+            .connect_errors
+            .lock()
+            .unwrap()
+            .push_back(HistorySummarizerProducerError::Client(
+                history_summarizer_producer::HistorySummarizerClientFailure {
+                    code: "dial_failed".to_owned(),
+                    message: "daemon dial failed".to_owned(),
+                },
+            ));
+        let (handler, store, _dir, _project) =
+            handler_with_store(Arc::clone(&producer), default_test_config());
+        seed_history_summarizer_phase(&store, HistorySummarizerPhase::AwaitingProducer);
+
+        let response = call_transform(&handler, big_messages()).await;
+        assert_eq!(response["history_summarizer"]["no_fire"], "reattaching");
+        wait_for_history_summarizer_state(&store, |state| state.counters.connect_failed == 1).await;
+        let state = store.load("ses").unwrap().meta.history_summarizer;
+        assert_eq!(state.state, HistorySummarizerPhase::AwaitingProducer);
+        assert_eq!(state.failure_backoff_at_ms, None);
+        assert_eq!(state.counters.firings, 0);
+        let entry = &state.recent_firings[0];
+        assert_eq!(entry.firing_seq, 1);
+        assert_eq!(
+            entry.source,
+            memory_store::summarizer_timeline::FiringSource::Reattach
+        );
+        assert_eq!(
+            entry.outcome,
+            Some(memory_store::summarizer_timeline::FiringOutcome::ReattachConnectFailed)
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_reattach_connect_failure_leaves_a_firing_that_replaced_its_run_untouched() {
+        let producer = Arc::new(ProducerState::default());
+        producer
+            .connect_errors
+            .lock()
+            .unwrap()
+            .push_back(HistorySummarizerProducerError::Client(
+                history_summarizer_producer::HistorySummarizerClientFailure {
+                    code: "dial_failed".to_owned(),
+                    message: "daemon dial failed".to_owned(),
+                },
+            ));
+        producer.block_connect.store(true, Ordering::SeqCst);
+        let (handler, store, _dir, _project) =
+            handler_with_store(Arc::clone(&producer), default_test_config());
+        seed_history_summarizer_phase(&store, HistorySummarizerPhase::AwaitingProducer);
+
+        let response = call_transform(&handler, big_messages()).await;
+        assert_eq!(response["history_summarizer"]["no_fire"], "reattaching");
+        wait_for_count(&producer.connects, 1).await;
+
+        // Firing 2, awaiting its own run, replaces firing 1 before the blocked reattach fails, so the stale failure must not mark or count firing 2.
+        let loaded = store.load("ses").unwrap();
+        let mut meta = loaded.meta.clone();
+        meta.history_summarizer.firing_seq = 2;
+        meta.history_summarizer.producer_session_id = Some("producer-session-2".to_string());
+        meta.history_summarizer.producer_run_id = Some("run-next".to_string());
+        meta.history_summarizer.record_fire(
+            memory_store::summarizer_timeline::FiringTrigger::default(),
+            2,
+            None,
+        );
+        store
+            .commit("ses", loaded.row_version, &loaded.core, &meta)
+            .unwrap();
+
+        producer.block_connect.store(false, Ordering::SeqCst);
+        producer.notify.notify_waiters();
+        wait_for_reattach_to_finish(&handler).await;
+
+        let state = store.load("ses").unwrap().meta.history_summarizer;
+        assert_eq!(state.firing_seq, 2);
+        assert_eq!(state.state, HistorySummarizerPhase::AwaitingProducer);
+        assert_eq!(state.counters.connect_failed, 0);
+        assert!(
+            state
+                .recent_firings
+                .iter()
+                .all(|entry| entry.outcome.is_none()),
+            "{:?}",
+            state.recent_firings
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn handler_emergency_inline_drive_folds_in_the_same_response() {
         let producer = Arc::new(ProducerState::default());
         let (handler, _store, _dir, _project) =
@@ -41392,6 +41693,9 @@ mod tests {
             consecutive_publish_failures: 0,
             memory_reviewer_nonadmission: Default::default(),
             memory_reviewer_reservation: None,
+            recent_firings: Vec::new(),
+            counters: Default::default(),
+            pending_eligibility: None,
         };
         store
             .commit("ses", loaded.row_version, &loaded.core, &meta)
@@ -41427,6 +41731,9 @@ mod tests {
             consecutive_publish_failures: 0,
             memory_reviewer_nonadmission: Default::default(),
             memory_reviewer_reservation: None,
+            recent_firings: Vec::new(),
+            counters: Default::default(),
+            pending_eligibility: None,
         };
         store
             .commit("ses", loaded.row_version, &loaded.core, &meta)
@@ -41464,6 +41771,7 @@ mod tests {
             &fired,
             backoff_at_ms,
             Some(detail.to_string()),
+            memory_store::summarizer_timeline::AbandonClass::ProducerFailed,
         );
         store
             .commit("ses", loaded.row_version, &loaded.core, &meta)
@@ -41944,6 +42252,7 @@ mod tests {
                 chunk_transcript: None,
                 memory_reviewer_nonadmission: None,
                 memory_reviewer_activation: None,
+                published_at_ms: 0,
             })
             .unwrap();
 
@@ -42038,6 +42347,10 @@ mod tests {
             "pre-fire connect failures must land in durable state, not only stderr"
         );
         assert_eq!(producer.starts.load(Ordering::SeqCst), 0);
+        // A connect failure before the fire counts as one, but no firing and no entry.
+        assert_eq!(state.counters.connect_failed, 1);
+        assert_eq!(state.counters.firings, 0);
+        assert!(state.recent_firings.is_empty());
 
         let backed_off = call_transform(&handler, messages.clone()).await;
         assert_eq!(backed_off["history_summarizer"]["fired"], false);

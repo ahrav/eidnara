@@ -569,6 +569,7 @@ impl AssembledHistorySummarizerFiring {
         project_path: &'a str,
         project_slug: &'a str,
         harness: &'a str,
+        trigger: memory_store::summarizer_timeline::FiringTrigger,
     ) -> HistorySummarizerFireRequest<'a> {
         HistorySummarizerFireRequest {
             store,
@@ -597,6 +598,7 @@ impl AssembledHistorySummarizerFiring {
             completion_now_ms: crate::now_ms,
             publication_fence: None,
             memory_reviewer_handoff: None,
+            trigger,
         }
     }
 }
