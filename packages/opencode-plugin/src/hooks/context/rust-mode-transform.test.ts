@@ -1384,10 +1384,9 @@ describe("Rust mode transform transport", () => {
             setSpy.mockRestore();
         }
         expect(shiftFailed).toBe(true);
+        // The failed pass republishes the first pass's empty output; nothing was appended since.
         expect(output.messages).toBe(array);
-        expect(output.messages).toHaveLength(2);
-        expect(output.messages[0]).toBe(messages[0]);
-        expect(output.messages[1]).toBe(messages[1]);
+        expect(output.messages).toHaveLength(0);
         expect(transform.getState(sessionId).ordinals).toEqual(priorMemo);
         expect(calls.map((call) => call.method)).toEqual([
             "transform",
@@ -1395,8 +1394,9 @@ describe("Rust mode transform transport", () => {
             "transform.nack",
         ]);
         expect(calls[2]?.body).toMatchObject({ transform_pass_id: "shift-1" });
-        await transform.run(sessionId, output);
-        expect(output.messages).toHaveLength(0);
+        const retry = { messages: [...messages] };
+        await transform.run(sessionId, retry);
+        expect(retry.messages).toHaveLength(0);
         expect(transform.getState(sessionId).ordinals.entries).toEqual(
             new Map([
                 ["m-1", 11],
@@ -2848,8 +2848,10 @@ describe("bounded transform ownership", () => {
         const output = { messages: [...changed] as unknown[] };
         const array = output.messages;
         await transform.run(sessionId, output);
+        // The failed pass serves the warm output followed by the appended message.
         expect(output.messages).toBe(array);
-        expect(output.messages[0]).toBe(changed[0]);
+        expect(output.messages).toEqual(changed);
+        expect(output.messages[1]).toBe(changed[1]);
         expect(bodies).toHaveLength(3);
         expect(transform.getState(sessionId).forceFullWire).toBe(true);
         const next = rowMessages(sessionId, rawRows(3));
@@ -3832,5 +3834,159 @@ describe("bounded transform ownership", () => {
         await transform.run(sessionId, output);
         expect(calls).toHaveLength(2);
         expect(transform.getState(sessionId).consecutiveFailures).toBe(0);
+    });
+});
+
+describe("fail-open after an applied pass", () => {
+    const folded = (sessionId: string): MessageLike => ({
+        info: { id: "fold-1", role: "user", sessionID: sessionId },
+        parts: [{ type: "text", text: "folded history" }],
+    });
+
+    /** The first transform call applies a fold of the whole input; every later call fails. */
+    function failAfterFirst(sessionId: string) {
+        return recordingClient((request, index) => {
+            if (index > 0) throw new Error("request deadline expired after a possible send");
+            return recipeResponse(request, [folded(sessionId)]);
+        });
+    }
+
+    function toolMessage(sessionId: string, id: string, completed: boolean): MessageLike {
+        return {
+            info: { id, role: "assistant", sessionID: sessionId },
+            parts: [
+                {
+                    type: "tool",
+                    callID: `call-${id}`,
+                    tool: "read",
+                    state: completed
+                        ? { status: "completed", input: { path: "a" }, output: "contents" }
+                        : { status: "running", input: { path: "a" } },
+                },
+            ],
+        };
+    }
+
+    it("serves the last applied output plus the messages appended since", async () => {
+        const sessionId = `rust-fail-open-append-${Date.now()}`;
+        const rows = rawRows(6);
+        installRawRows(sessionId, rows);
+        const { client, bodies } = failAfterFirst(sessionId);
+        const transform = createRustModeTransform(makeDeps(), { moduleClient: client });
+        const debugSpy = spyOn(logger.sessionLog, "debug");
+        try {
+            await transform.run(sessionId, { messages: rowMessages(sessionId, rows.slice(0, 3)) });
+
+            const grown = rowMessages(sessionId, rows.slice(0, 5));
+            const output = { messages: [...grown] as unknown[] };
+            await transform.run(sessionId, output);
+            expect(bodies).toHaveLength(2);
+            expect(output.messages).toEqual([folded(sessionId), grown[3], grown[4]]);
+            expect(output.messages[1]).toBe(grown[3]);
+            expect(transform.getState(sessionId).failureCount).toBe(1);
+
+            // A second consecutive failure still reuses the same applied output.
+            const again = rowMessages(sessionId, rows.slice(0, 6));
+            const againOutput = { messages: [...again] as unknown[] };
+            await transform.run(sessionId, againOutput);
+            expect(againOutput.messages).toEqual([folded(sessionId), ...again.slice(3)]);
+
+            const passLines = sessionLogs(debugSpy, sessionId).filter((line) =>
+                line.startsWith("rust pass:"),
+            );
+            expect(passLines[1]).toContain("served_from=last_applied in=5 out=3");
+            expect(passLines[2]).toContain("served_from=last_applied in=6 out=4");
+        } finally {
+            debugSpy.mockRestore();
+        }
+    });
+
+    it("serves the input unchanged after an in-place edit of an acknowledged message", async () => {
+        const sessionId = `rust-fail-open-edit-${Date.now()}`;
+        const rows = rawRows(4);
+        installRawRows(sessionId, rows);
+        const { client } = failAfterFirst(sessionId);
+        const transform = createRustModeTransform(makeDeps(), { moduleClient: client });
+        const debugSpy = spyOn(logger.sessionLog, "debug");
+        try {
+            await transform.run(sessionId, { messages: rowMessages(sessionId, rows.slice(0, 3)) });
+
+            const edited = rowMessages(sessionId, rows, (row) =>
+                row.id === "m-1" ? "EDITED m-1" : `message ${row.id}`,
+            );
+            const output = { messages: [...edited] as unknown[] };
+            await transform.run(sessionId, output);
+            expect(output.messages).toEqual(edited);
+
+            const removed = rowMessages(sessionId, [rows[0], rows[2], rows[3]] as RawRow[]);
+            const removedOutput = { messages: [...removed] as unknown[] };
+            await transform.run(sessionId, removedOutput);
+            expect(removedOutput.messages).toEqual(removed);
+
+            const passLines = sessionLogs(debugSpy, sessionId).filter((line) =>
+                line.startsWith("rust pass:"),
+            );
+            expect(passLines[1]).toContain("served_from=raw in=4 out=4");
+        } finally {
+            debugSpy.mockRestore();
+        }
+    });
+
+    it("serves the input unchanged when no output was applied", async () => {
+        const sessionId = `rust-fail-open-none-${Date.now()}`;
+        const rows = rawRows(2);
+        installRawRows(sessionId, rows);
+        const { client } = recordingClient(() => {
+            throw new Error("module transport deadline expired while queued");
+        });
+        const transform = createRustModeTransform(makeDeps(), { moduleClient: client });
+        const input = rowMessages(sessionId, rows);
+        const output = { messages: [...input] as unknown[] };
+        await transform.run(sessionId, output);
+        expect(output.messages).toEqual(input);
+        expect(transform.getState(sessionId).failureCount).toBe(1);
+    });
+
+    it("keeps a tool call and its result together at the boundary", async () => {
+        const sessionId = `rust-fail-open-tool-${Date.now()}`;
+        const rows = rawRows(4);
+        installRawRows(sessionId, rows);
+        const { client } = failAfterFirst(sessionId);
+        const transform = createRustModeTransform(makeDeps(), { moduleClient: client });
+        const [user] = rowMessages(sessionId, rows.slice(0, 1));
+        await transform.run(sessionId, {
+            messages: [user, toolMessage(sessionId, "m-2", true)],
+        });
+
+        const appended = [
+            toolMessage(sessionId, "m-3", true),
+            ...rowMessages(sessionId, [rows[3] as RawRow]),
+        ];
+        const output = {
+            messages: [user, toolMessage(sessionId, "m-2", true), ...appended] as unknown[],
+        };
+        await transform.run(sessionId, output);
+        expect(output.messages).toEqual([folded(sessionId), ...appended]);
+        expect((output.messages[1] as MessageLike).parts).toEqual(appended[0]?.parts);
+
+        // A terminal tool call completed in place since the applied pass is not append-only.
+        const pendingSession = `${sessionId}-pending`;
+        installRawRows(pendingSession, rows);
+        const pending = failAfterFirst(pendingSession);
+        const pendingTransform = createRustModeTransform(makeDeps(), {
+            moduleClient: pending.client,
+        });
+        const [pendingUser] = rowMessages(pendingSession, rows.slice(0, 1));
+        await pendingTransform.run(pendingSession, {
+            messages: [pendingUser, toolMessage(pendingSession, "m-2", false)],
+        });
+        const completed = [
+            pendingUser,
+            toolMessage(pendingSession, "m-2", true),
+            ...rowMessages(pendingSession, [rows[2] as RawRow]),
+        ];
+        const completedOutput = { messages: [...completed] as unknown[] };
+        await pendingTransform.run(pendingSession, completedOutput);
+        expect(completedOutput.messages).toEqual(completed);
     });
 });
