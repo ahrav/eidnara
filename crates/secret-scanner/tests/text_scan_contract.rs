@@ -895,3 +895,93 @@ proptest! {
         }
     }
 }
+
+/// A value that names code, such as a member path, a call, an environment
+/// lookup, or a `{name}` template, is not a secret literal.
+#[test]
+fn code_references_after_secret_keys_are_not_findings() {
+    for input in [
+        "key = event.id",
+        "billing.stripe_event_idempotency; key = event.id; TTL 90d",
+        "api_key = config.api_key",
+        "api_key = self.config.key",
+        "token = request.headers.get(\"x\")",
+        "secret = os.environ[\"X\"]",
+        "password = settings::DB_PASSWORD",
+        "key={pipeline_name}_{YYYYMMDD}",
+        "access_token_ttl=900s; refresh_token_ttl=86400s",
+        "Tethys token TTLs: access_token_ttl=900 s",
+        "* Auth claim name: active_membership_id.",
+        "copied from the incoming token. One-line omission: refreshedClaims.TenantRoles was never set",
+        "* New planner cache key field: partition_epoch.",
+    ] {
+        let report = comprehensive_scanner().scan(input).unwrap();
+        assert!(report.findings.is_empty(), "{input}: {:?}", report.findings);
+    }
+}
+
+/// Literals keep firing next to the code-reference shapes they resemble.
+#[test]
+fn secret_literals_resembling_code_references_are_findings() {
+    let rules = |input: &str| -> Vec<String> {
+        comprehensive_scanner()
+            .scan(input)
+            .unwrap()
+            .findings
+            .into_iter()
+            .map(|finding| finding.rule_id)
+            .collect()
+    };
+    for (input, rule_id) in [
+        ("password=hunter2", "magic-keyed-assignment"),
+        (
+            "password=\"hunter2\"",
+            "magic-keyed-assignment-double-quoted",
+        ),
+        ("password=hunter", "magic-keyed-assignment"),
+        ("password=900x", "magic-keyed-assignment"),
+        (
+            "key = \"Xk39fJ2qLp0ZrT8vWm4N\"",
+            "magic-keyed-assignment-double-quoted",
+        ),
+        ("key = \"event.id\"", "magic-keyed-assignment-double-quoted"),
+        ("api_key = aB3xZ9qL.Kp4mN2vT", "magic-keyed-assignment"),
+        (
+            concat!(
+                "api_key = SG",
+                ".abcdefghijklmnopqrstuv",
+                ".ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopq"
+            ),
+            "magic-keyed-assignment",
+        ),
+        ("key={user}_Xk39fJ2qLp0Z", "magic-keyed-assignment"),
+        (
+            "api_key: Ab3fGh1jKlMnOpQrStUvWxYz79PqRs24",
+            "generic-api-key",
+        ),
+        (
+            concat!("aws_access_key_id = AKIA", "Q7R3XM2ZT5WN6PBC"),
+            "magic-aws-access-key-id",
+        ),
+    ] {
+        let found = rules(input);
+        assert!(found.iter().any(|id| id == rule_id), "{input}: {found:?}");
+    }
+    let anthropic = format!(
+        "key = sk-ant-api03-{}",
+        "Zq8Xw2Vb7Ny4Rc6Hd0Jf5Gs8Aq1Te3Yu7Io2Pw9Dk4"
+    );
+    assert!(
+        rules(&anthropic)
+            .iter()
+            .any(|id| id == "magic-anthropic-api-key"),
+        "{anthropic}"
+    );
+    // The checksum suffix is valid for this payload, as in `checksum_backed_rules_reject_undecodable_checksums`.
+    let github = format!("token = ghp_{}0Zb5Hm", "A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5");
+    assert!(
+        rules(&github).iter().any(|id| id == "magic-github-token"),
+        "{github}: {:?}",
+        rules(&github)
+    );
+}
