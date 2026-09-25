@@ -5596,7 +5596,10 @@ fn apply_ingress_meta(
     }
 }
 
-fn effective_usage(request: Option<&ModuleUsage>, persisted: Option<&ModuleUsage>) -> ModuleUsage {
+pub(crate) fn effective_usage(
+    request: Option<&ModuleUsage>,
+    persisted: Option<&ModuleUsage>,
+) -> ModuleUsage {
     request
         .filter(|usage| usage.is_non_zero())
         .or(persisted)

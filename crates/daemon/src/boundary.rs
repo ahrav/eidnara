@@ -41,6 +41,9 @@ const TRIGGER_BUDGET_PERCENTAGE: f64 = 0.05;
 const TRIGGER_BUDGET_MIN: f64 = 5_000.0;
 const TRIGGER_BUDGET_MAX: f64 = 50_000.0;
 const PROACTIVE_TRIGGER_OFFSET_PERCENTAGE: f64 = 2.0;
+const MAX_PREPARE_LEAD_PERCENTAGE: u8 = 20;
+/// Fixture-only override of the preparation lead, read once per process; production launchers do not forward it.
+pub const PREPARE_LEAD_ENV: &str = "EIDNARA_HISTORY_SUMMARIZER_PREPARE_LEAD";
 const POST_DROP_TARGET_RATIO: f64 = 0.75;
 const MIN_PROACTIVE_TAIL_TOKEN_ESTIMATE: f64 = 6_000.0;
 const MIN_PROACTIVE_TAIL_MESSAGE_COUNT: usize = 12;
@@ -120,6 +123,38 @@ pub struct BoundaryMsg<'a> {
     pub blocks: Vec<BoundaryBlock<'a>>,
 }
 
+/// Percentage points below the execute threshold at which the proactive trigger starts preparing a summary. The execute threshold still decides activation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PrepareLead(u8);
+
+impl PrepareLead {
+    pub const DEFAULT: Self = Self(PROACTIVE_TRIGGER_OFFSET_PERCENTAGE as u8);
+
+    /// Clamps to `[0, 20]`; text that is not an integer keeps the default.
+    pub fn parse(value: &str) -> Self {
+        value.trim().parse::<i64>().map_or(Self::DEFAULT, |lead| {
+            Self(lead.clamp(0, i64::from(MAX_PREPARE_LEAD_PERCENTAGE)) as u8)
+        })
+    }
+
+    /// The process's lead: the environment override the first call finds, or the default.
+    pub fn configured() -> Self {
+        static LEAD: std::sync::OnceLock<PrepareLead> = std::sync::OnceLock::new();
+        load_once(&LEAD, || std::env::var(PREPARE_LEAD_ENV).ok())
+    }
+
+    pub fn percentage(self) -> f64 {
+        f64::from(self.0)
+    }
+}
+
+fn load_once(
+    cell: &std::sync::OnceLock<PrepareLead>,
+    read: impl FnOnce() -> Option<String>,
+) -> PrepareLead {
+    *cell.get_or_init(|| read().map_or(PrepareLead::DEFAULT, |value| PrepareLead::parse(&value)))
+}
+
 #[derive(Debug, Clone)]
 pub struct BoundaryContext {
     /// The field limits the main model context to this token count.
@@ -141,6 +176,8 @@ pub struct BoundaryContext {
     pub trigger_budget: Option<f64>,
     /// True when folding is the only reclaim path and the live tail is forwarded verbatim.
     pub fold_is_only_reclaim: bool,
+    /// Only the proactive tier reads it; force, tail-size, and commit-cluster tiers derive from the execute threshold alone.
+    pub prepare_lead: PrepareLead,
 }
 
 impl Default for BoundaryContext {
@@ -156,6 +193,7 @@ impl Default for BoundaryContext {
             emergency_tail_scale: None,
             trigger_budget: None,
             fold_is_only_reclaim: false,
+            prepare_lead: PrepareLead::DEFAULT,
         }
     }
 }
@@ -836,8 +874,10 @@ fn check_history_segment_trigger_with_index(
         return fire_with_progress(TriggerReason::TailSize, &boundary, progress);
     }
 
-    let proactive_trigger_percentage =
-        get_proactive_history_segment_trigger_percentage(ctx.boundary.execute_threshold_percentage);
+    let proactive_trigger_percentage = get_proactive_history_segment_trigger_percentage(
+        ctx.boundary.execute_threshold_percentage,
+        ctx.boundary.prepare_lead,
+    );
     if ctx.boundary.usage_percentage < proactive_trigger_percentage {
         return no_fire_with_progress(progress);
     }
@@ -906,10 +946,12 @@ fn clamp_percentage(value: f64) -> f64 {
     value.clamp(0.0, 100.0)
 }
 
+/// `max(execute - lead, 1)`: preparation never starts at zero usage, whatever the lead.
 pub(crate) fn get_proactive_history_segment_trigger_percentage(
     execute_threshold_percentage: f64,
+    lead: PrepareLead,
 ) -> f64 {
-    (execute_threshold_percentage - PROACTIVE_TRIGGER_OFFSET_PERCENTAGE).max(0.0)
+    (execute_threshold_percentage - lead.percentage()).max(1.0)
 }
 
 fn derive_min_force_eligible_tokens(scaled_n: f64) -> f64 {
@@ -1953,6 +1995,7 @@ mod tests {
             emergency_tail_scale: json.emergency_tail_scale,
             trigger_budget: json.trigger_budget,
             fold_is_only_reclaim: false,
+            prepare_lead: PrepareLead::DEFAULT,
         }
     }
 
@@ -2258,6 +2301,103 @@ mod tests {
             emergency_tail_scale: None,
             trigger_budget: None,
             fold_is_only_reclaim: false,
+            prepare_lead: PrepareLead::DEFAULT,
+        }
+    }
+
+    #[test]
+    fn the_lead_moves_only_the_proactive_percentage_and_floors_it_at_one() {
+        let proactive = |execute, lead| {
+            get_proactive_history_segment_trigger_percentage(execute, PrepareLead::parse(lead))
+        };
+        assert_eq!(PrepareLead::DEFAULT, PrepareLead::parse("2"));
+        assert_eq!(proactive(65.0, "2"), 63.0);
+        assert_eq!(proactive(65.0, "12"), 53.0);
+        assert_eq!(proactive(20.0, "20"), 1.0);
+        // The default reproduces the offset for every threshold at or above 3; below it the floor is 1, not 0.
+        for execute in 3..=90 {
+            assert_eq!(proactive(f64::from(execute), "2"), f64::from(execute) - 2.0);
+        }
+        assert_eq!(proactive(2.0, "2"), 1.0);
+        assert_eq!(proactive(1.0, "2"), 1.0);
+    }
+
+    #[test]
+    fn the_lead_override_clamps_and_is_read_once_per_process() {
+        for (text, lead) in [
+            ("25", 20),
+            ("-3", 0),
+            ("abc", 2),
+            ("0", 0),
+            (" 7 ", 7),
+            ("", 2),
+        ] {
+            assert_eq!(PrepareLead::parse(text), PrepareLead(lead), "{text:?}");
+        }
+        let cell = std::sync::OnceLock::new();
+        assert_eq!(load_once(&cell, || Some("12".to_string())), PrepareLead(12));
+        assert_eq!(
+            load_once(&cell, || unreachable!("the override is read once")),
+            PrepareLead(12)
+        );
+        assert_eq!(
+            load_once(&std::sync::OnceLock::new(), || None),
+            PrepareLead::DEFAULT
+        );
+    }
+
+    #[test]
+    fn a_wider_lead_fires_the_proactive_tier_at_lower_usage() {
+        // An eligible head past the meaningful floor and under the tail-size bar, so only the proactive tier can fire.
+        let tail = (0..=100)
+            .map(|ord| {
+                let role = if ord % 2 == 0 {
+                    Role::User
+                } else {
+                    Role::Assistant
+                };
+                text_msg(ord, role, &"proactive preparation content ".repeat(60))
+            })
+            .collect::<Vec<_>>();
+        let decide = |usage: f64, lead: &str| {
+            let mut trigger = TriggerContext::default();
+            trigger.boundary.context_limit = 200_000.0;
+            trigger.boundary.execute_threshold_percentage = 65.0;
+            trigger.boundary.usage_percentage = usage;
+            trigger.boundary.usage_input_tokens = usage * 2_000.0;
+            trigger.boundary.prepare_lead = PrepareLead::parse(lead);
+            check_history_segment_trigger(&tail, &trigger).reason
+        };
+        assert_eq!(decide(55.0, "2"), None);
+        assert_eq!(decide(55.0, "12"), Some(TriggerReason::ProjectedHeadroom));
+        assert_eq!(decide(52.0, "12"), None);
+        assert_eq!(decide(63.0, "2"), Some(TriggerReason::ProjectedHeadroom));
+        assert_eq!(decide(62.0, "2"), None);
+    }
+
+    #[test]
+    fn force_tail_size_and_commit_cluster_tiers_ignore_the_lead() {
+        let tail = (0..=5)
+            .map(|ord| text_msg(ord, Role::Assistant, &"lead neutral content ".repeat(4_000)))
+            .collect::<Vec<_>>();
+        for usage in [30.0, 49.0, 81.0, 96.0] {
+            let decide = |lead: &str| {
+                let mut trigger = TriggerContext::default();
+                trigger.boundary.context_limit = 20_000.0;
+                trigger.boundary.execute_threshold_percentage = 50.0;
+                trigger.boundary.usage_percentage = usage;
+                trigger.boundary.prepare_lead = PrepareLead::parse(lead);
+                let decision = check_history_segment_trigger(&tail, &trigger);
+                (
+                    decision.fire,
+                    decision.reason,
+                    decision.consume_through_ordinal,
+                )
+            };
+            let default = decide("2");
+            assert_ne!(default.1, Some(TriggerReason::ProjectedHeadroom), "{usage}");
+            assert_eq!(decide("12"), default, "usage {usage}");
+            assert_eq!(decide("20"), default, "usage {usage}");
         }
     }
 

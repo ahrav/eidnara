@@ -5722,10 +5722,7 @@ impl HandlerCore {
                     &store,
                     parsed,
                     &loaded,
-                    parsed.execute_threshold_or(
-                        self.effective_config(&binding.project_root)
-                            .execute_threshold_percentage,
-                    ),
+                    scheduler_execute_threshold(parsed, &binding.config),
                     now,
                     reason,
                 )
@@ -5801,7 +5798,7 @@ impl HandlerCore {
             Ok(_) | Err(_) => None,
         };
         let (context_limit, input_tokens, usage_percentage) =
-            usage_numbers(parsed.usage.as_ref(), parsed.geometry.as_ref());
+            scheduler_usage_numbers(parsed, loaded.meta.last_usage.as_ref());
         let serializer_profile = SerializerProfile::parse(&parsed.serializer_profile)
             .expect("serializer_profile validated upstream");
         let fold_is_only_reclaim = !tail_reclaim(serializer_profile);
@@ -5815,8 +5812,7 @@ impl HandlerCore {
             input_tokens,
             context_limit,
         );
-        let execute_threshold_percentage =
-            parsed.execute_threshold_or(cfg.execute_threshold_percentage);
+        let execute_threshold_percentage = scheduler_execute_threshold(parsed, &binding.config);
         let trigger_eval_started_at = Instant::now();
         let trigger = {
             let mut formatted_token_estimator =
@@ -5835,6 +5831,7 @@ impl HandlerCore {
                         emergency_tail_scale: None,
                         trigger_budget: None,
                         fold_is_only_reclaim,
+                        prepare_lead: boundary::PrepareLead::configured(),
                     },
                     projected_post_drop_percentage,
                     history_segment_in_progress: loaded.meta.history_summarizer.state
@@ -18102,6 +18099,28 @@ fn project_slug(path: &Path) -> String {
         .to_string()
 }
 
+/// The pressure the scheduler reads for this pass: the request's usage, or the persisted fallback when the request carries none, through `usage_numbers`' limit ladder.
+fn scheduler_usage_numbers(
+    parsed: &TransformRequest,
+    persisted: Option<&memory_store::ModuleUsage>,
+) -> (f64, f64, f64) {
+    let usage = transform::effective_usage(parsed.usage.as_ref(), persisted);
+    usage_numbers(Some(&usage), parsed.geometry.as_ref())
+}
+
+/// The execute threshold the scheduler applies: the request override, else the route's bound config, resolved and capped as the scheduler resolves it.
+fn scheduler_execute_threshold(parsed: &TransformRequest, bound: &DaemonConfig) -> f64 {
+    scheduler::resolve_execute_threshold(
+        &scheduler::ExecuteThresholdConfig::Percentage(
+            parsed.execute_threshold_or(bound.execute_threshold_percentage),
+        ),
+        None,
+        scheduler::DEFAULT_EXECUTE_THRESHOLD_PERCENTAGE,
+        None,
+        None,
+    )
+}
+
 /// Records a pass that reached the proactive percentage while no run could start, with `reason`; the caller writes it only while none is pending, and the next pressure-path fire moves it into its timeline entry. Returns whether it wrote. A lost CAS race drops the write, as `record_no_fire` does.
 fn record_blocked_eligibility(
     store: &MemoryStore,
@@ -18111,9 +18130,12 @@ fn record_blocked_eligibility(
     now: i64,
     reason: &str,
 ) -> bool {
-    let (_, _, usage_percentage) = usage_numbers(parsed.usage.as_ref(), parsed.geometry.as_ref());
+    let (_, _, usage_percentage) = scheduler_usage_numbers(parsed, loaded.meta.last_usage.as_ref());
     if usage_percentage
-        < boundary::get_proactive_history_segment_trigger_percentage(execute_threshold_percentage)
+        < boundary::get_proactive_history_segment_trigger_percentage(
+            execute_threshold_percentage,
+            boundary::PrepareLead::configured(),
+        )
     {
         return false;
     }
@@ -18858,6 +18880,74 @@ mod tests {
     }
 
     #[test]
+    fn the_trigger_reads_the_schedulers_usage_fallback_and_threshold() {
+        let parsed = |body: Value| serde_json::from_value::<TransformRequest>(body).unwrap();
+        let base =
+            json!({"kind": "transform", "session_id": "s", "render_config": "c", "messages": []});
+        let usage = |input: u64, limit: u64| ModuleUsage {
+            current_total_input_tokens: input,
+            context_limit_tokens: limit,
+            ..ModuleUsage::default()
+        };
+        let persisted = usage(140_000, 200_000);
+        // No request usage: the persisted 70% reaches the proactive tier.
+        let (_, _, pct) = scheduler_usage_numbers(&parsed(base.clone()), Some(&persisted));
+        assert!((pct - 70.0).abs() < 1e-9, "{pct}");
+        // Request usage wins over persisted; an all-zero request falls back.
+        let mut with_usage = base.clone();
+        with_usage["usage"] =
+            json!({"current_total_input_tokens": 80_000, "context_limit_tokens": 200_000});
+        let (_, _, pct) = scheduler_usage_numbers(&parsed(with_usage), Some(&persisted));
+        assert!((pct - 40.0).abs() < 1e-9, "{pct}");
+        let mut zero = base.clone();
+        zero["usage"] = json!({"current_total_input_tokens": 0, "context_limit_tokens": 0});
+        let (_, _, pct) = scheduler_usage_numbers(&parsed(zero), Some(&persisted));
+        assert!((pct - 70.0).abs() < 1e-9, "{pct}");
+        // An implausible persisted limit takes the same ladder as a request's.
+        let tiny = usage(50_000, 500);
+        assert_eq!(
+            scheduler_usage_numbers(&parsed(base.clone()), Some(&tiny)),
+            usage_numbers(Some(&tiny), None)
+        );
+        assert_eq!(
+            scheduler_usage_numbers(&parsed(base.clone()), None),
+            usage_numbers(None, None)
+        );
+
+        // Threshold: the request override, else the bound config, resolved and capped as the scheduler resolves it.
+        let mut bound = default_test_config();
+        bound.execute_threshold_percentage = 70.0;
+        assert_eq!(
+            scheduler_execute_threshold(&parsed(base.clone()), &bound),
+            70.0
+        );
+        let mut overridden = base.clone();
+        overridden["effective_execute_threshold"] = json!(95.0);
+        assert_eq!(
+            scheduler_execute_threshold(&parsed(overridden), &bound),
+            90.0
+        );
+        bound.execute_threshold_percentage = 97.0;
+        assert_eq!(
+            scheduler_execute_threshold(&parsed(base.clone()), &bound),
+            90.0
+        );
+        for threshold in [55.0, 65.0, 90.0, 97.0] {
+            bound.execute_threshold_percentage = threshold;
+            assert_eq!(
+                scheduler_execute_threshold(&parsed(base.clone()), &bound),
+                scheduler::resolve_execute_threshold(
+                    &scheduler::ExecuteThresholdConfig::Percentage(threshold),
+                    None,
+                    scheduler::DEFAULT_EXECUTE_THRESHOLD_PERCENTAGE,
+                    None,
+                    None,
+                )
+            );
+        }
+    }
+
+    #[test]
     fn usage_numbers_rejects_implausible_context_limit() {
         let tiny = ModuleUsage {
             current_total_input_tokens: 50_000,
@@ -19470,6 +19560,7 @@ mod tests {
                         emergency_tail_scale: None,
                         trigger_budget: Some(4_000.0),
                         fold_is_only_reclaim: false,
+                        prepare_lead: boundary::PrepareLead::DEFAULT,
                     },
                     projected_post_drop_percentage: optimized_projection,
                     history_segment_in_progress: false,
@@ -19543,6 +19634,7 @@ mod tests {
                 emergency_tail_scale: None,
                 trigger_budget: None,
                 fold_is_only_reclaim: false,
+                prepare_lead: boundary::PrepareLead::DEFAULT,
             },
             projected_post_drop_percentage: Some(50.0),
             history_segment_in_progress: false,
@@ -19741,6 +19833,7 @@ mod tests {
             emergency_tail_scale: None,
             trigger_budget: Some(10_000.0),
             fold_is_only_reclaim: false,
+            prepare_lead: boundary::PrepareLead::DEFAULT,
         };
         let mut context = TriggerContext {
             boundary,
@@ -41082,6 +41175,30 @@ mod tests {
         producer.block_output.store(false, Ordering::SeqCst);
         producer.notify.notify_waiters();
         wait_for_idle(&store).await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_pass_without_usage_triggers_on_the_persisted_pressure_the_scheduler_reads() {
+        let producer = Arc::new(ProducerState::default());
+        let mut config = default_test_config();
+        config.model_chain.clear();
+        let (handler, _store, _dir, _project) = handler_with_store(Arc::clone(&producer), config);
+        let messages = big_messages();
+        let measured =
+            call_transform_with_usage(&handler, messages.clone(), 140_000, 200_000).await;
+        let mut without_usage = request(messages);
+        without_usage.as_object_mut().unwrap().remove("usage");
+        let fallback = call_transform_request(&handler, without_usage).await;
+        // The protected tail follows the pressure, so the persisted 70% sizes it exactly as the request's 70% did.
+        assert_eq!(
+            fallback["history_summarizer"]["progress"],
+            measured["history_summarizer"]["progress"]
+        );
+        assert_eq!(
+            fallback["history_summarizer"]["reason"],
+            measured["history_summarizer"]["reason"]
+        );
+        assert!(measured["history_summarizer"]["progress"].is_object());
     }
 
     #[tokio::test(flavor = "current_thread")]
