@@ -544,12 +544,18 @@ export function createEidnaraCommandHandler(deps: {
             if (isStatus) {
                 let rustStatus: Record<string, unknown> | undefined;
                 let statusError: string | undefined;
+                const projectRoot = (await deps.resolveProjectRoot?.(sessionId)) ?? process.cwd();
                 try {
-                    rustStatus = await callRust("session.status", {
-                        method: "session.status",
-                        v: 1,
-                        session_id: sessionId,
-                    });
+                    rustStatus = await callRust(
+                        "session.status",
+                        {
+                            method: "session.status",
+                            v: 1,
+                            session_id: sessionId,
+                        },
+                        undefined,
+                        projectRoot,
+                    );
                 } catch (error) {
                     rethrowDeletedCommand(error, input.command);
                     sessionLog(sessionId, "rust session.status failed:", error);
@@ -593,7 +599,7 @@ export function createEidnaraCommandHandler(deps: {
                         );
                     }
                     const timing = formatCompactionTimingLines(
-                        summarizeCompactionTiming(sessionId, rustStatus),
+                        summarizeCompactionTiming(sessionId, projectRoot, rustStatus),
                     );
                     if (timing.length > 0) lines.push("", ...timing);
                 } else {

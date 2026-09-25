@@ -655,7 +655,7 @@ export function buildStatusDetail(
         loggerDiagnostics: getLoggerDiagnostics(),
     };
     const compactionTiming = formatCompactionTimingLines(
-        summarizeCompactionTiming(sessionId, moduleStatus),
+        summarizeCompactionTiming(sessionId, directory, moduleStatus),
     );
     if (compactionTiming.length > 0) detail.compactionTiming = compactionTiming;
 

@@ -25,6 +25,8 @@ export interface CompactionFiring {
     fireToPublishMs?: number;
     /** Publish to activation: time the summary waited unrendered. */
     publishToActivationMs?: number;
+    /** The daemon's `activated_by_first_fold`: the activation delay does not measure scheduling. */
+    firstFold?: true;
 }
 
 export interface CompactionCounters {
@@ -32,7 +34,7 @@ export interface CompactionCounters {
     exact: { firings: number; published: number; supersededBeforeActivation: number };
     /** Written after the failure; a crash in between loses one. */
     bestEffort: { validationRejected: number; invalidated: number; connectFailed: number };
-    /** A count fell since the previous read of this session by either status reader in this process: the session was reset, so no delta across this read is meaningful. */
+    /** A count fell since the previous read of this session under this project root by either status reader in this process: the session was reset, so no delta across this read is meaningful. */
     resetSincePreviousRead: boolean;
 }
 
@@ -45,7 +47,7 @@ export interface CacheReadShare {
 export interface CompactionTiming {
     firings: CompactionFiring[];
     counters?: CompactionCounters;
-    /** Publish-to-activation over activated firings, excluding the session's first firing, which folds immediately. */
+    /** First folds are excluded from publish-to-activation. */
     publishToActivation: { maxMs?: number; n: number; orderedMs: number[]; censored: number };
     /** Plugin requests by the served `ACTION reason`; an Emergency95 rerun counts with its request. */
     passesByReason: Record<string, number>;
@@ -54,6 +56,7 @@ export interface CompactionTiming {
 
 type Json = Record<string, unknown>;
 
+/** Keyed like the status poll caches: the daemon keys session state by `(session, project_root)`, so one id under two roots holds two independent counter sets. */
 const previousCounters = new BoundedSessionMap<number[]>(64);
 
 function record(value: unknown): Json | undefined {
@@ -104,10 +107,11 @@ function readFiring(entry: Json): CompactionFiring {
         executionDelayMs: duration(entry.eligible_at_ms, entry.fired_at_ms, clock),
         fireToPublishMs: duration(entry.fired_at_ms, entry.published_at_ms, clock),
         publishToActivationMs: duration(entry.published_at_ms, entry.activated_at_ms, clock),
+        ...(entry.activated_by_first_fold === true ? { firstFold: true as const } : {}),
     };
 }
 
-function readCounters(sessionId: string, value: Json): CompactionCounters {
+function readCounters(statusKey: string, value: Json): CompactionCounters {
     const exact = {
         firings: count(value, "firings"),
         published: count(value, "published"),
@@ -119,8 +123,8 @@ function readCounters(sessionId: string, value: Json): CompactionCounters {
         connectFailed: count(value, "connect_failed"),
     };
     const current = [...Object.values(exact), ...Object.values(bestEffort)];
-    const previous = previousCounters.get(sessionId);
-    previousCounters.set(sessionId, current);
+    const previous = previousCounters.get(statusKey);
+    previousCounters.set(statusKey, current);
     return {
         exact,
         bestEffort,
@@ -131,7 +135,7 @@ function readCounters(sessionId: string, value: Json): CompactionCounters {
 }
 
 interface RingEntry {
-    decision: string;
+    clock?: number;
     action?: string;
     reason?: string;
     cache?: { read: number; write: number };
@@ -142,13 +146,13 @@ function readRing(value: unknown): RingEntry[] {
     return value.flatMap((raw) => {
         const entry = record(raw);
         if (!entry) return [];
+        const clock = stamp(entry.timestamp_ms);
         const cache = record(entry.prev_response_cache);
         const read = cache && stamp(cache.cache_read_tokens);
         const write = cache && stamp(cache.cache_write_tokens);
         return [
             {
-                decision:
-                    typeof entry.scheduler_decision === "string" ? entry.scheduler_decision : "",
+                ...(clock !== undefined ? { clock } : {}),
                 ...(typeof entry.action === "string" ? { action: entry.action } : {}),
                 ...(typeof entry.materialize_reason === "string"
                     ? { reason: entry.materialize_reason }
@@ -159,18 +163,13 @@ function readRing(value: unknown): RingEntry[] {
     });
 }
 
-/** One plugin request per group: an Emergency95 pass reruns inside the same request, appending an entry with the same cache sample. */
+/** Adjacent entries with one pass clock are one request: every rerun repeats the request's `timestamp_ms`. The ring carries no other request identity, so two requests of one session stamped in the same wall millisecond read as one. */
 function groupByRequest(ring: RingEntry[]): RingEntry[][] {
     const requests: RingEntry[][] = [];
     for (const entry of ring) {
         const last = requests.at(-1);
-        const previous = last?.at(-1);
-        const rerun =
-            previous?.decision === "Emergency95" &&
-            previous.cache !== undefined &&
-            entry.cache?.read === previous.cache.read &&
-            entry.cache?.write === previous.cache.write;
-        if (last && rerun) last.push(entry);
+        const clock = last?.[0]?.clock;
+        if (last && clock !== undefined && entry.clock === clock) last.push(entry);
         else requests.push([entry]);
     }
     return requests;
@@ -201,6 +200,7 @@ function cacheReadShareAfter(ring: RingEntry[]): Record<string, CacheReadShare> 
 /** `undefined` when the payload carries no summarizer timeline, so an older daemon's status renders unchanged. */
 export function summarizeCompactionTiming(
     sessionId: string,
+    projectRoot: string,
     status: unknown,
 ): CompactionTiming | undefined {
     const summarizer = record(record(status)?.history_summarizer);
@@ -211,16 +211,14 @@ export function summarizeCompactionTiming(
         const entry = record(raw);
         return entry ? [readFiring(entry)] : [];
     });
-    const counters = rawCounters ? readCounters(sessionId, rawCounters) : undefined;
-    // The session's first publication folds immediately; it is excluded only while the window still holds it.
-    const published = firings.filter((firing) =>
-        ["activated", "pending", "superseded"].includes(firing.state),
+    const counters = rawCounters
+        ? readCounters(`${sessionId}\u001f${projectRoot}`, rawCounters)
+        : undefined;
+    // With no boundary, the next pass folds every pending publication as a first fold.
+    const foldsNext = record(status)?.boundary_present === false;
+    const measured = firings.filter(
+        (firing) => !firing.firstFold && !(foldsNext && firing.state === "pending"),
     );
-    const first =
-        counters !== undefined && counters.exact.published === published.length
-            ? published[0]
-            : undefined;
-    const measured = firings.filter((firing) => firing !== first);
     const orderedMs = measured
         .flatMap((firing) =>
             firing.publishToActivationMs === undefined ? [] : [firing.publishToActivationMs],
