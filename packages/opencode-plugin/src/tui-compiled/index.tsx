@@ -890,7 +890,7 @@ const StatusDialog = props => {
       })()];
     })());
     _$insert(_el$4, (() => {
-      var _c$7 = _$memo(() => !!(!compactionOff() && (s().compactionTiming?.length ?? 0) > 0));
+      var _c$7 = _$memo(() => (s().compactionTiming?.length ?? 0) > 0);
       return () => _c$7() && (() => {
         var _el$76 = _$createElement("box"),
           _el$77 = _$createElement("text"),

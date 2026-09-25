@@ -587,15 +587,15 @@ export function createEidnaraCommandHandler(deps: {
                 }
                 if (rustStatus) {
                     lines.push("", formatRustStatusText(rustStatus));
-                    const timing = formatCompactionTimingLines(
-                        summarizeCompactionTiming(sessionId, rustStatus),
-                    );
-                    if (timing.length > 0) lines.push("", ...timing);
                     if (windowGeometry) {
                         lines.push(
                             `- ${formatWindowDerivationLine(statusInputTokens(rustStatus), windowGeometry)}`,
                         );
                     }
+                    const timing = formatCompactionTimingLines(
+                        summarizeCompactionTiming(sessionId, rustStatus),
+                    );
+                    if (timing.length > 0) lines.push("", ...timing);
                 } else {
                     lines.push(
                         "",

@@ -371,6 +371,8 @@ describe("createEidnaraCommandHandler", () => {
             expect(text).toContain(
                 "- Best effort: validation rejected 1, invalidated 0, connect failed 0",
             );
+            // The timing block follows every daemon status line.
+            expect(text.indexOf("- Daemon:")).toBeLessThan(text.indexOf("### Compaction Timing"));
         });
 
         it("omits the pass and summary lines when the daemon does not supply them", async () => {

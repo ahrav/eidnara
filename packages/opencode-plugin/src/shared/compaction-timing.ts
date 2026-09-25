@@ -3,14 +3,21 @@
  */
 
 import { BoundedSessionMap } from "./bounded-session-map";
+import { isRecord } from "./record-type-guard";
 
 const TIMELINE_CLOCK = "daemon_wall_ms";
 
 export interface CompactionFiring {
-    firingSeq: number;
+    firingSeq?: number;
     source: string;
-    /** `activated` once a pass rendered it, `pending` while published and unrendered, otherwise the outcome kind. */
-    state: "activated" | "pending" | "abandoned" | "in_flight" | "reattach_connect_failed";
+    /** `activated` once a pass rendered it, `pending` while published and unrendered, `superseded` when a revert removed its unrendered segment or it published none, otherwise the outcome kind. */
+    state:
+        | "activated"
+        | "pending"
+        | "superseded"
+        | "abandoned"
+        | "in_flight"
+        | "reattach_connect_failed";
     abandonClass?: string;
     /** Eligibility to fire: time a run could not start. */
     executionDelayMs?: number;
@@ -25,7 +32,7 @@ export interface CompactionCounters {
     exact: { firings: number; published: number; supersededBeforeActivation: number };
     /** Written after the failure; a crash in between loses one. */
     bestEffort: { validationRejected: number; invalidated: number; connectFailed: number };
-    /** A count fell since the previous read: the session was reset, so no delta across this read is meaningful. */
+    /** A count fell since the previous read of this session by either status reader in this process: the session was reset, so no delta across this read is meaningful. */
     resetSincePreviousRead: boolean;
 }
 
@@ -40,19 +47,17 @@ export interface CompactionTiming {
     counters?: CompactionCounters;
     /** Publish-to-activation over activated firings, excluding the session's first firing, which folds immediately. */
     publishToActivation: { maxMs?: number; n: number; orderedMs: number[]; censored: number };
-    /** Pass counts by `ACTION reason` over the ring. */
+    /** Plugin requests by the served `ACTION reason`; an Emergency95 rerun counts with its request. */
     passesByReason: Record<string, number>;
     cacheReadShareAfter: Record<string, CacheReadShare>;
 }
 
 type Json = Record<string, unknown>;
 
-const previousCounters = new BoundedSessionMap<Record<string, number>>(64);
+const previousCounters = new BoundedSessionMap<number[]>(64);
 
 function record(value: unknown): Json | undefined {
-    return value !== null && typeof value === "object" && !Array.isArray(value)
-        ? (value as Json)
-        : undefined;
+    return isRecord(value) ? value : undefined;
 }
 
 function stamp(value: unknown): number | undefined {
@@ -60,8 +65,7 @@ function stamp(value: unknown): number | undefined {
 }
 
 function count(value: Json, key: string): number {
-    const found = value[key];
-    return typeof found === "number" && Number.isFinite(found) ? found : 0;
+    return stamp(value[key]) ?? 0;
 }
 
 /** Unknown unless both stamps exist, come from the timeline clock, and run forward. */
@@ -74,21 +78,26 @@ function duration(from: unknown, to: unknown, clock: unknown): number | undefine
     return end - start;
 }
 
+function firingState(entry: Json, outcome: Json | undefined): CompactionFiring["state"] {
+    switch (outcome?.kind) {
+        case "published":
+            if (stamp(entry.activated_at_ms) !== undefined) return "activated";
+            return stamp(outcome.sequence) === undefined ? "superseded" : "pending";
+        case "abandoned":
+            return "abandoned";
+        case "reattach_connect_failed":
+            return "reattach_connect_failed";
+        default:
+            return "in_flight";
+    }
+}
+
 function readFiring(entry: Json): CompactionFiring {
     const outcome = record(entry.outcome);
     const clock = entry.clock;
-    const state: CompactionFiring["state"] =
-        outcome?.kind === "published"
-            ? stamp(entry.activated_at_ms) === undefined
-                ? "pending"
-                : "activated"
-            : outcome?.kind === "abandoned"
-              ? "abandoned"
-              : outcome?.kind === "reattach_connect_failed"
-                ? "reattach_connect_failed"
-                : "in_flight";
+    const state = firingState(entry, outcome);
     return {
-        firingSeq: count(entry, "firing_seq"),
+        ...(stamp(entry.firing_seq) !== undefined ? { firingSeq: stamp(entry.firing_seq) } : {}),
         source: typeof entry.source === "string" ? entry.source : "unknown",
         state,
         ...(typeof outcome?.class === "string" ? { abandonClass: outcome.class } : {}),
@@ -99,33 +108,25 @@ function readFiring(entry: Json): CompactionFiring {
 }
 
 function readCounters(sessionId: string, value: Json): CompactionCounters {
-    const current: Record<string, number> = {};
-    for (const key of [
-        "firings",
-        "published",
-        "superseded_before_activation",
-        "validation_rejected",
-        "invalidated",
-        "connect_failed",
-    ]) {
-        current[key] = count(value, key);
-    }
+    const exact = {
+        firings: count(value, "firings"),
+        published: count(value, "published"),
+        supersededBeforeActivation: count(value, "superseded_before_activation"),
+    };
+    const bestEffort = {
+        validationRejected: count(value, "validation_rejected"),
+        invalidated: count(value, "invalidated"),
+        connectFailed: count(value, "connect_failed"),
+    };
+    const current = [...Object.values(exact), ...Object.values(bestEffort)];
     const previous = previousCounters.get(sessionId);
     previousCounters.set(sessionId, current);
     return {
-        exact: {
-            firings: current.firings ?? 0,
-            published: current.published ?? 0,
-            supersededBeforeActivation: current.superseded_before_activation ?? 0,
-        },
-        bestEffort: {
-            validationRejected: current.validation_rejected ?? 0,
-            invalidated: current.invalidated ?? 0,
-            connectFailed: current.connect_failed ?? 0,
-        },
+        exact,
+        bestEffort,
         resetSincePreviousRead:
             previous !== undefined &&
-            Object.entries(current).some(([key, value]) => value < (previous[key] ?? 0)),
+            current.some((value, index) => value < (previous[index] ?? 0)),
     };
 }
 
@@ -206,15 +207,14 @@ export function summarizeCompactionTiming(
     const rawFirings = summarizer?.recent_firings;
     const rawCounters = record(summarizer?.counters);
     if (!Array.isArray(rawFirings) && !rawCounters) return undefined;
-    const entries = (Array.isArray(rawFirings) ? rawFirings : []).flatMap((raw) => {
+    const firings = (Array.isArray(rawFirings) ? rawFirings : []).flatMap((raw) => {
         const entry = record(raw);
-        return entry ? [entry] : [];
+        return entry ? [readFiring(entry)] : [];
     });
-    const firings = entries.map(readFiring);
     const counters = rawCounters ? readCounters(sessionId, rawCounters) : undefined;
     // The session's first publication folds immediately; it is excluded only while the window still holds it.
-    const published = firings.filter(
-        (firing) => firing.state === "activated" || firing.state === "pending",
+    const published = firings.filter((firing) =>
+        ["activated", "pending", "superseded"].includes(firing.state),
     );
     const first =
         counters !== undefined && counters.exact.published === published.length
@@ -228,9 +228,10 @@ export function summarizeCompactionTiming(
         .sort((a, b) => a - b);
     const ring = readRing(record(record(status)?.pass_trace)?.scheduler_history);
     const passesByReason: Record<string, number> = {};
-    for (const entry of ring) {
-        if (!entry.action) continue;
-        const key = `${entry.action} ${entry.reason ?? "-"}`;
+    for (const request of groupByRequest(ring)) {
+        const served = request.at(-1);
+        if (!served?.action) continue;
+        const key = `${served.action} ${served.reason ?? "-"}`;
         passesByReason[key] = (passesByReason[key] ?? 0) + 1;
     }
     return {
@@ -262,9 +263,11 @@ export function formatCompactionTimingLines(timing: CompactionTiming | undefined
                 ? `abandoned (${last.abandonClass})`
                 : last.state === "pending"
                   ? "published, not yet activated"
-                  : last.state.replaceAll("_", " ");
+                  : last.state === "superseded"
+                    ? "published, superseded before activation"
+                    : last.state.replaceAll("_", " ");
         lines.push(
-            `- Last summary #${last.firingSeq} (${last.source.replaceAll("_", " ")}): ${state}`,
+            `- Last summary #${last.firingSeq ?? "unknown"} (${last.source.replaceAll("_", " ")}): ${state}`,
             `- Waited to start ${ms(last.executionDelayMs)}, ran ${ms(last.fireToPublishMs)}, sat unactivated ${last.state === "pending" ? "still" : ms(last.publishToActivationMs)}`,
         );
     }
@@ -279,8 +282,9 @@ export function formatCompactionTimingLines(timing: CompactionTiming | undefined
         const { exact, bestEffort } = counters;
         lines.push(
             `- Firings ${exact.firings}, published ${exact.published}, superseded before activation ${exact.supersededBeforeActivation}`,
-            `- Best effort: validation rejected ${bestEffort.validationRejected}, invalidated ${bestEffort.invalidated}, connect failed ${bestEffort.connectFailed}${counters.resetSincePreviousRead ? " (counts reset since the last read)" : ""}`,
+            `- Best effort: validation rejected ${bestEffort.validationRejected}, invalidated ${bestEffort.invalidated}, connect failed ${bestEffort.connectFailed}`,
         );
+        if (counters.resetSincePreviousRead) lines.push("- Counts reset since the last read");
     }
     const reasons = Object.entries(timing.passesByReason).sort(([a], [b]) => a.localeCompare(b));
     if (reasons.length > 0) {

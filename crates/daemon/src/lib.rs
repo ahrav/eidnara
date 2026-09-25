@@ -3349,7 +3349,7 @@ struct HistorySummarizerTriggerTimings {
     cache_store_ms: f64,
     token_cache_hits: usize,
     tokenized_blocks: usize,
-    /// Awaiting a live run and running one inline on an Emergency95 pass; it survives the rerun that replaces the pass's other timings.
+    /// Awaiting a live run and running one inline on an Emergency95 pass, summed across its reruns.
     emergency_wait_ms: f64,
 }
 

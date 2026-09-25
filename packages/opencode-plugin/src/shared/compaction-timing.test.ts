@@ -102,6 +102,31 @@ describe("summarizeCompactionTiming", () => {
         expect(lines).toContain("- Publish to activation: max 5.0s over 1 (5.0s), 1 pending");
     });
 
+    it("reads a publication a revert removed as superseded, never pending or censored", () => {
+        const timing = summarizeCompactionTiming("superseded", {
+            history_summarizer: {
+                recent_firings: [
+                    firing(
+                        1,
+                        { fired_at_ms: 0, published_at_ms: 5, activated_at_ms: 5 },
+                        published(1),
+                    ),
+                    firing(
+                        2,
+                        { fired_at_ms: 10, published_at_ms: 20 },
+                        { kind: "published", sequence: null },
+                    ),
+                ],
+                counters: counters({ firings: 2, published: 2, superseded_before_activation: 1 }),
+            },
+        });
+        expect(timing?.firings[1]?.state).toBe("superseded");
+        expect(timing?.publishToActivation.censored).toBe(0);
+        expect(formatCompactionTimingLines(timing)).toContain(
+            "- Last summary #2 (pressure path): published, superseded before activation",
+        );
+    });
+
     it("renders a missing, inverted, or differently clocked stamp as unknown", () => {
         const timing = summarizeCompactionTiming("unknown", {
             history_summarizer: {
@@ -151,9 +176,7 @@ describe("summarizeCompactionTiming", () => {
         });
         const reset = read({ firings: 1 });
         expect(reset?.counters?.resetSincePreviousRead).toBe(true);
-        expect(formatCompactionTimingLines(reset)).toContain(
-            "- Best effort: validation rejected 0, invalidated 0, connect failed 0 (counts reset since the last read)",
-        );
+        expect(formatCompactionTimingLines(reset)).toContain("- Counts reset since the last read");
     });
 
     it("counts passes by reason and scores each response against the pass before it, once per request", () => {
@@ -173,7 +196,7 @@ describe("summarizeCompactionTiming", () => {
         });
         expect(timing?.passesByReason).toEqual({
             "HARD first_render": 1,
-            "SOFT+ -": 4,
+            "SOFT+ -": 3,
             "SOFT coverage_fold": 1,
         });
         // HARD → write-heavy sample; SOFT+ → read-heavy; the zero sample after SOFT carries no ratio.
