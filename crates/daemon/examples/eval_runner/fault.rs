@@ -36,8 +36,8 @@ use rusqlite::{Connection, OpenFlags};
 use serde_json::json;
 
 use super::aging::{
-    self, ManifestInputs, Plan, Planned, Step, Stores, kernel_file, live, read_only, search_file,
-    suite_c_manifest,
+    self, DriveBounds, ManifestInputs, Plan, Planned, Step, Stores, kernel_file, live, read_only,
+    search_file, suite_c_manifest,
 };
 use super::campaign::{Charges, identity, prepare_publish, publish_file};
 use super::support::embedding_fixtures::{
@@ -2018,6 +2018,34 @@ fn decision_object(n: u64) -> String {
     format!("liveness-decision-{n}")
 }
 
+fn decision_payload(n: u64) -> DecisionPayload {
+    DecisionPayload {
+        summary: format!("Liveness rule {n} holds."),
+        rationale: format!("Decision {n} is fed while the memory store is locked."),
+    }
+}
+
+/// The decision window step `step` commits, if any: one every
+/// `DECISION_PERIOD` steps inside the materialization lane's bound.
+fn decision_at(step: u64, materialization_bound: u64) -> Option<u64> {
+    (step <= materialization_bound && step % DECISION_PERIOD == 1).then_some(step / DECISION_PERIOD)
+}
+
+/// The bounds a liveness root runs under: every unit the plan publishes plus
+/// the two claims the materializer publishes for each decision the window
+/// commits. A catch-up hold admits every reference in its window, retired
+/// claims included, so the plan's own bounds fall short once the claims
+/// carry the total past the fixture floor.
+pub fn liveness_bounds(plan: &Plan, window: u64, materialization_bound: u64) -> DriveBounds {
+    let (mut units, mut bytes) = DriveBounds::demand(&plan.rendering, &plan.steps);
+    for n in (1..=window).filter_map(|step| decision_at(step, materialization_bound)) {
+        let payload = decision_payload(n);
+        units += 2;
+        bytes += payload.summary.len() + payload.rationale.len();
+    }
+    DriveBounds::raised(units, bytes)
+}
+
 fn decide(kernel: &kernel::KernelStore, n: u64) {
     let object_id = decision_object(n);
     let spec = DecisionSpec {
@@ -2029,10 +2057,7 @@ fn decide(kernel: &kernel::KernelStore, n: u64) {
         anchor_id: None,
         evidence_id: None,
         decision_kind: "PROJECT_RULES".to_string(),
-        payload: DecisionPayload {
-            summary: format!("Liveness rule {n} holds."),
-            rationale: format!("Decision {n} is fed while the memory store is locked."),
-        },
+        payload: decision_payload(n),
         source_kind: "assistant".to_string(),
         source_id: object_id.clone(),
         source_revision: DECISION_REVISION,
@@ -2126,8 +2151,7 @@ pub fn feed(
     if let Some(planned) = planned {
         stores.apply_kernel_only(planned);
     }
-    if step <= materialization_bound && step % DECISION_PERIOD == 1 {
-        let n = step / DECISION_PERIOD;
+    if let Some(n) = decision_at(step, materialization_bound) {
         if n > 0 {
             retire_decision(&stores.corpus.kernel, n - 1);
         }
@@ -2147,8 +2171,22 @@ pub fn liveness(
     witness: &mut Witness,
     bounds: &LivenessBounds,
 ) -> Result<LivenessReport, RunError> {
+    let core_lanes = [
+        Lane::CatchUpEpisodes,
+        Lane::EmbeddingPasses,
+        Lane::MaterializationEpisodes,
+    ];
+    let window = core_lanes
+        .iter()
+        .map(|lane| lane.bound(bounds))
+        .max()
+        .unwrap_or(0);
     let root = charges.occupy()?;
-    let mut stores = Stores::open(root.path(), plan);
+    let mut stores = Stores::open_within(
+        root.path(),
+        plan,
+        liveness_bounds(plan, window, bounds.materialization_episodes),
+    );
     let k = plan.checkpoint_step as usize;
     live(&mut stores, &plan.steps[..k]);
     ClaimMaterializer::register(&stores.corpus.kernel, plan.steps[k].now_ms).unwrap();
@@ -2197,28 +2235,23 @@ pub fn liveness(
         max_payload_bytes: (1u64 << 20).try_into().unwrap(),
     };
     let mut fresh = fresh.iter();
-    let mut lanes: BTreeMap<Lane, LaneProgress> = [
-        Lane::CatchUpEpisodes,
-        Lane::EmbeddingPasses,
-        Lane::MaterializationEpisodes,
-    ]
-    .into_iter()
-    .map(|lane| {
-        (
-            lane,
-            LaneProgress {
-                bound: lane.bound(bounds),
-                steps: 0,
-                met_at: None,
-                stalled_at: None,
-                holds_at_bound: false,
-                fresh_commits: 0,
-                blocked: None,
-            },
-        )
-    })
-    .collect();
-    let window = lanes.values().map(|p| p.bound).max().unwrap_or(0);
+    let mut lanes: BTreeMap<Lane, LaneProgress> = core_lanes
+        .into_iter()
+        .map(|lane| {
+            (
+                lane,
+                LaneProgress {
+                    bound: lane.bound(bounds),
+                    steps: 0,
+                    met_at: None,
+                    stalled_at: None,
+                    holds_at_bound: false,
+                    fresh_commits: 0,
+                    blocked: None,
+                },
+            )
+        })
+        .collect();
     for step in 1..=window {
         let fed = feed(
             &mut stores,

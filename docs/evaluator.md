@@ -2642,8 +2642,12 @@ so a predecessor's descriptor published late is not the newest's (each such
 step receipts `claims_materialized`); the lane records the step the predicate
 first held, the first stall after that, and whether it held at the bound, and
 a stalled lane is unmet. A catch-up hold admits evidence references for its
-whole window, retired ones included; the drive's hold bounds, raised to every
-unit its plan publishes (`DriveBounds`), cover it. A CAS ingest fault cannot
+whole window, retired ones included, so the liveness root opens under bounds
+raised to every unit it publishes (`fault::liveness_bounds`): the plan's units
+(`DriveBounds::demand`) plus the two claims the materializer publishes for
+each decision the window commits. The plan's own bounds would fall short from
+36 messages, where the claims carry the total past the fixture floor of 64
+references. A CAS ingest fault cannot
 be the permanent outside-core fault here: its latch refuses the kernel
 ingestion the fresh publishes need, which would put the fault inside the core.
 The reviewer coordinator lane is outside this campaign's core (its scripted

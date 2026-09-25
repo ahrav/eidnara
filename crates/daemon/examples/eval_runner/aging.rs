@@ -244,6 +244,12 @@ pub struct DriveBounds {
 
 impl DriveBounds {
     fn admitting(rendering: &Rendering, steps: &[Planned]) -> Self {
+        let (units, bytes) = Self::demand(rendering, steps);
+        Self::raised(units, bytes)
+    }
+
+    /// The units `steps` publish and their text bytes.
+    pub fn demand(rendering: &Rendering, steps: &[Planned]) -> (usize, usize) {
         let messages: BTreeMap<&EventId, &Value> = rendering
             .messages
             .iter()
@@ -259,6 +265,12 @@ impl DriveBounds {
                 bytes += unit.text.len();
             }
         }
+        (units, bytes)
+    }
+
+    /// The fixture defaults raised to `units` published units of `bytes`
+    /// text bytes.
+    pub fn raised(units: usize, bytes: usize) -> Self {
         let raise = |floor: NonZeroUsize, demand: usize| {
             floor.max(NonZeroUsize::new(demand).unwrap_or(floor))
         };
@@ -352,10 +364,16 @@ pub struct Stores {
 
 impl Stores {
     pub fn open(root: &Path, plan: &Plan) -> Self {
+        Self::open_within(root, plan, plan.bounds)
+    }
+
+    /// `open` under `bounds` rather than the plan's, for a root that publishes
+    /// more units than the plan's steps.
+    pub fn open_within(root: &Path, plan: &Plan, bounds: DriveBounds) -> Self {
         let corpus = Corpus::open(root);
         corpus.seed();
         let memory = MemoryStore::open(&daemon::store_descriptor_in(root)).unwrap();
-        let (projection, consumer) = Self::bootstrap(&corpus, root, &plan.bounds, EPOCH_MS);
+        let (projection, consumer) = Self::bootstrap(&corpus, root, &bounds, EPOCH_MS);
         Self {
             root: root.to_path_buf(),
             corpus,
@@ -363,7 +381,7 @@ impl Stores {
             consumer,
             memory,
             rendering: plan.rendering.clone(),
-            bounds: plan.bounds,
+            bounds,
             chains: BTreeMap::new(),
             dead: BTreeSet::new(),
             applied: 0,
