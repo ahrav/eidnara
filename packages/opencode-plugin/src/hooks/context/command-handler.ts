@@ -4,6 +4,10 @@ import type { ContextResearcherConfig } from "../../config/schema/eidnara";
 import { runContextResearcher } from "../../features/context/context-researcher/agent";
 import type { PluginContext } from "../../plugin/types";
 import { sessionLog } from "../../shared";
+import {
+    formatCompactionTimingLines,
+    summarizeCompactionTiming,
+} from "../../shared/compaction-timing";
 import type { KernelClientResolver } from "../../shared/kernel-client";
 import {
     formatMemoryMarkOutcome,
@@ -583,6 +587,10 @@ export function createEidnaraCommandHandler(deps: {
                 }
                 if (rustStatus) {
                     lines.push("", formatRustStatusText(rustStatus));
+                    const timing = formatCompactionTimingLines(
+                        summarizeCompactionTiming(sessionId, rustStatus),
+                    );
+                    if (timing.length > 0) lines.push("", ...timing);
                     if (windowGeometry) {
                         lines.push(
                             `- ${formatWindowDerivationLine(statusInputTokens(rustStatus), windowGeometry)}`,

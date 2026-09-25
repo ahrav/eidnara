@@ -674,6 +674,20 @@ const StatusDialog = (props: { api: TuiPluginApi; s: StatusDetail }) => {
                 )}
             </box>
 
+            {/* Compaction timing, from the same helper the text status uses */}
+            {!compactionOff() && (s().compactionTiming?.length ?? 0) > 0 && (
+                <box marginTop={1} width="100%" flexDirection="column">
+                    <text fg={t().text}>
+                        <b>Compaction Timing</b>
+                    </text>
+                    {s()
+                        .compactionTiming?.slice(1)
+                        .map((line) => (
+                            <text fg={t().textMuted}>{line.replace(/^- /, "")}</text>
+                        ))}
+                </box>
+            )}
+
             {/* Error (full width, conditional) */}
             {s().lastTransformError && (
                 <box marginTop={1} width="100%">

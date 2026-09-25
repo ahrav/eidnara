@@ -201,6 +201,8 @@ export interface StatusDetail extends SidebarSnapshot {
     toastDurationMs: number;
     /** loggerDiagnostics records runtime logger write failures observed by this plugin process. */
     loggerDiagnostics: LoggerDiagnostics;
+    /** The compaction-timing lines `/eidnara-status` prints, heading first; absent when the daemon reported no summarizer timeline. */
+    compactionTiming?: string[];
 }
 
 export interface RpcNotificationMessage {

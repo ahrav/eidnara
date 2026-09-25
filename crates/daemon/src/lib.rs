@@ -3349,6 +3349,8 @@ struct HistorySummarizerTriggerTimings {
     cache_store_ms: f64,
     token_cache_hits: usize,
     tokenized_blocks: usize,
+    /// Awaiting a live run and running one inline on an Emergency95 pass; it survives the rerun that replaces the pass's other timings.
+    emergency_wait_ms: f64,
 }
 
 struct HistorySummarizerTriggerTimer<'a> {
@@ -7131,6 +7133,9 @@ impl HandlerCore {
             "history_summarizer": {
                 "consecutive_publish_failures": consecutive_publish_failures,
                 "publish_health_degraded": consecutive_publish_failures >= 3,
+                "recent_firings": loaded.meta.history_summarizer.recent_firings,
+                "counters": loaded.meta.history_summarizer.counters,
+                "pending_eligibility": loaded.meta.history_summarizer.pending_eligibility,
             },
             // `last_divergence` distinguishes a fresh bust from stable status reads.
             "pass_trace": pass_trace,
@@ -9098,10 +9103,13 @@ impl HandlerCore {
                 diagnostics,
                 completion,
             } => {
-                if self
+                let waited_at = Instant::now();
+                let completed = self
                     .await_live_history_summarizer_completion(completion)
-                    .await
-                {
+                    .await;
+                pass.trigger_timings.emergency_wait_ms +=
+                    waited_at.elapsed().as_secs_f64() * 1_000.0;
+                if completed {
                     let rerun = match self.run_rerun_unit(entry, &env, pass).await {
                         Ok(rerun) => rerun,
                         Err(outcome) => return outcome,
@@ -9121,6 +9129,7 @@ impl HandlerCore {
             }
             PreparedHistorySummarizerAction::FireReady(prepared) => {
                 let diagnostics = prepared.diagnostics.clone();
+                let fired_at = Instant::now();
                 let followup = match self
                     .run_history_summarizer_firing_inline(prepared.task)
                     .await
@@ -9128,6 +9137,8 @@ impl HandlerCore {
                     Ok(_) => HistorySummarizerFollowup::Published,
                     Err(_) => HistorySummarizerFollowup::Failed,
                 };
+                pass.trigger_timings.emergency_wait_ms +=
+                    fired_at.elapsed().as_secs_f64() * 1_000.0;
                 (diagnostics, followup)
             }
         };
@@ -9675,6 +9686,7 @@ impl HandlerCore {
             response_timings.trigger_cache_store = trigger_timings.cache_store_ms;
             response_timings.trigger_token_cache_hits = trigger_timings.token_cache_hits;
             response_timings.trigger_tokenized_blocks = trigger_timings.tokenized_blocks;
+            response_timings.emergency_wait = trigger_timings.emergency_wait_ms;
             response_timings.native_cache_reused_messages = native_cache_stats.reused_messages;
             response_timings.native_cache_encoded_messages = native_cache_stats.encoded_messages;
             response_timings.native_cache_refused_store = native_cache_stats.refused_store;
@@ -38250,6 +38262,48 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn session_status_carries_the_firing_timeline_counters_and_the_publication_pending_age() {
+        let producer = Arc::new(ProducerState::default());
+        let (handler, store, _dir, _project) =
+            handler_with_store(Arc::clone(&producer), default_test_config());
+        let status = || {
+            tool_body(handler.handle_session_status_value(
+                test_route(7),
+                &json!({ "method": "session.status", "v": 1, "session_id": "ses" }),
+            ))
+        };
+        call_transform(&handler, vec![ck("m1", 1, "hello")]).await;
+        let before = status();
+        assert_eq!(before["history_summarizer"]["recent_firings"], json!([]));
+        assert_eq!(before["history_summarizer"]["counters"]["firings"], 0);
+
+        let fired = call_transform(&handler, big_messages()).await;
+        assert_eq!(fired["history_summarizer"]["fired"], true);
+        wait_for_idle(&store).await;
+        let after = status();
+        let firing = &after["history_summarizer"]["recent_firings"][0];
+        assert_eq!(firing["source"], "pressure_path");
+        assert_eq!(firing["clock"], "daemon_wall_ms");
+        assert_eq!(firing["outcome"]["kind"], "published");
+        assert!(
+            firing["published_at_ms"].as_i64().unwrap() >= firing["fired_at_ms"].as_i64().unwrap()
+        );
+        assert_eq!(after["history_summarizer"]["counters"]["published"], 1);
+        // The publication stamped the pending start, so the unrendered segment has an age before any pass renders it.
+        let stamped = store.load("ses").unwrap().meta.m1_pending_since_ms;
+        assert_eq!(stamped, firing["published_at_ms"].as_i64());
+        assert_eq!(after["pending_m1_delta"], true);
+        assert!(after["pending_m1_age_ms"].as_i64().is_some());
+        assert!(
+            after["pass_trace"]["scheduler_history"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|entry| entry["action"].is_string())
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn session_status_surfaces_publish_failure_health_and_reset() {
         let producer = Arc::new(ProducerState::default());
         let (handler, store, _dir, _project) = handler_with_store(producer, default_test_config());
@@ -41132,6 +41186,41 @@ mod tests {
         assert_eq!(response["history_summarizer"]["fired"], true);
         assert!(m0_text(&response).contains("autonomous summary"));
         assert_eq!(producer.starts.load(Ordering::SeqCst), 1);
+        assert!(
+            response["timings"]["emergency_wait"].as_f64().unwrap() > 0.0,
+            "the inline firing is emergency wait"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn an_emergency_pass_reports_its_live_wait_after_the_rerun_and_other_passes_report_none()
+    {
+        let producer = Arc::new(ProducerState::default());
+        producer.block_output.store(true, Ordering::SeqCst);
+        let (handler, _store, _dir, _project) =
+            handler_with_store(Arc::clone(&producer), default_test_config());
+        let messages = big_messages();
+
+        let first = call_transform(&handler, messages.clone()).await;
+        assert_eq!(first["history_summarizer"]["fired"], true);
+        assert_eq!(first["timings"]["emergency_wait"], json!(0.0));
+        wait_for_count(&producer.starts, 1).await;
+
+        let release = {
+            let producer = Arc::clone(&producer);
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_millis(1_200)).await;
+                producer.block_output.store(false, Ordering::SeqCst);
+                producer.notify.notify_waiters();
+            })
+        };
+        let emergency = call_transform_with_usage(&handler, messages, 48_000, 50_000).await;
+        release.await.unwrap();
+        let waited = emergency["timings"]["emergency_wait"].as_f64().unwrap();
+        assert!(
+            waited >= 1_200.0,
+            "the live wait survives the rerun: {waited}"
+        );
     }
 
     /// The first run of an emergency pass decides the tail's hint and commits

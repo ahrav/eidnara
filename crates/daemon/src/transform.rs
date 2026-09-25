@@ -1356,6 +1356,9 @@ pub struct TransformTimings {
     pub trigger_token_cache_hits: usize,
     #[serde(default)]
     pub trigger_tokenized_blocks: usize,
+    /// Time an Emergency95 pass spent awaiting a live history_summarizer run and running one inline, across its reruns.
+    #[serde(default)]
+    pub emergency_wait: f64,
     #[serde(default)]
     pub post_attach: f64,
     #[serde(default)]
@@ -1448,7 +1451,7 @@ pub fn format_pass_timing_line(
          build_output={:.1} build_identity={:.1} build_identity_max={:.1} build_frozen_unit_scan={:.1} \
          build_cache_lookup={:.1} build_serialize_misses={:.1} build_tail_loop={:.1} \
            divergence={:.1} store_commit={:.1} trigger_ms={:.1} trigger_boundary_build={:.1} trigger_eval={:.1} \
-             trigger_cache_store={:.1} trigger_token_cache_hits={} trigger_tokenized_blocks={} \
+             trigger_cache_store={:.1} trigger_token_cache_hits={} trigger_tokenized_blocks={} emergency_wait={:.1} \
              post_attach_ms={:.1} native_cache_reused_messages={} native_cache_encoded_messages={} \
             native_cache_refused_store={} native_cache_degraded_store={} native_cache_evicted={} \
              response_encode={response_encode_ms:.1} response_meta_encode={:.1} response_size_account={:.1} response_splice={:.1} \
@@ -1527,6 +1530,7 @@ pub fn format_pass_timing_line(
         timings.trigger_cache_store,
         timings.trigger_token_cache_hits,
         timings.trigger_tokenized_blocks,
+        timings.emergency_wait,
         timings.post_attach,
         timings.native_cache_reused_messages,
         timings.native_cache_encoded_messages,
@@ -12647,6 +12651,7 @@ pub(crate) mod tests {
             "divergence",
             "store_commit",
             "trigger_ms",
+            "emergency_wait",
             "post_attach_ms",
             "response_encode",
             "response_meta_encode",
