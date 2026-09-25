@@ -6,6 +6,7 @@ import { describe, expect, it } from "bun:test";
 import {
     activated,
     EXECUTE_THRESHOLD,
+    parseSweepArm,
     printReport,
     published,
     runSweepArm,
@@ -246,10 +247,7 @@ describe.skipIf(!rustPrereqs.ok)("rust compaction timing", () => {
     it.skipIf(!active)(
         `replays the sweep workload for the ${sweepArm} arm`,
         async () => {
-            const lead = sweepArm === "default" ? undefined : Number(sweepArm);
-            if (lead !== undefined && !Number.isInteger(lead)) {
-                throw new Error(`EIDNARA_E2E_TIMING_ARM must be "default" or an integer lead`);
-            }
+            const lead = parseSweepArm(sweepArm);
             const producerTurns =
                 sweepProducerTurns === undefined ? SWEEP.producerTurns : Number(sweepProducerTurns);
             if (!Number.isInteger(producerTurns) || producerTurns < 1) {

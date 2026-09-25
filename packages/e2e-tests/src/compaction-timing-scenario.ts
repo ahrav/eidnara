@@ -13,12 +13,44 @@ import { type RustPassLine, RustTestHarness, stableSerialize } from "./rust-harn
 
 export const EXECUTE_THRESHOLD = 65;
 export const PREPARE_LEAD_ENV = "EIDNARA_HISTORY_SUMMARIZER_PREPARE_LEAD";
+/** Mirrors `MAX_PREPARE_LEAD_PERCENTAGE` in `crates/daemon/src/boundary.rs`, the bound `PrepareLead::parse` clamps to. */
+export const MAX_PREPARE_LEAD = 20;
 const MODEL_CONTEXT_LIMIT = 100_000;
 const TURN_BALLAST_TOKENS = 900;
 const MAX_WAIT_TURNS = 40;
 /** Served pressure counts request bytes at this many per token. */
 const BYTES_PER_TOKEN = 4;
 const CACHE_ACTIONS = ["SOFT+", "SOFT", "HARD"] as const;
+
+function isPrepareLead(lead: number): boolean {
+    return Number.isInteger(lead) && lead >= 0 && lead <= MAX_PREPARE_LEAD;
+}
+
+/**
+ * The fixture daemon's environment for an arm; `lead` undefined runs the built-in default.
+ *
+ * The daemon inherits the test process environment, so the default arm sets the variable empty rather than retaining an exported value. `PrepareLead::parse` uses its default for non-integer text and clamps integers to `[0, MAX_PREPARE_LEAD]`, so a lead outside that range throws here instead of being reported as a lead the daemon did not run.
+ */
+export function prepareLeadEnv(lead: number | undefined): Record<string, string> {
+    if (lead === undefined) return { [PREPARE_LEAD_ENV]: "" };
+    if (!isPrepareLead(lead)) {
+        throw new Error(`lead must be an integer in [0, ${MAX_PREPARE_LEAD}], got ${lead}`);
+    }
+    return { [PREPARE_LEAD_ENV]: String(lead) };
+}
+
+/** `EIDNARA_E2E_TIMING_ARM` accepts `default` or an integer lead in `[0, MAX_PREPARE_LEAD]`; unset uses `default`, which returns `undefined`. */
+export function parseSweepArm(value: string | undefined): number | undefined {
+    const arm = value ?? "default";
+    if (arm === "default") return undefined;
+    const lead = arm.trim() === "" ? Number.NaN : Number(arm);
+    if (!isPrepareLead(lead)) {
+        throw new Error(
+            `EIDNARA_E2E_TIMING_ARM must be "default" or an integer lead in [0, ${MAX_PREPARE_LEAD}], got "${arm}"`,
+        );
+    }
+    return lead;
+}
 
 /** The raw firing fields the shared helper does not project. */
 export interface RawFiring {
@@ -130,7 +162,7 @@ export class TimingSession {
                 protected_tags: 1,
                 history_summarizer: { model: "fixture/deterministic" },
             },
-            daemonEnv: lead === undefined ? {} : { [PREPARE_LEAD_ENV]: String(lead) },
+            daemonEnv: prepareLeadEnv(lead),
         });
         try {
             await h.host.backendSuccess();
