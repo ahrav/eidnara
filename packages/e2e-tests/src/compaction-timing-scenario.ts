@@ -376,18 +376,31 @@ export function printReport(report: ArmReport): void {
 /**
  * The sweep workload every arm replays unchanged: served pressure from a fixed turn sequence, a producer held for `producerTurns` turns after each firing starts, and a held producer that finishes `emergencyFinishMs` into an Emergency95 pass. Only the lead differs between arms.
  */
-export const SWEEP = {
+export interface SweepInputs {
+    turns: number;
+    modelContextLimit: number;
+    /** The producer's run length in turns; a comparison fixes it for every arm. */
+    producerTurns: number;
+    emergencyFinishMs: number;
+    emergencyPercent: number;
+}
+
+export const SWEEP: SweepInputs = {
     turns: 70,
     modelContextLimit: 60_000,
     producerTurns: 12,
     emergencyFinishMs: 1_500,
     emergencyPercent: 95,
-} as const;
+};
 
-export async function runSweepArm(lead: number | undefined, runId: string): Promise<ArmReport> {
+export async function runSweepArm(
+    lead: number | undefined,
+    runId: string,
+    inputs: SweepInputs = SWEEP,
+): Promise<ArmReport & { workload: SweepInputs }> {
     const session = await TimingSession.start(lead, {
         pressure: { kind: "served" },
-        modelContextLimit: SWEEP.modelContextLimit,
+        modelContextLimit: inputs.modelContextLimit,
     });
     // Re-arming only after the released run settles keeps one hold per firing.
     const settleAndRearm = async () => {
@@ -400,13 +413,13 @@ export async function runSweepArm(lead: number | undefined, runId: string): Prom
     try {
         await session.h.host.blockNextBackendCall();
         let heldTurns = 0;
-        for (let turn = 0; turn < SWEEP.turns; turn += 1) {
-            const emergencyNext = (await session.reportedPercent()) >= SWEEP.emergencyPercent;
+        for (let turn = 0; turn < inputs.turns; turn += 1) {
+            const emergencyNext = (await session.reportedPercent()) >= inputs.emergencyPercent;
             // An Emergency95 pass waits on a live run or fires inline; either way the held producer finishes into the wait. The release retries because an inline firing's call can start after the delay.
             let settled = false;
             const finish = emergencyNext
                 ? (async () => {
-                      await Bun.sleep(SWEEP.emergencyFinishMs);
+                      await Bun.sleep(inputs.emergencyFinishMs);
                       while (!settled) {
                           if (await session.h.host.releaseBlockedBackendCall()) return true;
                           await Bun.sleep(100);
@@ -430,13 +443,14 @@ export async function runSweepArm(lead: number | undefined, runId: string): Prom
                 continue;
             }
             heldTurns += 1;
-            if (heldTurns >= SWEEP.producerTurns) {
+            if (heldTurns >= inputs.producerTurns) {
                 await session.h.host.releaseBlockedBackendCall();
                 heldTurns = 0;
                 await settleAndRearm();
             }
         }
-        return await session.report(`rust-compaction-timing:sweep`, runId);
+        const report = await session.report(`rust-compaction-timing:sweep`, runId);
+        return { ...report, workload: inputs };
     } finally {
         await session.h.host.releaseBlockedBackendCall().catch(() => false);
         await session.dispose();

@@ -39,6 +39,8 @@ const runId = `${SCENARIO}-${process.pid}`;
 const active = rustPrereqs.ok && foldInfraEnabled();
 /** `default` or a lead; the sweep arm the gated run replays. */
 const sweepArm = process.env.EIDNARA_E2E_TIMING_ARM ?? "default";
+/** The sweep producer's run length in turns; unset keeps the workload's own. */
+const sweepProducerTurns = process.env.EIDNARA_E2E_TIMING_PRODUCER_TURNS;
 
 async function withSession(
     lead: number | undefined,
@@ -248,12 +250,19 @@ describe.skipIf(!rustPrereqs.ok)("rust compaction timing", () => {
             if (lead !== undefined && !Number.isInteger(lead)) {
                 throw new Error(`EIDNARA_E2E_TIMING_ARM must be "default" or an integer lead`);
             }
-            const report = await runSweepArm(lead, runId);
+            const producerTurns =
+                sweepProducerTurns === undefined ? SWEEP.producerTurns : Number(sweepProducerTurns);
+            if (!Number.isInteger(producerTurns) || producerTurns < 1) {
+                throw new Error("EIDNARA_E2E_TIMING_PRODUCER_TURNS must be a positive integer");
+            }
+            const report = await runSweepArm(lead, runId, { ...SWEEP, producerTurns });
             printReport(report);
             expect(report.passes).toBeGreaterThanOrEqual(SWEEP.turns);
             expect(report.pressure_path_firings).toBeGreaterThan(0);
-            // The workload reaches emergency pressure at the default lead; a candidate lead may remove it.
-            if (lead === undefined) expect(report.emergency_passes).toBeGreaterThan(0);
+            // The unchanged workload reaches emergency pressure at the default lead; a candidate lead or a shorter producer may remove it.
+            if (lead === undefined && sweepProducerTurns === undefined) {
+                expect(report.emergency_passes).toBeGreaterThan(0);
+            }
         },
         CASE_TIMEOUT_MS,
     );
