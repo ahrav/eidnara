@@ -127,6 +127,9 @@ pub struct BoundaryMsg<'a> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PrepareLead(u8);
 
+// The default lead is the pinned golden offset; a fractional offset would not survive the cast.
+const _: () = assert!(PROACTIVE_TRIGGER_OFFSET_PERCENTAGE == PrepareLead::DEFAULT.0 as f64);
+
 impl PrepareLead {
     pub const DEFAULT: Self = Self(PROACTIVE_TRIGGER_OFFSET_PERCENTAGE as u8);
 
@@ -2320,6 +2323,7 @@ mod tests {
         }
         assert_eq!(proactive(2.0, "2"), 1.0);
         assert_eq!(proactive(1.0, "2"), 1.0);
+        assert_eq!(proactive(0.0, "2"), 1.0);
     }
 
     #[test]
@@ -2377,25 +2381,51 @@ mod tests {
 
     #[test]
     fn force_tail_size_and_commit_cluster_tiers_ignore_the_lead() {
-        let tail = (0..=5)
+        let large = (0..=5)
             .map(|ord| text_msg(ord, Role::Assistant, &"lead neutral content ".repeat(4_000)))
             .collect::<Vec<_>>();
-        for usage in [30.0, 49.0, 81.0, 96.0] {
+        let committed = (0..=400)
+            .map(|ord| {
+                if ord % 2 == 0 {
+                    text_msg(ord, Role::User, &"next change please ".repeat(40))
+                } else {
+                    let hash = format!("{:07x}", 0xabc0000 + ord);
+                    let text = format!("Committed {hash} after the fix. {}", "detail ".repeat(200));
+                    text_msg(ord, Role::Assistant, &text)
+                }
+            })
+            .collect::<Vec<_>>();
+        let cases = [
+            (&large, 20_000.0, 50.0, 30.0, TriggerReason::TailSize),
+            (&large, 20_000.0, 50.0, 96.0, TriggerReason::ForceBand),
+            (
+                &committed,
+                200_000.0,
+                65.0,
+                40.0,
+                TriggerReason::CommitClusters,
+            ),
+            (
+                &committed,
+                200_000.0,
+                65.0,
+                55.0,
+                TriggerReason::CommitClusters,
+            ),
+        ];
+        for (tail, limit, execute, usage, reason) in cases {
             let decide = |lead: &str| {
                 let mut trigger = TriggerContext::default();
-                trigger.boundary.context_limit = 20_000.0;
-                trigger.boundary.execute_threshold_percentage = 50.0;
+                trigger.boundary.context_limit = limit;
+                trigger.boundary.execute_threshold_percentage = execute;
                 trigger.boundary.usage_percentage = usage;
+                trigger.boundary.usage_input_tokens = usage * limit / 100.0;
                 trigger.boundary.prepare_lead = PrepareLead::parse(lead);
-                let decision = check_history_segment_trigger(&tail, &trigger);
-                (
-                    decision.fire,
-                    decision.reason,
-                    decision.consume_through_ordinal,
-                )
+                let decision = check_history_segment_trigger(tail, &trigger);
+                (decision.reason, decision.consume_through_ordinal)
             };
             let default = decide("2");
-            assert_ne!(default.1, Some(TriggerReason::ProjectedHeadroom), "{usage}");
+            assert_eq!(default.0, Some(reason), "usage {usage}");
             assert_eq!(decide("12"), default, "usage {usage}");
             assert_eq!(decide("20"), default, "usage {usage}");
         }

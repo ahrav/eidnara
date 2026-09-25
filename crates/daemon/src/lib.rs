@@ -5710,7 +5710,7 @@ impl HandlerCore {
             last_failure: loaded.meta.history_summarizer.last_failure.clone(),
             project_memory: None,
         };
-        // Written once per pending eligibility, so the config is read only while none is recorded. A firing persisting its own transitions (entering awaiting, validating, publishing) would lose its row-version race to this write, so only an idle or awaiting row takes it.
+        // Written once per pending eligibility. A firing persisting its own transitions (entering awaiting, validating, publishing) would lose its row-version race to this write, so only an idle or awaiting row takes it.
         let blocked = |reason: &str| {
             let history_summarizer = &loaded.meta.history_summarizer;
             history_summarizer.pending_eligibility.is_none()
@@ -9335,8 +9335,7 @@ impl HandlerCore {
             temporal_awareness: binding.config.temporal_awareness,
             user_profile_budget_tokens: binding.config.user_profile_budget_tokens,
             now_ms: *pass_now,
-            execute_threshold_percentage: parsed
-                .execute_threshold_or(binding.config.execute_threshold_percentage),
+            execute_threshold_percentage: scheduler_execute_threshold(parsed, &binding.config),
             compaction_enabled: binding.config.compaction_enabled,
             smart_drops: binding.config.smart_drops,
             // Claude Code omits the value, so the host resolves the request model and records whether lookup matched.
@@ -18932,19 +18931,6 @@ mod tests {
             scheduler_execute_threshold(&parsed(base.clone()), &bound),
             90.0
         );
-        for threshold in [55.0, 65.0, 90.0, 97.0] {
-            bound.execute_threshold_percentage = threshold;
-            assert_eq!(
-                scheduler_execute_threshold(&parsed(base.clone()), &bound),
-                scheduler::resolve_execute_threshold(
-                    &scheduler::ExecuteThresholdConfig::Percentage(threshold),
-                    None,
-                    scheduler::DEFAULT_EXECUTE_THRESHOLD_PERCENTAGE,
-                    None,
-                    None,
-                )
-            );
-        }
     }
 
     #[test]
@@ -41175,6 +41161,38 @@ mod tests {
         producer.block_output.store(false, Ordering::SeqCst);
         producer.notify.notify_waiters();
         wait_for_idle(&store).await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_firing_records_the_bound_threshold_and_the_persisted_pressure_it_fired_on() {
+        let producer = Arc::new(ProducerState::default());
+        let (handler, store, _dir, project) =
+            handler_with_store(Arc::clone(&producer), default_test_config());
+        // The route binds 80 while the rebuilt config still says 65; the scheduler reads the bound value.
+        let mut route = binding(project.to_str().unwrap(), "ses");
+        route.config.execute_threshold_percentage = 80.0;
+        handler.bind_route(test_route(7), route);
+        call_transform_with_usage(&handler, vec![ck("m1", 1, "hello")], 140_000, 200_000).await;
+        let mut without_usage = request(big_messages());
+        without_usage.as_object_mut().unwrap().remove("usage");
+        let fired = call_transform_request(&handler, without_usage).await;
+        assert_eq!(fired["history_summarizer"]["fired"], true);
+        wait_for_idle(&store).await;
+        let firing = &store
+            .load("ses")
+            .unwrap()
+            .meta
+            .history_summarizer
+            .recent_firings[0];
+        assert_eq!(
+            firing.usage,
+            Some(memory_store::summarizer_timeline::FiringUsage {
+                input_tokens: 140_000,
+                context_limit_tokens: 200_000,
+                usage_percentage: 70,
+                execute_threshold_percentage: 80,
+            })
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]
