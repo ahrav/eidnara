@@ -15606,7 +15606,7 @@ pub(crate) mod tests {
                 "session_id": "cache",
                 "render_config": "cfg0",
                 "messages": [],
-                // The keys an older plugin also sent; the daemon never read them.
+                // `input_tokens` and `limit` are unknown usage keys, which deserialization ignores.
                 "usage": {
                     "input_tokens": 64_000,
                     "limit": 128_000,
@@ -15624,6 +15624,11 @@ pub(crate) mod tests {
             context_limit_tokens: 128_000,
             ..ModuleUsage::default()
         });
+        let persisted = ModuleUsage {
+            current_total_input_tokens: 90_000,
+            ..ModuleUsage::default()
+        };
+        let without = body(None);
         for (cache, expected) in [
             (None, None),
             (
@@ -15654,10 +15659,13 @@ pub(crate) mod tests {
                 "{cache:?}"
             );
             assert_eq!(parsed.usage, pressure, "{cache:?}");
-            assert_eq!(
-                effective_usage(parsed.usage.as_ref(), None),
-                effective_usage(pressure.as_ref(), None)
-            );
+            for fallback in [None, Some(&persisted)] {
+                assert_eq!(
+                    effective_usage(parsed.usage.as_ref(), fallback),
+                    effective_usage(without.usage.as_ref(), fallback),
+                    "{cache:?}"
+                );
+            }
         }
     }
 
@@ -15691,8 +15699,19 @@ pub(crate) mod tests {
             }
             observed
         };
+        let without = passes(None);
+        // The first pass folds and the 70% pass persists its pressure, so decisions and writes both ran.
+        let actions: Vec<_> = without
+            .iter()
+            .map(|(response, _, _)| response["action"].clone())
+            .collect();
+        assert_eq!(actions, [json!("HARD"), json!("SOFT+"), json!("SOFT+")]);
         assert_eq!(
-            passes(None),
+            without[1].2["last_usage"]["current_total_input_tokens"],
+            json!(140_000)
+        );
+        assert_eq!(
+            without,
             passes(Some(memory_store::ProviderCacheUsage {
                 cache_read_tokens: 90_000,
                 cache_write_tokens: 4_000,

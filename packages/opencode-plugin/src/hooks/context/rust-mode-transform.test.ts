@@ -513,6 +513,7 @@ describe("Rust mode transform request", () => {
         const first = makeMessages(sessionId);
         await transform.run(sessionId, { messages: [...first] });
         expect("usage" in bodies[0]!).toBe(false);
+        expect("prev_response_cache_usage" in bodies[0]!).toBe(false);
 
         deps.contextUsageMap.set(sessionId, {
             usage: { percentage: 50, inputTokens: 64_000 },
