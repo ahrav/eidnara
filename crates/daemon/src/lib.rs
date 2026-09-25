@@ -41192,6 +41192,42 @@ mod tests {
         );
     }
 
+    /// Status readers group ring entries into requests by `timestamp_ms`, so every run of one request records the request's pass clock and the next request records its own.
+    #[tokio::test(flavor = "current_thread")]
+    async fn an_emergency_rerun_records_its_request_pass_clock_in_the_ring() {
+        let producer = Arc::new(ProducerState::default());
+        let (handler, _store, _dir, _project) =
+            handler_with_store(Arc::clone(&producer), default_test_config());
+        let messages = big_messages();
+        let ring = || {
+            tool_body(handler.handle_session_status_value(
+                test_route(7),
+                &json!({ "method": "session.status", "v": 1, "session_id": "ses" }),
+            ))["pass_trace"]["scheduler_history"]
+                .as_array()
+                .unwrap()
+                .clone()
+        };
+
+        let emergency = call_transform_with_usage(&handler, messages.clone(), 48_000, 50_000).await;
+        assert_eq!(emergency["history_summarizer"]["fired"], true);
+        let runs = ring();
+        let request_clock = &runs[0]["timestamp_ms"];
+        assert_eq!(runs[0]["scheduler_decision"], "Emergency95");
+        assert!(runs.len() >= 2, "the rerun records its own entry: {runs:?}");
+        assert!(
+            runs.iter()
+                .all(|entry| &entry["timestamp_ms"] == request_clock),
+            "{runs:?}"
+        );
+
+        tokio::time::sleep(Duration::from_millis(5)).await;
+        call_transform(&handler, messages).await;
+        let after = ring();
+        assert_eq!(after.len(), runs.len() + 1, "{after:?}");
+        assert_ne!(&after[runs.len()]["timestamp_ms"], request_clock);
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn an_emergency_pass_reports_its_live_wait_after_the_rerun_and_other_passes_report_none()
     {

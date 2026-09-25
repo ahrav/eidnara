@@ -21,14 +21,16 @@ function counters(values: Partial<Record<string, number>> = {}) {
     };
 }
 
+/** `at` is the request's pass clock, which every rerun of that request repeats. */
 function ringEntry(
+    at: number,
     action: string,
     reason: string | undefined,
     cache?: [number, number],
     decision = "Defer",
 ) {
     return {
-        timestamp_ms: 1,
+        timestamp_ms: at,
         scheduler_decision: decision,
         drain_latch_active: false,
         action,
@@ -51,16 +53,19 @@ describe("summarizeCompactionTiming", () => {
         const timing = summarizeCompactionTiming("durations", {
             history_summarizer: {
                 recent_firings: [
-                    firing(
-                        1,
-                        {
-                            eligible_at_ms: 0,
-                            fired_at_ms: 0,
-                            published_at_ms: 10,
-                            activated_at_ms: 10,
-                        },
-                        published(1),
-                    ),
+                    {
+                        ...firing(
+                            1,
+                            {
+                                eligible_at_ms: 0,
+                                fired_at_ms: 0,
+                                published_at_ms: 10,
+                                activated_at_ms: 10,
+                            },
+                            published(1),
+                        ),
+                        activated_by_first_fold: true,
+                    },
                     firing(
                         2,
                         {
@@ -88,7 +93,6 @@ describe("summarizeCompactionTiming", () => {
             publishToActivationMs: 5_000,
         });
         expect(pending).toMatchObject({ state: "pending", publishToActivationMs: undefined });
-        // The first publication folds immediately and is left out; the pending one is censored.
         expect(timing?.publishToActivation).toEqual({
             maxMs: 5_000,
             n: 1,
@@ -100,6 +104,36 @@ describe("summarizeCompactionTiming", () => {
         expect(lines).toContain("- Last summary #3 (pressure path): published, not yet activated");
         expect(lines).toContain("- Waited to start 0.0s, ran 2.0s, sat unactivated still");
         expect(lines).toContain("- Publish to activation: max 5.0s over 1 (5.0s), 1 pending");
+    });
+
+    it("excludes only a first fold, even when the counters match the window", () => {
+        const only = (entry: unknown, boundaryPresent?: boolean) =>
+            summarizeCompactionTiming("first-fold", {
+                ...(boundaryPresent === undefined ? {} : { boundary_present: boundaryPresent }),
+                history_summarizer: {
+                    recent_firings: [entry],
+                    counters: counters({ firings: 1, published: 1 }),
+                },
+            })?.publishToActivation;
+        expect(
+            only(
+                firing(
+                    1,
+                    { fired_at_ms: 0, published_at_ms: 10, activated_at_ms: 4_010 },
+                    published(9),
+                ),
+            ),
+        ).toEqual({ maxMs: 4_000, n: 1, orderedMs: [4_000], censored: 0 });
+        expect(
+            only({
+                ...firing(1, { published_at_ms: 10, activated_at_ms: 20 }, published(1)),
+                activated_by_first_fold: true,
+            }),
+        ).toEqual({ n: 0, orderedMs: [], censored: 0 });
+        const pending = firing(1, { published_at_ms: 10 }, published(1));
+        expect(only(pending, false)?.censored).toBe(0);
+        expect(only(pending, true)?.censored).toBe(1);
+        expect(only(pending)?.censored).toBe(1);
     });
 
     it("reads a publication a revert removed as superseded, never pending or censored", () => {
@@ -184,13 +218,13 @@ describe("summarizeCompactionTiming", () => {
             history_summarizer: { recent_firings: [] },
             pass_trace: {
                 scheduler_history: [
-                    ringEntry("HARD", "first_render"),
-                    ringEntry("SOFT+", undefined, [0, 1_000]),
-                    ringEntry("SOFT+", undefined, [900, 100], "Emergency95"),
-                    // The emergency rerun repeats the request's sample and is not a second response.
-                    ringEntry("SOFT", "coverage_fold", [900, 100], "Execute"),
-                    ringEntry("SOFT+", undefined, [0, 0]),
-                    ringEntry("SOFT+", undefined, [800, 200]),
+                    ringEntry(10, "HARD", "first_render"),
+                    ringEntry(20, "SOFT+", undefined, [0, 1_000]),
+                    ringEntry(30, "SOFT+", undefined, [900, 100], "Emergency95"),
+                    // The emergency rerun runs inside the same request and is not a second response.
+                    ringEntry(30, "SOFT", "coverage_fold", [900, 100], "Execute"),
+                    ringEntry(40, "SOFT+", undefined, [0, 0]),
+                    ringEntry(50, "SOFT+", undefined, [800, 200]),
                 ],
             },
         });
@@ -207,5 +241,33 @@ describe("summarizeCompactionTiming", () => {
         expect(formatCompactionTimingLines(timing)).toContain(
             "- Cache read share after: HARD 0% (1), SOFT+ 85% (2)",
         );
+    });
+
+    it("groups a request by its pass clock, never by an equal or missing cache sample", () => {
+        const timing = summarizeCompactionTiming("request-identity", {
+            history_summarizer: { recent_firings: [] },
+            pass_trace: {
+                scheduler_history: [
+                    // An Emergency95 request that settled without a rerun, then a distinct request whose
+                    // provider reported the same zero cache counts.
+                    ringEntry(10, "SOFT", "m1_delta", [0, 0], "Emergency95"),
+                    ringEntry(20, "HARD", "hard_trigger", [0, 0]),
+                    // An Emergency95 request whose provider reported no cache counts, and its rerun.
+                    ringEntry(30, "SOFT+", undefined, undefined, "Emergency95"),
+                    ringEntry(30, "SOFT", "coverage_fold", undefined, "Execute"),
+                    ringEntry(40, "SOFT+", undefined, [600, 400]),
+                ],
+            },
+        });
+        expect(timing?.passesByReason).toEqual({
+            "SOFT m1_delta": 1,
+            "HARD hard_trigger": 1,
+            "SOFT coverage_fold": 1,
+            "SOFT+ -": 1,
+        });
+        // Only the rerun's served action is scored against the next request's sample.
+        expect(timing?.cacheReadShareAfter).toEqual({
+            SOFT: { ratio: 0.6, samples: 1 },
+        });
     });
 });

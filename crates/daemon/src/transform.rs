@@ -5207,6 +5207,7 @@ fn apply_once(
         loaded.meta.rendered_history_segment_seq(),
         meta.rendered_history_segment_seq(),
         ctx.now_ms,
+        first_fold_due,
     );
     let state_changed = core != loaded.core || meta != loaded.meta;
     if state_changed {
@@ -16064,6 +16065,17 @@ pub(crate) mod tests {
             .map(|entry| entry.activated_at_ms.is_some())
             .collect();
         assert_eq!(activated, [true, true, false], "segment 3 is not rendered");
+        let first_folds: Vec<_> = meta
+            .history_summarizer
+            .recent_firings
+            .iter()
+            .map(|entry| entry.activated_by_first_fold)
+            .collect();
+        assert_eq!(
+            first_folds,
+            [true, true, false],
+            "the fold that creates the boundary"
+        );
         let first_stamps: Vec<_> = meta
             .history_summarizer
             .recent_firings
@@ -16114,6 +16126,10 @@ pub(crate) mod tests {
             .collect();
         assert_eq!(&stamps[..2], &first_stamps[..2], "earlier stamps stay");
         assert!(stamps[2].is_some());
+        assert!(
+            !meta.history_summarizer.recent_firings[2].activated_by_first_fold,
+            "a fold under an existing boundary measures scheduling"
+        );
     }
 
     #[test]

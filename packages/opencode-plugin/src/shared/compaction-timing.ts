@@ -25,6 +25,8 @@ export interface CompactionFiring {
     fireToPublishMs?: number;
     /** Publish to activation: time the summary waited unrendered. */
     publishToActivationMs?: number;
+    /** The daemon's `activated_by_first_fold`: the activation delay does not measure scheduling. */
+    firstFold?: true;
 }
 
 export interface CompactionCounters {
@@ -45,7 +47,7 @@ export interface CacheReadShare {
 export interface CompactionTiming {
     firings: CompactionFiring[];
     counters?: CompactionCounters;
-    /** Publish-to-activation over activated firings, excluding the session's first firing, which folds immediately. */
+    /** First folds are excluded from publish-to-activation. */
     publishToActivation: { maxMs?: number; n: number; orderedMs: number[]; censored: number };
     /** Plugin requests by the served `ACTION reason`; an Emergency95 rerun counts with its request. */
     passesByReason: Record<string, number>;
@@ -104,6 +106,7 @@ function readFiring(entry: Json): CompactionFiring {
         executionDelayMs: duration(entry.eligible_at_ms, entry.fired_at_ms, clock),
         fireToPublishMs: duration(entry.fired_at_ms, entry.published_at_ms, clock),
         publishToActivationMs: duration(entry.published_at_ms, entry.activated_at_ms, clock),
+        ...(entry.activated_by_first_fold === true ? { firstFold: true as const } : {}),
     };
 }
 
@@ -131,7 +134,7 @@ function readCounters(sessionId: string, value: Json): CompactionCounters {
 }
 
 interface RingEntry {
-    decision: string;
+    clock?: number;
     action?: string;
     reason?: string;
     cache?: { read: number; write: number };
@@ -142,13 +145,13 @@ function readRing(value: unknown): RingEntry[] {
     return value.flatMap((raw) => {
         const entry = record(raw);
         if (!entry) return [];
+        const clock = stamp(entry.timestamp_ms);
         const cache = record(entry.prev_response_cache);
         const read = cache && stamp(cache.cache_read_tokens);
         const write = cache && stamp(cache.cache_write_tokens);
         return [
             {
-                decision:
-                    typeof entry.scheduler_decision === "string" ? entry.scheduler_decision : "",
+                ...(clock !== undefined ? { clock } : {}),
                 ...(typeof entry.action === "string" ? { action: entry.action } : {}),
                 ...(typeof entry.materialize_reason === "string"
                     ? { reason: entry.materialize_reason }
@@ -159,18 +162,12 @@ function readRing(value: unknown): RingEntry[] {
     });
 }
 
-/** One plugin request per group: an Emergency95 pass reruns inside the same request, appending an entry with the same cache sample. */
 function groupByRequest(ring: RingEntry[]): RingEntry[][] {
     const requests: RingEntry[][] = [];
     for (const entry of ring) {
         const last = requests.at(-1);
-        const previous = last?.at(-1);
-        const rerun =
-            previous?.decision === "Emergency95" &&
-            previous.cache !== undefined &&
-            entry.cache?.read === previous.cache.read &&
-            entry.cache?.write === previous.cache.write;
-        if (last && rerun) last.push(entry);
+        const clock = last?.[0]?.clock;
+        if (last && clock !== undefined && entry.clock === clock) last.push(entry);
         else requests.push([entry]);
     }
     return requests;
@@ -212,15 +209,11 @@ export function summarizeCompactionTiming(
         return entry ? [readFiring(entry)] : [];
     });
     const counters = rawCounters ? readCounters(sessionId, rawCounters) : undefined;
-    // The session's first publication folds immediately; it is excluded only while the window still holds it.
-    const published = firings.filter((firing) =>
-        ["activated", "pending", "superseded"].includes(firing.state),
+    // With no boundary, the next pass folds every pending publication as a first fold.
+    const foldsNext = record(status)?.boundary_present === false;
+    const measured = firings.filter(
+        (firing) => !firing.firstFold && !(foldsNext && firing.state === "pending"),
     );
-    const first =
-        counters !== undefined && counters.exact.published === published.length
-            ? published[0]
-            : undefined;
-    const measured = firings.filter((firing) => firing !== first);
     const orderedMs = measured
         .flatMap((firing) =>
             firing.publishToActivationMs === undefined ? [] : [firing.publishToActivationMs],
