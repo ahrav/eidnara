@@ -128,7 +128,9 @@ describe.skipIf(!rustPrereqs.ok)("rust compaction timing", () => {
                 lead10 = await leadArm(session, "lead-10");
             });
             expect(lead10).toBeGreaterThanOrEqual(EXECUTE_THRESHOLD - 10);
-            expect(lead10).toBeLessThan(EXECUTE_THRESHOLD - 2);
+            // Lead 10 fires on the first step; a shorter lead firing at the second step would still
+            // sit below lead 2's threshold, so bound the usage by the second step, not by lead 2.
+            expect(lead10).toBeLessThan(STEPS[1]);
             expect(lead10).toBeLessThan(lead2);
         },
         CASE_TIMEOUT_MS,
@@ -142,15 +144,9 @@ describe.skipIf(!rustPrereqs.ok)("rust compaction timing", () => {
                 // The emergency pass fires inline and waits on the held producer until the release.
                 await session.h.host.blockNextBackendCall();
                 await session.turn(EMERGENCY);
-                const release = Bun.sleep(EMERGENCY_FINISH_MS).then(() =>
-                    session.h.host.releaseBlockedBackendCall(),
-                );
-                let emergency: Awaited<ReturnType<TimingSession["turn"]>>;
-                try {
-                    emergency = await session.turn(EMERGENCY);
-                } finally {
-                    await release.catch(() => false);
-                }
+                const turn = session.turn(EMERGENCY);
+                const release = session.releaseHeldProducerDuring(turn, EMERGENCY_FINISH_MS);
+                const emergency = await turn;
                 expect(await release).toBe(true);
 
                 expect(emergency.pass?.emergencyWaitMs ?? 0).toBeGreaterThanOrEqual(

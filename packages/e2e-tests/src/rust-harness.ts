@@ -280,17 +280,7 @@ export class RustTestHarness {
         const db = new Database(join(this.env.dataDir, "opencode", "opencode.db"));
         try {
             db.exec("PRAGMA busy_timeout = 30000");
-            const remove = db.transaction(() => {
-                db.prepare(
-                    "DELETE FROM part WHERE message_id IN (SELECT id FROM message WHERE session_id = ?1 AND time_created > (SELECT time_created FROM message WHERE id = ?2))",
-                ).run(sessionId, messageId);
-                return db
-                    .prepare(
-                        "DELETE FROM message WHERE session_id = ?1 AND time_created > (SELECT time_created FROM message WHERE id = ?2)",
-                    )
-                    .run(sessionId, messageId).changes;
-            });
-            return remove();
+            return deleteMessagesAfter(db, sessionId, messageId);
         } finally {
             db.close();
         }
@@ -580,6 +570,25 @@ function field(body: string, key: string): string {
 function stageField(body: string, key: string): string {
     const match = body.match(new RegExp(`(?:^|\\s|=)${key}:([^\\s]+)`));
     return match ? match[1]! : "";
+}
+
+/**
+ * Deletes the session's messages, and their parts, that sort after `messageId` in the plugin's
+ * `(time_created, id)` session order, so a later message sharing the anchor's millisecond goes too.
+ * Returns the number of messages removed.
+ */
+export function deleteMessagesAfter(db: Database, sessionId: string, messageId: string): number {
+    const remove = db.transaction(() => {
+        db.prepare(
+            "DELETE FROM part WHERE message_id IN (SELECT m.id FROM message m, message anchor WHERE anchor.session_id = ?1 AND anchor.id = ?2 AND m.session_id = ?1 AND (m.time_created, m.id) > (anchor.time_created, anchor.id))",
+        ).run(sessionId, messageId);
+        return db
+            .prepare(
+                "DELETE FROM message WHERE id IN (SELECT m.id FROM message m, message anchor WHERE anchor.session_id = ?1 AND anchor.id = ?2 AND m.session_id = ?1 AND (m.time_created, m.id) > (anchor.time_created, anchor.id))",
+            )
+            .run(sessionId, messageId).changes;
+    });
+    return remove();
 }
 
 /** JSON without `cache_control` markers, because OpenCode moves the marker to the newest message each turn. */

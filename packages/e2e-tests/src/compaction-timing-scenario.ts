@@ -305,6 +305,25 @@ export class TimingSession {
         throw new Error(`${label} not observed\n${this.h.host.hostLog().slice(-4_000)}`);
     }
 
+    /**
+     * Finishes the held producer `delayMs` into `turn`, retrying the release until it lands or the
+     * turn settles: an inline firing's backend call can start after the delay, and a one-shot
+     * release before it would leave the turn blocked. Resolves to whether the release landed.
+     */
+    async releaseHeldProducerDuring(turn: Promise<unknown>, delayMs: number): Promise<boolean> {
+        let settled = false;
+        const settle = () => {
+            settled = true;
+        };
+        void turn.then(settle, settle);
+        await Bun.sleep(delayMs);
+        while (!settled) {
+            if (await this.h.host.releaseBlockedBackendCall()) return true;
+            await Bun.sleep(100);
+        }
+        return false;
+    }
+
     /** Ramps pressure and holds it until the session's first firing folds, which activates at once in any band and is excluded from tuning metrics. */
     async foldFirst(holdPercent: number): Promise<void> {
         for (const percent of [20, 35, 50]) await this.turn(percent);
@@ -447,24 +466,12 @@ export async function runSweepArm(
         let heldTurns = 0;
         for (let turn = 0; turn < inputs.turns; turn += 1) {
             const emergencyNext = (await session.reportedPercent()) >= inputs.emergencyPercent;
-            // An Emergency95 pass waits on a live run or fires inline; either way the held producer finishes into the wait. The release retries because an inline firing's call can start after the delay.
-            let settled = false;
+            // An Emergency95 pass waits on a live run or fires inline; either way the held producer finishes into the wait.
+            const turn = session.turn();
             const finish = emergencyNext
-                ? (async () => {
-                      await Bun.sleep(inputs.emergencyFinishMs);
-                      while (!settled) {
-                          if (await session.h.host.releaseBlockedBackendCall()) return true;
-                          await Bun.sleep(100);
-                      }
-                      return false;
-                  })()
+                ? session.releaseHeldProducerDuring(turn, inputs.emergencyFinishMs)
                 : Promise.resolve(false);
-            let record: TurnRecord;
-            try {
-                record = await session.turn();
-            } finally {
-                settled = true;
-            }
+            const record = await turn;
             if (await finish.catch(() => false)) {
                 heldTurns = 0;
                 await settleAndRearm();
