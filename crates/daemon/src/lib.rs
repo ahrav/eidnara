@@ -3564,6 +3564,8 @@ struct HistorySummarizerFiringTask {
     credential_fingerprints: std::collections::BTreeMap<String, String>,
     /// The MemoryReviewer handoff an accepted fact set is reserved and staged through; `None` when the Kernel is unavailable, which publication records as a nonadmission.
     memory_reviewer_handoff: Option<memory_reviewer::handoff::HandoffTarget>,
+    /// Set once a producer run starts, so an inline caller can tell a started firing from one that failed to connect, start, or claim the state.
+    producer_started: Arc<AtomicBool>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -5686,6 +5688,7 @@ impl HandlerCore {
             Err(e) => {
                 return PreparedHistorySummarizerAction::Complete(HistorySummarizerDiagnostics {
                     fired: false,
+                    started: None,
                     reason: None,
                     no_fire: Some(format!("state_load_failed:{e}")),
                     state: "unknown".to_string(),
@@ -5697,6 +5700,7 @@ impl HandlerCore {
         };
         let mut not_fired = HistorySummarizerDiagnostics {
             fired: false,
+            started: None,
             reason: None,
             no_fire: None,
             state: loaded.meta.history_summarizer.state.as_str().to_string(),
@@ -5995,6 +5999,7 @@ impl HandlerCore {
                 credential_fingerprints: binding.credential_fingerprints.clone(),
                 publication_fence: None,
                 memory_reviewer_handoff,
+                producer_started: Arc::default(),
             },
         }))
     }
@@ -6137,6 +6142,7 @@ impl HandlerCore {
             credential_fingerprints: binding.credential_fingerprints.clone(),
             publication_fence: None,
             memory_reviewer_handoff,
+            producer_started: Arc::default(),
         }))
     }
 
@@ -6189,16 +6195,23 @@ impl HandlerCore {
             publication_fence,
             credential_fingerprints,
             memory_reviewer_handoff,
+            producer_started,
         } = task;
         let cancel = live_guard.cancel.clone();
         let _guard = live_guard;
         let failure_started_at_ms = firing.now_ms;
         let configured_failure_backoff_at_ms = firing.failure_backoff_at_ms;
-        let connected = tokio::select! {
-            () = cancel.cancelled() => return Err(history_summarizer::HistorySummarizerDriveError::Cancelled),
-            connected = factory.connect(&project_root, &harness, &credential_fingerprints) => {
-                connected
-            }
+        let connected = match &firing.placeholder_output {
+            Some(output) => Ok(Box::new(history_summarizer_chunk::PlaceholderProducer::new(
+                output.clone(),
+            ))
+                as Box<dyn history_summarizer::HistorySummarizerProducerDriver + Send>),
+            None => tokio::select! {
+                () = cancel.cancelled() => return Err(history_summarizer::HistorySummarizerDriveError::Cancelled),
+                connected = factory.connect(&project_root, &harness, &credential_fingerprints) => {
+                    connected
+                }
+            },
         };
         match connected {
             Ok(mut producer) => {
@@ -6211,10 +6224,21 @@ impl HandlerCore {
                 );
                 request.publication_fence = publication_fence.as_deref();
                 request.memory_reviewer_handoff = memory_reviewer_handoff.as_ref();
-                tokio::select! {
+                request.producer_started = Some(&producer_started);
+                let outcome = tokio::select! {
                     () = cancel.cancelled() => Err(history_summarizer::HistorySummarizerDriveError::Cancelled),
                     outcome = run_history_summarizer_firing(&mut *producer, request) => outcome,
+                };
+                if let Err(error) = &outcome
+                    && history_summarizer::is_chunk_failure(error)
+                {
+                    record_history_summarizer_chunk_failure(
+                        &store,
+                        &session_id,
+                        firing.from_ordinal,
+                    );
                 }
+                outcome
             }
             Err(err) => {
                 let failure_backoff_at_ms = history_summarizer::completion_failure_backoff_at_ms(
@@ -9003,6 +9027,7 @@ impl HandlerCore {
         let action = if env.parsed.is_subagent {
             PreparedHistorySummarizerAction::Complete(HistorySummarizerDiagnostics {
                 fired: false,
+                started: None,
                 reason: Some("subagent_session".to_string()),
                 no_fire: Some("subagent_session".to_string()),
                 state: "disabled".to_string(),
@@ -9071,11 +9096,13 @@ impl HandlerCore {
                 (diagnostics, HistorySummarizerFollowup::Unchanged)
             }
             PreparedHistorySummarizerAction::FireReady(prepared) => {
-                let diagnostics = prepared.diagnostics.clone();
-                let followup = match self
+                let mut diagnostics = prepared.diagnostics.clone();
+                let producer_started = Arc::clone(&prepared.task.producer_started);
+                let result = self
                     .run_history_summarizer_firing_inline(prepared.task)
-                    .await
-                {
+                    .await;
+                diagnostics.started = Some(producer_started.load(Ordering::Relaxed));
+                let followup = match result {
                     Ok(_) => HistorySummarizerFollowup::Published,
                     Err(_) => HistorySummarizerFollowup::Failed,
                 };
@@ -18041,6 +18068,41 @@ fn project_slug(path: &Path) -> String {
         .to_string()
 }
 
+/// Counts a chunk failure on the idle state the failed firing left behind; a firing that kept a Publishing state or lost a race records nothing.
+fn record_history_summarizer_chunk_failure(
+    store: &MemoryStore,
+    session_id: &str,
+    chunk_start: u64,
+) {
+    for attempt in 0..2 {
+        let loaded = match store.load(session_id) {
+            Ok(loaded) => loaded,
+            Err(error) => {
+                eprintln!(
+                    "daemon: history_summarizer chunk failure count not recorded for {session_id}: {error}"
+                );
+                return;
+            }
+        };
+        if loaded.meta.history_summarizer.state != HistorySummarizerPhase::Idle {
+            return;
+        }
+        let mut meta = loaded.meta.clone();
+        meta.history_summarizer =
+            history_summarizer::record_chunk_failure(&meta.history_summarizer, chunk_start);
+        match store.commit(session_id, loaded.row_version, &loaded.core, &meta) {
+            Ok(_) => return,
+            Err(MemoryStoreError::CasConflict { .. }) if attempt == 0 => continue,
+            Err(error) => {
+                eprintln!(
+                    "daemon: history_summarizer chunk failure count not recorded for {session_id}: {error}"
+                );
+                return;
+            }
+        }
+    }
+}
+
 fn record_history_summarizer_connect_failure(
     store: &MemoryStore,
     session_id: &str,
@@ -22292,6 +22354,8 @@ mod tests {
         block_status: std::sync::atomic::AtomicBool,
         /// `connect` waits on `notify` while `block_connect` is set.
         block_connect: std::sync::atomic::AtomicBool,
+        /// `start` refuses with a permanent error every prompt whose chunk starts at this ordinal.
+        refused_chunk_start: Mutex<Option<u64>>,
     }
 
     struct TestProducerFactory {
@@ -22374,6 +22438,23 @@ mod tests {
                 .lock()
                 .expect("prompts mutex")
                 .push(prompt.to_string());
+            let refused = *self
+                .state
+                .refused_chunk_start
+                .lock()
+                .expect("refused chunk mutex");
+            if refused.is_some() && prompt_ordinal_range(prompt).map(|(start, _)| start) == refused
+            {
+                return Err(HistorySummarizerProducerError::RunFailed {
+                    run_id: format!("run-{n}"),
+                    detail: "content filter refused the chunk".to_string(),
+                    classification: Some(history_summarizer_producer::ErrorClassification {
+                        class: history_summarizer_producer::ErrorClass::Permanent,
+                        retry_after_secs: None,
+                    }),
+                    class_field_present: true,
+                });
+            }
             if let Some(result) = self
                 .state
                 .start_errors
@@ -40910,8 +40991,36 @@ mod tests {
 
         assert_eq!(response["action"], "HARD");
         assert_eq!(response["history_summarizer"]["fired"], true);
+        assert_eq!(response["history_summarizer"]["started"], true);
         assert!(m0_text(&response).contains("autonomous summary"));
         assert_eq!(producer.starts.load(Ordering::SeqCst), 1);
+    }
+
+    /// `fired` reports the dispatch; `started` tells an inline firing whose producer never connected from one that ran.
+    #[tokio::test(flavor = "current_thread")]
+    async fn handler_emergency_inline_connect_failure_reports_fired_but_not_started() {
+        let producer = Arc::new(ProducerState::default());
+        producer
+            .connect_errors
+            .lock()
+            .unwrap()
+            .push_back(HistorySummarizerProducerError::Client(
+                history_summarizer_producer::HistorySummarizerClientFailure {
+                    code: "dial_failed".to_owned(),
+                    message: "daemon dial failed".to_owned(),
+                },
+            ));
+        let (handler, _store, _dir, _project) =
+            handler_with_store(Arc::clone(&producer), default_test_config());
+
+        let response = call_transform_with_usage(&handler, big_messages(), 48_000, 50_000).await;
+
+        assert_eq!(response["history_summarizer"]["fired"], true, "{response}");
+        assert_eq!(
+            response["history_summarizer"]["started"], false,
+            "{response}"
+        );
+        assert_eq!(producer.starts.load(Ordering::SeqCst), 0);
     }
 
     /// The first run of an emergency pass decides the tail's hint and commits
@@ -41390,6 +41499,7 @@ mod tests {
             last_failure: None,
             last_no_fire: None,
             consecutive_publish_failures: 0,
+            chunk_retry: None,
             memory_reviewer_nonadmission: Default::default(),
             memory_reviewer_reservation: None,
         };
@@ -41425,6 +41535,7 @@ mod tests {
             last_failure: None,
             last_no_fire: None,
             consecutive_publish_failures: 0,
+            chunk_retry: None,
             memory_reviewer_nonadmission: Default::default(),
             memory_reviewer_reservation: None,
         };
@@ -42015,6 +42126,11 @@ mod tests {
 
         let first = call_transform(&handler, messages.clone()).await;
         assert_eq!(first["history_summarizer"]["fired"], true);
+        assert_eq!(
+            first["history_summarizer"]["started"],
+            Value::Null,
+            "an asynchronous firing has no start outcome in its own response"
+        );
         wait_for_count(&producer.connects, 1).await;
         wait_for_history_summarizer_state(&store, |state| {
             state
@@ -42052,6 +42168,74 @@ mod tests {
         let state = store.load("ses").unwrap().meta.history_summarizer;
         assert_eq!(state.last_failure, None);
         assert_eq!(state.failure_backoff_at_ms, None);
+    }
+
+    /// A chunk every model refuses varies its prompt, shrinks, and finally publishes a placeholder, so folding continues past it within a bounded number of firings.
+    #[tokio::test(flavor = "current_thread")]
+    async fn handler_chunk_that_always_fails_stops_stalling_folding() {
+        let producer = Arc::new(ProducerState::default());
+        *producer.refused_chunk_start.lock().unwrap() = Some(1);
+        let (handler, store, _dir, _project) =
+            handler_with_store(Arc::clone(&producer), default_test_config());
+        let messages = big_messages();
+
+        let mut firings = 0;
+        while store
+            .load_history_summarizer_assembly_snapshot("ses")
+            .unwrap()
+            .history_segments
+            .iter()
+            .all(|segment| segment.start_message == 1)
+        {
+            assert!(firings < 20, "folding stalled on the refused chunk");
+            if store.load("ses").is_ok() {
+                expire_history_summarizer_backoff(&store);
+            }
+            let response = call_transform(&handler, messages.clone()).await;
+            if response["history_summarizer"]["fired"] != true {
+                assert_eq!(
+                    response["history_summarizer"]["no_fire"], "busy",
+                    "{response}"
+                );
+                tokio::time::sleep(TEST_WAIT_POLL).await;
+                continue;
+            }
+            firings += 1;
+            wait_for_idle(&store).await;
+        }
+        let segments = store
+            .load_history_summarizer_assembly_snapshot("ses")
+            .unwrap()
+            .history_segments;
+        assert!(segments[0].title.starts_with("Unsummarized messages 1-"));
+        assert!(segments[1].start_message > segments[0].end_message);
+        assert_eq!(
+            firings,
+            history_summarizer_chunk::PLACEHOLDER_AFTER_FAILURES as usize + 2,
+            "the refused firings, the placeholder, and the first model publish past it"
+        );
+        let prompts = producer.prompts.lock().unwrap().clone();
+        let refused = history_summarizer_chunk::PLACEHOLDER_AFTER_FAILURES as usize;
+        assert_eq!(prompts.len(), refused + 1, "the placeholder calls no model");
+        assert_eq!(prompts[0], prompts[1], "a first retry sends the same bytes");
+        assert_ne!(
+            prompts[1], prompts[2],
+            "a repeated failure varies the seeds"
+        );
+        assert!(
+            prompts[7].len() < prompts[3].len() / 2,
+            "further failures shrink the presented chunk"
+        );
+        assert_eq!(
+            store
+                .load("ses")
+                .unwrap()
+                .meta
+                .history_summarizer
+                .chunk_retry,
+            None,
+            "a publish clears the count"
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]

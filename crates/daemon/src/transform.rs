@@ -1673,7 +1673,11 @@ impl TransformResponse {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct HistorySummarizerDiagnostics {
+    /// A firing was assembled and dispatched. The producer may still fail to connect, start, or claim the state.
     pub fired: bool,
+    /// Whether the dispatched firing's producer run started. Present only when the firing ran inline in this pass; an asynchronous firing has no outcome yet when the response is built.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub started: Option<bool>,
     pub reason: Option<String>,
     pub no_fire: Option<String>,
     pub state: String,

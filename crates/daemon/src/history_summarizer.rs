@@ -5,6 +5,7 @@
 
 use std::collections::BTreeMap;
 use std::fmt;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use memory_store::memory_reviewer_jobs::{
@@ -12,13 +13,14 @@ use memory_store::memory_reviewer_jobs::{
     MemoryReviewerJobState,
 };
 use memory_store::{
-    HistorySegmentSetGeneration, HistorySummarizerChunkRange, HistorySummarizerDurableState,
-    HistorySummarizerEventCandidate, HistorySummarizerPhase, HistorySummarizerPrimerCandidate,
-    HistorySummarizerPublishError, HistorySummarizerPublishPredicate,
-    HistorySummarizerPublishRequest, HistorySummarizerPublishResult,
-    HistorySummarizerSelectedMessageIdentity, HistorySummarizerUserMemoryCandidate, LoadedState,
-    MemoryReviewerActivation, MemoryReviewerNonadmissionCode, MemoryStore, MemoryStoreError,
-    PendingPublication, StoredHistorySegment,
+    HistorySegmentSetGeneration, HistorySummarizerChunkRange, HistorySummarizerChunkRetry,
+    HistorySummarizerDurableState, HistorySummarizerEventCandidate, HistorySummarizerPhase,
+    HistorySummarizerPrimerCandidate, HistorySummarizerPublishError,
+    HistorySummarizerPublishPredicate, HistorySummarizerPublishRequest,
+    HistorySummarizerPublishResult, HistorySummarizerSelectedMessageIdentity,
+    HistorySummarizerUserMemoryCandidate, LoadedState, MemoryReviewerActivation,
+    MemoryReviewerNonadmissionCode, MemoryStore, MemoryStoreError, PendingPublication,
+    StoredHistorySegment,
 };
 
 use crate::history_summarizer_citations::{ExtractionOutcome, FrozenAliasTable};
@@ -250,6 +252,7 @@ pub fn fire(
         // A fire clears the prior skip reason.
         last_no_fire: None,
         consecutive_publish_failures: current.consecutive_publish_failures,
+        chunk_retry: current.chunk_retry,
         memory_reviewer_nonadmission: current.memory_reviewer_nonadmission,
         // A reservation left by an earlier firing is not this firing's to publish; its job stays a capped reservation the expiry sweep closes.
         memory_reviewer_reservation: None,
@@ -339,9 +342,45 @@ pub fn abandon_with_detail(
         failure_backoff_at_ms: Some(failure_backoff_at_ms),
         last_failure: detail.or_else(|| current.last_failure.clone()),
         consecutive_publish_failures: current.consecutive_publish_failures,
+        chunk_retry: current.chunk_retry,
         memory_reviewer_nonadmission: current.memory_reviewer_nonadmission,
         memory_reviewer_reservation: current.memory_reviewer_reservation.clone(),
         ..HistorySummarizerDurableState::default()
+    }
+}
+
+/// Counts one more failed firing on the chunk starting at `chunk_start`; a count kept for another chunk restarts at one.
+pub fn record_chunk_failure(
+    current: &HistorySummarizerDurableState,
+    chunk_start: u64,
+) -> HistorySummarizerDurableState {
+    let failures = current
+        .chunk_retry
+        .filter(|retry| retry.chunk_start == chunk_start)
+        .map_or(0, |retry| retry.failures);
+    let mut next = current.clone();
+    next.chunk_retry = Some(HistorySummarizerChunkRetry {
+        chunk_start,
+        failures: failures.saturating_add(1),
+    });
+    next
+}
+
+/// Whether a firing error says something about the chunk itself, so a retry of the same bytes would likely fail again.
+/// Transient, auth, cross-incarnation, and unclassified producer errors describe the provider or the transport and do not count.
+pub fn is_chunk_failure(error: &HistorySummarizerDriveError) -> bool {
+    match error {
+        HistorySummarizerDriveError::Validation(_) => true,
+        HistorySummarizerDriveError::Producer(err) => {
+            !err.is_cross_incarnation_unknown()
+                && err.classification().is_some_and(|classification| {
+                    matches!(
+                        classification.class,
+                        ErrorClass::Permanent | ErrorClass::ContextOverflow
+                    )
+                })
+        }
+        _ => false,
     }
 }
 
@@ -1365,6 +1404,8 @@ pub struct HistorySummarizerFireRequest<'a> {
     pub publication_fence: Option<&'a dyn HistorySummarizerPublicationFence>,
     /// The MemoryReviewer handoff an accepted fact set is reserved and staged through; `None` records the candidates as not admitted for an unavailable MemoryReviewer.
     pub memory_reviewer_handoff: Option<&'a HandoffTarget>,
+    /// Set to true once a producer run starts.
+    pub producer_started: Option<&'a AtomicBool>,
 }
 
 pub struct HistorySummarizerReattachRequest<'a> {
@@ -1694,7 +1735,12 @@ where
             .start(&producer_session_id, request.system, request.prompt, model)
             .await
         {
-            Ok(handle) => handle,
+            Ok(handle) => {
+                if let Some(started) = request.producer_started {
+                    started.store(true, Ordering::Relaxed);
+                }
+                handle
+            }
             Err(err) => {
                 let completed_at_ms = (request.completion_now_ms)();
                 let failure_backoff_at_ms = completion_failure_backoff_at_ms(
@@ -2441,6 +2487,55 @@ mod handoff_tests;
 mod tests {
     use super::*;
 
+    #[test]
+    fn chunk_failures_count_per_chunk_and_ignore_provider_errors() {
+        let once = record_chunk_failure(&HistorySummarizerDurableState::default(), 5);
+        let twice = record_chunk_failure(&once, 5);
+        assert_eq!(
+            twice.chunk_retry,
+            Some(HistorySummarizerChunkRetry {
+                chunk_start: 5,
+                failures: 2,
+            })
+        );
+        assert_eq!(
+            record_chunk_failure(&twice, 9).chunk_retry,
+            Some(HistorySummarizerChunkRetry {
+                chunk_start: 9,
+                failures: 1,
+            }),
+            "a different chunk restarts the count"
+        );
+        assert_eq!(
+            abandon_with_detail(&twice, 1, None).chunk_retry,
+            twice.chunk_retry
+        );
+
+        let classified = |class| {
+            HistorySummarizerDriveError::Producer(HistorySummarizerProducerError::RunFailed {
+                run_id: "run".into(),
+                detail: "failed".into(),
+                classification: Some(ErrorClassification {
+                    class,
+                    retry_after_secs: None,
+                }),
+                class_field_present: true,
+            })
+        };
+        assert!(is_chunk_failure(&classified(ErrorClass::Permanent)));
+        assert!(is_chunk_failure(&classified(ErrorClass::ContextOverflow)));
+        assert!(!is_chunk_failure(&classified(ErrorClass::Transient)));
+        assert!(!is_chunk_failure(&classified(ErrorClass::AuthRequired)));
+        assert!(!is_chunk_failure(&HistorySummarizerDriveError::Producer(
+            HistorySummarizerProducerError::TimedOut
+        )));
+        assert!(is_chunk_failure(&HistorySummarizerDriveError::Validation(
+            HistorySummarizerValidationError {
+                message: "rejected".into(),
+            }
+        )));
+    }
+
     /// Shared reattach-test prologue: fire the trigger, mark the producer
     /// started ("producer-session"/"run-1" on pi), and commit the awaiting
     /// history_summarizer state for session "ses".
@@ -2926,6 +3021,7 @@ mod tests {
             completion_now_ms: || 123,
             publication_fence: None,
             memory_reviewer_handoff: None,
+            producer_started: None,
         }
     }
 
@@ -2974,6 +3070,7 @@ mod tests {
             last_failure: None,
             last_no_fire: None,
             consecutive_publish_failures: 0,
+            chunk_retry: None,
             memory_reviewer_nonadmission: Default::default(),
             memory_reviewer_reservation: None,
         }
@@ -4753,6 +4850,7 @@ mod tests {
             last_failure: None,
             last_no_fire: None,
             consecutive_publish_failures: 0,
+            chunk_retry: None,
             memory_reviewer_nonadmission: Default::default(),
             memory_reviewer_reservation: None,
         };

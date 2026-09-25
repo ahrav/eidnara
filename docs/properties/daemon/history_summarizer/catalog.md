@@ -714,8 +714,9 @@ Open questions:
 Type: liveness
 Reachability: default-production
 Status: active
-Exercised: not yet - no test drives repeated validation rejections across
-firings.
+Exercised: partial - `handler_chunk_that_always_fails_stops_stalling_folding`
+(`lib.rs:42175`) drives repeated permanent refusals of one chunk across firings;
+no test drives repeated validation rejections.
 Guarantee: After the fault-free window opens, a session whose producer keeps
 returning invalid output stops re-firing within a bounded number of attempts, or
 reports degraded publish health.
@@ -747,9 +748,22 @@ unchanged; the only increments are in `memory-store/src/lib.rs:9264-9268` and
 intra-firing fallback at `history_summarizer.rs:1440-1450` bounds attempts per firing only.
 Existing check: `lib.rs:5042-5047` enforces the 60-second cooldown, and
 `lib.rs:6258-6261` reports degradation from a counter this path never increments.
+Since the chunk retry ladder landed, the backoff still does not escalate, but the
+live model attempts on one chunk are bounded. A validation rejection or a
+permanent or context-overflow producer failure increments the durable
+`chunk_retry` count for the chunk start (`lib.rs:6233`,
+`history_summarizer.rs:353-384`). Assembly varies the calibration seeds from
+`VARY_SEEDS_AFTER_FAILURES` failures, halves the chunk token budget per failure
+from `SHRINK_CHUNK_AFTER_FAILURES`, and from `PLACEHOLDER_AFTER_FAILURES`
+publishes a daemon-authored placeholder segment for the shrunken chunk without a
+model call (`history_summarizer_chunk.rs:572-606`). A publish clears the count.
+Transient and auth failures do not count, so a chunk failing only with them
+still retries every 60 seconds without bound.
 Impact: Unbounded live model spend and log noise, and a session that never
 compacts while its status block reports healthy publishing. Distinct from a bad
-publish: no data is corrupted.
+publish: no data is corrupted. With the ladder, a chunk that keeps failing
+validation costs at most `PLACEHOLDER_AFTER_FAILURES` firings before folding
+moves past it, and the placeholder replaces a summary of those messages.
 Open questions:
 
 - Should a validation rejection increment `consecutive_publish_failures`, or does

@@ -526,6 +526,13 @@ pub struct HistorySummarizerChunkRange {
     pub to_ordinal: u64,
 }
 
+/// Consecutive failed firings on the chunk that starts at `chunk_start`. Assembly reads it to vary the prompt, then shrink the chunk, so a chunk that fails deterministically cannot stall folding.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HistorySummarizerChunkRetry {
+    pub chunk_start: u64,
+    pub failures: u32,
+}
+
 /// Content-sensitive identity for one message selected into a history_summarizer firing.
 /// The outer firing vector preserves message order; each block vector preserves
 /// the canonical block order already tracked by [`ModuleMeta::block_identity_by_mid`].
@@ -962,6 +969,9 @@ pub struct HistorySummarizerDurableState {
     /// state: it makes repeated fence/outbox failures visible without affecting bytes.
     #[serde(default)]
     pub consecutive_publish_failures: u32,
+    /// Consecutive producer or validation failures on one chunk. Abandonment carries it; a publish clears it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chunk_retry: Option<HistorySummarizerChunkRetry>,
     /// Q31 nonadmission count and latest reason. Unlike the fields above, these are not cleared by any transition: every constructor carries them from the prior state.
     #[serde(default)]
     pub memory_reviewer_nonadmission: MemoryReviewerNonadmission,
@@ -988,6 +998,7 @@ impl Default for HistorySummarizerDurableState {
             last_failure: None,
             last_no_fire: None,
             consecutive_publish_failures: 0,
+            chunk_retry: None,
             memory_reviewer_nonadmission: MemoryReviewerNonadmission::default(),
             memory_reviewer_reservation: None,
         }
@@ -1221,6 +1232,7 @@ pub struct HistorySummarizerAssemblySnapshot {
     pub history_segments: Vec<StoredHistorySegment>,
     pub revert_epoch: u64,
     pub history_segment_set_generation: HistorySegmentSetGeneration,
+    pub chunk_retry: Option<HistorySummarizerChunkRetry>,
 }
 
 /// Result of a deterministic revert re-cut. The caller must use the returned
@@ -10148,18 +10160,19 @@ impl MemoryStore {
                 )?;
                 Ok((meta_json, history_segments, history_segment_set_generation))
             })?;
-        let revert_epoch = match meta_json {
+        let (revert_epoch, chunk_retry) = match meta_json {
             Some(json) => {
-                serde_json::from_str::<ModuleMeta>(&json)
-                    .map_err(|e| MemoryStoreError::Serde(e.to_string()))?
-                    .revert_epoch
+                let meta = serde_json::from_str::<ModuleMeta>(&json)
+                    .map_err(|e| MemoryStoreError::Serde(e.to_string()))?;
+                (meta.revert_epoch, meta.history_summarizer.chunk_retry)
             }
-            None => 0,
+            None => (0, None),
         };
         Ok(HistorySummarizerAssemblySnapshot {
             history_segments,
             revert_epoch,
             history_segment_set_generation,
+            chunk_retry,
         })
     }
 
@@ -11468,6 +11481,7 @@ impl MemoryStore {
                 } else {
                     history_summarizer.consecutive_publish_failures
                 },
+                chunk_retry: history_summarizer.chunk_retry,
                 memory_reviewer_nonadmission: history_summarizer.memory_reviewer_nonadmission,
                 memory_reviewer_reservation: history_summarizer.memory_reviewer_reservation.clone(),
                 ..HistorySummarizerDurableState::default()
@@ -21077,6 +21091,10 @@ mod tests {
                 last_failure: None,
                 last_no_fire: None,
                 consecutive_publish_failures: 0,
+                chunk_retry: Some(HistorySummarizerChunkRetry {
+                    chunk_start: 10,
+                    failures: 3,
+                }),
                 memory_reviewer_nonadmission: MemoryReviewerNonadmission::default(),
                 memory_reviewer_reservation: None,
             },
@@ -21121,6 +21139,19 @@ mod tests {
                 expected_failures,
             );
         }
+        let abandoned = store
+            .load("publish-health")
+            .unwrap()
+            .meta
+            .history_summarizer;
+        assert_eq!(
+            abandoned.chunk_retry,
+            Some(HistorySummarizerChunkRetry {
+                chunk_start: 10,
+                failures: 3,
+            }),
+            "abandonment keeps the chunk failure count",
+        );
 
         let successful = store
             .load("publish-health")
@@ -21130,6 +21161,7 @@ mod tests {
             .cleared_of_in_flight_firing();
         assert_eq!(successful.consecutive_publish_failures, 0);
         assert_eq!(successful.firing_seq, predicate.firing_seq);
+        assert_eq!(successful.chunk_retry, None);
     }
 
     fn publish_predicate() -> HistorySummarizerPublishPredicate {
