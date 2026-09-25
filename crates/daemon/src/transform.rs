@@ -5607,7 +5607,10 @@ fn apply_ingress_meta(
     }
 }
 
-fn effective_usage(request: Option<&ModuleUsage>, persisted: Option<&ModuleUsage>) -> ModuleUsage {
+pub(crate) fn effective_usage(
+    request: Option<&ModuleUsage>,
+    persisted: Option<&ModuleUsage>,
+) -> ModuleUsage {
     request
         .filter(|usage| usage.is_non_zero())
         .or(persisted)
@@ -5615,7 +5618,7 @@ fn effective_usage(request: Option<&ModuleUsage>, persisted: Option<&ModuleUsage
         .unwrap_or_default()
 }
 
-fn effective_context_limit_tokens(
+pub(crate) fn effective_context_limit_tokens(
     usage: &ModuleUsage,
     geometry: Option<&TransformGeometry>,
 ) -> f64 {
