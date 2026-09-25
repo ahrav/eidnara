@@ -656,11 +656,12 @@ fn tag_numbers_by_block_and_arc<'a>(
     projection: &FlatProjection,
     tag_rows: impl IntoIterator<Item = &'a TagRow> + Clone,
 ) -> (HashMap<String, i64>, HashMap<String, i64>) {
-    let block_ids = projection
-        .blocks
-        .iter()
-        .map(|block| block.id.as_str())
-        .collect::<HashSet<_>>();
+    // The first block with an id wins, as a linear `find` would pick it; a scan per tag row
+    // made this quadratic in session length.
+    let mut blocks_by_id = HashMap::<&str, &FlatBlock>::with_capacity(projection.blocks.len());
+    for block in &projection.blocks {
+        blocks_by_id.entry(block.id.as_str()).or_insert(block);
+    }
     let message_indexes = projection_message_indexes(projection);
     let mut by_block = HashMap::new();
     let mut by_arc = HashMap::new();
@@ -669,14 +670,10 @@ fn tag_numbers_by_block_and_arc<'a>(
     for row in tag_rows
         .clone()
         .into_iter()
-        .filter(|row| block_ids.contains(row.block_id.as_str()))
+        .filter(|row| blocks_by_id.contains_key(row.block_id.as_str()))
     {
         by_block.insert(row.block_id.clone(), row.tag_number);
-        let Some(block) = projection
-            .blocks
-            .iter()
-            .find(|block| block.id == row.block_id)
-        else {
+        let Some(block) = blocks_by_id.get(row.block_id.as_str()) else {
             continue;
         };
         if let Some(arc_id) = &block.arc_id {
@@ -700,7 +697,8 @@ fn tag_numbers_by_block_and_arc<'a>(
         .collect::<HashSet<_>>();
     let mut orphan_rows = HashMap::<&str, Vec<&TagRow>>::new();
     for row in tag_rows.into_iter().filter(|row| {
-        !block_ids.contains(row.block_id.as_str()) && call_ids.contains(row.block_id.as_str())
+        !blocks_by_id.contains_key(row.block_id.as_str())
+            && call_ids.contains(row.block_id.as_str())
     }) {
         orphan_rows
             .entry(row.block_id.as_str())
@@ -1150,6 +1148,25 @@ mod tests {
             created_at_ms: 0,
             source_bytes: Vec::new(),
         }
+    }
+
+    /// Every tag resolves to its own block and message across a long session; the lookup is
+    /// by id, so a 5,000-message session costs one pass over the blocks, not one per tag.
+    #[test]
+    fn tags_resolve_by_block_id_across_a_long_session() {
+        let messages = (1..=5_000u64)
+            .map(|ordinal| text(&format!("m{ordinal}"), ordinal, "history"))
+            .collect::<Vec<_>>();
+        let projection = project_messages(&messages).unwrap();
+        let tags = (1..=5_000i64)
+            .map(|number| tag(number, &format!("m{number}#0")))
+            .chain([tag(9_999, "missing#0")])
+            .collect::<Vec<_>>();
+        let (by_block, _) = tag_numbers_by_block_and_arc(&projection, tags.iter());
+        assert_eq!(by_block.len(), 5_000);
+        assert_eq!(by_block.get("m1#0"), Some(&1));
+        assert_eq!(by_block.get("m5000#0"), Some(&5_000));
+        assert!(!by_block.contains_key("missing#0"));
     }
 
     #[test]
