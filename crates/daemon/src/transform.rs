@@ -49,8 +49,8 @@ use cache_stability::{CoreState, FrozenUnit, PassInput};
 use context_core::{ClassifierInput, PassPlan, PersistedShape, classify};
 use memory_store::{
     BlockIdentity, BlockIdentityBasis, Channel1AppendRow, DeferredExecuteState, LineageAnchor,
-    LineageConstituent, LineageDescentDisposition, LineageDescentRequest, MemoryStore,
-    MemoryStoreError, ModuleMeta, ModuleUsage, NoteDelivery, PassAction, PassRecord,
+    LineageConstituent, LineageDescentDisposition, LineageDescentRequest, MaterializeReason,
+    MemoryStore, MemoryStoreError, ModuleMeta, ModuleUsage, NoteDelivery, PassAction, PassRecord,
     PassSchedulerObservation, PendingAgentDrop, PendingChannel2Directive, PendingRewriteState,
     ProjectMemoryComposition, ServedBlockFingerprint, StoredHistorySegment, TagCacheSummary,
     TagMintInput, TagRow, TailHygieneBaseline, TemporalMarkInput, TemporalMarkRow, TransformCommit,
@@ -1683,7 +1683,11 @@ impl TransformResponse {
                     .map(ServedMessage::from_message)
                     .collect(),
             ),
-            ..Self::base(TransformStatus::Ok, "PASSTHROUGH", full_array_fingerprint)
+            ..Self::base(
+                TransformStatus::Ok,
+                PassAction::Passthrough.as_str(),
+                full_array_fingerprint,
+            )
         }
     }
 }
@@ -1991,7 +1995,7 @@ pub(crate) fn transform_with_projection(
         crate::token_cache::cached_estimate_tokens,
         None,
     );
-    record_stable_pass_trace(store, req, ctx, &result);
+    record_stable_pass_trace(store, req, &result);
     result
 }
 
@@ -2010,7 +2014,7 @@ pub(crate) fn transform_with_projection_cached(
         Some(output_cache),
         projection_cache,
     );
-    record_stable_pass_trace(store, req, ctx, &result);
+    record_stable_pass_trace(store, req, &result);
     result
 }
 
@@ -2018,7 +2022,6 @@ pub(crate) fn transform_with_projection_cached(
 fn record_stable_pass_trace(
     store: &MemoryStore,
     req: &TransformRequest,
-    _ctx: &ProducerContext<'_>,
     result: &Result<TransformWithProjection, TransformError>,
 ) {
     if let Some(pass) = result.as_ref().ok().filter(|pass| {
@@ -2039,19 +2042,32 @@ fn pass_scheduler_observation(
     drain_latch_active: bool,
     timestamp_ms: i64,
     action: Option<PassAction>,
-    materialize_reason: Option<&'static str>,
+    materialize_reason: Option<MaterializeReason>,
 ) -> PassSchedulerObservation {
-    let usage = effective_usage(req.usage.as_ref(), persisted_usage);
-    let soft_limit_tokens = effective_context_limit_tokens(&usage, req.geometry.as_ref()) as u64;
-    let percent = usage.current_total_input_tokens.saturating_mul(100) / soft_limit_tokens.max(1);
+    let reported = req
+        .usage
+        .as_ref()
+        .filter(|usage| usage.is_non_zero())
+        .or(persisted_usage);
+    let pressure = reported.map(|reported| {
+        let usage = effective_usage(Some(reported), None);
+        let soft_limit_tokens =
+            effective_context_limit_tokens(&usage, req.geometry.as_ref()) as u64;
+        let percent =
+            usage.current_total_input_tokens.saturating_mul(100) / soft_limit_tokens.max(1);
+        (
+            u32::try_from(percent).unwrap_or(u32::MAX),
+            soft_limit_tokens,
+        )
+    });
     PassSchedulerObservation {
         timestamp_ms,
         scheduler_decision: pass.as_str().into(),
         drain_latch_active,
         action,
-        materialize_reason: materialize_reason.map(Into::into),
-        usage_percent: Some(u32::try_from(percent).unwrap_or(u32::MAX)),
-        usage_soft_limit_tokens: Some(soft_limit_tokens),
+        materialize_reason,
+        usage_percent: pressure.map(|(percent, _)| percent),
+        usage_soft_limit_tokens: pressure.map(|(_, limit)| limit),
         prev_response_cache: req.prev_response_cache_usage,
     }
 }
@@ -2082,7 +2098,7 @@ fn pending_rewrite_pass_observation(
         false,
         timestamp_ms,
         Some(PassAction::Passthrough),
-        Some("pending_rewrite"),
+        Some(MaterializeReason::PendingRewrite),
     )
 }
 
@@ -2979,26 +2995,26 @@ fn apply_additive_only(
     timings.tail_messages_emitted = req.messages.len();
     timings.frozen_units = core.frozen_units.len();
 
-    let action = action_str(&plan, &core).to_string();
+    let action = action_str(&plan).to_string();
     let materialize_reason = match plan {
         PassPlan::Hard | PassPlan::MigrateHard => Some(
             if !loaded.meta.initialized || loaded.meta.bootstrap_seed_fold_pending {
-                "first_render"
+                MaterializeReason::FirstRender
             } else if is_legacy_baseline(&loaded.core) {
-                "legacy_migration"
+                MaterializeReason::LegacyMigration
             } else if render_config_changed {
-                "epoch_change"
+                MaterializeReason::EpochChange
             } else if scheduler_outcome.idle_ttl_fired {
-                "ttl_expiry"
+                MaterializeReason::TtlExpiry
             } else if external_revision_changed || project_memory_epoch_hard_due {
-                "project_memory_epoch"
+                MaterializeReason::ProjectMemoryEpoch
             } else if cached_m1_missing(&loaded.core) {
-                "cached_m1_missing"
+                MaterializeReason::CachedM1Missing
             } else {
-                "hard_trigger"
+                MaterializeReason::HardTrigger
             },
         ),
-        PassPlan::Soft => Some("m1_delta"),
+        PassPlan::Soft => Some(MaterializeReason::M1Delta),
         PassPlan::Defer | PassPlan::Reject => None,
     };
     let pass_observation = pass_scheduler_observation(
@@ -3010,11 +3026,7 @@ fn apply_additive_only(
         pass_action(&plan),
         materialize_reason,
     );
-    meta.history_summarizer.record_activation(
-        loaded.meta.rendered_history_segment_seq(),
-        meta.rendered_history_segment_seq(),
-        ctx.now_ms,
-    );
+    // This path renders no history segment, so it activates none.
     let state_changed = core != loaded.core || meta != loaded.meta;
     if state_changed {
         meta.last_committed_pass_at_ms = ctx.now_ms;
@@ -3068,7 +3080,7 @@ fn apply_additive_only(
             full_array_fingerprint: req.full_array_fingerprint.clone(),
             action: action.clone(),
             decision: action,
-            materialize_reason: materialize_reason.map(str::to_string),
+            materialize_reason: materialize_reason.map(|reason| reason.as_str().to_string()),
             first_divergence: None,
             timings: Some(timings),
             boundary_id: String::new(),
@@ -3501,7 +3513,6 @@ fn apply_once(
                 first_divergence,
                 surface_state,
                 timings,
-                materialize_reason: Some("pending_rewrite".to_string()),
                 pass_observation,
                 total_started_at,
             }));
@@ -3603,7 +3614,6 @@ fn apply_once(
             first_divergence,
             surface_state,
             timings,
-            materialize_reason: Some("pending_rewrite".to_string()),
             pass_observation,
             total_started_at,
         }));
@@ -4096,16 +4106,16 @@ fn apply_once(
         reductions_pending: reductions_pending_now,
     });
     if todo_injection_pending && matches!(plan, PassPlan::Soft) && materialize_reason.is_none() {
-        materialize_reason = Some("synthetic_todo");
+        materialize_reason = Some(MaterializeReason::SyntheticTodo);
     }
     if lineage_state.force_hard {
-        materialize_reason = Some("lineage_descent");
+        materialize_reason = Some(MaterializeReason::LineageDescent);
     }
     if boundary_divergence_recut.is_some() {
-        materialize_reason = Some("boundary_divergence_recut");
+        materialize_reason = Some(MaterializeReason::BoundaryDivergenceRecut);
     }
     if transition_due {
-        materialize_reason = Some("renderer_transition");
+        materialize_reason = Some(MaterializeReason::RendererTransition);
     }
 
     timings.planning = elapsed_ms(planning_started_at);
@@ -4169,7 +4179,7 @@ fn apply_once(
     if lineage_anchor_failure {
         core.reconcile_pending = true;
         plan = PassPlan::Defer;
-        materialize_reason = Some("lineage_anchor_mismatch");
+        materialize_reason = Some(MaterializeReason::LineageAnchorMismatch);
     }
 
     let is_provider_prefix_mutation_pass = matches!(
@@ -4372,10 +4382,7 @@ fn apply_once(
                             commit_expected = Some(outcome.row_version);
                             meta.revert_epoch = outcome.revert_epoch;
                             meta.last_recut = outcome.last_recut;
-                            meta.history_summarizer
-                                .counters
-                                .superseded_before_activation =
-                                outcome.superseded_before_activation;
+                            meta.history_summarizer = outcome.history_summarizer;
                             m1_signal = revision_signal_for_context(
                                 store,
                                 ctx.note_project_path,
@@ -4668,7 +4675,7 @@ fn apply_once(
                         run_started: false,
                     })?;
                     plan = PassPlan::Hard;
-                    materialize_reason = Some("pressure_refold");
+                    materialize_reason = Some(MaterializeReason::PressureRefold);
                     meta.initialized = true;
                     meta.last_render_config = effective_render_config_base.clone();
                     if meta.descent_completed {
@@ -4886,7 +4893,7 @@ fn apply_once(
     }
     timings.todo = todo_ms;
 
-    let result_action = action_str(&plan, &core);
+    let result_action = action_str(&plan).to_string();
 
     let mut tag_overlay = if tagging_active {
         tag_overlay_state(
@@ -5319,7 +5326,7 @@ fn apply_once(
             full_array_fingerprint: req.full_array_fingerprint.clone(),
             action: result_action.clone(),
             decision: result_action,
-            materialize_reason: materialize_reason.map(str::to_string),
+            materialize_reason: materialize_reason.map(|reason| reason.as_str().to_string()),
             first_divergence,
             timings: Some(timings),
             boundary_id: core.boundary_id.clone(),
@@ -6922,7 +6929,6 @@ struct PendingPassthroughArgs<'a> {
     first_divergence: Option<FirstDivergence>,
     surface_state: SurfaceState,
     timings: TransformTimings,
-    materialize_reason: Option<String>,
     pass_observation: PassSchedulerObservation,
     total_started_at: Instant,
 }
@@ -6975,7 +6981,6 @@ fn pending_passthrough_result(args: PendingPassthroughArgs<'_>) -> TransformWith
         first_divergence,
         surface_state,
         mut timings,
-        materialize_reason,
         pass_observation,
         total_started_at,
     } = args;
@@ -6986,7 +6991,9 @@ fn pending_passthrough_result(args: PendingPassthroughArgs<'_>) -> TransformWith
     response.project_memory = project_memory;
     response.surface_state = surface_state;
     response.committed = committed;
-    response.materialize_reason = materialize_reason;
+    response.materialize_reason = pass_observation
+        .materialize_reason
+        .map(|reason| reason.as_str().to_string());
     response.first_divergence = first_divergence;
     timings.total = elapsed_ms(total_started_at);
     response.timings = Some(timings);
@@ -11995,7 +12002,7 @@ struct MaterializeReasonInputs {
     reductions_pending: bool,
 }
 
-fn classify_materialize_reason(input: MaterializeReasonInputs) -> Option<&'static str> {
+fn classify_materialize_reason(input: MaterializeReasonInputs) -> Option<MaterializeReason> {
     let MaterializeReasonInputs {
         plan,
         bootstrap_due,
@@ -12015,36 +12022,36 @@ fn classify_materialize_reason(input: MaterializeReasonInputs) -> Option<&'stati
     let reason = match plan {
         PassPlan::Hard | PassPlan::MigrateHard => {
             if bootstrap_due {
-                "first_render"
+                MaterializeReason::FirstRender
             } else if legacy_baseline {
-                "legacy_migration"
+                MaterializeReason::LegacyMigration
             } else if profile_transition {
-                "profile_transition"
+                MaterializeReason::ProfileTransition
             } else if render_config_changed {
-                "epoch_change"
+                MaterializeReason::EpochChange
             } else if coverage_fold_due || first_fold_due {
-                "coverage_fold"
+                MaterializeReason::CoverageFold
             } else if ttl_expired {
-                "ttl_expiry"
+                MaterializeReason::TtlExpiry
             } else if project_memory_delta {
-                "project_memory_epoch"
+                MaterializeReason::ProjectMemoryEpoch
             } else if reconcile_hard_due {
-                "reconcile"
+                MaterializeReason::Reconcile
             } else {
-                "hard_trigger"
+                MaterializeReason::HardTrigger
             }
         }
         PassPlan::Soft => {
             if explicit_flush {
-                "explicit_flush"
+                MaterializeReason::ExplicitFlush
             } else if coverage_delta {
-                "coverage_fold"
+                MaterializeReason::CoverageFold
             } else if m1_delta {
-                "m1_delta"
+                MaterializeReason::M1Delta
             } else if reductions_pending {
-                "selection"
+                MaterializeReason::Selection
             } else {
-                "m1_delta"
+                MaterializeReason::M1Delta
             }
         }
         PassPlan::Defer | PassPlan::Reject => return None,
@@ -12062,10 +12069,8 @@ fn pass_action(plan: &PassPlan) -> Option<PassAction> {
 }
 
 /// A rejected plan reports `ERROR`, which no ring entry carries.
-fn action_str(plan: &PassPlan, _core: &CoreState) -> String {
-    pass_action(plan)
-        .map_or("ERROR", PassAction::as_str)
-        .to_string()
+fn action_str(plan: &PassPlan) -> &'static str {
+    pass_action(plan).map_or("ERROR", PassAction::as_str)
 }
 
 #[cfg(test)]
@@ -15795,7 +15800,7 @@ pub(crate) mod tests {
             Some(boot.action.as_str())
         );
         assert_eq!(
-            entry.materialize_reason.as_deref(),
+            entry.materialize_reason.map(MaterializeReason::as_str),
             boot.materialize_reason.as_deref()
         );
         assert_eq!(
@@ -15839,11 +15844,69 @@ pub(crate) mod tests {
         );
 
         // Without the field the entry carries no cache counts, even though persisted usage stands in for pressure.
-        run(&s, &req("ring", "cfg0", messages), &spine());
+        run(&s, &req("ring", "cfg0", messages.clone()), &spine());
         let entry = ring(&s, "ring").pop().unwrap();
         assert_eq!(entry.usage_percent, Some(30));
         assert_eq!(entry.prev_response_cache, None);
         assert_eq!(ring(&s, "ring").len(), 4);
+
+        // A new message commits once too, and pressure past the soft limit is not capped.
+        let row_version = s.load("ring").unwrap().row_version;
+        let mut grown = messages;
+        grown.push(item("c", 3, "gamma"));
+        let grown = run(
+            &s,
+            &with_usage(req("ring", "cfg0", grown), 250_000, 200_000),
+            &spine(),
+        );
+        assert!(grown.committed);
+        assert_eq!(
+            s.load("ring").unwrap().row_version,
+            row_version.map(|v| v + 1)
+        );
+        let entry = ring(&s, "ring").pop().unwrap();
+        assert_eq!(
+            entry.action.map(PassAction::as_str),
+            Some(grown.action.as_str())
+        );
+        assert_eq!(entry.usage_percent, Some(125));
+        assert_eq!(ring(&s, "ring").len(), 5);
+    }
+
+    #[test]
+    fn pass_pressure_is_absent_without_any_reported_usage_and_saturates_at_the_integer_bound() {
+        let observe = |usage: Option<ModuleUsage>, persisted: Option<&ModuleUsage>| {
+            let mut request = req("pressure", "cfg0", Vec::new());
+            request.usage = usage;
+            let observation = pass_scheduler_observation(
+                &request,
+                persisted,
+                scheduler::PassDecision::Defer,
+                false,
+                0,
+                Some(PassAction::Passthrough),
+                None,
+            );
+            (
+                observation.usage_percent,
+                observation.usage_soft_limit_tokens,
+            )
+        };
+        assert_eq!(observe(None, None), (None, None));
+        let zero = ModuleUsage::default();
+        assert_eq!(observe(Some(zero), None), (None, None));
+        let persisted = ModuleUsage {
+            current_total_input_tokens: 40_000,
+            context_limit_tokens: 200_000,
+            ..ModuleUsage::default()
+        };
+        assert_eq!(observe(None, Some(&persisted)), (Some(20), Some(200_000)));
+        let huge = ModuleUsage {
+            current_total_input_tokens: u64::MAX,
+            context_limit_tokens: 200_000,
+            ..ModuleUsage::default()
+        };
+        assert_eq!(observe(Some(huge), None), (Some(u32::MAX), Some(200_000)));
     }
 
     #[test]
@@ -15854,13 +15917,46 @@ pub(crate) mod tests {
         let mut ctx = pctx("git:proj", "/nonexistent-docs", 0);
         ctx.compaction_enabled = false;
         let first = transform(&s, &req("additive", "cfg0", vec![item("a", 1, "x")]), &ctx).unwrap();
-        let entry = ring(&s, "additive").pop().unwrap();
+        let loaded = s.load("additive").unwrap();
+        let mut meta = loaded.meta.clone();
+        meta.history_summarizer.firing_seq = 1;
+        meta.history_summarizer
+            .record_fire(Default::default(), 1, None);
+        meta.history_summarizer.record_outcome(
+            memory_store::summarizer_timeline::FiringOutcome::Published { sequence: Some(1) },
+        );
+        s.commit("additive", loaded.row_version, &loaded.core, &meta)
+            .unwrap();
+        s.replace_history_segments("additive", &[comp(1, 1, 1, "a", "S1")])
+            .unwrap();
+        let second = transform(
+            &s,
+            &req(
+                "additive",
+                "cfg0",
+                vec![item("a", 1, "x"), item("b", 2, "y")],
+            ),
+            &ctx,
+        )
+        .unwrap();
+        assert!(second.committed);
+        assert_eq!(
+            s.load("additive")
+                .unwrap()
+                .meta
+                .history_summarizer
+                .recent_firings[0]
+                .activated_at_ms,
+            None,
+            "this path renders no history segment"
+        );
+        let entry = ring(&s, "additive").remove(0);
         assert_eq!(
             entry.action.map(PassAction::as_str),
             Some(first.action.as_str())
         );
         assert_eq!(
-            entry.materialize_reason.as_deref(),
+            entry.materialize_reason.map(MaterializeReason::as_str),
             first.materialize_reason.as_deref()
         );
         assert!(entry.materialize_reason.is_some());
@@ -15891,7 +15987,7 @@ pub(crate) mod tests {
         .unwrap();
         let folded = ring(&s, "drift").len();
         assert!(folded > before);
-        transform(
+        let rejected = transform(
             &s,
             &req(
                 "drift",
@@ -15901,6 +15997,10 @@ pub(crate) mod tests {
             &ctx,
         )
         .unwrap_err();
+        assert!(
+            matches!(rejected, TransformError::IdentityDrift(_)),
+            "{rejected:?}"
+        );
         assert_eq!(
             ring(&s, "drift").len(),
             folded,
@@ -15945,7 +16045,10 @@ pub(crate) mod tests {
             entry.action.map(PassAction::as_str),
             Some(fold.action.as_str())
         );
-        assert_eq!(entry.materialize_reason.as_deref(), Some("coverage_fold"));
+        assert_eq!(
+            entry.materialize_reason.map(MaterializeReason::as_str),
+            Some("coverage_fold")
+        );
 
         let meta = s.load("act").unwrap().meta;
         assert_eq!(meta.rendered_history_segment_seq(), 2);
@@ -15993,7 +16096,7 @@ pub(crate) mod tests {
             Some(second.action.as_str())
         );
         assert_eq!(
-            entry.materialize_reason.as_deref(),
+            entry.materialize_reason.map(MaterializeReason::as_str),
             second.materialize_reason.as_deref()
         );
         let meta = s.load("act").unwrap().meta;
@@ -20407,7 +20510,10 @@ pub(crate) mod tests {
         assert_eq!(armed.action, "PASSTHROUGH");
         let entry = ring(&s, "ses").pop().unwrap();
         assert_eq!(entry.action, Some(PassAction::Passthrough));
-        assert_eq!(entry.materialize_reason.as_deref(), Some("pending_rewrite"));
+        assert_eq!(
+            entry.materialize_reason.map(MaterializeReason::as_str),
+            Some("pending_rewrite")
+        );
         let after_arm = s.load("ses").unwrap();
         assert_eq!(
             after_arm.meta.block_identity_by_mid, before.meta.block_identity_by_mid,
@@ -30161,7 +30267,7 @@ pub(crate) mod tests {
         let entry = ring(&store, "B").pop().unwrap();
         assert_eq!(entry.action, Some(PassAction::SoftPlus));
         assert_eq!(
-            entry.materialize_reason.as_deref(),
+            entry.materialize_reason.map(MaterializeReason::as_str),
             Some("lineage_anchor_mismatch")
         );
         assert_eq!(

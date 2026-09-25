@@ -1084,36 +1084,66 @@ impl PassAction {
     }
 }
 
-/// Every materialize reason a transform response reports; the ring refuses any other.
-pub const MATERIALIZE_REASONS: &[&str] = &[
-    "first_render",
-    "legacy_migration",
-    "profile_transition",
-    "epoch_change",
-    "coverage_fold",
-    "ttl_expiry",
-    "project_memory_epoch",
-    "reconcile",
-    "hard_trigger",
-    "cached_m1_missing",
-    "explicit_flush",
-    "m1_delta",
-    "selection",
-    "synthetic_todo",
-    "lineage_descent",
-    "boundary_divergence_recut",
-    "renderer_transition",
-    "lineage_anchor_mismatch",
-    "pressure_refold",
-    "pending_rewrite",
-];
+/// Why a pass materialized, or why it declined to; the transform response reports the same value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MaterializeReason {
+    FirstRender,
+    LegacyMigration,
+    ProfileTransition,
+    EpochChange,
+    CoverageFold,
+    TtlExpiry,
+    ProjectMemoryEpoch,
+    Reconcile,
+    HardTrigger,
+    CachedM1Missing,
+    ExplicitFlush,
+    M1Delta,
+    Selection,
+    SyntheticTodo,
+    LineageDescent,
+    BoundaryDivergenceRecut,
+    RendererTransition,
+    LineageAnchorMismatch,
+    PressureRefold,
+    PendingRewrite,
+}
+
+impl MaterializeReason {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::FirstRender => "first_render",
+            Self::LegacyMigration => "legacy_migration",
+            Self::ProfileTransition => "profile_transition",
+            Self::EpochChange => "epoch_change",
+            Self::CoverageFold => "coverage_fold",
+            Self::TtlExpiry => "ttl_expiry",
+            Self::ProjectMemoryEpoch => "project_memory_epoch",
+            Self::Reconcile => "reconcile",
+            Self::HardTrigger => "hard_trigger",
+            Self::CachedM1Missing => "cached_m1_missing",
+            Self::ExplicitFlush => "explicit_flush",
+            Self::M1Delta => "m1_delta",
+            Self::Selection => "selection",
+            Self::SyntheticTodo => "synthetic_todo",
+            Self::LineageDescent => "lineage_descent",
+            Self::BoundaryDivergenceRecut => "boundary_divergence_recut",
+            Self::RendererTransition => "renderer_transition",
+            Self::LineageAnchorMismatch => "lineage_anchor_mismatch",
+            Self::PressureRefold => "pressure_refold",
+            Self::PendingRewrite => "pending_rewrite",
+        }
+    }
+}
 
 const SCHEDULER_DECISIONS: &[&str] = &["Defer", "Execute", "Force85", "Emergency95"];
 
-/// One accepted pass in the bounded scheduler history attached to [`PassTrace`]. Entries written
-/// before `action` existed load with every later field absent. Closed-set strings are borrowed
-/// from the vocabularies above when written and owned only when read back.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+/// One accepted pass in the bounded scheduler history attached to [`PassTrace`]. An entry
+/// without the later fields loads them as absent. The decision string is borrowed from its
+/// vocabulary when written and owned only when read back.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(Default))]
 pub struct PassSchedulerObservation {
     pub timestamp_ms: i64,
     pub scheduler_decision: Cow<'static, str>,
@@ -1121,8 +1151,8 @@ pub struct PassSchedulerObservation {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub action: Option<PassAction>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub materialize_reason: Option<Cow<'static, str>>,
-    /// `floor(input * 100 / usage_soft_limit_tokens)` over the pressure usage the scheduler read, request or persisted. Not capped: past the soft limit it exceeds 100.
+    pub materialize_reason: Option<MaterializeReason>,
+    /// `floor(input * 100 / usage_soft_limit_tokens)` over the pressure usage the scheduler read, request or persisted, saturating at `u32::MAX`. Not capped at 100: past the soft limit it exceeds it. Absent when neither the request nor the row reported usage.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub usage_percent: Option<u32>,
     /// The denominator of `usage_percent`: the soft context limit the scheduler resolved.
@@ -1203,7 +1233,7 @@ impl InterestingPassSchedulerObservation {
     }
 }
 
-/// Refuses a decision or reason outside its vocabulary before anything reaches the ring.
+/// Refuses a decision outside its vocabulary before anything reaches the ring; action and reason are closed by their types.
 fn serialize_scheduler_observation(
     observation: &PassSchedulerObservation,
 ) -> Result<String, MemoryStoreError> {
@@ -1211,15 +1241,6 @@ fn serialize_scheduler_observation(
         return Err(MemoryStoreError::Serde(format!(
             "unknown scheduler decision {:?}",
             observation.scheduler_decision
-        )));
-    }
-    if let Some(reason) = observation
-        .materialize_reason
-        .as_deref()
-        .filter(|reason| !MATERIALIZE_REASONS.contains(reason))
-    {
-        return Err(MemoryStoreError::Serde(format!(
-            "unknown materialize reason {reason:?}"
         )));
     }
     serde_json::to_string(observation).map_err(|error| MemoryStoreError::Serde(error.to_string()))
@@ -1359,8 +1380,8 @@ pub struct TruncateOutcome {
     pub revert_epoch: u64,
     pub last_recut: Option<String>,
     pub row_version: u64,
-    /// The session's count after this transaction; a caller that commits its own meta over the result carries it forward.
-    pub superseded_before_activation: u64,
+    /// The summarizer state this transaction left, counts and timeline included; a caller that commits its own meta over the result carries it forward.
+    pub history_summarizer: HistorySummarizerDurableState,
 }
 
 pub struct HistorySummarizerPublishRequest<'a> {
@@ -5319,7 +5340,7 @@ enum AbandonHistorySummarizerTxnOutcome {
 }
 
 enum TruncateTxnOutcome {
-    Committed(TruncateOutcome),
+    Committed(Box<TruncateOutcome>),
     CasConflict(u64),
     Serde(String),
 }
@@ -11193,7 +11214,7 @@ impl MemoryStore {
                 Err(error) => return Ok(TruncateTxnOutcome::Serde(error.to_string())),
             };
             let next_epoch = prior_meta.revert_epoch.saturating_add(1);
-            let reset_meta = ModuleMeta {
+            let mut reset_meta = ModuleMeta {
                 revert_epoch: next_epoch,
                 last_recut: Some(format!(
                     "native recomp reset all history_segments; epoch {next_epoch}"
@@ -11201,6 +11222,7 @@ impl MemoryStore {
                 history_summarizer: prior_meta.history_summarizer.cleared_of_in_flight_firing(),
                 ..ModuleMeta::default()
             };
+            reset_meta.history_summarizer.forget_unrendered_above(0);
             let core_json = match serde_json::to_string(&CoreState::empty()) {
                 Ok(json) => json,
                 Err(error) => return Ok(TruncateTxnOutcome::Serde(error.to_string())),
@@ -11267,18 +11289,15 @@ impl MemoryStore {
                     current
                 ],
             )?;
-            Ok(TruncateTxnOutcome::Committed(TruncateOutcome {
+            Ok(TruncateTxnOutcome::Committed(Box::new(TruncateOutcome {
                 revert_epoch: next_epoch,
                 last_recut: reset_meta.last_recut,
                 row_version: next_version,
-                superseded_before_activation: reset_meta
-                    .history_summarizer
-                    .counters
-                    .superseded_before_activation,
-            }))
+                history_summarizer: reset_meta.history_summarizer,
+            })))
         })?;
         match outcome {
-            TruncateTxnOutcome::Committed(outcome) => Ok(outcome),
+            TruncateTxnOutcome::Committed(outcome) => Ok(*outcome),
             TruncateTxnOutcome::CasConflict(found) => Err(MemoryStoreError::CasConflict {
                 expected: expected_row_version,
                 found,
@@ -11329,15 +11348,12 @@ impl MemoryStore {
                     |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
                 )?;
             if dropped_count == 0 {
-                return Ok(TruncateTxnOutcome::Committed(TruncateOutcome {
+                return Ok(TruncateTxnOutcome::Committed(Box::new(TruncateOutcome {
                     revert_epoch: meta.revert_epoch,
                     last_recut: meta.last_recut,
                     row_version: current.max(0) as u64,
-                    superseded_before_activation: meta
-                        .history_summarizer
-                        .counters
-                        .superseded_before_activation,
-                }));
+                    history_summarizer: meta.history_summarizer,
+                })));
             }
 
             let surviving_tail = tx
@@ -11372,6 +11388,8 @@ impl MemoryStore {
                 .counters
                 .superseded_before_activation
                 .saturating_add(superseded as u64);
+            meta.history_summarizer
+                .forget_unrendered_above(keep_through_seq);
             let next_epoch = meta.revert_epoch.saturating_add(1);
             let dropped_range = match (dropped_min, dropped_max) {
                 (Some(min), Some(max)) if min == max => min.to_string(),
@@ -11448,19 +11466,16 @@ impl MemoryStore {
                 params![session_id, next as i64, meta_json, current],
             )?;
 
-            Ok(TruncateTxnOutcome::Committed(TruncateOutcome {
+            Ok(TruncateTxnOutcome::Committed(Box::new(TruncateOutcome {
                 revert_epoch: next_epoch,
                 last_recut,
                 row_version: next,
-                superseded_before_activation: meta
-                    .history_summarizer
-                    .counters
-                    .superseded_before_activation,
-            }))
+                history_summarizer: meta.history_summarizer,
+            })))
         })?;
 
         match outcome {
-            TruncateTxnOutcome::Committed(outcome) => Ok(outcome),
+            TruncateTxnOutcome::Committed(outcome) => Ok(*outcome),
             TruncateTxnOutcome::CasConflict(found) => Err(MemoryStoreError::CasConflict {
                 expected: expected_row_version,
                 found,
@@ -18395,14 +18410,14 @@ mod tests {
     /// Every field present at its widest serialization.
     fn worst_case_scheduler_observation(
         decision: &'static str,
-        reason: &'static str,
+        reason: MaterializeReason,
     ) -> PassSchedulerObservation {
         PassSchedulerObservation {
             timestamp_ms: i64::MIN,
             scheduler_decision: decision.into(),
             drain_latch_active: false,
             action: Some(PassAction::Passthrough),
-            materialize_reason: Some(reason.into()),
+            materialize_reason: Some(reason),
             usage_percent: Some(u32::MAX),
             usage_soft_limit_tokens: Some(u64::MAX),
             prev_response_cache: Some(ProviderCacheUsage {
@@ -20732,7 +20747,10 @@ mod tests {
     fn the_worst_case_ring_entry_passes_the_integrity_scan_through_both_writers_as_numbers() {
         let dir = tempfile::tempdir().unwrap();
         let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
-        let worst = worst_case_scheduler_observation("Emergency95", "boundary_divergence_recut");
+        let worst = worst_case_scheduler_observation(
+            "Emergency95",
+            MaterializeReason::BoundaryDivergenceRecut,
+        );
         store.trace_pass_stable("worst", &worst).unwrap();
         commit_scheduler_observation(
             &store,
@@ -20774,8 +20792,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
         let unknown = PassSchedulerObservation {
-            scheduler_decision: "Defer".into(),
-            materialize_reason: Some("guessed".into()),
+            scheduler_decision: "Guessed".into(),
             ..Default::default()
         };
         assert!(store.trace_pass_stable("vocab", &unknown).is_err());
@@ -20794,6 +20811,7 @@ mod tests {
         );
         assert!(store.load_pass_trace("vocab").unwrap().is_none());
         assert!(serde_json::from_str::<PassAction>("\"ERROR\"").is_err());
+        assert!(serde_json::from_str::<MaterializeReason>("\"guessed\"").is_err());
 
         let old: PassSchedulerObservation = serde_json::from_str(
             r#"{"timestamp_ms":1,"scheduler_decision":"Defer","drain_latch_active":false}"#,
@@ -20856,9 +20874,45 @@ mod tests {
         let longest = |set: &'static [&'static str]| {
             set.iter().copied().max_by_key(|value| value.len()).unwrap()
         };
+        let reasons = [
+            MaterializeReason::FirstRender,
+            MaterializeReason::LegacyMigration,
+            MaterializeReason::ProfileTransition,
+            MaterializeReason::EpochChange,
+            MaterializeReason::CoverageFold,
+            MaterializeReason::TtlExpiry,
+            MaterializeReason::ProjectMemoryEpoch,
+            MaterializeReason::Reconcile,
+            MaterializeReason::HardTrigger,
+            MaterializeReason::CachedM1Missing,
+            MaterializeReason::ExplicitFlush,
+            MaterializeReason::M1Delta,
+            MaterializeReason::Selection,
+            MaterializeReason::SyntheticTodo,
+            MaterializeReason::LineageDescent,
+            MaterializeReason::BoundaryDivergenceRecut,
+            MaterializeReason::RendererTransition,
+            MaterializeReason::LineageAnchorMismatch,
+            MaterializeReason::PressureRefold,
+            MaterializeReason::PendingRewrite,
+        ];
+        for reason in reasons {
+            assert_eq!(serde_json::to_value(reason).unwrap(), reason.as_str());
+        }
+        for action in [
+            PassAction::Hard,
+            PassAction::Soft,
+            PassAction::SoftPlus,
+            PassAction::Passthrough,
+        ] {
+            assert_eq!(serde_json::to_value(action).unwrap(), action.as_str());
+        }
         let worst_observation = worst_case_scheduler_observation(
             longest(SCHEDULER_DECISIONS),
-            longest(MATERIALIZE_REASONS),
+            reasons
+                .into_iter()
+                .max_by_key(|reason| reason.as_str().len())
+                .unwrap(),
         );
         assert_eq!(
             serialize_scheduler_observation(&worst_observation)
@@ -24008,11 +24062,17 @@ mod tests {
      {
         let dir = tempfile::tempdir().unwrap();
         let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
-        let meta = ModuleMeta {
+        let mut meta = ModuleMeta {
             folded_history_segment_seq: 1,
             m1_history_segment_seq: Some(2),
             ..Default::default()
         };
+        // Firing 3 published segment 3, which no pass rendered.
+        meta.history_summarizer.firing_seq = 3;
+        meta.history_summarizer
+            .record_fire(Default::default(), 1, None);
+        meta.history_summarizer
+            .record_outcome(summarizer_timeline::FiringOutcome::Published { sequence: Some(3) });
         let rv = store
             .commit("ses", None, &CoreState::empty(), &meta)
             .unwrap();
@@ -24043,6 +24103,14 @@ mod tests {
         let outcome_count = counters(&store).superseded_before_activation;
         assert_eq!(outcome_count, 2);
         assert_eq!(store.load_history_segments("ses").unwrap().len(), 1);
+        // Nothing of firing 3 remains to activate, so a later publication reusing sequence 3 cannot stamp it.
+        let mut after = store.load("ses").unwrap().meta.history_summarizer;
+        assert_eq!(
+            after.recent_firings[0].outcome,
+            Some(summarizer_timeline::FiringOutcome::Published { sequence: None })
+        );
+        after.record_activation(1, 3, 9);
+        assert_eq!(after.recent_firings[0].activated_at_ms, None);
 
         // A kept prefix above the render bounds the count too: only segment 4 is dropped.
         let loaded = store.load("ses").unwrap();
@@ -24065,7 +24133,13 @@ mod tests {
         let outcome = store
             .truncate_history_segments_for_revert("ses", 3, Some(rv))
             .unwrap();
-        assert_eq!(outcome.superseded_before_activation, 3);
+        assert_eq!(
+            outcome
+                .history_summarizer
+                .counters
+                .superseded_before_activation,
+            3
+        );
         assert_eq!(counters(&store).superseded_before_activation, 3);
     }
 

@@ -125,7 +125,7 @@ pub enum AbandonClass {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum FiringOutcome {
-    /// `sequence` is the highest history_segment sequence the publication appended; `None` when it appended none.
+    /// `sequence` is the highest history_segment sequence the publication appended; `None` when it appended none, or when a revert removed it before any pass rendered it.
     Published {
         sequence: Option<i64>,
     },
@@ -268,6 +268,18 @@ impl HistorySummarizerDurableState {
                 && entry.activated_at_ms.is_none()
             {
                 entry.activated_at_ms = Some(at_ms);
+            }
+        }
+    }
+
+    /// A revert removed every segment above `keep_through`; a publication whose segment went with it, unrendered, can never activate, and a later publication may reuse its sequence.
+    pub fn forget_unrendered_above(&mut self, keep_through: i64) {
+        for entry in &mut self.recent_firings {
+            if let Some(FiringOutcome::Published { sequence }) = &mut entry.outcome
+                && sequence.is_some_and(|published| published > keep_through)
+                && entry.activated_at_ms.is_none()
+            {
+                *sequence = None;
             }
         }
     }
