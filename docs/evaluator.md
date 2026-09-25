@@ -1767,8 +1767,8 @@ structured aged arm at S0 the daemon folded the older history five messages
 to a segment (twenty-two segments) and left the newest in the protected tail: the
 plain task's message sits at the head of its segment and is served whole;
 the falsifier is folded third into the first segment, its segment is
-selected, and the served fragment is cut at the cap before its words, so it
-reaches render with the evidence absent; the positive control is in the
+selected, and the served fragment is centered on its matched words, so it
+is delivered too; the positive control is in the
 protected tail and has no unit at all. The three policies are recorded as
 `GovernanceArms` over the pair set. The report carries the five injection
 cases planned for the task set (`plan_injection_cases` over the three task
