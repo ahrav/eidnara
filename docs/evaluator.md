@@ -2432,7 +2432,12 @@ life's live digest and differs historically by every death in the history.
 
 The run refuses an unapproved profile before the history is generated or any
 store opens (the profile's event bound is the generator's,
-`messages.max(64) * 2`, so it needs no plan), starts the envelope's clock
+`messages.max(64) * 2`, so it needs no plan). The profile's store bound is
+512 KiB per declared message and its artifact bound 4 KiB per message, each
+above the Suite B floor (64 MiB and 1 MiB), so a history under 128 messages
+keeps the floors and a longer one is measured rather than refused as
+`EnvelopeExceeded`; the fault and growth profiles are built on this one. The
+run starts the envelope's clock
 before planning, charges the roots, store bytes, elapsed time, and artifact
 bytes to the envelope, and
 publishes `suite-c-aging-report.json` and `manifest.json` write-then-rename;
@@ -2734,7 +2739,13 @@ The `growth` subcommand takes the `aging` flags plus `--mode
 <never_restored|restoring>`; the CI `eval-campaign` job runs `eval_growth`
 under `EIDNARA_EVAL_S0_BUDGET_MS` with the ignored scenarios, and the default
 shards run the never-restored campaign once with every scenario asserted over
-it. The S2 run is the same campaign under the S2 profile and budget.
+it. The S2 run is the same campaign under the S2 profile and budget, with
+the store and artifact bounds the aging profile scales from the history. At
+600 messages the envelope holds and the ledger refuses the run as
+`GrowthRateExceeded`: the durable stores grow faster per commit as the
+history lengthens (about 22 KB a commit over the first 100 commits and 40 KB
+averaged over 1,000 at 300 messages, 67 KB averaged over 2,002 at 600, most
+of it the kernel file), past the 64 KiB allowance.
 
 ## Shrinking
 
