@@ -199,6 +199,7 @@ describe("summarizeCompactionTiming", () => {
             "SOFT+ -": 3,
             "SOFT coverage_fold": 1,
         });
+        expect(timing?.emergencyPasses).toBe(1);
         // HARD → write-heavy sample; SOFT+ → read-heavy; the zero sample after SOFT carries no ratio.
         expect(timing?.cacheReadShareAfter).toEqual({
             HARD: { ratio: 0, samples: 1 },

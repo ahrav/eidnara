@@ -49,6 +49,8 @@ export interface CompactionTiming {
     publishToActivation: { maxMs?: number; n: number; orderedMs: number[]; censored: number };
     /** Plugin requests by the served `ACTION reason`; an Emergency95 rerun counts with its request. */
     passesByReason: Record<string, number>;
+    /** Plugin requests the scheduler served as Emergency95, whether or not they waited. */
+    emergencyPasses: number;
     cacheReadShareAfter: Record<string, CacheReadShare>;
 }
 
@@ -228,7 +230,8 @@ export function summarizeCompactionTiming(
         .sort((a, b) => a - b);
     const ring = readRing(record(record(status)?.pass_trace)?.scheduler_history);
     const passesByReason: Record<string, number> = {};
-    for (const request of groupByRequest(ring)) {
+    const requests = groupByRequest(ring);
+    for (const request of requests) {
         const served = request.at(-1);
         if (!served?.action) continue;
         const key = `${served.action} ${served.reason ?? "-"}`;
@@ -244,6 +247,8 @@ export function summarizeCompactionTiming(
             censored: measured.filter((firing) => firing.state === "pending").length,
         },
         passesByReason,
+        emergencyPasses: requests.filter((request) => request[0]?.decision === "Emergency95")
+            .length,
         cacheReadShareAfter: cacheReadShareAfter(ring),
     };
 }
