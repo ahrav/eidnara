@@ -704,6 +704,7 @@ export class HermeticHostStack {
     ): Promise<CompactionTiming | undefined> {
         return summarizeCompactionTiming(
             sessionId,
+            projectRoot,
             await this.primaryStatus(sessionId, projectRoot, "session.status"),
         );
     }

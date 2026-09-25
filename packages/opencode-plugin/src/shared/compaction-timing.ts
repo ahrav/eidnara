@@ -34,7 +34,7 @@ export interface CompactionCounters {
     exact: { firings: number; published: number; supersededBeforeActivation: number };
     /** Written after the failure; a crash in between loses one. */
     bestEffort: { validationRejected: number; invalidated: number; connectFailed: number };
-    /** A count fell since the previous read of this session by either status reader in this process: the session was reset, so no delta across this read is meaningful. */
+    /** A count fell since the previous read of this session under this project root by either status reader in this process: the session was reset, so no delta across this read is meaningful. */
     resetSincePreviousRead: boolean;
 }
 
@@ -56,6 +56,7 @@ export interface CompactionTiming {
 
 type Json = Record<string, unknown>;
 
+/** Keyed like the status poll caches: the daemon keys session state by `(session, project_root)`, so one id under two roots holds two independent counter sets. */
 const previousCounters = new BoundedSessionMap<number[]>(64);
 
 function record(value: unknown): Json | undefined {
@@ -110,7 +111,7 @@ function readFiring(entry: Json): CompactionFiring {
     };
 }
 
-function readCounters(sessionId: string, value: Json): CompactionCounters {
+function readCounters(statusKey: string, value: Json): CompactionCounters {
     const exact = {
         firings: count(value, "firings"),
         published: count(value, "published"),
@@ -122,8 +123,8 @@ function readCounters(sessionId: string, value: Json): CompactionCounters {
         connectFailed: count(value, "connect_failed"),
     };
     const current = [...Object.values(exact), ...Object.values(bestEffort)];
-    const previous = previousCounters.get(sessionId);
-    previousCounters.set(sessionId, current);
+    const previous = previousCounters.get(statusKey);
+    previousCounters.set(statusKey, current);
     return {
         exact,
         bestEffort,
@@ -162,6 +163,7 @@ function readRing(value: unknown): RingEntry[] {
     });
 }
 
+/** Adjacent entries with one pass clock are one request: every rerun repeats the request's `timestamp_ms`. The ring carries no other request identity, so two requests of one session stamped in the same wall millisecond read as one. */
 function groupByRequest(ring: RingEntry[]): RingEntry[][] {
     const requests: RingEntry[][] = [];
     for (const entry of ring) {
@@ -198,6 +200,7 @@ function cacheReadShareAfter(ring: RingEntry[]): Record<string, CacheReadShare> 
 /** `undefined` when the payload carries no summarizer timeline, so an older daemon's status renders unchanged. */
 export function summarizeCompactionTiming(
     sessionId: string,
+    projectRoot: string,
     status: unknown,
 ): CompactionTiming | undefined {
     const summarizer = record(record(status)?.history_summarizer);
@@ -208,7 +211,9 @@ export function summarizeCompactionTiming(
         const entry = record(raw);
         return entry ? [readFiring(entry)] : [];
     });
-    const counters = rawCounters ? readCounters(sessionId, rawCounters) : undefined;
+    const counters = rawCounters
+        ? readCounters(`${sessionId}\u001f${projectRoot}`, rawCounters)
+        : undefined;
     // With no boundary, the next pass folds every pending publication as a first fold.
     const foldsNext = record(status)?.boundary_present === false;
     const measured = firings.filter(

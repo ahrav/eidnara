@@ -44,13 +44,15 @@ function ringEntry(
 describe("summarizeCompactionTiming", () => {
     it("returns nothing for a status without the timeline, so older payloads render unchanged", () => {
         const status = { history_summarizer: { consecutive_publish_failures: 0 } };
-        expect(summarizeCompactionTiming("old", status)).toBeUndefined();
-        expect(formatCompactionTimingLines(summarizeCompactionTiming("old", status))).toEqual([]);
-        expect(summarizeCompactionTiming("old", undefined)).toBeUndefined();
+        expect(summarizeCompactionTiming("old", "/root", status)).toBeUndefined();
+        expect(
+            formatCompactionTimingLines(summarizeCompactionTiming("old", "/root", status)),
+        ).toEqual([]);
+        expect(summarizeCompactionTiming("old", "/root", undefined)).toBeUndefined();
     });
 
     it("derives both durations for an activated firing and marks a pending one unactivated", () => {
-        const timing = summarizeCompactionTiming("durations", {
+        const timing = summarizeCompactionTiming("durations", "/root", {
             history_summarizer: {
                 recent_firings: [
                     {
@@ -108,7 +110,7 @@ describe("summarizeCompactionTiming", () => {
 
     it("excludes only a first fold, even when the counters match the window", () => {
         const only = (entry: unknown, boundaryPresent?: boolean) =>
-            summarizeCompactionTiming("first-fold", {
+            summarizeCompactionTiming("first-fold", "/root", {
                 ...(boundaryPresent === undefined ? {} : { boundary_present: boundaryPresent }),
                 history_summarizer: {
                     recent_firings: [entry],
@@ -137,7 +139,7 @@ describe("summarizeCompactionTiming", () => {
     });
 
     it("reads a publication a revert removed as superseded, never pending or censored", () => {
-        const timing = summarizeCompactionTiming("superseded", {
+        const timing = summarizeCompactionTiming("superseded", "/root", {
             history_summarizer: {
                 recent_firings: [
                     firing(
@@ -162,7 +164,7 @@ describe("summarizeCompactionTiming", () => {
     });
 
     it("renders a missing, inverted, or differently clocked stamp as unknown", () => {
-        const timing = summarizeCompactionTiming("unknown", {
+        const timing = summarizeCompactionTiming("unknown", "/root", {
             history_summarizer: {
                 recent_firings: [
                     firing(
@@ -200,7 +202,7 @@ describe("summarizeCompactionTiming", () => {
 
     it("labels exact and best-effort counts and marks a decrease as a reset boundary", () => {
         const read = (values: Partial<Record<string, number>>) =>
-            summarizeCompactionTiming("reset", {
+            summarizeCompactionTiming("reset", "/root", {
                 history_summarizer: { counters: counters(values) },
             });
         expect(read({ firings: 5, published: 4, validation_rejected: 1 })?.counters).toEqual({
@@ -213,8 +215,19 @@ describe("summarizeCompactionTiming", () => {
         expect(formatCompactionTimingLines(reset)).toContain("- Counts reset since the last read");
     });
 
+    it("keeps counter history per (session, project root), the identity the daemon keys status by", () => {
+        const read = (root: string, firings: number) =>
+            summarizeCompactionTiming("shared-id", root, {
+                history_summarizer: { counters: counters({ firings }) },
+            })?.counters?.resetSincePreviousRead;
+        expect(read("/a", 10)).toBe(false);
+        expect(read("/b", 1)).toBe(false);
+        expect(read("/a", 11)).toBe(false);
+        expect(read("/a", 2)).toBe(true);
+    });
+
     it("counts passes by reason and scores each response against the pass before it, once per request", () => {
-        const timing = summarizeCompactionTiming("ring", {
+        const timing = summarizeCompactionTiming("ring", "/root", {
             history_summarizer: { recent_firings: [] },
             pass_trace: {
                 scheduler_history: [
@@ -244,7 +257,7 @@ describe("summarizeCompactionTiming", () => {
     });
 
     it("groups a request by its pass clock, never by an equal or missing cache sample", () => {
-        const timing = summarizeCompactionTiming("request-identity", {
+        const timing = summarizeCompactionTiming("request-identity", "/root", {
             history_summarizer: { recent_firings: [] },
             pass_trace: {
                 scheduler_history: [
