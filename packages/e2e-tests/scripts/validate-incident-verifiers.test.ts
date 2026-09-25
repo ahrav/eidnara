@@ -262,10 +262,11 @@ describe("catalog revision replay admission", () => {
         ).toThrow(/requires an appended fingerprint-bound baseline/);
     });
 
-    // History validation names the missing and reused cases before the replay gate would.
+    // History validation names a missing baseline or a reused revision id when the prior baseline's fingerprint differs; when the revision kept its fingerprint, the replay gate names both.
     const EXPECTED_PROBE_MESSAGE = {
-        missing: /is not bound by a fingerprint-matching baseline adjudication/,
-        reused: /changed its semantic fingerprint while reusing revision id/,
+        missing:
+            /is not bound by a fingerprint-matching baseline adjudication|requires an appended fingerprint-bound baseline/,
+        reused: /changed its semantic fingerprint while reusing revision id|requires an appended fingerprint-bound baseline and distinct semantic revision/,
         fingerprint: /does not match the registered case/,
     } as const;
 
