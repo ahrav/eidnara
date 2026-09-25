@@ -616,7 +616,7 @@ fn a_child_predicate_pinned_elsewhere_is_refused_and_nothing_is_published() {
 #[test]
 fn a_commit_count_the_scenario_cannot_carry_is_refused_before_anything_runs() {
     let publish = tempfile::tempdir().unwrap();
-    for commits in [0, 1, 78] {
+    for commits in [0, 1, 32, 78] {
         let mut config = config(publish.path().join(format!("commits-{commits}")));
         config.commits = commits;
         let refused = shrink::run(&config, spawn_child).err().unwrap();
@@ -790,8 +790,16 @@ fn the_shrink_flags_are_parsed_and_the_child_needs_its_environment() {
         shrink::config_from_args(flags("1")).is_err(),
         "a rename needs two commits"
     );
-    let largest = shrink::config_from_args(flags("77")).unwrap();
+    let largest = shrink::config_from_args(flags("31")).unwrap();
     shrink::scenario(largest.commits);
+    for commits in ["32", "60", "70", "77"] {
+        let refused = shrink::config_from_args(flags(commits))
+            .expect_err("a witness past the scanner's input limit cannot publish");
+        assert!(
+            refused.starts_with("--commits:") && refused.contains("witness"),
+            "{refused}"
+        );
+    }
     let refused = shrink::config_from_args(flags("78"))
         .expect_err("78 commits exceed the aged world's 128-event bound");
     assert!(refused.starts_with("--commits:"), "{refused}");

@@ -3008,7 +3008,13 @@ The `shrink` subcommand takes `--scale`, `--commits`, `--elapsed-bound-ms`,
 `--approved-by`, `--approval-run-id`, and `--publish`, and pins the planted
 oracle at `failing_at: 3, slipping_at: 6`. `--commits` below two is refused,
 and so is a count whose aged world declares more than its 128-event bound (78
-commits and above), before anything is created. `crates/daemon/tests/eval_shrink.rs`
+commits and above), before anything is created. So is a count whose witness
+cannot publish: the flag parser (and `run`, for a `Config` built directly)
+lives the shrink in-process with every candidate answered by the oracle as an
+honest child answers it, measures the canonical witness, and refuses
+(`Commits`) one larger than the envelope's artifact bound or the secret
+scanner's 512 KiB input limit, whichever is lower. Under the pinned oracle
+that ceiling is 31 commits; 32 and above are refused at the flag. `crates/daemon/tests/eval_shrink.rs`
 runs the shell with the test binary as the child: the minimized witness keeps
 six commits and its recipe counts the five whose single deletion slips the
 class, two further fresh processes agree on outcome and trace digest, the
