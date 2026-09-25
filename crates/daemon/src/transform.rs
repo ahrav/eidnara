@@ -2776,7 +2776,7 @@ fn apply_additive_only(
     }
     timings.decide = elapsed_ms(decide_scheduler_started_at);
 
-    // This path computes no fold, recut, absorb, emergency arm, or reconcile; each is `false` here.
+    // This path feeds no first fold, recut, absorb, or reconcile, and its veto leaves the emergency arm out; each is `false` here.
     let ActivationGates {
         hard_fold_requested,
         ordinary_history_summarizer_veto,

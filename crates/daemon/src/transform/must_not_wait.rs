@@ -24,7 +24,13 @@ fn pending(dir: &std::path::Path) -> (MemoryStore, Vec<IngressMessage>) {
     )
     .unwrap();
     messages.push(item("tail", 3, "tail"));
-    let first = run(&s, &req(SESSION, "cfg0", messages.clone()), &spine());
+    // In the Execute band with a live run, the session's first publication still folds at once.
+    let first = transform(
+        &s,
+        &with_usage(req(SESSION, "cfg0", messages.clone()), 140_000, 200_000),
+        &live_run("/nonexistent-docs", 0),
+    )
+    .unwrap();
     assert_eq!(
         (first.action.as_str(), first.materialize_reason.as_deref()),
         ("HARD", Some("coverage_fold")),
@@ -98,11 +104,11 @@ fn only_the_ordinary_execute_arm_waits_for_a_live_run() {
 /// Each hard member and each forced member busts with a live run and a pending summary; the forced ones reach the classifier through the bust gate, so a hold inserted before that gate fails them.
 #[test]
 fn every_must_not_wait_member_rebuilds_or_busts_through_a_live_run() {
-    type Setup = fn(&MemoryStore, &[IngressMessage]) -> (TransformRequest, i64);
+    type Setup = fn(&MemoryStore, &[IngressMessage]) -> (TransformRequest, bool);
     let cases: [(&str, Setup, (&str, &str)); 6] = [
         (
             "render-config epoch",
-            |_, messages| (quiet(messages, "cfg1"), 0),
+            |_, messages| (quiet(messages, "cfg1"), false),
             ("HARD", "epoch_change"),
         ),
         (
@@ -113,13 +119,13 @@ fn every_must_not_wait_member_rebuilds_or_busts_through_a_live_run() {
                 meta.project_memory_epoch_pending = true;
                 s.commit(SESSION, loaded.row_version, &loaded.core, &meta)
                     .unwrap();
-                (quiet(messages, "cfg0"), 0)
+                (quiet(messages, "cfg0"), false)
             },
             ("HARD", "project_memory_epoch"),
         ),
         (
             "idle TTL with an in-process anchor",
-            |_, messages| (quiet(messages, "cfg0"), 1),
+            |_, messages| (quiet(messages, "cfg0"), true),
             ("HARD", "ttl_expiry"),
         ),
         (
@@ -127,7 +133,7 @@ fn every_must_not_wait_member_rebuilds_or_busts_through_a_live_run() {
             |_, messages| {
                 (
                     with_usage(req(SESSION, "cfg0", messages.to_vec()), 172_000, 200_000),
-                    0,
+                    false,
                 )
             },
             ("SOFT", "coverage_fold"),
@@ -137,7 +143,7 @@ fn every_must_not_wait_member_rebuilds_or_busts_through_a_live_run() {
             |_, messages| {
                 (
                     with_usage(req(SESSION, "cfg0", messages.to_vec()), 192_000, 200_000),
-                    0,
+                    false,
                 )
             },
             ("SOFT", "coverage_fold"),
@@ -146,29 +152,30 @@ fn every_must_not_wait_member_rebuilds_or_busts_through_a_live_run() {
             "explicit flush",
             |s, messages| {
                 s.arm_soft_refresh(SESSION).unwrap();
-                (quiet(messages, "cfg0"), 0)
+                (quiet(messages, "cfg0"), false)
             },
             ("SOFT", "explicit_flush"),
         ),
     ];
+    let mut held = Vec::new();
     for (member, setup, expected) in cases {
         let dir = tempfile::tempdir().unwrap();
         let (s, messages) = pending(dir.path());
-        let (request, anchor) = setup(&s, &messages);
-        let mut ctx = live_run("/nonexistent-docs", 1_000_000_000);
-        if anchor != 0 {
+        let (request, anchored) = setup(&s, &messages);
+        let mut ctx = live_run(
+            "/nonexistent-docs",
+            if anchored { 1_000_000_000 } else { 0 },
+        );
+        if anchored {
             ctx.observed_last_response_at_ms = Some(1_000_000_000 - 3_600_000);
-        } else {
-            ctx.now_ms = 0;
         }
         let response = transform(&s, &request, &ctx).unwrap();
-        assert_eq!(
-            served(&response),
-            (expected.0, Some(expected.1)),
-            "{member}"
-        );
-        assert_eq!(rendered(&s), 3, "{member} renders the pending summary");
+        if served(&response) != (expected.0, Some(expected.1)) || rendered(&s) != 3 {
+            held.push(format!("{member}: served {:?}", served(&response)));
+        }
     }
+    // Every member runs before the verdict, so a hold names each member it delays.
+    assert!(held.is_empty(), "held members: {held:#?}");
 }
 
 #[test]
@@ -183,7 +190,7 @@ fn the_drain_latch_busts_through_a_live_run() {
         .unwrap();
     let request = with_usage(req(SESSION, "cfg0", messages), 124_000, 200_000);
     let response = transform(&s, &request, &live_run("/nonexistent-docs", 0)).unwrap();
-    assert_ne!(response.action, "SOFT+", "{response:?}");
+    assert_eq!(served(&response), ("SOFT", Some("coverage_fold")));
     assert_eq!(rendered(&s), 3);
 }
 
@@ -224,11 +231,17 @@ fn a_boundary_divergence_recut_rebuilds_through_a_live_run() {
     let dir = tempfile::tempdir().unwrap();
     let s = store(dir.path());
     let request = seed_astro_divergence(&s, "astro-hold", 2_402);
+    // The seed diverges the stored coverage (425) from the published segment set (through 2,400).
+    assert_eq!(
+        s.load("astro-hold").unwrap().meta.coverage_ordinal,
+        Some(425)
+    );
     let response = transform(&s, &request, &live_run("/nonexistent-docs", 0)).unwrap();
     assert_eq!(
         served(&response),
         ("HARD", Some("boundary_divergence_recut"))
     );
+    assert_eq!(response.coverage_ordinal, Some(2_400));
 }
 
 #[test]
@@ -246,6 +259,13 @@ fn a_covered_system_message_absorbs_through_a_live_run() {
     items.push(item("t4", 4, "after"));
     s.append_history_segments("absorb", &[comp(2, 2, 3, "sys3", "SUMMARY TWO")])
         .unwrap();
+    assert_eq!(
+        s.load("absorb")
+            .unwrap()
+            .meta
+            .rendered_history_segment_seq(),
+        1
+    );
     let response = transform(
         &s,
         &cc_req("absorb", "cfg0", items),
@@ -253,6 +273,13 @@ fn a_covered_system_message_absorbs_through_a_live_run() {
     )
     .unwrap();
     assert_eq!(served(&response), ("HARD", Some("coverage_fold")));
+    assert_eq!(
+        s.load("absorb")
+            .unwrap()
+            .meta
+            .rendered_history_segment_seq(),
+        2
+    );
 }
 
 #[test]
@@ -299,8 +326,8 @@ fn a_project_memory_revision_is_a_hard_member_too() {
     assert_eq!(rendered(&s), 3);
 }
 
-/// The expressions each pass-planning path computed inline before `activation_gates` owned them.
-fn ordinary_path_before(bits: [bool; 12], pass: scheduler::PassDecision) -> (bool, bool) {
+/// Each path's hard-fold and veto formula, written out independently of `activation_gates`.
+fn ordinary_path_reference(bits: [bool; 12], pass: scheduler::PassDecision) -> (bool, bool) {
     let [
         active,
         initialized,
@@ -312,13 +339,13 @@ fn ordinary_path_before(bits: [bool; 12], pass: scheduler::PassDecision) -> (boo
         absorb,
         external,
         epoch,
-        _,
+        latch,
         reconcile,
     ] = bits;
     let emergency = matches!(
         pass,
         scheduler::PassDecision::Force85 | scheduler::PassDecision::Emergency95
-    ) || bits[10];
+    ) || latch;
     let hard = first || recut || ttl || absorb || external || epoch;
     let veto = active
         && pass == scheduler::PassDecision::Execute
@@ -331,7 +358,7 @@ fn ordinary_path_before(bits: [bool; 12], pass: scheduler::PassDecision) -> (boo
     (hard, veto)
 }
 
-fn additive_path_before(bits: [bool; 12], pass: scheduler::PassDecision) -> (bool, bool) {
+fn additive_path_reference(bits: [bool; 12], pass: scheduler::PassDecision) -> (bool, bool) {
     let [
         active,
         initialized,
@@ -357,7 +384,7 @@ fn additive_path_before(bits: [bool; 12], pass: scheduler::PassDecision) -> (boo
 }
 
 #[test]
-fn the_shared_gate_matches_both_paths_before_extraction_for_every_input() {
+fn the_shared_gate_matches_each_paths_reference_formula_for_every_input() {
     use scheduler::PassDecision::*;
     for pass in [Defer, Execute, Force85, Emergency95] {
         for mask in 0u32..1 << 12 {
@@ -396,7 +423,7 @@ fn the_shared_gate_matches_both_paths_before_extraction_for_every_input() {
                     ordinary.hard_fold_requested,
                     ordinary.ordinary_history_summarizer_veto
                 ),
-                ordinary_path_before(bits, pass),
+                ordinary_path_reference(bits, pass),
                 "ordinary {pass:?} {mask:#b}"
             );
             let additive = activation_gates(&ActivationGateInputs {
@@ -419,7 +446,7 @@ fn the_shared_gate_matches_both_paths_before_extraction_for_every_input() {
                     additive.hard_fold_requested,
                     additive.ordinary_history_summarizer_veto
                 ),
-                additive_path_before(bits, pass),
+                additive_path_reference(bits, pass),
                 "additive {pass:?} {mask:#b}"
             );
         }
