@@ -158,6 +158,9 @@ pub struct RecentFiring {
     /// The pass clock of the first commit whose served prefix rendered `Published { sequence }`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub activated_at_ms: Option<i64>,
+    /// The activating pass was a session's first fold, which a transform forces once history exists without a boundary; its activation delay does not measure scheduling.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub activated_by_first_fold: bool,
     pub outcome: Option<FiringOutcome>,
 }
 
@@ -258,7 +261,13 @@ impl HistorySummarizerDurableState {
     }
 
     /// Stamps every entry whose published sequence a commit that renders through `rendered` shows for the first time, that is, above `previously_rendered`. A still-pending segment stays unstamped.
-    pub fn record_activation(&mut self, previously_rendered: i64, rendered: i64, at_ms: i64) {
+    pub fn record_activation(
+        &mut self,
+        previously_rendered: i64,
+        rendered: i64,
+        at_ms: i64,
+        first_fold: bool,
+    ) {
         for entry in &mut self.recent_firings {
             if let Some(FiringOutcome::Published {
                 sequence: Some(sequence),
@@ -268,6 +277,7 @@ impl HistorySummarizerDurableState {
                 && entry.activated_at_ms.is_none()
             {
                 entry.activated_at_ms = Some(at_ms);
+                entry.activated_by_first_fold = first_fold;
             }
         }
     }
@@ -308,6 +318,7 @@ impl RecentFiring {
             output_received_at_ms: None,
             published_at_ms: None,
             activated_at_ms: None,
+            activated_by_first_fold: false,
             outcome: None,
         }
     }
@@ -441,6 +452,28 @@ mod tests {
     }
 
     #[test]
+    fn an_activation_keeps_whether_its_commit_was_the_first_fold() {
+        let mut state = HistorySummarizerDurableState::default();
+        for (at, sequence) in [(1, 2), (2, 5)] {
+            fired(&mut state, at);
+            state.record_outcome(FiringOutcome::Published {
+                sequence: Some(sequence),
+            });
+        }
+        state.record_activation(0, 2, 10, true);
+        state.record_activation(2, 5, 20, false);
+        let folds: Vec<_> = state
+            .recent_firings
+            .iter()
+            .map(|entry| (entry.activated_at_ms, entry.activated_by_first_fold))
+            .collect();
+        assert_eq!(folds, vec![(Some(10), true), (Some(20), false)]);
+        let json = serde_json::to_value(&state.recent_firings).unwrap();
+        assert_eq!(json[0]["activated_by_first_fold"], true);
+        assert!(json[1].get("activated_by_first_fold").is_none(), "{json}");
+    }
+
+    #[test]
     fn a_no_fire_detail_is_cut_at_a_character_boundary() {
         // 127 ASCII bytes then a two-byte character straddling the cap.
         let text = format!("{}é tail", "a".repeat(NO_FIRE_DETAIL_MAX_BYTES - 1));
@@ -489,6 +522,7 @@ mod tests {
             output_received_at_ms: Some(i64::MIN),
             published_at_ms: Some(i64::MIN),
             activated_at_ms: Some(i64::MIN),
+            activated_by_first_fold: true,
             outcome: Some(FiringOutcome::Abandoned {
                 class: AbandonClass::CallerFenceRejected,
             }),

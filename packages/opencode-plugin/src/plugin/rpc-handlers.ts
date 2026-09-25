@@ -35,6 +35,10 @@ import {
 import { calibrateBuckets, resolveModelCalibration } from "../hooks/context/tokenizer-calibration";
 import { BoundedSessionMap } from "../shared/bounded-session-map";
 import {
+    formatCompactionTimingLines,
+    summarizeCompactionTiming,
+} from "../shared/compaction-timing";
+import {
     disabled,
     isServedMemoryDecisionRow,
     type KernelMemorySnapshot,
@@ -184,7 +188,8 @@ export interface RustSessionStatus {
     pending_m1_age_ms?: number | null;
     wrapup_active?: boolean;
     wrapup_rounds?: number | null;
-    pass_trace?: { last_reject_error?: string | null } | null;
+    pass_trace?: { last_reject_error?: string | null; scheduler_history?: unknown } | null;
+    history_summarizer?: Record<string, unknown>;
 }
 const rustStatusCache = new CoalescedTtlCache<RustSessionStatus>(
     RUST_STATUS_CACHE_TTL_MS,
@@ -649,6 +654,10 @@ export function buildStatusDetail(
         toastDurationMs: 5000,
         loggerDiagnostics: getLoggerDiagnostics(),
     };
+    const compactionTiming = formatCompactionTimingLines(
+        summarizeCompactionTiming(sessionId, directory, moduleStatus),
+    );
+    if (compactionTiming.length > 0) detail.compactionTiming = compactionTiming;
 
     try {
         if (activeModel) {

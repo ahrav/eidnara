@@ -323,6 +323,7 @@ describe("Rust mode transform request", () => {
                     handler_total: 5,
                     total: 4,
                     native_cache_encoded_messages: 1,
+                    emergency_wait: 1_234.5,
                 },
             },
             {
@@ -352,6 +353,8 @@ describe("Rust mode transform request", () => {
             expect(passLines).toHaveLength(2);
             expect(passLines[0]).toContain("decision=HARD");
             expect(passLines[0]).toContain("served_from=transform");
+            expect(passLines[0]).toContain("emergency_wait=1234.5");
+            expect(passLines[1]).toContain("emergency_wait=0.0");
             expect(passLines[0]).toMatch(
                 /reason=first_render .* stages=prefix_guard:[\d.]+ ordinal_resolve:[\d.]+ clone:[\d.]+ wire_build:[\d.]+ wire_messages:1 transport:[\d.]+ transport_pages:1 transport_bytes:\d+ apply:[\d.]+ other:[\d.]+$/,
             );

@@ -421,6 +421,7 @@ function formatRustPassLog(args: {
     elapsedMs: number;
     moduleElapsedMs: number;
     rowVersion: number;
+    emergencyWaitMs?: number;
     timings?: RustPassTimings;
 }): string {
     const timings = args.timings ?? emptyRustPassTimings();
@@ -433,7 +434,7 @@ function formatRustPassLog(args: {
         timings.apply;
     const unattributed = Math.max(0, args.elapsedMs - measured);
     const rowVersion = Number.isSafeInteger(args.rowVersion) ? args.rowVersion : 0;
-    return `rust pass: decision=${args.decision} reason=${args.reason} served_from=${args.servedFrom} in=${args.inputCount} out=${args.outputCount} applied=${args.applied} row_version=${rowVersion} elapsed=${args.elapsedMs.toFixed(1)} ms module=${args.moduleElapsedMs.toFixed(1)} ms stages=prefix_guard:${timings.prefixGuard.toFixed(1)} ordinal_resolve:${timings.ordinalResolve.toFixed(1)} clone:${timings.clone.toFixed(1)} wire_build:${timings.wireBuild.toFixed(1)} wire_messages:${timings.wireMessages} transport:${timings.transport.toFixed(1)} transport_pages:${timings.transportPages} transport_bytes:${timings.transportBytes} apply:${timings.apply.toFixed(1)} other:${unattributed.toFixed(1)}`;
+    return `rust pass: decision=${args.decision} reason=${args.reason} served_from=${args.servedFrom} in=${args.inputCount} out=${args.outputCount} applied=${args.applied} row_version=${rowVersion} emergency_wait=${(args.emergencyWaitMs ?? 0).toFixed(1)} elapsed=${args.elapsedMs.toFixed(1)} ms module=${args.moduleElapsedMs.toFixed(1)} ms stages=prefix_guard:${timings.prefixGuard.toFixed(1)} ordinal_resolve:${timings.ordinalResolve.toFixed(1)} clone:${timings.clone.toFixed(1)} wire_build:${timings.wireBuild.toFixed(1)} wire_messages:${timings.wireMessages} transport:${timings.transport.toFixed(1)} transport_pages:${timings.transportPages} transport_bytes:${timings.transportBytes} apply:${timings.apply.toFixed(1)} other:${unattributed.toFixed(1)}`;
 }
 
 function isSyntheticUserMessage(message: MessageLike | undefined): boolean {
@@ -961,6 +962,7 @@ export function createRustModeTransform(
         let materializeReason = "none";
         let servedFrom = "none";
         let moduleElapsedMs = 0;
+        let emergencyWaitMs = 0;
         let rowVersion = 0;
         let appliedAt: number | undefined;
         const finishPass = (applied: boolean): void => {
@@ -978,6 +980,7 @@ export function createRustModeTransform(
                     elapsedMs,
                     moduleElapsedMs,
                     rowVersion,
+                    emergencyWaitMs,
                     timings,
                 }),
             );
@@ -1000,6 +1003,11 @@ export function createRustModeTransform(
                     : "none";
             const timings = isRecord(response.timings) ? response.timings : undefined;
             const applyOnceTotal = timings?.total;
+            emergencyWaitMs =
+                typeof timings?.emergency_wait === "number" &&
+                Number.isFinite(timings.emergency_wait)
+                    ? timings.emergency_wait
+                    : 0;
             const handlerTotal = timings?.handler_total;
             moduleElapsedMs =
                 typeof handlerTotal === "number" && Number.isFinite(handlerTotal)

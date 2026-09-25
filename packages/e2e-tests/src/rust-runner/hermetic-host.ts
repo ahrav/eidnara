@@ -19,6 +19,10 @@ import {
 import { createConnection, type Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import {
+    type CompactionTiming,
+    summarizeCompactionTiming,
+} from "@eidnara/opencode/shared/compaction-timing";
 import { type BindIdentity, HostClient } from "@eidnara/opencode/shared/host-client";
 import {
     connectionFilePath,
@@ -691,6 +695,18 @@ export class HermeticHostStack {
 
     async backendRequestCount(): Promise<number> {
         return (await this.backendCounters()).started;
+    }
+
+    /** The session's compaction timing, read from `session.status` through the helper both `/eidnara-status` readers use. */
+    async compactionTiming(
+        sessionId: string,
+        projectRoot: string,
+    ): Promise<CompactionTiming | undefined> {
+        return summarizeCompactionTiming(
+            sessionId,
+            projectRoot,
+            await this.primaryStatus(sessionId, projectRoot, "session.status"),
+        );
     }
 
     async primaryStatus(

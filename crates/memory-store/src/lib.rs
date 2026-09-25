@@ -20850,7 +20850,9 @@ mod tests {
         let version = store.commit("cas", None, &core, &meta).unwrap();
         let mut activated = meta.clone();
         activated.m1_history_segment_seq = Some(7);
-        activated.history_summarizer.record_activation(0, 7, 5);
+        activated
+            .history_summarizer
+            .record_activation(0, 7, 5, false);
         let observation = PassSchedulerObservation {
             scheduler_decision: "Execute".into(),
             ..Default::default()
@@ -24118,7 +24120,7 @@ mod tests {
             after.recent_firings[0].outcome,
             Some(summarizer_timeline::FiringOutcome::Published { sequence: None })
         );
-        after.record_activation(1, 3, 9);
+        after.record_activation(1, 3, 9, false);
         assert_eq!(after.recent_firings[0].activated_at_ms, None);
 
         // A kept prefix above the render bounds the count too: only segment 4 is dropped.

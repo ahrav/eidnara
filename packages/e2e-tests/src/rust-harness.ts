@@ -73,6 +73,8 @@ export interface RustPassLine {
     transportPages: number;
     transportBytes: number;
     rowVersion: number;
+    /** Time the daemon spent awaiting or running a summarizer at the emergency wall, across reruns. */
+    emergencyWaitMs: number;
     raw: string;
 }
 
@@ -102,6 +104,7 @@ export function parseRustPassLine(line: string): RustPassLine | null {
         transportPages: Number(stageField(body, "transport_pages") || "0"),
         transportBytes: Number(stageField(body, "transport_bytes") || "0"),
         rowVersion: Number(field(body, "row_version") || "0"),
+        emergencyWaitMs: Number(field(body, "emergency_wait") || "0"),
         raw: line,
     };
 }

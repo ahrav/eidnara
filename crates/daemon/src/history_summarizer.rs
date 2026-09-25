@@ -3314,7 +3314,7 @@ mod tests {
         // A transform pass stamps the earlier firing's activation while the firing runs.
         let loaded = store.load("ses").unwrap();
         let mut stamped = loaded.meta.clone();
-        stamped.history_summarizer.record_activation(0, 1, 7);
+        stamped.history_summarizer.record_activation(0, 1, 7, false);
         store
             .commit("ses", loaded.row_version, &loaded.core, &stamped)
             .unwrap();
