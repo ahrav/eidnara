@@ -2776,15 +2776,25 @@ fn apply_additive_only(
     }
     timings.decide = elapsed_ms(decide_scheduler_started_at);
 
-    let hard_fold_requested = scheduler_outcome.idle_ttl_fired
-        || external_revision_changed
-        || project_memory_epoch_hard_due;
-    let ordinary_history_summarizer_veto = ctx.history_summarizer_active
-        && scheduler_outcome.pass == scheduler::PassDecision::Execute
-        && !hard_fold_requested
-        && !loaded.meta.soft_refresh_pending
-        && !render_config_changed
-        && loaded.meta.initialized;
+    // This path computes no fold, recut, absorb, emergency arm, or reconcile; each is `false` here.
+    let ActivationGates {
+        hard_fold_requested,
+        ordinary_history_summarizer_veto,
+    } = activation_gates(&ActivationGateInputs {
+        pass: scheduler_outcome.pass,
+        history_summarizer_active: ctx.history_summarizer_active,
+        initialized: loaded.meta.initialized,
+        soft_refresh_pending: loaded.meta.soft_refresh_pending,
+        render_config_changed,
+        first_fold_due: false,
+        boundary_divergence_recut: false,
+        idle_ttl_fired: scheduler_outcome.idle_ttl_fired,
+        system_absorb_hard_due: false,
+        external_revision_changed,
+        project_memory_epoch_hard_due,
+        emergency_arm_engaged: false,
+        reconcile_hard_due: false,
+    });
     let bust_opportunity = (scheduler_outcome.pass != scheduler::PassDecision::Defer
         && !ordinary_history_summarizer_veto)
         || loaded.meta.soft_refresh_pending
@@ -3867,24 +3877,27 @@ fn apply_once(
     } else {
         false
     };
-    let hard_fold_requested = first_fold_due
-        || boundary_divergence_recut.is_some()
-        || scheduler_outcome.idle_ttl_fired
-        || system_absorb_hard_due
-        || external_revision_changed
-        || project_memory_epoch_hard_due;
-    let emergency_arm_engaged = matches!(
-        scheduler_outcome.pass,
-        scheduler::PassDecision::Force85 | scheduler::PassDecision::Emergency95
-    ) || scheduler_outcome.drain_latch.is_active();
-    let ordinary_history_summarizer_veto = ctx.history_summarizer_active
-        && scheduler_outcome.pass == scheduler::PassDecision::Execute
-        && !hard_fold_requested
-        && !emergency_arm_engaged
-        && !loaded.meta.soft_refresh_pending
-        && !render_config_changed
-        && !reconcile_hard_due
-        && loaded.meta.initialized;
+    let ActivationGates {
+        hard_fold_requested,
+        ordinary_history_summarizer_veto,
+    } = activation_gates(&ActivationGateInputs {
+        pass: scheduler_outcome.pass,
+        history_summarizer_active: ctx.history_summarizer_active,
+        initialized: loaded.meta.initialized,
+        soft_refresh_pending: loaded.meta.soft_refresh_pending,
+        render_config_changed,
+        first_fold_due,
+        boundary_divergence_recut: boundary_divergence_recut.is_some(),
+        idle_ttl_fired: scheduler_outcome.idle_ttl_fired,
+        system_absorb_hard_due,
+        external_revision_changed,
+        project_memory_epoch_hard_due,
+        emergency_arm_engaged: matches!(
+            scheduler_outcome.pass,
+            scheduler::PassDecision::Force85 | scheduler::PassDecision::Emergency95
+        ) || scheduler_outcome.drain_latch.is_active(),
+        reconcile_hard_due,
+    });
     let supersession_ride_available = !loaded.meta.initialized
         || render_config_changed
         || hard_fold_requested
@@ -5786,6 +5799,51 @@ fn deferred_from_meta(state: &DeferredExecuteState) -> DeferredExecute {
 fn deferred_to_meta(state: DeferredExecute) -> DeferredExecuteState {
     DeferredExecuteState {
         reason: state.reason,
+    }
+}
+
+/// Everything that decides whether a pass must rebuild now and whether a live history_summarizer run may hold an ordinary Execute pass. Named fields and no `Default`: a path that does not compute a term says `false` where a reader can see it.
+struct ActivationGateInputs {
+    pass: scheduler::PassDecision,
+    history_summarizer_active: bool,
+    initialized: bool,
+    soft_refresh_pending: bool,
+    render_config_changed: bool,
+    first_fold_due: bool,
+    boundary_divergence_recut: bool,
+    idle_ttl_fired: bool,
+    system_absorb_hard_due: bool,
+    external_revision_changed: bool,
+    project_memory_epoch_hard_due: bool,
+    /// Force85, Emergency95, or the drain latch.
+    emergency_arm_engaged: bool,
+    reconcile_hard_due: bool,
+}
+
+struct ActivationGates {
+    hard_fold_requested: bool,
+    ordinary_history_summarizer_veto: bool,
+}
+
+/// The one definition of the must-not-wait set. A hard fold classifies `HARD` before the bust gate is read; the veto holds only an ordinary Execute pass while a run is live, never one a hard fold, an emergency arm, an explicit flush, a render-config change, a reconcile, or a first render forces.
+fn activation_gates(input: &ActivationGateInputs) -> ActivationGates {
+    let hard_fold_requested = input.first_fold_due
+        || input.boundary_divergence_recut
+        || input.idle_ttl_fired
+        || input.system_absorb_hard_due
+        || input.external_revision_changed
+        || input.project_memory_epoch_hard_due;
+    let ordinary_history_summarizer_veto = input.history_summarizer_active
+        && input.pass == scheduler::PassDecision::Execute
+        && !hard_fold_requested
+        && !input.emergency_arm_engaged
+        && !input.soft_refresh_pending
+        && !input.render_config_changed
+        && !input.reconcile_hard_due
+        && input.initialized;
+    ActivationGates {
+        hard_fold_requested,
+        ordinary_history_summarizer_veto,
     }
 }
 

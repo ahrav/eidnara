@@ -298,3 +298,130 @@ fn a_project_memory_revision_is_a_hard_member_too() {
     assert_eq!(served(&response), ("HARD", Some("project_memory_epoch")));
     assert_eq!(rendered(&s), 3);
 }
+
+/// The expressions each pass-planning path computed inline before `activation_gates` owned them.
+fn ordinary_path_before(bits: [bool; 12], pass: scheduler::PassDecision) -> (bool, bool) {
+    let [
+        active,
+        initialized,
+        flush,
+        render,
+        first,
+        recut,
+        ttl,
+        absorb,
+        external,
+        epoch,
+        _,
+        reconcile,
+    ] = bits;
+    let emergency = matches!(
+        pass,
+        scheduler::PassDecision::Force85 | scheduler::PassDecision::Emergency95
+    ) || bits[10];
+    let hard = first || recut || ttl || absorb || external || epoch;
+    let veto = active
+        && pass == scheduler::PassDecision::Execute
+        && !hard
+        && !emergency
+        && !flush
+        && !render
+        && !reconcile
+        && initialized;
+    (hard, veto)
+}
+
+fn additive_path_before(bits: [bool; 12], pass: scheduler::PassDecision) -> (bool, bool) {
+    let [
+        active,
+        initialized,
+        flush,
+        render,
+        _,
+        _,
+        ttl,
+        _,
+        external,
+        epoch,
+        _,
+        _,
+    ] = bits;
+    let hard = ttl || external || epoch;
+    let veto = active
+        && pass == scheduler::PassDecision::Execute
+        && !hard
+        && !flush
+        && !render
+        && initialized;
+    (hard, veto)
+}
+
+#[test]
+fn the_shared_gate_matches_both_paths_before_extraction_for_every_input() {
+    use scheduler::PassDecision::*;
+    for pass in [Defer, Execute, Force85, Emergency95] {
+        for mask in 0u32..1 << 12 {
+            let bits: [bool; 12] = std::array::from_fn(|index| mask & (1 << index) != 0);
+            let [
+                active,
+                initialized,
+                flush,
+                render,
+                first,
+                recut,
+                ttl,
+                absorb,
+                external,
+                epoch,
+                latch,
+                reconcile,
+            ] = bits;
+            let ordinary = activation_gates(&ActivationGateInputs {
+                pass,
+                history_summarizer_active: active,
+                initialized,
+                soft_refresh_pending: flush,
+                render_config_changed: render,
+                first_fold_due: first,
+                boundary_divergence_recut: recut,
+                idle_ttl_fired: ttl,
+                system_absorb_hard_due: absorb,
+                external_revision_changed: external,
+                project_memory_epoch_hard_due: epoch,
+                emergency_arm_engaged: matches!(pass, Force85 | Emergency95) || latch,
+                reconcile_hard_due: reconcile,
+            });
+            assert_eq!(
+                (
+                    ordinary.hard_fold_requested,
+                    ordinary.ordinary_history_summarizer_veto
+                ),
+                ordinary_path_before(bits, pass),
+                "ordinary {pass:?} {mask:#b}"
+            );
+            let additive = activation_gates(&ActivationGateInputs {
+                pass,
+                history_summarizer_active: active,
+                initialized,
+                soft_refresh_pending: flush,
+                render_config_changed: render,
+                first_fold_due: false,
+                boundary_divergence_recut: false,
+                idle_ttl_fired: ttl,
+                system_absorb_hard_due: false,
+                external_revision_changed: external,
+                project_memory_epoch_hard_due: epoch,
+                emergency_arm_engaged: false,
+                reconcile_hard_due: false,
+            });
+            assert_eq!(
+                (
+                    additive.hard_fold_requested,
+                    additive.ordinary_history_summarizer_veto
+                ),
+                additive_path_before(bits, pass),
+                "additive {pass:?} {mask:#b}"
+            );
+        }
+    }
+}
