@@ -435,7 +435,7 @@ pub fn persist_history_summarizer_state(
     Ok(store.commit(session_id, loaded.row_version, &loaded.core, &meta)?)
 }
 
-/// A firing advances from an in-memory state while other writers commit: a transform pass records eligibility, and publish and revert transactions count. Their fields are taken from the stored row, except the eligibility a fire, which advances the sequence, consumes.
+/// A firing advances from an in-memory state while other writers commit: a transform pass records eligibility and stamps activations, and publish and revert transactions count and settle earlier entries. Their fields are taken from the stored row: the eligibility unless a fire, which advances the sequence, consumed it, and every entry but the in-flight firing's own.
 fn keep_fields_other_writers_own(
     durable: &HistorySummarizerDurableState,
     next: &mut HistorySummarizerDurableState,
@@ -445,6 +445,16 @@ fn keep_fields_other_writers_own(
     }
     next.counters.published = durable.counters.published;
     next.counters.superseded_before_activation = durable.counters.superseded_before_activation;
+    let in_flight = next.firing_seq;
+    for entry in &mut next.recent_firings {
+        if let Some(stored) = durable
+            .recent_firings
+            .iter()
+            .find(|stored| stored.firing_seq == entry.firing_seq && stored.firing_seq != in_flight)
+        {
+            *entry = stored.clone();
+        }
+    }
 }
 
 /// Classifies the text the daemon records in `last_no_fire`.
@@ -3267,6 +3277,56 @@ mod tests {
                 "{name}"
             );
         }
+    }
+
+    #[test]
+    fn an_in_flight_persist_keeps_what_other_writers_stored_on_earlier_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(dir.path());
+        let mut earlier = HistorySummarizerDurableState {
+            firing_seq: 1,
+            ..Default::default()
+        };
+        earlier.record_fire(FiringTrigger::default(), 1, None);
+        earlier.record_outcome(FiringOutcome::Published { sequence: Some(1) });
+        let FireOutcome::Fired(mut in_flight) = fire(
+            &earlier,
+            2,
+            4,
+            "fp".into(),
+            test_selected_range_identities(),
+            0,
+            HistorySegmentSetGeneration::default(),
+            5,
+        )
+        .unwrap() else {
+            unreachable!("an idle state fires")
+        };
+        in_flight.record_fire(FiringTrigger::default(), 5, None);
+        store
+            .commit(
+                "ses",
+                None,
+                &CoreState::empty(),
+                &test_meta_with_history_summarizer(in_flight.clone()),
+            )
+            .unwrap();
+        // A transform pass stamps the earlier firing's activation while the firing runs.
+        let loaded = store.load("ses").unwrap();
+        let mut stamped = loaded.meta.clone();
+        stamped.history_summarizer.record_activation(0, 1, 7);
+        store
+            .commit("ses", loaded.row_version, &loaded.core, &stamped)
+            .unwrap();
+
+        let mut awaiting =
+            producer_started(&in_flight, "session".into(), "run".into(), "pi".into()).unwrap();
+        awaiting.current_firing_mut().producer_started_at_ms = Some(8);
+        persist_history_summarizer_state(&store, "ses", awaiting).unwrap();
+
+        let state = store.load("ses").unwrap().meta.history_summarizer;
+        assert_eq!(state.recent_firings[0].activated_at_ms, Some(7));
+        assert_eq!(state.recent_firings[1].producer_started_at_ms, Some(8));
     }
 
     #[test]

@@ -125,7 +125,7 @@ pub enum AbandonClass {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum FiringOutcome {
-    /// `sequence` is the highest history_segment sequence the publication appended; `None` when it appended none.
+    /// `sequence` is the highest history_segment sequence the publication appended; `None` when it appended none, or when a revert removed it before any pass rendered it.
     Published {
         sequence: Option<i64>,
     },
@@ -155,6 +155,9 @@ pub struct RecentFiring {
     pub producer_started_at_ms: Option<i64>,
     pub output_received_at_ms: Option<i64>,
     pub published_at_ms: Option<i64>,
+    /// The pass clock of the first commit whose served prefix rendered `Published { sequence }`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub activated_at_ms: Option<i64>,
     pub outcome: Option<FiringOutcome>,
 }
 
@@ -254,6 +257,33 @@ impl HistorySummarizerDurableState {
         *counter = counter.saturating_add(1);
     }
 
+    /// Stamps every entry whose published sequence a commit that renders through `rendered` shows for the first time, that is, above `previously_rendered`. A still-pending segment stays unstamped.
+    pub fn record_activation(&mut self, previously_rendered: i64, rendered: i64, at_ms: i64) {
+        for entry in &mut self.recent_firings {
+            if let Some(FiringOutcome::Published {
+                sequence: Some(sequence),
+            }) = entry.outcome
+                && previously_rendered < sequence
+                && sequence <= rendered
+                && entry.activated_at_ms.is_none()
+            {
+                entry.activated_at_ms = Some(at_ms);
+            }
+        }
+    }
+
+    /// A revert removed every segment above `keep_through`; a publication whose segment went with it, unrendered, can never activate, and a later publication may reuse its sequence.
+    pub fn forget_unrendered_above(&mut self, keep_through: i64) {
+        for entry in &mut self.recent_firings {
+            if let Some(FiringOutcome::Published { sequence }) = &mut entry.outcome
+                && sequence.is_some_and(|published| published > keep_through)
+                && entry.activated_at_ms.is_none()
+            {
+                *sequence = None;
+            }
+        }
+    }
+
     fn push_firing(&mut self, entry: RecentFiring) {
         if self.recent_firings.len() >= RECENT_FIRINGS_CAPACITY {
             let excess = self.recent_firings.len() + 1 - RECENT_FIRINGS_CAPACITY;
@@ -277,6 +307,7 @@ impl RecentFiring {
             producer_started_at_ms: None,
             output_received_at_ms: None,
             published_at_ms: None,
+            activated_at_ms: None,
             outcome: None,
         }
     }
@@ -457,6 +488,7 @@ mod tests {
             producer_started_at_ms: Some(i64::MIN),
             output_received_at_ms: Some(i64::MIN),
             published_at_ms: Some(i64::MIN),
+            activated_at_ms: Some(i64::MIN),
             outcome: Some(FiringOutcome::Abandoned {
                 class: AbandonClass::CallerFenceRejected,
             }),
