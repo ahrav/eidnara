@@ -435,7 +435,7 @@ pub fn persist_history_summarizer_state(
     Ok(store.commit(session_id, loaded.row_version, &loaded.core, &meta)?)
 }
 
-/// A firing advances from an in-memory state while other writers commit: a transform pass records eligibility, and publish and revert transactions count. Their fields are taken from the stored row, except the eligibility a fire, which advances the sequence, consumes.
+/// A firing advances from an in-memory state while other writers commit: a transform pass records eligibility and stamps activations, and publish and revert transactions count. Their fields are taken from the stored row, except the eligibility a fire, which advances the sequence, consumes.
 fn keep_fields_other_writers_own(
     durable: &HistorySummarizerDurableState,
     next: &mut HistorySummarizerDurableState,
@@ -445,6 +445,15 @@ fn keep_fields_other_writers_own(
     }
     next.counters.published = durable.counters.published;
     next.counters.superseded_before_activation = durable.counters.superseded_before_activation;
+    for entry in &mut next.recent_firings {
+        if let Some(stored) = durable
+            .recent_firings
+            .iter()
+            .find(|stored| stored.firing_seq == entry.firing_seq)
+        {
+            entry.activated_at_ms = entry.activated_at_ms.or(stored.activated_at_ms);
+        }
+    }
 }
 
 /// Classifies the text the daemon records in `last_no_fire`.
