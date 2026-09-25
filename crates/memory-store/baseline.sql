@@ -20,10 +20,15 @@ CREATE TABLE cache_state (
 -- transform has recorded, as a JSON array of `BlockIdentity`. It lives beside
 -- `cache_state` instead of inside `meta` so the metadata blob stays bounded
 -- as the session grows; the transform commit rewrites only changed rows.
+-- `scan_version` is the row version of the commit whose scanned document wrote
+-- the row and names that document's receipt owner, retired once no row names
+-- it; it is NULL for a lineage copy, whose bytes the descent's lineage links
+-- cover.
 CREATE TABLE block_identities (
     session_id TEXT NOT NULL,
     mid        TEXT NOT NULL,
     identities TEXT NOT NULL,
+    scan_version INTEGER,
     PRIMARY KEY (session_id, mid)
 ) WITHOUT ROWID;
 

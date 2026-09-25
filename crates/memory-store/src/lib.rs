@@ -4179,10 +4179,15 @@ fn load_block_identities(
 ///
 /// Written rows are scanned as JSON objects keyed by message id, the shape the `meta` blob
 /// carried them in, so a secret in an id is refused and one in a value is substituted
-/// exactly as before. The rows outlive the pass, so their receipts join the retained owner.
+/// exactly as before. The receipts of the documents one commit scans share an owner named
+/// by `scan_version`, the commit's row version, which every row they wrote records. An
+/// owner no stored row names is retired before this commit's scans are persisted, so the
+/// receipts never outnumber the stored rows, and a version shared with an older commit
+/// only merges the two owners' row counts.
 fn sync_block_identities(
     coordinated: &ActiveWriteTransaction<'_>,
     session_id: &str,
+    scan_version: i64,
     identities: &BTreeMap<String, Vec<BlockIdentity>>,
 ) -> rusqlite::Result<()> {
     let tx = coordinated.tx();
@@ -4195,19 +4200,19 @@ fn sync_block_identities(
             })?
             .collect::<rusqlite::Result<BTreeMap<_, _>>>()?
     };
-    {
-        let mut delete =
-            tx.prepare_cached("DELETE FROM block_identities WHERE session_id = ?1 AND mid = ?2")?;
-        for mid in stored.keys().filter(|mid| !identities.contains_key(*mid)) {
-            delete.execute(params![session_id, mid])?;
-        }
-    }
+    let mut released = stored
+        .keys()
+        .filter(|mid| !identities.contains_key(*mid))
+        .collect::<Vec<_>>();
+    let deleted = released.len();
     let mut documents = Vec::new();
     let mut document = String::new();
     for (mid, vector) in identities {
         let value = serde_json::to_string(vector).map_err(block_identity_serde_error)?;
-        if stored.get(mid) == Some(&value) {
-            continue;
+        match stored.get(mid) {
+            Some(stored_value) if *stored_value == value => continue,
+            Some(_) => released.push(mid),
+            None => {}
         }
         let key = serde_json::to_string(mid).map_err(block_identity_serde_error)?;
         if !document.is_empty()
@@ -4225,9 +4230,24 @@ fn sync_block_identities(
         document.push('}');
         documents.push(document);
     }
+    // Most commits only append, release no row, and so never read the owners.
+    let unreferenced = if released.is_empty() {
+        Vec::new()
+    } else {
+        unreferenced_block_identity_owners(tx, session_id, &released)?
+    };
+    {
+        let mut delete =
+            tx.prepare_cached("DELETE FROM block_identities WHERE session_id = ?1 AND mid = ?2")?;
+        for mid in &released[..deleted] {
+            delete.execute(params![session_id, mid])?;
+        }
+    }
     let mut upsert = tx.prepare_cached(
-        "INSERT INTO block_identities (session_id, mid, identities) VALUES (?1, ?2, ?3)
-         ON CONFLICT(session_id, mid) DO UPDATE SET identities = excluded.identities",
+        "INSERT INTO block_identities (session_id, mid, identities, scan_version)
+              VALUES (?1, ?2, ?3, ?4)
+         ON CONFLICT(session_id, mid) DO UPDATE SET
+              identities = excluded.identities, scan_version = excluded.scan_version",
     )?;
     for document in documents {
         let prepared = {
@@ -4245,7 +4265,7 @@ fn sync_block_identities(
                 first_scan..end_scan,
                 "session",
                 session_id,
-                CACHE_STATE_RETAINED_OWNER_KEY,
+                block_identity_owner_key(scan_version),
             );
             prepared
         };
@@ -4253,10 +4273,83 @@ fn sync_block_identities(
             serde_json::from_str(&prepared).map_err(block_identity_serde_error)?;
         for (mid, vector) in prepared {
             let value = serde_json::to_string(&vector).map_err(block_identity_serde_error)?;
-            upsert.execute(params![session_id, mid, value])?;
+            upsert.execute(params![session_id, mid, value, scan_version])?;
         }
     }
+    retire_block_identity_owners(tx, session_id, unreferenced)
+}
+
+/// Returns the owners whose every stored row is in `released`. The caller reads them before
+/// it deletes or rewrites those rows.
+fn unreferenced_block_identity_owners(
+    tx: &GuardedConn<'_>,
+    session_id: &str,
+    released: &[&String],
+) -> rusqlite::Result<Vec<i64>> {
+    let owners = tx
+        .prepare_cached(
+            "SELECT mid, scan_version FROM block_identities
+              WHERE session_id = ?1 AND scan_version IS NOT NULL",
+        )?
+        .query_map(params![session_id], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+        })?
+        .collect::<rusqlite::Result<BTreeMap<_, _>>>()?;
+    let mut releasing = BTreeMap::<i64, usize>::new();
+    for mid in released {
+        if let Some(&version) = owners.get(*mid) {
+            *releasing.entry(version).or_default() += 1;
+        }
+    }
+    let mut stored_rows = BTreeMap::<i64, usize>::new();
+    for version in owners
+        .values()
+        .filter(|version| releasing.contains_key(version))
+    {
+        *stored_rows.entry(*version).or_default() += 1;
+    }
+    Ok(releasing
+        .into_iter()
+        .filter(|(version, rows)| stored_rows.get(version) == Some(rows))
+        .map(|(version, _)| version)
+        .collect())
+}
+
+fn block_identity_owner_key(scan_version: i64) -> String {
+    format!("block_identities:{scan_version}")
+}
+
+/// Retires the receipt owners of `block_identities` documents no stored row names.
+fn retire_block_identity_owners(
+    tx: &GuardedConn<'_>,
+    session_id: &str,
+    scan_versions: impl IntoIterator<Item = i64>,
+) -> rusqlite::Result<()> {
+    for scan_version in scan_versions {
+        retire_active_scan_domain_owner(
+            tx,
+            "session",
+            session_id,
+            DurableWriteFamily::CacheState.owner_kind(),
+            &block_identity_owner_key(scan_version),
+        )?;
+    }
     Ok(())
+}
+
+/// Deletes one session's `block_identities` rows and retires the receipts of the
+/// documents they came from.
+fn delete_block_identities(tx: &GuardedConn<'_>, session_id: &str) -> rusqlite::Result<()> {
+    let scan_versions = tx
+        .prepare_cached(
+            "SELECT DISTINCT scan_version FROM block_identities
+              WHERE session_id = ?1 AND scan_version IS NOT NULL",
+        )?
+        .query_map(params![session_id], |row| row.get::<_, i64>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    tx.prepare_cached("DELETE FROM block_identities WHERE session_id = ?1")?
+        .execute(params![session_id])?;
+    retire_block_identity_owners(tx, session_id, scan_versions)
 }
 
 fn prepare_history_segment(
@@ -9515,7 +9608,7 @@ impl MemoryStore {
                       last_activity_at = excluded.last_activity_at",
                 params![session_id, next as i64, core_json, meta_json, current_time_ms()],
             )?;
-            sync_block_identities(coordinated, session_id, &meta.block_identity_by_mid)?;
+            sync_block_identities(coordinated, session_id, next as i64, &meta.block_identity_by_mid)?;
             // Every accepted transform owns the current-pass value: stable passes write NULL
             // rather than leaving an older divergence looking like a present observation.
             tx.execute(
@@ -10996,10 +11089,8 @@ impl MemoryStore {
                 params![request.target_key, source_key],
             )?;
             // The target adopts the source metadata whole, and the identities belong to it.
-            tx.execute(
-                "DELETE FROM block_identities WHERE session_id = ?1",
-                params![request.target_key],
-            )?;
+            // The copies name no document owner: the lineage links cover their bytes.
+            delete_block_identities(tx, request.target_key)?;
             tx.execute(
                 "INSERT INTO block_identities (session_id, mid, identities)
                   SELECT ?1, reject_transaction_text(mid), redact_transaction_text(identities)
@@ -11259,10 +11350,7 @@ impl MemoryStore {
             ] {
                 retire_active_scan_owner_kind(tx, "session", session_id, owner_kind)?;
             }
-            tx.execute(
-                "DELETE FROM block_identities WHERE session_id = ?1",
-                params![session_id],
-            )?;
+            delete_block_identities(tx, session_id)?;
             tx.execute(
                 "DELETE FROM chunk_transcripts WHERE session_id = ?1",
                 params![session_id],
@@ -17492,8 +17580,9 @@ mod tests {
     /// The scans a pass records for the fields it replaces are retired when the next pass
     /// settles over them, so the audit rows for a session do not grow with the pass count,
     /// also when another writer bumped the row version between passes; the scans for
-    /// cumulative overlay rows and block identity rows stay under the shared owner and
-    /// remain.
+    /// cumulative overlay rows stay under the shared owner and remain, and the scan of the
+    /// first pass's block identity document stays under that document's owner while its
+    /// rows are stored.
     #[test]
     fn settled_pass_scan_audit_rows_are_retired_while_overlay_scans_remain() {
         let dir = tempfile::tempdir().unwrap();
@@ -17528,8 +17617,8 @@ mod tests {
                 ("cache_state".to_string(), 1),
                 ("cache_state".to_string(), steady.1 - 1)
             ],
-            "the shared owner keeps the first pass's block identity receipt and one live \
-             pass owner holds every other copy"
+            "the block identity document owner keeps the first pass's receipt and one \
+             live pass owner holds every other copy"
         );
 
         // A history_summarizer publish bumps the row version without passing through a pass; the
@@ -17647,7 +17736,8 @@ mod tests {
         let mut counts = owner_copy_counts(&store, "ses");
         counts.sort();
         let mut want = vec![
-            ("cache_state".to_string(), overlay_copies + 1),
+            ("cache_state".to_string(), 1),
+            ("cache_state".to_string(), overlay_copies),
             ("cache_state".to_string(), steady_before_publish.1 - 1),
             (
                 "history_summarizer_side_channels".to_string(),
@@ -17657,8 +17747,8 @@ mod tests {
         want.sort();
         assert_eq!(
             counts, want,
-            "the shared overlay owner, the live pass owner, and the publish owner hold \
-             exactly their own copies"
+            "the block identity document owner, the shared overlay owner, the live pass \
+             owner, and the publish owner hold exactly their own copies"
         );
     }
 
@@ -27405,8 +27495,27 @@ mod lineage_descent_tests {
         }]
     }
 
+    fn identity_document_receipts(store: &MemoryStore, session: &str) -> i64 {
+        store
+            .inner
+            .with_conn(|conn| {
+                conn.query_row(
+                    "SELECT COUNT(*) FROM scan_owner_copies copies
+                       JOIN scan_domain_owners owners USING(domain_owner_id)
+                       JOIN scan_owner_scopes scopes USING(owner_scope_id)
+                      WHERE copies.field_id = 'block_identities'
+                        AND owners.owner_kind = 'cache_state'
+                        AND scopes.scope_kind = 'session' AND scopes.scope_key = ?1",
+                    params![active_scan_private_key("session", session)],
+                    |row| row.get(0),
+                )
+            })
+            .unwrap()
+    }
+
     /// Block identities live outside the `meta` blob: a commit makes the session's rows equal
-    /// the map, scans only the rows it writes, and a load returns them.
+    /// the map, scans only the rows it writes, and a load returns them. A scan receipt lives
+    /// exactly as long as some stored row came from its document.
     #[test]
     fn block_identities_round_trip_outside_meta_and_rewrite_only_changed_rows() {
         let dir = tempfile::tempdir().unwrap();
@@ -27439,18 +27548,7 @@ mod lineage_descent_tests {
                 .block_identity_by_mid
                 .is_empty()
         );
-        let receipts = || -> i64 {
-            store
-                .inner
-                .with_conn(|conn| {
-                    conn.query_row(
-                        "SELECT COUNT(*) FROM scan_owner_copies WHERE field_id = 'block_identities'",
-                        [],
-                        |row| row.get(0),
-                    )
-                })
-                .unwrap()
-        };
+        let receipts = || identity_document_receipts(&store, "ses");
         assert_eq!(receipts(), 1);
 
         let version = store
@@ -27458,15 +27556,44 @@ mod lineage_descent_tests {
             .unwrap();
         assert_eq!(receipts(), 1, "an unchanged map writes and scans no row");
 
+        // `b` still comes from the first document, so its receipt stays beside the new one.
+        meta.block_identity_by_mid
+            .insert("a".to_string(), identity("fp-a2"));
+        let version = store
+            .commit("ses", Some(version), &CoreState::empty(), &meta)
+            .unwrap();
+        assert_eq!(
+            receipts(),
+            2,
+            "a partly replaced document keeps its receipt"
+        );
+
+        // No stored row comes from the first document any more, so its receipt goes.
         meta.block_identity_by_mid.remove("b");
+        meta.block_identity_by_mid
+            .insert("c".to_string(), identity("fp-c"));
+        let version = store
+            .commit("ses", Some(version), &CoreState::empty(), &meta)
+            .unwrap();
+        assert_eq!(
+            receipts(),
+            2,
+            "the emptied document's receipt is retired; the `a` and `c` documents remain"
+        );
+
+        meta.block_identity_by_mid.clear();
+        store
+            .commit("ses", Some(version), &CoreState::empty(), &meta)
+            .unwrap();
+        assert_eq!(receipts(), 0, "deleting every row retires every receipt");
         meta.block_identity_by_mid
             .insert("a".to_string(), identity("fp-a2"));
         meta.block_identity_by_mid
             .insert("c".to_string(), identity("fp-c"));
+        let version = store.load("ses").unwrap().row_version;
         store
-            .commit("ses", Some(version), &CoreState::empty(), &meta)
+            .commit("ses", version, &CoreState::empty(), &meta)
             .unwrap();
-        assert_eq!(receipts(), 2);
         let snapshot = store.load_transform_snapshot("ses").unwrap();
         assert_eq!(
             snapshot.loaded.meta.block_identity_by_mid,
@@ -27475,7 +27602,9 @@ mod lineage_descent_tests {
     }
 
     /// A descendant adopts the source's metadata whole, identities included, and a
-    /// full-session recomp clears them with the rest of the metadata.
+    /// full-session recomp clears them with the rest of the metadata. Lineage descent and
+    /// recomp retire the receipts of the documents whose rows they delete; the descent's
+    /// lineage links cover the copied rows.
     #[test]
     fn descent_copies_block_identities_and_recomp_reset_clears_them() {
         let dir = tempfile::tempdir().unwrap();
@@ -27488,12 +27617,20 @@ mod lineage_descent_tests {
         let version = store
             .commit("A", loaded.row_version, &loaded.core, &meta)
             .unwrap();
+        let mut target_meta = ModuleMeta::default();
+        target_meta
+            .block_identity_by_mid
+            .insert("b1".to_string(), identity("fp-b1"));
+        let target_version = store
+            .commit("B", None, &CoreState::empty(), &target_meta)
+            .unwrap();
+        assert_eq!(identity_document_receipts(&store, "B"), 1);
         let hops = direct_hop("A", "B", 2);
         let anchor = anchor();
         store
             .descend_lineage(LineageDescentRequest {
                 target_key: "B",
-                expected_target_row_version: None,
+                expected_target_row_version: Some(target_version),
                 edge_id: 42,
                 prior_key: "A",
                 prior_epoch: 1,
@@ -27510,9 +27647,33 @@ mod lineage_descent_tests {
             store.load("B").unwrap().meta.block_identity_by_mid,
             expected
         );
+        assert_eq!(
+            identity_document_receipts(&store, "B"),
+            0,
+            "the target's replaced rows take their document receipt with them"
+        );
+        let target = store.load("B").unwrap();
+        let mut target_meta = target.meta.clone();
+        target_meta
+            .block_identity_by_mid
+            .insert("m1".to_string(), identity("fp-m1-edited"));
+        store
+            .commit("B", target.row_version, &target.core, &target_meta)
+            .unwrap();
+        assert_eq!(
+            identity_document_receipts(&store, "B"),
+            1,
+            "rewriting a copied row, which names no owner, records the new document's receipt"
+        );
 
+        assert_eq!(identity_document_receipts(&store, "A"), 1);
         let version = store.load("A").unwrap().row_version.unwrap_or(version);
         store.reset_session_for_recomp("A", Some(version)).unwrap();
+        assert_eq!(
+            identity_document_receipts(&store, "A"),
+            0,
+            "recomp deletes every row, so it retires every document receipt"
+        );
         assert!(
             store
                 .load("A")
