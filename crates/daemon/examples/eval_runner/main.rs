@@ -369,7 +369,7 @@ const USAGE: &str = "usage: eval_runner cassette-oracle | eval_runner ";
 #[cfg(unix)]
 fn run_campaign(args: impl Iterator<Item = String>) -> io::Result<()> {
     let config = campaign::config_from_args(args).map_err(io::Error::other)?;
-    let run = campaign::run(&config).map_err(|error| io::Error::other(format!("{error:?}")))?;
+    let run = campaign::run(&config).map_err(|error| io::Error::other(error.to_string()))?;
     let digest = |bytes: &[u8]| format!("{:x}", sha2::Sha256::digest(bytes));
     let summary = json!({
         "report": config.publish.join(campaign::REPORT_FILE),
@@ -390,7 +390,13 @@ fn run_campaign(args: impl Iterator<Item = String>) -> io::Result<()> {
         "structured_pairs": run.structured_outcomes.len(),
         "aged_summarizer": {
             "firings": run.aged.firings,
+            "unreached_firings": run.aged.unreached_firings,
             "refused": run.aged.refused,
+            "turn_refused": run.aged.turn_refused.as_ref().map(|refused| json!({
+                "turn": refused.turn,
+                "code": refused.code,
+                "message": refused.message,
+            })),
             "segments": run.aged.covered.len(),
         },
     });

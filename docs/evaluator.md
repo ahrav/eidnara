@@ -1643,7 +1643,22 @@ summary agrees with them.
 The campaign refuses an unapproved profile, an aged history no longer than
 the window, a publish directory it cannot create, and a staged report or
 manifest already sitting in the publish directory, all before anything runs
-(`RunError`). Under an approved profile it generates a one-session aged
+(`RunError`). A life the shell cannot read is refused typed as well, never
+panicked on: a raw or replayed arm whose turn the host answers with an error
+(`TurnRefused`, naming the policy, the history's length, the turn, and the
+host's code), a turn whose summarizer diagnostics carry a failure other than
+the cassette's redaction refusal (`SummarizerFailed`), and a recording whose
+backend started more calls than the daemon reported firings
+(`FiringsUnaccounted`). The daemon reports `fired` before a firing starts, and
+a firing that fails before its request (a session meta past its durable bound
+fails that way and cannot persist the failure) never reaches the backend, so a
+recording counts as firings only the calls its backend started and reports
+the rest as `unreached_firings` in the summary. A recording life the host
+refuses a turn of leaves no whole cassette: the world's structured samples end
+`indeterminate` (the treatment was attempted and cannot be judged), the
+summary names the refused turn and code under `aged_summarizer.turn_refused`,
+and the report is published with the refusal rate over the firings that
+reached the backend before it. Under an approved profile it generates a one-session aged
 history (130 messages at S0) and
 a twelve-message natural-fresh history under another seed, compiles three
 tasks (an early message as the falsifier, the last message as the positive
@@ -1850,7 +1865,12 @@ whole on every commit and is bounded at 512 KiB of durable text; at 1,000
 short messages the meta is about 475 KiB before a firing and the fired
 state's selected identities push it past the bound, so the firing fails with
 `InputLimit` and publishes nothing (a 1,600-message session is refused as
-durable text at the transform itself). S0 and S1 sit well under that.
+durable text at the transform itself). S0 and S1 sit well under that. At S1
+with 900 aged messages the recording's backend answers 22 of the 34 firings
+the daemon reports and the campaign publishes; at 1,000 the host refuses turn
+980 of the recording life with `host.transform_failed`, 83 firings never
+reach the backend, and the campaign publishes with the structured aged
+samples `indeterminate`.
 
 What the campaign found about the pair compiler on surface 1: its recency
 window counts messages, but surface 1's unit is the segment, so at S0 the
