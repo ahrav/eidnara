@@ -44,6 +44,8 @@ import {
 export interface RustTestHarnessOptions extends SharedHarnessOptions {
     /** Eidnara USER-tier config overrides (thresholds, memory, etc.). */
     eidnaraConfig?: Record<string, unknown>;
+    /** Extra environment for the fixture daemon only. */
+    daemonEnv?: Record<string, string>;
 }
 
 export interface SdkClient extends SdkClientCore {
@@ -169,6 +171,7 @@ export class RustTestHarness {
             host = await HermeticHostStack.start({
                 dataDir: env.dataDir,
                 fixtureBin,
+                daemonEnv: options.daemonEnv,
             });
             opencode = await RustTestHarness.spawnServe({
                 env,
@@ -266,6 +269,31 @@ export class RustTestHarness {
             );
         }
         throw new Error("session.create failed");
+    }
+
+    /**
+     * Deletes every message of the session later than `messageId` from OpenCode's own
+     * `opencode.db`, the removal a revert performs; `session.revert` marks the session without
+     * deleting its rows.
+     */
+    removeMessagesAfter(sessionId: string, messageId: string): number {
+        const db = new Database(join(this.env.dataDir, "opencode", "opencode.db"));
+        try {
+            db.exec("PRAGMA busy_timeout = 30000");
+            const remove = db.transaction(() => {
+                db.prepare(
+                    "DELETE FROM part WHERE message_id IN (SELECT id FROM message WHERE session_id = ?1 AND time_created > (SELECT time_created FROM message WHERE id = ?2))",
+                ).run(sessionId, messageId);
+                return db
+                    .prepare(
+                        "DELETE FROM message WHERE session_id = ?1 AND time_created > (SELECT time_created FROM message WHERE id = ?2)",
+                    )
+                    .run(sessionId, messageId).changes;
+            });
+            return remove();
+        } finally {
+            db.close();
+        }
     }
 
     /**
