@@ -751,10 +751,13 @@ intra-firing fallback at `history_summarizer.rs:1440-1450` bounds attempts per f
 Existing check: `lib.rs:5042-5047` enforces the 60-second cooldown, and
 `lib.rs:6258-6261` reports degradation from a counter this path never increments.
 Since the chunk retry ladder landed, the backoff still does not escalate, but the
-live model attempts on one chunk are bounded. A validation rejection, a
-context-overflow producer failure, or a permanent failure the model provider
-reported increments the durable `chunk_retry` count for the chunk start
-(`lib.rs:6239`, `history_summarizer.rs:352-390`). The host classes harness setup
+live model attempts on one chunk are bounded. A firing that ends in a
+validation rejection, a context-overflow producer failure, or a permanent
+failure the model provider reported increments the durable `chunk_retry` count
+for the chunk start (`lib.rs:6239`, `history_summarizer.rs:353-399`). Only the
+firing's final error counts: a rejection or provider failure that falls back to
+the next model in the chain (`history_summarizer.rs:1866-1871`, `:1903-1908`)
+and then publishes clears the count instead. The host classes harness setup
 and supervision failures permanent too, such as a missing credential or a
 harness that cannot start; `is_provider_reported_failure`
 (`host-runtime/src/model_execution/backend.rs:130-137`) excludes them, because
@@ -771,8 +774,10 @@ still retries every 60 seconds without bound.
 Impact: Unbounded live model spend and log noise, and a session that never
 compacts while its status block reports healthy publishing. Distinct from a bad
 publish: no data is corrupted. With the ladder, a chunk that keeps failing
-validation costs at most `PLACEHOLDER_AFTER_FAILURES` firings before folding
-moves past it, and the placeholder replaces a summary of those messages.
+validation costs `PLACEHOLDER_AFTER_FAILURES` failed model firings, then one
+placeholder firing that calls no model and moves folding past it
+(`lib.rs:42336-42343`), and the placeholder replaces a summary of those
+messages.
 Open questions:
 
 - Should a validation rejection increment `consecutive_publish_failures`, or does

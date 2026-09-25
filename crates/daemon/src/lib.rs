@@ -9105,7 +9105,16 @@ impl HandlerCore {
                 let result = self
                     .run_history_summarizer_firing_inline(prepared.task)
                     .await;
-                diagnostics.started = Some(producer_started.load(Ordering::Relaxed));
+                // A wait that elapsed first saw neither a start nor a failure to start; the spawned firing may still start the run.
+                diagnostics.started = match (&result, producer_started.load(Ordering::Relaxed)) {
+                    (
+                        Err(history_summarizer::HistorySummarizerDriveError::Producer(
+                            HistorySummarizerProducerError::TimedOut,
+                        )),
+                        false,
+                    ) => None,
+                    (_, started) => Some(started),
+                };
                 let followup = match result {
                     Ok(_) => HistorySummarizerFollowup::Published,
                     Err(_) => HistorySummarizerFollowup::Failed,
@@ -41026,6 +41035,26 @@ mod tests {
             "{response}"
         );
         assert_eq!(producer.starts.load(Ordering::SeqCst), 0);
+    }
+
+    /// An inline wait that elapses before the producer connects has not seen the run fail to start; the spawned firing may still start it, so `started` stays unknown.
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn handler_emergency_inline_timeout_leaves_started_unknown() {
+        let producer = Arc::new(ProducerState::default());
+        producer.block_connect.store(true, Ordering::SeqCst);
+        let (handler, _store, _dir, _project) =
+            handler_with_store(Arc::clone(&producer), default_test_config());
+
+        let response = call_transform_with_usage(&handler, big_messages(), 48_000, 50_000).await;
+        producer.block_connect.store(false, Ordering::SeqCst);
+        producer.notify.notify_waiters();
+
+        assert_eq!(response["history_summarizer"]["fired"], true, "{response}");
+        assert_eq!(
+            response["history_summarizer"]["started"],
+            serde_json::Value::Null,
+            "{response}"
+        );
     }
 
     /// The first run of an emergency pass decides the tail's hint and commits

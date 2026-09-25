@@ -372,6 +372,15 @@ pub fn is_chunk_failure(error: &HistorySummarizerDriveError) -> bool {
     let HistorySummarizerDriveError::Producer(err) = error else {
         return matches!(error, HistorySummarizerDriveError::Validation(_));
     };
+    let mut err = err;
+    // A failed cancel or close wraps the run's own error; the wrapper says nothing about the chunk.
+    while let HistorySummarizerProducerError::CleanupFailed {
+        primary: Some(primary),
+        ..
+    } = err
+    {
+        err = primary.as_ref();
+    }
     if err.is_cross_incarnation_unknown() {
         return false;
     }
@@ -2535,6 +2544,23 @@ mod tests {
         assert!(is_chunk_failure(&failed(
             ErrorClass::Permanent,
             "pi assistant stopped with reason \"error\""
+        )));
+        // A failed cancel or close wraps the provider refusal; the wrapper does not change what the provider said about the chunk.
+        let HistorySummarizerDriveError::Producer(refusal) =
+            failed(ErrorClass::Permanent, provider_refusal)
+        else {
+            unreachable!()
+        };
+        assert!(is_chunk_failure(&HistorySummarizerDriveError::Producer(
+            attach_cleanup(
+                attach_cleanup(
+                    refusal,
+                    Err(HistorySummarizerProducerError::TimedOut),
+                    "cancel"
+                ),
+                Err(HistorySummarizerProducerError::TimedOut),
+                "close"
+            )
         )));
         assert!(is_chunk_failure(&failed(
             ErrorClass::ContextOverflow,
