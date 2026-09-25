@@ -187,6 +187,17 @@ recorded. Duplicate object names remain
 refused by [`parse_json_with_unique_names`][unique-live] and its
 [existing test][t-dup-live].
 
+Later change: `ModuleMeta::block_identity_by_mid` is now `#[serde(skip)]` and
+persisted in the `block_identities` table, so `meta` no longer carries it.
+`commit_transform` scans the new and changed rows as JSON objects keyed by
+message id under the same durable preserve-identities policy, recording field
+`block_identities`. The store test now plants the `meta` secrets in
+`shadow_acked_watermarks` and checks the identity rows separately: a clean
+row stored byte for byte with a zero-finding receipt, a planted value
+substituted with a one-finding receipt, and a secret key refused with no row
+and unchanged audit counts. The refusal-ordering unit test serializes the
+`keyed` map directly.
+
 ### Focused execution, 2026-09-12
 
 At the merged tree `39f706b6`, `cargo test -p memory-store --locked` passed

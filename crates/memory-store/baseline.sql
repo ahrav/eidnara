@@ -16,6 +16,17 @@ CREATE TABLE cache_state (
             meta         TEXT NOT NULL
         , last_activity_at INTEGER NOT NULL DEFAULT 0);
 
+-- The ordered block identity vector of each producer message id a session's
+-- transform has recorded, as a JSON array of `BlockIdentity`. It lives beside
+-- `cache_state` instead of inside `meta` so the metadata blob stays bounded
+-- as the session grows; the transform commit rewrites only changed rows.
+CREATE TABLE block_identities (
+    session_id TEXT NOT NULL,
+    mid        TEXT NOT NULL,
+    identities TEXT NOT NULL,
+    PRIMARY KEY (session_id, mid)
+) WITHOUT ROWID;
+
 -- Automatic capture keeps input until a kernel receipt is confirmed. Completed
 -- identities remain replayable; only their source and prepared-output bytes go.
 -- `abandoned_at_ms` is terminal: the row keeps its identity and last error but

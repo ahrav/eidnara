@@ -433,8 +433,8 @@ Guarantee: No publish commits if any message in the pinned chunk range has
 changed content since the fire, and a firing with no recorded content identities
 cannot publish at all.
 Check: `always` - at the instant of commit, for every entry in
-`predicate.selected_range_identities`,
-`meta.block_identity_by_mid[mid] == entry.block_identities`, and
+`predicate.selected_range_identities`, the session's stored
+`block_identities` row for `mid` equals `entry.block_identities`, and
 `selected_range_identities` is non-empty. `always` because it is a precondition
 on every commit.
 Fault/timing angle: The whole model-run window, which is minutes. A harness can
@@ -442,9 +442,9 @@ edit, retract, or re-stamp a message while the producer runs. The fingerprint
 alone would not catch a same-length content edit; the module header says so
 explicitly (`history_summarizer.rs:141-143`).
 Required faults and enabling state: A configured model chain, a fired run, and a
-store mutation to `block_identity_by_mid` for one selected mid during the await.
-The existing tests use a commit hook to do exactly this, which is the seam to
-reuse.
+store mutation to `block_identity_by_mid` for one selected mid during the await,
+which `commit` writes to the `block_identities` table. The existing tests use a
+commit hook to do exactly this, which is the seam to reuse.
 Confidence: high - [evidence](evidence/publish-fence-rejects-selected-content-drift.md). Read the
 fence at `memory-store:9413-9425` and confirmed the empty-vector rejection is
 separate from and prior to the per-mid comparison, with the reasoning at

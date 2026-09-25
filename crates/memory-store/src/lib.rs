@@ -1665,8 +1665,16 @@ pub struct TailHygieneBaseline {
     pub computed_at_ms: i64,
     pub evaluable: bool,
     pub generation_invalidated: bool,
+    /// The measured parts after the leading run of excluded parts. History-covered blocks
+    /// are always excluded, so this list grows with the live tail, not the whole session.
     pub baseline_parts: Vec<TailHygienePartMeasurement>,
     pub content_signature: String,
+    /// Length of the leading run of excluded parts that `baseline_parts` omits.
+    #[serde(default)]
+    pub excluded_prefix_len: usize,
+    /// SHA-256 over the omitted parts, so a later walk still detects any change to them.
+    #[serde(default)]
+    pub excluded_prefix_digest: String,
 }
 
 /// The source of a project-memory block.
@@ -1872,7 +1880,13 @@ pub struct ModuleMeta {
     /// Ordered block identity vectors keyed by producer message id. Each vector stores
     /// the block kind and a fingerprint of the canonical reduction-accounting bytes, so
     /// a later request that changes a live message's block layout fails closed.
-    #[serde(default)]
+    ///
+    /// The map is persisted in the `block_identities` table, one row per id, rather than in
+    /// the `meta` blob, so the blob does not grow with the session's message count.
+    /// [`MemoryStore::load`] and [`MemoryStore::load_transform_snapshot`] fill it, and
+    /// [`MemoryStore::commit_transform`] makes the table equal to it in the same
+    /// transaction. Other loads leave it empty, so their metadata must not be committed.
+    #[serde(skip)]
     pub block_identity_by_mid: BTreeMap<String, Vec<BlockIdentity>>,
     #[serde(default = "BlockIdentityBasis::replay")]
     pub block_identity_basis: BlockIdentityBasis,
@@ -4127,6 +4141,122 @@ fn sqlite_redaction_kind(error: &rusqlite::Error) -> Option<RedactionErrorKind> 
             MemoryStoreError::Redaction(kind) => Some(*kind),
             _ => None,
         })
+}
+
+/// Size at which one `block_identities` scan document is closed, half the durable-text bound
+/// so a document that ends with one more row still meets it.
+const BLOCK_IDENTITY_SCAN_CHUNK_BYTES: usize = MAX_DURABLE_TEXT_BYTES / 2;
+
+fn block_identity_serde_error(error: serde_json::Error) -> rusqlite::Error {
+    rusqlite::Error::ToSqlConversionFailure(Box::new(MemoryStoreError::Serde(error.to_string())))
+}
+
+/// Reads one session's `block_identities` rows in the shape of
+/// [`ModuleMeta::block_identity_by_mid`].
+fn load_block_identities(
+    conn: &GuardedConn<'_>,
+    session_id: &str,
+) -> rusqlite::Result<BTreeMap<String, Vec<BlockIdentity>>> {
+    let mut statement =
+        conn.prepare_cached("SELECT mid, identities FROM block_identities WHERE session_id = ?1")?;
+    statement
+        .query_map(params![session_id], |row| {
+            let identities = row.get::<_, String>(1)?;
+            let identities = serde_json::from_str(&identities).map_err(|error| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    1,
+                    rusqlite::types::Type::Text,
+                    Box::new(error),
+                )
+            })?;
+            Ok((row.get::<_, String>(0)?, identities))
+        })?
+        .collect()
+}
+
+/// Makes one session's `block_identities` rows equal `identities`, writing only the rows
+/// whose vector changed and deleting the rows whose id is absent.
+///
+/// Written rows are scanned as JSON objects keyed by message id, the shape the `meta` blob
+/// carried them in, so a secret in an id is refused and one in a value is substituted
+/// exactly as before. The rows outlive the pass, so their receipts join the retained owner.
+fn sync_block_identities(
+    coordinated: &ActiveWriteTransaction<'_>,
+    session_id: &str,
+    identities: &BTreeMap<String, Vec<BlockIdentity>>,
+) -> rusqlite::Result<()> {
+    let tx = coordinated.tx();
+    let stored = {
+        let mut statement = tx
+            .prepare_cached("SELECT mid, identities FROM block_identities WHERE session_id = ?1")?;
+        statement
+            .query_map(params![session_id], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?
+            .collect::<rusqlite::Result<BTreeMap<_, _>>>()?
+    };
+    {
+        let mut delete =
+            tx.prepare_cached("DELETE FROM block_identities WHERE session_id = ?1 AND mid = ?2")?;
+        for mid in stored.keys().filter(|mid| !identities.contains_key(*mid)) {
+            delete.execute(params![session_id, mid])?;
+        }
+    }
+    let mut documents = Vec::new();
+    let mut document = String::new();
+    for (mid, vector) in identities {
+        let value = serde_json::to_string(vector).map_err(block_identity_serde_error)?;
+        if stored.get(mid) == Some(&value) {
+            continue;
+        }
+        let key = serde_json::to_string(mid).map_err(block_identity_serde_error)?;
+        if !document.is_empty()
+            && document.len() + key.len() + value.len() + 2 > BLOCK_IDENTITY_SCAN_CHUNK_BYTES
+        {
+            document.push('}');
+            documents.push(std::mem::take(&mut document));
+        }
+        document.push(if document.is_empty() { '{' } else { ',' });
+        document.push_str(&key);
+        document.push(':');
+        document.push_str(&value);
+    }
+    if !document.is_empty() {
+        document.push('}');
+        documents.push(document);
+    }
+    let mut upsert = tx.prepare_cached(
+        "INSERT INTO block_identities (session_id, mid, identities) VALUES (?1, ?2, ?3)
+         ON CONFLICT(session_id, mid) DO UPDATE SET identities = excluded.identities",
+    )?;
+    for document in documents {
+        let prepared = {
+            let mut write = coordinated.prepared.borrow_mut();
+            let first_scan = write.scans.len();
+            let prepared = write
+                .json_content(
+                    "block_identities",
+                    &document,
+                    JsonScanPolicy::DurablePreserveIdentities,
+                )
+                .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+            let end_scan = write.scans.len();
+            write.reassign_scans_in(
+                first_scan..end_scan,
+                "session",
+                session_id,
+                CACHE_STATE_RETAINED_OWNER_KEY,
+            );
+            prepared
+        };
+        let prepared: BTreeMap<String, Vec<BlockIdentity>> =
+            serde_json::from_str(&prepared).map_err(block_identity_serde_error)?;
+        for (mid, vector) in prepared {
+            let value = serde_json::to_string(&vector).map_err(block_identity_serde_error)?;
+            upsert.execute(params![session_id, mid, value])?;
+        }
+    }
+    Ok(())
 }
 
 fn prepare_history_segment(
@@ -6901,7 +7031,8 @@ impl MemoryStore {
     /// error to prevent initialization over corrupted state.
     pub fn load(&self, session_id: &str) -> Result<LoadedState, MemoryStoreError> {
         let row = self.inner.with_conn(|conn| {
-            conn.prepare_cached(CACHE_STATE_FULL_SELECT)?
+            let row = conn
+                .prepare_cached(CACHE_STATE_FULL_SELECT)?
                 .query_row(params![session_id], |r| {
                     Ok((
                         r.get::<_, i64>(0)? as u64,
@@ -6909,7 +7040,9 @@ impl MemoryStore {
                         r.get::<_, String>(2)?,
                     ))
                 })
-                .optional()
+                .optional()?;
+            row.map(|row| Ok((row, load_block_identities(conn, session_id)?)))
+                .transpose()
         })?;
 
         match row {
@@ -6918,19 +7051,24 @@ impl MemoryStore {
                 meta: ModuleMeta::default(),
                 row_version: None,
             }),
-            Some((rv, core_json, meta_json)) => Ok(LoadedState {
-                core: serde_json::from_str(&core_json)
-                    .map_err(|e| MemoryStoreError::Serde(e.to_string()))?,
-                meta: serde_json::from_str(&meta_json)
-                    .map_err(|e| MemoryStoreError::Serde(e.to_string()))?,
-                row_version: Some(rv),
-            }),
+            Some(((rv, core_json, meta_json), block_identity_by_mid)) => {
+                let mut meta: ModuleMeta = serde_json::from_str(&meta_json)
+                    .map_err(|e| MemoryStoreError::Serde(e.to_string()))?;
+                meta.block_identity_by_mid = block_identity_by_mid;
+                Ok(LoadedState {
+                    core: serde_json::from_str(&core_json)
+                        .map_err(|e| MemoryStoreError::Serde(e.to_string()))?,
+                    meta,
+                    row_version: Some(rv),
+                })
+            }
         }
     }
 
     /// Returns default metadata for an absent row; invalid `meta` JSON returns
     /// [`MemoryStoreError::Serde`]. `core_state` is neither read nor validated, so a row
     /// whose core is corrupt still answers here where [`Self::load`] fails.
+    /// [`ModuleMeta::block_identity_by_mid`] is left empty, so the result is read-only.
     pub fn load_meta(&self, session_id: &str) -> Result<ModuleMeta, MemoryStoreError> {
         let meta_json = self.inner.with_conn(|conn| {
             conn.prepare_cached(CACHE_STATE_META_SELECT)?
@@ -7087,13 +7225,16 @@ impl MemoryStore {
                             Box::new(error),
                         )
                     })?,
-                    meta: serde_json::from_str(&meta_json).map_err(|error| {
-                        rusqlite::Error::FromSqlConversionFailure(
-                            2,
-                            rusqlite::types::Type::Text,
-                            Box::new(error),
-                        )
-                    })?,
+                    meta: ModuleMeta {
+                        block_identity_by_mid: load_block_identities(transaction, session_id)?,
+                        ..serde_json::from_str(&meta_json).map_err(|error| {
+                            rusqlite::Error::FromSqlConversionFailure(
+                                2,
+                                rusqlite::types::Type::Text,
+                                Box::new(error),
+                            )
+                        })?
+                    },
                     row_version: Some(row_version),
                 },
                 None => LoadedState {
@@ -9374,6 +9515,7 @@ impl MemoryStore {
                       last_activity_at = excluded.last_activity_at",
                 params![session_id, next as i64, core_json, meta_json, current_time_ms()],
             )?;
+            sync_block_identities(coordinated, session_id, &meta.block_identity_by_mid)?;
             // Every accepted transform owns the current-pass value: stable passes write NULL
             // rather than leaving an older divergence looking like a present observation.
             tx.execute(
@@ -10853,6 +10995,17 @@ impl MemoryStore {
                    FROM chunk_transcripts WHERE session_id = ?2",
                 params![request.target_key, source_key],
             )?;
+            // The target adopts the source metadata whole, and the identities belong to it.
+            tx.execute(
+                "DELETE FROM block_identities WHERE session_id = ?1",
+                params![request.target_key],
+            )?;
+            tx.execute(
+                "INSERT INTO block_identities (session_id, mid, identities)
+                  SELECT ?1, reject_transaction_text(mid), redact_transaction_text(identities)
+                   FROM block_identities WHERE session_id = ?2",
+                params![request.target_key, source_key],
+            )?;
             tx.execute(
                 "INSERT INTO tags (
                      session_id, tag_number, block_id, kind, token_count, created_at_ms, source_bytes
@@ -11106,6 +11259,10 @@ impl MemoryStore {
             ] {
                 retire_active_scan_owner_kind(tx, "session", session_id, owner_kind)?;
             }
+            tx.execute(
+                "DELETE FROM block_identities WHERE session_id = ?1",
+                params![session_id],
+            )?;
             tx.execute(
                 "DELETE FROM chunk_transcripts WHERE session_id = ?1",
                 params![session_id],
@@ -11842,13 +11999,30 @@ impl MemoryStore {
                     "history_summarizer firing has no selected-range content identities".to_string(),
                 ));
             }
-            if let Some(changed) = predicate.selected_range_identities.iter().find(|selected| {
-                meta.block_identity_by_mid.get(&selected.mid) != Some(&selected.block_identities)
-            }) {
-                return Ok(PublishTxnOutcome::FenceRejected(format!(
-                    "selected history_summarizer message {} changed after firing",
-                    changed.mid
-                )));
+            {
+                let mut stored_identities = tx.prepare_cached(
+                    "SELECT identities FROM block_identities WHERE session_id = ?1 AND mid = ?2",
+                )?;
+                for selected in &predicate.selected_range_identities {
+                    let stored = stored_identities
+                        .query_row(params![session_id, selected.mid], |row| {
+                            row.get::<_, String>(0)
+                        })
+                        .optional()?;
+                    let stored = match stored
+                        .map(|json| serde_json::from_str::<Vec<BlockIdentity>>(&json))
+                        .transpose()
+                    {
+                        Ok(stored) => stored,
+                        Err(e) => return Ok(PublishTxnOutcome::Serde(e.to_string())),
+                    };
+                    if stored.as_ref() != Some(&selected.block_identities) {
+                        return Ok(PublishTxnOutcome::FenceRejected(format!(
+                            "selected history_summarizer message {} changed after firing",
+                            selected.mid
+                        )));
+                    }
+                }
             }
 
             if meta.revert_epoch != request.expected_revert_epoch {
@@ -16825,15 +16999,15 @@ mod tests {
     fn a_refusal_after_a_substitution_leaves_its_detection_in_the_callers_vector() {
         // Object members are walked in `serde_json::Map` order, so the value entry's key
         // sorts before the refusing key.
-        let mut keyed = ModuleMeta::default();
-        keyed.block_identity_by_mid.insert(
+        let mut keyed = BTreeMap::new();
+        keyed.insert(
             "a-mid".to_string(),
             vec![BlockIdentity {
                 kind_tag: "password=earlier-value".to_string(),
                 byte_fingerprint: "fp".to_string(),
             }],
         );
-        keyed.block_identity_by_mid.insert(
+        keyed.insert(
             "password=key-secret".to_string(),
             vec![BlockIdentity {
                 kind_tag: "text".to_string(),
@@ -17318,7 +17492,8 @@ mod tests {
     /// The scans a pass records for the fields it replaces are retired when the next pass
     /// settles over them, so the audit rows for a session do not grow with the pass count,
     /// also when another writer bumped the row version between passes; the scans for
-    /// cumulative overlay rows stay under the shared owner and remain.
+    /// cumulative overlay rows and block identity rows stay under the shared owner and
+    /// remain.
     #[test]
     fn settled_pass_scan_audit_rows_are_retired_while_overlay_scans_remain() {
         let dir = tempfile::tempdir().unwrap();
@@ -17349,8 +17524,12 @@ mod tests {
         let steady = steady_before_publish;
         assert_eq!(
             owner_copy_counts(&store, "ses"),
-            vec![("cache_state".to_string(), steady.1)],
-            "one live pass owner holds every copy"
+            vec![
+                ("cache_state".to_string(), 1),
+                ("cache_state".to_string(), steady.1 - 1)
+            ],
+            "the shared owner keeps the first pass's block identity receipt and one live \
+             pass owner holds every other copy"
         );
 
         // A history_summarizer publish bumps the row version without passing through a pass; the
@@ -17468,8 +17647,8 @@ mod tests {
         let mut counts = owner_copy_counts(&store, "ses");
         counts.sort();
         let mut want = vec![
-            ("cache_state".to_string(), overlay_copies),
-            ("cache_state".to_string(), steady_before_publish.1),
+            ("cache_state".to_string(), overlay_copies + 1),
+            ("cache_state".to_string(), steady_before_publish.1 - 1),
             (
                 "history_summarizer_side_channels".to_string(),
                 publish_copies,
@@ -18349,6 +18528,10 @@ mod tests {
     }
 
     const SESSION_TABLE_SEEDS: &[(&str, &str)] = &[
+        (
+            "block_identities",
+            "INSERT INTO block_identities(session_id, mid, identities) VALUES (?1, 'm0', '[]')",
+        ),
         (
             "cache_state",
             "INSERT INTO cache_state(session_id, row_version, core_state, meta) VALUES (?1, 1, '{}', '{}')",
@@ -27212,6 +27395,131 @@ mod lineage_descent_tests {
         assert_eq!(
             target.memory_reviewer_nonadmission,
             meta.history_summarizer.memory_reviewer_nonadmission
+        );
+    }
+
+    fn identity(fingerprint: &str) -> Vec<BlockIdentity> {
+        vec![BlockIdentity {
+            kind_tag: "text".to_string(),
+            byte_fingerprint: fingerprint.to_string(),
+        }]
+    }
+
+    /// Block identities live outside the `meta` blob: a commit makes the session's rows equal
+    /// the map, scans only the rows it writes, and a load returns them.
+    #[test]
+    fn block_identities_round_trip_outside_meta_and_rewrite_only_changed_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(dir.path());
+        let mut meta = ModuleMeta::default();
+        meta.block_identity_by_mid
+            .insert("a".to_string(), identity("fp-a"));
+        meta.block_identity_by_mid
+            .insert("b".to_string(), identity("fp-b"));
+        let version = store
+            .commit("ses", None, &CoreState::empty(), &meta)
+            .unwrap();
+        let stored_meta: String = store
+            .inner
+            .with_conn(|conn| {
+                conn.query_row(
+                    "SELECT meta FROM cache_state WHERE session_id = 'ses'",
+                    [],
+                    |row| row.get(0),
+                )
+            })
+            .unwrap();
+        assert!(!stored_meta.contains("fp-a"), "{stored_meta}");
+        let loaded = store.load("ses").unwrap();
+        assert_eq!(loaded.meta, meta);
+        assert!(
+            store
+                .load_meta("ses")
+                .unwrap()
+                .block_identity_by_mid
+                .is_empty()
+        );
+        let receipts = || -> i64 {
+            store
+                .inner
+                .with_conn(|conn| {
+                    conn.query_row(
+                        "SELECT COUNT(*) FROM scan_owner_copies WHERE field_id = 'block_identities'",
+                        [],
+                        |row| row.get(0),
+                    )
+                })
+                .unwrap()
+        };
+        assert_eq!(receipts(), 1);
+
+        let version = store
+            .commit("ses", Some(version), &CoreState::empty(), &meta)
+            .unwrap();
+        assert_eq!(receipts(), 1, "an unchanged map writes and scans no row");
+
+        meta.block_identity_by_mid.remove("b");
+        meta.block_identity_by_mid
+            .insert("a".to_string(), identity("fp-a2"));
+        meta.block_identity_by_mid
+            .insert("c".to_string(), identity("fp-c"));
+        store
+            .commit("ses", Some(version), &CoreState::empty(), &meta)
+            .unwrap();
+        assert_eq!(receipts(), 2);
+        let snapshot = store.load_transform_snapshot("ses").unwrap();
+        assert_eq!(
+            snapshot.loaded.meta.block_identity_by_mid,
+            meta.block_identity_by_mid
+        );
+    }
+
+    /// A descendant adopts the source's metadata whole, identities included, and a
+    /// full-session recomp clears them with the rest of the metadata.
+    #[test]
+    fn descent_copies_block_identities_and_recomp_reset_clears_them() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(dir.path());
+        seed_lineage(&store, "A", 10);
+        let loaded = store.load("A").unwrap();
+        let mut meta = loaded.meta.clone();
+        meta.block_identity_by_mid
+            .insert("m1".to_string(), identity("fp-m1"));
+        let version = store
+            .commit("A", loaded.row_version, &loaded.core, &meta)
+            .unwrap();
+        let hops = direct_hop("A", "B", 2);
+        let anchor = anchor();
+        store
+            .descend_lineage(LineageDescentRequest {
+                target_key: "B",
+                expected_target_row_version: None,
+                edge_id: 42,
+                prior_key: "A",
+                prior_epoch: 1,
+                new_epoch: 2,
+                constituents: &hops,
+                compaction_observed: true,
+                anchor: Some(&anchor),
+                now_ms: 10,
+            })
+            .unwrap();
+        let expected = store.load("A").unwrap().meta.block_identity_by_mid;
+        assert!(expected.contains_key("m1"));
+        assert_eq!(
+            store.load("B").unwrap().meta.block_identity_by_mid,
+            expected
+        );
+
+        let version = store.load("A").unwrap().row_version.unwrap_or(version);
+        store.reset_session_for_recomp("A", Some(version)).unwrap();
+        assert!(
+            store
+                .load("A")
+                .unwrap()
+                .meta
+                .block_identity_by_mid
+                .is_empty()
         );
     }
 
