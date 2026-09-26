@@ -2497,8 +2497,8 @@ pub struct CoverageSnapshot {
     pub rendered: Option<HistorySegmentEdge>,
     /// The row at the declared sequence, when one was declared.
     pub declared: Option<HistorySegmentEdge>,
-    /// With no declared sequence and a rendered boundary: the newest row ending at one of the
-    /// window's messages (see [`MemoryStore::coverage_snapshot`]).
+    /// With no declared sequence and a rendered boundary: the newest row at or below the rendered
+    /// one ending at one of the window's messages (see [`MemoryStore::coverage_snapshot`]).
     pub newest_window_end: Option<HistorySegmentEdge>,
 }
 
@@ -10602,7 +10602,7 @@ impl MemoryStore {
 
     /// Reads the rows anchor resolution needs in one read transaction: the session row's
     /// version and coverage, the newest and rendered rows, the row at `declared_sequence`, and,
-    /// when nothing is declared and a rendered row exists, the newest row whose end block
+    /// when nothing is declared and a rendered row exists, the newest row at or below it whose end block
     /// belongs to one of `live_mids` and whose end id is an anchor as
     /// [`Self::coverage_anchor_page`] defines it. `live_mids` are the window's non-synthetic message ids
     /// in order; the k-th (0-based) is matched at ordinal continuation base + k + 1, the
@@ -10635,8 +10635,11 @@ impl MemoryStore {
                 }
                 None => None,
             };
+            // Only rows the rendered boundary covers can be a stale slice: a newer row was published
+            // after the host's view, and cutting at it would drop the messages it summarizes. The
+            // unary `+` keeps the planner on the end-message seek, so the work stays independent of H.
             let newest_window_end = match (declared_sequence, &rendered) {
-                (None, Some(_)) => conn
+                (None, Some(rendered)) => conn
                     .prepare_cached(
                         "SELECT h.sequence, h.start_message, h.end_message, h.start_message_id,
                                 h.end_message_id
@@ -10645,13 +10648,15 @@ impl MemoryStore {
                             AND substr(h.end_message_id, 1, length(j.value) + 1) = j.value || '#'
                             AND h.end_message_id GLOB '?*#[0-9]*'
                             AND h.end_message_id NOT GLOB '*#*[^0-9]*'
+                            AND +h.sequence <= ?4
                           ORDER BY h.sequence DESC LIMIT 1",
                     )?
                     .query_row(
                         params![
                             session_id,
                             serde_json::to_string(live_mids).expect("strings serialize"),
-                            continuation_base.unwrap_or(0) as i64
+                            continuation_base.unwrap_or(0) as i64,
+                            rendered.sequence
                         ],
                         history_segment_edge_from_row,
                     )

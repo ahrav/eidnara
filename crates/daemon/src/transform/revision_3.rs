@@ -512,10 +512,11 @@ async fn a_panic_plus_reopen_after_the_unanchored_revert_removal_converges() {
     assert_reset_converges(&handler, &store, epoch, window).await;
 }
 
-/// A publish after the handler's resolution moves a null-boundary cut before the pass commits;
-/// the retry serves the new cut, and the ready snapshot holds that window, not the first cut.
+/// A publish during a null-boundary pass cannot move its cut: only rows the rendered boundary
+/// covers are stale-slice candidates, so the newer row is folded rather than cut at, and m3 is
+/// not dropped. The ready snapshot holds the window the pass served.
 #[tokio::test(flavor = "current_thread")]
-async fn a_publish_that_moves_the_cut_leaves_the_served_window_in_the_ready_snapshot() {
+async fn a_publish_during_a_null_boundary_pass_keeps_the_cut_at_the_rendered_boundary() {
     let (handler, store, _dir) = handler_for("rev3-cut");
     store
         .replace_history_segments(session(), &[segment(1, 1, 2)])
@@ -542,20 +543,53 @@ async fn a_publish_that_moves_the_cut_leaves_the_served_window_in_the_ready_snap
     let served = call(&handler, window).await;
     assert_eq!(served["status"], "ok", "{served}");
     assert!(published.load(std::sync::atomic::Ordering::SeqCst));
-    assert_eq!(served_mids(&served), ["m4", "m5", "m6", "m7"]);
-    assert_eq!(served["boundary"], anchor("m2", 1));
+    assert_eq!(served_mids(&served), ["m5", "m6", "m7"]);
+    assert_eq!(served["boundary"], anchor("m4", 2));
+    assert_eq!(
+        ready_snapshot_mids(&handler),
+        ["m2", "m3", "m4", "m5", "m6", "m7"]
+    );
+}
+
+/// A recomp reset after the handler's resolution moves the cut (the retry resolves a first
+/// pass); the retry serves the new cut, and the ready snapshot holds that window, not the first.
+#[tokio::test(flavor = "current_thread")]
+async fn a_reset_that_moves_the_cut_leaves_the_served_window_in_the_ready_snapshot() {
+    let (handler, store, _dir) = handler_for("rev3-reset-cut");
+    store
+        .replace_history_segments(session(), &[segment(1, 1, 2)])
+        .unwrap();
+    let host = mids(1..=7);
+    let host: Vec<&str> = host.iter().map(String::as_str).collect();
+    let first = call(&handler, body(&host[..6], Value::Null)).await;
+    assert_eq!(first["boundary"], anchor("m2", 1));
+    let hook_store = Arc::clone(&store);
+    install_transform_attempt_hook(session(), move || {
+        let loaded = hook_store.load("rev3-reset-cut").unwrap();
+        hook_store
+            .reset_session_for_recomp("rev3-reset-cut", loaded.row_version)
+            .unwrap();
+    });
+    let served = call(&handler, body(&host, Value::Null)).await;
+    assert_eq!(served["status"], "ok", "{served}");
+    let whole = ["m1", "m2", "m3", "m4", "m5", "m6", "m7"];
+    assert_eq!(served_mids(&served), whole);
+    assert_eq!(served["boundary"], Value::Null);
+    assert_eq!(ready_snapshot_mids(&handler), whole);
+}
+
+fn ready_snapshot_mids(handler: &Handler) -> Vec<String> {
     let TransformSnapshotLookup::Ready(lease) =
         handler.transform_snapshots.lock().unwrap().get(session())
     else {
         panic!("the accepted pass publishes a ready snapshot");
     };
-    let snapshot: Vec<&str> = lease
+    lease
         .request
         .messages
         .iter()
-        .map(|message| message.mid.as_str())
-        .collect();
-    assert_eq!(snapshot, ["m4", "m5", "m6", "m7"]);
+        .map(|message| message.mid.clone())
+        .collect()
 }
 
 fn native_user(mid: &str) -> Value {
