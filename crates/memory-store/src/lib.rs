@@ -2334,7 +2334,7 @@ pub struct TagNumberRow {
     pub tag_number: i64,
 }
 
-/// A cheap tag-table identity used to validate the module's in-process baseline.
+/// A cheap trigger-maintained tag-table identity.
 ///
 /// `generation` is advanced by SQLite triggers for every insert, update, and delete. The
 /// count/max fields make normal append deltas recognizable without rehydrating old payloads.
@@ -5191,7 +5191,7 @@ pub struct TransformSnapshotTimings {
 
 /// Cache state and every non-tag byte-affecting transform overlay from one SQLite snapshot.
 ///
-/// Tag rows are immutable payloads cached module-side and validated with [`TagCacheSummary`].
+/// Tag rows are read apart, for the pass's window, by [`MemoryStore::load_tags_for_window`].
 #[derive(Debug, Clone)]
 pub struct TransformSnapshot {
     pub loaded: LoadedState,
@@ -8633,29 +8633,71 @@ impl MemoryStore {
         })?)
     }
 
-    /// Load only rows minted after `after_tag_number`, in primary-key order.
-    pub fn load_tags_after(
+    /// Loads, in tag-number order, the tag rows a transform pass consumes: every row of a
+    /// block of `message_ids` (block ids `<mid>` and `<mid>#...` share a range on the
+    /// `(session_id, block_id)` index), every legacy row keyed by one of `tool_call_ids`, and
+    /// the session's newest `newest.max(1) + <rows of message_ids>` rows by primary key.
+    ///
+    /// The newest rows keep session-relative protection exact: at most one row per block of
+    /// the window is excluded from any ranking, so the newest `newest` rows outside the window
+    /// and the session's maximum tag number are among them. Rows read are bounded by the
+    /// window and `newest`, not by the session's tag count.
+    pub fn load_tags_for_window(
         &self,
         session_id: &str,
-        after_tag_number: i64,
+        message_ids: &[&str],
+        tool_call_ids: &[&str],
+        newest: usize,
     ) -> Result<Vec<TagRow>, MemoryStoreError> {
+        let message_ids = serde_json::to_string(message_ids).expect("string ids serialize");
+        let tool_call_ids = serde_json::to_string(tool_call_ids).expect("string ids serialize");
         Ok(self.inner.with_conn(|conn| {
-            let mut stmt = conn.prepare_cached(
-                "SELECT tag_number, block_id, kind, token_count, created_at_ms, source_bytes
-                 FROM tags
-                 WHERE session_id = ?1 AND tag_number > ?2
-                 ORDER BY tag_number ASC",
-            )?;
-            let rows = stmt.query_map(params![session_id, after_tag_number], tag_row_from_sql)?;
-            rows.collect::<Result<Vec<_>, _>>()
+            let mut rows = BTreeMap::new();
+            let window = conn
+                .prepare_cached(
+                    "SELECT t.tag_number, t.block_id, t.kind, t.token_count, t.created_at_ms,
+                            t.source_bytes
+                       FROM json_each(?2) AS j CROSS JOIN tags AS t
+                      WHERE t.session_id = ?1
+                        AND t.block_id >= j.value AND t.block_id < j.value || '$'",
+                )?
+                .query_map(params![session_id, message_ids], tag_row_from_sql)?
+                .collect::<Result<Vec<_>, _>>()?;
+            let window_rows = window.len();
+            let legacy = conn
+                .prepare_cached(
+                    "SELECT tag_number, block_id, kind, token_count, created_at_ms, source_bytes
+                       FROM tags
+                      WHERE session_id = ?1 AND block_id IN (SELECT value FROM json_each(?2))",
+                )?
+                .query_map(params![session_id, tool_call_ids], tag_row_from_sql)?
+                .collect::<Result<Vec<_>, _>>()?;
+            let newest = conn
+                .prepare_cached(
+                    "SELECT tag_number, block_id, kind, token_count, created_at_ms, source_bytes
+                       FROM tags
+                      WHERE session_id = ?1
+                      ORDER BY tag_number DESC LIMIT ?2",
+                )?
+                .query_map(
+                    params![
+                        session_id,
+                        sql_limit(newest.max(1).saturating_add(window_rows))
+                    ],
+                    tag_row_from_sql,
+                )?
+                .collect::<Result<Vec<_>, _>>()?;
+            for row in window.into_iter().chain(legacy).chain(newest) {
+                rows.insert(row.tag_number, row);
+            }
+            Ok(rows.into_values().collect())
         })?)
     }
 
-    /// Return the trigger-maintained tag identity for cache validation without reading blobs.
+    /// Return the trigger-maintained tag identity without reading blobs.
     ///
     /// Triggers maintain count and max during rare writes; replacements and deletions derive a
-    /// fresh max from the primary-key prefix. Steady transforms read this one small row instead of
-    /// scanning immutable tag payloads.
+    /// fresh max from the primary-key prefix.
     pub fn tag_cache_summary(&self, session_id: &str) -> Result<TagCacheSummary, MemoryStoreError> {
         Ok(self.inner.with_conn(|conn| {
             conn.prepare_cached(
@@ -10699,6 +10741,29 @@ impl MemoryStore {
     /// Return the newest ordinal covered by a persisted compacted history_segment.
     pub fn last_compacted_ordinal(&self, session_id: &str) -> Result<i64, MemoryStoreError> {
         self.max_history_segment_end_ordinal(session_id)
+    }
+
+    /// The `ordinals` no history_segment covers. Ranges are validated strictly increasing at
+    /// append, so the row with the smallest `end_message` at or after an ordinal is the only
+    /// one that can cover it: one seek on the end-message index per ordinal.
+    pub fn uncovered_ordinals(
+        &self,
+        session_id: &str,
+        ordinals: &[i64],
+    ) -> Result<Vec<i64>, MemoryStoreError> {
+        let ordinals = serde_json::to_string(ordinals).expect("an integer array serializes");
+        Ok(self.inner.with_conn(|conn| {
+            conn.prepare_cached(
+                "SELECT j.value FROM json_each(?2) AS j
+                  WHERE COALESCE(
+                          (SELECT h.start_message FROM history_segments AS h
+                            WHERE h.session_id = ?1 AND h.end_message >= j.value
+                            ORDER BY h.end_message LIMIT 1),
+                          j.value + 1) > j.value",
+            )?
+            .query_map(params![session_id, ordinals], |row| row.get(0))?
+            .collect::<Result<Vec<_>, _>>()
+        })?)
     }
 
     /// Read only the compacted rows intersecting a range. The SQL limit is intentional: facade
@@ -20656,15 +20721,6 @@ mod tests {
             ]
         );
         assert_eq!(store.tag_number_query_count_for_test(), 1);
-        assert_eq!(
-            store
-                .load_tags_after("ses", 1)
-                .unwrap()
-                .into_iter()
-                .map(|row| row.tag_number)
-                .collect::<Vec<_>>(),
-            vec![2, 3]
-        );
         assert_eq!(
             store
                 .load_tag_numbers_after("ses", 1)

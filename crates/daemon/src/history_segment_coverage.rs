@@ -1,12 +1,15 @@
-//! This module validates ordered stored history_segment ranges for coverage resolution.
+//! This module folds the m0 content epoch into the render identity.
 //!
-//! The functions are pure over history_segments in the order MemoryStore::load_history_segments returns.
+//! Under test, resolve_coverage is the whole-set oracle for coverage, which the transform
+//! reads from the set's two ends because append validates every range.
+//! It is pure over history_segments in the order MemoryStore::load_history_segments returns.
 //! resolve_coverage rejects negative, reversed, non-increasing, or overlapping stored history_segment ranges.
 //! resolve_coverage returns the last history_segment's end_message and end_message_id as the coverage end.
 //! resolve_coverage uses the returned coverage end as the combined m0/m1 coverage anchor.
 //! resolve_coverage permits sparse coordinate gaps because store data cannot distinguish retired ordinals from missing live messages.
 //! Live-aware callers guard against dropping present input across those gaps.
 
+#[cfg(test)]
 use memory_store::StoredHistorySegment;
 
 /// M0ContentEpoch fields trigger a HARD fold when their changes alter frozen m0 without a cheaper correction.
@@ -88,6 +91,7 @@ pub fn fold_m0_content_epoch(base_render_config: &str, epoch: &M0ContentEpoch) -
     format!("{base_render_config}|m0epoch[{}]", parts.join(";"))
 }
 
+#[cfg(test)]
 /// `HistorySegmentCoverage` records the latest sequence, terminal covered ordinal, and cache anchor.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HistorySegmentCoverage {
@@ -102,6 +106,7 @@ pub struct HistorySegmentCoverage {
     pub boundary_id: String,
 }
 
+#[cfg(test)]
 /// `CoverageError` reports a stored history_segment set that cannot anchor coverage.
 /// Overlaps are legal for consumer legs because retired ordinals are absent from the input.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -117,6 +122,7 @@ pub enum CoverageError {
     },
 }
 
+#[cfg(test)]
 impl std::fmt::Display for CoverageError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -135,6 +141,7 @@ impl std::fmt::Display for CoverageError {
     }
 }
 
+#[cfg(test)]
 /// Resolves the terminal coverage and cache anchor from store-ordered history_segments.
 ///
 /// Coordinate gaps remain valid because retired ordinals are absent from store data.

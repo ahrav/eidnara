@@ -17,7 +17,7 @@ use crate::config::{
 use crate::divergence;
 pub use crate::divergence::FirstDivergence;
 use crate::healing::{self, SerializerProfile, quirk_residual};
-use crate::history_segment_coverage::{M0ContentEpoch, fold_m0_content_epoch, resolve_coverage};
+use crate::history_segment_coverage::{M0ContentEpoch, fold_m0_content_epoch};
 use crate::injection::{
     InjectionOutcome, advance_injection_from_meta, capture_todo_state_on_bust,
     injection_pending_after_capture, is_synthetic_todo_id,
@@ -52,8 +52,8 @@ use memory_store::{
     LineageConstituent, LineageDescentDisposition, LineageDescentRequest, MaterializeReason,
     MemoryStore, MemoryStoreError, ModuleMeta, ModuleUsage, NoteDelivery, PassAction, PassRecord,
     PassSchedulerObservation, PendingAgentDrop, PendingChannel2Directive, PendingRewriteState,
-    ProjectMemoryComposition, ServedBlockFingerprint, StoredHistorySegment, TagCacheSummary,
-    TagMintInput, TagRow, TailHygieneBaseline, TemporalMarkInput, TemporalMarkRow, TransformCommit,
+    ProjectMemoryComposition, ServedBlockFingerprint, StoredHistorySegment, TagMintInput, TagRow,
+    TailHygieneBaseline, TemporalMarkInput, TemporalMarkRow, TransformCommit,
     TransformOverlayBatch, UserHintDecisionInput, UserHintRow,
 };
 use regex::Regex;
@@ -193,13 +193,9 @@ fn reset_emergency_reasoning_exclusion_count() {
 }
 
 pub(crate) const SERIALIZED_OUTPUT_CACHE_BUDGET_BYTES: usize = 256 * 1024 * 1024;
-const TAG_BASELINE_CACHE_BUDGET_BYTES: usize = 64 * 1024 * 1024;
-const TAG_MINT_FRONTIER_CACHE_BUDGET_BYTES: usize = 64 * 1024 * 1024;
-
-/// The tag caches retain data per process, not per handler.
-/// The host declaration uses the sum of the two enforced tag-cache budgets.
-pub(crate) const TAG_CACHE_COMBINED_BUDGET_BYTES: usize =
-    TAG_BASELINE_CACHE_BUDGET_BYTES + TAG_MINT_FRONTIER_CACHE_BUDGET_BYTES;
+/// The tag-mint frontier cache retains data per process, not per handler; the host
+/// declaration counts its enforced budget.
+pub(crate) const TAG_MINT_FRONTIER_CACHE_BUDGET_BYTES: usize = 64 * 1024 * 1024;
 
 /// The typed value stays behind an `Arc`, so a cache hit does not clone large tool output trees.
 #[derive(Debug, Clone)]
@@ -3304,7 +3300,7 @@ fn apply_once(
     timings.seed_or_sync = elapsed_ms(seed_or_sync_started_at);
     timings.store_cache_state = transform_snapshot.timings.cache_state_ms;
     let tag_hydration_started_at = Instant::now();
-    let baseline_tag_rows = load_cached_tags(store, &req.session_id)?;
+    let baseline_tag_rows = load_window_tags(store, req, &projection)?;
     let mut tag_rows = Arc::clone(&baseline_tag_rows);
     timings.store_tags = elapsed_ms(tag_hydration_started_at);
     timings.store_temporal = transform_snapshot.timings.temporal_ms;
@@ -3444,6 +3440,8 @@ fn apply_once(
                 has_history_segments
             };
         if needs_lineage_check {
+            // The declared exception to bounded pass reads (spec C3): an absent boundary is a
+            // revert shape, and finding its surviving prefix reads O(removed history).
             let history_segments = store.load_history_segments(&req.session_id)?;
             let has_history_segments = !history_segments.is_empty();
             has_history_segments_cache = Some(has_history_segments);
@@ -3879,8 +3877,7 @@ fn apply_once(
         == Some(SerializerProfile::ClaudeCodeAnthropic)
         && history_segment_seq_changed_since_meta
     {
-        let history_segments = store.load_history_segments(&req.session_id)?;
-        let new_coverage = coverage_ordinal_from_history_segments(&history_segments)?;
+        let new_coverage = stored_coverage_bounds(store, &req.session_id)?.map(|(_, end)| end);
         coverage_advance_covers_new_system(req, loaded.meta.coverage_ordinal, new_coverage)
     } else {
         false
@@ -4342,10 +4339,7 @@ fn apply_once(
         match plan {
             PassPlan::Reject => return Err(TransformError::UnknownShape(UNKNOWN_SHAPE)),
             PassPlan::Hard | PassPlan::MigrateHard => {
-                let history_segments_for_live_coverage =
-                    store.load_history_segments(&req.session_id)?;
-                let coverage_bounds =
-                    coverage_bounds_from_history_segments(&history_segments_for_live_coverage)?;
+                let coverage_bounds = stored_coverage_bounds(store, &req.session_id)?;
                 let covered_system_messages = covered_system_messages_for_coverage(
                     req,
                     coverage_bounds.map(|(_, end)| end),
@@ -4372,10 +4366,11 @@ fn apply_once(
                 )?;
 
                 if let Some(stray) = first_uncovered_live_block(
-                    &history_segments_for_live_coverage,
+                    store,
+                    &req.session_id,
                     &live,
                     comp.coverage_ordinal,
-                ) {
+                )? {
                     return Err(TransformError::CoverageGap(format!(
                         "coverage gap: live item {} (ordinal {}) sits at or below coverage end {:?} \
                      but no history_segment covers it; composing m0 would silently drop it from the tail",
@@ -4397,6 +4392,8 @@ fn apply_once(
                         )
                     {
                         if loaded.core.reconcile_pending {
+                            // The declared exception to bounded pass reads (spec C3): a revert
+                            // truncation reads the history it may remove, O(removed history).
                             let history_segments = store.load_history_segments(&req.session_id)?;
                             let keep_through_seq =
                                 surviving_revert_prefix_seq(&history_segments, &live);
@@ -4419,10 +4416,8 @@ fn apply_once(
                                 ctx,
                             )?;
                             current_m1_digest = m1_signal.revision;
-                            let recut_history_segments =
-                                store.load_history_segments(&req.session_id)?;
                             let recut_coverage_bounds =
-                                coverage_bounds_from_history_segments(&recut_history_segments)?;
+                                stored_coverage_bounds(store, &req.session_id)?;
                             let recut_covered_system_messages =
                                 covered_system_messages_for_coverage(
                                     req,
@@ -4455,10 +4450,11 @@ fn apply_once(
                                 .min(comp.coverage_ordinal.unwrap_or(0));
 
                             if let Some(stray) = first_uncovered_live_block(
-                                &recut_history_segments,
+                                store,
+                                &req.session_id,
                                 &live,
                                 comp.coverage_ordinal,
-                            ) {
+                            )? {
                                 return Err(TransformError::CoverageGap(format!(
                                     "coverage gap after re-cut: live item {} (ordinal {}) is below coverage end {:?} but uncovered",
                                     stray.id(),
@@ -4616,9 +4612,7 @@ fn apply_once(
                 // An unserved body folds; the empty default is never rendered.
                 let m1_body = served_m1_body.unwrap_or_default();
                 if served_m1_body.is_none() {
-                    let history_segments_for_fold = store.load_history_segments(&req.session_id)?;
-                    let coverage_bounds =
-                        coverage_bounds_from_history_segments(&history_segments_for_fold)?;
+                    let coverage_bounds = stored_coverage_bounds(store, &req.session_id)?;
                     let covered_system_messages = covered_system_messages_for_coverage(
                         req,
                         coverage_bounds.map(|(_, end)| end),
@@ -4647,10 +4641,11 @@ fn apply_once(
                     )?;
 
                     if let Some(stray) = first_uncovered_live_block(
-                        &history_segments_for_fold,
+                        store,
+                        &req.session_id,
                         &live,
                         comp.coverage_ordinal,
-                    ) {
+                    )? {
                         return Err(TransformError::CoverageGap(format!(
                             "coverage gap: live item {} (ordinal {}) sits at or below coverage end {:?} \
                               but no history_segment covers it; composing m0 would silently drop it from the tail",
@@ -4755,22 +4750,21 @@ fn apply_once(
                     rendered.extend(new_strip_units.clone());
                     rendered.extend(new_terse_text_compression_units.clone());
                     let new_boundary_id = m1.new_coverage.as_ref().map(|(id, _)| id.clone());
-                    if let Some((_, coverage_end)) = &m1.new_coverage {
-                        let history_segments_for_live_coverage =
-                            store.load_history_segments(&req.session_id)?;
-                        if let Some(stray) = first_uncovered_live_block(
-                            &history_segments_for_live_coverage,
+                    if let Some((_, coverage_end)) = &m1.new_coverage
+                        && let Some(stray) = first_uncovered_live_block(
+                            store,
+                            &req.session_id,
                             &live,
                             Some(*coverage_end),
-                        ) {
-                            return Err(TransformError::CoverageGap(format!(
-                                "coverage gap: live item {} (ordinal {}) sits at or below coverage end {} \
+                        )?
+                    {
+                        return Err(TransformError::CoverageGap(format!(
+                            "coverage gap: live item {} (ordinal {}) sits at or below coverage end {} \
                          but no history_segment covers it; composing m1 would silently drop it from the tail",
-                                stray.id(),
-                                stray.ordinal(),
-                                coverage_end
-                            )));
-                        }
+                            stray.id(),
+                            stray.ordinal(),
+                            coverage_end
+                        )));
                     }
                     if let Some((id, coverage_end)) = m1.new_coverage.as_ref() {
                         validate_live_boundary_ordinal(id, *coverage_end, &live)?;
@@ -6353,19 +6347,30 @@ fn detect_boundary_divergence_candidate(
     }))
 }
 
-fn coverage_ordinal_from_history_segments(
-    history_segments: &[StoredHistorySegment],
-) -> Result<Option<u64>, TransformError> {
-    coverage_bounds_from_history_segments(history_segments)
-        .map(|coverage| coverage.map(|(_, end)| end))
-}
-
-fn coverage_bounds_from_history_segments(
-    history_segments: &[StoredHistorySegment],
+/// The first covered ordinal and the coverage end, from the set's oldest and newest rows.
+/// Ranges are validated strictly increasing at append, so the two ends bound the set.
+fn stored_coverage_bounds(
+    store: &MemoryStore,
+    session_id: &str,
 ) -> Result<Option<(u64, u64)>, TransformError> {
-    resolve_coverage(history_segments)
-        .map(|coverage| coverage.map(|c| (c.first_covered_ordinal, c.coverage_end_ordinal)))
-        .map_err(|gap| TransformError::CoverageGap(gap.to_string()))
+    let Some(newest) = store.newest_history_segment(session_id)? else {
+        return Ok(None);
+    };
+    let oldest = store
+        .oldest_history_segment(session_id)?
+        .unwrap_or_else(|| newest.clone());
+    for edge in [&oldest, &newest] {
+        if edge.start_message < 0 || edge.end_message < edge.start_message {
+            return Err(TransformError::CoverageGap(format!(
+                "history_segment coverage range {}..={} is invalid; ordinals must be non-negative and end must not precede start",
+                edge.start_message, edge.end_message
+            )));
+        }
+    }
+    Ok(Some((
+        oldest.start_message as u64,
+        newest.end_message as u64,
+    )))
 }
 
 fn meta_coverage_history_segment_seq(meta: &ModuleMeta) -> i64 {
@@ -6817,30 +6822,39 @@ fn coverage_shrank(old: Option<u64>, new: Option<u64>) -> bool {
     }
 }
 
-fn stored_history_segment_covers_ordinal(
-    history_segment: &StoredHistorySegment,
-    ordinal: u64,
-) -> bool {
-    let start = history_segment.start_message.max(0) as u64;
-    let end = history_segment.end_message.max(0) as u64;
-    start <= ordinal && ordinal <= end
-}
-
+/// The lowest live non-system item at or below `coverage` that no history_segment covers.
+/// Reads one index seek per such item, so the work follows the live items, not the history.
 fn first_uncovered_live_block<'a>(
-    history_segments: &[StoredHistorySegment],
+    store: &MemoryStore,
+    session_id: &str,
     live: &[&'a FlatBlock],
     coverage: Option<u64>,
-) -> Option<&'a FlatBlock> {
-    let coverage = coverage?;
-    live.iter()
+) -> Result<Option<&'a FlatBlock>, TransformError> {
+    let Some(coverage) = coverage else {
+        return Ok(None);
+    };
+    let candidates = live
+        .iter()
         .copied()
         .filter(|block| block.role != "system" && block.ordinal() <= coverage)
-        .filter(|block| {
-            !history_segments.iter().any(|history_segment| {
-                stored_history_segment_covers_ordinal(history_segment, block.ordinal())
-            })
-        })
-        .min_by_key(|block| block.ordinal())
+        .collect::<Vec<_>>();
+    if candidates.is_empty() {
+        return Ok(None);
+    }
+    let ordinals = candidates
+        .iter()
+        .map(|block| i64::try_from(block.ordinal()).unwrap_or(i64::MAX))
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    let uncovered = store
+        .uncovered_ordinals(session_id, &ordinals)?
+        .into_iter()
+        .collect::<HashSet<_>>();
+    Ok(candidates
+        .into_iter()
+        .filter(|block| uncovered.contains(&i64::try_from(block.ordinal()).unwrap_or(i64::MAX)))
+        .min_by_key(|block| block.ordinal()))
 }
 
 fn validate_live_boundary_ordinal(
@@ -6915,11 +6929,7 @@ fn resolve_boundary_state(
         ));
     }
 
-    let history_segments = store.load_history_segments(&req.session_id)?;
-    let tail = history_segments
-        .iter()
-        .max_by_key(|history_segment| history_segment.sequence);
-    match tail {
+    match store.newest_history_segment(&req.session_id)?.as_ref() {
         Some(tail)
             if tail.end_message_id == declared.flat_boundary_id
                 && tail.end_message == declared.boundary_absolute_ordinal as i64
@@ -7208,193 +7218,35 @@ fn reanchor_kept_synthetic_todo_if_folded_or_shrunk(
     Ok(())
 }
 
-/// Cached tag baseline for one store generation.
-#[derive(Debug, Clone)]
-struct TagBaselineCacheEntry {
-    store_namespace: u64,
-    generation: u64,
-    count: usize,
-    max_tag_number: i64,
-    tags: Arc<[Arc<TagRow>]>,
-    retained_bytes: usize,
-}
-
-impl TagBaselineCacheEntry {
-    fn matches(&self, store_namespace: u64, summary: TagCacheSummary) -> bool {
-        self.store_namespace == store_namespace
-            && self.generation == summary.generation
-            && self.count == summary.count
-            && self.max_tag_number == summary.max_tag_number
-    }
-
-    fn can_append(&self, store_namespace: u64, summary: TagCacheSummary) -> bool {
-        let appended = summary.count.saturating_sub(self.count);
-        self.store_namespace == store_namespace
-            && appended > 0
-            && summary.count > self.count
-            && summary.max_tag_number > self.max_tag_number
-            && summary.generation.saturating_sub(self.generation) == appended as u64
-    }
-}
-
-#[derive(Debug)]
-struct TagBaselineCache {
-    sessions: HashMap<String, TagBaselineCacheEntry>,
-    lru: VecDeque<String>,
-    retained_bytes: usize,
-    max_retained_bytes: usize,
-}
-
-impl TagBaselineCache {
-    fn new(max_retained_bytes: usize) -> Self {
-        Self {
-            sessions: HashMap::new(),
-            lru: VecDeque::new(),
-            retained_bytes: 0,
-            max_retained_bytes,
-        }
-    }
-
-    fn snapshot(&mut self, session_id: &str) -> Option<TagBaselineCacheEntry> {
-        let entry = self.sessions.get(session_id)?.clone();
-        self.lru.retain(|candidate| candidate != session_id);
-        self.lru.push_back(session_id.to_string());
-        Some(entry)
-    }
-
-    fn remove(&mut self, session_id: &str) {
-        if let Some(entry) = self.sessions.remove(session_id) {
-            self.retained_bytes = self.retained_bytes.saturating_sub(entry.retained_bytes);
-        }
-        self.lru.retain(|candidate| candidate != session_id);
-    }
-
-    fn replace(&mut self, session_id: &str, entry: TagBaselineCacheEntry) {
-        self.remove(session_id);
-        if entry.tags.is_empty() || entry.retained_bytes > self.max_retained_bytes {
-            return;
-        }
-        self.retained_bytes = self.retained_bytes.saturating_add(entry.retained_bytes);
-        self.sessions.insert(session_id.to_string(), entry);
-        self.lru.push_back(session_id.to_string());
-        while self.retained_bytes > self.max_retained_bytes {
-            let Some(oldest) = self.lru.pop_front() else {
-                break;
-            };
-            if let Some(entry) = self.sessions.remove(&oldest) {
-                self.retained_bytes = self.retained_bytes.saturating_sub(entry.retained_bytes);
-            }
-        }
-    }
-}
-
-fn tag_baseline_cache() -> &'static Mutex<TagBaselineCache> {
-    static CACHE: OnceLock<Mutex<TagBaselineCache>> = OnceLock::new();
-    CACHE.get_or_init(|| Mutex::new(TagBaselineCache::new(TAG_BASELINE_CACHE_BUDGET_BYTES)))
-}
-
-pub(crate) fn tag_baseline_cache_metrics() -> (usize, usize) {
-    let cache = tag_baseline_cache()
-        .lock()
-        .expect("tag baseline cache mutex");
-    (cache.retained_bytes, cache.sessions.len())
-}
-
-fn tag_baseline_retained_bytes(tags: &[Arc<TagRow>]) -> usize {
-    use crate::retained_size::ARC_ALLOCATION_OVERHEAD_BYTES;
-
-    // Charge each row in full even when a pass or an older snapshot shares it.
-    // The 64-byte allowance covers allocator bookkeeping, not row or Arc headers.
-    tags.iter()
-        .fold(ARC_ALLOCATION_OVERHEAD_BYTES, |bytes, tag| {
-            bytes
-                .saturating_add(std::mem::size_of::<Arc<TagRow>>())
-                .saturating_add(ARC_ALLOCATION_OVERHEAD_BYTES)
-                .saturating_add(std::mem::size_of::<TagRow>())
-                .saturating_add(tag.block_id.capacity())
-                .saturating_add(tag.kind.capacity())
-                .saturating_add(tag.source_bytes.capacity())
-                .saturating_add(64)
-        })
-}
-
-fn tag_baseline_entry(
+/// The tag rows a pass consumes: rows of the request's messages, legacy rows keyed by the
+/// projection's tool call ids, and the session's newest `protected_tags` rows plus the window
+/// rows, so the maximum tag number and every newest-K protection ranking match a read of the
+/// whole session.
+fn load_window_tags(
     store: &MemoryStore,
-    summary: TagCacheSummary,
-    tags: Arc<[Arc<TagRow>]>,
-) -> TagBaselineCacheEntry {
-    TagBaselineCacheEntry {
-        store_namespace: store.tag_cache_namespace(),
-        generation: summary.generation,
-        count: summary.count,
-        max_tag_number: summary.max_tag_number,
-        retained_bytes: tag_baseline_retained_bytes(&tags),
-        tags,
-    }
-}
-
-fn load_cached_tags(
-    store: &MemoryStore,
-    session_id: &str,
+    req: &TransformIngress<'_>,
+    projection: &FlatProjection,
 ) -> Result<Arc<[Arc<TagRow>]>, TransformError> {
-    let store_namespace = store.tag_cache_namespace();
-    loop {
-        let summary = store.tag_cache_summary(session_id)?;
-        let cached = tag_baseline_cache()
-            .lock()
-            .expect("tag baseline cache mutex")
-            .snapshot(session_id);
-
-        if let Some(entry) = cached {
-            if entry.matches(store_namespace, summary) {
-                return Ok(entry.tags);
-            }
-            if entry.can_append(store_namespace, summary) {
-                let tail = store.load_tags_after(session_id, entry.max_tag_number)?;
-                let observed = store.tag_cache_summary(session_id)?;
-                let appended = summary.count.saturating_sub(entry.count);
-                if observed == summary
-                    && tail.len() == appended
-                    && tail
-                        .last()
-                        .is_some_and(|tag| tag.tag_number == summary.max_tag_number)
-                {
-                    let mut tags = Vec::with_capacity(summary.count);
-                    tags.extend(entry.tags.iter().cloned());
-                    tags.extend(tail.into_iter().map(Arc::new));
-                    let tags = Arc::from(tags);
-                    tag_baseline_cache()
-                        .lock()
-                        .expect("tag baseline cache mutex")
-                        .replace(
-                            session_id,
-                            tag_baseline_entry(store, summary, Arc::clone(&tags)),
-                        );
-                    return Ok(tags);
-                }
-                continue;
-            }
-        }
-
-        let tags: Arc<[Arc<TagRow>]> = store
-            .load_tags_for_session(session_id)?
-            .into_iter()
-            .map(Arc::new)
-            .collect();
-        let observed = store.tag_cache_summary(session_id)?;
-        if observed.count == tags.len()
-            && observed.max_tag_number == tags.last().map_or(0, |tag| tag.tag_number)
-        {
-            tag_baseline_cache()
-                .lock()
-                .expect("tag baseline cache mutex")
-                .replace(
-                    session_id,
-                    tag_baseline_entry(store, observed, Arc::clone(&tags)),
-                );
-            return Ok(tags);
-        }
-    }
+    let message_ids = req
+        .messages
+        .iter()
+        .map(|message| message.mid.as_str())
+        .collect::<BTreeSet<_>>();
+    let tool_call_ids = projection
+        .blocks
+        .iter()
+        .filter_map(|block| block.tool_call_id.as_deref())
+        .collect::<BTreeSet<_>>();
+    Ok(store
+        .load_tags_for_window(
+            &req.session_id,
+            &message_ids.into_iter().collect::<Vec<_>>(),
+            &tool_call_ids.into_iter().collect::<Vec<_>>(),
+            req.protected_tags,
+        )?
+        .into_iter()
+        .map(Arc::new)
+        .collect())
 }
 
 #[derive(Debug, Default)]
@@ -8292,9 +8144,17 @@ fn compute_active_overlay_decisions(
     let tag_mint_work = if !tag_mint_enabled {
         TagMintWork::default()
     } else {
+        // Only projection blocks are minted, and the frontier memo keys on this set, so rows
+        // outside the projection are left out to keep the key stable as the newest rows move.
+        let projected_ids = projection
+            .blocks
+            .iter()
+            .map(|block| block.id.as_str())
+            .collect::<HashSet<_>>();
         let existing_tag_ids = tag_rows
             .iter()
             .map(|row| row.block_id.as_str())
+            .filter(|block_id| projected_ids.contains(block_id))
             .collect::<HashSet<_>>();
         // Minting snapshots the session frontier before tokenization so slow minting does not hold the process-wide cache lock.
         let mut memo = tag_mint_frontier_cache()
@@ -12297,104 +12157,6 @@ pub(crate) mod tests {
         BlockKind, HarnessMeta, ModuleDropSeedRow, ModuleStateSyncRequest, ModuleUsage, OutputKind,
         ProviderExtras, StoredHistorySegment, TagRow, ToolOutput,
     };
-
-    fn tag_baseline_test_entry() -> TagBaselineCacheEntry {
-        let tags = vec![Arc::new(TagRow {
-            tag_number: 1,
-            block_id: "b1".to_string(),
-            kind: "message".to_string(),
-            token_count: 1,
-            created_at_ms: 0,
-            source_bytes: Vec::new(),
-        })];
-        // Charge through the production sizing function so the pinned budgets
-        // track the real retention envelope.
-        let retained_bytes = tag_baseline_retained_bytes(&tags);
-        TagBaselineCacheEntry {
-            store_namespace: 1,
-            generation: 1,
-            count: 1,
-            max_tag_number: 1,
-            tags: Arc::from(tags),
-            retained_bytes,
-        }
-    }
-
-    #[test]
-    fn tag_baseline_cache_refuses_an_insert_larger_than_its_budget() {
-        let entry = tag_baseline_test_entry();
-        let mut cache = TagBaselineCache::new(entry.retained_bytes - 1);
-        cache.replace("s1", entry.clone());
-        assert!(cache.sessions.is_empty());
-        assert_eq!(cache.retained_bytes, 0);
-        assert!(cache.lru.is_empty());
-
-        let mut cache = TagBaselineCache::new(entry.retained_bytes + 32);
-        cache.replace("s1", entry.clone());
-        assert!(cache.snapshot("s1").is_some());
-        let mut row = entry.tags[0].as_ref().clone();
-        row.source_bytes.extend_from_slice(b"loaded");
-        row.source_bytes.reserve(cache.max_retained_bytes);
-        let loaded: Arc<[Arc<TagRow>]> = vec![Arc::new(row)].into();
-        let retained_bytes = tag_baseline_retained_bytes(&loaded);
-        assert!(retained_bytes > cache.max_retained_bytes);
-        cache.replace(
-            "s1",
-            TagBaselineCacheEntry {
-                generation: 2,
-                tags: Arc::clone(&loaded),
-                retained_bytes,
-                ..entry.clone()
-            },
-        );
-        assert!(cache.snapshot("s1").is_none());
-        assert_eq!(cache.retained_bytes, 0);
-        assert!(cache.lru.is_empty());
-        assert_eq!(loaded[0].source_bytes, b"loaded");
-        assert_eq!(loaded[0].tag_number, 1);
-        cache.replace("s1", entry.clone());
-        assert_eq!(cache.retained_bytes, entry.retained_bytes);
-        assert_eq!(cache.lru.len(), 1);
-    }
-
-    #[test]
-    fn tag_baseline_charge_counts_capacity_and_shared_row_headers() {
-        let mut row = tag_baseline_test_entry().tags[0].as_ref().clone();
-        row.block_id.reserve(128);
-        row.kind.reserve(64);
-        row.source_bytes.reserve(256);
-        let row = Arc::new(row);
-        let rows = [Arc::clone(&row), Arc::clone(&row)];
-        let header = 2 * std::mem::size_of::<usize>();
-        let row_bytes = std::mem::size_of::<Arc<TagRow>>()
-            + header
-            + std::mem::size_of::<TagRow>()
-            + row.block_id.capacity()
-            + row.kind.capacity()
-            + row.source_bytes.capacity()
-            + 64;
-        assert_eq!(tag_baseline_retained_bytes(&[]), header);
-        assert_eq!(tag_baseline_retained_bytes(&rows), header + 2 * row_bytes);
-        assert!(row.source_bytes.capacity() > row.source_bytes.len());
-    }
-
-    #[test]
-    fn tag_baseline_cache_evicts_older_sessions_but_never_the_just_inserted_one() {
-        // Budget holds one entry but not two: an over-budget insert must
-        // evict the OLDEST session and keep the newcomer. The pre-insert
-        // budget guard makes a self-evicting insert unreachable (the newcomer
-        // alone always fits), so the newest session must always survive.
-        let entry = tag_baseline_test_entry();
-        let charge = entry.retained_bytes;
-        let mut cache = TagBaselineCache::new(charge + charge / 2);
-        cache.replace("s1", entry);
-        assert!(cache.sessions.contains_key("s1"));
-        cache.replace("s2", tag_baseline_test_entry());
-        assert!(!cache.sessions.contains_key("s1"));
-        assert!(cache.sessions.contains_key("s2"));
-        assert_eq!(cache.retained_bytes, charge);
-        assert_eq!(cache.lru.len(), 1);
-    }
 
     fn resolve_test_cache_ttl(
         ctx: &mut ProducerContext<'_>,
@@ -24187,75 +23949,6 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn tag_baseline_cache_matches_cold_passes_across_drop_reset_and_remint() {
-        fn cold_run(
-            store: &MemoryStore,
-            request: &TransformRequest,
-            reductions: &[ReductionDecision],
-        ) -> TransformResponse {
-            tag_baseline_cache()
-                .lock()
-                .expect("tag baseline cache mutex")
-                .remove(&request.session_id);
-            run(store, request, reductions)
-        }
-
-        let cold_dir = tempfile::tempdir().unwrap();
-        let cached_dir = tempfile::tempdir().unwrap();
-        let cold = store(cold_dir.path());
-        let cached = store(cached_dir.path());
-        let session = "tag-baseline-differential";
-        let compare_pass = |request: TransformRequest, reductions: &[ReductionDecision]| {
-            let cold_response = cold_run(&cold, &request, reductions);
-            let cached_response = run(&cached, &request, reductions);
-            assert_eq!(
-                canonical_output(cold_response.messages()),
-                canonical_output(cached_response.messages()),
-                "cached hydration must preserve the served bytes"
-            );
-            assert_eq!(
-                cold.load_tags_for_session(session).unwrap(),
-                cached.load_tags_for_session(session).unwrap(),
-                "cold and cached paths must observe the same durable tag rows"
-            );
-        };
-
-        let first = active_cc_req(session, "cfg0", vec![item("m1", 1, "alpha")]);
-        // The first pass establishes the initial output transition from an inactive session.
-        compare_pass(first.clone(), &spine());
-        // The durable transition permits tag minting on the repeated request.
-        compare_pass(first, &spine());
-        let extended = active_cc_req(
-            session,
-            "cfg0",
-            vec![item("m1", 1, "alpha"), item("m2", 2, "beta")],
-        );
-        compare_pass(
-            extended.clone(),
-            &with_reductions(vec![reduce("m1#0", "drop", "[dropped]")]),
-        );
-
-        for store in [&cold, &cached] {
-            let expected = store.load(session).unwrap().row_version;
-            store.reset_session_for_recomp(session, expected).unwrap();
-        }
-        // Resetting clears prior transform state, so the next pass emits the initial transition again.
-        compare_pass(extended.clone(), &spine());
-        compare_pass(
-            active_cc_req(
-                session,
-                "cfg0",
-                vec![
-                    item("m1", 1, "alpha"),
-                    item("m2", 2, "beta"),
-                    item("m3", 3, "reminted tail"),
-                ],
-            ),
-            &spine(),
-        );
-    }
-
-    #[test]
     fn production_transform_reuses_hygiene_memo_and_recounts_only_edited_block() {
         const CHILD: &str = "EIDNARA_HYGIENE_MEMO_TEST_CHILD";
         if std::env::var_os(CHILD).is_none() {
@@ -24323,88 +24016,6 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn poisoned_tag_baseline_refills_after_direct_sql_update() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = store(dir.path());
-        let session = "tag-baseline-poison";
-        store
-            .execute_tag_sql_for_test(
-                "INSERT INTO tags
-                    (session_id, tag_number, block_id, kind, token_count, created_at_ms, source_bytes)
-                 VALUES ('tag-baseline-poison', 1, 'm1#0', 'message', 1, 1, X'6f6c64')",
-            )
-            .unwrap();
-        let cached = load_cached_tags(&store, session).unwrap();
-        assert_eq!(cached[0].source_bytes, b"old");
-        let before = store.tag_cache_summary(session).unwrap();
-
-        // The direct SQLite mutation bypasses transform commits, so only the SQLite mutation trigger can invalidate the state.
-        // The mutation trigger invalidates the process-local baseline even when count and max_tag_number do not change.
-        store
-            .execute_tag_sql_for_test(
-                "UPDATE tags SET source_bytes = X'706f69736f6e6564'
-                  WHERE session_id = 'tag-baseline-poison' AND tag_number = 1",
-            )
-            .unwrap();
-        let after = store.tag_cache_summary(session).unwrap();
-        assert_eq!(after.count, before.count);
-        assert_eq!(after.max_tag_number, before.max_tag_number);
-        assert_ne!(after.generation, before.generation);
-
-        let refilled = load_cached_tags(&store, session).unwrap();
-        assert_eq!(refilled[0].source_bytes, b"poisoned");
-        assert_eq!(cached[0].source_bytes, b"old");
-        assert!(!Arc::ptr_eq(&cached[0], &refilled[0]));
-    }
-
-    #[test]
-    fn tag_baseline_cache_keeps_interleaved_sessions_isolated() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = store(dir.path());
-        store
-            .execute_tag_sql_for_test(
-                "INSERT INTO tags
-                    (session_id, tag_number, block_id, kind, token_count, created_at_ms, source_bytes)
-                 VALUES
-                    ('tag-cache-a', 1, 'a#0', 'message', 1, 1, X'41'),
-                    ('tag-cache-b', 1, 'b#0', 'message', 1, 1, X'42')",
-            )
-            .unwrap();
-
-        let a_first = load_cached_tags(&store, "tag-cache-a").unwrap();
-        let b = load_cached_tags(&store, "tag-cache-b").unwrap();
-        let a_second = load_cached_tags(&store, "tag-cache-a").unwrap();
-        assert_eq!(a_first[0].block_id, "a#0");
-        assert_eq!(a_second[0].source_bytes, b"A");
-        assert_eq!(b[0].block_id, "b#0");
-        assert_eq!(b[0].source_bytes, b"B");
-        assert!(Arc::ptr_eq(&a_first, &a_second));
-
-        store
-            .execute_tag_sql_for_test(
-                "INSERT INTO tags
-                    (session_id, tag_number, block_id, kind, token_count, created_at_ms, source_bytes)
-                 VALUES ('tag-cache-a', 2, 'c#0', 'message', 1, 2, X'43')",
-            )
-            .unwrap();
-        let appended = load_cached_tags(&store, "tag-cache-a").unwrap();
-        assert_eq!(appended.len(), 2);
-        assert_eq!(appended[1].source_bytes, b"C");
-        assert_eq!(a_first.len(), 1);
-        assert_eq!(appended[0].source_bytes, a_first[0].source_bytes);
-        assert!(Arc::ptr_eq(&appended[0], &a_first[0]));
-        assert_eq!(
-            appended[0].source_bytes.as_ptr(),
-            a_first[0].source_bytes.as_ptr(),
-            "committed append must share the baseline source allocation"
-        );
-        assert!(Arc::ptr_eq(
-            &b,
-            &load_cached_tags(&store, "tag-cache-b").unwrap()
-        ));
-    }
-
-    #[test]
     fn tag_mint_tail_and_hygiene_share_baseline_rows() {
         let request = active_cc_req(
             "tag-mint-sharing",
@@ -24441,8 +24052,119 @@ pub(crate) mod tests {
         }
     }
 
+    /// The window read keeps what every tag consumer decides from the whole session: the
+    /// per-message numbers, the maximum, newest-K protection with and without the overlay,
+    /// legacy call-id rows, and the next minted number.
     #[test]
-    fn failed_tag_mint_commit_preserves_baseline_and_rolls_back_store() {
+    fn window_tag_read_keeps_every_session_relative_tag_decision() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = store(dir.path());
+        let session = "window-tags";
+        let mut request = req(
+            session,
+            "cfg0",
+            vec![
+                item("w1", 101, "first window text"),
+                assistant_tool_call("w2", 102, "call-a"),
+                tool_result("w3", 103, "call-a", "tool output"),
+                item("w4", 104, "last window text"),
+            ],
+        );
+        let projection = project_messages(&request.messages).unwrap();
+        let tag = |block_id: &str| TagMintInput {
+            block_id: block_id.to_string(),
+            kind: "message".to_string(),
+            token_count: 1,
+            source_bytes: block_id.as_bytes().to_vec(),
+        };
+        let mut inputs = (0..30)
+            .map(|i| tag(&format!("history-{i}#0")))
+            .collect::<Vec<_>>();
+        inputs.push(tag("w2#7"));
+        inputs.push(tag("call-a"));
+        inputs.push(tag("w1#0"));
+        inputs.extend((30..34).map(|i| tag(&format!("history-{i}#0"))));
+        inputs.push(tag("w3#0"));
+        inputs.push(tag("w4#0"));
+        s.seed_tags_for_test(session, &inputs, 1).unwrap();
+        let full: Arc<[Arc<TagRow>]> = s
+            .load_tags_for_session(session)
+            .unwrap()
+            .into_iter()
+            .map(Arc::new)
+            .collect();
+        let projected = projection
+            .blocks
+            .iter()
+            .map(|block| block.id.as_str())
+            .chain(["call-a"])
+            .collect::<HashSet<_>>();
+        let top = |rows: &[Arc<TagRow>], k: usize| {
+            let mut numbers = rows.iter().map(|row| row.tag_number).collect::<Vec<_>>();
+            numbers.sort_unstable_by(|a, b| b.cmp(a));
+            numbers.truncate(k);
+            numbers
+        };
+        for protected_tags in [0, 1, 2, 3, 5, 8, 40, 100] {
+            request.protected_tags = protected_tags;
+            let window =
+                load_window_tags(&s, &TransformIngress::original(&request), &projection).unwrap();
+            if protected_tags < 5 {
+                assert!(window.len() < full.len(), "{protected_tags}: {window:?}");
+            }
+            let mids = |rows: &[Arc<TagRow>]| {
+                let numbers = tag_number_by_message(rows);
+                let max = numbers.values().copied().max();
+                let window = request
+                    .messages
+                    .iter()
+                    .map(|message| numbers.get(&message.mid).copied())
+                    .collect::<Vec<_>>();
+                (max, window)
+            };
+            assert_eq!(mids(&window), mids(&full), "{protected_tags}");
+            let next =
+                |rows: &[Arc<TagRow>]| tag_mint_rows(rows, vec![tag("w9#0")], 1)[0].tag_number;
+            assert_eq!(next(&window), next(&full));
+            let core = CoreState::empty();
+            let meta = ModuleMeta::default();
+            assert_eq!(
+                newest_active_tag_block_ids(
+                    &core,
+                    &meta,
+                    &projection,
+                    &window,
+                    None,
+                    protected_tags
+                ),
+                newest_active_tag_block_ids(&core, &meta, &projection, &full, None, protected_tags),
+            );
+            for tagging in [true, false] {
+                let hygiene = |rows: &[Arc<TagRow>]| {
+                    let overlay = if tagging {
+                        tag_overlay_state(rows, &[], &[], &[], &BTreeSet::new())
+                    } else {
+                        TagOverlayState::default()
+                    };
+                    let hygiene = tag_rows_for_hygiene(&projection, rows, &overlay, !tagging);
+                    let consumed = hygiene
+                        .iter()
+                        .filter(|row| projected.contains(row.block_id.as_str()))
+                        .map(|row| (row.block_id.clone(), row.tag_number))
+                        .collect::<Vec<_>>();
+                    (top(&hygiene, protected_tags), hygiene.is_empty(), consumed)
+                };
+                assert_eq!(
+                    hygiene(&window),
+                    hygiene(&full),
+                    "{protected_tags} tagging={tagging}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn failed_tag_mint_commit_rolls_back_store() {
         run_active_surface_test(|| {
             let dir = tempfile::tempdir().unwrap();
             let store = Arc::new(store(dir.path()));
@@ -24450,14 +24172,9 @@ pub(crate) mod tests {
             let first = active_cc_req(session, "cfg0", vec![item("m1", 1, "  α source\n")]);
             run(&store, &first, &spine());
             run(&store, &first, &spine());
-            let baseline = load_cached_tags(&store, session).unwrap();
-            let baseline_content = baseline
-                .iter()
-                .map(|row| row.as_ref().clone())
-                .collect::<Vec<_>>();
             let durable = store.load(session).unwrap();
-            let summary = store.tag_cache_summary(session).unwrap();
             let durable_tags = store.load_tags_for_session(session).unwrap();
+            assert_eq!(durable_tags.len(), 1);
             let temporal = store.load_temporal_marks(session).unwrap();
             let extended = active_cc_req(
                 session,
@@ -24469,15 +24186,7 @@ pub(crate) mod tests {
                 ],
             );
             let hook_store = Arc::clone(&store);
-            let hook_baseline = Arc::clone(&baseline);
             install_transform_attempt_hook(session, move || {
-                let cached = tag_baseline_cache()
-                    .lock()
-                    .unwrap()
-                    .snapshot(session)
-                    .unwrap();
-                assert!(Arc::ptr_eq(&cached.tags, &hook_baseline));
-                assert_eq!(cached.count, 1);
                 // Failing the second insert rolls back the first mint and cache-state write.
                 hook_store
                     .execute_tag_sql_for_test(
@@ -24491,21 +24200,10 @@ pub(crate) mod tests {
                 .unwrap_err();
             assert!(matches!(error, TransformError::Store(_)), "{error:?}");
             assert!(error.to_string().contains("injected tag mint failure"));
-            let cached = tag_baseline_cache()
-                .lock()
-                .unwrap()
-                .snapshot(session)
-                .unwrap();
-            assert!(Arc::ptr_eq(&cached.tags, &baseline));
-            assert!(Arc::ptr_eq(&cached.tags[0], &baseline[0]));
-            assert!(cached.tags.iter().map(Arc::as_ref).eq(&baseline_content));
-            assert!(cached.matches(store.tag_cache_namespace(), summary));
-            assert_eq!(cached.tags.len(), 1);
             let after = store.load(session).unwrap();
             assert_eq!(after.row_version, durable.row_version);
             assert_eq!(after.core, durable.core);
             assert_eq!(after.meta, durable.meta);
-            assert_eq!(store.tag_cache_summary(session).unwrap(), summary);
             assert_eq!(store.load_tags_for_session(session).unwrap(), durable_tags);
             assert_eq!(store.load_temporal_marks(session).unwrap(), temporal);
             store
@@ -24514,22 +24212,10 @@ pub(crate) mod tests {
             let response = run(&store, &extended, &spine());
             assert_eq!(tail_bytes(&response, "m2"), "§2§ second source");
             assert_eq!(tail_bytes(&response, "m3"), "§3§ third source");
-            let cached = tag_baseline_cache()
-                .lock()
-                .unwrap()
-                .snapshot(session)
-                .unwrap();
-            assert!(Arc::ptr_eq(&cached.tags, &baseline));
             assert_eq!(
-                cached.tags.len(),
-                1,
-                "commit does not publish pass-local rows"
-            );
-            let refilled = load_cached_tags(&store, session).unwrap();
-            assert_eq!(refilled.len(), 3);
-            assert!(Arc::ptr_eq(&refilled[0], &baseline[0]));
-            assert_eq!(
-                refilled
+                store
+                    .load_tags_for_session(session)
+                    .unwrap()
                     .iter()
                     .map(|row| (
                         row.tag_number,
@@ -24544,42 +24230,6 @@ pub(crate) mod tests {
                 ]
             );
         });
-    }
-
-    #[test]
-    #[ignore = "manual timing proof: cargo test -p daemon tag_baseline_warm_hydration_50k -- --ignored --nocapture"]
-    fn tag_baseline_warm_hydration_50k() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = store(dir.path());
-        let session = "tag-baseline-50k";
-        let mut sql = String::from("BEGIN;");
-        for tag_number in 1..=50_000 {
-            sql.push_str(&format!(
-                "INSERT INTO tags
-                    (session_id, tag_number, block_id, kind, token_count, created_at_ms, source_bytes)
-                 VALUES ('{session}', {tag_number}, 'm{tag_number}#0', 'message', 1, 1, X'7061796c6f6164');"
-            ));
-        }
-        sql.push_str("COMMIT;");
-        store.execute_tag_sql_for_test(&sql).unwrap();
-
-        let cold_started = Instant::now();
-        let cold = load_cached_tags(&store, session).unwrap();
-        let cold_elapsed = cold_started.elapsed();
-        let warm_started = Instant::now();
-        let warm = load_cached_tags(&store, session).unwrap();
-        let warm_elapsed = warm_started.elapsed();
-        assert_eq!(cold.len(), 50_000);
-        assert_eq!(warm.len(), 50_000);
-        eprintln!(
-            "tag baseline hydration: cold={:.3}ms warm={:.3}ms",
-            cold_elapsed.as_secs_f64() * 1_000.0,
-            warm_elapsed.as_secs_f64() * 1_000.0
-        );
-        assert!(
-            warm_elapsed < std::time::Duration::from_millis(1),
-            "warm tag hydration must stay under 1ms at 50K rows"
-        );
     }
 
     #[test]
