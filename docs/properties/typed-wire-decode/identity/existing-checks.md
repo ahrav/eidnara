@@ -258,7 +258,7 @@ Source: `crates/daemon/src/lib.rs`, with HEAD line numbers.
 | 23536 | `incremental_native_cache_invalidates_every_byte_affecting_input` | Checks byte-affecting native input invalidation. | deleted by #830 with the mechanism it checked |
 | 23619 | `renderer_transition_class_sets_invalidate_with_consumed_boolean_stable` | Checks class-set invalidation beyond a stable boolean. | deleted by #830 with the mechanism it checked |
 | 23734 | `reduced_shell_rematches_across_three_incremental_sidecar_generations` | Checks reduced shell matching across generations. | renamed by #830 to `reduced_shell_rematches_across_three_sidecar_generations`; unaudited |
-| 23843 | `marker_representation_reconciles_after_changed_native_frontier` | Checks marker representation at changed frontier. | unaudited |
+| 23843 | `marker_representation_reconciles_after_changed_native_frontier` | Checks marker representation at changed frontier. | renamed by #830 to `marker_representation_follows_the_changed_native_sidecar`, which encodes once against the changed sidecar; unaudited |
 | 23913 | `newest_reasoning_becomes_historical_after_watermark_tail_advance` | Checks reasoning state transition at a moved frontier. | unaudited |
 | 23988 | `frontier_vacuity_covers_opaque_repeats_eviction_and_same_length_edits` | Supplies opaque, eviction, and same-length frontier perturbations. | renamed by #830 to `same_length_edit_reaches_the_native_output`, which keeps only the same-length edit; unaudited |
 | 24059 | `differential_assert_rejects_frontier_inside_mutated_native_region` | Negative control for native frontier differential. | unaudited |

@@ -61,7 +61,7 @@ incremental attach `attach_native_messages_incremental` with its
 `ordinal_by_mid` and `native_reasoning_should_clear` helpers and
 `clear_served_native_reasoning_from_served`, and the incremental-versus-full
 differential with `EIDNARA_NATIVE_ATTACHMENT_DIFFERENTIAL`. Every native
-pass encodes its whole output with `encode_full_native_messages`. The pass's
+pass encodes its whole output in `attach_native_messages_with_tags`. The pass's
 output goes into `NativeOutputStore` as one record per session: the output
 revision, the encoded values, their byte charge, and the revert epoch they
 were built in. The next pass takes the record; it is a recipe `previous`

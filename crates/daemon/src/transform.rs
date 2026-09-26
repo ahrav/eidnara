@@ -11702,29 +11702,6 @@ pub(crate) fn clear_served_native_reasoning_with_tags(
     served_messages: &[WireMessage],
     ingress_messages: &[Arc<IngressMessage>],
     watermark: u64,
-    mid_turn: bool,
-    tag_numbers: &BTreeMap<String, u64>,
-) -> usize {
-    clear_served_native_reasoning_from_iter(
-        profile,
-        provider_accepts_empty_content,
-        native_messages,
-        served_messages.iter(),
-        ingress_messages,
-        watermark,
-        mid_turn,
-        tag_numbers,
-    )
-}
-
-#[allow(clippy::too_many_arguments)]
-fn clear_served_native_reasoning_from_iter<'a>(
-    profile: SerializerProfile,
-    provider_accepts_empty_content: bool,
-    native_messages: &mut [Value],
-    served_messages: impl IntoIterator<Item = &'a WireMessage>,
-    ingress_messages: &[Arc<IngressMessage>],
-    watermark: u64,
     _mid_turn: bool,
     tag_numbers: &BTreeMap<String, u64>,
 ) -> usize {
@@ -11736,7 +11713,7 @@ fn clear_served_native_reasoning_from_iter<'a>(
     }
 
     let served_ids = served_messages
-        .into_iter()
+        .iter()
         .filter(|message| !message.meta.synthetic && message.role == "assistant")
         .filter_map(|message| message.meta.harness_id.as_deref())
         .collect::<HashSet<_>>();
@@ -22033,7 +22010,6 @@ pub(crate) mod tests {
                 &BTreeMap::new(),
                 None,
                 None,
-                true,
             );
             response.native_messages.expect("native output")
         };
@@ -22211,7 +22187,6 @@ pub(crate) mod tests {
             &BTreeMap::new(),
             None,
             None,
-            true,
         );
         let native = moved_native.native_messages.expect("native output");
         let tail_index = native
@@ -28648,12 +28623,11 @@ pub(crate) mod tests {
             None,
         )
         .unwrap();
-        let old_native = crate::codec::opencode::encode_opencode_with_transition_state(
+        let old_native = crate::codec::opencode::encode_opencode_with_session_exemptions(
             &old_ck,
             &decoded.sidecar,
             Some("pair-transition"),
             &[],
-            false,
         );
         let old_pair = old_native
             .iter()
@@ -28676,12 +28650,11 @@ pub(crate) mod tests {
             .iter()
             .map(|message| (**message).clone())
             .collect::<Vec<_>>();
-        let salted_native = crate::codec::opencode::encode_opencode_with_transition_state(
+        let salted_native = crate::codec::opencode::encode_opencode_with_session_exemptions(
             &salted_ck,
             &decoded.sidecar,
             Some("pair-transition"),
             &[],
-            salted.transition_consumed,
         );
         let salted_pair = salted_native
             .iter()
@@ -28703,16 +28676,15 @@ pub(crate) mod tests {
             .iter()
             .map(|message| (**message).clone())
             .collect::<Vec<_>>();
-        let replay_native = crate::codec::opencode::encode_opencode_with_transition_state(
+        let replay_native = crate::codec::opencode::encode_opencode_with_session_exemptions(
             &replay_ck,
             &decoded.sidecar,
             Some("pair-transition"),
             &[],
-            replay.transition_consumed,
         );
         assert_eq!(replay_native, salted_native);
 
-        let native_round_trip = crate::codec::opencode::encode_opencode_with_transition_state(
+        let native_round_trip = crate::codec::opencode::encode_opencode_with_session_exemptions(
             &decoded
                 .messages
                 .iter()
@@ -28721,7 +28693,6 @@ pub(crate) mod tests {
             &decoded.sidecar,
             Some("pair-transition"),
             &[],
-            false,
         );
         assert_eq!(native_round_trip, vec![native_message]);
     }
@@ -28880,12 +28851,11 @@ pub(crate) mod tests {
             .iter()
             .map(|message| (**message).clone())
             .collect::<Vec<_>>();
-        let native = crate::codec::opencode::encode_opencode_with_transition_state(
+        let native = crate::codec::opencode::encode_opencode_with_session_exemptions(
             &folded_ck,
             &decoded.sidecar,
             Some("combined-transition"),
             &[],
-            folded.transition_consumed,
         );
         let combined_native = native
             .iter()
@@ -29204,7 +29174,6 @@ pub(crate) mod tests {
                     &result.tag_numbers,
                     result.mutation_exempt_mid.as_deref(),
                     result.lineage_anchor_mid.as_deref(),
-                    result.transition_consumed,
                 );
                 assert!(
                     result

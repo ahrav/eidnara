@@ -8947,7 +8947,6 @@ impl HandlerCore {
         let post_attach_started_at = Instant::now();
         let revert_epoch = result.revert_epoch;
         let reasoning_watermark = result.reasoning_watermark;
-        let transition_consumed = result.transition_consumed;
         let mutation_exempt_mid = result.mutation_exempt_mid;
         let lineage_anchor_mid = result.lineage_anchor_mid;
         let tag_numbers = result.tag_numbers;
@@ -8975,7 +8974,6 @@ impl HandlerCore {
                 &tag_numbers,
                 mutation_exempt_mid.as_deref(),
                 lineage_anchor_mid.as_deref(),
-                transition_consumed,
             );
             let values = response.native_messages.take().unwrap_or_default();
             if let Some(transform::UserHintPass::Decided(outcome)) = response.user_hint.as_mut() {
@@ -13409,7 +13407,6 @@ fn attach_native_messages(
         &std::collections::BTreeMap::new(),
         mutation_exempt_mid,
         None,
-        false,
     );
 }
 
@@ -13432,7 +13429,6 @@ fn message_tag_numbers(rows: Vec<TagNumberRow>) -> std::collections::BTreeMap<St
     by_message
 }
 
-#[allow(clippy::too_many_arguments)]
 fn attach_native_messages_with_tags(
     response: &mut transform::TransformResponse,
     request: &TransformRequest,
@@ -13440,39 +13436,18 @@ fn attach_native_messages_with_tags(
     tag_numbers: &BTreeMap<String, u64>,
     mutation_exempt_mid: Option<&str>,
     lineage_anchor_mid: Option<&str>,
-    transition_consumed: bool,
 ) {
     if !request.serve_native {
         return;
     }
-    let native_messages = encode_full_native_messages(
-        response.messages(),
-        request,
-        reasoning_watermark,
-        tag_numbers,
-        mutation_exempt_mid,
-        lineage_anchor_mid,
-        transition_consumed,
-    );
-    response.native_messages = Some(native_messages.into_iter().map(Arc::new).collect());
-}
-
-fn encode_full_native_messages(
-    served: &[transform::ServedMessage],
-    request: &TransformRequest,
-    reasoning_watermark: u64,
-    tag_numbers: &BTreeMap<String, u64>,
-    mutation_exempt_mid: Option<&str>,
-    lineage_anchor_mid: Option<&str>,
-    transition_consumed: bool,
-) -> Vec<Value> {
     let sidecar = request
         .native_messages
         .as_deref()
         .map(codec::opencode::decode_opencode_shared)
         .map(|decoded| decoded.sidecar)
         .unwrap_or_else(|| codec::DecodeSidecar::new("opencode"));
-    let served_messages = served
+    let served_messages = response
+        .messages()
         .iter()
         .map(|message| message.deref().clone())
         .collect::<Vec<_>>();
@@ -13480,12 +13455,11 @@ fn encode_full_native_messages(
         .into_iter()
         .flatten()
         .collect::<Vec<_>>();
-    let mut native_messages = codec::opencode::encode_opencode_with_transition_state(
+    let mut native_messages = codec::opencode::encode_opencode_with_session_exemptions(
         &served_messages,
         &sidecar,
         Some(&request.session_id),
         &mutation_exempt_mids,
-        transition_consumed,
     );
     if let Some(profile) = SerializerProfile::parse(&request.serializer_profile) {
         transform::clear_served_native_reasoning_with_tags(
@@ -13499,7 +13473,7 @@ fn encode_full_native_messages(
             tag_numbers,
         );
     }
-    native_messages
+    response.native_messages = Some(native_messages.into_iter().map(Arc::new).collect());
 }
 
 /// The caller's previously applied native output, offered as the recipe's `previous` source only
@@ -13509,7 +13483,7 @@ struct PreviousNativeOutput {
     values: Vec<Arc<Value>>,
 }
 
-/// The native output of one pass with the per-chunk canonical lengths recipe sizing needs.
+/// The native output of one pass with the per-value canonical lengths recipe sizing needs.
 struct NativeOutput {
     values: Vec<Arc<Value>>,
     wire_lens: Vec<usize>,
@@ -24808,7 +24782,6 @@ mod tests {
         served: Vec<WireMessage>,
         reasoning_watermark: u64,
         tag_numbers: &BTreeMap<String, u64>,
-        transition_consumed: bool,
     ) -> Vec<Arc<Value>> {
         let mut response = transform::TransformResponse::passthrough(served);
         attach_native_messages_with_tags(
@@ -24818,7 +24791,6 @@ mod tests {
             tag_numbers,
             None,
             None,
-            transition_consumed,
         );
         response.native_messages.expect("native output")
     }
@@ -24869,7 +24841,7 @@ mod tests {
             assert_eq!(shell["parts"][0]["callID"], "call-shell");
             shell["parts"][0]["state"]["output"].clone()
         };
-        let native = encode_native_pass(&first_request, served.clone(), 1, &BTreeMap::new(), true);
+        let native = encode_native_pass(&first_request, served.clone(), 1, &BTreeMap::new());
         assert_eq!(shell_output(&native), "[dropped gen1]");
 
         let user_2 = ck("shell-user-2", 2, "second");
@@ -24884,6 +24856,8 @@ mod tests {
             generation_2_native,
         );
         rewrite_first_tool_result(&mut served, "[dropped gen2]");
+        let native = encode_native_pass(&generation_2, served.clone(), 1, &BTreeMap::new());
+        assert_eq!(shell_output(&native), "[dropped gen2]");
 
         let user_3 = ck("shell-user-3", 3, "third");
         served.push(user_3.ck.clone());
@@ -24906,12 +24880,12 @@ mod tests {
             generation_3_native,
         );
         rewrite_first_tool_result(&mut served, "[dropped gen3]");
-        let native = encode_native_pass(&generation_3, served, 1, &BTreeMap::new(), true);
+        let native = encode_native_pass(&generation_3, served, 1, &BTreeMap::new());
         assert_eq!(shell_output(&native), "[dropped gen3]");
     }
 
     #[test]
-    fn marker_representation_reconciles_after_changed_native_frontier() {
+    fn marker_representation_follows_the_changed_native_sidecar() {
         let first_native = vec![
             native_text_message("marker-1", "user", "one"),
             native_text_message("marker-2", "user", "two"),
@@ -24934,7 +24908,7 @@ mod tests {
         changed_native[2]["parts"][1]["custom"] = json!(2);
         let changed_request =
             native_cache_request("native-marker-frontier", decoded.messages, changed_native);
-        let marker = encode_native_pass(&changed_request, served, 1, &BTreeMap::new(), true)
+        let marker = encode_native_pass(&changed_request, served, 1, &BTreeMap::new())
             .into_iter()
             .find(|message| message["info"]["id"] == "marker-3")
             .unwrap();
@@ -24960,7 +24934,6 @@ mod tests {
             vec![first_ingress[0].ck.clone()],
             0,
             &BTreeMap::from([("reasoning-1".to_string(), 1)]),
-            true,
         );
         assert_eq!(first[0]["parts"][0]["text"], "signed-1");
 
@@ -24989,7 +24962,6 @@ mod tests {
                 ("reasoning-1".to_string(), 1),
                 ("reasoning-2".to_string(), 2),
             ]),
-            true,
         );
         assert_eq!(
             native[0]["parts"][0],
@@ -25022,7 +24994,7 @@ mod tests {
         edited_native["parts"][0]["text"] = json!("ccc");
         let mut edited_served = baseline_served;
         edited_served[1] = edited_request.messages[1].ck.clone();
-        let edited = encode_native_pass(&edited_request, edited_served, 1, &BTreeMap::new(), true);
+        let edited = encode_native_pass(&edited_request, edited_served, 1, &BTreeMap::new());
         assert_eq!(edited[1]["info"]["meta"], "ccc");
     }
 
@@ -25127,7 +25099,6 @@ mod tests {
             next.iter().map(|message| message.ck.clone()).collect(),
             1,
             &BTreeMap::new(),
-            false,
         );
     }
 
@@ -25368,16 +25339,17 @@ mod tests {
     async fn native_previous_keeps_bind_the_applied_revision() {
         let (handler, _store, _dir, _project) =
             handler_with_store(Arc::new(ProducerState::default()), default_test_config());
-        let body = || {
-            let mut body = request(vec![ck("m1", 1, "hello"), ck("m2", 2, "again")]);
+        let body_with = |tail: &str| {
+            let mut body = request(vec![ck("m1", 1, "hello"), ck("m2", 2, tail)]);
             body["serializer_profile"] = json!("opencode-aisdk");
             body["serve_native"] = json!(true);
             body["native_messages"] = json!([
                 native_text_message("m1", "user", "hello"),
-                native_text_message("m2", "user", "again"),
+                native_text_message("m2", "user", tail),
             ]);
             body
         };
+        let body = || body_with("again");
         let first = call_transform_request(&handler, body()).await;
         assert_eq!(first["status"], "ok", "{first}");
 
@@ -25398,6 +25370,23 @@ mod tests {
         assert!(third.get("need_full_sync").is_none(), "{third}");
         assert_eq!(third["native_messages"], second["native_messages"]);
         assert_eq!(second["native_messages"], first["native_messages"]);
+
+        // A same-length edit under the matching revision: the edited message is not kept from the
+        // previous output by position, so the reconstruction equals a cold encode.
+        let edited = call_transform_request(&handler, body_with("agaim")).await;
+        assert_eq!(edited["status"], "ok", "{edited}");
+        assert_eq!(
+            edited["previous_output_revision"], third["output_revision"],
+            "{edited}"
+        );
+        assert!(keeps_from(&edited, "previous") > 0, "{edited}");
+        let (cold_handler, _cold_store, _cold_dir, _cold_project) =
+            handler_with_store(Arc::new(ProducerState::default()), default_test_config());
+        let cold = call_transform_request(&cold_handler, body_with("agaim")).await;
+        assert_eq!(cold["status"], "ok", "{cold}");
+        assert_eq!(keeps_from(&cold, "previous"), 0, "{cold}");
+        assert_eq!(edited["native_messages"], cold["native_messages"]);
+        assert_ne!(edited["native_messages"], third["native_messages"]);
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -25505,7 +25494,6 @@ mod tests {
             &old_tag_numbers,
             None,
             None,
-            false,
         );
         assert_eq!(
             replay

@@ -147,7 +147,6 @@ fn dg_goldens_encode_native_output_deterministically() {
                 &BTreeMap::new(),
                 None,
                 None,
-                false,
             );
             NativeOutput::measure(response.native_messages.expect("native output"))
         };
