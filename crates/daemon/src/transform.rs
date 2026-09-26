@@ -1355,6 +1355,7 @@ pub struct TransformTimings {
     pub emergency_wait: f64,
     #[serde(default)]
     pub post_attach: f64,
+    /// Always 0: every pass encodes its full native output, so nothing is reused. Kept for wire neutrality.
     #[serde(default)]
     pub native_cache_reused_messages: usize,
     #[serde(default)]

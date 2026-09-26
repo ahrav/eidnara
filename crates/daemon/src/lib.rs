@@ -2515,9 +2515,9 @@ struct RetainedNativeOutput {
     output: PreviousNativeOutput,
 }
 
-/// Each session's last served native output, keyed by session and then by the revision it was
-/// served under. An entry over the per-entry cap is refused; the least recently stored sessions
-/// are evicted while the total exceeds the global budget.
+/// One retained native output per session. `take` returns it only for the revision and revert
+/// epoch it was served under. An entry over the per-entry cap is refused; the least recently
+/// stored sessions are evicted while the total exceeds the global budget.
 struct NativeOutputStore {
     sessions: HashMap<String, RetainedNativeOutput>,
     lru: VecDeque<String>,
@@ -2539,7 +2539,7 @@ impl NativeOutputStore {
             lru: VecDeque::new(),
             retained_bytes: 0,
             max_retained_bytes,
-            max_entry_retained_bytes: max_entry_retained_bytes.min(max_retained_bytes),
+            max_entry_retained_bytes,
         }
     }
 
@@ -2563,14 +2563,13 @@ impl NativeOutputStore {
             .then_some(entry.output)
     }
 
-    /// Retains `output` as the session's next previous source. Returns how many stores were
-    /// refused (0 or 1) and how many sessions were evicted.
+    /// Retains `output` as the session's next previous source.
     fn store(
         &mut self,
         session_id: &str,
         revert_epoch: u64,
         output: PreviousNativeOutput,
-    ) -> (usize, usize) {
+    ) -> NativeStoreOutcome {
         use crate::retained_size::{ARC_ALLOCATION_OVERHEAD_BYTES, cloned_string_retained_bytes};
         self.remove(session_id);
         let retained_bytes = output.values.iter().fold(
@@ -2594,7 +2593,10 @@ impl NativeOutputStore {
                 "native-output-store refused_store session={session_id} byte_charge={retained_bytes} entry_cap={} total_budget={}",
                 self.max_entry_retained_bytes, self.max_retained_bytes,
             );
-            return (1, 0);
+            return NativeStoreOutcome {
+                refused: 1,
+                evicted: 0,
+            };
         }
         self.retained_bytes = self.retained_bytes.saturating_add(retained_bytes);
         self.sessions.insert(
@@ -2608,14 +2610,30 @@ impl NativeOutputStore {
         self.lru.push_back(session_id.to_string());
         let mut evicted = 0;
         while self.retained_bytes > self.max_retained_bytes {
-            let Some(oldest) = self.lru.front().cloned() else {
+            let Some(oldest) = self.lru.pop_front() else {
                 break;
             };
-            self.remove(&oldest);
+            if let Some(entry) = self.sessions.remove(&oldest) {
+                self.retained_bytes = self.retained_bytes.saturating_sub(entry.retained_bytes);
+                eprintln!(
+                    "native-output-store evicted session={oldest} byte_charge={} retained_bytes={} total_budget={}",
+                    entry.retained_bytes, self.retained_bytes, self.max_retained_bytes,
+                );
+            }
             evicted += 1;
         }
-        (0, evicted)
+        NativeStoreOutcome {
+            refused: 0,
+            evicted,
+        }
     }
+}
+
+/// How one `NativeOutputStore::store` call went: refused (0 or 1) and sessions evicted.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct NativeStoreOutcome {
+    refused: usize,
+    evicted: usize,
 }
 
 /// `Handler` is the Eidnara host primary. It owns one store lease and full-handle route state.
@@ -9142,7 +9160,7 @@ impl HandlerCore {
             return revision_exhausted_error();
         };
         let native_attach_started_at = Instant::now();
-        let (native_store, recipe) = if parsed.serve_native {
+        let (encoded_messages, stored, recipe) = if parsed.serve_native {
             // The retained output stays a keep source only for the revision the caller says it applied.
             let previous = self
                 .native_outputs
@@ -9187,7 +9205,8 @@ impl HandlerCore {
                     response.user_hint.clone();
             }
             (
-                (values.len(), stored),
+                values.len(),
+                stored,
                 RecipeInputs::Native {
                     output_revision,
                     output: NativeOutput::measure(values),
@@ -9203,7 +9222,8 @@ impl HandlerCore {
                 .take_previous_output(&parsed.session_id, revert_epoch)
                 .filter(|(revision, _)| parsed.previous_output_revision.as_ref() == Some(revision));
             (
-                (0, (0, 0)),
+                0,
+                NativeStoreOutcome::default(),
                 RecipeInputs::Ck {
                     output_revision,
                     previous,
@@ -9257,12 +9277,9 @@ impl HandlerCore {
             response_timings.trigger_token_cache_hits = trigger_timings.token_cache_hits;
             response_timings.trigger_tokenized_blocks = trigger_timings.tokenized_blocks;
             response_timings.emergency_wait = trigger_timings.emergency_wait_ms;
-            let (encoded_messages, (refused_store, evicted)) = native_store;
-            // Every pass encodes its full native output, so nothing is reused.
-            response_timings.native_cache_reused_messages = 0;
             response_timings.native_cache_encoded_messages = encoded_messages;
-            response_timings.native_cache_refused_store = refused_store;
-            response_timings.native_cache_evicted = evicted;
+            response_timings.native_cache_refused_store = stored.refused;
+            response_timings.native_cache_evicted = stored.evicted;
             response_timings.post_attach = post_attach_started_at.elapsed().as_secs_f64() * 1_000.0;
         }
         respond_transform(parsed, response, Some(recipe))
@@ -26091,6 +26108,7 @@ mod tests {
         let response_b =
             call_transform_request_on_channel(&handler, 8, request(session_b, "b", "before")).await;
         assert_eq!(response_b["status"], "ok", "{response_b}");
+        assert_eq!(response_b["timings"]["native_cache_evicted"], 1);
         {
             let native = handler.native_outputs.lock().unwrap();
             assert!(!native.sessions.contains_key(session_a));
@@ -26112,6 +26130,12 @@ mod tests {
                 .sessions
                 .contains_key(session_c)
         );
+        // The refused session's next pass names the refused revision and gets literals.
+        let retry =
+            call_transform_request_on_channel(&handler, 9, request(session_c, "c", "after")).await;
+        assert_eq!(retry["status"], "ok", "{retry}");
+        assert_eq!(keeps_from(&retry, "previous"), 0, "{retry}");
+        assert!(retry.get("need_full_sync").is_none(), "{retry}");
 
         // The evicted session's next pass re-encodes its native output instead of reusing it.
         let next =
@@ -26219,6 +26243,8 @@ mod tests {
         .await;
         assert_eq!(cached["status"], "ok", "{cached}");
         assert_eq!(full["status"], "ok", "{full}");
+        assert!(keeps_from(&cached, "previous") > 0, "{cached}");
+        assert_eq!(keeps_from(&full, "previous"), 0, "{full}");
         // The warm pass reconstructs the same native array a cold daemon emits.
         assert_eq!(
             serde_json::to_vec(&cached["native_messages"]).unwrap(),
@@ -26252,8 +26278,10 @@ mod tests {
 
         let mut next_messages = messages;
         next_messages[1] = ck("epoch-tail", 2, "after");
-        let next = native_cache_request(session, next_messages, Vec::new());
-        let response = call_transform_request(&handler, serde_json::to_value(next).unwrap()).await;
+        let mut next =
+            serde_json::to_value(native_cache_request(session, next_messages, Vec::new())).unwrap();
+        next["previous_output_revision"] = first["output_revision"].clone();
+        let response = call_transform_request(&handler, next).await;
         assert_eq!(response["status"], "ok", "{response}");
         let durable = store.load(session).unwrap();
         assert_eq!(durable.meta.revert_epoch, bumped.revert_epoch);
@@ -26337,21 +26365,48 @@ mod tests {
         let charge =
             |store: &NativeOutputStore, session: &str| store.sessions[session].retained_bytes;
         let mut probe = NativeOutputStore::default();
-        assert_eq!(probe.store("p", 0, output("r", 1024)), (0, 0));
+        assert_eq!(
+            probe.store("p", 0, output("r", 1024)),
+            NativeStoreOutcome::default()
+        );
         let entry = charge(&probe, "p");
+        let refused = NativeStoreOutcome {
+            refused: 1,
+            evicted: 0,
+        };
 
-        // Per entry: an output over the cap is refused and retains nothing.
+        // Per entry: an output over the cap is refused and drops the session's earlier entry too.
         let mut store = NativeOutputStore::with_limits(entry * 3, entry);
-        assert_eq!(store.store("large", 0, output("r", 64 * 1024)), (1, 0));
-        assert!(store.sessions.is_empty());
+        assert_eq!(
+            store.store("x", 0, output("r", 1024)),
+            NativeStoreOutcome::default()
+        );
+        assert_eq!(store.store("x", 0, output("r", 64 * 1024)), refused);
+        assert!(store.sessions.is_empty() && store.lru.is_empty());
         assert_eq!(store.retained_bytes, 0);
 
         // Global: the least recently stored session goes first.
         for session in ["a", "b", "c"] {
-            assert_eq!(store.store(session, 0, output(session, 1024)), (0, 0));
+            assert_eq!(
+                store.store(session, 0, output(session, 1024)),
+                NativeStoreOutcome::default()
+            );
         }
         assert_eq!(store.retained_bytes, entry * 3);
-        assert_eq!(store.store("d", 0, output("d", 1024)), (0, 1));
+        // Storing a session again without a take replaces its charge instead of adding to it.
+        assert_eq!(
+            store.store("c", 0, output("c", 1024)),
+            NativeStoreOutcome::default()
+        );
+        assert_eq!(store.retained_bytes, entry * 3);
+        assert_eq!(store.lru.len(), 3);
+        assert_eq!(
+            store.store("d", 0, output("d", 1024)),
+            NativeStoreOutcome {
+                refused: 0,
+                evicted: 1
+            }
+        );
         assert!(!store.sessions.contains_key("a"));
         assert_eq!(store.retained_bytes, entry * 3);
 
@@ -26375,7 +26430,7 @@ mod tests {
         // An entry under an entry cap raised above the total budget is still refused.
         store.max_retained_bytes = entry - 1;
         store.max_entry_retained_bytes = entry * 2;
-        assert_eq!(store.store("f", 0, output("f", 1024)), (1, 0));
+        assert_eq!(store.store("f", 0, output("f", 1024)), refused);
         assert!(store.sessions.is_empty());
         assert_eq!(store.retained_bytes, 0);
     }
@@ -26394,8 +26449,14 @@ mod tests {
                 .collect(),
         };
         let mut store = NativeOutputStore::with_limits(TOTAL_BUDGET_BYTES, TOTAL_BUDGET_BYTES / 4);
-        assert_eq!(store.store("a", 0, output("a")), (0, 0));
-        assert_eq!(store.store("b", 0, output("b")), (0, 0));
+        assert_eq!(
+            store.store("a", 0, output("a")),
+            NativeStoreOutcome::default()
+        );
+        assert_eq!(
+            store.store("b", 0, output("b")),
+            NativeStoreOutcome::default()
+        );
         let charges = store.sessions["a"].retained_bytes + store.sessions["b"].retained_bytes;
         assert!(
             charges > FORMER_BUDGET_BYTES,
@@ -26406,7 +26467,10 @@ mod tests {
                 let previous = store
                     .take(session, 0, Some(&revision(session)))
                     .unwrap_or_else(|| panic!("session {session} was evicted by the other"));
-                assert_eq!(store.store(session, 0, previous), (0, 0));
+                assert_eq!(
+                    store.store(session, 0, previous),
+                    NativeStoreOutcome::default()
+                );
             }
         }
     }
