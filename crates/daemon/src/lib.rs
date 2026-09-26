@@ -2253,7 +2253,7 @@ const NATIVE_ATTACHMENT_CACHE_ENTRY_BUDGET_BYTES: usize = 192 * 1024 * 1024;
 // The aggregate process-retained ceiling must remain explicit when an individual budget changes.
 const TRANSFORM_SERVE_CACHE_COMBINED_BUDGET_BYTES: usize = 512 * 1024 * 1024;
 const _: () = assert!(
-    transform::SERIALIZED_OUTPUT_CACHE_BUDGET_BYTES + NATIVE_ATTACHMENT_CACHE_BUDGET_BYTES
+    transform::SERIALIZED_OUTPUT_CACHE_BUDGET_BYTES + NATIVE_OUTPUT_BUDGET_BYTES
         == TRANSFORM_SERVE_CACHE_COMBINED_BUDGET_BYTES
 );
 
@@ -2278,6 +2278,7 @@ pub const PEAK_SEARCH_CONNECTIONS: u64 = 2;
 /// Each search projection connection holds `search_projection::CACHE_KIB` of page cache.
 /// The memory store's prepared-statement cache is bounded by `memory_store::STATEMENT_CACHE_CAPACITY` entries, not bytes: SQLite does not bound compiled-statement memory, so no byte figure is declared for it. A full 128-statement cache measured 861,472 bytes by `sqlite3_memory_used`.
 /// The MemoryReviewer host keeps its own bounded copy of the startup credentials and their keyed identities for the process lifetime (`memory_reviewer::worker::RETAINED_CREDENTIAL_BYTES`).
+/// The transform-serving combined budget is the serialized-output cache plus the native previous-output store, which refuses an entry above `NATIVE_OUTPUT_ENTRY_BUDGET_BYTES` and evicts sessions past `NATIVE_OUTPUT_BUDGET_BYTES`.
 /// A ready transform snapshot holds the CK input and scalar fields, never native messages or a delta fallback, so the snapshot and lease budgets bound what `TransformRequest::snapshot_retained_bytes` charges.
 pub const DECLARED_RETAINED_RESIDENT_BYTES: u64 = TRANSFORM_SERVE_CACHE_COMBINED_BUDGET_BYTES
     as u64
@@ -2391,6 +2392,8 @@ struct NativeAttachmentCache {
     max_entry_retained_bytes: usize,
 }
 
+// The pass no longer calls the incremental attach; its tests keep it compiled until it is deleted.
+#[cfg_attr(not(test), allow(dead_code))]
 impl Default for NativeAttachmentCache {
     fn default() -> Self {
         Self::with_limits(
@@ -2400,6 +2403,8 @@ impl Default for NativeAttachmentCache {
     }
 }
 
+// The pass no longer calls the incremental attach; its tests keep it compiled until it is deleted.
+#[cfg_attr(not(test), allow(dead_code))]
 impl NativeAttachmentCache {
     #[cfg(test)]
     fn new(max_retained_bytes: usize) -> Self {
@@ -2500,6 +2505,119 @@ impl NativeAttachmentCache {
     }
 }
 
+const NATIVE_OUTPUT_BUDGET_BYTES: usize = 256 * 1024 * 1024;
+const NATIVE_OUTPUT_ENTRY_BUDGET_BYTES: usize = 64 * 1024 * 1024;
+
+/// One session's last served native output with the revert epoch it was built in and its charge.
+struct RetainedNativeOutput {
+    revert_epoch: u64,
+    retained_bytes: usize,
+    output: PreviousNativeOutput,
+}
+
+/// Each session's last served native output, keyed by session and then by the revision it was
+/// served under. An entry over the per-entry cap is refused; the least recently stored sessions
+/// are evicted while the total exceeds the global budget.
+struct NativeOutputStore {
+    sessions: HashMap<String, RetainedNativeOutput>,
+    lru: VecDeque<String>,
+    retained_bytes: usize,
+    max_retained_bytes: usize,
+    max_entry_retained_bytes: usize,
+}
+
+impl Default for NativeOutputStore {
+    fn default() -> Self {
+        Self::with_limits(NATIVE_OUTPUT_BUDGET_BYTES, NATIVE_OUTPUT_ENTRY_BUDGET_BYTES)
+    }
+}
+
+impl NativeOutputStore {
+    fn with_limits(max_retained_bytes: usize, max_entry_retained_bytes: usize) -> Self {
+        Self {
+            sessions: HashMap::new(),
+            lru: VecDeque::new(),
+            retained_bytes: 0,
+            max_retained_bytes,
+            max_entry_retained_bytes: max_entry_retained_bytes.min(max_retained_bytes),
+        }
+    }
+
+    fn remove(&mut self, session_id: &str) -> Option<RetainedNativeOutput> {
+        let entry = self.sessions.remove(session_id)?;
+        self.retained_bytes = self.retained_bytes.saturating_sub(entry.retained_bytes);
+        self.lru.retain(|candidate| candidate != session_id);
+        Some(entry)
+    }
+
+    /// Removes the session's entry and returns its output only when it was built in `revert_epoch`
+    /// and served under `revision`. An entry from another epoch or revision is dropped whole.
+    fn take(
+        &mut self,
+        session_id: &str,
+        revert_epoch: u64,
+        revision: Option<&Revision>,
+    ) -> Option<PreviousNativeOutput> {
+        let entry = self.remove(session_id)?;
+        (entry.revert_epoch == revert_epoch && revision == Some(&entry.output.revision))
+            .then_some(entry.output)
+    }
+
+    /// Retains `output` as the session's next previous source. Returns how many stores were
+    /// refused (0 or 1) and how many sessions were evicted.
+    fn store(
+        &mut self,
+        session_id: &str,
+        revert_epoch: u64,
+        output: PreviousNativeOutput,
+    ) -> (usize, usize) {
+        use crate::retained_size::{ARC_ALLOCATION_OVERHEAD_BYTES, cloned_string_retained_bytes};
+        self.remove(session_id);
+        let retained_bytes = output.values.iter().fold(
+            output
+                .values
+                .capacity()
+                .saturating_mul(size_of::<Arc<Value>>())
+                .saturating_add(size_of::<RetainedNativeOutput>())
+                .saturating_add(edit_recipe::MAX_REVISION_BYTES)
+                .saturating_add(cloned_string_retained_bytes(session_id).saturating_mul(2)),
+            |bytes, value| {
+                bytes
+                    .saturating_add(ARC_ALLOCATION_OVERHEAD_BYTES)
+                    .saturating_add(native_value_retained_bytes(value))
+            },
+        );
+        if retained_bytes > self.max_entry_retained_bytes
+            || retained_bytes > self.max_retained_bytes
+        {
+            eprintln!(
+                "native-output-store refused_store session={session_id} byte_charge={retained_bytes} entry_cap={} total_budget={}",
+                self.max_entry_retained_bytes, self.max_retained_bytes,
+            );
+            return (1, 0);
+        }
+        self.retained_bytes = self.retained_bytes.saturating_add(retained_bytes);
+        self.sessions.insert(
+            session_id.to_string(),
+            RetainedNativeOutput {
+                revert_epoch,
+                retained_bytes,
+                output,
+            },
+        );
+        self.lru.push_back(session_id.to_string());
+        let mut evicted = 0;
+        while self.retained_bytes > self.max_retained_bytes {
+            let Some(oldest) = self.lru.front().cloned() else {
+                break;
+            };
+            self.remove(&oldest);
+            evicted += 1;
+        }
+        (0, evicted)
+    }
+}
+
 /// `Handler` is the Eidnara host primary. It owns one store lease and full-handle route state.
 /// Handler owns every module task admitted during its incarnation.
 /// Callback the host runs once with the incarnation bearer key; see [`Handler::with_connection_key_hook`].
@@ -2549,7 +2667,7 @@ pub struct HandlerCore {
     recomp_sessions: Arc<Mutex<HashSet<String>>>,
     transform_snapshots: Arc<Mutex<TransformSnapshotCache>>,
     serialized_outputs: Mutex<SerializedOutputCache>,
-    native_attachments: Mutex<NativeAttachmentCache>,
+    native_outputs: Mutex<NativeOutputStore>,
     /// The newest native-serving pass's auto-search outcome, kept for the evaluator's host-side survivor check.
     #[cfg(any(test, feature = "test-support", feature = "direct-host-fixture"))]
     last_user_hint: Mutex<Option<transform::UserHintPass>>,
@@ -3492,7 +3610,7 @@ impl Handler {
                 TRANSFORM_SNAPSHOT_BUDGET_BYTES,
             ))),
             serialized_outputs: Mutex::new(SerializedOutputCache::default()),
-            native_attachments: Mutex::new(NativeAttachmentCache::default()),
+            native_outputs: Mutex::new(NativeOutputStore::default()),
             #[cfg(any(test, feature = "test-support", feature = "direct-host-fixture"))]
             last_user_hint: Mutex::new(None),
             output_revisions: RevisionAllocator::default(),
@@ -3990,7 +4108,7 @@ impl Handler {
                 TRANSFORM_SNAPSHOT_BUDGET_BYTES,
             ))),
             serialized_outputs: Mutex::new(SerializedOutputCache::default()),
-            native_attachments: Mutex::new(NativeAttachmentCache::default()),
+            native_outputs: Mutex::new(NativeOutputStore::default()),
             #[cfg(any(test, feature = "test-support", feature = "direct-host-fixture"))]
             last_user_hint: Mutex::new(None),
             output_revisions: RevisionAllocator::default(),
@@ -4076,9 +4194,9 @@ impl HandlerCore {
                 .lock()
                 .expect("serialized output cache mutex")
                 .remove(&session_id);
-            self.native_attachments
+            self.native_outputs
                 .lock()
-                .expect("native attachment cache mutex")
+                .expect("native output store mutex")
                 .remove(&session_id);
             self.boundary_tokens
                 .lock()
@@ -4361,9 +4479,9 @@ impl HandlerCore {
             .lock()
             .expect("serialized output cache mutex")
             .remove(session);
-        self.native_attachments
+        self.native_outputs
             .lock()
-            .expect("native attachment cache mutex")
+            .expect("native output store mutex")
             .remove(session);
         self.boundary_tokens
             .lock()
@@ -6330,9 +6448,9 @@ impl HandlerCore {
             .lock()
             .expect("serialized output cache mutex")
             .remove(&session_id);
-        self.native_attachments
+        self.native_outputs
             .lock()
-            .expect("native attachment cache mutex")
+            .expect("native output store mutex")
             .remove(&session_id);
         self.boundary_tokens
             .lock()
@@ -7999,9 +8117,9 @@ impl HandlerCore {
         };
         let (native_bytes, native_count) = {
             let cache = self
-                .native_attachments
+                .native_outputs
                 .lock()
-                .expect("native attachment cache mutex");
+                .expect("native output store mutex");
             (cache.retained_bytes, cache.sessions.len())
         };
         let (serialized_bytes, serialized_count) = self
@@ -9024,8 +9142,18 @@ impl HandlerCore {
             return revision_exhausted_error();
         };
         let native_attach_started_at = Instant::now();
-        let (native_cache_stats, recipe) = if parsed.serve_native {
-            let attachment = attach_native_messages_incremental(
+        let (native_store, recipe) = if parsed.serve_native {
+            // The retained output stays a keep source only for the revision the caller says it applied.
+            let previous = self
+                .native_outputs
+                .lock()
+                .expect("native output store mutex")
+                .take(
+                    &parsed.session_id,
+                    revert_epoch,
+                    parsed.previous_output_revision.as_ref(),
+                );
+            attach_native_messages_with_tags(
                 &mut response,
                 parsed,
                 reasoning_watermark,
@@ -9033,11 +9161,23 @@ impl HandlerCore {
                 mutation_exempt_mid.as_deref(),
                 lineage_anchor_mid.as_deref(),
                 transition_consumed,
-                revert_epoch,
-                &output_revision,
-                &self.native_attachments,
-                NativeCacheKeyMode::Normal,
             );
+            let values = response.native_messages.take().unwrap_or_default();
+            if let Some(transform::UserHintPass::Decided(outcome)) = response.user_hint.as_mut() {
+                outcome.attached = native_carries_user_hint(&values, outcome);
+            }
+            let stored = self
+                .native_outputs
+                .lock()
+                .expect("native output store mutex")
+                .store(
+                    &parsed.session_id,
+                    revert_epoch,
+                    PreviousNativeOutput {
+                        revision: output_revision.clone(),
+                        values: values.clone(),
+                    },
+                );
             #[cfg(any(test, feature = "test-support", feature = "direct-host-fixture"))]
             {
                 *self
@@ -9047,11 +9187,11 @@ impl HandlerCore {
                     response.user_hint.clone();
             }
             (
-                attachment.stats,
+                (values.len(), stored),
                 RecipeInputs::Native {
                     output_revision,
-                    output: attachment.output,
-                    previous: attachment.previous,
+                    output: NativeOutput::measure(values),
+                    previous,
                 },
             )
         } else {
@@ -9063,7 +9203,7 @@ impl HandlerCore {
                 .take_previous_output(&parsed.session_id, revert_epoch)
                 .filter(|(revision, _)| parsed.previous_output_revision.as_ref() == Some(revision));
             (
-                NativeAttachmentCacheStats::default(),
+                (0, (0, 0)),
                 RecipeInputs::Ck {
                     output_revision,
                     previous,
@@ -9117,10 +9257,12 @@ impl HandlerCore {
             response_timings.trigger_token_cache_hits = trigger_timings.token_cache_hits;
             response_timings.trigger_tokenized_blocks = trigger_timings.tokenized_blocks;
             response_timings.emergency_wait = trigger_timings.emergency_wait_ms;
-            response_timings.native_cache_reused_messages = native_cache_stats.reused_messages;
-            response_timings.native_cache_encoded_messages = native_cache_stats.encoded_messages;
-            response_timings.native_cache_refused_store = native_cache_stats.refused_store;
-            response_timings.native_cache_evicted = native_cache_stats.evicted;
+            let (encoded_messages, (refused_store, evicted)) = native_store;
+            // Every pass encodes its full native output, so nothing is reused.
+            response_timings.native_cache_reused_messages = 0;
+            response_timings.native_cache_encoded_messages = encoded_messages;
+            response_timings.native_cache_refused_store = refused_store;
+            response_timings.native_cache_evicted = evicted;
             response_timings.post_attach = post_attach_started_at.elapsed().as_secs_f64() * 1_000.0;
         }
         respond_transform(parsed, response, Some(recipe))
@@ -9147,17 +9289,9 @@ impl HandlerCore {
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
             }
-            let values = response.native_messages.clone().unwrap_or_default();
             RecipeInputs::Native {
                 output_revision,
-                output: NativeOutput {
-                    wire_lens: values
-                        .iter()
-                        // An unmeasurable value must fail the reconstructed-size check.
-                        .map(|value| edit_recipe::canonical_len(value).unwrap_or(usize::MAX))
-                        .collect(),
-                    values,
-                },
+                output: NativeOutput::measure(response.native_messages.clone().unwrap_or_default()),
                 previous: None,
             }
         } else {
@@ -12550,9 +12684,9 @@ impl CompositeComponent for Handler {
             .lock()
             .expect("serialized output cache mutex") = SerializedOutputCache::default();
         *self
-            .native_attachments
+            .native_outputs
             .lock()
-            .expect("native attachment cache mutex") = NativeAttachmentCache::default();
+            .expect("native output store mutex") = NativeOutputStore::default();
         *self
             .boundary_tokens
             .lock()
@@ -13484,6 +13618,7 @@ fn message_tag_numbers(rows: Vec<TagNumberRow>) -> std::collections::BTreeMap<St
     by_message
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum NativeCacheKeyMode {
     Normal,
@@ -13681,12 +13816,28 @@ struct NativeOutput {
     wire_lens: Vec<usize>,
 }
 
+impl NativeOutput {
+    fn measure(values: Vec<Arc<Value>>) -> Self {
+        Self {
+            wire_lens: values
+                .iter()
+                // An unmeasurable value must fail the reconstructed-size check.
+                .map(|value| edit_recipe::canonical_len(value).unwrap_or(usize::MAX))
+                .collect(),
+            values,
+        }
+    }
+}
+
+#[allow(dead_code)]
 struct NativeAttachment {
     stats: NativeAttachmentCacheStats,
     output: NativeOutput,
     previous: Option<PreviousNativeOutput>,
 }
 
+// The pass no longer calls the incremental attach; its tests keep it compiled until it is deleted.
+#[cfg_attr(not(test), allow(dead_code))]
 #[allow(clippy::too_many_arguments)]
 fn attach_native_messages_incremental(
     response: &mut transform::TransformResponse,
@@ -25080,14 +25231,13 @@ mod tests {
         let second = call_transform_request(&handler, request).await;
         assert_eq!(second["status"], "ok");
         assert_eq!(second["action"], "SOFT+");
-        assert!(
-            second["timings"]["native_cache_reused_messages"]
-                .as_u64()
-                .unwrap_or_default()
-                > 0,
-            "steady native defer must reuse its encoded prefix"
+        // Every pass encodes its full native output; the previous one is a keep source only.
+        assert_eq!(second["timings"]["native_cache_reused_messages"], 0);
+        assert_eq!(
+            second["timings"]["native_cache_encoded_messages"],
+            second["native_messages"].as_array().unwrap().len()
         );
-        assert_eq!(second["timings"]["native_cache_encoded_messages"], 0);
+        assert!(keeps_from(&second, "previous") > 0, "{second}");
         assert_eq!(
             second["native_messages"]
                 .as_array()
@@ -25147,7 +25297,7 @@ mod tests {
         full_followup["serve_native"] = json!(true);
         full_followup["native_messages"] = json!([first_native.clone(), second_native.clone()]);
         let cold_start = |handler: &Handler| {
-            handler.native_attachments.lock().unwrap().remove("ses");
+            handler.native_outputs.lock().unwrap().remove("ses");
             handler.transform_snapshots.lock().unwrap().remove("ses");
             handler.serialized_outputs.lock().unwrap().remove("ses");
             handler.transform_snapshots.lock().unwrap().max_ready_bytes = 1;
@@ -25933,7 +26083,7 @@ mod tests {
             call_transform_request_on_channel(&handler, 7, request(session_a, "a", "before")).await;
         assert_eq!(response_a["status"], "ok", "{response_a}");
         let entry_charge = {
-            let mut native = handler.native_attachments.lock().unwrap();
+            let mut native = handler.native_outputs.lock().unwrap();
             let charge = native.sessions[session_a].retained_bytes;
             native.max_retained_bytes = charge;
             charge
@@ -25942,25 +26092,21 @@ mod tests {
             call_transform_request_on_channel(&handler, 8, request(session_b, "b", "before")).await;
         assert_eq!(response_b["status"], "ok", "{response_b}");
         {
-            let native = handler.native_attachments.lock().unwrap();
+            let native = handler.native_outputs.lock().unwrap();
             assert!(!native.sessions.contains_key(session_a));
             assert!(native.sessions.contains_key(session_b));
         }
 
-        // A native snapshot over the whole budget is refused, and the pass is still served.
+        // A native output over the whole budget is refused, and the pass is still served.
         assert!(entry_charge > 1);
-        handler
-            .native_attachments
-            .lock()
-            .unwrap()
-            .max_retained_bytes = entry_charge - 1;
+        handler.native_outputs.lock().unwrap().max_retained_bytes = entry_charge - 1;
         let response_c =
             call_transform_request_on_channel(&handler, 9, request(session_c, "c", "before")).await;
         assert_eq!(response_c["status"], "ok", "{response_c}");
         assert_eq!(response_c["timings"]["native_cache_refused_store"], 1);
         assert!(
             !handler
-                .native_attachments
+                .native_outputs
                 .lock()
                 .unwrap()
                 .sessions
@@ -26073,14 +26219,6 @@ mod tests {
         .await;
         assert_eq!(cached["status"], "ok", "{cached}");
         assert_eq!(full["status"], "ok", "{full}");
-        assert!(
-            cached["timings"]["native_cache_reused_messages"]
-                .as_u64()
-                .unwrap_or_default()
-                > 0,
-            "the warm pass must reuse the cached prefix: {cached}"
-        );
-        assert_eq!(full["timings"]["native_cache_reused_messages"], 0, "{full}");
         // The warm pass reconstructs the same native array a cold daemon emits.
         assert_eq!(
             serde_json::to_vec(&cached["native_messages"]).unwrap(),
@@ -26103,7 +26241,7 @@ mod tests {
         assert_eq!(first["status"], "ok", "{first}");
         let loaded = store.load(session).unwrap();
         assert_eq!(
-            handler.native_attachments.lock().unwrap().sessions[session].revert_epoch,
+            handler.native_outputs.lock().unwrap().sessions[session].revert_epoch,
             loaded.meta.revert_epoch
         );
         let mut bumped = loaded.meta.clone();
@@ -26119,10 +26257,16 @@ mod tests {
         assert_eq!(response["status"], "ok", "{response}");
         let durable = store.load(session).unwrap();
         assert_eq!(durable.meta.revert_epoch, bumped.revert_epoch);
+        // The client names the first pass's revision, but the bumped epoch evicted it: literals.
+        assert!(
+            response.get("previous_output_revision").is_none(),
+            "{response}"
+        );
+        assert_eq!(keeps_from(&response, "previous"), 0, "{response}");
         let native = handler
-            .native_attachments
+            .native_outputs
             .lock()
-            .expect("native attachment cache mutex");
+            .expect("native output store mutex");
         assert_eq!(
             native.sessions[session].revert_epoch,
             durable.meta.revert_epoch
@@ -26181,6 +26325,128 @@ mod tests {
         assert_eq!(stats.refused_store, 1);
         assert!(cache.sessions.contains_key("a"));
         assert_eq!(cache.retained_bytes, cache.sessions["a"].retained_bytes);
+    }
+
+    #[test]
+    fn native_output_store_enforces_entry_cap_lru_and_revert_epoch() {
+        let revision = |name: &str| Revision::parse(name).unwrap();
+        let output = |name: &str, text_len: usize| PreviousNativeOutput {
+            revision: revision(name),
+            values: vec![Arc::new(json!("x".repeat(text_len)))],
+        };
+        let charge =
+            |store: &NativeOutputStore, session: &str| store.sessions[session].retained_bytes;
+        let mut probe = NativeOutputStore::default();
+        assert_eq!(probe.store("p", 0, output("r", 1024)), (0, 0));
+        let entry = charge(&probe, "p");
+
+        // Per entry: an output over the cap is refused and retains nothing.
+        let mut store = NativeOutputStore::with_limits(entry * 3, entry);
+        assert_eq!(store.store("large", 0, output("r", 64 * 1024)), (1, 0));
+        assert!(store.sessions.is_empty());
+        assert_eq!(store.retained_bytes, 0);
+
+        // Global: the least recently stored session goes first.
+        for session in ["a", "b", "c"] {
+            assert_eq!(store.store(session, 0, output(session, 1024)), (0, 0));
+        }
+        assert_eq!(store.retained_bytes, entry * 3);
+        assert_eq!(store.store("d", 0, output("d", 1024)), (0, 1));
+        assert!(!store.sessions.contains_key("a"));
+        assert_eq!(store.retained_bytes, entry * 3);
+
+        // Only the served revision in the built epoch comes back; any other take drops the entry.
+        assert!(store.take("b", 0, Some(&revision("stale"))).is_none());
+        assert!(!store.sessions.contains_key("b"));
+        assert!(store.take("c", 0, None).is_none());
+        assert!(!store.sessions.contains_key("c"));
+        let kept = store
+            .take("d", 0, Some(&revision("d")))
+            .expect("matching revision");
+        assert_eq!(kept.values[0].as_str().unwrap().len(), 1024);
+        assert_eq!(store.retained_bytes, 0);
+
+        // A revert-epoch bump evicts the session's entry even under its own revision.
+        store.store("e", 0, output("e", 1024));
+        assert!(store.take("e", 1, Some(&revision("e"))).is_none());
+        assert!(store.sessions.is_empty() && store.lru.is_empty());
+        assert_eq!(store.retained_bytes, 0);
+
+        // An entry under an entry cap raised above the total budget is still refused.
+        store.max_retained_bytes = entry - 1;
+        store.max_entry_retained_bytes = entry * 2;
+        assert_eq!(store.store("f", 0, output("f", 1024)), (1, 0));
+        assert!(store.sessions.is_empty());
+        assert_eq!(store.retained_bytes, 0);
+    }
+
+    #[test]
+    fn multiple_large_sessions_do_not_ping_pong_under_the_native_output_total_budget() {
+        // The production budgets scaled down by 1024: a 256 MiB total, a 64 MiB entry cap, and
+        // the former shared 64 MiB budget.
+        const TOTAL_BUDGET_BYTES: usize = 256 * 1024;
+        const FORMER_BUDGET_BYTES: usize = 64 * 1024;
+        let revision = |name: &str| Revision::parse(name).unwrap();
+        let output = |name: &str| PreviousNativeOutput {
+            revision: revision(name),
+            values: (0..16)
+                .map(|index| Arc::new(json!(format!("{name}-{index}-{}", "x".repeat(3 * 1024)))))
+                .collect(),
+        };
+        let mut store = NativeOutputStore::with_limits(TOTAL_BUDGET_BYTES, TOTAL_BUDGET_BYTES / 4);
+        assert_eq!(store.store("a", 0, output("a")), (0, 0));
+        assert_eq!(store.store("b", 0, output("b")), (0, 0));
+        let charges = store.sessions["a"].retained_bytes + store.sessions["b"].retained_bytes;
+        assert!(
+            charges > FORMER_BUDGET_BYTES,
+            "fixture must exceed the scaled former shared budget: {charges}"
+        );
+        for _ in 0..2 {
+            for session in ["a", "b"] {
+                let previous = store
+                    .take(session, 0, Some(&revision(session)))
+                    .unwrap_or_else(|| panic!("session {session} was evicted by the other"));
+                assert_eq!(store.store(session, 0, previous), (0, 0));
+            }
+        }
+    }
+
+    /// A native pass keeps from its previous output only under the revision the caller applied;
+    /// any other revision gets literals and the same output, never a resend request.
+    #[tokio::test(flavor = "current_thread")]
+    async fn native_previous_keeps_bind_the_applied_revision() {
+        let (handler, _store, _dir, _project) =
+            handler_with_store(Arc::new(ProducerState::default()), default_test_config());
+        let body = || {
+            let mut body = request(vec![ck("m1", 1, "hello"), ck("m2", 2, "again")]);
+            body["serializer_profile"] = json!("opencode-aisdk");
+            body["serve_native"] = json!(true);
+            body["native_messages"] = json!([
+                native_text_message("m1", "user", "hello"),
+                native_text_message("m2", "user", "again"),
+            ]);
+            body
+        };
+        let first = call_transform_request(&handler, body()).await;
+        assert_eq!(first["status"], "ok", "{first}");
+
+        let second = call_transform_request(&handler, body()).await;
+        assert_eq!(second["status"], "ok", "{second}");
+        assert_eq!(
+            second["previous_output_revision"], first["output_revision"],
+            "{second}"
+        );
+        assert!(keeps_from(&second, "previous") > 0, "{second}");
+
+        let mut stale = body();
+        stale["previous_output_revision"] = json!("stale-revision");
+        let third = call_transform_request(&handler, stale).await;
+        assert_eq!(third["status"], "ok", "{third}");
+        assert!(third.get("previous_output_revision").is_none(), "{third}");
+        assert_eq!(keeps_from(&third, "previous"), 0, "{third}");
+        assert!(third.get("need_full_sync").is_none(), "{third}");
+        assert_eq!(third["native_messages"], second["native_messages"]);
+        assert_eq!(second["native_messages"], first["native_messages"]);
     }
 
     #[test]
