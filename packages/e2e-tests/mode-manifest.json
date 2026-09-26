@@ -111,7 +111,7 @@
         {
             "path": "tests/rust-multi-frame-delta.test.ts",
             "tier": "rust-only",
-            "rationale": "large provider-visible tail stays intact across one-page reuse and bounded multi-page retransmission",
+            "rationale": "every pass sends the whole captured array, and a large provider-visible tail stays intact across multi-page sends",
             "contract_refs": [
                 "U5-PORT"
             ],

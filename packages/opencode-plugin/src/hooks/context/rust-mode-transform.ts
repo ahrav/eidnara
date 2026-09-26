@@ -1,7 +1,7 @@
-import { createHash, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 
 import { DEFAULT_PROTECTED_TAGS } from "../../features/context/defaults";
-import { BoundedSessionMap } from "../../shared/bounded-session-map";
+import type { BoundedSessionMap } from "../../shared/bounded-session-map";
 import { piModelRefToCanonical } from "../../shared/harness-provider-map";
 import { sessionLog } from "../../shared/logger";
 import type { PromptSurfaceConfig } from "../../shared/prompt-surface";
@@ -63,10 +63,10 @@ import {
     defaultTransformCaptureAdmission,
     type HistoryDigest,
     historyDigestsEqual,
-    hostArrayReplacementRejection,
     inspectReferenceableMessages,
+    publicationRejection,
+    publishInPlace,
     readOwnDataProperty,
-    replaceHostArrayContents,
     type TransformCaptureAdmission,
 } from "./transform-capture";
 import { logTransformTiming } from "./transform-stage-logger";
@@ -129,14 +129,12 @@ export interface RustModeModuleClient {
     hasSessionRoute?(sessionId: string): boolean;
 }
 
-/** Wire caches hold a session's content snapshots and its last applied output, so the LRU bound is sized to the sessions one OpenCode process keeps active. An evicted session sends its next pass as a full array. */
-const WIRE_CACHE_SESSION_CAPACITY = 64;
-/** Applied outputs are optional reuse state, budgeted apart from the frame and reconstruction caps. */
-const OPTIONAL_OUTPUT_BUDGET_BYTES = 64 * 1024 * 1024;
+/** Retained outputs are bounded to the sessions one OpenCode process keeps active. An evicted session captures its next pass in full and has no `previous` source. */
+const RETAINED_OUTPUT_SESSION_CAPACITY = 64;
+/** Retained outputs are optional reuse state, budgeted apart from the frame and reconstruction caps. */
+const RETAINED_OUTPUT_BUDGET_BYTES = 64 * 1024 * 1024;
 /** Each retained canonical length occupies one number slot. */
 const LENGTH_SLOT_BYTES = 8;
-/** Per-message history state kept between passes, budgeted across sessions like applied outputs. */
-const RETAINED_HISTORY_BUDGET_BYTES = 64 * 1024 * 1024;
 /** Each retained message keeps an input length and a wire bound; the history digest is fixed size. */
 const HISTORY_ENTRY_RETAINED_BYTES = 2 * LENGTH_SLOT_BYTES;
 
@@ -146,42 +144,80 @@ interface AppliedOutput {
     values: readonly unknown[];
     lengths: readonly number[];
     capture: CapturedMessages;
-    /** Canonical bytes, retained lengths, and snapshots all count against the optional-output budget. */
+    /** Canonical bytes, retained lengths, and snapshots; part of the record's charge. */
     charge: number;
 }
 
 /**
- * Charges applied outputs across sessions and evicts the least recently retained ones once the
- * total exceeds the budget. A retention larger than the whole budget is refused, and refusal only
- * costs the next pass its `previous` source.
+ * A session's retained output: the capture basis of the input its last published pass submitted,
+ * which lets the next capture verify that prefix instead of taping it again and lets a failed pass
+ * decide whether the applied output is still served, and the output that pass applied.
  */
-class AppliedOutputBudget {
-    private readonly charges = new Map<string, number>();
+interface RetainedOutput {
+    rawCount: number;
+    /** Digest of every submitted message but the last. */
+    rawHistory: HistoryDigest;
+    /** The former terminal alone; the host may edit it in place, so it is compared separately. */
+    rawTerminal?: HistoryDigest;
+    /** Inspection wire bounds of the submitted messages, reused for the verified prefix. */
+    wireBytes: readonly number[];
+    /** Canonical JSON length of each submitted native message, reused for the verified prefix. */
+    inputLengths: readonly number[];
+    applied?: AppliedOutput;
+    /** One charge for the whole record, the applied output's included. */
+    charge: number;
+}
+
+/**
+ * Holds one retained output per session under a session-count and a byte limit, evicting the
+ * least recently retained record first. A record larger than the whole budget is refused, and
+ * refusal only costs the next pass its verified prefix and `previous` source. Eviction drops the
+ * record alone; capture leases belong to the admission owner and are never released here.
+ */
+class RetainedOutputs {
+    private readonly records = new Map<string, RetainedOutput>();
     private used = 0;
 
     constructor(
-        private readonly capacity: number,
-        private readonly evict: (sessionId: string) => void,
+        private readonly maxSessions: number,
+        private readonly maxBytes: number,
     ) {}
 
-    retain(sessionId: string, charge: number): boolean {
+    peek(sessionId: string): RetainedOutput | undefined {
+        return this.records.get(sessionId);
+    }
+
+    retain(sessionId: string, record: RetainedOutput): boolean {
         this.release(sessionId);
-        if (charge > this.capacity) return false;
-        for (const [oldest] of this.charges) {
-            if (this.used + charge <= this.capacity) break;
+        if (record.charge > this.maxBytes) return false;
+        for (const [oldest] of this.records) {
+            if (this.records.size < this.maxSessions && this.used + record.charge <= this.maxBytes)
+                break;
             this.release(oldest);
-            this.evict(oldest);
         }
-        this.charges.set(sessionId, charge);
-        this.used += charge;
+        this.records.set(sessionId, record);
+        this.used += record.charge;
         return true;
     }
 
+    /** Keeps the record's basis and gives back the applied output's share of the charge. */
+    dropApplied(sessionId: string, record: RetainedOutput): void {
+        const applied = record.applied;
+        if (!applied || this.records.get(sessionId) !== record) return;
+        record.applied = undefined;
+        this.used -= applied.charge;
+        record.charge -= applied.charge;
+    }
+
     release(sessionId: string): void {
-        const charge = this.charges.get(sessionId);
-        if (charge === undefined) return;
-        this.charges.delete(sessionId);
-        this.used -= charge;
+        const record = this.records.get(sessionId);
+        if (record === undefined) return;
+        this.records.delete(sessionId);
+        this.used -= record.charge;
+    }
+
+    get size(): number {
+        return this.records.size;
     }
 
     get usedBytes(): number {
@@ -198,39 +234,10 @@ function nextBaseRevision(): string {
     return `${baseRevisionNonce}-${baseRevisionCounter.toString(36)}`;
 }
 
-interface RustWireCache {
-    rawCount: number;
-    wireCount: number;
-    rawLastVisible: boolean;
-    /** Digest of every submitted message but the last. Each pass re-verifies the messages it
-     * covers, so in-place edits cannot reuse a stale prefix. */
-    rawHistory: HistoryDigest;
-    /** The former terminal alone; the host may edit it in place, so it is compared separately. */
-    rawTerminal?: HistoryDigest;
-    /** Inspection wire bounds of the submitted messages, reused for the verified prefix. */
-    wireBytes: readonly number[];
-    ckFingerprint: string;
-    ckPrefixFingerprintBeforeLast: string;
-    nativeFingerprint: string;
-    nativePrefixFingerprintBeforeLast: string;
-    fingerprint: string;
-    /** Canonical JSON length of each submitted native message; a delta pass reuses the prefix. */
-    inputLengths: readonly number[];
-    /** The output the last pass published, offered to the daemon as the next recipe's `previous`. */
-    applied?: AppliedOutput;
-}
-
 export interface RustSessionState {
     initialized: boolean;
     consecutiveFailures: number;
     passCount: number;
-    /** `need_full_sync` forces the next pass to send the full wire array until a pass applies.
-     * `need_full_sync` bypasses delta eligibility until a pass applies. */
-    forceFullWire: boolean;
-    /** `invalidateWireState` increments this value. A pass publishes only when the value
-     * matches the one it read alongside the previous cache, so an invalidation that lands during
-     * the daemon call rejects that pass's pending output. */
-    wireInvalidations: number;
     ordinals: ModuleOrdinalMemo;
     failureCount: number;
     /** Consecutive passes whose newest user message is synthetic. A real user message resets it. */
@@ -246,10 +253,8 @@ export interface RustModeTransformOptions {
     projectRoot?: string;
     /** Shared admission owner; tests inject one with smaller limits. */
     captureAdmission?: TransformCaptureAdmission;
-    /** Retained applied-output budget across sessions; tests inject a smaller one. */
-    optionalOutputBudgetBytes?: number;
-    /** Retained per-message history budget across sessions; tests inject a smaller one. */
-    retainedHistoryBudgetBytes?: number;
+    /** Retained-output budget across sessions; tests inject a smaller one. */
+    retainedOutputBudgetBytes?: number;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -261,89 +266,12 @@ function messageInfo(value: unknown): Record<string, unknown> {
     return isRecord(value.info) ? value.info : value;
 }
 
-function messageIdOf(message: MessageLike): string | null {
-    const id = messageInfo(message).id;
-    return typeof id === "string" && id.length > 0 ? id : null;
-}
-
-function advanceWireFingerprint(previous: string, encoded: unknown): string {
-    return createHash("sha256")
-        .update(previous)
-        .update("\\0")
-        .update(JSON.stringify(encoded) ?? "null")
-        .digest("hex");
-}
-
-function buildWireFingerprint(
-    encoded: readonly unknown[],
-    seed = "rust-wire-v1",
-): {
-    fingerprint: string;
-    prefixFingerprintBeforeLast: string;
-} {
-    let fingerprint = seed;
-    let prefixFingerprintBeforeLast = fingerprint;
-    for (let index = 0; index < encoded.length; index += 1) {
-        if (index === encoded.length - 1) prefixFingerprintBeforeLast = fingerprint;
-        fingerprint = advanceWireFingerprint(fingerprint, encoded[index]);
-    }
-    return { fingerprint, prefixFingerprintBeforeLast };
-}
-
-interface WireDelta {
-    rawStart: number;
-    wireStart: number;
-    after: string;
-    ckAfter: string;
-    nativeAfter: string;
-}
-
-/**
- * Delta transport requires the members before the former terminal to have verified against
- * `previous.rawHistory`. The terminal is compared separately because an invisible former terminal
- * may have been edited in place while a message was appended.
- */
-function computeWireDelta(
-    previous: RustWireCache,
-    captured: CapturedHistory,
-): WireDelta | undefined {
-    if (captured.members.length < previous.rawCount) return undefined;
-    if (!captured.verified || !historyDigestsEqual(captured.verified, previous.rawHistory))
-        return undefined;
-    const appending = captured.members.length > previous.rawCount;
-    const formerTerminalIndex = previous.rawCount - 1;
-    const lastChanged =
-        formerTerminalIndex >= 0 &&
-        !(appending && previous.rawLastVisible) &&
-        !formerTerminalUnchanged(previous, captured);
-    const replaceExistingTail = lastChanged || (appending && previous.rawLastVisible);
-    const rawStart = replaceExistingTail ? Math.max(0, previous.rawCount - 1) : previous.rawCount;
-    const replaceExistingWireTail = previous.rawLastVisible && (lastChanged || appending);
-    const wireStart = replaceExistingWireTail
-        ? Math.max(0, previous.wireCount - 1)
-        : previous.wireCount;
-    const ckAfter =
-        wireStart === previous.wireCount - 1
-            ? previous.ckPrefixFingerprintBeforeLast
-            : wireStart === previous.wireCount
-              ? previous.ckFingerprint
-              : undefined;
-    const nativeAfter =
-        rawStart === previous.rawCount - 1
-            ? previous.nativePrefixFingerprintBeforeLast
-            : rawStart === previous.rawCount
-              ? previous.nativeFingerprint
-              : undefined;
-    if (ckAfter === undefined || nativeAfter === undefined) return undefined;
-    return { rawStart, wireStart, ckAfter, nativeAfter, after: previous.fingerprint };
-}
-
 /**
  * A failed pass may serve the retained output only when every message the previous pass submitted,
  * its terminal included, is unchanged and in place. New messages may follow; an edit, removal,
  * revert, or reorder of an acknowledged message leaves the retained output stale.
  */
-function isAppendOnlyExtension(previous: RustWireCache, captured: CapturedHistory): boolean {
+function isAppendOnlyExtension(previous: RetainedOutput, captured: CapturedHistory): boolean {
     return (
         captured.members.length >= previous.rawCount &&
         captured.verified !== undefined &&
@@ -353,7 +281,7 @@ function isAppendOnlyExtension(previous: RustWireCache, captured: CapturedHistor
 }
 
 /** A verified capture tapes the former terminal first, so its boundary is that member. */
-function formerTerminalUnchanged(previous: RustWireCache, captured: CapturedHistory): boolean {
+function formerTerminalUnchanged(previous: RetainedOutput, captured: CapturedHistory): boolean {
     return (
         previous.rawTerminal !== undefined &&
         captured.boundary !== undefined &&
@@ -365,7 +293,7 @@ function formerTerminalUnchanged(previous: RustWireCache, captured: CapturedHist
  * The fail-open array and the raw input share the appended suffix, so the fail-open array is
  * larger than raw exactly when the retained output holds more bytes than its source prefix.
  */
-function appliedOutputGrew(previous: RustWireCache, applied: AppliedOutput): boolean {
+function appliedOutputGrew(previous: RetainedOutput, applied: AppliedOutput): boolean {
     let appliedBytes = 0;
     for (const length of applied.lengths) appliedBytes += length;
     let prefixBytes = 0;
@@ -373,49 +301,16 @@ function appliedOutputGrew(previous: RustWireCache, applied: AppliedOutput): boo
     return appliedBytes > prefixBytes;
 }
 
-/** The pending cache for a pass; `applied` is attached on publication. */
-function buildWireCache(args: {
-    messages: readonly MessageLike[];
-    encoded: readonly { mid?: unknown }[];
-    captured: CapturedHistory;
-    wireBytes: readonly number[];
-    inputLengths: readonly number[];
-    delta?: WireDelta;
-}): RustWireCache {
-    const { messages, encoded, captured, wireBytes, inputLengths, delta } = args;
-    const rawLast = messages.at(-1);
-    const ck = buildWireFingerprint(encoded, delta?.ckAfter);
-    const native = buildWireFingerprint(
-        delta ? messages.slice(delta.rawStart) : messages,
-        delta?.nativeAfter,
-    );
-    return {
-        rawCount: messages.length,
-        wireCount: (delta?.wireStart ?? 0) + encoded.length,
-        rawLastVisible:
-            rawLast !== undefined && encoded.some((entry) => entry.mid === messageIdOf(rawLast)),
-        ckFingerprint: ck.fingerprint,
-        ckPrefixFingerprintBeforeLast: ck.prefixFingerprintBeforeLast,
-        nativeFingerprint: native.fingerprint,
-        nativePrefixFingerprintBeforeLast: native.prefixFingerprintBeforeLast,
-        rawHistory: captured.history,
-        ...(captured.terminal ? { rawTerminal: captured.terminal } : {}),
-        wireBytes,
-        fingerprint: `${ck.fingerprint}|${native.fingerprint}`,
-        inputLengths,
-    };
-}
-
 /**
- * Lengths for the submitted native array: the acknowledged prefix keeps the lengths measured when
- * it was first sent, and only the suffix this pass sends is measured.
+ * Lengths for the submitted native array: members the capture verified against the retained
+ * digest keep the lengths measured when they were first sent, and only the rest are measured.
  */
 function measureInputLengths(
     messages: readonly unknown[],
-    previous: RustWireCache | undefined,
-    rawStart: number,
+    previous: RetainedOutput | undefined,
+    verifiedCount: number,
 ): number[] {
-    const lengths = previous ? previous.inputLengths.slice(0, rawStart) : [];
+    const lengths = previous ? previous.inputLengths.slice(0, verifiedCount) : [];
     for (let index = lengths.length; index < messages.length; index += 1)
         lengths.push(canonicalJsonLength(messages[index]));
     return lengths;
@@ -598,8 +493,6 @@ function ensureState(states: Map<string, RustSessionState>, sessionId: string): 
             initialized: false,
             consecutiveFailures: 0,
             passCount: 0,
-            forceFullWire: false,
-            wireInvalidations: 0,
             ordinals: { generation: 0, memoGeneration: 0, entries: new Map() },
             failureCount: 0,
             syntheticTurnCount: 0,
@@ -704,10 +597,6 @@ function transformGeometryForWire(
     };
 }
 
-function isNeedFullSync(response: Record<string, unknown>): boolean {
-    return response.status === "need_full_sync" || response.action === "NEED_FULL_SYNC";
-}
-
 /**
  * Applies a `status: ok` response's recipe against the submitted input and, when the daemon named
  * it, the retained previous output. The result is a fresh array of shared references, sized and
@@ -758,12 +647,6 @@ function buildTransformBody(args: {
     midTurn: boolean;
     prevResponseCompletedAtMs?: number;
     requestObservedAtMs?: number;
-    fullArrayFingerprint?: string;
-    tailDelta?: {
-        after: string;
-        replaceFrom: number;
-        nativeReplaceFrom: number;
-    };
 }): Record<string, unknown> {
     return {
         method: "transform",
@@ -790,16 +673,6 @@ function buildTransformBody(args: {
         protected_tags: args.passInputs.protected_tags ?? DEFAULT_PROTECTED_TAGS,
         messages: args.input,
         native_messages: args.nativeMessages,
-        ...(args.fullArrayFingerprint ? { full_array_fingerprint: args.fullArrayFingerprint } : {}),
-        ...(args.tailDelta
-            ? {
-                  tail_delta: {
-                      after: args.tailDelta.after,
-                      replace_from: args.tailDelta.replaceFrom,
-                      native_replace_from: args.tailDelta.nativeReplaceFrom,
-                  },
-              }
-            : {}),
         ...(args.usage ? { usage: args.usage } : {}),
         ...(args.prevResponseCacheUsage
             ? { prev_response_cache_usage: args.prevResponseCacheUsage }
@@ -848,7 +721,7 @@ type PassDeclineReason =
     | "unsupported_source"
     | "host_container"
     | "source_changed"
-    | "invalidated"
+    | "publication_failed"
     | "deleted"
     | "internal_child"
     | "daemon_session_busy"
@@ -914,53 +787,20 @@ export function createRustModeTransform(
 ): {
     run: (sessionId: string, output: { messages: unknown[] }) => Promise<void>;
     clearSession: (sessionId: string) => void;
-    invalidateWireState: (sessionId: string) => void;
+    invalidateOrdinals: (sessionId: string) => void;
     getState: (sessionId: string) => Readonly<RustSessionState>;
 } {
     const states = new Map<string, RustSessionState>();
-    const wireCaches = new BoundedSessionMap<RustWireCache>(WIRE_CACHE_SESSION_CAPACITY);
-    const appliedOutputs = new AppliedOutputBudget(
-        options.optionalOutputBudgetBytes ?? OPTIONAL_OUTPUT_BUDGET_BYTES,
-        (sessionId) => {
-            const cache = wireCaches.peek(sessionId);
-            if (cache) cache.applied = undefined;
-        },
+    const retainedOutputs = new RetainedOutputs(
+        RETAINED_OUTPUT_SESSION_CAPACITY,
+        options.retainedOutputBudgetBytes ?? RETAINED_OUTPUT_BUDGET_BYTES,
     );
-    /** A session whose history is evicted loses its wire cache and captures in full next pass. */
-    const retainedHistories = new AppliedOutputBudget(
-        options.retainedHistoryBudgetBytes ?? RETAINED_HISTORY_BUDGET_BYTES,
-        (sessionId) => {
-            wireCaches.delete(sessionId);
-            appliedOutputs.release(sessionId);
-        },
-    );
-    const releaseWireCache = (sessionId: string): void => {
-        wireCaches.delete(sessionId);
-        appliedOutputs.release(sessionId);
-        retainedHistories.release(sessionId);
-    };
-    /** A digest keeps each symbol, and so its description, alive with the wire cache. */
+    /** A digest keeps each symbol, and so its description, alive with the record. */
     const retainedSymbolBytes = (digest: HistoryDigest | undefined): number => {
         let bytes = 0;
         for (const symbol of digest?.symbols ?? [])
             bytes += CANDIDATE_SLOT_BYTES + (symbol.description?.length ?? 0) * 2;
         return bytes;
-    };
-    /** Count eviction uses `releaseWireCache`: a history eviction can free the slot `set` would evict, and a refused retention skips `set`. */
-    const storeWireCache = (sessionId: string, cache: RustWireCache): void => {
-        if (!wireCaches.has(sessionId) && wireCaches.size >= WIRE_CACHE_SESSION_CAPACITY) {
-            const oldest = wireCaches.entries().next().value;
-            if (oldest) releaseWireCache(oldest[0]);
-        }
-        const charge =
-            cache.rawCount * HISTORY_ENTRY_RETAINED_BYTES +
-            retainedSymbolBytes(cache.rawHistory) +
-            retainedSymbolBytes(cache.rawTerminal);
-        if (!retainedHistories.retain(sessionId, charge)) {
-            releaseWireCache(sessionId);
-            return;
-        }
-        wireCaches.set(sessionId, cache);
     };
     const captureAdmission = options.captureAdmission ?? defaultTransformCaptureAdmission;
 
@@ -998,12 +838,9 @@ export function createRustModeTransform(
         );
     };
 
-    const invalidateWireState = (sessionId: string): void => {
-        releaseWireCache(sessionId);
-        captureAdmission.requestCancel(
-            sessionId,
-            `rust session ${sessionId} wire state invalidated`,
-        );
+    /** A removed message can hold a memo ordinal; a pass in flight is cancelled so it cannot promote the stale memo it copied. */
+    const invalidateOrdinals = (sessionId: string): void => {
+        captureAdmission.requestCancel(sessionId, `rust session ${sessionId} ordinals invalidated`);
         const state = states.get(sessionId);
         if (!state) return;
         state.ordinals = {
@@ -1013,8 +850,6 @@ export function createRustModeTransform(
             storedCount: null,
             canonicalCount: 0,
         };
-        state.forceFullWire = true;
-        state.wireInvalidations += 1;
     };
 
     const execute = async (
@@ -1030,9 +865,9 @@ export function createRustModeTransform(
             applied: new Set(),
         };
         const target = readOwnDataProperty(output, "messages") as unknown[];
-        const hostRejection = hostArrayReplacementRejection(target);
+        const hostRejection = publicationRejection(target, 0);
         if (hostRejection !== null) {
-            sessionLog[hostRejection === "prototype_accessor" ? "warn" : "debug"](
+            sessionLog.debug(
                 sessionId,
                 `rust transform declined before dispatch: host_container ${hostRejection}`,
             );
@@ -1118,7 +953,7 @@ export function createRustModeTransform(
                 sessionLog.debug(
                     sessionId,
                     `rust module stages: handler=${stage("handler_total")} apply_once=${stage("total")} ` +
-                        `request_to_handler=${stage("request_observed_to_handler")} delta_expand=${stage("delta_expand")} ` +
+                        `request_to_handler=${stage("request_observed_to_handler")} ` +
                         `projection_cache_lookup=${stage("projection_cache_lookup")} projection=${stage("projection")} ` +
                         `selection=${stage("selection")} build_output=${stage("build_output")} ` +
                         `store_commit=${stage("store_commit")} trigger=${stage("trigger_ms")} ` +
@@ -1145,18 +980,15 @@ export function createRustModeTransform(
             }
         };
         state.passCount += 1;
-        const wireInvalidationsAtRead = state.wireInvalidations;
-        // Clearing a session replaces its state object; supersession, clearing, and wire invalidation abort the capture lease.
+        // Clearing a session replaces its state object; supersession, clearing, and ordinal invalidation abort the capture lease.
         const assertCurrentPass = (): void => {
             if (states.get(sessionId) !== state) throw new PassDeclined(sessionId, "cleared");
-            if (state.wireInvalidations !== wireInvalidationsAtRead)
-                throw new PassDeclined(sessionId, "invalidated");
             if (lease.signal.aborted) throw new PassDeclined(sessionId, "superseded");
         };
         const charge = (bytes: number, detail: string): void => {
             if (!lease.reserve(bytes)) throw new CaptureBudgetExceeded(detail);
         };
-        let failOpenSource: { captured: CapturedHistory; previous: RustWireCache } | undefined;
+        let failOpenSource: { captured: CapturedHistory; previous: RetainedOutput } | undefined;
         /**
          * Without native compaction a raw fail-open can overflow the provider window, so a failed
          * pass republishes the last applied output followed by the raw messages appended after the
@@ -1170,27 +1002,35 @@ export function createRustModeTransform(
             try {
                 if (
                     states.get(sessionId) !== state ||
-                    state.wireInvalidations !== wireInvalidationsAtRead ||
                     lease.signal.aborted ||
-                    wireCaches.peek(sessionId) !== source.previous ||
+                    retainedOutputs.peek(sessionId) !== source.previous ||
                     !isAppendOnlyExtension(source.previous, source.captured) ||
                     appliedOutputGrew(source.previous, applied) ||
                     readOwnDataProperty(output, "messages") !== target ||
-                    !capturedMessagesUnchanged(target, source.captured) ||
-                    hostArrayReplacementRejection(target) !== null
+                    !capturedMessagesUnchanged(target, source.captured)
                 )
                     return false;
                 if (!capturedMessagesUnchanged(applied.values, applied.capture)) {
-                    source.previous.applied = undefined;
-                    appliedOutputs.release(sessionId);
+                    retainedOutputs.dropApplied(sessionId, source.previous);
                     return false;
                 }
                 const served = [
                     ...applied.values,
                     ...source.captured.members.slice(source.previous.rawCount),
                 ];
-                if (!lease.reserve(served.length * CANDIDATE_SLOT_BYTES)) return false;
-                replaceHostArrayContents(target, served);
+                if (
+                    publicationRejection(target, served.length) !== null ||
+                    !lease.reserve(served.length * CANDIDATE_SLOT_BYTES)
+                )
+                    return false;
+                const failure = publishInPlace(target, served, source.captured.members);
+                if (failure) {
+                    sessionLog.warn(
+                        sessionId,
+                        `rust transform fail-open publication failed: ${failure.detail}`,
+                    );
+                    return false;
+                }
                 return true;
             } catch (error) {
                 sessionLog.warn(sessionId, "rust transform fail-open reuse declined:", error);
@@ -1200,7 +1040,7 @@ export function createRustModeTransform(
         try {
             // Source domain is validated synchronously before any message read.
             const prefixGuardStartedAt = performance.now();
-            const previousWireCache = wireCaches.get(sessionId);
+            const previous = retainedOutputs.peek(sessionId);
             // A full fallback inspection walks a superset of the partial one, so it pays only the difference.
             let inspectedBytes = 0;
             const inspect = (skip: number): number[] => {
@@ -1230,14 +1070,14 @@ export function createRustModeTransform(
              * former terminal is taped again because the host may still be editing it in place.
              * Any prefix change falls back to a full inspection and capture.
              */
-            const prefix = previousWireCache?.rawHistory;
+            const prefix = previous?.rawHistory;
             let verified: CapturedHistory | undefined;
             let messageWireBytes: number[] = [];
-            if (previousWireCache && prefix) {
+            if (previous && prefix) {
                 messageWireBytes = inspect(prefix.count);
                 verified = captureHistory(target, lease, prefix);
                 for (let index = 0; verified && index < prefix.count; index += 1)
-                    messageWireBytes[index] = previousWireCache.wireBytes[index] ?? 0;
+                    messageWireBytes[index] = previous.wireBytes[index] ?? 0;
             }
             if (!verified) messageWireBytes = inspect(0);
             const captured = verified ?? captureHistory(target, lease);
@@ -1260,19 +1100,12 @@ export function createRustModeTransform(
                 logStage(sessionId, "prefixGuard", startedAt, timings, `phase=${phase}`);
                 if (!unchanged) throw new PassDeclined(sessionId, "source_changed", phase);
             };
-            // The delta decision and the charges it implies derive from the capture, so byte pressure declines before the first await.
-            if (previousWireCache) failOpenSource = { captured, previous: previousWireCache };
-            let wireDelta =
-                !state.forceFullWire && previousWireCache
-                    ? computeWireDelta(previousWireCache, captured)
-                    : undefined;
-            const reserveWire = (from: number, to: number): void => {
-                let bytes = 0;
-                for (let index = from; index < to; index += 1)
-                    bytes += WIRE_PROJECTION_FACTOR * (messageWireBytes[index] ?? 0);
-                charge(bytes, "wire projection");
-            };
-            reserveWire(wireDelta?.rawStart ?? 0, messages.length);
+            // The wire charge derives from the capture, so byte pressure declines before the first await.
+            if (previous) failOpenSource = { captured, previous };
+            let wireBytes = 0;
+            for (let index = 0; index < messageWireBytes.length; index += 1)
+                wireBytes += WIRE_PROJECTION_FACTOR * (messageWireBytes[index] ?? 0);
+            charge(wireBytes, "wire projection");
             let memoCopyBytes = 0;
             for (const id of state.ordinals.entries.keys())
                 memoCopyBytes += ORDINAL_ENTRY_RETAINED_BYTES + id.length * 2;
@@ -1299,21 +1132,6 @@ export function createRustModeTransform(
                 ...state.ordinals,
                 entries: new Map(state.ordinals.entries),
             };
-            const provisionalBase = wireDelta
-                ? (() => {
-                      for (let index = wireDelta.rawStart - 1; index >= 0; index -= 1) {
-                          const priorId = messageIdOf(messages[index]);
-                          if (!priorId) continue;
-                          const prior = stagedMemo.entries.get(priorId);
-                          if (prior !== undefined)
-                              return Math.max(prior, stagedMemo.continuationBase ?? 0);
-                      }
-                      return Math.max(
-                          stagedMemo.canonicalCount ?? 0,
-                          stagedMemo.continuationBase ?? 0,
-                      );
-                  })()
-                : stagedMemo.continuationBase;
             // Every message read above is synchronous; the awaits below read nothing from the source, so the next recheck precedes ordinal annotation.
             // The directory read also records a host-reported `parentID`, so it runs before the subagent classification is read.
             const directory = await resolveSessionDirectory(deps, sessionId);
@@ -1413,16 +1231,11 @@ export function createRustModeTransform(
              * synchronously so no message read follows an await without a fresh guard.
              */
             const resolveOrdinals = async (
-                rawStart: number,
                 base: number | undefined,
                 detail: string,
             ): Promise<OrdinalResolution> => {
                 // Annotated shells and their memo entries coexist with the staged copy.
-                charge(
-                    (messages.length - rawStart) * ORDINAL_ENTRY_RETAINED_BYTES * 2,
-                    "ordinal annotation",
-                );
-                const inputMessages = rawStart === 0 ? messages : messages.slice(rawStart);
+                charge(messages.length * ORDINAL_ENTRY_RETAINED_BYTES * 2, "ordinal annotation");
                 const startedAt = performance.now();
                 const primed = await primeOrdinalMemo({
                     sessionId,
@@ -1438,7 +1251,7 @@ export function createRustModeTransform(
                     return primed;
                 }
                 const resolved = annotateOrdinals({
-                    messages: inputMessages,
+                    messages,
                     memo: stagedMemo,
                     primed: primed.primed,
                     provisionalBase: base,
@@ -1452,18 +1265,11 @@ export function createRustModeTransform(
                 }
                 return resolved;
             };
-            let resolved = await resolveOrdinals(
-                wireDelta?.rawStart ?? 0,
-                provisionalBase,
-                "attempt=first",
-            );
+            let resolved = await resolveOrdinals(stagedMemo.continuationBase, "attempt=first");
             if (!resolved.ok) {
-                if (wireDelta) reserveWire(0, wireDelta.rawStart);
-                wireDelta = undefined;
                 // A memo generation the scan cannot match forces a full re-prime without an anchor.
                 stagedMemo.memoGeneration = -1;
                 resolved = await resolveOrdinals(
-                    0,
                     stagedMemo.continuationBase,
                     "fallback=clean_full",
                 );
@@ -1481,42 +1287,26 @@ export function createRustModeTransform(
             deliveries.projectRoot = projectRoot;
             const wireBuildStartedAt = performance.now();
             const encodedInput = encodeOpenCodeMessagesToCk(resolved.annotatedInput);
-            timings.wireMessages = messages.length - (wireDelta?.rawStart ?? 0);
+            timings.wireMessages = messages.length;
             charge(messages.length * LENGTH_SLOT_BYTES, "input lengths");
             const inputLengths = measureInputLengths(
                 messages,
-                previousWireCache,
-                wireDelta?.rawStart ?? 0,
+                previous,
+                captured.verified?.count ?? 0,
             );
-            let pendingWireCache: RustWireCache =
-                // An empty delta replaces nothing: the terminal message, its wire visibility, and both before-last fingerprints stay the acknowledged ones.
-                wireDelta && previousWireCache && wireDelta.rawStart === messages.length
-                    ? { ...previousWireCache, applied: undefined }
-                    : buildWireCache({
-                          messages,
-                          encoded: encodedInput,
-                          captured,
-                          wireBytes: messageWireBytes,
-                          inputLengths,
-                          delta: wireDelta,
-                      });
-            // The retained output stays reusable only while the cache that applied it survives.
-            let previousApplied = previousWireCache?.applied;
+            // The retained output stays reusable only while the record that applied it survives.
+            let previousApplied = previous?.applied;
             if (
+                previous &&
                 previousApplied &&
                 !capturedMessagesUnchanged(previousApplied.values, previousApplied.capture)
             ) {
                 previousApplied = undefined;
-                if (previousWireCache) previousWireCache.applied = undefined;
-                appliedOutputs.release(sessionId);
+                retainedOutputs.dropApplied(sessionId, previous);
             }
-            let baseRevision = nextBaseRevision();
+            const baseRevision = nextBaseRevision();
             const usageEntry = deps.contextUsageMap.get(sessionId);
-            // Fields both the first attempt and the full-wire retry forward
-            // unchanged. `fullArrayFingerprint` stays per-site: the retry
-            // rebuilds `pendingWireCache` before its call and must read the
-            // rebuilt fingerprint.
-            const transformBodyBase = {
+            const body = buildTransformBody({
                 sessionId,
                 passInputs,
                 // The daemon keeps its persisted usage when the request carries none; a zero sample with a nonzero limit would replace it.
@@ -1532,29 +1322,12 @@ export function createRustModeTransform(
                         ? usageEntry.lastResponseTime
                         : undefined,
                 requestObservedAtMs,
-            };
-            let body = buildTransformBody({
-                ...transformBodyBase,
                 baseRevision,
                 previousOutputRevision: previousApplied?.revision,
                 input: encodedInput,
-                nativeMessages: wireDelta ? messages.slice(wireDelta.rawStart) : messages,
-                fullArrayFingerprint: pendingWireCache.fingerprint,
-                tailDelta: wireDelta
-                    ? {
-                          after: wireDelta.after,
-                          replaceFrom: wireDelta.wireStart,
-                          nativeReplaceFrom: wireDelta.rawStart,
-                      }
-                    : undefined,
+                nativeMessages: messages,
             });
-            logStage(
-                sessionId,
-                "wireBuild",
-                wireBuildStartedAt,
-                timings,
-                wireDelta ? `mode=tail_delta input=${encodedInput.length}` : "mode=full",
-            );
+            logStage(sessionId, "wireBuild", wireBuildStartedAt, timings);
             type TransformSeriesRestart = {
                 reason: "attempt_mismatch" | "reconnect";
                 pages: number;
@@ -1618,15 +1391,8 @@ export function createRustModeTransform(
                 // session_busy: the daemon's session lane already holds an active and a waiting pass for this session.
                 // An unrecognized status is declined the same way (Section 7.10.1 of the wire protocol).
                 const busy = response.status === "session_busy";
-                if (
-                    busy ||
-                    (response.status !== undefined &&
-                        response.status !== "ok" &&
-                        !isNeedFullSync(response))
-                ) {
-                    // The daemon committed nothing, so the flag this dispatch set is undone.
+                if (busy || (response.status !== undefined && response.status !== "ok")) {
                     assertCurrentPass();
-                    state.forceFullWire = forceFullWireOnBusy;
                     throw new PassDeclined(
                         sessionId,
                         busy ? "daemon_session_busy" : "daemon_status_unrecognized",
@@ -1661,75 +1427,8 @@ export function createRustModeTransform(
                 }
                 return result.response;
             };
-            // The daemon commits its native-output snapshot on response, so a pass that exits after dispatch without committing its cache must resend the full history.
-            let forceFullWireOnBusy = state.forceFullWire;
-            state.forceFullWire = true;
-            let response = await sendTransformSeriesWithSingleRestart(body, "");
+            const response = await sendTransformSeriesWithSingleRestart(body, "");
             captureResponseTelemetry(response);
-            if (isNeedFullSync(response)) {
-                // A cleared or superseded session must not receive the flag.
-                assertCurrentPass();
-                state.forceFullWire = true;
-                forceFullWireOnBusy = true;
-                // The retry names a fresh input snapshot; the recipe it receives binds to that one.
-                baseRevision = nextBaseRevision();
-                if (wireDelta) {
-                    reserveWire(0, wireDelta.rawStart);
-                    let retryResolved = await resolveOrdinals(
-                        0,
-                        stagedMemo.continuationBase,
-                        "retry=full",
-                    );
-                    if (!retryResolved.ok) {
-                        stagedMemo.memoGeneration = -1;
-                        retryResolved = await resolveOrdinals(
-                            0,
-                            undefined,
-                            "retry=full fallback=clean_full",
-                        );
-                    }
-                    if (!retryResolved.ok) {
-                        throw new Error(`rust ordinal ${retryResolved.reason} during full retry`);
-                    }
-                    recheckCapture("retry-wire-build");
-                    const retryEncodedInput = encodeOpenCodeMessagesToCk(
-                        retryResolved.annotatedInput,
-                    );
-                    timings.wireMessages = messages.length;
-                    pendingWireCache = buildWireCache({
-                        messages,
-                        encoded: retryEncodedInput,
-                        captured,
-                        wireBytes: messageWireBytes,
-                        inputLengths,
-                    });
-                    const retryWireBuildStartedAt = performance.now();
-                    body = buildTransformBody({
-                        ...transformBodyBase,
-                        baseRevision,
-                        previousOutputRevision: previousApplied?.revision,
-                        input: retryEncodedInput,
-                        nativeMessages: messages,
-                        fullArrayFingerprint: pendingWireCache.fingerprint,
-                    });
-                    logStage(
-                        sessionId,
-                        "wireBuild",
-                        retryWireBuildStartedAt,
-                        timings,
-                        "retry=full",
-                    );
-                } else {
-                    // The same body is serialized again from the live objects, so the source is rechecked first.
-                    recheckCapture("full-retry");
-                    body = { ...body, base_revision: baseRevision };
-                }
-                response = await sendTransformSeriesWithSingleRestart(body, " retry=full");
-                captureResponseTelemetry(response);
-                if (isNeedFullSync(response)) {
-                    throw new Error("rust module still requires full sync after a full-array send");
-                }
-            }
             const appliedDeliveryPassIds = new Set(noteDeliveryPassIds(response));
             const applyStartedAt = performance.now();
             try {
@@ -1739,8 +1438,7 @@ export function createRustModeTransform(
                     response.previous_output_revision !== undefined &&
                     !capturedMessagesUnchanged(previousApplied.values, previousApplied.capture)
                 ) {
-                    if (previousWireCache) previousWireCache.applied = undefined;
-                    appliedOutputs.release(sessionId);
+                    if (previous) retainedOutputs.dropApplied(sessionId, previous);
                     throw new PassDeclined(sessionId, "source_changed", "previous output");
                 }
                 // Recipe validation, sizing, and every boundary check run before the host array is touched.
@@ -1800,9 +1498,9 @@ export function createRustModeTransform(
                     }
                     stagedMemo.continuationBase = ordinalContinuationBase;
                 }
-                // Final synchronous guards: ownership, wire invalidation, source membership and content, and the host container contract.
+                // Final synchronous guards: ownership, source membership and content, and the host container contract.
                 recheckCapture("publish");
-                const publishRejection = hostArrayReplacementRejection(target);
+                const publishRejection = publicationRejection(target, candidate.length);
                 if (publishRejection !== null) {
                     throw new PassDeclined(sessionId, "host_container", publishRejection);
                 }
@@ -1823,18 +1521,31 @@ export function createRustModeTransform(
                 logStage(sessionId, "apply", applyStartedAt, timings);
                 const applyReplaceStartedAt = performance.now();
                 // Publication and state promotion are synchronous from here to the lease release.
-                replaceHostArrayContents(target, candidate);
-                // A refused retention keeps the pass; only the next pass loses its `previous` source.
-                appliedOutputs.release(sessionId);
-                pendingWireCache.applied =
-                    applied && appliedOutputs.retain(sessionId, applied.charge)
-                        ? applied
-                        : undefined;
+                const failure = publishInPlace(target, candidate, messages);
+                if (failure)
+                    throw new PassDeclined(sessionId, "publication_failed", failure.detail, "warn");
+                const record: RetainedOutput = {
+                    rawCount: messages.length,
+                    rawHistory: captured.history,
+                    ...(captured.terminal ? { rawTerminal: captured.terminal } : {}),
+                    wireBytes: messageWireBytes,
+                    inputLengths,
+                    ...(applied ? { applied } : {}),
+                    charge:
+                        messages.length * HISTORY_ENTRY_RETAINED_BYTES +
+                        retainedSymbolBytes(captured.history) +
+                        retainedSymbolBytes(captured.terminal) +
+                        (applied?.charge ?? 0),
+                };
+                // A refused retention keeps the pass; the next pass loses its verified prefix, or only its `previous` source.
+                if (!retainedOutputs.retain(sessionId, record) && applied) {
+                    record.charge -= applied.charge;
+                    record.applied = undefined;
+                    retainedOutputs.retain(sessionId, record);
+                }
                 state.ordinals = stagedMemo;
                 state.initialized = true;
                 state.consecutiveFailures = 0;
-                state.forceFullWire = false;
-                storeWireCache(sessionId, pendingWireCache);
                 deliveries.applied = appliedDeliveryPassIds;
                 logStage(sessionId, "apply", applyReplaceStartedAt, timings);
             } catch (error) {
@@ -1864,7 +1575,7 @@ export function createRustModeTransform(
                 )
                     servedFrom = "last_applied";
             } else {
-                if (decision.toLowerCase() !== "need_full_sync") decision = "error";
+                decision = "error";
                 const servedLastApplied = serveLastApplied();
                 if (servedLastApplied) servedFrom = "last_applied";
                 markFailure(sessionId, state, error, servedLastApplied);
@@ -1900,7 +1611,7 @@ export function createRustModeTransform(
                 options.projectRoot ??
                 knownSessionDirectory(deps, sessionId);
             states.delete(sessionId);
-            releaseWireCache(sessionId);
+            retainedOutputs.release(sessionId);
             captureAdmission.requestCancel(sessionId, `rust session ${sessionId} cleared`);
             // Route close asks the host to settle active work within its close budget before deletion acquires the lane; cleanup closes the replacement route.
             options.moduleClient.closeSession?.(sessionId);
@@ -1913,7 +1624,7 @@ export function createRustModeTransform(
                     .finally(() => options.moduleClient.closeSession?.(sessionId));
             }
         },
-        invalidateWireState,
+        invalidateOrdinals,
         getState(sessionId: string): Readonly<RustSessionState> {
             const state = ensureState(states, sessionId);
             return {
@@ -1925,9 +1636,9 @@ export function createRustModeTransform(
 }
 
 export const __rustModeTransformTest = {
-    WIRE_CACHE_SESSION_CAPACITY,
-    OPTIONAL_OUTPUT_BUDGET_BYTES,
-    AppliedOutputBudget,
+    RETAINED_OUTPUT_SESSION_CAPACITY,
+    RETAINED_OUTPUT_BUDGET_BYTES,
+    RetainedOutputs,
     applyTransformRecipe,
     buildTransformBody,
     transformGeometryForWire,

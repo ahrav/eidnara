@@ -286,7 +286,6 @@ describe("Rust mode transform request", () => {
             modelKey: "anthropic/opus",
             providerId: "anthropic",
             systemPromptHash: "abc",
-            fullArrayFingerprint: "fp",
         });
         expect(body).toMatchObject({
             method: "transform",
@@ -299,14 +298,19 @@ describe("Rust mode transform request", () => {
             channel2_nudge_state: "",
             emergency_recovery_armed: false,
             emergency_recovery_no_head_escape: false,
-            full_array_fingerprint: "fp",
             prompt_surface_preset: "full",
             history_budget_tokens: 42_000,
             terse_text_compression_enabled: true,
             terse_text_compression_min_chars: 240,
             messages: [{ mid: "m-1" }],
         });
-        for (const absent of ["pass_inputs", "mural", "detected_context_limit", "tail_delta"]) {
+        for (const absent of [
+            "pass_inputs",
+            "mural",
+            "detected_context_limit",
+            "tail_delta",
+            "full_array_fingerprint",
+        ]) {
             expect(absent in body).toBe(false);
         }
     });
@@ -366,7 +370,7 @@ describe("Rust mode transform request", () => {
         }
     });
 
-    it("sends the full array first and a tail delta on the next pass", async () => {
+    it("sends the whole captured array on every pass with no delta or fingerprint", async () => {
         const sessionId = `rust-seed-${Date.now()}`;
         installAvailabilityDb(sessionId, {});
         installRawRows(sessionId, rawRows(1));
@@ -407,13 +411,13 @@ describe("Rust mode transform request", () => {
         const secondOutput = { messages: secondInput as unknown[] };
         await transform.run(sessionId, secondOutput);
         expect(calls.map((call) => call.method)).toEqual(["transform", "transform"]);
-        expect(bodies[1]?.tail_delta).toEqual({
-            after: first.full_array_fingerprint,
-            replace_from: 1,
-            native_replace_from: 1,
-        });
-        expect(bodies[1]?.messages).toEqual([]);
-        expect(bodies[1]?.native_messages).toEqual([]);
+        for (const body of bodies) {
+            expect("tail_delta" in body).toBe(false);
+            expect("full_array_fingerprint" in body).toBe(false);
+            expect(body.messages).toHaveLength(1);
+        }
+        const secondWire = JSON.parse(serializedJsonText(bodies[1]!)!) as Record<string, unknown>;
+        expect(secondWire.native_messages).toEqual(makeMessages(sessionId));
         expect(secondOutput.messages).toEqual(native);
     });
 
@@ -436,7 +440,6 @@ describe("Rust mode transform request", () => {
                 expect(output.messages).toEqual(messages);
                 expect(transform.getState(sessionId).initialized).toBe(false);
                 expect(transform.getState(sessionId).consecutiveFailures).toBe(0);
-                expect(transform.getState(sessionId).forceFullWire).toBe(false);
                 expect(sessionLogs(debugSpy, sessionId)).toContain(
                     `rust session ${sessionId} pass declined: ${reason}`,
                 );
@@ -445,33 +448,6 @@ describe("Rust mode transform request", () => {
             }
         });
     }
-
-    it("declines a session_busy full-sync retry and keeps the full-sync flag", async () => {
-        const sessionId = `rust-session-busy-retry-${Date.now()}`;
-        installAvailabilityDb(sessionId, {});
-        installRawRows(sessionId, rawRows(1));
-        const { client, bodies } = recordingClient((_request, index) =>
-            index === 0
-                ? { status: "need_full_sync" }
-                : { status: "session_busy", action: "SESSION_BUSY" },
-        );
-        const transform = createRustModeTransform(makeDeps(), { moduleClient: client });
-        const messages = makeMessages(sessionId);
-        const output = { messages: [...messages] as unknown[] };
-        const debugSpy = spyOn(logger.sessionLog, "debug");
-        try {
-            await transform.run(sessionId, output);
-            expect(bodies).toHaveLength(2);
-            expect(output.messages).toEqual(messages);
-            expect(transform.getState(sessionId).consecutiveFailures).toBe(0);
-            expect(transform.getState(sessionId).forceFullWire).toBe(true);
-            expect(sessionLogs(debugSpy, sessionId)).toContain(
-                `rust session ${sessionId} pass declined: daemon_session_busy`,
-            );
-        } finally {
-            debugSpy.mockRestore();
-        }
-    });
 
     it("sends canonical model identity with the model-routed prompt preset and overrides", async () => {
         const sessionId = `rust-prompt-surface-${Date.now()}`;
@@ -883,48 +859,6 @@ describe("Rust mode transform request", () => {
 });
 
 describe("Rust mode transform transport", () => {
-    it("re-pages every transform payload after need_full_sync", async () => {
-        const sessionId = `rust-repage-${Date.now()}`;
-        installAvailabilityDb(sessionId, {});
-        installRawRows(sessionId, rawRows(1));
-        const messages = makeMessages(sessionId);
-        messages[0]!.parts = [{ type: "text", text: "x".repeat(600_000) }];
-        const native = [{ role: "assistant", parts: [] }];
-        let retryStarted = false;
-        const { client, bodies } = recordingClient((page) => {
-            if (!retryStarted && page.transform_page_complete === true) {
-                retryStarted = true;
-                return { status: "need_full_sync" };
-            }
-            return page.transform_page_complete === false
-                ? { staged: true }
-                : recipeResponse(page, native);
-        });
-        const transform = createRustModeTransform(makeDeps(), {
-            moduleClient: client,
-        });
-        const output = { messages: messages as unknown[] };
-        await transform.run(sessionId, output);
-
-        expect(new Set(bodies.map((body) => body.transform_page_id)).size).toBe(2);
-        expect(bodies.length).toBeGreaterThan(2);
-        expect(
-            bodies.every((body) =>
-                [
-                    "transform_page_id",
-                    "transform_generation",
-                    "transform_page_index",
-                    "transform_page_total",
-                    "transform_page_complete",
-                    "transform_page_digest",
-                ].every((field) => field in body),
-            ),
-        ).toBe(true);
-        expect(bodies.at(-1)?.tool_present).toBe(true);
-        expect(bodies.at(-1)?.todo_tool_present).toBe(true);
-        expect(output.messages).toEqual(native);
-    });
-
     for (const mismatch of ["thrown-code", "returned-code", "message"] as const) {
         it(`restarts a paged transform series after a ${mismatch} attempt mismatch`, async () => {
             const sessionId = `rust-series-restart-${mismatch}-${Date.now()}`;
@@ -1025,7 +959,7 @@ describe("Rust mode transform transport", () => {
         }
     });
 
-    it("clears Rust state, wire caches, and the transport route for a deleted session", async () => {
+    it("clears Rust state, the retained output, and the transport route for a deleted session", async () => {
         const sessionId = `rust-clear-session-${Date.now()}`;
         installRawRows(sessionId, rawRows(1));
         const deleteSession = mock(async () => {});
@@ -1042,7 +976,7 @@ describe("Rust mode transform transport", () => {
             const input = makeMessages(sessionId);
             await transform.run(sessionId, { messages: [...input] });
         }
-        expect(bodies[1]?.tail_delta).toBeDefined();
+        expect(bodies[1]?.previous_output_revision).toBeDefined();
 
         transform.clearSession(sessionId);
         await Bun.sleep(0);
@@ -1051,7 +985,7 @@ describe("Rust mode transform transport", () => {
         const afterClear = makeMessages(sessionId);
         await transform.run(sessionId, { messages: [...afterClear] });
 
-        expect(bodies[2]?.tail_delta).toBeUndefined();
+        expect(bodies[2]?.previous_output_revision).toBeUndefined();
         expect(bodies[2]?.messages).toHaveLength(1);
         expect(transform.getState(sessionId).passCount).toBe(1);
     });
@@ -1146,44 +1080,8 @@ describe("Rust mode transform transport", () => {
         expect(deleteSession).toHaveBeenCalledWith(other, "/tmp/project");
     });
 
-    it("forces a full send after a dispatched delta pass is source-declined", async () => {
-        const sessionId = `rust-decline-after-dispatch-${Date.now()}`;
-        installRawRows(sessionId, rawRows(1));
-        let live: unknown[] | undefined;
-        const { client, bodies, calls } = recordingClient((request) => {
-            // The daemon committed its snapshot for this request; the host replaces a member before the response is applied.
-            if (live) live[0] = makeMessages(sessionId)[0];
-            return recipeResponse(request, []);
-        });
-        const transform = createRustModeTransform(makeDeps(), {
-            moduleClient: client,
-        });
-        for (let pass = 0; pass < 2; pass += 1) {
-            await transform.run(sessionId, {
-                messages: [...makeMessages(sessionId)],
-            });
-        }
-        expect(bodies[1]?.tail_delta).toBeDefined();
-
-        live = [...makeMessages(sessionId)];
-        const original = live[0];
-        await transform.run(sessionId, { messages: live });
-        expect(bodies[2]?.tail_delta).toBeDefined();
-        expect(live[0]).not.toBe(original);
-        expect(calls.filter((call) => call.method === "transform").length).toBe(3);
-        expect(transform.getState(sessionId).consecutiveFailures).toBe(0);
-        expect(transform.getState(sessionId).forceFullWire).toBe(true);
-
-        live = undefined;
-        const next = makeMessages(sessionId);
-        await transform.run(sessionId, { messages: [...next] });
-        expect(bodies[3]?.tail_delta).toBeUndefined();
-        expect(bodies[3]?.native_messages).toEqual(next);
-        expect(transform.getState(sessionId).forceFullWire).toBe(false);
-    });
-
-    it("forces a full send after invalidateWireState", async () => {
-        const sessionId = `rust-invalidate-wire-${Date.now()}`;
+    it("resets the ordinal memo on invalidation and leaves the retained output in place", async () => {
+        const sessionId = `rust-invalidate-ordinals-${Date.now()}`;
         installRawRows(sessionId, rawRows(1));
         const { client, bodies } = recordingClient((request) => recipeResponse(request, []));
         const transform = createRustModeTransform(makeDeps(), {
@@ -1193,57 +1091,28 @@ describe("Rust mode transform transport", () => {
             const input = makeMessages(sessionId);
             await transform.run(sessionId, { messages: [...input] });
         }
-        expect(bodies[1]?.tail_delta).toBeDefined();
+        const primed = transform.getState(sessionId).ordinals;
+        expect(primed.entries.size).toBe(1);
+        expect(primed.anchor).not.toBeNull();
+        const retainedRevision = bodies[1]?.previous_output_revision;
+        expect(retainedRevision).toBeDefined();
 
-        transform.invalidateWireState(sessionId);
-        expect(transform.getState(sessionId).forceFullWire).toBe(true);
+        transform.invalidateOrdinals(sessionId);
+        const reset = transform.getState(sessionId).ordinals;
+        expect(reset.entries.size).toBe(0);
+        expect(reset.anchor).toBeNull();
+        expect(reset.storedCount).toBeNull();
+        expect(reset.canonicalCount).toBe(0);
         const input = makeMessages(sessionId);
         await transform.run(sessionId, { messages: [...input] });
 
-        expect(bodies[2]?.tail_delta).toBeUndefined();
+        // The retained output is not wire state that removal touches: the next pass still offers it.
+        expect(bodies[2]?.previous_output_revision).toBeDefined();
+        expect(bodies[2]?.previous_output_revision).not.toBe(retainedRevision);
         expect(bodies[2]?.messages).toHaveLength(1);
         expect(bodies[2]?.native_messages).toEqual(input);
-        expect(transform.getState(sessionId).forceFullWire).toBe(false);
+        expect(transform.getState(sessionId).ordinals.entries.size).toBe(1);
         expect(transform.getState(sessionId).passCount).toBe(3);
-    });
-
-    it("discards the pass cache when invalidateWireState lands while the daemon call is in flight", async () => {
-        const sessionId = `rust-invalidate-in-flight-${Date.now()}`;
-        installRawRows(sessionId, rawRows(1));
-        let release: (() => void) | undefined;
-        const bodies: Record<string, unknown>[] = [];
-        const client: RustModeModuleClient = {
-            call: async ({ body }) => {
-                const request = body as Record<string, unknown>;
-                bodies.push(request);
-                if (bodies.length === 2) {
-                    await new Promise<void>((resolve) => {
-                        release = resolve;
-                    });
-                }
-                return recipeResponse(request, []);
-            },
-        };
-        const transform = createRustModeTransform(makeDeps(), {
-            moduleClient: client,
-        });
-        const first = makeMessages(sessionId);
-        await transform.run(sessionId, { messages: [...first] });
-
-        const second = makeMessages(sessionId);
-        const inFlight = transform.run(sessionId, { messages: [...second] });
-        while (release === undefined) await Bun.sleep(0);
-        expect(bodies[1]?.tail_delta).toBeDefined();
-        transform.invalidateWireState(sessionId);
-        release?.();
-        await inFlight;
-
-        expect(transform.getState(sessionId).forceFullWire).toBe(true);
-        const third = makeMessages(sessionId);
-        await transform.run(sessionId, { messages: [...third] });
-        expect(bodies[2]?.tail_delta).toBeUndefined();
-        expect(bodies[2]?.native_messages).toEqual(third);
-        expect(transform.getState(sessionId).forceFullWire).toBe(false);
     });
 
     it("supersedes an older pass that finishes preflight after a newer pass starts", async () => {
@@ -1335,7 +1204,7 @@ describe("Rust mode transform transport", () => {
         expect(transform.getState(sessionId).failureCount).toBe(0);
     });
 
-    it("does not resurrect a wire cache for a session cleared while its pass is in flight", async () => {
+    it("does not resurrect a retained output for a session cleared while its pass is in flight", async () => {
         const sessionId = `rust-clear-in-flight-${Date.now()}`;
         installRawRows(sessionId, rawRows(1));
         const started = Promise.withResolvers<void>();
@@ -1373,7 +1242,7 @@ describe("Rust mode transform transport", () => {
 
         const third = makeMessages(sessionId);
         await transform.run(sessionId, { messages: [...third] });
-        expect(bodies[2]?.tail_delta).toBeUndefined();
+        expect(bodies[2]?.previous_output_revision).toBeUndefined();
         expect(bodies[2]?.native_messages).toEqual(third);
         expect(transform.getState(sessionId).passCount).toBe(1);
     });
@@ -1410,7 +1279,7 @@ describe("Rust mode transform transport", () => {
         });
 
         await transform.run(sessionId, { messages: [...first] });
-        expect(bodies[1]?.tail_delta).toBeDefined();
+        expect(ordinalsOf(bodies[1])).toEqual([11, 12]);
         expect(transform.getState(sessionId).ordinals).toEqual(shiftedMemo);
 
         shiftedMemo.continuationBase = 100;
@@ -1420,7 +1289,7 @@ describe("Rust mode transform transport", () => {
         expect(transform.getState(sessionId).ordinals.canonicalCount).toBe(12);
         expect(transform.getState(sessionId).ordinals.entries.get("m-2")).toBe(12);
 
-        transform.invalidateWireState(sessionId);
+        transform.invalidateOrdinals(sessionId);
         expect(transform.getState(sessionId).ordinals).toEqual({
             generation: 0,
             memoGeneration: 0,
@@ -1432,7 +1301,6 @@ describe("Rust mode transform transport", () => {
         });
         const second = rowMessages(sessionId, rawRows(2));
         await transform.run(sessionId, { messages: [...second] });
-        expect(bodies[2]?.tail_delta).toBeUndefined();
         expect(ordinalsOf(bodies[2])).toEqual([11, 12]);
         expect(transform.getState(sessionId).ordinals.entries.get("m-1")).toBe(11);
         expect(transform.getState(sessionId).consecutiveFailures).toBe(0);
@@ -1533,8 +1401,8 @@ describe("Rust mode transform transport", () => {
         expect(calls.at(-1)?.method).toBe("transform.ack");
     });
 
-    it("evicts the least recently used session's wire cache and sends its next pass in full", async () => {
-        const capacity = __rustModeTransformTest.WIRE_CACHE_SESSION_CAPACITY;
+    it("evicts the least recently retained session's output and offers it no previous source", async () => {
+        const capacity = __rustModeTransformTest.RETAINED_OUTPUT_SESSION_CAPACITY;
         const stamp = Date.now();
         const sessionIdAt = (index: number): string => `rust-wire-cache-lru-${stamp}-${index}`;
         const bodiesBySession = new Map<string, Record<string, unknown>[]>();
@@ -1560,16 +1428,86 @@ describe("Rust mode transform transport", () => {
         const newest = sessionIdAt(capacity);
         const newestInput = makeMessages(newest);
         await transform.run(newest, { messages: [...newestInput] });
-        expect(bodiesBySession.get(newest)?.[1]?.tail_delta).toBeDefined();
+        expect(bodiesBySession.get(newest)?.[1]?.previous_output_revision).toBeDefined();
 
         const evicted = sessionIdAt(0);
         const evictedInput = makeMessages(evicted);
         await transform.run(evicted, { messages: [...evictedInput] });
-        expect(bodiesBySession.get(evicted)?.[1]?.tail_delta).toBeUndefined();
+        expect(bodiesBySession.get(evicted)?.[1]?.previous_output_revision).toBeUndefined();
         expect(bodiesBySession.get(evicted)?.[1]?.native_messages).toEqual(evictedInput);
     });
 
-    it("keeps a multi-frame tail delta paged instead of rebuilding the full wire", async () => {
+    for (const limit of ["session count", "byte budget"] as const) {
+        it(`never releases an active capture lease when the ${limit} evicts its session's output`, async () => {
+            const stamp = Date.now();
+            const held = `rust-evict-held-${limit.replace(" ", "-")}-${stamp}`;
+            const text = "y".repeat(100_000);
+            const output = (sessionId: string) => [
+                {
+                    info: { id: "out", role: "user", sessionID: sessionId },
+                    parts: [{ type: "text", text }],
+                },
+            ];
+            const started = Promise.withResolvers<void>();
+            const release = Promise.withResolvers<void>();
+            const bodiesBySession = new Map<string, Record<string, unknown>[]>();
+            let heldSignal: AbortSignal | undefined;
+            const client: RustModeModuleClient = {
+                call: async ({ sessionId, body, signal }) => {
+                    const request = body as Record<string, unknown>;
+                    const list = bodiesBySession.get(sessionId) ?? [];
+                    list.push(request);
+                    bodiesBySession.set(sessionId, list);
+                    if (sessionId === held && list.length === 2) {
+                        heldSignal = signal;
+                        started.resolve();
+                        await release.promise;
+                    }
+                    return recipeResponse(request, output(sessionId));
+                },
+            };
+            const admission = new TransformCaptureAdmission();
+            const transform = createRustModeTransform(makeDeps(), {
+                moduleClient: client,
+                captureAdmission: admission,
+                // Each record charges about 300 KB of canonical and taped output; one fits and two do not.
+                ...(limit === "byte budget" ? { retainedOutputBudgetBytes: 450_000 } : {}),
+            });
+            installRawRows(held, rawRows(1));
+            await transform.run(held, { messages: [...makeMessages(held)] });
+            const heldOutput = { messages: [...makeMessages(held)] as unknown[] };
+            const inFlight = transform.run(held, heldOutput);
+            await Promise.race([started.promise, inFlight]);
+            expect(bodiesBySession.get(held)?.[1]?.previous_output_revision).toBeDefined();
+            const charged = admission.chargedBytes;
+            expect(admission.activePasses).toBe(1);
+            expect(charged).toBeGreaterThan(0);
+
+            const evictors =
+                limit === "byte budget"
+                    ? 1
+                    : __rustModeTransformTest.RETAINED_OUTPUT_SESSION_CAPACITY;
+            for (let index = 0; index < evictors; index += 1) {
+                const other = `rust-evict-other-${stamp}-${index}`;
+                installRawRows(other, rawRows(1));
+                await transform.run(other, { messages: [...makeMessages(other)] });
+            }
+            // The held session's output was evicted while its lease stayed live and charged.
+            expect(admission.activePasses).toBe(1);
+            expect(admission.chargedBytes).toBe(charged);
+            expect(heldSignal?.aborted).toBe(false);
+
+            release.resolve();
+            await inFlight;
+            expect(heldOutput.messages).toEqual(output(held));
+            expect(admission.activePasses).toBe(0);
+            expect(admission.chargedBytes).toBe(0);
+            await transform.run(held, { messages: [...makeMessages(held)] });
+            expect(bodiesBySession.get(held)?.[2]?.previous_output_revision).toBeDefined();
+        });
+    }
+
+    it("pages a multi-frame pass as a full send of the whole array", async () => {
         const sessionId = `rust-wire-paged-delta-${Date.now()}`;
         const rows = rawRows(3);
         installRawRows(sessionId, rows);
@@ -1595,23 +1533,17 @@ describe("Rust mode transform transport", () => {
         const appended = buildMessages();
         await transform.run(sessionId, { messages: [...appended] });
 
-        const deltaPages = bodies.filter((body) => "transform_page_id" in body);
-        expect(deltaPages.length).toBeGreaterThan(1);
+        const pages = bodies.filter((body) => "transform_page_id" in body);
+        expect(pages.length).toBeGreaterThan(1);
         expect(
-            deltaPages.every(
-                (page) => Buffer.byteLength(JSON.stringify(page)) <= MODULE_PAGE_MAX_BYTES,
-            ),
+            pages.every((page) => Buffer.byteLength(JSON.stringify(page)) <= MODULE_PAGE_MAX_BYTES),
         ).toBe(true);
-        expect(deltaPages.at(-1)!.tail_delta).toEqual({
-            after: bodies[0]?.full_array_fingerprint,
-            replace_from: 2,
-            native_replace_from: 2,
-        });
-        const pagedWire = JSON.stringify(deltaPages);
-        expect(pagedWire).not.toContain("message m-1");
-        expect(pagedWire).not.toContain("message m-2");
-        expect(pagedWire).toContain("message m-3");
-        expect(pagedWire).toContain("large delta");
+        expect(pages.some((page) => "tail_delta" in page || "full_array_fingerprint" in page)).toBe(
+            false,
+        );
+        const pagedWire = JSON.stringify(pages);
+        for (const text of ["message m-1", "message m-2", "message m-3", "large delta"])
+            expect(pagedWire).toContain(text);
     });
 });
 
@@ -1839,10 +1771,8 @@ describe("recipe application", () => {
 
         expect(firstOutput.messages).toEqual(firstNative);
         expect(secondOutput.messages).toEqual(secondNative);
-        expect(
-            (bodies[2]?.tail_delta as { native_replace_from?: number } | undefined)
-                ?.native_replace_from,
-        ).toBe(1);
+        expect(bodies[2]?.previous_output_revision).toBeDefined();
+        expect(bodies[2]?.native_messages).toEqual(thirdInput);
         expect(transform.getState(sessionId).failureCount).toBe(0);
     });
 
@@ -1951,38 +1881,6 @@ describe("recipe application", () => {
         expect(transform.getState(sessionId).failureCount).toBe(1);
     });
 
-    it("nacks initial and retry delivery IDs when the full retry still cannot be applied", async () => {
-        const sessionId = `rust-note-delivery-retry-failure-${Date.now()}`;
-        installRawRows(sessionId, rawRows(1));
-        const { client, calls } = recordingClient((request, index) =>
-            index === 0
-                ? {
-                      status: "need_full_sync",
-                      note_deliveries: [{ transform_pass_id: "pass-initial" }],
-                  }
-                : {
-                      ...recipeResponse(request, []),
-                      base_revision: "not-the-retry-base",
-                      note_deliveries: [{ transform_pass_id: "pass-retry" }],
-                  },
-        );
-        const transform = createRustModeTransform(makeDeps(), {
-            moduleClient: client,
-        });
-        const input = makeMessages(sessionId);
-        const output = { messages: [...input] as unknown[] };
-
-        await transform.run(sessionId, output);
-
-        expect(output.messages).toEqual(input);
-        expect(
-            calls
-                .filter((call) => call.method === "transform.nack")
-                .map((call) => (call.body as Record<string, unknown>).transform_pass_id),
-        ).toEqual(["pass-initial", "pass-retry"]);
-        expect(calls.some((call) => call.method === "transform.ack")).toBe(false);
-    });
-
     it("nacks note deliveries and serves the input unchanged when the boundary lacks a synthetic m0", async () => {
         const sessionId = `rust-wire-invariant-${Date.now()}`;
         installRawRows(sessionId, rawRows(1));
@@ -2017,13 +1915,13 @@ describe("recipe application", () => {
         expect(transform.getState(sessionId).failureCount).toBe(1);
     });
 
-    it("fails a delta pass whose response carries no recipe and sends the next pass in full", async () => {
+    it("fails a pass whose response carries no recipe and recovers on the next full send", async () => {
         const sessionId = `rust-recipe-omission-${Date.now()}`;
         installRawRows(sessionId, rawRows(1));
         const { client, bodies } = recordingClient((request, index) => {
             if (index === 0)
                 return recipeResponse(request, structuredClone(request.native_messages));
-            if (request.tail_delta) return { status: "ok", served_from: "transform" };
+            if (index === 1) return { status: "ok", served_from: "transform" };
             return recipeResponse(request, structuredClone(request.native_messages));
         });
         const transform = createRustModeTransform(makeDeps(), {
@@ -2037,21 +1935,15 @@ describe("recipe application", () => {
         const output = { messages: [...changed] as unknown[] };
         await transform.run(sessionId, output);
 
-        // The delta pass is refused as an invalid recipe; no second body is built for it.
+        // The pass is refused as an invalid recipe; no second body is built for it.
         expect(bodies).toHaveLength(2);
-        expect(bodies[1]?.tail_delta).toEqual({
-            after: bodies[0]?.full_array_fingerprint,
-            replace_from: 0,
-            native_replace_from: 0,
-        });
+        expect(bodies[1]?.native_messages).toEqual(changed);
         expect(output.messages).toEqual(changed);
         expect(transform.getState(sessionId).consecutiveFailures).toBe(1);
 
-        // The failed pass never applied, so the next pass resends the full array and recovers.
         const recovered = { messages: [...changed] as unknown[] };
         await transform.run(sessionId, recovered);
         expect(bodies).toHaveLength(3);
-        expect(bodies[2]?.tail_delta).toBeUndefined();
         expect(bodies[2]?.native_messages).toEqual(changed);
         expect(transform.getState(sessionId).consecutiveFailures).toBe(0);
     });
@@ -2096,47 +1988,65 @@ describe("recipe application", () => {
         admission.lease.release();
     });
 
-    it("evicts the least recently retained applied output once the optional budget is exceeded", () => {
-        const evicted: string[] = [];
-        const budget = new __rustModeTransformTest.AppliedOutputBudget(100, (sessionId) =>
-            evicted.push(sessionId),
-        );
-        expect(budget.retain("a", 60)).toBe(true);
-        expect(budget.retain("b", 30)).toBe(true);
-        expect(budget.usedBytes).toBe(90);
-        // Re-retaining a session replaces its charge instead of adding to it.
-        expect(budget.retain("a", 50)).toBe(true);
-        expect(budget.usedBytes).toBe(80);
-        expect(evicted).toEqual([]);
-        // The oldest retention goes first; `b` is older than the refreshed `a`.
-        expect(budget.retain("c", 40)).toBe(true);
-        expect(evicted).toEqual(["b"]);
-        expect(budget.usedBytes).toBe(90);
-        expect(budget.retain("d", 101)).toBe(false);
-        expect(budget.usedBytes).toBe(90);
-        budget.release("a");
-        expect(budget.usedBytes).toBe(40);
+    it("keeps one retained-output record per session under the session and byte limits", () => {
+        const record = (charge: number, appliedCharge?: number) => ({
+            rawCount: 1,
+            rawHistory: { count: 0, digest: "", symbols: [], bytes: 0 },
+            wireBytes: [0],
+            inputLengths: [0],
+            ...(appliedCharge === undefined
+                ? {}
+                : {
+                      applied: {
+                          revision: "r",
+                          values: [],
+                          lengths: [],
+                          capture: { members: [], snapshots: [], rootSnapshot: { fields: [] } },
+                          charge: appliedCharge,
+                      },
+                  }),
+            charge,
+        });
+        const outputs = new __rustModeTransformTest.RetainedOutputs(3, 100);
+        expect(__rustModeTransformTest.RETAINED_OUTPUT_SESSION_CAPACITY).toBe(64);
+        expect(__rustModeTransformTest.RETAINED_OUTPUT_BUDGET_BYTES).toBe(64 * 1024 * 1024);
+        expect(outputs.retain("a", record(60, 40))).toBe(true);
+        expect(outputs.retain("b", record(30))).toBe(true);
+        expect(outputs.usedBytes).toBe(90);
+        // Re-retaining a session replaces its record and charge instead of adding a second one.
+        const a = record(50, 30);
+        expect(outputs.retain("a", a)).toBe(true);
+        expect(outputs.size).toBe(2);
+        expect(outputs.usedBytes).toBe(80);
+        // Dropping the applied output keeps the basis and gives back only the applied share.
+        outputs.dropApplied("a", a);
+        expect(outputs.peek("a")).toBe(a);
+        expect(a.applied).toBeUndefined();
+        expect(outputs.usedBytes).toBe(50);
+        // The byte limit evicts the oldest record first; `b` is older than the refreshed `a`.
+        expect(outputs.retain("c", record(60))).toBe(true);
+        expect(outputs.peek("b")).toBeUndefined();
+        expect(outputs.usedBytes).toBe(80);
+        // The session limit evicts the oldest record even when bytes fit.
+        expect(outputs.retain("d", record(1))).toBe(true);
+        expect(outputs.retain("e", record(1))).toBe(true);
+        expect(outputs.size).toBe(3);
+        expect(outputs.peek("a")).toBeUndefined();
+        expect(outputs.retain("f", record(101))).toBe(false);
+        expect(outputs.peek("f")).toBeUndefined();
+        outputs.release("c");
+        expect(outputs.usedBytes).toBe(2);
     });
 });
 
-describe("delta prefix-mutation guard", () => {
-    it("in-place mutation of an older message forces a full send instead of a delta", async () => {
+describe("whole-array sends after host mutation", () => {
+    it("sends an in-place mutation of an older message with the whole array", async () => {
         const sessionId = `rust-prefix-guard-${Date.now()}`;
         const rows = rawRows(4);
         installRawRows(sessionId, rows);
-        let moduleNativeSnapshot: unknown[] = [];
-        const { client, bodies } = recordingClient((request) => {
-            const suffix = request.native_messages as unknown[];
-            const delta = request.tail_delta as { native_replace_from?: unknown } | undefined;
-            moduleNativeSnapshot =
-                delta && typeof delta.native_replace_from === "number"
-                    ? [
-                          ...moduleNativeSnapshot.slice(0, delta.native_replace_from),
-                          ...structuredClone(suffix),
-                      ]
-                    : structuredClone(suffix);
-            return recipeResponse(request, structuredClone(moduleNativeSnapshot));
-        });
+        const { client, bodies } = recordingClient((request) =>
+            recipeResponse(request, structuredClone(request.native_messages as unknown[])),
+        );
         const transform = createRustModeTransform(makeDeps(), {
             moduleClient: client,
         });
@@ -2150,18 +2060,13 @@ describe("delta prefix-mutation guard", () => {
         const appended = buildMessages(4);
         await transform.run(sessionId, { messages: [...appended] });
         expect(bodies).toHaveLength(2);
-        expect(bodies[1]?.tail_delta).toEqual({
-            after: expect.any(String),
-            replace_from: expect.any(Number),
-            native_replace_from: expect.any(Number),
-        });
+        expect(bodies[1]?.native_messages).toEqual(appended);
 
         const mutated = buildMessages(4, true);
         expect(JSON.stringify(mutated[0])).not.toEqual(JSON.stringify(appended[0]));
         const mutatedOutput = { messages: [...mutated] as unknown[] };
         await transform.run(sessionId, mutatedOutput);
         expect(bodies).toHaveLength(3);
-        expect(bodies[2]?.tail_delta).toBeUndefined();
         expect(bodies[2]?.messages).toHaveLength(4);
         expect(bodies[2]?.native_messages).toEqual(mutated);
         expect(JSON.stringify(bodies[2]?.messages)).toContain("MESSAGE m-1");
@@ -2170,55 +2075,9 @@ describe("delta prefix-mutation guard", () => {
         const stableOutput = { messages: [...mutated] as unknown[] };
         await transform.run(sessionId, stableOutput);
         expect(bodies).toHaveLength(4);
-        expect(bodies[3]?.tail_delta).toEqual({
-            after: bodies[2]?.full_array_fingerprint,
-            replace_from: 4,
-            native_replace_from: 4,
-        });
-        expect(bodies[3]?.messages).toEqual([]);
-        expect(bodies[3]?.native_messages).toEqual([]);
+        expect(bodies[3]?.messages).toHaveLength(4);
+        expect(bodies[3]?.native_messages).toEqual(mutated);
         expect(stableOutput.messages).toEqual(mutatedOutput.messages);
-    });
-
-    it("carries terminal visibility across an empty delta so a later append resends a mutated terminal", async () => {
-        const sessionId = `rust-empty-delta-visibility-${Date.now()}`;
-        const rows = rawRows(2);
-        installRawRows(sessionId, rows);
-        const { client, bodies } = recordingClient((request) => recipeResponse(request, []));
-        const transform = createRustModeTransform(makeDeps(), {
-            moduleClient: client,
-        });
-        const buildMessages = (count: number, mutateTerminal = false): MessageLike[] =>
-            rowMessages(sessionId, rows.slice(0, count), (row) =>
-                mutateTerminal && row.id === "m-2" ? "MESSAGE m-2" : `message ${row.id}`,
-            );
-
-        const first = buildMessages(2);
-        await transform.run(sessionId, { messages: [...first] });
-        const unchanged = buildMessages(2);
-        await transform.run(sessionId, { messages: [...unchanged] });
-        expect(bodies[1]?.tail_delta).toEqual({
-            after: bodies[0]?.full_array_fingerprint,
-            replace_from: 2,
-            native_replace_from: 2,
-        });
-
-        rows.push({
-            id: "m-3",
-            timeCreated: 3,
-            contributesOrdinal: true,
-            hasValidInfo: true,
-        });
-        const appended = buildMessages(3, true);
-        await transform.run(sessionId, { messages: [...appended] });
-        expect(bodies).toHaveLength(3);
-        expect(bodies[2]?.tail_delta).toEqual({
-            after: bodies[1]?.full_array_fingerprint,
-            replace_from: 1,
-            native_replace_from: 1,
-        });
-        expect(bodies[2]?.native_messages).toEqual(appended.slice(1));
-        expect(JSON.stringify(bodies[2]?.messages)).toContain("MESSAGE m-2");
     });
 
     it("resends a wire-invisible former terminal that was mutated while a message was appended", async () => {
@@ -2261,12 +2120,7 @@ describe("delta prefix-mutation guard", () => {
         const appended = buildMessages(3, "summary v2");
         await transform.run(sessionId, { messages: [...appended] });
         expect(bodies).toHaveLength(2);
-        expect(bodies[1]?.tail_delta).toEqual({
-            after: bodies[0]?.full_array_fingerprint,
-            replace_from: 1,
-            native_replace_from: 1,
-        });
-        expect(bodies[1]?.native_messages).toEqual(appended.slice(1));
+        expect(bodies[1]?.native_messages).toEqual(appended);
         expect(JSON.stringify(bodies[1]?.native_messages)).toContain("summary v2");
     });
 
@@ -2365,15 +2219,12 @@ describe("delta prefix-mutation guard", () => {
 });
 
 describe("bounded transform ownership", () => {
-    it.each([
-        "initial",
-        "full-retry",
-    ] as const)("rejects a getter installed after ordinal resolution before %s encoding", async (phase) => {
-        const sessionId = `rust-ordinal-microtask-${phase}`;
+    it("rejects a getter installed after ordinal resolution before encoding", async () => {
+        const sessionId = "rust-ordinal-microtask-initial";
         installAvailabilityDb(sessionId, {});
-        let rows = rawRows(1);
-        let messages = makeMessages(sessionId);
-        let armed = phase === "initial";
+        const rows = rawRows(1);
+        const messages = makeMessages(sessionId);
+        let armed = true;
         let installed = false;
         let getterCalls = 0;
         const getter = () => {
@@ -2408,38 +2259,21 @@ describe("bounded transform ownership", () => {
                 },
             }),
         );
-        const { client, bodies, calls } = recordingClient((request, index) => {
-            if (phase === "full-retry" && index === 1) {
-                armed = true;
-                return {
-                    status: "need_full_sync",
-                    note_deliveries: [{ transform_pass_id: "discarded" }],
-                };
-            }
-            return recipeResponse(request, request.native_messages);
-        });
+        const { client, bodies, calls } = recordingClient((request) =>
+            recipeResponse(request, request.native_messages as unknown[]),
+        );
         const transform = createRustModeTransform(makeDeps(), {
             moduleClient: client,
         });
-        if (phase === "full-retry") {
-            await transform.run(sessionId, { messages: [...messages] });
-            expect(transform.getState(sessionId).initialized).toBe(true);
-            rows = rawRows(2);
-            messages = rowMessages(sessionId, rows, () => "hello");
-        }
         const memoBefore = transform.getState(sessionId).ordinals;
         const output = { messages: messages as unknown[] };
         await transform.run(sessionId, output);
         expect(installed).toBe(true);
         expect(getterCalls).toBe(0);
-        expect(bodies).toHaveLength(phase === "initial" ? 0 : 2);
+        expect(bodies).toHaveLength(0);
         expect(output.messages).toBe(messages);
         expect(transform.getState(sessionId).ordinals).toEqual(memoBefore);
         expect(calls.some((call) => call.method === "transform.ack")).toBe(false);
-        if (phase === "full-retry") {
-            expect(bodies[1].tail_delta).toBeDefined();
-            expect(calls.at(-1)?.method).toBe("transform.nack");
-        }
         expect(defaultTransformCaptureAdmission.chargedBytes).toBe(0);
     });
 
@@ -2586,7 +2420,7 @@ describe("bounded transform ownership", () => {
                     enumerable: true,
                     configurable: true,
                 });
-            else transform.invalidateWireState(sessionId);
+            else transform.invalidateOrdinals(sessionId);
             reconnect.resolve(
                 restart === "reconnect"
                     ? {
@@ -2687,92 +2521,6 @@ describe("bounded transform ownership", () => {
         });
     }
 
-    it("recovers with a full request when byte pressure rejects a full-sync retry", async () => {
-        const sessionId = "rust-full-retry-byte-pressure";
-        const rows = rawRows(3);
-        installRawRows(sessionId, rows);
-        // A compaction summary is wire-invisible, so the append that follows it ships as a tail delta starting after it; the full retry must then project the two leading messages it skipped.
-        const input: MessageLike[] = rows.map((row, index) =>
-            index === 1
-                ? {
-                      info: {
-                          id: row.id,
-                          role: "assistant",
-                          sessionID: sessionId,
-                          summary: true,
-                          finish: "stop",
-                      },
-                      parts: [{ type: "text", text: "s".repeat(512) }],
-                  }
-                : {
-                      info: { id: row.id, role: "user", sessionID: sessionId },
-                      parts: [{ type: "text", text: "x".repeat(512) }],
-                  },
-        );
-        const size = inspectReferenceableMessages(input);
-        if (!size.ok) throw new Error("invalid fixture");
-        // A full pass fits the budget alone. While another session holds the appended message's projection, the tail-delta pass still fits but its full retry, which adds the two leading messages, does not.
-        const wireBytes = size.messageWireBytes.map((bytes) => 4 * bytes);
-        const admission = new TransformCaptureAdmission({
-            maxPasses: 2,
-            maxBytes: size.estimatedBytes + wireBytes[0] + wireBytes[1] + wireBytes[2] + 2000,
-        });
-        const { client, calls, bodies } = recordingClient((request, index) => {
-            if (index === 0) return recipeResponse(request, request.native_messages);
-            if (index === 1)
-                return {
-                    status: "need_full_sync",
-                    note_deliveries: [{ transform_pass_id: "discarded" }],
-                };
-            return {
-                ...recipeResponse(request, []),
-                note_deliveries: [{ transform_pass_id: "applied" }],
-            };
-        });
-        const transform = createRustModeTransform(makeDeps(), {
-            moduleClient: client,
-            captureAdmission: admission,
-        });
-        const first = input.slice(0, 2);
-        await transform.run(sessionId, { messages: first });
-        expect(bodies).toHaveLength(1);
-        expect(admission.chargedBytes).toBe(0);
-        const blocker = admission.admit("rust-full-retry-byte-pressure-blocker");
-        if (!("lease" in blocker)) throw new Error("blocker not admitted");
-        expect(blocker.lease.reserve(wireBytes[2])).toBe(true);
-        const output = { messages: input as unknown[] };
-        const array = output.messages;
-        const logSpy = spyOn(logger.sessionLog, "warn");
-        try {
-            await transform.run(sessionId, output);
-            expect(bodies).toHaveLength(2);
-            expect(bodies[1].tail_delta).toMatchObject({ native_replace_from: 2 });
-            expect(sessionLogs(logSpy, sessionId)).toContain(
-                `rust session ${sessionId} pass declined: capture_bytes (transform capture byte budget exceeded: wire projection)`,
-            );
-        } finally {
-            logSpy.mockRestore();
-        }
-        expect(output.messages).toBe(array);
-        expect(output.messages).toHaveLength(3);
-        expect(transform.getState(sessionId).failureCount).toBe(0);
-        expect(transform.getState(sessionId).forceFullWire).toBe(true);
-        expect(admission.chargedBytes).toBe(wireBytes[2]);
-        expect(calls.at(-1)?.body).toMatchObject({
-            transform_pass_id: "discarded",
-        });
-        expect(calls.at(-1)?.method).toBe("transform.nack");
-        // Once the other session settles, the next call is a full send that fits the budget.
-        blocker.lease.release();
-        await transform.run(sessionId, output);
-        expect(bodies[2].tail_delta).toBeUndefined();
-        expect(output.messages).toBe(array);
-        expect(output.messages).toHaveLength(0);
-        expect(transform.getState(sessionId).forceFullWire).toBe(false);
-        expect(calls.at(-1)?.body).toMatchObject({ transform_pass_id: "applied" });
-        expect(calls.at(-1)?.method).toBe("transform.ack");
-    });
-
     for (const cancellation of ["supersede", "clear", "invalidate"] as const) {
         it(`propagates ${cancellation} to the transport signal and waits for rejection before release`, async () => {
             const sessionId = `rust-signal-${cancellation}`;
@@ -2808,7 +2556,7 @@ describe("bounded transform ownership", () => {
             expect(admission.chargedBytes).toBeGreaterThan(0);
             let superseding: Promise<void> | undefined;
             if (cancellation === "clear") transform.clearSession(sessionId);
-            else if (cancellation === "invalidate") transform.invalidateWireState(sessionId);
+            else if (cancellation === "invalidate") transform.invalidateOrdinals(sessionId);
             else superseding = transform.run(sessionId, output);
             expect(signal.aborted).toBe(true);
             expect(admission.activePasses).toBe(1);
@@ -2878,17 +2626,16 @@ describe("bounded transform ownership", () => {
         expect(admission.chargedBytes).toBe(0);
         await transform.run(sessionId, { messages: [...messages] });
         expect(bodies).toHaveLength(2);
-        expect(bodies[1]?.tail_delta).toBeDefined();
+        expect(bodies[1]?.previous_output_revision).toBeDefined();
         expect(transform.getState(sessionId).ordinals).toEqual(priorMemo);
     });
 
-    it("reuses validated input lengths without repeated measurement on a full-sync retry", async () => {
-        const sessionId = "rust-full-retry-input-lengths";
+    it("reuses the input lengths of the verified prefix without measuring it again", async () => {
+        const sessionId = "rust-verified-input-lengths";
         const rows = rawRows(4);
         installRawRows(sessionId, rows);
         const messages = rowMessages(sessionId, rows);
-        const { client, bodies } = recordingClient((request, index) => {
-            if (index === 1) return { status: "need_full_sync" };
+        const { client, bodies } = recordingClient((request) => {
             return {
                 ...recipeResponse(request, []),
                 operations: [
@@ -2910,14 +2657,9 @@ describe("bounded transform ownership", () => {
         try {
             const output = { messages: [...messages] };
             await transform.run(sessionId, output);
-            expect(bodies).toHaveLength(3);
-            expect(bodies[1].tail_delta).toMatchObject({ native_replace_from: 2 });
-            expect(bodies[1].native_messages).toEqual(messages.slice(2));
-            expect(bodies[2].tail_delta).toBeUndefined();
-            expect(bodies[2].native_messages).toEqual(messages);
-            expect(bodies[2].base_revision).not.toBe(bodies[1].base_revision);
+            expect(bodies).toHaveLength(2);
+            expect(bodies[1].native_messages).toEqual(messages);
             expect(transform.getState(sessionId).failureCount).toBe(0);
-            expect(transform.getState(sessionId).forceFullWire).toBe(false);
             expect(output.messages).toHaveLength(messages.length);
             for (const [index, message] of messages.entries()) {
                 expect(output.messages[index]).toBe(message);
@@ -2930,36 +2672,6 @@ describe("bounded transform ownership", () => {
         } finally {
             lengthSpy.mockRestore();
         }
-    });
-
-    it("retains full-sync recovery after a failed retry until a full request publishes", async () => {
-        const sessionId = `rust-failed-full-retry-${Date.now()}`;
-        installRawRows(sessionId, rawRows(3));
-        const { client, bodies } = recordingClient((request, index) => {
-            if (index === 1) return { status: "need_full_sync" };
-            if (index === 2) throw new Error("full request connection reset");
-            return recipeResponse(request, request.native_messages);
-        });
-        const transform = createRustModeTransform(makeDeps(), {
-            moduleClient: client,
-        });
-        const warm = rowMessages(sessionId, rawRows(1));
-        await transform.run(sessionId, { messages: [...warm] });
-        const changed = rowMessages(sessionId, rawRows(2));
-        const output = { messages: [...changed] as unknown[] };
-        const array = output.messages;
-        await transform.run(sessionId, output);
-        // The failed pass serves the warm output followed by the appended message.
-        expect(output.messages).toBe(array);
-        expect(output.messages).toEqual(changed);
-        expect(output.messages[1]).toBe(changed[1]);
-        expect(bodies).toHaveLength(3);
-        expect(transform.getState(sessionId).forceFullWire).toBe(true);
-        const next = rowMessages(sessionId, rawRows(3));
-        await transform.run(sessionId, { messages: [...next] });
-        expect(bodies[3].tail_delta).toBeUndefined();
-        expect(transform.getState(sessionId).forceFullWire).toBe(false);
-        expect(transform.getState(sessionId).consecutiveFailures).toBe(0);
     });
 
     const trap = (): never => {
@@ -3026,7 +2738,7 @@ describe("bounded transform ownership", () => {
                         transform.clearSession(sessionId);
                         break;
                     case "invalidation":
-                        transform.invalidateWireState(sessionId);
+                        transform.invalidateOrdinals(sessionId);
                         break;
                 }
                 expect(admission.activePasses).toBe(1);
@@ -3049,7 +2761,7 @@ describe("bounded transform ownership", () => {
                 const recoveryInput = rowMessages(sessionId, rows.slice(-1));
                 await transform.run(sessionId, { messages: [...recoveryInput] });
                 expect(calls).toHaveLength(1);
-                expect(bodies[0]?.tail_delta).toBeUndefined();
+                expect(bodies[0]?.native_messages).toEqual(recoveryInput);
                 expect(transform.getState(sessionId).ordinals.entries.size).toBe(rows.length);
             });
         }
@@ -3206,77 +2918,6 @@ describe("bounded transform ownership", () => {
                 }
             });
         }
-    }
-
-    for (const fault of ["mutation", "supersession", "clear", "invalidation"] as const) {
-        it(`does not dispatch a need_full_sync retry after ${fault} of the valid first send`, async () => {
-            const sessionId = `rust-retry-${fault}`;
-            const rows = rawRows(1);
-            installRawRows(sessionId, rows);
-            const started = Promise.withResolvers<void>();
-            const response = Promise.withResolvers<unknown>();
-            const { client, bodies, calls } = recordingClient((request, index) => {
-                if (index === 0) return recipeResponse(request, request.native_messages);
-                started.resolve();
-                return response.promise;
-            });
-            const transform = createRustModeTransform(makeDeps(), {
-                moduleClient: client,
-            });
-            const seed = makeMessages(sessionId);
-            await transform.run(sessionId, { messages: [...seed] });
-            const priorMemo = transform.getState(sessionId).ordinals;
-            expect(priorMemo.entries.size).toBe(1);
-            rows.push(rawRows(2)[1]);
-            const messages = rowMessages(sessionId, rows);
-            const output = { messages: [...messages] };
-            const array = output.messages;
-            const pass = transform.run(sessionId, output);
-            await Promise.race([started.promise, pass]);
-            // Enabling state: the tail-delta send is pending its response.
-            expect(bodies).toHaveLength(2);
-            expect(bodies[1]?.tail_delta).toBeDefined();
-            switch (fault) {
-                case "mutation":
-                    (messages[1].parts[0] as { text: string }).text = "mutated before full retry";
-                    break;
-                case "supersession":
-                    await transform.run(sessionId, { messages: [...messages] });
-                    break;
-                case "clear":
-                    transform.clearSession(sessionId);
-                    break;
-                case "invalidation":
-                    transform.invalidateWireState(sessionId);
-                    break;
-            }
-            response.resolve({
-                status: "need_full_sync",
-                note_deliveries: [{ transform_pass_id: "retry-discarded" }],
-            });
-            await pass;
-            expect(bodies).toHaveLength(2);
-            expect(calls.map((call) => call.method)).toEqual([
-                "transform",
-                "transform",
-                "transform.nack",
-            ]);
-            expect(calls.at(-1)?.body).toMatchObject({
-                transform_pass_id: "retry-discarded",
-            });
-            expect(output.messages).toBe(array);
-            expect(output.messages[0]).toBe(messages[0]);
-            expect(output.messages[1]).toBe(messages[1]);
-            const state = transform.getState(sessionId);
-            if (fault === "clear" || fault === "invalidation") {
-                expect(state.ordinals.entries.size).toBe(0);
-            } else {
-                expect(state.ordinals).toEqual(priorMemo);
-            }
-            // A dispatched pass marks the next send full before awaiting the daemon; only a cleared session starts from fresh state.
-            expect(state.forceFullWire).toBe(fault !== "clear");
-            expect(state.failureCount).toBe(0);
-        });
     }
 
     it("declines before publication and NACKs known deliveries when the source changes between pages", async () => {
@@ -3441,7 +3082,7 @@ describe("bounded transform ownership", () => {
         expect(transform.getState(sessionId).ordinals.entries.size).toBe(0);
     });
 
-    it("rejects publication and promotes no memo when the wire state is invalidated mid-flight", async () => {
+    it("rejects publication and promotes no memo when the ordinals are invalidated mid-flight", async () => {
         const sessionId = `rust-invalidate-mid-flight-${Date.now()}`;
         installRawRows(sessionId, rawRows(1));
         const started = Promise.withResolvers<void>();
@@ -3465,7 +3106,7 @@ describe("bounded transform ownership", () => {
             }),
         ]);
         expect(calls).toHaveLength(1);
-        transform.invalidateWireState(sessionId);
+        transform.invalidateOrdinals(sessionId);
         response.resolve(
             recipeForLast(bodies, [{ info: { id: "stale" }, parts: [] }], {
                 note_deliveries: [{ transform_pass_id: "pass-stale" }],
@@ -3914,6 +3555,73 @@ describe("bounded transform ownership", () => {
         expect(transform.getState(sessionId).ordinals.entries.size).toBe(2);
     });
 
+    it("leaves exactly a shorter candidate in the original array object", async () => {
+        const sessionId = `rust-shrink-success-${Date.now()}`;
+        const rows = rawRows(5);
+        installRawRows(sessionId, rows);
+        const candidate = [{ info: { id: "fold" }, parts: [] }];
+        const { client } = recordingClient((request) => recipeResponse(request, candidate));
+        const transform = createRustModeTransform(makeDeps(), { moduleClient: client });
+        const output = { messages: [...rowMessages(sessionId, rows)] as unknown[] };
+        const array = output.messages;
+        await transform.run(sessionId, output);
+        expect(output.messages).toBe(array);
+        expect(array).toHaveLength(1);
+        expect(array[0]).toBe(candidate[0]);
+        expect(Object.keys(array)).toEqual(["0"]);
+    });
+
+    it("restores the captured references and promotes nothing when a planted slot stops the shrink", async () => {
+        const sessionId = `rust-shrink-planted-${Date.now()}`;
+        const rows = rawRows(6);
+        installRawRows(sessionId, rows);
+        const candidate = [{ info: { id: "fold" }, parts: [] }];
+        const { client, bodies, calls } = recordingClient((request) =>
+            recipeResponse(request, candidate, {
+                note_deliveries: [{ transform_pass_id: "planted" }],
+            }),
+        );
+        const transform = createRustModeTransform(makeDeps(), { moduleClient: client });
+        const members = rowMessages(sessionId, rows);
+        const output = { messages: [...members] as unknown[] };
+        const array = output.messages;
+        // Another plugin fixed slot k in place; the output is shorter than k, so the shrink meets it.
+        const k = 3;
+        Object.defineProperty(array, k, { value: members[k], configurable: false });
+        expect(candidate.length).toBeLessThanOrEqual(k);
+        const memoBefore = transform.getState(sessionId).ordinals;
+        const warnSpy = spyOn(logger.sessionLog, "warn");
+        let warnings: string[];
+        try {
+            await transform.run(sessionId, output);
+            warnings = sessionLogs(warnSpy, sessionId);
+        } finally {
+            warnSpy.mockRestore();
+        }
+        expect(bodies).toHaveLength(1);
+        // The original prefix through k followed by the captured references, and no candidate slot.
+        expect(output.messages).toBe(array);
+        expect(array).toHaveLength(members.length);
+        for (const [index, member] of members.entries()) expect(array[index]).toBe(member);
+        expect(array).not.toContain(candidate[0]);
+        // Exactly one failed-publication line, carrying the TypeError and the length before restoration.
+        expect(warnings).toEqual([
+            expect.stringMatching(
+                new RegExp(
+                    `^rust session ${sessionId} pass declined: publication_failed \\(shrink to 1 stopped at length ${k + 1} \\(TypeError: .*\\); restored 2 captured references\\)$`,
+                ),
+            ),
+        ]);
+        // Nothing was promoted: no memo, no retained output, and the delivery is refused.
+        const state = transform.getState(sessionId);
+        expect(state.ordinals).toEqual(memoBefore);
+        expect(state.initialized).toBe(false);
+        expect(state.failureCount).toBe(0);
+        expect(calls.map((call) => call.method)).toEqual(["transform", "transform.nack"]);
+        await transform.run(sessionId, { messages: [...rowMessages(sessionId, rows)] });
+        expect(bodies[1]?.previous_output_revision).toBeUndefined();
+    });
+
     it("does not resend after an outcome-unknown transport failure and recovers on the next attempt", async () => {
         const sessionId = `rust-unknown-send-${Date.now()}`;
         installRawRows(sessionId, rawRows(1));
@@ -4129,7 +3837,7 @@ describe("fail-open after an applied pass", () => {
     });
 });
 
-describe("capture scaled to the appended messages", () => {
+describe("capture verified against the retained prefix", () => {
     const folded = (sessionId: string): MessageLike => ({
         info: { id: "fold-1", role: "user", sessionID: sessionId },
         parts: [{ type: "text", text: "folded history" }],
@@ -4159,57 +3867,13 @@ describe("capture scaled to the appended messages", () => {
         return sessionLogs(spy, sessionId).filter((line) => line.startsWith("rust pass:"));
     }
 
-    it("keeps capturing a history past the 64 MiB budget at a per-pass charge set by the append", async () => {
-        const sessionId = `rust-delta-capture-large-${Date.now()}`;
-        const rows = rawRows(3_000);
-        installRawRows(sessionId, rows);
-        const texts = new Map(rows.map((row) => [row.id, `${row.id} ${"x".repeat(24_000)}`]));
-        const { client, bodies } = recordingClient((request) =>
-            recipeResponse(request, [folded(sessionId)]),
-        );
-        const { admission, charges } = chargeRecordingAdmission();
-        const transform = createRustModeTransform(makeDeps(), {
-            moduleClient: client,
-            captureAdmission: admission,
+    /** Each pass's count of leading members its capture verified against the retained digest. */
+    function verifiedCounts(spy: Parameters<typeof sessionLogs>[0], sessionId: string): number[] {
+        return sessionLogs(spy, sessionId).flatMap((line) => {
+            const match = /phase=capture verified=(\d+)$/.exec(line);
+            return match ? [Number(match[1])] : [];
         });
-        const debugSpy = spyOn(logger.sessionLog, "debug");
-        let history: MessageLike[] = [];
-        try {
-            // Each pass gets fresh message objects, as a host that clones its history does.
-            for (let count = 200; count <= 3_000; count += 200) {
-                history = rowMessages(sessionId, rows.slice(0, count), (row) =>
-                    String(texts.get(row.id)),
-                );
-                const output = { messages: [...history] as unknown[] };
-                await transform.run(sessionId, output);
-                expect(output.messages).toEqual([folded(sessionId)]);
-            }
-            const appended = rowMessages(sessionId, rows.slice(0, 3_000), (row) =>
-                String(texts.get(row.id)),
-            );
-            appended.push(...rowMessages(sessionId, [{ ...rows[0], id: "m-3001" } as RawRow]));
-            await transform.run(sessionId, { messages: appended });
-            const lines = passLines(debugSpy, sessionId);
-            expect(lines).toHaveLength(16);
-            for (const line of lines) expect(line).toContain("applied=true");
-            // After the first pass only the former terminal and the appended messages are sent.
-            expect(lines[0]).toContain("wire_messages:200 ");
-            for (const line of lines.slice(1, 15)) expect(line).toContain("wire_messages:201 ");
-            expect(lines[15]).toContain("in=3001 out=1");
-            expect(lines[15]).toContain("wire_messages:2 ");
-        } finally {
-            debugSpy.mockRestore();
-        }
-        expect(Buffer.byteLength(JSON.stringify(history))).toBeGreaterThan(64 * 1024 * 1024);
-        expect(bodies.at(-1)?.native_messages).toHaveLength(2);
-        // The same 200-message append costs the same at 400 and at 3,000 messages.
-        expect(charges).toHaveLength(16);
-        const [, atFourHundred] = charges as [number, number];
-        const atThreeThousand = charges[14] as number;
-        expect(atThreeThousand).toBeLessThan(atFourHundred * 1.1);
-        expect(charges.at(-1)).toBeLessThan(2 * 1024 * 1024);
-        expect(admission.chargedBytes).toBe(0);
-    }, 60_000);
+    }
 
     it("detects an in-place edit of an old message and falls back to a full capture", async () => {
         const sessionId = `rust-delta-capture-edit-${Date.now()}`;
@@ -4219,20 +3883,23 @@ describe("capture scaled to the appended messages", () => {
             recipeResponse(request, [folded(sessionId)]),
         );
         const transform = createRustModeTransform(makeDeps(), { moduleClient: client });
-        const history = rowMessages(sessionId, rows.slice(0, 4));
-        await transform.run(sessionId, { messages: [...history] });
-        await transform.run(sessionId, { messages: [...history] });
-        expect(bodies[1]?.tail_delta).toBeDefined();
+        const debugSpy = spyOn(logger.sessionLog, "debug");
+        try {
+            const history = rowMessages(sessionId, rows.slice(0, 4));
+            await transform.run(sessionId, { messages: [...history] });
+            await transform.run(sessionId, { messages: [...history] });
 
-        // The same object, edited in place, must not verify against its retained digest.
-        (history[1]?.parts as Array<{ text: string }>)[0].text = "EDITED m-2";
-        const grown = [...history, ...rowMessages(sessionId, rows.slice(4))];
-        await transform.run(sessionId, { messages: [...grown] });
-        expect(bodies).toHaveLength(3);
-        expect(bodies[2]?.tail_delta).toBeUndefined();
-        expect(bodies[2]?.native_messages).toEqual(grown);
-        await transform.run(sessionId, { messages: [...grown] });
-        expect(bodies[3]?.tail_delta).toBeDefined();
+            // The same object, edited in place, must not verify against its retained digest.
+            (history[1]?.parts as Array<{ text: string }>)[0].text = "EDITED m-2";
+            const grown = [...history, ...rowMessages(sessionId, rows.slice(4))];
+            await transform.run(sessionId, { messages: [...grown] });
+            expect(bodies).toHaveLength(3);
+            expect(bodies[2]?.native_messages).toEqual(grown);
+            await transform.run(sessionId, { messages: [...grown] });
+            expect(verifiedCounts(debugSpy, sessionId)).toEqual([0, 3, 0, 4]);
+        } finally {
+            debugSpy.mockRestore();
+        }
     });
 
     it("rejects a verified prefix message edited while the pass awaits the daemon", async () => {
@@ -4250,7 +3917,7 @@ describe("capture scaled to the appended messages", () => {
             await transform.run(sessionId, { messages: [...history] });
             const output = { messages: [...history] as unknown[] };
             await transform.run(sessionId, output);
-            expect(bodies[1]?.tail_delta).toBeDefined();
+            expect(bodies[1]?.previous_output_revision).toBeDefined();
             expect(output.messages).toEqual(history);
             expect(sessionLogs(debugSpy, sessionId)).toContain(
                 `rust session ${sessionId} pass declined: source_changed (publish)`,
@@ -4350,7 +4017,7 @@ describe("capture scaled to the appended messages", () => {
         }
     });
 
-    it("drops the wire cache when its digests exceed the retained history budget", async () => {
+    it("keeps the basis without the applied output, then drops the record, as the budget tightens", async () => {
         const sessionId = `rust-delta-capture-retained-${Date.now()}`;
         const rows = rawRows(3);
         installRawRows(sessionId, rows);
@@ -4359,17 +4026,28 @@ describe("capture scaled to the appended messages", () => {
         );
         const transform = createRustModeTransform(makeDeps(), {
             moduleClient: client,
-            retainedHistoryBudgetBytes: 2 * 16,
+            // Two messages' basis fits exactly; no applied output fits beside it.
+            retainedOutputBudgetBytes: 2 * 16,
         });
-        await transform.run(sessionId, { messages: rowMessages(sessionId, rows.slice(0, 2)) });
-        await transform.run(sessionId, { messages: rowMessages(sessionId, rows) });
-        expect(bodies[1]?.tail_delta).toBeDefined();
-        await transform.run(sessionId, { messages: rowMessages(sessionId, rows) });
-        expect(bodies[2]?.tail_delta).toBeUndefined();
+        const debugSpy = spyOn(logger.sessionLog, "debug");
+        try {
+            await transform.run(sessionId, { messages: rowMessages(sessionId, rows.slice(0, 2)) });
+            await transform.run(sessionId, { messages: rowMessages(sessionId, rows) });
+            await transform.run(sessionId, { messages: rowMessages(sessionId, rows) });
+            // The two-message basis verified the next capture; the three-message basis was refused.
+            expect(verifiedCounts(debugSpy, sessionId)).toEqual([0, 1, 0]);
+        } finally {
+            debugSpy.mockRestore();
+        }
+        expect(bodies.map((body) => body.previous_output_revision)).toEqual([
+            undefined,
+            undefined,
+            undefined,
+        ]);
         expect(bodies[2]?.native_messages).toHaveLength(3);
     });
 
-    it("charges retained symbol descriptions against the retained history budget", async () => {
+    it("charges retained symbol descriptions against the retained-output budget", async () => {
         const sessionId = `rust-delta-capture-retained-symbol-${Date.now()}`;
         const rows = rawRows(3);
         installRawRows(sessionId, rows);
@@ -4379,63 +4057,29 @@ describe("capture scaled to the appended messages", () => {
             Object.defineProperty(messages[0], key, { value: 1, enumerable: true, writable: true });
             return messages;
         };
-        const run = async (budget: number): Promise<Record<string, unknown> | undefined> => {
-            const { client, bodies } = recordingClient((request) =>
+        const run = async (budget: number): Promise<number[]> => {
+            const { client } = recordingClient((request) =>
                 recipeResponse(request, [folded(sessionId)]),
             );
             const transform = createRustModeTransform(makeDeps(), {
                 moduleClient: client,
-                retainedHistoryBudgetBytes: budget,
+                retainedOutputBudgetBytes: budget,
             });
-            await transform.run(sessionId, {
-                messages: withKey(rowMessages(sessionId, rows.slice(0, 2))),
-            });
-            await transform.run(sessionId, { messages: withKey(rowMessages(sessionId, rows)) });
-            return bodies[1];
+            const debugSpy = spyOn(logger.sessionLog, "debug");
+            try {
+                await transform.run(sessionId, {
+                    messages: withKey(rowMessages(sessionId, rows.slice(0, 2))),
+                });
+                await transform.run(sessionId, { messages: withKey(rowMessages(sessionId, rows)) });
+                return verifiedCounts(debugSpy, sessionId);
+            } finally {
+                debugSpy.mockRestore();
+            }
         };
         // Two messages, one symbol slot, and the description fit a generous budget.
-        expect((await run(4_096))?.tail_delta).toBeDefined();
-        // Without the description, the same cache would fit 64 bytes; with it, the cache is dropped.
-        const refused = await run(64);
-        expect(refused?.tail_delta).toBeUndefined();
-        expect(refused?.native_messages).toHaveLength(3);
-    });
-
-    it("evicts the session-count victim even when the history budget evicts another session", async () => {
-        const capacity = __rustModeTransformTest.WIRE_CACHE_SESSION_CAPACITY;
-        const stamp = Date.now();
-        const sessionIdAt = (index: number): string => `rust-delta-capture-lru-${stamp}-${index}`;
-        const bodiesBySession = new Map<string, Record<string, unknown>[]>();
-        const client: RustModeModuleClient = {
-            call: async ({ sessionId, body }) => {
-                const request = body as Record<string, unknown>;
-                const list = bodiesBySession.get(sessionId) ?? [];
-                list.push(request);
-                bodiesBySession.set(sessionId, list);
-                return recipeResponse(request, []);
-            },
-        };
-        // One-message sessions fill the history budget exactly at the session-count capacity.
-        const transform = createRustModeTransform(makeDeps(), {
-            moduleClient: client,
-            retainedHistoryBudgetBytes: capacity * 16,
-        });
-        for (let index = 0; index < capacity; index += 1) {
-            const sessionId = sessionIdAt(index);
-            installRawRows(sessionId, rawRows(1));
-            await transform.run(sessionId, { messages: makeMessages(sessionId) });
-        }
-        // The two-message newcomer needs a count eviction and a byte eviction.
-        const newcomer = sessionIdAt(capacity);
-        installRawRows(newcomer, rawRows(2));
-        await transform.run(newcomer, { messages: rowMessages(newcomer, rawRows(2)) });
-
-        for (const evicted of [sessionIdAt(0), sessionIdAt(1)]) {
-            const input = makeMessages(evicted);
-            await transform.run(evicted, { messages: [...input] });
-            expect(bodiesBySession.get(evicted)?.[1]?.tail_delta).toBeUndefined();
-            expect(bodiesBySession.get(evicted)?.[1]?.native_messages).toEqual(input);
-        }
+        expect(await run(4_096)).toEqual([0, 1]);
+        // Without the description, the same basis would fit 64 bytes; with it, the record is dropped.
+        expect(await run(64)).toEqual([0, 0]);
     });
 
     it("charges a fallback capture once after the prefix fails to verify", async () => {
@@ -4476,7 +4120,7 @@ describe("capture scaled to the appended messages", () => {
         (history[1]?.parts as Array<{ text: string }>)[0].text = "EDITED m-2";
         const grown = [...history, ...rowMessages(sessionId, rows.slice(4))];
         await transform.run(sessionId, { messages: [...grown] });
-        expect(bodies[1]?.tail_delta).toBeUndefined();
+        expect(bodies[1]?.native_messages).toEqual(grown);
         const full = inspectReferenceableMessages(grown);
         if (!full.ok) throw new Error("valid source rejected");
         // The first two reservations are the partial inspection and its full fallback.

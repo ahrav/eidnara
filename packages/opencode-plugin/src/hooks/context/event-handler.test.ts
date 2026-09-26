@@ -121,7 +121,7 @@ function buildHarness(): Harness {
         internalChildSessions: new Set<string>(),
         subagentSessions: new Set<string>(),
         onSessionCacheInvalidated: (id) => calls.cache.push(id),
-        onRustWireInvalidated: (id) => calls.wire.push(id),
+        onRustOrdinalsInvalidated: (id) => calls.wire.push(id),
         onSessionDeleted: (sessionId, directory) => calls.deleted.push({ sessionId, directory }),
     };
     const handler = createEventHandler(deps);
