@@ -129,7 +129,7 @@ pub(crate) const PI_PROVIDER_ERROR_MESSAGE: &str = "pi assistant stopped with re
 
 /// Whether a `BackendError::message` names a failure the model provider reported about the request's content, as opposed to one the host raised while preparing, launching, or supervising the harness, or one about the configuration.
 /// `ErrorClass::Permanent` covers all of these; a caller that reacts to the request's content needs the distinction, because a host or configuration failure recurs for any request until the environment changes.
-/// An OpenCode status is accepted only from [`CONTENT_REJECTION_STATUSES`]: an unknown model answers 404 and a billing problem 402, and neither says anything about the chunk.
+/// An OpenCode status is accepted only from `CONTENT_REJECTION_STATUSES`: an unknown model answers 404 and a billing problem 402, and neither says anything about the chunk.
 /// `merge_cleanup` and `merge_record_retained` may append `; additionally ...` to either message; the decoration reports host cleanup, not the provider.
 pub fn is_provider_reported_failure(message: &str) -> bool {
     let decorated = |rest: &str| rest.is_empty() || rest.starts_with("; additionally ");
