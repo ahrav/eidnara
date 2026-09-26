@@ -174,9 +174,10 @@ type OwnedRetainedOutput = { applied?: AppliedOutput; charge: number };
 
 /**
  * Holds one retained output per session under a session-count and a byte limit, evicting the
- * least recently retained record first. A record larger than the whole budget is refused, and
- * refusal only costs the next pass its verified prefix and `previous` source. Eviction drops the
- * record alone; capture leases belong to the admission owner and are never released here.
+ * least recently retained record first. A record over the budget is retained without its applied
+ * output when its basis fits, and refused otherwise; refusal costs the next pass its verified
+ * prefix and `previous` source. Eviction drops the record alone; capture leases belong to the
+ * admission owner and are never released here.
  */
 class RetainedOutputs {
     private readonly records = new Map<string, RetainedOutput>();
