@@ -22,15 +22,13 @@ the incremental builder paths (`project_incremental`,
 `EIDNARA_PREFIX_PROJECTION_DIFFERENTIAL`. Every pass projects its full CK
 input with `MessageProjection::project`. A tail delta reattaches its prefix
 only from the latest-ready request snapshot; without one it takes the
-full-sync path. Every session shares one ready-snapshot budget, so
-`TRANSFORM_SNAPSHOT_BUDGET_BYTES` rises from 64 MiB to 256 MiB, the budget
+full-sync path. Every session shares one ready-snapshot budget, so #828
+raised `TRANSFORM_SNAPSHOT_BUDGET_BYTES` from 64 MiB to 256 MiB, the budget
 the projection cache had. At 64 MiB, two sessions whose snapshots together
-exceeded it evicted each other on alternating turns and refused every delta
-(`alternating_sessions_keep_their_delta_prefix_under_the_shared_snapshot_budget`).
-Interim until #829 deletes the delta channel: a session whose request charge
-exceeds 256 MiB, or whose snapshot other sessions' passes evict, gets
-`need_full_sync` on its next delta turn. The projection cache used to serve
-such a session up to its 192 MiB entry cap.
+exceeded it evicted each other on alternating turns and refused every delta.
+#829 deletes the delta channel, so the ready snapshot serves only wrapup and
+holds no native payload; the budget returns to 64 MiB and the alternating-
+session delta test is deleted with the delta path.
 The tag-mint frontier memo no longer keys on the full-array
 fingerprint. Citations of the deleted symbols below are historical and link
 to `704568ec`, the last commit that has them.
@@ -47,12 +45,13 @@ deleted symbols in passing; the notes in those records say what replaced
 them. The wire keeps `projection_cache_lookup`, `projection_cache_store`,
 and `projection_reused_messages` in `TransformTimings`; they now report zero.
 
-`DECLARED_RETAINED_RESIDENT_BYTES` drops by 128 MiB, from 3,172,345,368 to
-3,038,127,640. The 256 MiB projection cache leaves
-`TRANSFORM_SERVE_CACHE_COMBINED_BUDGET_BYTES` (768 MiB to 512 MiB), and the
-256 MiB active projection lease budget leaves the sum. The ready-snapshot
-budget and `ACTIVE_SNAPSHOT_LEASE_BUDGET_BYTES`, which equals it, each rise
-by 192 MiB. A compile-time assertion now requires the combined budget to
+`DECLARED_RETAINED_RESIDENT_BYTES` dropped by 128 MiB under #828, from
+3,172,345,368 to 3,038,127,640: the 256 MiB projection cache left
+`TRANSFORM_SERVE_CACHE_COMBINED_BUDGET_BYTES` (768 MiB to 512 MiB), the
+256 MiB active projection lease budget left the sum, and the ready-snapshot
+budget and `ACTIVE_SNAPSHOT_LEASE_BUDGET_BYTES`, which equals it, each rose
+by 192 MiB. #829 returns both to 64 MiB, taking a further 384 MiB off the sum. A
+compile-time assertion now requires the combined budget to
 equal the serialized-output and native-attachment budgets.
 
 ## Scope and provenance
@@ -171,7 +170,7 @@ HEAD (`crates/daemon/src/dispatch.rs:132-148` measures, `:237-249` writes).
 | B2 | [synthetic-normalization-is-scoped-to-the-pass][b2] | safety | always |
 | B3 | [tag-baseline-cache-entry-is-never-mutated-by-a-pass][b3] | safety | always |
 | B4 | [hygiene-digest-is-kind-prefixed-part-content][b4] | safety | always |
-| B5 | [replayed-synthetic-pair-arrives-unflagged-on-a-delta-turn][b5] | reachability | sometimes |
+| B5 | [replayed-synthetic-pair-arrives-unflagged-on-a-delta-turn][b5] | reachability | sometimes (invalidated by #829) |
 | C1 | [consolidated-cache-state-reads-match-per-consumer-loads][c1] | safety | always |
 | C2 | [pass-trace-writes-count-every-pass-outside-the-cache-cas][c2] | safety | always |
 | C3 | [side-channel-drain-delivers-each-row-once-and-keeps-its-schedule][c3] | safety | always |
@@ -787,7 +786,7 @@ provenance, not an independently reexecuted or artifact-hash-verified run.
 
 Type: reachability
 Reachability: default-production
-Status: active
+Status: invalidated
 Exercised: yes - [The delta witness][synthetic-delta-witness] freezes a pair
 on a HARD pass, reattaches two prefix messages, sends the pair unflagged in
 the protected suffix, and observes a prepared firing with native output.
@@ -829,7 +828,15 @@ prefix reuse (removed by #828), and `history_summarizer.fired` before emitting t
 producer prompts, third-turn boundary and chunk inputs, and native bytes;
 unaudited.
 Impact: B2 can pass while the divergent observer is never reached.
-Open questions: None.
+Open questions:
+
+- Invalidated by #829. The daemon no longer expands `tail_delta` bodies:
+  `expand_transform_tail_delta` is deleted, a body that carries `tail_delta`
+  is refused with `transform_tail_delta_retired`, and every request carries
+  the whole captured array. No delta turn reattaches a prefix, so the
+  situation this record names cannot occur, and the delta witness was
+  deleted with the delta path. B2's shared-input equivalence stays with the
+  full-array request.
 
 ## Cache-state load, pass trace, side channel, and meta preparation
 
@@ -873,7 +880,7 @@ trigger. Decode: for every stored `meta` text, a scalar projection of
 field fails to deserialize the consumer takes the branch it took on a failed
 full load (`None` for the projection cache at
 [`lookup_full_projection_cache`][epoch-read], deleted by #828, and
-[`expand_transform_tail_delta`][epoch-read-delta], `false` for
+[`expand_transform_tail_delta`][epoch-read-delta], deleted by #829, `false` for
 [`history_summarizer_active`][active]), except for the recorded divergences: a
 corrupt `core_state` or a corrupt sibling field no longer takes that branch
 (the pass proceeds and the transform's own snapshot load refuses the row

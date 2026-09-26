@@ -29,44 +29,19 @@ const HARNESS: &str = "opencode";
 
 #[cfg(test)]
 pub(crate) fn decode_opencode(messages: &[MessageV2Json]) -> DecodedHarnessMessages {
-    decode_opencode_with_sidecar_and_base(messages, None, 0)
-}
-
-#[cfg(test)]
-pub(crate) fn decode_opencode_with_sidecar(
-    messages: &[MessageV2Json],
-    prior: Option<&DecodeSidecar>,
-) -> DecodedHarnessMessages {
-    decode_opencode_with_sidecar_and_base(messages, prior, 0)
-}
-
-#[cfg(test)]
-pub(crate) fn decode_opencode_with_sidecar_and_base(
-    messages: &[MessageV2Json],
-    prior: Option<&DecodeSidecar>,
-    provisional_base: u64,
-) -> DecodedHarnessMessages {
     let shared = messages.iter().cloned().map(Arc::new).collect::<Vec<_>>();
-    decode_opencode_shared(&shared, prior, provisional_base)
+    decode_opencode_shared(&shared)
 }
 
-/// Decodes shared messages while inheriting stable message-ID pins from `prior`.
+/// Decodes shared messages.
 ///
 /// Each envelope is retained in `HarnessMessageMeta::raw` through an `Arc`
 /// clone, so callers that already share values pay no deep copy. Explicit
-/// absolute ordinals win. Missing ordinals are assigned from
-/// `provisional_base + index + 1` with saturating arithmetic. The last
-/// compaction part becomes the extracted boundary and is omitted from CK
-/// content. Unknown parts remain opaque.
-pub(crate) fn decode_opencode_shared(
-    messages: &[Arc<Value>],
-    prior: Option<&DecodeSidecar>,
-    provisional_base: u64,
-) -> DecodedHarnessMessages {
+/// absolute ordinals win. A missing ordinal is `index + 1` with saturating
+/// arithmetic. The last compaction part becomes the extracted boundary and is
+/// omitted from CK content. Unknown parts remain opaque.
+pub(crate) fn decode_opencode_shared(messages: &[Arc<Value>]) -> DecodedHarnessMessages {
     let mut sidecar = DecodeSidecar::new(HARNESS);
-    if let Some(prior) = prior {
-        sidecar.mid_pins = prior.mid_pins.clone();
-    }
 
     let mut decoded = Vec::with_capacity(messages.len());
     let mut boundary = None;
@@ -77,18 +52,12 @@ pub(crate) fn decode_opencode_shared(
             .get("absolute_ordinal")
             .and_then(Value::as_u64)
             .or_else(|| info.get("absolute_ordinal").and_then(Value::as_u64));
-        let ordinal = explicit_ordinal.unwrap_or_else(|| {
-            provisional_base
-                .saturating_add(message_index as u64)
-                .saturating_add(1)
-        });
+        let ordinal = explicit_ordinal.unwrap_or_else(|| (message_index as u64).saturating_add(1));
         let stable_key = string_field(info, "id")
             .or_else(|| string_field(raw_message, "id"))
             .unwrap_or_else(|| format!("opencode-hash-{}", stable_hash_prefix(raw_message, 24)));
-        let mid = sidecar
-            .inherit_pin(&stable_key)
-            .unwrap_or_else(|| stable_key.clone());
-        sidecar.pin_mid(stable_key.clone(), mid.clone());
+        // Each call decodes the whole array with no prior sidecar, so the stable key is the mid.
+        let mid = stable_key.clone();
 
         let role = string_field(info, "role")
             .or_else(|| string_field(raw_message, "role"))
@@ -267,48 +236,6 @@ pub(crate) fn decode_opencode_shared(
         boundary,
         sidecar,
     }
-}
-
-pub(crate) fn decode_opencode_sidecar_incremental(
-    messages: &[Arc<Value>],
-    prior: &DecodeSidecar,
-    replace_from: usize,
-) -> DecodeSidecar {
-    debug_assert!(replace_from <= messages.len());
-    debug_assert!(replace_from <= prior.order.len());
-    if replace_from == messages.len() && replace_from == prior.order.len() {
-        return prior.clone();
-    }
-
-    let suffix =
-        decode_opencode_shared(&messages[replace_from..], Some(prior), replace_from as u64).sidecar;
-    let mut sidecar = DecodeSidecar::new(HARNESS);
-    sidecar.mid_pins = suffix.mid_pins;
-    let mut order_is_indexed = true;
-    for mid in prior.order.iter().take(replace_from) {
-        sidecar.order.push(mid.clone());
-        if let Some(meta) = prior.messages.get(mid) {
-            sidecar.messages.insert(mid.clone(), Arc::clone(meta));
-        } else {
-            order_is_indexed = false;
-        }
-    }
-    for mid in suffix.order {
-        let Some(meta) = suffix.messages.get(&mid) else {
-            continue;
-        };
-        // Sparse prefixes retain order entries whose metadata is absent.
-        let seen = if order_is_indexed {
-            sidecar.messages.contains_key(&mid)
-        } else {
-            sidecar.order.contains(&mid)
-        };
-        if !seen {
-            sidecar.order.push(mid.clone());
-        }
-        sidecar.messages.insert(mid, Arc::clone(meta));
-    }
-    sidecar
 }
 
 /// Encodes CK messages and reuses retained native envelopes when available.
@@ -2069,80 +1996,6 @@ mod tests {
                 std::panic::catch_unwind(|| assert_unique_tool_use_ids(&collided)).is_err(),
                 "copying the id from message {source} to message {target} must trip the guard"
             );
-        }
-    }
-
-    #[test]
-    fn incremental_sidecar_carries_pins_across_three_generations() {
-        let mut seed = DecodeSidecar::new(HARNESS);
-        seed.pin_mid("stable-key", "pinned-mid");
-        let generation_1 = vec![json!({
-            "info": { "id": "stable-key", "role": "user" },
-            "parts": [{ "type": "text", "text": "first" }]
-        })];
-        let first = decode_opencode_with_sidecar(&generation_1, Some(&seed));
-        assert_eq!(first.messages[0].mid, "pinned-mid");
-
-        let mut generation_2 = generation_1.clone();
-        generation_2.push(json!({
-            "info": { "id": "other-key", "role": "assistant" },
-            "parts": [{ "type": "text", "text": "second" }]
-        }));
-        let shared_2 = generation_2
-            .iter()
-            .cloned()
-            .map(Arc::new)
-            .collect::<Vec<_>>();
-        let second = decode_opencode_sidecar_incremental(&shared_2, &first.sidecar, 1);
-        assert_eq!(
-            second.inherit_pin("stable-key").as_deref(),
-            Some("pinned-mid")
-        );
-
-        let mut generation_3 = generation_2.clone();
-        generation_3.push(json!({
-            "info": { "id": "stable-key", "role": "user", "generation": 3 },
-            "parts": [{ "type": "text", "text": "third" }]
-        }));
-        let shared_3 = generation_3
-            .iter()
-            .cloned()
-            .map(Arc::new)
-            .collect::<Vec<_>>();
-        let incremental = decode_opencode_sidecar_incremental(&shared_3, &second, 2);
-        let full = decode_opencode_with_sidecar(&generation_3, Some(&seed)).sidecar;
-        assert!(
-            incremental
-                .order
-                .iter()
-                .all(|mid| incremental.messages.contains_key(mid))
-        );
-        assert_eq!(incremental.order, ["pinned-mid", "other-key"]);
-        assert_eq!(incremental, full);
-        assert_eq!(
-            incremental.message_by_mid("pinned-mid").unwrap().raw["info"]["generation"],
-            3
-        );
-
-        let mut broken_prior = second;
-        broken_prior.mid_pins.clear();
-        let broken = decode_opencode_sidecar_incremental(&shared_3, &broken_prior, 2);
-        assert_ne!(broken, full);
-        assert!(broken.message_by_mid("stable-key").is_some());
-
-        for missing in ["pinned-mid", "other-key"] {
-            let mut sparse = decode_opencode_with_sidecar(&generation_2, Some(&seed)).sidecar;
-            sparse.messages.remove(missing);
-            let recovered = decode_opencode_sidecar_incremental(&shared_3, &sparse, 2);
-            assert_eq!(
-                recovered.order, full.order,
-                "missing prefix metadata for {missing}"
-            );
-            let mut expected = full.clone();
-            if missing == "other-key" {
-                expected.messages.remove(missing);
-            }
-            assert_eq!(recovered, expected);
         }
     }
 

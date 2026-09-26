@@ -435,12 +435,13 @@ const CHUNK_TRANSCRIPT_TRUNCATION_MARKER: &str =
 const MAX_SESSION_TRANSCRIPT_COMPRESSED_BYTES: i64 = 8 * 1024 * 1024;
 const PASS_SCHEDULER_HISTORY_CAP: usize = 256;
 const PASS_SCHEDULER_INTERESTING_HISTORY_CAP: usize = 256;
-const MAX_FULL_ARRAY_FINGERPRINT_BYTES: usize = 256;
 /// The recency entry is at most 352 bytes: the longest decision, action, and reason, and every
-/// integer at its extreme. An interesting entry is at most 1,906 bytes with sender identity and
-/// arc counters; JSON's worst case expands fingerprint bytes to `\u00xx`.
+/// integer at its extreme. An interesting entry is at most 342 bytes with sender identity and
+/// arc counters.
 const MAX_PASS_SCHEDULER_OBSERVATION_JSON_BYTES: usize = 352;
-const MAX_INTERESTING_PASS_SCHEDULER_OBSERVATION_JSON_BYTES: usize = 1_906;
+const MAX_INTERESTING_PASS_SCHEDULER_OBSERVATION_JSON_BYTES: usize = 342;
+// The `PASS_SCHEDULER_*_MAX_BYTES` bounds cover rows written by this version; pre-#829 rows,
+// whose interesting entries carried a full-array fingerprint, age out through the 256-entry ring.
 /// Maximum UTF-8 bytes of the `scheduler_history` column: 256 entries, separators, and brackets.
 pub const PASS_SCHEDULER_HISTORY_MAX_BYTES: usize =
     1 + PASS_SCHEDULER_HISTORY_CAP * (MAX_PASS_SCHEDULER_OBSERVATION_JSON_BYTES + 1);
@@ -1199,11 +1200,10 @@ pub struct SupersessionCounts {
 
 /// One accepted pass as a transform commit records it: its ring entry, and what an interesting entry adds.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PassRecord<'a> {
+pub struct PassRecord {
     pub observation: PassSchedulerObservation,
-    /// Sender clock and exact full-array identity already carried on the transform request.
+    /// Sender clock already carried on the transform request.
     pub request_observed_at_ms: Option<u64>,
-    pub full_array_fingerprint: Option<&'a str>,
     pub supersession: SupersessionCounts,
     /// Whether this pass added a previously-unfrozen reduction to the served output.
     pub applied_reductions: bool,
@@ -1218,9 +1218,6 @@ pub struct InterestingPassSchedulerObservation {
     /// Sender-stamped request instant. Missing remains missing; it is never backfilled from the
     /// module clock because the two clocks are not interchangeable correlation keys.
     pub request_observed_at_ms: Option<u64>,
-    /// Caller-owned full-array fingerprint echoed by the transform response. This is omitted
-    /// only when the caller supplied no identity or exceeded the diagnostic byte bound.
-    pub full_array_fingerprint: Option<String>,
     /// Live superseded tool arcs observed when the ride gate opened, before downstream filters.
     /// Missing means the gate stayed shut and selection did not run; zero is an observed empty set.
     #[serde(default)]
@@ -1239,17 +1236,13 @@ pub struct InterestingPassSchedulerObservation {
 }
 
 impl InterestingPassSchedulerObservation {
-    fn from_record(record: &PassRecord<'_>) -> Self {
+    fn from_record(record: &PassRecord) -> Self {
         let observation = &record.observation;
         Self {
             timestamp_ms: observation.timestamp_ms,
             scheduler_decision: observation.scheduler_decision.clone(),
             drain_latch_active: observation.drain_latch_active,
             request_observed_at_ms: record.request_observed_at_ms,
-            full_array_fingerprint: record
-                .full_array_fingerprint
-                .filter(|fingerprint| fingerprint.len() <= MAX_FULL_ARRAY_FINGERPRINT_BYTES)
-                .map(str::to_string),
             eligible_supersession_count: record.supersession.eligible,
             withheld_by_tag_window: record.supersession.withheld_by_tag_window,
             withheld_by_exempt_message: record.supersession.withheld_by_exempt_message,
@@ -1279,7 +1272,7 @@ fn scheduler_pass_is_interesting(
 }
 
 fn serialize_interesting_scheduler_observation(
-    record: &PassRecord<'_>,
+    record: &PassRecord,
 ) -> Result<String, MemoryStoreError> {
     serde_json::to_string(&InterestingPassSchedulerObservation::from_record(record))
         .map_err(|error| MemoryStoreError::Serde(error.to_string()))
@@ -2411,7 +2404,7 @@ pub struct TransformCommit<'a> {
     /// Serialized first-divergence attribution to store with the accepted pass.
     pub first_divergence: Option<&'a str>,
     /// The accepted transform pass this commit records. Maintenance callers that reuse this transaction leave it absent.
-    pub pass: Option<PassRecord<'a>>,
+    pub pass: Option<PassRecord>,
     pub overlays: TransformOverlayBatch<'a>,
 }
 
@@ -8307,37 +8300,6 @@ impl MemoryStore {
         })?)
     }
 
-    /// Find retained passes by the caller-owned full-array fingerprint.
-    pub fn load_interesting_pass_scheduler_history_by_fingerprint(
-        &self,
-        session_id: &str,
-        full_array_fingerprint: &str,
-    ) -> Result<Vec<InterestingPassSchedulerObservation>, MemoryStoreError> {
-        Ok(self.inner.with_conn(|conn| {
-            let mut statement = conn.prepare_cached(
-                "SELECT history.value
-                   FROM pass_trace AS trace,
-                        json_each(trace.scheduler_interesting_history) AS history
-                  WHERE trace.session_id = ?1
-                    AND json_extract(history.value, '$.full_array_fingerprint') = ?2
-                  ORDER BY CAST(history.key AS INTEGER)",
-            )?;
-            let rows = statement
-                .query_map(params![session_id, full_array_fingerprint], |row| {
-                    let raw = row.get::<_, String>(0)?;
-                    serde_json::from_str(&raw).map_err(|error| {
-                        rusqlite::Error::FromSqlConversionFailure(
-                            0,
-                            rusqlite::types::Type::Text,
-                            Box::new(error),
-                        )
-                    })
-                })?
-                .collect::<Result<Vec<_>, _>>()?;
-            Ok(rows)
-        })?)
-    }
-
     /// Append flat block ids requested by eidnara_reduce to the durable per-session queue.
     /// Duplicate pending ids are ignored so repeated command delivery is harmless.
     pub fn append_pending_agent_drops(
@@ -9632,8 +9594,6 @@ impl MemoryStore {
             pass,
             overlays,
         } = request;
-        let scheduler_full_array_fingerprint =
-            pass.as_ref().and_then(|pass| pass.full_array_fingerprint);
         let TransformOverlayBatch {
             max_seen_ordinal,
             tag_mints,
@@ -9655,14 +9615,6 @@ impl MemoryStore {
             .as_deref()
             .map(|project_root| {
                 write.identity("project_root", project_root)?;
-                Ok::<_, MemoryStoreError>(write.scans.len() - 1)
-            })
-            .transpose()?;
-        // The fingerprint is stored only inside a `scheduler_interesting` entry, so its scan
-        // joins the retained owner only when that entry is written.
-        let fingerprint_scan = scheduler_full_array_fingerprint
-            .map(|fingerprint| {
-                write.identity("scheduler_full_array_fingerprint", fingerprint)?;
                 Ok::<_, MemoryStoreError>(write.scans.len() - 1)
             })
             .transpose()?;
@@ -9791,20 +9743,6 @@ impl MemoryStore {
             })
             .transpose()?;
         let history_scans = history_scans_start..write.scans.len();
-        // Stored only when the interesting entry is written and the fingerprint fits the
-        // diagnostic bound that `from_observation` applies; otherwise the scan is the live
-        // pass's alone.
-        let fingerprint_stored = scheduler_interesting_json.is_some()
-            && scheduler_full_array_fingerprint
-                .is_some_and(|fingerprint| fingerprint.len() <= MAX_FULL_ARRAY_FINGERPRINT_BYTES);
-        if let (true, Some(fingerprint_scan)) = (fingerprint_stored, fingerprint_scan) {
-            write.reassign_scans_in(
-                fingerprint_scan..fingerprint_scan + 1,
-                "session",
-                session_id,
-                CACHE_STATE_HISTORY_OWNER_KEY,
-            );
-        }
         // The accepted cache row version is a stable identity for the pass that produced the
         // divergence. Overlay timestamps are the request clock when available; direct callers
         // that omit one still receive a real commit timestamp.
@@ -9975,8 +9913,8 @@ impl MemoryStore {
             // replaced `last_divergence`; the receipts for those bytes go with them, before
             // this pass's receipts are persisted. Only `commit_transform` appends interesting
             // entries, so fingerprint receipts and fingerprint-bearing entries share one
-            // order: the receipts kept are the entries still stored, less this pass's own,
-            // which is persisted after this block.
+            // order. No pass writes a fingerprint any more; the receipts kept are the legacy
+            // entries still stored.
             let mut evictions: Vec<(&[&str], usize)> = Vec::with_capacity(4);
             if scheduler_observation_json.is_some() {
                 evictions.push((OBSERVATION_RING_FIELDS, PASS_TRACE_HISTORY_RING_LEN - 1));
@@ -9990,9 +9928,7 @@ impl MemoryStore {
                     params![session_id],
                     |row| row.get(0),
                 )?;
-                let keep = usize::try_from(stored_fingerprints)
-                    .unwrap_or(0)
-                    .saturating_sub(usize::from(fingerprint_stored));
+                let keep = usize::try_from(stored_fingerprints).unwrap_or(0);
                 evictions.push((&["scheduler_full_array_fingerprint"], keep));
             }
             if first_divergence.is_some() {
@@ -18920,190 +18856,6 @@ mod tests {
         );
     }
 
-    /// A fingerprint is stored only inside a `scheduler_interesting` entry, so a pass that
-    /// writes none leaves its fingerprint scan under the pass owner.
-    #[test]
-    fn a_fingerprint_without_an_interesting_entry_keeps_no_retained_receipt() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
-        let core = CoreState::empty();
-        let meta = ModuleMeta::default();
-        let observation = PassSchedulerObservation {
-            timestamp_ms: 1,
-            scheduler_decision: "Defer".into(),
-            drain_latch_active: false,
-            ..Default::default()
-        };
-        let field = ["scheduler_full_array_fingerprint"];
-        let mut version = None;
-        for pass in 0..5 {
-            version = Some(
-                store
-                    .commit_transform(
-                        "ses",
-                        TransformCommit {
-                            pass: Some(PassRecord {
-                                full_array_fingerprint: Some("fp-1"),
-                                ..test_pass_record(&observation)
-                            }),
-                            ..base_commit(version, &core, &meta)
-                        },
-                    )
-                    .unwrap(),
-            );
-            let counts = field_copy_counts(&store, "ses", &field);
-            assert_eq!(
-                counts["scheduler_full_array_fingerprint"], 1,
-                "pass {pass}: only the live pass's scan of an unstored fingerprint, got {counts:?}"
-            );
-        }
-        store
-            .commit_transform(
-                "ses",
-                TransformCommit {
-                    pass: Some(PassRecord {
-                        full_array_fingerprint: Some("fp-1"),
-                        applied_reductions: true,
-                        ..test_pass_record(&observation)
-                    }),
-                    ..base_commit(version, &core, &meta)
-                },
-            )
-            .unwrap();
-        assert_eq!(
-            field_copy_counts(&store, "ses", &field)["scheduler_full_array_fingerprint"],
-            1,
-            "a fingerprint stored inside an interesting entry keeps one retained receipt"
-        );
-    }
-
-    /// A fingerprint receipt leaves with the interesting entry that stores it, whether or
-    /// not the entry that evicts it carries a fingerprint of its own.
-    #[test]
-    fn a_fingerprint_receipt_is_evicted_with_its_interesting_entry() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
-        let core = CoreState::empty();
-        let meta = ModuleMeta::default();
-        let observation = PassSchedulerObservation {
-            timestamp_ms: 1,
-            scheduler_decision: "Defer".into(),
-            drain_latch_active: false,
-            ..Default::default()
-        };
-        let field = ["scheduler_full_array_fingerprint"];
-        let mut version = None;
-        for pass in 0..=PASS_TRACE_HISTORY_RING_LEN {
-            // Only the first pass stores a fingerprint; the ring then fills with entries
-            // without one until the first entry is evicted.
-            version = Some(
-                store
-                    .commit_transform(
-                        "ses",
-                        TransformCommit {
-                            pass: Some(PassRecord {
-                                full_array_fingerprint: (pass == 0).then_some("fp-first"),
-                                applied_reductions: true,
-                                ..test_pass_record(&observation)
-                            }),
-                            ..base_commit(version, &core, &meta)
-                        },
-                    )
-                    .unwrap(),
-            );
-        }
-        let (stored, receipts): (i64, i64) = (
-            store
-                .inner
-                .with_conn(|conn| {
-                    conn.query_row(
-                        "SELECT COUNT(*) FROM pass_trace, json_each(scheduler_interesting_history) \
-                         WHERE session_id = 'ses' \
-                           AND json_extract(value, '$.full_array_fingerprint') IS NOT NULL",
-                        [],
-                        |row| row.get(0),
-                    )
-                })
-                .unwrap(),
-            field_copy_counts(&store, "ses", &field)["scheduler_full_array_fingerprint"],
-        );
-        assert_eq!(stored, 0, "the fingerprint-bearing entry left the ring");
-        assert_eq!(
-            receipts, stored,
-            "no receipt outlives the entry that stored its fingerprint"
-        );
-    }
-
-    /// A fingerprint longer than the diagnostic bound is scanned but not stored, so it earns
-    /// no history receipt and evicts none.
-    #[test]
-    fn an_oversized_fingerprint_neither_keeps_nor_evicts_a_history_receipt() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
-        let core = CoreState::empty();
-        let meta = ModuleMeta::default();
-        let observation = PassSchedulerObservation {
-            timestamp_ms: 1,
-            scheduler_decision: "Defer".into(),
-            drain_latch_active: false,
-            ..Default::default()
-        };
-        let field = ["scheduler_full_array_fingerprint"];
-        let version = store
-            .commit_transform(
-                "ses",
-                TransformCommit {
-                    pass: Some(PassRecord {
-                        full_array_fingerprint: Some("fp-short"),
-                        applied_reductions: true,
-                        ..test_pass_record(&observation)
-                    }),
-                    ..base_commit(None, &core, &meta)
-                },
-            )
-            .unwrap();
-        let first = field_scan_ids(&store, "ses", &field);
-        assert_eq!(first.len(), 1);
-        let oversized = "f".repeat(MAX_FULL_ARRAY_FINGERPRINT_BYTES + 1);
-        store
-            .commit_transform(
-                "ses",
-                TransformCommit {
-                    pass: Some(PassRecord {
-                        full_array_fingerprint: Some(&oversized),
-                        applied_reductions: true,
-                        ..test_pass_record(&observation)
-                    }),
-                    ..base_commit(Some(version), &core, &meta)
-                },
-            )
-            .unwrap();
-        let after = field_scan_ids(&store, "ses", &field);
-        assert!(
-            after.is_superset(&first),
-            "the stored fingerprint's receipt survives an oversized one, got {after:?} after {first:?}"
-        );
-        assert_eq!(
-            after.len(),
-            2,
-            "the oversized fingerprint's scan stays as the live pass's receipt only"
-        );
-        store
-            .commit_transform(
-                "ses",
-                TransformCommit {
-                    pass: Some(test_pass_record(&observation)),
-                    ..base_commit(Some(version + 1), &core, &meta)
-                },
-            )
-            .unwrap();
-        assert_eq!(
-            field_scan_ids(&store, "ses", &field),
-            first,
-            "the next pass retires the oversized fingerprint's pass-owned receipt"
-        );
-    }
-
     /// `trace_pass_stable` and `commit_transform` append to the same observation ring, so a
     /// commit's receipt leaves when stable passes push its entry out.
     #[test]
@@ -19377,11 +19129,78 @@ mod tests {
         }
     }
 
-    fn test_pass_record<'a>(observation: &PassSchedulerObservation) -> PassRecord<'a> {
+    /// Pre-#829 interesting entries carried `full_array_fingerprint` with a history receipt.
+    /// No pass writes one now; the legacy receipt still leaves with its entry.
+    #[test]
+    fn a_legacy_fingerprint_receipt_is_evicted_with_its_interesting_entry() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
+        let core = CoreState::empty();
+        let meta = ModuleMeta::default();
+        let observation = PassSchedulerObservation {
+            timestamp_ms: 1,
+            scheduler_decision: "Defer".into(),
+            drain_latch_active: false,
+            ..Default::default()
+        };
+        let field = ["scheduler_full_array_fingerprint"];
+        let commit = |version: Option<u64>| {
+            store
+                .commit_transform(
+                    "ses",
+                    TransformCommit {
+                        pass: Some(PassRecord {
+                            applied_reductions: true,
+                            ..test_pass_record(&observation)
+                        }),
+                        ..base_commit(version, &core, &meta)
+                    },
+                )
+                .unwrap()
+        };
+        let mut version = commit(None);
+        store
+            .with_fenced_conn_for_test(|conn| {
+                conn.execute(
+                    "UPDATE pass_trace SET scheduler_interesting_history = json_set(
+                         scheduler_interesting_history, '$[0].full_array_fingerprint', 'fp-legacy')
+                      WHERE session_id = 'ses'",
+                    [],
+                )?;
+                conn.execute(
+                    "INSERT INTO scan_owner_copies
+                         (owner_copy_id, scan_id, domain_owner_id, owner_kind, field_id)
+                     SELECT lower(hex(randomblob(16))), scan_id, domain_owner_id, owner_kind,
+                            'scheduler_full_array_fingerprint'
+                       FROM scan_owner_copies WHERE field_id = 'scheduler_interesting' LIMIT 1",
+                    [],
+                )
+            })
+            .unwrap();
+        version = commit(Some(version));
+        assert_eq!(
+            field_copy_counts(&store, "ses", &field)["scheduler_full_array_fingerprint"],
+            1,
+            "the receipt stays while its entry is stored"
+        );
+        for _ in 1..PASS_TRACE_HISTORY_RING_LEN {
+            version = commit(Some(version));
+        }
+        assert_eq!(
+            field_copy_counts(&store, "ses", &field)["scheduler_full_array_fingerprint"],
+            0,
+            "the receipt leaves with the rotated-out entry"
+        );
+        let history = store
+            .load_interesting_pass_scheduler_history("ses", i64::MIN, i64::MAX)
+            .unwrap();
+        assert_eq!(history.len(), PASS_SCHEDULER_INTERESTING_HISTORY_CAP);
+    }
+
+    fn test_pass_record(observation: &PassSchedulerObservation) -> PassRecord {
         PassRecord {
             observation: observation.clone(),
             request_observed_at_ms: None,
-            full_array_fingerprint: None,
             supersession: SupersessionCounts::default(),
             applied_reductions: false,
         }
@@ -19401,7 +19220,6 @@ mod tests {
             u64,
         ),
         request_observed_at_ms: Option<u64>,
-        full_array_fingerprint: Option<&str>,
     ) -> u64 {
         let (
             produced_output_divergence,
@@ -19428,7 +19246,6 @@ mod tests {
                     overlays: TransformOverlayBatch::default(),
                     pass: Some(PassRecord {
                         request_observed_at_ms,
-                        full_array_fingerprint,
                         supersession: SupersessionCounts {
                             eligible: eligible_supersession_count,
                             withheld_by_tag_window: withheld_by_tag_window_count,
@@ -21443,7 +21260,6 @@ mod tests {
             &interesting,
             (false, Some(3), Some(0), Some(0), Some(3), 1),
             Some(10_001),
-            Some("oldest-interest"),
         );
         for timestamp_ms in 2..=513 {
             store
@@ -21466,7 +21282,6 @@ mod tests {
             vec![InterestingPassSchedulerObservation::from_record(
                 &PassRecord {
                     request_observed_at_ms: Some(10_001),
-                    full_array_fingerprint: Some("oldest-interest"),
                     supersession: SupersessionCounts {
                         eligible: Some(3),
                         withheld_by_tag_window: Some(0),
@@ -21513,7 +21328,6 @@ mod tests {
             if applied_reduction || produced_output_divergence {
                 expected_timestamps.push(timestamp_ms);
             }
-            let fingerprint = format!("population-{index}");
             expected = Some(commit_scheduler_observation(
                 &store,
                 "interesting-selectivity",
@@ -21533,7 +21347,6 @@ mod tests {
                     u64::from(applied_reduction),
                 ),
                 Some(20_000 + index as u64),
-                Some(&fingerprint),
             ));
         }
 
@@ -21586,7 +21399,6 @@ mod tests {
             &reduction,
             (false, Some(3), Some(1), Some(0), Some(1), 1),
             Some(70_000),
-            Some("reduction-fingerprint"),
         );
         commit_scheduler_observation(
             &store,
@@ -21595,7 +21407,6 @@ mod tests {
             &divergence,
             (false, Some(3), Some(0), Some(1), Some(2), 3),
             None,
-            Some("divergence-fingerprint"),
         );
 
         let retained = store
@@ -21606,7 +21417,6 @@ mod tests {
             vec![
                 InterestingPassSchedulerObservation::from_record(&PassRecord {
                     request_observed_at_ms: Some(70_000),
-                    full_array_fingerprint: Some("reduction-fingerprint"),
                     supersession: SupersessionCounts {
                         eligible: Some(3),
                         withheld_by_tag_window: Some(1),
@@ -21617,7 +21427,6 @@ mod tests {
                 }),
                 InterestingPassSchedulerObservation::from_record(&PassRecord {
                     request_observed_at_ms: None,
-                    full_array_fingerprint: Some("divergence-fingerprint"),
                     supersession: SupersessionCounts {
                         eligible: Some(3),
                         withheld_by_tag_window: Some(0),
@@ -21666,7 +21475,6 @@ mod tests {
             None,
             &worst,
             (false, None, None, None, None, 0),
-            None,
             None,
         );
         let raw: String = store
@@ -21833,7 +21641,6 @@ mod tests {
         assert_eq!(
             serialize_interesting_scheduler_observation(&PassRecord {
                 request_observed_at_ms: Some(u64::MAX),
-                full_array_fingerprint: Some(&"\0".repeat(MAX_FULL_ARRAY_FINGERPRINT_BYTES)),
                 supersession: SupersessionCounts {
                     eligible: Some(u64::MAX),
                     withheld_by_tag_window: Some(u64::MAX),
@@ -21849,7 +21656,6 @@ mod tests {
 
         let dir = tempfile::tempdir().unwrap();
         let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
-        let fingerprint = "x".repeat(MAX_FULL_ARRAY_FINGERPRINT_BYTES);
         let mut expected = None;
         for timestamp_ms in 0..=256 {
             expected = Some(commit_scheduler_observation(
@@ -21864,7 +21670,6 @@ mod tests {
                 },
                 (false, Some(3), Some(0), Some(0), Some(3), 1),
                 Some(timestamp_ms as u64),
-                Some(&fingerprint),
             ));
         }
 
@@ -21890,16 +21695,16 @@ mod tests {
     }
 
     #[test]
-    fn scheduler_interesting_history_queries_time_and_shared_request_identity() {
+    fn scheduler_interesting_history_queries_time_and_request_time() {
         let dir = tempfile::tempdir().unwrap();
         let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
         let entries = [
-            (100, "Execute", 9_001, "fingerprint-a"),
-            (100, "Force85", 9_024, "fingerprint-b"),
-            (300, "Emergency95", 9_300, "fingerprint-c"),
+            (100, "Execute", 9_001),
+            (100, "Force85", 9_024),
+            (300, "Emergency95", 9_300),
         ];
         let mut expected = None;
-        for (timestamp_ms, decision, request_time, fingerprint) in entries {
+        for (timestamp_ms, decision, request_time) in entries {
             expected = Some(commit_scheduler_observation(
                 &store,
                 "interesting-query",
@@ -21912,7 +21717,6 @@ mod tests {
                 },
                 (false, Some(3), Some(0), Some(0), Some(3), 1),
                 Some(request_time),
-                Some(fingerprint),
             ));
         }
 
@@ -21923,10 +21727,7 @@ mod tests {
         assert_eq!(range[0].scheduler_decision, "Execute");
         assert_eq!(range[1].scheduler_decision, "Force85");
 
-        for (request_time, fingerprint, expected_decision) in [
-            (9_001, "fingerprint-a", "Execute"),
-            (9_024, "fingerprint-b", "Force85"),
-        ] {
+        for (request_time, expected_decision) in [(9_001, "Execute"), (9_024, "Force85")] {
             let by_request_time = store
                 .load_interesting_pass_scheduler_history_by_request_time(
                     "interesting-query",
@@ -21936,43 +21737,10 @@ mod tests {
             assert_eq!(by_request_time.len(), 1);
             assert_eq!(by_request_time[0].scheduler_decision, expected_decision);
             assert_eq!(
-                by_request_time[0].full_array_fingerprint.as_deref(),
-                Some(fingerprint)
+                by_request_time[0].request_observed_at_ms,
+                Some(request_time)
             );
-
-            let by_fingerprint = store
-                .load_interesting_pass_scheduler_history_by_fingerprint(
-                    "interesting-query",
-                    fingerprint,
-                )
-                .unwrap();
-            assert_eq!(by_fingerprint.len(), 1);
-            assert_eq!(by_fingerprint[0].scheduler_decision, expected_decision);
-            assert_eq!(by_fingerprint[0].request_observed_at_ms, Some(request_time));
         }
-
-        commit_scheduler_observation(
-            &store,
-            "interesting-query",
-            expected,
-            &PassSchedulerObservation {
-                timestamp_ms: 400,
-                scheduler_decision: "Force85".into(),
-                drain_latch_active: false,
-                ..Default::default()
-            },
-            (false, Some(3), Some(0), Some(0), Some(3), 1),
-            None,
-            Some("fingerprint-without-sender-time"),
-        );
-        let absent = store
-            .load_interesting_pass_scheduler_history_by_fingerprint(
-                "interesting-query",
-                "fingerprint-without-sender-time",
-            )
-            .unwrap();
-        assert_eq!(absent.len(), 1);
-        assert_eq!(absent[0].request_observed_at_ms, None);
     }
 
     #[test]
@@ -21988,9 +21756,9 @@ mod tests {
             ..Default::default()
         };
 
-        for (session_id, first_divergence, applied_reductions, fingerprint) in [
-            ("divergence-interest", Some("{}"), false, "diverged"),
-            ("reduction-interest", None, true, "reduced"),
+        for (session_id, first_divergence, applied_reductions) in [
+            ("divergence-interest", Some("{}"), false),
+            ("reduction-interest", None, true),
         ] {
             store
                 .commit_transform(
@@ -22007,7 +21775,6 @@ mod tests {
                         overlays: TransformOverlayBatch::default(),
                         pass: Some(PassRecord {
                             request_observed_at_ms: Some(500),
-                            full_array_fingerprint: Some(fingerprint),
                             supersession: SupersessionCounts {
                                 eligible: None,
                                 withheld_by_tag_window: None,
@@ -22028,10 +21795,6 @@ mod tests {
             assert_eq!(
                 retained[0].eligible_supersession_count, None,
                 "Defer did not run supersession selection, so its depth must remain absent"
-            );
-            assert_eq!(
-                retained[0].full_array_fingerprint.as_deref(),
-                Some(fingerprint)
             );
         }
     }

@@ -664,8 +664,9 @@ impl HandlerCore {
     /// Checkpoints admitted raw text before any transform can fold it away.
     /// Reasoning/tool blocks and synthetic summaries never enter extraction.
     ///
-    /// Only the request's own `delta_messages` (the array tail after tail-delta
-    /// expansion) are considered. Memo-seen fragments skip the store.
+    /// Only the last `trailing_messages` of the request are considered;
+    /// production passes the whole array's length, and tests pass a shorter
+    /// suffix. Memo-seen fragments skip the store.
     ///
     /// Only `pi` sources are taken from the transform. Pi joins text blocks with
     /// `\n` exactly as `native_capture_fragments` does and marks synthetic text
@@ -687,13 +688,13 @@ impl HandlerCore {
         store: Arc<MemoryStore>,
         binding: &SessionBinding,
         request: &crate::transform::TransformRequest,
-        delta_messages: usize,
+        trailing_messages: usize,
         reserve: &dyn ResidentReserve,
     ) -> Option<CaptureCheckpoint> {
         if request.is_subagent || !capture_enabled(binding) || binding.harness != "pi" {
             return None;
         }
-        let start = request.messages.len().saturating_sub(delta_messages);
+        let start = request.messages.len().saturating_sub(trailing_messages);
         let project = capture_project(binding);
         let mut fragments = Vec::new();
         let mut refused = false;

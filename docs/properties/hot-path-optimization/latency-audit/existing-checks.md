@@ -330,7 +330,7 @@ not whether the focused tests ran.
 | [module-wire.test.ts:1310][t1308] | Unpaged `bytes` equals a later `JSON.stringify` length. | unaudited |
 | [module-wire.test.ts:1373][t1371] | Each paged `bytes` equals a later `JSON.stringify` length. | unaudited |
 | [module-wire.test.ts:1393][t1391] | The pageable array field list matches the daemon's Rust literal. | unaudited |
-| [rust-mode-transform.test.ts:540, 578, 617][tpaged] | A paged series re-pages after `need_full_sync`; it restarts on attempt mismatch and reconnect. | unaudited |
+| [rust-mode-transform.test.ts:540, 578, 617][tpaged] | A paged series re-pages after `need_full_sync` (invalidated by #829: the status and its retry are deleted); it restarts on attempt mismatch and reconnect. | unaudited |
 | [frame-channel.test.ts:181, 193][t181] | The declared byte length equals written bytes for lone surrogates, including across a segment boundary. | unaudited |
 | [Joint pager and native-writer fake][serialized-writer] | Frozen corpus checks carried UTF-8 bytes against the raw header and captured byte array through the real module transport, client encoder, and writer. Exact first/final lengths and page counts are asserted. | unaudited |
 | [Module transport snapshot][serialized-transport] | A getter changes on a second read, source and inspection values mutate, and a stringify spy rejects any send-time serialization. The public connection factory and channel injection exercise the transport without private-field assignments. | unaudited |
