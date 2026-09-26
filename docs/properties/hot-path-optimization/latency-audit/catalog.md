@@ -68,10 +68,15 @@ incremental attach `attach_native_messages_incremental` with its
 `ordinal_by_mid` and `native_reasoning_should_clear` helpers and
 `clear_served_native_reasoning_from_served`, and the incremental-versus-full
 differential with `EIDNARA_NATIVE_ATTACHMENT_DIFFERENTIAL`. Every native
-pass encodes its whole output in `attach_native_messages_with_tags`. The pass's
-output goes into `NativeOutputStore` as one record per session: the output
-revision, the encoded values, their byte charge, and the revert epoch they
-were built in. The next pass takes the record; it is a recipe `previous`
+pass encodes its whole output. A settled transform encodes it in
+`attach_native_messages_with_tags` and the output goes into
+`NativeOutputStore` as one record per session: the output revision, the
+encoded values, their byte charge, and the revert epoch they were built in.
+The passthrough for history-summarizer child sessions and registered
+memory-classifier sessions (`passthrough_transform_response`) encodes with
+`attach_native_messages`, builds its recipe with `previous: None`, and never
+stores; its output is not a `previous` source for the next request. The next
+settled pass takes the record; it is a recipe `previous`
 source only when the request's `previous_output_revision` names it and the
 epoch still matches, and any other take drops it. A missing or mismatched
 revision yields literals, never a resend request. A record above 64 MiB is
