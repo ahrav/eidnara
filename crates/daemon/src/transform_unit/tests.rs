@@ -1271,7 +1271,7 @@ async fn waiting_unpaged_pass_is_refused_when_a_page_stream_started_meanwhile() 
     page["transform_page_digest"] = json!(transform_page_content_digest(&page));
     let staged =
         watchdog(handler.handle_transform_with_runner(test_route(33), page, &*runner)).await;
-    assert!(matches!(staged, PreparedOutcome::Response(_)));
+    assert_ne!(tool_body(staged)["status"], "session_busy");
     assert!(handler.transform_page_in_progress("ses"));
 
     drop(gate);
@@ -1283,4 +1283,5 @@ async fn waiting_unpaged_pass_is_refused_when_a_page_stream_started_meanwhile() 
     runner.join_all().await;
     assert_eq!(error_code(refused), "authority_transform_page_in_progress");
     assert_eq!(runner.submitted.load(Ordering::SeqCst), 1);
+    assert!(handler.transform_session_lanes.0.lock().unwrap().is_empty());
 }
