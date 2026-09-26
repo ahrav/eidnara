@@ -1638,12 +1638,9 @@ Open questions:
 - Invalidated by #829. `decode_opencode_sidecar_incremental`,
   `validated_native_prefix`, and the native delta frontier are deleted with
   the delta channel; the daemon decodes every request's native array whole
-  with `decode_opencode_shared`, which takes no `replace_from`.
-- Should the function clamp with `messages.len().min(replace_from)` and fall
-  back to a full decode, matching the documented policy at `wire.rs:369-372`
-  that "malformed or out-of-range local metadata falls back to a full
-  projection rather than trusting a partial result"? The projection path
-  already does this; the sidecar path does not. (needs human input)
+  with `decode_opencode_shared`, which takes no `replace_from`. The former
+  question whether the sidecar path should clamp `replace_from` and fall back
+  to a full decode is moot: there is no partial decode to fall back from.
 
 ### codec-b-wire-level-tool-use-uniqueness-guard-has-no-release-behaviour
 
