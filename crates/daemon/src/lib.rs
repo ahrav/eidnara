@@ -25434,7 +25434,7 @@ mod tests {
 
     /// A pass whose request exceeds the ready-snapshot budget leaves no ready snapshot, so the
     /// next tail delta is refused with `need_full_sync` and the full follow-up serves the bytes
-    /// an uncached control handler serves.
+    /// a control handler that never received the refused delta serves.
     #[tokio::test(flavor = "current_thread")]
     async fn cold_soft_plus_over_ready_budget_refuses_the_next_tail_delta() {
         let first_native = json!({
@@ -27024,6 +27024,7 @@ mod tests {
         )
         .await;
         assert_eq!(warm["status"], "ok", "{warm}");
+        assert_eq!(warm["timings"]["projection_projected_messages"], 2);
         assert_eq!(warm["timings"]["native_cache_reused_messages"], 0);
         assert!(
             warm["timings"]["native_cache_encoded_messages"]
