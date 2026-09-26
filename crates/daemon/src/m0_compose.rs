@@ -20,17 +20,6 @@ use crate::memory_render::{
 };
 use crate::project_docs::read_project_docs_canonical;
 
-#[derive(thiserror::Error, Debug)]
-pub enum M0ComposeError {
-    #[error("store: {0}")]
-    Store(MemoryStoreError),
-}
-impl From<MemoryStoreError> for M0ComposeError {
-    fn from(e: MemoryStoreError) -> Self {
-        M0ComposeError::Store(e)
-    }
-}
-
 /// Frozen m0 bytes and watermarks persisted atomically by a HARD pass.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct M0Composition {
@@ -190,7 +179,7 @@ pub fn compose_m0(
     inputs: &M0ComposeInputs<'_>,
     memories: &[CanonicalMemory],
     estimate_tokens: impl Fn(&str) -> usize + Copy,
-) -> Result<M0Composition, M0ComposeError> {
+) -> Result<M0Composition, MemoryStoreError> {
     // The fold reads only rows the decay curve can render: the newest non-legacy rows up to
     // the horizon the budget sets and every legacy row. Rows older than the horizon are
     // archived at every retry multiplier, so the render matches one over every row. Range
@@ -518,6 +507,28 @@ mod bounded_read_tests {
         newest
     }
 
+    /// m1 over the rows above `folded` at the default row cap, with memory off.
+    fn m1_above(store: &MemoryStore, folded: i64) -> crate::m1_compose::M1Composition {
+        let meta = ModuleMeta {
+            folded_history_segment_seq: folded,
+            coverage_ordinal: Some(0),
+            ..ModuleMeta::default()
+        };
+        compose_m1(
+            store,
+            "git:proj",
+            SESSION,
+            &meta,
+            0,
+            false,
+            0.0,
+            true,
+            crate::m1_compose::DEFAULT_M1_ROW_CAP,
+            tokenizer::estimate_tokens,
+        )
+        .expect("compose m1")
+    }
+
     fn history_segment_work(store: &MemoryStore) -> Vec<storage::StatementWork> {
         store
             .take_statement_work()
@@ -644,10 +655,10 @@ mod bounded_read_tests {
                     .all(|w| !w.sql.starts_with("SELECT sequence FROM")),
                 "a persisted list skips the capture scan"
             );
-            let rows_visited: u64 = work.iter().map(|w| w.rows).sum();
+            let rows_produced: u64 = work.iter().map(|w| w.rows).sum();
             assert!(
-                rows_visited as usize <= PRESSURE_WINDOW + k + history.legacy_count() + 2,
-                "budget {budget}: {rows_visited} rows for K = {k}"
+                rows_produced as usize <= PRESSURE_WINDOW + k + history.legacy_count() + 2,
+                "budget {budget}: {rows_produced} rows for K = {k}"
             );
 
             // Falsifier (i): pressure from only the newest K rows.
@@ -667,55 +678,50 @@ mod bounded_read_tests {
         assert!(legacy_falsified, "skipping legacy rows went undetected");
     }
 
-    /// The fold's statement work is equal at two history lengths that share their newest
-    /// rows, so it does not grow with H.
+    /// The m0 and m1 reads' statement work is equal at two history lengths that share their
+    /// newest rows, so it does not grow with H.
     #[test]
     fn bounded_fold_work_is_independent_of_history_length() {
+        let cap = crate::m1_compose::DEFAULT_M1_ROW_CAP;
         let work = |segments: usize| {
             let history = SyntheticHistory::mixed(segments);
             let dir = tempfile::tempdir().unwrap();
             let store = open(dir.path());
             history.seed(&store, SESSION);
-            let legacy = bounded_m0(&store, 60_000.0, None).legacy_history_segment_seqs;
-            [20.0, 60_000.0, 10_000_000.0].map(|budget| {
+            let measured = |read: &dyn Fn()| {
                 store.start_statement_work_ledger();
-                bounded_m0(&store, budget, Some(&legacy));
+                read();
                 history_segment_work(&store)
                     .iter()
                     .map(|w| (w.rows, w.vm_steps))
                     .collect::<Vec<_>>()
-            })
+            };
+            let legacy = bounded_m0(&store, 60_000.0, None).legacy_history_segment_seqs;
+            let m0 = [20.0, 60_000.0, 10_000_000.0].map(|budget| {
+                measured(&|| {
+                    bounded_m0(&store, budget, Some(&legacy));
+                })
+            });
+            let m1 = [1, 200, cap + 1].map(|new_rows| {
+                measured(&|| {
+                    m1_above(&store, (segments - new_rows) as i64);
+                })
+            });
+            (m0, m1)
         };
         assert_eq!(work(4_000), work(60_000));
     }
 
     #[test]
-    fn bounded_m1_matches_the_full_read_and_flags_overflow() {
+    fn bounded_m1_matches_the_full_read_and_withholds_an_overflowing_body() {
         let history = SyntheticHistory::mixed(60_000);
         let dir = tempfile::tempdir().unwrap();
         let store = open(dir.path());
         history.seed(&store, SESSION);
         let cap = crate::m1_compose::DEFAULT_M1_ROW_CAP;
         let m1 = |folded: i64| {
-            let meta = ModuleMeta {
-                folded_history_segment_seq: folded,
-                coverage_ordinal: Some(0),
-                ..ModuleMeta::default()
-            };
             store.start_statement_work_ledger();
-            let m1 = compose_m1(
-                &store,
-                "git:proj",
-                SESSION,
-                &meta,
-                0,
-                false,
-                0.0,
-                true,
-                cap,
-                tokenizer::estimate_tokens,
-            )
-            .expect("compose m1");
+            let m1 = m1_above(&store, folded);
             let rows: u64 = history_segment_work(&store).iter().map(|w| w.rows).sum();
             assert!(rows as usize <= cap + 2, "{rows} rows for cap {cap}");
             m1
@@ -738,13 +744,12 @@ mod bounded_read_tests {
             );
             let last = all.last().unwrap();
             let bounded = m1(folded);
-            assert_eq!(bounded.body, reference, "{new_rows} new rows");
-            assert!(!bounded.overflow);
+            assert_eq!(bounded.body, Some(reference), "{new_rows} new rows");
             assert_eq!(
                 bounded.new_coverage,
                 Some((last.end_message_id.clone(), last.end_message as u64))
             );
         }
-        assert!(m1((60_000 - cap - 1) as i64).overflow);
+        assert_eq!(m1((60_000 - cap - 1) as i64).body, None);
     }
 }

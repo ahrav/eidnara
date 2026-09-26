@@ -12,29 +12,17 @@ use crate::memory_render::{
     M1_PLACEHOLDER, assemble_m1, render_new_history_segments, render_user_profile_block,
 };
 
-/// Failure to read composition state.
-#[derive(thiserror::Error, Debug)]
-pub enum M1ComposeError {
-    #[error("store: {0}")]
-    Store(MemoryStoreError),
-}
-
 /// The m1 row cap when the request carries no plausible hard geometry, as the specification
 /// sets for the default geometry.
 pub const DEFAULT_M1_ROW_CAP: usize = 259;
 
-/// The most history_segments m1 renders: every one renders at P1, so more than
-/// `ceil(usable_hard / P1 cost)` rows cannot fit the hard window and the pass folds instead.
+/// The most history_segments m1 reads: `ceil(usable_hard / P1 cost)`, where the P1 cost
+/// (322) is a nominal per-row cost, not a bound on any row's rendered size. Rows beyond the
+/// cap force a fold into m0 instead of riding m1.
 pub fn m1_row_cap(usable_hard: Option<u64>) -> usize {
     usable_hard.map_or(DEFAULT_M1_ROW_CAP, |usable_hard| {
         usable_hard.div_ceil(u64::from(Tier::P1.cost())) as usize
     })
-}
-
-impl From<MemoryStoreError> for M1ComposeError {
-    fn from(error: MemoryStoreError) -> Self {
-        Self::Store(error)
-    }
 }
 
 /// `revision` is a digest over ALL byte-affecting m1 render inputs such that the
@@ -103,11 +91,10 @@ pub fn m1_revision_signal_timed(
 /// Rendered M1 body plus state that the caller must publish after delivery.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct M1Composition {
-    pub body: String,
+    /// `None` when more history_segments above the folded sequence exist than the row cap
+    /// admits: m1 cannot carry them all, so the caller must fold instead of serving m1.
+    pub body: Option<String>,
     pub new_coverage: Option<(String, u64)>,
-    /// More history_segments above the folded sequence exist than the row cap admits; `body`
-    /// then omits the oldest of them, so the caller must fold rather than serve it.
-    pub overflow: bool,
     pub note_deliveries: Vec<NoteDelivery>,
     pub profile_rendered: bool,
     pub notes_block: String,
@@ -168,8 +155,8 @@ fn render_note_delta(notes: &[StoredNote]) -> String {
 /// Composes new history_segments, a changed user profile, and newly claimed notes.
 ///
 /// HistorySegments above the folded sequence render oldest first; at most `row_cap` of them are
-/// read, newest first, and [`M1Composition::overflow`] reports that more exist. Store reads and
-/// note claims return [`M1ComposeError::Store`].
+/// read, newest first, and [`M1Composition::body`] is `None` when more exist. Store reads and
+/// note claims return their store error.
 /// User profile budget units are tokens. Profile trimming receives 25 percent of that budget, clamped to at least one token.
 #[allow(clippy::too_many_arguments)]
 pub fn compose_m1(
@@ -183,7 +170,7 @@ pub fn compose_m1(
     temporal_awareness: bool,
     row_cap: usize,
     estimate_tokens: impl Fn(&str) -> usize + Copy,
-) -> Result<M1Composition, M1ComposeError> {
+) -> Result<M1Composition, MemoryStoreError> {
     let above =
         store.load_history_segments_above(session_id, meta.folded_history_segment_seq, row_cap)?;
     let rendered_history_segments = above
@@ -235,15 +222,16 @@ pub fn compose_m1(
         .collect::<Vec<_>>()
         .join("\n");
     Ok(M1Composition {
-        body: assemble_m1(
-            "",
-            &new_history_segments_block,
-            "",
-            &profile_and_notes,
-            M1_PLACEHOLDER,
-        ),
+        body: (!above.overflow).then(|| {
+            assemble_m1(
+                "",
+                &new_history_segments_block,
+                "",
+                &profile_and_notes,
+                M1_PLACEHOLDER,
+            )
+        }),
         new_coverage,
-        overflow: above.overflow,
         note_deliveries,
         profile_rendered,
         notes_block,

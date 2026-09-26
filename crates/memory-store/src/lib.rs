@@ -1384,11 +1384,15 @@ pub struct HistorySummarizerSideChannelStatus {
 /// A cheap, snapshot-consistent identifier for the history_segment set: its newest sequence,
 /// read by primary-key seek. A set change that keeps the maximum (a truncation followed by
 /// appends back to it) also bumps the session's `revert_epoch` and `row_version`, which fence
-/// publication on their own. Metadata written with an older `count` field still loads; the
-/// field is ignored.
+/// publication on their own.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HistorySegmentSetGeneration {
     pub max_sequence: i64,
+    /// Retained for downgrade compatibility: a daemon that predates the max-only fence
+    /// requires the field to parse this metadata. Written as 0 and ignored by every fence,
+    /// which compare `max_sequence` alone.
+    #[serde(default)]
+    pub count: i64,
 }
 
 /// Session data read atomically for history_summarizer assembly. The epoch and history_segment
@@ -5178,6 +5182,17 @@ pub struct TransformSnapshotTimings {
 /// Cache state and every non-tag byte-affecting transform overlay from one SQLite snapshot.
 ///
 /// Tag rows are immutable payloads cached module-side and validated with [`TagCacheSummary`].
+/// What a transform pass's overlay key selection may depend on, read in the snapshot before
+/// the overlay rows.
+#[derive(Debug, Clone, Copy)]
+pub struct TransformOverlayBasis<'a> {
+    pub loaded: &'a LoadedState,
+    pub overlay_frontier: Option<u64>,
+    /// The end ordinal of the newest stored history_segment, the greatest ordinal the stored
+    /// set covers.
+    pub history_end: Option<u64>,
+}
+
 #[derive(Debug, Clone)]
 pub struct TransformSnapshot {
     pub loaded: LoadedState,
@@ -5324,6 +5339,9 @@ pub enum ModuleStateSyncError {
     HistorySummarizerBusy { phase: HistorySummarizerPhase },
     #[error("invalid seed boundary {declared:?}: {detail}")]
     InvalidSeedBoundary { declared: String, detail: String },
+    /// The synced history_segments would leave the stored ranges out of strict order.
+    #[error("invalid state-sync history_segments: {detail}")]
+    InvalidHistorySegments { detail: String },
     #[error("serde: {0}")]
     Serde(String),
 }
@@ -5815,10 +5833,10 @@ fn split_flat_block_id(id: &str) -> Option<(&str, u64)> {
     Some((mid, index.parse().ok()?))
 }
 
-fn validate_history_segment_set_ordering(
-    history_segments: &[StoredHistorySegment],
+fn validate_history_segment_set_ordering<'a>(
+    history_segments: impl IntoIterator<Item = &'a StoredHistorySegment>,
 ) -> Result<(), String> {
-    let mut ordered = history_segments.iter().collect::<Vec<_>>();
+    let mut ordered = history_segments.into_iter().collect::<Vec<_>>();
     ordered.sort_by_key(|history_segment| history_segment.sequence);
     for pair in ordered.windows(2) {
         if pair[0].sequence == pair[1].sequence {
@@ -5888,6 +5906,7 @@ enum ModuleStateSyncTxnOutcome {
     AuthoritySeqMismatch { found: u64 },
     HistorySummarizerBusy { phase: HistorySummarizerPhase },
     InvalidSeedBoundary { declared: String, detail: String },
+    InvalidHistorySegments { detail: String },
     Serde(String),
 }
 
@@ -7538,23 +7557,24 @@ impl MemoryStore {
     /// No-write passes use this snapshot as their read linearization point; tag payloads use the
     /// separately validated module baseline so a stable pass does not stream every source blob.
     ///
-    /// Only the overlay rows keyed by `block_ids` are read, each by primary key, so the read is
-    /// bounded by the pass's window rather than by the session's overlay count.
-    pub fn load_transform_snapshot(
+    /// Only the overlay rows keyed by the block ids `overlay_block_ids` selects are read, each
+    /// by primary key, so the read is bounded by the blocks the pass consumes rather than by
+    /// the session's overlay count or the request's length. The selection sees the snapshot's
+    /// state, overlay frontier, and history end.
+    pub fn load_transform_snapshot<'b>(
         &self,
         session_id: &str,
-        block_ids: &[&str],
+        overlay_block_ids: impl FnOnce(TransformOverlayBasis<'_>) -> Vec<&'b str>,
     ) -> Result<TransformSnapshot, MemoryStoreError> {
-        self.load_transform_snapshot_with_hook(session_id, block_ids, || {})
+        self.load_transform_snapshot_with_hook(session_id, overlay_block_ids, || {})
     }
 
-    fn load_transform_snapshot_with_hook(
+    fn load_transform_snapshot_with_hook<'b>(
         &self,
         session_id: &str,
-        block_ids: &[&str],
+        overlay_block_ids: impl FnOnce(TransformOverlayBasis<'_>) -> Vec<&'b str>,
         after_state_read: impl FnOnce(),
     ) -> Result<TransformSnapshot, MemoryStoreError> {
-        let block_ids = serde_json::to_string(block_ids).expect("a string array serializes");
         let snapshot = self.inner.with_conn(|transaction| {
             let cache_state_started_at = Instant::now();
             let state = transaction
@@ -7595,6 +7615,24 @@ impl MemoryStore {
             };
             let cache_state_ms = cache_state_started_at.elapsed().as_secs_f64() * 1_000.0;
             after_state_read();
+            let overlay_frontier_started_at = Instant::now();
+            let overlay_frontier = transaction
+                .query_row(
+                    "SELECT max_seen_ordinal FROM overlay_frontiers WHERE session_id = ?1",
+                    params![session_id],
+                    |row| row.get::<_, i64>(0),
+                )
+                .optional()?
+                .map(|ordinal| ordinal.max(0) as u64);
+            let overlay_frontier_ms = overlay_frontier_started_at.elapsed().as_secs_f64() * 1_000.0;
+            let history_end = history_segment_edge_tx(transaction, session_id, EdgeAt::Newest)?
+                .map(|newest| newest.end_message.max(0) as u64);
+            let block_ids = serde_json::to_string(&overlay_block_ids(TransformOverlayBasis {
+                loaded: &loaded,
+                overlay_frontier,
+                history_end,
+            }))
+            .expect("a string array serializes");
 
             let temporal_started_at = Instant::now();
             let temporal_marks = {
@@ -7653,16 +7691,6 @@ impl MemoryStore {
                     .collect::<Result<Vec<_>, _>>()?
             };
             let channel1_ms = channel1_started_at.elapsed().as_secs_f64() * 1_000.0;
-            let overlay_frontier_started_at = Instant::now();
-            let overlay_frontier = transaction
-                .query_row(
-                    "SELECT max_seen_ordinal FROM overlay_frontiers WHERE session_id = ?1",
-                    params![session_id],
-                    |row| row.get::<_, i64>(0),
-                )
-                .optional()?
-                .map(|ordinal| ordinal.max(0) as u64);
-            let overlay_frontier_ms = overlay_frontier_started_at.elapsed().as_secs_f64() * 1_000.0;
             Ok(TransformSnapshot {
                 loaded,
                 temporal_marks,
@@ -10218,6 +10246,18 @@ impl MemoryStore {
                 }
             }
 
+            // Checked before the first write so a refusal writes nothing.
+            if let Err(detail) = validate_seed_history_segments_tx(
+                tx,
+                request.session_id,
+                &history_segments,
+                initialized_before_sync.then_some(meta.folded_history_segment_seq),
+            )? {
+                return Ok(WriteDisposition::Replay(
+                    ModuleStateSyncTxnOutcome::InvalidHistorySegments { detail },
+                ));
+            }
+
             let drop_seeds_skipped = materialize_drop_seed_units(
                 &mut core,
                 request.session_id,
@@ -10467,6 +10507,9 @@ impl MemoryStore {
             ModuleStateSyncTxnOutcome::InvalidSeedBoundary { declared, detail } => {
                 Err(ModuleStateSyncError::InvalidSeedBoundary { declared, detail })
             }
+            ModuleStateSyncTxnOutcome::InvalidHistorySegments { detail } => {
+                Err(ModuleStateSyncError::InvalidHistorySegments { detail })
+            }
             ModuleStateSyncTxnOutcome::Serde(e) => Err(ModuleStateSyncError::Serde(e)),
         }
     }
@@ -10573,65 +10616,46 @@ impl MemoryStore {
         Ok(self.inner.with_conn(|conn| {
             let newest = history_segment_edge_tx(conn, session_id, EdgeAt::Newest)?;
             let oldest = history_segment_edge_tx(conn, session_id, EdgeAt::Oldest)?;
-            let mut rows = conn
-                .prepare_cached(&format!(
-                    "SELECT {HISTORY_SEGMENT_SELECT_COLUMNS}
-                       FROM history_segments
-                      WHERE session_id = ?1 AND legacy <> 1
-                      ORDER BY sequence DESC LIMIT ?2"
-                ))?
-                .query_map(
-                    params![session_id, sql_limit(pressure_window)],
-                    Self::stored_history_segment_from_row,
-                )?
-                .collect::<Result<Vec<_>, _>>()?;
+            let mut rows = query_history_segments_tx(
+                conn,
+                "WHERE session_id = ?1 AND legacy <> 1 ORDER BY sequence DESC LIMIT ?2",
+                params![session_id, sql_limit(pressure_window)],
+            )?;
             let wanted = horizon(&rows);
             if let Some(last) = rows.last().map(|row| row.sequence)
                 && wanted > rows.len()
                 && rows.len() == pressure_window
             {
-                let older = conn
-                    .prepare_cached(&format!(
-                        "SELECT {HISTORY_SEGMENT_SELECT_COLUMNS}
-                           FROM history_segments
-                          WHERE session_id = ?1 AND legacy <> 1 AND sequence < ?2
-                          ORDER BY sequence DESC LIMIT ?3"
-                    ))?
-                    .query_map(
-                        params![session_id, last, sql_limit(wanted - rows.len())],
-                        Self::stored_history_segment_from_row,
-                    )?
-                    .collect::<Result<Vec<_>, _>>()?;
+                let older = query_history_segments_tx(
+                    conn,
+                    "WHERE session_id = ?1 AND legacy <> 1 AND sequence < ?2
+                     ORDER BY sequence DESC LIMIT ?3",
+                    params![session_id, last, sql_limit(wanted - rows.len())],
+                )?;
                 rows.extend(older);
             }
-            let captured;
             let legacy_seqs = match legacy_seqs {
-                Some(seqs) => seqs,
-                None => {
-                    captured = conn
-                        .prepare_cached(
-                            "SELECT sequence FROM history_segments
-                              WHERE session_id = ?1 AND legacy = 1",
-                        )?
-                        .query_map(params![session_id], |row| row.get::<_, i64>(0))?
-                        .collect::<Result<Vec<_>, _>>()?;
-                    &captured[..]
-                }
+                Some(seqs) => Cow::Borrowed(seqs),
+                None => Cow::Owned(
+                    conn.prepare_cached(
+                        "SELECT sequence FROM history_segments
+                          WHERE session_id = ?1 AND legacy = 1",
+                    )?
+                    .query_map(params![session_id], |row| row.get::<_, i64>(0))?
+                    .collect::<Result<Vec<_>, _>>()?,
+                ),
             };
-            let legacy = conn
-                .prepare_cached(&format!(
-                    "SELECT {HISTORY_SEGMENT_SELECT_COLUMNS}
-                       FROM history_segments
-                      WHERE session_id = ?1 AND legacy = 1
-                        AND sequence IN (SELECT value FROM json_each(?2))"
-                ))?
-                .query_map(
-                    params![session_id, json_i64_array(legacy_seqs)],
-                    Self::stored_history_segment_from_row,
-                )?
-                .collect::<Result<Vec<_>, _>>()?;
-            let mut legacy_seqs: Vec<i64> = legacy.iter().map(|row| row.sequence).collect();
-            legacy_seqs.sort_unstable();
+            let legacy = query_history_segments_tx(
+                conn,
+                "WHERE session_id = ?1 AND legacy = 1
+                   AND sequence IN (SELECT value FROM json_each(?2))
+                 ORDER BY sequence",
+                params![
+                    session_id,
+                    serde_json::to_string(&*legacy_seqs).expect("an integer array serializes")
+                ],
+            )?;
+            let legacy_seqs: Vec<i64> = legacy.iter().map(|row| row.sequence).collect();
             rows.extend(legacy);
             rows.sort_by_key(|row| row.sequence);
             Ok(HistorySegmentFold {
@@ -10653,18 +10677,11 @@ impl MemoryStore {
     ) -> Result<HistorySegmentsAbove, MemoryStoreError> {
         Ok(self.inner.with_conn(|conn| {
             let newest = history_segment_edge_tx(conn, session_id, EdgeAt::Newest)?;
-            let mut rows = conn
-                .prepare_cached(&format!(
-                    "SELECT {HISTORY_SEGMENT_SELECT_COLUMNS}
-                       FROM history_segments
-                      WHERE session_id = ?1 AND sequence > ?2
-                      ORDER BY sequence DESC LIMIT ?3"
-                ))?
-                .query_map(
-                    params![session_id, after_sequence, sql_limit(cap.saturating_add(1))],
-                    Self::stored_history_segment_from_row,
-                )?
-                .collect::<Result<Vec<_>, _>>()?;
+            let mut rows = query_history_segments_tx(
+                conn,
+                "WHERE session_id = ?1 AND sequence > ?2 ORDER BY sequence DESC LIMIT ?3",
+                params![session_id, after_sequence, sql_limit(cap.saturating_add(1))],
+            )?;
             let overflow = rows.len() > cap;
             rows.truncate(cap);
             rows.reverse();
@@ -10766,17 +10783,11 @@ impl MemoryStore {
                         |r| r.get::<_, String>(0),
                     )
                     .optional()?;
-                let newest = conn
-                    .prepare_cached(&format!(
-                        "SELECT {HISTORY_SEGMENT_SELECT_COLUMNS}
-                           FROM history_segments WHERE session_id = ?1
-                          ORDER BY sequence DESC LIMIT ?2"
-                    ))?
-                    .query_map(
-                        params![session_id, sql_limit(reference_rows)],
-                        Self::stored_history_segment_from_row,
-                    )?
-                    .collect::<Result<Vec<_>, _>>()?;
+                let newest = query_history_segments_tx(
+                    conn,
+                    "WHERE session_id = ?1 ORDER BY sequence DESC LIMIT ?2",
+                    params![session_id, sql_limit(reference_rows)],
+                )?;
                 let max_end_message = conn.query_row(
                     "SELECT MAX(end_message) FROM history_segments WHERE session_id = ?1",
                     params![session_id],
@@ -10802,7 +10813,10 @@ impl MemoryStore {
             newest_history_segments,
             max_end_message,
             revert_epoch,
-            history_segment_set_generation: HistorySegmentSetGeneration { max_sequence },
+            history_segment_set_generation: HistorySegmentSetGeneration {
+                max_sequence,
+                count: 0,
+            },
             chunk_retry,
         })
     }
@@ -11678,6 +11692,11 @@ impl MemoryStore {
     /// wholesale delete-then-insert (rather than an incremental upsert) keeps the
     /// stored `sequence` contiguous. Writes are serialized by the store's single-writer
     /// lease (the same one guarding the cache-state commit).
+    ///
+    /// Test support only: it leaves `ModuleMeta::legacy_history_segment_seqs` and the
+    /// publisher's set fence untouched, so a test that adds a legacy row or reshapes a set
+    /// under a live firing owns that metadata itself.
+    #[cfg(any(test, feature = "test-support"))]
     pub fn replace_history_segments(
         &self,
         session_id: &str,
@@ -12014,6 +12033,11 @@ impl MemoryStore {
     /// The incoming `sequence` values are treated as producer-local hints; durable
     /// sequences are assigned contiguously after the current max so concurrent readers
     /// never observe gaps or rewritten history.
+    ///
+    /// Test support only: it leaves `ModuleMeta::legacy_history_segment_seqs` untouched, so a
+    /// test that appends a legacy row owns that list itself. Production appends go through
+    /// the history_summarizer publisher.
+    #[cfg(any(test, feature = "test-support"))]
     pub fn append_history_segments(
         &self,
         session_id: &str,
@@ -12393,7 +12417,7 @@ impl MemoryStore {
                 && history_summarizer.producer_run_id.as_deref() == Some(predicate.producer_run_id.as_str())
                 && history_summarizer.chunk_fingerprint == predicate.chunk_fingerprint
                 && history_summarizer.selected_range_identities == predicate.selected_range_identities
-                && history_summarizer.history_segment_set_generation == predicate.history_segment_set_generation;
+                && history_summarizer.history_segment_set_generation.max_sequence == predicate.history_segment_set_generation.max_sequence;
             if !predicate_matches {
                 return Ok(AbandonHistorySummarizerTxnOutcome::Unchanged);
             }
@@ -12565,10 +12589,13 @@ impl MemoryStore {
                 |row| {
                     Ok(HistorySegmentSetGeneration {
                         max_sequence: row.get(0)?,
+                        count: 0,
                     })
                 },
             )?;
-            if current_history_segment_set_generation != predicate.history_segment_set_generation {
+            if current_history_segment_set_generation.max_sequence
+                != predicate.history_segment_set_generation.max_sequence
+            {
                 return Ok(PublishTxnOutcome::FenceRejected(format!(
                     "history_segment set changed after firing (expected max sequence {}, found {})",
                     predicate.history_segment_set_generation.max_sequence,
@@ -15397,6 +15424,62 @@ impl MemoryStore {
     }
 }
 
+/// Refuses a state-sync batch that would leave the stored history_segments out of strict
+/// order, which the fold and append reads rely on. `retained_sequence` is set when the sync
+/// keeps stored rows: rows at or below it, and rows whose sequence is already stored, are
+/// then not written. Each written row is checked against the other written rows and against
+/// its nearest stored neighbour on each side, read by primary-key seek. A neighbour the
+/// batch overwrites is covered by the in-batch check, so the work is bounded by the batch.
+fn validate_seed_history_segments_tx(
+    tx: &GuardedConn<'_>,
+    session_id: &str,
+    history_segments: &[StoredHistorySegment],
+    retained_sequence: Option<i64>,
+) -> rusqlite::Result<Result<(), String>> {
+    let mut written = Vec::with_capacity(history_segments.len());
+    for row in history_segments {
+        if row.start_message < 0 || row.end_message < row.start_message {
+            return Ok(Err(
+                "history_segment ordinal ranges must be non-negative and ordered".to_string(),
+            ));
+        }
+        if let Some(retained) = retained_sequence
+            && (row.sequence <= retained
+                || history_segment_edge_tx(tx, session_id, EdgeAt::Sequence(row.sequence))?
+                    .is_some())
+        {
+            continue;
+        }
+        written.push(row);
+    }
+    if let Err(detail) = validate_history_segment_set_ordering(written.iter().copied()) {
+        return Ok(Err(detail));
+    }
+    let sequences: HashSet<i64> = written.iter().map(|row| row.sequence).collect();
+    for row in &written {
+        let before = history_segment_edge_tx(tx, session_id, EdgeAt::Before(row.sequence))?;
+        let after = history_segment_edge_tx(tx, session_id, EdgeAt::After(row.sequence))?;
+        let before = before.filter(|stored| {
+            !sequences.contains(&stored.sequence) && stored.end_message >= row.start_message
+        });
+        let after = after.filter(|stored| {
+            !sequences.contains(&stored.sequence) && row.end_message >= stored.start_message
+        });
+        if let Some(stored) = before.or(after) {
+            return Ok(Err(format!(
+                "history_segment {} ({}..={}) overlaps stored history_segment {} ({}..={})",
+                row.sequence,
+                row.start_message,
+                row.end_message,
+                stored.sequence,
+                stored.start_message,
+                stored.end_message
+            )));
+        }
+    }
+    Ok(Ok(()))
+}
+
 fn write_seed_history_segment_tx(
     tx: &GuardedConn<'_>,
     session_id: &str,
@@ -15882,6 +15965,10 @@ enum EdgeAt {
     Oldest,
     EndMessage(i64),
     Sequence(i64),
+    /// The nearest row below the sequence.
+    Before(i64),
+    /// The nearest row above the sequence.
+    After(i64),
 }
 
 fn history_segment_edge_tx(
@@ -15897,6 +15984,14 @@ fn history_segment_edge_tx(
         EdgeAt::Oldest => (format!("{COLUMNS} ORDER BY sequence ASC LIMIT 1"), None),
         EdgeAt::EndMessage(end) => (format!("{COLUMNS} AND end_message = ?2 LIMIT 1"), Some(end)),
         EdgeAt::Sequence(sequence) => (format!("{COLUMNS} AND sequence = ?2"), Some(sequence)),
+        EdgeAt::Before(sequence) => (
+            format!("{COLUMNS} AND sequence < ?2 ORDER BY sequence DESC LIMIT 1"),
+            Some(sequence),
+        ),
+        EdgeAt::After(sequence) => (
+            format!("{COLUMNS} AND sequence > ?2 ORDER BY sequence ASC LIMIT 1"),
+            Some(sequence),
+        ),
     };
     let edge = |row: &rusqlite::Row<'_>| {
         Ok(HistorySegmentEdge {
@@ -15919,8 +16014,17 @@ fn sql_limit(limit: usize) -> i64 {
     i64::try_from(limit).unwrap_or(i64::MAX)
 }
 
-fn json_i64_array(values: &[i64]) -> String {
-    serde_json::to_string(values).expect("an integer array serializes")
+/// Wide history_segment rows matching `filter`, the clause after `FROM history_segments`.
+fn query_history_segments_tx(
+    conn: &GuardedConn<'_>,
+    filter: &str,
+    params: impl rusqlite::Params,
+) -> rusqlite::Result<Vec<StoredHistorySegment>> {
+    conn.prepare_cached(&format!(
+        "SELECT {HISTORY_SEGMENT_SELECT_COLUMNS} FROM history_segments {filter}"
+    ))?
+    .query_map(params, MemoryStore::stored_history_segment_from_row)?
+    .collect()
 }
 
 fn next_history_segment_sequence_tx(
@@ -20018,7 +20122,7 @@ mod tests {
         let meta_json = serde_json::to_string(&initial.meta).unwrap();
 
         let snapshot = store
-            .load_transform_snapshot_with_hook("ses", &[], || {
+            .load_transform_snapshot_with_hook("ses", |_| Vec::new(), || {
                 let transaction = raw.transaction().unwrap();
                 transaction
                     .execute(
@@ -20047,7 +20151,9 @@ mod tests {
             .unwrap();
         assert_eq!(snapshot.loaded.row_version, Some(1));
         assert_eq!(snapshot.overlay_frontier, None);
-        let current = store.load_transform_snapshot("ses", &["m1#0"]).unwrap();
+        let current = store
+            .load_transform_snapshot("ses", |_| vec!["m1#0"])
+            .unwrap();
         assert_eq!(current.loaded.row_version, Some(2));
         assert_eq!(store.load_tags_for_session("ses").unwrap().len(), 1);
         assert_eq!(current.overlay_frontier, Some(1));
@@ -20113,7 +20219,9 @@ mod tests {
             "a split read can mix v1 state with v2 overlays"
         );
 
-        let snapshot = store.load_transform_snapshot("ses", &["m1#0"]).unwrap();
+        let snapshot = store
+            .load_transform_snapshot("ses", |_| vec!["m1#0"])
+            .unwrap();
         assert_eq!(snapshot.loaded.row_version, Some(2));
         assert_eq!(store.load_tags_for_session("ses").unwrap().len(), 1);
         assert_eq!(snapshot.temporal_marks.len(), 1);
@@ -20173,7 +20281,9 @@ mod tests {
             )
             .unwrap_err();
         assert!(matches!(error, MemoryStoreError::CasConflict { .. }));
-        let snapshot = store.load_transform_snapshot("ses", &["m1#0"]).unwrap();
+        let snapshot = store
+            .load_transform_snapshot("ses", |_| vec!["m1#0"])
+            .unwrap();
         assert!(store.load_tags_for_session("ses").unwrap().is_empty());
         assert!(snapshot.temporal_marks.is_empty());
         assert!(snapshot.user_hints.is_empty());
@@ -21988,7 +22098,7 @@ mod tests {
     }
 
     /// Rows produced and VM steps of every statement that touched `table`.
-    fn work_on(store: &MemoryStore, table: &str) -> (u64, i64) {
+    fn work_on(store: &MemoryStore, table: &str) -> (u64, u64) {
         store
             .take_statement_work()
             .iter()
@@ -22180,7 +22290,7 @@ mod tests {
                 .unwrap();
             store.start_statement_work_ledger();
             let snapshot = store
-                .load_transform_snapshot("ses", &["b0#0", "b1#0", "absent#0"])
+                .load_transform_snapshot("ses", |_| vec!["b0#0", "b1#0", "absent#0"])
                 .unwrap();
             let work = work_on(&store, "json_each");
             let order = |ids: Vec<&str>| ids.into_iter().map(str::to_string).collect::<Vec<_>>();
@@ -22202,13 +22312,291 @@ mod tests {
         assert_eq!(measure(0), measure(2_000));
     }
 
-    /// Metadata a firing persisted before the generation dropped its row count still loads,
-    /// and the count takes no part in the fence.
+    /// Syncs `rows` into `ses` as the only section of a state-sync request.
+    fn sync_history_segments(
+        store: &MemoryStore,
+        expected_shadow_seq: u64,
+        rows: &[StoredHistorySegment],
+    ) -> Result<ModuleStateSyncResult, ModuleStateSyncError> {
+        store.apply_authority_state_sync(ModuleStateSyncRequest {
+            session_id: "ses",
+            project_path: "git:proj",
+            shadow_generation: 0,
+            expected_shadow_seq,
+            seed_boundary_id: None,
+            drop_seeds: &[],
+            drop_seed_skipped: 0,
+            pending_agent_drops: &[],
+            pending_agent_drops_skipped: 0,
+            user_hint_seeds: &[],
+            auto_search_hint_skipped: 0,
+            user_hints_replace_session: false,
+            note_nudge_anchors: None,
+            todo_synthetic_anchor: None,
+            todo_synthetic_anchor_present: false,
+            emergency_latches: None,
+            pending_compaction_marker: None,
+            deferred_execute_state: None,
+            channel2_nudge_state: None,
+            strip_seeds: &[],
+            strip_seed_skipped: 0,
+            reasoning_cleared_through_tag: None,
+            history_segments: rows,
+            user_profile: &[],
+            user_profile_present: false,
+            workspace: None,
+            workspace_present: false,
+            last_todo_state: Some(format!("sync {expected_shadow_seq}")),
+            project_memory_epoch: None,
+            user_profile_version: None,
+            acked_watermarks: serde_json::json!({}),
+        })
+    }
+
+    /// A state sync that would leave the stored ranges out of strict order is refused and
+    /// writes nothing, whether its row overlaps the stored tail or, as an upsert, an interior
+    /// neighbour.
     #[test]
-    fn history_segment_set_generation_ignores_a_persisted_count() {
+    fn state_sync_refuses_rows_that_overlap_stored_neighbours() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
+        let rows: Vec<_> = (1..=3).map(|seq| bounded_read_segment(seq, 0)).collect();
+        sync_history_segments(&store, 0, &rows).unwrap();
+        let stored = store.load_history_segments("ses").unwrap();
+
+        let overlaps_tail = StoredHistorySegment {
+            start_message: 6,
+            ..bounded_read_segment(4, 0)
+        };
+        let overlaps_neighbour = StoredHistorySegment {
+            start_message: 2,
+            ..bounded_read_segment(2, 0)
+        };
+        for (row, stored_neighbour) in [(overlaps_tail, 3), (overlaps_neighbour, 1)] {
+            let error = sync_history_segments(&store, 1, &[row]).unwrap_err();
+            assert!(
+                matches!(
+                    &error,
+                    ModuleStateSyncError::InvalidHistorySegments { detail }
+                        if detail.contains(&format!("stored history_segment {stored_neighbour} "))
+                ),
+                "{error:?}"
+            );
+            assert_eq!(store.load_history_segments("ses").unwrap(), stored);
+            let meta = store.load("ses").unwrap().meta;
+            assert_eq!(
+                (meta.shadow_seq, meta.last_todo_state.as_deref()),
+                (1, Some("sync 0"))
+            );
+        }
+
+        // Rewriting a neighbour in the same batch is judged against the rewritten range.
+        let moved = [
+            StoredHistorySegment {
+                start_message: 2,
+                ..bounded_read_segment(2, 0)
+            },
+            StoredHistorySegment {
+                end_message: 1,
+                ..bounded_read_segment(1, 0)
+            },
+        ];
+        sync_history_segments(&store, 1, &moved).unwrap();
+        sync_history_segments(&store, 2, &[bounded_read_segment(4, 0)]).unwrap();
+        assert_eq!(store.load_history_segments("ses").unwrap().len(), 4);
+    }
+
+    /// Every production writer that may add a legacy row clears the persisted legacy list, so
+    /// the next fold captures it again and reads the new row as a full read does.
+    #[test]
+    fn writers_that_add_a_legacy_row_clear_the_persisted_legacy_list() {
+        let stale = |store: &MemoryStore, key: &str, meta: ModuleMeta| {
+            let loaded = store.load(key).unwrap();
+            let meta = ModuleMeta {
+                legacy_history_segment_seqs: Some(Vec::new()),
+                ..meta
+            };
+            store
+                .commit(key, loaded.row_version, &loaded.core, &meta)
+                .unwrap();
+        };
+        let legacy = || StoredHistorySegment {
+            legacy: 1,
+            ..publish_history_segment()
+        };
+        type Writer =
+            fn(&MemoryStore, &dyn Fn(&MemoryStore, &str, ModuleMeta), StoredHistorySegment);
+        let writers: [(&str, Writer); 3] = [
+            ("state sync", |store, stale, row| {
+                stale(store, "ses", ModuleMeta::default());
+                sync_history_segments(store, 0, &[StoredHistorySegment { sequence: 1, ..row }])
+                    .unwrap();
+            }),
+            ("publish", |store, stale, row| {
+                stale(store, "ses", publishing_meta());
+                let expected = store.load("ses").unwrap().row_version;
+                store
+                    .publish_history_summarizer_chunk(HistorySummarizerPublishRequest {
+                        session_id: "ses",
+                        expected_row_version: expected,
+                        expected_revert_epoch: 0,
+                        predicate: &publish_predicate(),
+                        project_path: "git:proj",
+                        history_segments: &[row],
+                        events: &[],
+                        primer_candidates: &[],
+                        user_memory_candidates: &[],
+                        publication_floor_ordinal: 21,
+                        chunk_transcript: None,
+                        memory_reviewer_nonadmission: None,
+                        memory_reviewer_activation: None,
+                        published_at_ms: 0,
+                    })
+                    .unwrap();
+            }),
+            ("lineage descent", |store, stale, row| {
+                // The source's list misses its legacy row; the descendant must not inherit it.
+                stale(
+                    store,
+                    "prior",
+                    ModuleMeta {
+                        initialized: true,
+                        newest_live_ordinal: 30,
+                        coverage_ordinal: Some(20),
+                        ..ModuleMeta::default()
+                    },
+                );
+                store.append_history_segments("prior", &[row]).unwrap();
+                stale(store, "ses", ModuleMeta::default());
+                let hops = [LineageConstituent {
+                    prior_key: "prior".to_string(),
+                    new_key: "ses".to_string(),
+                    epoch: 2,
+                }];
+                let anchor = LineageAnchor {
+                    block_id: "summary#1".to_string(),
+                    message_id: "summary".to_string(),
+                    content_hash: "abc123".to_string(),
+                    ordinal: 1,
+                };
+                let outcome = store
+                    .descend_lineage(LineageDescentRequest {
+                        target_key: "ses",
+                        expected_target_row_version: store.load("ses").unwrap().row_version,
+                        edge_id: 42,
+                        prior_key: "prior",
+                        prior_epoch: 1,
+                        new_epoch: 2,
+                        constituents: &hops,
+                        compaction_observed: true,
+                        anchor: Some(&anchor),
+                        now_ms: 10,
+                    })
+                    .unwrap();
+                assert_eq!(outcome.disposition, LineageDescentDisposition::Descended);
+            }),
+        ];
+        for (name, write) in writers {
+            let dir = tempfile::tempdir().unwrap();
+            let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
+            store
+                .commit("ses", None, &CoreState::empty(), &ModuleMeta::default())
+                .unwrap();
+            write(&store, &stale, legacy());
+            let meta = store.load("ses").unwrap().meta;
+            assert_eq!(meta.legacy_history_segment_seqs, None, "{name}");
+            let full: Vec<_> = store
+                .load_history_segments("ses")
+                .unwrap()
+                .into_iter()
+                .filter(|row| row.legacy == 1)
+                .collect();
+            assert_eq!(full.len(), 1, "{name}");
+            let fold = store
+                .load_history_segment_fold(
+                    "ses",
+                    meta.legacy_history_segment_seqs.as_deref(),
+                    249,
+                    |_| 0,
+                )
+                .unwrap();
+            let folded_legacy: Vec<_> = fold
+                .history_segments
+                .into_iter()
+                .filter(|row| row.legacy == 1)
+                .collect();
+            assert_eq!(folded_legacy, full, "{name}");
+            assert_eq!(fold.legacy_seqs, vec![full[0].sequence], "{name}");
+        }
+    }
+
+    /// A truncation followed by appends back to the fired maximum restores `MAX(sequence)`,
+    /// the case the retired row count used to close; the revert epoch still rejects the
+    /// stale firing.
+    #[test]
+    fn publish_rejects_a_firing_whose_set_was_truncated_and_regrown_to_the_same_maximum() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
+        let rows: Vec<_> = (1..=3).map(|seq| bounded_read_segment(seq, 0)).collect();
+        store.replace_history_segments("ses", &rows).unwrap();
+        let fired = HistorySegmentSetGeneration {
+            max_sequence: 3,
+            count: 0,
+        };
+        let mut meta = publishing_meta();
+        meta.history_summarizer.history_segment_set_generation = fired;
+        let rv = store
+            .commit("ses", None, &CoreState::empty(), &meta)
+            .unwrap();
+
+        let truncated = store
+            .truncate_history_segments_for_revert("ses", 1, Some(rv))
+            .unwrap();
+        assert_eq!(truncated.revert_epoch, 1);
+        store.append_history_segments("ses", &rows[1..]).unwrap();
+        assert_eq!(store.max_history_segment_seq("ses").unwrap(), 3);
+
+        let error = store
+            .publish_history_summarizer_chunk(HistorySummarizerPublishRequest {
+                session_id: "ses",
+                expected_row_version: store.load("ses").unwrap().row_version,
+                expected_revert_epoch: 0,
+                predicate: &HistorySummarizerPublishPredicate {
+                    history_segment_set_generation: fired,
+                    ..publish_predicate()
+                },
+                project_path: "git:proj",
+                history_segments: &[publish_history_segment()],
+                events: &[],
+                primer_candidates: &[],
+                user_memory_candidates: &[],
+                publication_floor_ordinal: 21,
+                chunk_transcript: None,
+                memory_reviewer_nonadmission: None,
+                memory_reviewer_activation: None,
+                published_at_ms: 0,
+            })
+            .unwrap_err();
+        assert!(
+            matches!(error, HistorySummarizerPublishError::CasConflict { .. }),
+            "{error:?}"
+        );
+        assert_eq!(store.load_history_segments("ses").unwrap().len(), 3);
+    }
+
+    /// Metadata with or without the retained count loads, and the count is written for a
+    /// daemon that still parses it.
+    #[test]
+    fn history_segment_set_generation_keeps_a_count_for_older_readers() {
         let generation: HistorySegmentSetGeneration =
             serde_json::from_str(r#"{"max_sequence":7,"count":5}"#).unwrap();
-        assert_eq!(generation, HistorySegmentSetGeneration { max_sequence: 7 });
+        assert_eq!((generation.max_sequence, generation.count), (7, 5));
+        let generation: HistorySegmentSetGeneration =
+            serde_json::from_str(r#"{"max_sequence":7}"#).unwrap();
+        assert_eq!(
+            serde_json::to_value(generation).unwrap(),
+            serde_json::json!({"max_sequence": 7, "count": 0})
+        );
         let mut meta = serde_json::to_value(ModuleMeta::default()).unwrap();
         meta["history_summarizer"]["history_segment_set_generation"] =
             serde_json::json!({"max_sequence": 7, "count": 5});
@@ -22517,8 +22905,10 @@ mod tests {
         existing.sequence = 1;
         store.replace_history_segments("ses", &[existing]).unwrap();
         let mut meta = publishing_meta();
-        meta.history_summarizer.history_segment_set_generation =
-            HistorySegmentSetGeneration { max_sequence: 1 };
+        meta.history_summarizer.history_segment_set_generation = HistorySegmentSetGeneration {
+            max_sequence: 1,
+            count: 0,
+        };
         store
             .commit("ses", None, &CoreState::empty(), &meta)
             .unwrap();
@@ -23298,7 +23688,10 @@ mod tests {
             end_message_id: "m30".into(),
             ..publish_history_segment()
         };
-        let one_row = HistorySegmentSetGeneration { max_sequence: 1 };
+        let one_row = HistorySegmentSetGeneration {
+            max_sequence: 1,
+            count: 0,
+        };
 
         // A CAS conflict commits neither the floor nor the count.
         let rv = store
@@ -23631,7 +24024,10 @@ mod tests {
         let mut replay_meta = publishing_meta();
         replay_meta
             .history_summarizer
-            .history_segment_set_generation = HistorySegmentSetGeneration { max_sequence: 8 };
+            .history_segment_set_generation = HistorySegmentSetGeneration {
+            max_sequence: 8,
+            count: 0,
+        };
         store
             .commit("ses", loaded.row_version, &loaded.core, &replay_meta)
             .unwrap();
@@ -25111,7 +25507,10 @@ mod tests {
         assert_eq!(first.meta.history_summarizer.counters.published, 1);
         assert_eq!(first.meta.m1_pending_since_ms, Some(500));
 
-        let generation = HistorySegmentSetGeneration { max_sequence: 1 };
+        let generation = HistorySegmentSetGeneration {
+            max_sequence: 1,
+            count: 0,
+        };
         let mut next = first.meta.clone();
         next.history_summarizer = HistorySummarizerDurableState {
             firing_seq: 8,
@@ -28825,7 +29224,9 @@ mod lineage_descent_tests {
         store
             .commit("ses", version, &CoreState::empty(), &meta)
             .unwrap();
-        let snapshot = store.load_transform_snapshot("ses", &["m1#0"]).unwrap();
+        let snapshot = store
+            .load_transform_snapshot("ses", |_| vec!["m1#0"])
+            .unwrap();
         assert_eq!(
             snapshot.loaded.meta.block_identity_by_mid,
             meta.block_identity_by_mid

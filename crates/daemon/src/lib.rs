@@ -190,6 +190,9 @@ use transform::ReductionDecision;
 #[cfg(test)]
 pub mod test_support;
 
+/// Wrapup reads only the covered end and set generation from the assembly snapshot, no rows.
+const WRAPUP_REFERENCE_ROWS: usize = 0;
+
 #[cfg(test)]
 mod transform_meta_bound;
 
@@ -7561,7 +7564,8 @@ impl HandlerCore {
             }
         };
         let parsed = Arc::clone(&ready.request);
-        let initial_snapshot = match store.load_history_summarizer_assembly_snapshot(&session_id, 0)
+        let initial_snapshot = match store
+            .load_history_summarizer_assembly_snapshot(&session_id, WRAPUP_REFERENCE_ROWS)
         {
             Ok(snapshot) => snapshot,
             Err(error) => {
@@ -7847,7 +7851,9 @@ impl HandlerCore {
             }
         }
 
-        let final_snapshot = match store.load_history_summarizer_assembly_snapshot(&session_id, 0) {
+        let final_snapshot = match store
+            .load_history_summarizer_assembly_snapshot(&session_id, WRAPUP_REFERENCE_ROWS)
+        {
             Ok(snapshot) => snapshot,
             Err(error) => {
                 return PreparedOutcome::Error {

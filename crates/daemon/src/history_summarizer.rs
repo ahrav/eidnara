@@ -2788,7 +2788,10 @@ mod tests {
             "fp".into(),
             test_selected_range_identities(),
             0,
-            HistorySegmentSetGeneration { max_sequence: 1 },
+            HistorySegmentSetGeneration {
+                max_sequence: 1,
+                count: 0,
+            },
             1,
         )
         .unwrap()
@@ -4463,7 +4466,10 @@ mod tests {
                 "fp".into(),
                 test_selected_range_identities(),
                 0,
-                HistorySegmentSetGeneration { max_sequence: 1 },
+                HistorySegmentSetGeneration {
+                    max_sequence: 1,
+                    count: 0,
+                },
                 1,
             )
             .unwrap()
@@ -5494,7 +5500,10 @@ mod tests {
             producer_harness: None,
             fired_at_ms: Some(1),
             expected_revert_epoch: 0,
-            history_segment_set_generation: HistorySegmentSetGeneration { max_sequence: 1 },
+            history_segment_set_generation: HistorySegmentSetGeneration {
+                max_sequence: 1,
+                count: 0,
+            },
             failure_backoff_at_ms: None,
             last_failure: None,
             last_no_fire: None,
@@ -5647,6 +5656,7 @@ mod tests {
             let segments = store.load_history_segments("ses").unwrap();
             let generation = HistorySegmentSetGeneration {
                 max_sequence: segments.iter().map(|c| c.sequence).max().unwrap_or(0),
+                count: 0,
             };
             let fired = match fire(
                 &loaded.meta.history_summarizer,

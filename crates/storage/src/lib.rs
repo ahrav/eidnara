@@ -291,9 +291,10 @@ mod sqlite_backend {
                 .lock_conn()
                 .expect("the ledger is armed outside a store callback");
             *self.gate.work_ledger() = Some(WorkLedger::default());
-            // SAFETY: the context pointer is the gate, which the connection's authorizer
-            // keeps alive until the connection closes, so it outlives every callback the
-            // connection invokes. The callback reads only its arguments and the gate.
+            // SAFETY: the context pointer is the gate. `SqliteStore.gate` holds it for the
+            // store's life and the connection's authorizer holds it until the connection
+            // closes, so it outlives every callback the connection invokes. The callback
+            // reads only its arguments and the gate.
             let rc = unsafe {
                 rusqlite::ffi::sqlite3_trace_v2(
                     conn.handle(),
@@ -922,15 +923,16 @@ mod sqlite_backend {
         pub rows: u64,
         /// Virtual-machine operations the run executed (`SQLITE_STMTSTATUS_VM_STEP`), which
         /// counts rows visited, not rows returned; a trigger's work is included.
-        pub vm_steps: i64,
+        pub vm_steps: u64,
     }
 
     #[cfg(any(test, feature = "test-support"))]
     #[derive(Default)]
     struct WorkLedger {
         /// Per running statement handle: the cumulative VM step count at the run's start and
-        /// the rows produced so far. SQLite keeps the step count across runs.
-        open: std::collections::HashMap<usize, (i64, u64)>,
+        /// the rows produced so far. SQLite keeps the step count across runs in a 32-bit
+        /// counter, so a run's steps are the wrapping difference of two readings.
+        open: std::collections::HashMap<usize, (u32, u64)>,
         done: Vec<StatementWork>,
     }
 
@@ -945,17 +947,18 @@ mod sqlite_backend {
         _detail: *mut std::ffi::c_void,
     ) -> c_int {
         let stmt = statement.cast::<rusqlite::ffi::sqlite3_stmt>();
-        // SAFETY: `context` is the gate registered by `start_statement_work_ledger`, alive
-        // while the connection is open; `stmt` is the live statement SQLite reports, and the
+        // SAFETY: `context` is the gate registered by `start_statement_work_ledger`, kept
+        // alive by `SqliteStore.gate` and the connection's authorizer; `stmt` is the live statement SQLite reports, and the
         // status read and the SQL text read neither retain nor free it.
         let (gate, steps) = unsafe {
             (
                 &*context.cast::<AuthorityGate>(),
-                i64::from(rusqlite::ffi::sqlite3_stmt_status(
+                rusqlite::ffi::sqlite3_stmt_status(
                     stmt,
                     rusqlite::ffi::SQLITE_STMTSTATUS_VM_STEP,
                     0,
-                )),
+                )
+                .cast_unsigned(),
             )
         };
         let mut guard = gate.work_ledger();
@@ -988,7 +991,7 @@ mod sqlite_backend {
                 ledger.done.push(StatementWork {
                     sql,
                     rows,
-                    vm_steps: steps - baseline,
+                    vm_steps: u64::from(steps.wrapping_sub(baseline)),
                 });
             }
             _ => {}
@@ -6325,9 +6328,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// A handle with no runs handed out after a returned handle of its key had run means
-    /// the cache re-created it. A cache sized below the working set churns, a cache sized
-    /// for it does not.
     fn kv_store_with_rows(rows: usize) -> (std::path::PathBuf, SqliteStore) {
         let (root, d) = tmp();
         let store = open_sqlite(&d, KV_BASELINE).expect("open");
@@ -6423,6 +6423,9 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// A handle with no runs handed out after a returned handle of its key had run means
+    /// the cache re-created it. A cache sized below the working set churns, a cache sized
+    /// for it does not.
     #[test]
     fn statement_evictions_are_counted_per_text() {
         let sequence = [

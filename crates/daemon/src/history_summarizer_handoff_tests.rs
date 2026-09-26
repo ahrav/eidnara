@@ -939,7 +939,10 @@ fn identical_inputs_neither_duplicate_a_job_nor_reopen_a_settled_one() {
     assert_eq!(rig.handoff(t0() + 4).unwrap(), Handoff::Settled);
     // The firing publishes its own history with nothing recorded.
     let mut next = publishing_state(4);
-    next.history_segment_set_generation = HistorySegmentSetGeneration { max_sequence: 1 };
+    next.history_segment_set_generation = HistorySegmentSetGeneration {
+        max_sequence: 1,
+        count: 0,
+    };
     rig.persist(next);
     let publication = rig.publish_range(None, None, t0() + 5, 5, 6).unwrap();
     assert_eq!(
@@ -1183,7 +1186,10 @@ fn the_publication_path_hands_accepted_facts_off_and_records_rejected_ones() {
         from_ordinal: 4,
         to_ordinal: 6,
     });
-    next.history_segment_set_generation = HistorySegmentSetGeneration { max_sequence: 1 };
+    next.history_segment_set_generation = HistorySegmentSetGeneration {
+        max_sequence: 1,
+        count: 0,
+    };
     next.memory_reviewer_nonadmission = after.meta.history_summarizer.memory_reviewer_nonadmission;
     rig.persist(next);
     let later = HistorySummarizerChunk {
@@ -1602,7 +1608,10 @@ fn a_production_reservation_republishes_after_a_restart_and_a_stale_one_is_not_c
         "fp".into(),
         selected_range_identities(),
         0,
-        HistorySegmentSetGeneration { max_sequence: 1 },
+        HistorySegmentSetGeneration {
+            max_sequence: 1,
+            count: 0,
+        },
         t0() + 2,
     )
     .unwrap()

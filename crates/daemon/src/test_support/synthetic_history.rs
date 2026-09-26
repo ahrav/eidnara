@@ -7,22 +7,7 @@
 
 use memory_store::{HistorySummarizerPhase, MemoryStore, StoredHistorySegment};
 
-/// splitmix64: a deterministic stream from one seed.
-struct Rng(u64);
-
-impl Rng {
-    fn next(&mut self) -> u64 {
-        self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
-        let mut z = self.0;
-        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-        z ^ (z >> 31)
-    }
-
-    fn pick<'a, T>(&mut self, items: &'a [T]) -> &'a T {
-        &items[(self.next() % items.len() as u64) as usize]
-    }
-}
+use super::transform_corpus::Rng;
 
 /// Shape of one synthetic session.
 #[derive(Debug, Clone)]
@@ -57,7 +42,7 @@ impl SyntheticHistory {
     pub fn segment(&self, sequence: usize) -> StoredHistorySegment {
         assert!((1..=self.segments).contains(&sequence));
         let distance = self.segments + 1 - sequence;
-        let mut rng = Rng(self.seed ^ (distance as u64).wrapping_mul(0x9E37_79B9));
+        let mut rng = Rng::new(self.seed ^ (distance as u64).wrapping_mul(0x9E37_79B9));
         let end = 2 * sequence as i64;
         let words = |rng: &mut Rng, n: u64| {
             let count = 3 + rng.next() % n;
@@ -157,6 +142,13 @@ impl SyntheticHistory {
 /// Writes `count` rows into each of `temporal_marks`, `user_hints`, and `channel1_appends`
 /// under block ids `overlay-{n}#0`, none of which a synthetic window carries.
 pub fn seed_overlays(store: &MemoryStore, session_id: &str, count: usize) {
+    let ids: Vec<String> = (0..count).map(|n| format!("overlay-{n}#0")).collect();
+    seed_block_overlays(store, session_id, &ids);
+}
+
+/// Writes one row per block id into each of `temporal_marks`, `user_hints`, and
+/// `channel1_appends`, replacing any row the block already has.
+pub fn seed_block_overlays(store: &MemoryStore, session_id: &str, block_ids: &[String]) {
     store
         .with_fenced_conn_for_test(|tx| {
             for (table, text) in [
@@ -165,12 +157,13 @@ pub fn seed_overlays(store: &MemoryStore, session_id: &str, count: usize) {
                 ("channel1_appends", "reminder_text, fired_at_ms"),
             ] {
                 let mut insert = tx.prepare(&format!(
-                    "INSERT INTO {table} (session_id, block_id, {text}) VALUES (?1, ?2, ?3, ?4)"
+                    "INSERT OR REPLACE INTO {table} (session_id, block_id, {text})
+                     VALUES (?1, ?2, ?3, ?4)"
                 ))?;
-                for n in 0..count {
+                for (n, block_id) in block_ids.iter().enumerate() {
                     insert.execute(rusqlite::params![
                         session_id,
-                        format!("overlay-{n}#0"),
+                        block_id,
                         format!("{table} {n}"),
                         n as i64,
                     ])?;
