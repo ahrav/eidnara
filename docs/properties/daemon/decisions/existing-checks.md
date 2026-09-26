@@ -294,12 +294,12 @@ not adequacy verdicts; every check is `unaudited`.
 
 `#[ignore]`: none found in any 4f file, matching both `#[ignore]` and
 `#[ignore = "..."]`. `transform.rs` carries two ignored manual timing tests,
-`apply_once_stage_timings_large_fixture` (`transform.rs:12675-12676`) and
-`full_module_pass_timing_fixture` (`transform.rs:29718-29719`); the tag
+`apply_once_stage_timings_large_fixture` (`transform.rs:12689-12690`) and
+`full_module_pass_timing_fixture` (`transform.rs:29777-29778`); the tag
 baseline cache's `tag_baseline_warm_hydration_50k` is deleted, and
 `every_pass_read_is_bounded_independent_of_history_size`
 (`transform_read_bound.rs`) bounds the tag reads instead. `lib.rs` carries
-one, `history_summarizer_trigger_token_reuse_benchmark` (`lib.rs:19772-19773`), which
+one, `history_summarizer_trigger_token_reuse_benchmark` (`lib.rs:19770-19771`), which
 calls `boundary::check_history_segment_trigger_retokenized_reference`.
 
 `should_panic`: none found in any 4f file. One test has a panic oracle written a
