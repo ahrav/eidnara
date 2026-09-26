@@ -17,6 +17,7 @@ pub mod memory_capture;
 pub mod memory_classifier_ledger;
 pub mod memory_reviewer_jobs;
 pub mod memory_reviewer_ledger;
+pub mod summarizer_timeline;
 pub(crate) mod task_lease;
 
 use cache_stability::{DurabilityClass, FrozenUnit};
@@ -31,6 +32,7 @@ use rusqlite::{OptionalExtension, functions::FunctionFlags, params, types::Value
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
+use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::io::{Cursor, Error, ErrorKind, Read, Write};
 use std::path::{Path, PathBuf};
@@ -434,16 +436,24 @@ const MAX_SESSION_TRANSCRIPT_COMPRESSED_BYTES: i64 = 8 * 1024 * 1024;
 const PASS_SCHEDULER_HISTORY_CAP: usize = 256;
 const PASS_SCHEDULER_INTERESTING_HISTORY_CAP: usize = 256;
 const MAX_FULL_ARRAY_FINGERPRINT_BYTES: usize = 256;
-/// The recency entry is at most 99 bytes. An interesting entry is at most 1,906 bytes with
-/// sender identity and arc counters; JSON's worst case expands fingerprint bytes to `\u00xx`.
-const MAX_PASS_SCHEDULER_OBSERVATION_JSON_BYTES: usize = 99;
+/// The recency entry is at most 352 bytes: the longest decision, action, and reason, and every
+/// integer at its extreme. An interesting entry is at most 1,906 bytes with sender identity and
+/// arc counters; JSON's worst case expands fingerprint bytes to `\u00xx`.
+const MAX_PASS_SCHEDULER_OBSERVATION_JSON_BYTES: usize = 352;
 const MAX_INTERESTING_PASS_SCHEDULER_OBSERVATION_JSON_BYTES: usize = 1_906;
-/// Maximum combined UTF-8 bytes for both scheduler JSON arrays on one session row.
-pub const PASS_SCHEDULER_TELEMETRY_MAX_BYTES: usize = 1
-    + PASS_SCHEDULER_HISTORY_CAP * (MAX_PASS_SCHEDULER_OBSERVATION_JSON_BYTES + 1)
-    + 1
+/// Maximum UTF-8 bytes of the `scheduler_history` column: 256 entries, separators, and brackets.
+pub const PASS_SCHEDULER_HISTORY_MAX_BYTES: usize =
+    1 + PASS_SCHEDULER_HISTORY_CAP * (MAX_PASS_SCHEDULER_OBSERVATION_JSON_BYTES + 1);
+/// Maximum UTF-8 bytes of the `scheduler_interesting_history` column.
+pub const PASS_SCHEDULER_INTERESTING_HISTORY_MAX_BYTES: usize = 1
     + PASS_SCHEDULER_INTERESTING_HISTORY_CAP
         * (MAX_INTERESTING_PASS_SCHEDULER_OBSERVATION_JSON_BYTES + 1);
+// Each column is one durable text value, so each column, not their sum, must fit the bound.
+const _: () = assert!(PASS_SCHEDULER_HISTORY_MAX_BYTES <= MAX_DURABLE_TEXT_BYTES);
+const _: () = assert!(PASS_SCHEDULER_INTERESTING_HISTORY_MAX_BYTES <= MAX_DURABLE_TEXT_BYTES);
+/// Both scheduler columns on one session row together; reported, not enforced as one limit.
+pub const PASS_SCHEDULER_TELEMETRY_MAX_BYTES: usize =
+    PASS_SCHEDULER_HISTORY_MAX_BYTES + PASS_SCHEDULER_INTERESTING_HISTORY_MAX_BYTES;
 
 fn current_time_ms() -> i64 {
     std::time::SystemTime::now()
@@ -978,6 +988,15 @@ pub struct HistorySummarizerDurableState {
     /// The reservation the current or last firing made for its accepted facts. Cleared when the publication that activates it commits; kept through abandonment so the reservation is never downgraded to a pre-reservation refusal.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub memory_reviewer_reservation: Option<MemoryReviewerReservation>,
+    /// The newest [`summarizer_timeline::RECENT_FIRINGS_CAPACITY`] firings, oldest first. Survives every transition.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub recent_firings: Vec<summarizer_timeline::RecentFiring>,
+    /// Survives every transition.
+    #[serde(default)]
+    pub counters: summarizer_timeline::FiringCounters,
+    /// Set by the first pass that could have fired while no run could start; the next pressure-path fire consumes it. Survives every other transition.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_eligibility: Option<summarizer_timeline::PendingEligibility>,
 }
 
 impl Default for HistorySummarizerDurableState {
@@ -1001,34 +1020,187 @@ impl Default for HistorySummarizerDurableState {
             chunk_retry: None,
             memory_reviewer_nonadmission: MemoryReviewerNonadmission::default(),
             memory_reviewer_reservation: None,
+            recent_firings: Vec::new(),
+            counters: summarizer_timeline::FiringCounters::default(),
+            pending_eligibility: None,
         }
     }
 }
 
 impl HistorySummarizerDurableState {
-    /// The idle state with everything in flight cleared; the sequence and the nonadmission facts survive.
+    /// The default state holding only what every reset, fire, and abandon keeps: the timeline, the counters, the pending eligibility, and the nonadmission facts. Each constructor sets its own other fields over it. The destructuring names every field, so a new one must be placed on one side.
+    pub fn carried_forward(&self) -> Self {
+        let HistorySummarizerDurableState {
+            state: _,
+            firing_seq: _,
+            chunk_range: _,
+            chunk_fingerprint: _,
+            selected_range_identities: _,
+            producer_session_id: _,
+            producer_run_id: _,
+            producer_harness: _,
+            fired_at_ms: _,
+            expected_revert_epoch: _,
+            history_segment_set_generation: _,
+            failure_backoff_at_ms: _,
+            last_failure: _,
+            last_no_fire: _,
+            consecutive_publish_failures: _,
+            chunk_retry: _,
+            memory_reviewer_nonadmission,
+            memory_reviewer_reservation: _,
+            recent_firings,
+            counters,
+            pending_eligibility,
+        } = self;
+        HistorySummarizerDurableState {
+            memory_reviewer_nonadmission: *memory_reviewer_nonadmission,
+            recent_firings: recent_firings.clone(),
+            counters: *counters,
+            pending_eligibility: pending_eligibility.clone(),
+            ..HistorySummarizerDurableState::default()
+        }
+    }
+
+    /// The idle state with everything in flight cleared; the sequence and the carried facts survive.
     pub fn cleared_of_in_flight_firing(&self) -> Self {
         HistorySummarizerDurableState {
             firing_seq: self.firing_seq,
-            memory_reviewer_nonadmission: self.memory_reviewer_nonadmission,
-            ..HistorySummarizerDurableState::default()
+            ..self.carried_forward()
         }
     }
 }
 
-/// One accepted pass in the bounded scheduler history attached to [`PassTrace`].
+/// The served action a pass reports. `ERROR` is a response value only: a rejected pass records nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PassAction {
+    #[serde(rename = "HARD")]
+    Hard,
+    #[serde(rename = "SOFT")]
+    Soft,
+    #[serde(rename = "SOFT+")]
+    SoftPlus,
+    /// A pass that served the host array unchanged: a pending rewrite or a lineage refusal.
+    #[serde(rename = "PASSTHROUGH")]
+    Passthrough,
+}
+
+impl PassAction {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            PassAction::Hard => "HARD",
+            PassAction::Soft => "SOFT",
+            PassAction::SoftPlus => "SOFT+",
+            PassAction::Passthrough => "PASSTHROUGH",
+        }
+    }
+}
+
+/// Why a pass materialized, or why it declined to; the transform response reports the same value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MaterializeReason {
+    FirstRender,
+    LegacyMigration,
+    ProfileTransition,
+    EpochChange,
+    CoverageFold,
+    TtlExpiry,
+    ProjectMemoryEpoch,
+    Reconcile,
+    HardTrigger,
+    CachedM1Missing,
+    ExplicitFlush,
+    M1Delta,
+    Selection,
+    SyntheticTodo,
+    LineageDescent,
+    BoundaryDivergenceRecut,
+    RendererTransition,
+    LineageAnchorMismatch,
+    PressureRefold,
+    PendingRewrite,
+}
+
+impl MaterializeReason {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::FirstRender => "first_render",
+            Self::LegacyMigration => "legacy_migration",
+            Self::ProfileTransition => "profile_transition",
+            Self::EpochChange => "epoch_change",
+            Self::CoverageFold => "coverage_fold",
+            Self::TtlExpiry => "ttl_expiry",
+            Self::ProjectMemoryEpoch => "project_memory_epoch",
+            Self::Reconcile => "reconcile",
+            Self::HardTrigger => "hard_trigger",
+            Self::CachedM1Missing => "cached_m1_missing",
+            Self::ExplicitFlush => "explicit_flush",
+            Self::M1Delta => "m1_delta",
+            Self::Selection => "selection",
+            Self::SyntheticTodo => "synthetic_todo",
+            Self::LineageDescent => "lineage_descent",
+            Self::BoundaryDivergenceRecut => "boundary_divergence_recut",
+            Self::RendererTransition => "renderer_transition",
+            Self::LineageAnchorMismatch => "lineage_anchor_mismatch",
+            Self::PressureRefold => "pressure_refold",
+            Self::PendingRewrite => "pending_rewrite",
+        }
+    }
+}
+
+const SCHEDULER_DECISIONS: &[&str] = &["Defer", "Execute", "Force85", "Emergency95"];
+
+/// One accepted pass in the bounded scheduler history attached to [`PassTrace`]. An entry
+/// without the later fields loads them as absent. The decision string is borrowed from its
+/// vocabulary when written and owned only when read back.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(Default))]
 pub struct PassSchedulerObservation {
     pub timestamp_ms: i64,
-    pub scheduler_decision: String,
+    pub scheduler_decision: Cow<'static, str>,
     pub drain_latch_active: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub action: Option<PassAction>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub materialize_reason: Option<MaterializeReason>,
+    /// `floor(input * 100 / usage_soft_limit_tokens)` over the pressure usage the scheduler read, request or persisted, saturating at `u32::MAX`. Not capped at 100: past the soft limit it exceeds it. Absent when neither the request nor the row reported usage.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage_percent: Option<u32>,
+    /// The denominator of `usage_percent`: the soft context limit the scheduler resolved.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage_soft_limit_tokens: Option<u64>,
+    /// The request's report of the response before this pass, copied as received; absent when the request carried none, whatever usage persisted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prev_response_cache: Option<ProviderCacheUsage>,
+}
+
+/// Arc counters an interesting entry keeps. Missing means selection did not run.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SupersessionCounts {
+    pub eligible: Option<u64>,
+    pub withheld_by_tag_window: Option<u64>,
+    pub withheld_by_exempt_message: Option<u64>,
+    pub applied: Option<u64>,
+}
+
+/// One accepted pass as a transform commit records it: its ring entry, and what an interesting entry adds.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PassRecord<'a> {
+    pub observation: PassSchedulerObservation,
+    /// Sender clock and exact full-array identity already carried on the transform request.
+    pub request_observed_at_ms: Option<u64>,
+    pub full_array_fingerprint: Option<&'a str>,
+    pub supersession: SupersessionCounts,
+    /// Whether this pass added a previously-unfrozen reduction to the served output.
+    pub applied_reductions: bool,
 }
 
 /// Incident-worthy scheduler evidence retained independently of the recency ring.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InterestingPassSchedulerObservation {
     pub timestamp_ms: i64,
-    pub scheduler_decision: String,
+    pub scheduler_decision: Cow<'static, str>,
     pub drain_latch_active: bool,
     /// Sender-stamped request instant. Missing remains missing; it is never backfilled from the
     /// module clock because the two clocks are not interchangeable correlation keys.
@@ -1054,38 +1226,30 @@ pub struct InterestingPassSchedulerObservation {
 }
 
 impl InterestingPassSchedulerObservation {
-    fn from_observation(
-        observation: &PassSchedulerObservation,
-        request_observed_at_ms: Option<u64>,
-        full_array_fingerprint: Option<&str>,
-        eligible_supersession_count: Option<u64>,
-        withheld_by_tag_window: Option<u64>,
-        withheld_by_exempt_message: Option<u64>,
-        applied_supersession_count: Option<u64>,
-    ) -> Self {
+    fn from_record(record: &PassRecord<'_>) -> Self {
+        let observation = &record.observation;
         Self {
             timestamp_ms: observation.timestamp_ms,
             scheduler_decision: observation.scheduler_decision.clone(),
             drain_latch_active: observation.drain_latch_active,
-            request_observed_at_ms,
-            full_array_fingerprint: full_array_fingerprint
+            request_observed_at_ms: record.request_observed_at_ms,
+            full_array_fingerprint: record
+                .full_array_fingerprint
                 .filter(|fingerprint| fingerprint.len() <= MAX_FULL_ARRAY_FINGERPRINT_BYTES)
                 .map(str::to_string),
-            eligible_supersession_count,
-            withheld_by_tag_window,
-            withheld_by_exempt_message,
-            applied_supersession_count,
+            eligible_supersession_count: record.supersession.eligible,
+            withheld_by_tag_window: record.supersession.withheld_by_tag_window,
+            withheld_by_exempt_message: record.supersession.withheld_by_exempt_message,
+            applied_supersession_count: record.supersession.applied,
         }
     }
 }
 
+/// Refuses a decision outside its vocabulary before anything reaches the ring; action and reason are closed by their types.
 fn serialize_scheduler_observation(
     observation: &PassSchedulerObservation,
 ) -> Result<String, MemoryStoreError> {
-    if !matches!(
-        observation.scheduler_decision.as_str(),
-        "Defer" | "Execute" | "Force85" | "Emergency95"
-    ) {
+    if !SCHEDULER_DECISIONS.contains(&observation.scheduler_decision.as_ref()) {
         return Err(MemoryStoreError::Serde(format!(
             "unknown scheduler decision {:?}",
             observation.scheduler_decision
@@ -1102,24 +1266,10 @@ fn scheduler_pass_is_interesting(
 }
 
 fn serialize_interesting_scheduler_observation(
-    observation: &PassSchedulerObservation,
-    request_observed_at_ms: Option<u64>,
-    full_array_fingerprint: Option<&str>,
-    eligible_supersession_count: Option<u64>,
-    withheld_by_tag_window: Option<u64>,
-    withheld_by_exempt_message: Option<u64>,
-    applied_supersession_count: Option<u64>,
+    record: &PassRecord<'_>,
 ) -> Result<String, MemoryStoreError> {
-    serde_json::to_string(&InterestingPassSchedulerObservation::from_observation(
-        observation,
-        request_observed_at_ms,
-        full_array_fingerprint,
-        eligible_supersession_count,
-        withheld_by_tag_window,
-        withheld_by_exempt_message,
-        applied_supersession_count,
-    ))
-    .map_err(|error| MemoryStoreError::Serde(error.to_string()))
+    serde_json::to_string(&InterestingPassSchedulerObservation::from_record(record))
+        .map_err(|error| MemoryStoreError::Serde(error.to_string()))
 }
 
 /// Durable receive/complete/reject breadcrumbs for one session's transform passes.
@@ -1243,6 +1393,8 @@ pub struct TruncateOutcome {
     pub revert_epoch: u64,
     pub last_recut: Option<String>,
     pub row_version: u64,
+    /// The summarizer state this transaction left, counts and timeline included; a caller that commits its own meta over the result carries it forward.
+    pub history_summarizer: HistorySummarizerDurableState,
 }
 
 pub struct HistorySummarizerPublishRequest<'a> {
@@ -1261,6 +1413,8 @@ pub struct HistorySummarizerPublishRequest<'a> {
     pub memory_reviewer_nonadmission: Option<MemoryReviewerNonadmissionCode>,
     /// KTD3: the reserved MemoryReviewer job this publication activates with its reference-only input, in the same transaction as the history. A reservation past its queue deadline is finished as expired instead, and the publication still commits.
     pub memory_reviewer_activation: Option<MemoryReviewerActivation<'a>>,
+    /// The daemon clock sampled just before this publication; it stamps the firing's timeline entry and, when absent, `m1_pending_since_ms`.
+    pub published_at_ms: i64,
 }
 
 /// The reserved job a History Summarizer publication moves to `Ready`.
@@ -1339,6 +1493,13 @@ impl From<StoreError> for HistorySummarizerPublishError {
     fn from(e: StoreError) -> Self {
         HistorySummarizerPublishError::Store(MemoryStoreError::Store(e))
     }
+}
+
+/// The previous provider response's reported prompt-cache reads and writes, as the host received them. Measurement only: no pressure, boundary, or scheduling input reads it, and nothing persisted stands in for it when a request omits it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProviderCacheUsage {
+    pub cache_read_tokens: u64,
+    pub cache_write_tokens: u64,
 }
 
 /// Persisted provider-usage ground truth used to keep pressure bands stable across
@@ -1853,6 +2014,9 @@ pub struct ModuleMeta {
     /// fall back to `folded_history_segment_seq`.
     #[serde(default)]
     pub coverage_history_segment_seq: Option<i64>,
+    /// `Some` when the served prefix renders below `rendered_history_segment_seq()`: an additive-only pass advanced that watermark without rendering history_segments.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub additive_served_history_segment_seq: Option<i64>,
     /// `Some` records either a pinned canonical snapshot or a withheld composition.
     /// `None` occurs before the first HARD, or when memory was disabled at the
     /// HARD and no canonical read was taken.
@@ -2049,6 +2213,21 @@ pub struct ModuleMeta {
     pub shadow_acked_watermarks: Value,
 }
 
+impl ModuleMeta {
+    /// The highest history_segment sequence the m0 and m1 watermarks record.
+    pub fn rendered_history_segment_seq(&self) -> i64 {
+        self.m1_history_segment_seq
+            .unwrap_or(0)
+            .max(self.folded_history_segment_seq)
+    }
+
+    /// The highest history_segment sequence a served prefix renders, in m0 or m1: a published segment above it has not activated.
+    pub fn served_history_segment_seq(&self) -> i64 {
+        self.additive_served_history_segment_seq
+            .unwrap_or_else(|| self.rendered_history_segment_seq())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PendingAgentDrop {
     pub id: i64,
@@ -2183,20 +2362,8 @@ pub struct TransformCommit<'a> {
     pub project_root: Option<&'a str>,
     /// Serialized first-divergence attribution to store with the accepted pass.
     pub first_divergence: Option<&'a str>,
-    /// Scheduler arm and updated drain-latch state for a real accepted transform pass.
-    /// Maintenance callers that reuse this transaction leave it absent.
-    pub scheduler_observation: Option<&'a PassSchedulerObservation>,
-    /// Sender clock and exact full-array identity already carried on the transform request.
-    pub scheduler_request_observed_at_ms: Option<u64>,
-    pub scheduler_full_array_fingerprint: Option<&'a str>,
-    /// Eligible supersession tool arcs counted when an open ride gate runs selection. Missing
-    /// means selection did not run; zero means it ran and found none.
-    pub scheduler_eligible_supersession_count: Option<u64>,
-    pub scheduler_withheld_by_tag_window: Option<u64>,
-    pub scheduler_withheld_by_exempt_message: Option<u64>,
-    pub scheduler_applied_supersession_count: Option<u64>,
-    /// Whether this pass added a previously-unfrozen reduction to the served output.
-    pub scheduler_applied_reductions: bool,
+    /// The accepted transform pass this commit records. Maintenance callers that reuse this transaction leave it absent.
+    pub pass: Option<PassRecord<'a>>,
     pub overlays: TransformOverlayBatch<'a>,
 }
 
@@ -5195,7 +5362,7 @@ enum AbandonHistorySummarizerTxnOutcome {
 }
 
 enum TruncateTxnOutcome {
-    Committed(TruncateOutcome),
+    Committed(Box<TruncateOutcome>),
     CasConflict(u64),
     Serde(String),
 }
@@ -7406,8 +7573,6 @@ impl MemoryStore {
         &self,
         session_id: &str,
         observation: &PassSchedulerObservation,
-        _request_observed_at_ms: Option<u64>,
-        _full_array_fingerprint: Option<&str>,
     ) -> Result<(), MemoryStoreError> {
         let observation_json = serialize_scheduler_observation(observation)?;
         let interesting_json: Option<String> = None;
@@ -9053,14 +9218,7 @@ impl MemoryStore {
                 history_segment_max_seq: None,
                 project_root: None,
                 first_divergence: None,
-                scheduler_observation: None,
-                scheduler_request_observed_at_ms: None,
-                scheduler_full_array_fingerprint: None,
-                scheduler_eligible_supersession_count: None,
-                scheduler_withheld_by_tag_window: None,
-                scheduler_withheld_by_exempt_message: None,
-                scheduler_applied_supersession_count: None,
-                scheduler_applied_reductions: false,
+                pass: None,
                 overlays: TransformOverlayBatch::default(),
             },
         )
@@ -9099,16 +9257,11 @@ impl MemoryStore {
             history_segment_max_seq,
             project_root,
             first_divergence,
-            scheduler_observation,
-            scheduler_request_observed_at_ms,
-            scheduler_full_array_fingerprint,
-            scheduler_eligible_supersession_count,
-            scheduler_withheld_by_tag_window,
-            scheduler_withheld_by_exempt_message,
-            scheduler_applied_supersession_count,
-            scheduler_applied_reductions,
+            pass,
             overlays,
         } = request;
+        let scheduler_full_array_fingerprint =
+            pass.as_ref().and_then(|pass| pass.full_array_fingerprint);
         let TransformOverlayBatch {
             max_seen_ordinal,
             tag_mints,
@@ -9238,8 +9391,9 @@ impl MemoryStore {
             JsonScanPolicy::DurablePreserveIdentities,
         )?;
         let history_scans_start = write.scans.len();
-        let scheduler_observation_json = scheduler_observation
-            .map(serialize_scheduler_observation)
+        let scheduler_observation_json = pass
+            .as_ref()
+            .map(|pass| serialize_scheduler_observation(&pass.observation))
             .transpose()?
             .map(|value| {
                 write.json_content(
@@ -9249,24 +9403,12 @@ impl MemoryStore {
                 )
             })
             .transpose()?;
-        let scheduler_interesting_json = scheduler_observation
-            .filter(|_| {
-                scheduler_pass_is_interesting(
-                    scheduler_applied_reductions,
-                    first_divergence.is_some(),
-                )
+        let scheduler_interesting_json = pass
+            .as_ref()
+            .filter(|pass| {
+                scheduler_pass_is_interesting(pass.applied_reductions, first_divergence.is_some())
             })
-            .map(|observation| {
-                serialize_interesting_scheduler_observation(
-                    observation,
-                    scheduler_request_observed_at_ms,
-                    scheduler_full_array_fingerprint,
-                    scheduler_eligible_supersession_count,
-                    scheduler_withheld_by_tag_window,
-                    scheduler_withheld_by_exempt_message,
-                    scheduler_applied_supersession_count,
-                )
-            })
+            .map(serialize_interesting_scheduler_observation)
             .transpose()?
             .map(|value| {
                 write.json_content(
@@ -11095,7 +11237,7 @@ impl MemoryStore {
                 Err(error) => return Ok(TruncateTxnOutcome::Serde(error.to_string())),
             };
             let next_epoch = prior_meta.revert_epoch.saturating_add(1);
-            let reset_meta = ModuleMeta {
+            let mut reset_meta = ModuleMeta {
                 revert_epoch: next_epoch,
                 last_recut: Some(format!(
                     "native recomp reset all history_segments; epoch {next_epoch}"
@@ -11103,6 +11245,7 @@ impl MemoryStore {
                 history_summarizer: prior_meta.history_summarizer.cleared_of_in_flight_firing(),
                 ..ModuleMeta::default()
             };
+            reset_meta.history_summarizer.forget_unrendered_above(0);
             let core_json = match serde_json::to_string(&CoreState::empty()) {
                 Ok(json) => json,
                 Err(error) => return Ok(TruncateTxnOutcome::Serde(error.to_string())),
@@ -11169,14 +11312,15 @@ impl MemoryStore {
                     current
                 ],
             )?;
-            Ok(TruncateTxnOutcome::Committed(TruncateOutcome {
+            Ok(TruncateTxnOutcome::Committed(Box::new(TruncateOutcome {
                 revert_epoch: next_epoch,
                 last_recut: reset_meta.last_recut,
                 row_version: next_version,
-            }))
+                history_summarizer: reset_meta.history_summarizer,
+            })))
         })?;
         match outcome {
-            TruncateTxnOutcome::Committed(outcome) => Ok(outcome),
+            TruncateTxnOutcome::Committed(outcome) => Ok(*outcome),
             TruncateTxnOutcome::CasConflict(found) => Err(MemoryStoreError::CasConflict {
                 expected: expected_row_version,
                 found,
@@ -11227,11 +11371,12 @@ impl MemoryStore {
                     |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
                 )?;
             if dropped_count == 0 {
-                return Ok(TruncateTxnOutcome::Committed(TruncateOutcome {
+                return Ok(TruncateTxnOutcome::Committed(Box::new(TruncateOutcome {
                     revert_epoch: meta.revert_epoch,
                     last_recut: meta.last_recut,
                     row_version: current.max(0) as u64,
-                }));
+                    history_summarizer: meta.history_summarizer,
+                })));
             }
 
             let surviving_tail = tx
@@ -11253,6 +11398,21 @@ impl MemoryStore {
                 )
                 .optional()?;
 
+            let superseded: i64 = tx.query_row(
+                "SELECT COUNT(*) FROM history_segments WHERE session_id = ?1 AND sequence > ?2",
+                params![
+                    session_id,
+                    keep_through_seq.max(meta.served_history_segment_seq())
+                ],
+                |r| r.get(0),
+            )?;
+            meta.history_summarizer.counters.superseded_before_activation = meta
+                .history_summarizer
+                .counters
+                .superseded_before_activation
+                .saturating_add(superseded as u64);
+            meta.history_summarizer
+                .forget_unrendered_above(keep_through_seq);
             let next_epoch = meta.revert_epoch.saturating_add(1);
             let dropped_range = match (dropped_min, dropped_max) {
                 (Some(min), Some(max)) if min == max => min.to_string(),
@@ -11329,15 +11489,16 @@ impl MemoryStore {
                 params![session_id, next as i64, meta_json, current],
             )?;
 
-            Ok(TruncateTxnOutcome::Committed(TruncateOutcome {
+            Ok(TruncateTxnOutcome::Committed(Box::new(TruncateOutcome {
                 revert_epoch: next_epoch,
                 last_recut,
                 row_version: next,
-            }))
+                history_summarizer: meta.history_summarizer,
+            })))
         })?;
 
         match outcome {
-            TruncateTxnOutcome::Committed(outcome) => Ok(outcome),
+            TruncateTxnOutcome::Committed(outcome) => Ok(*outcome),
             TruncateTxnOutcome::CasConflict(found) => Err(MemoryStoreError::CasConflict {
                 expected: expected_row_version,
                 found,
@@ -11394,6 +11555,7 @@ impl MemoryStore {
         predicate: &HistorySummarizerPublishPredicate,
         failure_backoff_at_ms: Option<i64>,
         detail: Option<&str>,
+        class: summarizer_timeline::AbandonClass,
     ) -> Result<Option<u64>, MemoryStoreError> {
         self.abandon_history_summarizer_run_if_matching_with_publish_failure(
             session_id,
@@ -11401,6 +11563,7 @@ impl MemoryStore {
             failure_backoff_at_ms,
             detail,
             false,
+            class,
         )
     }
 
@@ -11414,6 +11577,7 @@ impl MemoryStore {
         failure_backoff_at_ms: Option<i64>,
         detail: Option<&str>,
         count_publish_failure: bool,
+        class: summarizer_timeline::AbandonClass,
     ) -> Result<Option<u64>, MemoryStoreError> {
         let mut write = PreparedWrite::new(DurableWriteFamily::HistorySummarizerSideChannels);
         write.domain_owner("session", session_id, "history_summarizer");
@@ -11482,10 +11646,11 @@ impl MemoryStore {
                     history_summarizer.consecutive_publish_failures
                 },
                 chunk_retry: history_summarizer.chunk_retry,
-                memory_reviewer_nonadmission: history_summarizer.memory_reviewer_nonadmission,
                 memory_reviewer_reservation: history_summarizer.memory_reviewer_reservation.clone(),
-                ..HistorySummarizerDurableState::default()
+                ..history_summarizer.carried_forward()
             };
+            meta.history_summarizer
+                .record_outcome(summarizer_timeline::FiringOutcome::Abandoned { class });
             let next = next_row_version(current)?;
             let meta_json = match serde_json::to_string(&meta) {
                 Ok(json) => json,
@@ -11918,6 +12083,16 @@ impl MemoryStore {
                 }
             }
             meta.history_summarizer = meta.history_summarizer.cleared_of_in_flight_firing();
+            let first_appended_sequence = next_history_segment_sequence_tx(tx, session_id)?;
+            let published_sequence = (!history_segments.is_empty())
+                .then(|| first_appended_sequence - 1 + history_segments.len() as i64);
+            meta.history_summarizer.current_firing_mut().published_at_ms =
+                Some(request.published_at_ms);
+            meta.history_summarizer
+                .record_outcome(summarizer_timeline::FiringOutcome::Published {
+                    sequence: published_sequence,
+                });
+            meta.m1_pending_since_ms.get_or_insert(request.published_at_ms);
             if let Some(code) = request.memory_reviewer_nonadmission {
                 let nonadmission = &mut meta.history_summarizer.memory_reviewer_nonadmission;
                 nonadmission.count = nonadmission.count.saturating_add(1);
@@ -11940,7 +12115,6 @@ impl MemoryStore {
             let meta_json = prepare_transaction_json_preserving_identities(&scanned_meta_json)
                 .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
 
-            let first_appended_sequence = next_history_segment_sequence_tx(tx, session_id)?;
             match append_history_segments_tx(tx, session_id, &history_segments)? {
                 AppendHistorySegmentsTxnOutcome::Appended => {}
                 AppendHistorySegmentsTxnOutcome::Overlap {
@@ -17384,6 +17558,7 @@ mod tests {
                 chunk_transcript: None,
                 memory_reviewer_nonadmission: None,
                 memory_reviewer_activation: None,
+                published_at_ms: 0,
             })
             .unwrap();
         let after_publish = scan_audit_rows(&store);
@@ -17672,8 +17847,9 @@ mod tests {
         let meta = ModuleMeta::default();
         let observation = PassSchedulerObservation {
             timestamp_ms: 1,
-            scheduler_decision: "Defer".to_string(),
+            scheduler_decision: "Defer".into(),
             drain_latch_active: false,
+            ..Default::default()
         };
         let retained = [
             "project_root",
@@ -17687,8 +17863,10 @@ mod tests {
                 TransformCommit {
                     project_root: Some("/root-a"),
                     first_divergence: Some("{\"where\":\"m1\"}"),
-                    scheduler_observation: Some(&observation),
-                    scheduler_applied_reductions: true,
+                    pass: Some(PassRecord {
+                        applied_reductions: true,
+                        ..test_pass_record(&observation)
+                    }),
                     ..base_commit(None, &core, &meta)
                 },
             )
@@ -17704,7 +17882,7 @@ mod tests {
                 "ses",
                 TransformCommit {
                     project_root: Some("/root-b"),
-                    scheduler_observation: Some(&observation),
+                    pass: Some(test_pass_record(&observation)),
                     ..base_commit(Some(version), &core, &meta)
                 },
             )
@@ -17756,7 +17934,7 @@ mod tests {
                 TransformCommit {
                     project_root: Some("/root-b"),
                     first_divergence: Some("{\"where\":\"m2\"}"),
-                    scheduler_observation: Some(&observation),
+                    pass: Some(test_pass_record(&observation)),
                     ..base_commit(Some(version), &core, &meta)
                 },
             )
@@ -17826,8 +18004,9 @@ mod tests {
         let meta = ModuleMeta::default();
         let observation = PassSchedulerObservation {
             timestamp_ms: 1,
-            scheduler_decision: "Defer".to_string(),
+            scheduler_decision: "Defer".into(),
             drain_latch_active: false,
+            ..Default::default()
         };
         let field = ["scheduler_full_array_fingerprint"];
         let mut version = None;
@@ -17837,8 +18016,10 @@ mod tests {
                     .commit_transform(
                         "ses",
                         TransformCommit {
-                            scheduler_observation: Some(&observation),
-                            scheduler_full_array_fingerprint: Some("fp-1"),
+                            pass: Some(PassRecord {
+                                full_array_fingerprint: Some("fp-1"),
+                                ..test_pass_record(&observation)
+                            }),
                             ..base_commit(version, &core, &meta)
                         },
                     )
@@ -17854,9 +18035,11 @@ mod tests {
             .commit_transform(
                 "ses",
                 TransformCommit {
-                    scheduler_observation: Some(&observation),
-                    scheduler_full_array_fingerprint: Some("fp-1"),
-                    scheduler_applied_reductions: true,
+                    pass: Some(PassRecord {
+                        full_array_fingerprint: Some("fp-1"),
+                        applied_reductions: true,
+                        ..test_pass_record(&observation)
+                    }),
                     ..base_commit(version, &core, &meta)
                 },
             )
@@ -17878,8 +18061,9 @@ mod tests {
         let meta = ModuleMeta::default();
         let observation = PassSchedulerObservation {
             timestamp_ms: 1,
-            scheduler_decision: "Defer".to_string(),
+            scheduler_decision: "Defer".into(),
             drain_latch_active: false,
+            ..Default::default()
         };
         let field = ["scheduler_full_array_fingerprint"];
         let mut version = None;
@@ -17891,9 +18075,11 @@ mod tests {
                     .commit_transform(
                         "ses",
                         TransformCommit {
-                            scheduler_observation: Some(&observation),
-                            scheduler_applied_reductions: true,
-                            scheduler_full_array_fingerprint: (pass == 0).then_some("fp-first"),
+                            pass: Some(PassRecord {
+                                full_array_fingerprint: (pass == 0).then_some("fp-first"),
+                                applied_reductions: true,
+                                ..test_pass_record(&observation)
+                            }),
                             ..base_commit(version, &core, &meta)
                         },
                     )
@@ -17932,17 +18118,20 @@ mod tests {
         let meta = ModuleMeta::default();
         let observation = PassSchedulerObservation {
             timestamp_ms: 1,
-            scheduler_decision: "Defer".to_string(),
+            scheduler_decision: "Defer".into(),
             drain_latch_active: false,
+            ..Default::default()
         };
         let field = ["scheduler_full_array_fingerprint"];
         let version = store
             .commit_transform(
                 "ses",
                 TransformCommit {
-                    scheduler_observation: Some(&observation),
-                    scheduler_applied_reductions: true,
-                    scheduler_full_array_fingerprint: Some("fp-short"),
+                    pass: Some(PassRecord {
+                        full_array_fingerprint: Some("fp-short"),
+                        applied_reductions: true,
+                        ..test_pass_record(&observation)
+                    }),
                     ..base_commit(None, &core, &meta)
                 },
             )
@@ -17954,9 +18143,11 @@ mod tests {
             .commit_transform(
                 "ses",
                 TransformCommit {
-                    scheduler_observation: Some(&observation),
-                    scheduler_applied_reductions: true,
-                    scheduler_full_array_fingerprint: Some(&oversized),
+                    pass: Some(PassRecord {
+                        full_array_fingerprint: Some(&oversized),
+                        applied_reductions: true,
+                        ..test_pass_record(&observation)
+                    }),
                     ..base_commit(Some(version), &core, &meta)
                 },
             )
@@ -17975,7 +18166,7 @@ mod tests {
             .commit_transform(
                 "ses",
                 TransformCommit {
-                    scheduler_observation: Some(&observation),
+                    pass: Some(test_pass_record(&observation)),
                     ..base_commit(Some(version + 1), &core, &meta)
                 },
             )
@@ -17997,15 +18188,16 @@ mod tests {
         let meta = ModuleMeta::default();
         let observation = PassSchedulerObservation {
             timestamp_ms: 1,
-            scheduler_decision: "Defer".to_string(),
+            scheduler_decision: "Defer".into(),
             drain_latch_active: false,
+            ..Default::default()
         };
         let fields = ["scheduler_observation", "scheduler_history"];
         store
             .commit_transform(
                 "ses",
                 TransformCommit {
-                    scheduler_observation: Some(&observation),
+                    pass: Some(test_pass_record(&observation)),
                     ..base_commit(None, &core, &meta)
                 },
             )
@@ -18013,9 +18205,7 @@ mod tests {
         let commit_receipt = field_scan_ids(&store, "ses", &fields);
         assert_eq!(commit_receipt.len(), 1);
         for _ in 0..PASS_TRACE_HISTORY_RING_LEN {
-            store
-                .trace_pass_stable("ses", &observation, None, None)
-                .unwrap();
+            store.trace_pass_stable("ses", &observation).unwrap();
         }
         let history_len: i64 = store
             .inner
@@ -18161,8 +18351,9 @@ mod tests {
         let meta = ModuleMeta::default();
         let observation = PassSchedulerObservation {
             timestamp_ms: 1,
-            scheduler_decision: "Defer".to_string(),
+            scheduler_decision: "Defer".into(),
             drain_latch_active: false,
+            ..Default::default()
         };
         let fields = ["scheduler_observation", "scheduler_interesting"];
         let mut version = None;
@@ -18172,8 +18363,10 @@ mod tests {
                     .commit_transform(
                         "ses",
                         TransformCommit {
-                            scheduler_observation: Some(&observation),
-                            scheduler_applied_reductions: true,
+                            pass: Some(PassRecord {
+                                applied_reductions: true,
+                                ..test_pass_record(&observation)
+                            }),
                             ..base_commit(version, &core, &meta)
                         },
                     )
@@ -18233,15 +18426,38 @@ mod tests {
             history_segment_max_seq: None,
             project_root: None,
             first_divergence: None,
-            scheduler_observation: None,
-            scheduler_request_observed_at_ms: None,
-            scheduler_full_array_fingerprint: None,
-            scheduler_eligible_supersession_count: None,
-            scheduler_withheld_by_tag_window: None,
-            scheduler_withheld_by_exempt_message: None,
-            scheduler_applied_supersession_count: None,
-            scheduler_applied_reductions: false,
             overlays: TransformOverlayBatch::default(),
+            pass: None,
+        }
+    }
+
+    /// Every field present at its widest serialization.
+    fn worst_case_scheduler_observation(
+        decision: &'static str,
+        reason: MaterializeReason,
+    ) -> PassSchedulerObservation {
+        PassSchedulerObservation {
+            timestamp_ms: i64::MIN,
+            scheduler_decision: decision.into(),
+            drain_latch_active: false,
+            action: Some(PassAction::Passthrough),
+            materialize_reason: Some(reason),
+            usage_percent: Some(u32::MAX),
+            usage_soft_limit_tokens: Some(u64::MAX),
+            prev_response_cache: Some(ProviderCacheUsage {
+                cache_read_tokens: u64::MAX,
+                cache_write_tokens: u64::MAX,
+            }),
+        }
+    }
+
+    fn test_pass_record<'a>(observation: &PassSchedulerObservation) -> PassRecord<'a> {
+        PassRecord {
+            observation: observation.clone(),
+            request_observed_at_ms: None,
+            full_array_fingerprint: None,
+            supersession: SupersessionCounts::default(),
+            applied_reductions: false,
         }
     }
 
@@ -18283,15 +18499,19 @@ mod tests {
                     history_segment_max_seq: None,
                     project_root: None,
                     first_divergence: produced_output_divergence.then_some("{}"),
-                    scheduler_observation: Some(observation),
-                    scheduler_request_observed_at_ms: request_observed_at_ms,
-                    scheduler_full_array_fingerprint: full_array_fingerprint,
-                    scheduler_eligible_supersession_count: eligible_supersession_count,
-                    scheduler_withheld_by_tag_window: withheld_by_tag_window_count,
-                    scheduler_withheld_by_exempt_message: withheld_by_exempt_message_count,
-                    scheduler_applied_supersession_count: applied_supersession_count,
-                    scheduler_applied_reductions: applied_reduction_count > 0,
                     overlays: TransformOverlayBatch::default(),
+                    pass: Some(PassRecord {
+                        request_observed_at_ms,
+                        full_array_fingerprint,
+                        supersession: SupersessionCounts {
+                            eligible: eligible_supersession_count,
+                            withheld_by_tag_window: withheld_by_tag_window_count,
+                            withheld_by_exempt_message: withheld_by_exempt_message_count,
+                            applied: applied_supersession_count,
+                        },
+                        applied_reductions: applied_reduction_count > 0,
+                        ..test_pass_record(observation)
+                    }),
                 },
             )
             .unwrap()
@@ -18997,14 +19217,7 @@ mod tests {
                         history_segment_max_seq: None,
                         project_root: Some("/root-a"),
                         first_divergence: None,
-                        scheduler_observation: None,
-                        scheduler_request_observed_at_ms: None,
-                        scheduler_full_array_fingerprint: None,
-                        scheduler_eligible_supersession_count: None,
-                        scheduler_withheld_by_tag_window: None,
-                        scheduler_withheld_by_exempt_message: None,
-                        scheduler_applied_supersession_count: None,
-                        scheduler_applied_reductions: false,
+                        pass: None,
                         overlays: TransformOverlayBatch {
                             created_at_ms: observed_at,
                             ..Default::default()
@@ -20272,20 +20485,18 @@ mod tests {
 
         let defer = PassSchedulerObservation {
             timestamp_ms: 32,
-            scheduler_decision: "Defer".to_string(),
+            scheduler_decision: "Defer".into(),
             drain_latch_active: false,
+            ..Default::default()
         };
         let force = PassSchedulerObservation {
             timestamp_ms: 33,
-            scheduler_decision: "Force85".to_string(),
+            scheduler_decision: "Force85".into(),
             drain_latch_active: true,
+            ..Default::default()
         };
-        store
-            .trace_pass_stable("scheduler-trace", &defer, None, None)
-            .unwrap();
-        store
-            .trace_pass_stable("scheduler-trace", &force, None, None)
-            .unwrap();
+        store.trace_pass_stable("scheduler-trace", &defer).unwrap();
+        store.trace_pass_stable("scheduler-trace", &force).unwrap();
         let scheduler_trace = store.load_pass_trace("scheduler-trace").unwrap().unwrap();
         assert_eq!(
             scheduler_trace.scheduler_history,
@@ -20304,11 +20515,10 @@ mod tests {
                     "bounded-scheduler-trace",
                     &PassSchedulerObservation {
                         timestamp_ms,
-                        scheduler_decision: "Execute".to_string(),
+                        scheduler_decision: "Execute".into(),
                         drain_latch_active: false,
+                        ..Default::default()
                     },
-                    None,
-                    None,
                 )
                 .unwrap();
         }
@@ -20337,8 +20547,9 @@ mod tests {
         let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
         let interesting = PassSchedulerObservation {
             timestamp_ms: 1,
-            scheduler_decision: "Force85".to_string(),
+            scheduler_decision: "Force85".into(),
             drain_latch_active: true,
+            ..Default::default()
         };
 
         commit_scheduler_observation(
@@ -20356,11 +20567,10 @@ mod tests {
                     "scheduler-flood",
                     &PassSchedulerObservation {
                         timestamp_ms,
-                        scheduler_decision: "Execute".to_string(),
+                        scheduler_decision: "Execute".into(),
                         drain_latch_active: true,
+                        ..Default::default()
                     },
-                    Some(10_000 + timestamp_ms as u64),
-                    None,
                 )
                 .unwrap();
         }
@@ -20369,14 +20579,18 @@ mod tests {
             store
                 .load_interesting_pass_scheduler_history("scheduler-flood", 1, 1)
                 .unwrap(),
-            vec![InterestingPassSchedulerObservation::from_observation(
-                &interesting,
-                Some(10_001),
-                Some("oldest-interest"),
-                Some(3),
-                Some(0),
-                Some(0),
-                Some(3),
+            vec![InterestingPassSchedulerObservation::from_record(
+                &PassRecord {
+                    request_observed_at_ms: Some(10_001),
+                    full_array_fingerprint: Some("oldest-interest"),
+                    supersession: SupersessionCounts {
+                        eligible: Some(3),
+                        withheld_by_tag_window: Some(0),
+                        withheld_by_exempt_message: Some(0),
+                        applied: Some(3)
+                    },
+                    ..test_pass_record(&interesting)
+                }
             )],
             "the oldest reduction pass must survive a flood of latched Execute passes that applied nothing"
         );
@@ -20422,8 +20636,9 @@ mod tests {
                 expected,
                 &PassSchedulerObservation {
                     timestamp_ms,
-                    scheduler_decision: scheduler_decision.to_string(),
+                    scheduler_decision: scheduler_decision.into(),
                     drain_latch_active,
+                    ..Default::default()
                 },
                 (
                     produced_output_divergence,
@@ -20469,13 +20684,15 @@ mod tests {
         let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
         let reduction = PassSchedulerObservation {
             timestamp_ms: 700,
-            scheduler_decision: "Execute".to_string(),
+            scheduler_decision: "Execute".into(),
             drain_latch_active: true,
+            ..Default::default()
         };
         let divergence = PassSchedulerObservation {
             timestamp_ms: 701,
-            scheduler_decision: "Emergency95".to_string(),
+            scheduler_decision: "Emergency95".into(),
             drain_latch_active: false,
+            ..Default::default()
         };
 
         let first_version = commit_scheduler_observation(
@@ -20503,24 +20720,28 @@ mod tests {
         assert_eq!(
             retained,
             vec![
-                InterestingPassSchedulerObservation::from_observation(
-                    &reduction,
-                    Some(70_000),
-                    Some("reduction-fingerprint"),
-                    Some(3),
-                    Some(1),
-                    Some(0),
-                    Some(1),
-                ),
-                InterestingPassSchedulerObservation::from_observation(
-                    &divergence,
-                    None,
-                    Some("divergence-fingerprint"),
-                    Some(3),
-                    Some(0),
-                    Some(1),
-                    Some(2),
-                ),
+                InterestingPassSchedulerObservation::from_record(&PassRecord {
+                    request_observed_at_ms: Some(70_000),
+                    full_array_fingerprint: Some("reduction-fingerprint"),
+                    supersession: SupersessionCounts {
+                        eligible: Some(3),
+                        withheld_by_tag_window: Some(1),
+                        withheld_by_exempt_message: Some(0),
+                        applied: Some(1)
+                    },
+                    ..test_pass_record(&reduction)
+                }),
+                InterestingPassSchedulerObservation::from_record(&PassRecord {
+                    request_observed_at_ms: None,
+                    full_array_fingerprint: Some("divergence-fingerprint"),
+                    supersession: SupersessionCounts {
+                        eligible: Some(3),
+                        withheld_by_tag_window: Some(0),
+                        withheld_by_exempt_message: Some(1),
+                        applied: Some(2)
+                    },
+                    ..test_pass_record(&divergence)
+                }),
             ]
         );
         assert_ne!(
@@ -20547,12 +20768,178 @@ mod tests {
     }
 
     #[test]
-    fn scheduler_interesting_history_is_oldest_first_bounded_and_byte_bounded() {
-        let worst_observation = PassSchedulerObservation {
-            timestamp_ms: i64::MIN,
-            scheduler_decision: "Emergency95".to_string(),
-            drain_latch_active: false,
+    fn the_worst_case_ring_entry_passes_the_integrity_scan_through_both_writers_as_numbers() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
+        let worst = worst_case_scheduler_observation(
+            "Emergency95",
+            MaterializeReason::BoundaryDivergenceRecut,
+        );
+        store.trace_pass_stable("worst", &worst).unwrap();
+        commit_scheduler_observation(
+            &store,
+            "worst",
+            None,
+            &worst,
+            (false, None, None, None, None, 0),
+            None,
+            None,
+        );
+        let raw: String = store
+            .inner
+            .with_conn(|conn| {
+                conn.query_row(
+                    "SELECT scheduler_history FROM pass_trace WHERE session_id = 'worst'",
+                    [],
+                    |row| row.get(0),
+                )
+            })
+            .unwrap();
+        assert_eq!(
+            raw.matches("\"cache_write_tokens\":18446744073709551615")
+                .count(),
+            2,
+            "{raw}"
+        );
+        assert_eq!(
+            store
+                .load_pass_trace("worst")
+                .unwrap()
+                .unwrap()
+                .scheduler_history,
+            vec![worst.clone(), worst]
+        );
+    }
+
+    #[test]
+    fn a_ring_entry_outside_its_vocabulary_is_refused_and_an_old_entry_loads_with_defaults() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
+        let unknown = PassSchedulerObservation {
+            scheduler_decision: "Guessed".into(),
+            ..Default::default()
         };
+        assert!(store.trace_pass_stable("vocab", &unknown).is_err());
+        let core = CoreState::empty();
+        let meta = ModuleMeta::default();
+        assert!(
+            store
+                .commit_transform(
+                    "vocab",
+                    TransformCommit {
+                        pass: Some(test_pass_record(&unknown)),
+                        ..base_commit(None, &core, &meta)
+                    },
+                )
+                .is_err()
+        );
+        assert!(store.load_pass_trace("vocab").unwrap().is_none());
+        assert!(serde_json::from_str::<PassAction>("\"ERROR\"").is_err());
+        assert!(serde_json::from_str::<MaterializeReason>("\"guessed\"").is_err());
+
+        let old: PassSchedulerObservation = serde_json::from_str(
+            r#"{"timestamp_ms":1,"scheduler_decision":"Defer","drain_latch_active":false}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            old,
+            PassSchedulerObservation {
+                timestamp_ms: 1,
+                scheduler_decision: "Defer".into(),
+                ..Default::default()
+            }
+        );
+    }
+
+    #[test]
+    fn a_refused_transform_commit_persists_neither_its_activation_nor_its_ring_entry() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
+        let core = CoreState::empty();
+        let mut meta = ModuleMeta::default();
+        meta.history_summarizer.firing_seq = 7;
+        meta.history_summarizer
+            .record_fire(Default::default(), 1, None);
+        meta.history_summarizer
+            .record_outcome(summarizer_timeline::FiringOutcome::Published { sequence: Some(7) });
+        let version = store.commit("cas", None, &core, &meta).unwrap();
+        let mut activated = meta.clone();
+        activated.m1_history_segment_seq = Some(7);
+        activated
+            .history_summarizer
+            .record_activation(0, 7, 5, false);
+        let observation = PassSchedulerObservation {
+            scheduler_decision: "Execute".into(),
+            ..Default::default()
+        };
+        assert!(matches!(
+            store.commit_transform(
+                "cas",
+                TransformCommit {
+                    pass: Some(test_pass_record(&observation)),
+                    ..base_commit(Some(version + 1), &core, &activated)
+                },
+            ),
+            Err(MemoryStoreError::CasConflict { .. })
+        ));
+        let loaded = store.load("cas").unwrap();
+        assert_eq!(
+            loaded.meta.history_summarizer.recent_firings[0].activated_at_ms,
+            None
+        );
+        assert!(
+            store
+                .load_pass_trace("cas")
+                .unwrap()
+                .is_none_or(|trace| trace.scheduler_history.is_empty())
+        );
+    }
+
+    #[test]
+    fn scheduler_interesting_history_is_oldest_first_bounded_and_byte_bounded() {
+        let longest = |set: &'static [&'static str]| {
+            set.iter().copied().max_by_key(|value| value.len()).unwrap()
+        };
+        let reasons = [
+            MaterializeReason::FirstRender,
+            MaterializeReason::LegacyMigration,
+            MaterializeReason::ProfileTransition,
+            MaterializeReason::EpochChange,
+            MaterializeReason::CoverageFold,
+            MaterializeReason::TtlExpiry,
+            MaterializeReason::ProjectMemoryEpoch,
+            MaterializeReason::Reconcile,
+            MaterializeReason::HardTrigger,
+            MaterializeReason::CachedM1Missing,
+            MaterializeReason::ExplicitFlush,
+            MaterializeReason::M1Delta,
+            MaterializeReason::Selection,
+            MaterializeReason::SyntheticTodo,
+            MaterializeReason::LineageDescent,
+            MaterializeReason::BoundaryDivergenceRecut,
+            MaterializeReason::RendererTransition,
+            MaterializeReason::LineageAnchorMismatch,
+            MaterializeReason::PressureRefold,
+            MaterializeReason::PendingRewrite,
+        ];
+        for reason in reasons {
+            assert_eq!(serde_json::to_value(reason).unwrap(), reason.as_str());
+        }
+        for action in [
+            PassAction::Hard,
+            PassAction::Soft,
+            PassAction::SoftPlus,
+            PassAction::Passthrough,
+        ] {
+            assert_eq!(serde_json::to_value(action).unwrap(), action.as_str());
+        }
+        let worst_observation = worst_case_scheduler_observation(
+            longest(SCHEDULER_DECISIONS),
+            reasons
+                .into_iter()
+                .max_by_key(|reason| reason.as_str().len())
+                .unwrap(),
+        );
         assert_eq!(
             serialize_scheduler_observation(&worst_observation)
                 .unwrap()
@@ -20560,15 +20947,17 @@ mod tests {
             MAX_PASS_SCHEDULER_OBSERVATION_JSON_BYTES
         );
         assert_eq!(
-            serialize_interesting_scheduler_observation(
-                &worst_observation,
-                Some(u64::MAX),
-                Some(&"\0".repeat(MAX_FULL_ARRAY_FINGERPRINT_BYTES)),
-                Some(u64::MAX),
-                Some(u64::MAX),
-                Some(u64::MAX),
-                Some(u64::MAX),
-            )
+            serialize_interesting_scheduler_observation(&PassRecord {
+                request_observed_at_ms: Some(u64::MAX),
+                full_array_fingerprint: Some(&"\0".repeat(MAX_FULL_ARRAY_FINGERPRINT_BYTES)),
+                supersession: SupersessionCounts {
+                    eligible: Some(u64::MAX),
+                    withheld_by_tag_window: Some(u64::MAX),
+                    withheld_by_exempt_message: Some(u64::MAX),
+                    applied: Some(u64::MAX)
+                },
+                ..test_pass_record(&worst_observation)
+            })
             .unwrap()
             .len(),
             MAX_INTERESTING_PASS_SCHEDULER_OBSERVATION_JSON_BYTES
@@ -20585,8 +20974,9 @@ mod tests {
                 expected,
                 &PassSchedulerObservation {
                     timestamp_ms,
-                    scheduler_decision: "Emergency95".to_string(),
+                    scheduler_decision: "Emergency95".into(),
                     drain_latch_active: true,
+                    ..Default::default()
                 },
                 (false, Some(3), Some(0), Some(0), Some(3), 1),
                 Some(timestamp_ms as u64),
@@ -20632,8 +21022,9 @@ mod tests {
                 expected,
                 &PassSchedulerObservation {
                     timestamp_ms,
-                    scheduler_decision: decision.to_string(),
+                    scheduler_decision: decision.into(),
                     drain_latch_active: decision == "Execute",
+                    ..Default::default()
                 },
                 (false, Some(3), Some(0), Some(0), Some(3), 1),
                 Some(request_time),
@@ -20682,8 +21073,9 @@ mod tests {
             expected,
             &PassSchedulerObservation {
                 timestamp_ms: 400,
-                scheduler_decision: "Force85".to_string(),
+                scheduler_decision: "Force85".into(),
                 drain_latch_active: false,
+                ..Default::default()
             },
             (false, Some(3), Some(0), Some(0), Some(3), 1),
             None,
@@ -20707,8 +21099,9 @@ mod tests {
         let meta = ModuleMeta::default();
         let observation = PassSchedulerObservation {
             timestamp_ms: 500,
-            scheduler_decision: "Defer".to_string(),
+            scheduler_decision: "Defer".into(),
             drain_latch_active: false,
+            ..Default::default()
         };
 
         for (session_id, first_divergence, applied_reductions, fingerprint) in [
@@ -20727,15 +21120,19 @@ mod tests {
                         history_segment_max_seq: None,
                         project_root: None,
                         first_divergence,
-                        scheduler_observation: Some(&observation),
-                        scheduler_request_observed_at_ms: Some(500),
-                        scheduler_full_array_fingerprint: Some(fingerprint),
-                        scheduler_eligible_supersession_count: None,
-                        scheduler_withheld_by_tag_window: None,
-                        scheduler_withheld_by_exempt_message: None,
-                        scheduler_applied_supersession_count: None,
-                        scheduler_applied_reductions: applied_reductions,
                         overlays: TransformOverlayBatch::default(),
+                        pass: Some(PassRecord {
+                            request_observed_at_ms: Some(500),
+                            full_array_fingerprint: Some(fingerprint),
+                            supersession: SupersessionCounts {
+                                eligible: None,
+                                withheld_by_tag_window: None,
+                                withheld_by_exempt_message: None,
+                                applied: None,
+                            },
+                            applied_reductions,
+                            ..test_pass_record(&observation)
+                        }),
                     },
                 )
                 .unwrap();
@@ -21097,6 +21494,9 @@ mod tests {
                 }),
                 memory_reviewer_nonadmission: MemoryReviewerNonadmission::default(),
                 memory_reviewer_reservation: None,
+                recent_firings: Vec::new(),
+                counters: Default::default(),
+                pending_eligibility: None,
             },
             ..Default::default()
         }
@@ -21127,6 +21527,7 @@ mod tests {
                     None,
                     Some("publication failed"),
                     true,
+                    summarizer_timeline::AbandonClass::Invalidated,
                 )
                 .unwrap();
             assert_eq!(
@@ -21227,6 +21628,7 @@ mod tests {
                 &publish_predicate(),
                 None,
                 Some("snapshot generation changed"),
+                summarizer_timeline::AbandonClass::Invalidated,
             )
             .unwrap();
         assert_eq!(first_abandoned, Some(first_before.row_version.unwrap() + 1));
@@ -21260,6 +21662,7 @@ mod tests {
                 &publish_predicate(),
                 Some(999),
                 Some("fingerprint or CAS conflict"),
+                summarizer_timeline::AbandonClass::Invalidated,
             )
             .unwrap();
         assert_eq!(
@@ -21323,6 +21726,7 @@ mod tests {
                 chunk_transcript: None,
                 memory_reviewer_nonadmission: None,
                 memory_reviewer_activation: None,
+                published_at_ms: 0,
             })
             .unwrap_err();
         assert!(matches!(
@@ -21388,6 +21792,7 @@ mod tests {
                     chunk_transcript: None,
                     memory_reviewer_nonadmission: None,
                     memory_reviewer_activation: None,
+                    published_at_ms: 0,
                 })
                 .unwrap();
 
@@ -21526,6 +21931,7 @@ mod tests {
                     chunk_transcript: None,
                     memory_reviewer_nonadmission: None,
                     memory_reviewer_activation: None,
+                    published_at_ms: 0,
                 })
                 .unwrap_err();
             assert!(
@@ -21603,6 +22009,7 @@ mod tests {
                 chunk_transcript: None,
                 memory_reviewer_nonadmission: None,
                 memory_reviewer_activation: None,
+                published_at_ms: 0,
             })
             .unwrap();
         assert_eq!(
@@ -21752,6 +22159,7 @@ mod tests {
                 chunk_transcript: None,
                 memory_reviewer_nonadmission: None,
                 memory_reviewer_activation: None,
+                published_at_ms: 0,
             })
             .unwrap();
         assert_eq!(
@@ -22037,6 +22445,7 @@ mod tests {
                     chunk_transcript: None,
                     memory_reviewer_nonadmission: code,
                     memory_reviewer_activation: None,
+                    published_at_ms: 0,
                 })
             };
         let nonadmission = || {
@@ -22172,6 +22581,7 @@ mod tests {
                 Some(5),
                 Some("fence"),
                 true,
+                summarizer_timeline::AbandonClass::Invalidated,
             )
             .unwrap()
             .expect("abandon applies");
@@ -22276,6 +22686,7 @@ mod tests {
                 chunk_transcript: Some("U: orphan"),
                 memory_reviewer_nonadmission: None,
                 memory_reviewer_activation: None,
+                published_at_ms: 0,
             })
             .unwrap_err();
         assert!(matches!(
@@ -22328,6 +22739,7 @@ mod tests {
                 chunk_transcript: Some(&transcript),
                 memory_reviewer_nonadmission: None,
                 memory_reviewer_activation: None,
+                published_at_ms: 0,
             })
             .unwrap_err();
         assert!(matches!(
@@ -22377,6 +22789,7 @@ mod tests {
                 chunk_transcript: Some("U: bounded row"),
                 memory_reviewer_nonadmission: None,
                 memory_reviewer_activation: None,
+                published_at_ms: 0,
             })
             .unwrap();
 
@@ -22440,6 +22853,7 @@ mod tests {
                 chunk_transcript: Some(&oversized),
                 memory_reviewer_nonadmission: None,
                 memory_reviewer_activation: None,
+                published_at_ms: 0,
             })
             .unwrap_err();
         assert!(matches!(
@@ -23663,6 +24077,7 @@ mod tests {
                 chunk_transcript: None,
                 memory_reviewer_nonadmission: None,
                 memory_reviewer_activation: None,
+                published_at_ms: 0,
             })
             .unwrap_err();
         assert!(
@@ -23684,6 +24099,248 @@ mod tests {
             importance: 50,
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn a_revert_counts_only_published_segments_no_pass_rendered_and_commits_the_count_with_the_revert()
+     {
+        let dir = tempfile::tempdir().unwrap();
+        let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
+        let mut meta = ModuleMeta {
+            folded_history_segment_seq: 1,
+            m1_history_segment_seq: Some(2),
+            ..Default::default()
+        };
+        // Firing 3 published segment 3, which no pass rendered.
+        meta.history_summarizer.firing_seq = 3;
+        meta.history_summarizer
+            .record_fire(Default::default(), 1, None);
+        meta.history_summarizer
+            .record_outcome(summarizer_timeline::FiringOutcome::Published { sequence: Some(3) });
+        let rv = store
+            .commit("ses", None, &CoreState::empty(), &meta)
+            .unwrap();
+        store
+            .replace_history_segments(
+                "ses",
+                &[
+                    recut_comp(1, 1, 1, "a#0"),
+                    recut_comp(2, 2, 2, "b#0"),
+                    recut_comp(3, 3, 3, "c#0"),
+                    recut_comp(4, 4, 4, "d#0"),
+                ],
+            )
+            .unwrap();
+
+        let counters =
+            |store: &MemoryStore| store.load("ses").unwrap().meta.history_summarizer.counters;
+        assert!(matches!(
+            store.truncate_history_segments_for_revert("ses", 1, Some(rv + 7)),
+            Err(MemoryStoreError::CasConflict { .. })
+        ));
+        assert_eq!(counters(&store).superseded_before_activation, 0);
+
+        store
+            .truncate_history_segments_for_revert("ses", 1, Some(rv))
+            .unwrap();
+        // Segment 2 is rendered by m1; 3 and 4 were published above both the kept prefix and the render.
+        let outcome_count = counters(&store).superseded_before_activation;
+        assert_eq!(outcome_count, 2);
+        assert_eq!(store.load_history_segments("ses").unwrap().len(), 1);
+        // Nothing of firing 3 remains to activate, so a later publication reusing sequence 3 cannot stamp it.
+        let mut after = store.load("ses").unwrap().meta.history_summarizer;
+        assert_eq!(
+            after.recent_firings[0].outcome,
+            Some(summarizer_timeline::FiringOutcome::Published { sequence: None })
+        );
+        after.record_activation(1, 3, 9, false);
+        assert_eq!(after.recent_firings[0].activated_at_ms, None);
+
+        // A kept prefix above the render bounds the count too: only segment 4 is dropped.
+        let loaded = store.load("ses").unwrap();
+        let mut meta = loaded.meta.clone();
+        meta.folded_history_segment_seq = 0;
+        meta.m1_history_segment_seq = None;
+        let rv = store
+            .commit("ses", loaded.row_version, &loaded.core, &meta)
+            .unwrap();
+        store
+            .append_history_segments(
+                "ses",
+                &[
+                    recut_comp(2, 2, 2, "b#0"),
+                    recut_comp(3, 3, 3, "c#0"),
+                    recut_comp(4, 4, 4, "d#0"),
+                ],
+            )
+            .unwrap();
+        let outcome = store
+            .truncate_history_segments_for_revert("ses", 3, Some(rv))
+            .unwrap();
+        assert_eq!(
+            outcome
+                .history_summarizer
+                .counters
+                .superseded_before_activation,
+            3
+        );
+        assert_eq!(counters(&store).superseded_before_activation, 3);
+    }
+
+    #[test]
+    fn a_revert_counts_segments_an_additive_only_pass_acknowledged_without_serving() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
+        // The watermarks reach 3, but the served prefix renders only segment 1.
+        let mut meta = ModuleMeta {
+            folded_history_segment_seq: 3,
+            m1_history_segment_seq: Some(3),
+            additive_served_history_segment_seq: Some(1),
+            ..Default::default()
+        };
+        for sequence in [2, 3] {
+            meta.history_summarizer.firing_seq = sequence;
+            meta.history_summarizer
+                .record_fire(Default::default(), 1, None);
+            meta.history_summarizer
+                .record_outcome(summarizer_timeline::FiringOutcome::Published {
+                    sequence: Some(sequence as i64),
+                });
+        }
+        let rv = store
+            .commit("ses", None, &CoreState::empty(), &meta)
+            .unwrap();
+        store
+            .replace_history_segments(
+                "ses",
+                &[
+                    recut_comp(1, 1, 1, "a#0"),
+                    recut_comp(2, 2, 2, "b#0"),
+                    recut_comp(3, 3, 3, "c#0"),
+                ],
+            )
+            .unwrap();
+
+        let outcome = store
+            .truncate_history_segments_for_revert("ses", 1, Some(rv))
+            .unwrap();
+        let state = outcome.history_summarizer;
+        assert_eq!(state.counters.superseded_before_activation, 2);
+        assert!(state.recent_firings.iter().all(|entry| entry.outcome
+            == Some(summarizer_timeline::FiringOutcome::Published { sequence: None })));
+    }
+
+    #[test]
+    fn a_publication_stamps_its_firing_counts_it_once_and_keeps_the_earliest_pending_start() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
+        let mut meta = publishing_meta();
+        meta.history_summarizer.record_fire(
+            summarizer_timeline::FiringTrigger::default(),
+            100,
+            None,
+        );
+        let rv = store
+            .commit("ses", None, &CoreState::empty(), &meta)
+            .unwrap();
+        let publish = |store: &MemoryStore,
+                       expected_row_version: u64,
+                       predicate: &HistorySummarizerPublishPredicate,
+                       segment: StoredHistorySegment,
+                       published_at_ms: i64| {
+            store.publish_history_summarizer_chunk(HistorySummarizerPublishRequest {
+                session_id: "ses",
+                expected_row_version: Some(expected_row_version),
+                expected_revert_epoch: 0,
+                predicate,
+                project_path: "git:proj",
+                history_segments: &[segment],
+                events: &[],
+                primer_candidates: &[],
+                user_memory_candidates: &[],
+                publication_floor_ordinal: 21,
+                chunk_transcript: None,
+                memory_reviewer_nonadmission: None,
+                memory_reviewer_activation: None,
+                published_at_ms,
+            })
+        };
+
+        // A refused publication changes no counter and records no outcome.
+        assert!(
+            publish(
+                &store,
+                rv + 1,
+                &publish_predicate(),
+                publish_history_segment(),
+                400
+            )
+            .is_err()
+        );
+        let refused = store.load("ses").unwrap().meta;
+        assert_eq!(refused.history_summarizer.counters.published, 0);
+        assert_eq!(refused.history_summarizer.recent_firings[0].outcome, None);
+        assert_eq!(refused.m1_pending_since_ms, None);
+
+        publish(
+            &store,
+            rv,
+            &publish_predicate(),
+            publish_history_segment(),
+            500,
+        )
+        .unwrap();
+        let first = store.load("ses").unwrap();
+        let entry = &first.meta.history_summarizer.recent_firings[0];
+        assert_eq!(entry.published_at_ms, Some(500));
+        assert_eq!(
+            entry.outcome,
+            Some(summarizer_timeline::FiringOutcome::Published { sequence: Some(1) })
+        );
+        assert_eq!(first.meta.history_summarizer.counters.published, 1);
+        assert_eq!(first.meta.m1_pending_since_ms, Some(500));
+
+        let generation = HistorySegmentSetGeneration {
+            max_sequence: 1,
+            count: 1,
+        };
+        let mut next = first.meta.clone();
+        next.history_summarizer = HistorySummarizerDurableState {
+            firing_seq: 8,
+            history_segment_set_generation: generation,
+            ..publishing_meta().history_summarizer
+        };
+        next.history_summarizer.recent_firings =
+            first.meta.history_summarizer.recent_firings.clone();
+        next.history_summarizer.counters = first.meta.history_summarizer.counters;
+        next.history_summarizer.record_fire(
+            summarizer_timeline::FiringTrigger::default(),
+            600,
+            None,
+        );
+        let rv = store
+            .commit("ses", first.row_version, &first.core, &next)
+            .unwrap();
+        let second_predicate = HistorySummarizerPublishPredicate {
+            firing_seq: 8,
+            history_segment_set_generation: generation,
+            ..publish_predicate()
+        };
+        let segment = StoredHistorySegment {
+            start_message: 21,
+            end_message: 30,
+            end_message_id: "m30".into(),
+            ..publish_history_segment()
+        };
+        publish(&store, rv, &second_predicate, segment, 900).unwrap();
+        let second = store.load("ses").unwrap().meta;
+        assert_eq!(second.m1_pending_since_ms, Some(500));
+        assert_eq!(second.history_summarizer.counters.published, 2);
+        assert_eq!(
+            second.history_summarizer.recent_firings[1].outcome,
+            Some(summarizer_timeline::FiringOutcome::Published { sequence: Some(2) })
+        );
+        assert_eq!(second.history_summarizer.counters.firings, 2);
     }
 
     #[test]
@@ -23866,6 +24523,7 @@ mod tests {
                 chunk_transcript: None,
                 memory_reviewer_nonadmission: None,
                 memory_reviewer_activation: None,
+                published_at_ms: 0,
             })
             .unwrap_err();
         assert!(matches!(

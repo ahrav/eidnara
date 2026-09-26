@@ -5,7 +5,7 @@ import { parseRustPassLine } from "./rust-harness";
 // instead of silently zeroing a timing the perf suite bounds.
 const PASS_LINE =
     "[eidnara] rust pass: decision=DEFER reason=steady served_from=transform in=12 out=12 " +
-    "applied=true row_version=7 elapsed=41.7 ms module=23.4 ms stages=prefix_guard:6.2 " +
+    "applied=true row_version=7 emergency_wait=1234.5 elapsed=41.7 ms module=23.4 ms stages=prefix_guard:6.2 " +
     "ordinal_resolve:1.1 clone:0.4 wire_build:3.9 wire_messages:3 transport:9.8 " +
     "transport_pages:1 transport_bytes:20480 apply:1.2 other:0.8";
 
@@ -16,6 +16,7 @@ describe("parseRustPassLine", () => {
         expect(pass).toMatchObject({
             decision: "DEFER",
             reason: "steady",
+            emergencyWaitMs: 1234.5,
             servedFrom: "transform",
             inputCount: 12,
             outputCount: 12,

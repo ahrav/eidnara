@@ -543,8 +543,8 @@ const StatusDialog = props => {
           }
         })), null);
         _$insert(_el$44, (() => {
-          var _c$0 = _$memo(() => s().readyConditionalNoteCount > 0);
-          return () => _c$0() && _$createComponent(R, {
+          var _c$1 = _$memo(() => s().readyConditionalNoteCount > 0);
+          return () => _c$1() && _$createComponent(R, {
             get t() {
               return t();
             },
@@ -558,8 +558,8 @@ const StatusDialog = props => {
           });
         })(), null);
         _$insert(_el$44, (() => {
-          var _c$1 = _$memo(() => !!s().lastMemoryClassifierRunAt);
-          return () => _c$1() && _$createComponent(R, {
+          var _c$10 = _$memo(() => !!s().lastMemoryClassifierRunAt);
+          return () => _c$10() && _$createComponent(R, {
             get t() {
               return t();
             },
@@ -802,8 +802,8 @@ const StatusDialog = props => {
         _$insertNode(_el$73, _el$74);
         _$insertNode(_el$74, _$createTextNode(`History Compression`));
         _$insert(_el$64, (() => {
-          var _c$10 = _$memo(() => typeof s().boundaryPresent === "boolean");
-          return () => _c$10() && _$createComponent(R, {
+          var _c$11 = _$memo(() => typeof s().boundaryPresent === "boolean");
+          return () => _c$11() && _$createComponent(R, {
             get t() {
               return t();
             },
@@ -814,8 +814,8 @@ const StatusDialog = props => {
           });
         })(), null);
         _$insert(_el$64, (() => {
-          var _c$11 = _$memo(() => s().coverageOrdinal !== undefined);
-          return () => _c$11() && _$createComponent(R, {
+          var _c$12 = _$memo(() => s().coverageOrdinal !== undefined);
+          return () => _c$12() && _$createComponent(R, {
             get t() {
               return t();
             },
@@ -826,8 +826,8 @@ const StatusDialog = props => {
           });
         })(), null);
         _$insert(_el$64, (() => {
-          var _c$12 = _$memo(() => typeof s().boundaryPresent === "boolean");
-          return () => _c$12() && _$createComponent(R, {
+          var _c$13 = _$memo(() => typeof s().boundaryPresent === "boolean");
+          return () => _c$13() && _$createComponent(R, {
             get t() {
               return t();
             },
@@ -847,8 +847,8 @@ const StatusDialog = props => {
           }
         }), null);
         _$insert(_el$64, (() => {
-          var _c$13 = _$memo(() => s().compressionBudget != null);
-          return () => _c$13() && _$createComponent(R, {
+          var _c$14 = _$memo(() => s().compressionBudget != null);
+          return () => _c$14() && _$createComponent(R, {
             get t() {
               return t();
             },
@@ -859,8 +859,8 @@ const StatusDialog = props => {
           });
         })(), null);
         _$insert(_el$64, (() => {
-          var _c$14 = _$memo(() => !!s().lastMemoryClassifierRunAt);
-          return () => _c$14() && _$createComponent(R, {
+          var _c$15 = _$memo(() => !!s().lastMemoryClassifierRunAt);
+          return () => _c$15() && _$createComponent(R, {
             get t() {
               return t();
             },
@@ -890,18 +890,40 @@ const StatusDialog = props => {
       })()];
     })());
     _$insert(_el$4, (() => {
-      var _c$7 = _$memo(() => !!s().lastTransformError);
+      var _c$7 = _$memo(() => (s().compactionTiming?.length ?? 0) > 0);
       return () => _c$7() && (() => {
         var _el$76 = _$createElement("box"),
           _el$77 = _$createElement("text"),
-          _el$78 = _$createTextNode(`⚠ `);
+          _el$78 = _$createElement("b");
         _$insertNode(_el$76, _el$77);
         _$setProp(_el$76, "marginTop", 1);
         _$setProp(_el$76, "width", "100%");
+        _$setProp(_el$76, "flexDirection", "column");
         _$insertNode(_el$77, _el$78);
-        _$insert(_el$77, () => s().lastTransformError, null);
-        _$effect(_$p => _$setProp(_el$77, "fg", t().error, _$p));
+        _$insertNode(_el$78, _$createTextNode(`Compaction Timing`));
+        _$insert(_el$76, () => s().compactionTiming?.slice(1).map(line => (() => {
+          var _el$80 = _$createElement("text");
+          _$insert(_el$80, () => line.replace(/^- /, ""));
+          _$effect(_$p => _$setProp(_el$80, "fg", t().textMuted, _$p));
+          return _el$80;
+        })()), null);
+        _$effect(_$p => _$setProp(_el$77, "fg", t().text, _$p));
         return _el$76;
+      })();
+    })(), _el$18);
+    _$insert(_el$4, (() => {
+      var _c$8 = _$memo(() => !!s().lastTransformError);
+      return () => _c$8() && (() => {
+        var _el$81 = _$createElement("box"),
+          _el$82 = _$createElement("text"),
+          _el$83 = _$createTextNode(`⚠ `);
+        _$insertNode(_el$81, _el$82);
+        _$setProp(_el$81, "marginTop", 1);
+        _$setProp(_el$81, "width", "100%");
+        _$insertNode(_el$82, _el$83);
+        _$insert(_el$82, () => s().lastTransformError, null);
+        _$effect(_$p => _$setProp(_el$82, "fg", t().error, _$p));
+        return _el$81;
       })();
     })(), _el$18);
     _$insertNode(_el$18, _el$19);
@@ -922,8 +944,8 @@ const StatusDialog = props => {
       }
     }), null);
     _$insert(_el$18, (() => {
-      var _c$8 = _$memo(() => !!s().loggerDiagnostics?.lastErrorMessage);
-      return () => _c$8() && _$createComponent(R, {
+      var _c$9 = _$memo(() => !!s().loggerDiagnostics?.lastErrorMessage);
+      return () => _c$9() && _$createComponent(R, {
         get t() {
           return t();
         },
@@ -937,8 +959,8 @@ const StatusDialog = props => {
       });
     })(), null);
     _$insert(_el$18, (() => {
-      var _c$9 = _$memo(() => !!s().loggerDiagnostics?.lastErrorTime);
-      return () => _c$9() && _$createComponent(R, {
+      var _c$0 = _$memo(() => !!s().loggerDiagnostics?.lastErrorTime);
+      return () => _c$0() && _$createComponent(R, {
         get t() {
           return t();
         },
@@ -1067,11 +1089,11 @@ function renderTuiProbeCustomArm(api, result) {
     api.ui.dialog.replace(() => {
       try {
         return (() => {
-          var _el$79 = _$createElement("box"),
-            _el$80 = _$createElement("text");
-          _$insertNode(_el$79, _el$80);
-          _$insertNode(_el$80, _$createTextNode(`probe`));
-          return _el$79;
+          var _el$84 = _$createElement("box"),
+            _el$85 = _$createElement("text");
+          _$insertNode(_el$84, _el$85);
+          _$insertNode(_el$85, _$createTextNode(`probe`));
+          return _el$84;
         })();
       } catch (error) {
         result.customThrew = probeErrorMessage(error);
@@ -1142,11 +1164,11 @@ function reportTuiProbe(api, result) {
   if (result.customThrew === null) {
     try {
       api.ui.dialog.replace(() => (() => {
-        var _el$82 = _$createElement("box"),
-          _el$83 = _$createElement("text");
-        _$insertNode(_el$82, _el$83);
-        _$insert(_el$83, summary);
-        return _el$82;
+        var _el$87 = _$createElement("box"),
+          _el$88 = _$createElement("text");
+        _$insertNode(_el$87, _el$88);
+        _$insert(_el$88, summary);
+        return _el$87;
       })());
       return;
     } catch (error) {

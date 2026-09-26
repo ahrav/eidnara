@@ -914,6 +914,38 @@ describe("buildStatusDetail", () => {
             lastErrorTime: null,
         });
 
+        expect(detail.compactionTiming).toBeUndefined();
+        const timed = buildStatusDetail(
+            "ses-status-timed",
+            process.cwd(),
+            "test-provider/test-model",
+            undefined,
+            live,
+            undefined,
+            {
+                ...DAEMON_STATUS,
+                history_summarizer: {
+                    recent_firings: [
+                        {
+                            firing_seq: 3,
+                            source: "wrapup",
+                            clock: "daemon_wall_ms",
+                            fired_at_ms: 1_000,
+                            published_at_ms: 2_500,
+                            outcome: { kind: "published", sequence: 3 },
+                        },
+                    ],
+                },
+            },
+        );
+        // The TUI dialog renders exactly the lines the text status prints.
+        expect(timed.compactionTiming).toEqual([
+            "### Compaction Timing",
+            "- Last summary #3 (wrapup): published, not yet activated",
+            "- Waited to start unknown, ran 1.5s, sat unactivated still",
+            "- Publish to activation: max unknown over 0 (none), 1 pending",
+        ]);
+
         const bare = buildStatusDetail("ses-status-neutral", process.cwd());
         expect(bare.tagCounter).toBe(0);
         expect(bare.activeTags).toBe(0);

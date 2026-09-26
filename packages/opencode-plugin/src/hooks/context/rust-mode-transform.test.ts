@@ -323,6 +323,7 @@ describe("Rust mode transform request", () => {
                     handler_total: 5,
                     total: 4,
                     native_cache_encoded_messages: 1,
+                    emergency_wait: 1_234.5,
                 },
             },
             {
@@ -352,6 +353,8 @@ describe("Rust mode transform request", () => {
             expect(passLines).toHaveLength(2);
             expect(passLines[0]).toContain("decision=HARD");
             expect(passLines[0]).toContain("served_from=transform");
+            expect(passLines[0]).toContain("emergency_wait=1234.5");
+            expect(passLines[1]).toContain("emergency_wait=0.0");
             expect(passLines[0]).toMatch(
                 /reason=first_render .* stages=prefix_guard:[\d.]+ ordinal_resolve:[\d.]+ clone:[\d.]+ wire_build:[\d.]+ wire_messages:1 transport:[\d.]+ transport_pages:1 transport_bytes:\d+ apply:[\d.]+ other:[\d.]+$/,
             );
@@ -513,6 +516,7 @@ describe("Rust mode transform request", () => {
         const first = makeMessages(sessionId);
         await transform.run(sessionId, { messages: [...first] });
         expect("usage" in bodies[0]!).toBe(false);
+        expect("prev_response_cache_usage" in bodies[0]!).toBe(false);
 
         deps.contextUsageMap.set(sessionId, {
             usage: { percentage: 50, inputTokens: 64_000 },
@@ -523,10 +527,50 @@ describe("Rust mode transform request", () => {
         const second = makeMessages(sessionId);
         await transform.run(sessionId, { messages: [...second] });
         expect(bodies[1]?.usage).toEqual({
-            input_tokens: 64_000,
-            limit: 128_000,
             current_total_input_tokens: 64_000,
             context_limit_tokens: 128_000,
+        });
+        expect("prev_response_cache_usage" in bodies[1]!).toBe(false);
+    });
+
+    it("sends the previous response's cache counts beside its pressure usage from one snapshot", async () => {
+        const sessionId = `rust-cache-usage-${Date.now()}`;
+        installAvailabilityDb(sessionId, {});
+        installRawRows(sessionId, rawRows(1));
+        const { client, bodies } = recordingClient((request) => recipeResponse(request, []));
+        const deps = makeDeps();
+        const transform = createRustModeTransform(deps, { moduleClient: client });
+        const entry = (inputTokens: number, readTokens: number, writeTokens: number) => ({
+            usage: {
+                percentage: inputTokens / 1_280,
+                inputTokens,
+                cache: { readTokens, writeTokens },
+            },
+            updatedAt: Date.now(),
+            lastResponseTime: Date.now(),
+            hasUsageTokens: true,
+        });
+
+        deps.contextUsageMap.set(sessionId, entry(64_000, 60_000, 3_000));
+        await transform.run(sessionId, { messages: [...makeMessages(sessionId)] });
+        deps.contextUsageMap.set(sessionId, entry(10_000, 0, 0));
+        await transform.run(sessionId, { messages: [...makeMessages(sessionId)] });
+
+        expect(bodies[0]?.usage).toEqual({
+            current_total_input_tokens: 64_000,
+            context_limit_tokens: 128_000,
+        });
+        expect(bodies[0]?.prev_response_cache_usage).toEqual({
+            cache_read_tokens: 60_000,
+            cache_write_tokens: 3_000,
+        });
+        expect(bodies[1]?.usage).toEqual({
+            current_total_input_tokens: 10_000,
+            context_limit_tokens: 128_000,
+        });
+        expect(bodies[1]?.prev_response_cache_usage).toEqual({
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
         });
     });
 
