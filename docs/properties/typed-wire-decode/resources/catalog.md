@@ -251,7 +251,8 @@ meter, contradicting A1's unqualified charge-before-probe statement at
 `docs/properties/hot-path-optimization/latency-audit/catalog.md:159-165`.
 This ordering discrepancy is verified; its allocation magnitude is unmeasured.
 Existing check: `crates/host-runtime/src/config.rs:481-502` checks pool splits;
-`crates/daemon/src/lib.rs:23311-23353` checks active projection leases. Both
+`crates/daemon/src/lib.rs:23311-23353` checked active projection leases until
+#828 deleted the projection cache and that test; the pool-split check is
 unaudited. No complete transient allocation-to-pool check is found.
 Impact: A smaller decode charge leaves projection or probe allocation unbounded
 by actual reservations, especially under concurrent load.

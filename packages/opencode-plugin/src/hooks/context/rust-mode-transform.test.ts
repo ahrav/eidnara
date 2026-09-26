@@ -1438,6 +1438,55 @@ describe("Rust mode transform transport", () => {
         expect(bodiesBySession.get(evicted)?.[1]?.native_messages).toEqual(evictedInput);
     });
 
+    it("keeps a session that serves its last applied output ahead of idle sessions in the eviction order", async () => {
+        const capacity = __rustModeTransformTest.RETAINED_OUTPUT_SESSION_CAPACITY;
+        const stamp = Date.now();
+        const sessionIdAt = (index: number): string =>
+            `rust-retained-output-recency-${stamp}-${index}`;
+        const failing = sessionIdAt(0);
+        let failNext = false;
+        const bodiesBySession = new Map<string, Record<string, unknown>[]>();
+        const client: RustModeModuleClient = {
+            call: async ({ sessionId, body }) => {
+                const request = body as Record<string, unknown>;
+                const list = bodiesBySession.get(sessionId) ?? [];
+                list.push(request);
+                bodiesBySession.set(sessionId, list);
+                if (sessionId === failing && failNext) {
+                    failNext = false;
+                    throw new Error("daemon timed out");
+                }
+                return recipeResponse(request, []);
+            },
+        };
+        const transform = createRustModeTransform(makeDeps(), {
+            moduleClient: client,
+        });
+        for (let index = 0; index < capacity; index += 1) {
+            const sessionId = sessionIdAt(index);
+            installRawRows(sessionId, rawRows(1));
+            await transform.run(sessionId, { messages: [...makeMessages(sessionId)] });
+        }
+
+        // `failing` holds the oldest record; its failed pass serves the last applied output.
+        failNext = true;
+        const failedOutput = { messages: [...makeMessages(failing)] as unknown[] };
+        await transform.run(failing, failedOutput);
+        expect(failedOutput.messages).toHaveLength(0);
+        expect(transform.getState(failing).failureCount).toBe(1);
+
+        // Adding `newcomer` evicts `sessionIdAt(1)`, not `failing`, because the failed pass counts as use.
+        const newcomer = sessionIdAt(capacity);
+        installRawRows(newcomer, rawRows(1));
+        await transform.run(newcomer, { messages: [...makeMessages(newcomer)] });
+
+        await transform.run(failing, { messages: [...makeMessages(failing)] });
+        expect(bodiesBySession.get(failing)?.[2]?.previous_output_revision).toBeDefined();
+        const idle = sessionIdAt(1);
+        await transform.run(idle, { messages: [...makeMessages(idle)] });
+        expect(bodiesBySession.get(idle)?.[1]?.previous_output_revision).toBeUndefined();
+    });
+
     for (const limit of ["session count", "byte budget"] as const) {
         it(`never releases an active capture lease when the ${limit} evicts its session's output`, async () => {
             const stamp = Date.now();
@@ -2045,6 +2094,31 @@ describe("recipe application", () => {
         expect(outputs.retain("h", record(150, 40))).toBe(false);
         outputs.release("g");
         expect(outputs.usedBytes).toBe(2);
+    });
+
+    it("moves a record read with get to the back of the eviction order and leaves peek reads in place", () => {
+        const record = (charge: number) => ({
+            rawCount: 1,
+            rawHistory: { count: 0, digest: "", symbols: [], bytes: 0 },
+            wireBytes: [0],
+            inputLengths: [0],
+            charge,
+        });
+        const outputs = new __rustModeTransformTest.RetainedOutputs(2, 100);
+        const a = record(10);
+        expect(outputs.retain("a", a)).toBe(true);
+        expect(outputs.retain("b", record(10))).toBe(true);
+        expect(outputs.get("a")).toBe(a);
+        expect(outputs.get("missing")).toBeUndefined();
+        expect(outputs.retain("c", record(10))).toBe(true);
+        expect(outputs.peek("a")).toBe(a);
+        expect(outputs.peek("b")).toBeUndefined();
+        expect(outputs.usedBytes).toBe(20);
+        // `peek` does not change the order, so `a` is still the oldest record.
+        expect(outputs.peek("a")).toBe(a);
+        expect(outputs.retain("d", record(10))).toBe(true);
+        expect(outputs.peek("a")).toBeUndefined();
+        expect(outputs.usedBytes).toBe(20);
     });
 });
 
@@ -3718,6 +3792,44 @@ describe("fail-open after an applied pass", () => {
             debugSpy.mockRestore();
         }
     });
+
+    for (const [status, reason] of [
+        ["session_busy", "daemon_session_busy"],
+        ["status_added_later", "daemon_status_unrecognized"],
+    ]) {
+        it(`serves the last applied output plus the appended messages on a ${status} decline`, async () => {
+            const sessionId = `rust-fail-open-${status}-${Date.now()}`;
+            const rows = rawRows(5);
+            installRawRows(sessionId, rows);
+            const { client, bodies } = recordingClient((request, index) =>
+                index === 0 ? recipeResponse(request, [folded(sessionId)]) : { status },
+            );
+            const transform = createRustModeTransform(makeDeps(), { moduleClient: client });
+            const debugSpy = spyOn(logger.sessionLog, "debug");
+            try {
+                await transform.run(sessionId, {
+                    messages: rowMessages(sessionId, rows.slice(0, 3)),
+                });
+
+                const grown = rowMessages(sessionId, rows);
+                const output = { messages: [...grown] as unknown[] };
+                await transform.run(sessionId, output);
+                expect(bodies).toHaveLength(2);
+                expect(output.messages).toEqual([folded(sessionId), grown[3], grown[4]]);
+                expect(output.messages[1]).toBe(grown[3]);
+                expect(transform.getState(sessionId).failureCount).toBe(0);
+                expect(transform.getState(sessionId).consecutiveFailures).toBe(0);
+                const passLines = sessionLogs(debugSpy, sessionId).filter((line) =>
+                    line.startsWith("rust pass:"),
+                );
+                expect(passLines[1]).toContain(
+                    `decision=declined:${reason} reason=none served_from=last_applied in=5 out=3`,
+                );
+            } finally {
+                debugSpy.mockRestore();
+            }
+        });
+    }
 
     it("serves the input unchanged after an in-place edit of an acknowledged message", async () => {
         const sessionId = `rust-fail-open-edit-${Date.now()}`;

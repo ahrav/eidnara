@@ -140,6 +140,7 @@ Impact: a stale or partially edited array reaches the model or the daemon's inbo
 Open questions:
 
 - The directory and permission awaits (`rust-mode-transform.ts:1087`, `:1096`) are ownership fences only. Clear, invalidation, and supersession are exercised at the page fence (`:1299`) and the ordinal yield; no witness lands one of those faults during the directory or permission await specifically.
+- Preserved by #829. The `need_full_sync` retry and its `retry-wire-build` recheck (`:1395`) are deleted with the delta channel, and with them the witness `:2594` "does not dispatch a need_full_sync retry after mutation|supersession|clear|invalidation of the valid first send". The ordinal, wire-build, series-restart, and page rechecks and their witnesses remain.
 
 ### ordinal-memo-promotion-is-owned
 
@@ -154,7 +155,9 @@ Required faults and enabling state: a resolved or partly resolved pass whose res
 Confidence: medium - [evidence](evidence/ordinal-memo-promotion-is-owned.md). Every named witness was read and ran green; the rejection oracles compare full memo objects with `toEqual(priorMemo)` or assert untouched spied maps, not sizes alone, except the between-pages witness, which starts from an empty memo and asserts it stays empty.
 Existing check: `rust-mode-transform.test.ts:2367` "rejects mutation|supersession|clear|invalidation at the persisted ordinal yield with shared|distinct arrays" (8 cases; marker: `expect(pageSizes).toEqual([MODULE_ORDINAL_PAGE_SIZE])` with `ordinals.entries.size` 0 and `heldBytes` above the page's entry charge; after settlement `ordinals.entries.size` stays 0); `:2594` "does not dispatch a need_full_sync retry after ..." (4 cases; `expect(state.ordinals).toEqual(priorMemo)` for mutation and supersession, `entries.size` 0 for clear and invalidation); `:2280` "charges every existing ordinal entry and ID before copying a warm memo" (marker: decline log `ordinal memo copy`; `expect(transform.getState(sessionId).ordinals).toEqual(priorMemo)`); `:1084` "discards a partly shifted ordinal memo before host publication when shifting throws" (marker: `shiftFailed` true; `toEqual(priorMemo)`); `:1144` "rejects ordinal continuation overflow before publication and recovers on a valid response"; `:2807` "rejects publication and promotes no memo when the wire state is invalidated mid-flight" (marker: `expect(calls).toHaveLength(1)` before `invalidateWireState`); `:2660` "declines before publication and NACKs known deliveries when the source changes between pages" (`ordinals.entries.size` 0 after the decline); `module-wire.test.ts:892` "keeps the supplied map untouched on <fault> during <mode>" (27 cases; marker: `expect(set).not.toHaveBeenCalled()` and `expect(clear).not.toHaveBeenCalled()`); `:990` "charges row and memo storage plus short|long IDs at exact byte boundaries" (2 cases; refused budgets leave `entries` equal to `original`); `:1085` "preserves the memo through a full restart ending in <outcome>" (5 cases); promotion controls: `rust-mode-transform.test.ts:3025` (`ordinals.entries.get("m-1")` is 1 after publication) and `:3224` (`entries.size` 2).
 Impact: a rejected pass leaves ordinals in the shared memo that the next pass trusts, producing mismatched ordinals or a spurious `need_full_sync`.
-Open questions: None.
+Open questions:
+
+- Preserved by #829. The witness `:2594` "does not dispatch a need_full_sync retry after mutation|supersession|clear|invalidation of the valid first send" is deleted with the retry; there is no `need_full_sync` to answer spuriously, and the remaining witnesses cover the memo rules.
 
 ### referenceable-json-rejects-hooks-before-reading
 
@@ -187,7 +190,7 @@ Impact: a partial array reaches the model, or OpenCode's array identity is repla
 Open questions:
 
 - #538's recipe operations must add a malformed-final-operation candidate case; the current candidate builder is exercised through `native_messages` and `native_messages_delta` only.
-- Invalidated by #829 as an all-or-none contract. Publication now checks the container and the output slots `[0, S)` (`publicationRejection`, `transform-capture.ts:723`), shrinks the length to S, then writes the candidate (`publishInPlace`, `:755`). A non-configurable slot k with S <= k stops the shrink after `ArraySetLength` deleted every slot above k; the captured references above k are restored, no candidate slot is written, nothing is promoted, and one `publication_failed` decline is logged (`rust-mode-transform.ts:1518`). In-place identity, the recipe charge, the boundary assertion, the ownership and source rechecks, and the container check still precede the first write. Witnesses: `transform-capture.test.ts:1018` "shrinks first and leaves exactly the candidate in the original array object" (records the define order `length`, `0`, `1`), `:1049` "restores the captured references after a shrink stopped by a planted non-configurable slot" (the `TypeError`, length k + 1 before restoration), `:1085` "reports a throw while restoring the captured references as the same failed publication"; `rust-mode-transform.test.ts:3539` "leaves exactly a shorter candidate in the original array object" and `:3555` "restores the captured references and promotes nothing when a planted slot stops the shrink". WP-P09 and WP-P20 in #824 own the replacement contract.
+- Invalidated by #829 as an all-or-none contract. Publication now checks the container and the output slots `[0, S)` (`publicationRejection`, `transform-capture.ts:723`), shrinks the length to S, then writes the candidate (`publishInPlace`, `:755`). A non-configurable slot k with S <= k stops the shrink after `ArraySetLength` deleted every slot above k; the captured references above k are restored, no candidate slot is written, nothing is promoted, and one `publication_failed` decline is logged (`rust-mode-transform.ts:1550`). In-place identity, the recipe charge, the boundary assertion, the ownership and source rechecks, and the container check still precede the first write. Witnesses: `transform-capture.test.ts:1018` "shrinks first and leaves exactly the candidate in the original array object" (records the define order `length`, `0`, `1`), `:1049` "restores the captured references after a shrink stopped by a planted non-configurable slot" (the `TypeError`, length k + 1 before restoration), `:1085` "reports a throw while restoring the captured references as the same failed publication"; `rust-mode-transform.test.ts:3641` "leaves exactly a shorter candidate in the original array object" and `:3657` "restores the captured references and promotes nothing when a planted slot stops the shrink". WP-P09 and WP-P20 in #824 own the replacement contract.
 
 ### previous-base-is-applied-and-live
 
@@ -219,7 +222,9 @@ Required faults and enabling state: a response with `note_deliveries` rejected b
 Confidence: medium - [evidence](evidence/delivery-disposition-follows-publication.md). Every named witness was read and ran green. Calls to the fake client are attempted dispositions; daemon-side receipt is not observed by these tests.
 Existing check: `rust-mode-transform.test.ts:3086` "releases rejected capture state before a paused NACK and keeps delivery IDs separate" (marker: `nackStarted.promise` race, then `[["transform.nack", "discarded"], ["transform.ack", "accepted"]]`); `:3025` "releases capture admission before the ACK so a paused ACK does not block the next pass" (marker: `ackStarted.promise` race; after the ACK throws, `firstOutput.messages[0]` is still `applied[0]`); `:1463` "nacks discarded delivery IDs and acks only IDs from the applied retry response"; `:1505` "nacks initial and retry delivery IDs when the full retry still cannot be applied"; `:1393` "disposes each duplicate delivery pass ID only once"; `:1290` "attempts every ack sequentially before reporting aggregate failures" (marker: `maxActiveCalls` 1); `:1417` "attempts every nack without replacing the original apply error"; `:1535` "nacks note deliveries and serves the input unchanged when the boundary lacks a synthetic m0"; `:1242` "applies a native_messages_delta in place and acks its note deliveries"; `:941` "nacks note deliveries when a pass is superseded while its transform response is pending" (marker: `calls` 1 before the newer call); `:2660` "declines before publication and NACKs known deliveries when the source changes between pages" (marker: no `transform.ack`; the NACK IDs equal the `delivered` list the fake recorded); `:2010` (6 cases; NACK `["page-zero"]` for every fault, no ACK); `:2594` "does not dispatch a need_full_sync retry after ..." (4 cases; NACK of `retry-discarded`); `:2085` (2 cases; ACK of `candidate` on publish, NACK on decline); `:2149` "recovers with a full request when byte pressure rejects a full-sync retry" (NACK `discarded`, later ACK `applied`).
 Impact: the daemon marks a note delivered that the model never received.
-Open questions: None.
+Open questions:
+
+- Preserved by #829. The witness `:2594` "does not dispatch a need_full_sync retry after mutation|supersession|clear|invalidation of the valid first send" is deleted with the retry; an `ok` response without a recipe now NACKs every delivery and does not retry (`rust-mode-transform.test.ts:1903` in the #829 tree).
 
 ### owner-admission-covers-live-captures
 
@@ -238,7 +243,7 @@ Open questions:
 
 - The retained `wireCaches` entries after transfer are bounded by the 64-session count, not by bytes; the byte budget for that optional-output state is TE25 in #538.
 - `states` (`rust-mode-transform.ts:788`) has no count or byte bound: `BoundedSessionMap` eviction has no callback into it, and only `clearSession` (`:1541`) deletes an entry, so the promoted `state.ordinals` memo of every undeleted session is retained for the process lifetime. No record or witness bounds it.
-- Inventory after #829: publication transfers the submitted input's digest, terminal digest, wire bounds, and input lengths plus the applied values and their capture to one retained-output record per session (`RetainedOutputs`, `rust-mode-transform.ts:181`), charged once under the 64-session and 64 MiB limits. The raw content snapshots, wire fingerprints, and delta frontier are no longer retained. The wire-projection charge now covers every captured message, since every request sends the whole array. Eviction drops the record only; `rust-mode-transform.test.ts:1414` "never releases an active capture lease when the session count|byte budget evicts its session's output" holds a lease across the eviction and asserts `activePasses` 1 and an unchanged charge.
+- Inventory after #829: publication transfers the submitted input's digest, terminal digest, wire bounds, and input lengths plus the applied values and their capture to one retained-output record per session (`RetainedOutputs`, `rust-mode-transform.ts:181`), charged once under the 64-session and 64 MiB limits. The raw content snapshots, wire fingerprints, and delta frontier are no longer retained. The wire-projection charge now covers every captured message, since every request sends the whole array. Eviction drops the record only; `rust-mode-transform.test.ts:1491` "never releases an active capture lease when the session count|byte budget evicts its session's output" holds a lease across the eviction and asserts `activePasses` 1 and an unchanged charge.
 
 ### capture-charge-outlives-cancellation
 
@@ -256,7 +261,7 @@ Impact: a slow cancelled pass's memory is double-counted as free and the budget 
 Open questions:
 
 - Real daemon transport abort through the lease signal is not exercised; the tests use in-process clients that honor or ignore the signal.
-- After #829, `invalidateWireState` is `invalidateOrdinals` (`rust-mode-transform.ts:849`): it resets the ordinal memo and cancels the live lease so the pass cannot promote the memo it copied; it no longer touches retained output. The retained-output record adds no lease accounting.
+- After #829, `invalidateWireState` is `invalidateOrdinals` (`rust-mode-transform.ts:871`): it resets the ordinal memo and cancels the live lease so the pass cannot promote the memo it copied; it no longer touches retained output. The retained-output record adds no lease accounting.
 
 ### uncertain-send-never-replays-blindly
 
@@ -274,7 +279,7 @@ Impact: a duplicate transform mutates daemon state twice for one host turn.
 Open questions:
 
 - A real transport that writes the request and loses the response is not constructed; the fake throws before returning.
-- Preserved by #829. The `need_full_sync` witness (`:2335` "retains full-sync recovery after a failed retry until a full request publishes") is invalidated and deleted with the retry; `rust-mode-transform.test.ts:3606` "does not resend after an outcome-unknown transport failure and recovers on the next attempt" remains the witness.
+- Preserved by #829. The `need_full_sync` witness (`:2335` "retains full-sync recovery after a failed retry until a full request publishes") is invalidated and deleted with the retry; `rust-mode-transform.test.ts:3708` "does not resend after an outcome-unknown transport failure and recovers on the next attempt" remains the witness.
 
 ### bounded-recovery-after-pressure-clears
 
@@ -291,7 +296,7 @@ Existing check: `rust-mode-transform.test.ts:2874` "keeps every pass within the 
 Impact: a session stays declined after the pressure that declined it is gone.
 Open questions:
 
-- Preserved by #829. The `need_full_sync` witness `:2149` "recovers with a full request when byte pressure rejects a full-sync retry" and the forced-full witness `:803` are invalidated and deleted; `rust-mode-transform.test.ts:3138` "keeps every pass within the global count limit and declines without queueing" and `:3187` "declines on byte pressure alone while the aggregate charge stays within the budget" remain.
+- Preserved by #829. The `need_full_sync` witness `:2149` "recovers with a full request when byte pressure rejects a full-sync retry" and the forced-full witness `:803` are invalidated and deleted; `rust-mode-transform.test.ts:3240` "keeps every pass within the global count limit and declines without queueing" and `:3289` "declines on byte pressure alone while the aggregate charge stays within the budget" remain.
 
 ### inbound-baseline-independent-of-output-base
 

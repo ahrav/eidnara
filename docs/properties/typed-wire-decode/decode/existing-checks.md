@@ -15,6 +15,17 @@ that contradict the accepted prospective contract remain listed.
 
 All line numbers are HEAD locations. Daemon lib.rs is read with `git show`
 because the worktree file is dirty. Other cited source files match HEAD.
+#828 deletes the `W` rows marked below and shrinks `wire.rs` to 1,145 lines,
+so every surviving `W` row has moved; after #828 the surviving tests sit at
+`repeated_call_id_within_owner_message_shares_one_arc_identity` 696,
+`reasoning_joins_the_arc_its_adjacent_call_was_assigned` 730,
+`user_carried_tool_result_pairs_with_prior_assistant_call` 811,
+`user_carried_tool_result_without_prior_call_still_rejects` 876,
+`opaque_and_media_inside_tool_result_content_are_accepted_and_projected` 901,
+`empty_and_reserved_message_ids_are_rejected` 975,
+`duplicate_message_ids_are_rejected` 992,
+`reduced_tool_result_keeps_failure_variant_and_output_extras` 1005, and
+`shared_ingress_is_send_and_preserves_decode_refusals` 1125.
 
 | Key | File |
 | --- | --- |
@@ -75,7 +86,7 @@ witnesses. Admission and pool guards stay in A1/A3 rather than this table.
 | D:19986-20117 `direct_and_tree_transform_decodes_agree_on_the_corpus` | Compare decoded serialization and negative-zero sign; pin accepted/tree-only/direct-only lists; rejected gate for direct-only cases; assembled valid pages equal one-slice request. | unaudited |
 | D:20140-20181 `unpaged_transform_bodies_reach_the_same_outcome_through_both_entry_paths` | Compare response minus timings or exact code/message; pin direct-lane names; valid body must produce response. | unaudited |
 | T:16470-16497 `transform_request_parses_full_flat_wire_envelope` | Assert typed envelope values and defaults after from_value. | unaudited |
-| W:1796-1814 `shared_ingress_is_send_and_preserves_decode_refusals` | Compare owned/shared array serde error text on eight malformed shapes, in addition to mobility constraints. | unaudited |
+| W:1796-1814 `shared_ingress_is_send_and_preserves_decode_refusals` | Compare owned/shared array serde error text on eight malformed shapes, in addition to mobility constraints. | unaudited; at `wire.rs:1125` after #828 |
 | D:29330-29384 `dispatch_routes_each_envelope_class_to_a_distinct_arm` | Transform succeeds, echo preserves probe, facade rejects distinctly, unknown keys/nonobject root identify the shape. | unaudited |
 | D:30224-30257 `transform_page_scalar_digest_covers_non_array_fields_only` | Arrays and page metadata do not alter scalar digest; changed scalar does. | unaudited |
 | D:30381-30389 `assemble_transform_pages_rejects_a_non_array_page_field` | Early and final-only nonarray messages fail; diagnostic contains `messages must be an array`. | unaudited |
@@ -106,9 +117,9 @@ must survive the retained tree path; they do not prove wire serde correctness:
 | W:1447-1517 `opaque_and_media_inside_tool_result_content_are_accepted_and_projected` | Opaque content is accepted; replacing nested result content with media projects its URL. | unaudited |
 | W:1521-1574 `incremental_projection_reuses_prefix_storage_and_preserves_tool_arc_state` | Reattachment equality, full/incremental equality, shared backing/bytes, and pending tool-arc continuation. | deleted by #828 with the mechanism it checked |
 | W:1578-1589 `empty_and_reserved_message_ids_are_rejected` | Empty and reserved mids produce their errors. | unaudited |
-| W:1595-1620 `duplicate_message_ids_are_rejected_across_the_incremental_prefix` | Duplicate mids reject in full and incremental projection. | unaudited; #828 deletes the incremental arm and renames the test `duplicate_message_ids_are_rejected` |
+| W:1595-1620 `duplicate_message_ids_are_rejected_across_the_incremental_prefix` | Duplicate mids reject in full and incremental projection. | unaudited; #828 deletes the incremental arm and renames the test `duplicate_message_ids_are_rejected`, now at `wire.rs:992` |
 | W:1624-1704 `reduced_tool_result_keeps_failure_variant_and_output_extras` | Each success/error/denied output keeps its classification and provider extras after reduction. | unaudited |
-| W:1708-1745 `reattach_keeps_block_level_original_but_rebuilds_the_message_shell` | Known shell fields survive; unknown message field drops; block unknown/original survives; raw ingress remains unchanged. Old retention assertions conflict with KTD1/R3. | unaudited |
+| W:1708-1745 `reattach_keeps_block_level_original_but_rebuilds_the_message_shell` | Known shell fields survive; unknown message field drops; block unknown/original survives; raw ingress remains unchanged. Old retention assertions conflict with KTD1/R3. | deleted by #828 with the mechanism it checked; renamed `reattach_shares_the_decoded_shell_and_unknown_envelope_fields_are_discarded` before #828 |
 | W:1749-1792 `repeated_prefix_reattachment_shares_canonical_shells` | Repeated sharing, equivalent projections, input preservation, copy-on-write isolation, and block owner after projection drop. Original-presence assertions need explicit revision. | deleted by #828 with the mechanism it checked |
 | W:1818-1860 `incremental_projection_checks_effective_synthetic_status` | All four old/new flag pairs compare full/incremental value and pointer reuse exactly when flags match. | deleted by #828 with the mechanism it checked |
 | T:13714-13755 `served_canonical_shell_bytes_and_segments_are_frozen` | Literal raw/latent/typed/edited bytes and prepared segments. Latent public-meta mutation is deliberately invisible under the old oracle. | unaudited |

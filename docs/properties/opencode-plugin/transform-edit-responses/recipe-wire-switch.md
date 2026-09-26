@@ -123,10 +123,13 @@ The missing-native compatibility retry is deleted. Renamed witnesses:
 carries no recipe and does not retry" (one body, both IDs NACKed, no ACK,
 `failureCount` 1) replaces "nacks discarded delivery IDs and acks only IDs from
 the applied retry response"; `:1637` "nacks initial and retry delivery IDs when
-the full retry still cannot be applied" now drives the retry through
+the full retry still cannot be applied" drove the retry through
 `need_full_sync` and a wrong `base_revision`; `:1703` "fails a delta pass whose
-response carries no recipe and sends the next pass in full" replaces "retries
-with full arrays when a delta response omits native content".
+response carries no recipe and sends the next pass in full" replaced "retries
+with full arrays when a delta response omits native content". Invalidated in
+part by #829: `:1637` and `:1703` are deleted with the retry and the delta
+pass; the surviving witness is `rust-mode-transform.test.ts:1903` in the #829
+tree, and an `ok` response without a recipe NACKs every delivery with no retry.
 
 ### TE25 optional-output budget
 
@@ -155,11 +158,11 @@ one record and one charge (`RetainedOutputs`, `rust-mode-transform.ts:181`),
 under the 64-session and 64 MiB (`RETAINED_OUTPUT_BUDGET_BYTES`, `:135`)
 limits. A retention over the budget first drops the applied output and keeps
 the basis, then drops the record. Eviction never touches a capture lease.
-Witnesses: `rust-mode-transform.test.ts:1964` "keeps one retained-output record
-per session under the session and byte limits", `:1377` "evicts the least
-recently retained session's output and offers it no previous source", `:1414`
+Witnesses: `rust-mode-transform.test.ts:2041` "keeps one retained-output record
+per session under the session and byte limits", `:1405` "evicts the least
+recently retained session's output and offers it no previous source", `:1491`
 "never releases an active capture lease when the session count|byte budget
-evicts its session's output", and `:4001` "keeps the basis without the applied
+evicts its session's output", and `:4141` "keeps the basis without the applied
 output, then drops the record, as the budget tightens".
 
 ### TE30 `inbound-baseline-independent-of-output-base`
@@ -186,7 +189,7 @@ members the capture verified against the retained digest.
 - `lib.rs:22659` `cached_transform_response_writer_is_byte_identical_to_value_round_trip`
   (a one-message CK passthrough inserts its typed served value).
 - `edit_recipe.rs:1192` `revision_allocator_names_each_pass_once_and_refuses_exhaustion`.
-- `lib.rs:26412` `native_attachment_reuses_transform_tag_baseline_and_preserves_bytes`
+- `lib.rs:29092` `native_attachment_reuses_transform_tag_rows_and_preserves_bytes`
   replays the served array against the native attachment.
 - `crates/daemon/tests/direct_host.rs:50` and `:133` drive a real fixture host
   over the wire and reconstruct the served array with

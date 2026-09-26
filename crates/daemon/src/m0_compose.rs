@@ -376,6 +376,7 @@ mod bounded_read_tests {
     use crate::test_support::synthetic_history::SyntheticHistory;
 
     const SESSION: &str = "ses";
+    const CAPTURE_SCAN: &str = "SELECT sequence, start_message, end_message, legacy FROM";
 
     fn open(dir: &std::path::Path) -> MemoryStore {
         MemoryStore::open(&crate::test_support::descriptor(dir)).expect("open store")
@@ -438,7 +439,8 @@ mod bounded_read_tests {
         let oracle = resolve_coverage(&rows)
             .expect("valid ranges")
             .map(|c| (c.first_covered_ordinal, c.coverage_end_ordinal));
-        let two_ends = crate::transform::stored_coverage_bounds(store, SESSION).expect("ends");
+        let two_ends =
+            crate::transform::stored_coverage_bounds(store, SESSION, &mut false).expect("ends");
         assert_eq!(two_ends, oracle, "{} rows", rows.len());
     }
 
@@ -643,16 +645,17 @@ mod bounded_read_tests {
         let captured = bounded_m0(&store, 60_000.0, None);
         let scan = history_segment_work(&store)
             .into_iter()
-            .find(|work| {
-                work.sql
-                    .starts_with("SELECT sequence FROM history_segments")
-            })
+            .find(|work| work.sql.starts_with(CAPTURE_SCAN))
             .expect("the first fold captures the legacy list with one scan");
         println!(
             "legacy-sequence capture scan at H = 60,000: rows = {}, vm_steps = {}",
             scan.rows, scan.vm_steps
         );
-        assert_eq!(scan.rows as usize, history.legacy_count());
+        assert_eq!(
+            scan.rows as usize,
+            rows.len(),
+            "the scan verifies every range"
+        );
         assert_eq!(
             captured.legacy_history_segment_seqs.len(),
             history.legacy_count()
@@ -675,8 +678,7 @@ mod bounded_read_tests {
             let work = history_segment_work(&store);
             assert_eq!(listed, bounded);
             assert!(
-                work.iter()
-                    .all(|w| !w.sql.starts_with("SELECT sequence FROM")),
+                work.iter().all(|w| !w.sql.starts_with(CAPTURE_SCAN)),
                 "a persisted list skips the capture scan"
             );
             let rows_produced: u64 = work.iter().map(|w| w.rows).sum();

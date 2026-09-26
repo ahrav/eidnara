@@ -2043,6 +2043,11 @@ pub struct ModuleMeta {
     /// and truncation filters it: extra sequences are harmless, a missing one is not.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub legacy_history_segment_seqs: Option<Vec<i64>>,
+    /// The stored `history_segment` ranges were checked once and are in strict order. Every
+    /// writer keeps that order, so a pass sets this after one scan and later passes skip it;
+    /// see [`MemoryStore::history_segment_order_violation`].
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub history_segments_ordered: bool,
     /// The first ordinal covered by the history_segment span reflected in `coverage_ordinal`.
     /// Leading system messages below this start are not summarized by history_segments and
     /// must remain pass-through on full-array profiles.
@@ -5543,6 +5548,16 @@ pub enum MemoryStoreError {
         incoming_start_message: i64,
         incoming_end_message: i64,
     },
+    /// A stored history_segment starts at or before the preceding stored row's `end_message`.
+    #[error(
+        "history_segment coverage overlap: history_segment {previous_sequence} ends at ordinal {previous_end_message} but history_segment {sequence} starts at {start_message}; ranges must be strictly increasing"
+    )]
+    HistorySegmentRangesOutOfOrder {
+        previous_sequence: i64,
+        previous_end_message: i64,
+        sequence: i64,
+        start_message: i64,
+    },
     /// A facade route bound to an authority-managed identity attempted to write
     /// using filesystem-path transport vocabulary instead of the domain identity.
     #[error(
@@ -8617,14 +8632,9 @@ impl MemoryStore {
         })?)
     }
 
-    /// Loads, deduplicated in tag-number order, three row sets: every row whose block id is
-    /// one of `message_ids` or starts with `<message id>#`, as ranges on the
-    /// `(session_id, block_id)` unique index; every row whose block id is one of
-    /// `tool_call_ids`; and the session's newest `newest.max(1) + <rows of the first set>`
-    /// rows on the primary key. Rows read are bounded by the inputs and `newest`, not by the
-    /// session's tag count. The `+ <rows of the first set>` term is required: the caller ranks
-    /// the newest `newest` rows outside the window exactly, so a plain `newest` limit is short
-    /// by every window row it returns.
+    /// Returns window rows and the session's newest `newest.max(1)` non-window rows by tag.
+    /// A window row's block ID is `<mid>` or starts with `<mid>#` for a `message_ids` entry.
+    /// A block ID equal to a `tool_call_ids` entry also marks a window row.
     pub fn load_tags_for_window(
         &self,
         session_id: &str,
@@ -8636,35 +8646,34 @@ impl MemoryStore {
         let tool_call_ids = serde_json::to_string(tool_call_ids).expect("string ids serialize");
         Ok(self.inner.with_conn(|conn| {
             let mut rows = BTreeMap::new();
-            let window = conn
-                .prepare_cached(WINDOW_TAGS_SQL)?
-                .query_map(params![session_id, message_ids], tag_row_from_sql)?
-                .collect::<Result<Vec<_>, _>>()?;
-            let window_rows = window.len();
-            let legacy = conn
-                .prepare_cached(
-                    "SELECT tag_number, block_id, kind, token_count, created_at_ms, source_bytes
-                       FROM tags
-                      WHERE session_id = ?1 AND block_id IN (SELECT value FROM json_each(?2))",
-                )?
-                .query_map(params![session_id, tool_call_ids], tag_row_from_sql)?
-                .collect::<Result<Vec<_>, _>>()?;
-            let newest = conn
-                .prepare_cached(
-                    "SELECT tag_number, block_id, kind, token_count, created_at_ms, source_bytes
-                       FROM tags
-                      WHERE session_id = ?1
-                      ORDER BY tag_number DESC LIMIT ?2",
-                )?
-                .query_map(
-                    params![
-                        session_id,
-                        sql_limit(newest.max(1).saturating_add(window_rows))
-                    ],
-                    tag_row_from_sql,
-                )?
-                .collect::<Result<Vec<_>, _>>()?;
-            for row in window.into_iter().chain(legacy).chain(newest) {
+            let mut window = conn.prepare_cached(WINDOW_TAGS_SQL)?;
+            for row in window.query_map(params![session_id, message_ids], tag_row_from_sql)? {
+                let row = row?;
+                rows.insert(row.tag_number, row);
+            }
+            let mut legacy = conn.prepare_cached(
+                "SELECT tag_number, block_id, kind, token_count, created_at_ms, source_bytes
+                   FROM tags
+                  WHERE session_id = ?1 AND block_id IN (SELECT value FROM json_each(?2))",
+            )?;
+            for row in legacy.query_map(params![session_id, tool_call_ids], tag_row_from_sql)? {
+                let row = row?;
+                rows.insert(row.tag_number, row);
+            }
+            let read = serde_json::to_string(&rows.keys().collect::<Vec<_>>())
+                .expect("an integer array serializes");
+            let mut newest_rows = conn.prepare_cached(
+                "SELECT tag_number, block_id, kind, token_count, created_at_ms, source_bytes
+                   FROM tags
+                  WHERE session_id = ?1
+                    AND tag_number NOT IN (SELECT value FROM json_each(?2))
+                  ORDER BY tag_number DESC LIMIT ?3",
+            )?;
+            for row in newest_rows.query_map(
+                params![session_id, read, sql_limit(newest.max(1))],
+                tag_row_from_sql,
+            )? {
+                let row = row?;
                 rows.insert(row.tag_number, row);
             }
             Ok(rows.into_values().collect())
@@ -10324,7 +10333,7 @@ impl MemoryStore {
                 request.strip_seed_skipped,
             );
 
-            if !history_segments.is_empty() {
+            if written_history_segments.iter().any(|row| row.legacy == 1) {
                 meta.legacy_history_segment_seqs = None;
             }
             let history_segment_overwrites_skipped =
@@ -10512,10 +10521,46 @@ impl MemoryStore {
             .with_conn(|conn| history_segment_edge_tx(conn, session_id, EdgeAt::Newest))?)
     }
 
-    /// The oldest and the newest history_segment by sequence, two primary-key seeks on one
-    /// connection hold. The store owns the write-side guarantee that stored ranges are
-    /// strictly increasing (append and replace reject overlapping and non-increasing ranges),
-    /// so these two rows bound the covered ordinals of the whole set.
+    /// Returns a stored `history_segment` range that violates strict order, or `None`.
+    /// Rows must have non-negative, strictly increasing, non-overlapping ranges by sequence.
+    /// This reads two integers per row of the session, so callers run it once per session and
+    /// record a pass in [`ModuleMeta::history_segments_ordered`]; store writers preserve the
+    /// order from then on.
+    pub fn history_segment_order_violation(
+        &self,
+        session_id: &str,
+    ) -> Result<Option<String>, MemoryStoreError> {
+        Ok(self.inner.with_conn(|conn| {
+            let mut stmt = conn.prepare_cached(
+                "SELECT sequence, start_message, end_message FROM history_segments
+                  WHERE session_id = ?1 ORDER BY sequence ASC",
+            )?;
+            let mut rows = stmt.query(params![session_id])?;
+            let mut previous: Option<(i64, i64)> = None;
+            while let Some(row) = rows.next()? {
+                let (sequence, start, end): (i64, i64, i64) =
+                    (row.get(0)?, row.get(1)?, row.get(2)?);
+                if start < 0 || end < start {
+                    return Ok(Some(format!(
+                        "history_segment {sequence} range {start}..={end} is invalid; ordinals must be non-negative and end must not precede start"
+                    )));
+                }
+                if let Some((previous_sequence, previous_end)) = previous
+                    && start <= previous_end
+                {
+                    return Ok(Some(format!(
+                        "history_segment coverage overlap: history_segment {previous_sequence} ends at ordinal {previous_end} but history_segment {sequence} starts at {start}; ranges must be strictly increasing"
+                    )));
+                }
+                previous = Some((sequence, end));
+            }
+            Ok(None)
+        })?)
+    }
+
+    /// Reads the oldest and newest `history_segment` rows by sequence with two primary-key
+    /// seeks in one snapshot. They bound the whole set's coverage only for a set in strict
+    /// order.
     pub fn history_segment_ends(
         &self,
         session_id: &str,
@@ -10624,30 +10669,30 @@ impl MemoryStore {
     }
 
     /// At most `limit` `(sequence, end_message_id)` pairs of rows at or below the rendered
-    /// boundary and below `before_sequence`, newest first, in one read transaction; empty
-    /// when the daemon holds no coverage. Only rows whose end id is `<mid>#<digits>` with no
-    /// other `#` count toward `limit`, so a run of rows without a message id cannot end a
-    /// walk early.
+    /// boundary and within `sequences`, newest first, in one read transaction; empty when the
+    /// daemon holds no coverage. Only rows whose end id is `<mid>#<digits>` with no other `#`
+    /// count toward `limit`, so a run of rows without a message id cannot end a walk early.
     pub fn coverage_anchor_page(
         &self,
         session_id: &str,
-        before_sequence: i64,
+        sequences: std::ops::RangeInclusive<i64>,
         limit: usize,
     ) -> Result<Vec<(i64, String)>, MemoryStoreError> {
         Ok(self.inner.with_conn(|conn| {
             let Some(rendered) = rendered_coverage_tx(conn, session_id)?.rendered else {
                 return Ok(Vec::new());
             };
-            let through = rendered.sequence.min(before_sequence.saturating_sub(1));
+            let through = rendered.sequence.min(*sequences.end());
             conn.prepare_cached(
                 "SELECT sequence, end_message_id FROM history_segments
-                  WHERE session_id = ?1 AND sequence <= ?2
+                  WHERE session_id = ?1 AND sequence BETWEEN ?4 AND ?2
                     AND end_message_id GLOB '?*#[0-9]*' AND end_message_id NOT GLOB '*#*[^0-9]*'
                   ORDER BY sequence DESC LIMIT ?3",
             )?
-            .query_map(params![session_id, through, sql_limit(limit)], |row| {
-                Ok((row.get(0)?, row.get(1)?))
-            })?
+            .query_map(
+                params![session_id, through, sql_limit(limit), sequences.start()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )?
             .collect()
         })?)
     }
@@ -10656,6 +10701,8 @@ impl MemoryStore {
     /// `pressure_window` non-legacy rows, newest first, and returns how many newest non-legacy
     /// rows the fold needs. Legacy rows are read by `legacy_seqs`, which must name every legacy
     /// row (extras are ignored), or by one scan when `None`; the result returns the exact list.
+    /// The scan also refuses a set whose ranges do not strictly increase by sequence with
+    /// [`MemoryStoreError::HistorySegmentRangesOutOfOrder`].
     pub fn load_history_segment_fold(
         &self,
         session_id: &str,
@@ -10663,7 +10710,14 @@ impl MemoryStore {
         pressure_window: usize,
         horizon: impl FnOnce(&[StoredHistorySegment]) -> usize,
     ) -> Result<HistorySegmentFold, MemoryStoreError> {
-        Ok(self.inner.with_conn(|conn| {
+        self.inner.with_conn(|conn| {
+            let legacy_seqs = match legacy_seqs {
+                Some(seqs) => Cow::Borrowed(seqs),
+                None => match capture_legacy_seqs_verifying_order_tx(conn, session_id)? {
+                    Ok(seqs) => Cow::Owned(seqs),
+                    Err(error) => return Ok(Err(error)),
+                },
+            };
             let newest = history_segment_edge_tx(conn, session_id, EdgeAt::Newest)?;
             let oldest = history_segment_edge_tx(conn, session_id, EdgeAt::Oldest)?;
             let mut rows = query_history_segments_tx(
@@ -10684,17 +10738,6 @@ impl MemoryStore {
                 )?;
                 rows.extend(older);
             }
-            let legacy_seqs = match legacy_seqs {
-                Some(seqs) => Cow::Borrowed(seqs),
-                None => Cow::Owned(
-                    conn.prepare_cached(
-                        "SELECT sequence FROM history_segments
-                          WHERE session_id = ?1 AND legacy = 1",
-                    )?
-                    .query_map(params![session_id], |row| row.get::<_, i64>(0))?
-                    .collect::<Result<Vec<_>, _>>()?,
-                ),
-            };
             let legacy = query_history_segments_tx(
                 conn,
                 "WHERE session_id = ?1 AND legacy = 1
@@ -10708,13 +10751,13 @@ impl MemoryStore {
             let legacy_seqs: Vec<i64> = legacy.iter().map(|row| row.sequence).collect();
             rows.extend(legacy);
             rows.sort_by_key(|row| row.sequence);
-            Ok(HistorySegmentFold {
+            Ok(Ok(HistorySegmentFold {
                 history_segments: rows,
                 legacy_seqs,
                 newest,
                 oldest,
-            })
-        })?)
+            }))
+        })?
     }
 
     /// Rows with `sequence > after_sequence`, at most `cap` of them read newest first, plus
@@ -15974,12 +16017,10 @@ fn append_history_segments_tx(
 
     let tail = history_segment_edge_tx(tx, session_id, EdgeAt::Newest)?;
     let next_sequence = tail.as_ref().map_or(0, |tail| tail.sequence) + 1;
-    let mut previous = tail.map(|tail| (tail.sequence, tail.end_message));
+    let mut previous = covered_end_tx(tx, session_id, tail)?;
     // Validate the whole append before writing its first row. This keeps a rejected
     // batch atomic and makes ordinal-overlap corruption impossible even if a caller
     // bypassed the history_summarizer's optimistic publish fence.
-    // Every append passes this check, so ranges strictly increase and the tail's end bounds every
-    // earlier range. Negative and reversed ranges are refused when the rows are prepared.
     for (index, history_segment) in history_segments.iter().enumerate() {
         if let Some((existing_sequence, previous_end)) = previous
             && history_segment.start_message <= previous_end
@@ -16013,6 +16054,61 @@ enum EdgeAt {
     Before(i64),
     /// The nearest row above the sequence.
     After(i64),
+}
+
+/// Returns `(sequence, end_message)` of the row holding the session's greatest end: the tail
+/// unless a range stored out of sequence order ends later.
+fn covered_end_tx(
+    tx: &GuardedConn<'_>,
+    session_id: &str,
+    tail: Option<HistorySegmentEdge>,
+) -> rusqlite::Result<Option<(i64, i64)>> {
+    let Some(tail) = tail else {
+        return Ok(None);
+    };
+    let covered_end: i64 = tx
+        .prepare_cached("SELECT MAX(end_message) FROM history_segments WHERE session_id = ?1")?
+        .query_row(params![session_id], |row| row.get(0))?;
+    if covered_end <= tail.end_message {
+        return Ok(Some((tail.sequence, tail.end_message)));
+    }
+    Ok(
+        history_segment_edge_tx(tx, session_id, EdgeAt::EndMessage(covered_end))?
+            .map(|edge| (edge.sequence, edge.end_message)),
+    )
+}
+
+/// Returns the session's legacy sequences in ascending sequence order, or an error naming
+/// the first row that overlaps the row before it.
+fn capture_legacy_seqs_verifying_order_tx(
+    conn: &GuardedConn<'_>,
+    session_id: &str,
+) -> rusqlite::Result<Result<Vec<i64>, MemoryStoreError>> {
+    let mut statement = conn.prepare_cached(
+        "SELECT sequence, start_message, end_message, legacy FROM history_segments
+          WHERE session_id = ?1 ORDER BY sequence",
+    )?;
+    let mut rows = statement.query(params![session_id])?;
+    let mut legacy_seqs = Vec::new();
+    let mut previous: Option<(i64, i64)> = None;
+    while let Some(row) = rows.next()? {
+        let (sequence, start_message, end_message) = (row.get(0)?, row.get(1)?, row.get(2)?);
+        if let Some((previous_sequence, previous_end_message)) = previous
+            && start_message <= previous_end_message
+        {
+            return Ok(Err(MemoryStoreError::HistorySegmentRangesOutOfOrder {
+                previous_sequence,
+                previous_end_message,
+                sequence,
+                start_message,
+            }));
+        }
+        if row.get::<_, i32>(3)? == 1 {
+            legacy_seqs.push(sequence);
+        }
+        previous = Some((sequence, end_message));
+    }
+    Ok(Ok(legacy_seqs))
 }
 
 fn history_segment_edge_tx(
@@ -22041,6 +22137,34 @@ mod tests {
     }
 
     #[test]
+    fn window_tag_read_returns_each_row_from_one_statement() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
+        let ids = ["old-1#0", "old-2#0", "w1#0", "w1#1", "call-a", "w2#0"];
+        let inputs = ids
+            .map(|block_id| TagMintInput {
+                block_id: block_id.to_string(),
+                kind: "message".to_string(),
+                token_count: 1,
+                source_bytes: block_id.as_bytes().to_vec(),
+            })
+            .to_vec();
+        store.seed_tags_for_test("ses", &inputs, 1).unwrap();
+        store.start_statement_work_ledger();
+        let read = store
+            .load_tags_for_window("ses", &["w1", "w2"], &["call-a"], 1)
+            .unwrap();
+        let tag_rows = store
+            .take_statement_work()
+            .into_iter()
+            .filter(|statement| statement.sql.split_whitespace().any(|word| word == "tags"))
+            .map(|statement| statement.rows)
+            .sum::<u64>();
+        assert_eq!(tag_rows, read.len() as u64, "{read:?}");
+        assert!(read.iter().any(|row| row.block_id == "w2#0"));
+    }
+
+    #[test]
     fn window_tag_read_takes_exact_block_ids_and_their_hash_prefix_on_the_index() {
         let dir = tempfile::tempdir().unwrap();
         let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
@@ -22062,12 +22186,8 @@ mod tests {
             .into_iter()
             .map(|row| row.block_id)
             .collect::<Vec<_>>();
-        // The newest read of 1 + 3 window rows adds "m10#0", "m1$", and "other#0";
-        // "m1!x" and "m1 " sort inside the old `<mid>`..`<mid>$` range and stay unread.
-        assert_eq!(
-            read,
-            ["m1", "m1#0", "m1#a#b", "m10#0", "m1$", "call-a", "other#0"]
-        );
+        // "m1!x" and "m1 " sort below "m1$" but lack the "m1#" prefix, so they stay unread.
+        assert_eq!(read, ["m1", "m1#0", "m1#a#b", "call-a", "other#0"]);
         let plan = store
             .inner
             .with_conn(|conn| {
@@ -22125,6 +22245,70 @@ mod tests {
             plan.iter()
                 .any(|detail| detail.contains("idx_history_segments_session_end_message")),
             "the uncovered-ordinal probe must seek the end-message index: {plan:?}"
+        );
+    }
+
+    #[test]
+    fn history_segment_order_check_names_the_violating_range() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
+        let segment = |sequence: i64, start: i64, end: i64| StoredHistorySegment {
+            sequence,
+            start_message: start,
+            end_message: end,
+            end_message_id: format!("m{end}#0"),
+            title: "s".to_string(),
+            content: "s".to_string(),
+            ..Default::default()
+        };
+        assert_eq!(
+            store.history_segment_order_violation("empty").unwrap(),
+            None
+        );
+        store
+            .replace_history_segments("ok", &[segment(1, 1, 3), segment(2, 5, 9)])
+            .unwrap();
+        store
+            .replace_history_segments("overlap", &[segment(1, 1, 3)])
+            .unwrap();
+        store
+            .replace_history_segments("reversed", &[segment(1, 1, 3)])
+            .unwrap();
+        store
+            .inner
+            .with_conn_fenced(|tx| {
+                for (session, sequence, start, end) in [
+                    ("overlap", 2i64, 4i64, 100i64),
+                    ("overlap", 3, 6, 7),
+                    ("reversed", 2, 9, 8),
+                ] {
+                    tx.execute(
+                        "INSERT INTO history_segments
+                             (session_id, sequence, start_message, end_message, title, content)
+                         VALUES (?1, ?2, ?3, ?4, 's', 's')",
+                        params![session, sequence, start, end],
+                    )?;
+                }
+                Ok(())
+            })
+            .unwrap();
+
+        assert_eq!(store.history_segment_order_violation("ok").unwrap(), None);
+        for (session, needle) in [("overlap", "overlap"), ("reversed", "invalid")] {
+            let violation = store.history_segment_order_violation(session).unwrap();
+            assert!(
+                violation
+                    .as_deref()
+                    .is_some_and(|detail| detail.contains(needle)),
+                "{session}: {violation:?}"
+            );
+        }
+        store
+            .replace_history_segments("overlap", &[segment(1, 1, 3), segment(2, 4, 100)])
+            .unwrap();
+        assert_eq!(
+            store.history_segment_order_violation("overlap").unwrap(),
+            None
         );
     }
 
@@ -22468,6 +22652,114 @@ mod tests {
         );
         assert!(store.load_history_segments("ses").unwrap().is_empty());
         assert_eq!(store.load("ses").unwrap().meta.shadow_seq, 0);
+    }
+
+    /// A state sync keeps the persisted legacy list unless it writes a legacy row: a new
+    /// non-legacy row or a batch of retained rows leaves the next fold's list valid, so the
+    /// fold need not scan the session again.
+    #[test]
+    fn state_sync_that_writes_no_legacy_row_keeps_the_legacy_list() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
+        let rows: Vec<_> = (1..=3).map(|seq| bounded_read_segment(seq, 0)).collect();
+        sync_history_segments(&store, 0, &rows).unwrap();
+        let loaded = store.load("ses").unwrap();
+        let meta = ModuleMeta {
+            initialized: true,
+            folded_history_segment_seq: 2,
+            legacy_history_segment_seqs: Some(Vec::new()),
+            ..loaded.meta
+        };
+        store
+            .commit("ses", loaded.row_version, &loaded.core, &meta)
+            .unwrap();
+        let listed =
+            |store: &MemoryStore| store.load("ses").unwrap().meta.legacy_history_segment_seqs;
+
+        sync_history_segments(&store, 1, &[bounded_read_segment(4, 0)]).unwrap();
+        assert_eq!(listed(&store), Some(Vec::new()), "a new non-legacy row");
+        sync_history_segments(&store, 2, &rows[1..]).unwrap();
+        assert_eq!(listed(&store), Some(Vec::new()), "only retained rows");
+        sync_history_segments(&store, 3, &[bounded_read_segment(5, 1)]).unwrap();
+        assert_eq!(listed(&store), None, "a new legacy row");
+    }
+
+    /// Sequence 1 covers 1..=100; sequences `s` in 2..=7 cover `2s - 1..=2s`. Raw SQL widens
+    /// sequence 1 because store writers reject out-of-order ranges.
+    fn store_with_ranges_out_of_order(dir: &Path) -> MemoryStore {
+        let store = bounded_read_store(dir, 7, &[]);
+        store
+            .with_fenced_conn_for_test(|tx| {
+                tx.execute(
+                    "UPDATE history_segments SET end_message = 100
+                      WHERE session_id = 'ses' AND sequence = 1",
+                    [],
+                )
+            })
+            .unwrap();
+        store
+    }
+
+    /// The fold's capture scan visits every row, so it also verifies the ranges strictly
+    /// increase and refuses a set that does not; a persisted list certifies a verified set.
+    #[test]
+    fn fold_capture_refuses_stored_ranges_out_of_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store_with_ranges_out_of_order(dir.path());
+        let error = store
+            .load_history_segment_fold("ses", None, 5, |_| 5)
+            .unwrap_err();
+        assert!(
+            matches!(
+                error,
+                MemoryStoreError::HistorySegmentRangesOutOfOrder {
+                    previous_sequence: 1,
+                    previous_end_message: 100,
+                    sequence: 2,
+                    start_message: 3,
+                }
+            ),
+            "{error:?}"
+        );
+        store
+            .load_history_segment_fold("ses", Some(&[]), 5, |_| 5)
+            .expect("a persisted list skips the scan");
+    }
+
+    /// An append must start past the greatest stored end, not only the tail's, so it cannot
+    /// overlap an earlier row whose range ends later than the tail.
+    #[test]
+    fn append_refuses_a_row_below_the_greatest_stored_end() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store_with_ranges_out_of_order(dir.path());
+        let row = |start: i64| StoredHistorySegment {
+            start_message: start,
+            end_message: start + 1,
+            ..bounded_read_segment(8, 0)
+        };
+        let error = store
+            .append_history_segments("ses", &[row(15)])
+            .unwrap_err();
+        assert!(
+            matches!(
+                error,
+                MemoryStoreError::HistorySegmentRangeOverlap {
+                    existing_sequence: 1,
+                    incoming_start_message: 15,
+                    incoming_end_message: 16,
+                }
+            ),
+            "{error:?}"
+        );
+        assert_eq!(store.load_history_segments("ses").unwrap().len(), 7);
+        store.append_history_segments("ses", &[row(101)]).unwrap();
+        assert_eq!(
+            store
+                .newest_history_segment("ses")
+                .unwrap()
+                .map(|edge| (edge.sequence, edge.start_message)),
+            Some((8, 101))
+        );
     }
 
     /// Every production writer that may add a legacy row clears the persisted legacy list, so

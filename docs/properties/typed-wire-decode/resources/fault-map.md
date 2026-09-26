@@ -15,7 +15,7 @@ All constructions below are recommendations for handoff. None runs here.
 | Real held scratch bytes | `crates/daemon/src/lib.rs:20242-20276,20414-20470` | TestPool uses ByteBudget and a distinct held charge. Ring-level competing-request barrier is not supplied. |
 | Frozen cases and additive ceiling neighbours | `crates/daemon/src/lib.rs:19569-19645,20188-20229` | Freeze original A1-A3 byte/capacity/outcome receipts; length caps and node floor stay fixed. Add new string-ceiling cases without replacing old ones. |
 | Projection and alias lifetimes | `crates/daemon/src/wire.rs:958-1238,1749-1792` | Manual estimate and pointer-sharing controls exist; no continuous full-path allocator ledger. |
-| Cache removal with live lease | `crates/daemon/src/lib.rs:20624-20675,23311-23353` | Retained owner and charge observations exist; not a transient-construction bound. |
+| Cache removal with live lease | `crates/daemon/src/lib.rs:20624-20675` | Retained owner and charge observations exist; not a transient-construction bound. #828 deletes the projection-lease test that `23311-23353` cited. |
 | Canonical serializer workspace | `crates/daemon/src/served_json.rs:121-141` | Code shows metadata and two buffers; attributable peak/charge instrumentation is missing. |
 | Above-facade-cap escaped key | `crates/daemon/src/lib.rs:12153-12166,15837-15860,16144-16161` | Probe-before-meter ordering is verified and conflicts with A1 at `docs/properties/hot-path-optimization/latency-audit/catalog.md:159-165`; allocation magnitude is unmeasured. |
 | Real host admission outcome | `crates/daemon/tests/direct_host.rs:48-69` | Existing Unix FixtureProcess; request-level resource trace/barrier requires downstream work. |
