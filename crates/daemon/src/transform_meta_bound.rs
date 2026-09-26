@@ -45,7 +45,7 @@ fn transform(
     project_directory: &str,
     messages: &[IngressMessage],
 ) -> Result<String, TransformError> {
-    let req: TransformRequest = serde_json::from_value(serde_json::json!({
+    let mut req: TransformRequest = serde_json::from_value(serde_json::json!({
         "kind": "transform",
         "v": 3,
         "boundary": null,
@@ -55,6 +55,7 @@ fn transform(
         "messages": messages,
     }))
     .expect("transform request");
+    crate::transform::resolve_window(store, &mut req)?;
     let ctx = ProducerContext {
         project_memory: Some(CanonicalMemoryRead::Available(
             CanonicalMemorySnapshot::new(0, false, Vec::new()),

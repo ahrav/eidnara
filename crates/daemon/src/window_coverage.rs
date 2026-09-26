@@ -106,9 +106,9 @@ pub fn read_snapshot(
 /// whose end block is not the declared mid, or a declared row newer than the rendered boundary,
 /// which discovery never returns. A stored anchor with a negative end ordinal is an error too;
 /// it names corrupt storage, not the request. A declared row with no rendered boundary is
-/// `Unknown`, so the plugin rediscovers: a revert truncation commits on its own before its
-/// pass, so a pass that fails after it leaves `core.boundary_id` naming a removed row while
-/// older rows remain. With no boundary declared that state is `FirstPass`.
+/// `Unknown`, so the plugin rediscovers. A revert truncate that committed before its fold
+/// leaves the newest surviving row rendered (see [`CoverageSnapshot::rendered`]), so the
+/// retry or the next pass resolves against it and its HARD folds from it (spec D10).
 pub fn resolve(
     snapshot: &CoverageSnapshot,
     declared: Option<DeclaredAnchor<'_>>,

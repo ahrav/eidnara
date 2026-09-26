@@ -1,7 +1,7 @@
 //! Transform revision 3 at the handler seam against a real store: wire admissibility (WP-P24),
 //! a duplicate id inside the window (WP-P01), one pass per resolution outcome with its
 //! resolution, ordinals, cut, output, and durable effects (WP-P02, WP-P03, WP-P05), and the
-//! interrupted revert (spec D10) under an injected CAS conflict and a process kill.
+//! interrupted revert (spec D10) under an injected CAS conflict and a panic plus reopen.
 
 use super::revision_goldens::call;
 use super::*;
@@ -196,6 +196,25 @@ async fn boundary_presence_head_sequence_and_duplicates_are_invalid_params() {
     assert_eq!(at_limit["status"], "boundary_unknown");
 }
 
+/// A `boundary` that fails typed decoding is `bad_request`, whatever its `v`, and changes nothing.
+#[tokio::test(flavor = "current_thread")]
+async fn a_boundary_that_does_not_decode_is_bad_request() {
+    let (handler, store, _dir) = folded().await;
+    let before = durable(&store);
+    for boundary in [
+        json!({ "sequence": 2 }),
+        json!({ "mid": "m4" }),
+        json!(5),
+        json!({ "mid": "m4", "sequence": 1.5 }),
+        json!({ "mid": "m4", "sequence": "2" }),
+    ] {
+        let (code, _) =
+            error_frame(raw(&handler, with_base(body(&["m4"], boundary.clone()))).await);
+        assert_eq!(code, "bad_request", "{boundary}");
+    }
+    assert_eq!(durable(&store), before);
+}
+
 /// A page the envelope splits: every page carries a message, the final page the scalars.
 fn pages(whole: &Value) -> Vec<Value> {
     let messages = whole["messages"].as_array().unwrap();
@@ -372,11 +391,89 @@ async fn each_resolution_outcome_runs_through_the_handler_with_its_effects() {
     assert_eq!(resolved.ordinals, vec![1]);
     let passthrough = call(&handler, none).await;
     assert_eq!(passthrough["action"], "PASSTHROUGH");
+    assert_eq!(passthrough["boundary"], anchor("m2", 1));
     assert_eq!(served_mids(&passthrough), ["x1"]);
     let loaded = store.load(session()).unwrap();
     assert!(loaded.meta.pending_rewrite.is_some());
     assert_eq!(loaded.meta.revert_epoch, epoch + 1);
     assert_eq!(store.load_history_segments(session()).unwrap().len(), 1);
+}
+
+/// A revert through no anchor that the pending-rewrite arm does not take (the session carries a
+/// lineage anchor) reconciles by removing every segment, as the base's empty surviving prefix
+/// did, so its HARD converges instead of failing every pass.
+#[tokio::test(flavor = "current_thread")]
+async fn a_revert_through_no_anchor_outside_the_pending_rewrite_arm_removes_every_segment() {
+    let (handler, store, _dir) = folded().await;
+    let loaded = store.load(session()).unwrap();
+    let mut meta = loaded.meta.clone();
+    meta.anchor_block_id = Some("m1#0".to_string());
+    store
+        .commit(session(), loaded.row_version, &loaded.core, &meta)
+        .unwrap();
+    let window = body(&["x1", "x2"], Value::Null);
+    assert_eq!(
+        resolution(&store, &window).resolution,
+        Resolution::Revert {
+            keep_through_seq: None
+        }
+    );
+    let soft = call(&handler, window.clone()).await;
+    assert_eq!(soft["reconcile_pending"], true, "{soft}");
+    let hard = call(&handler, window.clone()).await;
+    assert_eq!(hard["action"], "HARD", "{hard}");
+    assert_eq!(hard["reconcile_pending"], false);
+    assert_eq!(hard["boundary"], Value::Null);
+    assert!(store.load_history_segments(session()).unwrap().is_empty());
+    assert_eq!(
+        store.load(session()).unwrap().meta.revert_epoch,
+        meta.revert_epoch + 1
+    );
+    assert_eq!(call(&handler, window).await["status"], "ok");
+}
+
+/// A publish after the handler's resolution moves a null-boundary cut before the pass commits;
+/// the retry serves the new cut, and the ready snapshot holds that window, not the first cut.
+#[tokio::test(flavor = "current_thread")]
+async fn a_publish_that_moves_the_cut_leaves_the_served_window_in_the_ready_snapshot() {
+    let (handler, store, _dir) = handler_for("rev3-cut");
+    store
+        .replace_history_segments(session(), &[segment(1, 1, 2)])
+        .unwrap();
+    let host = mids(1..=7);
+    let host: Vec<&str> = host.iter().map(String::as_str).collect();
+    let first = call(&handler, body(&host[..6], Value::Null)).await;
+    assert_eq!(first["boundary"], anchor("m2", 1));
+    let window = body(&host, Value::Null);
+    assert_eq!(
+        resolution(&store, &window).resolution,
+        Resolution::StaleSlice { cut: 1 }
+    );
+    let hook_store = Arc::clone(&store);
+    let published = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let flag = Arc::clone(&published);
+    install_transform_attempt_hook(session(), move || {
+        hook_store
+            .append_history_segments("rev3-cut", &[segment(2, 3, 4)])
+            .unwrap();
+        hook_store.arm_soft_refresh("rev3-cut").unwrap();
+        flag.store(true, std::sync::atomic::Ordering::SeqCst);
+    });
+    let served = call(&handler, window).await;
+    assert_eq!(served["status"], "ok", "{served}");
+    assert!(published.load(std::sync::atomic::Ordering::SeqCst));
+    let TransformSnapshotLookup::Ready(lease) =
+        handler.transform_snapshots.lock().unwrap().get(session())
+    else {
+        panic!("the accepted pass publishes a ready snapshot");
+    };
+    let snapshot: Vec<&str> = lease
+        .request
+        .messages
+        .iter()
+        .map(|message| message.mid.as_str())
+        .collect();
+    assert_eq!(snapshot, ["m4", "m5", "m6", "m7"]);
 }
 
 fn native_user(mid: &str) -> Value {
@@ -505,11 +602,11 @@ async fn plugin_pass(handler: &Handler, host: &[&str]) -> Value {
 
 /// The interrupted-revert history of spec D10. The revert's first pass defers with reconcile
 /// pending; its second truncates to the surviving anchor, and `interrupt` runs between that
-/// commit and the pass's terminal commit. Returns the session after the interruption.
+/// commit and the pass's terminal commit. Returns the interrupted pass's own answer.
 async fn interrupted_revert(
     id: &'static str,
     interrupt: impl Fn(&MemoryStore, &str) + Send + Sync + 'static,
-) -> (Handler, Arc<MemoryStore>, tempfile::TempDir, u64) {
+) -> (Handler, Arc<MemoryStore>, tempfile::TempDir, u64, Value) {
     let (handler, store, dir) = handler_for(id);
     store
         .replace_history_segments(session(), &[segment(1, 1, 2), segment(2, 3, 4)])
@@ -522,8 +619,7 @@ async fn interrupted_revert(
     );
     let epoch = store.load(session()).unwrap().meta.revert_epoch;
     // The host reverts past m4 and appends n3; discovery finds m2.
-    let host = ["m1", "m2", "n3"];
-    assert_eq!(plugin_pass(&handler, &host).await["action"], "SOFT+");
+    assert_eq!(plugin_pass(&handler, &REVERTED).await["action"], "SOFT+");
     let hook_store = Arc::clone(&store);
     install_transform_attempt_hook(id, move || {
         assert_eq!(
@@ -533,54 +629,85 @@ async fn interrupted_revert(
         );
         interrupt(&hook_store, id);
     });
-    let _ = raw(&handler, with_base(body(&host[1..], anchor("m2", 1)))).await;
-    let truncated = store.load(session()).unwrap();
-    assert_eq!(truncated.meta.revert_epoch, epoch + 1);
-    assert!(truncated.core.reconcile_pending);
-    (handler, store, dir, epoch)
+    let answer = call(&handler, retained_pass()).await;
+    (handler, store, dir, epoch, answer)
 }
 
-/// The pass after the interruption converges: one HARD, the epoch moved once, and a truncate
-/// re-entered at the same keep point changes neither epoch nor row version.
-async fn assert_converges(handler: &Handler, store: &MemoryStore, epoch: u64) {
-    let converged = plugin_pass(handler, &["m1", "m2", "n3"]).await;
-    assert_eq!(converged["action"], "HARD", "{converged}");
-    assert_eq!(converged["reconcile_pending"], false);
-    assert_eq!(converged["boundary"], anchor("m2", 1));
-    assert_eq!(served_mids(&converged), ["n3"]);
-    let loaded = store.load(session()).unwrap();
-    assert_eq!(loaded.meta.revert_epoch, epoch + 1);
+/// The host after the revert, and the pass the plugin sends with its retained anchor (m2, 1).
+const REVERTED: [&str; 3] = ["m1", "m2", "n3"];
+
+fn retained_pass() -> Value {
+    body(&REVERTED[1..], anchor("m2", 1))
+}
+
+/// The fold D10 names: a HARD against the surviving anchor, the epoch moved once, one segment.
+fn assert_folded(store: &MemoryStore, answer: &Value, epoch: u64) {
+    assert_eq!(answer["action"], "HARD", "{answer}");
+    assert_eq!(answer["reconcile_pending"], false);
+    assert_eq!(answer["boundary"], anchor("m2", 1));
+    assert_eq!(served_mids(answer), ["n3"]);
+    assert_eq!(store.load(session()).unwrap().meta.revert_epoch, epoch + 1);
     assert_eq!(store.load_history_segments(session()).unwrap().len(), 1);
+}
+
+/// After the fold: its compose minted the surviving anchor live, so it skipped the truncate
+/// branch (D10's no-op path); a truncate re-entered at the same keep point changes neither
+/// epoch nor row version, and the next pass is steady.
+async fn assert_steady(handler: &Handler, store: &MemoryStore, epoch: u64) {
+    let loaded = store.load(session()).unwrap();
     let again = store
         .truncate_history_segments_for_revert(session(), 1, loaded.row_version)
         .unwrap();
     assert_eq!(again.revert_epoch, epoch + 1);
     assert_eq!(Some(again.row_version), loaded.row_version);
-    let steady = plugin_pass(handler, &["m1", "m2", "n3"]).await;
+    let steady = plugin_pass(handler, &REVERTED).await;
     assert_eq!(steady["action"], "SOFT+");
     assert_eq!(store.load(session()).unwrap().meta.revert_epoch, epoch + 1);
 }
 
+/// The conflict makes the same request resolve again: the surviving anchor is now rendered, so
+/// the retry folds against it and the request answers the HARD, never `boundary_unknown`.
 #[tokio::test(flavor = "current_thread")]
-async fn a_cas_conflict_after_the_revert_truncate_converges_on_the_next_pass() {
-    let (handler, store, _dir, epoch) = interrupted_revert("rev3-cas", |store, session| {
+async fn a_cas_conflict_after_the_revert_truncate_folds_in_the_same_request() {
+    let (handler, store, _dir, epoch, answer) = interrupted_revert("rev3-cas", |store, session| {
         let loaded = store.load(session).unwrap();
         store
             .commit(session, loaded.row_version, &loaded.core, &loaded.meta)
             .unwrap();
     })
     .await;
-    assert_converges(&handler, &store, epoch).await;
+    assert_folded(&store, &answer, epoch);
+    assert_steady(&handler, &store, epoch).await;
 }
 
+/// A panic after the truncate commit, then a reopened store: discovery lists the surviving
+/// anchor, and the plugin's retained anchor folds against it on the next pass with no
+/// `boundary_unknown` and no `null` whole-array pass.
 #[tokio::test(flavor = "current_thread")]
-async fn a_process_kill_after_the_revert_truncate_converges_on_the_next_pass() {
-    let (handler, store, dir, epoch) = interrupted_revert("rev3-kill", |_, _| {
-        panic!("the process dies after the truncate commit")
+async fn a_panic_plus_reopen_after_the_revert_truncate_folds_on_the_next_pass() {
+    let (handler, store, dir, epoch, answer) = interrupted_revert("rev3-kill", |_, _| {
+        panic!("the pass dies after the truncate commit")
     })
     .await;
+    assert_eq!(answer["status"], "error", "{answer}");
     drop(handler);
     drop(store);
     let (handler, store) = reopened(&dir);
-    assert_converges(&handler, &store, epoch).await;
+    let truncated = store.load(session()).unwrap();
+    assert_eq!(truncated.meta.revert_epoch, epoch + 1);
+    assert!(truncated.core.reconcile_pending);
+    let PreparedOutcome::Response(bytes) = handler
+        .dispatch_value(
+            test_route(7),
+            json!({ "method": "transform.boundary", "v": 3, "session_id": session() }),
+        )
+        .await
+    else {
+        panic!("discovery answers a page");
+    };
+    let page: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(page["anchors"], json!([anchor("m2", 1)]));
+    let answer = call(&handler, retained_pass()).await;
+    assert_folded(&store, &answer, epoch);
+    assert_steady(&handler, &store, epoch).await;
 }

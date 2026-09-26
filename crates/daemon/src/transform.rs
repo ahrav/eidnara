@@ -735,7 +735,7 @@ pub struct BoundaryAnchor {
 /// submitted window and the messages its cut removed, so each attempt re-resolves the same
 /// submitted window from a fresh snapshot.
 #[derive(Debug, Clone, PartialEq)]
-pub struct WindowCoverage {
+pub(crate) struct WindowCoverage {
     pub resolved: crate::window_coverage::Resolved,
     cut_prefix: Vec<Arc<IngressMessage>>,
 }
@@ -767,7 +767,7 @@ pub struct TransformRequest {
     /// Set once the window is resolved: the cut is applied and every message carries its
     /// daemon-derived ordinal.
     #[serde(skip)]
-    pub coverage: Option<Arc<WindowCoverage>>,
+    pub(crate) coverage: Option<Arc<WindowCoverage>>,
     /// The v2 wire requires `serializer_profile`; parsing it as a string permits typed errors for missing values.
     /// Unknown `serializer_profile` values return the typed contract error rather than Serde's malformed-request error.
     pub serializer_profile: String,
@@ -1714,6 +1714,9 @@ pub struct TransformWithProjection {
     /// retains it instead of the harness's origin-numbered copy, so wrapup compares its
     /// ordinals against the durable history-segment ends.
     pub rebased_request: Option<TransformRequest>,
+    /// The window the pass served when a retry re-resolved it to another cut; `None` when it
+    /// served the request it was given.
+    pub served_request: Option<Box<TransformRequest>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1953,7 +1956,8 @@ pub(crate) fn transform_with_projection(
     req: &TransformRequest,
     ctx: &ProducerContext<'_>,
 ) -> Result<TransformWithProjection, TransformError> {
-    let window = tests::plugin_window(store, req);
+    let mut window = tests::plugin_window(store, req);
+    resolve_window(store, &mut window)?;
     let req = &window;
     let result = apply_once_with_estimator(
         store,
@@ -2139,14 +2143,6 @@ fn apply_once_with_estimator(
     estimate_tokens: impl Fn(&str) -> usize + Copy,
     output_cache: Option<&Mutex<SerializedOutputCache>>,
 ) -> Result<TransformWithProjection, TransformError> {
-    let mut resolved;
-    let req = if req.coverage.is_some() {
-        req
-    } else {
-        resolved = req.clone();
-        resolve_window(store, &mut resolved)?;
-        &resolved
-    };
     let mut attempt = 0;
     loop {
         // Every attempt resolves the submitted window from a fresh snapshot, whose row version
@@ -2175,7 +2171,15 @@ fn apply_once_with_estimator(
                 }
                 output.response.cache_ttl =
                     response_marker_ttl(req, &ctx.cache_ttl, ctx.cache_ttl_provenance);
+                // The boundary as the store holds it after the commit. Publishers only append
+                // segments; `session.recomp` is the one writer outside the session's lane that
+                // moves `core.boundary_id`, and a reset read here answers `null`, which is the
+                // reset's truth. A store error fails the committed pass: the plugin serves raw
+                // once and declares its retained anchor, which resolves against the new state.
                 output.response.boundary = Some(rendered_boundary(store, &req.session_id)?);
+                if let Cow::Owned(served) = attempt_req {
+                    output.served_request = Some(Box::new(served));
+                }
                 return Ok(output);
             }
             other => return other,
@@ -2561,6 +2565,7 @@ fn lineage_protocol_passthrough(
         mutation_exempt_mid: None,
         lineage_anchor_mid: None,
         rebased_request: None,
+        served_request: None,
         response: TransformResponse::passthrough(
             req.messages
                 .iter()
@@ -3080,6 +3085,7 @@ fn apply_additive_only(
         mutation_exempt_mid: None,
         lineage_anchor_mid: None,
         rebased_request: None,
+        served_request: None,
         response: TransformResponse {
             status: TransformStatus::Ok,
             served_from: ServedFrom::Transform,
@@ -3310,11 +3316,10 @@ fn apply_once(
         .as_deref()
         .and_then(split_block_id)
         .map(|(mid, _)| mid);
-    if let Some(base) = loaded
-        .meta
-        .ordinal_continuation_base
-        .filter(|_| coverage.resolved.resolution == crate::window_coverage::Resolution::FirstPass)
-    {
+    // Only an unanchored first pass numbers its window from the continuation base; an
+    // anchored window takes its ordinals from the anchor.
+    let first_pass = coverage.resolved.resolution == crate::window_coverage::Resolution::FirstPass;
+    if first_pass && let Some(base) = loaded.meta.ordinal_continuation_base {
         let expected_boundary = base.checked_add(1).ok_or_else(|| {
             TransformError::LineageProtocol(
                 "durable ordinal continuation base overflow".to_string(),
@@ -4276,18 +4281,14 @@ fn apply_once(
                     let minted = comp.boundary_id.as_str();
                     if minted.is_empty() || !live.iter().any(|block| block.id() == minted) {
                         if loaded.core.reconcile_pending {
-                            // A revert keeps history through the effective anchor.
+                            // A revert keeps history through the effective anchor; with none
+                            // (a revert through no anchor that the pending-rewrite arm does not
+                            // take), it removes every segment, as the reset of spec D10 does.
                             let keep_through_seq = coverage
                                 .resolved
                                 .anchor
                                 .as_ref()
-                                .map(|anchor| anchor.sequence)
-                                .ok_or_else(|| {
-                                    TransformError::BoundaryNotPresent(format!(
-                                        "fold minted absent anchor {minted:?} and the window \
-                                         declares no surviving anchor to re-cut to"
-                                    ))
-                                })?;
+                                .map_or(-1, |anchor| anchor.sequence);
                             let outcome = store.truncate_history_segments_for_revert(
                                 &req.session_id,
                                 keep_through_seq,
@@ -5217,6 +5218,7 @@ fn apply_once(
             .max(meta.reasoning_cleared_through_ordinal),
         mutation_exempt_mid: mutation_exempt_mid.map(str::to_string),
         lineage_anchor_mid: lineage_anchor_mid.map(str::to_string),
+        served_request: None,
         response: TransformResponse {
             status: TransformStatus::Ok,
             served_from: ServedFrom::Transform,
@@ -6746,6 +6748,7 @@ fn pending_passthrough_result(args: PendingPassthroughArgs) -> TransformWithProj
         mutation_exempt_mid,
         lineage_anchor_mid: None,
         rebased_request: None,
+        served_request: None,
         response,
     }
 }
@@ -12266,6 +12269,13 @@ pub(crate) mod tests {
                 ..Default::default()
             },
         )
+    }
+
+    /// `req` resolved as the handler resolves it before the pass.
+    pub(crate) fn resolved(store: &MemoryStore, req: &TransformRequest) -> TransformRequest {
+        let mut req = req.clone();
+        resolve_window(store, &mut req).expect("the window resolves");
+        req
     }
 
     /// What the plugin sends for a request written with revision 2 ordinals, when the test
@@ -18665,7 +18675,14 @@ pub(crate) mod tests {
         let context = pctx("git:proj", "/nonexistent-docs", 0);
         let estimate = |value: &str| value.len();
 
-        let boot = apply_once_with_estimator(&store, &request, &context, estimate, None).unwrap();
+        let boot = apply_once_with_estimator(
+            &store,
+            &resolved(&store, &request),
+            &context,
+            estimate,
+            None,
+        )
+        .unwrap();
         assert_eq!(boot.response.action, "HARD");
         let untouched_messages = boot
             .response
@@ -18690,11 +18707,24 @@ pub(crate) mod tests {
             "text-keep"
         );
 
-        let active = apply_once_with_estimator(&store, &request, &context, estimate, None).unwrap();
+        let active = apply_once_with_estimator(
+            &store,
+            &resolved(&store, &request),
+            &context,
+            estimate,
+            None,
+        )
+        .unwrap();
         assert_eq!(active.response.action, "SOFT+");
         store.arm_soft_refresh("reasoning-tagged").unwrap();
-        let execute =
-            apply_once_with_estimator(&store, &request, &context, estimate, None).unwrap();
+        let execute = apply_once_with_estimator(
+            &store,
+            &resolved(&store, &request),
+            &context,
+            estimate,
+            None,
+        )
+        .unwrap();
         assert_eq!(execute.scheduler_pass, scheduler::PassDecision::Execute);
         assert_eq!(execute.mutation_exempt_mid, None);
         let served_messages = execute
@@ -18775,9 +18805,23 @@ pub(crate) mod tests {
         let context = pctx("git:proj", "/nonexistent-docs", 0);
         let estimate = |value: &str| value.len();
 
-        let boot = apply_once_with_estimator(&store, &request, &context, estimate, None).unwrap();
+        let boot = apply_once_with_estimator(
+            &store,
+            &resolved(&store, &request),
+            &context,
+            estimate,
+            None,
+        )
+        .unwrap();
         assert_eq!(boot.response.action, "HARD");
-        let active = apply_once_with_estimator(&store, &request, &context, estimate, None).unwrap();
+        let active = apply_once_with_estimator(
+            &store,
+            &resolved(&store, &request),
+            &context,
+            estimate,
+            None,
+        )
+        .unwrap();
         assert_eq!(active.response.action, "SOFT+");
         request.render_config = "cfg1".to_string();
         let mut execute_context = pctx("git:proj", "/nonexistent-docs", 0);
@@ -18785,8 +18829,14 @@ pub(crate) mod tests {
             reduce("assistant-tool#1", "drop", "[dropped]"),
             reduce("assistant-tool#2", "drop", "[dropped]"),
         ]);
-        let execute =
-            apply_once_with_estimator(&store, &request, &execute_context, estimate, None).unwrap();
+        let execute = apply_once_with_estimator(
+            &store,
+            &resolved(&store, &request),
+            &execute_context,
+            estimate,
+            None,
+        )
+        .unwrap();
         assert_eq!(execute.scheduler_pass, scheduler::PassDecision::Execute);
         assert_eq!(execute.response.action, "HARD");
         let frozen = frozen_red_targets(&store.load("reasoning-reduction").unwrap().core);
@@ -18796,7 +18846,14 @@ pub(crate) mod tests {
         );
 
         request = with_usage(request, 20, 100);
-        let defer = apply_once_with_estimator(&store, &request, &context, estimate, None).unwrap();
+        let defer = apply_once_with_estimator(
+            &store,
+            &resolved(&store, &request),
+            &context,
+            estimate,
+            None,
+        )
+        .unwrap();
         assert_eq!(defer.scheduler_pass, scheduler::PassDecision::Defer);
         assert_eq!(defer.mutation_exempt_mid, None);
         assert_eq!(defer.response.action, "SOFT+");
@@ -22727,7 +22784,7 @@ pub(crate) mod tests {
             let before = crate::tail_hygiene::local_memo_stats();
             let response = transform_with_projection_cached(
                 &store,
-                &make_request(middle),
+                &resolved(&store, &make_request(middle)),
                 &ctx,
                 &output_cache,
             )
@@ -24643,9 +24700,15 @@ pub(crate) mod tests {
                         assert_eq!(cached, tokenizer::estimate_tokens(text));
                         cached
                     };
-                    let result = apply_once_with_estimator(&s, &request, &context, estimate, None)
-                        .unwrap()
-                        .response;
+                    let result = apply_once_with_estimator(
+                        &s,
+                        &resolved(&s, &request),
+                        &context,
+                        estimate,
+                        None,
+                    )
+                    .unwrap()
+                    .response;
                     let observed = observed.borrow();
                     assert!(
                         observed.contains(&" x".repeat(m0_tokens)),
@@ -27949,9 +28012,14 @@ pub(crate) mod tests {
         let base_request = active_cc_req("duplicate-tool-use", "cfg0", base_messages.clone());
         let estimate = |value: &str| value.len();
 
-        let boot =
-            apply_once_with_estimator(&store, &base_request, &context, estimate, Some(&cache))
-                .unwrap();
+        let boot = apply_once_with_estimator(
+            &store,
+            &resolved(&store, &base_request),
+            &context,
+            estimate,
+            Some(&cache),
+        )
+        .unwrap();
         assert_eq!(boot.response.action, "HARD");
         let pair = store
             .load("duplicate-tool-use")
@@ -27978,9 +28046,14 @@ pub(crate) mod tests {
         });
         let replay_request = active_cc_req("duplicate-tool-use", "cfg0", replay_messages);
 
-        let warm =
-            apply_once_with_estimator(&store, &replay_request, &context, estimate, Some(&cache))
-                .unwrap();
+        let warm = apply_once_with_estimator(
+            &store,
+            &resolved(&store, &replay_request),
+            &context,
+            estimate,
+            Some(&cache),
+        )
+        .unwrap();
         // Replay would insert the stored synthetic pair between a live call and its result.
         // The renderer returns HARD to preserve adjacency between a live tool call and its result.
         // Each live tool exchange remains adjacent.
@@ -28014,7 +28087,7 @@ pub(crate) mod tests {
         ]);
         let selected = apply_once_with_estimator(
             &store,
-            &selection_request,
+            &resolved(&store, &selection_request),
             &selection_context,
             estimate,
             Some(&cache),

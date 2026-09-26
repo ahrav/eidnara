@@ -8236,8 +8236,8 @@ impl HandlerCore {
                 );
             }
             Some(Some(anchor))
-                if anchor.sequence.unsigned_abs()
-                    > window_coverage::MAX_SAFE_INTEGER.unsigned_abs() =>
+                if !(-window_coverage::MAX_SAFE_INTEGER..=window_coverage::MAX_SAFE_INTEGER)
+                    .contains(&anchor.sequence) =>
             {
                 return invalid_params_error("boundary.sequence must be a JavaScript safe integer");
             }
@@ -8963,7 +8963,7 @@ impl HandlerCore {
     ) -> PreparedHistorySummarizerAction {
         self.prepare_history_summarizer_fire(
             Arc::clone(&env.store),
-            &env.parsed,
+            pass.result.served_request.as_deref().unwrap_or(&env.parsed),
             &env.binding,
             &env.project_path,
             &pass.result.projection,
@@ -9005,10 +9005,13 @@ impl HandlerCore {
             }
         }
         let TransformedPass {
-            result,
+            mut result,
             trigger_timings,
             ..
         } = pass;
+        // Everything after the pass reads the window it served.
+        let served_request = result.served_request.take();
+        let parsed = served_request.as_deref().unwrap_or(parsed);
         let timings = &env.timings;
         let post_attach_started_at = Instant::now();
         let revert_epoch = result.revert_epoch;
@@ -9018,7 +9021,7 @@ impl HandlerCore {
         let tag_numbers = result.tag_numbers;
         // A descent pass rebased its ordinals; the snapshot keeps that copy so wrapup compares
         // them against the durable history-segment ends.
-        let snapshot_request = result.rebased_request.as_ref().map_or(&**parsed, |r| r);
+        let snapshot_request = result.rebased_request.as_ref().map_or(parsed, |r| r);
         let mut response = result.response;
         response.history_summarizer = Some(diagnostics);
         let Some(output_revision) = self.output_revisions.allocate() else {
@@ -9158,6 +9161,8 @@ impl HandlerCore {
                 .map(|message| message.ck.clone())
                 .collect(),
         );
+        // A child session holds no coverage.
+        response.boundary = Some(None);
         let Some(output_revision) = self.output_revisions.allocate() else {
             return revision_exhausted_error();
         };
@@ -13459,6 +13464,7 @@ fn window_refusal(request: &TransformRequest, error: transform::TransformError) 
             None,
         ),
         transform::TransformError::InvalidWindow(message) => invalid_params_error(message),
+        // A store error from the handler's resolution in `start_transform_pass`.
         other => PreparedOutcome::Error {
             code: "transform_failed".to_string(),
             message: other.to_string(),
@@ -25757,6 +25763,8 @@ mod tests {
         assert_eq!(child["served_from"], "transform");
         assert!(child.get("full_array_fingerprint").is_none());
         assert_eq!(child["action"], "PASSTHROUGH");
+        assert_eq!(child["boundary"], Value::Null);
+        assert!(child.as_object().unwrap().contains_key("boundary"));
         assert_eq!(child["messages"].as_array().unwrap().len(), 1);
         assert_eq!(child["messages"][0]["role"], "user");
     }

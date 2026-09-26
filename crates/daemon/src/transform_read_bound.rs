@@ -37,8 +37,9 @@ const MEMORIES: usize = 4;
 
 /// The D15 inventory rows, in report order.
 const ROWS: &[&str] = &[
-    // Holds the session state reads too: the pass's cache_state row and the lineage and
-    // assembly meta reads (see CLASSES).
+    // The handler's resolution, each attempt's, and the response's boundary read, plus the
+    // session state reads: the pass's cache_state row and the lineage and assembly meta reads
+    // (see CLASSES).
     "coverage snapshot",
     "append range validation",
     "m0 segments",
@@ -251,7 +252,8 @@ fn first_request(h: usize, render_config: &str) -> TransformRequest {
 fn pass(store: &MemoryStore, request: &TransformRequest) -> String {
     let dir = "/nonexistent-docs";
     let ctx = pctx("git:read-bound", dir, 1_700_000_000_000);
-    transform_with_projection_cached(store, request, &ctx, &Mutex::default())
+    let request = crate::transform::tests::resolved(store, request);
+    transform_with_projection_cached(store, &request, &ctx, &Mutex::default())
         .expect("pass")
         .response
         .action

@@ -2483,7 +2483,8 @@ pub struct CoverageSnapshot {
     pub continuation_base: Option<u64>,
     pub newest: Option<HistorySegmentEdge>,
     /// The rendered boundary: the row ending at `meta.coverage_ordinal` whose end block is
-    /// `core.boundary_id`. `None` when the daemon holds no coverage.
+    /// `core.boundary_id`, or the newest row after an interrupted revert truncate (spec D10).
+    /// `None` when the daemon holds no coverage.
     pub rendered: Option<HistorySegmentEdge>,
     /// The row at the declared sequence, when one was declared.
     pub declared: Option<HistorySegmentEdge>,
@@ -16143,7 +16144,9 @@ fn history_segment_edge_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Hi
 }
 
 /// The session row's version and continuation base, and the rendered boundary row: the row
-/// ending at `meta.coverage_ordinal` whose end block is `core.boundary_id`.
+/// ending at `meta.coverage_ordinal` whose end block is `core.boundary_id`. While
+/// `core.reconcile_pending` is set and that row is gone, a revert's truncate committed before
+/// its fold did, and the newest surviving row is the rendered boundary (spec D10).
 #[derive(Default)]
 struct RenderedCoverage {
     row_version: Option<u64>,
@@ -16159,7 +16162,8 @@ fn rendered_coverage_tx(
         .prepare_cached(
             "SELECT row_version, json_extract(core_state, '$.boundary_id'),
                     json_extract(meta, '$.coverage_ordinal'),
-                    json_extract(meta, '$.ordinal_continuation_base')
+                    json_extract(meta, '$.ordinal_continuation_base'),
+                    json_extract(core_state, '$.reconcile_pending')
                FROM cache_state WHERE session_id = ?1",
         )?
         .query_row(params![session_id], |row| {
@@ -16174,16 +16178,23 @@ fn rendered_coverage_tx(
                 row.get::<_, Option<i64>>(3)?
                     .map(|base| unsigned(3, base))
                     .transpose()?,
+                row.get::<_, Option<bool>>(4)?.unwrap_or(false),
             ))
         })
         .optional()?;
-    let Some((row_version, boundary_id, coverage, base)) = row else {
+    let Some((row_version, boundary_id, coverage, base, reconcile_pending)) = row else {
         return Ok(RenderedCoverage::default());
     };
     let rendered = match (boundary_id, coverage) {
         (Some(boundary_id), Some(coverage)) if !boundary_id.is_empty() => {
-            history_segment_edge_tx(conn, session_id, EdgeAt::EndMessage(coverage))?
+            match history_segment_edge_tx(conn, session_id, EdgeAt::EndMessage(coverage))?
                 .filter(|row| row.end_message_id == boundary_id)
+            {
+                None if reconcile_pending => {
+                    history_segment_edge_tx(conn, session_id, EdgeAt::Newest)?
+                }
+                rendered => rendered,
+            }
         }
         _ => None,
     };
@@ -25828,6 +25839,31 @@ mod tests {
             Some(summarizer_timeline::FiringOutcome::Published { sequence: Some(2) })
         );
         assert_eq!(second.history_summarizer.counters.firings, 2);
+    }
+
+    /// A meta row a revision 2 daemon wrote still carries `boundary_divergence_pending_count`;
+    /// the retired field is ignored and the row loads.
+    #[test]
+    fn a_legacy_meta_row_with_the_retired_divergence_counter_loads() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
+        let meta = ModuleMeta {
+            coverage_ordinal: Some(3),
+            ..Default::default()
+        };
+        store
+            .commit("ses", None, &CoreState::empty(), &meta)
+            .unwrap();
+        let raw = rusqlite::Connection::open(dir.path().join("memory.sqlite")).unwrap();
+        raw.execute(
+            "UPDATE cache_state
+                SET meta = json_set(meta, '$.boundary_divergence_pending_count', 2)
+              WHERE session_id = 'ses'",
+            [],
+        )
+        .unwrap();
+        drop(raw);
+        assert_eq!(store.load("ses").unwrap().meta, meta);
     }
 
     #[test]
