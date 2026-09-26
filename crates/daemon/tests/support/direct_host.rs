@@ -475,6 +475,18 @@ pub fn identity(root: &Path, harness: &str, session: &str) -> RouteIdentity {
 }
 
 pub async fn request_json(client: &Client, route: ClientRoute, body: Value) -> Value {
+    try_request_json(client, route, body)
+        .await
+        .expect("request succeeds")
+}
+
+/// `request_json`, with an error the host answered returned rather than
+/// panicked on, so a caller can account for it.
+pub async fn try_request_json(
+    client: &Client,
+    route: ClientRoute,
+    body: Value,
+) -> Result<Value, host_runtime::CallError> {
     let response = client
         .request(
             route,
@@ -484,9 +496,8 @@ pub async fn request_json(client: &Client, route: ClientRoute, body: Value) -> V
                 ..RequestOptions::default()
             },
         )
-        .await
-        .expect("request succeeds");
-    serde_json::from_slice(&response.body).expect("response JSON")
+        .await?;
+    Ok(serde_json::from_slice(&response.body).expect("response JSON"))
 }
 
 pub async fn wait_for_store(client: &Client, route: ClientRoute, session: &str) -> Value {

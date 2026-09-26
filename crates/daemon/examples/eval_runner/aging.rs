@@ -113,7 +113,32 @@ pub fn profile(
     profile.name = profile.name.replace("surface1-raw", "suite-c-aging");
     profile.tasks_per_world = 1;
     profile.envelope.temp_roots = 4;
+    profile.envelope.store_bytes = allowance(
+        profile.envelope.store_bytes,
+        STORE_BYTES_PER_MESSAGE,
+        messages,
+    );
+    profile.envelope.artifact_bytes = allowance(
+        profile.envelope.artifact_bytes,
+        ARTIFACT_BYTES_PER_MESSAGE,
+        messages,
+    );
     profile
+}
+
+/// A root's store bytes grow faster than the history: the aging drive peaked
+/// at 27 MB over 150 messages, 54 MB over 300, and 147 MB over 600, WAL
+/// included. The bound is a per-message allowance with room for that curve,
+/// above the Suite B floor, which every history under 128 messages keeps.
+const STORE_BYTES_PER_MESSAGE: u64 = 512 << 10;
+/// The published report grows with the history (the growth report carries a
+/// sample per step, about 1.6 KB a message); every history under 256
+/// messages keeps the Suite B floor.
+const ARTIFACT_BYTES_PER_MESSAGE: u64 = 4 << 10;
+
+/// `per_message` for each declared message, never below `floor`.
+fn allowance(floor: u64, per_message: u64, messages: u32) -> u64 {
+    floor.max(per_message.saturating_mul(u64::from(messages)))
 }
 
 /// The one event bound the generator enforces on the log and the profile
@@ -244,6 +269,12 @@ pub struct DriveBounds {
 
 impl DriveBounds {
     fn admitting(rendering: &Rendering, steps: &[Planned]) -> Self {
+        let (units, bytes) = Self::demand(rendering, steps);
+        Self::raised(units, bytes)
+    }
+
+    /// The units `steps` publish and their text bytes.
+    pub fn demand(rendering: &Rendering, steps: &[Planned]) -> (usize, usize) {
         let messages: BTreeMap<&EventId, &Value> = rendering
             .messages
             .iter()
@@ -259,6 +290,12 @@ impl DriveBounds {
                 bytes += unit.text.len();
             }
         }
+        (units, bytes)
+    }
+
+    /// The fixture defaults raised to `units` published units of `bytes`
+    /// text bytes.
+    pub fn raised(units: usize, bytes: usize) -> Self {
         let raise = |floor: NonZeroUsize, demand: usize| {
             floor.max(NonZeroUsize::new(demand).unwrap_or(floor))
         };
@@ -352,10 +389,16 @@ pub struct Stores {
 
 impl Stores {
     pub fn open(root: &Path, plan: &Plan) -> Self {
+        Self::open_within(root, plan, plan.bounds)
+    }
+
+    /// `open` under `bounds` rather than the plan's, for a root that publishes
+    /// more units than the plan's steps.
+    pub fn open_within(root: &Path, plan: &Plan, bounds: DriveBounds) -> Self {
         let corpus = Corpus::open(root);
         corpus.seed();
         let memory = MemoryStore::open(&daemon::store_descriptor_in(root)).unwrap();
-        let (projection, consumer) = Self::bootstrap(&corpus, root, &plan.bounds, EPOCH_MS);
+        let (projection, consumer) = Self::bootstrap(&corpus, root, &bounds, EPOCH_MS);
         Self {
             root: root.to_path_buf(),
             corpus,
@@ -363,7 +406,7 @@ impl Stores {
             consumer,
             memory,
             rendering: plan.rendering.clone(),
-            bounds: plan.bounds,
+            bounds,
             chains: BTreeMap::new(),
             dead: BTreeSet::new(),
             applied: 0,

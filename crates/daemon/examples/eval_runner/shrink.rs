@@ -201,21 +201,7 @@ pub fn replayed(args: &ChildArgs) -> Replayed {
     let outcome = std::fs::read(&args.scenario)
         .ok()
         .and_then(|bytes| serde_json::from_slice::<Scenario>(&bytes).ok())
-        .and_then(|scenario| {
-            let set = scenario.compile(&fixture).ok()?;
-            let task = &set.pairs.first()?.task;
-            let truth = reduce(&set.aged, &fixture, &task.query).ok()?;
-            Some((
-                scenario.digest(),
-                args.oracle.evaluate(
-                    &set,
-                    &task.id,
-                    &truth,
-                    args.checkpoint,
-                    &args.profile_digest,
-                ),
-            ))
-        });
+        .and_then(|scenario| Some((scenario.digest(), evaluate(args, &scenario, &fixture)?)));
     let (scenario_digest, outcome) = outcome.unwrap_or_else(|| {
         (
             String::new(),
@@ -230,6 +216,21 @@ pub fn replayed(args: &ChildArgs) -> Replayed {
         outcome,
         residue: residue(),
     }
+}
+
+/// The oracle over `scenario` at the cut; `None` when the pair set does not
+/// compile or the aged truth does not reduce.
+fn evaluate(args: &ChildArgs, scenario: &Scenario, fixture: &Value) -> Option<ReplayOutcome> {
+    let set = scenario.compile(fixture).ok()?;
+    let task = &set.pairs.first()?.task;
+    let truth = reduce(&set.aged, fixture, &task.query).ok()?;
+    Some(args.oracle.evaluate(
+        &set,
+        &task.id,
+        &truth,
+        args.checkpoint,
+        &args.profile_digest,
+    ))
 }
 
 /// The child: prints `replayed(args)` over the barrier line, then exits.
@@ -484,6 +485,7 @@ pub fn run(config: &Config, spawn: Spawn) -> Result<Run, RunError> {
         config.approval.clone(),
     );
     profile.approved()?;
+    witness_fits(config.commits, &config.oracle, &profile).map_err(RunError::Commits)?;
     let profile_digest = profile.digest()?;
     let mut charges = Charges::new(profile.envelope.clone());
     prepare_publish(&config.publish, &[WITNESS_FILE, MANIFEST_FILE]).map_err(publish_refused)?;
@@ -579,55 +581,18 @@ pub fn run(config: &Config, spawn: Spawn) -> Result<Run, RunError> {
     {
         return Err(RunError::BinaryChanged);
     }
-    let mut coverage = Coverage::default();
-    coverage
-        .record("flt_shrink_fresh_process_reproduced")
-        .unwrap();
-    if report
-        .candidates
-        .iter()
-        .any(|record| matches!(record.verdict, CandidateVerdict::Slipped { .. }))
-    {
-        coverage
-            .record("flt_shrink_slipped_candidate_rejected")
-            .unwrap();
-    }
-    if report.unknown_candidates > 0 {
-        coverage
-            .record("flt_shrink_unknown_effect_preserved")
-            .unwrap();
-    }
-    let mut witness = WitnessPackage {
-        schema: WITNESS_SCHEMA.to_string(),
-        original: OriginalFailure {
+    let (witness, coverage) = package(
+        config.commits,
+        &original,
+        tape,
+        Shrunk {
             eval_run_id: eval_run_id(&run_identity).unwrap(),
-            tape,
             trace_digest: first.trace_digest.clone(),
-            causal_trace: original.aged.causal_edges.clone(),
             predicate,
-            coverage: coverage.fired().iter().map(|m| m.to_string()).collect(),
+            minimized,
+            report,
         },
-        slice: Slice::Cassette,
-        replayable: true,
-        residue: residue(),
-        minimized,
-        recipe: None,
-        shrink: report,
-        claim_boundary: ClaimBoundary::pinned(),
-    };
-    if witness.validate() == Err(WitnessError::RecipeRequired) {
-        witness.recipe = Some(MultiplicityRecipe {
-            aged: Generation {
-                config: aged_config(config.commits),
-                root_seed: SEED,
-            },
-            natural_fresh: Generation {
-                config: fresh_config(),
-                root_seed: FRESH_SEED,
-            },
-            multiplicities: witness.count_triggered(),
-        });
-    }
+    );
     charges.vacate(root)?;
     charges.retain_publish_root()?;
     let redactor = Redactor::new().map_err(|e| std::io::Error::other(format!("{e:?}")))?;
@@ -678,6 +643,143 @@ pub fn run(config: &Config, spawn: Spawn) -> Result<Run, RunError> {
     })
 }
 
+/// What a shrink of the original found, the parts of the witness a replay
+/// decides.
+struct Shrunk {
+    eval_run_id: String,
+    trace_digest: String,
+    predicate: FailurePredicate,
+    minimized: Scenario,
+    report: eval_core::ShrinkReport,
+}
+
+/// The witness package over `shrunk`, with the recipe when validation needs
+/// one, and the coverage markers the report shows.
+fn package(
+    commits: u32,
+    original: &Scenario,
+    tape: eval_core::Tape,
+    shrunk: Shrunk,
+) -> (WitnessPackage, Coverage) {
+    let report = shrunk.report;
+    let mut coverage = Coverage::default();
+    coverage
+        .record("flt_shrink_fresh_process_reproduced")
+        .unwrap();
+    if report
+        .candidates
+        .iter()
+        .any(|record| matches!(record.verdict, CandidateVerdict::Slipped { .. }))
+    {
+        coverage
+            .record("flt_shrink_slipped_candidate_rejected")
+            .unwrap();
+    }
+    if report.unknown_candidates > 0 {
+        coverage
+            .record("flt_shrink_unknown_effect_preserved")
+            .unwrap();
+    }
+    let mut witness = WitnessPackage {
+        schema: WITNESS_SCHEMA.to_string(),
+        original: OriginalFailure {
+            eval_run_id: shrunk.eval_run_id,
+            tape,
+            trace_digest: shrunk.trace_digest,
+            causal_trace: original.aged.causal_edges.clone(),
+            predicate: shrunk.predicate,
+            coverage: coverage.fired().iter().map(|m| m.to_string()).collect(),
+        },
+        slice: Slice::Cassette,
+        replayable: true,
+        residue: residue(),
+        minimized: shrunk.minimized,
+        recipe: None,
+        shrink: report,
+        claim_boundary: ClaimBoundary::pinned(),
+    };
+    if witness.validate() == Err(WitnessError::RecipeRequired) {
+        witness.recipe = Some(MultiplicityRecipe {
+            aged: Generation {
+                config: aged_config(commits),
+                root_seed: SEED,
+            },
+            natural_fresh: Generation {
+                config: fresh_config(),
+                root_seed: FRESH_SEED,
+            },
+            multiplicities: witness.count_triggered(),
+        });
+    }
+    (witness, coverage)
+}
+
+/// The byte bound a witness publishes under: the envelope's artifact bound,
+/// or the secret scanner's input limit when that is lower, since
+/// `WitnessPackage::serialize` scans the whole canonical text.
+fn witness_bound(profile: &RunProfile) -> u64 {
+    profile
+        .envelope
+        .artifact_bytes
+        .min(context_core::redaction::MAX_REDACTABLE_BYTES as u64)
+}
+
+/// Refuses a commit count whose witness cannot publish, before anything
+/// runs: the shrink is lived in-process with every candidate answered by the
+/// oracle as an honest child would answer it, and the canonical witness
+/// bytes are measured against `witness_bound`. The trace digest and run id
+/// are fixed-length digests, so placeholders measure the same. A scenario
+/// the oracle does not fail is left for the replay to refuse.
+fn witness_fits(commits: u32, oracle: &Oracle, profile: &RunProfile) -> Result<(), String> {
+    let (original, tape) = scenario(commits);
+    let fixture = serialize_spec();
+    let args = ChildArgs {
+        scenario: PathBuf::new(),
+        oracle: oracle.clone(),
+        checkpoint: CUT,
+        profile_digest: profile.digest().map_err(|error| format!("{error:?}"))?,
+    };
+    let Some(ReplayOutcome::Failed { predicate }) = evaluate(&args, &original, &fixture) else {
+        return Ok(());
+    };
+    let mut callback = |request: ReplayRequest<'_>| {
+        evaluate(&args, request.scenario, &fixture).unwrap_or(ReplayOutcome::Unknown {
+            reason: UnknownReason::ReadBackFailed,
+        })
+    };
+    let Ok((minimized, report)) =
+        shrink(&original, &fixture, &predicate, MAX_REPLAYS, &mut callback)
+    else {
+        return Ok(());
+    };
+    let placeholder = "0".repeat(64);
+    let (witness, _) = package(
+        commits,
+        &original,
+        tape,
+        Shrunk {
+            eval_run_id: placeholder.clone(),
+            trace_digest: placeholder,
+            predicate,
+            minimized,
+            report,
+        },
+    );
+    let value = serde_json::to_value(&witness).unwrap();
+    let bytes = context_core::canonical_json::canonical_json_encode(&value)
+        .unwrap()
+        .len() as u64;
+    let bound = witness_bound(profile);
+    if bytes > bound {
+        return Err(format!(
+            "{commits} commits make a {bytes}-byte witness; a witness publishes at most \
+             {bound} bytes (the envelope's artifact bound or the secret scanner's input \
+             limit, whichever is lower)"
+        ));
+    }
+    Ok(())
+}
+
 /// At least two commits, so a rename exists, and an aged world within the
 /// event bound; `run` refuses a `Config` built directly the same way.
 fn commits(commits: u64) -> Result<u32, String> {
@@ -701,7 +803,7 @@ pub fn config_from_args(args: impl IntoIterator<Item = String>) -> Result<Config
             .parse::<u64>()
             .map_err(|error| format!("--{name}: {error}"))
     };
-    Ok(Config {
+    let config = Config {
         scale,
         commits: commits(number("commits")?).map_err(|error| format!("--commits: {error}"))?,
         elapsed_bound_ms: number("elapsed-bound-ms")?,
@@ -715,5 +817,9 @@ pub fn config_from_args(args: impl IntoIterator<Item = String>) -> Result<Config
             slipping_at: 6,
         },
         replay_timeout: REPLAY_TIMEOUT,
-    })
+    };
+    let profile = profile(config.scale, config.elapsed_bound_ms, None);
+    witness_fits(config.commits, &config.oracle, &profile)
+        .map_err(|error| format!("--commits: {error}"))?;
+    Ok(config)
 }

@@ -138,6 +138,7 @@ function readCounters(statusKey: string, value: Json): CompactionCounters {
 
 interface RingEntry {
     clock?: number;
+    decision?: string;
     action?: string;
     reason?: string;
     cache?: { read: number; write: number };
@@ -155,6 +156,9 @@ function readRing(value: unknown): RingEntry[] {
         return [
             {
                 ...(clock !== undefined ? { clock } : {}),
+                ...(typeof entry.scheduler_decision === "string"
+                    ? { decision: entry.scheduler_decision }
+                    : {}),
                 ...(typeof entry.action === "string" ? { action: entry.action } : {}),
                 ...(typeof entry.materialize_reason === "string"
                     ? { reason: entry.materialize_reason }

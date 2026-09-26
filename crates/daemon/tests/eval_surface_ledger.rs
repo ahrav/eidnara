@@ -19,7 +19,7 @@ use memory_store::StoredHistorySegment;
 use support::direct_host::FixtureProcess;
 use support::eval_surface::{
     EPOCH_MS, Knobs, Pass, SurfaceLedger, World, block_on, expected_id, identities, mid, observe,
-    pass, seed_store, segment,
+    pass, seed_store, segment, try_pass,
 };
 
 const SUITE: &str = "crates/daemon/tests/eval_surface_ledger.rs::";
@@ -43,7 +43,7 @@ fn world(messages: u32) -> World {
         repositories: Vec::new(),
         epoch_ms: EPOCH_MS,
         tick_ms: 1_000,
-        max_events_per_log: 512,
+        max_events_per_log: messages.max(256) * 2,
         planted: Vec::new(),
     };
     let generated = generate_all(SEED, &config, Mode::Generate).unwrap();
@@ -386,6 +386,25 @@ fn the_user_hint_pass_leaves_the_wire_response_bytes_unchanged() {
         <Surface1Stage as eval_core::Stage>::REACHABILITY,
         eval_core::Reachability::DefaultProduction
     );
+}
+
+/// A turn the host answers with an error is returned to the caller as the
+/// turn it refused, not panicked on: a session whose durable text is past its
+/// bound is refused at the transform itself.
+#[test]
+fn a_turn_the_host_refuses_is_returned_with_its_code() {
+    block_on(async {
+        let world = world(1_600);
+        let root = tempfile::tempdir().unwrap();
+        let fixture = FixtureProcess::start_at(root.path().to_path_buf());
+        let refused = try_pass(&fixture, &world, PROMPT, &Knobs::default())
+            .await
+            .err()
+            .expect("a session past the durable bound is refused");
+        let _ = fixture.shutdown();
+        assert_eq!(refused.turn, world.messages.len() + 1);
+        assert!(refused.code.starts_with("host."), "{refused:?}");
+    });
 }
 
 /// A second pass over the same tail decides nothing because the first pass's

@@ -209,8 +209,16 @@ fn shrink_child_reports_a_foreign_predicate() {
 
 /// Every child evaluates the original scenario, whatever candidate it was
 /// sent: a structurally valid answer for the wrong scenario.
+/// Each child's temp root is `child_temp_root()`, so the parent can see what
+/// the children left there.
 fn spawn_answering_for_the_original(_: &ChildArgs) -> Command {
-    reexec("shrink_child_answers_about_the_original_scenario")
+    let mut command = reexec("shrink_child_answers_about_the_original_scenario");
+    command.env("TMPDIR", child_temp_root());
+    command
+}
+
+fn child_temp_root() -> PathBuf {
+    std::env::temp_dir().join(format!("eidnara-shrink-child-tmp-{}", std::process::id()))
 }
 
 #[test]
@@ -219,17 +227,22 @@ fn shrink_child_answers_about_the_original_scenario() {
     let Some(args) = ChildArgs::from_env() else {
         return;
     };
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("original.json");
-    std::fs::write(
-        &path,
-        serde_json::to_vec(&shrink::scenario(COMMITS).0).unwrap(),
-    )
-    .unwrap();
-    shrink::child_main(&ChildArgs {
-        scenario: path,
-        ..args
-    });
+    // `child_main` exits the process, which would skip the temp dir's drop,
+    // so the dir is dropped before the barrier line is printed.
+    let replayed = {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("original.json");
+        std::fs::write(
+            &path,
+            serde_json::to_vec(&shrink::scenario(COMMITS).0).unwrap(),
+        )
+        .unwrap();
+        shrink::replayed(&ChildArgs {
+            scenario: path,
+            ..args
+        })
+    };
+    println!("{BARRIER} {}", serde_json::to_string(&replayed).unwrap());
 }
 
 fn approval() -> Approval {
@@ -603,7 +616,7 @@ fn a_child_predicate_pinned_elsewhere_is_refused_and_nothing_is_published() {
 #[test]
 fn a_commit_count_the_scenario_cannot_carry_is_refused_before_anything_runs() {
     let publish = tempfile::tempdir().unwrap();
-    for commits in [0, 1, 78] {
+    for commits in [0, 1, 32, 78] {
         let mut config = config(publish.path().join(format!("commits-{commits}")));
         config.commits = commits;
         let refused = shrink::run(&config, spawn_child).err().unwrap();
@@ -622,7 +635,15 @@ fn a_commit_count_the_scenario_cannot_carry_is_refused_before_anything_runs() {
 fn an_answer_for_another_scenario_is_unknown_and_shrinks_nothing() {
     let publish = tempfile::tempdir().unwrap();
     let config = config(publish.path().join("out"));
+    let children_tmp = child_temp_root();
+    std::fs::create_dir_all(&children_tmp).unwrap();
     let run = shrink::run(&config, spawn_answering_for_the_original).unwrap();
+    let leaked: Vec<_> = std::fs::read_dir(&children_tmp)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .collect();
+    std::fs::remove_dir_all(&children_tmp).unwrap();
+    assert!(leaked.is_empty(), "the children left {leaked:?}");
     let witness = &run.witness;
     assert!(
         witness.shrink.deleted.is_empty(),
@@ -769,8 +790,16 @@ fn the_shrink_flags_are_parsed_and_the_child_needs_its_environment() {
         shrink::config_from_args(flags("1")).is_err(),
         "a rename needs two commits"
     );
-    let largest = shrink::config_from_args(flags("77")).unwrap();
+    let largest = shrink::config_from_args(flags("31")).unwrap();
     shrink::scenario(largest.commits);
+    for commits in ["32", "60", "70", "77"] {
+        let refused = shrink::config_from_args(flags(commits))
+            .expect_err("a witness past the scanner's input limit cannot publish");
+        assert!(
+            refused.starts_with("--commits:") && refused.contains("witness"),
+            "{refused}"
+        );
+    }
     let refused = shrink::config_from_args(flags("78"))
         .expect_err("78 commits exceed the aged world's 128-event bound");
     assert!(refused.starts_with("--commits:"), "{refused}");

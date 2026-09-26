@@ -1643,7 +1643,25 @@ summary agrees with them.
 The campaign refuses an unapproved profile, an aged history no longer than
 the window, a publish directory it cannot create, and a staged report or
 manifest already sitting in the publish directory, all before anything runs
-(`RunError`). Under an approved profile it generates a one-session aged
+(`RunError`). A life the shell cannot read is refused typed as well, never
+panicked on: a raw or replayed arm whose turn the host answers with an error
+(`TurnRefused`, naming the policy, the history's length, the turn, and the
+host's code, plus any summarizer failure an earlier turn showed), a turn whose
+summarizer diagnostics carry a failure other than the cassette's redaction
+refusal when no turn is refused (`SummarizerFailed`), and a recording whose
+backend started more calls than the daemon reported firings
+(`FiringsUnaccounted`). The daemon reports `fired` before a firing starts, and
+a firing that fails before its request (a session meta past its durable bound
+fails that way and cannot persist the failure) never reaches the backend, so a
+recording counts as firings only the calls its backend started and reports
+the rest as `unreached_firings` in the summary. A recording life the host
+refuses a turn of leaves no whole cassette: the world's structured samples end
+`indeterminate` (the treatment was attempted and cannot be judged), the
+summary names the refused turn and code under `aged_summarizer.turn_refused`,
+with the first summarizer failure an earlier turn showed under its
+`summarizer_failure` (`null` when there was none), and the report is published
+with the refusal rate over the firings that
+reached the backend before it. Under an approved profile it generates a one-session aged
 history (130 messages at S0) and
 a twelve-message natural-fresh history under another seed, compiles three
 tasks (an early message as the falsifier, the last message as the positive
@@ -1854,7 +1872,11 @@ history: `crates/daemon/src/transform_meta_bound.rs` commits a first HARD
 pass over 10,000 messages whose segments cover all but the last 200 with
 about 70 KiB of meta, the same as at 1,000. A session with no coverage still
 carries roughly 340 bytes of meta per uncovered message, so about 1,500
-uncovered 2 KiB messages reach the bound. S0 and S1 sit well under that.
+uncovered 2 KiB messages reach the bound. S0 and S1 sit well under that. The
+campaign envelope's cassette bound does not: at S1 the recording life
+completes and the campaign is refused `EnvelopeExceeded { CassetteBytes }`,
+the recorded cassette about 6.9 MB at 900 aged messages and 7.7 MB at 1,000
+against the envelope's fixed 1 MiB.
 
 What the campaign found about the pair compiler on surface 1: its recency
 window counts messages, but surface 1's unit is the segment, so at S0 the
@@ -2435,7 +2457,12 @@ life's live digest and differs historically by every death in the history.
 
 The run refuses an unapproved profile before the history is generated or any
 store opens (the profile's event bound is the generator's,
-`messages.max(64) * 2`, so it needs no plan), starts the envelope's clock
+`messages.max(64) * 2`, so it needs no plan). The profile's store bound is
+512 KiB per declared message and its artifact bound 4 KiB per message, each
+above the Suite B floor (64 MiB and 1 MiB), so a history under 128 messages
+keeps the floors and a longer one is measured rather than refused as
+`EnvelopeExceeded`; the fault and growth profiles are built on this one. The
+run starts the envelope's clock
 before planning, charges the roots, store bytes, elapsed time, and artifact
 bytes to the envelope, and
 publishes `suite-c-aging-report.json` and `manifest.json` write-then-rename;
@@ -2645,8 +2672,12 @@ so a predecessor's descriptor published late is not the newest's (each such
 step receipts `claims_materialized`); the lane records the step the predicate
 first held, the first stall after that, and whether it held at the bound, and
 a stalled lane is unmet. A catch-up hold admits evidence references for its
-whole window, retired ones included; the drive's hold bounds, raised to every
-unit its plan publishes (`DriveBounds`), cover it. A CAS ingest fault cannot
+whole window, retired ones included, so the liveness root opens under bounds
+raised to every unit it publishes (`fault::liveness_bounds`): the plan's units
+(`DriveBounds::demand`) plus the two claims the materializer publishes for
+each decision the window commits. The plan's own bounds would fall short from
+36 messages, where the claims carry the total past the fixture floor of 64
+references. A CAS ingest fault cannot
 be the permanent outside-core fault here: its latch refuses the kernel
 ingestion the fresh publishes need, which would put the fault inside the core.
 The reviewer coordinator lane is outside this campaign's core (its scripted
@@ -2733,7 +2764,13 @@ The `growth` subcommand takes the `aging` flags plus `--mode
 <never_restored|restoring>`; the CI `eval-campaign` job runs `eval_growth`
 under `EIDNARA_EVAL_S0_BUDGET_MS` with the ignored scenarios, and the default
 shards run the never-restored campaign once with every scenario asserted over
-it. The S2 run is the same campaign under the S2 profile and budget.
+it. The S2 run is the same campaign under the S2 profile and budget, with
+the store and artifact bounds the aging profile scales from the history. At
+600 messages the envelope holds and the ledger refuses the run as
+`GrowthRateExceeded`: the durable stores grow faster per commit as the
+history lengthens (about 22 KB a commit over the first 100 commits and 40 KB
+averaged over 1,000 at 300 messages, 67 KB averaged over 2,002 at 600, most
+of it the kernel file), past the 64 KiB allowance.
 
 ## Shrinking
 
@@ -3011,7 +3048,13 @@ The `shrink` subcommand takes `--scale`, `--commits`, `--elapsed-bound-ms`,
 `--approved-by`, `--approval-run-id`, and `--publish`, and pins the planted
 oracle at `failing_at: 3, slipping_at: 6`. `--commits` below two is refused,
 and so is a count whose aged world declares more than its 128-event bound (78
-commits and above), before anything is created. `crates/daemon/tests/eval_shrink.rs`
+commits and above), before anything is created. So is a count whose witness
+cannot publish: the flag parser (and `run`, for a `Config` built directly)
+lives the shrink in-process with every candidate answered by the oracle as an
+honest child answers it, measures the canonical witness, and refuses
+(`Commits`) one larger than the envelope's artifact bound or the secret
+scanner's 512 KiB input limit, whichever is lower. Under the pinned oracle
+that ceiling is 31 commits; 32 and above are refused at the flag. `crates/daemon/tests/eval_shrink.rs`
 runs the shell with the test binary as the child: the minimized witness keeps
 six commits and its recipe counts the five whose single deletion slips the
 class, two further fresh processes agree on outcome and trace digest, the
@@ -3589,7 +3632,7 @@ measured, and fewer than five usable preparations refuse the study with the
 count) `time_study` projects the pilot; the corpus must be the pilot
 composition for the study to say anything, and `StopForApproval` returns
 `RunError::StopForApproval` with nothing published. The commit times are the
-repository's own: the corpus is maintainer-curated identifiers of trusted
+repository's own: the corpus is maintainer-chosen identifiers of trusted
 upstreams, and a forge-side timestamp is not yet a seam.
 
 Per task (an `AnchorTerminal`: the graded outcomes plus the real-history

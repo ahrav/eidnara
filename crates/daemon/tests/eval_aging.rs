@@ -668,6 +668,24 @@ fn every_aging_marker_fires_across_the_scenarios() {
     coverage.complete(SUITE).unwrap();
 }
 
+/// The store and artifact bounds scale with the declared history above the
+/// Suite B floors, which every short history keeps, so an S0 profile is the
+/// one it was; the fault and growth profiles are built on it.
+#[test]
+fn the_envelope_scales_with_the_history_above_the_floor() {
+    let floor = campaign::profile(Scale::S0, 128, 600_000, None).envelope;
+    for messages in [24, 40, 127] {
+        let envelope = aging::profile(Scale::S0, messages, 600_000, None).envelope;
+        assert_eq!(envelope.store_bytes, floor.store_bytes, "{messages}");
+        assert_eq!(envelope.artifact_bytes, floor.artifact_bytes, "{messages}");
+    }
+    for messages in [360, 600, 1000] {
+        let envelope = aging::profile(Scale::S2, messages, 600_000, None).envelope;
+        assert_eq!(envelope.store_bytes, u64::from(messages) * (512 << 10));
+        assert_eq!(envelope.artifact_bytes, u64::from(messages) * (4 << 10));
+    }
+}
+
 fn charges() -> Charges {
     let profile = campaign::profile(Scale::S0, 128, 600_000, None);
     Charges::new(profile.envelope)

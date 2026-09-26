@@ -807,6 +807,31 @@ fn liveness_window_stores(
     (plan, stores, fresh)
 }
 
+/// A catch-up hold admits every reference its window carries, the
+/// materializer's claims included; 36 messages is the shortest history whose
+/// planned units stay under the fixture's floor of 64 while the claims carry
+/// the total past it.
+#[test]
+fn the_liveness_window_admits_every_unit_it_publishes() {
+    let messages = 36;
+    let profile = fault::profile(
+        Scale::S0,
+        messages,
+        600_000,
+        Some(Approval {
+            approved_by: "maintainer".to_string(),
+            approved_at_run_id: "ab".repeat(32),
+        }),
+    );
+    let fault_profile = profile.fault_profile().unwrap();
+    let plan = fault::plan(messages).unwrap();
+    let mut charges = campaign::Charges::new(profile.envelope.clone());
+    let mut witness = Witness::new();
+    let report = fault::liveness(&plan, &mut charges, &mut witness, fault_profile.liveness())
+        .unwrap_or_else(|refused| panic!("{messages} messages: {refused:?}"));
+    assert!(report.lanes.values().all(|lane| lane.holds_at_bound));
+}
+
 #[test]
 fn a_fed_window_step_counts_the_kernel_commits_it_made() {
     let root = tempfile::tempdir().unwrap();

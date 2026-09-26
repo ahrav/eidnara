@@ -11,7 +11,7 @@ use host_runtime::TargetKind;
 use memory_store::{MemoryStore, StoredHistorySegment};
 use serde_json::{Value, json};
 
-use super::direct_host::{BUDGET, FixtureProcess, request_json, wait_for_store};
+use super::direct_host::{BUDGET, FixtureProcess, try_request_json, wait_for_store};
 
 pub const EPOCH_MS: i64 = 1_700_000_000_000;
 
@@ -215,9 +215,41 @@ pub fn transform_request(world: &World, upto: usize, tail: Option<&str>, knobs: 
     request
 }
 
+/// A harness turn the host answered with an error instead of a transform
+/// response: turn `n` carries the first `n` messages, and the task's turn is
+/// one past the history.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TurnRefused {
+    pub turn: usize,
+    pub code: String,
+    pub message: String,
+}
+
+impl TurnRefused {
+    fn new(turn: usize, error: &host_runtime::CallError) -> Self {
+        Self {
+            turn,
+            code: error.code().to_string(),
+            message: error.message().to_string(),
+        }
+    }
+}
+
 /// Drives one native-serving transform pass through the fixture and reads the
 /// host's recorded auto-search outcome back over the control socket.
 pub async fn pass(fixture: &FixtureProcess, world: &World, prompt: &str, knobs: &Knobs) -> Pass {
+    try_pass(fixture, world, prompt, knobs)
+        .await
+        .unwrap_or_else(|refused| panic!("the task turn was refused: {refused:?}"))
+}
+
+/// `pass`, with the host's refusal of the task turn returned.
+pub async fn try_pass(
+    fixture: &FixtureProcess,
+    world: &World,
+    prompt: &str,
+    knobs: &Knobs,
+) -> Result<Pass, TurnRefused> {
     let client = fixture.client().await;
     let route = fixture
         .open_route(&client, "context", TargetKind::ToolProvider, &world.session)
@@ -225,7 +257,9 @@ pub async fn pass(fixture: &FixtureProcess, world: &World, prompt: &str, knobs: 
     wait_for_store(&client, route, &world.session).await;
     let request = transform_request(world, world.messages.len(), Some(prompt), knobs);
     let native = request["native_messages"].as_array().unwrap().clone();
-    let response = request_json(&client, route, request).await;
+    let response = try_request_json(&client, route, request)
+        .await
+        .map_err(|error| TurnRefused::new(world.messages.len() + 1, &error))?;
     assert_eq!(response["status"], "ok", "{response}");
     assert!(
         response.get("user_hint").is_none(),
@@ -244,11 +278,11 @@ pub async fn pass(fixture: &FixtureProcess, world: &World, prompt: &str, knobs: 
         );
     }
     client.close_route(route).await.expect("route closes");
-    Pass {
+    Ok(Pass {
         response,
         native,
         outcome,
-    }
+    })
 }
 
 /// Whether a history_summarizer firing or reattach is still running inside
@@ -280,12 +314,13 @@ pub fn drain(fixture: &FixtureProcess) {
 /// harness would send it: turn `n` carries the first `n` messages, with the
 /// context pressure `usage(n)` reports for that turn, and the store moves
 /// through every turn in one incarnation. Each turn is mutate, then drain to
-/// quiescence. Returns each turn's transform response in order.
+/// quiescence. Returns each turn's transform response in order, up to the
+/// first turn the host refused, and that refusal; the life ends there.
 pub async fn lifecycle(
     fixture: &FixtureProcess,
     world: &World,
     usage: impl Fn(usize) -> Option<(u64, u64)>,
-) -> Vec<Value> {
+) -> (Vec<Value>, Option<TurnRefused>) {
     let client = fixture.client().await;
     let route = fixture
         .open_route(&client, "context", TargetKind::ToolProvider, &world.session)
@@ -298,13 +333,16 @@ pub async fn lifecycle(
             ..Knobs::default()
         };
         let request = transform_request(world, upto, None, &knobs);
-        let response = request_json(&client, route, request).await;
+        let response = match try_request_json(&client, route, request).await {
+            Ok(response) => response,
+            Err(error) => return (turns, Some(TurnRefused::new(upto, &error))),
+        };
         assert_eq!(response["status"], "ok", "turn {upto}: {response}");
         drain(fixture);
         turns.push(response);
     }
     client.close_route(route).await.expect("route closes");
-    turns
+    (turns, None)
 }
 
 pub fn ids(sequences: &[i64], identities: &BTreeMap<i64, String>) -> BTreeSet<String> {

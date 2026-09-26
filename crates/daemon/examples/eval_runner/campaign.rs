@@ -37,10 +37,10 @@ use memory_store::{MemoryStore, StoredHistorySegment};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
-use super::support::direct_host::{Backend, Launch, fixture_binary};
+use super::support::direct_host::{Backend, FixtureProcess, Launch, fixture_binary};
 use super::support::eval_surface::{
-    EPOCH_MS, Knobs, Pass, SurfaceLedger, World, block_on, drain, lifecycle, observe_rendered,
-    pass, text,
+    EPOCH_MS, Knobs, Pass, SurfaceLedger, TurnRefused, World, block_on, drain, lifecycle,
+    observe_rendered, text, try_pass,
 };
 use super::support::publish::{staged_path, write_then_rename};
 
@@ -71,8 +71,11 @@ pub struct Config {
 
 /// Why a campaign did not run to a report: the profile refused, the aged
 /// history is too short to hold a falsifier outside the window and a plain
-/// task inside it, or the envelope refused a reading. A fixture breaking its
-/// contract with the shell is a panic, not one of these.
+/// task inside it, the envelope refused a reading, the host refused a turn of
+/// a life, the daemon's summarizer failed other than by the cassette's
+/// refusal, or the backend answered more calls than the daemon fired. A
+/// fixture breaking any other part of its contract with the shell is a panic,
+/// not one of these.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RunError {
     Profile(ProfileError),
@@ -92,6 +95,76 @@ pub enum RunError {
         kind: std::io::ErrorKind,
     },
     Envelope(EnvelopeExceeded),
+    /// The host answered a harness turn with an error: the life cannot be
+    /// read, so no arm built on it can be scored.
+    TurnRefused {
+        policy: &'static str,
+        messages: usize,
+        refused: RefusedLife,
+    },
+    /// A turn's diagnostics carry a summarizer failure that is not the
+    /// cassette's redaction refusal.
+    SummarizerFailed {
+        policy: &'static str,
+        messages: usize,
+        failure: SummarizerFailure,
+    },
+    /// The recording backend started more calls than the daemon's
+    /// diagnostics say it fired.
+    FiringsUnaccounted {
+        messages: usize,
+        fired: u32,
+        backend_calls: u32,
+    },
+}
+
+impl std::fmt::Display for RunError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::TurnRefused {
+                policy,
+                messages,
+                refused,
+            } => {
+                let RefusedLife {
+                    refused,
+                    summarizer_failure,
+                } = refused;
+                write!(
+                    f,
+                    "the host refused turn {} of the {messages}-message {policy} life: {}: {}",
+                    refused.turn, refused.code, refused.message
+                )?;
+                if let Some(failure) = summarizer_failure {
+                    write!(
+                        f,
+                        "; the summarizer had failed by turn {}: {}",
+                        failure.turn, failure.detail
+                    )?;
+                }
+                Ok(())
+            }
+            Self::SummarizerFailed {
+                policy,
+                messages,
+                failure,
+            } => write!(
+                f,
+                "the summarizer failed by turn {} of the {messages}-message {policy} life: {}",
+                failure.turn, failure.detail
+            ),
+            Self::FiringsUnaccounted {
+                messages,
+                fired,
+                backend_calls,
+            } => write!(
+                f,
+                "the {messages}-message recording started {backend_calls} backend calls for \
+                 {fired} firings"
+            ),
+            other => write!(f, "{other:?}"),
+        }
+    }
 }
 
 impl From<ProfileError> for RunError {
@@ -110,11 +183,32 @@ fn publish_refused((path, kind): (PathBuf, std::io::ErrorKind)) -> RunError {
     RunError::Publish { path, kind }
 }
 
+/// The first non-redaction summarizer failure in a life's turn diagnostics.
+/// `turn` is the first turn whose diagnostics show the failure.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SummarizerFailure {
+    pub turn: usize,
+    pub detail: String,
+}
+
+/// A life the host ended by refusing a turn. `summarizer_failure` keeps a
+/// failure an earlier turn showed, so the refusal does not hide it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RefusedLife {
+    pub refused: TurnRefused,
+    pub summarizer_failure: Option<SummarizerFailure>,
+}
+
 /// What the aged world's recorded life established: how often the daemon's
 /// summarizer fired, whether a frame was refused, and the messages each of
 /// its segments covers, by sequence.
 pub struct RecordedLife {
+    /// Firings that reached the backend.
     pub firings: u32,
+    /// Firings the daemon reported that never reached the backend.
+    pub unreached_firings: u32,
+    /// The turn the host refused, which left the aged world no recording.
+    pub turn_refused: Option<RefusedLife>,
     pub refused: bool,
     pub covered: BTreeMap<i64, Vec<EventId>>,
 }
@@ -465,18 +559,34 @@ enum Replacement {
 
 /// What one life of a world through the fixture left behind: the store's
 /// history segments, the final pass, the fixture's backend counters, how many
-/// times the daemon's summarizer fired and how many of those firings the
-/// cassette refused as carrying a secret-shaped span.
+/// of the daemon's summarizer firings reached the backend and how many of
+/// those the cassette refused as carrying a secret-shaped span, and how many
+/// firings the daemon reported that never reached it.
 struct Lived {
     segments: Vec<StoredHistorySegment>,
-    pass: Pass,
+    /// The task turn; `None` when the host refused a turn first.
+    pass: Option<Pass>,
     /// The task turn's own duration, from its request to its response: the
     /// life before it builds the treatment and is not the task's spend.
     task_ms: u64,
     counters: Value,
     firings: u32,
+    unreached: u32,
     refusals: u32,
+    /// The turn the host refused, which ended the life.
+    turn_refused: Option<RefusedLife>,
     stderr: String,
+}
+
+impl Replacement {
+    /// The policy a life under this replacement lives, as a refusal names it.
+    fn policy(&self) -> &'static str {
+        match self {
+            Self::Raw => "raw",
+            Self::Summarizer(Backend::Record { .. }) => "structured recording",
+            Self::Summarizer(_) => "structured replay",
+        }
+    }
 }
 
 /// Whether a firing's recorded failure is the cassette refusing its frame.
@@ -497,7 +607,7 @@ fn live(
     replacement: &Replacement,
     prompt: &str,
     charges: &mut Charges,
-) -> Result<Lived, EnvelopeExceeded> {
+) -> Result<Lived, RunError> {
     let home = charges.occupy()?;
     let root = charges.occupy()?;
     let mut launch = Launch::at(root.path().to_path_buf()).config_home(home.path());
@@ -511,13 +621,23 @@ fn live(
         usage: usage(world.messages.len() + 1),
         ..Knobs::default()
     };
-    let (turns, pass, task_ms) = block_on(async {
-        let turns = lifecycle(&fixture, world, usage).await;
+    // A turn the host refuses ends the life there: no later turn and no task
+    // turn is sent, and what the turns before it left is read as usual.
+    let (turns, pass, task_ms, host_refusal) = block_on(async {
+        let (turns, refused) = lifecycle(&fixture, world, usage).await;
+        if refused.is_some() {
+            return (turns, None, 0, refused);
+        }
         let attempt = Instant::now();
-        let pass = pass(&fixture, world, prompt, &knobs).await;
+        let pass = try_pass(&fixture, world, prompt, &knobs).await;
         let task_ms = u64::try_from(attempt.elapsed().as_millis()).unwrap();
-        (turns, pass, task_ms)
+        match pass {
+            Ok(pass) => (turns, Some(pass), task_ms, None),
+            Err(refused) => (turns, None, task_ms, Some(refused)),
+        }
     });
+    let policy = replacement.policy();
+    let messages = world.messages.len();
     // The task turn drains like every lifecycle turn: a firing it spawned
     // finishes before its diagnostics, the counters, and the store are read.
     drain(&fixture);
@@ -525,41 +645,66 @@ fn live(
     // connection checkpoints the WAL away, so the root after shutdown is the
     // smaller reading.
     charges.store_bytes(root.path())?;
-    let mut firings: u32 = 0;
+    let mut fired: u32 = 0;
     let mut failures_seen = false;
-    for diagnostics in turns
+    let mut failure = None;
+    for (index, diagnostics) in turns
         .iter()
+        .chain(pass.as_ref().map(|pass| &pass.response))
         .map(|turn| &turn["history_summarizer"])
-        .chain([&pass.response["history_summarizer"]])
+        .enumerate()
     {
         if diagnostics["fired"] == json!(true) {
-            firings += 1;
+            fired += 1;
         }
         // A refused frame is the cassette's typed refusal; any other failure
         // of the daemon's own summarizer ends the campaign.
         if refused(diagnostics) {
             failures_seen = true;
-        } else {
-            assert_eq!(diagnostics["last_failure"], Value::Null, "{diagnostics}");
+        } else if failure.is_none() && diagnostics["last_failure"] != Value::Null {
+            failure = Some(SummarizerFailure {
+                turn: index + 1,
+                detail: diagnostics["last_failure"].to_string(),
+            });
         }
     }
     let counters = fixture.counters(11);
-    // The recording cassette counts the frames it refused; every firing
-    // reached the fixture's backend once on a recording run, and a replaying
-    // fixture has no controlled backend to count.
+    // The recording cassette counts the frames it refused, and the fixture's
+    // backend counts the calls it started; a replaying fixture has no
+    // controlled backend to count.
     let backend_calls = u32::try_from(counters["started"].as_u64().unwrap()).unwrap();
     let refusals = u32::try_from(counters["cassette_refused"].as_u64().unwrap()).unwrap();
-    match replacement {
+    // The daemon reports `fired` before a firing starts, so a firing that
+    // fails before its request (a session meta past its durable bound fails
+    // that way and cannot persist the failure either) is reported and never
+    // reaches the backend. On a recording the firings counted are the ones
+    // the backend answered; the rest are reported as unreached.
+    let (firings, unreached) = match replacement {
         Replacement::Summarizer(Backend::Record { .. }) => {
-            assert_eq!(
-                backend_calls, firings,
-                "{counters} against {firings} firings"
-            );
+            match reached_firings(messages, fired, backend_calls) {
+                Ok(reached) => reached,
+                Err(refused) => {
+                    abandon(fixture, [root, home], charges)?;
+                    return Err(refused);
+                }
+            }
         }
         Replacement::Raw | Replacement::Summarizer(Backend::Replay { .. }) => {
             assert_eq!(backend_calls, 0, "{counters}");
+            (fired, 0)
         }
-    }
+    };
+    let turn_refused = match life_end(host_refusal, failure) {
+        Ok(turn_refused) => turn_refused,
+        Err(failure) => {
+            abandon(fixture, [root, home], charges)?;
+            return Err(RunError::SummarizerFailed {
+                policy,
+                messages,
+                failure,
+            });
+        }
+    };
     // A turn's diagnostics describe the firings before it, so a refusal on
     // the last firing is in the cassette's counter and in no snapshot; a
     // failure the snapshots do show must be a refusal the counter has.
@@ -569,15 +714,18 @@ fn live(
     );
     let (status, output) = fixture.shutdown_with_status();
     // A recording fixture refuses to write a cassette holding a refused
-    // frame and says so at exit; every other exit is clean.
+    // frame and says so at exit; every other exit of a life the host never
+    // refused is clean.
     let refused_recording =
         refusals > 0 && matches!(replacement, Replacement::Summarizer(Backend::Record { .. }));
-    assert_eq!(
-        status.success(),
-        !refused_recording,
-        "fixture exit {status}:\n{}",
-        output.stderr
-    );
+    if turn_refused.is_none() {
+        assert_eq!(
+            status.success(),
+            !refused_recording,
+            "fixture exit {status}:\n{}",
+            output.stderr
+        );
+    }
     if refused_recording {
         assert!(
             output.stderr.contains("cassette refused: RedactionRefused"),
@@ -598,9 +746,105 @@ fn live(
         task_ms,
         counters,
         firings,
+        unreached,
         refusals,
+        turn_refused,
         stderr: output.stderr,
     })
+}
+
+/// A recording's firings as `(reached, unreached)`: the backend's own count
+/// is the firings that reached it, and the rest of the firings the daemon
+/// reported never did. A backend that started more calls than were fired is
+/// refused.
+fn reached_firings(
+    messages: usize,
+    fired: u32,
+    backend_calls: u32,
+) -> Result<(u32, u32), RunError> {
+    if backend_calls > fired {
+        return Err(RunError::FiringsUnaccounted {
+            messages,
+            fired,
+            backend_calls,
+        });
+    }
+    Ok((backend_calls, fired - backend_calls))
+}
+
+#[cfg(test)]
+#[test]
+fn a_firing_that_never_reached_the_backend_is_counted_apart() {
+    assert_eq!(reached_firings(900, 31, 22), Ok((22, 9)));
+    assert_eq!(reached_firings(130, 8, 8), Ok((8, 0)));
+    assert_eq!(
+        reached_firings(900, 22, 31),
+        Err(RunError::FiringsUnaccounted {
+            messages: 900,
+            fired: 22,
+            backend_calls: 31,
+        })
+    );
+}
+
+fn life_end(
+    host_refusal: Option<TurnRefused>,
+    failure: Option<SummarizerFailure>,
+) -> Result<Option<RefusedLife>, SummarizerFailure> {
+    match (host_refusal, failure) {
+        (Some(refused), summarizer_failure) => Ok(Some(RefusedLife {
+            refused,
+            summarizer_failure,
+        })),
+        (None, Some(failure)) => Err(failure),
+        (None, None) => Ok(None),
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn a_refused_life_keeps_the_summarizer_failure_before_it() {
+    let refused = TurnRefused {
+        turn: 980,
+        code: "host.transform_failed".to_string(),
+        message: "host returned a terminal error (message redacted)".to_string(),
+    };
+    let failure = SummarizerFailure {
+        turn: 200,
+        detail: "\"backend unavailable\"".to_string(),
+    };
+    assert_eq!(
+        life_end(Some(refused.clone()), Some(failure.clone())),
+        Ok(Some(RefusedLife {
+            refused: refused.clone(),
+            summarizer_failure: Some(failure.clone()),
+        })),
+        "a later refusal must not hide the failure"
+    );
+    assert_eq!(
+        life_end(Some(refused.clone()), None),
+        Ok(Some(RefusedLife {
+            refused,
+            summarizer_failure: None,
+        }))
+    );
+    assert_eq!(life_end(None, Some(failure.clone())), Err(failure));
+    assert_eq!(life_end(None, None), Ok(None));
+}
+
+/// Ends a life the campaign cannot read: the fixture is shut down whatever
+/// its exit, and its roots are vacated.
+fn abandon(
+    fixture: FixtureProcess,
+    roots: [tempfile::TempDir; 2],
+    charges: &mut Charges,
+) -> Result<(), EnvelopeExceeded> {
+    drop(fixture.shutdown_with_status());
+    charges.process_ended();
+    for root in roots {
+        charges.vacate(root)?;
+    }
+    Ok(())
 }
 
 /// One world's summarizer traffic recorded: the cassette's backend for the
@@ -613,7 +857,11 @@ struct Recording {
     /// The cassette file's size on disk; zero when nothing was written.
     cassette_bytes: u64,
     firings: u32,
+    /// Firings the daemon reported that never reached the backend.
+    unreached: u32,
     refusals: u32,
+    /// The turn the host refused, which left no whole recording.
+    turn_refused: Option<RefusedLife>,
 }
 
 /// Records one life of `world` under the summarizer into a cassette of its
@@ -626,7 +874,7 @@ fn record(
     world: &World,
     cassettes: &Path,
     charges: &mut Charges,
-) -> Result<Recording, EnvelopeExceeded> {
+) -> Result<Recording, RunError> {
     let file = cassettes.join(format!("{label}.cassette.json"));
     assert!(
         !file.exists(),
@@ -643,6 +891,21 @@ fn record(
         BUILD_PROMPT,
         charges,
     )?;
+    // A life the host refused a turn of has no whole recording to replay:
+    // the world's structured arm has no treatment, and its samples end
+    // indeterminate. Whatever cassette the fixture wrote at exit is charged
+    // and never replayed.
+    if lived.turn_refused.is_some() {
+        return Ok(Recording {
+            replay: None,
+            segments: lived.segments,
+            cassette_bytes: std::fs::metadata(&file).map_or(0, |meta| meta.len()),
+            firings: lived.firings,
+            unreached: lived.unreached,
+            refusals: lived.refusals,
+            turn_refused: lived.turn_refused,
+        });
+    }
     if lived.refusals > 0 {
         assert!(!file.exists(), "a refused recording writes no cassette");
         return Ok(Recording {
@@ -650,7 +913,9 @@ fn record(
             segments: lived.segments,
             cassette_bytes: 0,
             firings: lived.firings,
+            unreached: lived.unreached,
             refusals: lived.refusals,
+            turn_refused: None,
         });
     }
     // The fixture folds `CHUNK` presented lines into one segment, so every
@@ -692,7 +957,9 @@ fn record(
         segments: lived.segments,
         cassette_bytes: std::fs::metadata(&file).unwrap().len(),
         firings: lived.firings,
+        unreached: lived.unreached,
         refusals: 0,
+        turn_refused: None,
     })
 }
 
@@ -860,7 +1127,7 @@ fn run_arm(
     task: &Task,
     profile: &RunProfile,
     charges: &mut Charges,
-) -> Result<ArmRun, EnvelopeExceeded> {
+) -> Result<ArmRun, RunError> {
     assert_eq!(task.evidence.len(), 1, "one truth per task on surface 1");
     let evidence = task.evidence.iter().next().unwrap();
     let message = world
@@ -869,6 +1136,19 @@ fn run_arm(
         .find(|m| m.event_id == *evidence)
         .expect("the evidence is a rendered message");
     let lived = live(world, replacement, &prompt(message), charges)?;
+    // An arm whose life the host refused has no task turn to score, and the
+    // pair it belongs to cannot be analysed: the campaign refuses, typed.
+    if let Some(refused) = &lived.turn_refused {
+        return Err(RunError::TurnRefused {
+            policy: replacement.policy(),
+            messages: world.messages.len(),
+            refused: refused.clone(),
+        });
+    }
+    let pass = lived
+        .pass
+        .as_ref()
+        .expect("a life the host never refused has its task turn");
     // The attempt timed against the deadline is the task turn; the life
     // before it is the treatment's, charged to the envelope, not the task.
     let usage = TaskUsage {
@@ -900,13 +1180,13 @@ fn run_arm(
     if !covered.values().any(|ids| ids.contains(evidence)) {
         identities.insert(0, evidence.0.clone());
     }
-    if let Some(UserHintPass::Decided(outcome)) = &lived.pass.outcome {
+    if let Some(UserHintPass::Decided(outcome)) = &pass.outcome {
         assert!(
             !outcome.trace.window.contains(&0) && !outcome.trace.selected.contains(&0),
             "the store has no sequence zero"
         );
     }
-    let hint_text = match &lived.pass.outcome {
+    let hint_text = match &pass.outcome {
         Some(UserHintPass::Decided(outcome)) => outcome.hint_text.clone(),
         _ => String::new(),
     };
@@ -921,7 +1201,7 @@ fn run_arm(
     let mut ledger = SurfaceLedger::default();
     observe_rendered(
         &mut ledger,
-        lived.pass.outcome.as_ref(),
+        pass.outcome.as_ref(),
         &identities,
         |sequence| {
             covered[&sequence]
@@ -930,7 +1210,7 @@ fn run_arm(
                 .all(served)
         },
     );
-    let delivered: BTreeSet<EventId> = match &lived.pass.outcome {
+    let delivered: BTreeSet<EventId> = match &pass.outcome {
         Some(UserHintPass::Decided(outcome)) => outcome
             .trace
             .selected
@@ -953,7 +1233,7 @@ fn run_arm(
         &BTreeSet::new(),
         Surface1Stage::Attachment,
     );
-    let selected = match &lived.pass.outcome {
+    let selected = match &pass.outcome {
         Some(UserHintPass::Decided(outcome)) => outcome.trace.selected.clone(),
         _ => Vec::new(),
     };
@@ -1236,7 +1516,7 @@ pub fn run(config: &Config) -> Result<Run, RunError> {
     let cassettes = charges.occupy()?;
     let aged_recording = record("aged", &aged_world, cassettes.path(), &mut charges)?;
     assert!(
-        aged_recording.firings > 0,
+        aged_recording.firings > 0 || aged_recording.turn_refused.is_some(),
         "the aged history reaches the pressure the summarizer fires at"
     );
     let mut cassette_bytes = aged_recording.cassette_bytes;
@@ -1336,12 +1616,27 @@ pub fn run(config: &Config) -> Result<Run, RunError> {
             samples.insert(record.id.clone(), record);
             verdicts.insert((pair.task.id.clone(), label), run.verdict);
         }
-        for (kind, label, run) in [
-            (ArmKind::Aged, "aged/structured", &aged_structured_run),
-            (ArmKind::Fresh, "fresh/structured", &fresh_structured_run),
+        for (kind, label, run, recording) in [
+            (
+                ArmKind::Aged,
+                "aged/structured",
+                &aged_structured_run,
+                &aged_recording,
+            ),
+            (
+                ArmKind::Fresh,
+                "fresh/structured",
+                &fresh_structured_run,
+                &fresh_recording,
+            ),
         ] {
+            // No run means no cassette: the recording was refused a frame, and
+            // the arm is skipped as refused, or the host refused one of its
+            // turns, and the arm's treatment was attempted and cannot be
+            // judged.
             let terminal = match run {
                 Some(run) => terminal_of(run.result),
+                None if recording.turn_refused.is_some() => Terminal::Indeterminate,
                 None => Terminal::Skipped(SkipReason::RedactionRefused),
             };
             let record = sample(pair, kind, HistoryPolicy::Structured, terminal);
@@ -1391,7 +1686,7 @@ pub fn run(config: &Config) -> Result<Run, RunError> {
         });
     }
 
-    let refused_aged = aged_recording.replay.is_none();
+    let refused_aged = aged_recording.refusals > 0;
     // The messages each of the recording's segments covers, by sequence; every
     // replayed arm published the same segments.
     let aged_structured_covered = covered(&aged_recording.segments, &aged_world);
@@ -1572,7 +1867,9 @@ pub fn run(config: &Config) -> Result<Run, RunError> {
         structured_outcomes,
         aged: RecordedLife {
             firings: aged_recording.firings,
+            unreached_firings: aged_recording.unreached,
             refused: refused_aged,
+            turn_refused: aged_recording.turn_refused.clone(),
             covered: aged_structured_covered,
         },
     })
