@@ -3,6 +3,16 @@
 //! messages receive from the effective anchor, where the recipe's input keeps point in the
 //! submitted window, and the anchor pages `transform.boundary` answers. Nothing here writes;
 //! the transform commit persists what the pass does with a resolution.
+//!
+//! With no declared anchor, the store matches the k-th non-synthetic window message only at
+//! ordinal continuation base + k + 1 through the end-message index (the spec's C3 inventory
+//! row; C12 forbids another index). After a covered message before the hit was removed, a
+//! present segment end sits at a stored ordinal above its window position and is missed, and
+//! the answer is `Revert { keep_through_seq: None }`. The plugin's exhaustive mid-based
+//! discovery walk (D10, D19) is the primary guard; this query is a second check that can miss
+//! only when history before the hit was removed. A hit is not bounded by the rendered row:
+//! D10 answers any hit as `StaleSlice` at the newest hit, and bounding it would turn a present
+//! anchor above the rendered row into a reset.
 
 use memory_store::{CoverageSnapshot, HistorySegmentEdge, MemoryStore, MemoryStoreError};
 use serde_json::{Value, json};
@@ -47,6 +57,16 @@ pub enum Resolution {
     FirstPass,
 }
 
+impl Resolution {
+    /// The number of submitted messages sliced off before processing.
+    pub fn cut(&self) -> usize {
+        match self {
+            Resolution::StaleSlice { cut } => *cut,
+            _ => 0,
+        }
+    }
+}
+
 /// A resolution with its effective anchor and the ordinals of the processed window.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Resolved {
@@ -60,10 +80,7 @@ pub struct Resolved {
 impl Resolved {
     /// The number of submitted messages sliced off before processing.
     pub fn cut(&self) -> usize {
-        match self.resolution {
-            Resolution::StaleSlice { cut } => cut,
-            _ => 0,
-        }
+        self.resolution.cut()
     }
 }
 
@@ -89,7 +106,10 @@ pub fn read_snapshot(
 /// Resolves `declared` against `snapshot` and the original submitted `window`. An error is an
 /// `invalid_params` answer: a window that does not start at the declared mid, a declared row
 /// whose end block is not the declared mid, or a declared row newer than the rendered boundary,
-/// which discovery never returns.
+/// which discovery never returns. A declared row with no rendered boundary is `Unknown`, so the
+/// plugin rediscovers: a revert truncation commits on its own before its pass, so a pass that
+/// fails after it leaves `core.boundary_id` naming a removed row while older rows remain. With
+/// no boundary declared that state is `FirstPass`.
 pub fn resolve(
     snapshot: &CoverageSnapshot,
     declared: Option<DeclaredAnchor<'_>>,
@@ -98,6 +118,11 @@ pub fn resolve(
     let position = |row: &HistorySegmentEdge| {
         let (mid, _) = split_block_id(&row.end_message_id)?;
         window.iter().position(|message| message.mid == mid)
+    };
+    let unknown = || Resolved {
+        resolution: Resolution::Unknown,
+        anchor: None,
+        ordinals: Vec::new(),
     };
     let (resolution, anchor) = match declared {
         Some(declared) => {
@@ -108,11 +133,7 @@ pub fn resolve(
                 ));
             }
             let Some(row) = snapshot.declared.as_ref() else {
-                return Ok(Resolved {
-                    resolution: Resolution::Unknown,
-                    anchor: None,
-                    ordinals: Vec::new(),
-                });
+                return Ok(unknown());
             };
             if split_block_id(&row.end_message_id).map(|(mid, _)| mid) != Some(declared.mid) {
                 return Err(format!(
@@ -121,6 +142,7 @@ pub fn resolve(
                 ));
             }
             match snapshot.rendered.as_ref() {
+                None => return Ok(unknown()),
                 Some(rendered) if rendered.sequence == row.sequence => (Resolution::Normal, row),
                 Some(rendered) if row.sequence < rendered.sequence => match position(rendered) {
                     Some(cut) => (Resolution::StaleSlice { cut }, rendered),
@@ -131,7 +153,7 @@ pub fn resolve(
                         row,
                     ),
                 },
-                _ => {
+                Some(_) => {
                     return Err(format!(
                         "declared boundary sequence {} is newer than the rendered boundary",
                         row.sequence
@@ -171,10 +193,7 @@ pub fn resolve(
             }
         }
     };
-    let cut = match resolution {
-        Resolution::StaleSlice { cut } => cut,
-        _ => 0,
-    };
+    let cut = resolution.cut();
     Ok(Resolved {
         resolution,
         ordinals: assign_ordinals(&window[cut..], Some(anchor.end_message as u64), None),
@@ -185,7 +204,7 @@ pub fn resolve(
 /// Ordinals for a processed window (D11). A non-synthetic message counts one up from the
 /// head: the anchored head receives `anchor_ordinal`, and with no anchor the first
 /// non-synthetic message is `continuation_base + 1` (or 1). Synthetic messages follow the
-/// rule `resolveOrdinals` in `packages/opencode-plugin/src/hooks/context/module-wire.ts`
+/// rule `annotateOrdinals` in `packages/opencode-plugin/src/hooks/context/module-wire.ts`
 /// applies to its unresolved synthetic messages, case for case: one with a non-synthetic
 /// message after it borrows the ordinal of the message before it, or, with none before it,
 /// 0 (the anchor's ordinal in an anchored window); the trailing run after the last
@@ -202,8 +221,9 @@ pub fn assign_ordinals(
     let mut ordinals = Vec::with_capacity(window.len());
     for (index, message) in window.iter().enumerate() {
         let ordinal = if !message.synthetic {
+            let ordinal = next_live;
             next_live += 1;
-            next_live - 1
+            ordinal
         } else if last_live.is_some_and(|last| index < last) {
             prior.unwrap_or(anchor_ordinal.unwrap_or(0))
         } else {
@@ -231,7 +251,7 @@ pub fn translate_input_keeps<V>(operations: &mut [Operation<V>], cut: usize) {
     }
 }
 
-/// Validates a `transform.boundary` body: `v: 3`, a non-empty `session_id`, an optional
+/// Validates a `transform.boundary` body: `v: 3`, a non-blank `session_id`, an optional
 /// `before_sequence` that is a JavaScript safe integer, and nothing else beyond the envelope's
 /// `method`, `kind`, and `project_root`. Returns the session and the cursor.
 pub fn parse_boundary_request(request: &Value) -> Result<(&str, Option<i64>), String> {
@@ -254,14 +274,14 @@ pub fn parse_boundary_request(request: &Value) -> Result<(&str, Option<i64>), St
         .and_then(Value::as_str)
         .filter(|session| !session.trim().is_empty())
     else {
-        return Err("transform.boundary requires a nonempty session_id".to_string());
+        return Err("transform.boundary requires a non-blank session_id".to_string());
     };
     let before_sequence = match fields.get("before_sequence") {
         None => None,
         Some(value) => Some(
             value
                 .as_i64()
-                .filter(|before| before.abs() <= MAX_SAFE_INTEGER)
+                .filter(|before| (-MAX_SAFE_INTEGER..=MAX_SAFE_INTEGER).contains(before))
                 .ok_or("before_sequence must be a JavaScript safe integer")?,
         ),
     };
@@ -270,14 +290,18 @@ pub fn parse_boundary_request(request: &Value) -> Result<(&str, Option<i64>), St
 
 /// One `transform.boundary` page: anchors at or below the rendered boundary and below
 /// `before_sequence`, newest first. A row whose end block names no message is not an anchor
-/// and is left out.
+/// and is left out, as is a row above `2^53 - 1`, so every listed sequence is a safe integer.
 pub fn boundary_page(
     store: &MemoryStore,
     session_id: &str,
     before_sequence: Option<i64>,
 ) -> Result<Value, MemoryStoreError> {
     let anchors: Vec<Value> = store
-        .coverage_anchor_page(session_id, before_sequence, BOUNDARY_PAGE_LIMIT)?
+        .coverage_anchor_page(
+            session_id,
+            Some(before_sequence.unwrap_or(MAX_SAFE_INTEGER + 1)),
+            BOUNDARY_PAGE_LIMIT,
+        )?
         .iter()
         .filter_map(|(sequence, end_id)| {
             let (mid, _) = split_block_id(end_id)?;

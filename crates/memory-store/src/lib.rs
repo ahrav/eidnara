@@ -10631,8 +10631,11 @@ impl MemoryStore {
         live_mids: &[&str],
     ) -> Result<CoverageSnapshot, MemoryStoreError> {
         Ok(self.inner.with_conn(|conn| {
-            let (row_version, continuation_base, rendered) =
-                rendered_coverage_tx(conn, session_id)?;
+            let RenderedCoverage {
+                row_version,
+                continuation_base,
+                rendered,
+            } = rendered_coverage_tx(conn, session_id)?;
             let newest = history_segment_edge_tx(conn, session_id, EdgeAt::Newest)?;
             #[cfg(any(test, feature = "test-support"))]
             if let Some(hook) = self
@@ -10683,7 +10686,9 @@ impl MemoryStore {
 
     /// At most `limit` `(sequence, end_message_id)` pairs of rows at or below the rendered
     /// boundary and below `before_sequence`, newest first, in one read transaction; empty
-    /// when the daemon holds no coverage.
+    /// when the daemon holds no coverage. Only rows whose end id is `<mid>#<digits>` with no
+    /// other `#` count toward `limit`, so a run of rows without a message id cannot end a
+    /// walk early.
     pub fn coverage_anchor_page(
         &self,
         session_id: &str,
@@ -10691,7 +10696,7 @@ impl MemoryStore {
         limit: usize,
     ) -> Result<Vec<(i64, String)>, MemoryStoreError> {
         Ok(self.inner.with_conn(|conn| {
-            let Some(rendered) = rendered_coverage_tx(conn, session_id)?.2 else {
+            let Some(rendered) = rendered_coverage_tx(conn, session_id)?.rendered else {
                 return Ok(Vec::new());
             };
             let through = before_sequence.map_or(rendered.sequence, |before| {
@@ -10699,7 +10704,9 @@ impl MemoryStore {
             });
             conn.prepare_cached(
                 "SELECT sequence, end_message_id FROM history_segments
-                  WHERE session_id = ?1 AND sequence <= ?2 ORDER BY sequence DESC LIMIT ?3",
+                  WHERE session_id = ?1 AND sequence <= ?2
+                    AND end_message_id GLOB '?*#[0-9]*' AND end_message_id NOT GLOB '*#*[^0-9]*'
+                  ORDER BY sequence DESC LIMIT ?3",
             )?
             .query_map(params![session_id, through, sql_limit(limit)], |row| {
                 Ok((row.get(0)?, row.get(1)?))
@@ -16113,10 +16120,17 @@ fn history_segment_edge_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Hi
 
 /// The session row's version and continuation base, and the rendered boundary row: the row
 /// ending at `meta.coverage_ordinal` whose end block is `core.boundary_id`.
+#[derive(Default)]
+struct RenderedCoverage {
+    row_version: Option<u64>,
+    continuation_base: Option<u64>,
+    rendered: Option<HistorySegmentEdge>,
+}
+
 fn rendered_coverage_tx(
     conn: &GuardedConn<'_>,
     session_id: &str,
-) -> rusqlite::Result<(Option<u64>, Option<u64>, Option<HistorySegmentEdge>)> {
+) -> rusqlite::Result<RenderedCoverage> {
     let row = conn
         .prepare_cached(
             "SELECT row_version, json_extract(core_state, '$.boundary_id'),
@@ -16134,7 +16148,7 @@ fn rendered_coverage_tx(
         })
         .optional()?;
     let Some((row_version, boundary_id, coverage, base)) = row else {
-        return Ok((None, None, None));
+        return Ok(RenderedCoverage::default());
     };
     let rendered = match (boundary_id, coverage) {
         (Some(boundary_id), Some(coverage)) if !boundary_id.is_empty() => {
@@ -16143,11 +16157,11 @@ fn rendered_coverage_tx(
         }
         _ => None,
     };
-    Ok((
-        Some(row_version as u64),
-        base.map(|base| base as u64),
+    Ok(RenderedCoverage {
+        row_version: Some(row_version as u64),
+        continuation_base: base.map(|base| base as u64),
         rendered,
-    ))
+    })
 }
 
 /// The ordinals of the JSON array `?2` no history_segment of session `?1` covers.

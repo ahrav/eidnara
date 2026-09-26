@@ -88,6 +88,8 @@ async fn malformed_boundary_bodies_are_invalid_params() {
         boundary_request(Some(json!(safe + 1))),
         boundary_request(Some(json!(-safe - 1))),
         boundary_request(Some(json!(u64::MAX))),
+        boundary_request(Some(json!(i64::MIN))),
+        boundary_request(Some(json!(i64::MAX))),
         boundary_request(Some(json!(1.5))),
         boundary_request(Some(json!("4"))),
         boundary_request(Some(Value::Null)),

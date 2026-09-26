@@ -107,6 +107,8 @@ struct Case {
     resolution: Resolution,
     anchor_sequence: Option<i64>,
     ordinals: Vec<u64>,
+    /// Where the processed window's first message sits in the submitted window.
+    keep_start: u64,
 }
 
 /// WP-P02: one witness per transition row, with its cut, its ordinals, and its translated keeps.
@@ -123,6 +125,7 @@ fn each_resolution_outcome_has_its_cut_ordinals_and_keeps() {
             resolution: Resolution::Normal,
             anchor_sequence: Some(5),
             ordinals: vec![10, 11, 12],
+            keep_start: 0,
         },
         Case {
             name: "coverage advanced past the declared row, whose successor is still in the window",
@@ -134,6 +137,7 @@ fn each_resolution_outcome_has_its_cut_ordinals_and_keeps() {
             resolution: Resolution::StaleSlice { cut: 4 },
             anchor_sequence: Some(5),
             ordinals: vec![10, 11, 12],
+            keep_start: 4,
         },
         Case {
             name: "the rendered boundary's message is gone from the window",
@@ -147,6 +151,7 @@ fn each_resolution_outcome_has_its_cut_ordinals_and_keeps() {
             },
             anchor_sequence: Some(3),
             ordinals: vec![6, 7, 8],
+            keep_start: 0,
         },
         Case {
             name: "the declared sequence names no row",
@@ -158,6 +163,7 @@ fn each_resolution_outcome_has_its_cut_ordinals_and_keeps() {
             resolution: Resolution::Unknown,
             anchor_sequence: None,
             ordinals: vec![],
+            keep_start: 0,
         },
         Case {
             name: "no boundary, coverage held, and a surviving segment end in the window",
@@ -169,6 +175,7 @@ fn each_resolution_outcome_has_its_cut_ordinals_and_keeps() {
             resolution: Resolution::StaleSlice { cut: 7 },
             anchor_sequence: Some(4),
             ordinals: vec![8],
+            keep_start: 7,
         },
         Case {
             name: "no boundary, coverage held, and no surviving segment end",
@@ -182,6 +189,7 @@ fn each_resolution_outcome_has_its_cut_ordinals_and_keeps() {
             },
             anchor_sequence: None,
             ordinals: vec![1, 2],
+            keep_start: 0,
         },
         Case {
             name: "no boundary and no coverage",
@@ -193,6 +201,7 @@ fn each_resolution_outcome_has_its_cut_ordinals_and_keeps() {
             resolution: Resolution::FirstPass,
             anchor_sequence: None,
             ordinals: vec![41, 42],
+            keep_start: 0,
         },
     ];
     for case in cases {
@@ -220,7 +229,7 @@ fn each_resolution_outcome_has_its_cut_ordinals_and_keeps() {
             [
                 Operation::Keep {
                     source: Source::Input,
-                    start: cut as u64,
+                    start: case.keep_start,
                     count: (window.len() - cut) as u64,
                 },
                 Operation::Keep {
@@ -253,14 +262,22 @@ fn impossible_declarations_are_invalid_params() {
     let off_head = mids(7, 10);
     let error = resolve_in(&store, anchor("m6", 3), &window(&off_head)).unwrap_err();
     assert!(error.contains("does not start at"), "{error}");
+}
 
-    let (_dir, uncovered) = open_store();
-    seed_coverage(&uncovered, 5, None, None);
-    let error = resolve_in(&uncovered, anchor("m6", 3), &window(&mids(6, 8))).unwrap_err();
-    assert!(
-        error.contains("newer than the rendered boundary"),
-        "{error}"
-    );
+/// A declared row that survives a revert truncation which left `core.boundary_id` naming a
+/// removed row is `Unknown`, a decline that makes the plugin rediscover, not `invalid_params`.
+#[test]
+fn a_declared_row_without_a_rendered_boundary_is_unknown() {
+    let (_dir, store) = open_store();
+    seed_coverage(&store, 5, Some(5), None);
+    store
+        .truncate_history_segments_for_revert(SESSION, 3, Some(1))
+        .unwrap();
+    let submitted = mids(6, 8);
+    let resolved = resolve_in(&store, anchor("m6", 3), &window(&submitted)).unwrap();
+    assert_eq!(resolved.resolution, Resolution::Unknown);
+    let resolved = resolve_in(&store, None, &window(&submitted)).unwrap();
+    assert_eq!(resolved.resolution, Resolution::FirstPass);
 }
 
 /// WP-P02 snapshot clause: a publish that commits between the session-row read and the
@@ -293,7 +310,60 @@ fn a_publish_between_the_core_read_and_the_declared_read_is_invisible() {
     assert_eq!(after.resolution, Resolution::Unknown);
 }
 
-/// The plugin's `resolveOrdinals` loops, transcribed: non-synthetic messages are its memoized
+/// The snapshot clause on the null path: segments deleted between the session-row read and
+/// the intersection are still seen, so the answer is the snapshot's `StaleSlice`, not
+/// `Revert { keep_through_seq: None }`.
+#[test]
+fn a_removal_between_the_core_read_and_the_intersection_is_invisible() {
+    let (dir, store) = open_store();
+    seed_coverage(&store, 5, Some(5), None);
+    let raw_path = dir.path().join("store.db");
+    store.set_coverage_snapshot_hook(Box::new(move || {
+        rusqlite::Connection::open(raw_path)
+            .unwrap()
+            .execute(
+                "DELETE FROM history_segments WHERE session_id = ?1",
+                [SESSION],
+            )
+            .unwrap();
+    }));
+    let submitted = mids(1, 8);
+    let held = resolve_in(&store, None, &window(&submitted)).unwrap();
+    assert_eq!(held.resolution, Resolution::StaleSlice { cut: 7 });
+    // Afterwards no rendered row remains.
+    let after = resolve_in(&store, None, &window(&submitted)).unwrap();
+    assert_eq!(after.resolution, Resolution::FirstPass);
+}
+
+/// The null-anchor intersection matches a window mid only at its positional ordinal (see the
+/// module docs): a synthetic message before the hit does not shift it, a segment end at
+/// another ordinal does not match, and an interior removal before the hit is the documented
+/// miss.
+#[test]
+fn the_null_anchor_intersection_matches_mids_at_their_positional_ordinals() {
+    let (_dir, store) = open_store();
+    // Rows end at m2, m4, .., m10 (ordinals 2, 4, .., 10); the base puts m5 at ordinal 5.
+    seed_coverage(&store, 5, Some(5), Some(4));
+    // m10 sits at ordinal 9 here, not its stored 10, so the newest row does not match.
+    let names: Vec<String> = ["m5", "s1", "m6", "m7", "m8", "m10"]
+        .map(String::from)
+        .into();
+    let resolved = resolve_in(&store, None, &window(&names)).unwrap();
+    assert_eq!(resolved.resolution, Resolution::StaleSlice { cut: 4 });
+    assert_eq!(resolved.anchor.as_ref().map(|row| row.sequence), Some(4));
+    assert_eq!(resolved.ordinals, vec![8, 9]);
+    // m5 was removed: m6 and m8 sit one ordinal below their stored ends and are missed.
+    let removed = mids(6, 8);
+    let resolved = resolve_in(&store, None, &window(&removed)).unwrap();
+    assert_eq!(
+        resolved.resolution,
+        Resolution::Revert {
+            keep_through_seq: None
+        }
+    );
+}
+
+/// The plugin's `annotateOrdinals` loops, transcribed: non-synthetic messages are its memoized
 /// (resolved) messages, numbered from the head; synthetic messages are unresolved. With no
 /// resolved message at all, the plugin's provisional base is the ordinal before the head.
 fn plugin_ordinal_model(synthetic: &[bool], anchor: Option<u64>, base: Option<u64>) -> Vec<u64> {
@@ -333,7 +403,11 @@ fn plugin_ordinal_model(synthetic: &[bool], anchor: Option<u64>, base: Option<u6
 }
 
 /// WP-P03: the synthetic rule matches the plugin's for every synthetic pattern up to eight
-/// messages, anchored, unanchored, and under a lineage continuation base.
+/// messages, anchored, unanchored, and under a lineage continuation base. The domain is D11's:
+/// every non-synthetic message is persisted (resolved in the plugin's memo) and every synthetic
+/// one is unpersisted. `annotateOrdinals` also numbers an unpersisted suffix densely, synthetic
+/// messages included, which D11 does not adopt: after a resolved `a` at 1, the unpersisted
+/// suffix `[s, b]` is `[2, 3]` in the plugin and `[1, 2]` here.
 #[test]
 fn synthetic_borrowing_matches_the_plugin_rule_case_for_case() {
     for len in 0..=8usize {
@@ -535,4 +609,37 @@ fn intersection_and_page_work_is_independent_of_history_length() {
     let (short, long) = (measure(4_500), measure(9_000));
     eprintln!("intersection and page (rows, vm_steps): H=4500 {short:?}, H=9000 {long:?}");
     assert_eq!(short, long);
+}
+
+/// A run of rows without a message id longer than a page, below the rendered row and above
+/// real anchors, is skipped without ending the walk early.
+#[test]
+fn a_long_run_of_unlisted_rows_does_not_end_the_walk() {
+    let (_dir, store) = open_store();
+    seed_coverage(&store, 5_000, Some(5_000), None);
+    store
+        .with_fenced_conn_for_test(|conn| {
+            conn.execute(
+                "UPDATE history_segments SET end_message_id = 'unlisted'
+                  WHERE session_id = ?1 AND sequence BETWEEN 2 AND 4500",
+                [SESSION],
+            )
+        })
+        .unwrap();
+    let mut cursor = None;
+    let mut walked = Vec::new();
+    loop {
+        let page = boundary_page(&store, SESSION, cursor).unwrap();
+        let anchors: Vec<i64> = page["anchors"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|anchor| anchor["sequence"].as_i64().unwrap())
+            .collect();
+        let Some(last) = anchors.last() else { break };
+        cursor = Some(*last);
+        walked.extend(anchors);
+    }
+    let expected: Vec<i64> = (4_501..=5_000).rev().chain([1]).collect();
+    assert_eq!(walked, expected);
 }
