@@ -44,6 +44,8 @@ import {
 export interface RustTestHarnessOptions extends SharedHarnessOptions {
     /** Eidnara USER-tier config overrides (thresholds, memory, etc.). */
     eidnaraConfig?: Record<string, unknown>;
+    /** Extra environment for the fixture daemon only. */
+    daemonEnv?: Record<string, string>;
 }
 
 export interface SdkClient extends SdkClientCore {
@@ -169,6 +171,7 @@ export class RustTestHarness {
             host = await HermeticHostStack.start({
                 dataDir: env.dataDir,
                 fixtureBin,
+                daemonEnv: options.daemonEnv,
             });
             opencode = await RustTestHarness.spawnServe({
                 env,
@@ -266,6 +269,21 @@ export class RustTestHarness {
             );
         }
         throw new Error("session.create failed");
+    }
+
+    /**
+     * Deletes every message of the session later than `messageId` from OpenCode's own
+     * `opencode.db`, the removal a revert performs; `session.revert` marks the session without
+     * deleting its rows.
+     */
+    removeMessagesAfter(sessionId: string, messageId: string): number {
+        const db = new Database(join(this.env.dataDir, "opencode", "opencode.db"));
+        try {
+            db.exec("PRAGMA busy_timeout = 30000");
+            return deleteMessagesAfter(db, sessionId, messageId);
+        } finally {
+            db.close();
+        }
     }
 
     /**
@@ -552,6 +570,25 @@ function field(body: string, key: string): string {
 function stageField(body: string, key: string): string {
     const match = body.match(new RegExp(`(?:^|\\s|=)${key}:([^\\s]+)`));
     return match ? match[1]! : "";
+}
+
+/**
+ * Deletes the session's messages, and their parts, that sort after `messageId` in the plugin's
+ * `(time_created, id)` session order, so a later message sharing the anchor's millisecond goes too.
+ * Returns the number of messages removed.
+ */
+export function deleteMessagesAfter(db: Database, sessionId: string, messageId: string): number {
+    const remove = db.transaction(() => {
+        db.prepare(
+            "DELETE FROM part WHERE message_id IN (SELECT m.id FROM message m, message anchor WHERE anchor.session_id = ?1 AND anchor.id = ?2 AND m.session_id = ?1 AND (m.time_created, m.id) > (anchor.time_created, anchor.id))",
+        ).run(sessionId, messageId);
+        return db
+            .prepare(
+                "DELETE FROM message WHERE id IN (SELECT m.id FROM message m, message anchor WHERE anchor.session_id = ?1 AND anchor.id = ?2 AND m.session_id = ?1 AND (m.time_created, m.id) > (anchor.time_created, anchor.id))",
+            )
+            .run(sessionId, messageId).changes;
+    });
+    return remove();
 }
 
 /** JSON without `cache_control` markers, because OpenCode moves the marker to the newest message each turn. */
