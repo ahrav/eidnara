@@ -817,6 +817,7 @@ pub fn assemble_history_summarizer_firing(
     let expected_revert_epoch = snapshot.revert_epoch;
     let history_segment_set_generation = snapshot.history_segment_set_generation;
     let eligible_end = config.boundary.eligible_head.end;
+    // Ranges are strictly increasing, so the newest rows carry the covered end.
     let chunk_start =
         if let Some(last_end) = history_segments.iter().map(|c| c.end_message as u64).max() {
             let Some(next_present) = messages
