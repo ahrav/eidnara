@@ -1499,6 +1499,8 @@ pub struct HistorySummarizerFireRequest<'a> {
     pub memory_reviewer_handoff: Option<&'a HandoffTarget>,
     /// Set to true once a producer run starts.
     pub producer_started: Option<&'a AtomicBool>,
+    /// The budget the prompt was presented under; the firing records it so a reattachment presents the same bytes.
+    pub presented_token_budget: usize,
     /// What the entry path saw; each model attempt's timeline entry records it.
     pub trigger: FiringTrigger,
 }
@@ -1828,6 +1830,7 @@ where
                         .as_deref()
                         .map(classify_no_fire),
                 );
+                state.presented_token_budget = Some(request.presented_token_budget);
                 state
             }
         };
@@ -3234,6 +3237,7 @@ mod tests {
             .history_segment_set_generation;
         HistorySummarizerFireRequest {
             store,
+            presented_token_budget: 8_000,
             harness: "pi",
             session_id: "ses",
             project_path: "git:proj",
@@ -3299,6 +3303,7 @@ mod tests {
             }),
             chunk_fingerprint: "fp".into(),
             selected_range_identities: test_selected_range_identities(),
+            presented_token_budget: None,
             producer_session_id: Some("producer-session".into()),
             producer_run_id: Some("run-3".into()),
             producer_harness: None,
@@ -5500,6 +5505,7 @@ mod tests {
             }),
             chunk_fingerprint: "fp".into(),
             selected_range_identities: test_selected_range_identities(),
+            presented_token_budget: None,
             producer_session_id: Some("ps".into()),
             producer_run_id: Some("run-1".into()),
             producer_harness: None,

@@ -550,6 +550,8 @@ pub struct AssembledHistorySummarizerFiring {
     pub model_chain: Vec<String>,
     /// The configured chunk token budget this firing was assembled under, before any retry shrink.
     pub configured_token_budget: usize,
+    /// The budget the prompt was presented under, after the retry shrink.
+    pub token_budget: usize,
     pub chunk: HistorySummarizerBuiltChunk,
 
     pub chunk_fingerprint: String,
@@ -774,6 +776,7 @@ impl AssembledHistorySummarizerFiring {
             publication_fence: None,
             memory_reviewer_handoff: None,
             producer_started: None,
+            presented_token_budget: self.token_budget,
             trigger,
         }
     }
@@ -950,6 +953,7 @@ pub fn assemble_history_summarizer_firing(
             prompt,
             model_chain: config.model_chain,
             configured_token_budget: config.token_budget,
+            token_budget,
             from_ordinal: chunk.chunk.start_index,
             to_ordinal: chunk.chunk.end_index,
 

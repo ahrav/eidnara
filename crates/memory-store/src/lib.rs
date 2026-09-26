@@ -944,6 +944,9 @@ pub struct HistorySummarizerDurableState {
     /// transaction, allowing later tail extension while rejecting selected-byte drift.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub selected_range_identities: Vec<HistorySummarizerSelectedMessageIdentity>,
+    /// The token budget the fired prompt was presented under, after any retry shrink; a reattachment presents the frozen range under it rather than under the current configuration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub presented_token_budget: Option<usize>,
     #[serde(default)]
     pub producer_session_id: Option<String>,
     #[serde(default)]
@@ -1015,6 +1018,7 @@ impl Default for HistorySummarizerDurableState {
             chunk_range: None,
             chunk_fingerprint: String::new(),
             selected_range_identities: Vec::new(),
+            presented_token_budget: None,
             producer_session_id: None,
             producer_run_id: None,
             producer_harness: None,
@@ -1044,6 +1048,7 @@ impl HistorySummarizerDurableState {
             chunk_range: _,
             chunk_fingerprint: _,
             selected_range_identities: _,
+            presented_token_budget: _,
             producer_session_id: _,
             producer_run_id: _,
             producer_harness: _,
@@ -21486,6 +21491,7 @@ mod tests {
                 }),
                 chunk_fingerprint: "fp".into(),
                 selected_range_identities,
+                presented_token_budget: None,
                 producer_session_id: Some("producer-session".into()),
                 producer_run_id: Some("run-1".into()),
                 producer_harness: None,
