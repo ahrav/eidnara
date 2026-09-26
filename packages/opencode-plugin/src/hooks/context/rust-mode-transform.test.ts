@@ -3947,6 +3947,43 @@ describe("fail-open after an applied pass", () => {
         expect(transform.getState(sessionId).failureCount).toBe(1);
     });
 
+    it("serves the input unchanged when the applied output grew over its source prefix", async () => {
+        const sessionId = `rust-fail-open-grown-${Date.now()}`;
+        const rows = rawRows(5);
+        installRawRows(sessionId, rows);
+        const memory: MessageLike = {
+            info: { id: "memory-1", role: "user", sessionID: sessionId },
+            parts: [{ type: "text", text: "remembered context ".repeat(64) }],
+        };
+        const acknowledged = rowMessages(sessionId, rows.slice(0, 3));
+        const { client } = recordingClient((request, index) => {
+            if (index > 0) throw new Error("request deadline expired after a possible send");
+            // A compaction-off answer that has not folded yet adds memory ahead of the history.
+            return recipeResponse(request, [memory, ...acknowledged]);
+        });
+        const transform = createRustModeTransform(makeDeps(), { moduleClient: client });
+        const debugSpy = spyOn(logger.sessionLog, "debug");
+        try {
+            const first = { messages: [...acknowledged] as unknown[] };
+            await transform.run(sessionId, first);
+            expect(first.messages).toHaveLength(4);
+
+            const grown = rowMessages(sessionId, rows);
+            const output = { messages: [...grown] as unknown[] };
+            await transform.run(sessionId, output);
+            expect(output.messages).toEqual(grown);
+            expect(output.messages[0]).toBe(grown[0]);
+            expect(transform.getState(sessionId).failureCount).toBe(1);
+
+            const passLines = sessionLogs(debugSpy, sessionId).filter((line) =>
+                line.startsWith("rust pass:"),
+            );
+            expect(passLines[1]).toContain("served_from=raw in=5 out=5");
+        } finally {
+            debugSpy.mockRestore();
+        }
+    });
+
     it("keeps a tool call and its result together at the boundary", async () => {
         const sessionId = `rust-fail-open-tool-${Date.now()}`;
         const rows = rawRows(4);

@@ -350,6 +350,18 @@ function isAppendOnlyExtension(
     );
 }
 
+/**
+ * The fail-open array and the raw input share the appended suffix, so the fail-open array is
+ * larger than raw exactly when the retained output holds more bytes than its source prefix.
+ */
+function appliedOutputGrew(previous: RustWireCache, applied: AppliedOutput): boolean {
+    let appliedBytes = 0;
+    for (const length of applied.lengths) appliedBytes += length;
+    let prefixBytes = 0;
+    for (const length of previous.inputLengths) prefixBytes += length;
+    return appliedBytes > prefixBytes;
+}
+
 /** The pending cache for a pass; `applied` is attached on publication. */
 function buildWireCache(args: {
     messages: readonly MessageLike[];
@@ -1096,6 +1108,7 @@ export function createRustModeTransform(
                     lease.signal.aborted ||
                     wireCaches.peek(sessionId) !== source.previous ||
                     !isAppendOnlyExtension(source.previous, source.captured.snapshots) ||
+                    appliedOutputGrew(source.previous, applied) ||
                     readOwnDataProperty(output, "messages") !== target ||
                     !capturedMessagesUnchanged(target, source.captured) ||
                     hostArrayReplacementRejection(target) !== null
