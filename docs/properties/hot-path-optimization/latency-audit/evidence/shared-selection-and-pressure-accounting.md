@@ -185,6 +185,12 @@ carries no `tool_input`, and the renamed
 charges the input exactly once, through the wire. Both assertions fail on the
 prior code and pass after the removal.
 
+Update, 2026-09-26: [#828](https://github.com/ahrav/eidnara/issues/828) deletes
+`projection_retained_bytes_counts_wire_and_frontier_allocations_once` and
+`FlatProjection::retained_bytes`. The daemon projects every request from its
+full input. Citations of these symbols here are historical at their stated
+baseline.
+
 `M1Composition.memory_update_count` had one writer, the constant `0` in
 `compose_m1`, and no production reader once the SOFT disjunct was removed. The
 field is removed. The frozen reference keeps the original expression's shape

@@ -447,3 +447,9 @@ least one lens:
 - Whether a never-executed test counts as `Exercised: partial`. It governs every
   `Existing check:` line in this part, all three lenses raise it, and it is
   unresolved.
+
+Update, 2026-09-26: [#828](https://github.com/ahrav/eidnara/issues/828) deletes
+`EIDNARA_PREFIX_PROJECTION_DIFFERENTIAL` and the two asserts it gated; the
+question stands for `EIDNARA_NATIVE_ATTACHMENT_DIFFERENTIAL` alone. The daemon
+projects every request from its full input. Citations of these symbols here are
+historical at their stated baseline.

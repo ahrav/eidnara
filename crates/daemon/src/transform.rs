@@ -1224,6 +1224,7 @@ pub struct TransformTimings {
     pub side_channel_drain: f64,
     #[serde(default)]
     pub trace_received: f64,
+    // Kept for wire neutrality; always zero until the wire change removes them.
     #[serde(default)]
     pub projection_cache_lookup: f64,
     #[serde(default)]
@@ -1240,6 +1241,7 @@ pub struct TransformTimings {
     pub snapshot_store: f64,
     #[serde(default)]
     pub projection: f64,
+    // Kept for wire neutrality; always zero until the wire change removes it.
     #[serde(default)]
     pub projection_reused_messages: usize,
     #[serde(default)]
@@ -1726,18 +1728,6 @@ pub struct HistorySummarizerTriggerProgress {
     pub protected_start_ordinal: u64,
 }
 
-#[derive(Debug, Clone)]
-pub(crate) struct ProjectionCacheInput {
-    pub projection: Arc<FlatProjection>,
-    pub replace_from: usize,
-    pub prior_fingerprint: String,
-    pub message_retained_bytes: Arc<Vec<usize>>,
-    /// Keeps `projection` charged to the handler's active-lease budget while any clone lives.
-    /// Only the `Drop` matters; `expect` flags this attribute for removal if a reader appears.
-    #[expect(dead_code)]
-    pub lease: Option<Arc<crate::ProjectionLease>>,
-}
-
 pub struct TransformWithProjection {
     pub response: TransformResponse,
     pub projection: FlatProjection,
@@ -1752,6 +1742,10 @@ pub struct TransformWithProjection {
     pub transition_consumed: bool,
     pub mutation_exempt_mid: Option<String>,
     pub lineage_anchor_mid: Option<String>,
+    /// The request a descent pass rebased to the durable ordinal base. The ready snapshot
+    /// retains it instead of the harness's origin-numbered copy, so the next tail delta
+    /// reattaches a prefix that continued-lineage validation accepts.
+    pub rebased_request: Option<TransformRequest>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1844,7 +1838,6 @@ struct OverlayComputation<'a, 'ctx> {
     req: &'a TransformIngress<'a>,
     ctx: &'a ProducerContext<'ctx>,
     projection: &'a FlatProjection,
-    trusted_projection_prefix: Option<(&'a str, usize)>,
     core: &'a CoreState,
     tag_rows: &'a [Arc<TagRow>],
     temporal_rows: &'a mut Vec<TemporalMarkRow>,
@@ -2004,15 +1997,13 @@ pub(crate) fn transform_with_projection_cached(
     req: &TransformRequest,
     ctx: &ProducerContext<'_>,
     output_cache: &Mutex<SerializedOutputCache>,
-    projection_cache: Option<&ProjectionCacheInput>,
 ) -> Result<TransformWithProjection, TransformError> {
-    let result = apply_once_with_estimator_and_projection(
+    let result = apply_once_with_estimator(
         store,
         req,
         ctx,
         crate::token_cache::cached_estimate_tokens,
         Some(output_cache),
-        projection_cache,
     );
     record_stable_pass_trace(store, req, &result);
     result
@@ -2102,17 +2093,6 @@ fn pending_rewrite_pass_observation(
     )
 }
 
-#[cfg(test)]
-fn apply_once_with_estimator(
-    store: &MemoryStore,
-    req: &TransformRequest,
-    ctx: &ProducerContext<'_>,
-    estimate_tokens: impl Fn(&str) -> usize + Copy,
-    output_cache: Option<&Mutex<SerializedOutputCache>>,
-) -> Result<TransformWithProjection, TransformError> {
-    apply_once_with_estimator_and_projection(store, req, ctx, estimate_tokens, output_cache, None)
-}
-
 /// The provider marker represents the daemon's assumed cache lifetime as a Claude Code TTL.
 ///
 /// The input lifetime controls when the daemon assumes a cache is dead; the output marker is limited to `5m|1h`.
@@ -2182,13 +2162,12 @@ fn response_marker_ttl(
         })
 }
 
-fn apply_once_with_estimator_and_projection(
+fn apply_once_with_estimator(
     store: &MemoryStore,
     req: &TransformRequest,
     ctx: &ProducerContext<'_>,
     estimate_tokens: impl Fn(&str) -> usize + Copy,
     output_cache: Option<&Mutex<SerializedOutputCache>>,
-    projection_cache: Option<&ProjectionCacheInput>,
 ) -> Result<TransformWithProjection, TransformError> {
     let mut attempt = 0;
     let mut boundary_divergence_retry = false;
@@ -2200,7 +2179,6 @@ fn apply_once_with_estimator_and_projection(
             ctx,
             estimate_tokens,
             output_cache,
-            projection_cache,
             boundary_divergence_retry,
             &mut boundary_divergence_detected,
         ) {
@@ -2254,40 +2232,6 @@ fn run_transform_attempt_hook(session_id: &str) {
     if let Some(hook) = hook {
         hook();
     }
-}
-
-static PREFIX_PROJECTION_DIFFERENTIAL: OnceLock<bool> = OnceLock::new();
-
-fn prefix_projection_differential_enabled() -> bool {
-    cfg!(test)
-        || *PREFIX_PROJECTION_DIFFERENTIAL.get_or_init(|| {
-            std::env::var("EIDNARA_PREFIX_PROJECTION_DIFFERENTIAL").as_deref() == Ok("1")
-        })
-}
-
-#[cfg(test)]
-pub(crate) fn assert_prefix_projection_equivalent(
-    incremental: &FlatProjection,
-    messages: &[Arc<IngressMessage>],
-) -> Result<(), WireError> {
-    assert_message_projection_equivalent(incremental, &wire::MessageProjection::new(messages))
-}
-
-fn assert_message_projection_equivalent(
-    incremental: &FlatProjection,
-    messages: &wire::MessageProjection<'_>,
-) -> Result<(), WireError> {
-    let full = messages.project()?;
-    assert_eq!(
-        incremental.differential_bytes(),
-        full.differential_bytes(),
-        "incremental prefix projection byte drift"
-    );
-    assert_eq!(
-        incremental, &full,
-        "incremental prefix projection state drift"
-    );
-    Ok(())
 }
 
 fn served_output_fingerprints(messages: &[ServedMessage]) -> Vec<ServedBlockFingerprint> {
@@ -2573,6 +2517,7 @@ fn lineage_protocol_passthrough(
         transition_consumed: false,
         mutation_exempt_mid: None,
         lineage_anchor_mid: None,
+        rebased_request: None,
         response: TransformResponse::passthrough(
             req.messages
                 .iter()
@@ -3096,6 +3041,7 @@ fn apply_additive_only(
         transition_consumed: transition_consumed(&core),
         mutation_exempt_mid: None,
         lineage_anchor_mid: None,
+        rebased_request: None,
         response: TransformResponse {
             status: TransformStatus::Ok,
             served_from: ServedFrom::Transform,
@@ -3138,7 +3084,6 @@ fn apply_once(
     ctx: &ProducerContext<'_>,
     estimate_tokens: impl Fn(&str) -> usize + Copy,
     output_cache: Option<&Mutex<SerializedOutputCache>>,
-    projection_cache: Option<&ProjectionCacheInput>,
     boundary_divergence_retry: bool,
     boundary_divergence_detected: &mut bool,
 ) -> Result<TransformWithProjection, TransformError> {
@@ -3153,33 +3098,9 @@ fn apply_once(
     let projection_started_at = Instant::now();
     let normalized_req = normalize_synthetic_todo_ingress(req);
     let ingress_req = &normalized_req;
-    let reusable_projection = projection_cache.filter(|cache| {
-        !ingress_req.lineage_switched
-            && cache.replace_from <= ingress_req.messages.len()
-            && cache.replace_from <= cache.projection.message_count()
-    });
-    let (initial_projection, reused_messages) = if let Some(cache) = reusable_projection {
-        ingress_req
-            .projection
-            .project_incremental(&cache.projection, cache.replace_from)?
-    } else {
-        (ingress_req.projection.project()?, 0)
-    };
-    let trusted_projection_prefix = reusable_projection.and_then(|cache| {
-        cache
-            .projection
-            .prefix_block_count(cache.replace_from)
-            .map(|blocks| (cache.prior_fingerprint.as_str(), blocks))
-    });
+    let initial_projection = ingress_req.projection.project()?;
     timings.projection = elapsed_ms(projection_started_at);
-    timings.projection_reused_messages = reused_messages;
-    timings.projection_projected_messages = ingress_req
-        .messages
-        .len()
-        .saturating_sub(timings.projection_reused_messages);
-    if reusable_projection.is_some() && prefix_projection_differential_enabled() {
-        assert_message_projection_equivalent(&initial_projection, &ingress_req.projection)?;
-    }
+    timings.projection_projected_messages = ingress_req.messages.len();
     if ingress_req.lineage_switched && ingress_req.is_subagent {
         return Ok(lineage_protocol_passthrough(
             ingress_req,
@@ -3680,7 +3601,6 @@ fn apply_once(
             req,
             ctx,
             projection: &projection,
-            trusted_projection_prefix,
             core: &loaded.core,
             tag_rows: &tag_rows,
             temporal_rows: &mut temporal_marks,
@@ -5427,6 +5347,7 @@ fn apply_once(
             channel2_directive: channel2_output.channel2_directive,
             note_deliveries: (!note_deliveries.is_empty()).then_some(note_deliveries),
         },
+        rebased_request: rebased_req,
     })
 }
 
@@ -7172,6 +7093,7 @@ fn pending_passthrough_result(args: PendingPassthroughArgs<'_>) -> TransformWith
         transition_consumed,
         mutation_exempt_mid,
         lineage_anchor_mid: None,
+        rebased_request: None,
         response,
     }
 }
@@ -7301,7 +7223,6 @@ struct TagMintFrontierMemo {
     tagged_key: [u8; 32],
     frontier: usize,
     candidates_before_frontier: usize,
-    projection_fingerprint: Option<String>,
 }
 
 fn tag_mint_block_key(block: &FlatBlock) -> [u8; 32] {
@@ -7359,7 +7280,6 @@ fn tag_mint_frontier_start(
     projection: &FlatProjection,
     frozen: &HashSet<String>,
     existing_tag_ids: &HashSet<&str>,
-    trusted_projection_prefix: Option<(&str, usize)>,
     memo: Option<&TagMintFrontierMemo>,
 ) -> Option<(usize, usize)> {
     let memo = memo?;
@@ -7373,16 +7293,7 @@ fn tag_mint_frontier_start(
         .frontier
         .min(memo.block_keys.len())
         .min(projection.blocks.len());
-    let trusted_blocks = trusted_projection_prefix
-        .filter(|(fingerprint, _)| memo.projection_fingerprint.as_deref() == Some(*fingerprint))
-        .map_or(0, |(_, blocks)| blocks.min(limit));
-    for (index, block) in projection
-        .blocks
-        .iter()
-        .take(limit)
-        .enumerate()
-        .skip(trusted_blocks)
-    {
+    for (index, block) in projection.blocks.iter().take(limit).enumerate() {
         if memo.block_keys.get(index).copied() != Some(tag_mint_block_key(block)) {
             return None;
         }
@@ -7411,24 +7322,13 @@ fn tag_mint_count_candidates_before(
 fn tag_mint_frontier_store(
     memo: &mut TagMintFrontierMemo,
     projection: &FlatProjection,
-    trusted_projection_prefix: Option<(&str, usize)>,
-    projection_fingerprint: Option<&str>,
     frozen: &HashSet<String>,
     existing_tag_ids: &HashSet<&str>,
     newly_minted: &HashSet<&str>,
 ) {
-    let reusable_keys = trusted_projection_prefix
-        .filter(|(fingerprint, _)| memo.projection_fingerprint.as_deref() == Some(*fingerprint))
-        .map_or(0, |(_, blocks)| blocks.min(memo.block_keys.len()));
-    memo.block_keys.truncate(reusable_keys);
-    memo.block_keys.extend(
-        projection
-            .blocks
-            .iter()
-            .skip(reusable_keys)
-            .map(tag_mint_block_key),
-    );
-    memo.projection_fingerprint = projection_fingerprint.map(str::to_string);
+    memo.block_keys.clear();
+    memo.block_keys
+        .extend(projection.blocks.iter().map(tag_mint_block_key));
     memo.frozen_key = tag_mint_frozen_key(frozen);
     let mut tagged = existing_tag_ids.clone();
     for id in newly_minted {
@@ -7458,20 +7358,15 @@ fn tag_mint_inputs(
         None,
         existing_tag_ids,
         None,
-        None,
-        None,
     )
 }
 
-#[allow(clippy::too_many_arguments)]
 fn tag_mint_inputs_from(
     projection: &FlatProjection,
     core: &CoreState,
     mutation_exempt_mid: Option<&str>,
     lineage_anchor_mid: Option<&str>,
     existing_tag_ids: &HashSet<&str>,
-    trusted_projection_prefix: Option<(&str, usize)>,
-    projection_fingerprint: Option<&str>,
     frontier_memo: Option<&mut TagMintFrontierMemo>,
 ) -> TagMintWork {
     let frozen = frozen_red_targets(core);
@@ -7479,7 +7374,6 @@ fn tag_mint_inputs_from(
         projection,
         &frozen,
         existing_tag_ids,
-        trusted_projection_prefix,
         frontier_memo.as_deref(),
     )
     .unwrap_or((0, 0));
@@ -7519,15 +7413,7 @@ fn tag_mint_inputs_from(
             .iter()
             .map(|input| input.block_id.as_str())
             .collect::<HashSet<_>>();
-        tag_mint_frontier_store(
-            memo,
-            projection,
-            trusted_projection_prefix,
-            projection_fingerprint,
-            &frozen,
-            existing_tag_ids,
-            &newly_minted,
-        );
+        tag_mint_frontier_store(memo, projection, &frozen, existing_tag_ids, &newly_minted);
     }
     work
 }
@@ -8186,7 +8072,6 @@ fn compute_active_overlay_decisions(
         req,
         ctx,
         projection,
-        trusted_projection_prefix,
         core,
         tag_rows,
         temporal_rows,
@@ -8213,8 +8098,6 @@ fn compute_active_overlay_decisions(
             mutation_exempt_mid,
             lineage_anchor_mid,
             &existing_tag_ids,
-            trusted_projection_prefix,
-            req.full_array_fingerprint.as_deref(),
             Some(&mut memo),
         );
         tag_mint_frontier_cache()
@@ -14684,16 +14567,7 @@ pub(crate) mod tests {
         .unwrap();
         let empty_tags: HashSet<&str> = HashSet::new();
         let full1 = tag_mint_inputs(&pass1, &core, None, &empty_tags);
-        let memo1 = tag_mint_inputs_from(
-            &pass1,
-            &core,
-            None,
-            None,
-            &empty_tags,
-            None,
-            None,
-            Some(&mut memo),
-        );
+        let memo1 = tag_mint_inputs_from(&pass1, &core, None, None, &empty_tags, Some(&mut memo));
         assert_same_tag_mint_work(&memo1, &full1);
         assert!(memo.frontier > 0);
 
@@ -14710,16 +14584,7 @@ pub(crate) mod tests {
         )
         .unwrap();
         let full2 = tag_mint_inputs(&pass2, &core, None, &existing);
-        let memo2 = tag_mint_inputs_from(
-            &pass2,
-            &core,
-            None,
-            None,
-            &existing,
-            None,
-            None,
-            Some(&mut memo),
-        );
+        let memo2 = tag_mint_inputs_from(&pass2, &core, None, None, &existing, Some(&mut memo));
         assert_same_tag_mint_work(&memo2, &full2);
         assert_eq!(memo2.inputs.len(), 1, "only the appended block mints");
 
@@ -24158,7 +24023,6 @@ pub(crate) mod tests {
                 &make_request(middle),
                 &ctx,
                 &output_cache,
-                None,
             )
             .unwrap();
             assert_eq!(response.response.status, TransformStatus::Ok);
@@ -24242,14 +24106,13 @@ pub(crate) mod tests {
             let frozen = frozen_red_targets(&s.load(session).unwrap().core);
             let tagged = mint_tagged_ids(&projection, &rows);
             assert_eq!(
-                tag_mint_frontier_start(&projection, &frozen, &tagged, None, Some(&memo))
+                tag_mint_frontier_start(&projection, &frozen, &tagged, Some(&memo))
                     .map(|(start, _)| start),
                 Some(memo.frontier)
             );
             let unfiltered = rows.iter().map(|row| row.block_id.as_str()).collect();
             assert!(
-                tag_mint_frontier_start(&projection, &frozen, &unfiltered, None, Some(&memo))
-                    .is_none(),
+                tag_mint_frontier_start(&projection, &frozen, &unfiltered, Some(&memo)).is_none(),
                 "keying the memo on every row read would miss"
             );
             let after = run(&s, &request, &spine());
@@ -29838,26 +29701,6 @@ pub(crate) mod tests {
         let projection_started_at = Instant::now();
         let projection = project_messages(&request.messages).unwrap();
         let full_projection_ms = elapsed_ms(projection_started_at);
-        let mut changed_messages = request.messages.clone();
-        let changed = changed_messages
-            .last_mut()
-            .expect("large timing fixture has a tail message");
-        let wire::BlockKind::Text { text } = Arc::make_mut(changed).ck.content_mut()[0].kind_mut()
-        else {
-            panic!("large timing fixture tail must be text");
-        };
-        text.push_str(" changed");
-        let cached_projection_started_at = Instant::now();
-        let cached_projection =
-            wire::project_messages_incremental(&changed_messages, &projection, MESSAGE_COUNT - 1)
-                .unwrap();
-        let cached_projection_ms = elapsed_ms(cached_projection_started_at);
-        let full_changed_projection = project_messages(&changed_messages).unwrap();
-        assert_eq!(cached_projection, full_changed_projection);
-        assert!(
-            cached_projection_ms * 10.0 < full_projection_ms,
-            "cached projection must be at least 10x faster: first={full_projection_ms:.3}ms cached={cached_projection_ms:.3}ms"
-        );
         let mut frozen_units = vec![
             synth_region("m0", "m0 fixture".to_string()),
             synth_region("m1", "m1 fixture".to_string()),
@@ -30017,7 +29860,7 @@ pub(crate) mod tests {
         let _encoded = serde_json::to_vec(&response).unwrap();
         let encode_ms = elapsed_ms(encode_started_at);
         eprintln!(
-            "full-module-pass-decomposition n={MESSAGE_COUNT} projection_ms={full_projection_ms:.3} cached_projection_ms={cached_projection_ms:.3} apply_ms={:.3} attach_ms={attach_ms:.3} encode_ms={encode_ms:.3}",
+            "full-module-pass-decomposition n={MESSAGE_COUNT} projection_ms={full_projection_ms:.3} apply_ms={:.3} attach_ms={attach_ms:.3} encode_ms={encode_ms:.3}",
             replay.timings.total,
         );
         eprintln!(
@@ -30821,17 +30664,20 @@ pub(crate) mod tests {
             assert_eq!(result.response.ordinal_continuation_base, Some(10));
             assert!(!result.response.reconcile_pending);
             assert_eq!(request.messages[0].ordinal, 1);
-            let reattached = result.projection.reattach_messages_prefix(2).unwrap();
+            let blocks = &result.projection.blocks;
+            let head = blocks.iter().find(|block| block.mid == "synthetic-head");
+            let next = blocks.iter().find(|block| block.mid != "synthetic-head");
+            let (head, next) = (head.unwrap(), next.unwrap());
             assert_eq!(
-                reattached[0].ordinal, 11,
+                head.ordinal, 11,
                 "the non-subagent pass must actually rebase"
             );
             assert_eq!(
-                reattached[1].ordinal, 11,
+                next.ordinal, 11,
                 "synthetic head must not consume a live ordinal"
             );
-            assert!(reattached[0].ck.meta.synthetic);
-            assert!(!reattached[1].ck.meta.synthetic);
+            assert!(head.synthetic);
+            assert!(!next.synthetic);
             assert!(
                 result
                     .projection

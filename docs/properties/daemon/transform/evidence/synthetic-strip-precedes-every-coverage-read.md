@@ -49,6 +49,11 @@ Every reference read back at `HEAD` `76cd6f41`.
    Err(TransformError::ReservedId); } }`, with `RESERVED_ID_PREFIX = "eidnara_"` at
    `:91`.
 
+Update, 2026-09-26: [#828](https://github.com/ahrav/eidnara/issues/828) deletes
+`project_messages_incremental`; `apply_once` always projects fully. The daemon
+projects every request from its full input. Citations of these symbols here are
+historical at their stated baseline.
+
 ### Verification that the shadow covers every later read
 
 `ingress_req` appears only between `:3244` and `:3342`: at `:3244`, `:3249`,

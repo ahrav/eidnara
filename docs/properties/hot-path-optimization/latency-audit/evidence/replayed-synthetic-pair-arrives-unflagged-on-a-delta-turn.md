@@ -23,7 +23,14 @@ B2 can pass without the divergent observer ever being reached.
 - [`expand_transform_tail_delta`][expand] runs when `parsed.tail_delta` is an
   object with `after`; it reattaches the prefix through
   [`reattach_messages_prefix`][reattach-call] from the projection cache and
-  deep-copies the native prefix ([`:4228-4231`][native-deep]).
+  deep-copies the native prefix ([`:4228-4231`][native-deep]). Update,
+  2026-09-26: [#828](https://github.com/ahrav/eidnara/issues/828) deletes the
+  projection cache and `reattach_messages_prefix`. The prefix now comes from
+  the latest-ready request snapshot with the pair unflagged as the harness
+  sent it, the pass projects all 84 messages afresh, and the witness's pinned
+  third-turn prompt hash and native bytes are unchanged. Its boundary and
+  chunk inputs now match the unflagged reference, and the witness asserts
+  that shape instead of positive prefix reuse.
 - [`prepare_history_summarizer_fire`][history_summarizer-fire] is called with `&parsed` on the
   Emergency95 arm ([`:8245-8247`][prepare-a]) and on the ordinary arm
   ([`:8336-8338`][prepare-b]); it returns `no_models` without firing when

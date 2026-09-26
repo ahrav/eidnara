@@ -555,6 +555,49 @@ comment-marker script, `git diff --check`, daemon rustdoc with
 or environment capture runs here; the allocation counts are event counts, not
 latency.
 
+### Retirement of projection prefix reuse, 2026-09-26
+
+Base: `704568ec`. [#828](https://github.com/ahrav/eidnara/issues/828)
+deletes the projection cache, its active leases and budget, the cache
+lookup, store, and input validation, `ProjectionCacheKeyMode`,
+`ProjectionCacheInput`, the incremental projection call in `apply_once`,
+`FlatProjection::reattach_messages_prefix`, `project_incremental`,
+`project_messages_incremental`, `prefix_block_count`, the per-message
+`message_block_ends`, `states_after_messages`, and retained shells, the
+prefix differential ([`assert_message_projection_equivalent`][assert-prefix]
+behind [`prefix_projection_differential_enabled`][gate-prefix]), and
+`EIDNARA_PREFIX_PROJECTION_DIFFERENTIAL`. `FlatProjection` keeps `blocks` and
+`identity_by_mid`; `MessageProjection::project` and its builder remain.
+
+The record's reattached-prefix, reattached-shell, and incremental-projection
+clauses are invalidated: the mechanisms they compare no longer exist. A tail
+delta now reattaches its prefix only from the latest-ready request snapshot,
+whose messages carry the flags the harness sent; without that snapshot the
+delta takes the full-sync path. The value clauses stand. Full projection of
+the same input yields the projection the reused prefix path yielded, because
+the incremental path was a differential-checked copy of the full one.
+
+Replacing evidence at the #828 commit, all passing:
+
+- The native delta replay
+  (`incremental_native_cache_replays_complex_prefix_and_encodes_only_tail`)
+  seeds the ready snapshot, expands the delta, checks that the reattached
+  messages share the snapshot's `Arc`s, and compares the shared projection,
+  served bytes, and native bytes with a fresh full request.
+- `projection_rebuilds_only_the_shell_whose_synthetic_flag_changes` checks,
+  through the blocks' shells, that full projection shares every shell whose
+  effective synthetic flag matches and rebuilds only the one that differs.
+- The differential goldens keep every served and native byte assertion; only
+  the appended-tail incremental arm is removed.
+- The B5 witness keeps its pinned third-turn prompt hash and native bytes,
+  now with the prefix reattached from the ready snapshot.
+- Every projection, served-output, recipe, and edit-recipe golden and the
+  e2e byte-identity scenario pass unchanged.
+
+`cargo test -p daemon --all-features --locked`, workspace all-target and
+all-feature Clippy with `--locked -- -D warnings`, and `cargo fmt --all --
+--check` pass.
+
 [canonical-constructor]: ../../../../../crates/daemon/src/transform.rs#L164-L224
 [canonical-encoder]: ../../../../../crates/daemon/src/served_json.rs#L112-L164
 [canonical-identity]: ../../../../../crates/daemon/src/wire.rs#L885
@@ -574,11 +617,11 @@ latency.
 [shell-owner]: ../../../../../crates/daemon/src/wire.rs#L33-L88
 [shell-build]: ../../../../../crates/daemon/src/wire.rs#L540-L559
 [shell-block]: ../../../../../crates/daemon/src/wire.rs#L89-L116
-[shell-reattach]: ../../../../../crates/daemon/src/wire.rs#L212-L241
+[shell-reattach]: https://github.com/ahrav/eidnara/blob/704568ec/crates/daemon/src/wire.rs#L211-L238
 [shell-size]: ../../../../../crates/daemon/src/retained_size.rs#L263-L273
-[shell-sharing]: ../../../../../crates/daemon/src/wire.rs#L1746
-[shell-charge]: ../../../../../crates/daemon/src/wire.rs#L955
-[shell-metadata]: ../../../../../crates/daemon/src/wire.rs#L1705
+[shell-sharing]: https://github.com/ahrav/eidnara/blob/704568ec/crates/daemon/src/wire.rs#L1777
+[shell-charge]: https://github.com/ahrav/eidnara/blob/704568ec/crates/daemon/src/wire.rs#L946
+[shell-metadata]: https://github.com/ahrav/eidnara/blob/704568ec/crates/daemon/src/wire.rs#L1691
 
 [shared-expansion]: https://github.com/ahrav/eidnara/blob/6b2c0c5f/crates/daemon/src/lib.rs#L4157
 [shared-decode]: ../../../../../crates/daemon/src/codec/opencode.rs#L61
@@ -598,8 +641,8 @@ latency.
 [fp-reuse]: https://github.com/ahrav/eidnara/blob/6b2c0c5f/crates/daemon/src/wire.rs#L833-L842
 [served-reusing]: https://github.com/ahrav/eidnara/blob/e1a0d06a/crates/daemon/src/transform.rs#L164-L216
 [ser-served]: https://github.com/ahrav/eidnara/blob/e1a0d06a/crates/daemon/src/transform.rs#L293-L300
-[gate-prefix]: ../../../../../crates/daemon/src/transform.rs#L2019
-[assert-prefix]: ../../../../../crates/daemon/src/transform.rs#L2034
+[gate-prefix]: https://github.com/ahrav/eidnara/blob/704568ec/crates/daemon/src/transform.rs#L2250
+[assert-prefix]: https://github.com/ahrav/eidnara/blob/704568ec/crates/daemon/src/transform.rs#L2265
 [prefix-call]: https://github.com/ahrav/eidnara/blob/6b2c0c5f/crates/daemon/src/transform.rs#L2910-L2912
 [sel-item]: https://github.com/ahrav/eidnara/blob/6b2c0c5f/crates/daemon/src/transform.rs#L6352
 [sel-kind]: https://github.com/ahrav/eidnara/blob/6b2c0c5f/crates/daemon/src/lib.rs#L16632

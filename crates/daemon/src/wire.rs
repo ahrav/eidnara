@@ -168,199 +168,24 @@ impl FlatBlock {
     }
 }
 
-/// `ProjectionState` captures projector state at each message boundary.
-/// Resuming tail deltas at the saved frontier lets changed-suffix tool results pair with cached-prefix calls.
-#[derive(Debug, Clone, Default, PartialEq)]
-pub(crate) struct ProjectionState {
+/// Tool-arc state the projector carries from one message to the next.
+#[derive(Debug, Default)]
+struct ProjectionState {
     pending_calls: BTreeMap<String, VecDeque<String>>,
     call_arcs: BTreeMap<String, String>,
 }
 
-/// Flattened message projection plus metadata needed to rebuild cached prefixes.
+/// Flattened message projection.
 ///
-/// Block order follows message order and then content order. Each
-/// `message_block_ends` entry is the exclusive block frontier for one message.
+/// Block order follows message order and then content order.
 #[derive(Debug, Clone, PartialEq)]
 pub struct FlatProjection {
     pub blocks: Vec<FlatBlock>,
     pub identity_by_mid: BTreeMap<String, Vec<BlockIdentity>>,
-    /// Canonical replay shells share their ownership with reattached requests.
-    messages: IngressMessages,
-    /// `message_block_ends` maps each transport message frontier to its flat-block end.
-    /// This mapping avoids walking or serializing cached payloads.
-    message_block_ends: Vec<usize>,
-    /// Shared boundary states reconstruct prefixes with small `Arc` copies.
-    /// Shared boundary states avoid cloning pending tool-arc maps for every retained message.
-    states_after_messages: Vec<Arc<ProjectionState>>,
 }
 
 impl FlatProjection {
-    pub(crate) fn message_count(&self) -> usize {
-        self.message_block_ends.len()
-    }
-
-    pub(crate) fn prefix_block_count(&self, prefix_messages: usize) -> Option<usize> {
-        if prefix_messages == 0 {
-            return Some(0);
-        }
-        self.message_block_ends.get(prefix_messages - 1).copied()
-    }
-
-    /// Replay shares canonical shells. Projection ownership discards unknown
-    /// top-level wire fields but retains blocks' ingress JSON.
-    pub(crate) fn reattach_messages_prefix(
-        &self,
-        prefix_messages: usize,
-    ) -> Option<IngressMessages> {
-        if prefix_messages > self.message_count() || self.messages.len() != self.message_count() {
-            return None;
-        }
-
-        let mut block_start = 0;
-        for (message_index, message) in self.messages.iter().take(prefix_messages).enumerate() {
-            let block_end = *self.message_block_ends.get(message_index)?;
-            if block_end < block_start || block_end > self.blocks.len() {
-                return None;
-            }
-            if !self.blocks[block_start..block_end].iter().enumerate().all(
-                |(block_index, block)| {
-                    block.mid == message.mid
-                        && block.ordinal == message.ordinal
-                        && block.role == message.ck.role
-                        && block.block_index == block_index
-                },
-            ) {
-                return None;
-            }
-            block_start = block_end;
-        }
-        Some(IngressMessages(self.messages[..prefix_messages].to_vec()))
-    }
-
-    pub(crate) fn retained_bytes(&self) -> usize {
-        use crate::retained_size::{
-            ARC_ALLOCATION_OVERHEAD_BYTES, btree_map_allocation_bytes,
-            ingress_message_retained_bytes,
-        };
-        use std::mem::size_of;
-
-        let block_bytes = self
-            .blocks
-            .capacity()
-            .saturating_mul(size_of::<FlatBlock>())
-            .saturating_add(
-                self.blocks
-                    .iter()
-                    .map(|block| {
-                        block
-                            .id
-                            .capacity()
-                            .saturating_add(block.mid.capacity())
-                            .saturating_add(block.role.capacity())
-                            .saturating_add(block.kind_tag.capacity())
-                            .saturating_add(block.name.as_ref().map_or(0, String::capacity))
-                            .saturating_add(block.file_path.as_ref().map_or(0, String::capacity))
-                            .saturating_add(block.arc_id.as_ref().map_or(0, String::capacity))
-                            .saturating_add(block.tool_call_id.as_ref().map_or(0, String::capacity))
-                            .saturating_add(block.output_kind.as_ref().map_or(0, String::capacity))
-                            .saturating_add(ARC_ALLOCATION_OVERHEAD_BYTES)
-                            .saturating_add(block.bytes.len())
-                    })
-                    .sum::<usize>(),
-            );
-        let identity_bytes =
-            btree_map_allocation_bytes::<String, Vec<BlockIdentity>>(self.identity_by_mid.len())
-                .saturating_add(
-                    self.identity_by_mid
-                        .iter()
-                        .map(|(mid, identities)| {
-                            mid.capacity()
-                                .saturating_add(
-                                    identities
-                                        .capacity()
-                                        .saturating_mul(size_of::<BlockIdentity>()),
-                                )
-                                .saturating_add(
-                                    identities
-                                        .iter()
-                                        .map(|identity| {
-                                            identity.kind_tag.capacity().saturating_add(
-                                                identity.byte_fingerprint.capacity(),
-                                            )
-                                        })
-                                        .sum::<usize>(),
-                                )
-                        })
-                        .sum::<usize>(),
-                );
-        let message_bytes = self
-            .messages
-            .capacity()
-            .saturating_mul(size_of::<Arc<IngressMessage>>())
-            .saturating_add(
-                self.messages
-                    .iter()
-                    .map(|message| ingress_message_retained_bytes(message))
-                    .sum::<usize>(),
-            );
-        let frontier_bytes = self
-            .states_after_messages
-            .capacity()
-            .saturating_mul(size_of::<Arc<ProjectionState>>())
-            .saturating_add(
-                self.states_after_messages
-                    .iter()
-                    .map(|state| {
-                        let pending_calls = btree_map_allocation_bytes::<String, VecDeque<String>>(
-                            state.pending_calls.len(),
-                        )
-                        .saturating_add(
-                            state
-                                .pending_calls
-                                .iter()
-                                .map(|(call_id, arcs)| {
-                                    call_id
-                                        .capacity()
-                                        .saturating_add(
-                                            arcs.capacity().saturating_mul(size_of::<String>()),
-                                        )
-                                        .saturating_add(
-                                            arcs.iter().map(String::capacity).sum::<usize>(),
-                                        )
-                                })
-                                .sum::<usize>(),
-                        );
-                        let call_arcs =
-                            btree_map_allocation_bytes::<String, String>(state.call_arcs.len())
-                                .saturating_add(
-                                    state
-                                        .call_arcs
-                                        .iter()
-                                        .map(|(block_id, arc_id)| {
-                                            block_id.capacity().saturating_add(arc_id.capacity())
-                                        })
-                                        .sum::<usize>(),
-                                );
-                        ARC_ALLOCATION_OVERHEAD_BYTES
-                            .saturating_add(size_of::<ProjectionState>())
-                            .saturating_add(pending_calls)
-                            .saturating_add(call_arcs)
-                    })
-                    .sum::<usize>(),
-            );
-
-        size_of::<Self>()
-            .saturating_add(block_bytes)
-            .saturating_add(identity_bytes)
-            .saturating_add(message_bytes)
-            .saturating_add(frontier_bytes)
-            .saturating_add(
-                self.message_block_ends
-                    .capacity()
-                    .saturating_mul(size_of::<usize>()),
-            )
-    }
-
+    #[cfg(test)]
     pub(crate) fn differential_bytes(&self) -> Vec<u8> {
         let wires = self
             .blocks
@@ -405,17 +230,6 @@ pub fn project_messages(messages: &[Arc<IngressMessage>]) -> Result<FlatProjecti
     MessageProjection::new(messages).project()
 }
 
-#[cfg(test)]
-pub(crate) fn project_messages_incremental(
-    messages: &[Arc<IngressMessage>],
-    cached: &FlatProjection,
-    prefix_messages: usize,
-) -> Result<FlatProjection, WireError> {
-    MessageProjection::new(messages)
-        .project_incremental(cached, prefix_messages)
-        .map(|(projection, _)| projection)
-}
-
 /// Tracks synthetic message IDs separately from ingress messages.
 pub(crate) struct MessageProjection<'a> {
     messages: &'a [Arc<IngressMessage>],
@@ -448,61 +262,12 @@ impl<'a> MessageProjection<'a> {
     pub(crate) fn project(&self) -> Result<FlatProjection, WireError> {
         project_messages_from_state(self, FlatProjectionBuilder::default())
     }
-
-    /// The tuple contains the projection and the number of messages reused from the cached prefix.
-    ///
-    /// Invalid prefix bounds, missing identities, or changed synthetic status fall
-    /// back to a full projection with zero reused messages. Projection errors have
-    /// the same meaning as [`project_messages`].
-    pub(crate) fn project_incremental(
-        &self,
-        cached: &FlatProjection,
-        prefix_messages: usize,
-    ) -> Result<(FlatProjection, usize), WireError> {
-        let messages = self.messages;
-        if prefix_messages == 0
-            || prefix_messages > messages.len()
-            || prefix_messages > cached.message_count()
-        {
-            return Ok((self.project()?, 0));
-        }
-
-        let prefix_block_end = cached.message_block_ends[prefix_messages - 1];
-        let mut identity_by_mid = BTreeMap::new();
-        for (index, message) in messages[..prefix_messages].iter().enumerate() {
-            let synthetic = self.is_synthetic(message);
-            if cached.messages[index].ck.meta.synthetic != synthetic {
-                return Ok((self.project()?, 0));
-            }
-            if synthetic {
-                continue;
-            }
-            let Some(identities) = cached.identity_by_mid.get(&message.mid) else {
-                return Ok((self.project()?, 0));
-            };
-            identity_by_mid.insert(message.mid.clone(), identities.clone());
-        }
-        let builder = FlatProjectionBuilder {
-            blocks: cached.blocks[..prefix_block_end].to_vec(),
-            identity_by_mid,
-            messages: IngressMessages(cached.messages[..prefix_messages].to_vec()),
-            message_block_ends: cached.message_block_ends[..prefix_messages].to_vec(),
-            states_after_messages: cached.states_after_messages[..prefix_messages].to_vec(),
-            state: cached.states_after_messages[prefix_messages - 1]
-                .as_ref()
-                .clone(),
-        };
-        Ok((project_messages_from_state(self, builder)?, prefix_messages))
-    }
 }
 
 #[derive(Default)]
 struct FlatProjectionBuilder {
     blocks: Vec<FlatBlock>,
     identity_by_mid: BTreeMap<String, Vec<BlockIdentity>>,
-    messages: IngressMessages,
-    message_block_ends: Vec<usize>,
-    states_after_messages: Vec<Arc<ProjectionState>>,
     state: ProjectionState,
 }
 
@@ -510,18 +275,11 @@ fn project_messages_from_state(
     ingress: &MessageProjection<'_>,
     mut builder: FlatProjectionBuilder,
 ) -> Result<FlatProjection, WireError> {
-    debug_assert_eq!(builder.messages.len(), builder.message_block_ends.len());
-    debug_assert_eq!(builder.messages.len(), builder.states_after_messages.len());
-    // One metadata entry completes each message; its count is the suffix cursor.
     // Block ids are `mid#index`, so a repeated mid would give two messages'
     // blocks the same identities and let one message's content stand for the
     // other's. Synthetic messages take part: their block ids collide too.
-    let mut seen_mids: BTreeSet<String> = builder
-        .messages
-        .iter()
-        .map(|meta| meta.mid.clone())
-        .collect();
-    for msg in ingress.messages.iter().skip(builder.messages.len()) {
+    let mut seen_mids = BTreeSet::new();
+    for msg in ingress.messages {
         if msg.mid.is_empty() {
             return Err(WireError::EmptyMid {
                 ordinal: msg.ordinal,
@@ -601,19 +359,11 @@ fn project_messages_from_state(
         if !synthetic {
             builder.identity_by_mid.insert(msg.mid.clone(), identities);
         }
-        builder.messages.0.push(msg);
-        builder.message_block_ends.push(builder.blocks.len());
-        builder
-            .states_after_messages
-            .push(Arc::new(builder.state.clone()));
     }
 
     Ok(FlatProjection {
         blocks: builder.blocks,
         identity_by_mid: builder.identity_by_mid,
-        messages: builder.messages,
-        message_block_ends: builder.message_block_ends,
-        states_after_messages: builder.states_after_messages,
     })
 }
 
@@ -943,285 +693,6 @@ mod tests {
     }
 
     #[test]
-    fn projection_retained_bytes_counts_wire_and_frontier_allocations_once() {
-        use std::mem::size_of;
-
-        fn manual_value_retained_bytes(value: &Value) -> usize {
-            fn heap(value: &Value) -> usize {
-                match value {
-                    Value::Null | Value::Bool(_) | Value::Number(_) => 0,
-                    Value::String(value) => value.capacity(),
-                    Value::Array(values) => values
-                        .capacity()
-                        .saturating_mul(size_of::<Value>())
-                        .saturating_add(values.iter().map(heap).sum::<usize>()),
-                    Value::Object(values) => values
-                        .len()
-                        .saturating_mul(
-                            size_of::<String>() + size_of::<Value>() + size_of::<usize>() * 3,
-                        )
-                        .saturating_add(
-                            values
-                                .iter()
-                                .map(|(key, value)| key.capacity().saturating_add(heap(value)))
-                                .sum::<usize>(),
-                        ),
-                }
-            }
-            size_of::<Value>().saturating_add(heap(value))
-        }
-
-        let input = Value::Object(
-            (0..96)
-                .map(|index| {
-                    (
-                        format!("k{index}"),
-                        serde_json::json!({"v": format!("x{index}"), "ok": index % 2 == 0}),
-                    )
-                })
-                .collect(),
-        );
-        let constructed = Arc::new(IngressMessage {
-            mid: "tool-heavy".to_string(),
-            ordinal: 1,
-            ck: WireMessage::from_parts(
-                "assistant",
-                vec![WireBlock::bare(BlockKind::ToolCall {
-                    id: "call-heavy".to_string(),
-                    name: "fixture_tool".to_string(),
-                    input,
-                    provider_executed: false,
-                })],
-                Some(MessageOrigin {
-                    provider: "fixture-provider".into(),
-                    model: "fixture-model".into(),
-                    api: "chat".into(),
-                }),
-                serde_json::from_value(serde_json::json!({
-                    "fixture-provider": {"cache_control": {"type": "ephemeral"}}
-                }))
-                .unwrap(),
-                HarnessMeta {
-                    harness_id: Some("harness-tool-heavy".into()),
-                    ordinal: Some(1),
-                    summary: true,
-                    errored: true,
-                    finish: Some("tool_calls".into()),
-                    created_at_ms: Some(123_000),
-                    synthetic: false,
-                },
-            ),
-        });
-        let message: Arc<IngressMessage> =
-            serde_json::from_value(serde_json::to_value(constructed).unwrap()).unwrap();
-        let projection = project_messages(&[message]).unwrap();
-        let block = &projection.blocks[0];
-        let BlockKind::ToolCall {
-            id, name, input, ..
-        } = block.wire.kind()
-        else {
-            panic!("fixture must project a tool call");
-        };
-        let wire_retained = size_of::<WireBlock>()
-            .saturating_add(id.capacity())
-            .saturating_add(name.capacity())
-            .saturating_add(manual_value_retained_bytes(input).saturating_sub(size_of::<Value>()));
-        let block_heap = block
-            .id
-            .capacity()
-            .saturating_add(block.mid.capacity())
-            .saturating_add(block.role.capacity())
-            .saturating_add(block.kind_tag.capacity())
-            .saturating_add(block.name.as_ref().map_or(0, String::capacity))
-            .saturating_add(block.file_path.as_ref().map_or(0, String::capacity))
-            .saturating_add(block.arc_id.as_ref().map_or(0, String::capacity))
-            .saturating_add(block.tool_call_id.as_ref().map_or(0, String::capacity))
-            .saturating_add(block.output_kind.as_ref().map_or(0, String::capacity))
-            .saturating_add(crate::retained_size::ARC_ALLOCATION_OVERHEAD_BYTES)
-            .saturating_add(block.bytes.len());
-        let blocks = projection
-            .blocks
-            .capacity()
-            .saturating_mul(size_of::<FlatBlock>())
-            .saturating_add(block_heap);
-        let identities = projection
-            .identity_by_mid
-            .len()
-            .saturating_mul(
-                size_of::<String>() + size_of::<Vec<BlockIdentity>>() + size_of::<usize>() * 3,
-            )
-            .saturating_add(
-                projection
-                    .identity_by_mid
-                    .iter()
-                    .map(|(mid, identities)| {
-                        mid.capacity()
-                            .saturating_add(
-                                identities
-                                    .capacity()
-                                    .saturating_mul(size_of::<BlockIdentity>()),
-                            )
-                            .saturating_add(
-                                identities
-                                    .iter()
-                                    .map(|identity| {
-                                        identity
-                                            .kind_tag
-                                            .capacity()
-                                            .saturating_add(identity.byte_fingerprint.capacity())
-                                    })
-                                    .sum::<usize>(),
-                            )
-                    })
-                    .sum::<usize>(),
-            );
-        let frontiers = projection
-            .states_after_messages
-            .capacity()
-            .saturating_mul(size_of::<Arc<ProjectionState>>())
-            .saturating_add(
-                projection
-                    .states_after_messages
-                    .iter()
-                    .map(|state| {
-                        let pending = state
-                            .pending_calls
-                            .len()
-                            .saturating_mul(
-                                size_of::<String>()
-                                    + size_of::<VecDeque<String>>()
-                                    + size_of::<usize>() * 3,
-                            )
-                            .saturating_add(
-                                state
-                                    .pending_calls
-                                    .iter()
-                                    .map(|(key, values)| {
-                                        key.capacity()
-                                            .saturating_add(
-                                                values
-                                                    .capacity()
-                                                    .saturating_mul(size_of::<String>()),
-                                            )
-                                            .saturating_add(
-                                                values.iter().map(String::capacity).sum::<usize>(),
-                                            )
-                                    })
-                                    .sum::<usize>(),
-                            );
-                        let arcs = state
-                            .call_arcs
-                            .len()
-                            .saturating_mul(size_of::<String>() * 2 + size_of::<usize>() * 3)
-                            .saturating_add(
-                                state
-                                    .call_arcs
-                                    .iter()
-                                    .map(|(key, value)| {
-                                        key.capacity().saturating_add(value.capacity())
-                                    })
-                                    .sum::<usize>(),
-                            );
-                        crate::retained_size::ARC_ALLOCATION_OVERHEAD_BYTES
-                            .saturating_add(size_of::<ProjectionState>())
-                            .saturating_add(pending)
-                            .saturating_add(arcs)
-                    })
-                    .sum::<usize>(),
-            );
-        let shell = &projection.messages[0].ck;
-        let origin = shell.origin.as_ref().unwrap();
-        let origin_heap =
-            origin.provider.capacity() + origin.model.capacity() + origin.api.capacity();
-        let provider_heap = shell.provider_extras.len()
-            * (size_of::<String>() + size_of::<BTreeMap<String, Value>>() + size_of::<usize>() * 3)
-            + shell
-                .provider_extras
-                .iter()
-                .map(|(namespace, fields)| {
-                    namespace.capacity()
-                        + fields.len()
-                            * (size_of::<String>() + size_of::<Value>() + size_of::<usize>() * 3)
-                        + fields
-                            .iter()
-                            .map(|(key, value)| {
-                                key.capacity() + manual_value_retained_bytes(value)
-                                    - size_of::<Value>()
-                            })
-                            .sum::<usize>()
-                })
-                .sum::<usize>();
-        let meta_heap = shell.meta.harness_id.as_ref().unwrap().capacity()
-            + shell.meta.finish.as_ref().unwrap().capacity();
-        assert!(origin_heap > 0 && provider_heap > 0 && meta_heap > 0);
-        let expected = size_of::<FlatProjection>()
-            .saturating_add(blocks)
-            .saturating_add(identities)
-            .saturating_add(frontiers)
-            .saturating_add(projection.messages.capacity() * size_of::<Arc<IngressMessage>>())
-            .saturating_add(size_of::<usize>() * 2)
-            .saturating_add(size_of::<IngressMessage>())
-            .saturating_add(projection.messages[0].mid.capacity())
-            .saturating_add(projection.messages[0].ck.role.capacity())
-            .saturating_add(projection.messages[0].ck.content().capacity() * size_of::<WireBlock>())
-            .saturating_add(wire_retained - size_of::<WireBlock>())
-            .saturating_add(origin_heap)
-            .saturating_add(provider_heap)
-            .saturating_add(meta_heap)
-            .saturating_add(
-                projection
-                    .message_block_ends
-                    .capacity()
-                    .saturating_mul(size_of::<usize>()),
-            );
-        let legacy = projection
-            .blocks
-            .iter()
-            .map(|block| {
-                size_of::<FlatBlock>()
-                    + block.id.len()
-                    + block.mid.len()
-                    + block.role.len()
-                    + block.kind_tag.len()
-                    + block.name.as_deref().map_or(0, str::len)
-                    + block.file_path.as_deref().map_or(0, str::len)
-                    + block.arc_id.as_deref().map_or(0, str::len)
-                    + block.tool_call_id.as_deref().map_or(0, str::len)
-                    + block.output_kind.as_deref().map_or(0, str::len)
-                    + block.bytes.len() * 3
-            })
-            .sum::<usize>()
-            + projection
-                .identity_by_mid
-                .iter()
-                .map(|(mid, identities)| mid.len() + identities.len() * size_of::<BlockIdentity>())
-                .sum::<usize>()
-            + projection
-                .states_after_messages
-                .iter()
-                .map(|state| {
-                    state
-                        .pending_calls
-                        .iter()
-                        .map(|(key, values)| {
-                            key.len() + values.iter().map(String::len).sum::<usize>()
-                        })
-                        .sum::<usize>()
-                        + state
-                            .call_arcs
-                            .iter()
-                            .map(|(key, value)| key.len() + value.len())
-                            .sum::<usize>()
-                })
-                .sum::<usize>()
-            + projection.message_block_ends.len() * size_of::<usize>();
-        let retained = projection.retained_bytes();
-
-        assert!(retained >= legacy.saturating_mul(2));
-        assert_eq!(retained, expected);
-    }
-
-    #[test]
     fn repeated_call_id_within_owner_message_shares_one_arc_identity() {
         let message = Arc::new(IngressMessage {
             mid: "assistant-1".to_string(),
@@ -1501,63 +972,6 @@ mod tests {
     }
 
     #[test]
-    fn incremental_projection_reuses_prefix_storage_and_preserves_tool_arc_state() {
-        let mut messages = vec![
-            text_msg("m0", 0, "user", "start"),
-            assistant_with_call("m1", 1, "toolu_1"),
-            Arc::new(IngressMessage {
-                mid: "m2".to_string(),
-                ordinal: 2,
-                ck: WireMessage::from_parts(
-                    "tool",
-                    vec![WireBlock::bare(BlockKind::ToolResult {
-                        id: "toolu_1".to_string(),
-                        tool_name: "read".to_string(),
-                        output: ToolOutput::bare(OutputKind::Text {
-                            text: "first result".into(),
-                        }),
-                        provider_executed: false,
-                    })],
-                    None,
-                    ProviderExtras::new(),
-                    HarnessMeta::default(),
-                ),
-            }),
-        ];
-        let cached = project_messages(&messages).expect("initial projection");
-        let reattached = cached
-            .reattach_messages_prefix(2)
-            .expect("cached projection rebuilds its acknowledged ingress prefix");
-        assert_eq!(reattached[..], messages[..2]);
-        if let BlockKind::ToolResult { output, .. } =
-            Arc::make_mut(&mut messages[2]).ck.content_mut()[0].kind_mut()
-        {
-            output.kind = OutputKind::Text {
-                text: "changed result".into(),
-            };
-        }
-
-        let incremental =
-            project_messages_incremental(&messages, &cached, 2).expect("incremental projection");
-        let full = project_messages(&messages).expect("full projection");
-        assert_eq!(incremental, full);
-        assert_eq!(incremental.differential_bytes(), full.differential_bytes());
-        assert!(std::ptr::eq(
-            incremental.blocks[0].wire.as_ref(),
-            cached.blocks[0].wire.as_ref()
-        ));
-        assert!(Arc::ptr_eq(
-            &incremental.blocks[0].bytes,
-            &cached.blocks[0].bytes
-        ));
-        assert_eq!(
-            incremental.blocks[2].arc_id.as_deref(),
-            Some("m1#1"),
-            "the cached frontier must carry the pending tool call into the suffix"
-        );
-    }
-
-    #[test]
     fn empty_and_reserved_message_ids_are_rejected() {
         let empty = vec![text_msg("m0", 0, "user", "a"), text_msg("", 7, "user", "b")];
         assert_eq!(
@@ -1575,7 +989,7 @@ mod tests {
     /// Two messages sharing a mid would share every `mid#index` block id, so
     /// one message's blocks would stand for the other's in identity matching.
     #[test]
-    fn duplicate_message_ids_are_rejected_across_the_incremental_prefix() {
+    fn duplicate_message_ids_are_rejected() {
         let duplicated = vec![
             text_msg("m0", 0, "user", "a"),
             text_msg("m1", 1, "assistant", "b"),
@@ -1584,22 +998,6 @@ mod tests {
         assert_eq!(
             project_messages(&duplicated).unwrap_err(),
             WireError::DuplicateMid("m0".into())
-        );
-
-        // The incremental path carries the cached prefix's mids into the check.
-        let prefix = vec![
-            text_msg("m0", 0, "user", "a"),
-            text_msg("m1", 1, "assistant", "b"),
-        ];
-        let cached = project_messages(&prefix).unwrap();
-        let extended = vec![
-            text_msg("m0", 0, "user", "a"),
-            text_msg("m1", 1, "assistant", "b"),
-            text_msg("m1", 2, "user", "c"),
-        ];
-        assert_eq!(
-            project_messages_incremental(&extended, &cached, 2).unwrap_err(),
-            WireError::DuplicateMid("m1".into())
         );
     }
 
@@ -1687,60 +1085,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn reattach_shares_the_decoded_shell_and_unknown_envelope_fields_are_discarded() {
-        let mut json = serde_json::to_value(text_msg("m0", 0, "user", "hello")).unwrap();
-        json["ck"]["future_field"] = Value::from(1);
-        json["ck"]["content"][0]["future_block_field"] = Value::from(2);
-        json["ck"]["origin"] = serde_json::json!({
-            "provider": "fixture-provider", "model": "fixture-model", "api": "chat"
-        });
-        json["ck"]["provider_extras"] = serde_json::json!({
-            "fixture-provider": {"cache_control": {"type": "ephemeral"}, "sequence": [1, 2]}
-        });
-        json["ck"]["meta"] = serde_json::json!({
-            "harness_id": "harness-m0", "ordinal": 7, "summary": true,
-            "errored": true, "finish": "stop", "created_at_ms": 123_000
-        });
-        let message: Arc<IngressMessage> = serde_json::from_value(json.clone()).unwrap();
-        assert!(!message.ck.meta.synthetic);
-        assert_ne!(message.ck.meta, HarnessMeta::default());
-        let projection = project_messages(std::slice::from_ref(&message)).unwrap();
-
-        let reattached = projection.reattach_messages_prefix(1).unwrap();
-        assert!(
-            Arc::ptr_eq(&reattached[0], &message),
-            "the effective synthetic flag matches, so the decoded shell is shared"
-        );
-        let replayed = serde_json::to_value(&reattached[0].ck).unwrap();
-        // Unknown envelope fields are discarded at both the message and block level.
-        assert_eq!(replayed.get("future_field"), None);
-        assert_eq!(replayed["content"][0].get("future_block_field"), None);
-        assert_eq!(reattached[0].mid, message.mid);
-        assert_eq!(reattached[0].ordinal, message.ordinal);
-        assert_eq!(reattached[0].ck.origin, message.ck.origin);
-        assert_eq!(reattached[0].ck.provider_extras, message.ck.provider_extras);
-        assert_eq!(reattached[0].ck.meta, message.ck.meta);
-        assert_eq!(reattached[0].ck.content(), message.ck.content());
-        let mut expected = json["ck"].clone();
-        expected.as_object_mut().unwrap().remove("future_field");
-        expected["content"][0]
-            .as_object_mut()
-            .unwrap()
-            .remove("future_block_field");
-        assert_eq!(
-            serde_json::to_vec(&replayed).unwrap(),
-            serde_json::to_vec(&expected).unwrap()
-        );
-        let mut typed = json.clone();
-        typed["ck"].as_object_mut().unwrap().remove("future_field");
-        typed["ck"]["content"][0]
-            .as_object_mut()
-            .unwrap()
-            .remove("future_block_field");
-        assert_eq!(serde_json::to_value(&message).unwrap(), typed);
-    }
-
     /// A message whose effective synthetic flag differs from its ingress flag gets a rebuilt shell with only that flag changed; the ingress shell is untouched.
     #[test]
     fn projection_rebuilds_only_the_shell_whose_synthetic_flag_changes() {
@@ -1761,61 +1105,20 @@ mod tests {
         let mut ingress = MessageProjection::new(&messages);
         ingress.mark_synthetic(&messages[1]);
         let projection = ingress.project().unwrap();
-        let reattached = projection.reattach_messages_prefix(2).unwrap();
-        assert!(Arc::ptr_eq(&reattached[0], &messages[0]));
-        assert!(!Arc::ptr_eq(&reattached[1], &messages[1]));
-        assert!(reattached[1].ck.meta.synthetic);
+        let shell = |mid: &str| {
+            let block = projection.blocks.iter().find(|block| block.mid == mid);
+            Arc::clone(&block.unwrap().wire.message)
+        };
+        let (live, rebuilt) = (shell("m0"), shell("m1"));
+        assert!(Arc::ptr_eq(&live, &messages[0]));
+        assert!(!Arc::ptr_eq(&rebuilt, &messages[1]));
+        assert!(rebuilt.ck.meta.synthetic);
         assert!(!messages[1].ck.meta.synthetic);
         let mut expected = unflagged;
         expected.meta.synthetic = true;
-        assert_eq!(reattached[1].ck, expected);
-        assert_eq!(reattached[1].mid, "m1");
-        assert_eq!(reattached[1].ordinal, 1);
-    }
-
-    #[test]
-    fn repeated_prefix_reattachment_shares_canonical_shells() {
-        let mut json = serde_json::to_value(text_msg("m0", 0, "user", "prefix")).unwrap();
-        json["ck"]["future_field"] = Value::from(1);
-        json["ck"]["content"][0]["future_block_field"] = Value::from(2);
-        let messages: IngressMessages = serde_json::from_value(serde_json::json!([json])).unwrap();
-        let original_bytes = serde_json::to_vec(&messages).unwrap();
-        let cached = project_messages(&messages).unwrap();
-        let first = cached.reattach_messages_prefix(1).unwrap();
-        let second = cached.reattach_messages_prefix(1).unwrap();
-        assert!(std::ptr::eq(&first[0].ck, &second[0].ck));
-        assert!(std::ptr::eq(
-            cached.blocks[0].wire.as_ref(),
-            &first[0].ck.content()[0]
-        ));
-        let projected = project_messages(&first).unwrap();
-        let third = projected.reattach_messages_prefix(1).unwrap();
-        assert!(std::ptr::eq(&first[0].ck, &third[0].ck));
-        let shared = first.clone();
-        let incremental = project_messages_incremental(&shared, &cached, 1).unwrap();
-        assert!(Arc::ptr_eq(&incremental.messages[0], &first[0]));
-        for projection in [&projected, &incremental] {
-            assert_eq!(projection, &cached);
-            assert_eq!(projection.differential_bytes(), cached.differential_bytes());
-            assert_eq!(
-                projection.blocks[0].content_hash,
-                cached.blocks[0].content_hash
-            );
-            assert_eq!(projection.identity_by_mid, cached.identity_by_mid);
-        }
-        assert_eq!(
-            serde_json::to_vec(&first).unwrap(),
-            serde_json::to_vec(&shared).unwrap()
-        );
-        assert_eq!(serde_json::to_vec(&messages).unwrap(), original_bytes);
-        let mut edited = shared;
-        Arc::make_mut(&mut edited[0]).ck.content_mut().clear();
-        assert!(!Arc::ptr_eq(&first[0], &edited[0]));
-        assert_eq!(first[0].ck.content().len(), 1);
-        assert_eq!(cached.reattach_messages_prefix(1).unwrap(), first);
-        let block = cached.blocks[0].clone();
-        drop(cached);
-        assert!(std::ptr::eq(block.wire.as_ref(), &first[0].ck.content()[0]));
+        assert_eq!(rebuilt.ck, expected);
+        assert_eq!(rebuilt.mid, "m1");
+        assert_eq!(rebuilt.ordinal, 1);
     }
 
     #[test]
@@ -1837,53 +1140,6 @@ mod tests {
             let owned = serde_json::from_str::<Vec<IngressMessage>>(body).unwrap_err();
             let shared = serde_json::from_str::<IngressMessages>(body).unwrap_err();
             assert_eq!(shared.to_string(), owned.to_string(), "{body}");
-        }
-    }
-
-    #[test]
-    fn incremental_projection_checks_effective_synthetic_status() {
-        let messages = [
-            text_msg("m0", 0, "user", "prefix"),
-            text_msg("m1", 1, "user", "tail"),
-        ];
-        for cached_synthetic in [false, true] {
-            let mut prior = MessageProjection::new(&messages);
-            if cached_synthetic {
-                prior.mark_synthetic(&messages[0]);
-            }
-            let cached = prior.project().unwrap();
-            for synthetic in [false, true] {
-                let mut current = MessageProjection::new(&messages);
-                if synthetic {
-                    current.mark_synthetic(&messages[0]);
-                }
-                let (incremental, reused_messages) =
-                    current.project_incremental(&cached, 1).unwrap();
-                assert_eq!(reused_messages, usize::from(cached_synthetic == synthetic));
-                assert_eq!(incremental, current.project().unwrap());
-                assert_eq!(
-                    std::ptr::eq(
-                        incremental.blocks[0].wire.as_ref(),
-                        cached.blocks[0].wire.as_ref()
-                    ),
-                    cached_synthetic == synthetic,
-                );
-                assert_eq!(
-                    Arc::ptr_eq(&incremental.blocks[0].bytes, &cached.blocks[0].bytes),
-                    cached_synthetic == synthetic,
-                );
-                assert_eq!(
-                    Arc::ptr_eq(&incremental.messages[0], &cached.messages[0]),
-                    cached_synthetic == synthetic,
-                );
-                assert_eq!(
-                    incremental.reattach_messages_prefix(1).unwrap()[0]
-                        .ck
-                        .meta
-                        .synthetic,
-                    synthetic
-                );
-            }
         }
     }
 }

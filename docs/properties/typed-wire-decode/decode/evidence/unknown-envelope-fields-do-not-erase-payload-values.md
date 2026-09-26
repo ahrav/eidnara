@@ -115,3 +115,9 @@ and the reattach sharing test (wire.rs), `overlay_canonicalizes_only_the_mutated
 (the opaque payload survives; `sentinel_unknown_field` does not), and
 `decoded_envelope_charges_only_typed_fields`. A nested unknown key inside a
 retained payload `Value` is not separately witnessed.
+
+Update, 2026-09-26: [#828](https://github.com/ahrav/eidnara/issues/828) deletes
+`reattach_shares_the_decoded_shell_and_unknown_envelope_fields_are_discarded`
+with prefix reattachment; decode-side unknown-field handling is unchanged. The
+daemon projects every request from its full input. Citations of these symbols
+here are historical at their stated baseline.

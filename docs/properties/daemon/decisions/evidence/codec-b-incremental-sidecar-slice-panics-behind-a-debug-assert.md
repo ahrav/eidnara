@@ -124,6 +124,11 @@ alongside `NativeCacheKeyMode::CorruptSidecarForTest` at `:12450-12454`. So the
 authors built a corruption hook for the projection prefix and clamp it defensively;
 the sidecar slice has neither.
 
+Update, 2026-09-26: [#828](https://github.com/ahrav/eidnara/issues/828) deletes
+`ProjectionCacheKeyMode` and `validated_projection_cache_input`;
+`NativeCacheKeyMode` remains. The daemon projects every request from its full
+input. Citations of these symbols here are historical at their stated baseline.
+
 `wire.rs:369-372` states the policy the projection path follows: "The caller
 validates the session fingerprint and context before supplying `cached`;
 malformed or out-of-range local metadata falls back to a full projection rather

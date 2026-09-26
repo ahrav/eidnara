@@ -270,6 +270,13 @@ matters for how the part is read: a subsystem whose invariants otherwise live in
 guard clusters returning `Result` needs reachability records for the few places that
 panic instead, and only one of the three release-live panics has one.
 
+Update, 2026-09-26: [#828](https://github.com/ahrav/eidnara/issues/828) deletes
+`assert_prefix_projection_equivalent`, `prefix_projection_differential_enabled`,
+and `EIDNARA_PREFIX_PROJECTION_DIFFERENTIAL`, so the two projection-differential
+`assert_eq!` described here no longer exist and gap G2 applies to the native
+switch alone. The daemon projects every request from its full input. Citations
+of these symbols here are historical at their stated baseline.
+
 ### The legal transitions, and what the engine does outside them
 
 Durable state is two JSON blobs in one row plus `row_version`. Exactly three

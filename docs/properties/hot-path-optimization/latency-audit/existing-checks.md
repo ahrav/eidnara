@@ -133,18 +133,24 @@ not the handler.
 
 ## Shared-input equivalence
 
+[#828](catalog.md#projection-prefix-reuse-retirement-2026-09-26) deletes the
+projection cache, prefix reattachment from the projection, incremental
+projection, and the prefix-projection differential. Rows marked "deleted by
+#828" name checks removed with that mechanism; their links point at
+`704568ec`. The full-projection checks that remain replace them.
+
 | Check | Source condition or assertion | Status |
 | --- | --- | --- |
-| [`assert_message_projection_equivalent`][assert-prefix] | Incremental and full projection equal by `differential_bytes` and by value; production calls run under [`prefix_projection_differential_enabled`][gate-prefix], which is enabled in tests or by `EIDNARA_PREFIX_PROJECTION_DIFFERENTIAL=1`. The test-only slice adapter `assert_prefix_projection_equivalent` delegates to this shared check. | unaudited |
-| [`incremental_projection_reuses_prefix_storage_and_preserves_tool_arc_state`][t-inc] | Reattached prefix equals `from_parts` inputs; incremental equals full; prefix block backing and byte allocations are pointer-shared. | unaudited |
-| [`incremental_projection_checks_effective_synthetic_status`][t-synthetic-status] | Across all four cached/current effective synthetic-flag pairs, incremental and full projections agree; prefix block backing, shell Arcs, and byte allocations are shared exactly when flags agree. | unaudited |
-| [`compaction_mode_projection_cache_reclassifies_synthetic_prefix`][t-compaction-cache] | Direct off/on/on/off/on changes to `ProducerContext.compaction_enabled` drive real transforms and the handler's cache lookup/store helpers. Checks full-projection equality, reattached flags, prefix `wire` reuse on the repeated on pass, and unchanged ingress bytes. On enabled passes, `(projection_reused_messages, projection_projected_messages)` is `(0, 4)` after a mode change and `(4, 0)` on stable reuse. No route binding or config reload. | unaudited |
-| [`reattach_keeps_block_level_original_but_rebuilds_the_message_shell`][t-reattach] | Reparsed input has nonempty origin and provider extras plus non-default, non-synthetic harness metadata. Replay drops only the unknown message-level field; transport identity, all known shell fields, and block originals remain equal. The original unknown-field expectations are retained. | unaudited |
-| [Repeated canonical-shell reattachment][shell-sharing] | Reattachment, cloned requests, full projection of canonical input, and incremental projection preserve pointers, projection bytes, digests, and identities. Unknown message fields are discarded without changing raw ingress; block originals survive. Copy-on-write edits leave the cached shell unchanged. | unaudited |
+| [`assert_message_projection_equivalent`][assert-prefix] | Incremental and full projection equal by `differential_bytes` and by value; production calls run under [`prefix_projection_differential_enabled`][gate-prefix], which is enabled in tests or by `EIDNARA_PREFIX_PROJECTION_DIFFERENTIAL=1`. The test-only slice adapter `assert_prefix_projection_equivalent` delegates to this shared check. | deleted by #828 with the mechanism it checked |
+| [`incremental_projection_reuses_prefix_storage_and_preserves_tool_arc_state`][t-inc] | Reattached prefix equals `from_parts` inputs; incremental equals full; prefix block backing and byte allocations are pointer-shared. | deleted by #828 with the mechanism it checked |
+| [`incremental_projection_checks_effective_synthetic_status`][t-synthetic-status] | Across all four cached/current effective synthetic-flag pairs, incremental and full projections agree; prefix block backing, shell Arcs, and byte allocations are shared exactly when flags agree. | deleted by #828 with the mechanism it checked |
+| [`compaction_mode_projection_cache_reclassifies_synthetic_prefix`][t-compaction-cache] | Direct off/on/on/off/on changes to `ProducerContext.compaction_enabled` drive real transforms and the handler's cache lookup/store helpers. Checks full-projection equality, reattached flags, prefix `wire` reuse on the repeated on pass, and unchanged ingress bytes. On enabled passes, `(projection_reused_messages, projection_projected_messages)` is `(0, 4)` after a mode change and `(4, 0)` on stable reuse. No route binding or config reload. | deleted by #828 with the mechanism it checked |
+| [`reattach_keeps_block_level_original_but_rebuilds_the_message_shell`][t-reattach] | Reparsed input has nonempty origin and provider extras plus non-default, non-synthetic harness metadata. Replay drops only the unknown message-level field; transport identity, all known shell fields, and block originals remain equal. The original unknown-field expectations are retained. | deleted by #828 with the mechanism it checked |
+| [Repeated canonical-shell reattachment][shell-sharing] | Reattachment, cloned requests, full projection of canonical input, and incremental projection preserve pointers, projection bytes, digests, and identities. Unknown message fields are discarded without changing raw ingress; block originals survive. Copy-on-write edits leave the cached shell unchanged. | deleted by #828 with the mechanism it checked |
 | [Shared ingress decode and mobility][shell-decode] | Request messages and projections satisfy `Send + 'static`; malformed message arrays return the same errors as owned ingress arrays. | unaudited |
-| [Projection shell allocation accounting][shell-charge] | An independent sum covers shell and block backing, retained block JSON, Arc counters, content capacity, identities, and frontiers with exact equality. Nonzero origin, provider namespace/tree/value, and harness metadata heap terms are computed without the cached-charge helper. | unaudited |
-| [`projection_differential_catches_corrupt_first_changed_position`][t-projdiff] | A corrupt frontier is caught by the differential. | unaudited |
-| [`astro_scale_projection_cache_reuses_on_the_second_pass`][t-astro] | The second pass reuses the cached projection. | unaudited |
+| [Projection shell allocation accounting][shell-charge] | An independent sum covers shell and block backing, retained block JSON, Arc counters, content capacity, identities, and frontiers with exact equality. Nonzero origin, provider namespace/tree/value, and harness metadata heap terms are computed without the cached-charge helper. | deleted by #828 with the mechanism it checked |
+| [`projection_differential_catches_corrupt_first_changed_position`][t-projdiff] | A corrupt frontier is caught by the differential. | deleted by #828 with the mechanism it checked |
+| [`astro_scale_projection_cache_reuses_on_the_second_pass`][t-astro] | The second pass reuses the cached projection. | deleted by #828 with the mechanism it checked |
 | [`pending_rewrite_passes_isolate_ingress_meta_usage_and_reconcile`][t-pending] | Pass reads of ingress meta are isolated. | unaudited |
 | [`warm_cache_selection_bust_does_not_replay_collapsed_synthetic_todo_as_live`][t-collapsed] | A replayed pair without the flag yields no duplicate tool-use id and reuses the cache. | unaudited |
 | [synthetic_ingress_matches_flagged_reference][synthetic-reference] | Fresh, pending and lineage cases preserve canonical bytes, digests/projection state, native bytes and tag rows against typed-flagged input. Complete boundary diagnostics and chunk inputs agree with the same original handler request. A carrier-targeted overlay cannot mutate the synthetic message; a live control does take its tag. | unaudited |
@@ -564,17 +570,17 @@ not a claim that no related check exists anywhere in the repository.
 [t-budget-charge]: ../../../../crates/host-runtime/src/wire.rs#L863
 [t-pools]: ../../../../crates/host-runtime/src/config.rs#L481
 
-[gate-prefix]: ../../../../crates/daemon/src/transform.rs#L2016
-[assert-prefix]: ../../../../crates/daemon/src/transform.rs#L2031
-[t-inc]: ../../../../crates/daemon/src/wire.rs#L1521
-[t-synthetic-status]: ../../../../crates/daemon/src/wire.rs#L1818
-[t-compaction-cache]: ../../../../crates/daemon/src/lib.rs#L39309
-[t-reattach]: ../../../../crates/daemon/src/wire.rs#L1708
-[shell-sharing]: ../../../../crates/daemon/src/wire.rs#L1749
-[shell-decode]: ../../../../crates/daemon/src/wire.rs#L1796
-[shell-charge]: ../../../../crates/daemon/src/wire.rs#L958
-[t-projdiff]: ../../../../crates/daemon/src/lib.rs#L24897
-[t-astro]: ../../../../crates/daemon/src/lib.rs#L23613
+[gate-prefix]: https://github.com/ahrav/eidnara/blob/704568ec/crates/daemon/src/transform.rs#L2250
+[assert-prefix]: https://github.com/ahrav/eidnara/blob/704568ec/crates/daemon/src/transform.rs#L2265
+[t-inc]: https://github.com/ahrav/eidnara/blob/704568ec/crates/daemon/src/wire.rs#L1504
+[t-synthetic-status]: https://github.com/ahrav/eidnara/blob/704568ec/crates/daemon/src/wire.rs#L1844
+[t-compaction-cache]: https://github.com/ahrav/eidnara/blob/704568ec/crates/daemon/src/lib.rs#L43823
+[t-reattach]: https://github.com/ahrav/eidnara/blob/704568ec/crates/daemon/src/wire.rs#L1691
+[shell-sharing]: https://github.com/ahrav/eidnara/blob/704568ec/crates/daemon/src/wire.rs#L1777
+[shell-decode]: ../../../../crates/daemon/src/wire.rs#L1125
+[shell-charge]: https://github.com/ahrav/eidnara/blob/704568ec/crates/daemon/src/wire.rs#L946
+[t-projdiff]: https://github.com/ahrav/eidnara/blob/704568ec/crates/daemon/src/lib.rs#L28101
+[t-astro]: https://github.com/ahrav/eidnara/blob/704568ec/crates/daemon/src/lib.rs#L26821
 [t-pending]: ../../../../crates/daemon/src/transform.rs#L19407
 [t-collapsed]: ../../../../crates/daemon/src/transform.rs#L27958
 [synthetic-reference]: ../../../../crates/daemon/src/transform.rs#L27709

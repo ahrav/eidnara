@@ -66,6 +66,12 @@ inside-the-pass invariant; nothing states the outside one.
   bust pass can freeze a todo pair; the [replayed-pair test][t-collapsed]
   builds the replay at `:27303-27318` without the `synthetic` marker.
 
+Update, 2026-09-26: [#828](https://github.com/ahrav/eidnara/issues/828) deletes
+`store_projection_cache` and `reattach_messages_prefix`; a delta prefix now
+comes from the ready request snapshot with the flags the harness sent. The
+daemon projects every request from its full input. Citations of these symbols
+here are historical at their stated baseline.
+
 ## Failure scenario
 
 A shared-reference design flags `parsed` before `apply`. The history_summarizer's

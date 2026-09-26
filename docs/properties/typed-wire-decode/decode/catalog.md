@@ -277,6 +277,12 @@ Impact: Tool arguments, opaque content, native metadata, or media references
 disappear, or R3 silently remains unimplemented.
 Open questions:
 
+Update, 2026-09-26: [#828](https://github.com/ahrav/eidnara/issues/828) deletes
+`reattach_shares_the_decoded_shell_and_unknown_envelope_fields_are_discarded`
+with prefix reattachment; decode-side unknown-field handling is unchanged. The
+daemon projects every request from its full input. Citations of these symbols
+here are historical at their stated baseline.
+
 - Does every kept-field witness distinguish explicit field null from a null
   nested inside a Value?
 - Which unlisted sender shapes rely on discarded typed-envelope extensions?
@@ -324,13 +330,17 @@ Open questions:
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: partial - `wire.rs` sharing tests pass with the owned model
-(`reattach_shares_the_decoded_shell_and_unknown_envelope_fields_are_discarded` and
-the shared-shell checks at `wire.rs:1749-1814`), and
-`decode_and_projection_fit_the_declared_pool` checks every projection block
-points into the request's shells; the projection now shares the shell whenever
-the effective synthetic flag matches (`wire.rs` `project_messages_from_state`).
-No input-drop sequence was added.
+Exercised: partial -
+`projection_rebuilds_only_the_shell_whose_synthetic_flag_changes`
+(`wire.rs:1090`) checks shell sharing through the projected blocks, and
+`decode_and_projection_fit_the_declared_pool`
+(`crates/daemon/tests/typed_wire_decode_allocations.rs:250`) checks every
+projection block points into the request's shells; the projection shares the
+shell whenever the effective synthetic flag matches (`wire.rs`
+`project_messages_from_state`). No input-drop sequence was added. #828
+deleted `reattach_shares_the_decoded_shell_and_unknown_envelope_fields_are_discarded`
+and the shared-shell checks formerly at `wire.rs:1749-1814` together with
+prefix reattachment; `existing-checks.md` keeps their pre-#828 rows.
 Guarantee: Decoded requests and retained projections own their data, remain
 Send plus static, and share unchanged prefix shells without depending on the
 body buffer's lifetime.
@@ -349,8 +359,11 @@ Arc owners.
 Confidence: high - [evidence](evidence/decoded-snapshots-own-and-share-prefixes.md).
 Owned field types and retention paths are verified; early production input
 release is not claimed.
-Existing check: daemon wire.rs:1749-1814 and :1818-1860; daemon
-lib.rs:22886-23004; all unaudited, with byte-buffer-drop witness missing.
+Existing check: daemon wire.rs:1090
+`projection_rebuilds_only_the_shell_whose_synthetic_flag_changes`, unaudited;
+the former wire.rs:1749-1814 and :1818-1860 checks are deleted by #828; daemon
+lib.rs:22886-23004 at the 2026-09-13 discovery HEAD, unaudited; byte-buffer-drop
+witness missing.
 Impact: Buffer lifetime constrains request retention, prefix sharing is lost,
 or surviving cached input becomes unusable.
 Open questions:

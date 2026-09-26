@@ -198,25 +198,6 @@ fn dg_goldens_exercise_incremental_native_differential_mode() {
         assert_eq!(stats.reused_messages, served.len(), "{} prefix", case.id);
         assert!(first.native_messages.is_none(), "{}", case.id);
         assert!(replay.native_messages.is_none(), "{}", case.id);
-
-        let mut appended = request.messages.clone();
-        appended.push(IngressMessage {
-            mid: format!("dg-{}-tail", case.id),
-            ordinal: appended
-                .last()
-                .map_or(1, |message| message.ordinal.saturating_add(1)),
-            ck: WireMessage::synthetic_user_text("differential projection tail"),
-        });
-        let projection =
-            crate::wire::project_messages(&request.messages).expect("DG projection must succeed");
-        let incremental = crate::wire::project_messages_incremental(
-            &appended,
-            &projection,
-            request.messages.len(),
-        )
-        .expect("DG incremental projection must succeed");
-        crate::transform::assert_prefix_projection_equivalent(&incremental, &appended)
-            .expect("DG full projection must succeed");
     }
 }
 
