@@ -104,6 +104,11 @@ does not define the new messages allocation threshold.
 
 ## Retained accounting and projection controls
 
+Locations are at the header HEAD `2e4433e6`. #828 deletes the rows marked
+below and shrinks `wire.rs` to 1,145 lines, so every surviving `wire.rs` row
+from `:1242` on has moved; the status column names the surviving location for
+the rows #828 renamed or displaced past that file end.
+
 | Location and test | Condition or role | Status |
 | --- | --- | --- |
 | `crates/daemon/src/retained_size.rs:290` `original_json_is_charged_only_while_retained` | Original-tree heap deltas disappear on mutation; this assertion depends on the representation the plan removes. | unaudited |
@@ -116,11 +121,11 @@ does not define the new messages allocation threshold.
 | `crates/daemon/src/wire.rs:1447` `opaque_and_media_inside_tool_result_content_are_accepted_and_projected` | Surviving Value-bearing payload shape control. | unaudited |
 | `crates/daemon/src/wire.rs:1521` `incremental_projection_reuses_prefix_storage_and_preserves_tool_arc_state` | Prefix storage reuse and semantic equivalence. | deleted by #828 with the mechanism it checked |
 | `crates/daemon/src/wire.rs:1578` `empty_and_reserved_message_ids_are_rejected` | Invalid identity projection control. | unaudited |
-| `crates/daemon/src/wire.rs:1595` `duplicate_message_ids_are_rejected_across_the_incremental_prefix` | Incremental prefix failure control. | unaudited; #828 deletes the incremental arm and renames the test `duplicate_message_ids_are_rejected` |
+| `crates/daemon/src/wire.rs:1595` `duplicate_message_ids_are_rejected_across_the_incremental_prefix` | Incremental prefix failure control. | unaudited; #828 deletes the incremental arm and renames the test `duplicate_message_ids_are_rejected`, now at `wire.rs:992` |
 | `crates/daemon/src/wire.rs:1624` `reduced_tool_result_keeps_failure_variant_and_output_extras` | Payload preservation control; no byte accounting assertion. | unaudited |
 | `crates/daemon/src/wire.rs:1708` `reattach_keeps_block_level_original_but_rebuilds_the_message_shell` | Message original removed, block original retained, replay preserved; representation-specific clauses need replacement. | deleted by #828 with the mechanism it checked; renamed `reattach_shares_the_decoded_shell_and_unknown_envelope_fields_are_discarded` before #828 |
 | `crates/daemon/src/wire.rs:1749` `repeated_prefix_reattachment_shares_canonical_shells` | Pointer sharing, equivalent projection, copy-on-write, surviving block owner. | deleted by #828 with the mechanism it checked |
-| `crates/daemon/src/wire.rs:1796` `shared_ingress_is_send_and_preserves_decode_refusals` | Send + static types and shared/owned decode refusal equivalence. | unaudited |
+| `crates/daemon/src/wire.rs:1796` `shared_ingress_is_send_and_preserves_decode_refusals` | Send + static types and shared/owned decode refusal equivalence. | unaudited; at `wire.rs:1125` after #828 |
 | `crates/daemon/src/wire.rs:1818` `incremental_projection_checks_effective_synthetic_status` | Sharing occurs only with compatible synthetic status. | deleted by #828 with the mechanism it checked |
 | `crates/daemon/src/lib.rs:20584` `transform_snapshot_cache_is_generation_safe_and_lru_bounded` | Snapshot lifecycle/LRU control; not a transient allocator peak. | unaudited |
 | `crates/daemon/src/lib.rs:20624` `snapshot_lease_budget_survives_cache_churn_and_releases_exact_charge` | Active owner remains charged across eviction and releases on drop. | unaudited |
