@@ -709,39 +709,78 @@ export function capturedMessagesUnchanged(live: unknown, captured: CapturedMessa
 }
 
 type HostArrayRejectionReason =
-    | ReferenceableRejection["reason"]
+    | "proxy"
+    | "not_array"
     | "not_extensible"
     | "length_not_writable"
-    | "element_not_writable"
-    | "budget";
+    | "slot_not_configurable";
 
-export function hostArrayReplacementRejection(target: unknown): HostArrayRejectionReason | null {
+/**
+ * Checks the container and the output slots `[0, slots)` a publication writes; the capture recheck
+ * covers every captured slot. Slots at `slots` and above are deleted by the shrink, which fails
+ * explicitly instead of being checked here.
+ */
+export function publicationRejection(
+    target: unknown,
+    slots: number,
+): HostArrayRejectionReason | null {
     if (types.isProxy(target)) return "proxy";
     if (!Array.isArray(target)) return "not_array";
-    if (!Object.isExtensible(target)) return "not_extensible";
+    // D21 lists the sealed and frozen checks although non-extensibility already implies them.
+    if (!Object.isExtensible(target) || Object.isSealed(target) || Object.isFrozen(target))
+        return "not_extensible";
     if (!Object.getOwnPropertyDescriptor(target, "length")?.writable) return "length_not_writable";
-    try {
-        let writable = true;
-        new ReferenceableWalk().members(target, (slot) => {
-            writable = writable && slot.writable === true && slot.configurable === true;
-        });
-        return writable ? null : "element_not_writable";
-    } catch (error) {
-        if (error instanceof SourceRejected) return error.reason;
-        if (error instanceof CaptureBudgetExceeded) return "budget";
-        throw error;
+    const end = Math.min(slots, target.length);
+    for (let index = 0; index < end; index += 1) {
+        if (Object.getOwnPropertyDescriptor(target, index)?.configurable === false)
+            return "slot_not_configurable";
     }
+    return null;
+}
+
+/** Why a shrink failed and the length `ArraySetLength` left before the members were restored. */
+export interface PublicationFailure {
+    error: unknown;
+    shrunkLength: number;
+    detail: string;
 }
 
 /**
- * Precondition: `hostArrayReplacementRejection(target)` returns `null`. Own-slot definitions
- * bypass inherited setters; a writable length and configurable slots allow shrinking.
+ * Precondition: `publicationRejection(target, next.length)` returns `null`. Shrinks the length to
+ * `next.length` first, then defines each slot, bypassing inherited setters. A non-configurable slot
+ * k at or above `next.length` stops the shrink after every slot above k is deleted; the members
+ * above k are then restored from `members`, no slot of `next` is written, and the failure is
+ * returned. A throw while restoring is reported as the same failure.
  */
-export function replaceHostArrayContents(target: unknown[], next: readonly unknown[]): void {
-    for (let index = 0; index < next.length; index += 1) {
-        defineSlot(target, index, next[index]);
+export function publishInPlace(
+    target: unknown[],
+    next: readonly unknown[],
+    members: readonly unknown[],
+): PublicationFailure | undefined {
+    try {
+        if (target.length > next.length)
+            Object.defineProperty(target, "length", { value: next.length });
+    } catch (error) {
+        const shrunkLength = target.length;
+        let restoreError: unknown;
+        try {
+            for (let index = shrunkLength; index < members.length; index += 1)
+                defineSlot(target, index, members[index]);
+        } catch (thrown) {
+            restoreError = thrown;
+        }
+        const restored =
+            restoreError === undefined
+                ? `restored ${members.length - shrunkLength} captured references`
+                : `restoring captured references failed (${String(restoreError)})`;
+        return {
+            error,
+            shrunkLength,
+            detail: `shrink to ${next.length} stopped at length ${shrunkLength} (${String(error)}); ${restored}`,
+        };
     }
-    Object.defineProperty(target, "length", { value: next.length });
+    for (let index = 0; index < next.length; index += 1) defineSlot(target, index, next[index]);
+    return undefined;
 }
 
 export interface CaptureLease {

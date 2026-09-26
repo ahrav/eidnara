@@ -111,11 +111,11 @@
         {
             "path": "tests/rust-multi-frame-delta.test.ts",
             "tier": "rust-only",
-            "rationale": "large provider-visible tail stays intact across one-page reuse and bounded multi-page retransmission",
+            "rationale": "every pass sends the whole captured array, and a large provider-visible tail stays intact across multi-page sends",
             "contract_refs": [
                 "U5-PORT"
             ],
-            "quarantined": "the large-tail invariant reads false against the paged module wire; the paging bound and tail preservation need re-derivation"
+            "quarantined": "the 160k-token tail exceeds the memory store's 512 KiB MAX_DURABLE_TEXT_BYTES, so the daemon rejects the pass with InputLimit and serves raw"
         },
         {
             "path": "tests/rust-park-self-heal.test.ts",

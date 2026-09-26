@@ -11,11 +11,11 @@ import {
     defaultTransformCaptureAdmission,
     type HistoryDigest,
     historyDigestsEqual,
-    hostArrayReplacementRejection,
     inspectReferenceableMessages,
     type MessageContentSnapshot,
+    publicationRejection,
+    publishInPlace,
     readOwnDataProperty,
-    replaceHostArrayContents,
     rootArrayRejection,
     snapshotFieldsEqual,
     TransformCaptureAdmission,
@@ -134,7 +134,7 @@ describe("referenceable JSON domain guard", () => {
             });
             expect(() => captureMessages(source)).toThrow();
             expect(capturedMessagesUnchanged(source, captured)).toBe(false);
-            expect(hostArrayReplacementRejection(source)).toBe("proxy");
+            expect(publicationRejection(source, 0)).toBe("proxy");
         }
         expect(counter.count).toBe(0);
     });
@@ -971,7 +971,7 @@ describe("host array replacement contract", () => {
         const next = [message("m1"), message("m2"), message("m3")];
         const saved = Object.getOwnPropertyDescriptor(prototype, "0");
         let inspection: ReturnType<typeof inspectReferenceableMessages> | undefined;
-        let hostRejection: ReturnType<typeof hostArrayReplacementRejection> | undefined;
+        let hostRejection: ReturnType<typeof publicationRejection> | undefined;
         try {
             Object.defineProperty(prototype, "0", {
                 set: counter.trap,
@@ -979,9 +979,9 @@ describe("host array replacement contract", () => {
                 configurable: true,
             });
             inspection = inspectReferenceableMessages(next);
-            hostRejection = hostArrayReplacementRejection(target);
+            hostRejection = publicationRejection(target, next.length);
             // Own-slot definitions never consult inherited accessors.
-            replaceHostArrayContents(target, next);
+            expect(publishInPlace(target, next, [])).toBeUndefined();
         } finally {
             if (saved) Object.defineProperty(prototype, "0", saved);
             else Reflect.deleteProperty(prototype, "0");
@@ -991,18 +991,21 @@ describe("host array replacement contract", () => {
             ok: false,
             rejection: { reason: "prototype_accessor", path: `${name}.prototype/0` },
         });
-        expect(hostRejection).toBe("prototype_accessor");
+        // The container check reads no prototype; the capture walk refuses the accessor first.
+        expect(hostRejection).toBeNull();
         expect(target).toEqual(next);
         expect(target[0]).toBe(next[0]);
         expect(counter.count).toBe(0);
     });
 
-    it("reports a destination slot that stopped accepting writes and reads no candidate getter", () => {
+    it("checks only the output slots a publication writes and reads no candidate getter", () => {
         const counter = trapCounter();
         const target: unknown[] = ["old0", "old1", "old2"];
-        expect(hostArrayReplacementRejection(target)).toBeNull();
+        expect(publicationRejection(target, 3)).toBeNull();
         Object.defineProperty(target, "2", { writable: false, configurable: false });
-        expect(hostArrayReplacementRejection(target)).toBe("element_not_writable");
+        // Slot 2 lies past a two-slot output, so the shrink meets it instead of the preflight.
+        expect(publicationRejection(target, 2)).toBeNull();
+        expect(publicationRejection(target, 3)).toBe("slot_not_configurable");
         const source = ["new0", "new1"];
         Object.defineProperty(source, "1", { get: counter.trap, enumerable: true });
         expect(inspectReferenceableMessages(source)).toEqual({
@@ -1012,15 +1015,90 @@ describe("host array replacement contract", () => {
         expect(counter.count).toBe(0);
     });
 
-    it("replaces every slot and the length of an accepted destination in place", () => {
+    it("shrinks first and leaves exactly the candidate in the original array object", () => {
         const target: unknown[] = ["old0", "old1", "old2"];
         const kept = { id: "kept" };
-        replaceHostArrayContents(target, [kept, "new1"]);
+        const order: string[] = [];
+        const define = Object.defineProperty;
+        const spy = spyOn(Object, "defineProperty").mockImplementation(((
+            object: object,
+            key: PropertyKey,
+            descriptor: PropertyDescriptor,
+        ) => {
+            if (object === target) order.push(String(key));
+            return define(object, key, descriptor);
+        }) as typeof Object.defineProperty);
+        try {
+            expect(
+                publishInPlace(target, [kept, "new1"], ["old0", "old1", "old2"]),
+            ).toBeUndefined();
+        } finally {
+            spy.mockRestore();
+        }
+        // The falsifier writes slot zero before the length change.
+        expect(order).toEqual(["length", "0", "1"]);
         expect(target).toEqual([kept, "new1"]);
         expect(target[0]).toBe(kept);
-        replaceHostArrayContents(target, []);
+        expect(publishInPlace(target, [], [])).toBeUndefined();
         expect(target).toEqual([]);
+        expect(publishInPlace(target, ["a", "b"], [])).toBeUndefined();
+        expect(target).toEqual(["a", "b"]);
         expect(Object.getOwnPropertyDescriptor(target, "length")?.writable).toBe(true);
+    });
+
+    it("restores the captured references after a shrink stopped by a planted non-configurable slot", () => {
+        const members = ["m0", "m1", "m2", "m3", "m4", "m5"];
+        const target = [...members];
+        const k = 3;
+        Object.defineProperty(target, k, { value: members[k], configurable: false });
+        const candidate = [{ id: "candidate" }];
+        expect(candidate.length).toBeLessThanOrEqual(k);
+        expect(publicationRejection(target, candidate.length)).toBeNull();
+        const lengths: number[] = [];
+        const define = Object.defineProperty;
+        const spy = spyOn(Object, "defineProperty").mockImplementation(((
+            object: object,
+            key: PropertyKey,
+            descriptor: PropertyDescriptor,
+        ) => {
+            // Enabling state: `ArraySetLength` deleted every slot above k before it threw.
+            if (object === target && key !== "length" && lengths.length === 0)
+                lengths.push(target.length);
+            return define(object, key, descriptor);
+        }) as typeof Object.defineProperty);
+        let failure: ReturnType<typeof publishInPlace>;
+        try {
+            failure = publishInPlace(target, candidate, members);
+        } finally {
+            spy.mockRestore();
+        }
+        expect(failure?.error).toBeInstanceOf(TypeError);
+        expect(failure?.shrunkLength).toBe(k + 1);
+        expect(lengths).toEqual([k + 1]);
+        expect(failure?.detail).toContain(`shrink to 1 stopped at length ${k + 1}`);
+        expect(failure?.detail).toContain("restored 2 captured references");
+        // The original prefix through k, then the captured references; no candidate slot was written.
+        expect(target).toEqual(members);
+        expect(target).not.toContain(candidate[0]);
+    });
+
+    it("reports a throw while restoring the captured references as the same failed publication", () => {
+        const members = ["m0", "m1", "m2", "m3"];
+        const target = [...members];
+        Object.defineProperty(target, 1, { value: members[1], configurable: false });
+        const hostile = [...members];
+        Object.defineProperty(hostile, 2, {
+            get: () => {
+                throw new RangeError("allocation failed");
+            },
+        });
+        const failure = publishInPlace(target, [], hostile);
+        expect(failure?.error).toBeInstanceOf(TypeError);
+        expect(failure?.shrunkLength).toBe(2);
+        expect(failure?.detail).toContain(
+            "restoring captured references failed (RangeError: allocation failed)",
+        );
+        expect(target).toEqual(["m0", "m1"]);
     });
 
     it("rejects inherited membership and does not consult its getter", () => {
@@ -1044,27 +1122,22 @@ describe("host array replacement contract", () => {
         expect(counter.count).toBe(0);
     });
 
-    it("accepts a plain extensible array and replaces its contents in place", () => {
-        const target: unknown[] = [1, 2, 3];
-        expect(hostArrayReplacementRejection(target)).toBeNull();
-        replaceHostArrayContents(target, ["a", "b"]);
-        expect(target).toEqual(["a", "b"]);
-        replaceHostArrayContents(target, ["a", "b", "c", "d"]);
-        expect(target).toEqual(["a", "b", "c", "d"]);
-    });
-
     it("rejects containers whose element or length assignment could throw", () => {
-        expect(hostArrayReplacementRejection({ length: 0 })).toBe("not_array");
-        expect(hostArrayReplacementRejection(new Proxy([], {}))).toBe("proxy");
-        expect(hostArrayReplacementRejection(Object.freeze([1]))).toBe("not_extensible");
+        expect(publicationRejection({ length: 0 }, 0)).toBe("not_array");
+        expect(publicationRejection(new Proxy([], {}), 0)).toBe("proxy");
+        expect(publicationRejection(Object.freeze([1]), 0)).toBe("not_extensible");
+        expect(publicationRejection(Object.seal([1]), 0)).toBe("not_extensible");
+        expect(publicationRejection(Object.preventExtensions([1]), 0)).toBe("not_extensible");
         const sealedLength: unknown[] = [1];
         Object.defineProperty(sealedLength, "length", { writable: false });
-        expect(hostArrayReplacementRejection(sealedLength)).toBe("length_not_writable");
+        expect(publicationRejection(sealedLength, 0)).toBe("length_not_writable");
+        const fixedElement: unknown[] = [1, 2];
+        Object.defineProperty(fixedElement, 0, { configurable: false });
+        expect(publicationRejection(fixedElement, 1)).toBe("slot_not_configurable");
+        // A non-writable but configurable slot is redefined, not assigned.
         const readOnlyElement: unknown[] = [1, 2];
         Object.defineProperty(readOnlyElement, 0, { writable: false });
-        expect(hostArrayReplacementRejection(readOnlyElement)).toBe("element_not_writable");
-        class Sub extends Array {}
-        expect(hostArrayReplacementRejection(new Sub())).toBe("prototype");
+        expect(publicationRejection(readOnlyElement, 2)).toBeNull();
     });
 });
 
