@@ -5593,10 +5593,10 @@ fn apply_ingress_meta(
         meta.block_identity_by_mid
             .insert(re_adoption.mid.clone(), projected_vector(&re_adoption.mid));
     }
-    // A re-adopted message changes the bytes a retried chunk at or before it would send; its failure count no longer describes those bytes.
+    // A re-adopted message inside the counted chunk changes the bytes a retry would send; its failure count no longer describes those bytes.
     if let Some(retry) = &meta.history_summarizer.chunk_retry
         && projection.blocks.iter().any(|block| {
-            block.ordinal >= retry.chunk_start
+            (retry.chunk_start..=retry.chunk_end).contains(&block.ordinal)
                 && enforcement
                     .tail_re_adoptions
                     .iter()
@@ -15486,9 +15486,10 @@ pub(crate) mod tests {
         )
         .unwrap();
         assert_eq!(enforcement.tail_re_adoptions.len(), 1);
-        let retry = |chunk_start| {
+        let retry = |chunk_start, chunk_end| {
             Some(memory_store::HistorySummarizerChunkRetry {
                 chunk_start,
+                chunk_end,
                 failures: 8,
                 model_chain: vec!["prov/model".to_string()],
                 token_budget: 8_000,
@@ -15496,7 +15497,7 @@ pub(crate) mod tests {
         };
 
         let mut changed = before.meta.clone();
-        changed.history_summarizer.chunk_retry = retry(2);
+        changed.history_summarizer.chunk_retry = retry(1, 2);
         apply_ingress_meta(
             &mut changed,
             &mutated_request,
@@ -15507,8 +15508,21 @@ pub(crate) mod tests {
         );
         assert_eq!(changed.history_summarizer.chunk_retry, None);
 
+        // The failed chunk ended before the re-adopted message: the retried bytes are unchanged.
+        let mut ended_before = before.meta.clone();
+        ended_before.history_summarizer.chunk_retry = retry(1, 1);
+        apply_ingress_meta(
+            &mut ended_before,
+            &mutated_request,
+            &mutated_projection,
+            None,
+            None,
+            &enforcement,
+        );
+        assert_eq!(ended_before.history_summarizer.chunk_retry, retry(1, 1));
+
         let mut unchanged = before.meta.clone();
-        unchanged.history_summarizer.chunk_retry = retry(3);
+        unchanged.history_summarizer.chunk_retry = retry(3, 5);
         apply_ingress_meta(
             &mut unchanged,
             &mutated_request,
@@ -15517,7 +15531,7 @@ pub(crate) mod tests {
             None,
             &enforcement,
         );
-        assert_eq!(unchanged.history_summarizer.chunk_retry, retry(3));
+        assert_eq!(unchanged.history_summarizer.chunk_retry, retry(3, 5));
     }
 
     fn replay_basis_covered_item(mid: &str, ordinal: u64) -> IngressMessage {

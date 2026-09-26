@@ -1935,6 +1935,7 @@ mod tests {
         let mut meta = loaded.meta;
         meta.history_summarizer.chunk_retry = Some(memory_store::HistorySummarizerChunkRetry {
             chunk_start: 0,
+            chunk_end: 3,
             failures,
             model_chain: vec!["prov/model".to_string()],
             token_budget: 8_000,

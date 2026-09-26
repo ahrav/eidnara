@@ -540,6 +540,9 @@ pub struct HistorySummarizerChunkRange {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HistorySummarizerChunkRetry {
     pub chunk_start: u64,
+    /// The last ordinal the counted firing sent; a re-adoption past it leaves the count alone.
+    #[serde(default)]
+    pub chunk_end: u64,
     pub failures: u32,
     #[serde(default)]
     pub model_chain: Vec<String>,
@@ -21495,6 +21498,7 @@ mod tests {
                 consecutive_publish_failures: 0,
                 chunk_retry: Some(HistorySummarizerChunkRetry {
                     chunk_start: 10,
+                    chunk_end: 12,
                     failures: 3,
                     model_chain: vec!["prov/model".to_string()],
                     token_budget: 8_000,
@@ -21556,6 +21560,7 @@ mod tests {
             abandoned.chunk_retry,
             Some(HistorySummarizerChunkRetry {
                 chunk_start: 10,
+                chunk_end: 12,
                 failures: 3,
                 model_chain: vec!["prov/model".to_string()],
                 token_budget: 8_000,

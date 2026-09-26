@@ -5622,6 +5622,7 @@ impl HandlerCore {
                                 &store,
                                 &session_id,
                                 range.from_ordinal,
+                                range.to_ordinal,
                                 &config.model_chain,
                                 configured_budget,
                                 &selected_range_identities,
@@ -6318,6 +6319,7 @@ impl HandlerCore {
                         &store,
                         &session_id,
                         firing.from_ordinal,
+                        firing.to_ordinal,
                         &firing.model_chain,
                         firing.configured_token_budget,
                         &firing.selected_range_identities,
@@ -18174,6 +18176,7 @@ fn record_history_summarizer_chunk_failure(
     store: &MemoryStore,
     session_id: &str,
     chunk_start: u64,
+    chunk_end: u64,
     model_chain: &[String],
     token_budget: usize,
     selected: &[memory_store::HistorySummarizerSelectedMessageIdentity],
@@ -18200,6 +18203,7 @@ fn record_history_summarizer_chunk_failure(
         meta.history_summarizer = history_summarizer::record_chunk_failure(
             &meta.history_summarizer,
             chunk_start,
+            chunk_end,
             model_chain,
             token_budget,
         );
@@ -42670,6 +42674,7 @@ mod tests {
             fired_at_ms: Some(1),
             chunk_retry: Some(memory_store::HistorySummarizerChunkRetry {
                 chunk_start: 1,
+                chunk_end: 1,
                 failures,
                 model_chain: default_test_config().model_chain,
                 token_budget: configured_budget,
@@ -42730,7 +42735,15 @@ mod tests {
             }]
         };
 
-        record_history_summarizer_chunk_failure(&store, "ses", 1, &chain, 8_000, &selected(fired));
+        record_history_summarizer_chunk_failure(
+            &store,
+            "ses",
+            1,
+            1,
+            &chain,
+            8_000,
+            &selected(fired),
+        );
         assert_eq!(
             store
                 .load("ses")
@@ -42745,6 +42758,7 @@ mod tests {
         record_history_summarizer_chunk_failure(
             &store,
             "ses",
+            1,
             1,
             &chain,
             8_000,
@@ -42820,6 +42834,7 @@ mod tests {
             fired_at_ms: Some(1),
             chunk_retry: Some(memory_store::HistorySummarizerChunkRetry {
                 chunk_start: 1,
+                chunk_end: 1,
                 failures: 2,
                 model_chain: default_test_config().model_chain,
                 token_budget: derive_history_summarizer_chunk_tokens(
@@ -42848,6 +42863,7 @@ mod tests {
             state.chunk_retry,
             Some(memory_store::HistorySummarizerChunkRetry {
                 chunk_start: 1,
+                chunk_end: 1,
                 failures: 3,
                 model_chain: default_test_config().model_chain,
                 token_budget: derive_history_summarizer_chunk_tokens(
