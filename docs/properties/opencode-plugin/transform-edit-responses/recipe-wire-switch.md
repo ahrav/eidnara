@@ -123,10 +123,13 @@ The missing-native compatibility retry is deleted. Renamed witnesses:
 carries no recipe and does not retry" (one body, both IDs NACKed, no ACK,
 `failureCount` 1) replaces "nacks discarded delivery IDs and acks only IDs from
 the applied retry response"; `:1637` "nacks initial and retry delivery IDs when
-the full retry still cannot be applied" now drives the retry through
+the full retry still cannot be applied" drove the retry through
 `need_full_sync` and a wrong `base_revision`; `:1703` "fails a delta pass whose
-response carries no recipe and sends the next pass in full" replaces "retries
-with full arrays when a delta response omits native content".
+response carries no recipe and sends the next pass in full" replaced "retries
+with full arrays when a delta response omits native content". Invalidated in
+part by #829: `:1637` and `:1703` are deleted with the retry and the delta
+pass; the surviving witness is `rust-mode-transform.test.ts:1903` in the #829
+tree, and an `ok` response without a recipe NACKs every delivery with no retry.
 
 ### TE25 optional-output budget
 
