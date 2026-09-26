@@ -10688,30 +10688,30 @@ impl MemoryStore {
     }
 
     /// At most `limit` `(sequence, end_message_id)` pairs of rows at or below the rendered
-    /// boundary and below `before_sequence`, newest first, in one read transaction; empty
-    /// when the daemon holds no coverage. Only rows whose end id is `<mid>#<digits>` with no
-    /// other `#` count toward `limit`, so a run of rows without a message id cannot end a
-    /// walk early.
+    /// boundary and within `sequences`, newest first, in one read transaction; empty when the
+    /// daemon holds no coverage. Only rows whose end id is `<mid>#<digits>` with no other `#`
+    /// count toward `limit`, so a run of rows without a message id cannot end a walk early.
     pub fn coverage_anchor_page(
         &self,
         session_id: &str,
-        before_sequence: i64,
+        sequences: std::ops::RangeInclusive<i64>,
         limit: usize,
     ) -> Result<Vec<(i64, String)>, MemoryStoreError> {
         Ok(self.inner.with_conn(|conn| {
             let Some(rendered) = rendered_coverage_tx(conn, session_id)?.rendered else {
                 return Ok(Vec::new());
             };
-            let through = rendered.sequence.min(before_sequence.saturating_sub(1));
+            let through = rendered.sequence.min(*sequences.end());
             conn.prepare_cached(
                 "SELECT sequence, end_message_id FROM history_segments
-                  WHERE session_id = ?1 AND sequence <= ?2
+                  WHERE session_id = ?1 AND sequence BETWEEN ?4 AND ?2
                     AND end_message_id GLOB '?*#[0-9]*' AND end_message_id NOT GLOB '*#*[^0-9]*'
                   ORDER BY sequence DESC LIMIT ?3",
             )?
-            .query_map(params![session_id, through, sql_limit(limit)], |row| {
-                Ok((row.get(0)?, row.get(1)?))
-            })?
+            .query_map(
+                params![session_id, through, sql_limit(limit), sequences.start()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )?
             .collect()
         })?)
     }

@@ -644,6 +644,37 @@ fn a_long_run_of_unlisted_rows_does_not_end_the_walk() {
     assert_eq!(walked, expected);
 }
 
+/// A state-sync seed may carry any `i64` sequence; a row below `-(2^53 - 1)` is left out, so the
+/// page keeps its safe-integer promise at both ends and the walk still ends.
+#[test]
+fn an_unsafe_negative_sequence_is_not_listed() {
+    let (_dir, store) = open_store();
+    seed_coverage(&store, 3, Some(3), None);
+    store
+        .with_fenced_conn_for_test(|conn| {
+            conn.execute(
+                "UPDATE history_segments SET sequence = ?2 WHERE session_id = ?1 AND sequence = 1",
+                rusqlite::params![SESSION, -(1i64 << 53)],
+            )
+        })
+        .unwrap();
+    let mut cursor = None;
+    let mut walked = Vec::new();
+    loop {
+        let page = boundary_page(&store, SESSION, cursor).unwrap();
+        let anchors: Vec<i64> = page["anchors"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|anchor| anchor["sequence"].as_i64().unwrap())
+            .collect();
+        let Some(last) = anchors.last() else { break };
+        cursor = Some(*last);
+        walked.extend(anchors);
+    }
+    assert_eq!(walked, [3, 2]);
+}
+
 /// Both anchor queries accept `<mid>#[0-9]+` with no other `#`, which agrees with
 /// `split_block_id` except for the pinned cases: a signed index, which `usize` parsing accepts,
 /// and an index past `usize`, which it refuses.
@@ -675,7 +706,7 @@ fn the_sql_anchor_grammar_matches_split_block_id() {
             .unwrap();
         let split = split_block_id(id).is_some();
         let paged = store
-            .coverage_anchor_page(SESSION, i64::MAX, 10)
+            .coverage_anchor_page(SESSION, i64::MIN..=i64::MAX, 10)
             .unwrap()
             .iter()
             .any(|(sequence, _)| *sequence == 1);

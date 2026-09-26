@@ -297,7 +297,8 @@ pub fn parse_boundary_request(request: &Value) -> Result<(&str, Option<i64>), St
 
 /// One `transform.boundary` page: anchors at or below the rendered boundary and below
 /// `before_sequence`, newest first. A row whose end block names no message is not an anchor
-/// and is left out, as is a row above `2^53 - 1`, so every listed sequence is a safe integer.
+/// and is left out, as is a row whose sequence has a magnitude above `2^53 - 1`, so every listed
+/// sequence is a safe integer.
 pub fn boundary_page(
     store: &MemoryStore,
     session_id: &str,
@@ -306,7 +307,7 @@ pub fn boundary_page(
     let anchors: Vec<Value> = store
         .coverage_anchor_page(
             session_id,
-            before_sequence.unwrap_or(MAX_SAFE_INTEGER + 1),
+            -MAX_SAFE_INTEGER..=before_sequence.map_or(MAX_SAFE_INTEGER, |before| before - 1),
             BOUNDARY_PAGE_LIMIT,
         )?
         .iter()
