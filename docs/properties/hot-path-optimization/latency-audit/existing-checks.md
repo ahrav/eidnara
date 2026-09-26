@@ -605,11 +605,11 @@ not a claim that no related check exists anywhere in the repository.
 [t-native-ingress]: ../../../../crates/daemon/src/lib.rs#L23251
 [t-native-charge-floor]: ../../../../crates/daemon/src/lib.rs#L23373
 [t-native-reject]: ../../../../crates/daemon/src/lib.rs#L24424
-[t-vacuity]: ../../../../crates/daemon/src/lib.rs#L24985
-[t-dup]: ../../../../crates/daemon/src/lib.rs#L25085
-[t-native-store]: ../../../../crates/daemon/src/lib.rs#L25216
-[t-native-pingpong]: ../../../../crates/daemon/src/lib.rs#L25269
-[t-native-previous]: ../../../../crates/daemon/src/lib.rs#L25302
+[t-vacuity]: ../../../../crates/daemon/src/lib.rs#L24984
+[t-dup]: ../../../../crates/daemon/src/lib.rs#L25091
+[t-native-store]: ../../../../crates/daemon/src/lib.rs#L25225
+[t-native-pingpong]: ../../../../crates/daemon/src/lib.rs#L25322
+[t-native-previous]: ../../../../crates/daemon/src/lib.rs#L25365
 [t-sidecar]: ../../../../crates/daemon/src/codec/opencode.rs#L2083
 [t-tagcold]: ../../../../crates/daemon/src/transform.rs#L22516
 [t-poison]: ../../../../crates/daemon/src/transform.rs#L22652
