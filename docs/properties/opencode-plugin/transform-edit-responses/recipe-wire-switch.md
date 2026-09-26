@@ -41,10 +41,14 @@ warnings` and `cargo +1.98 fmt --all -- --check` pass.
   `transform_base_revision_missing` (`crates/daemon/src/lib.rs:8331-8336`).
   `previous_output_revision` names the output the client applied.
 - Request: since #829 a body that carries `tail_delta` is refused with the
-  terminal error `transform_tail_delta_retired` (`crates/daemon/src/lib.rs:8227`;
-  witness `transform_refuses_a_retired_tail_delta`, `:24634`), so a pre-#829
-  plugin's suffix-only `messages` is never read as the whole history. The
-  current plugin never sends the field.
+  terminal error `transform_tail_delta_retired` (`handle_transform_typed` in
+  `crates/daemon/src/lib.rs`; witness `transform_refuses_a_retired_tail_delta`),
+  so a pre-#829 plugin's suffix-only `messages` is never read as the whole
+  history. The current plugin never sends the field. Skew consequence: a
+  pre-#829 plugin's tail-delta passes are refused with
+  `transform_tail_delta_retired` until its wire state is invalidated, so M1
+  requires the daemon and plugin to be upgraded and restarted together (#824
+  C11: they ship from one commit).
 - Response: `base_revision`, `output_revision`, `operations`, and
   `previous_output_revision` only when a `previous` keep was used. `messages`
   and `native_messages` are daemon-internal (`#[serde(skip)]`); the native

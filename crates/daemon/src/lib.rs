@@ -1691,8 +1691,8 @@ impl TransformRequest {
         self.effective_execute_threshold.unwrap_or_else(fallback)
     }
 
-    /// The ready snapshot of this request: the CK input shares its message `Arc`s, and the clone
-    /// copies only the native pointer vector it drops.
+    /// The ready snapshot of this request. The clone shares the CK message `Arc`s, so the only
+    /// copy it discards is the native pointer vector.
     fn ready_snapshot(&self) -> Self {
         Self {
             native_messages: None,
@@ -1744,6 +1744,8 @@ impl TransformRequest {
                     .map_or(0, String::capacity),
             )
             .saturating_add(self.prior_conversation_key.capacity())
+            // `Revision` hides its `String`; `Revision::parse` builds it with `to_owned`, so its
+            // capacity equals its length.
             .saturating_add(
                 [&self.base_revision, &self.previous_output_revision]
                     .into_iter()
@@ -1930,6 +1932,7 @@ impl TransformSnapshotCache {
         revert_epoch: u64,
         retained_bytes: usize,
     ) {
+        debug_assert!(request.native_messages.is_none());
         let matches_current = matches!(
             self.entries.get(session_id),
             Some(TransformSnapshot::InFlight { generation: current }) if *current == generation
@@ -2447,7 +2450,9 @@ impl NativeAttachmentCache {
         served_bytes: usize,
     ) {
         let retained_bytes = snapshot.retained_bytes(served_bytes);
-        if retained_bytes > self.max_entry_retained_bytes {
+        if retained_bytes > self.max_entry_retained_bytes
+            || retained_bytes > self.max_retained_bytes
+        {
             stats.refused_store = stats.refused_store.saturating_add(1);
             eprintln!(
                 "native-attachment-cache refused_store session={session_id} byte_charge={retained_bytes} entry_cap={} total_budget={}",
@@ -24683,15 +24688,121 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn transform_refuses_a_retired_tail_delta() {
         let producer = Arc::new(ProducerState::default());
-        let (handler, _store, _dir, _project) = handler_with_store(producer, default_test_config());
+        let (handler, store, _dir, _project) = handler_with_store(producer, default_test_config());
         let mut request = request(vec![ck("m1", 1, "hello")]);
         request["tail_delta"] = json!({ "after": "fp", "replace_from": 1 });
         let outcome = call_transform_outcome(&handler, request.clone()).await;
         assert_eq!(error_code(outcome), "transform_tail_delta_retired");
+        // The refusal commits no cache state and publishes no snapshot.
+        assert!(!store.has_cache_state("ses").unwrap());
+        assert!(
+            !handler
+                .transform_snapshots
+                .lock()
+                .unwrap()
+                .entries
+                .contains_key("ses")
+        );
         // An explicit null is absence, not a delta.
         request["tail_delta"] = Value::Null;
         let response = call_transform_request(&handler, request).await;
         assert_eq!(response["status"], "ok", "{response}");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn lineage_descent_on_the_whole_array_forces_full_projection() {
+        let target = "projection-lineage-target";
+        let source = "projection-lineage-source";
+        let (handler, store, _dir, project) =
+            handler_with_store(Arc::new(ProducerState::default()), default_test_config());
+        handler.bind_route(test_route(7), binding(project.to_str().unwrap(), target));
+        handler.bind_route(test_route(8), binding(project.to_str().unwrap(), source));
+        let source_messages = (1..=10)
+            .map(|ordinal| {
+                ck(
+                    &format!("prior-{ordinal}"),
+                    ordinal,
+                    &format!("turn {ordinal}"),
+                )
+            })
+            .collect::<Vec<_>>();
+        let source_request = native_cache_request(source, source_messages, Vec::new());
+        let source_response = call_transform_request_on_channel(
+            &handler,
+            8,
+            serde_json::to_value(source_request).unwrap(),
+        )
+        .await;
+        assert_eq!(source_response["status"], "ok", "{source_response}");
+        store
+            .append_history_segments(
+                source,
+                &[
+                    stored_comp(1, 1, 3, "prior-3", "history one through three"),
+                    stored_comp(2, 4, 6, "prior-6", "history four through six"),
+                ],
+            )
+            .unwrap();
+        let source_epoch = store.load(source).unwrap().meta.revert_epoch;
+        let summary = "This session is being continued from a previous conversation.\n\nSummary:\nDurable summary alpha\n\nFull transcript: /tmp/session.jsonl";
+        let compaction_user = IngressMessage {
+            mid: "lineage-summary".to_string(),
+            ordinal: 1,
+            ck: WireMessage::from_parts(
+                "user",
+                vec![
+                    WireBlock::bare(BlockKind::Text {
+                        text: "<system-reminder>Today's date: 2026-08-10</system-reminder>"
+                            .to_string(),
+                    }),
+                    WireBlock::bare(BlockKind::Text {
+                        text: summary.to_string(),
+                    }),
+                ],
+                None,
+                ProviderExtras::new(),
+                HarnessMeta {
+                    harness_id: Some("lineage-summary".to_string()),
+                    ..Default::default()
+                },
+            ),
+        };
+        let initial_messages = vec![
+            compaction_user,
+            wire_with_role("lineage-tail", 2, "assistant", "continued answer"),
+        ];
+        let configure_lineage = |request: &mut TransformRequest, subagent: bool| {
+            request.lineage_switched = true;
+            request.is_subagent = subagent;
+            request.descent_edge_id = 101;
+            request.prior_conversation_key = source.to_string();
+            request.prior_epoch = source_epoch;
+            request.new_epoch = source_epoch.saturating_add(1);
+            request.constituents = vec![(
+                source.to_string(),
+                target.to_string(),
+                source_epoch.saturating_add(1),
+            )];
+            request.compaction_observed = true;
+        };
+        let mut subagent = native_cache_request(target, initial_messages.clone(), Vec::new());
+        configure_lineage(&mut subagent, true);
+        let passthrough =
+            call_transform_request(&handler, serde_json::to_value(subagent).unwrap()).await;
+        assert_eq!(passthrough["status"], "ok", "{passthrough}");
+
+        let mut descended_messages = initial_messages;
+        descended_messages[1] =
+            wire_with_role("lineage-tail", 2, "assistant", "continued answer changed");
+        let mut descent = native_cache_request(target, descended_messages, Vec::new());
+        configure_lineage(&mut descent, false);
+        let descended =
+            call_transform_request(&handler, serde_json::to_value(descent).unwrap()).await;
+        assert_eq!(descended["status"], "ok", "{descended}");
+        assert_eq!(descended["lineage_descent_disposition"], "descended");
+        assert_eq!(descended["lineage_switch_consumed_id"], 101);
+        assert_eq!(descended["timings"]["projection_projected_messages"], 2);
+        assert!(store.load(target).unwrap().meta.descent_completed);
     }
 
     #[test]
@@ -25206,20 +25317,19 @@ mod tests {
 
     #[test]
     fn multiple_large_sessions_do_not_ping_pong_under_the_native_cache_total_budget() {
-        const SESSION_NATIVE_WIRE_BYTES: usize = 12 * 1024 * 1024;
-        let cache = Mutex::new(NativeAttachmentCache::default());
-        let (request_a, served_a) = native_cache_fixture(
-            "native-large-session-a",
-            512,
-            1_536,
-            SESSION_NATIVE_WIRE_BYTES,
-        );
-        let (request_b, served_b) = native_cache_fixture(
-            "native-large-session-b",
-            512,
-            1_536,
-            SESSION_NATIVE_WIRE_BYTES,
-        );
+        // The production budgets scaled down by 1024: a 256 MiB total, a 192 MiB entry cap, and
+        // the former shared 64 MiB budget.
+        const TOTAL_BUDGET_BYTES: usize = 256 * 1024;
+        const FORMER_BUDGET_BYTES: usize = 64 * 1024;
+        const SESSION_NATIVE_WIRE_BYTES: usize = 12 * 1024;
+        let cache = Mutex::new(NativeAttachmentCache::with_limits(
+            TOTAL_BUDGET_BYTES,
+            TOTAL_BUDGET_BYTES / 4 * 3,
+        ));
+        let (request_a, served_a) =
+            native_cache_fixture("native-large-session-a", 16, 48, SESSION_NATIVE_WIRE_BYTES);
+        let (request_b, served_b) =
+            native_cache_fixture("native-large-session-b", 16, 48, SESSION_NATIVE_WIRE_BYTES);
 
         run_native_cache_pass(
             &cache,
@@ -25242,8 +25352,8 @@ mod tests {
         );
         let charge_b = cache.lock().unwrap().sessions["native-large-session-b"].retained_bytes;
         assert!(
-            charge_a.saturating_add(charge_b) > 64 * 1024 * 1024,
-            "fixture must exceed the former shared 64 MiB budget"
+            charge_a.saturating_add(charge_b) > FORMER_BUDGET_BYTES,
+            "fixture must exceed the scaled former shared budget: {charge_a} + {charge_b}"
         );
 
         let (_second_a, second_a_stats) = run_native_cache_pass(
@@ -25837,13 +25947,13 @@ mod tests {
             assert!(native.sessions.contains_key(session_b));
         }
 
-        // A native snapshot over the entry cap is refused, and the pass is still served.
+        // A native snapshot over the whole budget is refused, and the pass is still served.
         assert!(entry_charge > 1);
-        {
-            let mut native = handler.native_attachments.lock().unwrap();
-            native.max_retained_bytes = entry_charge - 1;
-            native.max_entry_retained_bytes = entry_charge - 1;
-        }
+        handler
+            .native_attachments
+            .lock()
+            .unwrap()
+            .max_retained_bytes = entry_charge - 1;
         let response_c =
             call_transform_request_on_channel(&handler, 9, request(session_c, "c", "before")).await;
         assert_eq!(response_c["status"], "ok", "{response_c}");
@@ -26057,6 +26167,20 @@ mod tests {
         let stored = &cache.sessions["small"];
         assert!(stored.retained_bytes <= cache.max_entry_retained_bytes);
         assert_eq!(cache.retained_bytes, stored.retained_bytes);
+
+        // An entry under an entry cap raised above the total budget is still refused, and the
+        // session's older entry survives.
+        let mut cache = NativeAttachmentCache::with_limits(entry_cap * 4, entry_cap);
+        let mut stats = NativeAttachmentCacheStats::default();
+        cache.replace("a", 0, snapshot(16), &mut stats, 0);
+        let medium = snapshot(4 * 1024);
+        cache.max_retained_bytes = medium.retained_bytes(0) - 1;
+        cache.max_entry_retained_bytes = cache.max_retained_bytes * 2;
+        let mut stats = NativeAttachmentCacheStats::default();
+        cache.replace("a", 0, medium, &mut stats, 0);
+        assert_eq!(stats.refused_store, 1);
+        assert!(cache.sessions.contains_key("a"));
+        assert_eq!(cache.retained_bytes, cache.sessions["a"].retained_bytes);
     }
 
     #[test]

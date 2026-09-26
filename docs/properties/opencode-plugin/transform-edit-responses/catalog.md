@@ -26,7 +26,10 @@
 > `[0, S)` as the ticket's Scope says; "no per-slot preflight" in its Outcome
 > means no all-slot preflight. A daemon that receives `tail_delta` from a
 > pre-#829 plugin answers the terminal error `transform_tail_delta_retired`
-> instead of treating the suffix as the whole history. The multi-frame e2e
+> instead of treating the suffix as the whole history; its tail-delta passes
+> are refused until its wire state is invalidated, so M1 requires the daemon
+> and plugin to be upgraded and restarted together (#824 C11: they ship from
+> one commit). The multi-frame e2e
 > scenario stays quarantined: its 160k-token tail exceeds the memory store's
 > 512 KiB `MAX_DURABLE_TEXT_BYTES`, so the pass fails with `InputLimit`,
 > unrelated to the delta channel.

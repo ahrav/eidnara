@@ -440,8 +440,8 @@ const PASS_SCHEDULER_INTERESTING_HISTORY_CAP: usize = 256;
 /// arc counters.
 const MAX_PASS_SCHEDULER_OBSERVATION_JSON_BYTES: usize = 352;
 const MAX_INTERESTING_PASS_SCHEDULER_OBSERVATION_JSON_BYTES: usize = 342;
-/// The `PASS_SCHEDULER_*_MAX_BYTES` bounds cover rows written by this version; pre-#829 rows,
-/// whose interesting entries carried a full-array fingerprint, age out through the 256-entry ring.
+// The `PASS_SCHEDULER_*_MAX_BYTES` bounds cover rows written by this version; pre-#829 rows,
+// whose interesting entries carried a full-array fingerprint, age out through the 256-entry ring.
 /// Maximum UTF-8 bytes of the `scheduler_history` column: 256 entries, separators, and brackets.
 pub const PASS_SCHEDULER_HISTORY_MAX_BYTES: usize =
     1 + PASS_SCHEDULER_HISTORY_CAP * (MAX_PASS_SCHEDULER_OBSERVATION_JSON_BYTES + 1);

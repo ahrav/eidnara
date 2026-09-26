@@ -929,7 +929,7 @@ pub struct TransformRequest {
     pub compaction_observed: bool,
     /// Set when the body carries the retired `tail_delta` field; the handler refuses it.
     #[serde(skip)]
-    pub tail_delta_retired: bool,
+    pub(crate) tail_delta_retired: bool,
 }
 
 fn default_wire_version() -> u32 {
