@@ -26393,9 +26393,10 @@ mod tests {
             );
         }
         assert_eq!(store.retained_bytes, entry * 3);
-        // Storing a session again without a take replaces its charge instead of adding to it.
+        // Storing a session again without a take replaces its charge instead of adding to it,
+        // and moves it to the most recently stored end.
         assert_eq!(
-            store.store("c", 0, output("c", 1024)),
+            store.store("a", 0, output("a", 1024)),
             NativeStoreOutcome::default()
         );
         assert_eq!(store.retained_bytes, entry * 3);
@@ -26407,12 +26408,13 @@ mod tests {
                 evicted: 1
             }
         );
-        assert!(!store.sessions.contains_key("a"));
+        assert!(!store.sessions.contains_key("b"));
+        assert!(store.sessions.contains_key("a"));
         assert_eq!(store.retained_bytes, entry * 3);
 
         // Only the served revision in the built epoch comes back; any other take drops the entry.
-        assert!(store.take("b", 0, Some(&revision("stale"))).is_none());
-        assert!(!store.sessions.contains_key("b"));
+        assert!(store.take("a", 0, Some(&revision("stale"))).is_none());
+        assert!(!store.sessions.contains_key("a"));
         assert!(store.take("c", 0, None).is_none());
         assert!(!store.sessions.contains_key("c"));
         let kept = store
