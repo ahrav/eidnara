@@ -278,16 +278,15 @@ implement the same contract is an open question, not a resolved one.
 
 Measured over production lines only, restricted to the five 4c ranges.
 
-**Runtime assertions: one, and it is compiled out of release.** `:2441`,
+**Runtime assertions: none.** The one this survey found, `:2441`
 `debug_assert_eq!(self.ingress_chunks.len(),
-self.ingress_chunk_retained_bytes.len())`, a representation invariant pairing the
-native cache's ingress chunks with their retained-byte entries. Absent from
-release builds. No named test.
+self.ingress_chunk_retained_bytes.len())`, paired the native attachment cache's
+ingress chunks with their retained-byte entries; #830 deleted it with that cache.
 
 **Compile-time assertions: one, and it is the strongest guard in scope.**
-`:2309-2314`, a `const _: () = assert!(...)` requiring
-`SERIALIZED_OUTPUT_CACHE_BUDGET_BYTES + NATIVE_ATTACHMENT_CACHE_BUDGET_BYTES +
-PROJECTION_CACHE_BUDGET_BYTES <= TRANSFORM_SERVE_CACHE_COMBINED_BUDGET_BYTES`. A
+`crates/daemon/src/lib.rs:2254-2257`, a `const _: () = assert!(...)` requiring
+`SERIALIZED_OUTPUT_CACHE_BUDGET_BYTES + NATIVE_OUTPUT_BUDGET_BYTES ==
+TRANSFORM_SERVE_CACHE_COMBINED_BUDGET_BYTES`. A
 budget change that breaks the aggregate ceiling fails the build rather than
 production. It constrains **declared constants**, not observed retention, and the
 observed-retention side is documented as approximate:
@@ -477,10 +476,10 @@ Ranked by the gap between what the code decides and what any check proves.
    `:7187-7239` and binds the route at `:7250` (`if row.state == "MODULE"` at
    `:7248`), and has none at all. The ordering is unstated in the code and
    unasserted in the tests, so nothing would notice if it were swapped.
-6. **One runtime assertion in 7,857 production lines, and it is a
-   `debug_assert!`.** `:2441` is the only one and it is compiled out of release.
-   The only unconditional assertion in scope is the compile-time `const _` at
-   `:2309`. Compare 4a, which found the same shape in `history_summarizer.rs`, and 4b,
+6. **No runtime assertion in the production lines.** The one this survey found,
+   the `debug_assert!` at `:2441`, was compiled out of release and #830 deleted it
+   with the native attachment cache. The only assertion in scope is the
+   compile-time `const _` at `:2254-2257`. Compare 4a, which found the same shape in `history_summarizer.rs`, and 4b,
    which found its strongest drift check compiled out while a weaker twin shipped.
 7. **The one panic site has no test.** `:3661`, `panic!("store open worker
    failed")` on a `JoinError`. Six tests cover store open; none constructs a

@@ -252,6 +252,15 @@ tests that drove them; G2 applies to the native differential alone. The daemon
 projects every request from its full input. Citations of these symbols here are
 historical at their stated baseline.
 
+Update, 2026-09-26: [#830](https://github.com/ahrav/eidnara/issues/830) deletes
+the native attachment cache, the incremental native attach, its differential,
+and `EIDNARA_NATIVE_ATTACHMENT_DIFFERENTIAL`. Every native pass is a full
+encode. It renames `dg_goldens_exercise_incremental_native_differential_mode`
+to `dg_goldens_encode_native_output_deterministically`, which compares two full
+native encodes of each golden case. Citations of the old test here are
+historical at their stated baseline. G2 has no remaining
+release-live differential.
+
 - `dg_goldens_exercise_incremental_native_differential_mode`
   (`differential_goldens.rs:110-204`) calls
   `assert_prefix_projection_equivalent` directly at `:202`, on an appended-tail

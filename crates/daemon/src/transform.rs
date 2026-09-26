@@ -202,7 +202,6 @@ pub(crate) const TAG_MINT_FRONTIER_CACHE_BUDGET_BYTES: usize = 64 * 1024 * 1024;
 pub struct ServedMessage {
     message: Arc<WireMessage>,
     canonical_bytes: Arc<[u8]>,
-    canonical_hash: [u8; 32],
     output_identity: Arc<str>,
     block_fingerprints: Arc<[(String, usize)]>,
     retained_bytes: usize,
@@ -261,9 +260,7 @@ impl ServedMessage {
                 (wire::fingerprint(&serialized), serialized.len())
             })
             .collect::<Vec<_>>();
-        let canonical_digest = Sha256::digest(&canonical_bytes);
-        let output_identity = format!("{canonical_digest:x}");
-        let canonical_hash: [u8; 32] = canonical_digest.into();
+        let output_identity = format!("{:x}", Sha256::digest(&canonical_bytes));
         let message = Arc::new(message);
         let output_identity: Arc<str> = Arc::from(output_identity);
         let block_fingerprints: Arc<[(String, usize)]> = Arc::from(block_fingerprints);
@@ -276,7 +273,6 @@ impl ServedMessage {
         Self {
             message,
             canonical_bytes,
-            canonical_hash,
             output_identity,
             block_fingerprints,
             retained_bytes,
@@ -290,10 +286,6 @@ impl ServedMessage {
             .saturating_add(identity.len());
         self.output_identity = Arc::from(identity);
         self
-    }
-
-    pub(crate) fn native_identity_basis(&self) -> (&str, &[u8; 32]) {
-        (&self.output_identity, &self.canonical_hash)
     }
 
     pub fn into_message(self) -> WireMessage {
@@ -1590,8 +1582,7 @@ pub struct TransformResponse {
     /// does not. Every `ok` response sets it to `Some`, including legitimately empty output.
     #[serde(skip)]
     pub messages: Option<Vec<ServedMessage>>,
-    /// Native output for the non-incremental attachment path, used to build its wire recipe.
-    /// Incremental attachment returns its output directly instead of populating this field.
+    /// This pass's full native encode, which the handler takes to build the wire recipe.
     #[serde(skip)]
     pub native_messages: Option<Vec<Arc<Value>>>,
     /// This pass's auto-search decision and its fate; daemon-internal, never
@@ -1719,7 +1710,6 @@ pub struct TransformWithProjection {
     pub trim_mismatch: Option<TrimMismatch>,
     pub revert_epoch: u64,
     pub reasoning_watermark: u64,
-    pub transition_consumed: bool,
     pub mutation_exempt_mid: Option<String>,
     pub lineage_anchor_mid: Option<String>,
     /// The request a descent pass rebased to the durable ordinal base. The ready snapshot
@@ -2490,7 +2480,6 @@ fn lineage_protocol_passthrough(
         trim_mismatch: None,
         revert_epoch: 0,
         reasoning_watermark: 0,
-        transition_consumed: false,
         mutation_exempt_mid: None,
         lineage_anchor_mid: None,
         rebased_request: None,
@@ -3013,7 +3002,6 @@ fn apply_additive_only(
         reasoning_watermark: meta
             .reasoning_cleared_through_tag
             .max(meta.reasoning_cleared_through_ordinal),
-        transition_consumed: transition_consumed(&core),
         mutation_exempt_mid: None,
         lineage_anchor_mid: None,
         rebased_request: None,
@@ -3436,7 +3424,6 @@ fn apply_once(
                 reasoning_watermark: next_meta
                     .reasoning_cleared_through_tag
                     .max(next_meta.reasoning_cleared_through_ordinal),
-                transition_consumed: transition_consumed(&loaded.core),
                 committed: fingerprint_changed,
                 trim_mismatch,
                 messages: passthrough_messages,
@@ -3536,7 +3523,6 @@ fn apply_once(
             reasoning_watermark: meta
                 .reasoning_cleared_through_tag
                 .max(meta.reasoning_cleared_through_ordinal),
-            transition_consumed: transition_consumed(&loaded.core),
             committed: true,
             trim_mismatch,
             messages: passthrough_messages,
@@ -5284,7 +5270,6 @@ fn apply_once(
         reasoning_watermark: meta
             .reasoning_cleared_through_tag
             .max(meta.reasoning_cleared_through_ordinal),
-        transition_consumed: transition_consumed(&core),
         mutation_exempt_mid: mutation_exempt_mid.map(str::to_string),
         lineage_anchor_mid: lineage_anchor_mid.map(str::to_string),
         response: TransformResponse {
@@ -6976,7 +6961,6 @@ struct PendingPassthroughArgs {
     project_memory: Option<ProjectMemoryComposition>,
     revert_epoch: u64,
     reasoning_watermark: u64,
-    transition_consumed: bool,
     committed: bool,
     trim_mismatch: Option<TrimMismatch>,
     messages: Vec<ServedMessage>,
@@ -7027,7 +7011,6 @@ fn pending_passthrough_result(args: PendingPassthroughArgs) -> TransformWithProj
         project_memory,
         revert_epoch,
         reasoning_watermark,
-        transition_consumed,
         committed,
         trim_mismatch,
         messages,
@@ -7058,7 +7041,6 @@ fn pending_passthrough_result(args: PendingPassthroughArgs) -> TransformWithProj
         trim_mismatch,
         revert_epoch,
         reasoning_watermark,
-        transition_consumed,
         mutation_exempt_mid,
         lineage_anchor_mid: None,
         rebased_request: None,
@@ -10307,6 +10289,7 @@ fn transition_consumed_classes(core: &CoreState) -> BTreeSet<RendererTransitionC
     classes
 }
 
+#[cfg(test)]
 fn transition_consumed(core: &CoreState) -> bool {
     !transition_consumed_classes(core).is_empty()
 }
@@ -11741,52 +11724,6 @@ pub(crate) fn clear_served_native_reasoning_with_tags(
     served_messages: &[WireMessage],
     ingress_messages: &[Arc<IngressMessage>],
     watermark: u64,
-    mid_turn: bool,
-    tag_numbers: &BTreeMap<String, u64>,
-) -> usize {
-    clear_served_native_reasoning_from_iter(
-        profile,
-        provider_accepts_empty_content,
-        native_messages,
-        served_messages.iter(),
-        ingress_messages,
-        watermark,
-        mid_turn,
-        tag_numbers,
-    )
-}
-
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn clear_served_native_reasoning_from_served(
-    profile: SerializerProfile,
-    provider_accepts_empty_content: bool,
-    native_messages: &mut [Value],
-    served_messages: &[ServedMessage],
-    ingress_messages: &[Arc<IngressMessage>],
-    watermark: u64,
-    mid_turn: bool,
-    tag_numbers: &BTreeMap<String, u64>,
-) -> usize {
-    clear_served_native_reasoning_from_iter(
-        profile,
-        provider_accepts_empty_content,
-        native_messages,
-        served_messages.iter().map(Deref::deref),
-        ingress_messages,
-        watermark,
-        mid_turn,
-        tag_numbers,
-    )
-}
-
-#[allow(clippy::too_many_arguments)]
-fn clear_served_native_reasoning_from_iter<'a>(
-    profile: SerializerProfile,
-    provider_accepts_empty_content: bool,
-    native_messages: &mut [Value],
-    served_messages: impl IntoIterator<Item = &'a WireMessage>,
-    ingress_messages: &[Arc<IngressMessage>],
-    watermark: u64,
     _mid_turn: bool,
     tag_numbers: &BTreeMap<String, u64>,
 ) -> usize {
@@ -11798,7 +11735,7 @@ fn clear_served_native_reasoning_from_iter<'a>(
     }
 
     let served_ids = served_messages
-        .into_iter()
+        .iter()
         .filter(|message| !message.meta.synthetic && message.role == "assistant")
         .filter_map(|message| message.meta.harness_id.as_deref())
         .collect::<HashSet<_>>();
@@ -13910,7 +13847,6 @@ pub(crate) mod tests {
             &hit.block_fingerprints,
             &served.block_fingerprints
         ));
-        assert_eq!(hit.canonical_hash, served.canonical_hash);
         assert_eq!((timings.cache_hits, timings.cache_misses), (1, 0));
 
         // `Some(None)`, a dirty item, a foreign identity, and an absent key all construct.
@@ -14229,10 +14165,6 @@ pub(crate) mod tests {
         ] {
             let served = ServedMessage::from_message(message);
             assert_eq!(served.canonical_bytes(), expected.as_bytes());
-            assert_eq!(
-                served.canonical_hash,
-                <[u8; 32]>::from(Sha256::digest(expected.as_bytes()))
-            );
             assert_eq!(
                 served.output_identity.as_ref(),
                 format!("{:x}", Sha256::digest(expected.as_bytes()))
@@ -22160,24 +22092,19 @@ pub(crate) mod tests {
         );
         request.serializer_profile = "opencode-aisdk".to_string();
         request.serve_native = true;
-        let cache = Mutex::new(crate::NativeAttachmentCache::new(1024 * 1024));
-        let mut first = TransformResponse::passthrough(healed_ck.clone());
-        let first_attachment = crate::attach_native_messages_incremental(
-            &mut first,
-            &request,
-            0,
-            &BTreeMap::new(),
-            None,
-            None,
-            true,
-            0,
-            &crate::edit_recipe::Revision::parse("test-output").unwrap(),
-            &cache,
-            crate::NativeCacheKeyMode::Normal,
-        );
-        assert_eq!(first_attachment.stats.encoded_messages, healed_ck.len());
-        assert!(first.native_messages.is_none());
-        let native = &first_attachment.output.values;
+        let encode = || {
+            let mut response = TransformResponse::passthrough(healed_ck.clone());
+            crate::attach_native_messages_with_tags(
+                &mut response,
+                &request,
+                0,
+                &BTreeMap::new(),
+                None,
+                None,
+            );
+            response.native_messages.expect("native output")
+        };
+        let native = encode();
         let tool_ids = native
             .iter()
             .flat_map(|message| message["parts"].as_array().into_iter().flatten())
@@ -22188,28 +22115,7 @@ pub(crate) mod tests {
             tool_ids.iter().copied().collect::<HashSet<_>>().len()
         );
         assert_eq!(tool_ids, vec!["duplicate"]);
-
-        let mut replay = TransformResponse::passthrough(healed_ck.clone());
-        let replay_attachment = crate::attach_native_messages_incremental(
-            &mut replay,
-            &request,
-            0,
-            &BTreeMap::new(),
-            None,
-            None,
-            true,
-            0,
-            &crate::edit_recipe::Revision::parse("test-output").unwrap(),
-            &cache,
-            crate::NativeCacheKeyMode::Normal,
-        );
-        assert_eq!(replay_attachment.stats.reused_messages, healed_ck.len());
-        assert_eq!(replay_attachment.stats.encoded_messages, 0);
-        assert!(replay.native_messages.is_none());
-        assert_eq!(
-            replay_attachment.output.values,
-            first_attachment.output.values
-        );
+        assert_eq!(encode(), native);
     }
 
     #[test]
@@ -22353,29 +22259,6 @@ pub(crate) mod tests {
             Some("t3")
         );
 
-        let cache = Mutex::new(crate::NativeAttachmentCache::new(1024 * 1024));
-        let mut first_request = req(
-            "keep-fold-native",
-            "cfg0",
-            vec![item("a", 1, "raw"), todowrite_call("todo", 2, json!([]))],
-        );
-        first_request.serializer_profile = "opencode-aisdk".to_string();
-        first_request.serve_native = true;
-        let mut first_native = first.clone();
-        crate::attach_native_messages_incremental(
-            &mut first_native,
-            &first_request,
-            0,
-            &BTreeMap::new(),
-            None,
-            None,
-            true,
-            0,
-            &crate::edit_recipe::Revision::parse("test-output").unwrap(),
-            &cache,
-            crate::NativeCacheKeyMode::Normal,
-        );
-
         let mut moved_request = req(
             "keep-fold-native",
             "cfg0",
@@ -22388,22 +22271,15 @@ pub(crate) mod tests {
         moved_request.serializer_profile = "opencode-aisdk".to_string();
         moved_request.serve_native = true;
         let mut moved_native = moved.clone();
-        let attachment = crate::attach_native_messages_incremental(
+        crate::attach_native_messages_with_tags(
             &mut moved_native,
             &moved_request,
             0,
             &BTreeMap::new(),
             None,
             None,
-            true,
-            0,
-            &crate::edit_recipe::Revision::parse("test-output").unwrap(),
-            &cache,
-            crate::NativeCacheKeyMode::Normal,
         );
-        assert!(attachment.stats.encoded_messages > 0);
-        assert!(moved_native.native_messages.is_none());
-        let native = attachment.output.values;
+        let native = moved_native.native_messages.expect("native output");
         let tail_index = native
             .iter()
             .position(|message| message["info"]["id"] == "t3")
@@ -28479,9 +28355,10 @@ pub(crate) mod tests {
             replay.response.action, "SOFT+",
             "persisting consumption must prevent the salt from re-firing forever"
         );
-        assert!(first.transition_consumed);
-        assert!(replay.transition_consumed);
         assert!(transition_consumed(&post_salt.core));
+        assert!(transition_consumed(
+            &store.load("reasoning-transition").unwrap().core
+        ));
         assert_eq!(
             serde_json::to_vec(replay.response.messages()).unwrap(),
             healed_bytes,
@@ -28838,12 +28715,11 @@ pub(crate) mod tests {
             None,
         )
         .unwrap();
-        let old_native = crate::codec::opencode::encode_opencode_with_transition_state(
+        let old_native = crate::codec::opencode::encode_opencode_with_session_exemptions(
             &old_ck,
             &decoded.sidecar,
             Some("pair-transition"),
             &[],
-            false,
         );
         let old_pair = old_native
             .iter()
@@ -28859,19 +28735,20 @@ pub(crate) mod tests {
             transform_with_projection(&store, &request, &pctx("git:proj", "/nonexistent-docs", 0))
                 .unwrap();
         assert_eq!(salted.response.action, "HARD");
-        assert!(salted.transition_consumed);
+        assert!(transition_consumed(
+            &store.load("pair-transition").unwrap().core
+        ));
         let salted_ck = salted
             .response
             .messages()
             .iter()
             .map(|message| (**message).clone())
             .collect::<Vec<_>>();
-        let salted_native = crate::codec::opencode::encode_opencode_with_transition_state(
+        let salted_native = crate::codec::opencode::encode_opencode_with_session_exemptions(
             &salted_ck,
             &decoded.sidecar,
             Some("pair-transition"),
             &[],
-            salted.transition_consumed,
         );
         let salted_pair = salted_native
             .iter()
@@ -28893,16 +28770,15 @@ pub(crate) mod tests {
             .iter()
             .map(|message| (**message).clone())
             .collect::<Vec<_>>();
-        let replay_native = crate::codec::opencode::encode_opencode_with_transition_state(
+        let replay_native = crate::codec::opencode::encode_opencode_with_session_exemptions(
             &replay_ck,
             &decoded.sidecar,
             Some("pair-transition"),
             &[],
-            replay.transition_consumed,
         );
         assert_eq!(replay_native, salted_native);
 
-        let native_round_trip = crate::codec::opencode::encode_opencode_with_transition_state(
+        let native_round_trip = crate::codec::opencode::encode_opencode_with_session_exemptions(
             &decoded
                 .messages
                 .iter()
@@ -28911,7 +28787,6 @@ pub(crate) mod tests {
             &decoded.sidecar,
             Some("pair-transition"),
             &[],
-            false,
         );
         assert_eq!(native_round_trip, vec![native_message]);
     }
@@ -29014,7 +28889,6 @@ pub(crate) mod tests {
             folded.response.materialize_reason.as_deref(),
             Some("renderer_transition")
         );
-        assert!(folded.transition_consumed);
         let folded_state = store.load("combined-transition").unwrap();
         assert_eq!(
             transition_consumed_classes(&folded_state.core),
@@ -29070,12 +28944,11 @@ pub(crate) mod tests {
             .iter()
             .map(|message| (**message).clone())
             .collect::<Vec<_>>();
-        let native = crate::codec::opencode::encode_opencode_with_transition_state(
+        let native = crate::codec::opencode::encode_opencode_with_session_exemptions(
             &folded_ck,
             &decoded.sidecar,
             Some("combined-transition"),
             &[],
-            folded.transition_consumed,
         );
         let combined_native = native
             .iter()
@@ -29394,7 +29267,6 @@ pub(crate) mod tests {
                     &result.tag_numbers,
                     result.mutation_exempt_mid.as_deref(),
                     result.lineage_anchor_mid.as_deref(),
-                    result.transition_consumed,
                 );
                 assert!(
                     result

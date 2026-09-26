@@ -166,8 +166,9 @@ occurrences in the test module, so nothing observes it either.
 constituents are not individually re-checked.** Doc side: `:2303-2307` states "No
 cache may interpret another cache's presence as authority. Keep their aggregate
 process-retained ceiling explicit when any individual budget changes." Code side:
-`:2309-2314` is a `const _: () = assert!(...)`, a compile-time check that the
-three budgets sum within `TRANSFORM_SERVE_CACHE_COMBINED_BUDGET_BYTES`. This is
+`crates/daemon/src/lib.rs:2254-2257` is a `const _: () = assert!(...)`, a compile-time check
+that the serialized-output and native-output budgets sum to exactly
+`TRANSFORM_SERVE_CACHE_COMBINED_BUDGET_BYTES`. This is
 the strongest guard in the whole 4c range and it is the only `assert!` in it, but
 it constrains declared constants, not observed retention. The observed-retention
 side is claimed separately at `:2316-2329`
@@ -451,18 +452,18 @@ recorded as an open question.
 
 Measured over production lines only, restricted to the five 4c ranges.
 
-**Runtime assertions: one, and it is compiled out of release.**
+**Runtime assertions: none.**
 
-- `:2441`
-  `debug_assert_eq!(self.ingress_chunks.len(), self.ingress_chunk_retained_bytes.len())`
-  — a representation invariant pairing the native cache's ingress chunks with
-  their retained-byte entries. Absent from release builds. No named test.
+- The one this survey found, `:2441`
+  `debug_assert_eq!(self.ingress_chunks.len(), self.ingress_chunk_retained_bytes.len())`,
+  paired the native attachment cache's ingress chunks with their retained-byte
+  entries; #830 deleted it with that cache.
 
 **Compile-time assertions: one, and it is the strongest guard in scope.**
 
-- `:2309-2314`, a `const _: () = assert!(...)` requiring
-  `SERIALIZED_OUTPUT_CACHE_BUDGET_BYTES + NATIVE_ATTACHMENT_CACHE_BUDGET_BYTES +
-  PROJECTION_CACHE_BUDGET_BYTES <= TRANSFORM_SERVE_CACHE_COMBINED_BUDGET_BYTES`.
+- `crates/daemon/src/lib.rs:2254-2257`, a `const _: () = assert!(...)` requiring
+  `SERIALIZED_OUTPUT_CACHE_BUDGET_BYTES + NATIVE_OUTPUT_BUDGET_BYTES ==
+  TRANSFORM_SERVE_CACHE_COMBINED_BUDGET_BYTES`.
   A `const` assertion, so a budget change that breaks the aggregate ceiling fails
   the build rather than production. It constrains declared constants only; see
   lead L7.
@@ -568,10 +569,10 @@ Ranked by the gap between what the code decides and what any check proves.
    Lens A owns both records; the quiet part is that the ordering contract is
    unstated in the code and unasserted in the tests, so nothing would notice if
    the order were swapped.
-6. **One runtime assertion in 7,857 production lines, and it is
-   `debug_assert!`.** `:2441` is the only one, and it is compiled out of release.
-   The only unconditional assertion in scope is the compile-time `const _`
-   at `:2309`. Every other invariant is a typed `Result`, which means a violated
+6. **No runtime assertion in the production lines.** The one this survey found,
+   the `debug_assert!` at `:2441`, was compiled out of release and #830 deleted it
+   with the native attachment cache. The only assertion in scope is the
+   compile-time `const _` at `:2254-2257`. Every other invariant is a typed `Result`, which means a violated
    invariant becomes an error code a caller may or may not surface, never a loud
    failure. Compare 4a, which found the same shape in `history_summarizer.rs`.
 7. **The one panic site has no test.** `:3661` `panic!("store open worker
