@@ -327,6 +327,10 @@ fn measure(h: usize, overlays: usize, memories: usize) -> Measured {
     let warm = request(h, "cfg0");
     assert_eq!(pass(&store, &warm), "HARD");
     pass(&store, &warm);
+    // A daemon restart: the measured passes run on a store with no process-local memo, so a
+    // read the store remembers only in memory shows up as a cold full read.
+    drop(store);
+    let store = Arc::new(crate::transform::tests::store(dir.path()));
     seed_active_summarizer(&store, SESSION);
 
     let mut phases = Vec::new();

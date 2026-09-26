@@ -2298,7 +2298,6 @@ pub const PEAK_SEARCH_CONNECTIONS: u64 = 2;
 /// The seed and page coordinators hold request bytes across requests, after each ingress reservation has ended, so their staging caps count here.
 /// Each storage-backed connection retains one schema snapshot within `storage::SCHEMA_SNAPSHOT_RETAINED_BYTES_BOUND`; the daemon opens [`STORAGE_CONNECTIONS`] kinds of them, and holds [`PEAK_SEARCH_CONNECTIONS`] search connections at the peak of a rebuild, so that many snapshots and search page caches are declared.
 /// The memory store's connection holds `memory_store::PAGE_CACHE_BUDGET_BYTES` of page cache and maps up to `memory_store::MMAP_BUDGET_BYTES` of its file; mapped pages are file-backed and reclaimable, and are counted so the ceiling stays conservative.
-/// The memory store's ordered-history-segment session memo stays within `memory_store::ORDERED_HISTORY_SEGMENTS_MEMO_RETAINED_BYTES_BOUND`.
 /// Each search projection connection holds `search_projection::CACHE_KIB` of page cache.
 /// The memory store's prepared-statement cache is bounded by `memory_store::STATEMENT_CACHE_CAPACITY` entries, not bytes: SQLite does not bound compiled-statement memory, so no byte figure is declared for it. A full 128-statement cache measured 861,472 bytes by `sqlite3_memory_used`.
 /// The MemoryReviewer host keeps its own bounded copy of the startup credentials and their keyed identities for the process lifetime (`memory_reviewer::worker::RETAINED_CREDENTIAL_BYTES`).
@@ -2318,7 +2317,6 @@ pub const DECLARED_RETAINED_RESIDENT_BYTES: u64 = TRANSFORM_SERVE_CACHE_COMBINED
         * (STORAGE_CONNECTIONS - 1 + PEAK_SEARCH_CONNECTIONS)
     + memory_store::PAGE_CACHE_BUDGET_BYTES as u64
     + memory_store::MMAP_BUDGET_BYTES as u64
-    + memory_store::ORDERED_HISTORY_SEGMENTS_MEMO_RETAINED_BYTES_BOUND as u64
     + search_projection::CACHE_KIB as u64 * 1024 * PEAK_SEARCH_CONNECTIONS
     + kernel_routes::ingest::MAX_STAGED_BYTES
     + kernel_routes::ingest::FINISH_WORKING_BYTES_MAX

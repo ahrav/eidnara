@@ -2050,6 +2050,11 @@ pub struct ModuleMeta {
     /// and truncation filters it: extra sequences are harmless, a missing one is not.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub legacy_history_segment_seqs: Option<Vec<i64>>,
+    /// The stored `history_segment` ranges were checked once and are in strict order. Every
+    /// writer keeps that order, so a pass sets this after one scan and later passes skip it;
+    /// see [`MemoryStore::history_segment_order_violation`].
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub history_segments_ordered: bool,
     /// The first ordinal covered by the history_segment span reflected in `coverage_ordinal`.
     /// Leading system messages below this start are not summarized by history_segments and
     /// must remain pass-through on full-array profiles.
@@ -6144,63 +6149,12 @@ impl<'a> FacadeMutationTxn<'a> {
     }
 }
 
-const ORDERED_HISTORY_SEGMENT_SESSIONS_MAX: usize = 4096;
-const ORDERED_HISTORY_SEGMENT_SESSION_ID_BYTES_MAX: usize = 256 * 1024;
-/// A hash table of `ORDERED_HISTORY_SEGMENT_SESSIONS_MAX` entries holds at most twice that
-/// many buckets.
-pub const ORDERED_HISTORY_SEGMENTS_MEMO_RETAINED_BYTES_BOUND: usize =
-    ORDERED_HISTORY_SEGMENT_SESSION_ID_BYTES_MAX
-        + 2 * ORDERED_HISTORY_SEGMENT_SESSIONS_MAX * (std::mem::size_of::<String>() + 1)
-        + 64;
-
-/// Session ids whose history_segment ranges passed the order check. Forgetting a session only
-/// costs one rescan, so the memo starts over at either cap instead of tracking recency.
-#[derive(Debug, Default)]
-struct OrderedHistorySegmentSessions {
-    sessions: HashSet<String>,
-    id_bytes: usize,
-}
-
-impl OrderedHistorySegmentSessions {
-    fn contains(&self, session_id: &str) -> bool {
-        self.sessions.contains(session_id)
-    }
-
-    fn insert(&mut self, session_id: String) {
-        let bytes = session_id.capacity();
-        if bytes > ORDERED_HISTORY_SEGMENT_SESSION_ID_BYTES_MAX
-            || self.sessions.contains(&session_id)
-        {
-            return;
-        }
-        if self.sessions.len() == ORDERED_HISTORY_SEGMENT_SESSIONS_MAX
-            || self.id_bytes + bytes > ORDERED_HISTORY_SEGMENT_SESSION_ID_BYTES_MAX
-        {
-            self.sessions.clear();
-            self.id_bytes = 0;
-        }
-        self.id_bytes += bytes;
-        self.sessions.insert(session_id);
-    }
-
-    #[cfg(test)]
-    fn retained_bytes(&self) -> usize {
-        let buckets = (self.sessions.capacity() * 8)
-            .div_ceil(7)
-            .next_power_of_two();
-        self.id_bytes + buckets * (std::mem::size_of::<String>() + 1) + 16
-    }
-}
-
 pub struct MemoryStore {
     inner: SqliteStore,
     connection_profile: ConnectionProfile,
     // Distinguishes independent stores in the process-local tail hygiene memo. Production
     // opens one store for the module lifetime; tests and embedded callers may open several.
     tag_cache_namespace: u64,
-    /// Sessions with strictly ordered stored `history_segment` ranges; see
-    /// [`MemoryStore::history_segment_order_violation`].
-    ordered_history_segment_sessions: Mutex<OrderedHistorySegmentSessions>,
     /// The caller identity used by note ownership triggers. It is installed only while a
     /// fenced note mutation is executing and is tagged with the installing thread, so an
     /// unwrapped SQL writer or a concurrent thread reads an empty project.
@@ -6672,7 +6626,6 @@ impl MemoryStore {
             inner,
             connection_profile,
             tag_cache_namespace: NEXT_TAG_CACHE_NAMESPACE.fetch_add(1, Ordering::Relaxed),
-            ordered_history_segment_sessions: Mutex::default(),
             note_caller_project,
             facade_authority_scope,
             facade_mutation_lock: Mutex::new(()),
@@ -10591,21 +10544,14 @@ impl MemoryStore {
 
     /// Returns a stored `history_segment` range that violates strict order, or `None`.
     /// Rows must have non-negative, strictly increasing, non-overlapping ranges by sequence.
-    /// Store writers preserve that order, so a passing session is remembered for this store's
-    /// lifetime; a violating set is rescanned on every call.
+    /// This reads two integers per row of the session, so callers run it once per session and
+    /// record a pass in [`ModuleMeta::history_segments_ordered`]; store writers preserve the
+    /// order from then on.
     pub fn history_segment_order_violation(
         &self,
         session_id: &str,
     ) -> Result<Option<String>, MemoryStoreError> {
-        let ordered = || {
-            self.ordered_history_segment_sessions
-                .lock()
-                .expect("ordered history_segment memo mutex")
-        };
-        if ordered().contains(session_id) {
-            return Ok(None);
-        }
-        let violation = self.inner.with_conn(|conn| {
+        Ok(self.inner.with_conn(|conn| {
             let mut stmt = conn.prepare_cached(
                 "SELECT sequence, start_message, end_message FROM history_segments
                   WHERE session_id = ?1 ORDER BY sequence ASC",
@@ -10630,11 +10576,7 @@ impl MemoryStore {
                 previous = Some((sequence, end));
             }
             Ok(None)
-        })?;
-        if violation.is_none() {
-            ordered().insert(session_id.to_string());
-        }
-        Ok(violation)
+        })?)
     }
 
     /// Reads the oldest and newest `history_segment` rows by sequence with two primary-key
@@ -22299,7 +22241,7 @@ mod tests {
     }
 
     #[test]
-    fn history_segment_order_check_scans_a_valid_session_once_and_rechecks_a_violation() {
+    fn history_segment_order_check_names_the_violating_range() {
         let dir = tempfile::tempdir().unwrap();
         let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
         let segment = |sequence: i64, start: i64, end: i64| StoredHistorySegment {
@@ -22344,28 +22286,14 @@ mod tests {
             .unwrap();
 
         assert_eq!(store.history_segment_order_violation("ok").unwrap(), None);
-        store.start_statement_work_ledger();
-        assert_eq!(store.history_segment_order_violation("ok").unwrap(), None);
-        assert!(
-            store.take_statement_work().is_empty(),
-            "a checked session is answered from memory"
-        );
-
         for (session, needle) in [("overlap", "overlap"), ("reversed", "invalid")] {
-            for _ in 0..2 {
-                store.start_statement_work_ledger();
-                let violation = store.history_segment_order_violation(session).unwrap();
-                assert!(
-                    violation
-                        .as_deref()
-                        .is_some_and(|detail| detail.contains(needle)),
-                    "{session}: {violation:?}"
-                );
-                assert!(
-                    !store.take_statement_work().is_empty(),
-                    "{session}: a violation is not remembered, so a repaired set is rechecked"
-                );
-            }
+            let violation = store.history_segment_order_violation(session).unwrap();
+            assert!(
+                violation
+                    .as_deref()
+                    .is_some_and(|detail| detail.contains(needle)),
+                "{session}: {violation:?}"
+            );
         }
         store
             .replace_history_segments("overlap", &[segment(1, 1, 3), segment(2, 4, 100)])
@@ -22373,41 +22301,6 @@ mod tests {
         assert_eq!(
             store.history_segment_order_violation("overlap").unwrap(),
             None
-        );
-    }
-
-    #[test]
-    fn history_segment_order_memo_stays_within_its_retained_bound() {
-        let mut memo = OrderedHistorySegmentSessions::default();
-        let long = "s".repeat(1024);
-        for i in 0..4 * ORDERED_HISTORY_SEGMENT_SESSIONS_MAX {
-            memo.insert(format!("{long}{i}"));
-            assert!(memo.sessions.len() <= ORDERED_HISTORY_SEGMENT_SESSIONS_MAX);
-            assert!(memo.id_bytes <= ORDERED_HISTORY_SEGMENT_SESSION_ID_BYTES_MAX);
-            assert!(memo.retained_bytes() <= ORDERED_HISTORY_SEGMENTS_MEMO_RETAINED_BYTES_BOUND);
-        }
-        assert!(memo.contains(&format!(
-            "{long}{}",
-            4 * ORDERED_HISTORY_SEGMENT_SESSIONS_MAX - 1
-        )));
-        let mut memo = OrderedHistorySegmentSessions::default();
-        for i in 0..4 * ORDERED_HISTORY_SEGMENT_SESSIONS_MAX {
-            memo.insert(format!("s{i}"));
-            assert!(memo.retained_bytes() <= ORDERED_HISTORY_SEGMENTS_MEMO_RETAINED_BYTES_BOUND);
-        }
-        assert!(memo.contains(&format!(
-            "s{}",
-            4 * ORDERED_HISTORY_SEGMENT_SESSIONS_MAX - 1
-        )));
-        assert!(
-            !memo.contains("s0"),
-            "the memo starts over at its entry cap"
-        );
-        let oversized = "x".repeat(ORDERED_HISTORY_SEGMENT_SESSION_ID_BYTES_MAX + 1);
-        memo.insert(oversized.clone());
-        assert!(
-            !memo.contains(&oversized),
-            "an id over the whole budget is not kept"
         );
     }
 

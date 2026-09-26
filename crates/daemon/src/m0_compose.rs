@@ -438,7 +438,8 @@ mod bounded_read_tests {
         let oracle = resolve_coverage(&rows)
             .expect("valid ranges")
             .map(|c| (c.first_covered_ordinal, c.coverage_end_ordinal));
-        let two_ends = crate::transform::stored_coverage_bounds(store, SESSION).expect("ends");
+        let two_ends =
+            crate::transform::stored_coverage_bounds(store, SESSION, &mut false).expect("ends");
         assert_eq!(two_ends, oracle, "{} rows", rows.len());
     }
 

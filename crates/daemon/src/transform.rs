@@ -3307,7 +3307,7 @@ fn apply_once(
     timings.store_user_hints = transform_snapshot.timings.user_hints_ms;
     timings.store_channel1 = transform_snapshot.timings.channel1_ms;
     timings.store_overlay_frontier = transform_snapshot.timings.overlay_frontier_ms;
-    let loaded = transform_snapshot.loaded;
+    let mut loaded = transform_snapshot.loaded;
     let overlay_frontier = transform_snapshot.overlay_frontier;
     let transition_detection_started_at = Instant::now();
     let transition_shapes = renderer_transition_shapes(
@@ -3882,7 +3882,12 @@ fn apply_once(
         == Some(SerializerProfile::ClaudeCodeAnthropic)
         && history_segment_seq_changed_since_meta
     {
-        let new_coverage = stored_coverage_bounds(store, &req.session_id)?.map(|(_, end)| end);
+        let new_coverage = stored_coverage_bounds(
+            store,
+            &req.session_id,
+            &mut loaded.meta.history_segments_ordered,
+        )?
+        .map(|(_, end)| end);
         coverage_advance_covers_new_system(req, loaded.meta.coverage_ordinal, new_coverage)
     } else {
         false
@@ -4344,7 +4349,11 @@ fn apply_once(
         match plan {
             PassPlan::Reject => return Err(TransformError::UnknownShape(UNKNOWN_SHAPE)),
             PassPlan::Hard | PassPlan::MigrateHard => {
-                let coverage_bounds = stored_coverage_bounds(store, &req.session_id)?;
+                let coverage_bounds = stored_coverage_bounds(
+                    store,
+                    &req.session_id,
+                    &mut meta.history_segments_ordered,
+                )?;
                 let covered_system_messages = covered_system_messages_for_coverage(
                     req,
                     coverage_bounds.map(|(_, end)| end),
@@ -4421,8 +4430,11 @@ fn apply_once(
                                 ctx,
                             )?;
                             current_m1_digest = m1_signal.revision;
-                            let recut_coverage_bounds =
-                                stored_coverage_bounds(store, &req.session_id)?;
+                            let recut_coverage_bounds = stored_coverage_bounds(
+                                store,
+                                &req.session_id,
+                                &mut meta.history_segments_ordered,
+                            )?;
                             let recut_covered_system_messages =
                                 covered_system_messages_for_coverage(
                                     req,
@@ -4617,7 +4629,11 @@ fn apply_once(
                 // An unserved body folds; the empty default is never rendered.
                 let m1_body = served_m1_body.unwrap_or_default();
                 if served_m1_body.is_none() {
-                    let coverage_bounds = stored_coverage_bounds(store, &req.session_id)?;
+                    let coverage_bounds = stored_coverage_bounds(
+                        store,
+                        &req.session_id,
+                        &mut meta.history_segments_ordered,
+                    )?;
                     let covered_system_messages = covered_system_messages_for_coverage(
                         req,
                         coverage_bounds.map(|(_, end)| end),
@@ -6354,13 +6370,19 @@ fn detect_boundary_divergence_candidate(
 
 /// The first covered ordinal and the coverage end, from the set's oldest and newest rows.
 /// The two ends bound the set only when its ranges are in strict order, so a set out of
-/// order fails as a coverage gap instead of trimming the tail at the wrong ordinal.
+/// order fails as a coverage gap instead of trimming the tail at the wrong ordinal. The
+/// order scan reads the session once: `ordered` is `ModuleMeta::history_segments_ordered`,
+/// set on a pass and committed with the pass's meta, so no restart repeats the scan.
 pub(crate) fn stored_coverage_bounds(
     store: &MemoryStore,
     session_id: &str,
+    ordered: &mut bool,
 ) -> Result<Option<(u64, u64)>, TransformError> {
-    if let Some(violation) = store.history_segment_order_violation(session_id)? {
-        return Err(TransformError::CoverageGap(violation));
+    if !*ordered {
+        if let Some(violation) = store.history_segment_order_violation(session_id)? {
+            return Err(TransformError::CoverageGap(violation));
+        }
+        *ordered = true;
     }
     let Some((oldest, newest)) = store.history_segment_ends(session_id)? else {
         return Ok(None);
