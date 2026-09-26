@@ -256,7 +256,7 @@ pub(crate) const PRESSURE_WINDOW: usize = 249;
 
 /// The oldest curve index that can render at the pressure floor: `2484 >= Z4 * H50 * 4 / P_FLOOR`
 /// fails and `2485` passes.
-const MAX_RENDERABLE_INDEX: u32 = 2_484;
+pub(crate) const MAX_RENDERABLE_INDEX: u32 = 2_484;
 
 /// How many newest non-legacy rows a render at `history_budget` can show: at least
 /// [`PRESSURE_WINDOW`], else the largest index importance 100 keeps unarchived under the

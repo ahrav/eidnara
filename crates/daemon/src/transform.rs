@@ -6349,16 +6349,13 @@ fn detect_boundary_divergence_candidate(
 
 /// The first covered ordinal and the coverage end, from the set's oldest and newest rows.
 /// Ranges are validated strictly increasing at append, so the two ends bound the set.
-fn stored_coverage_bounds(
+pub(crate) fn stored_coverage_bounds(
     store: &MemoryStore,
     session_id: &str,
 ) -> Result<Option<(u64, u64)>, TransformError> {
-    let Some(newest) = store.newest_history_segment(session_id)? else {
+    let Some((oldest, newest)) = store.history_segment_ends(session_id)? else {
         return Ok(None);
     };
-    let oldest = store
-        .oldest_history_segment(session_id)?
-        .unwrap_or_else(|| newest.clone());
     for edge in [&oldest, &newest] {
         if edge.start_message < 0 || edge.end_message < edge.start_message {
             return Err(TransformError::CoverageGap(format!(
@@ -6833,28 +6830,24 @@ fn first_uncovered_live_block<'a>(
     let Some(coverage) = coverage else {
         return Ok(None);
     };
-    let candidates = live
-        .iter()
-        .copied()
-        .filter(|block| block.role != "system" && block.ordinal() <= coverage)
-        .collect::<Vec<_>>();
-    if candidates.is_empty() {
+    let key = |block: &FlatBlock| i64::try_from(block.ordinal()).unwrap_or(i64::MAX);
+    let candidates = || {
+        live.iter()
+            .copied()
+            .filter(move |block| block.role != "system" && block.ordinal() <= coverage)
+    };
+    let ordinals = candidates().map(key).collect::<Vec<_>>();
+    if ordinals.is_empty() {
         return Ok(None);
     }
-    let ordinals = candidates
-        .iter()
-        .map(|block| i64::try_from(block.ordinal()).unwrap_or(i64::MAX))
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .collect::<Vec<_>>();
-    let uncovered = store
+    let Some(lowest) = store
         .uncovered_ordinals(session_id, &ordinals)?
         .into_iter()
-        .collect::<HashSet<_>>();
-    Ok(candidates
-        .into_iter()
-        .filter(|block| uncovered.contains(&i64::try_from(block.ordinal()).unwrap_or(i64::MAX)))
-        .min_by_key(|block| block.ordinal()))
+        .min()
+    else {
+        return Ok(None);
+    };
+    Ok(candidates().find(|block| key(block) == lowest))
 }
 
 fn validate_live_boundary_ordinal(
@@ -7218,10 +7211,14 @@ fn reanchor_kept_synthetic_todo_if_folded_or_shrunk(
     Ok(())
 }
 
-/// The tag rows a pass consumes: rows of the request's messages, legacy rows keyed by the
-/// projection's tool call ids, and the session's newest `protected_tags` rows plus the window
-/// rows, so the maximum tag number and every newest-K protection ranking match a read of the
-/// whole session.
+/// The tag rows a pass consumes: rows of the request's messages (block ids `<mid>` and
+/// `<mid>#...`), legacy rows keyed by the projection's tool call ids, and the session's newest
+/// `protected_tags.max(1)` rows plus one per window row.
+///
+/// The newest rows keep session-relative protection exact (WP-E09): a ranking excludes at
+/// most one row per window block, so the newest `protected_tags` rows outside the window and
+/// the session's maximum tag number are always among the rows read, and every newest-K
+/// decision matches a read of the whole session.
 fn load_window_tags(
     store: &MemoryStore,
     req: &TransformIngress<'_>,
@@ -7297,6 +7294,25 @@ fn tag_mint_block_resolved(
     existing_tag_ids.contains(block.id.as_str())
         || frozen.contains(block.id.as_str())
         || taggable_source(block).is_none()
+}
+
+/// The projection blocks that already hold a tag. Only projection blocks are minted, and the
+/// frontier memo keys on this set, so rows outside the projection are left out to keep the
+/// key stable as the newest rows move.
+fn mint_tagged_ids<'a>(
+    projection: &FlatProjection,
+    tag_rows: &'a [Arc<TagRow>],
+) -> HashSet<&'a str> {
+    let projected_ids = projection
+        .blocks
+        .iter()
+        .map(|block| block.id.as_str())
+        .collect::<HashSet<_>>();
+    tag_rows
+        .iter()
+        .map(|row| row.block_id.as_str())
+        .filter(|block_id| projected_ids.contains(block_id))
+        .collect()
 }
 
 fn tag_mint_frontier_start(
@@ -8144,18 +8160,7 @@ fn compute_active_overlay_decisions(
     let tag_mint_work = if !tag_mint_enabled {
         TagMintWork::default()
     } else {
-        // Only projection blocks are minted, and the frontier memo keys on this set, so rows
-        // outside the projection are left out to keep the key stable as the newest rows move.
-        let projected_ids = projection
-            .blocks
-            .iter()
-            .map(|block| block.id.as_str())
-            .collect::<HashSet<_>>();
-        let existing_tag_ids = tag_rows
-            .iter()
-            .map(|row| row.block_id.as_str())
-            .filter(|block_id| projected_ids.contains(block_id))
-            .collect::<HashSet<_>>();
+        let existing_tag_ids = mint_tagged_ids(projection, tag_rows);
         // Minting snapshots the session frontier before tokenization so slow minting does not hold the process-wide cache lock.
         let mut memo = tag_mint_frontier_cache()
             .lock()
@@ -14754,7 +14759,7 @@ pub(crate) mod tests {
             .collect()
     }
 
-    fn assistant_tool_call(mid: &str, ordinal: u64, call_id: &str) -> IngressMessage {
+    pub(crate) fn assistant_tool_call(mid: &str, ordinal: u64, call_id: &str) -> IngressMessage {
         IngressMessage {
             mid: mid.to_string(),
             ordinal,
@@ -14860,7 +14865,12 @@ pub(crate) mod tests {
         }
     }
 
-    fn tool_result(mid: &str, ordinal: u64, call_id: &str, text: &str) -> IngressMessage {
+    pub(crate) fn tool_result(
+        mid: &str,
+        ordinal: u64,
+        call_id: &str,
+        text: &str,
+    ) -> IngressMessage {
         tool_result_with_output(
             mid,
             ordinal,
@@ -24050,6 +24060,119 @@ pub(crate) mod tests {
             );
             assert!(Arc::ptr_eq(observed, original));
         }
+    }
+
+    /// Tag rows minted outside the window move the newest-K read but not the frontier memo's
+    /// tagged-id key, so a repeat pass still starts minting at the memo's frontier.
+    #[test]
+    fn tag_mint_frontier_memo_hits_after_tag_rows_land_outside_the_window() {
+        run_active_surface_test(|| {
+            let dir = tempfile::tempdir().unwrap();
+            let s = store(dir.path());
+            let session = "frontier-outside-rows";
+            let request = active_cc_req(
+                session,
+                "cfg0",
+                vec![item("m1", 1, "first"), item("m2", 2, "second")],
+            );
+            run(&s, &request, &spine());
+            let before = run(&s, &request, &spine());
+            s.execute_tag_sql_for_test(
+                "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 50)
+                 INSERT INTO tags
+                     (session_id, tag_number, block_id, kind, token_count, created_at_ms,
+                      source_bytes)
+                 SELECT 'frontier-outside-rows', 100 + i, 'outside-' || i || '#0', 'message',
+                        1, 1, X'61' FROM n",
+            )
+            .unwrap();
+
+            let memo = tag_mint_frontier_cache()
+                .lock()
+                .unwrap()
+                .snapshot(session)
+                .unwrap();
+            assert!(memo.frontier > 0);
+            let projection = project_messages(&request.messages).unwrap();
+            let rows =
+                load_window_tags(&s, &TransformIngress::original(&request), &projection).unwrap();
+            assert!(rows.iter().any(|row| row.block_id.starts_with("outside-")));
+            let frozen = frozen_red_targets(&s.load(session).unwrap().core);
+            let tagged = mint_tagged_ids(&projection, &rows);
+            assert_eq!(
+                tag_mint_frontier_start(&projection, &frozen, &tagged, None, Some(&memo))
+                    .map(|(start, _)| start),
+                Some(memo.frontier)
+            );
+            let unfiltered = rows.iter().map(|row| row.block_id.as_str()).collect();
+            assert!(
+                tag_mint_frontier_start(&projection, &frozen, &unfiltered, None, Some(&memo))
+                    .is_none(),
+                "keying the memo on every row read would miss"
+            );
+            let after = run(&s, &request, &spine());
+            assert_eq!(
+                canonical_output(after.messages()),
+                canonical_output(before.messages())
+            );
+        });
+    }
+
+    #[test]
+    fn first_uncovered_live_block_picks_the_first_block_at_the_lowest_gap() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = store(dir.path());
+        s.append_history_segments(
+            "gap",
+            &[comp(1, 1, 2, "m2", "S1"), comp(2, 5, 6, "m6", "S2")],
+        )
+        .unwrap();
+        let two_blocks = IngressMessage {
+            mid: "m3".to_string(),
+            ordinal: 3,
+            ck: WireMessage::from_parts(
+                "user",
+                ["first", "second"]
+                    .map(|text| {
+                        wire::WireBlock::bare(wire::BlockKind::Text {
+                            text: text.to_string(),
+                        })
+                    })
+                    .to_vec(),
+                None,
+                wire::ProviderExtras::new(),
+                wire::HarnessMeta {
+                    harness_id: Some("m3".to_string()),
+                    ..Default::default()
+                },
+            ),
+        };
+        let request = req(
+            "gap",
+            "cfg0",
+            vec![
+                item("m1", 1, "a"),
+                two_blocks,
+                item("m4", 4, "d"),
+                item("m6", 6, "f"),
+            ],
+        );
+        let projection = project_messages(&request.messages).unwrap();
+        let live = projection.blocks.iter().collect::<Vec<_>>();
+        let stray = first_uncovered_live_block(&s, "gap", &live, Some(6))
+            .unwrap()
+            .unwrap();
+        assert_eq!((stray.ordinal(), stray.block_index), (3, 0));
+        assert!(
+            first_uncovered_live_block(&s, "gap", &live, Some(2))
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            first_uncovered_live_block(&s, "gap", &live, None)
+                .unwrap()
+                .is_none()
+        );
     }
 
     /// The window read keeps what every tag consumer decides from the whole session: the

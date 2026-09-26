@@ -1,8 +1,10 @@
 //! The per-pass read inventory (spec D15, property WP-P07): every statement a transform pass
 //! or a history_summarizer prepare and publish runs is recorded by the store's statement-work
 //! ledger, classified into one inventory row by its SQL text, and checked against that row's
-//! bound while the stored history, overlays, and tags grow. An unclassified statement fails
-//! the test, so a new full read cannot land unnoticed.
+//! bound while the stored history, the overlays, and the active user memories grow, together
+//! and apart. The guard against a new full read is the H-independence check: its rows and VM
+//! steps would grow with the seeded tables. Classification only names the row; a statement no
+//! needle names fails the test, and history_segments reads are named by their exact shapes.
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
@@ -17,7 +19,7 @@ use storage::StatementWork;
 use crate::test_support::synthetic_history::{
     SyntheticHistory, seed_active_summarizer, seed_overlays,
 };
-use crate::transform::tests::{active_cc_req, item, pctx, store};
+use crate::transform::tests::{active_cc_req, assistant_tool_call, item, pctx, store, tool_result};
 use crate::transform::{
     TransformRequest, install_transform_attempt_hook, transform_with_projection_cached,
 };
@@ -26,7 +28,11 @@ const SESSION: &str = "read-bound";
 /// Live messages after the covered pair the request repeats.
 const TAIL: u64 = 8;
 /// Largest non-archived index under any pressure (WP-P08).
-const MAX_K: u64 = 2_484;
+const MAX_K: u64 = crate::decay_render::MAX_RENDERABLE_INDEX as u64;
+/// The request's tool call id; one legacy tag row is keyed by it.
+const CALL: &str = "call-read-bound";
+/// Active user memories seeded when the axis holds them fixed.
+const MEMORIES: usize = 4;
 
 /// The D15 inventory rows, in report order.
 const ROWS: &[&str] = &[
@@ -44,6 +50,12 @@ const ROWS: &[&str] = &[
     "pass trace and ledgers",
     "scan ledger",
 ];
+
+/// Rows no statement of these passes touches, each with the reason.
+const ABSENT_BY_DESIGN: &[(&str, &str)] = &[(
+    "kernel project memory",
+    "the handler reads it before the pass and hands it in through ProducerContext",
+)];
 
 /// Where a statement no inventory row names is counted; any such statement fails the test.
 const UNCLASSIFIED: &str = "unclassified";
@@ -68,12 +80,26 @@ const CLASSES: &[(&str, &str)] = &[
         "SELECT MAX(end_message) FROM history_segments",
         "summarizer assembly",
     ),
-    ("SELECT meta FROM cache_state", "summarizer assembly"),
     (
         "COALESCE(MAX(sequence), 0) FROM history_segments",
         "publication set fence",
     ),
-    ("history_segments", "coverage snapshot"),
+    // The edge lookups: newest, oldest, by end ordinal, by sequence, and its neighbours.
+    (
+        "SELECT sequence, start_message, end_message, start_message_id, end_message_id \
+         FROM history_segments WHERE session_id = ?1",
+        "coverage snapshot",
+    ),
+    (
+        "(SELECT h.start_message FROM history_segments AS h \
+         WHERE h.session_id = ?1 AND h.end_message >= j.value ORDER BY h.end_message LIMIT 1)",
+        "coverage snapshot",
+    ),
+    (
+        "SELECT COALESCE(MAX(end_message), 0) FROM history_segments WHERE session_id = ?1",
+        "coverage snapshot",
+    ),
+    // Session state: the pass's cache_state row, and the lineage and assembly meta reads.
     ("cache_state", "coverage snapshot"),
     ("block_identities", "coverage snapshot"),
     (" tags ", "tags"),
@@ -102,13 +128,30 @@ const CLASSES: &[(&str, &str)] = &[
     ("ROLLBACK", "pass trace and ledgers"),
 ];
 
+/// The SQL text with its whitespace collapsed and padded by one space on each side.
+fn normalized(sql: &str) -> String {
+    format!(" {} ", sql.split_whitespace().collect::<Vec<_>>().join(" "))
+}
+
 /// The inventory row of one statement, by its SQL text.
 fn classify(sql: &str) -> Option<&'static str> {
-    let sql = format!(" {} ", sql.split_whitespace().collect::<Vec<_>>().join(" "));
+    let sql = normalized(sql);
     CLASSES
         .iter()
         .find(|(needle, _)| sql.contains(needle))
         .map(|(_, row)| *row)
+}
+
+/// A table read, count, update, or delete without a WHERE clause. SQLite can do O(table)
+/// work in one opcode (`COUNT(*)`, a whole-table clear), which `VM_STEP` does not see, and
+/// page counts grow with B-tree depth, so the shape itself is what is ruled out.
+/// The connection's temp schema is the one table read whole: it holds the storage layer's
+/// own fixed set of temp objects, not session data.
+fn whole_table(sql: &str) -> bool {
+    let sql = normalized(sql);
+    (sql.contains(" FROM ") || sql.starts_with(" UPDATE "))
+        && !sql.contains(" WHERE ")
+        && !sql.contains(" FROM temp.sqlite_schema ")
 }
 
 /// Rows and VM steps per inventory row, summed over the statements of one phase.
@@ -117,6 +160,11 @@ type Totals = BTreeMap<&'static str, (u64, u64)>;
 fn totals(phase: &str, h: usize, work: &[StatementWork]) -> Totals {
     let mut out = Totals::new();
     for statement in work {
+        assert!(
+            !whole_table(&statement.sql),
+            "{phase} at H={h} ran a whole-table statement: {}",
+            statement.sql
+        );
         let row = classify(&statement.sql).unwrap_or_else(|| {
             eprintln!("read-bound unclassified {phase} at H={h}: {statement:?}");
             UNCLASSIFIED
@@ -128,19 +176,28 @@ fn totals(phase: &str, h: usize, work: &[StatementWork]) -> Totals {
     out
 }
 
+/// The covered pair, then `TAIL` window messages ending in a tool call and its result.
 fn request(h: usize, render_config: &str) -> TransformRequest {
     let end = 2 * h as u64;
     let mut messages = vec![
         item(&format!("m{}", end - 1), end - 1, "covered question"),
         item(&format!("m{end}"), end, "covered answer"),
     ];
-    messages.extend((1..=TAIL).map(|k| {
+    messages.extend((1..=TAIL - 2).map(|k| {
         item(
             &format!("m{}", end + k),
             end + k,
             &format!("window message {k} with some text"),
         )
     }));
+    let (call, result) = (end + TAIL - 1, end + TAIL);
+    messages.push(assistant_tool_call(&format!("m{call}"), call, CALL));
+    messages.push(tool_result(
+        &format!("m{result}"),
+        result,
+        CALL,
+        "tool output",
+    ));
     active_cc_req(SESSION, render_config, messages)
 }
 
@@ -153,22 +210,49 @@ fn pass(store: &MemoryStore, request: &TransformRequest) -> String {
         .action
 }
 
-/// Seeds a session of `h` segments with `h` overlay rows per table and `h` tag rows outside
-/// the window, then measures each phase.
-fn measure(h: usize) -> Vec<(&'static str, Totals)> {
+/// The legacy tag read's rows in `work`: the statement keyed by the window's tool call ids.
+fn legacy_tag_rows(work: &[StatementWork]) -> u64 {
+    work.iter()
+        .filter(|statement| {
+            normalized(&statement.sql)
+                .contains(" FROM tags WHERE session_id = ?1 AND block_id IN (SELECT value FROM json_each(?2))")
+        })
+        .map(|statement| statement.rows)
+        .sum()
+}
+
+/// Seeds a session of `h` segments, `overlays` overlay rows per table, `h` tag rows outside
+/// the window plus one legacy row keyed by the request's tool call id, and `memories` active
+/// user memories, then measures each phase.
+fn measure(h: usize, overlays: usize, memories: usize) -> Vec<(&'static str, Totals)> {
     let dir = tempfile::tempdir().expect("store dir");
     let store = Arc::new(store(dir.path()));
     let history = SyntheticHistory::mixed(h);
     history.seed(&store, SESSION);
-    seed_overlays(&store, SESSION, h);
+    seed_overlays(&store, SESSION, overlays);
     store
         .execute_tag_sql_for_test(&format!(
             "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < {h})
              INSERT INTO tags
                  (session_id, tag_number, block_id, kind, token_count, created_at_ms, source_bytes)
-             SELECT '{SESSION}', i, 'history-' || i || '#0', 'message', 1, 1, X'61' FROM n"
+             SELECT '{SESSION}', i, 'history-' || i || '#0', 'message', 1, 1, X'61' FROM n;
+             INSERT INTO tags
+                 (session_id, tag_number, block_id, kind, token_count, created_at_ms, source_bytes)
+             VALUES ('{SESSION}', {h} + 1, '{CALL}', 'tool_call', 1, 1, X'61');"
         ))
         .expect("seed tags");
+    store
+        .with_fenced_conn_for_test(|tx| {
+            for id in 1..=memories as i64 {
+                tx.execute(
+                    "INSERT INTO user_memories (id, content, status, promoted_at)
+                     VALUES (?1, ?2, 'active', ?1)",
+                    rusqlite::params![id, format!("profile line {id}")],
+                )?;
+            }
+            Ok(())
+        })
+        .expect("seed user memories");
 
     // The first fold captures the legacy list with its one declared scan; the second pass
     // mints the window's tags once the tag surface is durable.
@@ -185,7 +269,13 @@ fn measure(h: usize) -> Vec<(&'static str, Totals)> {
 
     store.start_statement_work_ledger();
     assert_eq!(pass(&store, &request(h, "cfg1")), "HARD", "H={h}");
-    phases.push(("HARD", totals("HARD", h, &store.take_statement_work())));
+    let work = store.take_statement_work();
+    assert_eq!(
+        legacy_tag_rows(&work),
+        1,
+        "H={h}: the legacy tag row is read"
+    );
+    phases.push(("HARD", totals("HARD", h, &work)));
 
     // A write between the pass's reads and its commit fails the CAS; the retry reruns the
     // pass. The conflicting write itself is kept out of the ledger.
@@ -209,6 +299,13 @@ fn measure(h: usize) -> Vec<(&'static str, Totals)> {
     phases.push(("HARD CAS retry", totals("HARD retry", h, &retry)));
 
     phases.push(("summarizer", summarizer_round(&store, h)));
+    for (phase, totals) in &phases {
+        // The bound of this row is the host profile's line count, not H: state sync replaces
+        // the active memories wholesale and a HARD pass reads every one.
+        if let Some((rows, _)) = totals.get("active user memories") {
+            assert_eq!(*rows, memories as u64, "{phase} at H={h}");
+        }
+    }
     phases
 }
 
@@ -302,76 +399,112 @@ fn fold_row(row: &str) -> bool {
     matches!(row, "m0 segments" | "m1 segments")
 }
 
-#[test]
-fn every_pass_read_is_bounded_independent_of_history_size() {
-    let sizes = [100usize, 5_000, 50_000];
-    let measured = sizes.map(|h| (h, measure(h)));
-    eprintln!("read-bound phase | row | H | rows | vm_steps");
-    for (h, phases) in &measured {
-        for (phase, totals) in phases {
-            for row in ROWS {
-                if let Some((rows, steps)) = totals.get(row) {
-                    eprintln!("read-bound {phase} | {row} | {h} | {rows} | {steps}");
-                }
+type Measured = Vec<(&'static str, Totals)>;
+
+fn report(axis: &str, label: &str, phases: &Measured) {
+    for (phase, totals) in phases {
+        for row in ROWS {
+            if let Some((rows, steps)) = totals.get(row) {
+                eprintln!("read-bound {axis} | {label} | {phase} | {row} | {rows} | {steps}");
             }
         }
     }
+}
 
-    for (h, phases) in &measured {
-        for (phase, totals) in phases {
-            assert!(
-                !totals.contains_key(UNCLASSIFIED),
-                "{phase} at H={h} ran a statement no inventory row names"
-            );
-        }
-    }
-
-    let legacy = SyntheticHistory::mixed(50_000).legacy_count() as u64;
-    let phases = |index: usize| &measured[index].1;
-    for (phase_index, (phase, small)) in phases(0).iter().enumerate() {
-        let (_, middle) = &phases(1)[phase_index];
-        let (_, large) = &phases(2)[phase_index];
+/// Asserts every row outside `skip` is equal between two measurements of the same request.
+fn assert_same(axis: &str, small: &Measured, large: &Measured, skip: impl Fn(&str) -> bool) {
+    for ((phase, small), (_, large)) in small.iter().zip(large) {
         let rows = small
             .keys()
             .chain(large.keys())
             .collect::<std::collections::BTreeSet<_>>();
-        for row in rows {
-            if fold_row(row) {
-                let (rows_read, _) = large[row];
-                let cap = if *row == "m0 segments" {
-                    249 + MAX_K + legacy
-                } else {
-                    crate::m1_compose::DEFAULT_M1_ROW_CAP as u64 + 1
-                };
-                assert!(
-                    rows_read <= cap,
-                    "{phase} {row}: {rows_read} rows over {cap}"
-                );
-                assert_eq!(
-                    middle.get(row),
-                    large.get(row),
-                    "{phase} {row}: H=5,000 vs 50,000"
-                );
-            } else if *row == "scan ledger" {
+        for row in rows.into_iter().filter(|row| !skip(row)) {
+            if *row == "scan ledger" {
                 // Scan ids are random, so a statement's B-tree walk varies by a few steps
                 // from run to run at any H; the rows it touches do not.
                 let ((small_rows, small_steps), (large_rows, large_steps)) =
                     (small[row], large[row]);
-                assert_eq!(
-                    small_rows, large_rows,
-                    "{phase} {row}: rows at H=100 vs 50,000"
-                );
+                assert_eq!(small_rows, large_rows, "{axis} {phase} {row}: rows");
                 assert!(
                     small_steps.abs_diff(large_steps) <= 16 + small_steps / 100,
-                    "{phase} {row}: {small_steps} steps at H=100 vs {large_steps} at 50,000"
+                    "{axis} {phase} {row}: {small_steps} steps vs {large_steps}"
                 );
             } else {
-                assert_eq!(
-                    small.get(row),
-                    large.get(row),
-                    "{phase} {row}: H=100 vs 50,000"
-                );
+                assert_eq!(small.get(row), large.get(row), "{axis} {phase} {row}");
             }
         }
     }
+}
+
+#[test]
+fn every_pass_read_is_bounded_independent_of_history_size() {
+    let sizes = [100usize, 5_000, 50_000];
+    let together = sizes.map(|h| measure(h, h, MEMORIES));
+    let history_only = measure(50_000, 100, MEMORIES);
+    let overlays_only = measure(100, 5_000, 10 * MEMORIES);
+    eprintln!("read-bound axis | size | phase | row | rows | vm_steps");
+    for (h, phases) in sizes.iter().zip(&together) {
+        report("together", &format!("H=overlays={h}"), phases);
+    }
+    report("H only", "H=50000 overlays=100", &history_only);
+    report(
+        "overlays and memories only",
+        "H=100 overlays=5000 memories=40",
+        &overlays_only,
+    );
+
+    let all = together.iter().chain([&history_only, &overlays_only]);
+    let mut observed = std::collections::BTreeSet::new();
+    for phases in all {
+        for (phase, totals) in phases {
+            assert!(
+                !totals.contains_key(UNCLASSIFIED),
+                "{phase} ran a statement no inventory row names"
+            );
+            observed.extend(totals.keys().copied());
+        }
+    }
+    for row in ROWS {
+        let absent = ABSENT_BY_DESIGN.iter().find(|(name, _)| name == row);
+        assert_eq!(
+            observed.contains(row),
+            absent.is_none(),
+            "{row}: observed {}, declared absent {absent:?}",
+            observed.contains(row)
+        );
+    }
+
+    let legacy = SyntheticHistory::mixed(50_000).legacy_count() as u64;
+    for ((phase, middle), (_, large)) in together[1].iter().zip(&together[2]) {
+        for row in large.keys().filter(|row| fold_row(row)) {
+            let (rows_read, _) = large[row];
+            let cap = if *row == "m0 segments" {
+                249 + MAX_K + legacy
+            } else {
+                crate::m1_compose::DEFAULT_M1_ROW_CAP as u64 + 1
+            };
+            assert!(
+                rows_read <= cap,
+                "{phase} {row}: {rows_read} rows over {cap}"
+            );
+            assert_eq!(
+                middle.get(row),
+                large.get(row),
+                "{phase} {row}: H=5,000 vs 50,000"
+            );
+        }
+    }
+    let memories = |row: &str| row == "active user memories";
+    assert_same("together", &together[0], &together[2], |row| {
+        fold_row(row) || memories(row)
+    });
+    assert_same("H only", &together[0], &history_only, |row| {
+        fold_row(row) || memories(row)
+    });
+    assert_same(
+        "overlays and memories only",
+        &together[0],
+        &overlays_only,
+        memories,
+    );
 }

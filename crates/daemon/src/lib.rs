@@ -14325,6 +14325,17 @@ fn native_value_retained_bytes(value: &Value) -> usize {
     crate::retained_size::value_retained_bytes(value)
 }
 
+/// Each mid's ordinal. The first message of a mid wins, as a linear find would pick it.
+fn ordinal_by_mid(request: &TransformRequest) -> HashMap<&str, u64> {
+    let mut ordinal_by_mid = HashMap::with_capacity(request.messages.len());
+    for message in &request.messages {
+        ordinal_by_mid
+            .entry(message.mid.as_str())
+            .or_insert(message.ordinal);
+    }
+    ordinal_by_mid
+}
+
 fn native_reasoning_should_clear(
     served: &transform::ServedMessage,
     request: &TransformRequest,
@@ -14551,13 +14562,7 @@ fn attach_native_messages_incremental(
         .filter(|message| !message.ck.meta.synthetic && message.ck.role == "assistant")
         .max_by_key(|message| message.ordinal)
         .map(|message| message.mid.as_str());
-    // The first message of a mid wins, as a linear find would pick it.
-    let mut ordinal_by_mid = HashMap::with_capacity(request.messages.len());
-    for message in &request.messages {
-        ordinal_by_mid
-            .entry(message.mid.as_str())
-            .or_insert(message.ordinal);
-    }
+    let ordinal_by_mid = ordinal_by_mid(request);
 
     let mut sidecar_hashes = cached
         .as_mut()
@@ -29069,6 +29074,18 @@ mod tests {
                 .skip(1)
                 .all(|block| block.synthetic)
         );
+    }
+
+    #[test]
+    fn ordinal_by_mid_keeps_the_first_message_of_a_duplicated_mid() {
+        use crate::transform::tests::{item, req};
+        let request = req(
+            "dup-mid",
+            "cfg0",
+            vec![item("a", 1, "x"), item("b", 2, "y"), item("a", 3, "z")],
+        );
+        let ordinals = ordinal_by_mid(&request);
+        assert_eq!((ordinals["a"], ordinals["b"], ordinals.len()), (1, 2, 2));
     }
 
     #[tokio::test(flavor = "current_thread")]

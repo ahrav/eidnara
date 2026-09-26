@@ -6171,7 +6171,9 @@ mod tests {
             1,
             "the stale publish must not append a second overlapping range"
         );
-        assert!(crate::history_segment_coverage::resolve_coverage(&history_segments).is_ok());
+        assert!(
+            crate::history_segment_coverage::oracle::resolve_coverage(&history_segments).is_ok()
+        );
     }
 
     #[tokio::test]

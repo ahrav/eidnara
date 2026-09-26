@@ -2334,17 +2334,6 @@ pub struct TagNumberRow {
     pub tag_number: i64,
 }
 
-/// A cheap trigger-maintained tag-table identity.
-///
-/// `generation` is advanced by SQLite triggers for every insert, update, and delete. The
-/// count/max fields make normal append deltas recognizable without rehydrating old payloads.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct TagCacheSummary {
-    pub generation: u64,
-    pub count: usize,
-    pub max_tag_number: i64,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Channel1AppendRow {
     pub block_id: String,
@@ -6158,7 +6147,7 @@ impl<'a> FacadeMutationTxn<'a> {
 pub struct MemoryStore {
     inner: SqliteStore,
     connection_profile: ConnectionProfile,
-    // Distinguishes independent stores in the process-local tag baseline cache. Production
+    // Distinguishes independent stores in the process-local tail hygiene memo. Production
     // opens one store for the module lifetime; tests and embedded callers may open several.
     tag_cache_namespace: u64,
     /// The caller identity used by note ownership triggers. It is installed only while a
@@ -8633,15 +8622,12 @@ impl MemoryStore {
         })?)
     }
 
-    /// Loads, in tag-number order, the tag rows a transform pass consumes: every row of a
-    /// block of `message_ids` (block ids `<mid>` and `<mid>#...` share a range on the
-    /// `(session_id, block_id)` index), every legacy row keyed by one of `tool_call_ids`, and
-    /// the session's newest `newest.max(1) + <rows of message_ids>` rows by primary key.
-    ///
-    /// The newest rows keep session-relative protection exact: at most one row per block of
-    /// the window is excluded from any ranking, so the newest `newest` rows outside the window
-    /// and the session's maximum tag number are among them. Rows read are bounded by the
-    /// window and `newest`, not by the session's tag count.
+    /// Loads, deduplicated in tag-number order, three row sets: every row whose block id is
+    /// one of `message_ids` or starts with `<message id>#`, as ranges on the
+    /// `(session_id, block_id)` unique index; every row whose block id is one of
+    /// `tool_call_ids`; and the session's newest `newest.max(1) + <rows of the first set>`
+    /// rows on the primary key. Rows read are bounded by the inputs and `newest`, not by the
+    /// session's tag count.
     pub fn load_tags_for_window(
         &self,
         session_id: &str,
@@ -8654,13 +8640,7 @@ impl MemoryStore {
         Ok(self.inner.with_conn(|conn| {
             let mut rows = BTreeMap::new();
             let window = conn
-                .prepare_cached(
-                    "SELECT t.tag_number, t.block_id, t.kind, t.token_count, t.created_at_ms,
-                            t.source_bytes
-                       FROM json_each(?2) AS j CROSS JOIN tags AS t
-                      WHERE t.session_id = ?1
-                        AND t.block_id >= j.value AND t.block_id < j.value || '$'",
-                )?
+                .prepare_cached(WINDOW_TAGS_SQL)?
                 .query_map(params![session_id, message_ids], tag_row_from_sql)?
                 .collect::<Result<Vec<_>, _>>()?;
             let window_rows = window.len();
@@ -8691,29 +8671,6 @@ impl MemoryStore {
                 rows.insert(row.tag_number, row);
             }
             Ok(rows.into_values().collect())
-        })?)
-    }
-
-    /// Return the trigger-maintained tag identity without reading blobs.
-    ///
-    /// Triggers maintain count and max during rare writes; replacements and deletions derive a
-    /// fresh max from the primary-key prefix.
-    pub fn tag_cache_summary(&self, session_id: &str) -> Result<TagCacheSummary, MemoryStoreError> {
-        Ok(self.inner.with_conn(|conn| {
-            conn.prepare_cached(
-                "SELECT generation, tag_count, max_tag_number
-                   FROM tag_cache_generations
-                  WHERE session_id = ?1",
-            )?
-            .query_row(params![session_id], |row| {
-                Ok(TagCacheSummary {
-                    generation: row.get::<_, i64>(0)?.max(0) as u64,
-                    count: row.get::<_, i64>(1)?.max(0) as usize,
-                    max_tag_number: row.get(2)?,
-                })
-            })
-            .optional()
-            .map(|summary| summary.unwrap_or_default())
         })?)
     }
 
@@ -10584,14 +10541,22 @@ impl MemoryStore {
             .with_conn(|conn| history_segment_edge_tx(conn, session_id, EdgeAt::Newest))?)
     }
 
-    /// The oldest history_segment by sequence, by primary-key seek.
-    pub fn oldest_history_segment(
+    /// The oldest and the newest history_segment by sequence, two primary-key seeks on one
+    /// connection hold. The store owns the write-side guarantee that stored ranges are
+    /// strictly increasing (append and replace reject overlapping and non-increasing ranges),
+    /// so these two rows bound the covered ordinals of the whole set.
+    pub fn history_segment_ends(
         &self,
         session_id: &str,
-    ) -> Result<Option<HistorySegmentEdge>, MemoryStoreError> {
-        Ok(self
-            .inner
-            .with_conn(|conn| history_segment_edge_tx(conn, session_id, EdgeAt::Oldest))?)
+    ) -> Result<Option<(HistorySegmentEdge, HistorySegmentEdge)>, MemoryStoreError> {
+        Ok(self.inner.with_conn(|conn| {
+            let Some(newest) = history_segment_edge_tx(conn, session_id, EdgeAt::Newest)? else {
+                return Ok(None);
+            };
+            let oldest = history_segment_edge_tx(conn, session_id, EdgeAt::Oldest)?
+                .unwrap_or_else(|| newest.clone());
+            Ok(Some((oldest, newest)))
+        })?)
     }
 
     /// The history_segment ending at `end_message`; ranges strictly increase, so at most one.
@@ -10743,9 +10708,10 @@ impl MemoryStore {
         self.max_history_segment_end_ordinal(session_id)
     }
 
-    /// The `ordinals` no history_segment covers. Ranges are validated strictly increasing at
-    /// append, so the row with the smallest `end_message` at or after an ordinal is the only
-    /// one that can cover it: one seek on the end-message index per ordinal.
+    /// The `ordinals` no history_segment covers, one output row per input ordinal. The store
+    /// guarantees at write time that ranges are strictly increasing, so the row with the
+    /// smallest `end_message` at or after an ordinal is the only one that can cover it: one
+    /// seek on the end-message index per ordinal.
     pub fn uncovered_ordinals(
         &self,
         session_id: &str,
@@ -16023,6 +15989,15 @@ fn history_segment_edge_tx(
     .optional()
 }
 
+/// Tag rows of a block id `<mid>` or `<mid>#...` for each `<mid>` of the JSON array `?2`.
+/// '$' is the character after '#', so the range holds exactly the `<mid>#` prefix.
+const WINDOW_TAGS_SQL: &str =
+    "SELECT t.tag_number, t.block_id, t.kind, t.token_count, t.created_at_ms, t.source_bytes
+       FROM json_each(?2) AS j CROSS JOIN tags AS t
+      WHERE t.session_id = ?1
+        AND (t.block_id = j.value
+             OR (t.block_id >= j.value || '#' AND t.block_id < j.value || '$'))";
+
 fn sql_limit(limit: usize) -> i64 {
     i64::try_from(limit).unwrap_or(i64::MAX)
 }
@@ -20731,28 +20706,6 @@ mod tests {
             vec![2, 3]
         );
         assert_eq!(
-            store.tag_cache_summary("ses").unwrap(),
-            TagCacheSummary {
-                generation: 3,
-                count: 3,
-                max_tag_number: 3,
-            }
-        );
-        store
-            .execute_tag_sql_for_test(
-                "UPDATE tags SET source_bytes = X'706f69736f6e6564' WHERE session_id = 'ses' AND tag_number = 1",
-            )
-            .unwrap();
-        assert_eq!(
-            store.tag_cache_summary("ses").unwrap(),
-            TagCacheSummary {
-                generation: 5,
-                count: 3,
-                max_tag_number: 3,
-            },
-            "an update fires both OLD and NEW generation writes"
-        );
-        assert_eq!(
             all[0].token_count, 11,
             "token count is computed once at mint"
         );
@@ -20769,21 +20722,6 @@ mod tests {
                 .unwrap(),
             44
         );
-        store
-            .execute_tag_sql_for_test(
-                "DELETE FROM tags WHERE session_id = 'ses' AND tag_number = 3",
-            )
-            .unwrap();
-        assert_eq!(
-            store.tag_cache_summary("ses").unwrap(),
-            TagCacheSummary {
-                generation: 6,
-                count: 2,
-                max_tag_number: 2,
-            },
-            "deletion advances the generation and refreshes the cached table summary"
-        );
-
         assert!(
             store
                 .append_channel1_nudge(
@@ -22150,6 +22088,81 @@ mod tests {
     }
 
     #[test]
+    fn window_tag_read_takes_exact_block_ids_and_their_hash_prefix_on_the_index() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
+        let ids = [
+            "m1", "m1#0", "m1#a#b", "m1!x", "m1 ", "m10#0", "m1$", "call-a", "other#0",
+        ];
+        let inputs = ids
+            .map(|block_id| TagMintInput {
+                block_id: block_id.to_string(),
+                kind: "message".to_string(),
+                token_count: 1,
+                source_bytes: Vec::new(),
+            })
+            .to_vec();
+        store.seed_tags_for_test("ses", &inputs, 1).unwrap();
+        let read = store
+            .load_tags_for_window("ses", &["m1"], &["call-a"], 1)
+            .unwrap()
+            .into_iter()
+            .map(|row| row.block_id)
+            .collect::<Vec<_>>();
+        // The newest read of 1 + 3 window rows adds "m10#0", "m1$", and "other#0";
+        // "m1!x" and "m1 " sort inside the old `<mid>`..`<mid>$` range and stay unread.
+        assert_eq!(
+            read,
+            ["m1", "m1#0", "m1#a#b", "m10#0", "m1$", "call-a", "other#0"]
+        );
+        let plan = store
+            .inner
+            .with_conn(|conn| {
+                conn.prepare(&format!("EXPLAIN QUERY PLAN {WINDOW_TAGS_SQL}"))?
+                    .query_map(params!["ses", r#"["m1"]"#], |row| row.get::<_, String>(3))?
+                    .collect::<Result<Vec<_>, _>>()
+            })
+            .unwrap();
+        assert!(
+            plan.iter().any(|detail| detail.contains("USING INDEX"))
+                && !plan.iter().any(|detail| detail.starts_with("SCAN t")),
+            "the window tag read must seek the block-id index: {plan:?}"
+        );
+    }
+
+    #[test]
+    fn uncovered_ordinals_match_a_scan_over_sparse_ranges() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
+        let ranges = [(1, 3), (7, 7), (10, 15)];
+        let segments = ranges
+            .iter()
+            .zip(1..)
+            .map(|(&(start, end), sequence)| StoredHistorySegment {
+                sequence,
+                start_message: start,
+                end_message: end,
+                end_message_id: format!("m{end}"),
+                title: "s".to_string(),
+                content: "s".to_string(),
+                ..Default::default()
+            })
+            .collect::<Vec<_>>();
+        store.replace_history_segments("ses", &segments).unwrap();
+        let ordinals = [0, 1, 2, 3, 3, 4, 4, 6, 7, 8, 9, 10, 12, 15, 16, 100];
+        let mut uncovered = store.uncovered_ordinals("ses", &ordinals).unwrap();
+        uncovered.sort_unstable();
+        let expected = ordinals
+            .into_iter()
+            .filter(|&o| !ranges.iter().any(|&(start, end)| start <= o && o <= end))
+            .collect::<Vec<_>>();
+        assert_eq!(uncovered, expected);
+        assert_eq!(uncovered, [0, 4, 4, 6, 8, 9, 16, 100]);
+        assert_eq!(store.uncovered_ordinals("none", &[0, 5]).unwrap(), [0, 5]);
+        assert!(store.uncovered_ordinals("ses", &[]).unwrap().is_empty());
+    }
+
+    #[test]
     fn point_lookups_name_one_row_each() {
         let dir = tempfile::tempdir().unwrap();
         let store = bounded_read_store(dir.path(), 10, &[]);
@@ -22161,14 +22174,8 @@ mod tests {
                 .sequence,
             10
         );
-        assert_eq!(
-            store
-                .oldest_history_segment("ses")
-                .unwrap()
-                .unwrap()
-                .sequence,
-            1
-        );
+        let (oldest, newest) = store.history_segment_ends("ses").unwrap().unwrap();
+        assert_eq!((oldest.sequence, newest.sequence), (1, 10));
         let rendered = store.history_segment_ending_at("ses", 8).unwrap().unwrap();
         assert_eq!(
             (rendered.sequence, rendered.end_message_id.as_str()),

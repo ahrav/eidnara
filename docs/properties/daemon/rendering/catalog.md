@@ -772,10 +772,12 @@ both.
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: partial - `tag_baseline_cache_matches_cold_passes_across_drop_reset_and_remint`
-(`transform.rs:23364`) and
-`tag_baseline_cache_keeps_interleaved_sessions_isolated` (`:23466`) cover the
-baseline paths. Nothing asserts uniqueness of `block_id` within one mint batch.
+Exercised: partial - `window_tag_read_keeps_every_session_relative_tag_decision`
+(`transform.rs:24155`) checks that the window tag read keeps every tag decision
+of a whole-session read, and
+`every_pass_read_is_bounded_independent_of_history_size`
+(`transform_read_bound.rs:440`) bounds the tag reads. The tag baseline cache is
+deleted. Nothing asserts uniqueness of `block_id` within one mint batch.
 Guarantee: A single tag-mint batch never contains the same `block_id` twice,
 and never contains a `block_id` that already has a durable `tags` row.
 Check: `always` - before the commit, assert `tag_mint_work.inputs` has distinct

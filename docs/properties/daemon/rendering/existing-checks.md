@@ -438,7 +438,7 @@ Every cited `fn` line was re-read at `HEAD`. `†` marks `#[ignore]`.
 | Cluster | Tests | Lines | Notes |
 | --- | --- | --- | --- |
 | serialized-output cache | 5 | `:28596`, `:28622`, `:28660`, `:28698`, `:28726` | The invalidation-granularity family. `:28622` and `:28660` are the two byte-equality replays lens A leans on |
-| tag baseline cache | 4 | `:23364`, `:23433`, `:23466`, `:23490`† | `:23433` `poisoned_tag_baseline_refills_after_direct_sql_update` is the only one that corrupts the store directly. `:23490` is `#[ignore]`, a manual 50k timing proof |
+| window tag read | 2 | `:24155`, `transform_read_bound.rs:440` | The tag baseline cache and its four tests are deleted. `:24155` `window_tag_read_keeps_every_session_relative_tag_decision` compares every tag decision against a whole-session read; `transform_read_bound.rs:440` bounds the three tag queries |
 | reasoning clearing and exemption | 3 | `:18360`, `:18850`, `:19070` | The Anthropic-signed-block rules at `:12273`, `:10258` |
 | orphan-arc and served-fingerprint shape | 3 | `:14310`, `:14456`, `:27338` | `:14310` and `:27338` are the only tests whose oracle is `assert_no_orphaned_tool_arcs` |
 | byte-identical replay through the output cache | 2 | `:27150`, `:27216` | Lens A's strongest evidence for composition order and determinism |

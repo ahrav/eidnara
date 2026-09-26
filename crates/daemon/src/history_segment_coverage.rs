@@ -1,16 +1,14 @@
 //! This module folds the m0 content epoch into the render identity.
 //!
-//! Under test, resolve_coverage is the whole-set oracle for coverage, which the transform
-//! reads from the set's two ends because append validates every range.
-//! It is pure over history_segments in the order MemoryStore::load_history_segments returns.
+//! Its test-only `oracle` module holds resolve_coverage, the whole-set oracle for coverage,
+//! which the transform reads from the set's two ends because the store validates every range
+//! at write time.
+//! resolve_coverage is pure over history_segments in the order MemoryStore::load_history_segments returns.
 //! resolve_coverage rejects negative, reversed, non-increasing, or overlapping stored history_segment ranges.
 //! resolve_coverage returns the last history_segment's end_message and end_message_id as the coverage end.
 //! resolve_coverage uses the returned coverage end as the combined m0/m1 coverage anchor.
 //! resolve_coverage permits sparse coordinate gaps because store data cannot distinguish retired ordinals from missing live messages.
 //! Live-aware callers guard against dropping present input across those gaps.
-
-#[cfg(test)]
-use memory_store::StoredHistorySegment;
 
 /// M0ContentEpoch fields trigger a HARD fold when their changes alter frozen m0 without a cheaper correction.
 /// Changes to composition and structure fields change `render_config` and trigger a HARD fold.
@@ -91,107 +89,111 @@ pub fn fold_m0_content_epoch(base_render_config: &str, epoch: &M0ContentEpoch) -
     format!("{base_render_config}|m0epoch[{}]", parts.join(";"))
 }
 
+/// The whole-set coverage oracle the tests check the transform's two-end coverage read against.
 #[cfg(test)]
-/// `HistorySegmentCoverage` records the latest sequence, terminal covered ordinal, and cache anchor.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct HistorySegmentCoverage {
-    pub max_sequence: i64,
-    /// `first_covered_ordinal` marks the leading edge of m0 coverage.
-    /// The caller rejects a live item below `start_message` to prevent a silent leading-gap drop.
-    pub first_covered_ordinal: u64,
-    /// `coverage_end_ordinal` marks the m0+m1 coverage end ordinal.
-    /// `coverage_end_ordinal` is the tail-trim point: items with greater ordinals form the live tail.
-    pub coverage_end_ordinal: u64,
-    /// The last history_segment's `end_message_id` is the cache/revert anchor.
-    pub boundary_id: String,
-}
+pub(crate) mod oracle {
+    use memory_store::StoredHistorySegment;
 
-#[cfg(test)]
-/// `CoverageError` reports a stored history_segment set that cannot anchor coverage.
-/// Overlaps are legal for consumer legs because retired ordinals are absent from the input.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum CoverageError {
-    Overlap {
-        prev_end: i64,
-        next_start: i64,
-    },
-    /// A negative or descending range cannot bound a coverage span.
-    InvalidRange {
-        start: i64,
-        end: i64,
-    },
-}
+    /// `HistorySegmentCoverage` records the latest sequence, terminal covered ordinal, and cache anchor.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct HistorySegmentCoverage {
+        pub max_sequence: i64,
+        /// `first_covered_ordinal` marks the leading edge of m0 coverage.
+        /// The caller rejects a live item below `start_message` to prevent a silent leading-gap drop.
+        pub first_covered_ordinal: u64,
+        /// `coverage_end_ordinal` marks the m0+m1 coverage end ordinal.
+        /// `coverage_end_ordinal` is the tail-trim point: items with greater ordinals form the live tail.
+        pub coverage_end_ordinal: u64,
+        /// The last history_segment's `end_message_id` is the cache/revert anchor.
+        pub boundary_id: String,
+    }
 
-#[cfg(test)]
-impl std::fmt::Display for CoverageError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Overlap {
-                prev_end,
-                next_start,
-            } => write!(
-                f,
-                "history_segment coverage overlap: a history_segment ends at ordinal {prev_end} but the next starts at {next_start}; ranges must be strictly increasing"
-            ),
-            Self::InvalidRange { start, end } => write!(
-                f,
-                "history_segment coverage range {start}..={end} is invalid; ordinals must be non-negative and end must not precede start"
-            ),
+    /// `CoverageError` reports a stored history_segment set that cannot anchor coverage.
+    /// Overlaps are legal for consumer legs because retired ordinals are absent from the input.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub enum CoverageError {
+        Overlap {
+            prev_end: i64,
+            next_start: i64,
+        },
+        /// A negative or descending range cannot bound a coverage span.
+        InvalidRange {
+            start: i64,
+            end: i64,
+        },
+    }
+
+    impl std::fmt::Display for CoverageError {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            match self {
+                Self::Overlap {
+                    prev_end,
+                    next_start,
+                } => write!(
+                    f,
+                    "history_segment coverage overlap: a history_segment ends at ordinal {prev_end} but the next starts at {next_start}; ranges must be strictly increasing"
+                ),
+                Self::InvalidRange { start, end } => write!(
+                    f,
+                    "history_segment coverage range {start}..={end} is invalid; ordinals must be non-negative and end must not precede start"
+                ),
+            }
         }
     }
-}
 
-#[cfg(test)]
-/// Resolves the terminal coverage and cache anchor from store-ordered history_segments.
-///
-/// Coordinate gaps remain valid because retired ordinals are absent from store data.
-/// Invalid ranges take precedence over overlap errors.
-///
-/// # Errors
-///
-/// Returns `CoverageError` when a range is negative or descending, or a later range starts at or before the preceding range's end.
-pub fn resolve_coverage(
-    history_segments: &[StoredHistorySegment],
-) -> Result<Option<HistorySegmentCoverage>, CoverageError> {
-    let Some(first) = history_segments.first() else {
-        return Ok(None);
-    };
-    for history_segment in history_segments {
-        if history_segment.start_message < 0
-            || history_segment.end_message < history_segment.start_message
-        {
-            return Err(CoverageError::InvalidRange {
-                start: history_segment.start_message,
-                end: history_segment.end_message,
-            });
+    /// Resolves the terminal coverage and cache anchor from store-ordered history_segments.
+    ///
+    /// Coordinate gaps remain valid because retired ordinals are absent from store data.
+    /// Invalid ranges take precedence over overlap errors.
+    ///
+    /// # Errors
+    ///
+    /// Returns `CoverageError` when a range is negative or descending, or a later range starts at or before the preceding range's end.
+    pub fn resolve_coverage(
+        history_segments: &[StoredHistorySegment],
+    ) -> Result<Option<HistorySegmentCoverage>, CoverageError> {
+        let Some(first) = history_segments.first() else {
+            return Ok(None);
+        };
+        for history_segment in history_segments {
+            if history_segment.start_message < 0
+                || history_segment.end_message < history_segment.start_message
+            {
+                return Err(CoverageError::InvalidRange {
+                    start: history_segment.start_message,
+                    end: history_segment.end_message,
+                });
+            }
         }
-    }
-    let mut prev = first;
-    for next in &history_segments[1..] {
-        if next.start_message <= prev.end_message {
-            return Err(CoverageError::Overlap {
-                prev_end: prev.end_message,
-                next_start: next.start_message,
-            });
+        let mut prev = first;
+        for next in &history_segments[1..] {
+            if next.start_message <= prev.end_message {
+                return Err(CoverageError::Overlap {
+                    prev_end: prev.end_message,
+                    next_start: next.start_message,
+                });
+            }
+            prev = next;
         }
-        prev = next;
+        let last = history_segments.last().expect("non-empty checked above");
+        Ok(Some(HistorySegmentCoverage {
+            max_sequence: history_segments
+                .iter()
+                .map(|c| c.sequence)
+                .max()
+                .unwrap_or(0),
+            first_covered_ordinal: first.start_message as u64,
+            coverage_end_ordinal: last.end_message as u64,
+            boundary_id: last.end_message_id.clone(),
+        }))
     }
-    let last = history_segments.last().expect("non-empty checked above");
-    Ok(Some(HistorySegmentCoverage {
-        max_sequence: history_segments
-            .iter()
-            .map(|c| c.sequence)
-            .max()
-            .unwrap_or(0),
-        first_covered_ordinal: first.start_message as u64,
-        coverage_end_ordinal: last.end_message as u64,
-        boundary_id: last.end_message_id.clone(),
-    }))
 }
 
 #[cfg(test)]
 mod tests {
+    use super::oracle::*;
     use super::*;
+    use memory_store::StoredHistorySegment;
 
     fn comp(seq: i64, start: i64, end: i64, end_id: &str) -> StoredHistorySegment {
         StoredHistorySegment {
