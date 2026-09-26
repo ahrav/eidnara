@@ -152,11 +152,11 @@ one record and one charge (`RetainedOutputs`, `rust-mode-transform.ts:181`),
 under the 64-session and 64 MiB (`RETAINED_OUTPUT_BUDGET_BYTES`, `:135`)
 limits. A retention over the budget first drops the applied output and keeps
 the basis, then drops the record. Eviction never touches a capture lease.
-Witnesses: `rust-mode-transform.test.ts:1964` "keeps one retained-output record
-per session under the session and byte limits", `:1377` "evicts the least
-recently retained session's output and offers it no previous source", `:1414`
+Witnesses: `rust-mode-transform.test.ts:2041` "keeps one retained-output record
+per session under the session and byte limits", `:1405` "evicts the least
+recently retained session's output and offers it no previous source", `:1491`
 "never releases an active capture lease when the session count|byte budget
-evicts its session's output", and `:4001` "keeps the basis without the applied
+evicts its session's output", and `:4141` "keeps the basis without the applied
 output, then drops the record, as the budget tightens".
 
 ### TE30 `inbound-baseline-independent-of-output-base`
