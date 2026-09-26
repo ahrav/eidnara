@@ -516,6 +516,76 @@ describe("boundary discovery", () => {
         expect(transform.getState(sessionId).boundary).toBeUndefined();
     });
 
+    /** A pass with a known anchor `m-2` whose first send answers through `unknown`; returns its pass lines. */
+    async function rediscoveryPass(
+        sessionId: string,
+        unknown: (
+            transform: ReturnType<typeof createRustModeTransform>,
+            output: { messages: unknown[] },
+        ) => Promise<void> | void,
+    ) {
+        let transform: ReturnType<typeof createRustModeTransform> | undefined;
+        const output = { messages: hostArray(sessionId, 6) as unknown[] };
+        const daemon = fakeDaemon({
+            pages: () => ({ anchors: [{ mid: "m-2", sequence: 7 }] }),
+            transform: async (body, index) => {
+                if (index !== 1) return keepAll(body, { mid: "m-2", sequence: 7 });
+                if (transform) await unknown(transform, output);
+                return { status: "boundary_unknown" };
+            },
+        });
+        transform = createRustModeTransform(makeDeps(), { moduleClient: daemon.client });
+        await transform.run(sessionId, { messages: hostArray(sessionId, 5) });
+        const debug = spyOn(logger.sessionLog, "debug");
+        try {
+            await transform.run(sessionId, output);
+            const lines = logsOf(debug, sessionId);
+            const passes = lines.filter((line) => line.startsWith("rust pass:"));
+            return { ...daemon, lines, passes, output };
+        } finally {
+            debug.mockRestore();
+        }
+    }
+
+    it("stops at boundary_unknown for a session cleared during the send", async () => {
+        const sessionId = `discovery-cleared-${Date.now()}`;
+        const { cursors, bodies, passes } = await rediscoveryPass(sessionId, (transform) =>
+            transform.clearSession(sessionId),
+        );
+        // The falsifier reruns into a fresh state entry for the cleared session and declines superseded.
+        expect(passes).toHaveLength(1);
+        expect(passes[0]).toContain("decision=declined:cleared");
+        expect(passes[0]).toContain("rediscovered=false");
+        expect(cursors).toHaveLength(1);
+        expect(bodies).toHaveLength(2);
+    });
+
+    it("logs one pass line when the host locks its container before a rerun", async () => {
+        const sessionId = `discovery-locked-${Date.now()}`;
+        const { cursors, passes } = await rediscoveryPass(sessionId, (_, output) => {
+            Object.preventExtensions(output.messages);
+        });
+        expect(cursors).toHaveLength(2);
+        expect(passes).toHaveLength(1);
+        expect(passes[0]).toContain("rediscovered=true");
+        expect(passes[0]).toContain("applied=false");
+    });
+
+    it("declines a rediscovery once a slow first send spent the pass's discovery budget", async () => {
+        const sessionId = `discovery-slow-${Date.now()}`;
+        const { cursors, bodies, lines, passes, output } = await rediscoveryPass(sessionId, () =>
+            Bun.sleep(1_100),
+        );
+        expect(lines).toContain(
+            `rust session ${sessionId} pass declined: discovery_declined (time budget)`,
+        );
+        // The first pass walked once; the rerun sent no page and no second transform.
+        expect(cursors).toHaveLength(1);
+        expect(bodies).toHaveLength(2);
+        expect(passes[0]).toContain("rediscovered=true");
+        expect(output.messages).toEqual(hostArray(sessionId, 6));
+    });
+
     it("refunds the first attempt so a rediscovered window near the byte limit still publishes", async () => {
         const run = async (maxBytes: number, unknownAt: number | undefined) => {
             const sessionId = "discovery-refund";
@@ -621,6 +691,35 @@ describe("boundary discovery", () => {
         expect(ck.map((entry) => entry.mid)).toEqual(["m-0", "m-2"]);
         // The native decoder numbers the tool part's message 3, counting the summary.
         expect(JSON.stringify(ck[1]?.ck.content)).toContain('"id":"synth-tool-3-0-read-');
+    });
+
+    it("keeps a later tool call whose callID a dropped compaction summary also carries", async () => {
+        const sessionId = `ck-summary-call-${Date.now()}`;
+        const tool = {
+            type: "tool",
+            tool: "read",
+            callID: "call-1",
+            state: { status: "pending", input: {} },
+        };
+        const host: MessageLike[] = [
+            {
+                info: {
+                    id: "m-0",
+                    role: "assistant",
+                    sessionID: sessionId,
+                    summary: true,
+                    finish: "stop",
+                },
+                parts: [tool],
+            },
+            { info: { id: "m-1", role: "assistant", sessionID: sessionId }, parts: [tool] },
+        ];
+        const { client, bodies } = fakeDaemon({});
+        const transform = createRustModeTransform(makeDeps(), { moduleClient: client });
+        await transform.run(sessionId, { messages: [...host] });
+        const ck = bodies[0]?.messages as Array<{ mid: string; ck: { content: unknown[] } }>;
+        expect(ck.map((entry) => entry.mid)).toEqual(["m-1"]);
+        expect(JSON.stringify(ck[0]?.ck.content)).toContain('"type":"tool_call","id":"call-1"');
     });
 
     it("serves raw and logs an upgrade hint when the daemon refuses the revision", async () => {

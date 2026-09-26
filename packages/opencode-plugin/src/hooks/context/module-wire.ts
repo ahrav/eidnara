@@ -631,8 +631,11 @@ export const __moduleWireTest = {
     toFlatModuleWireBody,
 };
 
-/** Carries no ordinal: the daemon derives every ordinal from the declared window boundary. */
-export function encodeOpenCodeMessagesToCk(messages: unknown[]): Array<{
+/** Carries no ordinal; `positions[i]` is message i's 1-based window position, else i + 1. */
+export function encodeOpenCodeMessagesToCk(
+    messages: unknown[],
+    positions?: number[],
+): Array<{
     mid: string;
     ck: Record<string, unknown>;
 }> {
@@ -653,7 +656,7 @@ export function encodeOpenCodeMessagesToCk(messages: unknown[]): Array<{
                   ? raw.id
                   : `opencode-hash-${stableHashPrefix(message, 24)}`;
         // The daemon's native decoder names a synthetic tool call by window position the same way.
-        const position = index + 1;
+        const position = positions?.[index] ?? index + 1;
         const role =
             typeof info.role === "string"
                 ? info.role

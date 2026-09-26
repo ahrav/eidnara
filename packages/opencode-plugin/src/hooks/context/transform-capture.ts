@@ -863,7 +863,7 @@ export interface CaptureLease {
     /** Owner-wide headroom shared by every lease, not this lease's own remainder; zero once released. */
     readonly remainingBytes: number;
     reserve(bytes: number): boolean;
-    /** Returns every byte this lease holds to the owner and keeps the lease live. */
+    /** Returns every byte this lease holds to the owner and keeps the lease live; the caller must hold no charged capture at the call. */
     refund(): void;
     requestCancel(reason: string): void;
     release(): void;

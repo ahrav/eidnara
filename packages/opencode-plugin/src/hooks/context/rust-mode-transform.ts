@@ -888,7 +888,8 @@ export function createRustModeTransform(
             applied: new Set(),
         };
         const target = readOwnDataProperty(output, "messages") as unknown[];
-        const hostRejection = publicationRejection(target, 0);
+        // A rerun leaves a changed container to the publish-time check, so the pass still logs its line.
+        const hostRejection = rerun ? null : publicationRejection(target, 0);
         if (hostRejection !== null) {
             sessionLog.debug(
                 sessionId,
@@ -1022,6 +1023,7 @@ export function createRustModeTransform(
          * Walks `transform.boundary` newest first until a page names an anchor present in the host
          * array, verified by one id scan; an empty page is exhaustion and sends `null`. Budget,
          * timeout, a malformed or repeated page, or a daemon without the method declines, never `null`.
+         * The budget runs from the pass start, so a rediscovery gets only what the first attempt left.
          */
         const discover = async (
             projectRoot: string,
@@ -1314,11 +1316,13 @@ export function createRustModeTransform(
             state.routeRoot = projectRoot;
             deliveries.projectRoot = projectRoot;
             const wireBuildStartedAt = performance.now();
-            // Compaction summaries stay out of the CK window, as the daemon's CK decoder expects.
-            // Encoding before filtering names synthetic tool calls by unfiltered window position.
-            const encodedInput = encodeOpenCodeMessagesToCk(messages).filter(
-                (_, index) => !isRawCompactionSummaryInfo(messages[index]?.info),
+            // Compaction summaries stay out of the CK window, as the daemon's CK decoder expects;
+            // the kept messages carry their unfiltered window positions for synthetic tool call ids.
+            const positions: number[] = [];
+            const kept = messages.filter(
+                (message, i) => !isRawCompactionSummaryInfo(message.info) && positions.push(i + 1),
             );
+            const encodedInput = encodeOpenCodeMessagesToCk(kept, positions);
             timings.wireMessages = messages.length;
             charge(messages.length * LENGTH_SLOT_BYTES, "input lengths");
             const inputLengths = measureInputLengths(
@@ -1475,6 +1479,7 @@ export function createRustModeTransform(
             };
             const response = await sendTransformSeriesWithSingleRestart(body, "");
             if (response.status === "boundary_unknown") {
+                assertCurrentPass();
                 state.boundary = undefined;
                 if (discovered || rerun)
                     throw new PassDeclined(sessionId, "boundary_unknown", "after discovery");
