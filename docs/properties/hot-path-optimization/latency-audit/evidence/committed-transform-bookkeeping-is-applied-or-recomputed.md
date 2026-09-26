@@ -68,6 +68,11 @@ In-memory mutations after `run_transform()` returns, in order:
   [`:8452-8461`][finish-ready] finishes the snapshot generation with the
   retained request.
 
+Update, 2026-09-26: [#828](https://github.com/ahrav/eidnara/issues/828) deletes
+`store_projection_cache` and `projection_cache_input`; the settle no longer
+stores a projection. The daemon projects every request from its full input.
+Citations of these symbols here are historical at their stated baseline.
+
 On the ordinary path there is no `.await` between [`:8202`][commit-call] and
 [`:8461`][finish-ready]. The three awaits at `:8263`, `:8289`, and `:8315`
 sit inside the Emergency95 branch ([`:8244-8334`][emergency]), and each is

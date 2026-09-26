@@ -445,6 +445,14 @@ cover tool-result pairing, and `wire.rs:1258` and `wire.rs:1283` assert
 (`wire.rs:1438-1441`, `wire.rs:1455-1458`). `UnsupportedBlock` has no test that
 reaches `wire.rs:629`.
 
+Update, 2026-09-26: [#828](https://github.com/ahrav/eidnara/issues/828) deletes
+`projection_retained_bytes_counts_wire_and_frontier_allocations_once` and
+`incremental_projection_reuses_prefix_storage_and_preserves_tool_arc_state`, and
+reduces `duplicate_message_ids_are_rejected_across_the_incremental_prefix` to
+its full-projection arm as `duplicate_message_ids_are_rejected`. The daemon
+projects every request from its full input. Citations of these symbols here are
+historical at their stated baseline.
+
 ## Codec golden coverage
 
 Both harness directions have a golden, both goldens are one case each, their

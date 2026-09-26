@@ -79,7 +79,7 @@ fn transform(
         wrapup_active: false,
         injected_reductions: Vec::new(),
     };
-    transform_with_projection_cached(store, &req, &ctx, &std::sync::Mutex::default(), None)
+    transform_with_projection_cached(store, &req, &ctx, &std::sync::Mutex::default())
         .map(|out| out.response.action)
 }
 

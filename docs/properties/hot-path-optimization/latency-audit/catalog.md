@@ -10,6 +10,40 @@ records final focused and Bun passes. The earlier full-workspace run failed
 with two known daemon deadlines and one additional timing-sensitive embedding
 failure. No workspace pass is claimed. Earlier `d6060f79` results stay historical.
 
+## Projection prefix reuse retirement, 2026-09-26
+
+[#828](https://github.com/ahrav/eidnara/issues/828) deletes the projection
+cache, its active leases and budget, the cache lookup, store, and input
+validation, `ProjectionCacheKeyMode`, `ProjectionCacheInput`, the incremental
+projection call in `apply_once`, `FlatProjection::reattach_messages_prefix`,
+the incremental builder paths (`project_incremental`,
+`project_messages_incremental`, `prefix_block_count`, `message_block_ends`,
+`states_after_messages`), the prefix-projection differential, and
+`EIDNARA_PREFIX_PROJECTION_DIFFERENTIAL`. Every pass projects its full CK
+input with `MessageProjection::project`. A tail delta reattaches its prefix
+only from the latest-ready request snapshot; without one it takes the
+full-sync path. The tag-mint frontier memo no longer keys on the full-array
+fingerprint. Citations of the deleted symbols below are historical and link
+to `704568ec`, the last commit that has them.
+
+B1's prefix-reattachment and incremental-projection clauses are invalidated.
+Its value clauses still hold: full projection of the same input yields the
+projection the reused prefix path yielded. The replacing evidence is the
+unchanged projection, served-output, recipe, and edit-recipe goldens, the
+differential goldens without the appended-tail incremental arm, the native
+delta replay that checks the snapshot-reattached request against a fresh
+projection, the B5 witness whose pinned third-turn prompt and native bytes
+are unchanged, and the e2e byte-identity scenario. B2, B5, C1, and W8 name
+deleted symbols in passing; the notes in those records say what replaced
+them. The wire keeps `projection_cache_lookup`, `projection_cache_store`,
+and `projection_reused_messages` in `TransformTimings`; they now report zero.
+
+`DECLARED_RETAINED_RESIDENT_BYTES` drops by 512 MiB: the 256 MiB projection
+cache leaves `TRANSFORM_SERVE_CACHE_COMBINED_BUDGET_BYTES` (768 MiB to
+512 MiB), and the 256 MiB active projection lease budget leaves the sum. A
+compile-time assertion now requires the combined budget to equal the
+serialized-output and native-attachment budgets.
+
 ## Scope and provenance
 
 This area extends the [parent supplement](../catalog.md) with the remaining
@@ -76,7 +110,7 @@ the [check inventory](existing-checks.md).
 | --- | --- | --- |
 | A1-A2 | default-production | Every request runs [`Handler::handle`][handle] and its body branch; an unpaged transform body the tree-parse walk admits enters the typed handler from its bytes, and every other body runs [`dispatch_value_with_inbound_bytes`][dispatch]. Refusal arms and the over-1 MiB probe need constructed input because the plugin [pages at 512 KiB][paging]. |
 | A3 | test-only | Pool pressure needs concurrent oversize parses; production occurrence is plausible but unverified. |
-| B1-B5 | default-production | Every pass with [`compaction_enabled`][cfg-compaction] (default true) projects, serves, and normalizes; the incremental arms need a cache hit, which the plugin's delta protocol produces on steady turns. |
+| B1-B5 | default-production | Every pass with [`compaction_enabled`][cfg-compaction] (default true) projects, serves, and normalizes; the native incremental arm needs a native-cache hit, which the plugin's delta protocol produces on steady turns. The projection incremental arm is deleted ([#828](#projection-prefix-reuse-retirement-2026-09-26)). |
 | C1, C2, C4, C5 | default-production | The [handler path][handler] runs for every transform request; the Emergency95 arm needs usage at the emergency threshold. |
 | C3 | explicit-config-only | The empty drain runs every pass, but outbox rows come from [`publish_history_summarizer_chunk`][publish], which needs a configured [`model_chain`][cfg-models]; `user_observation` rows also need [`user_memory_collection_enabled`][cfg-user-mem]. |
 | C6 | explicit-config-only | The same gate as C3; the due row also needs a failed inline delivery at publish time or a process end between the enqueue commit and the inline drain, which the [`test-support` seam][fail-sc] constructs. |
@@ -394,7 +428,10 @@ Open questions: None.
 
 Type: safety
 Reachability: default-production
-Status: active
+Status: active - [#828](#projection-prefix-reuse-retirement-2026-09-26)
+invalidates the prefix-reattachment and incremental-projection clauses, which
+are marked below and kept for traceability. The value clauses hold with every
+pass projecting its full input.
 Exercised: partial - The selection differential passes unchanged against its
 frozen reference. The [sharing check][selection-sharing] compares the selected
 inputs from all 48 frozen-corpus tool calls with the projected wire value and
@@ -434,17 +471,19 @@ which lane assembled them.
 Check: `always` - For every pass, three artifact families agree with their
 value-only construction. Projection: `project_messages(&msgs)` is equal under
 [`FlatProjection`][flatproj]'s derived `PartialEq` whether the slice is the
-fresh request, the normalized clone, a reattached prefix plus suffix, or a
+fresh request, the normalized clone, a reattached prefix plus suffix
+(invalidated by #828: the projection no longer reattaches prefixes), or a
 shared view. The projection owns canonical replay shells: unknown top-level
 message fields are discarded once, original block JSON survives, and effective
 synthetic metadata is retained. Flat blocks hold an immutable shell and block
 index, not an independent copy of the wire block. Reattached requests share
-those shells rather than raw ingress shells; per block `content_hash ==
+those shells rather than raw ingress shells (invalidated by #828); per block `content_hash ==
 sha256(bytes)` and `bytes == to_string(wire)`, and `FlatBlock` holds no tool
 input outside `wire` (the shared wire block itself may keep the input in both
 `kind()` and its retained `original`, and the shell charge counts both);
 and `project_messages_incremental(msgs, cached, k) == project_messages(msgs)`
-with equal [`differential_bytes`][diff-bytes]. Native attachment: under
+with equal [`differential_bytes`][diff-bytes] (invalidated by #828: no
+incremental projection exists). Native attachment: under
 `serve_native`, `to_vec(incremental native_messages) ==
 to_vec(encode_full_native_messages(..))` as the [differential][native-diff]
 already compares; with complete prefix metadata, the incremental sidecar has
@@ -487,8 +526,9 @@ struct field order instead of sorted keys, which
 [`Serialize for ServedMessage`][ser-served] already does and the handler
 avoids only by taking `messages` out before `to_value(response)`
 ([response encoding][segments-take]).
-Required faults and enabling state: A second-pass projection cache hit; a
-delta body so the prefix is [reattached][reattach] and the native prefix
+Required faults and enabling state: A second-pass projection cache hit
+(invalidated by #828); a delta body so the prefix is [reattached][reattach]
+(from the ready snapshot since #828) and the native prefix
 comes from the attachment cache; tool calls, tool results in a user message,
 repeated call ids, and a suffix that repeats a prefix mid; a message equal by
 value but not by pointer to a cached chunk; a response holding a harness
@@ -522,7 +562,8 @@ Open questions:
   `EIDNARA_NATIVE_ATTACHMENT_DIFFERENTIAL` the intended production contract
   or a developer switch? The transform catalog's
   [portfolio evaluation][tc-g2] queued this as gap G2 and it is still open.
-  (needs human input)
+  (needs human input) #828 deletes the prefix switch and its asserts; the
+  question stands for the native switch alone.
 
 ### synthetic-normalization-is-scoped-to-the-pass
 
@@ -535,7 +576,8 @@ history_summarizer boundary messages and chunk input ordinals. The
 [handler delta comparison][synthetic-delta-parity] checks full versus delta
 projection and native bytes; the [delta witness][synthetic-delta-witness]
 captures production history_summarizer prompts and native output on the second and
-third turns, including replay carried in the third turn's cached prefix.
+third turns, including replay carried in the third turn's cached prefix
+(since #828 the ready-snapshot prefix, pair unflagged as sent).
 The [lineage rebase comparison][synthetic-lineage-rebase] covers a normalized
 synthetic head on a non-subagent descent replay that rebases ordinals.
 Guarantee: Replacing the normalization clone with a shared view changes no
@@ -548,10 +590,11 @@ in the pass-local projection view, and request-dependent helpers consume
 that view); in
 [`cached_boundary_messages`][cached-boundary],
 [`assemble_history_summarizer_firing`][assemble],
-[`store_projection_cache`][store-pc], and
+[`store_projection_cache`][store-pc] (deleted by #828), and
 [`attach_native_messages_incremental`][native-attach] a message is synthetic
 iff `parsed.messages[i].ck.meta.synthetic` in that pass's ingress, including
-flags restored by prefix reattachment. The override set is not retained;
+flags restored by prefix reattachment (since #828 the ready snapshot restores
+the flags the harness sent). The override set is not retained;
 derived projection metadata is retained with normalized flags, as in the
 clone-based baseline. The served wire
 bytes of a message whose flag was set by normalization equal the bytes of
@@ -729,7 +772,10 @@ on a HARD pass, reattaches two prefix messages, sends the pair unflagged in
 the protected suffix, and observes a prepared firing with native output.
 A third delta reuses all 84 prefix messages, including the normalized pair;
 its captured production prompt and native bytes match a typed-flag baseline
-prefix reconstruction.
+prefix reconstruction. Since #828 the third delta reattaches the 84 messages
+from the ready snapshot with the pair unflagged as sent, the pass projects
+all 84 afresh, and the pinned prompt hash and native bytes still match the
+typed-flag baseline.
 Guarantee: A shared-input campaign reaches the situation in which the
 normalized and un-normalized views of one request differ for a downstream
 observer.
@@ -757,7 +803,7 @@ harness replays pairs on delta turns in production is inferred from the
 plugin's delta protocol, not observed.
 Existing check: [The delta witness][synthetic-delta-witness] asserts the input
 flags and frozen call ID, configured compaction and model chain, positive
-prefix reuse, and `history_summarizer.fired` before emitting the constant marker
+prefix reuse (removed by #828), and `history_summarizer.fired` before emitting the constant marker
 `replayed-synthetic-pair-arrives-unflagged-on-a-delta-turn`. It compares captured
 producer prompts, third-turn boundary and chunk inputs, and native bytes;
 unaudited.
@@ -805,7 +851,7 @@ trigger. Decode: for every stored `meta` text, a scalar projection of
 `serde_json::from_str::<ModuleMeta>(meta)` when that succeeds, and when that
 field fails to deserialize the consumer takes the branch it took on a failed
 full load (`None` for the projection cache at
-[`lookup_full_projection_cache`][epoch-read] and
+[`lookup_full_projection_cache`][epoch-read], deleted by #828, and
 [`expand_transform_tail_delta`][epoch-read-delta], `false` for
 [`history_summarizer_active`][active]), except for the recorded divergences: a
 corrupt `core_state` or a corrupt sibling field no longer takes that branch
@@ -2692,7 +2738,7 @@ evaluation of this area and its disposition are recorded in
 
 [cfg-compaction]: ../../../../crates/daemon/src/config.rs#L121
 [expand]: ../../../../crates/daemon/src/lib.rs#L4456
-[store-pc]: ../../../../crates/daemon/src/lib.rs#L4594
+[store-pc]: https://github.com/ahrav/eidnara/blob/704568ec/crates/daemon/src/lib.rs#L4863
 [history_summarizer-fire]: ../../../../crates/daemon/src/lib.rs#L5305
 [assemble]: ../../../../crates/daemon/src/history_summarizer_chunk.rs#L560
 [ingress-chunks]: ../../../../crates/daemon/src/lib.rs#L13707
@@ -2708,7 +2754,7 @@ evaluation of this area and its disposition are recorded in
 [ser-served]: ../../../../crates/daemon/src/transform.rs#L301-L308
 [served-byte-witnesses]: evidence/derived-artifacts-are-ownership-independent.md#canonical-served-bytes-and-fingerprint-identity
 [block-identity]: ../../../../crates/daemon/src/wire.rs#L885
-[gate-prefix]: ../../../../crates/daemon/src/transform.rs#L2019
+[gate-prefix]: https://github.com/ahrav/eidnara/blob/704568ec/crates/daemon/src/transform.rs#L2250
 [normalize]: ../../../../crates/daemon/src/transform.rs#L2126
 [sel-item]: ../../../../crates/daemon/src/transform.rs#L6377
 [tag-entry]: ../../../../crates/daemon/src/transform.rs#L6846-L6871
@@ -2727,14 +2773,14 @@ evaluation of this area and its disposition are recorded in
 [combined-tags]: ../../../../crates/daemon/src/transform.rs#L3441-L3449
 [mint-tail]: ../../../../crates/daemon/src/transform.rs#L7964-L7974
 [commit-mints]: ../../../../crates/daemon/src/transform.rs#L4972-L4981
-[flatproj]: ../../../../crates/daemon/src/wire.rs#L187-L198
-[reattach]: ../../../../crates/daemon/src/wire.rs#L214-L241
-[diff-bytes]: ../../../../crates/daemon/src/wire.rs#L367
+[flatproj]: ../../../../crates/daemon/src/wire.rs#L178-L184
+[reattach]: https://github.com/ahrav/eidnara/blob/704568ec/crates/daemon/src/wire.rs#L211-L238
+[diff-bytes]: ../../../../crates/daemon/src/wire.rs#L189
 [flatten]: ../../../../crates/daemon/src/wire.rs#L725-L786
 [fp-reuse]: ../../../../crates/daemon/src/wire.rs#L871-L880
-[shell-sharing]: ../../../../crates/daemon/src/wire.rs#L1749
-[shell-decode]: ../../../../crates/daemon/src/wire.rs#L1796
-[shell-metadata]: ../../../../crates/daemon/src/wire.rs#L1708
+[shell-sharing]: https://github.com/ahrav/eidnara/blob/704568ec/crates/daemon/src/wire.rs#L1777
+[shell-decode]: ../../../../crates/daemon/src/wire.rs#L1125
+[shell-metadata]: https://github.com/ahrav/eidnara/blob/704568ec/crates/daemon/src/wire.rs#L1691
 [hyg-output]: ../../../../crates/daemon/src/tail_hygiene.rs#L572
 [part-measure]: ../../../../crates/daemon/src/tail_hygiene.rs#L599
 [th-cwd]: ../../../../crates/daemon/src/tail_hygiene.rs#L614
@@ -2757,7 +2803,7 @@ evaluation of this area and its disposition are recorded in
 [serde-features]: ../../../../Cargo.toml#L47
 [load]: ../../../../crates/memory-store/src/lib.rs#L6652
 [full-select]: ../../../../crates/memory-store/src/lib.rs#L4905-L4906
-[epoch-read]: ../../../../crates/daemon/src/lib.rs#L4567
+[epoch-read]: https://github.com/ahrav/eidnara/blob/704568ec/crates/daemon/src/lib.rs#L4847
 [epoch-read-delta]: ../../../../crates/daemon/src/lib.rs#L4456
 [active]: ../../../../crates/daemon/src/lib.rs#L4859
 [prepare]: ../../../../crates/daemon/src/lib.rs#L5305

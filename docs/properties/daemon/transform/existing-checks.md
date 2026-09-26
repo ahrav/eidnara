@@ -286,6 +286,14 @@ per-file claim above stands as written. No `loom`, `shuttle`, `miri`, `proptest`
 hand-written fixture case. There is no coverage measurement, so every placement
 observation in this file is structural, not measured.
 
+Update, 2026-09-26: [#828](https://github.com/ahrav/eidnara/issues/828) deletes
+`assert_prefix_projection_equivalent`, `prefix_projection_differential_enabled`,
+`EIDNARA_PREFIX_PROJECTION_DIFFERENTIAL`, `ProjectionCacheKeyMode`,
+`projection_differential_catches_corrupt_first_changed_position`, and the
+appended-tail incremental arm of the differential goldens. The daemon projects
+every request from its full input. Citations of these symbols here are
+historical at their stated baseline.
+
 ## Integration and CI status
 
 **Integration tests in `crates/daemon/tests/` that drive a real transform:

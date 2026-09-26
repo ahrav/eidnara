@@ -55,6 +55,12 @@ defaulted or malformed field differently from the full deserialization.
 - The [interleave hook][hook] at `:8224-8232` is `#[cfg(test)]` and runs
   between the transform and the floor check.
 
+Update, 2026-09-26: [#828](https://github.com/ahrav/eidnara/issues/828) deletes
+`lookup_full_projection_cache`, so that pre-commit load no longer exists;
+`expand_transform_tail_delta` keeps its epoch read. The daemon projects every
+request from its full input. Citations of these symbols here are historical at
+their stated baseline.
+
 ## Failure scenario
 
 A consolidation reuses the pre-transform snapshot inside

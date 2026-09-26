@@ -298,6 +298,13 @@ compile-time exact and the other is documented as an estimate. `:2816-2818`
 concedes the rest: "TODO(memory-accounting): add an active-clone budget for this
 `Arc` ... A running transform can retain it after LRU eviction."
 
+Update, 2026-09-26: [#828](https://github.com/ahrav/eidnara/issues/828) deletes
+the projection cache and `PROJECTION_CACHE_BUDGET_BYTES`.
+`TRANSFORM_SERVE_CACHE_COMBINED_BUDGET_BYTES` is now 512 MiB and a compile-time
+assertion requires it to equal the serialized-output and native-attachment
+budgets. The daemon projects every request from its full input. Citations of
+these symbols here are historical at their stated baseline.
+
 **Panicking sites: one.** `:3661`, `panic!("store open worker failed: {error}")`
 on a `JoinError` from the `spawn_blocking` in `open_store_once`. No named test.
 Zero `unreachable!`, zero `todo!`, zero `unimplemented!`, and zero `.unwrap()`

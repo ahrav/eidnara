@@ -58,7 +58,7 @@ cover retained payload shape and mutation effects at this boundary.
 | W:528-537 projection input validation | Empty/reserved/duplicate mids reject before block construction. These are downstream guards, not JSON duplicate-key rejection. | unaudited |
 | W:540-559 synthetic override | Share only original-free, same-synthetic shells; otherwise build a typed shell. KTD1 intentionally removes the original-free condition. | unaudited |
 | D:4328-4365 tail expansion | Malformed/missing delta fields, fingerprint/state absence, or out-of-range prefix return None; no stricter typed tail_delta is introduced. | unaudited |
-| T:2016-2045 projection differential | Enabled in unit tests or by EIDNARA_PREFIX_PROJECTION_DIFFERENTIAL=1; asserts `incremental prefix projection byte drift` and `incremental prefix projection state drift`. | unaudited |
+| T:2016-2045 projection differential | Enabled in unit tests or by EIDNARA_PREFIX_PROJECTION_DIFFERENTIAL=1; asserts `incremental prefix projection byte drift` and `incremental prefix projection state drift`. | deleted by #828 with the mechanism it checked |
 | W:1796-1800 compile constraints | Local generic assertions require IngressMessages, FlatProjection, and TransformRequest to be Send + 'static when tests compile. | unaudited |
 
 No production assertion specifically forbids envelope-tree retention or stale
@@ -104,22 +104,22 @@ must survive the retained tree path; they do not prove wire serde correctness:
 | --- | --- | --- |
 | M:16096-16112 `a_block_edit_leaves_its_sibling_byte_identical` | Edited first text serializes; second text and unknown sibling field survive. Unknown-field expectation contradicts accepted R3. | unaudited |
 | W:1447-1517 `opaque_and_media_inside_tool_result_content_are_accepted_and_projected` | Opaque content is accepted; replacing nested result content with media projects its URL. | unaudited |
-| W:1521-1574 `incremental_projection_reuses_prefix_storage_and_preserves_tool_arc_state` | Reattachment equality, full/incremental equality, shared backing/bytes, and pending tool-arc continuation. | unaudited |
+| W:1521-1574 `incremental_projection_reuses_prefix_storage_and_preserves_tool_arc_state` | Reattachment equality, full/incremental equality, shared backing/bytes, and pending tool-arc continuation. | deleted by #828 with the mechanism it checked |
 | W:1578-1589 `empty_and_reserved_message_ids_are_rejected` | Empty and reserved mids produce their errors. | unaudited |
-| W:1595-1620 `duplicate_message_ids_are_rejected_across_the_incremental_prefix` | Duplicate mids reject in full and incremental projection. | unaudited |
+| W:1595-1620 `duplicate_message_ids_are_rejected_across_the_incremental_prefix` | Duplicate mids reject in full and incremental projection. | unaudited; #828 deletes the incremental arm and renames the test `duplicate_message_ids_are_rejected` |
 | W:1624-1704 `reduced_tool_result_keeps_failure_variant_and_output_extras` | Each success/error/denied output keeps its classification and provider extras after reduction. | unaudited |
 | W:1708-1745 `reattach_keeps_block_level_original_but_rebuilds_the_message_shell` | Known shell fields survive; unknown message field drops; block unknown/original survives; raw ingress remains unchanged. Old retention assertions conflict with KTD1/R3. | unaudited |
-| W:1749-1792 `repeated_prefix_reattachment_shares_canonical_shells` | Repeated sharing, equivalent projections, input preservation, copy-on-write isolation, and block owner after projection drop. Original-presence assertions need explicit revision. | unaudited |
-| W:1818-1860 `incremental_projection_checks_effective_synthetic_status` | All four old/new flag pairs compare full/incremental value and pointer reuse exactly when flags match. | unaudited |
+| W:1749-1792 `repeated_prefix_reattachment_shares_canonical_shells` | Repeated sharing, equivalent projections, input preservation, copy-on-write isolation, and block owner after projection drop. Original-presence assertions need explicit revision. | deleted by #828 with the mechanism it checked |
+| W:1818-1860 `incremental_projection_checks_effective_synthetic_status` | All four old/new flag pairs compare full/incremental value and pointer reuse exactly when flags match. | deleted by #828 with the mechanism it checked |
 | T:13714-13755 `served_canonical_shell_bytes_and_segments_are_frozen` | Literal raw/latent/typed/edited bytes and prepared segments. Latent public-meta mutation is deliberately invisible under the old oracle. | unaudited |
 | T:13760-13793 `served_canonical_frozen_corpus_matches_value_reference_for_both_shells` | Original/fully typed shell serialization and pairwise equality/digest relation over the fixture. Digest details go to the identity agent. | unaudited |
 | T:13797 `served_fingerprint_fallback_preserves_complete_identity_and_first_match` | Null block rejection and latent extras/original distinctions among candidates; receipt/hash details belong to the identity agent. | unaudited |
 | D:20584-20621 `transform_snapshot_cache_is_generation_safe_and_lru_bounded` | Ready/in-flight/missing transitions, stale finish rejection, retained ready entries, and eviction. | unaudited |
 | D:22568-22882 `incremental_native_cache_replays_complex_prefix_and_encodes_only_tail` | Fresh/reattached/shared equality, shared ingress/native/sidecar pointers, suffix encoding, and native output copy-on-write isolation. | unaudited |
 | D:22886-23004 `native_delta_ingress_core_is_independent_of_changed_output_messages` | Changed output does not replace raw ingress; evicted caches recover CK/native prefix pointers from ready snapshot. | unaudited |
-| D:38911-39024 `compaction_mode_projection_cache_reclassifies_synthetic_prefix` | Off/on transition sequence compares full projection, flags, stable prefix reuse, and unchanged request serialization. | unaudited |
-| T:2031-2045 `assert_message_projection_equivalent` | Shared runtime/unit differential detailed above; test adapter at T:2024-2028 delegates. | unaudited |
-| D:24532 `projection_differential_catches_corrupt_first_changed_position` | Corrupt projection frontier triggers differential rejection. | unaudited |
+| D:38911-39024 `compaction_mode_projection_cache_reclassifies_synthetic_prefix` | Off/on transition sequence compares full projection, flags, stable prefix reuse, and unchanged request serialization. | deleted by #828 with the mechanism it checked |
+| T:2031-2045 `assert_message_projection_equivalent` | Shared runtime/unit differential detailed above; test adapter at T:2024-2028 delegates. | deleted by #828 with the mechanism it checked |
+| D:24532 `projection_differential_catches_corrupt_first_changed_position` | Corrupt projection frontier triggers differential rejection. | deleted by #828 with the mechanism it checked |
 | D:24059 `differential_assert_rejects_frontier_inside_mutated_native_region` | Corrupt native frontier triggers differential rejection. | unaudited |
 
 ## Retained native payload and producer checks

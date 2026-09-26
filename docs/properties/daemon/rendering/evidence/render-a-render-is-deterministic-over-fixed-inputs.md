@@ -153,6 +153,11 @@ different byte orders. Every restart of the daemon busts the provider prefix cac
 on the first pass, and `assert_prefix_projection_equivalent` (`:2303-2359`
 region) would not catch it because both renders are internally consistent.
 
+Update, 2026-09-26: [#828](https://github.com/ahrav/eidnara/issues/828) deletes
+`assert_prefix_projection_equivalent` and the prefix-projection differential.
+The daemon projects every request from its full input. Citations of these
+symbols here are historical at their stated baseline.
+
 ## Timing windows and dependencies
 
 None inside the splice. The cross-process dependency is the `RandomState` seed,

@@ -153,6 +153,10 @@ frees the result without a route teardown.
   results, or expiring it with the session are three different answers and the
   code implements none of them.
 
+Update, 2026-09-26: [#828](https://github.com/ahrav/eidnara/issues/828) deletes
+`ProjectionCache`. The daemon projects every request from its full input.
+Citations of these symbols here are historical at their stated baseline.
+
 ### Q: Does the seed replay guard compare all the fields it retains?
 
 - Sources examined: `CompletedStateSyncSeed`'s fields (`:914-921`) and the

@@ -277,6 +277,12 @@ Impact: Tool arguments, opaque content, native metadata, or media references
 disappear, or R3 silently remains unimplemented.
 Open questions:
 
+Update, 2026-09-26: [#828](https://github.com/ahrav/eidnara/issues/828) deletes
+`reattach_shares_the_decoded_shell_and_unknown_envelope_fields_are_discarded`
+with prefix reattachment; decode-side unknown-field handling is unchanged. The
+daemon projects every request from its full input. Citations of these symbols
+here are historical at their stated baseline.
+
 - Does every kept-field witness distinguish explicit field null from a null
   nested inside a Value?
 - Which unlisted sender shapes rely on discarded typed-envelope extensions?

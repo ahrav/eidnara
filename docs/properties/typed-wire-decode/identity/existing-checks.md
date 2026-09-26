@@ -91,20 +91,20 @@ Source: `crates/daemon/src/wire.rs`.
 
 | Line | Test | Check semantics or message | Status |
 | --- | --- | --- | --- |
-| 958 | `projection_retained_bytes_counts_wire_and_frontier_allocations_once` | Checks retained projection ownership accounting; adjacent identity seam. | unaudited |
+| 958 | `projection_retained_bytes_counts_wire_and_frontier_allocations_once` | Checks retained projection ownership accounting; adjacent identity seam. | deleted by #828 with the mechanism it checked |
 | 1242 | `repeated_call_id_within_owner_message_shares_one_arc_identity` | Repeated call IDs use one owner-scoped arc. | unaudited |
 | 1276 | `reasoning_joins_the_arc_its_adjacent_call_was_assigned` | Adjacent reasoning uses assigned call arc. | unaudited |
 | 1357 | `user_carried_tool_result_pairs_with_prior_assistant_call` | Checks valid call/result pairing across roles. | unaudited |
 | 1422 | `user_carried_tool_result_without_prior_call_still_rejects` | Rejects unpaired result input. | unaudited |
 | 1447 | `opaque_and_media_inside_tool_result_content_are_accepted_and_projected` | Checks nested result payload projection. | unaudited |
-| 1521 | `incremental_projection_reuses_prefix_storage_and_preserves_tool_arc_state` | Compares incremental state and prefix sharing. | unaudited |
+| 1521 | `incremental_projection_reuses_prefix_storage_and_preserves_tool_arc_state` | Compares incremental state and prefix sharing. | deleted by #828 with the mechanism it checked |
 | 1578 | `empty_and_reserved_message_ids_are_rejected` | Rejects empty or hash-containing mids. | unaudited |
-| 1595 | `duplicate_message_ids_are_rejected_across_the_incremental_prefix` | Checks duplicate identity rejection across prefix boundary. | unaudited |
+| 1595 | `duplicate_message_ids_are_rejected_across_the_incremental_prefix` | Checks duplicate identity rejection across prefix boundary. | unaudited; #828 deletes the incremental arm and renames the test `duplicate_message_ids_are_rejected` |
 | 1624 | `reduced_tool_result_keeps_failure_variant_and_output_extras` | Preserves tool error class and output extras on reduction. | unaudited |
 | 1708 | `reattach_keeps_block_level_original_but_rebuilds_the_message_shell` | Pins old block-original versus message-shell behavior. | unaudited |
-| 1749 | `repeated_prefix_reattachment_shares_canonical_shells` | Checks repeated sharing without mutation of raw ingress. | unaudited |
+| 1749 | `repeated_prefix_reattachment_shares_canonical_shells` | Checks repeated sharing without mutation of raw ingress. | deleted by #828 with the mechanism it checked |
 | 1796 | `shared_ingress_is_send_and_preserves_decode_refusals` | Compile-time Send/static and malformed-input assertions. | unaudited |
-| 1818 | `incremental_projection_checks_effective_synthetic_status` | Effective synthetic status invalidates unsafe prefix reuse. | unaudited |
+| 1818 | `incremental_projection_checks_effective_synthetic_status` | Effective synthetic status invalidates unsafe prefix reuse. | deleted by #828 with the mechanism it checked |
 
 Source: `crates/memory-store/src/lib.rs`.
 
@@ -253,8 +253,8 @@ Source: `crates/daemon/src/lib.rs`, with HEAD line numbers.
 | 22177 | `serve_native_adds_opencode_messages_without_changing_wire_response` | Preserves CK response when adding native messages. | unaudited |
 | 22568 | `incremental_native_cache_replays_complex_prefix_and_encodes_only_tail` | Checks full/shared/reattached complex prefix output. | unaudited |
 | 23008 | `native_cache_charge_keeps_raw_allocation_floor_beside_sidecar_estimate` | Checks ownership accounting beside identity cache state. | unaudited |
-| 23248 | `astro_scale_projection_cache_reuses_on_the_second_pass` | Checks projection reuse. | unaudited |
-| 23357 | `projection_cache_invalidators_are_mutation_checked_in_both_directions` | Perturbs projection cache inputs and invalidators. | unaudited |
+| 23248 | `astro_scale_projection_cache_reuses_on_the_second_pass` | Checks projection reuse. | deleted by #828 with the mechanism it checked |
+| 23357 | `projection_cache_invalidators_are_mutation_checked_in_both_directions` | Perturbs projection cache inputs and invalidators. | deleted by #828 with the mechanism it checked |
 | 23536 | `incremental_native_cache_invalidates_every_byte_affecting_input` | Checks byte-affecting native input invalidation. | unaudited |
 | 23619 | `renderer_transition_class_sets_invalidate_with_consumed_boolean_stable` | Checks class-set invalidation beyond a stable boolean. | unaudited |
 | 23734 | `reduced_shell_rematches_across_three_incremental_sidecar_generations` | Checks reduced shell matching across generations. | unaudited |

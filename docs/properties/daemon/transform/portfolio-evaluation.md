@@ -245,6 +245,13 @@ area 6, with a qualification added to the `should_panic` inventory line.
 The file said of the two `assert_eq!` inside `assert_prefix_projection_equivalent`
 (`transform.rs:2349-2353` and `:2354-2357`): "Neither has a named test". Both do.
 
+Update, 2026-09-26: [#828](https://github.com/ahrav/eidnara/issues/828) deletes
+`assert_prefix_projection_equivalent`, `prefix_projection_differential_enabled`,
+`EIDNARA_PREFIX_PROJECTION_DIFFERENTIAL`, `ProjectionCacheKeyMode`, and the
+tests that drove them; G2 applies to the native differential alone. The daemon
+projects every request from its full input. Citations of these symbols here are
+historical at their stated baseline.
+
 - `dg_goldens_exercise_incremental_native_differential_mode`
   (`differential_goldens.rs:110-204`) calls
   `assert_prefix_projection_equivalent` directly at `:202`, on an appended-tail
