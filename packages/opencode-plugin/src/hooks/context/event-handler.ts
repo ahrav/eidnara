@@ -234,10 +234,15 @@ export function createEventHandler(deps: EventHandlerDeps) {
                     `event message.updated: totalInputTokens=${totalInputTokens} contextLimit=${contextLimit} percentage=${percentage.toFixed(1)}%`,
                 );
 
+                const cacheRead = info.tokens?.cache?.read;
+                const cacheWrite = info.tokens?.cache?.write;
                 deps.contextUsageMap.set(info.sessionID, {
                     usage: {
                         percentage,
                         inputTokens: totalInputTokens,
+                        ...(typeof cacheRead === "number" && typeof cacheWrite === "number"
+                            ? { cache: { readTokens: cacheRead, writeTokens: cacheWrite } }
+                            : {}),
                     },
                     updatedAt: now,
                     lastResponseTime: now,

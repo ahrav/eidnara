@@ -656,11 +656,12 @@ fn tag_numbers_by_block_and_arc<'a>(
     projection: &FlatProjection,
     tag_rows: impl IntoIterator<Item = &'a TagRow> + Clone,
 ) -> (HashMap<String, i64>, HashMap<String, i64>) {
-    let block_ids = projection
-        .blocks
-        .iter()
-        .map(|block| block.id.as_str())
-        .collect::<HashSet<_>>();
+    // The first block with an id wins, as a linear `find` would pick it; a scan per tag row
+    // made this quadratic in session length.
+    let mut blocks_by_id = HashMap::<&str, &FlatBlock>::with_capacity(projection.blocks.len());
+    for block in &projection.blocks {
+        blocks_by_id.entry(block.id.as_str()).or_insert(block);
+    }
     let message_indexes = projection_message_indexes(projection);
     let mut by_block = HashMap::new();
     let mut by_arc = HashMap::new();
@@ -669,14 +670,10 @@ fn tag_numbers_by_block_and_arc<'a>(
     for row in tag_rows
         .clone()
         .into_iter()
-        .filter(|row| block_ids.contains(row.block_id.as_str()))
+        .filter(|row| blocks_by_id.contains_key(row.block_id.as_str()))
     {
         by_block.insert(row.block_id.clone(), row.tag_number);
-        let Some(block) = projection
-            .blocks
-            .iter()
-            .find(|block| block.id == row.block_id)
-        else {
+        let Some(block) = blocks_by_id.get(row.block_id.as_str()) else {
             continue;
         };
         if let Some(arc_id) = &block.arc_id {
@@ -700,7 +697,8 @@ fn tag_numbers_by_block_and_arc<'a>(
         .collect::<HashSet<_>>();
     let mut orphan_rows = HashMap::<&str, Vec<&TagRow>>::new();
     for row in tag_rows.into_iter().filter(|row| {
-        !block_ids.contains(row.block_id.as_str()) && call_ids.contains(row.block_id.as_str())
+        !blocks_by_id.contains_key(row.block_id.as_str())
+            && call_ids.contains(row.block_id.as_str())
     }) {
         orphan_rows
             .entry(row.block_id.as_str())
@@ -980,15 +978,42 @@ pub(crate) fn measure_tail_hygiene<'a>(
     }
 }
 
+/// Length of the leading run of excluded parts. An excluded part is never protected and
+/// carries no tag, so comparing it to a later part is plain equality, which a digest keeps.
+fn excluded_prefix_len(parts: &[TailHygienePartMeasurement]) -> usize {
+    parts
+        .iter()
+        .take_while(|part| part.kind == TailHygienePartKind::Excluded)
+        .count()
+}
+
+/// Empty for no parts, which is also the stored default.
+fn parts_digest(parts: &[TailHygienePartMeasurement]) -> String {
+    if parts.is_empty() {
+        return String::new();
+    }
+    let mut input = Vec::new();
+    for part in parts {
+        serde_json::to_writer(&mut input, part).expect("hygiene parts are serializable");
+        input.push(0);
+    }
+    hex_digest(input)
+}
+
+/// Compares the stored baseline with a later walk part by part, the omitted excluded
+/// prefix through its digest.
 fn same_measured_prefix(
-    baseline: &[TailHygienePartMeasurement],
+    baseline: &TailHygieneBaseline,
     current: &[TailHygienePartMeasurement],
 ) -> Option<i64> {
-    if current.len() < baseline.len() {
+    let prefix_len = baseline.excluded_prefix_len;
+    if current.len() < prefix_len.saturating_add(baseline.baseline_parts.len())
+        || parts_digest(&current[..prefix_len]) != baseline.excluded_prefix_digest
+    {
         return None;
     }
     let mut boundary_advance_u = 0i64;
-    for (before, after) in baseline.iter().zip(current) {
+    for (before, after) in baseline.baseline_parts.iter().zip(&current[prefix_len..]) {
         if before.key != after.key
             || before.content_hash != after.content_hash
             || before.kind != after.kind
@@ -1027,6 +1052,10 @@ pub(crate) fn refresh_tail_hygiene_baseline(
         return baseline;
     }
     if cache_busting || previous.is_none() {
+        let mut parts = measured.parts;
+        let excluded_prefix_len = excluded_prefix_len(&parts);
+        let excluded_prefix_digest = parts_digest(&parts[..excluded_prefix_len]);
+        parts.drain(..excluded_prefix_len);
         return TailHygieneBaseline {
             baseline_u: measured.u,
             baseline_t: measured.t,
@@ -1038,14 +1067,15 @@ pub(crate) fn refresh_tail_hygiene_baseline(
             computed_at_ms: now_ms,
             evaluable: true,
             generation_invalidated: false,
-            baseline_parts: measured.parts,
+            baseline_parts: parts,
             content_signature: measured.content_signature,
+            excluded_prefix_len,
+            excluded_prefix_digest,
         };
     }
 
     let previous = previous.expect("non-busting refresh has a previous baseline");
-    let Some(mut turn_delta_u) = same_measured_prefix(&previous.baseline_parts, &measured.parts)
-    else {
+    let Some(mut turn_delta_u) = same_measured_prefix(previous, &measured.parts) else {
         let mut invalidated = previous.clone();
         invalidated.evaluable = false;
         invalidated.generation_invalidated = true;
@@ -1053,7 +1083,8 @@ pub(crate) fn refresh_tail_hygiene_baseline(
         return invalidated;
     };
     let mut turn_delta_t = 0i64;
-    for part in &measured.parts[previous.baseline_parts.len()..] {
+    let measured_len = previous.excluded_prefix_len + previous.baseline_parts.len();
+    for part in &measured.parts[measured_len..] {
         turn_delta_t = turn_delta_t.saturating_add(part.tokens);
         // A just-completed output remains T-only in the newest recency reserve to prevent a defer pass from inflating U before the next full bust walk.
         // Keeping a just-completed output T-only prevents a defer pass from inflating U before the next full bust walk.
@@ -1150,6 +1181,25 @@ mod tests {
             created_at_ms: 0,
             source_bytes: Vec::new(),
         }
+    }
+
+    /// Every tag resolves to its own block and message across a long session; the lookup is
+    /// by id, so a 5,000-message session costs one pass over the blocks, not one per tag.
+    #[test]
+    fn tags_resolve_by_block_id_across_a_long_session() {
+        let messages = (1..=5_000u64)
+            .map(|ordinal| text(&format!("m{ordinal}"), ordinal, "history"))
+            .collect::<Vec<_>>();
+        let projection = project_messages(&messages).unwrap();
+        let tags = (1..=5_000i64)
+            .map(|number| tag(number, &format!("m{number}#0")))
+            .chain([tag(9_999, "missing#0")])
+            .collect::<Vec<_>>();
+        let (by_block, _) = tag_numbers_by_block_and_arc(&projection, tags.iter());
+        assert_eq!(by_block.len(), 5_000);
+        assert_eq!(by_block.get("m1#0"), Some(&1));
+        assert_eq!(by_block.get("m5000#0"), Some(&5_000));
+        assert!(!by_block.contains_key("missing#0"));
     }
 
     #[test]
@@ -2110,6 +2160,46 @@ mod tests {
             Some(&baseline),
             20,
         );
+        assert!(!invalid.evaluable);
+        assert!(invalid.generation_invalidated);
+    }
+
+    /// The stored baseline omits the covered prefix yet still compares it: an append after
+    /// it measures the same delta, and an edit inside it invalidates the baseline.
+    #[test]
+    fn covered_prefix_is_digested_out_of_the_baseline_but_still_compared() {
+        let mut memo = TailHygieneMemo::default();
+        let mut messages = (1..=50)
+            .map(|ordinal| text(&format!("m{ordinal}"), ordinal, "covered history"))
+            .collect::<Vec<_>>();
+        messages.push(text("live", 51, "live tail"));
+        let tags = vec![tag(1, "live#0")];
+        let mut measure = |messages: &[Arc<IngressMessage>]| {
+            measure_tail_hygiene(
+                &project_messages(messages).unwrap(),
+                &CoreState::empty(),
+                Some(50),
+                &tags,
+                0,
+                &HashSet::new(),
+                &mut memo,
+            )
+        };
+        let full = measure(&messages);
+        let baseline = refresh_tail_hygiene_baseline(full.clone(), true, None, 10);
+        assert_eq!(baseline.excluded_prefix_len, 50);
+        assert_eq!(baseline.baseline_parts, full.parts[50..]);
+        assert_eq!((baseline.baseline_u, baseline.baseline_t), (full.u, full.t));
+
+        let mut appended = messages.clone();
+        appended.push(text("next", 52, "next turn"));
+        let defer = refresh_tail_hygiene_baseline(measure(&appended), false, Some(&baseline), 20);
+        assert!(defer.evaluable);
+        assert!(defer.turn_delta_t > 0);
+
+        let mut edited = appended;
+        edited[3] = text("m4", 4, "covered history, edited");
+        let invalid = refresh_tail_hygiene_baseline(measure(&edited), false, Some(&baseline), 30);
         assert!(!invalid.evaluable);
         assert!(invalid.generation_invalidated);
     }

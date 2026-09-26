@@ -323,6 +323,7 @@ describe("Rust mode transform request", () => {
                     handler_total: 5,
                     total: 4,
                     native_cache_encoded_messages: 1,
+                    emergency_wait: 1_234.5,
                 },
             },
             {
@@ -352,6 +353,8 @@ describe("Rust mode transform request", () => {
             expect(passLines).toHaveLength(2);
             expect(passLines[0]).toContain("decision=HARD");
             expect(passLines[0]).toContain("served_from=transform");
+            expect(passLines[0]).toContain("emergency_wait=1234.5");
+            expect(passLines[1]).toContain("emergency_wait=0.0");
             expect(passLines[0]).toMatch(
                 /reason=first_render .* stages=prefix_guard:[\d.]+ ordinal_resolve:[\d.]+ clone:[\d.]+ wire_build:[\d.]+ wire_messages:1 transport:[\d.]+ transport_pages:1 transport_bytes:\d+ apply:[\d.]+ other:[\d.]+$/,
             );
@@ -513,6 +516,7 @@ describe("Rust mode transform request", () => {
         const first = makeMessages(sessionId);
         await transform.run(sessionId, { messages: [...first] });
         expect("usage" in bodies[0]!).toBe(false);
+        expect("prev_response_cache_usage" in bodies[0]!).toBe(false);
 
         deps.contextUsageMap.set(sessionId, {
             usage: { percentage: 50, inputTokens: 64_000 },
@@ -523,10 +527,50 @@ describe("Rust mode transform request", () => {
         const second = makeMessages(sessionId);
         await transform.run(sessionId, { messages: [...second] });
         expect(bodies[1]?.usage).toEqual({
-            input_tokens: 64_000,
-            limit: 128_000,
             current_total_input_tokens: 64_000,
             context_limit_tokens: 128_000,
+        });
+        expect("prev_response_cache_usage" in bodies[1]!).toBe(false);
+    });
+
+    it("sends the previous response's cache counts beside its pressure usage from one snapshot", async () => {
+        const sessionId = `rust-cache-usage-${Date.now()}`;
+        installAvailabilityDb(sessionId, {});
+        installRawRows(sessionId, rawRows(1));
+        const { client, bodies } = recordingClient((request) => recipeResponse(request, []));
+        const deps = makeDeps();
+        const transform = createRustModeTransform(deps, { moduleClient: client });
+        const entry = (inputTokens: number, readTokens: number, writeTokens: number) => ({
+            usage: {
+                percentage: inputTokens / 1_280,
+                inputTokens,
+                cache: { readTokens, writeTokens },
+            },
+            updatedAt: Date.now(),
+            lastResponseTime: Date.now(),
+            hasUsageTokens: true,
+        });
+
+        deps.contextUsageMap.set(sessionId, entry(64_000, 60_000, 3_000));
+        await transform.run(sessionId, { messages: [...makeMessages(sessionId)] });
+        deps.contextUsageMap.set(sessionId, entry(10_000, 0, 0));
+        await transform.run(sessionId, { messages: [...makeMessages(sessionId)] });
+
+        expect(bodies[0]?.usage).toEqual({
+            current_total_input_tokens: 64_000,
+            context_limit_tokens: 128_000,
+        });
+        expect(bodies[0]?.prev_response_cache_usage).toEqual({
+            cache_read_tokens: 60_000,
+            cache_write_tokens: 3_000,
+        });
+        expect(bodies[1]?.usage).toEqual({
+            current_total_input_tokens: 10_000,
+            context_limit_tokens: 128_000,
+        });
+        expect(bodies[1]?.prev_response_cache_usage).toEqual({
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
         });
     });
 
@@ -3946,6 +3990,43 @@ describe("fail-open after an applied pass", () => {
         await transform.run(sessionId, output);
         expect(output.messages).toEqual(input);
         expect(transform.getState(sessionId).failureCount).toBe(1);
+    });
+
+    it("serves the input unchanged when the applied output grew over its source prefix", async () => {
+        const sessionId = `rust-fail-open-grown-${Date.now()}`;
+        const rows = rawRows(5);
+        installRawRows(sessionId, rows);
+        const memory: MessageLike = {
+            info: { id: "memory-1", role: "user", sessionID: sessionId },
+            parts: [{ type: "text", text: "remembered context ".repeat(64) }],
+        };
+        const acknowledged = rowMessages(sessionId, rows.slice(0, 3));
+        const { client } = recordingClient((request, index) => {
+            if (index > 0) throw new Error("request deadline expired after a possible send");
+            // A compaction-off answer that has not folded yet adds memory ahead of the history.
+            return recipeResponse(request, [memory, ...acknowledged]);
+        });
+        const transform = createRustModeTransform(makeDeps(), { moduleClient: client });
+        const debugSpy = spyOn(logger.sessionLog, "debug");
+        try {
+            const first = { messages: [...acknowledged] as unknown[] };
+            await transform.run(sessionId, first);
+            expect(first.messages).toHaveLength(4);
+
+            const grown = rowMessages(sessionId, rows);
+            const output = { messages: [...grown] as unknown[] };
+            await transform.run(sessionId, output);
+            expect(output.messages).toEqual(grown);
+            expect(output.messages[0]).toBe(grown[0]);
+            expect(transform.getState(sessionId).failureCount).toBe(1);
+
+            const passLines = sessionLogs(debugSpy, sessionId).filter((line) =>
+                line.startsWith("rust pass:"),
+            );
+            expect(passLines[1]).toContain("served_from=raw in=5 out=5");
+        } finally {
+            debugSpy.mockRestore();
+        }
     });
 
     it("keeps a tool call and its result together at the boundary", async () => {

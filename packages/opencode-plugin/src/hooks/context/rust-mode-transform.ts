@@ -361,6 +361,18 @@ function formerTerminalUnchanged(previous: RustWireCache, captured: CapturedHist
     );
 }
 
+/**
+ * The fail-open array and the raw input share the appended suffix, so the fail-open array is
+ * larger than raw exactly when the retained output holds more bytes than its source prefix.
+ */
+function appliedOutputGrew(previous: RustWireCache, applied: AppliedOutput): boolean {
+    let appliedBytes = 0;
+    for (const length of applied.lengths) appliedBytes += length;
+    let prefixBytes = 0;
+    for (const length of previous.inputLengths) prefixBytes += length;
+    return appliedBytes > prefixBytes;
+}
+
 /** The pending cache for a pass; `applied` is attached on publication. */
 function buildWireCache(args: {
     messages: readonly MessageLike[];
@@ -452,6 +464,7 @@ function formatRustPassLog(args: {
     elapsedMs: number;
     moduleElapsedMs: number;
     rowVersion: number;
+    emergencyWaitMs?: number;
     timings?: RustPassTimings;
 }): string {
     const timings = args.timings ?? emptyRustPassTimings();
@@ -464,7 +477,7 @@ function formatRustPassLog(args: {
         timings.apply;
     const unattributed = Math.max(0, args.elapsedMs - measured);
     const rowVersion = Number.isSafeInteger(args.rowVersion) ? args.rowVersion : 0;
-    return `rust pass: decision=${args.decision} reason=${args.reason} served_from=${args.servedFrom} in=${args.inputCount} out=${args.outputCount} applied=${args.applied} row_version=${rowVersion} elapsed=${args.elapsedMs.toFixed(1)} ms module=${args.moduleElapsedMs.toFixed(1)} ms stages=prefix_guard:${timings.prefixGuard.toFixed(1)} ordinal_resolve:${timings.ordinalResolve.toFixed(1)} clone:${timings.clone.toFixed(1)} wire_build:${timings.wireBuild.toFixed(1)} wire_messages:${timings.wireMessages} transport:${timings.transport.toFixed(1)} transport_pages:${timings.transportPages} transport_bytes:${timings.transportBytes} apply:${timings.apply.toFixed(1)} other:${unattributed.toFixed(1)}`;
+    return `rust pass: decision=${args.decision} reason=${args.reason} served_from=${args.servedFrom} in=${args.inputCount} out=${args.outputCount} applied=${args.applied} row_version=${rowVersion} emergency_wait=${(args.emergencyWaitMs ?? 0).toFixed(1)} elapsed=${args.elapsedMs.toFixed(1)} ms module=${args.moduleElapsedMs.toFixed(1)} ms stages=prefix_guard:${timings.prefixGuard.toFixed(1)} ordinal_resolve:${timings.ordinalResolve.toFixed(1)} clone:${timings.clone.toFixed(1)} wire_build:${timings.wireBuild.toFixed(1)} wire_messages:${timings.wireMessages} transport:${timings.transport.toFixed(1)} transport_pages:${timings.transportPages} transport_bytes:${timings.transportBytes} apply:${timings.apply.toFixed(1)} other:${unattributed.toFixed(1)}`;
 }
 
 function isSyntheticUserMessage(message: MessageLike | undefined): boolean {
@@ -645,11 +658,22 @@ function resolveHistoryBudgetTokens(
 
 function passUsage(usage: ContextUsage, limit: number): Record<string, number> {
     return {
-        input_tokens: usage.inputTokens,
-        limit,
         current_total_input_tokens: usage.inputTokens,
         context_limit_tokens: limit,
     };
+}
+
+/** The previous response's reported cache counts, from the same snapshot as its pressure usage; absent until a response reports them. */
+function prevResponseCacheUsage(
+    usage: ContextUsage | undefined,
+): { cache_read_tokens: number; cache_write_tokens: number } | undefined {
+    const cache = usage?.cache;
+    if (!cache || !isCount(cache.readTokens) || !isCount(cache.writeTokens)) return undefined;
+    return { cache_read_tokens: cache.readTokens, cache_write_tokens: cache.writeTokens };
+}
+
+function isCount(value: number): boolean {
+    return Number.isSafeInteger(value) && value >= 0;
 }
 
 interface TransformGeometryWire {
@@ -726,6 +750,7 @@ function buildTransformBody(args: {
     nativeMessages: unknown[];
     passInputs: Record<string, unknown>;
     usage?: Record<string, number | boolean>;
+    prevResponseCacheUsage?: { cache_read_tokens: number; cache_write_tokens: number };
     geometry?: TransformGeometryWire;
     modelKey: string | null;
     providerId: string | null;
@@ -776,6 +801,9 @@ function buildTransformBody(args: {
               }
             : {}),
         ...(args.usage ? { usage: args.usage } : {}),
+        ...(args.prevResponseCacheUsage
+            ? { prev_response_cache_usage: args.prevResponseCacheUsage }
+            : {}),
         ...(args.geometry ? { geometry: args.geometry } : {}),
         mid_turn: args.midTurn,
         prev_response_completed_at_ms: args.prevResponseCompletedAtMs,
@@ -1008,6 +1036,7 @@ export function createRustModeTransform(
         let materializeReason = "none";
         let servedFrom = "none";
         let moduleElapsedMs = 0;
+        let emergencyWaitMs = 0;
         let rowVersion = 0;
         let appliedAt: number | undefined;
         const finishPass = (applied: boolean): void => {
@@ -1025,6 +1054,7 @@ export function createRustModeTransform(
                     elapsedMs,
                     moduleElapsedMs,
                     rowVersion,
+                    emergencyWaitMs,
                     timings,
                 }),
             );
@@ -1047,6 +1077,11 @@ export function createRustModeTransform(
                     : "none";
             const timings = isRecord(response.timings) ? response.timings : undefined;
             const applyOnceTotal = timings?.total;
+            emergencyWaitMs =
+                typeof timings?.emergency_wait === "number" &&
+                Number.isFinite(timings.emergency_wait)
+                    ? timings.emergency_wait
+                    : 0;
             const handlerTotal = timings?.handler_total;
             moduleElapsedMs =
                 typeof handlerTotal === "number" && Number.isFinite(handlerTotal)
@@ -1130,6 +1165,7 @@ export function createRustModeTransform(
                     lease.signal.aborted ||
                     wireCaches.peek(sessionId) !== source.previous ||
                     !isAppendOnlyExtension(source.previous, source.captured) ||
+                    appliedOutputGrew(source.previous, applied) ||
                     readOwnDataProperty(output, "messages") !== target ||
                     !capturedMessagesUnchanged(target, source.captured) ||
                     hostArrayReplacementRejection(target) !== null
@@ -1476,6 +1512,7 @@ export function createRustModeTransform(
                 passInputs,
                 // The daemon keeps its persisted usage when the request carries none; a zero sample with a nonzero limit would replace it.
                 usage: usage ? passUsage(usage, contextLimit) : undefined,
+                prevResponseCacheUsage: prevResponseCacheUsage(usage),
                 geometry: transformGeometry,
                 modelKey: modelKey ?? null,
                 providerId: model?.providerID ?? null,

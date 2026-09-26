@@ -49,11 +49,11 @@ use cache_stability::{CoreState, FrozenUnit, PassInput};
 use context_core::{ClassifierInput, PassPlan, PersistedShape, classify};
 use memory_store::{
     BlockIdentity, BlockIdentityBasis, Channel1AppendRow, DeferredExecuteState, LineageAnchor,
-    LineageConstituent, LineageDescentDisposition, LineageDescentRequest, MemoryStore,
-    MemoryStoreError, ModuleMeta, ModuleUsage, NoteDelivery, PassSchedulerObservation,
-    PendingAgentDrop, PendingChannel2Directive, PendingRewriteState, ProjectMemoryComposition,
-    ServedBlockFingerprint, StoredHistorySegment, TagCacheSummary, TagMintInput, TagRow,
-    TailHygieneBaseline, TemporalMarkInput, TemporalMarkRow, TransformCommit,
+    LineageConstituent, LineageDescentDisposition, LineageDescentRequest, MaterializeReason,
+    MemoryStore, MemoryStoreError, ModuleMeta, ModuleUsage, NoteDelivery, PassAction, PassRecord,
+    PassSchedulerObservation, PendingAgentDrop, PendingChannel2Directive, PendingRewriteState,
+    ProjectMemoryComposition, ServedBlockFingerprint, StoredHistorySegment, TagCacheSummary,
+    TagMintInput, TagRow, TailHygieneBaseline, TemporalMarkInput, TemporalMarkRow, TransformCommit,
     TransformOverlayBatch, UserHintDecisionInput, UserHintRow,
 };
 use regex::Regex;
@@ -876,6 +876,9 @@ pub struct TransformRequest {
     pub tail_delta: Option<Value>,
     #[serde(default)]
     pub usage: Option<ModuleUsage>,
+    /// The previous response's actual provider cache counts, kept out of `usage` so pressure and fallback never read them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prev_response_cache_usage: Option<memory_store::ProviderCacheUsage>,
     /// Scheduler bands read `usage.context_limit_tokens` for compatibility.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub geometry: Option<TransformGeometry>,
@@ -1042,6 +1045,9 @@ struct TransformRequestWire {
     tail_delta: Option<Value>,
     #[serde(default)]
     usage: Option<ModuleUsage>,
+    /// A malformed or negative count is dropped instead of refusing the pass it rides on.
+    #[serde(default, deserialize_with = "admitted_cache_usage")]
+    prev_response_cache_usage: Option<memory_store::ProviderCacheUsage>,
     #[serde(default)]
     geometry: Option<TransformGeometry>,
     #[serde(default)]
@@ -1082,6 +1088,16 @@ struct TransformRequestWire {
     constituents: Vec<(String, String, u64)>,
     #[serde(default)]
     compaction_observed: bool,
+}
+
+fn admitted_cache_usage<'de, D>(
+    deserializer: D,
+) -> Result<Option<memory_store::ProviderCacheUsage>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(Option::<Value>::deserialize(deserializer)?
+        .and_then(|value| serde_json::from_value(value).ok()))
 }
 
 impl<'de> Deserialize<'de> for TransformRequest {
@@ -1126,6 +1142,7 @@ impl<'de> Deserialize<'de> for TransformRequest {
             messages,
             tail_delta: wire.tail_delta,
             usage: wire.usage,
+            prev_response_cache_usage: wire.prev_response_cache_usage,
             geometry: wire.geometry,
             provider_error: wire.provider_error,
             mid_turn: wire.mid_turn,
@@ -1339,6 +1356,9 @@ pub struct TransformTimings {
     pub trigger_token_cache_hits: usize,
     #[serde(default)]
     pub trigger_tokenized_blocks: usize,
+    /// Time an Emergency95 pass spent awaiting a live history_summarizer run and running one inline, across its reruns.
+    #[serde(default)]
+    pub emergency_wait: f64,
     #[serde(default)]
     pub post_attach: f64,
     #[serde(default)]
@@ -1431,7 +1451,7 @@ pub fn format_pass_timing_line(
          build_output={:.1} build_identity={:.1} build_identity_max={:.1} build_frozen_unit_scan={:.1} \
          build_cache_lookup={:.1} build_serialize_misses={:.1} build_tail_loop={:.1} \
            divergence={:.1} store_commit={:.1} trigger_ms={:.1} trigger_boundary_build={:.1} trigger_eval={:.1} \
-             trigger_cache_store={:.1} trigger_token_cache_hits={} trigger_tokenized_blocks={} \
+             trigger_cache_store={:.1} trigger_token_cache_hits={} trigger_tokenized_blocks={} emergency_wait={:.1} \
              post_attach_ms={:.1} native_cache_reused_messages={} native_cache_encoded_messages={} \
             native_cache_refused_store={} native_cache_degraded_store={} native_cache_evicted={} \
              response_encode={response_encode_ms:.1} response_meta_encode={:.1} response_size_account={:.1} response_splice={:.1} \
@@ -1510,6 +1530,7 @@ pub fn format_pass_timing_line(
         timings.trigger_cache_store,
         timings.trigger_token_cache_hits,
         timings.trigger_tokenized_blocks,
+        timings.emergency_wait,
         timings.post_attach,
         timings.native_cache_reused_messages,
         timings.native_cache_encoded_messages,
@@ -1666,14 +1687,22 @@ impl TransformResponse {
                     .map(ServedMessage::from_message)
                     .collect(),
             ),
-            ..Self::base(TransformStatus::Ok, "PASSTHROUGH", full_array_fingerprint)
+            ..Self::base(
+                TransformStatus::Ok,
+                PassAction::Passthrough.as_str(),
+                full_array_fingerprint,
+            )
         }
     }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct HistorySummarizerDiagnostics {
+    /// A firing was assembled and dispatched. The producer may still fail to connect, start, or claim the state.
     pub fired: bool,
+    /// Whether the dispatched firing's producer run started. Present only when the firing ran inline in this pass and either started or failed before it could; absent for an asynchronous firing, which has no outcome yet when the response is built, and for an inline wait that elapsed before the run started.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub started: Option<bool>,
     pub reason: Option<String>,
     pub no_fire: Option<String>,
     pub state: String,
@@ -1712,7 +1741,8 @@ pub struct TransformWithProjection {
     pub projection: FlatProjection,
     pub tag_numbers: BTreeMap<String, u64>,
     pub scheduler_pass: scheduler::PassDecision,
-    pub scheduler_drain_latch_active: bool,
+    /// The ring entry for this pass, committed with it or, for a stable pass, traced after it.
+    pub pass_observation: PassSchedulerObservation,
     pub boundary_state: BoundaryState,
     pub trim_mismatch: Option<TrimMismatch>,
     pub revert_epoch: u64,
@@ -1973,7 +2003,7 @@ pub(crate) fn transform_with_projection(
         crate::token_cache::cached_estimate_tokens,
         None,
     );
-    record_stable_pass_trace(store, req, ctx, &result);
+    record_stable_pass_trace(store, req, &result);
     result
 }
 
@@ -1992,7 +2022,7 @@ pub(crate) fn transform_with_projection_cached(
         Some(output_cache),
         projection_cache,
     );
-    record_stable_pass_trace(store, req, ctx, &result);
+    record_stable_pass_trace(store, req, &result);
     result
 }
 
@@ -2000,7 +2030,6 @@ pub(crate) fn transform_with_projection_cached(
 fn record_stable_pass_trace(
     store: &MemoryStore,
     req: &TransformRequest,
-    ctx: &ProducerContext<'_>,
     result: &Result<TransformWithProjection, TransformError>,
 ) {
     if let Some(pass) = result.as_ref().ok().filter(|pass| {
@@ -2009,30 +2038,76 @@ fn record_stable_pass_trace(
             && pass.response.first_divergence.is_none()
             && !pass.response.committed
     }) {
-        let observation = pass_scheduler_observation(
-            pass.scheduler_pass,
-            pass.scheduler_drain_latch_active,
-            ctx.now_ms,
-        );
-        let _ = store.trace_pass_stable(
-            &req.session_id,
-            &observation,
-            req.request_observed_at_ms,
-            req.full_array_fingerprint.as_deref(),
-        );
+        let _ = store.trace_pass_stable(&req.session_id, &pass.pass_observation);
     }
 }
 
+/// The ring entry for one accepted pass: the scheduler arm and latch, what the pass served, and the pressure it ran at. Pressure is the request's usage or the persisted fallback over the soft limit the scheduler resolves, the same inputs the scheduler read; the previous response's cache counts are copied from the request alone.
 fn pass_scheduler_observation(
+    req: &TransformRequest,
+    persisted_usage: Option<&ModuleUsage>,
     pass: scheduler::PassDecision,
     drain_latch_active: bool,
     timestamp_ms: i64,
+    action: Option<PassAction>,
+    materialize_reason: Option<MaterializeReason>,
 ) -> PassSchedulerObservation {
+    let reported = req
+        .usage
+        .as_ref()
+        .filter(|usage| usage.is_non_zero())
+        .or(persisted_usage);
+    let pressure = reported.map(|reported| {
+        let usage = effective_usage(Some(reported), None);
+        let soft_limit_tokens =
+            effective_context_limit_tokens(&usage, req.geometry.as_ref()) as u64;
+        let percent =
+            usage.current_total_input_tokens.saturating_mul(100) / soft_limit_tokens.max(1);
+        (
+            u32::try_from(percent).unwrap_or(u32::MAX),
+            soft_limit_tokens,
+        )
+    });
     PassSchedulerObservation {
         timestamp_ms,
-        scheduler_decision: pass.as_str().to_string(),
+        scheduler_decision: pass.as_str().into(),
         drain_latch_active,
+        action,
+        materialize_reason,
+        usage_percent: pressure.map(|(percent, _)| percent),
+        usage_soft_limit_tokens: pressure.map(|(_, limit)| limit),
+        prev_response_cache: req.prev_response_cache_usage,
     }
+}
+
+fn pass_record<'a>(
+    req: &'a TransformRequest,
+    observation: PassSchedulerObservation,
+) -> PassRecord<'a> {
+    PassRecord {
+        observation,
+        request_observed_at_ms: req.request_observed_at_ms,
+        full_array_fingerprint: req.full_array_fingerprint.as_deref(),
+        supersession: Default::default(),
+        applied_reductions: false,
+    }
+}
+
+/// Both pending-rewrite commits record the host array served unchanged, with no scheduler arm.
+fn pending_rewrite_pass_observation(
+    req: &TransformRequest,
+    persisted_usage: Option<&ModuleUsage>,
+    timestamp_ms: i64,
+) -> PassSchedulerObservation {
+    pass_scheduler_observation(
+        req,
+        persisted_usage,
+        scheduler::PassDecision::Defer,
+        false,
+        timestamp_ms,
+        Some(PassAction::Passthrough),
+        Some(MaterializeReason::PendingRewrite),
+    )
 }
 
 #[cfg(test)]
@@ -2483,12 +2558,21 @@ fn rebase_descent_ordinals(
 fn lineage_protocol_passthrough(
     req: &TransformIngress<'_>,
     projection: FlatProjection,
+    now_ms: i64,
 ) -> TransformWithProjection {
     TransformWithProjection {
         tag_numbers: BTreeMap::new(),
         projection,
         scheduler_pass: scheduler::PassDecision::Defer,
-        scheduler_drain_latch_active: false,
+        pass_observation: pass_scheduler_observation(
+            req,
+            None,
+            scheduler::PassDecision::Defer,
+            false,
+            now_ms,
+            Some(PassAction::Passthrough),
+            None,
+        ),
         boundary_state: BoundaryState::Absent,
         trim_mismatch: None,
         revert_epoch: 0,
@@ -2696,15 +2780,25 @@ fn apply_additive_only(
     }
     timings.decide = elapsed_ms(decide_scheduler_started_at);
 
-    let hard_fold_requested = scheduler_outcome.idle_ttl_fired
-        || external_revision_changed
-        || project_memory_epoch_hard_due;
-    let ordinary_history_summarizer_veto = ctx.history_summarizer_active
-        && scheduler_outcome.pass == scheduler::PassDecision::Execute
-        && !hard_fold_requested
-        && !loaded.meta.soft_refresh_pending
-        && !render_config_changed
-        && loaded.meta.initialized;
+    // This path feeds no first fold, recut, absorb, or reconcile, and its veto leaves the emergency arm out; each is `false` here.
+    let ActivationGates {
+        hard_fold_requested,
+        ordinary_history_summarizer_veto,
+    } = activation_gates(&ActivationGateInputs {
+        pass: scheduler_outcome.pass,
+        history_summarizer_active: ctx.history_summarizer_active,
+        initialized: loaded.meta.initialized,
+        soft_refresh_pending: loaded.meta.soft_refresh_pending,
+        render_config_changed,
+        first_fold_due: false,
+        boundary_divergence_recut: false,
+        idle_ttl_fired: scheduler_outcome.idle_ttl_fired,
+        system_absorb_hard_due: false,
+        external_revision_changed,
+        project_memory_epoch_hard_due,
+        emergency_arm_engaged: false,
+        reconcile_hard_due: false,
+    });
     let bust_opportunity = (scheduler_outcome.pass != scheduler::PassDecision::Defer
         && !ordinary_history_summarizer_veto)
         || loaded.meta.soft_refresh_pending
@@ -2919,6 +3013,41 @@ fn apply_additive_only(
     timings.tail_messages_emitted = req.messages.len();
     timings.frozen_units = core.frozen_units.len();
 
+    let action = action_str(&plan).to_string();
+    let materialize_reason = match plan {
+        PassPlan::Hard | PassPlan::MigrateHard => Some(
+            if !loaded.meta.initialized || loaded.meta.bootstrap_seed_fold_pending {
+                MaterializeReason::FirstRender
+            } else if is_legacy_baseline(&loaded.core) {
+                MaterializeReason::LegacyMigration
+            } else if render_config_changed {
+                MaterializeReason::EpochChange
+            } else if scheduler_outcome.idle_ttl_fired {
+                MaterializeReason::TtlExpiry
+            } else if external_revision_changed || project_memory_epoch_hard_due {
+                MaterializeReason::ProjectMemoryEpoch
+            } else if cached_m1_missing(&loaded.core) {
+                MaterializeReason::CachedM1Missing
+            } else {
+                MaterializeReason::HardTrigger
+            },
+        ),
+        PassPlan::Soft => Some(MaterializeReason::M1Delta),
+        PassPlan::Defer | PassPlan::Reject => None,
+    };
+    let pass_observation = pass_scheduler_observation(
+        req,
+        loaded.meta.last_usage.as_ref(),
+        scheduler_outcome.pass,
+        scheduler_outcome.drain_latch.is_active(),
+        ctx.now_ms,
+        pass_action(&plan),
+        materialize_reason,
+    );
+    // No history segment renders here, so this path activates none and keeps the served sequence.
+    let served = loaded.meta.served_history_segment_seq();
+    meta.additive_served_history_segment_seq =
+        (served != meta.rendered_history_segment_seq()).then_some(served);
     let state_changed = core != loaded.core || meta != loaded.meta;
     if state_changed {
         meta.last_committed_pass_at_ms = ctx.now_ms;
@@ -2939,18 +3068,7 @@ fn apply_additive_only(
                 history_segment_max_seq: commit_history_segment_max_seq,
                 project_root: Some(ctx.project_directory),
                 first_divergence: None,
-                scheduler_observation: Some(&pass_scheduler_observation(
-                    scheduler_outcome.pass,
-                    scheduler_outcome.drain_latch.is_active(),
-                    ctx.now_ms,
-                )),
-                scheduler_request_observed_at_ms: req.request_observed_at_ms,
-                scheduler_full_array_fingerprint: req.full_array_fingerprint.as_deref(),
-                scheduler_eligible_supersession_count: None,
-                scheduler_withheld_by_tag_window: None,
-                scheduler_withheld_by_exempt_message: None,
-                scheduler_applied_supersession_count: None,
-                scheduler_applied_reductions: false,
+                pass: Some(pass_record(req, pass_observation.clone())),
                 overlays: TransformOverlayBatch::default(),
             },
         )?
@@ -2963,34 +3081,11 @@ fn apply_additive_only(
     record_token_cache_delta(&mut timings, token_cache_stats_at_start);
     timings.total = elapsed_ms(total_started_at);
 
-    let action = action_str(&plan, &core).to_string();
-    let materialize_reason = match plan {
-        PassPlan::Hard | PassPlan::MigrateHard => Some(
-            if !loaded.meta.initialized || loaded.meta.bootstrap_seed_fold_pending {
-                "first_render"
-            } else if is_legacy_baseline(&loaded.core) {
-                "legacy_migration"
-            } else if render_config_changed {
-                "epoch_change"
-            } else if scheduler_outcome.idle_ttl_fired {
-                "ttl_expiry"
-            } else if external_revision_changed || project_memory_epoch_hard_due {
-                "project_memory_epoch"
-            } else if cached_m1_missing(&loaded.core) {
-                "cached_m1_missing"
-            } else {
-                "hard_trigger"
-            }
-            .to_string(),
-        ),
-        PassPlan::Soft => Some("m1_delta".to_string()),
-        PassPlan::Defer | PassPlan::Reject => None,
-    };
     Ok(TransformWithProjection {
         tag_numbers: BTreeMap::new(),
         projection,
         scheduler_pass: scheduler_outcome.pass,
-        scheduler_drain_latch_active: scheduler_outcome.drain_latch.is_active(),
+        pass_observation,
         boundary_state: BoundaryState::Absent,
         trim_mismatch: None,
         revert_epoch: meta.revert_epoch,
@@ -3006,7 +3101,7 @@ fn apply_additive_only(
             full_array_fingerprint: req.full_array_fingerprint.clone(),
             action: action.clone(),
             decision: action,
-            materialize_reason,
+            materialize_reason: materialize_reason.map(|reason| reason.as_str().to_string()),
             first_divergence: None,
             timings: Some(timings),
             boundary_id: String::new(),
@@ -3088,6 +3183,7 @@ fn apply_once(
         return Ok(lineage_protocol_passthrough(
             ingress_req,
             initial_projection,
+            ctx.now_ms,
         ));
     }
     let mut lineage_state = LineagePassState::default();
@@ -3110,6 +3206,7 @@ fn apply_once(
             return Ok(lineage_protocol_passthrough(
                 ingress_req,
                 initial_projection,
+                ctx.now_ms,
             ));
         }
         let initial_state = store.load(&ingress_req.session_id)?;
@@ -3143,6 +3240,7 @@ fn apply_once(
             return Ok(lineage_protocol_passthrough(
                 ingress_req,
                 initial_projection,
+                ctx.now_ms,
             ));
         }
         lineage_state.acknowledge_edge = outcome.acknowledge.then_some(ingress_req.descent_edge_id);
@@ -3387,6 +3485,8 @@ fn apply_once(
             let mut next_meta = loaded.meta.clone();
             next_meta.served_output_fingerprint = served_fingerprints;
             let fingerprint_changed = next_meta != loaded.meta;
+            let pass_observation =
+                pending_rewrite_pass_observation(req, loaded.meta.last_usage.as_ref(), ctx.now_ms);
             let row_version = if fingerprint_changed {
                 #[cfg(test)]
                 run_transform_attempt_hook(&req.session_id);
@@ -3401,18 +3501,7 @@ fn apply_once(
                         history_segment_max_seq: None,
                         project_root: Some(ctx.project_directory),
                         first_divergence: first_divergence_json.as_deref(),
-                        scheduler_observation: Some(&pass_scheduler_observation(
-                            scheduler::PassDecision::Defer,
-                            false,
-                            ctx.now_ms,
-                        )),
-                        scheduler_request_observed_at_ms: req.request_observed_at_ms,
-                        scheduler_full_array_fingerprint: req.full_array_fingerprint.as_deref(),
-                        scheduler_eligible_supersession_count: None,
-                        scheduler_withheld_by_tag_window: None,
-                        scheduler_withheld_by_exempt_message: None,
-                        scheduler_applied_supersession_count: None,
-                        scheduler_applied_reductions: false,
+                        pass: Some(pass_record(req, pass_observation.clone())),
                         overlays: TransformOverlayBatch::default(),
                     },
                 )?
@@ -3445,7 +3534,7 @@ fn apply_once(
                 first_divergence,
                 surface_state,
                 timings,
-                materialize_reason: Some("pending_rewrite".to_string()),
+                pass_observation,
                 total_started_at,
             }));
         }
@@ -3497,6 +3586,8 @@ fn apply_once(
             .as_ref()
             .map(|value| serde_json::to_string(value).expect("divergence is serializable"));
         meta.served_output_fingerprint = served_fingerprints;
+        let pass_observation =
+            pending_rewrite_pass_observation(req, loaded.meta.last_usage.as_ref(), ctx.now_ms);
         #[cfg(test)]
         run_transform_attempt_hook(&req.session_id);
         let row_version = store.commit_transform(
@@ -3510,18 +3601,7 @@ fn apply_once(
                 history_segment_max_seq: None,
                 project_root: Some(ctx.project_directory),
                 first_divergence: first_divergence_json.as_deref(),
-                scheduler_observation: Some(&pass_scheduler_observation(
-                    scheduler::PassDecision::Defer,
-                    false,
-                    ctx.now_ms,
-                )),
-                scheduler_request_observed_at_ms: req.request_observed_at_ms,
-                scheduler_full_array_fingerprint: req.full_array_fingerprint.as_deref(),
-                scheduler_eligible_supersession_count: None,
-                scheduler_withheld_by_tag_window: None,
-                scheduler_withheld_by_exempt_message: None,
-                scheduler_applied_supersession_count: None,
-                scheduler_applied_reductions: false,
+                pass: Some(pass_record(req, pass_observation.clone())),
                 overlays: TransformOverlayBatch::default(),
             },
         )?;
@@ -3555,7 +3635,7 @@ fn apply_once(
             first_divergence,
             surface_state,
             timings,
-            materialize_reason: Some("pending_rewrite".to_string()),
+            pass_observation,
             total_started_at,
         }));
     }
@@ -3804,24 +3884,27 @@ fn apply_once(
     } else {
         false
     };
-    let hard_fold_requested = first_fold_due
-        || boundary_divergence_recut.is_some()
-        || scheduler_outcome.idle_ttl_fired
-        || system_absorb_hard_due
-        || external_revision_changed
-        || project_memory_epoch_hard_due;
-    let emergency_arm_engaged = matches!(
-        scheduler_outcome.pass,
-        scheduler::PassDecision::Force85 | scheduler::PassDecision::Emergency95
-    ) || scheduler_outcome.drain_latch.is_active();
-    let ordinary_history_summarizer_veto = ctx.history_summarizer_active
-        && scheduler_outcome.pass == scheduler::PassDecision::Execute
-        && !hard_fold_requested
-        && !emergency_arm_engaged
-        && !loaded.meta.soft_refresh_pending
-        && !render_config_changed
-        && !reconcile_hard_due
-        && loaded.meta.initialized;
+    let ActivationGates {
+        hard_fold_requested,
+        ordinary_history_summarizer_veto,
+    } = activation_gates(&ActivationGateInputs {
+        pass: scheduler_outcome.pass,
+        history_summarizer_active: ctx.history_summarizer_active,
+        initialized: loaded.meta.initialized,
+        soft_refresh_pending: loaded.meta.soft_refresh_pending,
+        render_config_changed,
+        first_fold_due,
+        boundary_divergence_recut: boundary_divergence_recut.is_some(),
+        idle_ttl_fired: scheduler_outcome.idle_ttl_fired,
+        system_absorb_hard_due,
+        external_revision_changed,
+        project_memory_epoch_hard_due,
+        emergency_arm_engaged: matches!(
+            scheduler_outcome.pass,
+            scheduler::PassDecision::Force85 | scheduler::PassDecision::Emergency95
+        ) || scheduler_outcome.drain_latch.is_active(),
+        reconcile_hard_due,
+    });
     let supersession_ride_available = !loaded.meta.initialized
         || render_config_changed
         || hard_fold_requested
@@ -4047,16 +4130,16 @@ fn apply_once(
         reductions_pending: reductions_pending_now,
     });
     if todo_injection_pending && matches!(plan, PassPlan::Soft) && materialize_reason.is_none() {
-        materialize_reason = Some("synthetic_todo".to_string());
+        materialize_reason = Some(MaterializeReason::SyntheticTodo);
     }
     if lineage_state.force_hard {
-        materialize_reason = Some("lineage_descent".to_string());
+        materialize_reason = Some(MaterializeReason::LineageDescent);
     }
     if boundary_divergence_recut.is_some() {
-        materialize_reason = Some("boundary_divergence_recut".to_string());
+        materialize_reason = Some(MaterializeReason::BoundaryDivergenceRecut);
     }
     if transition_due {
-        materialize_reason = Some("renderer_transition".to_string());
+        materialize_reason = Some(MaterializeReason::RendererTransition);
     }
 
     timings.planning = elapsed_ms(planning_started_at);
@@ -4120,7 +4203,7 @@ fn apply_once(
     if lineage_anchor_failure {
         core.reconcile_pending = true;
         plan = PassPlan::Defer;
-        materialize_reason = Some("lineage_anchor_mismatch".to_string());
+        materialize_reason = Some(MaterializeReason::LineageAnchorMismatch);
     }
 
     let is_provider_prefix_mutation_pass = matches!(
@@ -4323,6 +4406,7 @@ fn apply_once(
                             commit_expected = Some(outcome.row_version);
                             meta.revert_epoch = outcome.revert_epoch;
                             meta.last_recut = outcome.last_recut;
+                            meta.history_summarizer = outcome.history_summarizer;
                             m1_signal = revision_signal_for_context(
                                 store,
                                 ctx.note_project_path,
@@ -4615,7 +4699,7 @@ fn apply_once(
                         run_started: false,
                     })?;
                     plan = PassPlan::Hard;
-                    materialize_reason = Some("pressure_refold".to_string());
+                    materialize_reason = Some(MaterializeReason::PressureRefold);
                     meta.initialized = true;
                     meta.last_render_config = effective_render_config_base.clone();
                     if meta.descent_completed {
@@ -4833,7 +4917,7 @@ fn apply_once(
     }
     timings.todo = todo_ms;
 
-    let result_action = action_str(&plan, &core);
+    let result_action = action_str(&plan).to_string();
 
     let mut tag_overlay = if tagging_active {
         tag_overlay_state(
@@ -5130,6 +5214,28 @@ fn apply_once(
     let scheduler_applied_reductions = frozen_red_targets(&core)
         .iter()
         .any(|target| !frozen_reductions_before.contains(target));
+    let pass_observation = pass_scheduler_observation(
+        req,
+        loaded.meta.last_usage.as_ref(),
+        scheduler_outcome.pass,
+        scheduler_outcome.drain_latch.is_active(),
+        ctx.now_ms,
+        pass_action(&plan),
+        materialize_reason,
+    );
+    // A HARD renders every stored segment, including those an additive-only pass never served; a SOFT renders only segments above the watermarks.
+    let previously_served = if matches!(plan, PassPlan::Hard | PassPlan::MigrateHard) {
+        meta.additive_served_history_segment_seq = None;
+        loaded.meta.served_history_segment_seq()
+    } else {
+        loaded.meta.rendered_history_segment_seq()
+    };
+    meta.history_summarizer.record_activation(
+        previously_served,
+        meta.rendered_history_segment_seq(),
+        ctx.now_ms,
+        first_fold_due,
+    );
     let state_changed = core != loaded.core || meta != loaded.meta;
     if state_changed {
         meta.last_committed_pass_at_ms = ctx.now_ms;
@@ -5162,18 +5268,16 @@ fn apply_once(
                 history_segment_max_seq: is_bust_pass.then_some(m1_signal.max_history_segment_seq),
                 project_root: Some(ctx.project_directory),
                 first_divergence: first_divergence_json.as_deref(),
-                scheduler_observation: Some(&pass_scheduler_observation(
-                    scheduler_outcome.pass,
-                    scheduler_outcome.drain_latch.is_active(),
-                    ctx.now_ms,
-                )),
-                scheduler_request_observed_at_ms: req.request_observed_at_ms,
-                scheduler_full_array_fingerprint: req.full_array_fingerprint.as_deref(),
-                scheduler_eligible_supersession_count: eligible_supersession_count,
-                scheduler_withheld_by_tag_window: supersession_withheld_by_tag_window_count,
-                scheduler_withheld_by_exempt_message: supersession_withheld_by_exempt_message_count,
-                scheduler_applied_supersession_count: applied_supersession_count,
-                scheduler_applied_reductions,
+                pass: Some(PassRecord {
+                    supersession: memory_store::SupersessionCounts {
+                        eligible: eligible_supersession_count,
+                        withheld_by_tag_window: supersession_withheld_by_tag_window_count,
+                        withheld_by_exempt_message: supersession_withheld_by_exempt_message_count,
+                        applied: applied_supersession_count,
+                    },
+                    applied_reductions: scheduler_applied_reductions,
+                    ..pass_record(req, pass_observation.clone())
+                }),
                 overlays: TransformOverlayBatch {
                     max_seen_ordinal: pending_overlays.max_seen_ordinal,
                     tag_mints: &tag_mint_inputs,
@@ -5238,7 +5342,7 @@ fn apply_once(
         tag_numbers,
         projection,
         scheduler_pass: scheduler_outcome.pass,
-        scheduler_drain_latch_active: scheduler_outcome.drain_latch.is_active(),
+        pass_observation,
         boundary_state,
         trim_mismatch,
         revert_epoch: meta.revert_epoch,
@@ -5254,7 +5358,7 @@ fn apply_once(
             full_array_fingerprint: req.full_array_fingerprint.clone(),
             action: result_action.clone(),
             decision: result_action,
-            materialize_reason,
+            materialize_reason: materialize_reason.map(|reason| reason.as_str().to_string()),
             first_divergence,
             timings: Some(timings),
             boundary_id: core.boundary_id.clone(),
@@ -5489,6 +5593,18 @@ fn apply_ingress_meta(
         meta.block_identity_by_mid
             .insert(re_adoption.mid.clone(), projected_vector(&re_adoption.mid));
     }
+    // A re-adopted message inside the counted chunk changes the bytes a retry would send; its failure count no longer describes those bytes.
+    if let Some(retry) = &meta.history_summarizer.chunk_retry
+        && projection.blocks.iter().any(|block| {
+            (retry.chunk_start..=retry.chunk_end).contains(&block.ordinal)
+                && enforcement
+                    .tail_re_adoptions
+                    .iter()
+                    .any(|re_adoption| re_adoption.mid == block.mid)
+        })
+    {
+        meta.history_summarizer.chunk_retry = None;
+    }
     meta.tail_identity_re_adopt_count = meta
         .tail_identity_re_adopt_count
         .saturating_add(enforcement.tail_re_adoptions.len() as u64);
@@ -5520,7 +5636,10 @@ fn apply_ingress_meta(
     }
 }
 
-fn effective_usage(request: Option<&ModuleUsage>, persisted: Option<&ModuleUsage>) -> ModuleUsage {
+pub(crate) fn effective_usage(
+    request: Option<&ModuleUsage>,
+    persisted: Option<&ModuleUsage>,
+) -> ModuleUsage {
     request
         .filter(|usage| usage.is_non_zero())
         .or(persisted)
@@ -5528,7 +5647,7 @@ fn effective_usage(request: Option<&ModuleUsage>, persisted: Option<&ModuleUsage
         .unwrap_or_default()
 }
 
-fn effective_context_limit_tokens(
+pub(crate) fn effective_context_limit_tokens(
     usage: &ModuleUsage,
     geometry: Option<&TransformGeometry>,
 ) -> f64 {
@@ -5707,6 +5826,51 @@ fn deferred_from_meta(state: &DeferredExecuteState) -> DeferredExecute {
 fn deferred_to_meta(state: DeferredExecute) -> DeferredExecuteState {
     DeferredExecuteState {
         reason: state.reason,
+    }
+}
+
+/// Everything that decides whether a pass must rebuild now and whether a live history_summarizer run may hold an ordinary Execute pass. Named fields and no `Default`: a path that does not compute a term says `false` where a reader can see it.
+struct ActivationGateInputs {
+    pass: scheduler::PassDecision,
+    history_summarizer_active: bool,
+    initialized: bool,
+    soft_refresh_pending: bool,
+    render_config_changed: bool,
+    first_fold_due: bool,
+    boundary_divergence_recut: bool,
+    idle_ttl_fired: bool,
+    system_absorb_hard_due: bool,
+    external_revision_changed: bool,
+    project_memory_epoch_hard_due: bool,
+    /// Force85, Emergency95, or the drain latch.
+    emergency_arm_engaged: bool,
+    reconcile_hard_due: bool,
+}
+
+struct ActivationGates {
+    hard_fold_requested: bool,
+    ordinary_history_summarizer_veto: bool,
+}
+
+/// The one definition of the must-not-wait set. A hard fold classifies `HARD` before the bust gate is read; the veto holds only an ordinary Execute pass while a run is live, never one a hard fold, an emergency arm, an explicit flush, a render-config change, a reconcile, or a first render forces.
+fn activation_gates(input: &ActivationGateInputs) -> ActivationGates {
+    let hard_fold_requested = input.first_fold_due
+        || input.boundary_divergence_recut
+        || input.idle_ttl_fired
+        || input.system_absorb_hard_due
+        || input.external_revision_changed
+        || input.project_memory_epoch_hard_due;
+    let ordinary_history_summarizer_veto = input.history_summarizer_active
+        && input.pass == scheduler::PassDecision::Execute
+        && !hard_fold_requested
+        && !input.emergency_arm_engaged
+        && !input.soft_refresh_pending
+        && !input.render_config_changed
+        && !input.reconcile_hard_due
+        && input.initialized;
+    ActivationGates {
+        hard_fold_requested,
+        ordinary_history_summarizer_veto,
     }
 }
 
@@ -6857,7 +7021,7 @@ struct PendingPassthroughArgs<'a> {
     first_divergence: Option<FirstDivergence>,
     surface_state: SurfaceState,
     timings: TransformTimings,
-    materialize_reason: Option<String>,
+    pass_observation: PassSchedulerObservation,
     total_started_at: Instant,
 }
 
@@ -6909,7 +7073,7 @@ fn pending_passthrough_result(args: PendingPassthroughArgs<'_>) -> TransformWith
         first_divergence,
         surface_state,
         mut timings,
-        materialize_reason,
+        pass_observation,
         total_started_at,
     } = args;
     let mut response =
@@ -6919,7 +7083,9 @@ fn pending_passthrough_result(args: PendingPassthroughArgs<'_>) -> TransformWith
     response.project_memory = project_memory;
     response.surface_state = surface_state;
     response.committed = committed;
-    response.materialize_reason = materialize_reason;
+    response.materialize_reason = pass_observation
+        .materialize_reason
+        .map(|reason| reason.as_str().to_string());
     response.first_divergence = first_divergence;
     timings.total = elapsed_ms(total_started_at);
     response.timings = Some(timings);
@@ -6927,7 +7093,7 @@ fn pending_passthrough_result(args: PendingPassthroughArgs<'_>) -> TransformWith
         tag_numbers,
         projection,
         scheduler_pass: scheduler::PassDecision::Defer,
-        scheduler_drain_latch_active: false,
+        pass_observation,
         boundary_state: BoundaryState::Absent,
         trim_mismatch,
         revert_epoch,
@@ -8451,6 +8617,7 @@ fn run_user_hint_lexical_search(
                 matched.len(),
                 candidate.recency,
                 candidate.result,
+                matched,
             ))
         })
         .collect::<Vec<_>>();
@@ -8462,17 +8629,29 @@ fn run_user_hint_lexical_search(
             .then_with(|| right.2.cmp(&left.2))
             .then_with(|| left.3.id.cmp(&right.3.id))
     });
-    trace.matched = scored.iter().map(|(_, _, _, result)| result.id).collect();
+    trace.matched = scored
+        .iter()
+        .map(|(_, _, _, result, _)| result.id)
+        .collect();
     trace.threshold = scored
         .first()
-        .is_some_and(|(score, _, _, _)| *score >= score_threshold);
+        .is_some_and(|(score, _, _, _, _)| *score >= score_threshold);
     if !trace.threshold {
         return Ok(Vec::new());
     }
     let selected: Vec<_> = scored
         .into_iter()
         .take(USER_HINT_RESULT_LIMIT)
-        .map(|(_, _, _, result)| result)
+        .map(|(_, _, _, mut result, mut matched)| {
+            // Matched tokens are in sorted order, so the stable sort puts the rarest first and breaks ties by that order.
+            matched.sort_by_key(|token| *document_frequency.get(*token).unwrap_or(&0));
+            let anchors = matched
+                .iter()
+                .map(|token| token.as_str())
+                .collect::<Vec<_>>();
+            result.snippet = user_hint_snippet(std::mem::take(&mut result.snippet), &anchors);
+            result
+        })
         .collect();
     trace.selected = selected.iter().map(|result| result.id).collect();
     Ok(selected)
@@ -8596,6 +8775,89 @@ pub(crate) fn utf16_prefix(text: &str, limit: usize) -> &str {
     &text[..end]
 }
 
+/// Returns the first whole-word, case-insensitive occurrence of a `lexical_tokens` token.
+///
+/// A word ends where the tokenizer's lowercased text would split: U+0130 lowercases to `i` plus a
+/// combining dot, so it bounds a word instead of joining it.
+fn first_whole_word(text: &str, token: &str) -> Option<std::ops::Range<usize>> {
+    let is_word_char =
+        |ch: char| ch.is_alphanumeric() && ch.to_lowercase().all(char::is_alphanumeric);
+    let mut word_start = None;
+    for (index, character) in text.char_indices().chain([(text.len(), ' ')]) {
+        match (is_word_char(character), word_start) {
+            (true, None) => word_start = Some(index),
+            (false, Some(start)) => {
+                let word = &text[start..index];
+                // ASCII lowercasing is context-free, so it equals `str::to_lowercase` without allocating.
+                let matches = if word.is_ascii() {
+                    word.eq_ignore_ascii_case(token)
+                } else {
+                    word.to_lowercase() == token
+                };
+                if matches {
+                    return Some(start..index);
+                }
+                word_start = None;
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Anchors are ordered rarest first; the first anchor the served fragment can show decides the snippet.
+/// Whether a fragment shows the anchor is judged on the rendered text: escaping can push a match past the cap
+/// that the raw text kept, and compression drops filler words and compresses code whose fences fall outside
+/// the window. A window without its anchor carries less evidence than the prefix.
+fn user_hint_snippet(body: String, anchors: &[&str]) -> String {
+    let mut prefix_fragment = None;
+    for anchor in anchors {
+        let Some(hit) = first_whole_word(&body, anchor) else {
+            continue;
+        };
+        let prefix = prefix_fragment.get_or_insert_with(|| user_hint_fragment(&body));
+        if first_whole_word(prefix, anchor).is_some() {
+            return body;
+        }
+        // The rendered window is `…` + left context + anchor + `…`, so a long anchor gets less context.
+        // Bytes bound UTF-16 units from above, so the byte length is a safe stand-in.
+        let context = (USER_HINT_FRAGMENT_CHAR_CAP / 2)
+            .min((USER_HINT_FRAGMENT_CHAR_CAP - 2).saturating_sub(hit.len()));
+        let window = crate::memory_tool::snippet_around_match(&body, hit, context);
+        if first_whole_word(&user_hint_fragment(&window), anchor).is_some() {
+            return window;
+        }
+    }
+    body
+}
+
+fn user_hint_fragment(snippet: &str) -> String {
+    let compressed = crate::terse_text_compression::compress(
+        snippet,
+        crate::terse_text_compression::TerseTextCompressionLevel::Ultra,
+    );
+    one_line_fragment(
+        &neutralize_user_hint_markup(&compressed),
+        USER_HINT_FRAGMENT_CHAR_CAP,
+    )
+}
+
+/// Stored segment tiers are unescaped, and the hint lands in the user's own text block.
+/// Escaping and removing tag imitations keeps a fragment from closing the hint envelope or forging another marker.
+/// The fragment cap applies afterwards, so escaping cannot push a fragment past it.
+fn neutralize_user_hint_markup(text: &str) -> Cow<'_, str> {
+    let text = if text.contains('\u{a7}') {
+        Cow::Owned(strip_tag_notation(text))
+    } else {
+        Cow::Borrowed(text)
+    };
+    if text.contains(['&', '<', '>']) {
+        Cow::Owned(crate::decay_render::escape_xml_content(&text))
+    } else {
+        text
+    }
+}
+
 fn render_user_hint(results: &[crate::memory_tool::MemorySearchResult]) -> Option<String> {
     if results.is_empty() {
         return None;
@@ -8603,16 +8865,7 @@ fn render_user_hint(results: &[crate::memory_tool::MemorySearchResult]) -> Optio
     let lines = results
         .iter()
         .take(USER_HINT_RESULT_LIMIT)
-        .map(|result| {
-            let fragment = crate::terse_text_compression::compress(
-                &result.snippet,
-                crate::terse_text_compression::TerseTextCompressionLevel::Ultra,
-            );
-            format!(
-                "- {}",
-                one_line_fragment(&fragment, USER_HINT_FRAGMENT_CHAR_CAP)
-            )
-        })
+        .map(|result| format!("- {}", user_hint_fragment(&result.snippet)))
         .filter(|line| line.len() > 2)
         .collect::<Vec<_>>();
     if lines.is_empty() {
@@ -11928,7 +12181,7 @@ struct MaterializeReasonInputs {
     reductions_pending: bool,
 }
 
-fn classify_materialize_reason(input: MaterializeReasonInputs) -> Option<String> {
+fn classify_materialize_reason(input: MaterializeReasonInputs) -> Option<MaterializeReason> {
     let MaterializeReasonInputs {
         plan,
         bootstrap_due,
@@ -11948,51 +12201,55 @@ fn classify_materialize_reason(input: MaterializeReasonInputs) -> Option<String>
     let reason = match plan {
         PassPlan::Hard | PassPlan::MigrateHard => {
             if bootstrap_due {
-                "first_render"
+                MaterializeReason::FirstRender
             } else if legacy_baseline {
-                "legacy_migration"
+                MaterializeReason::LegacyMigration
             } else if profile_transition {
-                "profile_transition"
+                MaterializeReason::ProfileTransition
             } else if render_config_changed {
-                "epoch_change"
+                MaterializeReason::EpochChange
             } else if coverage_fold_due || first_fold_due {
-                "coverage_fold"
+                MaterializeReason::CoverageFold
             } else if ttl_expired {
-                "ttl_expiry"
+                MaterializeReason::TtlExpiry
             } else if project_memory_delta {
-                "project_memory_epoch"
+                MaterializeReason::ProjectMemoryEpoch
             } else if reconcile_hard_due {
-                "reconcile"
+                MaterializeReason::Reconcile
             } else {
-                "hard_trigger"
+                MaterializeReason::HardTrigger
             }
         }
         PassPlan::Soft => {
             if explicit_flush {
-                "explicit_flush"
+                MaterializeReason::ExplicitFlush
             } else if coverage_delta {
-                "coverage_fold"
+                MaterializeReason::CoverageFold
             } else if m1_delta {
-                "m1_delta"
+                MaterializeReason::M1Delta
             } else if reductions_pending {
-                "selection"
+                MaterializeReason::Selection
             } else {
-                "m1_delta"
+                MaterializeReason::M1Delta
             }
         }
         PassPlan::Defer | PassPlan::Reject => return None,
     };
-    Some(reason.to_string())
+    Some(reason)
 }
 
-fn action_str(plan: &PassPlan, _core: &CoreState) -> String {
+fn pass_action(plan: &PassPlan) -> Option<PassAction> {
     match plan {
-        PassPlan::Hard | PassPlan::MigrateHard => "HARD",
-        PassPlan::Soft => "SOFT",
-        PassPlan::Defer => "SOFT+",
-        PassPlan::Reject => "ERROR",
+        PassPlan::Hard | PassPlan::MigrateHard => Some(PassAction::Hard),
+        PassPlan::Soft => Some(PassAction::Soft),
+        PassPlan::Defer => Some(PassAction::SoftPlus),
+        PassPlan::Reject => None,
     }
-    .to_string()
+}
+
+/// A rejected plan reports `ERROR`, which no ring entry carries.
+fn action_str(plan: &PassPlan) -> &'static str {
+    pass_action(plan).map_or("ERROR", PassAction::as_str)
 }
 
 #[cfg(test)]
@@ -12000,6 +12257,9 @@ mod aged_goldens;
 
 #[cfg(test)]
 mod surface_census;
+
+#[cfg(test)]
+mod must_not_wait;
 
 #[cfg(test)]
 pub(crate) mod tests {
@@ -12569,6 +12829,7 @@ pub(crate) mod tests {
             "divergence",
             "store_commit",
             "trigger_ms",
+            "emergency_wait",
             "post_attach_ms",
             "response_encode",
             "response_meta_encode",
@@ -12683,7 +12944,7 @@ pub(crate) mod tests {
         )
     }
 
-    fn item(id: &str, ordinal: u64, bytes: &str) -> IngressMessage {
+    pub(crate) fn item(id: &str, ordinal: u64, bytes: &str) -> IngressMessage {
         IngressMessage {
             mid: id.to_string(),
             ordinal,
@@ -13140,7 +13401,7 @@ pub(crate) mod tests {
         }
     }
 
-    fn system_item(id: &str, ordinal: u64, bytes: &str) -> IngressMessage {
+    pub(crate) fn system_item(id: &str, ordinal: u64, bytes: &str) -> IngressMessage {
         IngressMessage {
             mid: id.to_string(),
             ordinal,
@@ -13210,7 +13471,7 @@ pub(crate) mod tests {
         }
     }
 
-    fn req(session: &str, cfg: &str, messages: Vec<IngressMessage>) -> TransformRequest {
+    pub(crate) fn req(session: &str, cfg: &str, messages: Vec<IngressMessage>) -> TransformRequest {
         TransformRequest {
             cache_ttl: None,
             effective_execute_threshold: None,
@@ -13266,6 +13527,7 @@ pub(crate) mod tests {
             new_epoch: 0,
             constituents: Vec::new(),
             compaction_observed: false,
+            prev_response_cache_usage: None,
         }
     }
 
@@ -13381,7 +13643,7 @@ pub(crate) mod tests {
     /// The producer context uses a throwaway project directory with no documentation files, so its docs are empty.
     /// Each test fixes `now_ms` instead of reading the wall clock, so expiry uses a deterministic cutoff.
     /// is deterministic.
-    fn pctx<'a>(project: &'a str, dir: &'a str, now_ms: i64) -> ProducerContext<'a> {
+    pub(crate) fn pctx<'a>(project: &'a str, dir: &'a str, now_ms: i64) -> ProducerContext<'a> {
         ProducerContext {
             project_memory: canonical_read(1, &[]),
             project_path: project,
@@ -13414,7 +13676,7 @@ pub(crate) mod tests {
     }
 
     /// A pinned canonical read with `(object_id, category, content)` rows.
-    fn canonical_read(
+    pub(crate) fn canonical_read(
         known_as_of: i64,
         rows: &[(&str, &str, &str)],
     ) -> Option<CanonicalMemoryRead> {
@@ -13583,7 +13845,7 @@ pub(crate) mod tests {
         assert!(!served_bytes(&withheld).contains("<project-memory>"));
     }
 
-    fn with_usage(
+    pub(crate) fn with_usage(
         mut request: TransformRequest,
         current_total_input_tokens: u64,
         context_limit_tokens: u64,
@@ -15284,6 +15546,81 @@ pub(crate) mod tests {
         );
     }
 
+    /// A re-adopted tail message changes the bytes a retried chunk would send, so the retry count for a chunk at or before it starts over; a chunk that ends before the change keeps its count.
+    #[test]
+    fn a_tail_re_adoption_clears_the_retry_count_of_a_chunk_it_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = store(dir.path());
+        let session = "tail-re-adopt-retry";
+        s.replace_history_segments(session, &[comp(1, 1, 1, "covered", "SUMMARY")])
+            .unwrap();
+        let original = vec![item("covered", 1, "covered"), item("tail", 2, "before")];
+        run(&s, &req(session, "cfg0", original), &spine());
+        let before = s.load(session).unwrap();
+        let mutated_request = req(
+            session,
+            "cfg0",
+            vec![item("covered", 1, "covered"), item("tail", 2, "after")],
+        );
+        let mutated_projection = project_messages(&mutated_request.messages).unwrap();
+        let enforcement = enforce_block_identity(
+            &before.meta,
+            &normalize_synthetic_todo_ingress(&mutated_request),
+            &mutated_projection,
+            &before.core,
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(enforcement.tail_re_adoptions.len(), 1);
+        let retry = |chunk_start, chunk_end| {
+            Some(memory_store::HistorySummarizerChunkRetry {
+                chunk_start,
+                chunk_end,
+                failures: 8,
+                model_chain: vec!["prov/model".to_string()],
+                token_budget: 8_000,
+            })
+        };
+
+        let mut changed = before.meta.clone();
+        changed.history_summarizer.chunk_retry = retry(1, 2);
+        apply_ingress_meta(
+            &mut changed,
+            &mutated_request,
+            &mutated_projection,
+            None,
+            None,
+            &enforcement,
+        );
+        assert_eq!(changed.history_summarizer.chunk_retry, None);
+
+        // The failed chunk ended before the re-adopted message: the retried bytes are unchanged.
+        let mut ended_before = before.meta.clone();
+        ended_before.history_summarizer.chunk_retry = retry(1, 1);
+        apply_ingress_meta(
+            &mut ended_before,
+            &mutated_request,
+            &mutated_projection,
+            None,
+            None,
+            &enforcement,
+        );
+        assert_eq!(ended_before.history_summarizer.chunk_retry, retry(1, 1));
+
+        let mut unchanged = before.meta.clone();
+        unchanged.history_summarizer.chunk_retry = retry(3, 5);
+        apply_ingress_meta(
+            &mut unchanged,
+            &mutated_request,
+            &mutated_projection,
+            None,
+            None,
+            &enforcement,
+        );
+        assert_eq!(unchanged.history_summarizer.chunk_retry, retry(3, 5));
+    }
+
     fn replay_basis_covered_item(mid: &str, ordinal: u64) -> IngressMessage {
         let ck: WireMessage = serde_json::from_value(json!({
             "role": "assistant",
@@ -15572,6 +15909,545 @@ pub(crate) mod tests {
                 "{name} frozen unit must preserve the tail identity, got {error:?}"
             );
         }
+    }
+
+    #[test]
+    fn prev_response_cache_usage_is_admitted_only_as_two_unsigned_counts() {
+        let body = |cache: Option<Value>| {
+            let mut body = json!({
+                "kind": "transform",
+                "v": 2,
+                "serializer_profile": "opencode-aisdk",
+                "session_id": "cache",
+                "render_config": "cfg0",
+                "messages": [],
+                // `input_tokens` and `limit` are unknown usage keys, which deserialization ignores.
+                "usage": {
+                    "input_tokens": 64_000,
+                    "limit": 128_000,
+                    "current_total_input_tokens": 64_000,
+                    "context_limit_tokens": 128_000
+                },
+            });
+            if let Some(cache) = cache {
+                body["prev_response_cache_usage"] = cache;
+            }
+            serde_json::from_value::<TransformRequest>(body).unwrap()
+        };
+        let pressure = Some(ModuleUsage {
+            current_total_input_tokens: 64_000,
+            context_limit_tokens: 128_000,
+            ..ModuleUsage::default()
+        });
+        let persisted = ModuleUsage {
+            current_total_input_tokens: 90_000,
+            ..ModuleUsage::default()
+        };
+        let without = body(None);
+        for (cache, expected) in [
+            (None, None),
+            (
+                Some(json!({"cache_read_tokens": 0, "cache_write_tokens": 0})),
+                Some((0, 0)),
+            ),
+            (
+                Some(json!({"cache_read_tokens": u64::MAX, "cache_write_tokens": 7})),
+                Some((u64::MAX, 7)),
+            ),
+            (
+                Some(json!({"cache_read_tokens": -1, "cache_write_tokens": 7})),
+                None,
+            ),
+            (
+                Some(json!({"cache_read_tokens": 1.5, "cache_write_tokens": 7})),
+                None,
+            ),
+            (Some(json!({"cache_read_tokens": 3})), None),
+            (Some(json!("3")), None),
+        ] {
+            let parsed = body(cache.clone());
+            assert_eq!(
+                parsed
+                    .prev_response_cache_usage
+                    .map(|usage| (usage.cache_read_tokens, usage.cache_write_tokens)),
+                expected,
+                "{cache:?}"
+            );
+            assert_eq!(parsed.usage, pressure, "{cache:?}");
+            for fallback in [None, Some(&persisted)] {
+                assert_eq!(
+                    effective_usage(parsed.usage.as_ref(), fallback),
+                    effective_usage(without.usage.as_ref(), fallback),
+                    "{cache:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn prev_response_cache_usage_changes_no_decision_bytes_or_persisted_state() {
+        let passes = |cache: Option<memory_store::ProviderCacheUsage>| {
+            let dir = tempfile::tempdir().unwrap();
+            let s = store(dir.path());
+            let mut observed = Vec::new();
+            for (tokens, messages) in [
+                (1_000, vec![item("a", 1, "x")]),
+                (140_000, vec![item("a", 1, "x"), item("b", 2, "y")]),
+                (0, vec![item("a", 1, "x"), item("b", 2, "y")]),
+            ] {
+                let mut request = req("cache", "cfg0", messages);
+                request.usage = Some(ModuleUsage {
+                    current_total_input_tokens: tokens,
+                    context_limit_tokens: 200_000,
+                    ..ModuleUsage::default()
+                });
+                request.prev_response_cache_usage = cache;
+                let response = run(&s, &request, &spine());
+                let loaded = s.load("cache").unwrap();
+                let mut response = serde_json::to_value(&response).unwrap();
+                response.as_object_mut().unwrap().remove("timings");
+                observed.push((
+                    response,
+                    serde_json::to_value(&loaded.core).unwrap(),
+                    serde_json::to_value(&loaded.meta).unwrap(),
+                ));
+            }
+            observed
+        };
+        let without = passes(None);
+        // The first pass folds and the 70% pass persists its pressure, so decisions and writes both ran.
+        let actions: Vec<_> = without
+            .iter()
+            .map(|(response, _, _)| response["action"].clone())
+            .collect();
+        assert_eq!(actions, [json!("HARD"), json!("SOFT+"), json!("SOFT+")]);
+        assert_eq!(
+            without[1].2["last_usage"]["current_total_input_tokens"],
+            json!(140_000)
+        );
+        assert_eq!(
+            without,
+            passes(Some(memory_store::ProviderCacheUsage {
+                cache_read_tokens: 90_000,
+                cache_write_tokens: 4_000,
+            }))
+        );
+    }
+
+    fn ring(s: &MemoryStore, session: &str) -> Vec<PassSchedulerObservation> {
+        s.load_pass_trace(session)
+            .unwrap()
+            .map(|trace| trace.scheduler_history)
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn each_pass_appends_its_action_reason_pressure_and_cache_to_the_ring_in_its_own_write() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = store(dir.path());
+        let messages = vec![item("a", 1, "alpha"), item("b", 2, "beta")];
+        let boot = run(
+            &s,
+            &with_usage(req("ring", "cfg0", messages.clone()), 50_000, 200_000),
+            &spine(),
+        );
+        let entry = ring(&s, "ring").pop().unwrap();
+        assert_eq!(entry.action, Some(PassAction::Hard));
+        assert_eq!(
+            entry.action.map(PassAction::as_str),
+            Some(boot.action.as_str())
+        );
+        assert_eq!(
+            entry.materialize_reason.map(MaterializeReason::as_str),
+            boot.materialize_reason.as_deref()
+        );
+        assert_eq!(
+            (entry.usage_percent, entry.usage_soft_limit_tokens),
+            (Some(25), Some(200_000))
+        );
+        assert_eq!(entry.prev_response_cache, None);
+
+        // A byte-identical repeat appends one entry and writes no cache_state row.
+        let row_version = s.load("ring").unwrap().row_version;
+        let repeat = run(
+            &s,
+            &with_usage(req("ring", "cfg0", messages.clone()), 50_000, 200_000),
+            &spine(),
+        );
+        assert_eq!((repeat.action.as_str(), repeat.committed), ("SOFT+", false));
+        assert_eq!(s.load("ring").unwrap().row_version, row_version);
+        assert_eq!(ring(&s, "ring").len(), 2);
+
+        // New usage commits once, as before, and its entry rides that commit.
+        let mut moved = with_usage(req("ring", "cfg0", messages.clone()), 61_999, 200_000);
+        moved.prev_response_cache_usage = Some(memory_store::ProviderCacheUsage {
+            cache_read_tokens: 0,
+            cache_write_tokens: u64::MAX,
+        });
+        let moved = run(&s, &moved, &spine());
+        assert_eq!((moved.action.as_str(), moved.committed), ("SOFT+", true));
+        assert_eq!(
+            s.load("ring").unwrap().row_version,
+            row_version.map(|v| v + 1)
+        );
+        let entry = ring(&s, "ring").pop().unwrap();
+        assert_eq!(entry.action, Some(PassAction::SoftPlus));
+        assert_eq!(entry.usage_percent, Some(30), "rounded down");
+        assert_eq!(
+            entry.prev_response_cache,
+            Some(memory_store::ProviderCacheUsage {
+                cache_read_tokens: 0,
+                cache_write_tokens: u64::MAX,
+            })
+        );
+
+        // Without the field the entry carries no cache counts, even though persisted usage stands in for pressure.
+        run(&s, &req("ring", "cfg0", messages.clone()), &spine());
+        let entry = ring(&s, "ring").pop().unwrap();
+        assert_eq!(entry.usage_percent, Some(30));
+        assert_eq!(entry.prev_response_cache, None);
+        assert_eq!(ring(&s, "ring").len(), 4);
+
+        // A new message commits once too, and pressure past the soft limit is not capped.
+        let row_version = s.load("ring").unwrap().row_version;
+        let mut grown = messages;
+        grown.push(item("c", 3, "gamma"));
+        let grown = run(
+            &s,
+            &with_usage(req("ring", "cfg0", grown), 250_000, 200_000),
+            &spine(),
+        );
+        assert!(grown.committed);
+        assert_eq!(
+            s.load("ring").unwrap().row_version,
+            row_version.map(|v| v + 1)
+        );
+        let entry = ring(&s, "ring").pop().unwrap();
+        assert_eq!(
+            entry.action.map(PassAction::as_str),
+            Some(grown.action.as_str())
+        );
+        assert_eq!(entry.usage_percent, Some(125));
+        assert_eq!(ring(&s, "ring").len(), 5);
+    }
+
+    #[test]
+    fn pass_pressure_is_absent_without_any_reported_usage_and_saturates_at_the_integer_bound() {
+        let observe = |usage: Option<ModuleUsage>, persisted: Option<&ModuleUsage>| {
+            let mut request = req("pressure", "cfg0", Vec::new());
+            request.usage = usage;
+            let observation = pass_scheduler_observation(
+                &request,
+                persisted,
+                scheduler::PassDecision::Defer,
+                false,
+                0,
+                Some(PassAction::Passthrough),
+                None,
+            );
+            (
+                observation.usage_percent,
+                observation.usage_soft_limit_tokens,
+            )
+        };
+        assert_eq!(observe(None, None), (None, None));
+        let zero = ModuleUsage::default();
+        assert_eq!(observe(Some(zero), None), (None, None));
+        let persisted = ModuleUsage {
+            current_total_input_tokens: 40_000,
+            context_limit_tokens: 200_000,
+            ..ModuleUsage::default()
+        };
+        assert_eq!(observe(None, Some(&persisted)), (Some(20), Some(200_000)));
+        let huge = ModuleUsage {
+            current_total_input_tokens: u64::MAX,
+            context_limit_tokens: 200_000,
+            ..ModuleUsage::default()
+        };
+        assert_eq!(observe(Some(huge), None), (Some(u32::MAX), Some(200_000)));
+    }
+
+    #[test]
+    fn additive_only_passes_record_the_reason_their_response_reports_and_a_rejected_pass_records_nothing()
+     {
+        let dir = tempfile::tempdir().unwrap();
+        let s = store(dir.path());
+        let mut ctx = pctx("git:proj", "/nonexistent-docs", 0);
+        ctx.compaction_enabled = false;
+        let first = transform(&s, &req("additive", "cfg0", vec![item("a", 1, "x")]), &ctx).unwrap();
+        let loaded = s.load("additive").unwrap();
+        let mut meta = loaded.meta.clone();
+        meta.history_summarizer.firing_seq = 1;
+        meta.history_summarizer
+            .record_fire(Default::default(), 1, None);
+        meta.history_summarizer.record_outcome(
+            memory_store::summarizer_timeline::FiringOutcome::Published { sequence: Some(1) },
+        );
+        s.commit("additive", loaded.row_version, &loaded.core, &meta)
+            .unwrap();
+        s.replace_history_segments("additive", &[comp(1, 1, 1, "a", "S1")])
+            .unwrap();
+        let second = transform(
+            &s,
+            &req(
+                "additive",
+                "cfg0",
+                vec![item("a", 1, "x"), item("b", 2, "y")],
+            ),
+            &ctx,
+        )
+        .unwrap();
+        assert!(second.committed);
+        assert_eq!(
+            s.load("additive")
+                .unwrap()
+                .meta
+                .history_summarizer
+                .recent_firings[0]
+                .activated_at_ms,
+            None,
+            "this path renders no history segment"
+        );
+        let entry = ring(&s, "additive").remove(0);
+        assert_eq!(
+            entry.action.map(PassAction::as_str),
+            Some(first.action.as_str())
+        );
+        assert_eq!(
+            entry.materialize_reason.map(MaterializeReason::as_str),
+            first.materialize_reason.as_deref()
+        );
+        assert!(entry.materialize_reason.is_some());
+
+        let ctx = pctx("git:proj", "/nonexistent-docs", 0);
+        transform(
+            &s,
+            &req(
+                "drift",
+                "cfg0",
+                vec![item("anchor", 1, "stable"), item("tail", 2, "one")],
+            ),
+            &ctx,
+        )
+        .unwrap();
+        let before = ring(&s, "drift").len();
+        s.replace_history_segments("drift", &[comp(1, 1, 2, "tail", "covers the tail")])
+            .unwrap();
+        transform(
+            &s,
+            &req(
+                "drift",
+                "cfg0",
+                vec![item("anchor", 1, "stable"), item("tail", 2, "one")],
+            ),
+            &ctx,
+        )
+        .unwrap();
+        let folded = ring(&s, "drift").len();
+        assert!(folded > before);
+        let rejected = transform(
+            &s,
+            &req(
+                "drift",
+                "cfg0",
+                vec![item("anchor", 1, "stable"), item("tail", 2, "two")],
+            ),
+            &ctx,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(rejected, TransformError::IdentityDrift(_)),
+            "{rejected:?}"
+        );
+        assert_eq!(
+            ring(&s, "drift").len(),
+            folded,
+            "a rejected pass records nothing"
+        );
+    }
+
+    #[test]
+    fn a_hard_after_additive_only_passes_activates_what_they_acknowledged_without_serving() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = store(dir.path());
+        let mut additive = pctx("git:proj", "/nonexistent-docs", 0);
+        additive.compaction_enabled = false;
+        let messages = vec![item("a", 1, "x"), item("b", 2, "y")];
+        transform(
+            &s,
+            &req("toggle", "cfg0", vec![item("a", 1, "x")]),
+            &additive,
+        )
+        .unwrap();
+        let loaded = s.load("toggle").unwrap();
+        let mut meta = loaded.meta.clone();
+        meta.history_summarizer.firing_seq = 1;
+        meta.history_summarizer
+            .record_fire(Default::default(), 1, None);
+        meta.history_summarizer.record_outcome(
+            memory_store::summarizer_timeline::FiringOutcome::Published { sequence: Some(1) },
+        );
+        s.commit("toggle", loaded.row_version, &loaded.core, &meta)
+            .unwrap();
+        s.replace_history_segments("toggle", &[comp(1, 1, 1, "a", "S1 summary")])
+            .unwrap();
+        // A new render config forces an additive HARD, which acknowledges every stored segment.
+        let acknowledged =
+            transform(&s, &req("toggle", "cfg1", messages.clone()), &additive).unwrap();
+        assert_eq!(
+            (acknowledged.action.as_str(), acknowledged.committed),
+            ("HARD", true)
+        );
+        let meta = s.load("toggle").unwrap().meta;
+        assert_eq!(
+            meta.rendered_history_segment_seq(),
+            1,
+            "the additive path advances the render watermark without serving segment 1"
+        );
+        assert_eq!(
+            meta.history_summarizer.recent_firings[0].activated_at_ms,
+            None
+        );
+        assert_eq!(meta.served_history_segment_seq(), 0);
+        let row_version = s.load("toggle").unwrap().row_version;
+        let repeat = transform(&s, &req("toggle", "cfg1", messages.clone()), &additive).unwrap();
+        assert!(!repeat.committed, "a repeat additive pass stays write-free");
+        assert_eq!(s.load("toggle").unwrap().row_version, row_version);
+
+        let mut compaction = pctx("git:proj", "/nonexistent-docs", 0);
+        compaction.now_ms = 42;
+        let hard = transform(&s, &req("toggle", "cfg1", messages), &compaction).unwrap();
+        assert_eq!((hard.action.as_str(), hard.committed), ("HARD", true));
+        assert!(
+            serde_json::to_string(&hard.messages())
+                .unwrap()
+                .contains("S1 summary"),
+            "the HARD serves segment 1 for the first time"
+        );
+        let meta = s.load("toggle").unwrap().meta;
+        assert_eq!(
+            meta.history_summarizer.recent_firings[0].activated_at_ms,
+            Some(42)
+        );
+        assert_eq!(meta.additive_served_history_segment_seq, None);
+    }
+
+    #[test]
+    fn a_bust_stamps_activation_on_every_published_firing_it_renders_and_no_other() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = store(dir.path());
+        let mut messages = vec![item("anchor", 1, "alpha"), item("fold-target", 2, "beta")];
+        let request = |messages: &[IngressMessage]| req("act", "cfg0", messages.to_vec());
+        run(&s, &request(&messages), &spine());
+        let loaded = s.load("act").unwrap();
+        let mut meta = loaded.meta.clone();
+        for sequence in [1, 2, 3] {
+            let state = &mut meta.history_summarizer;
+            state.firing_seq = sequence;
+            state.record_fire(Default::default(), 10, None);
+            state.record_outcome(
+                memory_store::summarizer_timeline::FiringOutcome::Published {
+                    sequence: Some(sequence as i64),
+                },
+            );
+        }
+        s.commit("act", loaded.row_version, &loaded.core, &meta)
+            .unwrap();
+        s.replace_history_segments(
+            "act",
+            &[
+                comp(1, 1, 1, "anchor", "first coverage"),
+                comp(2, 2, 2, "fold-target", "second coverage"),
+            ],
+        )
+        .unwrap();
+        messages.push(item("tail", 3, "tail"));
+        let fold = run(&s, &request(&messages), &spine());
+        assert_eq!(fold.materialize_reason.as_deref(), Some("coverage_fold"));
+        let entry = ring(&s, "act").pop().unwrap();
+        assert_eq!(
+            entry.action.map(PassAction::as_str),
+            Some(fold.action.as_str())
+        );
+        assert_eq!(
+            entry.materialize_reason.map(MaterializeReason::as_str),
+            Some("coverage_fold")
+        );
+
+        let meta = s.load("act").unwrap().meta;
+        assert_eq!(meta.rendered_history_segment_seq(), 2);
+        let activated: Vec<_> = meta
+            .history_summarizer
+            .recent_firings
+            .iter()
+            .map(|entry| entry.activated_at_ms.is_some())
+            .collect();
+        assert_eq!(activated, [true, true, false], "segment 3 is not rendered");
+        let first_folds: Vec<_> = meta
+            .history_summarizer
+            .recent_firings
+            .iter()
+            .map(|entry| entry.activated_by_first_fold)
+            .collect();
+        assert_eq!(
+            first_folds,
+            [true, true, false],
+            "the fold that creates the boundary"
+        );
+        let first_stamps: Vec<_> = meta
+            .history_summarizer
+            .recent_firings
+            .iter()
+            .map(|entry| entry.activated_at_ms)
+            .collect();
+
+        s.append_history_segments("act", &[comp(3, 3, 3, "tail", "third coverage")])
+            .unwrap();
+        messages.push(item("next", 4, "next"));
+        // Below the execute threshold a published segment waits; nothing renders or stamps it.
+        let waiting = run(&s, &request(&messages), &spine());
+        assert_eq!(waiting.action, "SOFT+");
+        assert!(
+            s.load("act")
+                .unwrap()
+                .meta
+                .history_summarizer
+                .recent_firings[2]
+                .activated_at_ms
+                .is_none()
+        );
+        let second = run(
+            &s,
+            &with_usage(request(&messages), 140_000, 200_000),
+            &spine(),
+        );
+        assert_eq!(
+            (second.action.as_str(), second.materialize_reason.as_deref()),
+            ("SOFT", Some("coverage_fold"))
+        );
+        let entry = ring(&s, "act").pop().unwrap();
+        assert_eq!(
+            entry.action.map(PassAction::as_str),
+            Some(second.action.as_str())
+        );
+        assert_eq!(
+            entry.materialize_reason.map(MaterializeReason::as_str),
+            second.materialize_reason.as_deref()
+        );
+        let meta = s.load("act").unwrap().meta;
+        assert_eq!(meta.rendered_history_segment_seq(), 3);
+        let stamps: Vec<_> = meta
+            .history_summarizer
+            .recent_firings
+            .iter()
+            .map(|entry| entry.activated_at_ms)
+            .collect();
+        assert_eq!(&stamps[..2], &first_stamps[..2], "earlier stamps stay");
+        assert!(stamps[2].is_some());
+        assert!(
+            !meta.history_summarizer.recent_firings[2].activated_by_first_fold,
+            "a fold under an existing boundary measures scheduling"
+        );
     }
 
     #[test]
@@ -19748,6 +20624,46 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn a_reconcile_recut_keeps_the_revert_count_through_the_pass_commit() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = store(dir.path());
+        s.replace_history_segments(
+            "ses",
+            &[comp(1, 1, 1, "a", "S0"), comp(2, 2, 2, "t2", "S1")],
+        )
+        .unwrap();
+        let live_full = vec![
+            item("a", 1, "raw"),
+            item("t2", 2, "turn two"),
+            item("t3", 3, "tail"),
+        ];
+        assert_eq!(
+            run(&s, &req("ses", "cfg0", live_full), &spine()).action,
+            "HARD"
+        );
+        // Published after the fold rendered segments 1 and 2, so no pass has rendered it.
+        s.append_history_segments("ses", &[comp(3, 3, 3, "t3", "S2")])
+            .unwrap();
+
+        let live_reverted = vec![item("a", 1, "raw"), item("t4", 2, "new turn")];
+        let observing = run(&s, &req("ses", "cfg0", live_reverted.clone()), &spine());
+        assert!(observing.reconcile_pending);
+        let remat = run(&s, &req("ses", "cfg0", live_reverted), &spine());
+        assert_eq!(remat.action, "HARD");
+        let loaded = s.load("ses").unwrap();
+        assert_eq!(loaded.meta.revert_epoch, 1);
+        assert_eq!(
+            loaded
+                .meta
+                .history_summarizer
+                .counters
+                .superseded_before_activation,
+            1,
+            "segment 2 was rendered; segment 3 was not"
+        );
+    }
+
+    #[test]
     fn reconcile_recut_nothing_survives_arms_pending_raw_without_truncate() {
         let dir = tempfile::tempdir().unwrap();
         let s = store(dir.path());
@@ -19931,6 +20847,12 @@ pub(crate) mod tests {
             &spine(),
         );
         assert_eq!(armed.action, "PASSTHROUGH");
+        let entry = ring(&s, "ses").pop().unwrap();
+        assert_eq!(entry.action, Some(PassAction::Passthrough));
+        assert_eq!(
+            entry.materialize_reason.map(MaterializeReason::as_str),
+            Some("pending_rewrite")
+        );
         let after_arm = s.load("ses").unwrap();
         assert_eq!(
             after_arm.meta.block_identity_by_mid, before.meta.block_identity_by_mid,
@@ -20321,6 +21243,7 @@ pub(crate) mod tests {
                             chunk_transcript: None,
                             memory_reviewer_nonadmission: None,
                             memory_reviewer_activation: None,
+                            published_at_ms: 0,
                         },
                     )
                     .unwrap();
@@ -20427,6 +21350,7 @@ pub(crate) mod tests {
                     chunk_transcript: None,
                     memory_reviewer_nonadmission: None,
                     memory_reviewer_activation: None,
+                    published_at_ms: 0,
                 })
                 .unwrap();
         }));
@@ -24004,15 +24928,8 @@ pub(crate) mod tests {
                     history_segment_max_seq: None,
                     project_root: None,
                     first_divergence: None,
-                    scheduler_observation: None,
-                    scheduler_request_observed_at_ms: None,
-                    scheduler_full_array_fingerprint: None,
-                    scheduler_eligible_supersession_count: None,
-                    scheduler_withheld_by_tag_window: None,
-                    scheduler_withheld_by_exempt_message: None,
-                    scheduler_applied_supersession_count: None,
-                    scheduler_applied_reductions: false,
                     overlays: TransformOverlayBatch::default(),
+                    pass: None,
                 },
             )
             .unwrap();
@@ -24090,15 +25007,8 @@ pub(crate) mod tests {
                     history_segment_max_seq: None,
                     project_root: None,
                     first_divergence: None,
-                    scheduler_observation: None,
-                    scheduler_request_observed_at_ms: None,
-                    scheduler_full_array_fingerprint: None,
-                    scheduler_eligible_supersession_count: None,
-                    scheduler_withheld_by_tag_window: None,
-                    scheduler_withheld_by_exempt_message: None,
-                    scheduler_applied_supersession_count: None,
-                    scheduler_applied_reductions: false,
                     overlays: TransformOverlayBatch::default(),
+                    pass: None,
                 },
             )
             .unwrap();
@@ -25177,7 +26087,11 @@ pub(crate) mod tests {
         r
     }
 
-    fn cc_req(session: &str, cfg: &str, messages: Vec<IngressMessage>) -> TransformRequest {
+    pub(crate) fn cc_req(
+        session: &str,
+        cfg: &str,
+        messages: Vec<IngressMessage>,
+    ) -> TransformRequest {
         profile_req(
             SerializerProfile::ClaudeCodeAnthropic,
             session,
@@ -26973,15 +27887,8 @@ pub(crate) mod tests {
                 history_segment_max_seq: None,
                 project_root: None,
                 first_divergence: None,
-                scheduler_observation: None,
-                scheduler_request_observed_at_ms: None,
-                scheduler_full_array_fingerprint: None,
-                scheduler_eligible_supersession_count: None,
-                scheduler_withheld_by_tag_window: None,
-                scheduler_withheld_by_exempt_message: None,
-                scheduler_applied_supersession_count: None,
-                scheduler_applied_reductions: false,
                 overlays: TransformOverlayBatch::default(),
+                pass: None,
             },
         )
         .unwrap();
@@ -29698,6 +30605,12 @@ pub(crate) mod tests {
         assert!(refused.reconcile_pending);
         assert_eq!(
             refused.materialize_reason.as_deref(),
+            Some("lineage_anchor_mismatch")
+        );
+        let entry = ring(&store, "B").pop().unwrap();
+        assert_eq!(entry.action, Some(PassAction::SoftPlus));
+        assert_eq!(
+            entry.materialize_reason.map(MaterializeReason::as_str),
             Some("lineage_anchor_mismatch")
         );
         assert_eq!(

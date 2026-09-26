@@ -297,6 +297,7 @@ describe("createEidnaraCommandHandler", () => {
             expect(text).toContain(`- Daemon: ${STATUS_RESPONSE.summary}`);
             expect(text).not.toContain("### Tail Hygiene");
             expect(text).not.toContain("**Compaction:** disabled");
+            expect(text).not.toContain("### Compaction Timing");
         });
 
         it("renders pending work, a running wrapup, degraded publish health, and the last reject", async () => {
@@ -330,6 +331,48 @@ describe("createEidnaraCommandHandler", () => {
             );
             const passesLine = text.split("\n").find((line) => line.startsWith("- Passes:"));
             expect(passesLine?.length).toBeLessThan(220);
+        });
+
+        it("renders the compaction timing block from the summarizer timeline", async () => {
+            const { run, texts } = setup(() => ({
+                ...STATUS_RESPONSE,
+                history_summarizer: {
+                    ...STATUS_RESPONSE.history_summarizer,
+                    recent_firings: [
+                        {
+                            firing_seq: 2,
+                            source: "pressure_path",
+                            clock: "daemon_wall_ms",
+                            eligible_at_ms: 0,
+                            fired_at_ms: 2_000,
+                            published_at_ms: 5_000,
+                            activated_at_ms: 9_000,
+                            outcome: { kind: "published", sequence: 2 },
+                        },
+                    ],
+                    counters: {
+                        firings: 2,
+                        published: 2,
+                        superseded_before_activation: 0,
+                        validation_rejected: 1,
+                        invalidated: 0,
+                        connect_failed: 0,
+                    },
+                },
+            }));
+
+            await expectSentinel(run("eidnara-status", "ses-status-timing"), "eidnara-status");
+
+            const [text] = texts();
+            expect(text).toContain("### Compaction Timing");
+            expect(text).toContain("- Last summary #2 (pressure path): activated");
+            expect(text).toContain("- Waited to start 2.0s, ran 3.0s, sat unactivated 4.0s");
+            expect(text).toContain("- Firings 2, published 2, superseded before activation 0");
+            expect(text).toContain(
+                "- Best effort: validation rejected 1, invalidated 0, connect failed 0",
+            );
+            // The timing block follows every daemon status line.
+            expect(text.indexOf("- Daemon:")).toBeLessThan(text.indexOf("### Compaction Timing"));
         });
 
         it("omits the pass and summary lines when the daemon does not supply them", async () => {

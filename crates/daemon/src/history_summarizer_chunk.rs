@@ -8,8 +8,9 @@ use std::collections::{BTreeMap, HashMap};
 
 use chrono::{Local, TimeZone};
 use memory_store::{
-    BlockIdentity, HistorySegmentSetGeneration, HistorySummarizerSelectedMessageIdentity,
-    MemoryStore, ProjectMemoryComposition, StoredHistorySegment,
+    BlockIdentity, HistorySegmentSetGeneration, HistorySummarizerChunkRetry,
+    HistorySummarizerSelectedMessageIdentity, MemoryStore, ProjectMemoryComposition,
+    StoredHistorySegment,
 };
 use serde_json::Value;
 use tokenizer::estimate_tokens;
@@ -17,9 +18,13 @@ use tokenizer::estimate_tokens;
 use crate::boundary::BoundaryResolution;
 use crate::canonical_memory::CanonicalMemoryRead;
 use crate::history_summarizer::{
-    ChunkSnapshotItem, HistorySummarizerFireRequest, compute_chunk_fingerprint,
+    ChunkSnapshotItem, HistorySummarizerFireRequest, HistorySummarizerProducerDriver,
+    compute_chunk_fingerprint,
 };
 use crate::history_summarizer_citations::{FrozenAlias, FrozenAliasTable};
+use crate::history_summarizer_producer::{
+    HistorySummarizerProducerError, ProducerOutput, RunHandle, RunState,
+};
 use crate::history_summarizer_prompt::{
     HistorySegmentPromptInputs, build_history_segment_agent_prompt,
     build_reference_blocks_from_stored, render_history_summarizer_memory_block,
@@ -543,6 +548,10 @@ pub enum HistorySummarizerNoFireReason {
 pub struct AssembledHistorySummarizerFiring {
     pub prompt: String,
     pub model_chain: Vec<String>,
+    /// The configured chunk token budget this firing was assembled under, before any retry shrink.
+    pub configured_token_budget: usize,
+    /// The budget the prompt was presented under, after the retry shrink.
+    pub token_budget: usize,
     pub chunk: HistorySummarizerBuiltChunk,
 
     pub chunk_fingerprint: String,
@@ -558,6 +567,174 @@ pub struct AssembledHistorySummarizerFiring {
     pub boundary_dates: BTreeMap<String, String>,
     /// The `<project-memory>` gate sets `project_memory` to `None`.
     pub project_memory: Option<ProjectMemoryComposition>,
+    /// Consecutive failed firings recorded for this chunk's start when it was assembled.
+    pub chunk_failures: u32,
+    /// Daemon-authored output that replaces the model once the chunk reaches [`PLACEHOLDER_AFTER_FAILURES`].
+    pub placeholder_output: Option<String>,
+}
+
+/// Failed firings on one chunk after which the calibration seeds change with each further failure.
+pub const VARY_SEEDS_AFTER_FAILURES: u32 = 2;
+/// Failed firings on one chunk after which each further failure halves the chunk's token budget.
+pub const SHRINK_CHUNK_AFTER_FAILURES: u32 = 4;
+/// Failed firings on one chunk after which the daemon publishes a placeholder segment for the shrunken chunk instead of calling a model.
+pub const PLACEHOLDER_AFTER_FAILURES: u32 = 8;
+
+/// The seed hash key for a chunk retried after `failures` failed firings. Below [`VARY_SEEDS_AFTER_FAILURES`] it is the session id, so a first retry of a transient failure sends identical bytes; above it, each failure count selects its own deterministic seeds.
+fn seed_session_key(session_id: &str, failures: u32) -> String {
+    if failures < VARY_SEEDS_AFTER_FAILURES {
+        session_id.to_string()
+    } else {
+        format!("{session_id}#retry{failures}")
+    }
+}
+
+/// The chunk token budget after `failures` failed firings: halved per failure from [`SHRINK_CHUNK_AFTER_FAILURES`] on, and no smaller than at the placeholder stage.
+fn retry_token_budget(token_budget: usize, failures: u32) -> usize {
+    if failures < SHRINK_CHUNK_AFTER_FAILURES {
+        return token_budget;
+    }
+    let halvings = failures.min(PLACEHOLDER_AFTER_FAILURES) - SHRINK_CHUNK_AFTER_FAILURES + 1;
+    (token_budget >> halvings).max(1)
+}
+
+/// The failures counted for the chunk at `chunk_start` under the current `model_chain` and configured `token_budget`; a count kept under another configuration does not apply.
+pub fn chunk_failures(
+    chunk_retry: Option<&HistorySummarizerChunkRetry>,
+    chunk_start: u64,
+    model_chain: &[String],
+    token_budget: usize,
+) -> u32 {
+    chunk_retry
+        .filter(|retry| {
+            retry.chunk_start == chunk_start
+                && retry.model_chain == model_chain
+                && retry.token_budget == token_budget
+        })
+        .map_or(0, |retry| retry.failures)
+}
+
+/// The budget a firing on the chunk starting at `chunk_start` builds and presents its input under.
+/// A reattachment uses the same budget because an in-flight firing does not change the durable count.
+pub fn firing_token_budget(
+    configured_budget: usize,
+    chunk_retry: Option<&HistorySummarizerChunkRetry>,
+    chunk_start: u64,
+    model_chain: &[String],
+) -> usize {
+    retry_token_budget(
+        configured_budget,
+        chunk_failures(chunk_retry, chunk_start, model_chain, configured_budget),
+    )
+}
+
+/// The ordinal a placeholder chunk must reach when a tool arc that opens the chunk has its result past the chunk end, so its placeholder cannot stop before the arc; `None` when the chunk already ends outside such an arc or the result lies at or past `eligible_end`.
+fn placeholder_reach(chunk: &HistorySummarizerChunk, eligible_end: u64) -> Option<u64> {
+    let mut end = chunk.end_index;
+    for _ in 0..=chunk.completed_tool_arcs.len() {
+        let Some(arc) = chunk
+            .completed_tool_arcs
+            .iter()
+            .find(|arc| arc.start <= end && end < arc.end)
+        else {
+            break;
+        };
+        // `placeholder_output` stops before an arc that opens after the chunk start.
+        if arc.start > chunk.start_index {
+            break;
+        }
+        if arc.end >= eligible_end {
+            return None;
+        }
+        end = arc.end;
+    }
+    (end != chunk.end_index).then_some(end)
+}
+
+/// One segment covering the chunk, so coverage stays contiguous past messages no model would summarize. A shrunken chunk can end between a tool invocation and its result, a boundary validation refuses; the segment then stops before that arc and leaves it unprocessed.
+fn placeholder_output(chunk: &HistorySummarizerChunk, failures: u32) -> String {
+    let start = chunk.start_index;
+    let mut end = chunk.end_index;
+    while let Some(arc) = chunk
+        .completed_tool_arcs
+        .iter()
+        .find(|arc| start < arc.start && arc.start <= end && end < arc.end)
+    {
+        end = arc.start - 1;
+    }
+    let body = format!(
+        "Messages {start}-{end} were not summarized: {failures} summarizer attempts on them failed."
+    );
+    format!(
+        "<output><history_segments>\n<history_segment start=\"{start}\" end=\"{end}\" title=\"Unsummarized messages {start}-{end}\" importance=\"1\"><p1>{body}</p1><p2>{body}</p2><p3>{body}</p3><p4 /></history_segment>\n</history_segments><meta><unprocessed_from>{}</unprocessed_from></meta></output>",
+        end.saturating_add(1)
+    )
+}
+
+/// The run id a placeholder firing records; no harness holds such a run, so restart recovery refires instead of reattaching to it.
+pub fn placeholder_run_id(session_id: &str) -> String {
+    format!("{PLACEHOLDER_RUN_ID_PREFIX}{session_id}")
+}
+
+pub fn is_placeholder_run_id(run_id: &str) -> bool {
+    run_id.starts_with(PLACEHOLDER_RUN_ID_PREFIX)
+}
+
+const PLACEHOLDER_RUN_ID_PREFIX: &str = "placeholder:";
+
+/// Stands in for the model on a placeholder firing and returns the daemon-authored document, which then validates and publishes like model output.
+pub struct PlaceholderProducer {
+    output: String,
+}
+
+impl PlaceholderProducer {
+    pub fn new(output: String) -> Self {
+        Self { output }
+    }
+}
+
+#[async_trait::async_trait]
+impl HistorySummarizerProducerDriver for PlaceholderProducer {
+    async fn bind_session(
+        &mut self,
+        _session_id: &str,
+    ) -> Result<(), HistorySummarizerProducerError> {
+        Ok(())
+    }
+
+    async fn start(
+        &mut self,
+        session_id: &str,
+        _system: &str,
+        _prompt: &str,
+        _model: &str,
+    ) -> Result<RunHandle, HistorySummarizerProducerError> {
+        Ok(RunHandle {
+            run_id: placeholder_run_id(session_id),
+        })
+    }
+
+    async fn await_output(
+        &mut self,
+        _run_id: &str,
+    ) -> Result<ProducerOutput, HistorySummarizerProducerError> {
+        Ok(ProducerOutput {
+            text: self.output.clone(),
+            length_capped: false,
+        })
+    }
+
+    async fn status(&mut self, _run_id: &str) -> Result<RunState, HistorySummarizerProducerError> {
+        Ok(RunState::Terminal)
+    }
+
+    async fn cancel(&mut self, _run_id: &str) -> Result<(), HistorySummarizerProducerError> {
+        Ok(())
+    }
+
+    async fn close(&mut self) -> Result<(), HistorySummarizerProducerError> {
+        Ok(())
+    }
 }
 
 impl AssembledHistorySummarizerFiring {
@@ -569,6 +746,7 @@ impl AssembledHistorySummarizerFiring {
         project_path: &'a str,
         project_slug: &'a str,
         harness: &'a str,
+        trigger: memory_store::summarizer_timeline::FiringTrigger,
     ) -> HistorySummarizerFireRequest<'a> {
         HistorySummarizerFireRequest {
             store,
@@ -597,6 +775,9 @@ impl AssembledHistorySummarizerFiring {
             completion_now_ms: crate::now_ms,
             publication_fence: None,
             memory_reviewer_handoff: None,
+            producer_started: None,
+            presented_token_budget: self.token_budget,
+            trigger,
         }
     }
 }
@@ -670,20 +851,38 @@ pub fn assemble_history_summarizer_firing(
             },
         ));
     }
-    let mut chunk = build_history_summarizer_chunk(
-        messages,
-        live,
+    let chunk_failures = chunk_failures(
+        snapshot.chunk_retry.as_ref(),
         chunk_start,
+        &config.model_chain,
         config.token_budget,
-        eligible_end,
     );
-    let input_source = presented_input(&mut chunk, config.token_budget);
+    let token_budget = retry_token_budget(config.token_budget, chunk_failures);
+    let mut chunk =
+        build_history_summarizer_chunk(messages, live, chunk_start, token_budget, eligible_end);
+    // A placeholder firing calls no model, so its chunk can spend the configured budget the retry shrink withheld on reaching the result of a tool arc that opens the chunk; a result even that budget cannot hold leaves the chunk as built.
+    if chunk_failures >= PLACEHOLDER_AFTER_FAILURES
+        && let Some(reach) = placeholder_reach(&chunk.chunk, eligible_end)
+    {
+        let reaching = build_history_summarizer_chunk(
+            messages,
+            live,
+            chunk_start,
+            config.token_budget,
+            reach + 1,
+        );
+        if reaching.chunk.end_index >= reach {
+            chunk = reaching;
+        }
+    }
+    let input_source = presented_input(&mut chunk, token_budget);
     if chunk.text.is_empty() || chunk.chunk.lines.is_empty() {
         return Ok(AssembleHistorySummarizerFiringOutcome::NoFire(
             HistorySummarizerNoFireReason::EmptyChunk,
         ));
     }
     if chunk.token_estimate < config.min_chunk_tokens
+        && chunk_failures < SHRINK_CHUNK_AFTER_FAILURES
         && !config.in_emergency
         && !config.fold_is_only_reclaim
     {
@@ -716,7 +915,7 @@ pub fn assemble_history_summarizer_firing(
 
     let boundary_dates = native_boundary_dates(messages);
     let reference_blocks = build_reference_blocks_from_stored(
-        &config.session_id,
+        &seed_session_key(&config.session_id, chunk_failures),
         chunk.chunk.start_index as i64,
         &history_segments,
     );
@@ -753,6 +952,8 @@ pub fn assemble_history_summarizer_firing(
         AssembledHistorySummarizerFiring {
             prompt,
             model_chain: config.model_chain,
+            configured_token_budget: config.token_budget,
+            token_budget,
             from_ordinal: chunk.chunk.start_index,
             to_ordinal: chunk.chunk.end_index,
 
@@ -772,6 +973,9 @@ pub fn assemble_history_summarizer_firing(
             now_ms,
             failure_backoff_at_ms: config.failure_backoff_at_ms,
             boundary_dates,
+            placeholder_output: (chunk_failures >= PLACEHOLDER_AFTER_FAILURES)
+                .then(|| placeholder_output(&chunk.chunk, chunk_failures)),
+            chunk_failures,
             chunk,
             project_memory: project_memory.map(CanonicalMemoryRead::composition),
         },
@@ -1703,6 +1907,302 @@ mod tests {
         assert_eq!(validated.history_segments[0].start_message, 3);
         assert_eq!(validated.history_segments[0].end_message, 9);
         assert_eq!(validated.unprocessed_from, 10);
+    }
+
+    /// Assembles the first chunk of a 40-message session after `failures` failed firings on it.
+    fn assemble_after_failures(failures: u32) -> AssembledHistorySummarizerFiring {
+        let messages: Vec<_> = (0..40)
+            .map(|ordinal| {
+                let role = if ordinal % 2 == 0 {
+                    "user"
+                } else {
+                    "assistant"
+                };
+                msg(
+                    &format!("m{ordinal}"),
+                    ordinal,
+                    role,
+                    vec![text(&format!("message {ordinal} {}", "word ".repeat(200)))],
+                )
+            })
+            .collect();
+        assemble_messages_after_failures(messages, failures)
+    }
+
+    /// Assembles the chunk at ordinal 0 of `messages` after `failures` failed firings on it.
+    fn assemble_messages_after_failures(
+        messages: Vec<Arc<IngressMessage>>,
+        failures: u32,
+    ) -> AssembledHistorySummarizerFiring {
+        let (_dir, store) = store_for_tests();
+        let loaded = store.load("ses-retry").unwrap();
+        let mut meta = loaded.meta;
+        meta.history_summarizer.chunk_retry = Some(memory_store::HistorySummarizerChunkRetry {
+            chunk_start: 0,
+            chunk_end: 3,
+            failures,
+            model_chain: vec!["prov/model".to_string()],
+            token_budget: 8_000,
+        });
+        store
+            .commit("ses-retry", loaded.row_version, &loaded.core, &meta)
+            .unwrap();
+        let projection = project_messages(&messages).unwrap();
+        let outcome = assemble_history_summarizer_firing(
+            &store,
+            &messages,
+            &projection.blocks,
+            &projection.identity_by_mid,
+            HistorySummarizerAssemblerConfig {
+                session_id: "ses-retry".to_string(),
+                project_path: "/proj".to_string(),
+                project_slug: "proj".to_string(),
+                model_chain: vec!["prov/model".to_string()],
+                token_budget: 8_000,
+                boundary: crate::boundary::BoundaryResolution {
+                    protected_start_ordinal: 40,
+                    eligible_head: 0..40,
+                    n_tokens: 0.0,
+                    floored_by_live_prompt: false,
+                    fenced_by_open_arc: false,
+                    true_raw_eligible_tokens: 10_000.0,
+                    oversize_atomic_unit: false,
+                    raw_message_count: 40,
+                    boundary_reason: "test".to_string(),
+                },
+                memory_enabled: false,
+                project_memory: None,
+                auto_promote: true,
+                user_memory_collection_enabled: false,
+                extraction_free: false,
+                in_emergency: false,
+                force_keep_last_history_segment: false,
+                fold_is_only_reclaim: false,
+                failure_backoff_at_ms: 0,
+                min_chunk_tokens: 2_000,
+            },
+            1,
+        )
+        .unwrap();
+        let AssembleHistorySummarizerFiringOutcome::Fire(firing) = outcome else {
+            panic!("expected the chunk to fire after {failures} failures, got {outcome:?}");
+        };
+        *firing
+    }
+
+    /// Retry bytes are a function of the failure count: identical below the seed threshold and for a repeated count, different once the count crosses it, smaller once shrinking starts.
+    #[test]
+    fn retry_prompt_bytes_are_deterministic_per_failure_count() {
+        let first = assemble_after_failures(0);
+        let retried = assemble_after_failures(1);
+        assert_eq!(first.prompt, retried.prompt);
+        assert_eq!(first.chunk_failures, 0);
+
+        let varied = assemble_after_failures(VARY_SEEDS_AFTER_FAILURES);
+        assert_eq!(
+            varied.prompt,
+            assemble_after_failures(VARY_SEEDS_AFTER_FAILURES).prompt
+        );
+        assert_ne!(
+            varied.prompt, first.prompt,
+            "the seeds change past the threshold"
+        );
+        assert_eq!(
+            varied.to_ordinal, first.to_ordinal,
+            "seed variation keeps the chunk"
+        );
+        assert_ne!(
+            varied.prompt,
+            assemble_after_failures(VARY_SEEDS_AFTER_FAILURES + 1).prompt,
+            "each further failure selects its own seeds"
+        );
+
+        let shrunk = assemble_after_failures(SHRINK_CHUNK_AFTER_FAILURES);
+        assert_eq!(
+            shrunk.prompt,
+            assemble_after_failures(SHRINK_CHUNK_AFTER_FAILURES).prompt
+        );
+        assert!(shrunk.to_ordinal < first.to_ordinal, "the chunk halves");
+        assert!(shrunk.placeholder_output.is_none());
+
+        let placeholder = assemble_after_failures(PLACEHOLDER_AFTER_FAILURES);
+        assert!(placeholder.to_ordinal < shrunk.to_ordinal);
+        let output = placeholder
+            .placeholder_output
+            .as_deref()
+            .expect("the placeholder stage replaces the model");
+        let validated = crate::history_summarizer_validate::validate_history_summarizer_output(
+            output,
+            &placeholder.chunk.chunk,
+            &placeholder.prior_history_segments,
+            placeholder.validate_options,
+        )
+        .expect("the placeholder document validates");
+        assert_eq!(validated.history_segments.len(), 1);
+        assert_eq!(validated.history_segments[0].start_message, 0);
+        assert_eq!(
+            validated.history_segments[0].end_message,
+            placeholder.to_ordinal
+        );
+        assert_eq!(validated.unprocessed_from, placeholder.to_ordinal + 1);
+    }
+
+    /// Reaching the result stays within the configured budget: a result the full budget cannot hold leaves the shrunken chunk as built rather than rendering an oversized prompt nobody reads.
+    #[test]
+    fn placeholder_reach_stays_within_the_configured_budget() {
+        let mut messages = vec![
+            msg(
+                "m0",
+                0,
+                "assistant",
+                vec![
+                    text(&format!("calling a tool {}", "word ".repeat(200))),
+                    BlockKind::ToolCall {
+                        id: "call".to_string(),
+                        name: "read".to_string(),
+                        input: json!({"path":"one.rs"}),
+                        provider_executed: false,
+                    },
+                ],
+            ),
+            msg(
+                "m1",
+                1,
+                "user",
+                vec![
+                    BlockKind::ToolResult {
+                        id: "call".to_string(),
+                        tool_name: "read".to_string(),
+                        output: memory_store::ToolOutput::bare(memory_store::OutputKind::Text {
+                            text: "one".to_string(),
+                        }),
+                        provider_executed: false,
+                    },
+                    // Far past the 8_000-token configured budget on its own.
+                    text(&format!("and the user pastes {}", "word ".repeat(40_000))),
+                ],
+            ),
+        ];
+        messages.extend((2..40).map(|ordinal| {
+            let role = if ordinal % 2 == 0 {
+                "user"
+            } else {
+                "assistant"
+            };
+            msg(
+                &format!("m{ordinal}"),
+                ordinal,
+                role,
+                vec![text(&format!("message {ordinal} {}", "word ".repeat(200)))],
+            )
+        }));
+        let placeholder = assemble_messages_after_failures(messages, PLACEHOLDER_AFTER_FAILURES);
+        assert_eq!(
+            placeholder.chunk.chunk.completed_tool_arcs,
+            vec![crate::history_summarizer_validate::MessageRange { start: 0, end: 1 }]
+        );
+        assert_eq!(
+            placeholder.to_ordinal, 0,
+            "the result does not fit the configured budget, so the chunk is not rebuilt to it"
+        );
+    }
+
+    /// A shrunken chunk that opens with a tool invocation whose result the budget cut cannot stop before the arc; the placeholder firing has no model to spare tokens for, so its chunk reaches the result instead.
+    #[test]
+    fn placeholder_reaches_the_result_of_a_tool_arc_that_opens_the_chunk() {
+        let mut messages = vec![
+            msg(
+                "m0",
+                0,
+                "assistant",
+                vec![
+                    text(&format!("calling a tool {}", "word ".repeat(200))),
+                    BlockKind::ToolCall {
+                        id: "call".to_string(),
+                        name: "read".to_string(),
+                        input: json!({"path":"one.rs"}),
+                        provider_executed: false,
+                    },
+                ],
+            ),
+            msg(
+                "m1",
+                1,
+                "user",
+                vec![
+                    BlockKind::ToolResult {
+                        id: "call".to_string(),
+                        tool_name: "read".to_string(),
+                        output: memory_store::ToolOutput::bare(memory_store::OutputKind::Text {
+                            text: "one".to_string(),
+                        }),
+                        provider_executed: false,
+                    },
+                    text(&format!("and the user adds {}", "word ".repeat(200))),
+                ],
+            ),
+        ];
+        messages.extend((2..40).map(|ordinal| {
+            let role = if ordinal % 2 == 0 {
+                "user"
+            } else {
+                "assistant"
+            };
+            msg(
+                &format!("m{ordinal}"),
+                ordinal,
+                role,
+                vec![text(&format!("message {ordinal} {}", "word ".repeat(200)))],
+            )
+        }));
+        let placeholder = assemble_messages_after_failures(messages, PLACEHOLDER_AFTER_FAILURES);
+        assert_eq!(
+            placeholder.chunk.chunk.completed_tool_arcs,
+            vec![crate::history_summarizer_validate::MessageRange { start: 0, end: 1 }]
+        );
+        let output = placeholder
+            .placeholder_output
+            .as_deref()
+            .expect("the placeholder stage replaces the model");
+        let validated = crate::history_summarizer_validate::validate_history_summarizer_output(
+            output,
+            &placeholder.chunk.chunk,
+            &placeholder.prior_history_segments,
+            placeholder.validate_options,
+        )
+        .expect("the placeholder document validates");
+        assert_eq!(validated.history_segments.len(), 1);
+        assert!(
+            validated.history_segments[0].end_message >= 1,
+            "{validated:?}"
+        );
+    }
+
+    /// A shrunken chunk can end between a tool invocation and its result; the placeholder stops before that arc so its terminal boundary validates, and leaves the arc unprocessed.
+    #[test]
+    fn placeholder_stops_before_a_tool_arc_the_chunk_end_splits() {
+        let placeholder = assemble_after_failures(SHRINK_CHUNK_AFTER_FAILURES);
+        let end = placeholder.to_ordinal;
+        assert!(
+            end >= 2,
+            "the shrunken chunk still spans several messages: {end}"
+        );
+        let mut chunk = placeholder.chunk.chunk.clone();
+        chunk.completed_tool_arcs = vec![crate::history_summarizer_validate::MessageRange {
+            start: end - 1,
+            end: end + 2,
+        }];
+        let output = placeholder_output(&chunk, PLACEHOLDER_AFTER_FAILURES);
+        let validated = crate::history_summarizer_validate::validate_history_summarizer_output(
+            &output,
+            &chunk,
+            &placeholder.prior_history_segments,
+            placeholder.validate_options,
+        )
+        .expect("the placeholder document validates");
+        assert_eq!(validated.history_segments.len(), 1);
+        assert_eq!(validated.history_segments[0].end_message, end - 2);
+        assert_eq!(validated.unprocessed_from, end - 1);
     }
 
     #[test]

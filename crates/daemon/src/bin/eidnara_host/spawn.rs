@@ -543,6 +543,8 @@ mod tests {
         ]);
         assert!(dropped.is_empty());
         assert!(config_env([("XDG_CONFIG_HOME", None), ("HOME", None)]).is_empty());
+        // The preparation-lead override reaches only fixture daemons, which inherit their parent's environment.
+        assert!(!CONFIG_ENV_NAMES.contains(&daemon::boundary::PREPARE_LEAD_ENV));
     }
 
     #[test]

@@ -262,10 +262,10 @@ describe("catalog revision replay admission", () => {
         ).toThrow(/requires an appended fingerprint-bound baseline/);
     });
 
-    // History validation names the missing and reused cases before the replay gate would.
     const EXPECTED_PROBE_MESSAGE = {
-        missing: /is not bound by a fingerprint-matching baseline adjudication/,
-        reused: /changed its semantic fingerprint while reusing revision id/,
+        missing:
+            /is not bound by a fingerprint-matching baseline adjudication|accepted variant edited without an appended adjudication/,
+        reused: /changed its semantic fingerprint while reusing revision id|requires an appended fingerprint-bound baseline and distinct semantic revision/,
         fingerprint: /does not match the registered case/,
     } as const;
 
@@ -275,10 +275,18 @@ describe("catalog revision replay admission", () => {
             const before = parseIncidentCatalog(JSON.parse(accepted.catalogText));
             const after = parseIncidentCatalog(JSON.parse(current.catalogText));
             const a1 = after.families[0]!.variants[0]!;
+            const replay = () =>
+                replayCatalogVerifierChanges(
+                    accepted,
+                    current,
+                    acceptedDigests,
+                    currentDigests,
+                    replayPass,
+                );
+            // The fixture is accepted before its mutation.
+            expect(replay, failure).not.toThrow();
             if (failure === "missing") {
                 current.adjudicationLines.splice(-2, 1);
-                before.families[0]!.variants[0] = structuredClone(a1);
-                accepted.catalogText = JSON.stringify(before);
             } else if (failure === "reused") {
                 a1.semantic_revision.id = before.families[0]!.variants[0]!.semantic_revision.id;
             } else {
@@ -289,15 +297,7 @@ describe("catalog revision replay admission", () => {
                     JSON.stringify(event);
             }
             current.catalogText = JSON.stringify(after);
-            expect(() =>
-                replayCatalogVerifierChanges(
-                    accepted,
-                    current,
-                    acceptedDigests,
-                    currentDigests,
-                    replayPass,
-                ),
-            ).toThrow(EXPECTED_PROBE_MESSAGE[failure]);
+            expect(replay, failure).toThrow(EXPECTED_PROBE_MESSAGE[failure]);
         }
     });
 

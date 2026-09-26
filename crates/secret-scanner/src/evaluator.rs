@@ -5,7 +5,8 @@ use regex::bytes::Captures;
 
 use crate::api::REVISION;
 use crate::rules::{
-    EntropySpec, LocalContextSpec, OfflineValidationKind, OfflineValidationSpec, Rule, RuleSet,
+    CodeReferenceGate, EntropySpec, LocalContextSpec, OfflineValidationKind, OfflineValidationSpec,
+    Rule, RuleSet,
 };
 use crate::{
     Finding, LimitExhausted, MAX_MATCH_BYTES, RuleSource, ScanError, ScanLimits, ScanProfile,
@@ -260,6 +261,12 @@ fn evaluate_candidate_spans(
         }
     }
     if rule.declaration.reject_scalars && is_scalar(value) {
+        return Ok(None);
+    }
+    if rule
+        .code_reference_gate
+        .is_some_and(|gate| names_code(gate, value))
+    {
         return Ok(None);
     }
 
@@ -1146,6 +1153,9 @@ const SCALAR_KEYWORDS: &[&str] = &[
     "~",
 ];
 
+// A number with a time unit is a duration, as in `access_token_ttl=900s`.
+const DURATION_UNITS: &[&str] = &["ns", "us", "ms", "s", "m", "h", "d", "w"];
+
 // Quoted overlay rules keep `\\.` sequences as content, so a value spelled `\n` arrives as two bytes that `trim` leaves in place.
 fn is_blank_with_escapes(text: &str) -> bool {
     let bytes = text.as_bytes();
@@ -1247,6 +1257,12 @@ fn is_scalar(value: &[u8]) -> bool {
     if digits == 0 {
         return false;
     }
+    if DURATION_UNITS
+        .iter()
+        .any(|unit| bytes[index..].eq_ignore_ascii_case(unit.as_bytes()))
+    {
+        return true;
+    }
     if matches!(bytes.get(index), Some(b'e' | b'E')) {
         index += 1;
         if matches!(bytes.get(index), Some(b'+' | b'-')) {
@@ -1261,6 +1277,111 @@ fn is_scalar(value: &[u8]) -> bool {
         }
     }
     index == bytes.len()
+}
+
+// Longer segments are left to the secret rules: a random body such as a vendor token's dotted payload runs past this, while member names stay well under it.
+const MAX_CODE_SEGMENT_BYTES: usize = 32;
+
+// Digest widths such as `sha256` need three digits; a four-digit suffix is usually a year.
+const MAX_CODE_SUFFIX_DIGITS: usize = 3;
+
+fn names_code(gate: CodeReferenceGate, value: &[u8]) -> bool {
+    if is_code_reference(value) {
+        return true;
+    }
+    match gate {
+        CodeReferenceGate::Assignment => false,
+        // The upstream rule allowlists `^[a-zA-Z_.-]+$`, since a credential this generic carries a digit.
+        CodeReferenceGate::GenericApiKey => {
+            value
+                .iter()
+                .all(|byte| byte.is_ascii_alphabetic() || matches!(byte, b'_' | b'.' | b'-'))
+                || value
+                    .iter()
+                    .position(|byte| *byte == b'=')
+                    .is_some_and(|equals| {
+                        let (name, rest) = (&value[..equals], &value[equals + 1..]);
+                        // An empty right side is Base64 padding, as in `QxWvErTy4=`, and `is_scalar` admits blanks.
+                        !rest.is_empty()
+                            && is_identifier_path(name, 1)
+                            && (is_scalar(rest) || is_code_reference(rest))
+                    })
+        }
+    }
+}
+
+/// A qualified name such as `event.id` or `self.config.api_key`, a call or index
+/// whose unquoted value stops at `(` or a quote (`request.headers.get`,
+/// `os.environ[`), or a `{name}` template such as `{pipeline_name}_{YYYYMMDD}`.
+/// One bare word is not a reference, because `password=hunter` is a literal.
+fn is_code_reference(value: &[u8]) -> bool {
+    let value = value.strip_suffix(b".").unwrap_or(value);
+    let value = value.strip_suffix(b"[").unwrap_or(value);
+    is_identifier_path(value, 2) || is_template(value)
+}
+
+fn is_identifier_path(value: &[u8], min_segments: usize) -> bool {
+    let mut segments = 0usize;
+    let mut rest = value;
+    loop {
+        let end = rest
+            .iter()
+            .position(|byte| matches!(byte, b'.' | b':'))
+            .unwrap_or(rest.len());
+        if !is_identifier(&rest[..end]) {
+            return false;
+        }
+        segments += 1;
+        rest = match &rest[end..] {
+            [] => return segments >= min_segments,
+            [b'.', tail @ ..] | [b':', b':', tail @ ..] => tail,
+            _ => return false,
+        };
+    }
+}
+
+/// Digits may only close a segment, since a digit inside a word marks a random body.
+/// A digit suffix must also be short and follow a lowercase word (`sha256`, `api_v2`),
+/// because a capitalized or year-numbered word such as `River2024` is how people build passwords.
+fn is_identifier(segment: &[u8]) -> bool {
+    let Some(first) = segment.first() else {
+        return false;
+    };
+    let word_end = segment
+        .iter()
+        .rposition(|byte| !byte.is_ascii_digit())
+        .map_or(0, |index| index + 1);
+    let (word, suffix) = segment.split_at(word_end);
+    segment.len() <= MAX_CODE_SEGMENT_BYTES
+        && (first.is_ascii_alphabetic() || *first == b'_')
+        && word
+            .iter()
+            .all(|byte| byte.is_ascii_alphabetic() || *byte == b'_')
+        && (suffix.is_empty()
+            || (suffix.len() <= MAX_CODE_SUFFIX_DIGITS && !word.iter().any(u8::is_ascii_uppercase)))
+}
+
+fn is_template(value: &[u8]) -> bool {
+    let mut placeholders = 0usize;
+    let mut rest = value;
+    while let Some(open) = rest.iter().position(|byte| *byte == b'{') {
+        if !rest[..open].iter().all(is_template_literal_byte) {
+            return false;
+        }
+        let Some(close) = rest[open..].iter().position(|byte| *byte == b'}') else {
+            return false;
+        };
+        if !is_identifier(&rest[open + 1..open + close]) {
+            return false;
+        }
+        placeholders += 1;
+        rest = &rest[open + close + 1..];
+    }
+    placeholders > 0 && rest.iter().all(is_template_literal_byte)
+}
+
+fn is_template_literal_byte(byte: &u8) -> bool {
+    matches!(byte, b'_' | b'-' | b'.' | b'/' | b':')
 }
 
 fn local_context_allows(
@@ -1623,11 +1744,19 @@ mod tests {
             "0b1010",
             "-0x10",
             "0xdeadbeef",
+            "900s",
+            "86400s",
+            "250ms",
+            "1.5h",
+            "90d",
         ] {
             assert!(is_scalar(scalar.as_bytes()), "{scalar:?}");
         }
         for secret in [
             "12x",
+            "900x",
+            "9s9",
+            "s",
             "hunter2",
             "true-blue",
             "nilpotent",
@@ -1651,6 +1780,50 @@ mod tests {
     }
 
     #[test]
+    fn code_reference_gate_is_closed() {
+        for gate in [
+            CodeReferenceGate::Assignment,
+            CodeReferenceGate::GenericApiKey,
+        ] {
+            for code in [
+                "event.id",
+                "self.config.api_key",
+                "settings::DB_PASSWORD",
+                "refreshedClaims.TenantRoles",
+                "os.environ[",
+                "partition_epoch.id.",
+                "self.hashes.sha256",
+                "client.oauth2.token",
+                "settings.api_v2",
+                "{pipeline_name}_{YYYYMMDD}",
+            ] {
+                assert!(names_code(gate, code.as_bytes()), "{gate:?} {code:?}");
+            }
+            for secret in [
+                "hunter2",
+                "aB3xZ9qL.Kp4mN2vT",
+                "Cobalt.River2024",
+                "Cobalt.River123",
+                "cobalt.river2024",
+                "QxWvErTyUiOpAsDfGhJkLz4=",
+                "{user}_Xk39fJ2qLp0Z",
+            ] {
+                assert!(!names_code(gate, secret.as_bytes()), "{gate:?} {secret:?}");
+            }
+        }
+        for code in [
+            "access_token_ttl=900",
+            "active_membership_id.",
+            "name=event.id",
+        ] {
+            assert!(
+                names_code(CodeReferenceGate::GenericApiKey, code.as_bytes()),
+                "{code:?}"
+            );
+        }
+    }
+
+    #[test]
     fn crc32_matches_standard_vector() {
         assert_eq!(crc32(b"123456789"), 0xcbf4_3926);
     }
@@ -1670,14 +1843,17 @@ mod tests {
         push_table(&mut encoded, KEY_QUALIFIERS);
         push_table(&mut encoded, NON_SECRET_KEY_MARKERS);
         push_table(&mut encoded, SCALAR_KEYWORDS);
+        push_table(&mut encoded, DURATION_UNITS);
         push_table(&mut encoded, &KEYED_KEYWORDS);
         encoded.extend_from_slice(&(MAX_MATCH_BYTES as u64).to_le_bytes());
         encoded.extend_from_slice(&(MAX_RADIX_SCALAR_DIGITS as u64).to_le_bytes());
+        encoded.extend_from_slice(&(MAX_CODE_SEGMENT_BYTES as u64).to_le_bytes());
+        encoded.extend_from_slice(&(MAX_CODE_SUFFIX_DIGITS as u64).to_le_bytes());
         encoded.push(DEFAULT_CHAR_CLASS.max_lower_pct);
         encoded.extend_from_slice(&DEFAULT_CHAR_CLASS.min_window_len.to_le_bytes());
         assert_eq!(
             crate::rules::digest_hex(&encoded),
-            "0e4ff709da2e81e21916202e7d301018b04b8aa380841f487036ebf7904a73f3",
+            "2ed72f2b8587f32df348793829c9594bdd251f700ef805bc3c8c75d0c8e0587e",
             "evaluator constants changed: bump REVISION.semantic_digest_version and re-pin"
         );
     }

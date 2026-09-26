@@ -701,7 +701,10 @@ fn assistant_message_terminal(
                 BackendTerminal::Failed(BackendError {
                     class: subprocess::classify_failure_text(provider_text),
                     retry_after_secs: subprocess::retry_after_secs_in_text(provider_text),
-                    message: format!("pi assistant stopped with reason \"{reason}\""),
+                    message: match reason {
+                        "error" => backend::PI_PROVIDER_ERROR_MESSAGE.to_owned(),
+                        _ => format!("pi assistant stopped with reason \"{reason}\""),
+                    },
                     provider_code: None,
                 }),
             ))
@@ -746,4 +749,37 @@ fn message_requests_tools(message: &serde_json::Value) -> bool {
                 block.get("type").and_then(serde_json::Value::as_str) == Some("toolCall")
             })
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The emitted message drops `errorMessage`, so a content refusal and a model the provider does not know arrive as the same string; neither can count against the chunk.
+    #[test]
+    fn a_pi_error_stop_is_not_a_content_rejection() {
+        for (stop_reason, error_message) in [
+            ("error", "Output blocked by content filtering policy"),
+            ("error", "model not found: prov/typo"),
+            ("aborted", "Output blocked by content filtering policy"),
+        ] {
+            let message = serde_json::json!({
+                "role": "assistant",
+                "stopReason": stop_reason,
+                "errorMessage": error_message,
+                "content": [],
+            });
+            let Some((_, BackendTerminal::Failed(error))) =
+                assistant_message_terminal(&message, 1).expect("a known stop reason")
+            else {
+                panic!("expected a failed terminal for {stop_reason}");
+            };
+            assert_eq!(error.class, ErrorClass::Permanent);
+            assert!(
+                !backend::is_provider_reported_failure(&error.message),
+                "{}",
+                error.message
+            );
+        }
+    }
 }

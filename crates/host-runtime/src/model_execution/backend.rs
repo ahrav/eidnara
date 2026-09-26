@@ -122,6 +122,29 @@ impl std::fmt::Debug for BackendError {
     }
 }
 
+/// `BackendError::message` of an OpenCode run whose model provider rejected the request; a status code, when known, follows as ` (status N)`.
+pub(crate) const OPENCODE_PROVIDER_ERROR_MESSAGE: &str = "opencode provider reported an error";
+/// `BackendError::message` of a Pi run whose model provider rejected the request.
+pub(crate) const PI_PROVIDER_ERROR_MESSAGE: &str = "pi assistant stopped with reason \"error\"";
+
+/// Whether a `BackendError::message` names a failure the model provider reported about the request's content, as opposed to one the host raised while preparing, launching, or supervising the harness, or one about the configuration.
+/// `ErrorClass::Permanent` covers all of these; a caller that reacts to the request's content needs the distinction, because a host or configuration failure recurs for any request until the environment changes.
+/// Only an OpenCode terminal carrying a status from `CONTENT_REJECTION_STATUSES` qualifies. A Pi `"error"` stop drops the provider's text, and an OpenCode terminal without a status keeps only a text classification whose default is `Permanent`, so neither separates a content refusal from an unknown model or an exhausted account.
+/// `merge_cleanup` and `merge_record_retained` may append `; additionally ...`; the decoration reports host cleanup, not the provider.
+pub fn is_provider_reported_failure(message: &str) -> bool {
+    message
+        .strip_prefix(OPENCODE_PROVIDER_ERROR_MESSAGE)
+        .and_then(|rest| rest.strip_prefix(" (status "))
+        .and_then(|rest| rest.split_once(')'))
+        .is_some_and(|(status, rest)| {
+            CONTENT_REJECTION_STATUSES.contains(&status)
+                && (rest.is_empty() || rest.starts_with("; additionally "))
+        })
+}
+
+/// Provider statuses that reject the request as sent: bad request, payload too large, unprocessable content.
+const CONTENT_REJECTION_STATUSES: [&str; 3] = ["400", "413", "422"];
+
 /// Every backend run resolves to exactly one terminal classification.
 #[derive(Debug, Clone, PartialEq)]
 pub enum BackendTerminal {
