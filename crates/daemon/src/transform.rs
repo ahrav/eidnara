@@ -4625,210 +4625,201 @@ fn apply_once(
                         estimate_tokens,
                     )
                 });
-                match served_m1_body {
-                    None => {
-                        let history_segments_for_fold =
-                            store.load_history_segments(&req.session_id)?;
-                        let coverage_bounds =
-                            coverage_bounds_from_history_segments(&history_segments_for_fold)?;
-                        let covered_system_messages = covered_system_messages_for_coverage(
-                            req,
-                            coverage_bounds.map(|(_, end)| end),
-                            coverage_bounds.map(|(start, _)| start),
-                            serializer_profile,
-                        );
-                        let mut comp = compose_m0_for_context(
-                            store,
-                            &req.session_id,
-                            &covered_system_messages,
-                            &meta,
-                            estimate_tokens,
-                            ctx,
-                        )?;
+                // An unserved body folds; the empty default is never rendered.
+                let m1_body = served_m1_body.unwrap_or_default();
+                if served_m1_body.is_none() {
+                    let history_segments_for_fold = store.load_history_segments(&req.session_id)?;
+                    let coverage_bounds =
+                        coverage_bounds_from_history_segments(&history_segments_for_fold)?;
+                    let covered_system_messages = covered_system_messages_for_coverage(
+                        req,
+                        coverage_bounds.map(|(_, end)| end),
+                        coverage_bounds.map(|(start, _)| start),
+                        serializer_profile,
+                    );
+                    let mut comp = compose_m0_for_context(
+                        store,
+                        &req.session_id,
+                        &covered_system_messages,
+                        &meta,
+                        estimate_tokens,
+                        ctx,
+                    )?;
 
-                        if let Some(stray) = first_uncovered_live_block(
-                            &history_segments_for_fold,
-                            &live,
-                            comp.coverage_ordinal,
-                        ) {
-                            return Err(TransformError::CoverageGap(format!(
-                                "coverage gap: live item {} (ordinal {}) sits at or below coverage end {:?} \
+                    if let Some(stray) = first_uncovered_live_block(
+                        &history_segments_for_fold,
+                        &live,
+                        comp.coverage_ordinal,
+                    ) {
+                        return Err(TransformError::CoverageGap(format!(
+                            "coverage gap: live item {} (ordinal {}) sits at or below coverage end {:?} \
                               but no history_segment covers it; composing m0 would silently drop it from the tail",
-                                stray.id(),
-                                stray.ordinal(),
-                                comp.coverage_ordinal
-                            )));
-                        }
+                            stray.id(),
+                            stray.ordinal(),
+                            comp.coverage_ordinal
+                        )));
+                    }
 
-                        if let Some(coverage_end) = comp.coverage_ordinal {
-                            let minted = comp.boundary_id.as_str();
-                            validate_live_boundary_ordinal(minted, coverage_end, &live)?;
-                            if minted.is_empty()
-                                || !boundary_available(
-                                    minted,
-                                    &live,
-                                    &boundary_state,
-                                    req.declared_trim.as_ref(),
-                                )
-                            {
-                                return Err(TransformError::BoundaryNotPresent(format!(
-                                    "fold minted anchor {minted:?} from the folded history_segment's \
+                    if let Some(coverage_end) = comp.coverage_ordinal {
+                        let minted = comp.boundary_id.as_str();
+                        validate_live_boundary_ordinal(minted, coverage_end, &live)?;
+                        if minted.is_empty()
+                            || !boundary_available(
+                                minted,
+                                &live,
+                                &boundary_state,
+                                req.declared_trim.as_ref(),
+                            )
+                        {
+                            return Err(TransformError::BoundaryNotPresent(format!(
+                                "fold minted anchor {minted:?} from the folded history_segment's \
                               end_message_id, but no live block carries that id; the anchor \
                               must be the flat block id (`<mid>#<index>`) of the last covered \
                               block; check the publisher's end_message_id"
-                                )));
-                            }
+                            )));
                         }
-
-                        let effective = effective_reductions(
-                            &core,
-                            &selected_reductions,
-                            suppress_bootstrap_reduction_tag_overlay,
-                        );
-                        let survivors =
-                            surviving_red_units(&effective, &live, comp.coverage_ordinal);
-                        let mut strip_survivors = surviving_strip_units(&core, req);
-                        strip_survivors.extend(new_strip_units.clone());
-                        let terse_text_compression_survivors =
-                            surviving_terse_text_compression_units(
-                                &core,
-                                &new_terse_text_compression_units,
-                                &live,
-                                comp.coverage_ordinal,
-                            );
-                        core.frozen_units.clear();
-                        core.pending_changes.clear();
-                        let refold_m1_unit = if m1.notes_block.is_empty() {
-                            render_m1_placeholder()
-                        } else {
-                            render_m1_body(&m1.notes_block)
-                        };
-                        let mut rendered =
-                            vec![synth_region("m0", std::mem::take(&mut comp.m0_bytes))];
-                        rendered.push(refold_m1_unit);
-                        rendered.extend(survivors);
-                        rendered.extend(strip_survivors);
-                        rendered.extend(terse_text_compression_survivors);
-                        core.step(PassInput {
-                            proposed: cache_stability::Action::Hard,
-                            boundary_present: boundary_token,
-                            rendered_units: rendered,
-                            new_boundary_id: Some(comp.boundary_id.clone()),
-                            queued: Vec::new(),
-                            run_started: false,
-                        })?;
-                        plan = PassPlan::Hard;
-                        materialize_reason = Some(MaterializeReason::PressureRefold);
-                        meta.initialized = true;
-                        meta.last_render_config = effective_render_config_base.clone();
-                        if meta.descent_completed {
-                            meta.lineage_descent_materialized = true;
-                        }
-                        record_m0_composition(&mut meta, comp, ctx);
-                        let applied_m1_signal = revision_signal_for_context(
-                            store,
-                            ctx.note_project_path,
-                            &req.session_id,
-                            loaded.meta.user_profile_version,
-                            ctx.memory_enabled,
-                            Some(&mut m1_revision_read_timings),
-                            ctx,
-                        )?;
-                        meta.m1_revision = applied_m1_signal.revision;
-                        meta.m1_history_segment_seq =
-                            Some(applied_m1_signal.max_history_segment_seq);
-                        meta.m1_user_profile_version = loaded.meta.user_profile_version;
-                        meta.m1_external_revision = applied_m1_signal.external_revision;
-                        meta.project_memory_epoch_pending = false;
-                        meta.m1_pending_since_ms = None;
                     }
-                    Some(m1_body) => {
-                        let mut rendered = vec![render_m1_body(m1_body)];
-                        rendered.extend(new_reduction_units(
-                            &core,
-                            &selected_reductions,
+
+                    let effective = effective_reductions(
+                        &core,
+                        &selected_reductions,
+                        suppress_bootstrap_reduction_tag_overlay,
+                    );
+                    let survivors = surviving_red_units(&effective, &live, comp.coverage_ordinal);
+                    let mut strip_survivors = surviving_strip_units(&core, req);
+                    strip_survivors.extend(new_strip_units.clone());
+                    let terse_text_compression_survivors = surviving_terse_text_compression_units(
+                        &core,
+                        &new_terse_text_compression_units,
+                        &live,
+                        comp.coverage_ordinal,
+                    );
+                    core.frozen_units.clear();
+                    core.pending_changes.clear();
+                    let refold_m1_unit = if m1.notes_block.is_empty() {
+                        render_m1_placeholder()
+                    } else {
+                        render_m1_body(&m1.notes_block)
+                    };
+                    let mut rendered = vec![synth_region("m0", std::mem::take(&mut comp.m0_bytes))];
+                    rendered.push(refold_m1_unit);
+                    rendered.extend(survivors);
+                    rendered.extend(strip_survivors);
+                    rendered.extend(terse_text_compression_survivors);
+                    core.step(PassInput {
+                        proposed: cache_stability::Action::Hard,
+                        boundary_present: boundary_token,
+                        rendered_units: rendered,
+                        new_boundary_id: Some(comp.boundary_id.clone()),
+                        queued: Vec::new(),
+                        run_started: false,
+                    })?;
+                    plan = PassPlan::Hard;
+                    materialize_reason = Some(MaterializeReason::PressureRefold);
+                    meta.initialized = true;
+                    meta.last_render_config = effective_render_config_base.clone();
+                    if meta.descent_completed {
+                        meta.lineage_descent_materialized = true;
+                    }
+                    record_m0_composition(&mut meta, comp, ctx);
+                    let applied_m1_signal = revision_signal_for_context(
+                        store,
+                        ctx.note_project_path,
+                        &req.session_id,
+                        loaded.meta.user_profile_version,
+                        ctx.memory_enabled,
+                        Some(&mut m1_revision_read_timings),
+                        ctx,
+                    )?;
+                    meta.m1_revision = applied_m1_signal.revision;
+                    meta.m1_history_segment_seq = Some(applied_m1_signal.max_history_segment_seq);
+                    meta.m1_user_profile_version = loaded.meta.user_profile_version;
+                    meta.m1_external_revision = applied_m1_signal.external_revision;
+                    meta.project_memory_epoch_pending = false;
+                    meta.m1_pending_since_ms = None;
+                } else {
+                    let mut rendered = vec![render_m1_body(m1_body)];
+                    rendered.extend(new_reduction_units(
+                        &core,
+                        &selected_reductions,
+                        &live,
+                        loaded.meta.coverage_ordinal,
+                        suppress_bootstrap_reduction_tag_overlay,
+                    ));
+                    rendered.extend(new_strip_units.clone());
+                    rendered.extend(new_terse_text_compression_units.clone());
+                    let new_boundary_id = m1.new_coverage.as_ref().map(|(id, _)| id.clone());
+                    if let Some((_, coverage_end)) = &m1.new_coverage {
+                        let history_segments_for_live_coverage =
+                            store.load_history_segments(&req.session_id)?;
+                        if let Some(stray) = first_uncovered_live_block(
+                            &history_segments_for_live_coverage,
                             &live,
-                            loaded.meta.coverage_ordinal,
-                            suppress_bootstrap_reduction_tag_overlay,
-                        ));
-                        rendered.extend(new_strip_units.clone());
-                        rendered.extend(new_terse_text_compression_units.clone());
-                        let new_boundary_id = m1.new_coverage.as_ref().map(|(id, _)| id.clone());
-                        if let Some((_, coverage_end)) = &m1.new_coverage {
-                            let history_segments_for_live_coverage =
-                                store.load_history_segments(&req.session_id)?;
-                            if let Some(stray) = first_uncovered_live_block(
-                                &history_segments_for_live_coverage,
-                                &live,
-                                Some(*coverage_end),
-                            ) {
-                                return Err(TransformError::CoverageGap(format!(
-                                    "coverage gap: live item {} (ordinal {}) sits at or below coverage end {} \
+                            Some(*coverage_end),
+                        ) {
+                            return Err(TransformError::CoverageGap(format!(
+                                "coverage gap: live item {} (ordinal {}) sits at or below coverage end {} \
                          but no history_segment covers it; composing m1 would silently drop it from the tail",
-                                    stray.id(),
-                                    stray.ordinal(),
-                                    coverage_end
-                                )));
-                            }
+                                stray.id(),
+                                stray.ordinal(),
+                                coverage_end
+                            )));
                         }
-                        if let Some((id, coverage_end)) = m1.new_coverage.as_ref() {
-                            validate_live_boundary_ordinal(id, *coverage_end, &live)?;
-                            if id.is_empty()
-                                || !boundary_available(
-                                    id,
-                                    &live,
-                                    &boundary_state,
-                                    req.declared_trim.as_ref(),
-                                )
-                            {
-                                return Err(TransformError::BoundaryNotPresent(format!(
-                                    "coverage-extending delta advanced the anchor to {id:?}, but no \
+                    }
+                    if let Some((id, coverage_end)) = m1.new_coverage.as_ref() {
+                        validate_live_boundary_ordinal(id, *coverage_end, &live)?;
+                        if id.is_empty()
+                            || !boundary_available(
+                                id,
+                                &live,
+                                &boundary_state,
+                                req.declared_trim.as_ref(),
+                            )
+                        {
+                            return Err(TransformError::BoundaryNotPresent(format!(
+                                "coverage-extending delta advanced the anchor to {id:?}, but no \
                          live block carries that id; the anchor must be the flat block id \
                          (`<mid>#<index>`) of the last covered block"
-                                )));
-                            }
+                            )));
                         }
-                        core.step(PassInput {
-                            proposed: cache_stability::Action::Soft,
-                            boundary_present: boundary_token,
-                            rendered_units: rendered,
-                            new_boundary_id,
-                            queued: Vec::new(),
-                            run_started: false,
-                        })?;
-                        if let Some((_, ord)) = m1.new_coverage {
-                            meta.coverage_ordinal = Some(ord);
-                            meta.coverage_history_segment_seq =
-                                Some(m1_signal.max_history_segment_seq);
-                            prune_covered_red_units(&mut core, &live, meta.coverage_ordinal);
-                            prune_covered_terse_text_compression_units(
-                                &mut core,
-                                &live,
-                                meta.coverage_ordinal,
-                            );
-                        } else if history_segment_seq_changed_since_meta {
-                            meta.coverage_history_segment_seq =
-                                Some(m1_signal.max_history_segment_seq);
-                        }
-                        let applied_m1_signal = revision_signal_for_context(
-                            store,
-                            ctx.note_project_path,
-                            &req.session_id,
-                            loaded.meta.user_profile_version,
-                            ctx.memory_enabled,
-                            Some(&mut m1_revision_read_timings),
-                            ctx,
-                        )?;
-                        if m1_body != M1_PLACEHOLDER || memory_gate_digest_transition {
-                            meta.m1_revision = applied_m1_signal.revision;
-                        }
-                        meta.m1_history_segment_seq =
-                            Some(applied_m1_signal.max_history_segment_seq);
-                        if m1.profile_rendered {
-                            meta.m1_user_profile_version = loaded.meta.user_profile_version;
-                        }
-                        meta.m1_pending_since_ms = None;
                     }
+                    core.step(PassInput {
+                        proposed: cache_stability::Action::Soft,
+                        boundary_present: boundary_token,
+                        rendered_units: rendered,
+                        new_boundary_id,
+                        queued: Vec::new(),
+                        run_started: false,
+                    })?;
+                    if let Some((_, ord)) = m1.new_coverage {
+                        meta.coverage_ordinal = Some(ord);
+                        meta.coverage_history_segment_seq = Some(m1_signal.max_history_segment_seq);
+                        prune_covered_red_units(&mut core, &live, meta.coverage_ordinal);
+                        prune_covered_terse_text_compression_units(
+                            &mut core,
+                            &live,
+                            meta.coverage_ordinal,
+                        );
+                    } else if history_segment_seq_changed_since_meta {
+                        meta.coverage_history_segment_seq = Some(m1_signal.max_history_segment_seq);
+                    }
+                    let applied_m1_signal = revision_signal_for_context(
+                        store,
+                        ctx.note_project_path,
+                        &req.session_id,
+                        loaded.meta.user_profile_version,
+                        ctx.memory_enabled,
+                        Some(&mut m1_revision_read_timings),
+                        ctx,
+                    )?;
+                    if m1_body != M1_PLACEHOLDER || memory_gate_digest_transition {
+                        meta.m1_revision = applied_m1_signal.revision;
+                    }
+                    meta.m1_history_segment_seq = Some(applied_m1_signal.max_history_segment_seq);
+                    if m1.profile_rendered {
+                        meta.m1_user_profile_version = loaded.meta.user_profile_version;
+                    }
+                    meta.m1_pending_since_ms = None;
                 }
             }
             PassPlan::Defer => {
