@@ -1,5 +1,13 @@
 # Part 4 scope map and risk ranking
 
+> Invalidated in part: the tag baseline cache (`load_cached_tags`,
+> `tag_baseline_cache()`, `TagBaselineCacheEntry`, `tag_cache_summary`,
+> `load_tags_after`, and the `tag_baseline_*` tests) is deleted. A pass reads
+> its tags from the store through `load_window_tags`, checked by
+> `window_tag_read_keeps_every_session_relative_tag_decision` and
+> `every_pass_read_is_bounded_independent_of_history_size`. Statements below
+> that cite the cache describe removed code.
+
 Scoping pass only. No property records, no fixes, no source or CI edits. The
 deliverable is the sub-partition plan and the region maps that let later lens
 passes cite line ranges without re-reading two 30k-line files.
@@ -282,8 +290,8 @@ inferred from names.
 | `7031-7165` | 135 | Tail projection and coverage predicates: `sel_item_from_flat`, `tail_sel_items`, `tail_end_mid`, `tail_contains_mid`, `coverage_advanced`, `coverage_shrank`, `stored_history_segment_covers_ordinal`, `first_uncovered_live_block`, `validate_live_boundary_ordinal`, `boundary_available` |
 | `7167-7323` | 157 | `resolve_boundary_state` (`:7167-7269`), `trim_mismatch`, `surviving_revert_prefix_seq`, `has_durable_lineage`, `absent_shape_fingerprint`, `pending_rewrite_detail` |
 | `7325-7509` | 185 | Pending passthrough and synthetic todo: `PendingPassthroughArgs`, `pending_passthrough_messages`, `pending_passthrough_result` (`:7376-7425`), `anchor_folded_by_coverage`, `advance_synthetic_todo`, `reanchor_kept_synthetic_todo_if_folded_or_shrunk` |
-| `7511-7634` | 124 | Tag baseline cache: entry + impl, cache + impl (`:7554-7595`), accessor, metrics, retained bytes, entry builder |
-| `7639-7697` | 59 | `load_cached_tags` |
+| `7511-7634` | 124 | Tag baseline cache (since deleted): entry + impl, cache + impl (`:7554-7595`), accessor, metrics, retained bytes, entry builder |
+| `7639-7697` | 59 | `load_cached_tags` (since deleted; `load_window_tags` reads the pass's tags from the store) |
 | `7700-8044` | 345 | Tag mint frontier: `TagMintWork`, memo, key hashing, `tag_mint_frontier_start` (`:7764-7797`), candidate counting, `tag_mint_frontier_store` (`:7817-7853`), `#[cfg(test)] tag_mint_inputs` (`:7856-7872`), `tag_mint_inputs_from` (`:7875-7938`), `TagMintFrontierCache` + impl (`:7951-8010`), accessor, `append_tag_mint_rows` |
 | `8048-8169` | 122 | Taggable classification and overlay state: `taggable_source`, `taggable_kind`, `newest_active_tag_block_ids`, `protected_tail_cutoff_ordinal`, `tag_overlay_state` |
 | `8172-8398` | 227 | Overlay application: `temporal_gap_prefix` (`:8172-8206`), `apply_tag_overlay_to_message` (`:8208-8269`), `apply_tag_prefix_to_block`, `prepend_tag_to_tool_output`, temporal/hint/channel1 block appenders, `tag_prefix`, `prepend_tag` |
@@ -607,7 +615,7 @@ lost durable state.
 Attention focuses:
 
 1. **Output integrity guards.** `assert_no_orphaned_tool_arcs` and `enforce_unique_tool_use_ids` are fail-loud production checks on the final array. Determine what each actually panics on, whether either can fire on a legitimate input, and which orphan or duplicate shapes slip past both.
-2. **Tag mint and baseline-cache freshness.** Tag-number monotonicity across passes, the generation-gated append-only recognition in `TagBaselineCacheEntry` (documented at `transform.rs:7511-7515`), and what a full-refill-required generation transition serves if the refill is skipped.
+2. **Tag mint and baseline-cache freshness.** Tag-number monotonicity across passes, the generation-gated append-only recognition in `TagBaselineCacheEntry` (documented at `transform.rs:7511-7515`), and what a full-refill-required generation transition serves if the refill is skipped. The baseline cache is since deleted, so only the tag-number half remains.
 3. **Nudge arming and imitation defence.** Channel-2 arming watermark, `channel2_directive_id` determinism, the three rearm paths, and whether `strip_leading_tag_imitations` plus `well_formed_tag_suffix` can be walked past by harness content, including inside inline code spans.
 
 ### 4f Pure decision units, harness codecs, and config — risk 3

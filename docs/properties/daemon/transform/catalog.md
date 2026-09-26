@@ -198,10 +198,10 @@ scratch, and the only value carried across the reload is
 sit beside it and all four degrade gracefully rather than failing: the selection
 ceiling (`:4230-4232`), the pass bands in `scheduler.rs:716-757`, the
 three-pass divergence-suppression limit (`:85`, `:3925-3947`), and the
-five-minute cache idle TTL (`scheduler.rs:23`, `:810-812`). One budget is missing:
-`load_cached_tags` (`:7644`, called from the engine at `:3391`) is an unbounded
-`loop` whose two exits are optimistic revalidations, and nothing counts its
-attempts. Its body is 4e's scope; the unbounded call from the engine is 4b's.
+five-minute cache idle TTL (`scheduler.rs:23`, `:810-812`). The one missing
+budget this paragraph recorded, the unbounded `load_cached_tags` loop, is gone:
+the tag baseline cache is deleted and `load_window_tags` reads the pass's tags
+in three bounded statements with no retry loop.
 
 **Selection is deterministic on collection order and is not pure.** Every ordered
 artifact in the slice comes from a `BTreeMap`, a `BTreeSet`, or an explicit
@@ -1074,7 +1074,9 @@ Open questions: None.
 Type: liveness
 Reachability: default-production - `load_cached_tags` is called on every compaction-enabled
 pass (`transform.rs:3391`).
-Status: active
+Status: invalidated - `load_cached_tags` and the tag baseline cache are deleted.
+`load_window_tags` reads the pass's tags in three bounded statements with no
+retry loop, so no tag-hydration loop remains to terminate.
 Exercised: not yet - no test drives concurrent tag mutation against `load_cached_tags` to
 force repeated retries.
 Guarantee: Once tag mutation stops, `load_cached_tags` returns rather than continuing to

@@ -1,5 +1,13 @@
 # Transform Edit Responses: the recipe wire switch (#538 U3-U5)
 
+> Invalidated in part: the tag baseline cache (`load_cached_tags`,
+> `tag_baseline_cache()`, `TagBaselineCacheEntry`, `tag_cache_summary`,
+> `load_tags_after`, and the `tag_baseline_*` tests) is deleted. A pass reads
+> its tags from the store through `load_window_tags`, checked by
+> `window_tag_read_keeps_every_session_relative_tag_decision` and
+> `every_pass_read_is_bounded_independent_of_history_size`. Statements below
+> that cite the cache describe removed code.
+
 This file records the client and daemon behavior that the two-source recipe
 switch adds on `feat/transform-recipe-wire`, stacked on
 `feat/transform-recipe-builder` (`ed538110`). The eleven #533 records in
@@ -142,7 +150,7 @@ separate owners.
 - `lib.rs:22659` `cached_transform_response_writer_is_byte_identical_to_value_round_trip`
   (a one-message CK passthrough inserts its typed served value).
 - `edit_recipe.rs:1192` `revision_allocator_names_each_pass_once_and_refuses_exhaustion`.
-- `lib.rs:26412` `native_attachment_reuses_transform_tag_baseline_and_preserves_bytes`
+- `lib.rs:29092` `native_attachment_reuses_transform_tag_rows_and_preserves_bytes`
   replays the served array against the native attachment.
 - `crates/daemon/tests/direct_host.rs:50` and `:133` drive a real fixture host
   over the wire and reconstruct the served array with

@@ -197,6 +197,9 @@ const WRAPUP_REFERENCE_ROWS: usize = 0;
 mod transform_meta_bound;
 
 #[cfg(test)]
+mod transform_read_bound;
+
+#[cfg(test)]
 mod differential_goldens;
 
 #[cfg(test)]
@@ -2309,7 +2312,7 @@ pub const DECLARED_RETAINED_RESIDENT_BYTES: u64 = TRANSFORM_SERVE_CACHE_COMBINED
     + ACTIVE_SNAPSHOT_LEASE_BUDGET_BYTES as u64
     + ACTIVE_PROJECTION_LEASE_BUDGET_BYTES as u64
     + token_cache::RETAINED_BYTES_BOUND as u64
-    + transform::TAG_CACHE_COMBINED_BUDGET_BYTES as u64
+    + transform::TAG_MINT_FRONTIER_CACHE_BUDGET_BYTES as u64
     + storage::SCHEMA_SNAPSHOT_RETAINED_BYTES_BOUND as u64
         * (STORAGE_CONNECTIONS - 1 + PEAK_SEARCH_CONNECTIONS)
     + memory_store::PAGE_CACHE_BUDGET_BYTES as u64
@@ -8608,7 +8611,6 @@ impl HandlerCore {
             .lock()
             .expect("serialized output cache mutex")
             .metrics();
-        let (tag_baseline_bytes, tag_baseline_count) = transform::tag_baseline_cache_metrics();
         let (boundary_bytes, boundary_count) = {
             let cache = self
                 .boundary_tokens
@@ -8664,10 +8666,6 @@ impl HandlerCore {
             "serialized_output": {
                 "charged_bytes": serialized_bytes,
                 "entry_count": serialized_count,
-            },
-            "tag_baseline": {
-                "charged_bytes": tag_baseline_bytes,
-                "entry_count": tag_baseline_count,
             },
             "boundary_token": {
                 "charged_bytes": boundary_bytes,
@@ -14327,20 +14325,32 @@ fn native_value_retained_bytes(value: &Value) -> usize {
     crate::retained_size::value_retained_bytes(value)
 }
 
+/// Each mid's ordinal. The first message of a mid wins, as a linear find would pick it.
+fn ordinal_by_mid(request: &TransformRequest) -> HashMap<&str, u64> {
+    let mut ordinal_by_mid = HashMap::with_capacity(request.messages.len());
+    for message in &request.messages {
+        ordinal_by_mid
+            .entry(message.mid.as_str())
+            .or_insert(message.ordinal);
+    }
+    ordinal_by_mid
+}
+
 fn native_reasoning_should_clear(
     served: &transform::ServedMessage,
     request: &TransformRequest,
     reasoning_watermark: u64,
     tag_numbers: &BTreeMap<String, u64>,
+    ordinal_by_mid: &HashMap<&str, u64>,
     newest_assistant_mid: Option<&str>,
 ) -> (u64, bool) {
     let Some(mid) = served.meta.harness_id.as_deref() else {
         return (0, false);
     };
-    let Some(ingress) = request.messages.iter().find(|message| message.mid == mid) else {
+    let Some(&ordinal) = ordinal_by_mid.get(mid) else {
         return (0, false);
     };
-    let tag_number = tag_numbers.get(mid).copied().unwrap_or(ingress.ordinal);
+    let tag_number = tag_numbers.get(mid).copied().unwrap_or(ordinal);
     let should_clear = served.role == "assistant"
         && !served.meta.synthetic
         && reasoning_watermark > 0
@@ -14552,6 +14562,7 @@ fn attach_native_messages_incremental(
         .filter(|message| !message.ck.meta.synthetic && message.ck.role == "assistant")
         .max_by_key(|message| message.ordinal)
         .map(|message| message.mid.as_str());
+    let ordinal_by_mid = ordinal_by_mid(request);
 
     let mut sidecar_hashes = cached
         .as_mut()
@@ -14602,6 +14613,7 @@ fn attach_native_messages_incremental(
             request,
             reasoning_watermark,
             tag_numbers,
+            &ordinal_by_mid,
             newest_assistant_mid,
         );
         message_keys.push(native_message_key(
@@ -29064,8 +29076,20 @@ mod tests {
         );
     }
 
+    #[test]
+    fn ordinal_by_mid_keeps_the_first_message_of_a_duplicated_mid() {
+        use crate::transform::tests::{item, req};
+        let request = req(
+            "dup-mid",
+            "cfg0",
+            vec![item("a", 1, "x"), item("b", 2, "y"), item("a", 3, "z")],
+        );
+        let ordinals = ordinal_by_mid(&request);
+        assert_eq!((ordinals["a"], ordinals["b"], ordinals.len()), (1, 2, 2));
+    }
+
     #[tokio::test(flavor = "current_thread")]
-    async fn native_attachment_reuses_transform_tag_baseline_and_preserves_bytes() {
+    async fn native_attachment_reuses_transform_tag_rows_and_preserves_bytes() {
         let producer = Arc::new(ProducerState::default());
         let (handler, store, _dir, _project) = handler_with_store(producer, default_test_config());
         let seeded_tags = (0..55)

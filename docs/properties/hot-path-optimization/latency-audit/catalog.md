@@ -592,7 +592,9 @@ questions and their evidence remain in the evidence file.
 
 Type: safety
 Reachability: default-production
-Status: active
+Status: invalidated - `TagBaselineCacheEntry`, `load_cached_tags`, and their
+tests are deleted. A pass reads its tags from the store through
+`load_window_tags`, so no process-global baseline exists to mutate.
 Exercised: partial - Cold, drop, reset, remint, poisoned-refill, and interleaved
 session tests pass. A failed second mint insert leaves the baseline pointer,
 contents, and durable state unchanged. Row-sharing checks fail on the

@@ -370,7 +370,7 @@ mod bounded_read_tests {
 
     use super::*;
     use crate::decay_render::PRESSURE_WINDOW;
-    use crate::history_segment_coverage::resolve_coverage;
+    use crate::history_segment_coverage::oracle::resolve_coverage;
     use crate::m1_compose::compose_m1;
     use crate::memory_render::{M1_PLACEHOLDER, assemble_m1, render_new_history_segments};
     use crate::test_support::synthetic_history::SyntheticHistory;
@@ -429,6 +429,31 @@ mod bounded_read_tests {
             )
         });
         (render_rows(&rows, budget), coverage)
+    }
+
+    /// The transform's coverage from the set's two ends equals the whole-set oracle.
+    fn assert_two_end_coverage_matches_the_full_set(store: &MemoryStore) {
+        let rows = store
+            .load_history_segments(SESSION)
+            .expect("load every row");
+        let oracle = resolve_coverage(&rows)
+            .expect("valid ranges")
+            .map(|c| (c.first_covered_ordinal, c.coverage_end_ordinal));
+        let two_ends =
+            crate::transform::stored_coverage_bounds(store, SESSION, &mut false).expect("ends");
+        assert_eq!(two_ends, oracle, "{} rows", rows.len());
+    }
+
+    #[test]
+    fn two_end_coverage_matches_the_full_set_over_synthetic_histories() {
+        for h in [0, 1, 2, 249, 3_000] {
+            let dir = tempfile::tempdir().unwrap();
+            let store = open(dir.path());
+            if h > 0 {
+                SyntheticHistory::mixed(h).seed(&store, SESSION);
+            }
+            assert_two_end_coverage_matches_the_full_set(&store);
+        }
     }
 
     fn bounded_m0(store: &MemoryStore, budget: f64, legacy: Option<&[i64]>) -> M0Composition {
@@ -597,6 +622,7 @@ mod bounded_read_tests {
         let dir = tempfile::tempdir().unwrap();
         let store = open(dir.path());
         store.replace_history_segments(SESSION, &rows).unwrap();
+        assert_two_end_coverage_matches_the_full_set(&store);
         assert_eq!(differential.cases.len(), 4);
         for case in &differential.cases {
             assert_bounded_matches_full(&store, case.budget);
@@ -613,6 +639,7 @@ mod bounded_read_tests {
         let dir = tempfile::tempdir().unwrap();
         let store = open(dir.path());
         history.seed(&store, SESSION);
+        assert_two_end_coverage_matches_the_full_set(&store);
 
         store.start_statement_work_ledger();
         let captured = bounded_m0(&store, 60_000.0, None);
