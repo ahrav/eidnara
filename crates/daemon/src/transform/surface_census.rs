@@ -495,6 +495,33 @@ fn the_anchor_window_respects_utf16_units_near_wide_characters() {
 }
 
 #[test]
+fn escaped_markup_before_a_prefix_match_does_not_keep_the_prefix() {
+    // Sixteen ampersands are sixteen raw units but eighty escaped ones, so the raw prefix holds the anchor
+    // and the served prefix cuts before it.
+    let body = format!(
+        "{} {} quasar {}",
+        "&".repeat(16),
+        "x".repeat(30),
+        [FILLER; 6].join(" ")
+    );
+    let snippet = user_hint_snippet(body.clone(), &["quasar"]);
+    let rendered = render_user_hint(&[hint_result(&snippet)]).unwrap();
+    let line = hint_fragment_lines(&rendered)[0];
+    assert!(first_whole_word(line, "quasar").is_some(), "got {line:?}");
+    assert!(utf16_len(line) <= SURFACE1_HINT_BOUNDS.fragment_units);
+}
+
+#[test]
+fn whole_word_lookup_splits_where_lowercasing_splits() {
+    // U+0130 lowercases to `i` plus a combining dot, which the tokenizer splits on.
+    assert_eq!(
+        lexical_tokens("İstanbul").into_iter().next().as_deref(),
+        Some("stanbul")
+    );
+    assert_eq!(first_whole_word("İstanbul", "stanbul"), Some(2..9));
+}
+
+#[test]
 fn whole_word_lookup_matches_the_lexical_tokenizer() {
     assert_eq!(
         first_whole_word("zephyrines Zephyrine", "zephyrine"),

@@ -8610,10 +8610,15 @@ pub(crate) fn utf16_prefix(text: &str, limit: usize) -> &str {
 }
 
 /// Returns the first whole-word, case-insensitive occurrence of a `lexical_tokens` token.
+///
+/// A word ends where the tokenizer's lowercased text would split: U+0130 lowercases to `i` plus a
+/// combining dot, so it bounds a word instead of joining it.
 fn first_whole_word(text: &str, token: &str) -> Option<std::ops::Range<usize>> {
+    let is_word_char =
+        |ch: char| ch.is_alphanumeric() && ch.to_lowercase().all(char::is_alphanumeric);
     let mut word_start = None;
     for (index, character) in text.char_indices().chain([(text.len(), ' ')]) {
-        match (character.is_alphanumeric(), word_start) {
+        match (is_word_char(character), word_start) {
             (true, None) => word_start = Some(index),
             (false, Some(start)) => {
                 let word = &text[start..index];
@@ -8635,17 +8640,15 @@ fn first_whole_word(text: &str, token: &str) -> Option<std::ops::Range<usize>> {
 }
 
 /// Anchors are ordered rarest first; the first anchor the served fragment can show decides the snippet.
-/// A window is kept only when its rendered fragment still shows the anchor: compression drops filler words and
-/// compresses code whose fences fall outside the window, and a window without its anchor carries less evidence than the prefix.
+/// Whether a fragment shows the anchor is judged on the rendered text: escaping can push a match past the cap
+/// that the raw text kept, and compression drops filler words and compresses code whose fences fall outside
+/// the window. A window without its anchor carries less evidence than the prefix.
 fn user_hint_snippet(body: String, anchors: &[&str]) -> String {
     let mut prefix_fragment = None;
     for anchor in anchors {
         let Some(hit) = first_whole_word(&body, anchor) else {
             continue;
         };
-        if utf16_len(&body[..hit.end]) < USER_HINT_FRAGMENT_CHAR_CAP {
-            return body;
-        }
         let prefix = prefix_fragment.get_or_insert_with(|| user_hint_fragment(&body));
         if first_whole_word(prefix, anchor).is_some() {
             return body;
