@@ -1927,7 +1927,12 @@ impl From<WireError> for TransformError {
 
 impl From<MemoryStoreError> for TransformError {
     fn from(e: MemoryStoreError) -> Self {
-        TransformError::Store(e)
+        match e {
+            MemoryStoreError::HistorySegmentRangesOutOfOrder { .. } => {
+                TransformError::CoverageGap(e.to_string())
+            }
+            e => TransformError::Store(e),
+        }
     }
 }
 
@@ -21150,6 +21155,36 @@ pub(crate) mod tests {
         assert!(!raw.committed);
         assert_eq!(s.load("ses").unwrap().row_version.unwrap(), row);
         assert_eq!(s.load_history_segments("ses").unwrap().len(), 1);
+    }
+
+    /// A fold fails with a coverage error when stored ranges are not strictly ordered, and
+    /// commits nothing.
+    #[test]
+    fn a_fold_over_stored_ranges_out_of_order_fails_closed() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = store(dir.path());
+        s.replace_history_segments("ses", &[comp(1, 1, 1, "a", "S1"), comp(2, 2, 2, "b", "S2")])
+            .unwrap();
+        s.with_fenced_conn_for_test(|conn| {
+            conn.execute(
+                "UPDATE history_segments SET end_message = 5
+                  WHERE session_id = 'ses' AND sequence = 1",
+                [],
+            )
+        })
+        .unwrap();
+        let live = vec![
+            item("a", 1, "first"),
+            item("b", 2, "second"),
+            item("t3", 3, "turn three"),
+        ];
+        let ctx = pctx("git:proj", "/nonexistent-docs", 0);
+        let fold = transform(&s, &req("ses", "cfg0", live), &ctx);
+        assert!(
+            matches!(&fold, Err(TransformError::CoverageGap(detail)) if detail.contains("strictly increasing")),
+            "{fold:?}"
+        );
+        assert_eq!(s.load("ses").unwrap().row_version, None);
     }
 
     #[test]
