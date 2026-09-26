@@ -927,6 +927,9 @@ pub struct TransformRequest {
     pub constituents: Vec<(String, String, u64)>,
     #[serde(default)]
     pub compaction_observed: bool,
+    /// Set when the body carries the retired `tail_delta` field; the handler refuses it.
+    #[serde(skip)]
+    pub tail_delta_retired: bool,
 }
 
 fn default_wire_version() -> u32 {
@@ -1076,6 +1079,9 @@ struct TransformRequestWire {
     constituents: Vec<(String, String, u64)>,
     #[serde(default)]
     compaction_observed: bool,
+    /// Presence tombstone: a pre-#829 plugin pairs `tail_delta` with a suffix-only `messages`.
+    #[serde(default)]
+    tail_delta: Option<serde::de::IgnoredAny>,
 }
 
 fn admitted_cache_usage<'de, D>(
@@ -1149,6 +1155,7 @@ impl<'de> Deserialize<'de> for TransformRequest {
             new_epoch: wire.new_epoch,
             constituents: wire.constituents,
             compaction_observed: wire.compaction_observed,
+            tail_delta_retired: wire.tail_delta.is_some(),
         })
     }
 }
@@ -1354,6 +1361,7 @@ pub struct TransformTimings {
     pub native_cache_encoded_messages: usize,
     #[serde(default)]
     pub native_cache_refused_store: usize,
+    /// Always 0: the native cache no longer degrades a store. Kept for wire neutrality.
     #[serde(default)]
     pub native_cache_degraded_store: usize,
     #[serde(default)]
@@ -13172,6 +13180,7 @@ pub(crate) mod tests {
             constituents: Vec::new(),
             compaction_observed: false,
             prev_response_cache_usage: None,
+            tail_delta_retired: false,
         }
     }
 

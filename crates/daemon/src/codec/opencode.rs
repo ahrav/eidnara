@@ -29,36 +29,19 @@ const HARNESS: &str = "opencode";
 
 #[cfg(test)]
 pub(crate) fn decode_opencode(messages: &[MessageV2Json]) -> DecodedHarnessMessages {
-    decode_opencode_with_sidecar_and_base(messages, None, 0)
-}
-
-#[cfg(test)]
-pub(crate) fn decode_opencode_with_sidecar_and_base(
-    messages: &[MessageV2Json],
-    prior: Option<&DecodeSidecar>,
-    provisional_base: u64,
-) -> DecodedHarnessMessages {
     let shared = messages.iter().cloned().map(Arc::new).collect::<Vec<_>>();
-    decode_opencode_shared(&shared, prior, provisional_base)
+    decode_opencode_shared(&shared)
 }
 
-/// Decodes shared messages while inheriting stable message-ID pins from `prior`.
+/// Decodes shared messages.
 ///
 /// Each envelope is retained in `HarnessMessageMeta::raw` through an `Arc`
 /// clone, so callers that already share values pay no deep copy. Explicit
-/// absolute ordinals win. Missing ordinals are assigned from
-/// `provisional_base + index + 1` with saturating arithmetic. The last
-/// compaction part becomes the extracted boundary and is omitted from CK
-/// content. Unknown parts remain opaque.
-pub(crate) fn decode_opencode_shared(
-    messages: &[Arc<Value>],
-    prior: Option<&DecodeSidecar>,
-    provisional_base: u64,
-) -> DecodedHarnessMessages {
+/// absolute ordinals win. A missing ordinal is `index + 1` with saturating
+/// arithmetic. The last compaction part becomes the extracted boundary and is
+/// omitted from CK content. Unknown parts remain opaque.
+pub(crate) fn decode_opencode_shared(messages: &[Arc<Value>]) -> DecodedHarnessMessages {
     let mut sidecar = DecodeSidecar::new(HARNESS);
-    if let Some(prior) = prior {
-        sidecar.mid_pins = prior.mid_pins.clone();
-    }
 
     let mut decoded = Vec::with_capacity(messages.len());
     let mut boundary = None;
@@ -69,11 +52,7 @@ pub(crate) fn decode_opencode_shared(
             .get("absolute_ordinal")
             .and_then(Value::as_u64)
             .or_else(|| info.get("absolute_ordinal").and_then(Value::as_u64));
-        let ordinal = explicit_ordinal.unwrap_or_else(|| {
-            provisional_base
-                .saturating_add(message_index as u64)
-                .saturating_add(1)
-        });
+        let ordinal = explicit_ordinal.unwrap_or_else(|| (message_index as u64).saturating_add(1));
         let stable_key = string_field(info, "id")
             .or_else(|| string_field(raw_message, "id"))
             .unwrap_or_else(|| format!("opencode-hash-{}", stable_hash_prefix(raw_message, 24)));

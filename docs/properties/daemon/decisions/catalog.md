@@ -411,7 +411,7 @@ changing runtime policy.
 | [codec-b-decoder-output-can-violate-the-projector-precondition](#codec-b-decoder-output-can-violate-the-projector-precondition) | safety | high |
 | [codec-b-absolute-ordinal-is-harness-supplied-and-never-validated](#codec-b-absolute-ordinal-is-harness-supplied-and-never-validated) | safety | high |
 | [codec-b-block-identity-stamp-is-caller-writable-and-the-fingerprint-is-not-an-identity](#codec-b-block-identity-stamp-is-caller-writable-and-the-fingerprint-is-not-an-identity) | safety | high |
-| [codec-b-incremental-sidecar-slice-panics-behind-a-debug-assert](#codec-b-incremental-sidecar-slice-panics-behind-a-debug-assert) | safety | high |
+| [codec-b-incremental-sidecar-slice-panics-behind-a-debug-assert](#codec-b-incremental-sidecar-slice-panics-behind-a-debug-assert) | safety (invalidated by #829) | high |
 | [codec-b-wire-level-tool-use-uniqueness-guard-has-no-release-behaviour](#codec-b-wire-level-tool-use-uniqueness-guard-has-no-release-behaviour) | safety | high |
 | [codec-b-round-trip-identity-is-claimed-in-one-direction-on-one-case-per-harness](#codec-b-round-trip-identity-is-claimed-in-one-direction-on-one-case-per-harness) | safety | high |
 | [codec-b-declared-missing-capture-classes-are-never-decoded](#codec-b-declared-missing-capture-classes-are-never-decoded) | reachability | high |
@@ -1589,7 +1589,7 @@ behaviour is the one with no test in either case.
 
 Type: safety
 Reachability: default-production
-Status: active
+Status: invalidated
 Exercised: not yet - no test calls `decode_opencode_sidecar_incremental` with
 `replace_from > messages.len()`, and no test calls it in a release build.
 Guarantee: `decode_opencode_sidecar_incremental` returns a sidecar or a
@@ -1635,6 +1635,10 @@ reasoning that keeps the call safe lives only in the callers, and nothing in
 the tree records that the callee depends on it.
 Open questions:
 
+- Invalidated by #829. `decode_opencode_sidecar_incremental`,
+  `validated_native_prefix`, and the native delta frontier are deleted with
+  the delta channel; the daemon decodes every request's native array whole
+  with `decode_opencode_shared`, which takes no `replace_from`.
 - Should the function clamp with `messages.len().min(replace_from)` and fall
   back to a full decode, matching the documented policy at `wire.rs:369-372`
   that "malformed or out-of-range local metadata falls back to a full

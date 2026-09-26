@@ -1691,6 +1691,16 @@ impl TransformRequest {
         self.effective_execute_threshold.unwrap_or_else(fallback)
     }
 
+    /// The ready snapshot of this request: the CK input shares its message `Arc`s, and the clone
+    /// copies only the native pointer vector it drops.
+    fn ready_snapshot(&self) -> Self {
+        Self {
+            native_messages: None,
+            serve_native: false,
+            ..self.clone()
+        }
+    }
+
     /// The ready snapshot's charge: the retained CK input and scalar fields, one snapshot's
     /// cache keys, and its `Arc`. A snapshot never holds native messages, so none are charged.
     pub(crate) fn snapshot_retained_bytes(&self) -> usize {
@@ -1733,7 +1743,19 @@ impl TransformRequest {
                     .as_ref()
                     .map_or(0, String::capacity),
             )
-            .saturating_add(self.prior_conversation_key.capacity());
+            .saturating_add(self.prior_conversation_key.capacity())
+            .saturating_add(
+                [&self.base_revision, &self.previous_output_revision]
+                    .into_iter()
+                    .flatten()
+                    .map(|revision| revision.as_str().len())
+                    .sum::<usize>(),
+            )
+            .saturating_add(
+                self.geometry
+                    .as_ref()
+                    .map_or(0, |geometry| geometry.derivation.capacity()),
+            );
         let prompt_surface = btree_map_allocation_bytes::<String, String>(
             self.prompt_surface_tool_descriptions.len(),
         )
@@ -2253,7 +2275,7 @@ pub const PEAK_SEARCH_CONNECTIONS: u64 = 2;
 /// Each search projection connection holds `search_projection::CACHE_KIB` of page cache.
 /// The memory store's prepared-statement cache is bounded by `memory_store::STATEMENT_CACHE_CAPACITY` entries, not bytes: SQLite does not bound compiled-statement memory, so no byte figure is declared for it. A full 128-statement cache measured 861,472 bytes by `sqlite3_memory_used`.
 /// The MemoryReviewer host keeps its own bounded copy of the startup credentials and their keyed identities for the process lifetime (`memory_reviewer::worker::RETAINED_CREDENTIAL_BYTES`).
-/// A ready transform snapshot holds the CK input and scalar fields, never native messages or a delta fallback, so the snapshot and lease budgets bound exactly what `TransformRequest::snapshot_retained_bytes` charges.
+/// A ready transform snapshot holds the CK input and scalar fields, never native messages or a delta fallback, so the snapshot and lease budgets bound what `TransformRequest::snapshot_retained_bytes` charges.
 pub const DECLARED_RETAINED_RESIDENT_BYTES: u64 = TRANSFORM_SERVE_CACHE_COMBINED_BUDGET_BYTES
     as u64
     + TRANSFORM_SNAPSHOT_BUDGET_BYTES as u64
@@ -2302,7 +2324,6 @@ struct NativeAttachmentCacheStats {
     reused_messages: usize,
     encoded_messages: usize,
     refused_store: usize,
-    degraded_store: usize,
     evicted: usize,
 }
 
@@ -2311,21 +2332,13 @@ struct NativeAttachmentCacheSnapshot {
     context: NativeAttachmentContext,
     /// The revision the caller applied these chunks under; a request advertising it may keep from them.
     output_revision: Option<Revision>,
-    sidecar: Arc<codec::DecodeSidecar>,
     message_keys: Vec<[u8; 32]>,
-    // Hashes let a retained prefix keep its cache keys after the corresponding raw tree is dropped.
-    sidecar_hashes: HashMap<String, [u8; 32]>,
-    // Sizes exist only for raw trees still present in `sidecar.messages`.
-    sidecar_sizes: HashMap<String, usize>,
     chunks: Vec<NativeEncodedChunk>,
 }
 
 impl NativeAttachmentCacheSnapshot {
     fn retained_bytes(&self, served_bytes: usize) -> usize {
-        use crate::retained_size::{
-            ARC_ALLOCATION_OVERHEAD_BYTES, btree_map_allocation_bytes,
-            cloned_string_retained_bytes, hash_map_allocation_bytes,
-        };
+        use crate::retained_size::{ARC_ALLOCATION_OVERHEAD_BYTES, cloned_string_retained_bytes};
         use std::mem::size_of;
 
         let encoded_bytes = self
@@ -2338,51 +2351,6 @@ impl NativeAttachmentCacheSnapshot {
                     .map(|chunk| ARC_ALLOCATION_OVERHEAD_BYTES.saturating_add(chunk.retained_bytes))
                     .sum::<usize>(),
             );
-        let sidecar_core_bytes = size_of::<codec::DecodeSidecar>()
-            .saturating_add(self.sidecar.harness.capacity())
-            .saturating_add(
-                self.sidecar
-                    .order
-                    .capacity()
-                    .saturating_mul(size_of::<String>()),
-            )
-            .saturating_add(self.sidecar.order.iter().map(String::capacity).sum())
-            .saturating_add(btree_map_allocation_bytes::<String, String>(
-                self.sidecar.mid_pins.len(),
-            ))
-            .saturating_add(
-                self.sidecar
-                    .mid_pins
-                    .iter()
-                    .map(|(key, value)| key.capacity().saturating_add(value.capacity()))
-                    .sum(),
-            )
-            .saturating_add(hash_map_allocation_bytes(&self.sidecar_hashes))
-            .saturating_add(
-                self.sidecar_hashes
-                    .keys()
-                    .map(String::capacity)
-                    .sum::<usize>(),
-            );
-        let sidecar_bulk_bytes = btree_map_allocation_bytes::<
-            String,
-            Arc<codec::sidecar::HarnessMessageMeta>,
-        >(self.sidecar.messages.len())
-        .saturating_add(
-            self.sidecar
-                .messages
-                .keys()
-                .map(|key| key.capacity().saturating_add(ARC_ALLOCATION_OVERHEAD_BYTES))
-                .sum(),
-        )
-        .saturating_add(hash_map_allocation_bytes(&self.sidecar_sizes))
-        .saturating_add(
-            self.sidecar_sizes
-                .keys()
-                .map(String::capacity)
-                .sum::<usize>(),
-        )
-        .saturating_add(self.sidecar_sizes.values().copied().sum::<usize>());
         let cache_structure_bytes = self
             .message_keys
             .capacity()
@@ -2398,18 +2366,7 @@ impl NativeAttachmentCacheSnapshot {
         // Encoded canonical bytes stand in for shared served-message allocations (hence the ×2).
         encoded_bytes
             .saturating_add(served_bytes.saturating_mul(2))
-            .saturating_add(sidecar_core_bytes)
-            .saturating_add(sidecar_bulk_bytes)
             .saturating_add(cache_structure_bytes)
-    }
-
-    fn discard_optional_sidecar_trees(&mut self) -> bool {
-        let had_sidecar_trees = !self.sidecar.messages.is_empty() || !self.sidecar_sizes.is_empty();
-        if had_sidecar_trees {
-            Arc::make_mut(&mut self.sidecar).messages.clear();
-            self.sidecar_sizes.clear();
-        }
-        had_sidecar_trees
     }
 }
 
@@ -2485,33 +2442,18 @@ impl NativeAttachmentCache {
         &mut self,
         session_id: &str,
         revert_epoch: u64,
-        mut snapshot: NativeAttachmentCacheSnapshot,
+        snapshot: NativeAttachmentCacheSnapshot,
         stats: &mut NativeAttachmentCacheStats,
         served_bytes: usize,
     ) {
-        let requested_bytes = snapshot.retained_bytes(served_bytes);
-        let mut retained_bytes = requested_bytes;
-        let mut dropped_sidecar_trees = false;
-
+        let retained_bytes = snapshot.retained_bytes(served_bytes);
         if retained_bytes > self.max_entry_retained_bytes {
-            dropped_sidecar_trees = snapshot.discard_optional_sidecar_trees();
-            retained_bytes = snapshot.retained_bytes(served_bytes);
-        }
-        if retained_bytes > self.max_entry_retained_bytes
-            || retained_bytes > self.max_retained_bytes
-        {
             stats.refused_store = stats.refused_store.saturating_add(1);
             eprintln!(
-                "native-attachment-cache refused_store session={session_id} byte_charge={retained_bytes} requested_byte_charge={requested_bytes} entry_cap={} total_budget={}",
+                "native-attachment-cache refused_store session={session_id} byte_charge={retained_bytes} entry_cap={} total_budget={}",
                 self.max_entry_retained_bytes, self.max_retained_bytes,
             );
             return;
-        }
-        if dropped_sidecar_trees {
-            stats.degraded_store = stats.degraded_store.saturating_add(1);
-            eprintln!(
-                "native-attachment-cache degraded_store session={session_id} requested_byte_charge={requested_bytes} stored_byte_charge={retained_bytes} dropped_sidecar_trees={dropped_sidecar_trees}",
-            );
         }
 
         self.remove(session_id);
@@ -8314,6 +8256,12 @@ impl HandlerCore {
         if parsed.serve_native && serializer_profile != Some(SerializerProfile::OpencodeAiSdk) {
             return serve_native_unsupported_profile_error(&parsed.serializer_profile);
         }
+        if parsed.tail_delta_retired {
+            return PreparedOutcome::Error {
+                code: "transform_tail_delta_retired".to_string(),
+                message: "tail_delta is retired; send the whole captured array".to_string(),
+            };
+        }
         if parsed.base_revision.is_none() {
             return PreparedOutcome::Error {
                 code: "transform_base_revision_missing".to_string(),
@@ -9127,12 +9075,9 @@ impl HandlerCore {
         let response_observation_ms =
             response_observation_started_at.elapsed().as_secs_f64() * 1_000.0;
         // The ready snapshot keeps the CK input and scalar fields wrapup reads, never the native
-        // payload; the ready LRU and active-lease budget charge exactly what its `Arc` keeps alive.
+        // payload; the ready LRU and active-lease budget charge what its `Arc` keeps alive.
+        let snapshot = Arc::new(parsed.ready_snapshot());
         let retained_size_started_at = Instant::now();
-        let snapshot = Arc::new(TransformRequest {
-            native_messages: None,
-            ..(**parsed).clone()
-        });
         let retained_bytes = snapshot.snapshot_retained_bytes();
         let retained_size_ms = retained_size_started_at.elapsed().as_secs_f64() * 1_000.0;
         let snapshot_store_started_at = Instant::now();
@@ -9170,7 +9115,6 @@ impl HandlerCore {
             response_timings.native_cache_reused_messages = native_cache_stats.reused_messages;
             response_timings.native_cache_encoded_messages = native_cache_stats.encoded_messages;
             response_timings.native_cache_refused_store = native_cache_stats.refused_store;
-            response_timings.native_cache_degraded_store = native_cache_stats.degraded_store;
             response_timings.native_cache_evicted = native_cache_stats.evicted;
             response_timings.post_attach = post_attach_started_at.elapsed().as_secs_f64() * 1_000.0;
         }
@@ -13581,18 +13525,9 @@ fn native_attachment_context(
     }
 }
 
-fn native_sidecar(request: &TransformRequest) -> Arc<codec::DecodeSidecar> {
-    let native_messages = request.native_messages.as_deref().unwrap_or_default();
-    Arc::new(codec::opencode::decode_opencode_shared(native_messages, None, 0).sidecar)
-}
-
-fn native_sidecar_hash_and_size(meta: &codec::sidecar::HarnessMessageMeta) -> ([u8; 32], usize) {
+fn native_sidecar_hash(meta: &codec::sidecar::HarnessMessageMeta) -> [u8; 32] {
     let bytes = serde_json::to_vec(meta).expect("OpenCode sidecar metadata must serialize");
-    let retained_bytes = std::mem::size_of_val(meta)
-        .saturating_add(crate::retained_size::ARC_ALLOCATION_OVERHEAD_BYTES)
-        .saturating_add(std::mem::size_of::<Value>())
-        .saturating_add(bytes.len().saturating_mul(2));
-    (Sha256::digest(&bytes).into(), retained_bytes)
+    Sha256::digest(&bytes).into()
 }
 
 fn native_digest_field(hasher: &mut Sha256, bytes: &[u8]) {
@@ -13685,7 +13620,7 @@ fn encode_full_native_messages(
     let sidecar = request
         .native_messages
         .as_deref()
-        .map(|messages| codec::opencode::decode_opencode_shared(messages, None, 0))
+        .map(codec::opencode::decode_opencode_shared)
         .map(|decoded| decoded.sidecar)
         .unwrap_or_else(|| codec::DecodeSidecar::new("opencode"));
     let served_messages = served
@@ -13779,7 +13714,10 @@ fn attach_native_messages_incremental(
             }
         })
     });
-    let sidecar = native_sidecar(request);
+    let sidecar = codec::opencode::decode_opencode_shared(
+        request.native_messages.as_deref().unwrap_or_default(),
+    )
+    .sidecar;
     let sidecar_positions = sidecar
         .order
         .iter()
@@ -13799,8 +13737,6 @@ fn attach_native_messages_incremental(
         .map(|message| message.mid.as_str());
     let ordinal_by_mid = ordinal_by_mid(request);
 
-    let mut sidecar_hashes = HashMap::new();
-    let mut sidecar_sizes = HashMap::new();
     let mut message_keys = Vec::with_capacity(response.messages().len());
     for (position, served) in response.messages().iter().enumerate() {
         let meta = codec::sidecar::meta_for_ck(&sidecar, served, position);
@@ -13816,12 +13752,7 @@ fn attach_native_messages_incremental(
                     .or_else(|| sidecar.order.get(position).map(String::as_str))
             }
         });
-        let sidecar_hash = slot.and_then(|slot| {
-            let (hash, retained_bytes) = meta.map(native_sidecar_hash_and_size)?;
-            sidecar_sizes.insert(slot.to_string(), retained_bytes);
-            sidecar_hashes.insert(slot.to_string(), hash);
-            Some(hash)
-        });
+        let sidecar_hash = slot.and(meta).map(native_sidecar_hash);
         let mutation_exempt = slot.is_some_and(|mid| mutation_exempt_mids.contains(&mid));
         let (tag_number, reasoning_should_clear) = native_reasoning_should_clear(
             served,
@@ -13841,16 +13772,6 @@ fn attach_native_messages_incremental(
             mode,
         ));
     }
-    for (slot, meta) in &sidecar.messages {
-        if sidecar_sizes.contains_key(slot) {
-            continue;
-        }
-        let (hash, retained_bytes) = native_sidecar_hash_and_size(meta);
-        sidecar_hashes.insert(slot.clone(), hash);
-        sidecar_sizes.insert(slot.clone(), retained_bytes);
-    }
-    sidecar_hashes.retain(|slot, _| sidecar_positions.contains_key(slot.as_str()));
-    sidecar_sizes.retain(|slot, _| sidecar_positions.contains_key(slot.as_str()));
 
     let cache_compatible = cached
         .as_ref()
@@ -13992,10 +13913,7 @@ fn attach_native_messages_incremental(
             NativeAttachmentCacheSnapshot {
                 context,
                 output_revision: Some(output_revision.clone()),
-                sidecar,
                 message_keys,
-                sidecar_hashes,
-                sidecar_sizes,
                 chunks,
             },
             &mut stats,
@@ -21656,6 +21574,7 @@ mod tests {
         };
         // The snapshot keeps the CK input and is charged for it alone, not the 64 KiB native payload.
         assert!(lease.request.native_messages.is_none());
+        assert!(!lease.request.serve_native);
         assert_eq!(lease.request.messages.len(), 1);
         assert_eq!(
             lease.retained_bytes,
@@ -21685,6 +21604,29 @@ mod tests {
             },
             (0, 0)
         );
+    }
+
+    #[test]
+    fn ready_snapshot_shares_messages_and_charges_at_least_their_bytes() {
+        let charge = |text: &str| {
+            let mut request = transform_request(vec![ck("m1", 1, text)], 1, 200_000);
+            request.serve_native = true;
+            request.native_messages = Some(vec![Arc::new(json!({ "info": { "id": "m1" } }))]);
+            let snapshot = request.ready_snapshot();
+            assert!(snapshot.native_messages.is_none());
+            assert!(!snapshot.serve_native);
+            assert!(Arc::ptr_eq(&snapshot.messages[0], &request.messages[0]));
+            let bytes = snapshot.snapshot_retained_bytes();
+            let ingress = snapshot
+                .messages
+                .iter()
+                .map(|message| retained_size::ingress_message_retained_bytes(message))
+                .sum::<usize>();
+            assert!(bytes >= ingress, "{bytes} < {ingress}");
+            bytes
+        };
+        let grown = 4096;
+        assert!(charge(&"x".repeat(grown + 1)) >= charge("x") + grown);
     }
 
     #[test]
@@ -24738,6 +24680,20 @@ mod tests {
         assert_eq!(error_code(outcome), "serve_native_unsupported_profile");
     }
 
+    #[tokio::test(flavor = "current_thread")]
+    async fn transform_refuses_a_retired_tail_delta() {
+        let producer = Arc::new(ProducerState::default());
+        let (handler, _store, _dir, _project) = handler_with_store(producer, default_test_config());
+        let mut request = request(vec![ck("m1", 1, "hello")]);
+        request["tail_delta"] = json!({ "after": "fp", "replace_from": 1 });
+        let outcome = call_transform_outcome(&handler, request.clone()).await;
+        assert_eq!(error_code(outcome), "transform_tail_delta_retired");
+        // An explicit null is absence, not a delta.
+        request["tail_delta"] = Value::Null;
+        let response = call_transform_request(&handler, request).await;
+        assert_eq!(response["status"], "ok", "{response}");
+    }
+
     #[test]
     fn colliding_recipe_keys_do_not_reserialize_previous_output() {
         let previous: Vec<transform::ServedMessage> = (0..edit_recipe::MAX_CONFIRM_PROBES)
@@ -25250,7 +25206,7 @@ mod tests {
 
     #[test]
     fn multiple_large_sessions_do_not_ping_pong_under_the_native_cache_total_budget() {
-        const SESSION_NATIVE_WIRE_BYTES: usize = 5 * 1024 * 1024;
+        const SESSION_NATIVE_WIRE_BYTES: usize = 12 * 1024 * 1024;
         let cache = Mutex::new(NativeAttachmentCache::default());
         let (request_a, served_a) = native_cache_fixture(
             "native-large-session-a",
@@ -25881,13 +25837,13 @@ mod tests {
             assert!(native.sessions.contains_key(session_b));
         }
 
-        // A native snapshot over the whole budget is refused, and the pass is still served.
+        // A native snapshot over the entry cap is refused, and the pass is still served.
         assert!(entry_charge > 1);
-        handler
-            .native_attachments
-            .lock()
-            .unwrap()
-            .max_retained_bytes = entry_charge - 1;
+        {
+            let mut native = handler.native_attachments.lock().unwrap();
+            native.max_retained_bytes = entry_charge - 1;
+            native.max_entry_retained_bytes = entry_charge - 1;
+        }
         let response_c =
             call_transform_request_on_channel(&handler, 9, request(session_c, "c", "before")).await;
         assert_eq!(response_c["status"], "ok", "{response_c}");
@@ -25967,12 +25923,11 @@ mod tests {
             assistant_tool_call("call-ordinary", 2),
             tool_result("result-ordinary", 3, "ordinary"),
         ];
-        for handler in [&cached_handler, &control_handler] {
-            let request = native_cache_request("ses", initial_messages.clone(), Vec::new());
-            let response =
-                call_transform_request(handler, serde_json::to_value(request).unwrap()).await;
-            assert_eq!(response["status"], "ok", "{response}");
-        }
+        // Only the cached handler sees the prefix first; the control stays cold.
+        let request = native_cache_request("ses", initial_messages, Vec::new());
+        let response =
+            call_transform_request(&cached_handler, serde_json::to_value(request).unwrap()).await;
+        assert_eq!(response["status"], "ok", "{response}");
 
         let pair = injection::build_synthetic_todo_pair(
             r#"[{"content":"pin normalization","status":"in_progress","priority":"high"}]"#,
@@ -26007,11 +25962,101 @@ mod tests {
         )
         .await;
         assert_eq!(cached["status"], "ok", "{cached}");
+        assert_eq!(full["status"], "ok", "{full}");
+        assert!(
+            cached["timings"]["native_cache_reused_messages"]
+                .as_u64()
+                .unwrap_or_default()
+                > 0,
+            "the warm pass must reuse the cached prefix: {cached}"
+        );
+        assert_eq!(full["timings"]["native_cache_reused_messages"], 0, "{full}");
         // The warm pass reconstructs the same native array a cold daemon emits.
         assert_eq!(
             serde_json::to_vec(&cached["native_messages"]).unwrap(),
             serde_json::to_vec(&full["native_messages"]).unwrap()
         );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn handler_native_cache_adopts_the_bumped_durable_revert_epoch() {
+        let session = "native-revert-epoch";
+        let (handler, store, _dir, project) =
+            handler_with_store(Arc::new(ProducerState::default()), default_test_config());
+        handler.bind_route(test_route(7), binding(project.to_str().unwrap(), session));
+        let messages = vec![
+            ck("epoch-prefix", 1, "prefix"),
+            ck("epoch-tail", 2, "before"),
+        ];
+        let initial = native_cache_request(session, messages.clone(), Vec::new());
+        let first = call_transform_request(&handler, serde_json::to_value(initial).unwrap()).await;
+        assert_eq!(first["status"], "ok", "{first}");
+        let loaded = store.load(session).unwrap();
+        assert_eq!(
+            handler.native_attachments.lock().unwrap().sessions[session].revert_epoch,
+            loaded.meta.revert_epoch
+        );
+        let mut bumped = loaded.meta.clone();
+        bumped.revert_epoch = bumped.revert_epoch.saturating_add(1);
+        store
+            .commit(session, loaded.row_version, &loaded.core, &bumped)
+            .unwrap();
+
+        let mut next_messages = messages;
+        next_messages[1] = ck("epoch-tail", 2, "after");
+        let next = native_cache_request(session, next_messages, Vec::new());
+        let response = call_transform_request(&handler, serde_json::to_value(next).unwrap()).await;
+        assert_eq!(response["status"], "ok", "{response}");
+        let durable = store.load(session).unwrap();
+        assert_eq!(durable.meta.revert_epoch, bumped.revert_epoch);
+        let native = handler
+            .native_attachments
+            .lock()
+            .expect("native attachment cache mutex");
+        assert_eq!(
+            native.sessions[session].revert_epoch,
+            durable.meta.revert_epoch
+        );
+    }
+
+    #[test]
+    fn native_attachment_cache_refuses_an_entry_above_its_cap_and_stores_one_under_it() {
+        let snapshot = |text_len: usize| NativeAttachmentCacheSnapshot {
+            context: NativeAttachmentContext {
+                session_id: "native-cap".to_string(),
+                serializer_profile: "opencode-aisdk".to_string(),
+                render_config: String::new(),
+                profile_epoch: 0,
+                transition_consumed: false,
+            },
+            output_revision: None,
+            message_keys: vec![[0; 32]],
+            chunks: vec![NativeEncodedChunk {
+                start_index: 0,
+                end_index: 1,
+                value: Arc::new(json!("x".repeat(text_len))),
+                retained_bytes: text_len,
+                wire_len: text_len + 2,
+            }],
+        };
+        let small = snapshot(16);
+        let large = snapshot(64 * 1024);
+        let entry_cap = small.retained_bytes(0) + 1024;
+        assert!(large.retained_bytes(0) > entry_cap);
+        let mut cache = NativeAttachmentCache::with_limits(entry_cap * 4, entry_cap);
+
+        let mut stats = NativeAttachmentCacheStats::default();
+        cache.replace("large", 0, large, &mut stats, 0);
+        assert_eq!(stats.refused_store, 1);
+        assert!(cache.sessions.is_empty());
+        assert_eq!(cache.retained_bytes, 0);
+
+        let mut stats = NativeAttachmentCacheStats::default();
+        cache.replace("small", 0, small, &mut stats, 0);
+        assert_eq!(stats.refused_store, 0);
+        let stored = &cache.sessions["small"];
+        assert!(stored.retained_bytes <= cache.max_entry_retained_bytes);
+        assert_eq!(cache.retained_bytes, stored.retained_bytes);
     }
 
     #[test]

@@ -440,6 +440,8 @@ const PASS_SCHEDULER_INTERESTING_HISTORY_CAP: usize = 256;
 /// arc counters.
 const MAX_PASS_SCHEDULER_OBSERVATION_JSON_BYTES: usize = 352;
 const MAX_INTERESTING_PASS_SCHEDULER_OBSERVATION_JSON_BYTES: usize = 342;
+/// The `PASS_SCHEDULER_*_MAX_BYTES` bounds cover rows written by this version; pre-#829 rows,
+/// whose interesting entries carried a full-array fingerprint, age out through the 256-entry ring.
 /// Maximum UTF-8 bytes of the `scheduler_history` column: 256 entries, separators, and brackets.
 pub const PASS_SCHEDULER_HISTORY_MAX_BYTES: usize =
     1 + PASS_SCHEDULER_HISTORY_CAP * (MAX_PASS_SCHEDULER_OBSERVATION_JSON_BYTES + 1);
@@ -19029,6 +19031,74 @@ mod tests {
                 cache_write_tokens: u64::MAX,
             }),
         }
+    }
+
+    /// Pre-#829 interesting entries carried `full_array_fingerprint` with a history receipt.
+    /// No pass writes one now; the legacy receipt still leaves with its entry.
+    #[test]
+    fn a_legacy_fingerprint_receipt_is_evicted_with_its_interesting_entry() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
+        let core = CoreState::empty();
+        let meta = ModuleMeta::default();
+        let observation = PassSchedulerObservation {
+            timestamp_ms: 1,
+            scheduler_decision: "Defer".into(),
+            drain_latch_active: false,
+            ..Default::default()
+        };
+        let field = ["scheduler_full_array_fingerprint"];
+        let commit = |version: Option<u64>| {
+            store
+                .commit_transform(
+                    "ses",
+                    TransformCommit {
+                        pass: Some(PassRecord {
+                            applied_reductions: true,
+                            ..test_pass_record(&observation)
+                        }),
+                        ..base_commit(version, &core, &meta)
+                    },
+                )
+                .unwrap()
+        };
+        let mut version = commit(None);
+        store
+            .with_fenced_conn_for_test(|conn| {
+                conn.execute(
+                    "UPDATE pass_trace SET scheduler_interesting_history = json_set(
+                         scheduler_interesting_history, '$[0].full_array_fingerprint', 'fp-legacy')
+                      WHERE session_id = 'ses'",
+                    [],
+                )?;
+                conn.execute(
+                    "INSERT INTO scan_owner_copies
+                         (owner_copy_id, scan_id, domain_owner_id, owner_kind, field_id)
+                     SELECT lower(hex(randomblob(16))), scan_id, domain_owner_id, owner_kind,
+                            'scheduler_full_array_fingerprint'
+                       FROM scan_owner_copies WHERE field_id = 'scheduler_interesting' LIMIT 1",
+                    [],
+                )
+            })
+            .unwrap();
+        version = commit(Some(version));
+        assert_eq!(
+            field_copy_counts(&store, "ses", &field)["scheduler_full_array_fingerprint"],
+            1,
+            "the receipt stays while its entry is stored"
+        );
+        for _ in 1..PASS_TRACE_HISTORY_RING_LEN {
+            version = commit(Some(version));
+        }
+        assert_eq!(
+            field_copy_counts(&store, "ses", &field)["scheduler_full_array_fingerprint"],
+            0,
+            "the receipt leaves with the rotated-out entry"
+        );
+        let history = store
+            .load_interesting_pass_scheduler_history("ses", i64::MIN, i64::MAX)
+            .unwrap();
+        assert_eq!(history.len(), PASS_SCHEDULER_INTERESTING_HISTORY_CAP);
     }
 
     fn test_pass_record(observation: &PassSchedulerObservation) -> PassRecord {

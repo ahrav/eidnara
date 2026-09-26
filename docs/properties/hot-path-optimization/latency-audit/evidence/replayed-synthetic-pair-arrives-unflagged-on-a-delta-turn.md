@@ -5,6 +5,11 @@ The [scope and provenance](../catalog.md#scope-and-provenance) apply here.
 The discovery and investigation sections describe that baseline. Their source
 links are pinned to it. The executed witness below supplements that history.
 
+Update, 2026-09-26: [#829](https://github.com/ahrav/eidnara/issues/829) retires the delta channel.
+`expand_transform_tail_delta` is deleted, a `tail_delta` body is refused with
+`transform_tail_delta_retired`, and the delta witness is deleted, so this
+record is invalidated. The sections below are historical at their baseline.
+
 ## Discovery trigger
 
 B2's outside clause states that the history_summarizer, the projection-cache charge,

@@ -163,7 +163,7 @@ HEAD (`crates/daemon/src/dispatch.rs:132-148` measures, `:237-249` writes).
 | B2 | [synthetic-normalization-is-scoped-to-the-pass][b2] | safety | always |
 | B3 | [tag-baseline-cache-entry-is-never-mutated-by-a-pass][b3] | safety | always |
 | B4 | [hygiene-digest-is-kind-prefixed-part-content][b4] | safety | always |
-| B5 | [replayed-synthetic-pair-arrives-unflagged-on-a-delta-turn][b5] | reachability | sometimes |
+| B5 | [replayed-synthetic-pair-arrives-unflagged-on-a-delta-turn][b5] | reachability | sometimes (invalidated by #829) |
 | C1 | [consolidated-cache-state-reads-match-per-consumer-loads][c1] | safety | always |
 | C2 | [pass-trace-writes-count-every-pass-outside-the-cache-cas][c2] | safety | always |
 | C3 | [side-channel-drain-delivers-each-row-once-and-keeps-its-schedule][c3] | safety | always |
@@ -769,7 +769,7 @@ provenance, not an independently reexecuted or artifact-hash-verified run.
 
 Type: reachability
 Reachability: default-production
-Status: active
+Status: invalidated
 Exercised: yes - [The delta witness][synthetic-delta-witness] freezes a pair
 on a HARD pass, reattaches two prefix messages, sends the pair unflagged in
 the protected suffix, and observes a prepared firing with native output.
@@ -811,7 +811,15 @@ prefix reuse (removed by #828), and `history_summarizer.fired` before emitting t
 producer prompts, third-turn boundary and chunk inputs, and native bytes;
 unaudited.
 Impact: B2 can pass while the divergent observer is never reached.
-Open questions: None.
+Open questions:
+
+- Invalidated by #829. The daemon no longer expands `tail_delta` bodies:
+  `expand_transform_tail_delta` is deleted, a body that carries `tail_delta`
+  is refused with `transform_tail_delta_retired`, and every request carries
+  the whole captured array. No delta turn reattaches a prefix, so the
+  situation this record names cannot occur, and the delta witness was
+  deleted with the delta path. B2's shared-input equivalence stays with the
+  full-array request.
 
 ## Cache-state load, pass trace, side channel, and meta preparation
 
@@ -855,7 +863,7 @@ trigger. Decode: for every stored `meta` text, a scalar projection of
 field fails to deserialize the consumer takes the branch it took on a failed
 full load (`None` for the projection cache at
 [`lookup_full_projection_cache`][epoch-read], deleted by #828, and
-[`expand_transform_tail_delta`][epoch-read-delta], `false` for
+[`expand_transform_tail_delta`][epoch-read-delta], deleted by #829, `false` for
 [`history_summarizer_active`][active]), except for the recorded divergences: a
 corrupt `core_state` or a corrupt sibling field no longer takes that branch
 (the pass proceeds and the transform's own snapshot load refuses the row

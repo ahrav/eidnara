@@ -40,6 +40,11 @@ warnings` and `cargo +1.98 fmt --all -- --check` pass.
 - Request: `base_revision` is mandatory; the daemon refuses its absence with
   `transform_base_revision_missing` (`crates/daemon/src/lib.rs:8331-8336`).
   `previous_output_revision` names the output the client applied.
+- Request: since #829 a body that carries `tail_delta` is refused with the
+  terminal error `transform_tail_delta_retired` (`crates/daemon/src/lib.rs:8227`;
+  witness `transform_refuses_a_retired_tail_delta`, `:24634`), so a pre-#829
+  plugin's suffix-only `messages` is never read as the whole history. The
+  current plugin never sends the field.
 - Response: `base_revision`, `output_revision`, `operations`, and
   `previous_output_revision` only when a `previous` keep was used. `messages`
   and `native_messages` are daemon-internal (`#[serde(skip)]`); the native
@@ -139,15 +144,15 @@ side by `lib.rs:25199`
 again on the following pass).
 
 After #829 the applied output and the input basis it was computed from share
-one record and one charge (`RetainedOutputs`, `rust-mode-transform.ts:177`),
+one record and one charge (`RetainedOutputs`, `rust-mode-transform.ts:181`),
 under the 64-session and 64 MiB (`RETAINED_OUTPUT_BUDGET_BYTES`, `:135`)
 limits. A retention over the budget first drops the applied output and keeps
 the basis, then drops the record. Eviction never touches a capture lease.
-Witnesses: `rust-mode-transform.test.ts:1963` "keeps one retained-output record
-per session under the session and byte limits", `:1376` "evicts the least
-recently retained session's output and offers it no previous source", `:1413`
+Witnesses: `rust-mode-transform.test.ts:1964` "keeps one retained-output record
+per session under the session and byte limits", `:1377` "evicts the least
+recently retained session's output and offers it no previous source", `:1414`
 "never releases an active capture lease when the session count|byte budget
-evicts its session's output", and `:3992` "keeps the basis without the applied
+evicts its session's output", and `:4001` "keeps the basis without the applied
 output, then drops the record, as the budget tightens".
 
 ### TE30 `inbound-baseline-independent-of-output-base`

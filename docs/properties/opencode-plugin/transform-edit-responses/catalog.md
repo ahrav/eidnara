@@ -7,9 +7,9 @@
 > `forceFullWire`, `wireInvalidations`, and the wire fingerprints are deleted,
 > and `message.removed` resets only the ordinal memo. `wireCaches` and the
 > applied-output budget merge into one retained-output record per session
-> (`RetainedOutputs`, `rust-mode-transform.ts:177`) under the 64-session and
+> (`RetainedOutputs`, `rust-mode-transform.ts:181`) under the 64-session and
 > 64 MiB (`:135`) limits. Publication shrinks first (`publishInPlace`,
-> `transform-capture.ts:754`), and the all-slot preflight
+> `transform-capture.ts:755`), and the all-slot preflight
 > (`hostArrayReplacementRejection`) and `replaceHostArrayContents` are deleted.
 > TE30 is invalidated as a delta and fingerprint contract. TE20 is invalidated
 > as an all-or-none failure contract; in-place identity and prepublication
@@ -17,6 +17,19 @@
 > witnesses are invalidated. TE23 to TE25 inventories drop the delta
 > allocations. Line references in the records below stay bound to the #533
 > revision unless a record names the #829 tree.
+>
+> Owner decisions recorded for #829. Whole-array sends charge the wire
+> projection for the whole history, so a session above about 16 MiB of wire
+> declines on capture bytes and serves the last applied output until
+> revision 3 sends windows; this is accepted as interim because M1 lands as
+> one coordinated release. The per-slot descriptor check covers output slots
+> `[0, S)` as the ticket's Scope says; "no per-slot preflight" in its Outcome
+> means no all-slot preflight. A daemon that receives `tail_delta` from a
+> pre-#829 plugin answers the terminal error `transform_tail_delta_retired`
+> instead of treating the suffix as the whole history. The multi-frame e2e
+> scenario stays quarantined: its 160k-token tail exceeds the memory store's
+> 512 KiB `MAX_DURABLE_TEXT_BYTES`, so the pass fails with `InputLimit`,
+> unrelated to the delta channel.
 
 This directory is a client implementation supplement for
 [#533](https://github.com/ahrav/eidnara/issues/533), not the reusable 30-record
@@ -171,7 +184,7 @@ Impact: a partial array reaches the model, or OpenCode's array identity is repla
 Open questions:
 
 - #538's recipe operations must add a malformed-final-operation candidate case; the current candidate builder is exercised through `native_messages` and `native_messages_delta` only.
-- Invalidated by #829 as an all-or-none contract. Publication now checks the container and the output slots `[0, S)` (`publicationRejection`, `transform-capture.ts:723`), shrinks the length to S, then writes the candidate (`publishInPlace`, `:754`). A non-configurable slot k with S <= k stops the shrink after `ArraySetLength` deleted every slot above k; the captured references above k are restored, no candidate slot is written, nothing is promoted, and one `publication_failed` decline is logged (`rust-mode-transform.ts:1512`). In-place identity, the recipe charge, the boundary assertion, the ownership and source rechecks, and the container check still precede the first write. Witnesses: `transform-capture.test.ts:1018` "shrinks first and leaves exactly the candidate in the original array object" (records the define order `length`, `0`, `1`), `:1049` "restores the captured references after a shrink stopped by a planted non-configurable slot" (the `TypeError`, length k + 1 before restoration), `:1085` "reports a throw while restoring the captured references as the same failed publication"; `rust-mode-transform.test.ts:3530` "leaves exactly a shorter candidate in the original array object" and `:3546` "restores the captured references and promotes nothing when a planted slot stops the shrink". WP-P09 and WP-P20 in #824 own the replacement contract.
+- Invalidated by #829 as an all-or-none contract. Publication now checks the container and the output slots `[0, S)` (`publicationRejection`, `transform-capture.ts:723`), shrinks the length to S, then writes the candidate (`publishInPlace`, `:755`). A non-configurable slot k with S <= k stops the shrink after `ArraySetLength` deleted every slot above k; the captured references above k are restored, no candidate slot is written, nothing is promoted, and one `publication_failed` decline is logged (`rust-mode-transform.ts:1518`). In-place identity, the recipe charge, the boundary assertion, the ownership and source rechecks, and the container check still precede the first write. Witnesses: `transform-capture.test.ts:1018` "shrinks first and leaves exactly the candidate in the original array object" (records the define order `length`, `0`, `1`), `:1049` "restores the captured references after a shrink stopped by a planted non-configurable slot" (the `TypeError`, length k + 1 before restoration), `:1085` "reports a throw while restoring the captured references as the same failed publication"; `rust-mode-transform.test.ts:3539` "leaves exactly a shorter candidate in the original array object" and `:3555` "restores the captured references and promotes nothing when a planted slot stops the shrink". WP-P09 and WP-P20 in #824 own the replacement contract.
 
 ### previous-base-is-applied-and-live
 
@@ -222,7 +235,7 @@ Open questions:
 
 - The retained `wireCaches` entries after transfer are bounded by the 64-session count, not by bytes; the byte budget for that optional-output state is TE25 in #538.
 - `states` (`rust-mode-transform.ts:788`) has no count or byte bound: `BoundedSessionMap` eviction has no callback into it, and only `clearSession` (`:1541`) deletes an entry, so the promoted `state.ordinals` memo of every undeleted session is retained for the process lifetime. No record or witness bounds it.
-- Inventory after #829: publication transfers the submitted input's digest, terminal digest, wire bounds, and input lengths plus the applied values and their capture to one retained-output record per session (`RetainedOutputs`, `rust-mode-transform.ts:177`), charged once under the 64-session and 64 MiB limits. The raw content snapshots, wire fingerprints, and delta frontier are no longer retained. The wire-projection charge now covers every captured message, since every request sends the whole array. Eviction drops the record only; `rust-mode-transform.test.ts:1413` "never releases an active capture lease when the session count|byte budget evicts its session's output" holds a lease across the eviction and asserts `activePasses` 1 and an unchanged charge.
+- Inventory after #829: publication transfers the submitted input's digest, terminal digest, wire bounds, and input lengths plus the applied values and their capture to one retained-output record per session (`RetainedOutputs`, `rust-mode-transform.ts:181`), charged once under the 64-session and 64 MiB limits. The raw content snapshots, wire fingerprints, and delta frontier are no longer retained. The wire-projection charge now covers every captured message, since every request sends the whole array. Eviction drops the record only; `rust-mode-transform.test.ts:1414` "never releases an active capture lease when the session count|byte budget evicts its session's output" holds a lease across the eviction and asserts `activePasses` 1 and an unchanged charge.
 
 ### capture-charge-outlives-cancellation
 
@@ -240,7 +253,7 @@ Impact: a slow cancelled pass's memory is double-counted as free and the budget 
 Open questions:
 
 - Real daemon transport abort through the lease signal is not exercised; the tests use in-process clients that honor or ignore the signal.
-- After #829, `invalidateWireState` is `invalidateOrdinals` (`rust-mode-transform.ts:840`): it resets the ordinal memo and cancels the live lease so the pass cannot promote the memo it copied; it no longer touches retained output. The retained-output record adds no lease accounting.
+- After #829, `invalidateWireState` is `invalidateOrdinals` (`rust-mode-transform.ts:849`): it resets the ordinal memo and cancels the live lease so the pass cannot promote the memo it copied; it no longer touches retained output. The retained-output record adds no lease accounting.
 
 ### uncertain-send-never-replays-blindly
 
@@ -258,7 +271,7 @@ Impact: a duplicate transform mutates daemon state twice for one host turn.
 Open questions:
 
 - A real transport that writes the request and loses the response is not constructed; the fake throws before returning.
-- Preserved by #829. The `need_full_sync` witness (`:2335` "retains full-sync recovery after a failed retry until a full request publishes") is invalidated and deleted with the retry; `rust-mode-transform.test.ts:3597` "does not resend after an outcome-unknown transport failure and recovers on the next attempt" remains the witness.
+- Preserved by #829. The `need_full_sync` witness (`:2335` "retains full-sync recovery after a failed retry until a full request publishes") is invalidated and deleted with the retry; `rust-mode-transform.test.ts:3606` "does not resend after an outcome-unknown transport failure and recovers on the next attempt" remains the witness.
 
 ### bounded-recovery-after-pressure-clears
 
@@ -275,7 +288,7 @@ Existing check: `rust-mode-transform.test.ts:2874` "keeps every pass within the 
 Impact: a session stays declined after the pressure that declined it is gone.
 Open questions:
 
-- Preserved by #829. The `need_full_sync` witness `:2149` "recovers with a full request when byte pressure rejects a full-sync retry" and the forced-full witness `:803` are invalidated and deleted; `rust-mode-transform.test.ts:3129` "keeps every pass within the global count limit and declines without queueing" and `:3178` "declines on byte pressure alone while the aggregate charge stays within the budget" remain.
+- Preserved by #829. The `need_full_sync` witness `:2149` "recovers with a full request when byte pressure rejects a full-sync retry" and the forced-full witness `:803` are invalidated and deleted; `rust-mode-transform.test.ts:3138` "keeps every pass within the global count limit and declines without queueing" and `:3187` "declines on byte pressure alone while the aggregate charge stays within the budget" remain.
 
 ### inbound-baseline-independent-of-output-base
 
