@@ -605,11 +605,11 @@ not a claim that no related check exists anywhere in the repository.
 [t-native-ingress]: ../../../../crates/daemon/src/lib.rs#L23251
 [t-native-charge-floor]: ../../../../crates/daemon/src/lib.rs#L23373
 [t-native-reject]: ../../../../crates/daemon/src/lib.rs#L24424
-[t-vacuity]: ../../../../crates/daemon/src/lib.rs#L24984
-[t-dup]: ../../../../crates/daemon/src/lib.rs#L25091
-[t-native-store]: ../../../../crates/daemon/src/lib.rs#L25225
-[t-native-pingpong]: ../../../../crates/daemon/src/lib.rs#L25322
-[t-native-previous]: ../../../../crates/daemon/src/lib.rs#L25365
+[t-vacuity]: https://github.com/ahrav/eidnara/blob/5b12cb5e/crates/daemon/src/lib.rs#L25009
+[t-dup]: https://github.com/ahrav/eidnara/blob/5b12cb5e/crates/daemon/src/lib.rs#L25116
+[t-native-store]: https://github.com/ahrav/eidnara/blob/5b12cb5e/crates/daemon/src/lib.rs#L25250
+[t-native-pingpong]: https://github.com/ahrav/eidnara/blob/5b12cb5e/crates/daemon/src/lib.rs#L25355
+[t-native-previous]: https://github.com/ahrav/eidnara/blob/5b12cb5e/crates/daemon/src/lib.rs#L25404
 [t-sidecar]: ../../../../crates/daemon/src/codec/opencode.rs#L2083
 [t-tagcold]: ../../../../crates/daemon/src/transform.rs#L22516
 [t-poison]: ../../../../crates/daemon/src/transform.rs#L22652
