@@ -4298,6 +4298,9 @@ fn apply_once(
                             meta.revert_epoch = outcome.revert_epoch;
                             meta.last_recut = outcome.last_recut;
                             meta.history_summarizer = outcome.history_summarizer;
+                            if keep_through_seq < 0 {
+                                meta.forget_lineage_continuation();
+                            }
                             m1_signal = revision_signal_for_context(
                                 store,
                                 ctx.note_project_path,

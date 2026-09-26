@@ -207,11 +207,16 @@ async fn a_boundary_that_does_not_decode_is_bad_request() {
         json!(5),
         json!({ "mid": "m4", "sequence": 1.5 }),
         json!({ "mid": "m4", "sequence": "2" }),
+        json!({ "mid": "m4", "sequence": 9_223_372_036_854_775_808_u64 }),
     ] {
         let (code, _) =
             error_frame(raw(&handler, with_base(body(&["m4"], boundary.clone()))).await);
         assert_eq!(code, "bad_request", "{boundary}");
     }
+    let mut revision_2 = body(&["m4"], json!({ "mid": "m4" }));
+    revision_2["v"] = json!(2);
+    let (code, _) = error_frame(raw(&handler, with_base(revision_2)).await);
+    assert_eq!(code, "bad_request", "decoding precedes the revision check");
     assert_eq!(durable(&store), before);
 }
 
@@ -399,15 +404,35 @@ async fn each_resolution_outcome_runs_through_the_handler_with_its_effects() {
     assert_eq!(store.load_history_segments(session()).unwrap().len(), 1);
 }
 
-/// A revert through no anchor that the pending-rewrite arm does not take (the session carries a
-/// lineage anchor) reconciles by removing every segment, as the base's empty surviving prefix
-/// did, so its HARD converges instead of failing every pass.
-#[tokio::test(flavor = "current_thread")]
-async fn a_revert_through_no_anchor_outside_the_pending_rewrite_arm_removes_every_segment() {
-    let (handler, store, _dir) = folded().await;
+/// A revert through no anchor that the pending-rewrite arm does not take: the session carries
+/// a lineage anchor and continuation base, as lineage descent writes them. Its first pass
+/// defers; its second removes every segment, and `interrupt` runs between that removal's commit
+/// and the pass's terminal commit. Returns the window and the interrupted pass's own answer.
+async fn unanchored_revert(
+    id: &'static str,
+    interrupt: impl Fn(&MemoryStore, &str) + Send + Sync + 'static,
+) -> (
+    Handler,
+    Arc<MemoryStore>,
+    tempfile::TempDir,
+    u64,
+    Value,
+    Value,
+) {
+    let (handler, store, dir) = handler_for(id);
+    store
+        .replace_history_segments(session(), &[segment(1, 1, 2), segment(2, 3, 4)])
+        .unwrap();
+    let names = mids(1..=6);
+    let names: Vec<&str> = names.iter().map(String::as_str).collect();
+    assert_eq!(
+        call(&handler, body(&names, Value::Null)).await["action"],
+        "HARD"
+    );
     let loaded = store.load(session()).unwrap();
     let mut meta = loaded.meta.clone();
     meta.anchor_block_id = Some("m1#0".to_string());
+    meta.ordinal_continuation_base = Some(6);
     store
         .commit(session(), loaded.row_version, &loaded.core, &meta)
         .unwrap();
@@ -420,16 +445,71 @@ async fn a_revert_through_no_anchor_outside_the_pending_rewrite_arm_removes_ever
     );
     let soft = call(&handler, window.clone()).await;
     assert_eq!(soft["reconcile_pending"], true, "{soft}");
-    let hard = call(&handler, window.clone()).await;
+    let hook_store = Arc::clone(&store);
+    install_transform_attempt_hook(id, move || {
+        assert!(
+            hook_store.load_history_segments(id).unwrap().is_empty(),
+            "the interruption lands after the removal commit"
+        );
+        interrupt(&hook_store, id);
+    });
+    let answer = call(&handler, window.clone()).await;
+    (handler, store, dir, meta.revert_epoch, window, answer)
+}
+
+/// Removing every segment is the reset of spec D10: the continuation base goes with the
+/// history, so the next `null` pass is a first pass numbered from 1, not a lineage refusal.
+async fn assert_reset_converges(handler: &Handler, store: &MemoryStore, epoch: u64, window: Value) {
+    assert!(store.load_history_segments(session()).unwrap().is_empty());
+    let loaded = store.load(session()).unwrap();
+    assert_eq!(loaded.meta.revert_epoch, epoch + 1);
+    assert_eq!(loaded.meta.ordinal_continuation_base, None);
+    let resolved = resolution(store, &window);
+    assert_eq!(resolved.resolution, Resolution::FirstPass);
+    assert_eq!(resolved.ordinals, vec![1, 2]);
+    let next = call(handler, window).await;
+    assert_eq!(next["status"], "ok", "{next}");
+    assert_eq!(next["boundary"], Value::Null);
+    assert_eq!(served_mids(&next), ["x1", "x2"]);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn a_revert_through_no_anchor_outside_the_pending_rewrite_arm_removes_every_segment() {
+    let (handler, store, _dir, epoch, window, hard) =
+        unanchored_revert("rev3-reset", |_, _| {}).await;
     assert_eq!(hard["action"], "HARD", "{hard}");
     assert_eq!(hard["reconcile_pending"], false);
     assert_eq!(hard["boundary"], Value::Null);
-    assert!(store.load_history_segments(session()).unwrap().is_empty());
-    assert_eq!(
-        store.load(session()).unwrap().meta.revert_epoch,
-        meta.revert_epoch + 1
-    );
-    assert_eq!(call(&handler, window).await["status"], "ok");
+    assert_reset_converges(&handler, &store, epoch, window).await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn a_cas_conflict_after_the_unanchored_revert_removal_converges() {
+    let (handler, store, _dir, epoch, window, answer) =
+        unanchored_revert("rev3-reset-cas", |store, session| {
+            let loaded = store.load(session).unwrap();
+            store
+                .commit(session, loaded.row_version, &loaded.core, &loaded.meta)
+                .unwrap();
+        })
+        .await;
+    assert_eq!(answer["status"], "ok", "{answer}");
+    assert_eq!(answer["boundary"], Value::Null);
+    assert_reset_converges(&handler, &store, epoch, window).await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn a_panic_plus_reopen_after_the_unanchored_revert_removal_converges() {
+    let (handler, store, dir, epoch, window, answer) =
+        unanchored_revert("rev3-reset-kill", |_, _| {
+            panic!("the pass dies after the removal commit")
+        })
+        .await;
+    assert_eq!(answer["code"], "internal_error", "{answer}");
+    drop(handler);
+    drop(store);
+    let (handler, store) = reopened(&dir);
+    assert_reset_converges(&handler, &store, epoch, window).await;
 }
 
 /// A publish after the handler's resolution moves a null-boundary cut before the pass commits;
@@ -462,6 +542,8 @@ async fn a_publish_that_moves_the_cut_leaves_the_served_window_in_the_ready_snap
     let served = call(&handler, window).await;
     assert_eq!(served["status"], "ok", "{served}");
     assert!(published.load(std::sync::atomic::Ordering::SeqCst));
+    assert_eq!(served_mids(&served), ["m4", "m5", "m6", "m7"]);
+    assert_eq!(served["boundary"], anchor("m2", 1));
     let TransformSnapshotLookup::Ready(lease) =
         handler.transform_snapshots.lock().unwrap().get(session())
     else {
@@ -689,7 +771,7 @@ async fn a_panic_plus_reopen_after_the_revert_truncate_folds_on_the_next_pass() 
         panic!("the pass dies after the truncate commit")
     })
     .await;
-    assert_eq!(answer["status"], "error", "{answer}");
+    assert_eq!(answer["code"], "internal_error", "{answer}");
     drop(handler);
     drop(store);
     let (handler, store) = reopened(&dir);

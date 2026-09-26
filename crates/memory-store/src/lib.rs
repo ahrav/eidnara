@@ -2269,6 +2269,15 @@ impl ModuleMeta {
         self.additive_served_history_segment_seq
             .unwrap_or_else(|| self.rendered_history_segment_seq())
     }
+
+    /// Drops the lineage continuation a descent wrote. A revert that removes every segment
+    /// is the reset of spec D10, and the next pass numbers its window from 1.
+    pub fn forget_lineage_continuation(&mut self) {
+        self.ordinal_continuation_base = None;
+        self.anchor_block_id = None;
+        self.anchor_content_hash = None;
+        self.descent_completed = false;
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -12051,6 +12060,9 @@ impl MemoryStore {
             if let Some(seqs) = meta.legacy_history_segment_seqs.as_mut() {
                 seqs.retain(|sequence| *sequence <= keep_through_seq);
             }
+            if surviving_tail.is_none() {
+                meta.forget_lineage_continuation();
+            }
             let meta_json = match serde_json::to_string(&meta) {
                 Ok(json) => json,
                 Err(e) => return Ok(TruncateTxnOutcome::Serde(e.to_string())),
@@ -16190,6 +16202,11 @@ fn rendered_coverage_tx(
             match history_segment_edge_tx(conn, session_id, EdgeAt::EndMessage(coverage))?
                 .filter(|row| row.end_message_id == boundary_id)
             {
+                // Only `truncate_history_segments_for_revert` removes the `core.boundary_id`
+                // row while the flag is set; `lineage_anchor_failure` also sets the flag but
+                // leaves the row. The truncate bumps `revert_epoch`, which rejects every
+                // publication fired before it, and the next committing pass is the fold itself,
+                // so no row lands above the kept anchor before the fold.
                 None if reconcile_pending => {
                     history_segment_edge_tx(conn, session_id, EdgeAt::Newest)?
                 }

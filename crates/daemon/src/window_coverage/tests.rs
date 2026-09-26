@@ -231,8 +231,8 @@ fn impossible_declarations_are_invalid_params() {
     assert!(error.contains("does not start at"), "{error}");
 }
 
-/// A declared row that survives a revert truncation which left `core.boundary_id` naming a
-/// removed row is `Unknown`, a decline that makes the plugin rediscover, not `invalid_params`.
+/// Without a pending reconcile, a missing rendered row is `Unknown`, a decline that makes the
+/// plugin rediscover, not `invalid_params`.
 #[test]
 fn a_declared_row_without_a_rendered_boundary_is_unknown() {
     let (_dir, store) = open_store();
@@ -245,6 +245,39 @@ fn a_declared_row_without_a_rendered_boundary_is_unknown() {
     assert_eq!(resolved.resolution, Resolution::Unknown);
     let resolved = resolve_in(&store, None, &window(&submitted)).unwrap();
     assert_eq!(resolved.resolution, Resolution::FirstPass);
+}
+
+/// With the reconcile pending, a revert truncate that removed the rendered row leaves the
+/// newest surviving row as the rendered boundary (spec D10): the declared survivor is `Normal`
+/// and discovery lists it.
+#[test]
+fn a_pending_reconcile_renders_the_newest_row_the_truncate_left() {
+    let (_dir, store) = open_store();
+    seed_coverage(&store, 5, Some(5), None);
+    store
+        .with_fenced_conn_for_test(|conn| {
+            conn.execute(
+                "UPDATE cache_state SET core_state = json_set(core_state, '$.reconcile_pending', json('true'))
+                  WHERE session_id = ?1",
+                [SESSION],
+            )
+        })
+        .unwrap();
+    store
+        .truncate_history_segments_for_revert(SESSION, 3, Some(1))
+        .unwrap();
+    let submitted = mids(6, 8);
+    let snapshot = store
+        .coverage_snapshot(SESSION, Some(3), &["m6", "m7", "m8"])
+        .unwrap();
+    assert_eq!(snapshot.rendered.map(|row| row.sequence), Some(3));
+    let resolved = resolve_in(&store, anchor("m6", 3), &window(&submitted)).unwrap();
+    assert_eq!(resolved.resolution, Resolution::Normal);
+    let page = boundary_page(&store, SESSION, None).unwrap();
+    assert_eq!(
+        page["anchors"][0],
+        serde_json::json!({ "mid": "m6", "sequence": 3 })
+    );
 }
 
 /// WP-P02 snapshot clause: a publish that commits between the session-row read and the
