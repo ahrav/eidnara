@@ -2788,10 +2788,7 @@ mod tests {
             "fp".into(),
             test_selected_range_identities(),
             0,
-            HistorySegmentSetGeneration {
-                max_sequence: 1,
-                count: 1,
-            },
+            HistorySegmentSetGeneration { max_sequence: 1 },
             1,
         )
         .unwrap()
@@ -3232,7 +3229,7 @@ mod tests {
     ) -> HistorySummarizerFireRequest<'a> {
         seed_test_selected_range_identities(store);
         let history_segment_set_generation = store
-            .load_history_summarizer_assembly_snapshot("ses")
+            .load_history_summarizer_assembly_snapshot("ses", 6)
             .unwrap()
             .history_segment_set_generation;
         HistorySummarizerFireRequest {
@@ -4466,10 +4463,7 @@ mod tests {
                 "fp".into(),
                 test_selected_range_identities(),
                 0,
-                HistorySegmentSetGeneration {
-                    max_sequence: 1,
-                    count: 1,
-                },
+                HistorySegmentSetGeneration { max_sequence: 1 },
                 1,
             )
             .unwrap()
@@ -5234,14 +5228,7 @@ mod tests {
         assert_eq!(producer.attempt_closes, 1);
         assert_eq!(producer.closes, 1);
         assert!(producer.connection_closed);
-        assert_eq!(
-            store
-                .load_history_summarizer_assembly_snapshot("ses")
-                .unwrap()
-                .history_segments
-                .len(),
-            2
-        );
+        assert_eq!(store.load_history_segments("ses").unwrap().len(), 2);
     }
 
     fn completion_after_long_model_run() -> i64 {
@@ -5280,11 +5267,7 @@ mod tests {
 
         assert_eq!(producer.observed_starts.len(), 2);
         assert_eq!(
-            store
-                .load_history_summarizer_assembly_snapshot("ses")
-                .unwrap()
-                .history_segments
-                .len(),
+            store.load_history_segments("ses").unwrap().len(),
             1,
             "flat retries must not publish any new history_segment rows"
         );
@@ -5338,10 +5321,10 @@ mod tests {
             .expect_err("a five-message narrative gap must reject");
         assert!(matches!(error, HistorySummarizerDriveError::Validation(_)));
         let after_rejection = store
-            .load_history_summarizer_assembly_snapshot("ses")
+            .load_history_summarizer_assembly_snapshot("ses", 6)
             .unwrap();
-        assert_eq!(after_rejection.history_segments.len(), 1);
-        assert_eq!(after_rejection.history_segments[0].end_message, 1);
+        assert_eq!(after_rejection.newest_history_segments.len(), 1);
+        assert_eq!(after_rejection.newest_history_segments[0].end_message, 1);
         assert_eq!(
             store.load("ses").unwrap().meta.publication_floor_ordinal,
             None
@@ -5365,11 +5348,11 @@ mod tests {
             HistorySummarizerDriveOutcome::Completed(_)
         ));
         let after_retry = store
-            .load_history_summarizer_assembly_snapshot("ses")
+            .load_history_summarizer_assembly_snapshot("ses", 6)
             .unwrap();
-        assert_eq!(after_retry.history_segments.len(), 2);
-        assert_eq!(after_retry.history_segments[1].start_message, 2);
-        assert_eq!(after_retry.history_segments[1].end_message, 9);
+        assert_eq!(after_retry.newest_history_segments.len(), 2);
+        assert_eq!(after_retry.newest_history_segments[1].start_message, 2);
+        assert_eq!(after_retry.newest_history_segments[1].end_message, 9);
         assert_eq!(
             store.load("ses").unwrap().meta.publication_floor_ordinal,
             Some(10)
@@ -5511,10 +5494,7 @@ mod tests {
             producer_harness: None,
             fired_at_ms: Some(1),
             expected_revert_epoch: 0,
-            history_segment_set_generation: HistorySegmentSetGeneration {
-                max_sequence: 1,
-                count: 1,
-            },
+            history_segment_set_generation: HistorySegmentSetGeneration { max_sequence: 1 },
             failure_backoff_at_ms: None,
             last_failure: None,
             last_no_fire: None,
@@ -5667,7 +5647,6 @@ mod tests {
             let segments = store.load_history_segments("ses").unwrap();
             let generation = HistorySegmentSetGeneration {
                 max_sequence: segments.iter().map(|c| c.sequence).max().unwrap_or(0),
-                count: segments.len() as i64,
             };
             let fired = match fire(
                 &loaded.meta.history_summarizer,
