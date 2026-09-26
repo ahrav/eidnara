@@ -488,7 +488,7 @@ pub fn persist_history_summarizer_state(
     Ok(store.commit(session_id, loaded.row_version, &loaded.core, &meta)?)
 }
 
-/// A firing advances from an in-memory state while other writers commit: a transform pass records eligibility and stamps activations, and publish and revert transactions count and settle earlier entries. Their fields are taken from the stored row: the eligibility unless a fire, which advances the sequence, consumed it, and every entry but the in-flight firing's own.
+/// A firing advances from an in-memory state while other writers commit: a transform pass records eligibility, stamps activations, and clears a chunk's retry count when it re-adopts one of its messages; publish and revert transactions count and settle earlier entries; the failed-firing path counts the chunk. Their fields are taken from the stored row: the eligibility unless a fire, which advances the sequence, consumed it, the retry count, and every entry but the in-flight firing's own.
 fn keep_fields_other_writers_own(
     durable: &HistorySummarizerDurableState,
     next: &mut HistorySummarizerDurableState,
@@ -496,6 +496,7 @@ fn keep_fields_other_writers_own(
     if next.firing_seq == durable.firing_seq {
         next.pending_eligibility = durable.pending_eligibility.clone();
     }
+    next.chunk_retry = durable.chunk_retry;
     next.counters.published = durable.counters.published;
     next.counters.superseded_before_activation = durable.counters.superseded_before_activation;
     let in_flight = next.firing_seq;
@@ -3496,6 +3497,69 @@ mod tests {
         let state = store.load("ses").unwrap().meta.history_summarizer;
         assert_eq!(state.recent_firings[0].activated_at_ms, Some(7));
         assert_eq!(state.recent_firings[1].producer_started_at_ms, Some(8));
+    }
+
+    /// A transform pass that re-adopts a chunk's message clears its retry count while the firing awaits the model; the firing's abandonment, built from its earlier snapshot, must not restore the count.
+    #[test]
+    fn an_in_flight_abandonment_keeps_a_retry_count_another_writer_cleared() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(dir.path());
+        let idle = HistorySummarizerDurableState {
+            chunk_retry: Some(HistorySummarizerChunkRetry {
+                chunk_start: 2,
+                failures: 7,
+            }),
+            ..Default::default()
+        };
+        let FireOutcome::Fired(fired) = fire(
+            &idle,
+            2,
+            4,
+            "fp".into(),
+            test_selected_range_identities(),
+            0,
+            HistorySegmentSetGeneration::default(),
+            5,
+        )
+        .unwrap() else {
+            unreachable!("an idle state fires")
+        };
+        let awaiting =
+            producer_started(&fired, "session".into(), "run".into(), "pi".into()).unwrap();
+        assert_eq!(awaiting.chunk_retry, idle.chunk_retry);
+        store
+            .commit(
+                "ses",
+                None,
+                &CoreState::empty(),
+                &test_meta_with_history_summarizer(awaiting.clone()),
+            )
+            .unwrap();
+        // The pass re-adopts a message in the chunk while the model runs.
+        let loaded = store.load("ses").unwrap();
+        let mut cleared = loaded.meta.clone();
+        cleared.history_summarizer.chunk_retry = None;
+        store
+            .commit("ses", loaded.row_version, &loaded.core, &cleared)
+            .unwrap();
+
+        persist_history_summarizer_state(
+            &store,
+            "ses",
+            abandon_with_detail(&awaiting, 60, None, AbandonClass::ProducerFailed),
+        )
+        .unwrap();
+        let state = store.load("ses").unwrap().meta.history_summarizer;
+        assert_eq!(state.state, HistorySummarizerPhase::Idle);
+        assert_eq!(state.chunk_retry, None, "{state:?}");
+        assert_eq!(
+            record_chunk_failure(&state, 2).chunk_retry,
+            Some(HistorySummarizerChunkRetry {
+                chunk_start: 2,
+                failures: 1,
+            }),
+            "the revised bytes start their own count"
+        );
     }
 
     #[test]
