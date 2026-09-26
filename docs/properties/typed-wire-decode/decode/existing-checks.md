@@ -15,6 +15,17 @@ that contradict the accepted prospective contract remain listed.
 
 All line numbers are HEAD locations. Daemon lib.rs is read with `git show`
 because the worktree file is dirty. Other cited source files match HEAD.
+#828 deletes the `W` rows marked below and shrinks `wire.rs` to 1,145 lines,
+so every surviving `W` row has moved; after #828 the surviving tests sit at
+`repeated_call_id_within_owner_message_shares_one_arc_identity` 696,
+`reasoning_joins_the_arc_its_adjacent_call_was_assigned` 730,
+`user_carried_tool_result_pairs_with_prior_assistant_call` 811,
+`user_carried_tool_result_without_prior_call_still_rejects` 876,
+`opaque_and_media_inside_tool_result_content_are_accepted_and_projected` 901,
+`empty_and_reserved_message_ids_are_rejected` 975,
+`duplicate_message_ids_are_rejected` 992,
+`reduced_tool_result_keeps_failure_variant_and_output_extras` 1005, and
+`shared_ingress_is_send_and_preserves_decode_refusals` 1125.
 
 | Key | File |
 | --- | --- |
