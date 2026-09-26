@@ -330,18 +330,15 @@ function messageInfo(value: unknown): Record<string, unknown> {
 
 /**
  * A failed pass may serve the retained output only when every window message the previous pass
- * submitted, its terminal included, is unchanged and in place. New messages may follow; an edit,
- * removal, revert, or reorder of an acknowledged message leaves the retained output stale.
+ * submitted is unchanged and in place. A verified capture already proves the members before the
+ * terminal, so this checks the terminal; an edit of it leaves the retained output stale.
  */
 function isAppendOnlyExtension(previous: RetainedOutput, captured: CapturedHistory): boolean {
     return (
-        captured.members.length >= previous.rawCount &&
-        captured.verified !== undefined &&
-        historyDigestsEqual(captured.verified, previous.rawHistory) &&
-        (previous.rawCount === 0 ||
-            (previous.rawTerminal !== undefined &&
-                captured.boundary !== undefined &&
-                historyDigestsEqual(captured.boundary, previous.rawTerminal)))
+        previous.rawCount === 0 ||
+        (previous.rawTerminal !== undefined &&
+            captured.boundary !== undefined &&
+            historyDigestsEqual(captured.boundary, previous.rawTerminal))
     );
 }
 
@@ -1056,9 +1053,13 @@ export function createRustModeTransform(
             if (!lease.reserve(bytes)) throw new CaptureBudgetExceeded(detail);
         };
         let failOpenSource:
-            | { previous: RetainedOutput; captured: CapturedHistory; boundaryIndex: number }
+            | {
+                  previous: RetainedOutput;
+                  captured: CapturedHistory;
+                  boundaryIndex: number;
+                  recheck: (phase: string) => void;
+              }
             | undefined;
-        let recheckWindow: ((phase: string) => void) | undefined;
         /**
          * Without native compaction a raw fail-open can overflow the provider window, so a failed
          * pass declared at the retained basis republishes the applied output followed by the window
@@ -1068,9 +1069,9 @@ export function createRustModeTransform(
         const serveLastApplied = (): boolean => {
             const source = failOpenSource;
             const applied = source?.previous.applied;
-            if (!source || !applied || !recheckWindow) return false;
+            if (!source || !applied) return false;
             try {
-                recheckWindow("fail-open");
+                source.recheck("fail-open");
                 if (
                     retainedOutputs.peek(sessionId) !== source.previous ||
                     !isAppendOnlyExtension(source.previous, source.captured)
@@ -1293,10 +1294,9 @@ export function createRustModeTransform(
                 logStage(sessionId, "prefixGuard", startedAt, timings, `phase=${phase}`);
                 if (!unchanged) throw new PassDeclined(sessionId, "source_changed", phase);
             };
-            recheckWindow = recheckCapture;
-            // Tapes are never rebased: fail-open needs the anchor the retained basis was acknowledged at.
-            if (previous && sameBoundary(previous.basis, boundary))
-                failOpenSource = { previous, captured, boundaryIndex };
+            // Tapes are never rebased: a verified prefix was declared at the retained basis anchor.
+            if (previous && verified)
+                failOpenSource = { previous, captured, boundaryIndex, recheck: recheckCapture };
             // The wire charge derives from the capture, so byte pressure declines before the next await.
             let wireBytes = 0;
             for (let index = 0; index < messageWireBytes.length; index += 1)
