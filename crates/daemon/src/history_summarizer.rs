@@ -5,6 +5,7 @@
 
 use std::collections::BTreeMap;
 use std::fmt;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use memory_store::memory_reviewer_jobs::{
@@ -12,13 +13,14 @@ use memory_store::memory_reviewer_jobs::{
     MemoryReviewerJobState,
 };
 use memory_store::{
-    HistorySegmentSetGeneration, HistorySummarizerChunkRange, HistorySummarizerDurableState,
-    HistorySummarizerEventCandidate, HistorySummarizerPhase, HistorySummarizerPrimerCandidate,
-    HistorySummarizerPublishError, HistorySummarizerPublishPredicate,
-    HistorySummarizerPublishRequest, HistorySummarizerPublishResult,
-    HistorySummarizerSelectedMessageIdentity, HistorySummarizerUserMemoryCandidate, LoadedState,
-    MemoryReviewerActivation, MemoryReviewerNonadmissionCode, MemoryStore, MemoryStoreError,
-    PendingPublication, StoredHistorySegment,
+    HistorySegmentSetGeneration, HistorySummarizerChunkRange, HistorySummarizerChunkRetry,
+    HistorySummarizerDurableState, HistorySummarizerEventCandidate, HistorySummarizerPhase,
+    HistorySummarizerPrimerCandidate, HistorySummarizerPublishError,
+    HistorySummarizerPublishPredicate, HistorySummarizerPublishRequest,
+    HistorySummarizerPublishResult, HistorySummarizerSelectedMessageIdentity,
+    HistorySummarizerUserMemoryCandidate, LoadedState, MemoryReviewerActivation,
+    MemoryReviewerNonadmissionCode, MemoryStore, MemoryStoreError, PendingPublication,
+    StoredHistorySegment,
     summarizer_timeline::{AbandonClass, FiringOutcome, FiringTrigger, NoFire, NoFireReason},
 };
 
@@ -251,6 +253,7 @@ pub fn fire(
         // A fire clears the prior skip reason.
         last_no_fire: None,
         consecutive_publish_failures: current.consecutive_publish_failures,
+        chunk_retry: current.chunk_retry.clone(),
         // A reservation left by an earlier firing is not this firing's to publish; its job stays a capped reservation the expiry sweep closes.
         memory_reviewer_reservation: None,
         ..current.carried_forward()
@@ -346,11 +349,72 @@ pub fn abandon_with_detail(
         failure_backoff_at_ms: Some(failure_backoff_at_ms),
         last_failure: detail.or_else(|| current.last_failure.clone()),
         consecutive_publish_failures: current.consecutive_publish_failures,
+        chunk_retry: current.chunk_retry.clone(),
         memory_reviewer_reservation: current.memory_reviewer_reservation.clone(),
         ..current.carried_forward()
     };
     next.record_outcome(FiringOutcome::Abandoned { class });
     next
+}
+
+/// Counts one more failed firing on the chunk `chunk_start..=chunk_end` under `model_chain` and the configured `token_budget`; a count kept for a chunk starting elsewhere, or under another chain or budget, restarts at one. The end is the failed firing's own, so a later re-adoption knows which messages the count describes.
+pub fn record_chunk_failure(
+    current: &HistorySummarizerDurableState,
+    chunk_start: u64,
+    chunk_end: u64,
+    model_chain: &[String],
+    token_budget: usize,
+) -> HistorySummarizerDurableState {
+    let failures = current
+        .chunk_retry
+        .as_ref()
+        .filter(|retry| {
+            retry.chunk_start == chunk_start
+                && retry.model_chain == model_chain
+                && retry.token_budget == token_budget
+        })
+        .map_or(0, |retry| retry.failures);
+    let mut next = current.clone();
+    next.chunk_retry = Some(HistorySummarizerChunkRetry {
+        chunk_start,
+        chunk_end,
+        failures: failures.saturating_add(1),
+        model_chain: model_chain.to_vec(),
+        token_budget,
+    });
+    next
+}
+
+/// Whether a firing error says something about the chunk itself, so a retry of the same bytes would likely fail again.
+/// A permanent failure counts only when the model provider reported it. A host setup failure fails every chunk the same way, and counting it would publish placeholders over history a working model could summarize.
+pub fn is_chunk_failure(error: &HistorySummarizerDriveError) -> bool {
+    let HistorySummarizerDriveError::Producer(err) = error else {
+        return matches!(error, HistorySummarizerDriveError::Validation(_));
+    };
+    let mut err = err;
+    // A failed cancel or close wraps the run's own error; the wrapper says nothing about the chunk.
+    while let HistorySummarizerProducerError::CleanupFailed {
+        primary: Some(primary),
+        ..
+    } = err
+    {
+        err = primary.as_ref();
+    }
+    if err.is_cross_incarnation_unknown() {
+        return false;
+    }
+    match err
+        .classification()
+        .map(|classification| classification.class)
+    {
+        Some(ErrorClass::ContextOverflow) => true,
+        Some(ErrorClass::Permanent) => matches!(
+            err,
+            HistorySummarizerProducerError::RunFailed { detail, .. }
+                if host_runtime::model_execution::backend::is_provider_reported_failure(detail)
+        ),
+        _ => false,
+    }
 }
 
 /// Keeps a Publishing firing that holds a MemoryReviewer reservation in place with the failure recorded, so recovery reconciles it against the reservation instead of refiring the model.
@@ -435,7 +499,7 @@ pub fn persist_history_summarizer_state(
     Ok(store.commit(session_id, loaded.row_version, &loaded.core, &meta)?)
 }
 
-/// A firing advances from an in-memory state while other writers commit: a transform pass records eligibility and stamps activations, and publish and revert transactions count and settle earlier entries. Their fields are taken from the stored row: the eligibility unless a fire, which advances the sequence, consumed it, and every entry but the in-flight firing's own.
+/// A firing advances from an in-memory state while other writers commit: a transform pass records eligibility, stamps activations, and clears a chunk's retry count when it re-adopts one of its messages; publish and revert transactions count and settle earlier entries; the failed-firing path counts the chunk. Their fields are taken from the stored row: the eligibility unless a fire, which advances the sequence, consumed it, the retry count, and every entry but the in-flight firing's own.
 fn keep_fields_other_writers_own(
     durable: &HistorySummarizerDurableState,
     next: &mut HistorySummarizerDurableState,
@@ -443,6 +507,7 @@ fn keep_fields_other_writers_own(
     if next.firing_seq == durable.firing_seq {
         next.pending_eligibility = durable.pending_eligibility.clone();
     }
+    next.chunk_retry = durable.chunk_retry.clone();
     next.counters.published = durable.counters.published;
     next.counters.superseded_before_activation = durable.counters.superseded_before_activation;
     let in_flight = next.firing_seq;
@@ -813,10 +878,19 @@ pub fn handle_restart_load(
     match state.state {
         HistorySummarizerPhase::Idle => Ok(RestartAction::Done),
         HistorySummarizerPhase::AwaitingProducer => {
-            let (Some(producer_session_id), Some(producer_run_id)) = (
+            // No harness holds a placeholder run, so there is nothing to reattach; the refire is another placeholder firing and needs no model.
+            let run = match (
                 state.producer_session_id.clone(),
                 state.producer_run_id.clone(),
-            ) else {
+            ) {
+                (Some(session), Some(run))
+                    if !crate::history_summarizer_chunk::is_placeholder_run_id(&run) =>
+                {
+                    Some((session, run))
+                }
+                _ => None,
+            };
+            let Some((producer_session_id, producer_run_id)) = run else {
                 let next = abandon(&state, failure_backoff_at_ms, AbandonClass::Restarted);
                 persist_history_summarizer_state(store, session_id, next)?;
                 return Ok(RestartAction::AbandonedAndRefireEligible {
@@ -1423,6 +1497,10 @@ pub struct HistorySummarizerFireRequest<'a> {
     pub publication_fence: Option<&'a dyn HistorySummarizerPublicationFence>,
     /// The MemoryReviewer handoff an accepted fact set is reserved and staged through; `None` records the candidates as not admitted for an unavailable MemoryReviewer.
     pub memory_reviewer_handoff: Option<&'a HandoffTarget>,
+    /// Set to true once a producer run starts.
+    pub producer_started: Option<&'a AtomicBool>,
+    /// The budget the prompt was presented under; the firing records it so a reattachment presents the same bytes.
+    pub presented_token_budget: usize,
     /// What the entry path saw; each model attempt's timeline entry records it.
     pub trigger: FiringTrigger,
 }
@@ -1752,6 +1830,7 @@ where
                         .as_deref()
                         .map(classify_no_fire),
                 );
+                state.presented_token_budget = Some(request.presented_token_budget);
                 state
             }
         };
@@ -1766,7 +1845,12 @@ where
             .start(&producer_session_id, request.system, request.prompt, model)
             .await
         {
-            Ok(handle) => handle,
+            Ok(handle) => {
+                if let Some(started) = request.producer_started {
+                    started.store(true, Ordering::Relaxed);
+                }
+                handle
+            }
             Err(err) => {
                 let completed_at_ms = (request.completion_now_ms)();
                 let failure_backoff_at_ms = completion_failure_backoff_at_ms(
@@ -2538,6 +2622,161 @@ mod handoff_tests;
 mod tests {
     use super::*;
 
+    #[test]
+    fn chunk_failures_count_per_chunk_and_ignore_provider_errors() {
+        let chain = vec!["prov/model".to_string()];
+        let once = record_chunk_failure(
+            &HistorySummarizerDurableState::default(),
+            5,
+            7,
+            &chain,
+            8_000,
+        );
+        let twice = record_chunk_failure(&once, 5, 7, &chain, 8_000);
+        assert_eq!(
+            twice.chunk_retry,
+            Some(HistorySummarizerChunkRetry {
+                chunk_start: 5,
+                chunk_end: 7,
+                failures: 2,
+                model_chain: chain.clone(),
+                token_budget: 8_000,
+            })
+        );
+        assert_eq!(
+            record_chunk_failure(&twice, 9, 11, &chain, 8_000).chunk_retry,
+            Some(HistorySummarizerChunkRetry {
+                chunk_start: 9,
+                chunk_end: 11,
+                failures: 1,
+                model_chain: chain.clone(),
+                token_budget: 8_000,
+            }),
+            "a different chunk restarts the count"
+        );
+        let other_chain = vec!["prov/other".to_string()];
+        assert_eq!(
+            record_chunk_failure(&twice, 5, 7, &other_chain, 8_000).chunk_retry,
+            Some(HistorySummarizerChunkRetry {
+                chunk_start: 5,
+                chunk_end: 7,
+                failures: 1,
+                model_chain: other_chain.clone(),
+                token_budget: 8_000,
+            }),
+            "a different model chain restarts the count"
+        );
+        assert_eq!(
+            record_chunk_failure(&twice, 5, 7, &chain, 4_000).chunk_retry,
+            Some(HistorySummarizerChunkRetry {
+                chunk_start: 5,
+                chunk_end: 7,
+                failures: 1,
+                model_chain: chain.clone(),
+                token_budget: 4_000,
+            }),
+            "a different configured budget restarts the count"
+        );
+        assert_eq!(
+            crate::history_summarizer_chunk::chunk_failures(
+                twice.chunk_retry.as_ref(),
+                5,
+                &other_chain,
+                8_000
+            ),
+            0,
+            "a count under another chain does not shrink the chunk the new chain sees"
+        );
+        assert_eq!(
+            crate::history_summarizer_chunk::chunk_failures(
+                twice.chunk_retry.as_ref(),
+                5,
+                &chain,
+                4_000
+            ),
+            0,
+            "a count under another budget does not shrink the chunk the new budget sees"
+        );
+        assert_eq!(
+            abandon_with_detail(&twice, 1, None, AbandonClass::ProducerFailed).chunk_retry,
+            twice.chunk_retry
+        );
+
+        let failed = |class, detail: &str| {
+            HistorySummarizerDriveError::Producer(HistorySummarizerProducerError::RunFailed {
+                run_id: "run".into(),
+                detail: detail.into(),
+                classification: Some(ErrorClassification {
+                    class,
+                    retry_after_secs: None,
+                }),
+                class_field_present: true,
+            })
+        };
+        let provider_refusal = "opencode provider reported an error (status 400)";
+        assert!(is_chunk_failure(&failed(
+            ErrorClass::Permanent,
+            provider_refusal
+        )));
+        // Pi drops the provider's text, so its error stop cannot tell a refusal from an unknown model.
+        assert!(!is_chunk_failure(&failed(
+            ErrorClass::Permanent,
+            "pi assistant stopped with reason \"error\""
+        )));
+        // A failed cancel or close wraps the provider refusal; the wrapper does not change what the provider said about the chunk.
+        let HistorySummarizerDriveError::Producer(refusal) =
+            failed(ErrorClass::Permanent, provider_refusal)
+        else {
+            unreachable!()
+        };
+        assert!(is_chunk_failure(&HistorySummarizerDriveError::Producer(
+            attach_cleanup(
+                attach_cleanup(
+                    refusal,
+                    Err(HistorySummarizerProducerError::TimedOut),
+                    "cancel"
+                ),
+                Err(HistorySummarizerProducerError::TimedOut),
+                "close"
+            )
+        )));
+        assert!(is_chunk_failure(&failed(
+            ErrorClass::ContextOverflow,
+            "opencode backend exited with status 1"
+        )));
+        assert!(!is_chunk_failure(&failed(
+            ErrorClass::Transient,
+            provider_refusal
+        )));
+        assert!(!is_chunk_failure(&failed(
+            ErrorClass::AuthRequired,
+            provider_refusal
+        )));
+        // The host classes these permanent too, but they fail the same way for every chunk, so counting them would placeholder history during an environment outage.
+        for setup_failure in [
+            "opencode harness_unavailable: credential_missing",
+            "pi harness_unavailable: closure_incomplete",
+            "opencode backend run could not start (entity not found)",
+            "pi backend was terminated by a signal",
+            "opencode backend exited with status 1",
+            "opencode run closed before subprocess dispatch",
+            "pi assistant stopped with reason \"aborted\"",
+        ] {
+            assert!(
+                !is_chunk_failure(&failed(ErrorClass::Permanent, setup_failure)),
+                "{setup_failure}"
+            );
+        }
+        assert!(!is_chunk_failure(&HistorySummarizerDriveError::Producer(
+            HistorySummarizerProducerError::TimedOut
+        )));
+        assert!(is_chunk_failure(&HistorySummarizerDriveError::Validation(
+            HistorySummarizerValidationError {
+                message: "rejected".into(),
+            }
+        )));
+    }
+
     /// Shared reattach-test prologue: fire the trigger, mark the producer
     /// started ("producer-session"/"run-1" on pi), and commit the awaiting
     /// history_summarizer state for session "ses".
@@ -2998,6 +3237,7 @@ mod tests {
             .history_segment_set_generation;
         HistorySummarizerFireRequest {
             store,
+            presented_token_budget: 8_000,
             harness: "pi",
             session_id: "ses",
             project_path: "git:proj",
@@ -3023,6 +3263,7 @@ mod tests {
             completion_now_ms: || 123,
             publication_fence: None,
             memory_reviewer_handoff: None,
+            producer_started: None,
             trigger: Default::default(),
         }
     }
@@ -3062,6 +3303,7 @@ mod tests {
             }),
             chunk_fingerprint: "fp".into(),
             selected_range_identities: test_selected_range_identities(),
+            presented_token_budget: None,
             producer_session_id: Some("producer-session".into()),
             producer_run_id: Some("run-3".into()),
             producer_harness: None,
@@ -3072,6 +3314,7 @@ mod tests {
             last_failure: None,
             last_no_fire: None,
             consecutive_publish_failures: 0,
+            chunk_retry: None,
             memory_reviewer_nonadmission: Default::default(),
             memory_reviewer_reservation: None,
             recent_firings: Vec::new(),
@@ -3327,6 +3570,75 @@ mod tests {
         let state = store.load("ses").unwrap().meta.history_summarizer;
         assert_eq!(state.recent_firings[0].activated_at_ms, Some(7));
         assert_eq!(state.recent_firings[1].producer_started_at_ms, Some(8));
+    }
+
+    /// A transform pass that re-adopts a chunk's message clears its retry count while the firing awaits the model; the firing's abandonment, built from its earlier snapshot, must not restore the count.
+    #[test]
+    fn an_in_flight_abandonment_keeps_a_retry_count_another_writer_cleared() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(dir.path());
+        let idle = HistorySummarizerDurableState {
+            chunk_retry: Some(HistorySummarizerChunkRetry {
+                chunk_start: 2,
+                chunk_end: 4,
+                failures: 7,
+                model_chain: vec!["prov/model".to_string()],
+                token_budget: 8_000,
+            }),
+            ..Default::default()
+        };
+        let FireOutcome::Fired(fired) = fire(
+            &idle,
+            2,
+            4,
+            "fp".into(),
+            test_selected_range_identities(),
+            0,
+            HistorySegmentSetGeneration::default(),
+            5,
+        )
+        .unwrap() else {
+            unreachable!("an idle state fires")
+        };
+        let awaiting =
+            producer_started(&fired, "session".into(), "run".into(), "pi".into()).unwrap();
+        assert_eq!(awaiting.chunk_retry, idle.chunk_retry);
+        store
+            .commit(
+                "ses",
+                None,
+                &CoreState::empty(),
+                &test_meta_with_history_summarizer(awaiting.clone()),
+            )
+            .unwrap();
+        // The pass re-adopts a message in the chunk while the model runs.
+        let loaded = store.load("ses").unwrap();
+        let mut cleared = loaded.meta.clone();
+        cleared.history_summarizer.chunk_retry = None;
+        store
+            .commit("ses", loaded.row_version, &loaded.core, &cleared)
+            .unwrap();
+
+        persist_history_summarizer_state(
+            &store,
+            "ses",
+            abandon_with_detail(&awaiting, 60, None, AbandonClass::ProducerFailed),
+        )
+        .unwrap();
+        let state = store.load("ses").unwrap().meta.history_summarizer;
+        assert_eq!(state.state, HistorySummarizerPhase::Idle);
+        assert_eq!(state.chunk_retry, None, "{state:?}");
+        assert_eq!(
+            record_chunk_failure(&state, 2, 4, &["prov/model".to_string()], 8_000).chunk_retry,
+            Some(HistorySummarizerChunkRetry {
+                chunk_start: 2,
+                chunk_end: 4,
+                failures: 1,
+                model_chain: vec!["prov/model".to_string()],
+                token_budget: 8_000,
+            }),
+            "the revised bytes start their own count"
+        );
     }
 
     #[test]
@@ -5193,6 +5505,7 @@ mod tests {
             }),
             chunk_fingerprint: "fp".into(),
             selected_range_identities: test_selected_range_identities(),
+            presented_token_budget: None,
             producer_session_id: Some("ps".into()),
             producer_run_id: Some("run-1".into()),
             producer_harness: None,
@@ -5206,6 +5519,7 @@ mod tests {
             last_failure: None,
             last_no_fire: None,
             consecutive_publish_failures: 0,
+            chunk_retry: None,
             memory_reviewer_nonadmission: Default::default(),
             memory_reviewer_reservation: None,
             recent_firings: Vec::new(),
@@ -5993,6 +6307,63 @@ mod tests {
             store.load("ses").unwrap().meta.history_summarizer.state,
             HistorySummarizerPhase::AwaitingProducer,
             "reattach does not clear the durable single-flight"
+        );
+    }
+
+    /// A placeholder firing has no run in any harness; a restart that finds one awaiting abandons it for a refire instead of asking the model harness for a run it never held.
+    #[test]
+    fn restart_mid_awaiting_placeholder_run_abandons_for_refire_without_reattach() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(dir.path());
+        let mut awaiting = producer_started(
+            &match fire(
+                &HistorySummarizerDurableState::default(),
+                1,
+                3,
+                "fp".into(),
+                test_selected_range_identities(),
+                0,
+                HistorySegmentSetGeneration::default(),
+                10,
+            )
+            .unwrap()
+            {
+                FireOutcome::Fired(state) => state,
+                FireOutcome::Busy(_) => unreachable!(),
+            },
+            "producer-session".into(),
+            crate::history_summarizer_chunk::placeholder_run_id("ses"),
+            "pi".into(),
+        )
+        .unwrap();
+        awaiting.chunk_retry = Some(HistorySummarizerChunkRetry {
+            chunk_start: 1,
+            chunk_end: 3,
+            failures: 8,
+            model_chain: vec!["prov/model".to_string()],
+            token_budget: 8_000,
+        });
+        let meta = test_meta_with_history_summarizer(awaiting);
+        store
+            .commit("ses", None, &CoreState::empty(), &meta)
+            .unwrap();
+
+        assert_eq!(
+            handle_restart_load(&store, "ses", 500).unwrap(),
+            RestartAction::AbandonedAndRefireEligible { firing_seq: 1 }
+        );
+        let after = store.load("ses").unwrap().meta.history_summarizer;
+        assert_eq!(after.state, HistorySummarizerPhase::Idle);
+        assert_eq!(
+            after.chunk_retry,
+            Some(HistorySummarizerChunkRetry {
+                chunk_start: 1,
+                chunk_end: 3,
+                failures: 8,
+                model_chain: vec!["prov/model".to_string()],
+                token_budget: 8_000,
+            }),
+            "the refire is still a placeholder firing"
         );
     }
 

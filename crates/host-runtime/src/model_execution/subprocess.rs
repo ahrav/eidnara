@@ -3160,4 +3160,122 @@ mod tests {
             Err(CredentialRowError::CredentialValueTooLarge)
         ));
     }
+
+    #[test]
+    fn setup_and_supervision_failures_are_not_provider_reported() {
+        use std::io;
+
+        use crate::model_execution::backend::{
+            BackendTerminal, Harness, dispatch_closed, harness_mismatch,
+            is_provider_reported_failure,
+        };
+
+        let limits = super::SubprocessLimits::default();
+        let terminals = [
+            super::credential_failure(Harness::OpenCode, CredentialRowError::CredentialMissing),
+            super::harness_unavailable_failure(Harness::Pi, "closure_incomplete"),
+            super::spawn_failure(Harness::OpenCode, &io::Error::from(io::ErrorKind::NotFound)),
+            super::spawn_failure(
+                Harness::Pi,
+                &io::Error::from(io::ErrorKind::PermissionDenied),
+            ),
+            super::abnormal_end_terminal(
+                Harness::OpenCode,
+                super::SubprocessEnd::Signaled,
+                b"",
+                &limits,
+            )
+            .expect("a signal is a failure"),
+            super::abnormal_end_terminal(
+                Harness::Pi,
+                super::SubprocessEnd::Exited(1),
+                b"output blocked by the content filter",
+                &limits,
+            )
+            .expect("a nonzero exit is a failure"),
+            super::parse_failure(Harness::OpenCode, "line 3"),
+            dispatch_closed(Harness::Pi),
+            harness_mismatch(Harness::OpenCode, Harness::Pi),
+        ];
+        for terminal in terminals {
+            let (BackendTerminal::Failed(error) | BackendTerminal::FailedUnresolved(error)) =
+                terminal
+            else {
+                panic!("expected a failed terminal");
+            };
+            assert!(
+                !is_provider_reported_failure(&error.message),
+                "{}",
+                error.message
+            );
+        }
+    }
+
+    /// A cleanup failure or a retained crash record decorates the provider's message; the decoration says nothing about what the provider reported.
+    #[test]
+    fn a_decorated_provider_failure_stays_provider_reported() {
+        use std::io;
+
+        use crate::model_execution::backend::{
+            BackendError, BackendTerminal, ErrorClass, Harness, OPENCODE_PROVIDER_ERROR_MESSAGE,
+            is_provider_reported_failure,
+        };
+
+        let provider = |message: &str| {
+            BackendTerminal::Failed(BackendError {
+                class: ErrorClass::Permanent,
+                message: message.to_owned(),
+                retry_after_secs: None,
+                provider_code: None,
+            })
+        };
+        let cleanup = Err(super::CleanupFailure {
+            kind: io::ErrorKind::PermissionDenied,
+        });
+        let refusal = format!("{OPENCODE_PROVIDER_ERROR_MESSAGE} (status 400)");
+        let decorated = [
+            super::merge_cleanup(provider(&refusal), cleanup),
+            super::merge_record_retained(Harness::OpenCode, provider(&refusal), true),
+        ];
+        for terminal in decorated {
+            let BackendTerminal::Failed(error) = terminal else {
+                panic!("expected a failed terminal");
+            };
+            assert_ne!(error.message, refusal);
+            assert!(
+                is_provider_reported_failure(&error.message),
+                "{}",
+                error.message
+            );
+        }
+        assert!(!is_provider_reported_failure(&format!(
+            "{refusal} while the host was preparing the harness"
+        )));
+    }
+
+    /// A provider status that names the request's content counts against the chunk; one that names the configuration, such as an unknown model, recurs for any chunk until the configuration changes, and a terminal without a status cannot tell the two apart.
+    #[test]
+    fn only_content_rejection_statuses_are_provider_reported() {
+        use crate::model_execution::backend::{
+            OPENCODE_PROVIDER_ERROR_MESSAGE, PI_PROVIDER_ERROR_MESSAGE,
+            is_provider_reported_failure,
+        };
+
+        for status in [400, 413, 422] {
+            let message = format!("{OPENCODE_PROVIDER_ERROR_MESSAGE} (status {status})");
+            assert!(is_provider_reported_failure(&message), "{message}");
+            assert!(
+                is_provider_reported_failure(&format!("{message}; additionally cleanup failed")),
+                "{message}"
+            );
+        }
+        for status in [402, 404, 405, 410, 415] {
+            let message = format!("{OPENCODE_PROVIDER_ERROR_MESSAGE} (status {status})");
+            assert!(!is_provider_reported_failure(&message), "{message}");
+        }
+        assert!(!is_provider_reported_failure(
+            OPENCODE_PROVIDER_ERROR_MESSAGE
+        ));
+        assert!(!is_provider_reported_failure(PI_PROVIDER_ERROR_MESSAGE));
+    }
 }

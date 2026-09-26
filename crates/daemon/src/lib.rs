@@ -3571,6 +3571,8 @@ struct HistorySummarizerFiringTask {
     credential_fingerprints: std::collections::BTreeMap<String, String>,
     /// The MemoryReviewer handoff an accepted fact set is reserved and staged through; `None` when the Kernel is unavailable, which publication records as a nonadmission.
     memory_reviewer_handoff: Option<memory_reviewer::handoff::HandoffTarget>,
+    /// Set once a producer run starts, so an inline caller can tell a started firing from one that failed to connect, start, or claim the state.
+    producer_started: Arc<AtomicBool>,
     trigger: memory_store::summarizer_timeline::FiringTrigger,
 }
 
@@ -5483,6 +5485,11 @@ impl HandlerCore {
                     drop(guard);
                     return Some("recovering");
                 };
+                let selected_range_identities = loaded
+                    .meta
+                    .history_summarizer
+                    .selected_range_identities
+                    .clone();
                 // `usize::MAX` builds the full frozen ordinal range before `presented_input` truncates it to `token_budget` and withdraws the aliases the cut removes.
                 let mut chunk = history_summarizer_chunk::build_history_summarizer_chunk(
                     parsed.messages.as_slice(),
@@ -5491,9 +5498,22 @@ impl HandlerCore {
                     usize::MAX,
                     range.to_ordinal.saturating_add(1),
                 );
-                let token_budget = derive_history_summarizer_chunk_tokens(
+                let configured_budget = derive_history_summarizer_chunk_tokens(
                     config.history_summarizer_context_limit_tokens,
                 );
+                // The fired prompt's own budget; a firing recorded before the field existed falls back to the current retry budget.
+                let token_budget = loaded
+                    .meta
+                    .history_summarizer
+                    .presented_token_budget
+                    .unwrap_or_else(|| {
+                        history_summarizer_chunk::firing_token_budget(
+                            configured_budget,
+                            loaded.meta.history_summarizer.chunk_retry.as_ref(),
+                            range.from_ordinal,
+                            &config.model_chain,
+                        )
+                    });
                 let _ = history_summarizer_chunk::presented_input(&mut chunk, token_budget);
                 let prior_history_segments = match store.load_history_segments(&session_id) {
                     Ok(cs) => cs
@@ -5604,6 +5624,17 @@ impl HandlerCore {
                     .await;
                     if let Err(e) = result {
                         eprintln!("daemon: history_summarizer reattach failed for {session_id}: {e}");
+                        if history_summarizer::is_chunk_failure(&e) {
+                            record_history_summarizer_chunk_failure(
+                                &store,
+                                &session_id,
+                                range.from_ordinal,
+                                range.to_ordinal,
+                                &config.model_chain,
+                                configured_budget,
+                                &selected_range_identities,
+                            );
+                        }
                     }
                 });
                 // ever perform.
@@ -5705,6 +5736,7 @@ impl HandlerCore {
             Err(e) => {
                 return PreparedHistorySummarizerAction::Complete(HistorySummarizerDiagnostics {
                     fired: false,
+                    started: None,
                     reason: None,
                     no_fire: Some(format!("state_load_failed:{e}")),
                     state: "unknown".to_string(),
@@ -5716,6 +5748,7 @@ impl HandlerCore {
         };
         let mut not_fired = HistorySummarizerDiagnostics {
             fired: false,
+            started: None,
             reason: None,
             no_fire: None,
             state: loaded.meta.history_summarizer.state.as_str().to_string(),
@@ -6039,6 +6072,7 @@ impl HandlerCore {
                 credential_fingerprints: binding.credential_fingerprints.clone(),
                 publication_fence: None,
                 memory_reviewer_handoff,
+                producer_started: Arc::default(),
                 trigger: firing_trigger(
                     FiringSource::PressurePath,
                     trigger.reason,
@@ -6195,6 +6229,7 @@ impl HandlerCore {
             credential_fingerprints: binding.credential_fingerprints.clone(),
             publication_fence: None,
             memory_reviewer_handoff,
+            producer_started: Arc::default(),
             trigger,
         }))
     }
@@ -6248,17 +6283,24 @@ impl HandlerCore {
             publication_fence,
             credential_fingerprints,
             memory_reviewer_handoff,
+            producer_started,
             trigger,
         } = task;
         let cancel = live_guard.cancel.clone();
         let _guard = live_guard;
         let failure_started_at_ms = firing.now_ms;
         let configured_failure_backoff_at_ms = firing.failure_backoff_at_ms;
-        let connected = tokio::select! {
-            () = cancel.cancelled() => return Err(history_summarizer::HistorySummarizerDriveError::Cancelled),
-            connected = factory.connect(&project_root, &harness, &credential_fingerprints) => {
-                connected
-            }
+        let connected = match &firing.placeholder_output {
+            Some(output) => Ok(Box::new(history_summarizer_chunk::PlaceholderProducer::new(
+                output.clone(),
+            ))
+                as Box<dyn history_summarizer::HistorySummarizerProducerDriver + Send>),
+            None => tokio::select! {
+                () = cancel.cancelled() => return Err(history_summarizer::HistorySummarizerDriveError::Cancelled),
+                connected = factory.connect(&project_root, &harness, &credential_fingerprints) => {
+                    connected
+                }
+            },
         };
         match connected {
             Ok(mut producer) => {
@@ -6272,10 +6314,25 @@ impl HandlerCore {
                 );
                 request.publication_fence = publication_fence.as_deref();
                 request.memory_reviewer_handoff = memory_reviewer_handoff.as_ref();
-                tokio::select! {
+                request.producer_started = Some(&producer_started);
+                let outcome = tokio::select! {
                     () = cancel.cancelled() => Err(history_summarizer::HistorySummarizerDriveError::Cancelled),
                     outcome = run_history_summarizer_firing(&mut *producer, request) => outcome,
+                };
+                if let Err(error) = &outcome
+                    && history_summarizer::is_chunk_failure(error)
+                {
+                    record_history_summarizer_chunk_failure(
+                        &store,
+                        &session_id,
+                        firing.from_ordinal,
+                        firing.to_ordinal,
+                        &firing.model_chain,
+                        firing.configured_token_budget,
+                        &firing.selected_range_identities,
+                    );
                 }
+                outcome
             }
             Err(err) => {
                 let failure_backoff_at_ms = history_summarizer::completion_failure_backoff_at_ms(
@@ -9067,6 +9124,7 @@ impl HandlerCore {
         let action = if env.parsed.is_subagent {
             PreparedHistorySummarizerAction::Complete(HistorySummarizerDiagnostics {
                 fired: false,
+                started: None,
                 reason: Some("subagent_session".to_string()),
                 no_fire: Some("subagent_session".to_string()),
                 state: "disabled".to_string(),
@@ -9138,12 +9196,23 @@ impl HandlerCore {
                 (diagnostics, HistorySummarizerFollowup::Unchanged)
             }
             PreparedHistorySummarizerAction::FireReady(prepared) => {
-                let diagnostics = prepared.diagnostics.clone();
+                let mut diagnostics = prepared.diagnostics.clone();
+                let producer_started = Arc::clone(&prepared.task.producer_started);
                 let fired_at = Instant::now();
-                let followup = match self
+                let result = self
                     .run_history_summarizer_firing_inline(prepared.task)
-                    .await
-                {
+                    .await;
+                // A wait that elapsed first saw neither a start nor a failure to start; the spawned firing may still start the run.
+                diagnostics.started = match (&result, producer_started.load(Ordering::Relaxed)) {
+                    (
+                        Err(history_summarizer::HistorySummarizerDriveError::Producer(
+                            HistorySummarizerProducerError::TimedOut,
+                        )),
+                        false,
+                    ) => None,
+                    (_, started) => Some(started),
+                };
+                let followup = match result {
                     Ok(_) => HistorySummarizerFollowup::Published,
                     Err(_) => HistorySummarizerFollowup::Failed,
                 };
@@ -18109,6 +18178,55 @@ fn project_slug(path: &Path) -> String {
         .to_string()
 }
 
+/// Counts a chunk failure on the idle state the failed firing left behind; a firing that kept a Publishing state or lost a race records nothing, and neither does one whose selected messages a pass re-adopted meanwhile, since the failure belongs to bytes no longer in the chunk.
+fn record_history_summarizer_chunk_failure(
+    store: &MemoryStore,
+    session_id: &str,
+    chunk_start: u64,
+    chunk_end: u64,
+    model_chain: &[String],
+    token_budget: usize,
+    selected: &[memory_store::HistorySummarizerSelectedMessageIdentity],
+) {
+    for attempt in 0..2 {
+        let loaded = match store.load(session_id) {
+            Ok(loaded) => loaded,
+            Err(error) => {
+                eprintln!(
+                    "daemon: history_summarizer chunk failure count not recorded for {session_id}: {error}"
+                );
+                return;
+            }
+        };
+        if loaded.meta.history_summarizer.state != HistorySummarizerPhase::Idle
+            || selected.iter().any(|message| {
+                loaded.meta.block_identity_by_mid.get(&message.mid)
+                    != Some(&message.block_identities)
+            })
+        {
+            return;
+        }
+        let mut meta = loaded.meta.clone();
+        meta.history_summarizer = history_summarizer::record_chunk_failure(
+            &meta.history_summarizer,
+            chunk_start,
+            chunk_end,
+            model_chain,
+            token_budget,
+        );
+        match store.commit(session_id, loaded.row_version, &loaded.core, &meta) {
+            Ok(_) => return,
+            Err(MemoryStoreError::CasConflict { .. }) if attempt == 0 => continue,
+            Err(error) => {
+                eprintln!(
+                    "daemon: history_summarizer chunk failure count not recorded for {session_id}: {error}"
+                );
+                return;
+            }
+        }
+    }
+}
+
 /// The pressure the scheduler reads for this pass: the request's usage, or the persisted fallback when the request carries none, through `usage_numbers`' limit ladder.
 fn scheduler_usage_numbers(
     parsed: &TransformRequest,
@@ -22532,6 +22650,8 @@ mod tests {
         block_status: std::sync::atomic::AtomicBool,
         /// `connect` waits on `notify` while `block_connect` is set.
         block_connect: std::sync::atomic::AtomicBool,
+        /// `start` fails permanently with this host message for prompts whose chunk starts at this ordinal.
+        refused_chunk: Mutex<Option<(u64, &'static str)>>,
     }
 
     struct TestProducerFactory {
@@ -22614,6 +22734,24 @@ mod tests {
                 .lock()
                 .expect("prompts mutex")
                 .push(prompt.to_string());
+            let refused = *self
+                .state
+                .refused_chunk
+                .lock()
+                .expect("refused chunk mutex");
+            if let Some((refused_start, detail)) = refused
+                && prompt_ordinal_range(prompt).map(|(start, _)| start) == Some(refused_start)
+            {
+                return Err(HistorySummarizerProducerError::RunFailed {
+                    run_id: format!("run-{n}"),
+                    detail: detail.to_string(),
+                    classification: Some(history_summarizer_producer::ErrorClassification {
+                        class: history_summarizer_producer::ErrorClass::Permanent,
+                        retry_after_secs: None,
+                    }),
+                    class_field_present: true,
+                });
+            }
             if let Some(result) = self
                 .state
                 .start_errors
@@ -41432,6 +41570,7 @@ mod tests {
 
         assert_eq!(response["action"], "HARD");
         assert_eq!(response["history_summarizer"]["fired"], true);
+        assert_eq!(response["history_summarizer"]["started"], true);
         assert!(m0_text(&response).contains("autonomous summary"));
         assert_eq!(producer.starts.load(Ordering::SeqCst), 1);
         assert!(
@@ -41504,6 +41643,53 @@ mod tests {
         assert!(
             waited >= 1_200.0,
             "the live wait survives the rerun: {waited}"
+        );
+    }
+
+    /// `fired` reports the dispatch; `started` tells an inline firing whose producer never connected from one that ran.
+    #[tokio::test(flavor = "current_thread")]
+    async fn handler_emergency_inline_connect_failure_reports_fired_but_not_started() {
+        let producer = Arc::new(ProducerState::default());
+        producer
+            .connect_errors
+            .lock()
+            .unwrap()
+            .push_back(HistorySummarizerProducerError::Client(
+                history_summarizer_producer::HistorySummarizerClientFailure {
+                    code: "dial_failed".to_owned(),
+                    message: "daemon dial failed".to_owned(),
+                },
+            ));
+        let (handler, _store, _dir, _project) =
+            handler_with_store(Arc::clone(&producer), default_test_config());
+
+        let response = call_transform_with_usage(&handler, big_messages(), 48_000, 50_000).await;
+
+        assert_eq!(response["history_summarizer"]["fired"], true, "{response}");
+        assert_eq!(
+            response["history_summarizer"]["started"], false,
+            "{response}"
+        );
+        assert_eq!(producer.starts.load(Ordering::SeqCst), 0);
+    }
+
+    /// An inline wait that elapses before the producer connects has not seen the run fail to start; the spawned firing may still start it, so `started` stays unknown.
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn handler_emergency_inline_timeout_leaves_started_unknown() {
+        let producer = Arc::new(ProducerState::default());
+        producer.block_connect.store(true, Ordering::SeqCst);
+        let (handler, _store, _dir, _project) =
+            handler_with_store(Arc::clone(&producer), default_test_config());
+
+        let response = call_transform_with_usage(&handler, big_messages(), 48_000, 50_000).await;
+        producer.block_connect.store(false, Ordering::SeqCst);
+        producer.notify.notify_waiters();
+
+        assert_eq!(response["history_summarizer"]["fired"], true, "{response}");
+        assert_eq!(
+            response["history_summarizer"]["started"],
+            serde_json::Value::Null,
+            "{response}"
         );
     }
 
@@ -41973,6 +42159,7 @@ mod tests {
             }),
             chunk_fingerprint: fingerprint,
             selected_range_identities,
+            presented_token_budget: None,
             producer_session_id: Some("producer-session".to_string()),
             producer_run_id: Some("run-reattach".to_string()),
             producer_harness: producer_harness.map(str::to_owned),
@@ -41983,6 +42170,7 @@ mod tests {
             last_failure: None,
             last_no_fire: None,
             consecutive_publish_failures: 0,
+            chunk_retry: None,
             memory_reviewer_nonadmission: Default::default(),
             memory_reviewer_reservation: None,
             recent_firings: Vec::new(),
@@ -42011,6 +42199,7 @@ mod tests {
             }),
             chunk_fingerprint: "seeded-fingerprint".to_string(),
             selected_range_identities,
+            presented_token_budget: None,
             producer_session_id: Some("producer-session".to_string()),
             producer_run_id: Some("run-stale".to_string()),
             producer_harness: None,
@@ -42021,6 +42210,7 @@ mod tests {
             last_failure: None,
             last_no_fire: None,
             consecutive_publish_failures: 0,
+            chunk_retry: None,
             memory_reviewer_nonadmission: Default::default(),
             memory_reviewer_reservation: None,
             recent_firings: Vec::new(),
@@ -42412,6 +42602,406 @@ mod tests {
         assert_eq!(history_segments[0].end_message, 3);
     }
 
+    /// A reattachment must use the retry budget; otherwise it restores aliases the live cut removed from an oversized message and can accept facts citing unseen bytes.
+    #[tokio::test(flavor = "current_thread")]
+    async fn handler_reattach_presents_a_shrunk_chunk_under_its_retry_budget() {
+        let config = DaemonConfig {
+            history_summarizer_context_limit_tokens: 32_000,
+            ..default_test_config()
+        };
+        let configured_budget =
+            derive_history_summarizer_chunk_tokens(config.history_summarizer_context_limit_tokens);
+        let failures = history_summarizer_chunk::SHRINK_CHUNK_AFTER_FAILURES;
+        let messages: Vec<IngressMessage> = (1..=3)
+            .map(|ordinal| {
+                let words = if ordinal == 1 { 6_000 } else { 10 };
+                wire_with_role(
+                    &format!("m{ordinal}"),
+                    ordinal,
+                    if ordinal % 2 == 1 {
+                        "user"
+                    } else {
+                        "assistant"
+                    },
+                    &format!("message {ordinal} {}", "word ".repeat(words)),
+                )
+            })
+            .collect();
+        let canonical_messages = transform_request(messages.clone(), 1, 200_000).messages;
+        let projection = crate::wire::project_messages(&canonical_messages).unwrap();
+        // At `failures`, the frozen range contains only the oversized first message.
+        let rebuild = || {
+            history_summarizer_chunk::build_history_summarizer_chunk(
+                &canonical_messages,
+                &projection.blocks,
+                1,
+                usize::MAX,
+                2,
+            )
+        };
+        let mut at_configured_budget = rebuild();
+        history_summarizer_chunk::presented_input(&mut at_configured_budget, configured_budget);
+        assert_eq!(at_configured_budget.chunk.aliases.aliases.len(), 1);
+        let mut at_retry_budget = rebuild();
+        history_summarizer_chunk::presented_input(&mut at_retry_budget, configured_budget / 2);
+        assert!(
+            at_retry_budget.chunk.aliases.aliases.is_empty(),
+            "the live firing withdrew the cut alias"
+        );
+
+        let producer = Arc::new(ProducerState::default());
+        producer
+            .outputs
+            .lock()
+            .unwrap()
+            .push_back(history_summarizer_output_with_fact(
+                1,
+                1,
+                "[s1:0-4] cites bytes past the presented cut",
+            ));
+        let (handler, store, _dir, _project) = handler_with_store(Arc::clone(&producer), config);
+        let frozen = rebuild();
+        let fingerprint_items: Vec<_> = frozen.snapshot.iter().map(|item| item.as_item()).collect();
+        let loaded = store.load("ses").unwrap();
+        let mut meta = loaded.meta;
+        meta.block_identity_by_mid
+            .extend(projection.identity_by_mid.clone());
+        meta.history_summarizer = HistorySummarizerDurableState {
+            state: HistorySummarizerPhase::AwaitingProducer,
+            firing_seq: 1,
+            chunk_range: Some(HistorySummarizerChunkRange {
+                from_ordinal: 1,
+                to_ordinal: 1,
+            }),
+            chunk_fingerprint: history_summarizer::compute_chunk_fingerprint(&fingerprint_items),
+            selected_range_identities: vec![
+                memory_store::HistorySummarizerSelectedMessageIdentity {
+                    mid: "m1".to_string(),
+                    block_identities: projection.identity_by_mid["m1"].clone(),
+                },
+            ],
+            producer_session_id: Some("producer-session".to_string()),
+            producer_run_id: Some("run-reattach".to_string()),
+            fired_at_ms: Some(1),
+            chunk_retry: Some(memory_store::HistorySummarizerChunkRetry {
+                chunk_start: 1,
+                chunk_end: 1,
+                failures,
+                model_chain: default_test_config().model_chain,
+                token_budget: configured_budget,
+            }),
+            ..HistorySummarizerDurableState::default()
+        };
+        store
+            .commit("ses", loaded.row_version, &loaded.core, &meta)
+            .unwrap();
+
+        let response = call_transform(&handler, messages).await;
+        assert_eq!(response["history_summarizer"]["no_fire"], "reattaching");
+        wait_for_idle(&store).await;
+
+        let state = store.load("ses").unwrap().meta.history_summarizer;
+        assert_eq!(state.last_failure, None, "{state:?}");
+        assert_eq!(store.load_history_segments("ses").unwrap().len(), 1);
+        assert_eq!(
+            state
+                .memory_reviewer_nonadmission
+                .latest
+                .map(|recorded| recorded.code),
+            Some(
+                memory_store::MemoryReviewerNonadmissionCode::FactSetRejected {
+                    failure: memory_store::ExtractionFailure::UnknownAlias,
+                }
+            ),
+            "{state:?}"
+        );
+    }
+
+    /// The budget a reattachment presents is the one the firing was sent under, even when the model chain changed while the run was in flight; recomputing it from the new configuration would restore aliases the fired prompt withdrew.
+    #[tokio::test(flavor = "current_thread")]
+    async fn handler_reattach_keeps_the_fired_budget_across_a_model_chain_change() {
+        let config = DaemonConfig {
+            history_summarizer_context_limit_tokens: 32_000,
+            ..default_test_config()
+        };
+        let configured_budget =
+            derive_history_summarizer_chunk_tokens(config.history_summarizer_context_limit_tokens);
+        let failures = history_summarizer_chunk::SHRINK_CHUNK_AFTER_FAILURES;
+        let messages: Vec<IngressMessage> = (1..=3)
+            .map(|ordinal| {
+                let words = if ordinal == 1 { 6_000 } else { 10 };
+                wire_with_role(
+                    &format!("m{ordinal}"),
+                    ordinal,
+                    if ordinal % 2 == 1 {
+                        "user"
+                    } else {
+                        "assistant"
+                    },
+                    &format!("message {ordinal} {}", "word ".repeat(words)),
+                )
+            })
+            .collect();
+        let canonical_messages = transform_request(messages.clone(), 1, 200_000).messages;
+        let projection = crate::wire::project_messages(&canonical_messages).unwrap();
+        // At `failures`, the frozen range contains only the oversized first message.
+        let rebuild = || {
+            history_summarizer_chunk::build_history_summarizer_chunk(
+                &canonical_messages,
+                &projection.blocks,
+                1,
+                usize::MAX,
+                2,
+            )
+        };
+        let mut at_configured_budget = rebuild();
+        history_summarizer_chunk::presented_input(&mut at_configured_budget, configured_budget);
+        assert_eq!(at_configured_budget.chunk.aliases.aliases.len(), 1);
+        let mut at_retry_budget = rebuild();
+        history_summarizer_chunk::presented_input(&mut at_retry_budget, configured_budget / 2);
+        assert!(
+            at_retry_budget.chunk.aliases.aliases.is_empty(),
+            "the live firing withdrew the cut alias"
+        );
+
+        let producer = Arc::new(ProducerState::default());
+        producer
+            .outputs
+            .lock()
+            .unwrap()
+            .push_back(history_summarizer_output_with_fact(
+                1,
+                1,
+                "[s1:0-4] cites bytes past the presented cut",
+            ));
+        let (handler, store, _dir, _project) = handler_with_store(Arc::clone(&producer), config);
+        let frozen = rebuild();
+        let fingerprint_items: Vec<_> = frozen.snapshot.iter().map(|item| item.as_item()).collect();
+        let loaded = store.load("ses").unwrap();
+        let mut meta = loaded.meta;
+        meta.block_identity_by_mid
+            .extend(projection.identity_by_mid.clone());
+        meta.history_summarizer = HistorySummarizerDurableState {
+            state: HistorySummarizerPhase::AwaitingProducer,
+            firing_seq: 1,
+            chunk_range: Some(HistorySummarizerChunkRange {
+                from_ordinal: 1,
+                to_ordinal: 1,
+            }),
+            chunk_fingerprint: history_summarizer::compute_chunk_fingerprint(&fingerprint_items),
+            selected_range_identities: vec![
+                memory_store::HistorySummarizerSelectedMessageIdentity {
+                    mid: "m1".to_string(),
+                    block_identities: projection.identity_by_mid["m1"].clone(),
+                },
+            ],
+            producer_session_id: Some("producer-session".to_string()),
+            producer_run_id: Some("run-reattach".to_string()),
+            fired_at_ms: Some(1),
+            presented_token_budget: Some(configured_budget / 2),
+            // The chain that counted the failures is no longer the configured one.
+            chunk_retry: Some(memory_store::HistorySummarizerChunkRetry {
+                chunk_start: 1,
+                chunk_end: 1,
+                failures,
+                model_chain: vec!["retired/model".to_string()],
+                token_budget: configured_budget,
+            }),
+            ..HistorySummarizerDurableState::default()
+        };
+        store
+            .commit("ses", loaded.row_version, &loaded.core, &meta)
+            .unwrap();
+
+        let response = call_transform(&handler, messages).await;
+        assert_eq!(response["history_summarizer"]["no_fire"], "reattaching");
+        wait_for_idle(&store).await;
+
+        let state = store.load("ses").unwrap().meta.history_summarizer;
+        assert_eq!(state.last_failure, None, "{state:?}");
+        assert_eq!(store.load_history_segments("ses").unwrap().len(), 1);
+        assert_eq!(
+            state
+                .memory_reviewer_nonadmission
+                .latest
+                .map(|recorded| recorded.code),
+            Some(
+                memory_store::MemoryReviewerNonadmissionCode::FactSetRejected {
+                    failure: memory_store::ExtractionFailure::UnknownAlias,
+                }
+            ),
+            "{state:?}"
+        );
+    }
+
+    /// A failure counts only against the bytes the firing sent: a pass that re-adopted one of the chunk's messages after the firing abandoned, but before its cleanup finished, has already started the revised bytes at zero, and the old firing's failure is not theirs.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_late_chunk_failure_count_is_fenced_to_the_fired_identities() {
+        let producer = Arc::new(ProducerState::default());
+        let (_handler, store, _dir, _project) =
+            handler_with_store(Arc::clone(&producer), default_test_config());
+        let fired = vec![memory_store::BlockIdentity {
+            kind_tag: "text".to_string(),
+            byte_fingerprint: "fired".to_string(),
+        }];
+        let revised = vec![memory_store::BlockIdentity {
+            kind_tag: "text".to_string(),
+            byte_fingerprint: "revised".to_string(),
+        }];
+        let loaded = store.load("ses").unwrap();
+        let mut meta = loaded.meta;
+        meta.block_identity_by_mid
+            .insert("m1".to_string(), revised.clone());
+        store
+            .commit("ses", loaded.row_version, &loaded.core, &meta)
+            .unwrap();
+        let chain = default_test_config().model_chain;
+        let selected = |identities: Vec<memory_store::BlockIdentity>| {
+            vec![memory_store::HistorySummarizerSelectedMessageIdentity {
+                mid: "m1".to_string(),
+                block_identities: identities,
+            }]
+        };
+
+        record_history_summarizer_chunk_failure(
+            &store,
+            "ses",
+            1,
+            1,
+            &chain,
+            8_000,
+            &selected(fired),
+        );
+        assert_eq!(
+            store
+                .load("ses")
+                .unwrap()
+                .meta
+                .history_summarizer
+                .chunk_retry,
+            None,
+            "the fired bytes are gone; their failure does not count against the revised ones"
+        );
+
+        record_history_summarizer_chunk_failure(
+            &store,
+            "ses",
+            1,
+            1,
+            &chain,
+            8_000,
+            &selected(revised),
+        );
+        assert_eq!(
+            store
+                .load("ses")
+                .unwrap()
+                .meta
+                .history_summarizer
+                .chunk_retry
+                .map(|retry| retry.failures),
+            Some(1)
+        );
+    }
+
+    /// A reattached run that ends in a chunk failure counts toward the same ladder as a live one; otherwise a restart during every firing would retry the identical chunk forever.
+    #[tokio::test(flavor = "current_thread")]
+    async fn handler_reattach_counts_a_chunk_failure_toward_the_retry_ladder() {
+        let messages: Vec<IngressMessage> = (1..=3)
+            .map(|ordinal| {
+                wire_with_role(
+                    &format!("m{ordinal}"),
+                    ordinal,
+                    if ordinal % 2 == 1 {
+                        "user"
+                    } else {
+                        "assistant"
+                    },
+                    &format!("message {ordinal} {}", "word ".repeat(200)),
+                )
+            })
+            .collect();
+        let canonical_messages = transform_request(messages.clone(), 1, 200_000).messages;
+        let projection = crate::wire::project_messages(&canonical_messages).unwrap();
+        let frozen = history_summarizer_chunk::build_history_summarizer_chunk(
+            &canonical_messages,
+            &projection.blocks,
+            1,
+            usize::MAX,
+            2,
+        );
+        let producer = Arc::new(ProducerState::default());
+        producer
+            .outputs
+            .lock()
+            .unwrap()
+            .push_back("<output>not a history_segments document</output>".to_string());
+        let (handler, store, _dir, _project) =
+            handler_with_store(Arc::clone(&producer), default_test_config());
+        let fingerprint_items: Vec<_> = frozen.snapshot.iter().map(|item| item.as_item()).collect();
+        let loaded = store.load("ses").unwrap();
+        let mut meta = loaded.meta;
+        meta.block_identity_by_mid
+            .extend(projection.identity_by_mid.clone());
+        meta.history_summarizer = HistorySummarizerDurableState {
+            state: HistorySummarizerPhase::AwaitingProducer,
+            firing_seq: 1,
+            chunk_range: Some(HistorySummarizerChunkRange {
+                from_ordinal: 1,
+                to_ordinal: 1,
+            }),
+            chunk_fingerprint: history_summarizer::compute_chunk_fingerprint(&fingerprint_items),
+            selected_range_identities: vec![
+                memory_store::HistorySummarizerSelectedMessageIdentity {
+                    mid: "m1".to_string(),
+                    block_identities: projection.identity_by_mid["m1"].clone(),
+                },
+            ],
+            producer_session_id: Some("producer-session".to_string()),
+            producer_run_id: Some("run-reattach".to_string()),
+            fired_at_ms: Some(1),
+            chunk_retry: Some(memory_store::HistorySummarizerChunkRetry {
+                chunk_start: 1,
+                chunk_end: 1,
+                failures: 2,
+                model_chain: default_test_config().model_chain,
+                token_budget: derive_history_summarizer_chunk_tokens(
+                    default_test_config().history_summarizer_context_limit_tokens,
+                ),
+            }),
+            ..HistorySummarizerDurableState::default()
+        };
+        store
+            .commit("ses", loaded.row_version, &loaded.core, &meta)
+            .unwrap();
+
+        let response = call_transform(&handler, messages).await;
+        assert_eq!(response["history_summarizer"]["no_fire"], "reattaching");
+        wait_for_idle(&store).await;
+
+        let state = store.load("ses").unwrap().meta.history_summarizer;
+        assert!(
+            state
+                .last_failure
+                .as_deref()
+                .is_some_and(|failure| failure.starts_with("validate rejected")),
+            "{state:?}"
+        );
+        assert_eq!(
+            state.chunk_retry,
+            Some(memory_store::HistorySummarizerChunkRetry {
+                chunk_start: 1,
+                chunk_end: 1,
+                failures: 3,
+                model_chain: default_test_config().model_chain,
+                token_budget: derive_history_summarizer_chunk_tokens(
+                    default_test_config().history_summarizer_context_limit_tokens
+                ),
+            }),
+            "{state:?}"
+        );
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn handler_reattach_publishes_under_the_memories_authority_project() {
         let producer = Arc::new(ProducerState::default());
@@ -42616,6 +43206,11 @@ mod tests {
 
         let first = call_transform(&handler, messages.clone()).await;
         assert_eq!(first["history_summarizer"]["fired"], true);
+        assert_eq!(
+            first["history_summarizer"]["started"],
+            Value::Null,
+            "an asynchronous firing has no start outcome in its own response"
+        );
         wait_for_count(&producer.connects, 1).await;
         wait_for_history_summarizer_state(&store, |state| {
             state
@@ -42657,6 +43252,117 @@ mod tests {
         let state = store.load("ses").unwrap().meta.history_summarizer;
         assert_eq!(state.last_failure, None);
         assert_eq!(state.failure_backoff_at_ms, None);
+    }
+
+    async fn fire_and_settle(handler: &Handler, store: &MemoryStore, messages: &[IngressMessage]) {
+        loop {
+            if store.load("ses").is_ok() {
+                expire_history_summarizer_backoff(store);
+            }
+            let response = call_transform(handler, messages.to_vec()).await;
+            if response["history_summarizer"]["fired"] == true {
+                wait_for_idle(store).await;
+                return;
+            }
+            assert_eq!(
+                response["history_summarizer"]["no_fire"], "busy",
+                "{response}"
+            );
+            tokio::time::sleep(TEST_WAIT_POLL).await;
+        }
+    }
+
+    /// A chunk every model refuses varies its prompt, shrinks, and finally publishes a placeholder, so folding continues past it within a bounded number of firings.
+    #[tokio::test(flavor = "current_thread")]
+    async fn handler_chunk_that_always_fails_stops_stalling_folding() {
+        let producer = Arc::new(ProducerState::default());
+        *producer.refused_chunk.lock().unwrap() =
+            Some((1, "opencode provider reported an error (status 400)"));
+        let (handler, store, _dir, _project) =
+            handler_with_store(Arc::clone(&producer), default_test_config());
+        let messages = big_messages();
+
+        let mut firings = 0;
+        while store
+            .load_history_summarizer_assembly_snapshot("ses")
+            .unwrap()
+            .history_segments
+            .iter()
+            .all(|segment| segment.start_message == 1)
+        {
+            assert!(firings < 20, "folding stalled on the refused chunk");
+            fire_and_settle(&handler, &store, &messages).await;
+            firings += 1;
+        }
+        let segments = store
+            .load_history_summarizer_assembly_snapshot("ses")
+            .unwrap()
+            .history_segments;
+        assert!(segments[0].title.starts_with("Unsummarized messages 1-"));
+        assert!(segments[1].start_message > segments[0].end_message);
+        assert_eq!(
+            firings,
+            history_summarizer_chunk::PLACEHOLDER_AFTER_FAILURES as usize + 2,
+            "the refused firings, the placeholder, and the first model publish past it"
+        );
+        let prompts = producer.prompts.lock().unwrap().clone();
+        let refused = history_summarizer_chunk::PLACEHOLDER_AFTER_FAILURES as usize;
+        assert_eq!(prompts.len(), refused + 1, "the placeholder calls no model");
+        assert_eq!(prompts[0], prompts[1], "a first retry sends the same bytes");
+        assert_ne!(
+            prompts[1], prompts[2],
+            "a repeated failure varies the seeds"
+        );
+        assert!(
+            prompts[7].len() < prompts[3].len() / 2,
+            "further failures shrink the presented chunk"
+        );
+        assert_eq!(
+            store
+                .load("ses")
+                .unwrap()
+                .meta
+                .history_summarizer
+                .chunk_retry,
+            None,
+            "a publish clears the count"
+        );
+    }
+
+    /// A harness that cannot run fails the same way on every chunk. Counting that as a chunk failure would publish placeholders over real history for as long as the environment stays broken, so the chunk keeps its model attempts and publishes nothing.
+    #[tokio::test(flavor = "current_thread")]
+    async fn handler_setup_failure_does_not_placeholder_the_chunk() {
+        let producer = Arc::new(ProducerState::default());
+        *producer.refused_chunk.lock().unwrap() =
+            Some((1, "opencode harness_unavailable: credential_missing"));
+        let (handler, store, _dir, _project) =
+            handler_with_store(Arc::clone(&producer), default_test_config());
+        let messages = big_messages();
+
+        let firings = history_summarizer_chunk::PLACEHOLDER_AFTER_FAILURES as usize + 1;
+        for _ in 0..firings {
+            fire_and_settle(&handler, &store, &messages).await;
+        }
+
+        assert!(
+            store.load_history_segments("ses").unwrap().is_empty(),
+            "no placeholder covers the chunk"
+        );
+        assert_eq!(
+            store
+                .load("ses")
+                .unwrap()
+                .meta
+                .history_summarizer
+                .chunk_retry,
+            None
+        );
+        let prompts = producer.prompts.lock().unwrap().clone();
+        assert_eq!(prompts.len(), firings, "every firing called the model");
+        assert!(
+            prompts.iter().all(|prompt| *prompt == prompts[0]),
+            "the retry ladder never engaged"
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]

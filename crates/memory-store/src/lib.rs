@@ -536,6 +536,21 @@ pub struct HistorySummarizerChunkRange {
     pub to_ordinal: u64,
 }
 
+/// Consecutive failed firings on the chunk that starts at `chunk_start` under `model_chain` and `token_budget`. Assembly reads it to vary the prompt, then shrink the chunk, so a chunk that fails deterministically cannot stall folding; a count kept under another chain does not apply, so a configuration fix sends the bytes to the new models first.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HistorySummarizerChunkRetry {
+    pub chunk_start: u64,
+    /// The last ordinal the counted firing sent; a re-adoption past it leaves the count alone.
+    #[serde(default)]
+    pub chunk_end: u64,
+    pub failures: u32,
+    #[serde(default)]
+    pub model_chain: Vec<String>,
+    /// The configured chunk token budget the failures were counted under; a lowered budget presents a smaller chunk, so the count starts over.
+    #[serde(default)]
+    pub token_budget: usize,
+}
+
 /// Content-sensitive identity for one message selected into a history_summarizer firing.
 /// The outer firing vector preserves message order; each block vector preserves
 /// the canonical block order already tracked by [`ModuleMeta::block_identity_by_mid`].
@@ -929,6 +944,9 @@ pub struct HistorySummarizerDurableState {
     /// transaction, allowing later tail extension while rejecting selected-byte drift.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub selected_range_identities: Vec<HistorySummarizerSelectedMessageIdentity>,
+    /// The token budget the fired prompt was presented under, after any retry shrink; a reattachment presents the frozen range under it rather than under the current configuration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub presented_token_budget: Option<usize>,
     #[serde(default)]
     pub producer_session_id: Option<String>,
     #[serde(default)]
@@ -972,6 +990,9 @@ pub struct HistorySummarizerDurableState {
     /// state: it makes repeated fence/outbox failures visible without affecting bytes.
     #[serde(default)]
     pub consecutive_publish_failures: u32,
+    /// Consecutive producer or validation failures on one chunk. Abandonment carries it; a publish clears it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chunk_retry: Option<HistorySummarizerChunkRetry>,
     /// Q31 nonadmission count and latest reason. Unlike the fields above, these are not cleared by any transition: every constructor carries them from the prior state.
     #[serde(default)]
     pub memory_reviewer_nonadmission: MemoryReviewerNonadmission,
@@ -997,6 +1018,7 @@ impl Default for HistorySummarizerDurableState {
             chunk_range: None,
             chunk_fingerprint: String::new(),
             selected_range_identities: Vec::new(),
+            presented_token_budget: None,
             producer_session_id: None,
             producer_run_id: None,
             producer_harness: None,
@@ -1007,6 +1029,7 @@ impl Default for HistorySummarizerDurableState {
             last_failure: None,
             last_no_fire: None,
             consecutive_publish_failures: 0,
+            chunk_retry: None,
             memory_reviewer_nonadmission: MemoryReviewerNonadmission::default(),
             memory_reviewer_reservation: None,
             recent_firings: Vec::new(),
@@ -1025,6 +1048,7 @@ impl HistorySummarizerDurableState {
             chunk_range: _,
             chunk_fingerprint: _,
             selected_range_identities: _,
+            presented_token_budget: _,
             producer_session_id: _,
             producer_run_id: _,
             producer_harness: _,
@@ -1035,6 +1059,7 @@ impl HistorySummarizerDurableState {
             last_failure: _,
             last_no_fire: _,
             consecutive_publish_failures: _,
+            chunk_retry: _,
             memory_reviewer_nonadmission,
             memory_reviewer_reservation: _,
             recent_firings,
@@ -1370,6 +1395,7 @@ pub struct HistorySummarizerAssemblySnapshot {
     pub history_segments: Vec<StoredHistorySegment>,
     pub revert_epoch: u64,
     pub history_segment_set_generation: HistorySegmentSetGeneration,
+    pub chunk_retry: Option<HistorySummarizerChunkRetry>,
 }
 
 /// Result of a deterministic revert re-cut. The caller must use the returned
@@ -10524,18 +10550,19 @@ impl MemoryStore {
                 )?;
                 Ok((meta_json, history_segments, history_segment_set_generation))
             })?;
-        let revert_epoch = match meta_json {
+        let (revert_epoch, chunk_retry) = match meta_json {
             Some(json) => {
-                serde_json::from_str::<ModuleMeta>(&json)
-                    .map_err(|e| MemoryStoreError::Serde(e.to_string()))?
-                    .revert_epoch
+                let meta = serde_json::from_str::<ModuleMeta>(&json)
+                    .map_err(|e| MemoryStoreError::Serde(e.to_string()))?;
+                (meta.revert_epoch, meta.history_summarizer.chunk_retry)
             }
-            None => 0,
+            None => (0, None),
         };
         Ok(HistorySummarizerAssemblySnapshot {
             history_segments,
             revert_epoch,
             history_segment_set_generation,
+            chunk_retry,
         })
     }
 
@@ -11876,6 +11903,7 @@ impl MemoryStore {
                 } else {
                     history_summarizer.consecutive_publish_failures
                 },
+                chunk_retry: history_summarizer.chunk_retry.clone(),
                 memory_reviewer_reservation: history_summarizer.memory_reviewer_reservation.clone(),
                 ..history_summarizer.carried_forward()
             };
@@ -21736,6 +21764,7 @@ mod tests {
                 }),
                 chunk_fingerprint: "fp".into(),
                 selected_range_identities,
+                presented_token_budget: None,
                 producer_session_id: Some("producer-session".into()),
                 producer_run_id: Some("run-1".into()),
                 producer_harness: None,
@@ -21746,6 +21775,13 @@ mod tests {
                 last_failure: None,
                 last_no_fire: None,
                 consecutive_publish_failures: 0,
+                chunk_retry: Some(HistorySummarizerChunkRetry {
+                    chunk_start: 10,
+                    chunk_end: 12,
+                    failures: 3,
+                    model_chain: vec!["prov/model".to_string()],
+                    token_budget: 8_000,
+                }),
                 memory_reviewer_nonadmission: MemoryReviewerNonadmission::default(),
                 memory_reviewer_reservation: None,
                 recent_firings: Vec::new(),
@@ -21794,6 +21830,22 @@ mod tests {
                 expected_failures,
             );
         }
+        let abandoned = store
+            .load("publish-health")
+            .unwrap()
+            .meta
+            .history_summarizer;
+        assert_eq!(
+            abandoned.chunk_retry,
+            Some(HistorySummarizerChunkRetry {
+                chunk_start: 10,
+                chunk_end: 12,
+                failures: 3,
+                model_chain: vec!["prov/model".to_string()],
+                token_budget: 8_000,
+            }),
+            "abandonment keeps the chunk failure count",
+        );
 
         let successful = store
             .load("publish-health")
@@ -21803,6 +21855,7 @@ mod tests {
             .cleared_of_in_flight_firing();
         assert_eq!(successful.consecutive_publish_failures, 0);
         assert_eq!(successful.firing_seq, predicate.firing_seq);
+        assert_eq!(successful.chunk_retry, None);
     }
 
     fn publish_predicate() -> HistorySummarizerPublishPredicate {
