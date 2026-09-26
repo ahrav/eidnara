@@ -1872,17 +1872,11 @@ history: `crates/daemon/src/transform_meta_bound.rs` commits a first HARD
 pass over 10,000 messages whose segments cover all but the last 200 with
 about 70 KiB of meta, the same as at 1,000. A session with no coverage still
 carries roughly 340 bytes of meta per uncovered message, so about 1,500
-uncovered 2 KiB messages reach the bound. S0 and S1 sit well under that. At S1
-with 900 aged messages the recording life completes and the campaign is
-refused `EnvelopeExceeded { CassetteBytes }`: the recorded cassette is about
-6.9 MB (7.7 MB at 1,000) against the campaign envelope's fixed 1 MiB, now
-that the secret scanner no longer refuses the recording's redaction (before
-that fix the cassette was refused and stayed under 2 KiB). Before the meta
-was bounded by the tail, the 1,000-message recording life reached the meta
-bound instead: the host refused turn 980 with `host.transform_failed`, 83
-firings never reached the backend, and the campaign published with the
-structured aged samples `indeterminate`, which is the path `TurnRefused` and
-`unreached_firings` were built for.
+uncovered 2 KiB messages reach the bound. S0 and S1 sit well under that. The
+campaign envelope's cassette bound does not: at S1 the recording life
+completes and the campaign is refused `EnvelopeExceeded { CassetteBytes }`,
+the recorded cassette about 6.9 MB at 900 aged messages and 7.7 MB at 1,000
+against the envelope's fixed 1 MiB.
 
 What the campaign found about the pair compiler on surface 1: its recency
 window counts messages, but surface 1's unit is the segment, so at S0 the
