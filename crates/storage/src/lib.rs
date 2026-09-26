@@ -278,6 +278,59 @@ mod sqlite_backend {
                 .collect()
         }
 
+        /// Starts recording per-run statement work on the store's connection; an earlier
+        /// recording is discarded. Every statement the connection runs is recorded, whatever
+        /// path prepared it, including the store's own fence statements.
+        ///
+        /// # Panics
+        ///
+        /// Panics when called from a callback running under the connection lock.
+        #[cfg(any(test, feature = "test-support"))]
+        pub fn start_statement_work_ledger(&self) {
+            let conn = self
+                .lock_conn()
+                .expect("the ledger is armed outside a store callback");
+            *self.gate.work_ledger() = Some(WorkLedger::default());
+            // SAFETY: the context pointer is the gate. `SqliteStore.gate` holds it for the
+            // store's life and the connection's authorizer holds it until the connection
+            // closes, so it outlives every callback the connection invokes. The callback
+            // reads only its arguments and the gate.
+            let rc = unsafe {
+                rusqlite::ffi::sqlite3_trace_v2(
+                    conn.handle(),
+                    rusqlite::ffi::SQLITE_TRACE_STMT
+                        | rusqlite::ffi::SQLITE_TRACE_ROW
+                        | rusqlite::ffi::SQLITE_TRACE_PROFILE,
+                    Some(record_statement_work),
+                    Arc::as_ptr(&self.gate).cast_mut().cast(),
+                )
+            };
+            assert_eq!(rc, rusqlite::ffi::SQLITE_OK, "sqlite3_trace_v2 installs");
+        }
+
+        /// Stops the ledger armed by [`Self::start_statement_work_ledger`] and returns every
+        /// statement run it recorded, in completion order. Empty when never armed.
+        ///
+        /// # Panics
+        ///
+        /// Panics when called from a callback running under the connection lock.
+        #[cfg(any(test, feature = "test-support"))]
+        pub fn take_statement_work(&self) -> Vec<StatementWork> {
+            let conn = self
+                .lock_conn()
+                .expect("the ledger is read outside a store callback");
+            // SAFETY: a zero mask with no callback unregisters the trace hook; no pointer
+            // is retained afterwards.
+            unsafe {
+                rusqlite::ffi::sqlite3_trace_v2(conn.handle(), 0, None, std::ptr::null_mut());
+            }
+            self.gate
+                .work_ledger()
+                .take()
+                .map(|ledger| ledger.done)
+                .unwrap_or_default()
+        }
+
         fn over(claimed: ClaimedConnection, epoch: u64, lease: Option<HeldFileLease>) -> Self {
             SqliteStore {
                 conn: Mutex::new(claimed.conn),
@@ -859,6 +912,94 @@ mod sqlite_backend {
         }
     }
 
+    /// One completed run of one statement, recorded by
+    /// [`SqliteStore::start_statement_work_ledger`].
+    #[cfg(any(test, feature = "test-support"))]
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct StatementWork {
+        /// The statement text as prepared, trimmed.
+        pub sql: String,
+        /// Rows the run produced to its caller.
+        pub rows: u64,
+        /// Virtual-machine operations the run executed (`SQLITE_STMTSTATUS_VM_STEP`), which
+        /// counts rows visited, not rows returned; a trigger's work is included.
+        pub vm_steps: u64,
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    #[derive(Default)]
+    struct WorkLedger {
+        /// Per running statement handle: the cumulative VM step count at the run's start and
+        /// the rows produced so far. SQLite keeps the step count across runs in a 32-bit
+        /// counter, so a run's steps are the wrapping difference of two readings.
+        open: std::collections::HashMap<usize, (u32, u64)>,
+        done: Vec<StatementWork>,
+    }
+
+    /// The `sqlite3_trace_v2` hook behind the statement-work ledger. `TRACE_STMT` opens a
+    /// run (a trigger sub-program reports the same handle again, so the first baseline
+    /// stays), `TRACE_ROW` counts a produced row, and `TRACE_PROFILE` closes the run.
+    #[cfg(any(test, feature = "test-support"))]
+    unsafe extern "C" fn record_statement_work(
+        event: std::ffi::c_uint,
+        context: *mut std::ffi::c_void,
+        statement: *mut std::ffi::c_void,
+        _detail: *mut std::ffi::c_void,
+    ) -> c_int {
+        let stmt = statement.cast::<rusqlite::ffi::sqlite3_stmt>();
+        // SAFETY: `context` is the gate registered by `start_statement_work_ledger`, kept
+        // alive by `SqliteStore.gate` and the connection's authorizer; `stmt` is the live
+        // statement SQLite reports, and the status read and the SQL text read neither retain
+        // nor free it.
+        let (gate, steps) = unsafe {
+            (
+                &*context.cast::<AuthorityGate>(),
+                rusqlite::ffi::sqlite3_stmt_status(
+                    stmt,
+                    rusqlite::ffi::SQLITE_STMTSTATUS_VM_STEP,
+                    0,
+                )
+                .cast_unsigned(),
+            )
+        };
+        let mut guard = gate.work_ledger();
+        let Some(ledger) = guard.as_mut() else {
+            return 0;
+        };
+        let key = stmt as usize;
+        match event {
+            rusqlite::ffi::SQLITE_TRACE_STMT => {
+                ledger.open.entry(key).or_insert((steps, 0));
+            }
+            rusqlite::ffi::SQLITE_TRACE_ROW => {
+                ledger.open.entry(key).or_insert((steps, 0)).1 += 1;
+            }
+            rusqlite::ffi::SQLITE_TRACE_PROFILE => {
+                let (baseline, rows) = ledger.open.remove(&key).unwrap_or((steps, 0));
+                // SAFETY: as above; the returned text is owned by the statement and copied
+                // before the callback returns.
+                let sql = unsafe {
+                    let text = rusqlite::ffi::sqlite3_sql(stmt);
+                    if text.is_null() {
+                        String::new()
+                    } else {
+                        std::ffi::CStr::from_ptr(text)
+                            .to_string_lossy()
+                            .trim()
+                            .to_string()
+                    }
+                };
+                ledger.done.push(StatementWork {
+                    sql,
+                    rows,
+                    vm_steps: u64::from(steps.wrapping_sub(baseline)),
+                });
+            }
+            _ => {}
+        }
+        0
+    }
+
     /// Bytes the SQLite library holds through its allocator, across every connection in
     /// the process, so an assertion on a delta must leave room for concurrent connections.
     /// Zero unless [`enable_library_memory_statistics`] ran first in this process: the
@@ -1204,6 +1345,9 @@ mod sqlite_backend {
     /// no method holds the lock across a statement.
     struct AuthorityGate {
         state: Mutex<GateState>,
+        /// Kept apart from `state` because the trace hook takes it while a statement steps.
+        #[cfg(any(test, feature = "test-support"))]
+        work: Mutex<Option<WorkLedger>>,
     }
 
     impl AuthorityGate {
@@ -1221,6 +1365,8 @@ mod sqlite_backend {
                     #[cfg(any(test, feature = "test-support"))]
                     statement_probe: None,
                 }),
+                #[cfg(any(test, feature = "test-support"))]
+                work: Mutex::new(None),
             });
             let hook = Arc::clone(&gate);
             conn.authorizer(Some(move |context: rusqlite::hooks::AuthContext<'_>| {
@@ -1232,6 +1378,11 @@ mod sqlite_backend {
 
         fn lock(&self) -> MutexGuard<'_, GateState> {
             self.state.lock().unwrap_or_else(|p| p.into_inner())
+        }
+
+        #[cfg(any(test, feature = "test-support"))]
+        fn work_ledger(&self) -> MutexGuard<'_, Option<WorkLedger>> {
+            self.work.lock().unwrap_or_else(|p| p.into_inner())
         }
 
         fn authorize(
@@ -3131,6 +3282,8 @@ mod sqlite_backend {
     }
 }
 
+#[cfg(all(feature = "sqlite", any(test, feature = "test-support")))]
+pub use sqlite_backend::StatementWork;
 #[cfg(all(feature = "sqlite", feature = "test-support"))]
 pub use sqlite_backend::after_commit_for_test;
 #[cfg(all(feature = "sqlite", any(test, feature = "test-support")))]
@@ -6173,6 +6326,101 @@ mod tests {
             })
             .expect("reading the pragmas stays allowed");
         assert_eq!((cache_size, temp_store, mmap_size), (-512, 2, 0));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    fn kv_store_with_rows(rows: usize) -> (std::path::PathBuf, SqliteStore) {
+        let (root, d) = tmp();
+        let store = open_sqlite(&d, KV_BASELINE).expect("open");
+        store
+            .with_conn_fenced(|tx| {
+                let mut insert = tx.prepare_cached("INSERT INTO kv (k, v) VALUES (?1, ?2)")?;
+                for i in 0..rows {
+                    insert.execute(rusqlite::params![format!("k{i:08}"), format!("v{i}")])?;
+                }
+                Ok(())
+            })
+            .expect("seed the table");
+        (root, store)
+    }
+
+    fn only_work(store: &SqliteStore, sql: &str) -> Vec<super::StatementWork> {
+        store
+            .take_statement_work()
+            .into_iter()
+            .filter(|work| work.sql == sql)
+            .collect()
+    }
+
+    #[test]
+    fn statement_work_counts_visited_rows_not_returned_rows() {
+        const SCAN: &str = "SELECT k FROM kv WHERE v = ?1 LIMIT 1";
+        let (root, store) = kv_store_with_rows(10_000);
+        store.start_statement_work_ledger();
+        let found: String = store
+            .with_conn(|c| c.query_row(SCAN, ["v9999"], |r| r.get(0)))
+            .expect("scan");
+        assert_eq!(found, "k00009999");
+        let work = only_work(&store, SCAN);
+        assert_eq!(work.len(), 1, "one run recorded: {work:?}");
+        assert_eq!(work[0].rows, 1, "LIMIT 1 returns one row");
+        assert!(
+            work[0].vm_steps > 10_000,
+            "the scan visits every row before the match, got {work:?}"
+        );
+        drop(store);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn statement_work_of_a_point_lookup_is_independent_of_table_size() {
+        const POINT: &str = "SELECT v FROM kv WHERE k = ?1";
+        let steps = |rows: usize| {
+            let (root, store) = kv_store_with_rows(rows);
+            store.start_statement_work_ledger();
+            store
+                .with_conn(|c| c.query_row(POINT, ["k00000042"], |r| r.get::<_, String>(0)))
+                .expect("lookup");
+            let work = only_work(&store, POINT);
+            drop(store);
+            let _ = std::fs::remove_dir_all(&root);
+            assert_eq!(work.len(), 1);
+            assert_eq!(work[0].rows, 1);
+            work[0].vm_steps
+        };
+        assert_eq!(steps(100), steps(20_000));
+    }
+
+    #[test]
+    fn statement_work_of_a_cached_statement_is_per_run() {
+        const RANGE: &str = "SELECT k FROM kv WHERE k >= ?1 ORDER BY k LIMIT 10";
+        let (root, store) = kv_store_with_rows(1_000);
+        store.start_statement_work_ledger();
+        store
+            .with_conn(|c| {
+                for _ in 0..3 {
+                    let mut stmt = c.prepare_cached(RANGE)?;
+                    let rows = stmt
+                        .query_map(["k00000100"], |r| r.get::<_, String>(0))?
+                        .collect::<rusqlite::Result<Vec<_>>>()?;
+                    assert_eq!(rows.len(), 10);
+                }
+                Ok(())
+            })
+            .expect("run the cached statement");
+        let work = only_work(&store, RANGE);
+        assert_eq!(work.len(), 3, "{work:?}");
+        assert!(work.iter().all(|w| w.rows == 10));
+        assert!(work[0].vm_steps > 0);
+        assert!(
+            work.iter().all(|w| w.vm_steps == work[0].vm_steps),
+            "each run reports its own work, not the running total: {work:?}"
+        );
+        assert!(
+            store.take_statement_work().is_empty(),
+            "taking the work stops the ledger"
+        );
+        drop(store);
         let _ = std::fs::remove_dir_all(&root);
     }
 

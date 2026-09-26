@@ -1892,6 +1892,9 @@ pub enum TransformError {
     ReductionConflict,
     #[error("{0}")]
     CoverageGap(String),
+    /// More rows landed above the folded sequence mid-pass than m1 reads; retried like a CAS conflict.
+    #[error("history_segment set moved under the pass: more new rows than the m1 row cap")]
+    HistorySegmentSetMoved,
     #[error("search: {0}")]
     Search(String),
     #[error("wire: {0}")]
@@ -1924,24 +1927,11 @@ impl From<WireError> for TransformError {
 
 impl From<MemoryStoreError> for TransformError {
     fn from(e: MemoryStoreError) -> Self {
-        TransformError::Store(e)
-    }
-}
-impl From<crate::m0_compose::M0ComposeError> for TransformError {
-    fn from(e: crate::m0_compose::M0ComposeError) -> Self {
-        use crate::m0_compose::M0ComposeError;
         match e {
-            M0ComposeError::Store(s) => TransformError::Store(s),
-            M0ComposeError::CoverageGap(g) => TransformError::CoverageGap(g.to_string()),
-        }
-    }
-}
-impl From<crate::m1_compose::M1ComposeError> for TransformError {
-    fn from(e: crate::m1_compose::M1ComposeError) -> Self {
-        use crate::m1_compose::M1ComposeError;
-        match e {
-            M1ComposeError::Store(s) => TransformError::Store(s),
-            M1ComposeError::CoverageGap(g) => TransformError::CoverageGap(g.to_string()),
+            MemoryStoreError::HistorySegmentRangesOutOfOrder { .. } => {
+                TransformError::CoverageGap(e.to_string())
+            }
+            e => TransformError::Store(e),
         }
     }
 }
@@ -1971,7 +1961,7 @@ fn compose_m0_for_context(
     inputs: &crate::m0_compose::M0ComposeInputs<'_>,
     estimate_tokens: impl Fn(&str) -> usize + Copy,
     ctx: &ProducerContext<'_>,
-) -> Result<crate::m0_compose::M0Composition, crate::m0_compose::M0ComposeError> {
+) -> Result<crate::m0_compose::M0Composition, MemoryStoreError> {
     compose_m0(store, inputs, ctx.project_memory_rows(), estimate_tokens)
 }
 
@@ -2212,9 +2202,10 @@ fn apply_once_with_estimator_and_projection(
             boundary_divergence_retry,
             &mut boundary_divergence_detected,
         ) {
-            Err(TransformError::Store(MemoryStoreError::CasConflict { .. }))
-                if attempt < MAX_CAS_RETRIES =>
-            {
+            Err(
+                TransformError::Store(MemoryStoreError::CasConflict { .. })
+                | TransformError::HistorySegmentSetMoved,
+            ) if attempt < MAX_CAS_RETRIES => {
                 // A history_summarizer publish can win after detection but before the transform commit.
                 // The reload path preserves recut intent so a new m1 watermark cannot convert a proven inconsistency into an ordinary defer.
                 boundary_divergence_retry |= boundary_divergence_detected;
@@ -2935,6 +2926,8 @@ fn apply_additive_only(
             let mut additive_meta = meta.clone();
             additive_meta.folded_history_segment_seq = m1_signal.max_history_segment_seq;
             additive_meta.coverage_ordinal = None;
+            #[cfg(test)]
+            run_transform_attempt_hook(&format!("m1_compose:{}", req.session_id));
             let m1 = compose_m1(
                 store,
                 ctx.note_project_path,
@@ -2944,14 +2937,20 @@ fn apply_additive_only(
                 ctx.memory_enabled,
                 ctx.user_profile_budget_tokens,
                 ctx.temporal_awareness,
+                m1_row_cap_for(req.geometry.as_ref()),
                 crate::token_cache::cached_estimate_tokens,
             )?;
             note_deliveries = m1.note_deliveries.clone();
+            // Rows above the signal's newest sequence past the row cap landed mid-pass. The retry
+            // reloads the signal and reclaims the notes this pass left unacked.
+            let Some(m1_body) = m1.body.as_deref() else {
+                return Err(TransformError::HistorySegmentSetMoved);
+            };
             let profile_rendered = m1.profile_rendered;
             core.step(PassInput {
                 proposed: cache_stability::Action::Soft,
                 boundary_present: "-".to_string(),
-                rendered_units: vec![render_m1_body(&m1.body)],
+                rendered_units: vec![render_m1_body(m1_body)],
                 new_boundary_id: None,
                 queued: Vec::new(),
                 run_started: false,
@@ -3299,7 +3298,14 @@ fn apply_once(
     let tagging_surface_requested =
         crate::tagging_surface_active(serializer_profile, req.tool_present);
     let seed_or_sync_started_at = Instant::now();
-    let transform_snapshot = store.load_transform_snapshot(&req.session_id)?;
+    // Every overlay consumer looks rows up by a projection block, so only those rows are read.
+    let projection_block_ids: Vec<&str> = projection
+        .blocks
+        .iter()
+        .map(|block| block.id.as_str())
+        .collect();
+    let transform_snapshot =
+        store.load_transform_snapshot(&req.session_id, &projection_block_ids)?;
     timings.seed_or_sync = elapsed_ms(seed_or_sync_started_at);
     timings.store_cache_state = transform_snapshot.timings.cache_state_ms;
     let tag_hydration_started_at = Instant::now();
@@ -4364,6 +4370,7 @@ fn apply_once(
                         user_profile_budget_tokens: ctx.user_profile_budget_tokens,
                         inject_docs: ctx.inject_docs,
                         temporal_awareness: ctx.temporal_awareness,
+                        legacy_history_segment_seqs: meta.legacy_history_segment_seqs.as_deref(),
                     },
                     estimate_tokens,
                     ctx,
@@ -4441,6 +4448,9 @@ fn apply_once(
                                     user_profile_budget_tokens: ctx.user_profile_budget_tokens,
                                     inject_docs: ctx.inject_docs,
                                     temporal_awareness: ctx.temporal_awareness,
+                                    legacy_history_segment_seqs: meta
+                                        .legacy_history_segment_seqs
+                                        .as_deref(),
                                 },
                                 estimate_tokens,
                                 ctx,
@@ -4564,6 +4574,7 @@ fn apply_once(
                 meta.coverage_start_ordinal = comp.first_covered_ordinal;
                 meta.coverage_history_segment_seq = Some(comp.folded_history_segment_seq);
                 meta.folded_history_segment_seq = comp.folded_history_segment_seq;
+                meta.legacy_history_segment_seqs = Some(comp.legacy_history_segment_seqs);
                 meta.project_memory = ctx.project_memory_composition();
                 meta.expiry_cutoff_ms = ctx.now_ms; // FROZEN here, atomic with the m0 bytes
                 let applied_m1_signal = revision_signal_for_context(
@@ -4593,16 +4604,23 @@ fn apply_once(
                     ctx.memory_enabled,
                     ctx.user_profile_budget_tokens,
                     ctx.temporal_awareness,
+                    m1_row_cap_for(req.geometry.as_ref()),
                     crate::token_cache::cached_estimate_tokens,
                 )?;
                 note_deliveries = m1.note_deliveries.clone();
-                let pressure_refold = soft_pressure_refold(
-                    &core.frozen_units,
-                    &m1.body,
-                    ctx.history_budget_tokens,
-                    estimate_tokens,
-                );
-                if pressure_refold {
+                // Rows past m1's row cap are never dropped: the pass folds them into m0,
+                // whose bounded read renders the same bytes as a full one.
+                let served_m1_body = m1.body.as_deref().filter(|body| {
+                    !soft_pressure_refold(
+                        &core.frozen_units,
+                        body,
+                        ctx.history_budget_tokens,
+                        estimate_tokens,
+                    )
+                });
+                // An unserved body folds; the empty default is never rendered.
+                let m1_body = served_m1_body.unwrap_or_default();
+                if served_m1_body.is_none() {
                     let history_segments_for_fold = store.load_history_segments(&req.session_id)?;
                     let coverage_bounds =
                         coverage_bounds_from_history_segments(&history_segments_for_fold)?;
@@ -4625,6 +4643,9 @@ fn apply_once(
                             user_profile_budget_tokens: ctx.user_profile_budget_tokens,
                             inject_docs: ctx.inject_docs,
                             temporal_awareness: ctx.temporal_awareness,
+                            legacy_history_segment_seqs: meta
+                                .legacy_history_segment_seqs
+                                .as_deref(),
                         },
                         estimate_tokens,
                         ctx,
@@ -4709,6 +4730,7 @@ fn apply_once(
                     meta.coverage_start_ordinal = comp.first_covered_ordinal;
                     meta.coverage_history_segment_seq = Some(comp.folded_history_segment_seq);
                     meta.folded_history_segment_seq = comp.folded_history_segment_seq;
+                    meta.legacy_history_segment_seqs = Some(comp.legacy_history_segment_seqs);
                     meta.project_memory = ctx.project_memory_composition();
                     meta.expiry_cutoff_ms = ctx.now_ms;
                     let applied_m1_signal = revision_signal_for_context(
@@ -4727,7 +4749,7 @@ fn apply_once(
                     meta.project_memory_epoch_pending = false;
                     meta.m1_pending_since_ms = None;
                 } else {
-                    let mut rendered = vec![render_m1_body(&m1.body)];
+                    let mut rendered = vec![render_m1_body(m1_body)];
                     rendered.extend(new_reduction_units(
                         &core,
                         &selected_reductions,
@@ -4801,7 +4823,7 @@ fn apply_once(
                         Some(&mut m1_revision_read_timings),
                         ctx,
                     )?;
-                    if m1.body != M1_PLACEHOLDER || memory_gate_digest_transition {
+                    if m1_body != M1_PLACEHOLDER || memory_gate_digest_transition {
                         meta.m1_revision = applied_m1_signal.revision;
                     }
                     meta.m1_history_segment_seq = Some(applied_m1_signal.max_history_segment_seq);
@@ -6666,6 +6688,16 @@ fn synthetic_m0_message(text: String) -> WireMessage {
             synthetic: true,
             ..Default::default()
         },
+    )
+}
+
+fn m1_row_cap_for(geometry: Option<&TransformGeometry>) -> usize {
+    crate::m1_compose::m1_row_cap(
+        geometry
+            .filter(|geometry| {
+                geometry.usable_hard >= crate::scheduler::MIN_PLAUSIBLE_CONTEXT_LIMIT
+            })
+            .map(|geometry| geometry.usable_hard),
     )
 }
 
@@ -16266,6 +16298,74 @@ pub(crate) mod tests {
         );
     }
 
+    /// Rows past the m1 row cap that land mid-pass send the additive SOFT back for a retry,
+    /// which accounts for them and delivers the note the first attempt claimed.
+    #[test]
+    fn additive_soft_retries_when_rows_past_the_m1_cap_land_mid_pass() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = Arc::new(store(dir.path()));
+        let session = "additive-set-moved";
+        let mut ctx = pctx("git:proj", "/nonexistent-docs", 0);
+        ctx.compaction_enabled = false;
+        let mut request = req(session, "cfg0", vec![item("a", 1, "x")]);
+        // A 1,024-token hard window caps m1 at four rows.
+        request.geometry = Some(TransformGeometry {
+            usable_soft: 1_024,
+            usable_hard: 1_024,
+            derivation: "test".to_string(),
+        });
+        assert_eq!(transform(&s, &request, &ctx).unwrap().action, "HARD");
+        let note = s
+            .insert_project_note(memory_store::NoteWriteInput {
+                project_path: "git:proj",
+                route_project_root: None,
+                session_id: Some("writer"),
+                content: "claimed once",
+                surface_condition: Some("always"),
+                anchor_block_id: None,
+                anchor_ordinal: None,
+                compiled_provider: None,
+                compiled_config: None,
+                compiled_at: None,
+                compile_status: None,
+                now_ms: 1,
+            })
+            .unwrap();
+        s.with_fenced_conn_for_test(|conn| {
+            conn.execute("UPDATE notes SET status = 'ready' WHERE id = ?1", [note.id])
+        })
+        .unwrap();
+        s.arm_soft_refresh(session).unwrap();
+        let hook_store = Arc::clone(&s);
+        let appended = std::sync::atomic::AtomicUsize::new(0);
+        let appended = Arc::new(appended);
+        let hook_appended = Arc::clone(&appended);
+        install_transform_attempt_hook(&format!("m1_compose:{session}"), move || {
+            hook_appended.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let rows: Vec<_> = (1..=5).map(|seq| comp(seq, seq, seq, "a", "S")).collect();
+            hook_store.append_history_segments(session, &rows).unwrap();
+        });
+        let soft = transform(&s, &request, &ctx).unwrap();
+        assert_eq!(appended.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!((soft.action.as_str(), soft.committed), ("SOFT", true));
+        let deliveries = soft
+            .note_deliveries
+            .as_ref()
+            .expect("the retry delivers the note");
+        assert_eq!(
+            deliveries.iter().map(|d| d.note_id).collect::<Vec<_>>(),
+            vec![note.id]
+        );
+        assert!(
+            serde_json::to_string(&soft.messages())
+                .unwrap()
+                .contains("claimed once")
+        );
+        let meta = s.load(session).unwrap().meta;
+        assert_eq!(meta.folded_history_segment_seq, 5);
+        assert_eq!(meta.m1_history_segment_seq, Some(5));
+    }
+
     #[test]
     fn a_hard_after_additive_only_passes_activates_what_they_acknowledged_without_serving() {
         let dir = tempfile::tempdir().unwrap();
@@ -20371,6 +20471,141 @@ pub(crate) mod tests {
         }
     }
 
+    /// More new history_segments than m1's row cap never ride m1 partially: the SOFT pass
+    /// folds them into m0 on the pressure-refold path instead.
+    #[test]
+    fn m1_row_cap_overflow_takes_the_pressure_refold() {
+        let outcome = |usable_hard: Option<u64>| {
+            let dir = tempfile::tempdir().unwrap();
+            let s = store(dir.path());
+            bootstrap_covering_a(&s);
+            let ids = ["a", "b", "c", "d", "e", "f"];
+            let rows: Vec<_> = ids
+                .iter()
+                .enumerate()
+                .map(|(i, id)| comp(i as i64 + 1, i as i64 + 1, i as i64 + 1, id, "S"))
+                .collect();
+            s.replace_history_segments("ses", &rows).unwrap();
+            s.arm_soft_refresh("ses").unwrap();
+            let mut live: Vec<_> = ids
+                .iter()
+                .enumerate()
+                .map(|(i, id)| item(id, i as u64 + 1, "raw"))
+                .collect();
+            live.push(item("tail", 7, "tail"));
+            let mut request = req("ses", "cfg0", live);
+            request.geometry = usable_hard.map(|usable_hard| TransformGeometry {
+                usable_soft: usable_hard,
+                usable_hard,
+                derivation: "test".to_string(),
+            });
+            let result = run(&s, &request, &spine());
+            (result.action.clone(), result.materialize_reason.clone())
+        };
+        // A 1,024-token hard window caps m1 at four rows; five are new.
+        assert_eq!(
+            outcome(Some(1_024)),
+            ("HARD".to_string(), Some("pressure_refold".to_string()))
+        );
+        assert_eq!(outcome(None).0, "SOFT");
+    }
+
+    /// Overlay rows keyed by blocks outside the projection are not read, and they change
+    /// nothing a pass serves or commits.
+    #[test]
+    fn foreign_block_overlays_leave_the_pass_unchanged() {
+        use crate::test_support::synthetic_history::seed_overlays;
+        let passes = |foreign: usize| {
+            let dir = tempfile::tempdir().unwrap();
+            let s = store(dir.path());
+            seed_overlays(&s, "ses", foreign);
+            s.replace_history_segments("ses", &[comp(1, 1, 2, "b", "SUMMARY")])
+                .unwrap();
+            let mut live = vec![
+                item("a", 1, "raw"),
+                item("b", 2, "second"),
+                item("t3", 3, "turn three"),
+            ];
+            run(&s, &active_cc_req("ses", "cfg0", live.clone()), &spine());
+            assert!(s.load("ses").unwrap().meta.coverage_ordinal == Some(2));
+            s.append_history_segments("ses", &[comp(2, 3, 3, "t3", "S2")])
+                .unwrap();
+            s.arm_soft_refresh("ses").unwrap();
+            live.push(item("t4", 4, "turn four"));
+            s.start_statement_work_ledger();
+            let mut soft = run(&s, &active_cc_req("ses", "cfg0", live), &spine());
+            let overlay_work: Vec<_> = s
+                .take_statement_work()
+                .into_iter()
+                .filter(|work| {
+                    ["temporal_marks", "user_hints", "channel1_appends"]
+                        .iter()
+                        .any(|table| work.sql.contains(&format!("FROM {table}\n")))
+                        && work.sql.contains("json_each(?2)")
+                })
+                .map(|work| (work.rows, work.vm_steps))
+                .collect();
+            assert_eq!(overlay_work.len(), 3, "{overlay_work:?}");
+            soft.timings = None;
+            let loaded = s.load("ses").unwrap();
+            (
+                soft,
+                serde_json::to_value(&loaded.core).unwrap(),
+                serde_json::to_value(&loaded.meta).unwrap(),
+                overlay_work,
+            )
+        };
+        // One foreign row keeps every overlay table non-empty, so SQLite's seeks do the same
+        // work in each run.
+        let baseline = passes(1);
+        assert_eq!(baseline.0.action, "SOFT");
+        assert_eq!(passes(200), baseline);
+    }
+
+    /// The first fold captures the session's legacy sequences and its commit persists them,
+    /// so later folds read legacy rows by key.
+    #[test]
+    fn hard_fold_persists_the_legacy_sequence_list_it_captured() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = store(dir.path());
+        let live = vec![
+            item("a", 1, "first"),
+            item("b", 2, "second"),
+            item("t3", 3, "turn three"),
+        ];
+        assert_eq!(
+            run(&s, &req("ses", "cfg0", live.clone()), &spine()).action,
+            "HARD"
+        );
+        assert_eq!(
+            s.load("ses").unwrap().meta.legacy_history_segment_seqs,
+            Some(vec![])
+        );
+
+        let legacy = StoredHistorySegment {
+            p1: None,
+            legacy: 1,
+            ..comp(1, 1, 1, "a", "U: legacy body")
+        };
+        s.replace_history_segments("ses", &[legacy, comp(2, 2, 2, "b", "S2")])
+            .unwrap();
+        let mut loaded = s.load("ses").unwrap();
+        loaded.meta.legacy_history_segment_seqs = None;
+        s.commit("ses", loaded.row_version, &loaded.core, &loaded.meta)
+            .unwrap();
+        let fold = run(&s, &req("ses", "cfg0", live), &spine());
+        assert_eq!(fold.action, "HARD");
+        assert!(
+            m0_bytes(&fold).contains("legacy body"),
+            "{}",
+            m0_bytes(&fold)
+        );
+        assert_eq!(
+            s.load("ses").unwrap().meta.legacy_history_segment_seqs,
+            Some(vec![1])
+        );
+    }
+
     #[test]
     fn first_history_segment_published_after_empty_bootstrap_hard_folds_and_mints_boundary() {
         //
@@ -20922,6 +21157,36 @@ pub(crate) mod tests {
         assert_eq!(s.load_history_segments("ses").unwrap().len(), 1);
     }
 
+    /// A fold fails with a coverage error when stored ranges are not strictly ordered, and
+    /// commits nothing.
+    #[test]
+    fn a_fold_over_stored_ranges_out_of_order_fails_closed() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = store(dir.path());
+        s.replace_history_segments("ses", &[comp(1, 1, 1, "a", "S1"), comp(2, 2, 2, "b", "S2")])
+            .unwrap();
+        s.with_fenced_conn_for_test(|conn| {
+            conn.execute(
+                "UPDATE history_segments SET end_message = 5
+                  WHERE session_id = 'ses' AND sequence = 1",
+                [],
+            )
+        })
+        .unwrap();
+        let live = vec![
+            item("a", 1, "first"),
+            item("b", 2, "second"),
+            item("t3", 3, "turn three"),
+        ];
+        let ctx = pctx("git:proj", "/nonexistent-docs", 0);
+        let fold = transform(&s, &req("ses", "cfg0", live), &ctx);
+        assert!(
+            matches!(&fold, Err(TransformError::CoverageGap(detail)) if detail.contains("strictly increasing")),
+            "{fold:?}"
+        );
+        assert_eq!(s.load("ses").unwrap().row_version, None);
+    }
+
     #[test]
     fn first_fold_error_leaves_state_unchanged_and_the_hard_retries_visibly() {
         // If the first-fold HARD fires and the fold errors, transform returns Err without committing, leaving the boundary empty and the history_segment present.
@@ -21181,10 +21446,7 @@ pub(crate) mod tests {
                 mid: "m2400".to_string(),
                 block_identities: loaded.meta.block_identity_by_mid["m2400"].clone(),
             }];
-        let generation = memory_store::HistorySegmentSetGeneration {
-            max_sequence: 47,
-            count: 48,
-        };
+        let generation = memory_store::HistorySegmentSetGeneration::new(47);
         let predicate = memory_store::HistorySummarizerPublishPredicate {
             firing_seq: 7,
             producer_run_id: "race-run".to_string(),
@@ -21293,10 +21555,7 @@ pub(crate) mod tests {
                 mid: "m2400".to_string(),
                 block_identities: loaded.meta.block_identity_by_mid["m2400"].clone(),
             }];
-        let generation = memory_store::HistorySegmentSetGeneration {
-            max_sequence: 47,
-            count: 48,
-        };
+        let generation = memory_store::HistorySegmentSetGeneration::new(47);
         let predicate = memory_store::HistorySummarizerPublishPredicate {
             firing_seq: 8,
             producer_run_id: "between-reads-run".to_string(),
@@ -25814,9 +26073,9 @@ pub(crate) mod tests {
             .find(|unit| unit.key == "m0")
             .map(|unit| tokenizer::estimate_tokens(&unit.frozen_payload))
             .unwrap_or(0);
-        let m1_has_content = m1.body != M1_PLACEHOLDER;
+        let m1_has_content = m1.body.as_deref() != Some(M1_PLACEHOLDER);
         let m1_tokens = if m1_has_content {
-            tokenizer::estimate_tokens(&m1.body)
+            tokenizer::estimate_tokens(m1.body.as_deref().unwrap())
         } else {
             0
         };
@@ -25854,10 +26113,11 @@ pub(crate) mod tests {
                             true,
                             10_000.0,
                             true,
+                            crate::m1_compose::DEFAULT_M1_ROW_CAP,
                             tokenizer::estimate_tokens,
                         )
                         .unwrap();
-                        tokenizer::estimate_tokens(&m1.body) == target
+                        tokenizer::estimate_tokens(m1.body.as_deref().unwrap()) == target
                     })
                     .expect("construct exact composed m1 token count");
                 (target, " x".repeat(n))
@@ -25896,10 +26156,14 @@ pub(crate) mod tests {
                         true,
                         10_000.0,
                         true,
+                        crate::m1_compose::DEFAULT_M1_ROW_CAP,
                         tokenizer::estimate_tokens,
                     )
                     .unwrap();
-                    assert_eq!(tokenizer::estimate_tokens(&m1.body), target_m1_tokens);
+                    assert_eq!(
+                        tokenizer::estimate_tokens(m1.body.as_deref().unwrap()),
+                        target_m1_tokens
+                    );
                     let expected = frozen_soft_pressure_refold(&loaded.core, &m1, budget, 0);
                     let budget_pressure = budget > 0.0 && target_m1_tokens as f64 > budget * 0.20;
                     let ratio_pressure =
@@ -25935,7 +26199,7 @@ pub(crate) mod tests {
                         "SOFT measures frozen m0 through injection"
                     );
                     assert!(
-                        observed.contains(&m1.body),
+                        observed.contains(m1.body.as_ref().unwrap()),
                         "SOFT measures composed m1 through injection"
                     );
                     assert_eq!(result.action, if expected { "HARD" } else { "SOFT" });
@@ -25975,7 +26239,7 @@ pub(crate) mod tests {
                     core.frozen_units.push(synth_region("m0", " x".repeat(500)));
                 }
                 let m1 = crate::m1_compose::M1Composition {
-                    body: body.to_string(),
+                    body: Some(body.to_string()),
                     new_coverage: None,
                     note_deliveries: Vec::new(),
                     profile_rendered: false,

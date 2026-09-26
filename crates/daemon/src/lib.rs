@@ -190,6 +190,9 @@ use transform::ReductionDecision;
 #[cfg(test)]
 pub mod test_support;
 
+/// Wrapup reads only the covered end and set generation from the assembly snapshot, no rows.
+const WRAPUP_REFERENCE_ROWS: usize = 0;
+
 #[cfg(test)]
 mod transform_meta_bound;
 
@@ -7561,7 +7564,9 @@ impl HandlerCore {
             }
         };
         let parsed = Arc::clone(&ready.request);
-        let initial_snapshot = match store.load_history_summarizer_assembly_snapshot(&session_id) {
+        let initial_snapshot = match store
+            .load_history_summarizer_assembly_snapshot(&session_id, WRAPUP_REFERENCE_ROWS)
+        {
             Ok(snapshot) => snapshot,
             Err(error) => {
                 return PreparedOutcome::Error {
@@ -7592,11 +7597,7 @@ impl HandlerCore {
             .expect("boundary token cache mutex")
             .replace(&parsed.session_id, boundary_messages.token_cache_snapshot);
         let boundary_messages = boundary_messages.messages;
-        let initial_history_segments = initial_snapshot.history_segments;
-        let initial_end = initial_history_segments
-            .iter()
-            .map(|history_segment| history_segment.end_message as u64)
-            .max();
+        let initial_end = initial_snapshot.max_end_message.map(|end| end as u64);
         let wrapup_cfg = self.effective_config(&binding.project_root);
         let (wrapup_context_limit, _, _) =
             usage_numbers(parsed.usage.as_ref(), parsed.geometry.as_ref());
@@ -7850,8 +7851,10 @@ impl HandlerCore {
             }
         }
 
-        let final_history_segments = match store.load_history_segments(&session_id) {
-            Ok(history_segments) => history_segments,
+        let final_snapshot = match store
+            .load_history_summarizer_assembly_snapshot(&session_id, WRAPUP_REFERENCE_ROWS)
+        {
+            Ok(snapshot) => snapshot,
             Err(error) => {
                 return PreparedOutcome::Error {
                     code: "store_load_failed".to_string(),
@@ -7859,10 +7862,7 @@ impl HandlerCore {
                 };
             }
         };
-        let final_end = final_history_segments
-            .iter()
-            .map(|history_segment| history_segment.end_message as u64)
-            .max();
+        let final_end = final_snapshot.max_end_message.map(|end| end as u64);
         let compacted_messages = parsed
             .messages
             .iter()
@@ -7870,9 +7870,12 @@ impl HandlerCore {
             .filter(|message| initial_end.is_none_or(|end| message.ordinal > end))
             .filter(|message| final_end.is_some_and(|end| message.ordinal <= end))
             .count();
-        let history_segments_created = final_history_segments
-            .len()
-            .saturating_sub(initial_history_segments.len());
+        // Appends take sequences above the newest, so its rise counts the rows created.
+        let history_segments_created = usize::try_from(
+            final_snapshot.history_segment_set_generation.max_sequence
+                - initial_snapshot.history_segment_set_generation.max_sequence,
+        )
+        .unwrap_or(0);
         debug_assert!(
             failure.is_some()
                 || terminal_failure.is_some()
@@ -43284,9 +43287,8 @@ mod tests {
 
         let mut firings = 0;
         while store
-            .load_history_summarizer_assembly_snapshot("ses")
+            .load_history_segments("ses")
             .unwrap()
-            .history_segments
             .iter()
             .all(|segment| segment.start_message == 1)
         {
@@ -43294,10 +43296,7 @@ mod tests {
             fire_and_settle(&handler, &store, &messages).await;
             firings += 1;
         }
-        let segments = store
-            .load_history_summarizer_assembly_snapshot("ses")
-            .unwrap()
-            .history_segments;
+        let segments = store.load_history_segments("ses").unwrap();
         assert!(segments[0].title.starts_with("Unsummarized messages 1-"));
         assert!(segments[1].start_message > segments[0].end_message);
         assert_eq!(

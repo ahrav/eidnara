@@ -2,28 +2,25 @@ use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::time::Instant;
 
+use context_core::decay::Tier;
 use memory_store::{MemoryStore, MemoryStoreError, ModuleMeta, NoteDelivery, StoredNote};
 
 use crate::decay_render::DecayRenderHistorySegment;
-use crate::history_segment_coverage::{CoverageError, partition_by_folded_seq, resolve_coverage};
 use crate::m0_compose::trim_user_profile_to_budget;
 use crate::memory_render::{
     M1_PLACEHOLDER, assemble_m1, render_new_history_segments, render_user_profile_block,
 };
 
-/// Failure to read composition state, or a history_segment range that overlaps or fails to advance.
-#[derive(thiserror::Error, Debug)]
-pub enum M1ComposeError {
-    #[error("store: {0}")]
-    Store(MemoryStoreError),
-    #[error("{0}")]
-    CoverageGap(CoverageError),
-}
+/// The m1 row cap when the request carries no plausible hard geometry, as the specification
+/// sets for the default geometry.
+pub const DEFAULT_M1_ROW_CAP: usize = 259;
 
-impl From<MemoryStoreError> for M1ComposeError {
-    fn from(error: MemoryStoreError) -> Self {
-        Self::Store(error)
-    }
+/// The most history_segments m1 reads: `ceil(usable_hard / P1 cost)`, a nominal per-row cost
+/// (322), not a bound on row size. Rows beyond the cap force a fold into m0.
+pub fn m1_row_cap(usable_hard: Option<u64>) -> usize {
+    usable_hard.map_or(DEFAULT_M1_ROW_CAP, |usable_hard| {
+        usable_hard.div_ceil(u64::from(Tier::P1.cost())) as usize
+    })
 }
 
 /// `revision` is a digest over ALL byte-affecting m1 render inputs such that the
@@ -92,7 +89,8 @@ pub fn m1_revision_signal_timed(
 /// Rendered M1 body plus state that the caller must publish after delivery.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct M1Composition {
-    pub body: String,
+    /// `None` when more rows sit above the folded sequence than the row cap: the caller folds.
+    pub body: Option<String>,
     pub new_coverage: Option<(String, u64)>,
     pub note_deliveries: Vec<NoteDelivery>,
     pub profile_rendered: bool,
@@ -153,7 +151,8 @@ fn render_note_delta(notes: &[StoredNote]) -> String {
 
 /// Composes new history_segments, a changed user profile, and newly claimed notes.
 ///
-/// HistorySegment order follows the store result. A history_segment whose `start_message` does not advance past the previous `end_message` returns [`M1ComposeError::CoverageGap`], while sparse ordinal gaps are permitted; store reads and note claims return [`M1ComposeError::Store`].
+/// Renders up to `row_cap` of the newest history_segments above the folded sequence, oldest
+/// first; [`M1Composition::body`] is `None` when more exist. Store failures return as-is.
 /// User profile budget units are tokens. Profile trimming receives 25 percent of that budget, clamped to at least one token.
 #[allow(clippy::too_many_arguments)]
 pub fn compose_m1(
@@ -165,16 +164,16 @@ pub fn compose_m1(
     memory_enabled: bool,
     user_profile_budget_tokens: f64,
     temporal_awareness: bool,
+    row_cap: usize,
     estimate_tokens: impl Fn(&str) -> usize + Copy,
-) -> Result<M1Composition, M1ComposeError> {
-    let history_segments = store.load_history_segments(session_id)?;
-    let coverage = resolve_coverage(&history_segments).map_err(M1ComposeError::CoverageGap)?;
-    let (_, new_history_segments) =
-        partition_by_folded_seq(&history_segments, meta.folded_history_segment_seq);
-    let rendered_history_segments = new_history_segments
+) -> Result<M1Composition, MemoryStoreError> {
+    let above =
+        store.load_history_segments_above(session_id, meta.folded_history_segment_seq, row_cap)?;
+    let rendered_history_segments = above
+        .history_segments
         .iter()
         .map(|history_segment| {
-            let mut rendered = DecayRenderHistorySegment::from(*history_segment);
+            let mut rendered = DecayRenderHistorySegment::from(history_segment);
             if !temporal_awareness {
                 rendered.start_date = None;
                 rendered.end_date = None;
@@ -184,12 +183,10 @@ pub fn compose_m1(
         .collect::<Vec<_>>();
     let history_segment_refs = rendered_history_segments.iter().collect::<Vec<_>>();
     let new_history_segments_block = render_new_history_segments(&history_segment_refs);
-    let new_coverage = match coverage {
-        Some(coverage) if Some(coverage.coverage_end_ordinal) > meta.coverage_ordinal => {
-            Some((coverage.boundary_id, coverage.coverage_end_ordinal))
-        }
-        _ => None,
-    };
+    let new_coverage = above
+        .newest
+        .map(|newest| (newest.end_message_id, newest.end_message as u64))
+        .filter(|(_, end)| Some(*end) > meta.coverage_ordinal);
 
     let (new_user_profile_block, profile_rendered) =
         if memory_enabled && meta.user_profile_version != meta.m1_user_profile_version {
@@ -221,13 +218,15 @@ pub fn compose_m1(
         .collect::<Vec<_>>()
         .join("\n");
     Ok(M1Composition {
-        body: assemble_m1(
-            "",
-            &new_history_segments_block,
-            "",
-            &profile_and_notes,
-            M1_PLACEHOLDER,
-        ),
+        body: (!above.overflow).then(|| {
+            assemble_m1(
+                "",
+                &new_history_segments_block,
+                "",
+                &profile_and_notes,
+                M1_PLACEHOLDER,
+            )
+        }),
         new_coverage,
         note_deliveries,
         profile_rendered,

@@ -242,6 +242,39 @@ fn tier_ordinal(tier: Tier) -> u8 {
     }
 }
 
+fn decay_pressure(importances_newest_first: &[i32], history_budget: f64) -> f64 {
+    if history_budget > 0.0 {
+        compute_budget_pressure(importances_newest_first, history_budget)
+    } else {
+        1.0
+    }
+}
+
+/// Newest non-legacy rows whose importance can move the pressure: at pressure 1, index 250
+/// archives even at importance 100 (`249 >= Z4 * H50 * 4`), so older rows add no cost.
+pub(crate) const PRESSURE_WINDOW: usize = 249;
+
+/// The oldest curve index that can render at the pressure floor: `2484 >= Z4 * H50 * 4 / P_FLOOR`
+/// fails and `2485` passes.
+const MAX_RENDERABLE_INDEX: u32 = 2_484;
+
+/// How many newest non-legacy rows a render at `history_budget` can show: at least
+/// [`PRESSURE_WINDOW`], else the largest index importance 100 keeps unarchived under the
+/// pressure of `newest_importances` (the newest window, newest first). Retries at a raised
+/// multiplier only raise the pressure, so the count covers them too.
+pub(crate) fn fold_horizon(newest_importances: &[i32], history_budget: f64) -> usize {
+    let importances: Vec<i32> = newest_importances
+        .iter()
+        .map(|importance| (*importance).clamp(1, 100))
+        .collect();
+    let pressure = decay_pressure(&importances, history_budget);
+    let renderable = (1..=MAX_RENDERABLE_INDEX)
+        .rev()
+        .find(|index| rendered_tier(*index, 100, pressure, 0.0) != Tier::P5)
+        .unwrap_or(0);
+    PRESSURE_WINDOW.max(renderable as usize)
+}
+
 fn compute_tiers(history_segments: &[DecayRenderHistorySegment], history_budget: f64) -> Vec<u8> {
     let v2_indices: Vec<usize> = history_segments
         .iter()
@@ -263,11 +296,7 @@ fn compute_tiers(history_segments: &[DecayRenderHistorySegment], history_budget:
             .unwrap_or(50)
             .clamp(1, 100);
     }
-    let pressure = if history_budget > 0.0 {
-        compute_budget_pressure(&importances_newest_first, history_budget)
-    } else {
-        1.0
-    };
+    let pressure = decay_pressure(&importances_newest_first, history_budget);
 
     history_segments
         .iter()
@@ -553,6 +582,31 @@ mod tests {
     #[derive(Deserialize)]
     struct RenderGolden {
         cases: Vec<RenderCase>,
+    }
+
+    #[test]
+    fn fold_horizon_spans_the_renderable_curve() {
+        use context_core::decay::P_FLOOR;
+        assert_eq!(
+            rendered_tier(MAX_RENDERABLE_INDEX, 100, P_FLOOR, 0.0),
+            Tier::P4
+        );
+        assert_eq!(
+            rendered_tier(MAX_RENDERABLE_INDEX + 1, 100, P_FLOOR, 0.0),
+            Tier::P5
+        );
+        assert_eq!(
+            rendered_tier(PRESSURE_WINDOW as u32 + 1, 100, 1.0, 0.0),
+            Tier::P5,
+            "rows past the window add no pressure"
+        );
+        assert_eq!(
+            fold_horizon(&[100; PRESSURE_WINDOW], 1e12),
+            MAX_RENDERABLE_INDEX as usize,
+            "an unbinding budget hits the pressure floor"
+        );
+        assert_eq!(fold_horizon(&[100; PRESSURE_WINDOW], 1.0), PRESSURE_WINDOW);
+        assert_eq!(fold_horizon(&[100; PRESSURE_WINDOW], 0.0), PRESSURE_WINDOW);
     }
 
     #[test]

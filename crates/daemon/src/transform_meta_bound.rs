@@ -4,9 +4,6 @@
 
 #![forbid(unsafe_code)]
 
-#[path = "test_support/transform_corpus.rs"]
-mod corpus;
-
 use crate::canonical_memory::{CanonicalMemoryRead, CanonicalMemorySnapshot};
 use crate::config::CacheTtlProvenance;
 use crate::transform::{
@@ -15,7 +12,7 @@ use crate::transform::{
 use crate::wire::IngressMessage;
 use memory_store::{LoadedState, MemoryStore, StoredHistorySegment};
 
-use corpus::{CORPUS_SEED, ContentClass};
+use crate::test_support::transform_corpus::{self as corpus, CORPUS_SEED, ContentClass};
 
 const SESSION: &str = "meta-bound";
 /// Messages left uncovered behind the history segments.

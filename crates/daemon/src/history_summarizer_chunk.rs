@@ -809,11 +809,15 @@ pub fn assemble_history_summarizer_firing(
             verdict.state_key()
         );
     }
-    let snapshot = store.load_history_summarizer_assembly_snapshot(&config.session_id)?;
-    let history_segments = snapshot.history_segments;
+    let snapshot = store.load_history_summarizer_assembly_snapshot(
+        &config.session_id,
+        crate::history_summarizer_prompt::SESSION_REF_WINDOW,
+    )?;
+    let history_segments = snapshot.newest_history_segments;
     let expected_revert_epoch = snapshot.revert_epoch;
     let history_segment_set_generation = snapshot.history_segment_set_generation;
     let eligible_end = config.boundary.eligible_head.end;
+    // Ranges are strictly increasing, so the newest rows carry the covered end.
     let chunk_start =
         if let Some(last_end) = history_segments.iter().map(|c| c.end_message as u64).max() {
             let Some(next_present) = messages
@@ -940,13 +944,13 @@ pub fn assemble_history_summarizer_firing(
         .map(ChunkSnapshotOwnedItem::as_item)
         .collect();
     let chunk_fingerprint = compute_chunk_fingerprint(&fingerprint_items);
-    let prior_history_segments = history_segments.iter().map(stored_range).collect();
-    let sequence_offset = history_segments
-        .iter()
-        .map(|c| c.sequence as u64)
-        .max()
-        .unwrap_or(0)
-        .saturating_add(1);
+    // Appends keep ranges strictly increasing, so the tail is all the output validator needs.
+    let prior_history_segments = history_segments
+        .last()
+        .map(stored_range)
+        .into_iter()
+        .collect();
+    let sequence_offset = (history_segment_set_generation.max_sequence as u64).saturating_add(1);
 
     Ok(AssembleHistorySummarizerFiringOutcome::Fire(Box::new(
         AssembledHistorySummarizerFiring {

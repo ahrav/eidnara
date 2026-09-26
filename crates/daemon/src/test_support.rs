@@ -5,6 +5,9 @@
 
 use serde_json::{Value, json};
 
+pub mod synthetic_history;
+pub(crate) mod transform_corpus;
+
 /// `StoreFixture` keeps backing directory alive for `store`.
 pub struct StoreFixture {
     pub dir: tempfile::TempDir,

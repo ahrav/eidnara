@@ -1,4 +1,4 @@
-//! This module validates ordered stored history_segment ranges and partitions them for m0/m1 rendering.
+//! This module validates ordered stored history_segment ranges for coverage resolution.
 //!
 //! The functions are pure over history_segments in the order MemoryStore::load_history_segments returns.
 //! resolve_coverage rejects negative, reversed, non-increasing, or overlapping stored history_segment ranges.
@@ -180,16 +180,6 @@ pub fn resolve_coverage(
         coverage_end_ordinal: last.end_message as u64,
         boundary_id: last.end_message_id.clone(),
     }))
-}
-
-/// Preserves input order within the folded and later output vectors.
-pub fn partition_by_folded_seq(
-    history_segments: &[StoredHistorySegment],
-    folded_seq: i64,
-) -> (Vec<&StoredHistorySegment>, Vec<&StoredHistorySegment>) {
-    history_segments
-        .iter()
-        .partition(|c| c.sequence <= folded_seq)
 }
 
 #[cfg(test)]
@@ -393,31 +383,5 @@ mod tests {
             fold_m0_content_epoch(base, &forge_a),
             fold_m0_content_epoch(base, &forge_b)
         );
-    }
-
-    #[test]
-    fn partition_splits_at_folded_seq() {
-        let comps = vec![
-            comp(1, 1, 10, "m10"),
-            comp(2, 11, 20, "m20"),
-            comp(3, 21, 30, "m30"),
-        ];
-        let (folded, new) = partition_by_folded_seq(&comps, 1);
-        assert_eq!(
-            folded.iter().map(|c| c.sequence).collect::<Vec<_>>(),
-            vec![1]
-        );
-        assert_eq!(
-            new.iter().map(|c| c.sequence).collect::<Vec<_>>(),
-            vec![2, 3]
-        );
-
-        let (folded0, new0) = partition_by_folded_seq(&comps, 0);
-        assert!(folded0.is_empty());
-        assert_eq!(new0.len(), 3);
-
-        let (folded_all, new_all) = partition_by_folded_seq(&comps, 3);
-        assert_eq!(folded_all.len(), 3);
-        assert!(new_all.is_empty());
     }
 }
