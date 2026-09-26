@@ -71,10 +71,6 @@ const CLASSES: &[(&str, &str)] = &[
     ("legacy <> 1", "m0 segments"),
     ("legacy = 1", "m0 segments"),
     (
-        "history_segments WHERE session_id = ?1 AND sequence > ?2",
-        "m1 segments",
-    ),
-    (
         "history_segments WHERE session_id = ?1 ORDER BY sequence DESC LIMIT ?2",
         "summarizer assembly",
     ),
@@ -139,6 +135,12 @@ const EDGE_STATEMENTS: &[&str] = &[
      ORDER BY h.end_message LIMIT 1), j.value + 1) > j.value",
 ];
 
+/// m1's capped read above the folded sequence, matched as a whole statement like the edges.
+const M1_STATEMENT: &str = "SELECT sequence, start_message, end_message, start_message_id, \
+     end_message_id, start_date, end_date, title, content, p1, p2, p3, p4, importance, \
+     episode_type, legacy, created_at FROM history_segments \
+     WHERE session_id = ?1 AND sequence > ?2 ORDER BY sequence DESC LIMIT ?3";
+
 /// The SQL text with its whitespace collapsed and padded by one space on each side.
 fn normalized(sql: &str) -> String {
     format!(" {} ", sql.split_whitespace().collect::<Vec<_>>().join(" "))
@@ -152,6 +154,9 @@ fn classify(sql: &str) -> Option<&'static str> {
         .any(|statement| sql.trim() == normalized(statement).trim())
     {
         return Some("coverage snapshot");
+    }
+    if sql.trim() == normalized(M1_STATEMENT).trim() {
+        return Some("m1 segments");
     }
     CLASSES
         .iter()
@@ -269,20 +274,18 @@ fn measure(h: usize, overlays: usize, memories: usize) -> Measured {
     let end = 2 * h as u64;
     store
         .with_fenced_conn_for_test(|tx| {
-            for (table, text) in [
-                ("temporal_marks", "marker_text, created_at"),
-                ("user_hints", "hint_text, created_at"),
-                ("channel1_appends", "reminder_text, fired_at_ms"),
+            // The temporal mark sits on the tool call, a block the pass never marks, so its
+            // row is read only because the window keys reach it.
+            for (table, text, ordinal) in [
+                ("temporal_marks", "marker_text, created_at", end + TAIL - 1),
+                ("user_hints", "hint_text, created_at", end + 1),
+                ("channel1_appends", "reminder_text, fired_at_ms", end + 1),
             ] {
                 tx.execute(
                     &format!(
                         "INSERT INTO {table} (session_id, block_id, {text}) VALUES (?1, ?2, ?3, 1)"
                     ),
-                    rusqlite::params![
-                        SESSION,
-                        format!("m{}#0", end + 1),
-                        format!("{table} window")
-                    ],
+                    rusqlite::params![SESSION, format!("m{ordinal}#0"), format!("{table} window")],
                 )?;
             }
             Ok(())
@@ -340,10 +343,12 @@ fn measure(h: usize, overlays: usize, memories: usize) -> Measured {
         1,
         "H={h}: the legacy tag row is read"
     );
+    // Temporal marks: the pass's own marks on the covered pair and the six window user
+    // messages, plus the seeded row on the tool call.
     for (table, rows) in [
         ("user_hints", 1),
         ("channel1_appends", 1),
-        ("temporal_marks", TAIL),
+        ("temporal_marks", TAIL + 1),
     ] {
         assert_eq!(
             window_overlay_rows(&work, table),
@@ -375,6 +380,21 @@ fn measure(h: usize, overlays: usize, memories: usize) -> Measured {
     phases.push(("HARD CAS retry", totals("HARD retry", h, &retry)));
 
     phases.push(("summarizer", summarizer_round(&store, h)));
+
+    // The host drops the covered pair: the boundary is absent while the durable lineage and
+    // the seeded history remain, so the pass decides the absent shape from the oldest row.
+    let mut absent = request(h, "cfg2");
+    absent.messages.drain(..2);
+    store.start_statement_work_ledger();
+    assert_eq!(pass(&store, &absent), "PASSTHROUGH", "H={h}");
+    let work = store.take_statement_work();
+    let oldest_edge = normalized(EDGE_STATEMENTS[1]);
+    assert!(
+        work.iter()
+            .any(|statement| normalized(&statement.sql) == oldest_edge),
+        "H={h}: the absent shape reads the oldest row"
+    );
+    phases.push(("absent boundary", totals("absent boundary", h, &work)));
     for (phase, totals) in &phases {
         // The bound of this row is the host profile's line count, not H: state sync replaces
         // the active memories wholesale and a HARD pass reads every one.

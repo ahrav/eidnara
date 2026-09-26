@@ -13378,11 +13378,17 @@ pub(crate) mod tests {
             &[comp(0, 1, 1, "gone", "S"), comp(1, 2, 2, "b", "S")],
             &[comp(0, 1, 1, "a", "S"), comp(1, 2, 2, "gone", "S")],
         ];
-        for set in sets {
+        let expected = [true, false, true, true, false];
+        for (set, expected) in sets.into_iter().zip(expected) {
             let oldest = set.first().map(|row| row.end_message_id.as_str());
             assert_eq!(
                 no_revert_prefix_survives(oldest, &live),
+                expected,
+                "{set:?}"
+            );
+            assert_eq!(
                 surviving_revert_prefix_seq(set, &live) < 0,
+                expected,
                 "{set:?}"
             );
         }
