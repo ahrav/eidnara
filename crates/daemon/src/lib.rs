@@ -29045,11 +29045,16 @@ mod tests {
         assert_eq!(boot["action"], "HARD");
         assert_eq!(boot["boundary_id"], "m1#0");
 
-        let raw = call_transform_request(
-            &handler,
-            request_with_usage(vec![ck("foreign", 90, "other conversation")], 95, 100),
-        )
-        .await;
+        // Only a lineage switch arms pending_rewrite for a window with no surviving anchor.
+        let mut switched =
+            request_with_usage(vec![ck("foreign", 90, "other conversation")], 95, 100);
+        switched["lineage_switched"] = json!(true);
+        switched["descent_edge_id"] = json!(1);
+        switched["prior_conversation_key"] = json!("prior");
+        switched["prior_epoch"] = json!(1);
+        switched["new_epoch"] = json!(2);
+        switched["constituents"] = json!([["prior", "ses", 2]]);
+        let raw = call_transform_request(&handler, switched).await;
         assert_eq!(raw["action"], "PASSTHROUGH");
         assert_eq!(raw["history_summarizer"]["no_fire"], "pending_rewrite");
         assert_eq!(producer.connects.load(Ordering::SeqCst), 0);

@@ -46,7 +46,7 @@ impl Op {
 }
 
 /// The traces: one fixed trace that visits every operation, then seeded traces. Once a revert
-/// removes every anchor, only appends and edits follow, since the session serves raw from then on.
+/// removes every anchor, only appends and edits follow, since revision 2 served raw from then on.
 pub(super) fn traces() -> Vec<(String, Vec<Op>)> {
     use Op::*;
     let mut traces = vec![(
@@ -418,6 +418,9 @@ impl Plugin {
 
 /// The revision 2 goldens replayed against revision 3: after every operation of every trace,
 /// the served array without ordinals, the m0 bytes, and the tag rows equal the recorded ones.
+/// Where revision 2 served a revert before the first anchor raw and kept doing so, revision 3
+/// resets the session (spec D10), so from that step on every step equals a fresh session's step
+/// over the same host arrays instead, tag numbers aside.
 #[tokio::test(flavor = "current_thread")]
 async fn revision_3_replays_the_revision_2_goldens() {
     let goldens: Value =
@@ -430,12 +433,34 @@ async fn revision_3_replays_the_revision_2_goldens() {
         let (handler, store, _dir) = golden_handler();
         let mut host = Host::default();
         let mut plugin = Plugin::default();
+        let mut fresh = None;
         for (index, op) in ops.iter().copied().enumerate() {
             host.apply(op, &store);
             let response = plugin.pass(&handler, &host).await;
             let actual = step(op, &response, &store);
-            let expected = &golden["steps"][index];
+            if golden["steps"][index]["action"] == "PASSTHROUGH" && fresh.is_none() {
+                fresh = Some((golden_handler(), Plugin::default()));
+            }
+            let expected = match fresh.as_mut() {
+                Some(((fresh_handler, fresh_store, _), fresh_plugin)) => {
+                    let response = fresh_plugin.pass(fresh_handler, &host).await;
+                    &step(op, &response, fresh_store)
+                }
+                None => &golden["steps"][index],
+            };
             for field in ["op", "status", "code", "action", "served", "m0", "tags"] {
+                if fresh.is_some() && field == "tags" {
+                    // Tag rows are session-wide and outlive the reset, so tag numbers continue.
+                    continue;
+                }
+                if fresh.is_some() && field == "served" {
+                    assert_eq!(
+                        untagged(&actual[field]),
+                        untagged(&expected[field]),
+                        "{name} step {index} ({op:?}) {field}"
+                    );
+                    continue;
+                }
                 assert_eq!(
                     actual[field], expected[field],
                     "{name} step {index} ({op:?}) {field}"
@@ -443,4 +468,12 @@ async fn revision_3_replays_the_revision_2_goldens() {
             }
         }
     }
+}
+
+/// `served` as JSON with every `§<digits>§` tag number blanked.
+fn untagged(served: &Value) -> String {
+    regex::Regex::new("§[0-9]+§")
+        .unwrap()
+        .replace_all(&served.to_string(), "§§")
+        .into_owned()
 }

@@ -88,6 +88,11 @@ const CLASSES: &[(&str, &str)] = &[
         "SELECT COALESCE(MAX(end_message), 0) FROM history_segments WHERE session_id = ?1",
         "coverage snapshot",
     ),
+    // The first-fold probe of a session with no rendered boundary, one index seek.
+    (
+        "SELECT EXISTS(SELECT 1 FROM history_segments WHERE session_id = ?1)",
+        "coverage snapshot",
+    ),
     // The null-boundary window-end match (spec D10), bounded by the window's mids.
     (
         "FROM json_each(?2) AS j CROSS JOIN history_segments AS h",
@@ -415,14 +420,18 @@ fn measure(h: usize, overlays: usize, memories: usize) -> Measured {
     phases.push(("summarizer", summarizer_round(&store, h)));
 
     // The host drops the anchor and discovery finds no other: the null window with no
-    // surviving anchor is the pass-through revert.
+    // surviving anchor resets the session and serves the window as a first pass (spec D10).
+    // The reset removes the whole history, the declared O(removed history) exception, so the
+    // bounded phase is the pass after it.
     let mut absent = request(h, "cfg2");
     absent.messages.remove(0);
     absent.boundary = Some(None);
+    assert_eq!(pass(&store, &absent), "HARD", "H={h}");
+    assert!(store.load_history_segments(SESSION).unwrap().is_empty());
     store.start_statement_work_ledger();
-    assert_eq!(pass(&store, &absent), "PASSTHROUGH", "H={h}");
+    pass(&store, &absent);
     let work = store.take_statement_work();
-    phases.push(("absent boundary", totals("absent boundary", h, &work)));
+    phases.push(("after reset", totals("after reset", h, &work)));
     for (phase, totals) in &phases {
         // The bound of this row is the host profile's line count, not H: state sync replaces
         // the active memories wholesale and a HARD pass reads every one.

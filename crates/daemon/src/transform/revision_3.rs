@@ -1,7 +1,8 @@
 //! Transform revision 3 at the handler seam against a real store: wire admissibility (WP-P24),
 //! a duplicate id inside the window (WP-P01), one pass per resolution outcome with its
-//! resolution, ordinals, cut, output, and durable effects (WP-P02, WP-P03, WP-P05), and the
-//! interrupted revert (spec D10) under an injected CAS conflict and a panic plus reopen.
+//! resolution, ordinals, cut, output, and durable effects (WP-P02, WP-P03, WP-P05), the reset of
+//! a revert before the first anchor (spec D10), and the interrupted revert under an injected CAS
+//! conflict and a panic plus reopen.
 
 use super::revision_goldens::call;
 use super::*;
@@ -113,7 +114,12 @@ fn with_base(mut body: Value) -> Value {
 
 /// A session whose first pass folded segments 1 (m1..m2) and 2 (m3..m4) over m1..m6.
 async fn folded() -> (Handler, Arc<MemoryStore>, tempfile::TempDir) {
-    let (handler, store, dir) = handler_for("rev3");
+    folded_as("rev3").await
+}
+
+/// [`folded`] under its own session, for a test that installs the session-keyed attempt hook.
+async fn folded_as(id: &'static str) -> (Handler, Arc<MemoryStore>, tempfile::TempDir) {
+    let (handler, store, dir) = handler_for(id);
     store
         .replace_history_segments(session(), &[segment(1, 1, 2), segment(2, 3, 4)])
         .unwrap();
@@ -384,7 +390,7 @@ async fn each_resolution_outcome_runs_through_the_handler_with_its_effects() {
     assert!(unknown.get("boundary").is_none());
     assert_eq!(durable(&store), before);
 
-    // Revert through no anchor: today's pass-through arm, history kept.
+    // Revert through no anchor: the session is reset and the window served as a first pass.
     let none = body(&["x1"], Value::Null);
     let resolved = resolution(&store, &none);
     assert_eq!(
@@ -394,20 +400,99 @@ async fn each_resolution_outcome_runs_through_the_handler_with_its_effects() {
         }
     );
     assert_eq!(resolved.ordinals, vec![1]);
-    let passthrough = call(&handler, none).await;
-    assert_eq!(passthrough["action"], "PASSTHROUGH");
-    assert_eq!(passthrough["boundary"], anchor("m2", 1));
-    assert_eq!(served_mids(&passthrough), ["x1"]);
+    let reset = call(&handler, none).await;
+    assert_eq!(reset["action"], "HARD");
+    assert_eq!(reset["boundary"], Value::Null);
+    assert_eq!(served_mids(&reset), ["x1"]);
     let loaded = store.load(session()).unwrap();
-    assert!(loaded.meta.pending_rewrite.is_some());
-    assert_eq!(loaded.meta.revert_epoch, epoch + 1);
-    assert_eq!(store.load_history_segments(session()).unwrap().len(), 1);
+    assert!(loaded.meta.pending_rewrite.is_none());
+    assert_eq!(loaded.meta.revert_epoch, epoch + 2);
+    assert!(store.load_history_segments(session()).unwrap().is_empty());
 }
 
-/// A revert through no anchor that the pending-rewrite arm does not take: the session carries
-/// a lineage anchor and continuation base, as lineage descent writes them. Its first pass
-/// defers; its second removes every segment, and `interrupt` runs between that removal's commit
-/// and the pass's terminal commit. Returns the window and the interrupted pass's own answer.
+/// Acceptance (spec D10, WP-E03 disposition): a revert before the first anchor resets the
+/// session in the same pass and serves the window as a first pass numbered from 1; the next
+/// fold starts from the surviving array. The pass-through arm is not taken without
+/// `lineage_switched`.
+#[tokio::test(flavor = "current_thread")]
+async fn a_revert_before_the_first_anchor_resets_and_serves_the_window_as_a_first_pass() {
+    let (handler, store, _dir) = folded().await;
+    let epoch = store.load(session()).unwrap().meta.revert_epoch;
+    let window = body(&["x1", "x2"], Value::Null);
+    assert_eq!(
+        resolution(&store, &window).resolution,
+        Resolution::Revert {
+            keep_through_seq: None
+        }
+    );
+    let served = call(&handler, window).await;
+    assert_eq!(served["status"], "ok", "{served}");
+    assert_eq!(served["action"], "HARD");
+    assert_eq!(served["boundary"], Value::Null);
+    assert_eq!(served_mids(&served), ["x1", "x2"]);
+    let loaded = store.load(session()).unwrap();
+    assert_eq!(loaded.meta.revert_epoch, epoch + 1);
+    assert!(loaded.meta.pending_rewrite.is_none());
+    assert_eq!(loaded.core.boundary_id, "");
+    assert!(store.load_history_segments(session()).unwrap().is_empty());
+
+    // A fold over the surviving array anchors the next pass at its own ordinals.
+    store
+        .append_history_segments(
+            session(),
+            &[StoredHistorySegment {
+                start_message_id: "x1#0".to_string(),
+                end_message_id: "x2#0".to_string(),
+                ..segment(1, 1, 2)
+            }],
+        )
+        .unwrap();
+    store.arm_soft_refresh(session()).unwrap();
+    let next = body(&["x1", "x2", "x3"], Value::Null);
+    let resolved = resolution(&store, &next);
+    assert_eq!(resolved.resolution, Resolution::FirstPass);
+    assert_eq!(resolved.ordinals, vec![1, 2, 3]);
+    let folded = call(&handler, next).await;
+    assert_eq!(folded["status"], "ok", "{folded}");
+    assert_eq!(folded["boundary"], anchor("x2", 1));
+    assert_eq!(served_mids(&folded), ["x3"]);
+}
+
+/// A write between the reset's resolution and its commit fails the reset's CAS; the pass
+/// resolves again, resets once, and serves the first pass.
+#[tokio::test(flavor = "current_thread")]
+async fn a_cas_conflict_on_the_no_survivor_reset_resolves_again_and_resets_once() {
+    let (handler, store, _dir) = folded_as("rev3-reset-now-cas").await;
+    let epoch = store.load(session()).unwrap().meta.revert_epoch;
+    let hook_store = Arc::clone(&store);
+    let conflicted = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let flag = Arc::clone(&conflicted);
+    install_transform_attempt_hook(session(), move || {
+        let loaded = hook_store.load("rev3-reset-now-cas").unwrap();
+        hook_store
+            .commit(
+                "rev3-reset-now-cas",
+                loaded.row_version,
+                &loaded.core,
+                &loaded.meta,
+            )
+            .unwrap();
+        flag.store(true, std::sync::atomic::Ordering::SeqCst);
+    });
+    let served = call(&handler, body(&["x1", "x2"], Value::Null)).await;
+    assert!(conflicted.load(std::sync::atomic::Ordering::SeqCst));
+    assert_eq!(served["status"], "ok", "{served}");
+    assert_eq!(served["boundary"], Value::Null);
+    assert_eq!(served_mids(&served), ["x1", "x2"]);
+    assert_eq!(store.load(session()).unwrap().meta.revert_epoch, epoch + 1);
+    assert!(store.load_history_segments(session()).unwrap().is_empty());
+}
+
+/// A revert through no anchor that the pending-rewrite arm does not take: a lineage-switched
+/// window over a session that carries a lineage anchor and continuation base, as lineage
+/// descent writes them, so the reset of spec D10 does not run. Its first pass defers; its
+/// second removes every segment, and `interrupt` runs between that removal's commit and the
+/// pass's terminal commit. Returns the window and the interrupted pass's own answer.
 async fn unanchored_revert(
     id: &'static str,
     interrupt: impl Fn(&MemoryStore, &str) + Send + Sync + 'static,
@@ -439,7 +524,17 @@ async fn unanchored_revert(
     store
         .commit(session(), loaded.row_version, &loaded.core, &meta)
         .unwrap();
-    let window = body(&["x1", "x2"], Value::Null);
+    let mut window = body(&["x1", "x2"], Value::Null);
+    for (field, value) in [
+        ("lineage_switched", json!(true)),
+        ("descent_edge_id", json!(1)),
+        ("prior_conversation_key", json!("prior")),
+        ("prior_epoch", json!(1)),
+        ("new_epoch", json!(2)),
+        ("constituents", json!([["prior", id, 2]])),
+    ] {
+        window[field] = value;
+    }
     assert_eq!(
         resolution(&store, &window).resolution,
         Resolution::Revert {

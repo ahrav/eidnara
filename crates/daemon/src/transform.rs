@@ -2146,6 +2146,16 @@ fn apply_once_with_estimator(
         let resolve_started_at = Instant::now();
         let (coverage_row_version, attempt_req) = resolve_attempt(store, req)?;
         let coverage_resolve = elapsed_ms(resolve_started_at);
+        if !req.lineage_switched
+            && attempt_req
+                .coverage
+                .as_deref()
+                .is_some_and(|coverage| coverage.resolved.resolution == NO_SURVIVOR)
+        {
+            reset_no_survivor(store, &req.session_id, coverage_row_version, attempt)?;
+            attempt += 1;
+            continue;
+        }
         match apply_once(
             store,
             &attempt_req,
@@ -2182,6 +2192,43 @@ fn apply_once_with_estimator(
             }
             other => return other,
         }
+    }
+}
+
+const NO_SURVIVOR: crate::window_coverage::Resolution =
+    crate::window_coverage::Resolution::Revert {
+        keep_through_seq: None,
+    };
+
+/// A `null` window that matches no segment while the session holds coverage is a revert before
+/// the first anchor (spec D10): the `session.recomp` reset, after which the same request
+/// resolves again as a first pass. The host already removed that history, and every segment
+/// writer appends at the newest sequence or removes a suffix, so no anchor can return. A CAS
+/// conflict re-resolves like any other; the next resolution decides again.
+fn reset_no_survivor(
+    store: &MemoryStore,
+    session_id: &str,
+    row_version: Option<u64>,
+    attempt: u32,
+) -> Result<(), TransformError> {
+    // The reset's CAS fails if a writer moved the row after this read, so the range is exact.
+    let removed = store.history_segment_ends(session_id)?;
+    #[cfg(test)]
+    run_transform_attempt_hook(session_id);
+    match store.reset_session_for_recomp(session_id, row_version) {
+        Ok(reset) => {
+            let range = removed.map_or_else(
+                || "none".to_string(),
+                |(oldest, newest)| format!("{}..={}", oldest.sequence, newest.sequence),
+            );
+            eprintln!(
+                "daemon: revert before the first anchor reset {session_id}: removed history_segment sequences {range}; epoch {}",
+                reset.revert_epoch
+            );
+            Ok(())
+        }
+        Err(MemoryStoreError::CasConflict { .. }) if attempt < MAX_CAS_RETRIES => Ok(()),
+        Err(error) => Err(error.into()),
     }
 }
 
@@ -3421,7 +3468,8 @@ fn apply_once(
         Vec::new()
     };
 
-    // Revert through no anchor enters the pending-rewrite pass-through (spec D10 interim).
+    // A revert through no anchor reaches this pass only with `lineage_switched`; every other
+    // one was reset before the pass ran (spec D10).
     let boundary_present = !loaded.core.boundary_id.is_empty()
         && live
             .iter()
@@ -3431,10 +3479,8 @@ fn apply_once(
     } else {
         "-".to_string()
     };
-    let pending_rewrite_absent_shape = coverage.resolved.resolution
-        == crate::window_coverage::Resolution::Revert {
-            keep_through_seq: None,
-        };
+    let pending_rewrite_absent_shape =
+        req.lineage_switched && coverage.resolved.resolution == NO_SURVIVOR;
 
     if pending_rewrite_absent_shape && loaded.meta.anchor_block_id.is_none() {
         let fingerprint = absent_shape_fingerprint(&live);
@@ -20269,6 +20315,19 @@ pub(crate) mod tests {
         );
     }
 
+    /// `request` as the lineage owner sends it after a fake-compaction switch, the only request
+    /// a window with no surviving anchor arms `pending_rewrite` for (spec D10); the prior
+    /// conversation holds nothing, so the descent adopts nothing.
+    fn switched(mut request: TransformRequest) -> TransformRequest {
+        request.lineage_switched = true;
+        request.descent_edge_id = 1;
+        request.prior_conversation_key = "prior".to_string();
+        request.prior_epoch = 1;
+        request.new_epoch = 2;
+        request.constituents = vec![("prior".to_string(), request.session_id.clone(), 2)];
+        request
+    }
+
     #[test]
     fn reconcile_recut_nothing_survives_arms_pending_raw_without_truncate() {
         let dir = tempfile::tempdir().unwrap();
@@ -20283,7 +20342,11 @@ pub(crate) mod tests {
         let before_history_segments = s.load_history_segments("ses").unwrap();
 
         let live_absent = vec![item("t9", 1, "post-revert")];
-        let armed = run(&s, &req("ses", "cfg0", live_absent.clone()), &spine());
+        let armed = run(
+            &s,
+            &switched(req("ses", "cfg0", live_absent.clone())),
+            &spine(),
+        );
         assert_eq!(armed.action, "PASSTHROUGH");
         assert!(armed.committed, "arming writes the one durable alarm row");
         assert!(!armed.reconcile_pending);
@@ -20307,7 +20370,7 @@ pub(crate) mod tests {
         );
 
         let row_after_arm = after_arm.row_version.unwrap();
-        let repeat = run(&s, &req("ses", "cfg0", live_absent), &spine());
+        let repeat = run(&s, &switched(req("ses", "cfg0", live_absent)), &spine());
         assert_eq!(repeat.action, "PASSTHROUGH");
         assert!(!repeat.committed, "arm-once pending repeats are write-free");
         assert_eq!(repeat.row_version, row_after_arm);
@@ -20371,7 +20434,7 @@ pub(crate) mod tests {
         assert_eq!(boot.boundary_id, "t2#0");
 
         let absent = vec![item("foreign", 50, "other conversation")];
-        let armed = run(&s, &req("ses", "cfg0", absent), &spine());
+        let armed = run(&s, &switched(req("ses", "cfg0", absent)), &spine());
         assert_eq!(armed.action, "PASSTHROUGH");
         assert!(s.load("ses").unwrap().meta.pending_rewrite.is_some());
 
@@ -20403,7 +20466,7 @@ pub(crate) mod tests {
 
         for cycle in 0..3 {
             let absent = vec![item(&format!("foreign{cycle}"), 50 + cycle, "other")];
-            let raw = run(&s, &req("ses", "cfg0", absent), &spine());
+            let raw = run(&s, &switched(req("ses", "cfg0", absent)), &spine());
             assert_eq!(raw.action, "PASSTHROUGH");
             let normal = run(&s, &req("ses", "cfg0", present.clone()), &spine());
             assert_eq!(normal.action, "SOFT+");
@@ -20449,7 +20512,11 @@ pub(crate) mod tests {
         let foreign_same_mid = vec![item("t3", 90, "foreign bytes with reused tail mid")];
         let armed = run(
             &s,
-            &with_usage(req("ses", "cfg0", foreign_same_mid.clone()), 95, 100),
+            &switched(with_usage(
+                req("ses", "cfg0", foreign_same_mid.clone()),
+                95,
+                100,
+            )),
             &spine(),
         );
         assert_eq!(armed.action, "PASSTHROUGH");
@@ -20474,7 +20541,7 @@ pub(crate) mod tests {
         let meta_after_arm = after_arm.meta.clone();
         let repeat = run(
             &s,
-            &with_usage(req("ses", "cfg0", foreign_same_mid), 100, 100),
+            &switched(with_usage(req("ses", "cfg0", foreign_same_mid), 100, 100)),
             &spine(),
         );
         assert_eq!(repeat.action, "PASSTHROUGH");
@@ -20506,7 +20573,7 @@ pub(crate) mod tests {
             assert_eq!(boot.boundary_id, "t2#0");
             let raw = run(
                 &s,
-                &req("ses", "cfg0", vec![item("foreign", 90, "other")]),
+                &switched(req("ses", "cfg0", vec![item("foreign", 90, "other")])),
                 &spine(),
             );
             assert_eq!(raw.action, "PASSTHROUGH");
@@ -20519,7 +20586,7 @@ pub(crate) mod tests {
         let row = before.row_version.unwrap();
         let raw = run(
             &s,
-            &req("ses", "cfg0", vec![item("foreign", 90, "other")]),
+            &switched(req("ses", "cfg0", vec![item("foreign", 90, "other")])),
             &spine(),
         );
         assert_eq!(raw.action, "PASSTHROUGH");
@@ -20857,15 +20924,16 @@ pub(crate) mod tests {
             "healthy SOFT+ bytes must match the pre-detector golden",
         );
 
-        // A share-nothing boundary absence degrades to raw pass-through and arms the pending-rewrite alarm without changing lineage.
+        // A share-nothing boundary absence resets the session and serves a first pass (spec D10).
         let revert = run(
             &s,
             &req("ses", "cfg0", vec![item("z", 30, "other")]),
             &spine(),
         );
-        assert_eq!(revert.action, "PASSTHROUGH");
+        assert_eq!(revert.action, "HARD");
         assert!(!revert.reconcile_pending);
-        assert!(s.load("ses").unwrap().meta.pending_rewrite.is_some());
+        assert!(s.load("ses").unwrap().meta.pending_rewrite.is_none());
+        assert!(s.load_history_segments("ses").unwrap().is_empty());
     }
 
     #[test]
@@ -27919,6 +27987,9 @@ pub(crate) mod tests {
             if mode == "lineage" {
                 original.lineage_switched = true;
                 original.is_subagent = true;
+            }
+            if mode == "pending" {
+                original = switched(original);
             }
             let before = original.clone();
             let mut flagged = original.clone();
