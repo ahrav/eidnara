@@ -850,7 +850,19 @@ type PassDeclineReason =
     | "source_changed"
     | "invalidated"
     | "deleted"
-    | "internal_child";
+    | "internal_child"
+    | "daemon_session_busy"
+    | "daemon_status_unrecognized";
+
+/**
+ * Declines that try `serveLastApplied` before raw output, because raw output carries the whole
+ * uncompacted history.
+ */
+const LAST_APPLIED_DECLINES: ReadonlySet<PassDeclineReason> = new Set([
+    "capture_bytes",
+    "daemon_session_busy",
+    "daemon_status_unrecognized",
+]);
 
 /**
  * A local refusal prevents publication without counting a daemon failure. Byte pressure and a
@@ -1613,6 +1625,23 @@ export function createRustModeTransform(
                     );
                 }
                 if (!response) throw new Error("rust module returned no transform response");
+                // session_busy: the daemon's session lane already holds an active and a waiting pass for this session.
+                // An unrecognized status is declined the same way (Section 7.10.1 of the wire protocol).
+                const busy = response.status === "session_busy";
+                if (
+                    busy ||
+                    (response.status !== undefined &&
+                        response.status !== "ok" &&
+                        !isNeedFullSync(response))
+                ) {
+                    // The daemon committed nothing, so the flag this dispatch set is undone.
+                    assertCurrentPass();
+                    state.forceFullWire = forceFullWireOnBusy;
+                    throw new PassDeclined(
+                        sessionId,
+                        busy ? "daemon_session_busy" : "daemon_status_unrecognized",
+                    );
+                }
                 return { response };
             };
             let transformSeriesRestarted = false;
@@ -1643,6 +1672,7 @@ export function createRustModeTransform(
                 return result.response;
             };
             // The daemon commits its native-output snapshot on response, so a pass that exits after dispatch without committing its cache must resend the full history.
+            let forceFullWireOnBusy = state.forceFullWire;
             state.forceFullWire = true;
             let response = await sendTransformSeriesWithSingleRestart(body, "");
             captureResponseTelemetry(response);
@@ -1650,6 +1680,7 @@ export function createRustModeTransform(
                 // A cleared or superseded session must not receive the flag.
                 assertCurrentPass();
                 state.forceFullWire = true;
+                forceFullWireOnBusy = true;
                 // The retry names a fresh input snapshot; the recipe it receives binds to that one.
                 baseRevision = nextBaseRevision();
                 if (wireDelta) {
@@ -1835,10 +1866,9 @@ export function createRustModeTransform(
                     sessionId,
                     error instanceof Error ? error.message : String(error),
                 );
-                // Byte pressure recurs on every pass, so serving raw would send the whole history.
                 if (
                     error instanceof PassDeclined &&
-                    error.reason === "capture_bytes" &&
+                    LAST_APPLIED_DECLINES.has(error.reason) &&
                     serveLastApplied()
                 )
                     servedFrom = "last_applied";

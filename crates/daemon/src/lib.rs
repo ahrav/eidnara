@@ -73,6 +73,7 @@ mod tail_hygiene;
 pub mod terse_text_compression;
 mod token_cache;
 pub(crate) mod transform_unit;
+pub mod window_coverage;
 pub mod wire;
 
 pub mod transform;
@@ -153,7 +154,8 @@ use host_runtime::{BlockingWorkFailed, CancelSignal};
 
 use crate::transform_unit::{
     AdmissionPermit, HistorySummarizerFollowup, PageApplyGuard, PassContinuation, PassEntry,
-    PassHold, TRANSFORM_ADMISSION_PERMITS, TRANSFORM_UNITS_AT_ONCE, UnitOutcome, UnitPermit,
+    PassHold, SessionLanes, TRANSFORM_ADMISSION_PERMITS, TRANSFORM_UNITS_AT_ONCE, UnitOutcome,
+    UnitPermit,
 };
 
 use boundary::{BoundaryBlock, BoundaryContext, BoundaryMsg, Role, TriggerContext};
@@ -3048,6 +3050,8 @@ pub struct HandlerCore {
     transform_units: Arc<tokio::sync::Semaphore>,
     /// Admits the passes that may run or wait for a unit; see [`TRANSFORM_ADMISSION_PERMITS`].
     transform_admission: Arc<tokio::sync::Semaphore>,
+    /// Orders same-session passes after admission; see [`SessionLanes`].
+    transform_session_lanes: Arc<SessionLanes>,
     #[cfg(test)]
     transform_page_discard_logs: Mutex<Vec<String>>,
     /// The durable classify protocol behind `memory_classifier.run_task`; the scheduler
@@ -3983,6 +3987,7 @@ impl Handler {
             transform_pages: Mutex::new(TransformPageCoordinator::default()),
             transform_units: Arc::new(tokio::sync::Semaphore::new(TRANSFORM_UNITS_AT_ONCE)),
             transform_admission: Arc::new(tokio::sync::Semaphore::new(TRANSFORM_ADMISSION_PERMITS)),
+            transform_session_lanes: Arc::default(),
             #[cfg(test)]
             transform_page_discard_logs: Mutex::new(Vec::new()),
             missing_facade_command_id_sessions: Mutex::new(HashSet::new()),
@@ -4471,6 +4476,7 @@ impl Handler {
             transform_pages: Mutex::new(TransformPageCoordinator::default()),
             transform_units: Arc::new(tokio::sync::Semaphore::new(TRANSFORM_UNITS_AT_ONCE)),
             transform_admission: Arc::new(tokio::sync::Semaphore::new(TRANSFORM_ADMISSION_PERMITS)),
+            transform_session_lanes: Arc::default(),
             #[cfg(test)]
             transform_page_discard_logs: Mutex::new(Vec::new()),
             missing_facade_command_id_sessions: Mutex::new(HashSet::new()),
@@ -6760,6 +6766,33 @@ impl HandlerCore {
         Ok((session_id.to_string(), binding))
     }
 
+    /// `transform.boundary` (Section 7.10.2 of the wire protocol): one read-only anchor page.
+    fn handle_transform_boundary_value(
+        &self,
+        channel: RouteHandle,
+        request: &Value,
+    ) -> PreparedOutcome {
+        let (session_id, before_sequence) = match window_coverage::parse_boundary_request(request) {
+            Ok(parsed) => parsed,
+            Err(message) => return invalid_params_error(message),
+        };
+        if let Err(outcome) =
+            self.management_binding_version(channel, request, "transform.boundary", 3)
+        {
+            return outcome;
+        }
+        let Some(store) = self.store() else {
+            return store_unavailable_error();
+        };
+        match window_coverage::boundary_page(&store, session_id, before_sequence) {
+            Ok(page) => respond(page),
+            Err(error) => PreparedOutcome::Error {
+                code: "store_load_failed".to_string(),
+                message: error.to_string(),
+            },
+        }
+    }
+
     fn handle_todo_state_set_value(
         &self,
         channel: RouteHandle,
@@ -8945,6 +8978,26 @@ impl HandlerCore {
             Ok(admission) => admission,
             Err(outcome) => return outcome,
         };
+        let page_refused = || {
+            (page_apply.is_none() && self.transform_page_in_progress(&binding.session)).then(|| {
+                PreparedOutcome::Error {
+                    code: "authority_transform_page_in_progress".to_string(),
+                    message: "transform is blocked until all transform pages arrive".to_string(),
+                }
+            })
+        };
+        // Refused before the lane, so an unpaged pass never waits behind an applying page.
+        if let Some(refused) = page_refused() {
+            return refused;
+        }
+        let Some(lane) = self.transform_session_lanes.join(&parsed.session_id) else {
+            return respond_transform(&parsed, transform::TransformResponse::session_busy(), None);
+        };
+        let lane = lane.activate().await;
+        // Checked again: a page stream may have started staging while this pass waited.
+        if let Some(refused) = page_refused() {
+            return refused;
+        }
         apply_claude_code_config_controls(&mut parsed, &binding.config, serializer_profile);
         parsed
             .prompt_surface_tool_descriptions
@@ -9007,12 +9060,6 @@ impl HandlerCore {
         } else {
             None
         };
-        if page_apply.is_none() && self.transform_page_in_progress(&binding.session) {
-            return PreparedOutcome::Error {
-                code: "authority_transform_page_in_progress".to_string(),
-                message: "transform is blocked until all transform pages arrive".to_string(),
-            };
-        }
         let permit = match self.acquire_unit_permit().await {
             Ok(permit) => permit,
             Err(outcome) => return outcome,
@@ -9048,6 +9095,7 @@ impl HandlerCore {
             held: PassHold {
                 _charges: entry.meter.take_charges(),
                 _page_apply: page_apply,
+                _lane: lane,
             },
         };
         // From here the pass's store work runs on the blocking pool. The resident charges the
@@ -13943,6 +13991,7 @@ impl HandlerCore {
                     self.handle_transform_dispatch(entry, request, inbound_bytes)
                         .await
                 }
+                "transform.boundary" => self.handle_transform_boundary_value(channel, &request),
                 "state_sync" => self.handle_state_sync_value(channel, request),
                 "agent_drops.append" => self.handle_agent_drops_value(channel, request),
                 "note.evaluate" => note_evaluation_protocol_retired(),
@@ -18811,6 +18860,8 @@ mod tests {
     mod blocking_unit_tests;
     #[path = "request_budget/host_tests.rs"]
     mod request_budget_host_tests;
+    #[path = "window_coverage/dispatch_tests.rs"]
+    mod window_coverage_dispatch_tests;
 
     use super::*;
     use crate::metered_decode::{

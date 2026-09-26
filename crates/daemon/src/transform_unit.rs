@@ -144,6 +144,8 @@ pub(crate) enum HistorySummarizerFollowup {
 pub(crate) struct PassHold {
     pub(crate) _charges: Vec<host_runtime::wire::ByteCharge>,
     pub(crate) _page_apply: Option<Arc<PageApplyGuard>>,
+    /// Last, so a waiting same-session pass wakes only after the page phase is released.
+    pub(crate) _lane: SessionPass,
 }
 
 /// Keeps a paged session's `Applying` phase until the pass has settled or has been given up.
@@ -200,3 +202,95 @@ pub(crate) const TRANSFORM_ADMISSION_PERMITS: usize =
 pub(crate) type UnitPermit = OwnedSemaphorePermit;
 
 pub(crate) type AdmissionPermit = OwnedSemaphorePermit;
+
+/// Per-session transform lanes (spec D3): at most one active and one waiting pass per session
+/// id, whatever route carries it. A session has an entry while it has an active pass; the value
+/// is the waiting pass's wake-up, which the active pass's [`SessionPass`] fires as it drops. Join
+/// and hand-off both happen under this one lock, so passes activate in the order they joined.
+#[derive(Default)]
+pub(crate) struct SessionLanes(
+    pub(crate)  std::sync::Mutex<
+        std::collections::HashMap<String, Option<tokio::sync::oneshot::Sender<()>>>,
+    >,
+);
+
+/// One pass's place in its session lane. It rides in the pass's [`PassHold`], so it is released
+/// after the last unit's thread and the pass's emergency waits and final settlement finish,
+/// never while a unit may still commit. Detached work the pass starts (the history_summarizer
+/// firing's publication, checkpoint fragment writes) outlives it and is fenced by its own
+/// publication checks, not by the lane.
+pub(crate) struct SessionPass {
+    lanes: Arc<SessionLanes>,
+    session_id: String,
+    /// `Some` while the pass waits; the lane is handed over by a send on it.
+    waiting: Option<tokio::sync::oneshot::Receiver<()>>,
+}
+
+impl SessionLanes {
+    /// Joins the session's lane without waiting; `None` when it already holds two passes.
+    pub(crate) fn join(self: &Arc<Self>, session_id: &str) -> Option<SessionPass> {
+        let mut lanes = self
+            .0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let waiting = match lanes.entry(session_id.to_string()) {
+            std::collections::hash_map::Entry::Vacant(lane) => {
+                lane.insert(None);
+                None
+            }
+            std::collections::hash_map::Entry::Occupied(mut lane) if lane.get().is_none() => {
+                let (wake, waiting) = tokio::sync::oneshot::channel();
+                *lane.get_mut() = Some(wake);
+                Some(waiting)
+            }
+            std::collections::hash_map::Entry::Occupied(_) => return None,
+        };
+        Some(SessionPass {
+            lanes: Arc::clone(self),
+            session_id: session_id.to_string(),
+            waiting,
+        })
+    }
+}
+
+impl SessionPass {
+    /// Waits, abortably, until the pass is the session's active pass.
+    pub(crate) async fn activate(mut self) -> Self {
+        if let Some(waiting) = self.waiting.as_mut() {
+            // Only this pass's own Drop drops the sender unsent, so the wait ends in a hand-off.
+            let handed_off = waiting.await;
+            debug_assert!(
+                handed_off.is_ok(),
+                "a waiting lane sender was dropped unsent"
+            );
+        }
+        self.waiting = None;
+        self
+    }
+}
+
+impl Drop for SessionPass {
+    fn drop(&mut self) {
+        let mut lanes = self
+            .lanes
+            .0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        // A waiter dropped after its hand-off was sent is the active pass.
+        let active = self
+            .waiting
+            .as_mut()
+            .is_none_or(|waiting| waiting.try_recv().is_ok());
+        let Some(wake) = lanes.get_mut(&self.session_id) else {
+            return;
+        };
+        if !active {
+            *wake = None;
+            return;
+        }
+        if wake.take().is_some_and(|wake| wake.send(()).is_ok()) {
+            return;
+        }
+        lanes.remove(&self.session_id);
+    }
+}

@@ -417,6 +417,62 @@ describe("Rust mode transform request", () => {
         expect(secondOutput.messages).toEqual(native);
     });
 
+    for (const [status, reason] of [
+        ["session_busy", "daemon_session_busy"],
+        ["status_added_later", "daemon_status_unrecognized"],
+    ]) {
+        it(`declines a daemon ${status} pass without publishing or promoting`, async () => {
+            const sessionId = `rust-session-${status}-${Date.now()}`;
+            installAvailabilityDb(sessionId, {});
+            installRawRows(sessionId, rawRows(1));
+            const { client, bodies } = recordingClient(() => ({ status }));
+            const transform = createRustModeTransform(makeDeps(), { moduleClient: client });
+            const messages = makeMessages(sessionId);
+            const output = { messages: [...messages] as unknown[] };
+            const debugSpy = spyOn(logger.sessionLog, "debug");
+            try {
+                await transform.run(sessionId, output);
+                expect(bodies).toHaveLength(1);
+                expect(output.messages).toEqual(messages);
+                expect(transform.getState(sessionId).initialized).toBe(false);
+                expect(transform.getState(sessionId).consecutiveFailures).toBe(0);
+                expect(transform.getState(sessionId).forceFullWire).toBe(false);
+                expect(sessionLogs(debugSpy, sessionId)).toContain(
+                    `rust session ${sessionId} pass declined: ${reason}`,
+                );
+            } finally {
+                debugSpy.mockRestore();
+            }
+        });
+    }
+
+    it("declines a session_busy full-sync retry and keeps the full-sync flag", async () => {
+        const sessionId = `rust-session-busy-retry-${Date.now()}`;
+        installAvailabilityDb(sessionId, {});
+        installRawRows(sessionId, rawRows(1));
+        const { client, bodies } = recordingClient((_request, index) =>
+            index === 0
+                ? { status: "need_full_sync" }
+                : { status: "session_busy", action: "SESSION_BUSY" },
+        );
+        const transform = createRustModeTransform(makeDeps(), { moduleClient: client });
+        const messages = makeMessages(sessionId);
+        const output = { messages: [...messages] as unknown[] };
+        const debugSpy = spyOn(logger.sessionLog, "debug");
+        try {
+            await transform.run(sessionId, output);
+            expect(bodies).toHaveLength(2);
+            expect(output.messages).toEqual(messages);
+            expect(transform.getState(sessionId).consecutiveFailures).toBe(0);
+            expect(transform.getState(sessionId).forceFullWire).toBe(true);
+            expect(sessionLogs(debugSpy, sessionId)).toContain(
+                `rust session ${sessionId} pass declined: daemon_session_busy`,
+            );
+        } finally {
+            debugSpy.mockRestore();
+        }
+    });
+
     it("sends canonical model identity with the model-routed prompt preset and overrides", async () => {
         const sessionId = `rust-prompt-surface-${Date.now()}`;
         installAvailabilityDb(sessionId, {});
@@ -3945,6 +4001,44 @@ describe("fail-open after an applied pass", () => {
             debugSpy.mockRestore();
         }
     });
+
+    for (const [status, reason] of [
+        ["session_busy", "daemon_session_busy"],
+        ["status_added_later", "daemon_status_unrecognized"],
+    ]) {
+        it(`serves the last applied output plus the appended messages on a ${status} decline`, async () => {
+            const sessionId = `rust-fail-open-${status}-${Date.now()}`;
+            const rows = rawRows(5);
+            installRawRows(sessionId, rows);
+            const { client, bodies } = recordingClient((request, index) =>
+                index === 0 ? recipeResponse(request, [folded(sessionId)]) : { status },
+            );
+            const transform = createRustModeTransform(makeDeps(), { moduleClient: client });
+            const debugSpy = spyOn(logger.sessionLog, "debug");
+            try {
+                await transform.run(sessionId, {
+                    messages: rowMessages(sessionId, rows.slice(0, 3)),
+                });
+
+                const grown = rowMessages(sessionId, rows);
+                const output = { messages: [...grown] as unknown[] };
+                await transform.run(sessionId, output);
+                expect(bodies).toHaveLength(2);
+                expect(output.messages).toEqual([folded(sessionId), grown[3], grown[4]]);
+                expect(output.messages[1]).toBe(grown[3]);
+                expect(transform.getState(sessionId).failureCount).toBe(0);
+                expect(transform.getState(sessionId).consecutiveFailures).toBe(0);
+                const passLines = sessionLogs(debugSpy, sessionId).filter((line) =>
+                    line.startsWith("rust pass:"),
+                );
+                expect(passLines[1]).toContain(
+                    `decision=declined:${reason} reason=none served_from=last_applied in=5 out=3`,
+                );
+            } finally {
+                debugSpy.mockRestore();
+            }
+        });
+    }
 
     it("serves the input unchanged after an in-place edit of an acknowledged message", async () => {
         const sessionId = `rust-fail-open-edit-${Date.now()}`;
