@@ -5593,6 +5593,18 @@ fn apply_ingress_meta(
         meta.block_identity_by_mid
             .insert(re_adoption.mid.clone(), projected_vector(&re_adoption.mid));
     }
+    // A re-adopted message changes the bytes a retried chunk at or before it would send; its failure count no longer describes those bytes.
+    if let Some(retry) = meta.history_summarizer.chunk_retry
+        && projection.blocks.iter().any(|block| {
+            block.ordinal >= retry.chunk_start
+                && enforcement
+                    .tail_re_adoptions
+                    .iter()
+                    .any(|re_adoption| re_adoption.mid == block.mid)
+        })
+    {
+        meta.history_summarizer.chunk_retry = None;
+    }
     meta.tail_identity_re_adopt_count = meta
         .tail_identity_re_adopt_count
         .saturating_add(enforcement.tail_re_adoptions.len() as u64);
@@ -15445,6 +15457,65 @@ pub(crate) mod tests {
             1,
             "a replay of the adopted bytes is not another re-adoption"
         );
+    }
+
+    /// A re-adopted tail message changes the bytes a retried chunk would send, so the retry count for a chunk at or before it starts over; a chunk that ends before the change keeps its count.
+    #[test]
+    fn a_tail_re_adoption_clears_the_retry_count_of_a_chunk_it_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = store(dir.path());
+        let session = "tail-re-adopt-retry";
+        s.replace_history_segments(session, &[comp(1, 1, 1, "covered", "SUMMARY")])
+            .unwrap();
+        let original = vec![item("covered", 1, "covered"), item("tail", 2, "before")];
+        run(&s, &req(session, "cfg0", original), &spine());
+        let before = s.load(session).unwrap();
+        let mutated_request = req(
+            session,
+            "cfg0",
+            vec![item("covered", 1, "covered"), item("tail", 2, "after")],
+        );
+        let mutated_projection = project_messages(&mutated_request.messages).unwrap();
+        let enforcement = enforce_block_identity(
+            &before.meta,
+            &normalize_synthetic_todo_ingress(&mutated_request),
+            &mutated_projection,
+            &before.core,
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(enforcement.tail_re_adoptions.len(), 1);
+        let retry = |chunk_start| {
+            Some(memory_store::HistorySummarizerChunkRetry {
+                chunk_start,
+                failures: 8,
+            })
+        };
+
+        let mut changed = before.meta.clone();
+        changed.history_summarizer.chunk_retry = retry(2);
+        apply_ingress_meta(
+            &mut changed,
+            &mutated_request,
+            &mutated_projection,
+            None,
+            None,
+            &enforcement,
+        );
+        assert_eq!(changed.history_summarizer.chunk_retry, None);
+
+        let mut unchanged = before.meta.clone();
+        unchanged.history_summarizer.chunk_retry = retry(3);
+        apply_ingress_meta(
+            &mut unchanged,
+            &mutated_request,
+            &mutated_projection,
+            None,
+            None,
+            &enforcement,
+        );
+        assert_eq!(unchanged.history_summarizer.chunk_retry, retry(3));
     }
 
     fn replay_basis_covered_item(mid: &str, ordinal: u64) -> IngressMessage {

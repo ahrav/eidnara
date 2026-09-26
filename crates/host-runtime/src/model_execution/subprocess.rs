@@ -3095,4 +3095,28 @@ mod tests {
             "{PI_PROVIDER_ERROR_MESSAGE} while the host was preparing the harness"
         )));
     }
+
+    /// A provider status that names the request's content counts against the chunk; one that names the configuration, such as an unknown model, recurs for any chunk until the configuration changes.
+    #[test]
+    fn only_content_rejection_statuses_are_provider_reported() {
+        use crate::model_execution::backend::{
+            OPENCODE_PROVIDER_ERROR_MESSAGE, is_provider_reported_failure,
+        };
+
+        for status in [400, 413, 422] {
+            let message = format!("{OPENCODE_PROVIDER_ERROR_MESSAGE} (status {status})");
+            assert!(is_provider_reported_failure(&message), "{message}");
+            assert!(
+                is_provider_reported_failure(&format!("{message}; additionally cleanup failed")),
+                "{message}"
+            );
+        }
+        for status in [402, 404, 405, 410, 415] {
+            let message = format!("{OPENCODE_PROVIDER_ERROR_MESSAGE} (status {status})");
+            assert!(!is_provider_reported_failure(&message), "{message}");
+        }
+        assert!(is_provider_reported_failure(
+            OPENCODE_PROVIDER_ERROR_MESSAGE
+        ));
+    }
 }

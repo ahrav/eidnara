@@ -866,10 +866,19 @@ pub fn handle_restart_load(
     match state.state {
         HistorySummarizerPhase::Idle => Ok(RestartAction::Done),
         HistorySummarizerPhase::AwaitingProducer => {
-            let (Some(producer_session_id), Some(producer_run_id)) = (
+            // No harness holds a placeholder run, so there is nothing to reattach; the refire is another placeholder firing and needs no model.
+            let run = match (
                 state.producer_session_id.clone(),
                 state.producer_run_id.clone(),
-            ) else {
+            ) {
+                (Some(session), Some(run))
+                    if !crate::history_summarizer_chunk::is_placeholder_run_id(&run) =>
+                {
+                    Some((session, run))
+                }
+                _ => None,
+            };
+            let Some((producer_session_id, producer_run_id)) = run else {
                 let next = abandon(&state, failure_backoff_at_ms, AbandonClass::Restarted);
                 persist_history_summarizer_state(store, session_id, next)?;
                 return Ok(RestartAction::AbandonedAndRefireEligible {
@@ -6154,6 +6163,57 @@ mod tests {
             store.load("ses").unwrap().meta.history_summarizer.state,
             HistorySummarizerPhase::AwaitingProducer,
             "reattach does not clear the durable single-flight"
+        );
+    }
+
+    /// A placeholder firing has no run in any harness; a restart that finds one awaiting abandons it for a refire instead of asking the model harness for a run it never held.
+    #[test]
+    fn restart_mid_awaiting_placeholder_run_abandons_for_refire_without_reattach() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(dir.path());
+        let mut awaiting = producer_started(
+            &match fire(
+                &HistorySummarizerDurableState::default(),
+                1,
+                3,
+                "fp".into(),
+                test_selected_range_identities(),
+                0,
+                HistorySegmentSetGeneration::default(),
+                10,
+            )
+            .unwrap()
+            {
+                FireOutcome::Fired(state) => state,
+                FireOutcome::Busy(_) => unreachable!(),
+            },
+            "producer-session".into(),
+            crate::history_summarizer_chunk::placeholder_run_id("ses"),
+            "pi".into(),
+        )
+        .unwrap();
+        awaiting.chunk_retry = Some(HistorySummarizerChunkRetry {
+            chunk_start: 1,
+            failures: 8,
+        });
+        let meta = test_meta_with_history_summarizer(awaiting);
+        store
+            .commit("ses", None, &CoreState::empty(), &meta)
+            .unwrap();
+
+        assert_eq!(
+            handle_restart_load(&store, "ses", 500).unwrap(),
+            RestartAction::AbandonedAndRefireEligible { firing_seq: 1 }
+        );
+        let after = store.load("ses").unwrap().meta.history_summarizer;
+        assert_eq!(after.state, HistorySummarizerPhase::Idle);
+        assert_eq!(
+            after.chunk_retry,
+            Some(HistorySummarizerChunkRetry {
+                chunk_start: 1,
+                failures: 8,
+            }),
+            "the refire is still a placeholder firing"
         );
     }
 

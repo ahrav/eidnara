@@ -127,8 +127,9 @@ pub(crate) const OPENCODE_PROVIDER_ERROR_MESSAGE: &str = "opencode provider repo
 /// `BackendError::message` of a Pi run whose model provider rejected the request.
 pub(crate) const PI_PROVIDER_ERROR_MESSAGE: &str = "pi assistant stopped with reason \"error\"";
 
-/// Whether a `BackendError::message` names a failure the model provider reported for the request, as opposed to one the host raised while preparing, launching, or supervising the harness.
-/// `ErrorClass::Permanent` covers both kinds; a caller that reacts to the request's content needs this distinction, because a host failure recurs for any request until the environment changes.
+/// Whether a `BackendError::message` names a failure the model provider reported about the request's content, as opposed to one the host raised while preparing, launching, or supervising the harness, or one about the configuration.
+/// `ErrorClass::Permanent` covers all of these; a caller that reacts to the request's content needs the distinction, because a host or configuration failure recurs for any request until the environment changes.
+/// An OpenCode status is accepted only from [`CONTENT_REJECTION_STATUSES`]: an unknown model answers 404 and a billing problem 402, and neither says anything about the chunk.
 /// `merge_cleanup` and `merge_record_retained` may append `; additionally ...` to either message; the decoration reports host cleanup, not the provider.
 pub fn is_provider_reported_failure(message: &str) -> bool {
     let decorated = |rest: &str| rest.is_empty() || rest.starts_with("; additionally ");
@@ -137,8 +138,19 @@ pub fn is_provider_reported_failure(message: &str) -> bool {
         .is_some_and(decorated)
         || message
             .strip_prefix(OPENCODE_PROVIDER_ERROR_MESSAGE)
-            .is_some_and(|rest| decorated(rest) || rest.starts_with(" (status "))
+            .is_some_and(|rest| {
+                decorated(rest)
+                    || rest
+                        .strip_prefix(" (status ")
+                        .and_then(|rest| rest.split_once(')'))
+                        .is_some_and(|(status, rest)| {
+                            CONTENT_REJECTION_STATUSES.contains(&status) && decorated(rest)
+                        })
+            })
 }
+
+/// Provider statuses that reject the request as sent: bad request, payload too large, unprocessable content.
+const CONTENT_REJECTION_STATUSES: [&str; 3] = ["400", "413", "422"];
 
 /// Every backend run resolves to exactly one terminal classification.
 #[derive(Debug, Clone, PartialEq)]

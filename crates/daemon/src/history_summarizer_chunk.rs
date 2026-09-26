@@ -630,6 +630,17 @@ fn placeholder_output(chunk: &HistorySummarizerChunk, failures: u32) -> String {
     )
 }
 
+/// The run id a placeholder firing records; no harness holds such a run, so restart recovery refires instead of reattaching to it.
+pub fn placeholder_run_id(session_id: &str) -> String {
+    format!("{PLACEHOLDER_RUN_ID_PREFIX}{session_id}")
+}
+
+pub fn is_placeholder_run_id(run_id: &str) -> bool {
+    run_id.starts_with(PLACEHOLDER_RUN_ID_PREFIX)
+}
+
+const PLACEHOLDER_RUN_ID_PREFIX: &str = "placeholder:";
+
 /// Stands in for the model on a placeholder firing and returns the daemon-authored document, which then validates and publishes like model output.
 pub struct PlaceholderProducer {
     output: String,
@@ -658,7 +669,7 @@ impl HistorySummarizerProducerDriver for PlaceholderProducer {
         _model: &str,
     ) -> Result<RunHandle, HistorySummarizerProducerError> {
         Ok(RunHandle {
-            run_id: format!("placeholder:{session_id}"),
+            run_id: placeholder_run_id(session_id),
         })
     }
 

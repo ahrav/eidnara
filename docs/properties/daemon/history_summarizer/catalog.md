@@ -715,8 +715,8 @@ Type: liveness
 Reachability: default-production
 Status: active
 Exercised: partial - `handler_chunk_that_always_fails_stops_stalling_folding`
-(`lib.rs:42310`) drives repeated provider-reported refusals of one chunk across
-firings, and `handler_setup_failure_does_not_placeholder_the_chunk` (`:42367`)
+(`lib.rs:43037`) drives repeated provider-reported refusals of one chunk across
+firings, and `handler_setup_failure_does_not_placeholder_the_chunk` (`:43094`)
 holds that repeated harness setup failures never advance the ladder; no test
 drives repeated validation rejections.
 Guarantee: After the fault-free window opens, a session whose producer keeps
@@ -757,14 +757,17 @@ failure the model provider reported increments the durable `chunk_retry` count
 for the chunk start (`lib.rs:6307`, `history_summarizer.rs:361-407`); a reattached
 run that ends the same way counts too (`lib.rs:5614`). Only the
 firing's final error counts: a rejection or provider failure that falls back to
-the next model in the chain (`history_summarizer.rs:1946-1951`, `:1983-1988`)
+the next model in the chain (`history_summarizer.rs:1955-1960`, `:1992-1997`)
 and then publishes clears the count instead. The host classes harness setup
 and supervision failures permanent too, such as a missing credential or a
 harness that cannot start; `is_provider_reported_failure`
-(`host-runtime/src/model_execution/backend.rs:133-141`) excludes them, because
-they fail every chunk alike and counting them would publish placeholders over
-history a working model could summarize. Assembly varies the calibration seeds
-from `VARY_SEEDS_AFTER_FAILURES` failures, halves the chunk token budget per
+(`host-runtime/src/model_execution/backend.rs:134-150`) excludes them, and
+excludes provider statuses that name the configuration rather than the request
+(an unknown model's 404), because they fail every chunk alike and counting them
+would publish placeholders over history a working model could summarize. A
+re-adopted tail message at or past the chunk start clears the count
+(`transform.rs:5596-5607`), since the retried bytes changed. Assembly varies the
+calibration seeds from `VARY_SEEDS_AFTER_FAILURES` failures, halves the chunk token budget per
 failure from `SHRINK_CHUNK_AFTER_FAILURES`, and from `PLACEHOLDER_AFTER_FAILURES`
 publishes a daemon-authored placeholder segment for the shrunken chunk without a
 model call (`history_summarizer_chunk.rs:572-631`); the placeholder stops before
