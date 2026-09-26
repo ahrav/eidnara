@@ -15,16 +15,11 @@ import {
     permissionDisabled,
     resetEidnaraReduceRegisteredGloballyForTest,
     resolveEidnaraReduceAvailability,
-    resolveEidnaraReduceAvailabilityFromMessages,
-    resolveTodowriteAvailabilityFromMessages,
+    resolveTodowriteAvailability,
     resolveToolPermissionDenied,
     setEidnaraReduceRegisteredGlobally,
 } from "./eidnara-reduce-availability";
 import { closeReadOnlySessionDb } from "./read-session-db";
-
-function userMsg(tools?: Record<string, unknown>) {
-    return { info: { role: "user", ...(tools !== undefined ? { tools } : {}) } };
-}
 
 describe("eidnara_reduce availability (OpenCode DB)", () => {
     const originalXdgDataHome = process.env.XDG_DATA_HOME;
@@ -135,83 +130,6 @@ describe("eidnara_reduce availability (OpenCode DB)", () => {
             callable: false,
             frozen: true,
         });
-    });
-});
-
-describe("eidnara_reduce availability (spawn tools map)", () => {
-    it("freezes the first user message's verdict: explicit signal decides, no signal fails open", () => {
-        for (const [sessionId, messages, callable] of [
-            ["ses-allow", [userMsg({ "*": false, read: true, grep: true })], false],
-            ["ses-explicit", [userMsg({ "*": false, read: true, eidnara_reduce: true })], true],
-            ["ses-plain", [userMsg()], true],
-            ["ses-deny", [userMsg({ eidnara_reduce: false })], false],
-            // Non-user messages carry no policy; an empty tools map is no signal.
-            ["ses-nosignal", [{ info: { role: "assistant" } }, userMsg({})], true],
-        ] as const) {
-            clearEidnaraReduceAvailability(sessionId);
-            expect(
-                resolveEidnaraReduceAvailabilityFromMessages(sessionId, messages),
-                sessionId,
-            ).toEqual({ callable, frozen: true });
-        }
-    });
-
-    it("freezes the verdict per session — later, different tool maps cannot flap it", () => {
-        clearEidnaraReduceAvailability("ses-frozen");
-        const first = resolveEidnaraReduceAvailabilityFromMessages("ses-frozen", [
-            userMsg({ "*": false, read: true }),
-        ]);
-        expect(first).toEqual({ callable: false, frozen: true });
-        // Same session, contradictory map on a later pass: cached verdict wins
-        // (per-turn maps can differ; a flapping verdict would bust the cache).
-        const second = resolveEidnaraReduceAvailabilityFromMessages("ses-frozen", [
-            userMsg({ "*": false, eidnara_reduce: true }),
-        ]);
-        expect(second).toEqual({ callable: false, frozen: true });
-    });
-
-    it("does not freeze a fail-open verdict from an array with no user message", () => {
-        clearEidnaraReduceAvailability("ses-no-user-yet");
-        // No-user scans remain provisional until a user message supplies the session policy.
-        const provisional = resolveEidnaraReduceAvailabilityFromMessages("ses-no-user-yet", [
-            { info: { role: "assistant" } },
-        ]);
-        expect(provisional).toEqual({ callable: true, frozen: false });
-        // The first user tools map freezes the session verdict.
-        const final = resolveEidnaraReduceAvailabilityFromMessages("ses-no-user-yet", [
-            { info: { role: "assistant" } },
-            userMsg({ "*": false, read: true }),
-        ]);
-        expect(final).toEqual({ callable: false, frozen: true });
-    });
-});
-
-describe("todowrite availability (generalized resolver)", () => {
-    it("freezes the first user message's todowrite verdict the same way as eidnara_reduce", () => {
-        for (const [sessionId, tools, callable] of [
-            ["ses-td-allow", { "*": false, read: true, grep: true }, false],
-            ["ses-td-explicit", { "*": false, read: true, todowrite: true }, true],
-            ["ses-td-deny", { todowrite: false }, false],
-            ["ses-td-plain", undefined, true],
-        ] as const) {
-            clearTodowriteAvailability(sessionId);
-            expect(
-                resolveTodowriteAvailabilityFromMessages(sessionId, [userMsg(tools)]),
-                sessionId,
-            ).toEqual({ callable, frozen: true });
-        }
-    });
-
-    it("resolves eidnara_reduce and todowrite independently for the same session", () => {
-        // A tools map can keep eidnara_reduce but filter todowrite (or vice versa);
-        // the two verdicts must not bleed into each other through the cache.
-        clearEidnaraReduceAvailability("ses-td-mixed");
-        clearTodowriteAvailability("ses-td-mixed");
-        const map = userMsg({ "*": false, eidnara_reduce: true });
-        const reduce = resolveEidnaraReduceAvailabilityFromMessages("ses-td-mixed", [map]);
-        const todo = resolveTodowriteAvailabilityFromMessages("ses-td-mixed", [map]);
-        expect(reduce).toEqual({ callable: true, frozen: true });
-        expect(todo).toEqual({ callable: false, frozen: true });
     });
 });
 
@@ -670,17 +588,8 @@ describe("eidnara_reduce process-global registration override (compaction-off #2
         try {
             // The override must force `callable=false` so unregistration reaches guidance, nudges, and `§N§` prefix injection.
             clearEidnaraReduceAvailability("ses-plain-off");
-            const verdict = resolveEidnaraReduceAvailabilityFromMessages("ses-plain-off", [
-                userMsg(),
-            ]);
+            const verdict = resolveEidnaraReduceAvailability("ses-plain-off");
             expect(verdict).toEqual({ callable: false, frozen: true });
-
-            // Global unregistration overrides a per-session `eidnara_reduce` allow.
-            clearEidnaraReduceAvailability("ses-allow-off");
-            const verdictAllow = resolveEidnaraReduceAvailabilityFromMessages("ses-allow-off", [
-                userMsg({ "*": false, eidnara_reduce: true }),
-            ]);
-            expect(verdictAllow).toEqual({ callable: false, frozen: true });
         } finally {
             resetEidnaraReduceRegisteredGloballyForTest();
         }
@@ -690,8 +599,7 @@ describe("eidnara_reduce process-global registration override (compaction-off #2
         setEidnaraReduceRegisteredGlobally(false);
         try {
             clearTodowriteAvailability("ses-td-off");
-            const verdict = resolveTodowriteAvailabilityFromMessages("ses-td-off", [userMsg()]);
-            expect(verdict).toEqual({ callable: true, frozen: true });
+            expect(resolveTodowriteAvailability("ses-td-off").callable).toBe(true);
         } finally {
             resetEidnaraReduceRegisteredGloballyForTest();
         }
