@@ -142,13 +142,6 @@ impl SyntheticHistory {
 /// Writes `count` rows into each of `temporal_marks`, `user_hints`, and `channel1_appends`
 /// under block ids `overlay-{n}#0`, none of which a synthetic window carries.
 pub fn seed_overlays(store: &MemoryStore, session_id: &str, count: usize) {
-    let ids: Vec<String> = (0..count).map(|n| format!("overlay-{n}#0")).collect();
-    seed_block_overlays(store, session_id, &ids);
-}
-
-/// Writes one row per block id into each of `temporal_marks`, `user_hints`, and
-/// `channel1_appends`, replacing any row the block already has.
-pub fn seed_block_overlays(store: &MemoryStore, session_id: &str, block_ids: &[String]) {
     store
         .with_fenced_conn_for_test(|tx| {
             for (table, text) in [
@@ -157,13 +150,12 @@ pub fn seed_block_overlays(store: &MemoryStore, session_id: &str, block_ids: &[S
                 ("channel1_appends", "reminder_text, fired_at_ms"),
             ] {
                 let mut insert = tx.prepare(&format!(
-                    "INSERT OR REPLACE INTO {table} (session_id, block_id, {text})
-                     VALUES (?1, ?2, ?3, ?4)"
+                    "INSERT INTO {table} (session_id, block_id, {text}) VALUES (?1, ?2, ?3, ?4)"
                 ))?;
-                for (n, block_id) in block_ids.iter().enumerate() {
+                for n in 0..count {
                     insert.execute(rusqlite::params![
                         session_id,
-                        block_id,
+                        format!("overlay-{n}#0"),
                         format!("{table} {n}"),
                         n as i64,
                     ])?;

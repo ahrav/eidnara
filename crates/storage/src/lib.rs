@@ -948,8 +948,9 @@ mod sqlite_backend {
     ) -> c_int {
         let stmt = statement.cast::<rusqlite::ffi::sqlite3_stmt>();
         // SAFETY: `context` is the gate registered by `start_statement_work_ledger`, kept
-        // alive by `SqliteStore.gate` and the connection's authorizer; `stmt` is the live statement SQLite reports, and the
-        // status read and the SQL text read neither retain nor free it.
+        // alive by `SqliteStore.gate` and the connection's authorizer; `stmt` is the live
+        // statement SQLite reports, and the status read and the SQL text read neither retain
+        // nor free it.
         let (gate, steps) = unsafe {
             (
                 &*context.cast::<AuthorityGate>(),

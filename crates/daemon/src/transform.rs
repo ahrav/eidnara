@@ -2965,12 +2965,15 @@ fn apply_additive_only(
             )?;
             note_deliveries = m1.note_deliveries.clone();
             // The folded sequence is the newest one the signal saw, so only rows appended
-            // since then sit above it; more of them than the row cap is refused, not cut.
+            // since then sit above it. More of them than the row cap means the set grew under
+            // the pass, which the commit's set fence also reports as a CAS conflict. The retry
+            // reloads the signal; the notes this pass claimed stay unacked, so it claims them
+            // again.
             let Some(m1_body) = m1.body.as_deref() else {
-                return Err(TransformError::CoverageGap(
-                    "more history_segments were appended during the pass than m1 can carry"
-                        .to_string(),
-                ));
+                return Err(TransformError::Store(MemoryStoreError::CasConflict {
+                    expected: loaded.row_version,
+                    found: loaded.row_version.unwrap_or(0),
+                }));
             };
             let profile_rendered = m1.profile_rendered;
             core.step(PassInput {
@@ -3324,9 +3327,15 @@ fn apply_once(
     let tagging_surface_requested =
         crate::tagging_surface_active(serializer_profile, req.tool_present);
     let seed_or_sync_started_at = Instant::now();
-    let transform_snapshot = store.load_transform_snapshot(&req.session_id, |basis| {
-        overlay_block_ids(req, &projection, &live, basis)
-    })?;
+    // Every overlay consumer looks rows up by a block of this projection, so only those
+    // rows are read.
+    let projection_block_ids: Vec<&str> = projection
+        .blocks
+        .iter()
+        .map(|block| block.id.as_str())
+        .collect();
+    let transform_snapshot =
+        store.load_transform_snapshot(&req.session_id, &projection_block_ids)?;
     timings.seed_or_sync = elapsed_ms(seed_or_sync_started_at);
     timings.store_cache_state = transform_snapshot.timings.cache_state_ms;
     let tag_hydration_started_at = Instant::now();
@@ -4613,202 +4622,210 @@ fn apply_once(
                         estimate_tokens,
                     )
                 });
-                if served_m1_body.is_none() {
-                    let history_segments_for_fold = store.load_history_segments(&req.session_id)?;
-                    let coverage_bounds =
-                        coverage_bounds_from_history_segments(&history_segments_for_fold)?;
-                    let covered_system_messages = covered_system_messages_for_coverage(
-                        req,
-                        coverage_bounds.map(|(_, end)| end),
-                        coverage_bounds.map(|(start, _)| start),
-                        serializer_profile,
-                    );
-                    let mut comp = compose_m0_for_context(
-                        store,
-                        &req.session_id,
-                        &covered_system_messages,
-                        &meta,
-                        estimate_tokens,
-                        ctx,
-                    )?;
+                match served_m1_body {
+                    None => {
+                        let history_segments_for_fold =
+                            store.load_history_segments(&req.session_id)?;
+                        let coverage_bounds =
+                            coverage_bounds_from_history_segments(&history_segments_for_fold)?;
+                        let covered_system_messages = covered_system_messages_for_coverage(
+                            req,
+                            coverage_bounds.map(|(_, end)| end),
+                            coverage_bounds.map(|(start, _)| start),
+                            serializer_profile,
+                        );
+                        let mut comp = compose_m0_for_context(
+                            store,
+                            &req.session_id,
+                            &covered_system_messages,
+                            &meta,
+                            estimate_tokens,
+                            ctx,
+                        )?;
 
-                    if let Some(stray) = first_uncovered_live_block(
-                        &history_segments_for_fold,
-                        &live,
-                        comp.coverage_ordinal,
-                    ) {
-                        return Err(TransformError::CoverageGap(format!(
-                            "coverage gap: live item {} (ordinal {}) sits at or below coverage end {:?} \
+                        if let Some(stray) = first_uncovered_live_block(
+                            &history_segments_for_fold,
+                            &live,
+                            comp.coverage_ordinal,
+                        ) {
+                            return Err(TransformError::CoverageGap(format!(
+                                "coverage gap: live item {} (ordinal {}) sits at or below coverage end {:?} \
                               but no history_segment covers it; composing m0 would silently drop it from the tail",
-                            stray.id(),
-                            stray.ordinal(),
-                            comp.coverage_ordinal
-                        )));
-                    }
+                                stray.id(),
+                                stray.ordinal(),
+                                comp.coverage_ordinal
+                            )));
+                        }
 
-                    if let Some(coverage_end) = comp.coverage_ordinal {
-                        let minted = comp.boundary_id.as_str();
-                        validate_live_boundary_ordinal(minted, coverage_end, &live)?;
-                        if minted.is_empty()
-                            || !boundary_available(
-                                minted,
-                                &live,
-                                &boundary_state,
-                                req.declared_trim.as_ref(),
-                            )
-                        {
-                            return Err(TransformError::BoundaryNotPresent(format!(
-                                "fold minted anchor {minted:?} from the folded history_segment's \
+                        if let Some(coverage_end) = comp.coverage_ordinal {
+                            let minted = comp.boundary_id.as_str();
+                            validate_live_boundary_ordinal(minted, coverage_end, &live)?;
+                            if minted.is_empty()
+                                || !boundary_available(
+                                    minted,
+                                    &live,
+                                    &boundary_state,
+                                    req.declared_trim.as_ref(),
+                                )
+                            {
+                                return Err(TransformError::BoundaryNotPresent(format!(
+                                    "fold minted anchor {minted:?} from the folded history_segment's \
                               end_message_id, but no live block carries that id; the anchor \
                               must be the flat block id (`<mid>#<index>`) of the last covered \
                               block; check the publisher's end_message_id"
-                            )));
+                                )));
+                            }
                         }
-                    }
 
-                    let effective = effective_reductions(
-                        &core,
-                        &selected_reductions,
-                        suppress_bootstrap_reduction_tag_overlay,
-                    );
-                    let survivors = surviving_red_units(&effective, &live, comp.coverage_ordinal);
-                    let mut strip_survivors = surviving_strip_units(&core, req);
-                    strip_survivors.extend(new_strip_units.clone());
-                    let terse_text_compression_survivors = surviving_terse_text_compression_units(
-                        &core,
-                        &new_terse_text_compression_units,
-                        &live,
-                        comp.coverage_ordinal,
-                    );
-                    core.frozen_units.clear();
-                    core.pending_changes.clear();
-                    let refold_m1_unit = if m1.notes_block.is_empty() {
-                        render_m1_placeholder()
-                    } else {
-                        render_m1_body(&m1.notes_block)
-                    };
-                    let mut rendered = vec![synth_region("m0", std::mem::take(&mut comp.m0_bytes))];
-                    rendered.push(refold_m1_unit);
-                    rendered.extend(survivors);
-                    rendered.extend(strip_survivors);
-                    rendered.extend(terse_text_compression_survivors);
-                    core.step(PassInput {
-                        proposed: cache_stability::Action::Hard,
-                        boundary_present: boundary_token,
-                        rendered_units: rendered,
-                        new_boundary_id: Some(comp.boundary_id.clone()),
-                        queued: Vec::new(),
-                        run_started: false,
-                    })?;
-                    plan = PassPlan::Hard;
-                    materialize_reason = Some(MaterializeReason::PressureRefold);
-                    meta.initialized = true;
-                    meta.last_render_config = effective_render_config_base.clone();
-                    if meta.descent_completed {
-                        meta.lineage_descent_materialized = true;
-                    }
-                    record_m0_composition(&mut meta, comp, ctx);
-                    let applied_m1_signal = revision_signal_for_context(
-                        store,
-                        ctx.note_project_path,
-                        &req.session_id,
-                        loaded.meta.user_profile_version,
-                        ctx.memory_enabled,
-                        Some(&mut m1_revision_read_timings),
-                        ctx,
-                    )?;
-                    meta.m1_revision = applied_m1_signal.revision;
-                    meta.m1_history_segment_seq = Some(applied_m1_signal.max_history_segment_seq);
-                    meta.m1_user_profile_version = loaded.meta.user_profile_version;
-                    meta.m1_external_revision = applied_m1_signal.external_revision;
-                    meta.project_memory_epoch_pending = false;
-                    meta.m1_pending_since_ms = None;
-                } else {
-                    let Some(m1_body) = served_m1_body else {
-                        unreachable!("the pass folds when m1 is not served")
-                    };
-                    let mut rendered = vec![render_m1_body(m1_body)];
-                    rendered.extend(new_reduction_units(
-                        &core,
-                        &selected_reductions,
-                        &live,
-                        loaded.meta.coverage_ordinal,
-                        suppress_bootstrap_reduction_tag_overlay,
-                    ));
-                    rendered.extend(new_strip_units.clone());
-                    rendered.extend(new_terse_text_compression_units.clone());
-                    let new_boundary_id = m1.new_coverage.as_ref().map(|(id, _)| id.clone());
-                    if let Some((_, coverage_end)) = &m1.new_coverage {
-                        let history_segments_for_live_coverage =
-                            store.load_history_segments(&req.session_id)?;
-                        if let Some(stray) = first_uncovered_live_block(
-                            &history_segments_for_live_coverage,
-                            &live,
-                            Some(*coverage_end),
-                        ) {
-                            return Err(TransformError::CoverageGap(format!(
-                                "coverage gap: live item {} (ordinal {}) sits at or below coverage end {} \
-                         but no history_segment covers it; composing m1 would silently drop it from the tail",
-                                stray.id(),
-                                stray.ordinal(),
-                                coverage_end
-                            )));
-                        }
-                    }
-                    if let Some((id, coverage_end)) = m1.new_coverage.as_ref() {
-                        validate_live_boundary_ordinal(id, *coverage_end, &live)?;
-                        if id.is_empty()
-                            || !boundary_available(
-                                id,
+                        let effective = effective_reductions(
+                            &core,
+                            &selected_reductions,
+                            suppress_bootstrap_reduction_tag_overlay,
+                        );
+                        let survivors =
+                            surviving_red_units(&effective, &live, comp.coverage_ordinal);
+                        let mut strip_survivors = surviving_strip_units(&core, req);
+                        strip_survivors.extend(new_strip_units.clone());
+                        let terse_text_compression_survivors =
+                            surviving_terse_text_compression_units(
+                                &core,
+                                &new_terse_text_compression_units,
                                 &live,
-                                &boundary_state,
-                                req.declared_trim.as_ref(),
-                            )
-                        {
-                            return Err(TransformError::BoundaryNotPresent(format!(
-                                "coverage-extending delta advanced the anchor to {id:?}, but no \
+                                comp.coverage_ordinal,
+                            );
+                        core.frozen_units.clear();
+                        core.pending_changes.clear();
+                        let refold_m1_unit = if m1.notes_block.is_empty() {
+                            render_m1_placeholder()
+                        } else {
+                            render_m1_body(&m1.notes_block)
+                        };
+                        let mut rendered =
+                            vec![synth_region("m0", std::mem::take(&mut comp.m0_bytes))];
+                        rendered.push(refold_m1_unit);
+                        rendered.extend(survivors);
+                        rendered.extend(strip_survivors);
+                        rendered.extend(terse_text_compression_survivors);
+                        core.step(PassInput {
+                            proposed: cache_stability::Action::Hard,
+                            boundary_present: boundary_token,
+                            rendered_units: rendered,
+                            new_boundary_id: Some(comp.boundary_id.clone()),
+                            queued: Vec::new(),
+                            run_started: false,
+                        })?;
+                        plan = PassPlan::Hard;
+                        materialize_reason = Some(MaterializeReason::PressureRefold);
+                        meta.initialized = true;
+                        meta.last_render_config = effective_render_config_base.clone();
+                        if meta.descent_completed {
+                            meta.lineage_descent_materialized = true;
+                        }
+                        record_m0_composition(&mut meta, comp, ctx);
+                        let applied_m1_signal = revision_signal_for_context(
+                            store,
+                            ctx.note_project_path,
+                            &req.session_id,
+                            loaded.meta.user_profile_version,
+                            ctx.memory_enabled,
+                            Some(&mut m1_revision_read_timings),
+                            ctx,
+                        )?;
+                        meta.m1_revision = applied_m1_signal.revision;
+                        meta.m1_history_segment_seq =
+                            Some(applied_m1_signal.max_history_segment_seq);
+                        meta.m1_user_profile_version = loaded.meta.user_profile_version;
+                        meta.m1_external_revision = applied_m1_signal.external_revision;
+                        meta.project_memory_epoch_pending = false;
+                        meta.m1_pending_since_ms = None;
+                    }
+                    Some(m1_body) => {
+                        let mut rendered = vec![render_m1_body(m1_body)];
+                        rendered.extend(new_reduction_units(
+                            &core,
+                            &selected_reductions,
+                            &live,
+                            loaded.meta.coverage_ordinal,
+                            suppress_bootstrap_reduction_tag_overlay,
+                        ));
+                        rendered.extend(new_strip_units.clone());
+                        rendered.extend(new_terse_text_compression_units.clone());
+                        let new_boundary_id = m1.new_coverage.as_ref().map(|(id, _)| id.clone());
+                        if let Some((_, coverage_end)) = &m1.new_coverage {
+                            let history_segments_for_live_coverage =
+                                store.load_history_segments(&req.session_id)?;
+                            if let Some(stray) = first_uncovered_live_block(
+                                &history_segments_for_live_coverage,
+                                &live,
+                                Some(*coverage_end),
+                            ) {
+                                return Err(TransformError::CoverageGap(format!(
+                                    "coverage gap: live item {} (ordinal {}) sits at or below coverage end {} \
+                         but no history_segment covers it; composing m1 would silently drop it from the tail",
+                                    stray.id(),
+                                    stray.ordinal(),
+                                    coverage_end
+                                )));
+                            }
+                        }
+                        if let Some((id, coverage_end)) = m1.new_coverage.as_ref() {
+                            validate_live_boundary_ordinal(id, *coverage_end, &live)?;
+                            if id.is_empty()
+                                || !boundary_available(
+                                    id,
+                                    &live,
+                                    &boundary_state,
+                                    req.declared_trim.as_ref(),
+                                )
+                            {
+                                return Err(TransformError::BoundaryNotPresent(format!(
+                                    "coverage-extending delta advanced the anchor to {id:?}, but no \
                          live block carries that id; the anchor must be the flat block id \
                          (`<mid>#<index>`) of the last covered block"
-                            )));
+                                )));
+                            }
                         }
+                        core.step(PassInput {
+                            proposed: cache_stability::Action::Soft,
+                            boundary_present: boundary_token,
+                            rendered_units: rendered,
+                            new_boundary_id,
+                            queued: Vec::new(),
+                            run_started: false,
+                        })?;
+                        if let Some((_, ord)) = m1.new_coverage {
+                            meta.coverage_ordinal = Some(ord);
+                            meta.coverage_history_segment_seq =
+                                Some(m1_signal.max_history_segment_seq);
+                            prune_covered_red_units(&mut core, &live, meta.coverage_ordinal);
+                            prune_covered_terse_text_compression_units(
+                                &mut core,
+                                &live,
+                                meta.coverage_ordinal,
+                            );
+                        } else if history_segment_seq_changed_since_meta {
+                            meta.coverage_history_segment_seq =
+                                Some(m1_signal.max_history_segment_seq);
+                        }
+                        let applied_m1_signal = revision_signal_for_context(
+                            store,
+                            ctx.note_project_path,
+                            &req.session_id,
+                            loaded.meta.user_profile_version,
+                            ctx.memory_enabled,
+                            Some(&mut m1_revision_read_timings),
+                            ctx,
+                        )?;
+                        if m1_body != M1_PLACEHOLDER || memory_gate_digest_transition {
+                            meta.m1_revision = applied_m1_signal.revision;
+                        }
+                        meta.m1_history_segment_seq =
+                            Some(applied_m1_signal.max_history_segment_seq);
+                        if m1.profile_rendered {
+                            meta.m1_user_profile_version = loaded.meta.user_profile_version;
+                        }
+                        meta.m1_pending_since_ms = None;
                     }
-                    core.step(PassInput {
-                        proposed: cache_stability::Action::Soft,
-                        boundary_present: boundary_token,
-                        rendered_units: rendered,
-                        new_boundary_id,
-                        queued: Vec::new(),
-                        run_started: false,
-                    })?;
-                    if let Some((_, ord)) = m1.new_coverage {
-                        meta.coverage_ordinal = Some(ord);
-                        meta.coverage_history_segment_seq = Some(m1_signal.max_history_segment_seq);
-                        prune_covered_red_units(&mut core, &live, meta.coverage_ordinal);
-                        prune_covered_terse_text_compression_units(
-                            &mut core,
-                            &live,
-                            meta.coverage_ordinal,
-                        );
-                    } else if history_segment_seq_changed_since_meta {
-                        meta.coverage_history_segment_seq = Some(m1_signal.max_history_segment_seq);
-                    }
-                    let applied_m1_signal = revision_signal_for_context(
-                        store,
-                        ctx.note_project_path,
-                        &req.session_id,
-                        loaded.meta.user_profile_version,
-                        ctx.memory_enabled,
-                        Some(&mut m1_revision_read_timings),
-                        ctx,
-                    )?;
-                    if m1_body != M1_PLACEHOLDER || memory_gate_digest_transition {
-                        meta.m1_revision = applied_m1_signal.revision;
-                    }
-                    meta.m1_history_segment_seq = Some(applied_m1_signal.max_history_segment_seq);
-                    if m1.profile_rendered {
-                        meta.m1_user_profile_version = loaded.meta.user_profile_version;
-                    }
-                    meta.m1_pending_since_ms = None;
                 }
             }
             PassPlan::Defer => {
@@ -6667,54 +6684,6 @@ fn synthetic_m0_message(text: String) -> WireMessage {
             ..Default::default()
         },
     )
-}
-
-/// The projection blocks whose temporal-mark, user-hint, and channel1 rows the pass can
-/// consume. When the durable boundary is live and no re-cut, pending rewrite, or failed
-/// lineage anchor can widen the tail, every consumer reads rows only above a floor: the
-/// served tail sits above the pass's coverage, which ends no lower than the stored history
-/// (a truncation that lowers it bumps `row_version` and fails the pass's CAS); the channel1
-/// target is a tail block; temporal and user-hint decisions skip messages at or below the
-/// overlay frontier; and the user-hint check reads the newest message's rows. Any other
-/// pass, including a raw pass-through that serves every block, reads every block's rows.
-fn overlay_block_ids<'p>(
-    req: &TransformIngress<'_>,
-    projection: &'p FlatProjection,
-    live: &[&'p FlatBlock],
-    basis: memory_store::TransformOverlayBasis<'_>,
-) -> Vec<&'p str> {
-    let loaded = basis.loaded;
-    let boundary_live = !loaded.core.boundary_id.is_empty()
-        && live
-            .iter()
-            .any(|block| block.id() == loaded.core.boundary_id);
-    let floor = [
-        loaded.meta.coverage_ordinal,
-        basis.overlay_frontier,
-        basis.history_end,
-    ]
-    .into_iter()
-    .min()
-    .flatten()
-    .filter(|_| {
-        boundary_live
-            && !loaded.core.reconcile_pending
-            && loaded.meta.pending_rewrite.is_none()
-            && validate_lineage_anchor(&loaded.meta, req, projection).is_ok()
-    });
-    let newest_mid = live.last().map(|block| block.mid.as_str());
-    projection
-        .blocks
-        .iter()
-        .filter(|block| {
-            floor.is_none_or(|floor| {
-                block.synthetic()
-                    || block.ordinal() > floor
-                    || Some(block.mid.as_str()) == newest_mid
-            })
-        })
-        .map(|block| block.id.as_str())
-        .collect()
 }
 
 fn m1_row_cap_for(geometry: Option<&TransformGeometry>) -> usize {
@@ -20468,12 +20437,12 @@ pub(crate) mod tests {
         assert_eq!(outcome(None).0, "SOFT");
     }
 
-    /// Overlay rows keyed by blocks outside the window, or by blocks the pass has already
-    /// covered, are not read, and they change nothing a pass serves or commits.
+    /// Overlay rows keyed by blocks outside the projection are not read, and they change
+    /// nothing a pass serves or commits.
     #[test]
-    fn foreign_and_covered_block_overlays_leave_the_pass_unchanged() {
-        use crate::test_support::synthetic_history::{seed_block_overlays, seed_overlays};
-        let passes = |foreign: usize, covered: bool| {
+    fn foreign_block_overlays_leave_the_pass_unchanged() {
+        use crate::test_support::synthetic_history::seed_overlays;
+        let passes = |foreign: usize| {
             let dir = tempfile::tempdir().unwrap();
             let s = store(dir.path());
             seed_overlays(&s, "ses", foreign);
@@ -20486,9 +20455,6 @@ pub(crate) mod tests {
             ];
             run(&s, &active_cc_req("ses", "cfg0", live.clone()), &spine());
             assert!(s.load("ses").unwrap().meta.coverage_ordinal == Some(2));
-            if covered {
-                seed_block_overlays(&s, "ses", &["a#0".to_string(), "b#0".to_string()]);
-            }
             s.append_history_segments("ses", &[comp(2, 3, 3, "t3", "S2")])
                 .unwrap();
             s.arm_soft_refresh("ses").unwrap();
@@ -20518,10 +20484,9 @@ pub(crate) mod tests {
         };
         // One foreign row keeps every overlay table non-empty, so SQLite's seeks do the same
         // work in each run.
-        let baseline = passes(1, false);
+        let baseline = passes(1);
         assert_eq!(baseline.0.action, "SOFT");
-        assert_eq!(passes(200, false), baseline);
-        assert_eq!(passes(1, true), baseline);
+        assert_eq!(passes(200), baseline);
     }
 
     /// The first fold captures the session's legacy sequences and its commit persists them,
@@ -21378,10 +21343,7 @@ pub(crate) mod tests {
                 mid: "m2400".to_string(),
                 block_identities: loaded.meta.block_identity_by_mid["m2400"].clone(),
             }];
-        let generation = memory_store::HistorySegmentSetGeneration {
-            max_sequence: 47,
-            count: 0,
-        };
+        let generation = memory_store::HistorySegmentSetGeneration::new(47);
         let predicate = memory_store::HistorySummarizerPublishPredicate {
             firing_seq: 7,
             producer_run_id: "race-run".to_string(),
@@ -21490,10 +21452,7 @@ pub(crate) mod tests {
                 mid: "m2400".to_string(),
                 block_identities: loaded.meta.block_identity_by_mid["m2400"].clone(),
             }];
-        let generation = memory_store::HistorySegmentSetGeneration {
-            max_sequence: 47,
-            count: 0,
-        };
+        let generation = memory_store::HistorySegmentSetGeneration::new(47);
         let predicate = memory_store::HistorySummarizerPublishPredicate {
             firing_seq: 8,
             producer_run_id: "between-reads-run".to_string(),
