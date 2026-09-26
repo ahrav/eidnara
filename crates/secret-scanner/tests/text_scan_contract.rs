@@ -914,6 +914,9 @@ fn code_references_after_secret_keys_are_not_findings() {
         "* Auth claim name: active_membership_id.",
         "copied from the incoming token. One-line omission: refreshedClaims.TenantRoles was never set",
         "* New planner cache key field: partition_epoch.",
+        "key = self.hashes.sha256",
+        "token = client.oauth2.token",
+        "api_key = settings.api_v2",
     ] {
         let report = comprehensive_scanner().scan(input).unwrap();
         assert!(report.findings.is_empty(), "{input}: {:?}", report.findings);
@@ -959,6 +962,16 @@ fn secret_literals_resembling_code_references_are_findings() {
             "api_key: Ab3fGh1jKlMnOpQrStUvWxYz79PqRs24",
             "generic-api-key",
         ),
+        // A single `=` of Base64 padding is not an empty `name=` assignment.
+        ("api_key: QxWvErTyUiOpAsDfGhJkLz4=", "generic-api-key"),
+        (
+            "api_key: \"uQnBxFjLrVpSaMcZdHeWkYpRtV4=\"",
+            "generic-api-key",
+        ),
+        // Words ending in a number are how people build passwords, not code names.
+        ("password=Cobalt.River2024", "magic-keyed-assignment"),
+        ("password=Cobalt.River123", "magic-keyed-assignment"),
+        ("password=cobalt.river2024", "magic-keyed-assignment"),
         (
             concat!("aws_access_key_id = AKIA", "Q7R3XM2ZT5WN6PBC"),
             "magic-aws-access-key-id",
@@ -966,6 +979,17 @@ fn secret_literals_resembling_code_references_are_findings() {
     ] {
         let found = rules(input);
         assert!(found.iter().any(|id| id == rule_id), "{input}: {found:?}");
+    }
+    // The conservative profile has no `generic-api-key` to fall back on.
+    let conservative = Scanner::new(ScanProfile::Conservative).unwrap();
+    for input in ["password=Cobalt.River2024", "password=Cobalt.River123"] {
+        let found = conservative.scan(input).unwrap().findings;
+        assert!(
+            found
+                .iter()
+                .any(|finding| finding.rule_id == "magic-keyed-assignment"),
+            "{input}: {found:?}"
+        );
     }
     let anthropic = format!(
         "key = sk-ant-api03-{}",

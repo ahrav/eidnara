@@ -1282,6 +1282,9 @@ fn is_scalar(value: &[u8]) -> bool {
 // Longer segments are left to the secret rules: a random body such as a vendor token's dotted payload runs past this, while member names stay well under it.
 const MAX_CODE_SEGMENT_BYTES: usize = 32;
 
+// Digest widths such as `sha256` need three digits; a four-digit suffix is usually a year.
+const MAX_CODE_SUFFIX_DIGITS: usize = 3;
+
 fn names_code(gate: CodeReferenceGate, value: &[u8]) -> bool {
     if is_code_reference(value) {
         return true;
@@ -1298,7 +1301,10 @@ fn names_code(gate: CodeReferenceGate, value: &[u8]) -> bool {
                     .position(|byte| *byte == b'=')
                     .is_some_and(|equals| {
                         let (name, rest) = (&value[..equals], &value[equals + 1..]);
-                        is_identifier_path(name, 1) && (is_scalar(rest) || is_code_reference(rest))
+                        // An empty right side is Base64 padding, as in `QxWvErTy4=`, and `is_scalar` admits blanks.
+                        !rest.is_empty()
+                            && is_identifier_path(name, 1)
+                            && (is_scalar(rest) || is_code_reference(rest))
                     })
         }
     }
@@ -1334,7 +1340,9 @@ fn is_identifier_path(value: &[u8], min_segments: usize) -> bool {
     }
 }
 
-/// Digits may only close a segment (`sha256`, `v2`), since a digit inside a word marks a random body.
+/// Digits may only close a segment, since a digit inside a word marks a random body.
+/// A digit suffix must also be short and follow a lowercase word (`sha256`, `api_v2`),
+/// because a capitalized or year-numbered word such as `River2024` is how people build passwords.
 fn is_identifier(segment: &[u8]) -> bool {
     let Some(first) = segment.first() else {
         return false;
@@ -1343,11 +1351,14 @@ fn is_identifier(segment: &[u8]) -> bool {
         .iter()
         .rposition(|byte| !byte.is_ascii_digit())
         .map_or(0, |index| index + 1);
+    let (word, suffix) = segment.split_at(word_end);
     segment.len() <= MAX_CODE_SEGMENT_BYTES
         && (first.is_ascii_alphabetic() || *first == b'_')
-        && segment[..word_end]
+        && word
             .iter()
             .all(|byte| byte.is_ascii_alphabetic() || *byte == b'_')
+        && (suffix.is_empty()
+            || (suffix.len() <= MAX_CODE_SUFFIX_DIGITS && !word.iter().any(u8::is_ascii_uppercase)))
 }
 
 fn is_template(value: &[u8]) -> bool {
@@ -1769,6 +1780,50 @@ mod tests {
     }
 
     #[test]
+    fn code_reference_gate_is_closed() {
+        for gate in [
+            CodeReferenceGate::Assignment,
+            CodeReferenceGate::GenericApiKey,
+        ] {
+            for code in [
+                "event.id",
+                "self.config.api_key",
+                "settings::DB_PASSWORD",
+                "refreshedClaims.TenantRoles",
+                "os.environ[",
+                "partition_epoch.id.",
+                "self.hashes.sha256",
+                "client.oauth2.token",
+                "settings.api_v2",
+                "{pipeline_name}_{YYYYMMDD}",
+            ] {
+                assert!(names_code(gate, code.as_bytes()), "{gate:?} {code:?}");
+            }
+            for secret in [
+                "hunter2",
+                "aB3xZ9qL.Kp4mN2vT",
+                "Cobalt.River2024",
+                "Cobalt.River123",
+                "cobalt.river2024",
+                "QxWvErTyUiOpAsDfGhJkLz4=",
+                "{user}_Xk39fJ2qLp0Z",
+            ] {
+                assert!(!names_code(gate, secret.as_bytes()), "{gate:?} {secret:?}");
+            }
+        }
+        for code in [
+            "access_token_ttl=900",
+            "active_membership_id.",
+            "name=event.id",
+        ] {
+            assert!(
+                names_code(CodeReferenceGate::GenericApiKey, code.as_bytes()),
+                "{code:?}"
+            );
+        }
+    }
+
+    #[test]
     fn crc32_matches_standard_vector() {
         assert_eq!(crc32(b"123456789"), 0xcbf4_3926);
     }
@@ -1793,11 +1848,12 @@ mod tests {
         encoded.extend_from_slice(&(MAX_MATCH_BYTES as u64).to_le_bytes());
         encoded.extend_from_slice(&(MAX_RADIX_SCALAR_DIGITS as u64).to_le_bytes());
         encoded.extend_from_slice(&(MAX_CODE_SEGMENT_BYTES as u64).to_le_bytes());
+        encoded.extend_from_slice(&(MAX_CODE_SUFFIX_DIGITS as u64).to_le_bytes());
         encoded.push(DEFAULT_CHAR_CLASS.max_lower_pct);
         encoded.extend_from_slice(&DEFAULT_CHAR_CLASS.min_window_len.to_le_bytes());
         assert_eq!(
             crate::rules::digest_hex(&encoded),
-            "95ea93425638039ef85a63770f313910e652e1fcda651e95cd69ba27a85533d5",
+            "2ed72f2b8587f32df348793829c9594bdd251f700ef805bc3c8c75d0c8e0587e",
             "evaluator constants changed: bump REVISION.semantic_digest_version and re-pin"
         );
     }
