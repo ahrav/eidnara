@@ -72,14 +72,13 @@ function useTempDataHome(prefix: string): string {
     return dir;
 }
 
-/** One raw user message lets the transform resolve ordinals without an OpenCode session DB. */
+/** One raw user message stands in for the OpenCode session DB. */
 function installOneRawMessage(sessionId: string): MessageLike[] {
     const row = { id: "m-1", timeCreated: 1, contributesOrdinal: true, hasValidInfo: true };
     unregisterProviders.push(
         setRawMessageProvider(sessionId, {
             readMessages: () => [row] as unknown as RawMessage[],
             readMessageOrdinalPage: (after) => (after ? [] : [row]),
-            getStoredMessageCount: () => 1,
         }),
     );
     return [
@@ -137,6 +136,8 @@ function createFakeModuleClient(
             if (!isModuleCallBodyValid(method, body)) {
                 throw new TypeError(`invalid fake module body for ${method}`);
             }
+            // Discovery answers an empty page, so a first pass sends the whole array.
+            if (method === "transform.boundary") return { anchors: [] };
             const call = { sessionId, projectRoot, method, body, signal };
             calls.push(call);
             return respond(call);
@@ -999,7 +1000,9 @@ describe("eidnara hook", () => {
                 expect(output.messages).toBe(array);
                 expect(Object.getOwnPropertyDescriptor(messages, "0")).toEqual(slotBefore);
                 expect(trap).not.toHaveBeenCalled();
-                expect(client.session.get).not.toHaveBeenCalled();
+                // A cold pass reads the directory to route discovery before it knows its window.
+                if (unsupported !== "nested-getter")
+                    expect(client.session.get).not.toHaveBeenCalled();
                 expect(client.app.agents).not.toHaveBeenCalled();
                 expect(fake.calls).toHaveLength(0);
             });
@@ -1032,7 +1035,7 @@ describe("eidnara hook", () => {
         });
     }
 
-    it("logs a byte-budget decline at warn before preflight", async () => {
+    it("logs a byte-budget decline at warn before the transform dispatch", async () => {
         useTempDataHome("hook-source-limit-");
         const fake = createFakeModuleClient(({ body }) => recipeResponse(body, []));
         const client = createClientMock();
@@ -1058,7 +1061,6 @@ describe("eidnara hook", () => {
         } finally {
             warn.mockRestore();
         }
-        expect(client.session.get).not.toHaveBeenCalled();
         expect(fake.calls).toHaveLength(0);
     });
 
@@ -1088,7 +1090,9 @@ describe("eidnara hook", () => {
         }
         expect(fake.calls.map((call) => call.method)).toEqual(["transform"]);
         expect(messages[0]).toBe(approved);
-        expect(memberSlotDefinitions).toBe(1);
+        // One window copy and one member slot at capture, then one window copy per recheck
+        // (wire build and publication); the source itself is taped once.
+        expect(memberSlotDefinitions).toBe(4);
     });
 
     it("rejects source mutation during hook directory lookup before direct transform", async () => {

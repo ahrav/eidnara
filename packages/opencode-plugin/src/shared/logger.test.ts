@@ -534,7 +534,6 @@ describe("logger", () => {
             const unregister = setRawMessageProvider(sessionId, {
                 readMessages: () => [row],
                 readMessageOrdinalPage: after => after ? [] : [row],
-                getStoredMessageCount: () => 1,
             });
             const results = [];
             try {
@@ -550,7 +549,8 @@ describe("logger", () => {
                         contextUsageMap, clearReasoningAge: 50, cacheTtl: "5m", compactionOff: true,
                         directory: process.env.LOGGER_SCENARIO_ROOT, sessionDirectoryBySession: new Map(),
                         isSubagentSession: () => false, systemPromptHashFor: () => "",
-                    }, { moduleClient: { call: async ({ body }) => {
+                    }, { moduleClient: { call: async ({ method, body }) => {
+                        if (method === "transform.boundary") return { anchors: [] };
                         calls++;
                         if (fail) throw new Error("provider\\nfailed\\u0007");
                         return {
@@ -583,11 +583,11 @@ describe("logger", () => {
             "hooks",
             root,
         );
-        const { results, native } = JSON.parse(stdout);
+        const { results, native, input } = JSON.parse(stdout);
         for (const result of results) {
             expect(result.served).toBe(native);
-            // The failed pass appends nothing new, so it serves the last applied output.
-            expect(result.fallback).toBe(native);
+            // A real failure serves the input unchanged.
+            expect(result.fallback).toBe(input);
             expect(result.calls).toBe(2);
             expect(result.failures).toBe(1);
             expect(result.eventUnchanged).toBe(true);
@@ -600,9 +600,7 @@ describe("logger", () => {
         expect(debug).toContain("rust module stages:");
         expect(debug.match(/event message.updated:/g)).toHaveLength(2);
         expect(warn.trim().split("\n")).toHaveLength(1);
-        expect(warn).toContain(
-            "rust transform failed; serving the last applied output with the messages appended since:",
-        );
+        expect(warn).toContain("rust transform failed; serving the input unchanged:");
         expect(warn).toContain("provider failed");
         expect(warn).not.toContain("\u0007");
         expect(off).toBe("");

@@ -14,7 +14,6 @@ import {
 } from "./read-session-formatting";
 import {
     countRawSessionMessageOrdinalsFromDb,
-    countStoredRawSessionMessagesFromDb,
     type RawMessage,
     type RawMessageOrdinalAnchor,
     type RawMessageOrdinalEntry,
@@ -124,8 +123,6 @@ export interface RawMessageProvider {
     ) => RawMessageOrdinalEntry[];
     /** `getMessageCount` falls back to `readMessages().length` when no fast count is available. */
     getMessageCount?: () => number;
-    /** The stored row count includes compaction summaries for ordinal drift detection. */
-    getStoredMessageCount?: () => number;
 }
 
 /**
@@ -398,14 +395,6 @@ export function readRawSessionMessageOrdinalPage(
     return withReadOnlySessionDb((db) =>
         readRawSessionMessageOrdinalPageFromDb(db, sessionId, after, limit),
     );
-}
-
-export function getRawSessionStoredMessageCount(sessionId: string): number {
-    const provider = activeRawMessageProvider(sessionId);
-    if (provider?.getStoredMessageCount) return provider.getStoredMessageCount();
-    if (provider) return provider.readMessages().length;
-    if (!refreshOpenCodeDbPresence()) return 0;
-    return withReadOnlySessionDb((db) => countStoredRawSessionMessagesFromDb(db, sessionId));
 }
 
 export function readRawSessionMessagePartsById(

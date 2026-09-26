@@ -54,8 +54,6 @@ export function isOlderThanNewestResponse(
 export interface EventHandlerDeps {
     contextUsageMap: BoundedSessionMap<ContextUsageEntry>;
     onSessionCacheInvalidated?: (sessionId: string) => void;
-    /** A removed message can hold an ordinal the Rust transform memo still maps. */
-    onRustOrdinalsInvalidated?: (sessionId: string) => void;
     /** Fires when a message at or after the newest usage response is removed; `model` is the newest remaining persisted response's model, or `undefined` when none remains. */
     onNewestResponseRemoved?: (
         sessionId: string,
@@ -281,7 +279,6 @@ export function createEventHandler(deps: EventHandlerDeps) {
                 return;
             }
 
-            deps.onRustOrdinalsInvalidated?.(info.sessionID);
             sessionLog.debug(
                 info.sessionID,
                 `event message.removed: invalidating state for message ${info.messageID}`,

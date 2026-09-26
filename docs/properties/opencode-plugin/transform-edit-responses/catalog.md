@@ -34,6 +34,24 @@
 > 512 KiB `MAX_DURABLE_TEXT_BYTES`, so the pass fails with `InputLimit`,
 > unrelated to the delta channel.
 
+> Dispositions for [#832](https://github.com/ahrav/eidnara/issues/832), which
+> sends transform revision 3 windows. The plugin locates the window with one
+> backward id scan (`scanMessageIds`, `transform-capture.ts:97`), discovers an
+> unknown boundary through `transform.boundary` (`discover`,
+> `rust-mode-transform.ts:1016`), copies `host[boundaryIndex..length)` through
+> own descriptors (`copyWindow`, `transform-capture.ts:148`) before the walk,
+> sends `v: 3` with `boundary` and no ordinal, and publishes shrink-first with
+> the window as the captured slots (`publishInPlace`, `:826`). The ordinal
+> memo, its primers and annotators, the stored-message count, the
+> continuation shift, and the `message.removed` invalidation are deleted.
+> TE17 is preserved and scoped to the window; TE18 is invalidated; TE19 is
+> extended by the id scan; TE21 and TE22 are preserved. WP-E11 in #824 records
+> this tree's failure behavior as the WP-P11 baseline: a real failure serves
+> the input unchanged (`markFailure`, `rust-mode-transform.ts:1588`), and no
+> failed candidate is published. Window-scoped fail-open (WP-P11) is the second
+> #832 change. Witnesses named in these notes are in
+> `rust-mode-window.test.ts` unless another file is named.
+
 This directory is a client implementation supplement for
 [#533](https://github.com/ahrav/eidnara/issues/533), not the reusable 30-record
 companion named by the parent specification
@@ -110,9 +128,9 @@ revision named above.
 
 | Record | Type | Exercised | Check or gap |
 | --- | --- | --- | --- |
-| TE17 `captured-input-stays-coherent` | safety | yes | Rechecks at ordinal, full-retry, and publish; ownership fences at directory, permission, and each page; a change between pages is refused at publication and NACKed |
-| TE18 `ordinal-memo-promotion-is-owned` | safety | yes | Shared memo equals its pre-pass copy on every rejected path; promoted only after replacement |
-| TE19 `referenceable-json-rejects-hooks-before-reading` | safety | yes | Zero trap and getter counts at the guard, the built-in prototype scan, the hook, the wrapper, and the rechecks |
+| TE17 `captured-input-stays-coherent` | safety | yes (window, #832) | Rechecks at wire build, series restart, and publish compare the root, captured length, fixed boundary index, window slots, and tapes; ownership fences at directory, discovery, permission, and each page |
+| TE18 `ordinal-memo-promotion-is-owned` | safety | invalidated (#832) | The plugin ordinal memo is removed; the daemon derives ordinals |
+| TE19 `referenceable-json-rejects-hooks-before-reading` | safety | yes | Zero trap and getter counts at the guard, the built-in prototype scan, the hook, the wrapper, the rechecks, and the id scan (#832) |
 | TE20 `publication-is-current-and-atomic` | safety | invalidated (#829) | All-or-none failure replaced by shrink-first (WP-P09); in-place identity and prepublication validation preserved |
 | TE21 `previous-base-is-applied-and-live` | safety | partial | Kept-prefix identity and fingerprint match; kept-prefix value validation awaits #538 |
 | TE22 `delivery-disposition-follows-publication` | safety | yes | Per-identity ACK and NACK tuples, including every delivery of a series refused at publication; ACK failure leaves published output |
@@ -140,7 +158,8 @@ Impact: a stale or partially edited array reaches the model or the daemon's inbo
 Open questions:
 
 - The directory and permission awaits (`rust-mode-transform.ts:1087`, `:1096`) are ownership fences only. Clear, invalidation, and supersession are exercised at the page fence (`:1299`) and the ordinal yield; no witness lands one of those faults during the directory or permission await specifically.
-- Preserved by #829. The `need_full_sync` retry and its `retry-wire-build` recheck (`:1395`) are deleted with the delta channel, and with them the witness `:2594` "does not dispatch a need_full_sync retry after mutation|supersession|clear|invalidation of the valid first send". The ordinal, wire-build, series-restart, and page rechecks and their witnesses remain.
+- Preserved by #829. The `need_full_sync` retry and its `retry-wire-build` recheck are deleted with the delta channel, and with them the witness `:2594` "does not dispatch a need_full_sync retry after mutation|supersession|clear|invalidation of the valid first send". The wire-build, series-restart, and page rechecks and their witnesses remain; #832 deletes the ordinal recheck with the ordinal memo.
+- Preserved by #832 and scoped to the captured window. The capture is the private copy of `host[boundaryIndex..length)`, taken in the synchronous section that fixed `boundaryIndex` (`rust-mode-transform.ts:1112`); `recheckCapture` (`:1177`) verifies the same root, its own `then` and the built-in prototypes, the captured length, and every window slot reference and tape at wire build (`:1297`), series restart (`:1451`), and publication (`:1519`). The full-history retry and ordinal-prime clauses are invalidated. The directory await now precedes the capture because discovery routes through it, so a cold pass reads the directory before it can refuse a hostile window. A root property outside the window is not captured state. Witnesses: "declines prefix deletion|same-length reorder|root rebinding|interior window omission during the await with no candidate write and no promotion" (4 cases; marker: the pending body declared `m-6` with a four-message window before the mutation; `output.messages` equals the mutated array, holds no candidate, and `boundary` stays `m-6`); `rust-mode-transform.test.ts` "preserves a host member|append|rebind|metadata during transport with shared|distinct source" (metadata now publishes and keeps the property).
 
 ### ordinal-memo-promotion-is-owned
 
@@ -157,7 +176,7 @@ Existing check: `rust-mode-transform.test.ts:2367` "rejects mutation|supersessio
 Impact: a rejected pass leaves ordinals in the shared memo that the next pass trusts, producing mismatched ordinals or a spurious `need_full_sync`.
 Open questions:
 
-- Preserved by #829. The witness `:2594` "does not dispatch a need_full_sync retry after mutation|supersession|clear|invalidation of the valid first send" is deleted with the retry; there is no `need_full_sync` to answer spuriously, and the remaining witnesses cover the memo rules.
+- Invalidated by #832: the ordinal memo, `primeOrdinalMemo`, `annotateOrdinals`, the stored-message count, the continuation shift, and the `message.removed` invalidation are deleted, and no request carries an ordinal ("sends the declared window in both representations and publishes the recipe at boundaryIndex + i" asserts the body text holds no `ordinal`). The per-session state that promotes only on accepted publication is now the declared `boundary` (`rust-mode-transform.ts:1562`). Earlier, #829 deleted the `need_full_sync` retry with the delta channel, and with it the witness "does not dispatch a need_full_sync retry after mutation|supersession|clear|invalidation of the valid first send"; there is no `need_full_sync` to answer spuriously.
 
 ### referenceable-json-rejects-hooks-before-reading
 
@@ -172,7 +191,9 @@ Required faults and enabling state: a message tree carrying an accessor, proxy, 
 Confidence: medium - [evidence](evidence/referenceable-json-rejects-hooks-before-reading.md). Every named witness was read and ran green; each installs an instrumented hook and asserts a zero count. The non-trapping guarantee of `util.types.isProxy` and `util.types.isBoxedPrimitive` is a Node runtime property, verified by these tests on Node 24.18.0 only.
 Existing check: `transform-capture.test.ts:76` "rejects symbol-keyed accessors and coercion callbacks without invocation"; `:108` "rejects proxy roots, including revoked arrays, before reflective traps"; `:213` "rejects hidden accessors without depending on consumer field names"; `:283` "rejects an accessor without invoking it"; `:292` "rejects a proxy without running its traps"; `:306` "rejects toJSON hooks, class instances, functions, symbols, bigints, and non-finite numbers"; `:339` "rejects cycles, sparse arrays, undefined elements, and excessive depth"; `:365` "reads own data properties without touching accessors or proxies"; `:760` "fails the recheck without running an accessor installed after capture"; `:1113` "revalidates hooks installed between inspection and reserved capture" (all with marker `expect(counter.count).toBe(0)`); `it.each` families at `:133`, `:147`, `:166`, `:183`, `:241` cover own and inherited `toJSON`, hidden array operation overrides, membership accessors, and hidden accessors on production-read fields; the "built-in prototype scan" describe at `:381`: `:384` "rejects an accessor inherited from Object.prototype without calling it" (marker: `rejection` equals `{ reason: "prototype_accessor", path: "Object.prototype/agent" }`, `capturedMessagesUnchanged` false, `counter.count` 0), `:409` "rejects an Array.prototype iterator accessor without calling it", `:428` "rejects an Object.prototype value accessor alongside a source accessor without calling either", `:453` "rejects prototype-reset boxed primitives whose tapes cannot distinguish their values" (`boxed_primitive` at `/0/flag`), `:463` "rejects a String.prototype accessor without calling it", `:481` "records whether a nested object has a null prototype", `:491` "rejects an inherited then on the root array without calling it" (`extra_property` at `/then`), `:518` "accepts a metadata-heavy history of short messages within the walk budget" (12,000 messages; positive control); `:843` "rejects inherited membership and does not consult its getter" (getter on `Array.prototype["0"]`); `:783` "refuses a numeric accessor on a built-in prototype and defines slots without invoking it" (2 cases; `inspectReferenceableMessages` reports `prototype_accessor` at `<Array|Object>.prototype/0`, `counter.count` 0); `rust-mode-transform.test.ts:2699` "declines an unsupported source before any dispatch and leaves the host array intact" (marker: `expect(getter).not.toHaveBeenCalled()`, `calls` 0); `:2499` "rejects nested accessor|toJSON|proxy installed at source-await|pre-apply without invoking it" (6 cases; `expect(hook).not.toHaveBeenCalled()`); `:2660` "declines before publication and NACKs known deliveries when the source changes between pages" (`expect(hook).not.toHaveBeenCalled()`); `hook.test.ts:210` "rejects output-proxy|root-proxy|message-proxy|index-getter|nested-getter|then at the actual hook|wrapper entry without triggering reads" (12 cases; markers: `expect(trap).not.toHaveBeenCalled()`, `client.session.get` not called, `fake.calls` 0); `messages-transform.test.ts:61` and `:110` `it.each` wrapper families (marker: `getterCalls` or `trapCalls` 0); `:175` "logs a polluted built-in prototype at warn and skips the inner hook" (marker: `warn` called with `transform declined: prototype_accessor at Object.prototype/agent (entry)`, `hookCalls` 0, `getterCalls` 0); `:232` "leaves array-slot inspection at entry|await to the inner owner" (2 cases; `getterCalls` 0).
 Impact: harness-installed hooks run inside the transform, observe or alter the pass, or throw after a partial publication.
-Open questions: None.
+Open questions:
+
+- Extended by #832 (WP-P13): the id scan reads each hop (slot, `info`, `id`) with `readOwnDataProperty` (`transform-capture.ts:86`, `:97`), so a planted proxy, revoked proxy, or accessor reads as no id; the membership filter uses the same reads. A matched boundary whose message fails the walk declines the pass rather than selecting another anchor. Witnesses: "crosses planted proxies, accessors, and revoked proxies without invoking any hook" (marker: the one readable match sits below every hostile hop; `traps` 0); "declines a matched boundary that fails the hostile walk instead of picking another" (`getterCalls` 0, no transform body and no second discovery). Falsifier: read `messages[i].info.id` before checking for a proxy.
 
 ### publication-is-current-and-atomic
 

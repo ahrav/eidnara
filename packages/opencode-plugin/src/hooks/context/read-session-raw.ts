@@ -342,14 +342,6 @@ export function readRawSessionMessageOrdinalPageFromDb(
     });
 }
 
-/** The count includes compaction-summary rows. */
-export function countStoredRawSessionMessagesFromDb(db: SqliteReader, sessionId: string): number {
-    const row = db
-        .prepare("SELECT COUNT(*) AS count FROM message WHERE session_id = ?")
-        .get(sessionId) as { count?: number } | null;
-    return typeof row?.count === "number" ? row.count : 0;
-}
-
 interface AnchorRow {
     time_created: number;
     id: string;

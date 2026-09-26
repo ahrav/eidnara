@@ -83,10 +83,80 @@ function defineSlot<T>(array: T[], index: number, value: T): void {
 }
 
 /** Own data property read that cannot run an accessor or proxy trap. */
-export function readOwnDataProperty(value: unknown, key: string): unknown {
+export function readOwnDataProperty(value: unknown, key: PropertyKey): unknown {
     if (value === null || typeof value !== "object" || types.isProxy(value)) return undefined;
     const descriptor = Object.getOwnPropertyDescriptor(value, key);
     return descriptor && Object.hasOwn(descriptor, "value") ? descriptor.value : undefined;
+}
+
+/**
+ * Scans host ids from the end until `stop` accepts one and returns its index, or -1. Each hop
+ * (slot, `info`, `id`) is an own data read, so a planted proxy, revoked proxy, or accessor reads as
+ * no id and none of its traps or getters runs. The caller has rejected a proxied `host`.
+ */
+export function scanMessageIds(
+    host: readonly unknown[],
+    stop: (id: string, index: number) => boolean,
+): number {
+    for (let index = host.length - 1; index >= 0; index -= 1) {
+        const info = readOwnDataProperty(readOwnDataProperty(host, index), "info");
+        const id = readOwnDataProperty(info, "id");
+        if (typeof id === "string" && stop(id, index)) return index;
+    }
+    return -1;
+}
+
+/** 32-bit FNV-1a over UTF-16 code units. */
+export function fnv1a32(text: string): number {
+    let hash = 0x811c9dc5;
+    for (let index = 0; index < text.length; index += 1)
+        hash = Math.imul(hash ^ text.charCodeAt(index), 0x01000193);
+    return hash >>> 0;
+}
+
+/**
+ * The sorted id hashes of `host`, retaining no id string. A hit may be a collision, so the caller
+ * verifies it with an id scan. `undefined` when `reserve` refuses the four bytes per slot.
+ */
+export function messageIdFilter(
+    host: readonly unknown[],
+    reserve: (bytes: number) => boolean,
+): Uint32Array | undefined {
+    if (!reserve(host.length * 4)) return undefined;
+    const hashes = new Uint32Array(host.length);
+    let count = 0;
+    scanMessageIds(host, (id) => {
+        hashes[count++] = fnv1a32(id);
+        return false;
+    });
+    return hashes.subarray(0, count).sort();
+}
+
+export function filterMayHold(filter: Uint32Array, id: string): boolean {
+    const hash = fnv1a32(id);
+    let low = 0;
+    let high = filter.length;
+    while (low < high) {
+        const middle = (low + high) >>> 1;
+        if ((filter[middle] as number) < hash) low = middle + 1;
+        else high = middle;
+    }
+    return low < filter.length && filter[low] === hash;
+}
+
+/** Copies `host[start..end)` through indexed own data descriptors; a hole or accessor slot yields `undefined`. */
+export function copyWindow(
+    host: readonly unknown[],
+    start: number,
+    end: number,
+): unknown[] | undefined {
+    const window: unknown[] = [];
+    for (let index = start; index < end; index += 1) {
+        const slot = Object.getOwnPropertyDescriptor(host, index);
+        if (!slot || !Object.hasOwn(slot, "value")) return undefined;
+        defineSlot(window, index - start, slot.value);
+    }
+    return window;
 }
 
 // Source values are arrays, plain objects, strings, numbers and booleans; a read that misses an
@@ -717,7 +787,7 @@ type HostArrayRejectionReason =
 
 /**
  * Checks the container and the output slots `[0, slots)` a publication writes; the capture recheck
- * covers every captured slot. Slots at `slots` and above are deleted by the shrink, which fails
+ * covers every captured window slot. Slots at `slots` and above are deleted by the shrink, which fails
  * explicitly instead of being checked here.
  */
 export function publicationRejection(
@@ -738,7 +808,7 @@ export function publicationRejection(
     return null;
 }
 
-/** Why a shrink failed and the length `ArraySetLength` left before the members were restored. */
+/** Why a shrink failed and the length `ArraySetLength` left before the window was restored. */
 export interface PublicationFailure {
     error: unknown;
     shrunkLength: number;
@@ -748,31 +818,34 @@ export interface PublicationFailure {
 /**
  * Precondition: `publicationRejection(target, next.length)` returns `null`. Shrinks the length to
  * `next.length` first, then defines each slot, bypassing inherited setters. A non-configurable slot
- * k at or above `next.length` stops the shrink after every slot above k is deleted; the members
- * above k are then restored from `members`, no slot of `next` is written, and the failure is
- * returned. A throw while restoring is reported as the same failure.
+ * k at or above `next.length` stops the shrink after every slot above k is deleted; no slot of
+ * `next` is then written, and the captured `window` references that the shrink removed are put
+ * back after k: the part above k when k is inside the window, the whole window after a covered k,
+ * whose covered slots above it stay lost. A throw while restoring is reported as the same failure.
  */
 export function publishInPlace(
     target: unknown[],
     next: readonly unknown[],
-    members: readonly unknown[],
+    window: readonly unknown[],
+    boundaryIndex: number,
 ): PublicationFailure | undefined {
     try {
         if (target.length > next.length)
             Object.defineProperty(target, "length", { value: next.length });
     } catch (error) {
         const shrunkLength = target.length;
+        const first = Math.max(0, shrunkLength - boundaryIndex);
         let restoreError: unknown;
         try {
-            for (let index = shrunkLength; index < members.length; index += 1)
-                defineSlot(target, index, members[index]);
+            for (let index = first; index < window.length; index += 1)
+                defineSlot(target, shrunkLength + index - first, window[index]);
         } catch (thrown) {
             restoreError = thrown;
         }
         const restored =
             restoreError === undefined
-                ? `restored ${members.length - shrunkLength} captured references`
-                : `restoring captured references failed (${String(restoreError)})`;
+                ? `restored ${window.length - first} captured window references`
+                : `restoring captured window references failed (${String(restoreError)})`;
         return {
             error,
             shrunkLength,

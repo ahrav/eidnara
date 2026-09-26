@@ -5,12 +5,6 @@ import {
     serializedJsonText,
     serializeJsonBody,
 } from "../../shared/host-client/serialized-json-body";
-import {
-    getRawSessionStoredMessageCount,
-    readRawSessionMessageOrdinalPage,
-} from "./read-session-chunk";
-import { isRawCompactionSummaryInfo, type RawMessageOrdinalAnchor } from "./read-session-raw";
-import type { MessageLike } from "./tag-content-primitives";
 
 /** The module facade accepts request pages up to 512 KiB. */
 export const MODULE_PAGE_MAX_BYTES = 512 * 1024;
@@ -18,28 +12,12 @@ export const MODULE_PAGE_MAX_BYTES = 512 * 1024;
 export const MODULE_ITEM_CONTINUATION_CHUNK_BYTES = 64 * 1024;
 // The module reassembles this envelope for live transform requests.
 export const MODULE_ITEM_CONTINUATION_KEY = "__shadow_item_continuation";
-export const MODULE_ORDINAL_PAGE_SIZE = 500;
-/** Retained-heap estimate for one ordinal memo entry or one persisted ordinal row. */
-export const ORDINAL_ENTRY_RETAINED_BYTES = 96;
 
 /** Matches the daemon's marker check in `assemble_transform_page_field`. */
 function looksLikeContinuationMarker(value: unknown): boolean {
     if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
     const marker = (value as Record<string, unknown>)[MODULE_ITEM_CONTINUATION_KEY];
     return marker !== null && typeof marker === "object" && !Array.isArray(marker);
-}
-
-export interface ModuleNormalizationRecord {
-    kind: "tag_prefix" | "eidnara_search_hint" | "summary_message";
-    message_id: string | null;
-    part_index: number;
-    field: string;
-    tag_number?: number;
-    removed: string;
-}
-
-function yieldToEventLoop(): Promise<void> {
-    return new Promise((resolve) => setTimeout(resolve, 0));
 }
 
 /** Shortest round-trip digits of a finite double; the value is `0.digits` times `10^pointIndex`. */
@@ -153,22 +131,6 @@ function transformPageDigest(arrays: Record<string, unknown[]>): string {
         throw new Error("module transform page is not JSON-serializable", { cause: error });
     }
     return crypto.createHash("sha256").update(canonicalJson(wireArrays)).digest("hex");
-}
-
-function getMessageId(message: MessageLike): string | null {
-    if (typeof message.info.id === "string") return message.info.id;
-    const topLevel = (message as { id?: unknown }).id;
-    return typeof topLevel === "string" ? topLevel : null;
-}
-
-/** An explicit absolute ordinal the daemon reads with `Value::as_u64`; zero is a valid value. */
-function wireOrdinal(value: unknown): number | undefined {
-    return typeof value === "number" &&
-        Number.isInteger(value) &&
-        value >= 0 &&
-        wireIntegerText(value) !== undefined
-        ? value
-        : undefined;
 }
 
 /** The daemon's `media_kind` classification of a MIME type. */
@@ -380,270 +342,6 @@ function isSyntheticPart(part: unknown): boolean {
 /** The daemon's `is_synthetic_message` predicate: every part carries a synthetic marker. */
 function isSyntheticMessageParts(parts: unknown[]): boolean {
     return parts.length > 0 && parts.every(isSyntheticPart);
-}
-
-function isSyntheticWireMessage(message: MessageLike): boolean {
-    return isSyntheticMessageParts(message.parts);
-}
-
-/**
- * The session's ordinal-memo state, passed as one bundle. Callers project their memo fields
- * into this shape exactly once so the field-to-field rename map cannot drift between call
- * sites. The resolver mutates `entries` in place (clear/set): the transform passes a charged
- * pass-local copy and promotes it to the session only after accepted publication.
- */
-export interface ModuleOrdinalMemo {
-    generation: number;
-    memoGeneration: number;
-    entries: Map<string, number>;
-    anchor?: RawMessageOrdinalAnchor | null;
-    storedCount?: number | null;
-    canonicalCount?: number;
-    /** Highest ordinal from the prior lineage; priming assigns persisted rows ordinals starting at `continuationBase + 1`. */
-    continuationBase?: number;
-}
-
-/** Cancellation and byte accounting for an ordinal scan owned by a transform pass. */
-export interface OrdinalScanBudget {
-    /** An aborted signal stops the scan at its next yield boundary. */
-    signal: AbortSignal;
-    /** Charges each fetched page's rows, ID strings, and memo growth before the scan retains it across a yield; throws when the owner cannot grant them. */
-    reserve: (bytes: number) => void;
-}
-
-/** Reads every ordinal row after `anchor`, then the stored count that must account for them. */
-async function scanOrdinalRows(
-    sessionId: string,
-    anchor: RawMessageOrdinalAnchor | null,
-    budget: OrdinalScanBudget,
-): Promise<{
-    entries: ReturnType<typeof readRawSessionMessageOrdinalPage>;
-    anchor: RawMessageOrdinalAnchor | null;
-    storedCount: number;
-}> {
-    const entries: ReturnType<typeof readRawSessionMessageOrdinalPage> = [];
-    let pageAnchor = anchor;
-    while (true) {
-        budget.signal.throwIfAborted();
-        const page = readRawSessionMessageOrdinalPage(
-            sessionId,
-            pageAnchor,
-            MODULE_ORDINAL_PAGE_SIZE,
-        );
-        // The page provider and the reservation are owner callbacks that may abort the pass.
-        budget.signal.throwIfAborted();
-        if (page.length === 0) break;
-        // Rows and memo slots coexist during assignment and share their UTF-16 ID strings.
-        let bytes = page.length * 2 * ORDINAL_ENTRY_RETAINED_BYTES;
-        for (const row of page) bytes += row.id.length * 2;
-        budget.reserve(bytes);
-        budget.signal.throwIfAborted();
-        for (const row of page) entries.push(row);
-        const last = page[page.length - 1];
-        pageAnchor = { timeCreated: last.timeCreated, id: last.id };
-        if (page.length < MODULE_ORDINAL_PAGE_SIZE) break;
-        await yieldToEventLoop();
-    }
-    return { entries, anchor: pageAnchor, storedCount: getRawSessionStoredMessageCount(sessionId) };
-}
-
-export interface PrimedOrdinalMemo {
-    memoAnchor: RawMessageOrdinalAnchor | null;
-    memoStoredCount: number;
-    memoCanonicalCount: number;
-}
-
-export type OrdinalResolution =
-    | {
-          ok: true;
-          annotatedInput: unknown[];
-          normalizations: ModuleNormalizationRecord[];
-      }
-    | {
-          ok: false;
-          reason: "unresolved" | "mismatch";
-          messageId?: string;
-          messageIndex?: number;
-          messageRole?: string;
-      };
-
-/**
- * Asynchronous half of ordinal resolution: read persisted ordinal rows and assign their
- * ordinals into `memo.entries` only after a consistent, uncancelled scan. Rejection leaves the
- * supplied map untouched. No message object is read here, so a caller can revalidate its captured
- * messages after this returns and before `annotateOrdinals` reads them.
- */
-export async function primeOrdinalMemo(args: {
-    sessionId: string;
-    memo: ModuleOrdinalMemo;
-    budget: OrdinalScanBudget;
-}): Promise<
-    { ok: true; primed: PrimedOrdinalMemo } | { ok: false; reason: "mismatch"; messageId?: string }
-> {
-    const memo = args.memo.entries;
-    const generationChanged = args.memo.memoGeneration !== args.memo.generation;
-    const continuationBase = Math.max(0, args.memo.continuationBase ?? 0);
-    const storedCount = generationChanged ? null : (args.memo.storedCount ?? null);
-    const reset = storedCount === null;
-    const anchor = reset ? null : (args.memo.anchor ?? null);
-    let canonicalBase = reset ? continuationBase : (args.memo.canonicalCount ?? continuationBase);
-    let priming = reset;
-
-    let scan = await scanOrdinalRows(args.sessionId, anchor, args.budget);
-    args.budget.signal.throwIfAborted();
-    if (scan.storedCount !== (storedCount ?? 0) + scan.entries.length) {
-        // A row that sorts at or before `anchor` is unreachable from it. Restart without an
-        // anchor; `memo` is preserved until a scan is consistent.
-        scan = await scanOrdinalRows(args.sessionId, null, args.budget);
-        args.budget.signal.throwIfAborted();
-        if (scan.storedCount !== scan.entries.length) {
-            return { ok: false, reason: "mismatch" };
-        }
-        priming = true;
-        canonicalBase = continuationBase;
-    }
-
-    // Validate `scan.entries` against `memo` before assignment mutates it.
-    let canonicalCount = canonicalBase;
-    for (const entry of scan.entries) {
-        if (!entry.contributesOrdinal) continue;
-        canonicalCount += 1;
-        const prior = reset ? undefined : memo.get(entry.id);
-        if (prior !== undefined && prior !== canonicalCount) {
-            return { ok: false, reason: "mismatch", messageId: entry.id };
-        }
-    }
-    if (priming) memo.clear();
-    let ordinal = canonicalBase;
-    for (const entry of scan.entries) {
-        if (entry.contributesOrdinal) memo.set(entry.id, ++ordinal);
-    }
-    if (ordinal !== canonicalCount) throw new Error("ordinal scan changed during memo assignment");
-    return {
-        ok: true,
-        primed: {
-            memoAnchor: scan.anchor,
-            memoStoredCount: scan.storedCount,
-            memoCanonicalCount: canonicalCount,
-        },
-    };
-}
-
-/**
- * Synchronous half of ordinal resolution: map the captured messages onto the primed memo and
- * build the annotated wire input. Runs to completion without yielding.
- */
-export function annotateOrdinals(args: {
-    messages: MessageLike[];
-    memo: ModuleOrdinalMemo;
-    primed: PrimedOrdinalMemo;
-    /** Absolute ordinal immediately before a sliced unresolved tail. */
-    provisionalBase?: number;
-}): OrdinalResolution {
-    const memo = args.memo.entries;
-    const canonicalCount = args.primed.memoCanonicalCount;
-    const normalizations: ModuleNormalizationRecord[] = [];
-    const visibleIndexes: number[] = [];
-    const visibleMessages = args.messages.filter((message, index) => {
-        if (!isRawCompactionSummaryInfo(message.info)) {
-            visibleIndexes.push(index);
-            return true;
-        }
-        normalizations.push({
-            kind: "summary_message",
-            message_id: getMessageId(message),
-            part_index: -1,
-            field: "input",
-            removed: JSON.stringify(message),
-        });
-        return false;
-    });
-
-    // The encoder must not mutate caller-owned OpenCode objects.
-    // A shallow root projection is sufficient because the encoder only reads nested fields.
-    // The shallow root projection avoids walking or duplicating the full message tree on every pass.
-    const annotated: Array<Record<string, unknown>> = new Array(visibleMessages.length);
-    const resolved: Array<number | undefined> = new Array(annotated.length);
-    let firstUnresolved:
-        | {
-              messageId: string;
-              messageIndex: number;
-              messageRole: string;
-          }
-        | undefined;
-    for (let index = 0; index < annotated.length; index += 1) {
-        const messageId = getMessageId(visibleMessages[index]);
-        if (messageId === null) {
-            return {
-                ok: false,
-                reason: "unresolved",
-                messageIndex: visibleIndexes[index],
-                messageRole: visibleMessages[index].info.role ?? "unknown",
-            };
-        }
-        const ordinal = memo.get(messageId);
-        if (ordinal === undefined && firstUnresolved === undefined) {
-            firstUnresolved = {
-                messageId,
-                messageIndex: visibleIndexes[index],
-                messageRole: visibleMessages[index].info.role ?? "unknown",
-            };
-        }
-        resolved[index] = ordinal;
-    }
-
-    /**
-     * An unpersisted explicit synthetic message borrows its preceding canonical ordinal.
-     * Persisted unpaged messages remain unresolved and are rejected.
-     */
-    for (let index = 0; index < resolved.length; index += 1) {
-        if (resolved[index] !== undefined || !isSyntheticWireMessage(visibleMessages[index])) {
-            continue;
-        }
-        const hasResolvedMessageAfter = resolved
-            .slice(index + 1)
-            .some((ordinal) => ordinal !== undefined);
-        if (!hasResolvedMessageAfter) continue;
-        let priorIndex = index - 1;
-        while (priorIndex >= 0 && resolved[priorIndex] === undefined) priorIndex -= 1;
-        resolved[index] = priorIndex >= 0 ? (resolved[priorIndex] as number) : 0;
-    }
-
-    let suffixStart = annotated.length;
-    while (suffixStart > 0 && resolved[suffixStart - 1] === undefined) suffixStart -= 1;
-    for (let index = 0; index < suffixStart; index += 1) {
-        if (resolved[index] === undefined) {
-            return { ok: false, reason: "unresolved", ...firstUnresolved };
-        }
-    }
-    if (suffixStart < annotated.length) {
-        const base =
-            suffixStart > 0
-                ? (resolved[suffixStart - 1] as number)
-                : Math.max(0, args.provisionalBase ?? canonicalCount);
-        for (let index = suffixStart; index < annotated.length; index += 1) {
-            resolved[index] = base + (index - suffixStart) + 1;
-        }
-    }
-
-    for (let index = 0; index < annotated.length; index += 1) {
-        const messageId = getMessageId(visibleMessages[index]) as string;
-        const ordinal = resolved[index] as number;
-        const prior = memo.get(messageId);
-        if (prior !== undefined && prior !== ordinal) {
-            return {
-                ok: false,
-                reason: "mismatch",
-                messageId,
-                messageIndex: visibleIndexes[index],
-                messageRole: visibleMessages[index].info.role ?? "unknown",
-            };
-        }
-        memo.set(messageId, ordinal);
-        annotated[index] = { ...visibleMessages[index], absolute_ordinal: ordinal };
-    }
-
-    return { ok: true, annotatedInput: annotated, normalizations };
 }
 
 /** Flatten the typed builder shape to the module's top-level wire envelope. */
@@ -933,9 +631,9 @@ export const __moduleWireTest = {
     toFlatModuleWireBody,
 };
 
+/** Carries no ordinal: the daemon derives every ordinal from the declared window boundary. */
 export function encodeOpenCodeMessagesToCk(messages: unknown[]): Array<{
     mid: string;
-    ordinal: number;
     ck: Record<string, unknown>;
 }> {
     const emittedToolCallIds = new Set<string>();
@@ -954,8 +652,8 @@ export function encodeOpenCodeMessagesToCk(messages: unknown[]): Array<{
                 : typeof raw.id === "string"
                   ? raw.id
                   : `opencode-hash-${stableHashPrefix(message, 24)}`;
-        const ordinal =
-            wireOrdinal(raw.absolute_ordinal) ?? wireOrdinal(info.absolute_ordinal) ?? index + 1;
+        // The daemon's native decoder names a synthetic tool call by window position the same way.
+        const position = index + 1;
         const role =
             typeof info.role === "string"
                 ? info.role
@@ -1048,7 +746,7 @@ export function encodeOpenCodeMessagesToCk(messages: unknown[]): Array<{
                           ? part.callId
                           : typeof part.id === "string"
                             ? part.id
-                            : `synth-tool-${ordinal}-${partIndex}-${toolName}-${stableHashPrefix(input, 12)}`;
+                            : `synth-tool-${position}-${partIndex}-${toolName}-${stableHashPrefix(input, 12)}`;
                 const metadata =
                     part.metadata !== null && typeof part.metadata === "object"
                         ? (part.metadata as Record<string, unknown>)
@@ -1119,14 +817,12 @@ export function encodeOpenCodeMessagesToCk(messages: unknown[]): Array<{
         const createdAtMs = messageCreatedAtMs(info);
         return {
             mid: id,
-            ordinal,
             ck: {
                 role,
                 content,
                 ...(origin !== undefined ? { origin } : {}),
                 meta: {
                     harness_id: id,
-                    ordinal,
                     synthetic,
                     summary: info.summary === true,
                     errored: info.error !== undefined && info.error !== null,
@@ -1145,6 +841,7 @@ export type ModuleMethod =
     | "memory.capture.submit"
     | "memory.capture.status"
     | "transform"
+    | "transform.boundary"
     | "session.status"
     | "session.delete"
     | "session.flush"
