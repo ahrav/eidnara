@@ -93,6 +93,14 @@
             ]
         },
         {
+            "path": "tests/rust-compaction-timing.test.ts",
+            "tier": "rust-only",
+            "rationale": "fixed-lead compaction timing arms reach fire, delayed publish, pending wait, Execute activation, emergency wait, and both revert cases, and emit per-run timing measurements",
+            "contract_refs": [
+                "U5-PORT"
+            ]
+        },
+        {
             "path": "tests/rust-history_summarizer-producer.test.ts",
             "tier": "rust-only",
             "rationale": "history_summarizer producer reaches the controlled backend and records a typed backend failure without killing a provider process",

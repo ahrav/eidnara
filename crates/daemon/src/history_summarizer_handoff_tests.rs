@@ -260,6 +260,7 @@ impl Rig {
                 publication_fence: None,
                 memory_reviewer_nonadmission: nonadmission,
                 memory_reviewer_activation: activation,
+                published_at_ms: 0,
             },
         )
     }
@@ -454,7 +455,12 @@ fn a_reservation_left_by_an_abandoned_firing_does_not_block_the_next_firing() {
     let orphaned = activation(rig.handoff(t0()).unwrap());
     let stale = rig.reservation();
     // Firing 3 fails after the reservation exists and recovery abandons it with the reservation retained.
-    let abandoned = abandon_with_detail(&rig.state(), t0() + 1, Some("crash".to_string()));
+    let abandoned = abandon_with_detail(
+        &rig.state(),
+        t0() + 1,
+        Some("crash".to_string()),
+        AbandonClass::ProducerFailed,
+    );
     assert_eq!(abandoned.memory_reviewer_reservation, Some(stale.clone()));
     rig.persist(abandoned);
     // Firing 4 summarizes the next chunk and extracts nothing to hand off; the stale reservation is not its to publish, so `fire` drops it.
@@ -491,6 +497,7 @@ fn identical_facts_from_the_next_firing_adopt_the_orphaned_reservation() {
         &rig.state(),
         t0() + 1,
         Some("crash".to_string()),
+        AbandonClass::ProducerFailed,
     ));
     // Firing 4 re-summarizes the same chunk and extracts the same facts.
     rig.persist(next_publishing_firing(&rig, 2, 4));
@@ -2456,6 +2463,7 @@ fn a_refused_publication_settles_only_the_reservation_it_attempted() {
                 &rig.state(),
                 t0() + 1,
                 Some("crash".to_string()),
+                AbandonClass::ProducerFailed,
             ));
             rig.persist(next_publishing_firing(rig, 2, 4));
             let _ = activation(rig.handoff(t0() + 2).unwrap());
@@ -2490,6 +2498,7 @@ fn a_refused_publication_settles_only_the_reservation_it_attempted() {
             publication_fence: Some(&fence),
             memory_reviewer_nonadmission: None,
             memory_reviewer_activation: Some(&prepared),
+            published_at_ms: 0,
         },
     );
     assert!(
@@ -2549,6 +2558,7 @@ fn a_recut_firing_adopts_the_reservation_under_the_staged_binding() {
         &rig.state(),
         t0() + 1,
         Some("crash".to_string()),
+        AbandonClass::ProducerFailed,
     ));
     // Firing 4 re-cuts the chunk to 3..=4 and extracts the same facts from the same messages.
     rig.persist(next_publishing_firing(&rig, 3, 4));
@@ -2622,7 +2632,12 @@ fn a_stale_retain_leaves_a_later_firing_untouched() {
         ) -> Result<memory_store::HistorySummarizerPublishResult, HistorySummarizerPublishError>
         {
             let rig = self.0;
-            rig.persist(abandon_with_detail(&rig.state(), t0() + 1, None));
+            rig.persist(abandon_with_detail(
+                &rig.state(),
+                t0() + 1,
+                None,
+                AbandonClass::ProducerFailed,
+            ));
             rig.persist(next_publishing_firing(rig, 2, 4));
             let _ = activation(rig.handoff(t0() + 2).unwrap());
             Err(HistorySummarizerPublishError::CallerFenceRejected {
@@ -2728,6 +2743,7 @@ fn a_publication_without_an_activation_drops_a_retained_publication_no_reservati
         &rig.state(),
         t0() + 1,
         Some("crash".to_string()),
+        AbandonClass::ProducerFailed,
     ));
     assert_eq!(rig.pending().map(|(firing_seq, _)| firing_seq), Some(3));
     rig.persist(next_publishing_firing(&rig, 5, 6));
@@ -2743,7 +2759,12 @@ fn a_handoff_failure_retains_only_the_firing_whose_handoff_failed() {
     let publishing = rig.state();
     let publishing_row_version = rig.store.load(SESSION).unwrap().row_version.unwrap();
     // Another path moved the session on: firing 3 was abandoned, firing 4 fired and holds its own reservation with its retained publication.
-    rig.persist(abandon_with_detail(&rig.state(), t0() + 1, None));
+    rig.persist(abandon_with_detail(
+        &rig.state(),
+        t0() + 1,
+        None,
+        AbandonClass::ProducerFailed,
+    ));
     rig.persist(next_publishing_firing(&rig, 5, 6));
     rig.retain(
         &later_reservation(),

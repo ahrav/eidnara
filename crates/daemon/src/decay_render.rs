@@ -70,7 +70,7 @@ pub fn render_stored_history_segments(
     render_decayed_history_segments(&mapped, history_budget_tokens, estimate_tokens)
 }
 
-fn escape_xml_content(s: &str) -> String {
+pub(crate) fn escape_xml_content(s: &str) -> String {
     s.replace('&', "&amp;")
         .replace('<', "&lt;")
         .replace('>', "&gt;")

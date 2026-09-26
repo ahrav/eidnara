@@ -328,11 +328,9 @@ fn campaign(scale: Scale, aged_messages: u32, elapsed_bound_ms: u64) -> Run {
                 ArmResult::Fail,
                 StageVerdict::FirstLoss(Surface1Stage::CandidateWindow),
             ),
-            Some(0) => (ArmResult::Pass, StageVerdict::Clean),
-            Some(_) => (
-                ArmResult::Fail,
-                StageVerdict::FirstLoss(Surface1Stage::Render),
-            ),
+            // The served fragment is centered on the matched evidence, so a
+            // message folded anywhere in its segment is delivered whole.
+            Some(_) => (ArmResult::Pass, StageVerdict::Clean),
         };
         assert_eq!(
             (

@@ -433,8 +433,8 @@ Guarantee: No publish commits if any message in the pinned chunk range has
 changed content since the fire, and a firing with no recorded content identities
 cannot publish at all.
 Check: `always` - at the instant of commit, for every entry in
-`predicate.selected_range_identities`,
-`meta.block_identity_by_mid[mid] == entry.block_identities`, and
+`predicate.selected_range_identities`, the session's stored
+`block_identities` row for `mid` equals `entry.block_identities`, and
 `selected_range_identities` is non-empty. `always` because it is a precondition
 on every commit.
 Fault/timing angle: The whole model-run window, which is minutes. A harness can
@@ -442,13 +442,13 @@ edit, retract, or re-stamp a message while the producer runs. The fingerprint
 alone would not catch a same-length content edit; the module header says so
 explicitly (`history_summarizer.rs:141-143`).
 Required faults and enabling state: A configured model chain, a fired run, and a
-store mutation to `block_identity_by_mid` for one selected mid during the await.
-The existing tests use a commit hook to do exactly this, which is the seam to
-reuse.
+store mutation to `block_identity_by_mid` for one selected mid during the await,
+which `commit` writes to the `block_identities` table. The existing tests use a
+commit hook to do exactly this, which is the seam to reuse.
 Confidence: high - [evidence](evidence/publish-fence-rejects-selected-content-drift.md). Read the
-fence at `memory-store:9413-9425` and confirmed the empty-vector rejection is
+fence at `memory-store:12085-12113` and confirmed the empty-vector rejection is
 separate from and prior to the per-mid comparison, with the reasoning at
-`:9409-9412`.
+`:12081-12084`.
 Existing check: `history_summarizer.rs:2323`, `:2369`, `:2942`, `:3776`
 `reattach_fingerprint_mismatch_recovers_to_idle_and_releases_routes`. Status
 `unaudited`.
@@ -714,29 +714,41 @@ Open questions:
 Type: liveness
 Reachability: default-production
 Status: active
-Exercised: not yet - no test drives repeated validation rejections across
-firings.
+Exercised: partial - `handler_chunk_that_always_fails_stops_stalling_folding`
+(`lib.rs:43275`) drives repeated provider-reported refusals of one chunk across
+firings, and `handler_setup_failure_does_not_placeholder_the_chunk` (`:43332`)
+holds that repeated harness setup failures never advance the ladder; no test
+drives repeated validation rejections.
 Guarantee: After the fault-free window opens, a session whose producer keeps
-returning invalid output stops re-firing within a bounded number of attempts, or
-reports degraded publish health.
-Check: `always` - poll for a bounded window of `N` firing opportunities after the
-last configuration change; after `N` consecutive validation rejections, either
-`history_summarizer.failure_backoff_at_ms` has escalated beyond
-`HISTORY_SUMMARIZER_FAILURE_BACKOFF_MS` or `publish_health_degraded` is true. Stated in
-attempts, not in an unbounded "eventually", per the liveness rules.
-Fault/timing angle: The window is the 60-second backoff at `history_summarizer.rs:29`,
-re-evaluated at `lib.rs:5042-5047`. Each expiry admits one more firing, each
-costing a full model chain of live calls.
+returning invalid output for one chunk stops calling a model for that chunk
+within `PLACEHOLDER_AFTER_FAILURES` failed firings, and the next firing publishes
+a placeholder segment that moves folding past the chunk whenever the placeholder
+itself validates; the one placeholder shape that cannot validate is a chunk whose
+opening tool arc has its result at or past the eligible end, and that chunk keeps
+retrying the placeholder without a model call.
+Check: `always` - expire the backoff and fire `PLACEHOLDER_AFTER_FAILURES + 1`
+times against a producer whose output the gate rejects on every attempt for
+every model in the chain; the producer received exactly
+`PLACEHOLDER_AFTER_FAILURES` prompts per configured model (each failed firing
+walks the whole chain before its terminal rejection counts), the stored history
+segments cover the chunk, and `history_summarizer.chunk_retry` is `None`. Neither the cooldown nor
+`publish_health_degraded` is part of the bound: `failure_backoff_at_ms` stays at
+`HISTORY_SUMMARIZER_FAILURE_BACKOFF_MS` past the last failure and the health
+counter this path never increments stays at zero. Stated in attempts, not in an
+unbounded "eventually", per the liveness rules.
+Fault/timing angle: The window is the 60-second backoff at `history_summarizer.rs:41`,
+re-evaluated at `lib.rs:5954`. Each expiry admits one more firing, each
+costing a full model chain of live calls until the placeholder stage.
 Required faults and enabling state: A configured model chain; a producer that
 returns a well-formed document the gate rejects on every attempt, for every model
 in the chain; and N firing opportunities without N times 60 seconds of wall clock.
 The seam for that exists and is already used: the backoff gate compares the durable
 `failure_backoff_at_ms` against a caller-supplied `now`
-(`lib.rs:5042-5047`, with `now` arriving through `HistorySummarizerPrepareContext` at
-`:4808-4821`), so expiring the durable field is equivalent to advancing the clock.
-The test helper `expire_history_summarizer_backoff` (`lib.rs:29784-29791`) already does
+(`lib.rs:5949-5955`, with `now` arriving through `HistorySummarizerPrepareContext` at
+`:9601`), so expiring the durable field is equivalent to advancing the clock.
+The test helper `expire_history_summarizer_backoff` (`lib.rs:42261-42268`) already does
 exactly this by committing `Some(now_ms() - 1)`, and
-`assert_seeded_phase_recovers_then_refires_after_backoff` (`:29793`) drives a
+`assert_seeded_phase_recovers_then_refires_after_backoff` (`:42270`) drives a
 refire through it. So each additional attempt costs no wall clock.
 Confidence: high - [evidence](evidence/hv-validation-rejection-retry-has-no-attempt-bound.md).
 Traced the whole rejection path: `history_summarizer.rs:1680-1703` abandons with a backoff;
@@ -747,9 +759,48 @@ unchanged; the only increments are in `memory-store/src/lib.rs:9264-9268` and
 intra-firing fallback at `history_summarizer.rs:1440-1450` bounds attempts per firing only.
 Existing check: `lib.rs:5042-5047` enforces the 60-second cooldown, and
 `lib.rs:6258-6261` reports degradation from a counter this path never increments.
-Impact: Unbounded live model spend and log noise, and a session that never
-compacts while its status block reports healthy publishing. Distinct from a bad
-publish: no data is corrupted.
+Since the chunk retry ladder landed, the backoff still does not escalate, but the
+live model attempts on one chunk are bounded. A firing that ends in a
+validation rejection, a context-overflow producer failure, or a permanent
+failure the model provider reported increments the durable `chunk_retry` count
+for the chunk start (`lib.rs:6325`, `history_summarizer.rs:361-418`); a reattached
+run that ends the same way counts too (`lib.rs:5628`). Only the
+firing's final error counts: a rejection or provider failure that falls back to
+the next model in the chain (`history_summarizer.rs:1970-1975`, `:2007-2012`)
+and then publishes clears the count instead. The host classes harness setup
+and supervision failures permanent too, such as a missing credential or a
+harness that cannot start; `is_provider_reported_failure`
+(`host-runtime/src/model_execution/backend.rs:134-143`) admits only an OpenCode
+terminal whose status names the request (400, 413, 422). A Pi error stop drops
+the provider's text and a status-less OpenCode terminal keeps only a text
+classification, so neither separates a content refusal from an unknown model,
+and neither counts; counting them would publish placeholders over history a
+working model could summarize. The count is keyed by the model chain and the
+configured chunk token budget as well as the chunk start
+(`memory-store/src/lib.rs:541-552`), so a changed chain or a lowered budget sends
+the bytes to a model before any placeholder. A re-adopted tail message inside
+the counted chunk's range clears the count (`transform.rs:5596-5607`), since the
+retried bytes changed, and a failure is recorded only while the firing's
+selected identities are still the stored ones (`lib.rs:18182-18228`). Assembly varies the
+calibration seeds from `VARY_SEEDS_AFTER_FAILURES` failures, halves the chunk token budget per
+failure from `SHRINK_CHUNK_AFTER_FAILURES`, and from `PLACEHOLDER_AFTER_FAILURES`
+publishes a daemon-authored placeholder segment for the shrunken chunk without a
+model call (`history_summarizer_chunk.rs:572-670`); the placeholder stops before
+a tool arc the shrunken chunk end splits, and reaches the result of one that opens
+the chunk when the configured budget holds it. A reattachment presents the
+frozen range under the budget the firing recorded at fire time
+(`history_summarizer.rs:1833`, read at `lib.rs:5505-5516`), not the current
+configuration, so it withdraws the aliases the live prompt withdrew. A publish clears the count. Transient,
+auth, and host setup failures do not count, so a chunk failing only with them
+still retries every 60 seconds without bound.
+Impact: A chunk that fails only with the excluded transient, authentication,
+or host setup failures retries every 60 seconds without bound: live model spend
+and log noise, and a session that never compacts while its status block reports
+healthy publishing. Distinct from a bad publish: no data is corrupted. A chunk
+that keeps failing validation costs `PLACEHOLDER_AFTER_FAILURES` failed model
+firings, then one placeholder firing that calls no model and, when the
+placeholder validates, moves folding past it (`lib.rs:43301-43305`); the
+placeholder replaces a summary of those messages.
 Open questions:
 
 - Should a validation rejection increment `consecutive_publish_failures`, or does
@@ -1101,7 +1152,7 @@ long span, which a campaign can miss entirely while executing those lines
 constantly.
 
 Two corrections are folded in. The semantics were `reachable`, which this record's
-own rationale defended as "this code location is attainable" — but the location is
+own rationale defended as "this code location is attainable", but the location is
 attained by every publish, so the old check could not fail. And the cited location
 was wrong: `history_summarizer.rs:1738` is inside `abandon_current_state`'s signature, and
 the secondary citation `:471-475` is the events projection. The only production
@@ -1442,7 +1493,7 @@ these records has an executing check.
   The commit point runs seven gates and these three records partition them. The
   fingerprint is deliberately blind to same-length content edits
   (`history_summarizer.rs:141-143`) and `selected_range_identities` is the compensating
-  fence (`memory-store:9413-9425`), so the fence record and the single-flight record
+  fence (`memory-store:12085-12113`), so the fence record and the single-flight record
   are testing different gates that happen to share one predicate struct.
   Constructing the fence record's drift mutation *hypothetically dominates* half
   of the single-flight record, because the same commit hook that mutates
@@ -1534,7 +1585,7 @@ these records has an executing check.
   because each breaks a different signal. They are grouped because a single
   campaign observation, counting provider runs and rejections at a fake while
   polling the status block, would exercise all three at once, which makes this the
-  cheapest cluster in the part by leverage.
+  cheapest cluster in the part for what it covers.
 - **Bytes and numbers that only one consumer repairs.**
   [hv-control-characters-reach-durable-rows](#hv-control-characters-reach-durable-rows),
   [hv-unescape-xml-double-decodes-entities](#hv-unescape-xml-double-decodes-entities),

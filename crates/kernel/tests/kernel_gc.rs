@@ -900,3 +900,149 @@ fn ordinary_reclaim_leaves_a_concurrent_ingest_staging_alone() {
         "ordinary reclaim swept a concurrent ingest's staged bytes"
     );
 }
+
+fn insert_backup_pin(
+    root: &std::path::Path,
+    store: &KernelStore,
+    pin_id: &str,
+    expires_at: i64,
+    evidence_ids: &[String],
+) {
+    let mut connection = Connection::open(root.join("kernel.sqlite")).unwrap();
+    let tx = connection.transaction().unwrap();
+    let commit_seq: i64 = tx
+        .query_row("SELECT MAX(commit_seq) FROM commit_log", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    tx.execute(
+        "INSERT INTO capture_pins(capture_pin_id,pin_kind,owner_id,commit_seq,lease_epoch,writer_epoch,created_at,expires_at)
+         VALUES (?1,'backup','test',?2,?3,?3,0,?4)",
+        params![pin_id, commit_seq, i64::try_from(store.lease_epoch()).unwrap(), expires_at],
+    )
+    .unwrap();
+    for evidence_id in evidence_ids {
+        tx.execute(
+            "INSERT INTO capture_pin_refs(capture_pin_id,evidence_id,expires_at) VALUES (?1,?2,?3)",
+            params![pin_id, evidence_id, expires_at],
+        )
+        .unwrap();
+    }
+    tx.commit().unwrap();
+}
+
+fn pin_ref_rows(root: &std::path::Path, filter: &str) -> i64 {
+    Connection::open(root.join("kernel.sqlite"))
+        .unwrap()
+        .query_row(
+            &format!("SELECT COUNT(*) FROM capture_pin_refs WHERE {filter}"),
+            [],
+            |row| row.get(0),
+        )
+        .unwrap()
+}
+
+#[test]
+fn released_references_collapse_to_the_latest_release_per_evidence() {
+    for later_first in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        let store = KernelStore::open(root.path()).unwrap();
+        seed_domain(&store);
+        let handle = store.ingest_artifact(request("shared", b"shared")).unwrap();
+        invalidate(root.path(), &handle.evidence_id, 0);
+        let evidence = [handle.evidence_id.clone()];
+        insert_backup_pin(root.path(), &store, "early", 30 * DAY_MS, &evidence);
+        insert_backup_pin(root.path(), &store, "late", 30 * DAY_MS, &evidence);
+        let releases = [("early", 10 * DAY_MS), ("late", 20 * DAY_MS)];
+        let order: Vec<_> = if later_first {
+            releases.iter().rev().collect()
+        } else {
+            releases.iter().collect()
+        };
+        for (pin_id, released_at) in order {
+            store.release_capture_pin(pin_id, *released_at).unwrap();
+        }
+
+        let connection = Connection::open(root.path().join("kernel.sqlite")).unwrap();
+        let survivors: Vec<(String, i64)> = connection
+            .prepare("SELECT capture_pin_id,released_at FROM capture_pin_refs")
+            .unwrap()
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(survivors, [("late".to_string(), 20 * DAY_MS)]);
+        let pins: i64 = connection
+            .query_row("SELECT COUNT(*) FROM capture_pins", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(pins, 2, "pin rows are audit records and survive");
+        drop(connection);
+
+        // The deadline still follows the latest release: 20 days plus the 14-day grace.
+        assert_eq!(
+            store
+                .run_staging_maintenance(33 * DAY_MS)
+                .unwrap()
+                .artifact_gc
+                .reclaimed_objects,
+            0
+        );
+        assert_eq!(
+            store
+                .run_staging_maintenance(35 * DAY_MS)
+                .unwrap()
+                .artifact_gc
+                .reclaimed_objects,
+            1
+        );
+    }
+}
+
+#[test]
+fn repeated_captures_keep_references_bounded_by_evidence() {
+    const EVIDENCE: usize = 200;
+    const CYCLES: usize = 50;
+    let root = tempfile::tempdir().unwrap();
+    let store = KernelStore::open(root.path()).unwrap();
+    seed_domain(&store);
+    let evidence: Vec<String> = (0..EVIDENCE)
+        .map(|index| {
+            let key = format!("e{index}");
+            store
+                .ingest_artifact(request(&key, key.as_bytes()))
+                .unwrap()
+                .evidence_id
+        })
+        .collect();
+    // A long-lived pin stays active throughout; its rows must never collapse.
+    insert_backup_pin(root.path(), &store, "active", 100 * DAY_MS, &evidence);
+    for cycle in 0..CYCLES {
+        let pin_id = format!("cycle-{cycle}");
+        let at = i64::try_from(cycle).unwrap() + 1;
+        if cycle % 2 == 0 {
+            insert_backup_pin(root.path(), &store, &pin_id, 100 * DAY_MS, &evidence);
+            // Release instants are caller-supplied and need not be monotonic.
+            let released_at = if cycle % 4 == 0 { at } else { 1_000 - at };
+            store.release_capture_pin(&pin_id, released_at).unwrap();
+        } else {
+            insert_backup_pin(root.path(), &store, &pin_id, at, &evidence);
+            store.run_capture_pin_maintenance(at).unwrap();
+        }
+    }
+
+    let evidence_rows = i64::try_from(EVIDENCE).unwrap();
+    assert_eq!(
+        pin_ref_rows(root.path(), "released_at IS NULL"),
+        evidence_rows
+    );
+    assert_eq!(
+        pin_ref_rows(root.path(), "released_at IS NOT NULL"),
+        evidence_rows,
+        "one released reference per evidence"
+    );
+    // The survivor carries the latest release: cycle 2 released at 1000-3.
+    assert_eq!(
+        pin_ref_rows(root.path(), "released_at IS NOT NULL AND released_at<>997"),
+        0
+    );
+}

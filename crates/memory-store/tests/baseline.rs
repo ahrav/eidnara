@@ -55,6 +55,7 @@ const EXPECTED_OBJECTS: &[(&str, &str)] = &[
     ("table", "authority"),
     ("table", "authority_route_bindings"),
     ("table", "authority_seed_rows"),
+    ("table", "block_identities"),
     ("table", "cache_state"),
     ("table", "changefeed"),
     ("table", "channel1_appends"),

@@ -583,10 +583,11 @@ describe("logger", () => {
             "hooks",
             root,
         );
-        const { results, input, native } = JSON.parse(stdout);
+        const { results, native } = JSON.parse(stdout);
         for (const result of results) {
             expect(result.served).toBe(native);
-            expect(result.fallback).toBe(input);
+            // The failed pass appends nothing new, so it serves the last applied output.
+            expect(result.fallback).toBe(native);
             expect(result.calls).toBe(2);
             expect(result.failures).toBe(1);
             expect(result.eventUnchanged).toBe(true);
@@ -599,7 +600,9 @@ describe("logger", () => {
         expect(debug).toContain("rust module stages:");
         expect(debug.match(/event message.updated:/g)).toHaveLength(2);
         expect(warn.trim().split("\n")).toHaveLength(1);
-        expect(warn).toContain("rust transform failed; serving the input unchanged:");
+        expect(warn).toContain(
+            "rust transform failed; serving the last applied output with the messages appended since:",
+        );
         expect(warn).toContain("provider failed");
         expect(warn).not.toContain("\u0007");
         expect(off).toBe("");

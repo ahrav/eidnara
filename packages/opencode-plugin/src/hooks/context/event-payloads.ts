@@ -17,6 +17,8 @@ export type EidnaraEvent = {
 export interface ContextUsage {
     percentage: number;
     inputTokens: number;
+    /** The response's reported cache reads and writes, kept apart from `inputTokens` that sums them; absent unless the provider reported both. */
+    cache?: { readTokens: number; writeTokens: number };
 }
 
 export interface SessionCreatedInfo {

@@ -19,6 +19,10 @@ import {
 import { createConnection, type Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import {
+    type CompactionTiming,
+    summarizeCompactionTiming,
+} from "@eidnara/opencode/shared/compaction-timing";
 import { type BindIdentity, HostClient } from "@eidnara/opencode/shared/host-client";
 import {
     connectionFilePath,
@@ -620,6 +624,8 @@ export interface HermeticHostOptions {
     dataDir: string;
     fixtureBin: string;
     startTimeoutMs?: number;
+    /** Extra environment for the fixture daemon, such as the fixture-only preparation lead. */
+    daemonEnv?: Record<string, string>;
 }
 
 /** The direct-host fixture starts no provider or module subprocess. */
@@ -629,6 +635,7 @@ export class HermeticHostStack {
     private readonly dataDir: string;
     private readonly fixtureBin: string;
     private readonly startTimeoutMs: number;
+    private readonly daemonEnv: Record<string, string>;
     private readonly fixtureConfigDir: string;
     private readonly logPath: string;
     private readonly pidFilePath: string;
@@ -644,6 +651,7 @@ export class HermeticHostStack {
         this.dataDir = options.dataDir;
         this.fixtureBin = options.fixtureBin;
         this.startTimeoutMs = options.startTimeoutMs;
+        this.daemonEnv = options.daemonEnv;
         this.connectionFile = connectionFilePath(this.dataDir);
         this.controlPath = join(this.dataDir, CONTROL_FILE);
         this.fixtureConfigDir = join(this.dataDir, "fixture-config");
@@ -656,6 +664,7 @@ export class HermeticHostStack {
         const stack = new HermeticHostStack({
             ...options,
             startTimeoutMs: options.startTimeoutMs ?? 60_000,
+            daemonEnv: options.daemonEnv ?? {},
         });
         try {
             await stack.startHost();
@@ -693,10 +702,23 @@ export class HermeticHostStack {
         return (await this.backendCounters()).started;
     }
 
+    /** The session's compaction timing, read from `session.status` through the helper both `/eidnara-status` readers use. */
+    async compactionTiming(
+        sessionId: string,
+        projectRoot: string,
+    ): Promise<CompactionTiming | undefined> {
+        return summarizeCompactionTiming(
+            sessionId,
+            projectRoot,
+            await this.primaryStatus(sessionId, projectRoot, "session.status"),
+        );
+    }
+
     async primaryStatus(
         sessionId: string,
         projectRoot: string,
         method: "status" | "session.status" = "status",
+        extra: Record<string, unknown> = {},
     ): Promise<Record<string, unknown>> {
         const identity: BindIdentity = {
             project_root: resolve(projectRoot),
@@ -711,6 +733,7 @@ export class HermeticHostStack {
                 identity,
             );
             const response = await client.request(route, {
+                ...extra,
                 method,
                 v: 1,
                 session_id: sessionId,
@@ -853,6 +876,7 @@ export class HermeticHostStack {
             cwd: REPO_ROOT,
             env: {
                 ...process.env,
+                ...this.daemonEnv,
                 NO_COLOR: "1",
                 XDG_CONFIG_HOME: this.fixtureConfigDir,
             },

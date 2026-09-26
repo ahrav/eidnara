@@ -40,18 +40,20 @@ each carrying that message's `block_identities` from
 
 `crates/memory-store/src/lib.rs`, inside the publish transaction:
 
-- `:9402` the predicate comparison includes
+- `:12074` the predicate comparison includes
   `meta.history_summarizer.selected_range_identities == predicate.selected_range_identities`,
   which proves the durable row still describes this firing.
-- `:9409-9412` the comment that separates the two roles: "`chunk_fingerprint`
+- `:12081-12084` the comment that separates the two roles: "`chunk_fingerprint`
   remains a readable structural diagnostic; exact content freshness is verified
   using the durable block identities. An empty vector means the firing predates
   selected-range identity persistence, so it cannot establish that the selected
   content is still current."
-- `:9413-9417` rejects outright when `predicate.selected_range_identities` is
+- `:12085-12089` rejects outright when `predicate.selected_range_identities` is
   empty. This is a separate, earlier rejection from the per-mid comparison.
-- `:9418-9425` for each selected entry, compares against
-  `meta.block_identity_by_mid[mid]` and rejects with the offending mid named.
+- `:12090-12113` for each selected entry, reads the session's `block_identities`
+  row for that mid (the durable form of `meta.block_identity_by_mid`, written by
+  `sync_block_identities` at `:9611`), compares its `identities` against
+  `entry.block_identities`, and rejects with the offending mid named.
 
 Both rejections are `PublishTxnOutcome::FenceRejected`, which the module maps to
 `HistorySummarizerPublishError::FenceRejected` (`:9525-9527`) and then abandons **without**
@@ -117,7 +119,7 @@ Dependencies:
    Assert `FenceRejected`, no history_segment appended, and no failure cooldown armed.
 2. Empty-vector case: construct a durable `AwaitingProducer` row with
    `selected_range_identities: vec![]` and drive a publish. Assert the rejection
-   fires at `memory-store:9413-9417` before the per-mid loop.
+   fires at `memory-store:12085-12089` before the per-mid loop.
 3. Permitted case: extend the tail past the pinned range and assert the publish
    still commits, pinning the deliberate carve-out so a future tightening is a
    conscious change.
@@ -129,7 +131,7 @@ Dependencies:
 
 ### Q: The fence covers only mids inside the pinned chunk range. Is permitting a tail extension safe?
 
-- Sources examined: `crates/memory-store/src/lib.rs:9413-9425`;
+- Sources examined: `crates/memory-store/src/lib.rs:12085-12113`;
   `crates/daemon/src/history_summarizer_chunk.rs:698-715`;
   `crates/daemon/src/history_summarizer.rs:2369-2409` (the permitting test) and
   `:2942-3010` (the rejecting test);

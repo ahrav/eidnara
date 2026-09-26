@@ -275,7 +275,7 @@ pub enum ScanError {
 
 pub(crate) const REVISION: ScannerRevision = ScannerRevision {
     crate_version: env!("CARGO_PKG_VERSION"),
-    semantic_digest_version: 8,
+    semantic_digest_version: 9,
     upstream_commit: "3d2869011138cd7812a12f893dc93635a961b0d7",
 };
 

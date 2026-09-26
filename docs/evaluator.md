@@ -1785,8 +1785,8 @@ structured aged arm at S0 the daemon folded the older history five messages
 to a segment (twenty-two segments) and left the newest in the protected tail: the
 plain task's message sits at the head of its segment and is served whole;
 the falsifier is folded third into the first segment, its segment is
-selected, and the served fragment is cut at the cap before its words, so it
-reaches render with the evidence absent; the positive control is in the
+selected, and the served fragment is centered on its matched words, so it
+is delivered too; the positive control is in the
 protected tail and has no unit at all. The three policies are recorded as
 `GovernanceArms` over the pair set. The report carries the five injection
 cases planned for the task set (`plan_injection_cases` over the three task
@@ -1864,22 +1864,30 @@ context-pressure numbers the boundary protects the whole history and nothing
 is eligible; the trigger fires `force_band` from 85 percent of the limit
 with the firing spawned behind the pass, and in the emergency band from 95
 percent inline, before the pass settles. The session's meta row is written
-whole on every commit and is bounded at 512 KiB of durable text; at 1,000
-short messages the meta is about 475 KiB before a firing and the fired
-state's selected identities push it past the bound, so the firing fails with
-`InputLimit` and publishes nothing (a 1,600-message session is refused as
-durable text at the transform itself). S0 and S1 sit well under that. At S1
-with 900 aged messages the recording's backend answers 22 of the 34 firings
-the daemon reports and the campaign publishes; at 1,000 the host refuses turn
-980 of the recording life with `host.transform_failed`, 83 firings never
-reach the backend, and the campaign publishes with the structured aged
-samples `indeterminate`.
+whole on every commit and is bounded at 512 KiB of durable text. Per-message
+block identities live in their own `block_identities` table, and the tail
+hygiene baseline keeps only the parts after the covered prefix, so the meta
+grows with the uncovered tail and the served output, not with covered
+history: `crates/daemon/src/transform_meta_bound.rs` commits a first HARD
+pass over 10,000 messages whose segments cover all but the last 200 with
+about 70 KiB of meta, the same as at 1,000. A session with no coverage still
+carries roughly 340 bytes of meta per uncovered message, so about 1,500
+uncovered 2 KiB messages reach the bound. S0 and S1 sit well under that. At S1
+with 900 aged messages the recording life completes and the campaign is
+refused `EnvelopeExceeded { CassetteBytes }`: the recorded cassette is about
+6.9 MB (7.7 MB at 1,000) against the campaign envelope's fixed 1 MiB, now
+that the secret scanner no longer refuses the recording's redaction (before
+that fix the cassette was refused and stayed under 2 KiB). Before the meta
+was bounded by the tail, the 1,000-message recording life reached the meta
+bound instead: the host refused turn 980 with `host.transform_failed`, 83
+firings never reached the backend, and the campaign published with the
+structured aged samples `indeterminate`, which is the path `TurnRefused` and
+`unreached_firings` were built for.
 
 What the campaign found about the pair compiler on surface 1: its recency
 window counts messages, but surface 1's unit is the segment, so at S0 the
 twenty-two segments all sit inside a window of 100 and no truth is lost to
-recency there; a recency loss on surface 1 needs more than 500 messages,
-which the meta bound puts near the limit of what one firing can persist.
+recency there; a recency loss on surface 1 needs more than 500 messages.
 The falsification pair's structural verdict is still the compiler's.
 
 Not composed yet: the write-then-rename publisher is test support
