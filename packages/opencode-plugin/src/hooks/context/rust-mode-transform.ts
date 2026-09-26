@@ -54,9 +54,11 @@ import {
 import type { MessageLike } from "./tag-content-primitives";
 import {
     CaptureBudgetExceeded,
+    type CapturedHistory,
     type CapturedMessages,
     type CaptureLease,
     capturedMessagesUnchanged,
+    captureHistory,
     captureMessages,
     defaultTransformCaptureAdmission,
     type HistoryDigest,
@@ -303,7 +305,7 @@ interface WireDelta {
  */
 function computeWireDelta(
     previous: RustWireCache,
-    captured: CapturedMessages,
+    captured: CapturedHistory,
 ): WireDelta | undefined {
     if (captured.members.length < previous.rawCount) return undefined;
     if (!captured.verified || !historyDigestsEqual(captured.verified, previous.rawHistory))
@@ -341,7 +343,7 @@ function computeWireDelta(
  * its terminal included, is unchanged and in place. New messages may follow; an edit, removal,
  * revert, or reorder of an acknowledged message leaves the retained output stale.
  */
-function isAppendOnlyExtension(previous: RustWireCache, captured: CapturedMessages): boolean {
+function isAppendOnlyExtension(previous: RustWireCache, captured: CapturedHistory): boolean {
     return (
         captured.members.length >= previous.rawCount &&
         captured.verified !== undefined &&
@@ -351,7 +353,7 @@ function isAppendOnlyExtension(previous: RustWireCache, captured: CapturedMessag
 }
 
 /** A verified capture tapes the former terminal first, so its boundary is that member. */
-function formerTerminalUnchanged(previous: RustWireCache, captured: CapturedMessages): boolean {
+function formerTerminalUnchanged(previous: RustWireCache, captured: CapturedHistory): boolean {
     return (
         previous.rawTerminal !== undefined &&
         captured.boundary !== undefined &&
@@ -363,7 +365,7 @@ function formerTerminalUnchanged(previous: RustWireCache, captured: CapturedMess
 function buildWireCache(args: {
     messages: readonly MessageLike[];
     encoded: readonly { mid?: unknown }[];
-    captured: CapturedMessages;
+    captured: CapturedHistory;
     wireBytes: readonly number[];
     inputLengths: readonly number[];
     delta?: WireDelta;
@@ -907,14 +909,11 @@ export function createRustModeTransform(
         appliedOutputs.release(sessionId);
         retainedHistories.release(sessionId);
     };
-    /** The session map evicts silently on count; its victim's retained charges are released here. */
+    /** Count eviction uses `releaseWireCache`: a history eviction can free the slot `set` would evict, and a refused retention skips `set`. */
     const storeWireCache = (sessionId: string, cache: RustWireCache): void => {
         if (!wireCaches.has(sessionId) && wireCaches.size >= WIRE_CACHE_SESSION_CAPACITY) {
             const oldest = wireCaches.entries().next().value;
-            if (oldest) {
-                appliedOutputs.release(oldest[0]);
-                retainedHistories.release(oldest[0]);
-            }
+            if (oldest) releaseWireCache(oldest[0]);
         }
         const charge =
             cache.rawCount * HISTORY_ENTRY_RETAINED_BYTES +
@@ -1113,7 +1112,7 @@ export function createRustModeTransform(
         const charge = (bytes: number, detail: string): void => {
             if (!lease.reserve(bytes)) throw new CaptureBudgetExceeded(detail);
         };
-        let failOpenSource: { captured: CapturedMessages; previous: RustWireCache } | undefined;
+        let failOpenSource: { captured: CapturedHistory; previous: RustWireCache } | undefined;
         /**
          * Without native compaction a raw fail-open can overflow the provider window, so a failed
          * pass republishes the last applied output followed by the raw messages appended after the
@@ -1157,8 +1156,14 @@ export function createRustModeTransform(
             // Source domain is validated synchronously before any message read.
             const prefixGuardStartedAt = performance.now();
             const previousWireCache = wireCaches.get(sessionId);
+            // A full fallback inspection walks a superset of the partial one, so it pays only the difference.
+            let inspectedBytes = 0;
             const inspect = (skip: number): number[] => {
-                const inspection = inspectReferenceableMessages(target, lease.remainingBytes, skip);
+                const inspection = inspectReferenceableMessages(
+                    target,
+                    lease.remainingBytes + inspectedBytes,
+                    skip,
+                );
                 if (!inspection.ok) {
                     throw new PassDeclined(
                         sessionId,
@@ -1167,7 +1172,11 @@ export function createRustModeTransform(
                         inspection.rejection.reason === "prototype_accessor" ? "warn" : "debug",
                     );
                 }
-                charge(inspection.estimatedBytes, `capture charge=${inspection.estimatedBytes}`);
+                charge(
+                    inspection.estimatedBytes - inspectedBytes,
+                    `capture charge=${inspection.estimatedBytes}`,
+                );
+                inspectedBytes = inspection.estimatedBytes;
                 return inspection.messageWireBytes;
             };
             /**
@@ -1177,16 +1186,16 @@ export function createRustModeTransform(
              * Any prefix change falls back to a full inspection and capture.
              */
             const prefix = previousWireCache?.rawHistory;
-            let verified: CapturedMessages | undefined;
+            let verified: CapturedHistory | undefined;
             let messageWireBytes: number[] = [];
             if (previousWireCache && prefix) {
                 messageWireBytes = inspect(prefix.count);
-                verified = captureMessages(target, lease, prefix);
+                verified = captureHistory(target, lease, prefix);
                 for (let index = 0; verified && index < prefix.count; index += 1)
                     messageWireBytes[index] = previousWireCache.wireBytes[index] ?? 0;
             }
             if (!verified) messageWireBytes = inspect(0);
-            const captured = verified ?? captureMessages(target, lease);
+            const captured = verified ?? captureHistory(target, lease);
             inputCount = messageWireBytes.length;
             // Later reads use the captured members; the live array is only rechecked against them.
             const messages = captured.members as MessageLike[];

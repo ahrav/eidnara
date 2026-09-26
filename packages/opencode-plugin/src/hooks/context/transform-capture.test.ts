@@ -1,9 +1,11 @@
 import { afterEach, describe, expect, it, spyOn } from "bun:test";
 import {
     CaptureBudgetExceeded,
+    type CapturedHistory,
     type CapturedMessages,
     type CaptureLease,
     capturedMessagesUnchanged,
+    captureHistory as captureHistoryWithLease,
     captureMessages as captureWithLease,
     defaultTransformCaptureAdmission,
     type HistoryDigest,
@@ -41,6 +43,10 @@ function reserveCapture(messages: unknown): CaptureLease {
 
 function captureMessages(messages: unknown): CapturedMessages {
     return captureWithLease(messages, reserveCapture(messages));
+}
+
+function captureHistory(messages: unknown): CapturedHistory {
+    return captureHistoryWithLease(messages, reserveCapture(messages));
 }
 
 function messageContentSnapshot(message: unknown): MessageContentSnapshot {
@@ -783,7 +789,7 @@ describe("digest-verified prefix capture", () => {
 
     /** Digest of `[value]` as the prefix a later pass verifies. */
     function digestOf(value: unknown): HistoryDigest {
-        return captureMessages([value, tail]).history;
+        return captureHistory([value, tail]).history;
     }
 
     function verifiesAgainst(value: unknown, digest: HistoryDigest): boolean {
@@ -794,7 +800,7 @@ describe("digest-verified prefix capture", () => {
             const inspection = inspectReferenceableMessages(live, undefined, digest.count);
             if (!inspection.ok || !admitted.lease.reserve(inspection.estimatedBytes))
                 throw new Error("root inspection refused");
-            return captureWithLease(live, admitted.lease, digest) !== undefined;
+            return captureHistoryWithLease(live, admitted.lease, digest) !== undefined;
         } finally {
             admitted.lease.release();
         }
@@ -850,7 +856,7 @@ describe("digest-verified prefix capture", () => {
             message("m2", "y".repeat(4096)),
             message("m3"),
         ];
-        const captured = captureMessages(first);
+        const captured = captureHistory(first);
         expect(captured.history.count).toBe(2);
         const next = [...structuredClone(first), message("m4")];
         const full = inspectReferenceableMessages(next);
@@ -863,7 +869,7 @@ describe("digest-verified prefix capture", () => {
         if (!("lease" in admitted)) throw new Error("admission refused");
         try {
             expect(admitted.lease.reserve(partial.estimatedBytes)).toBe(true);
-            const verified = captureWithLease(next, admitted.lease, captured.history);
+            const verified = captureHistoryWithLease(next, admitted.lease, captured.history);
             if (!verified) throw new Error("unchanged prefix did not verify");
             expect(verified.snapshots.slice(0, 2)).toEqual([undefined, undefined]);
             expect(verified.snapshots[2]).toBeDefined();
@@ -875,16 +881,16 @@ describe("digest-verified prefix capture", () => {
                 ),
             ).toBe(true);
             expect(verified.history.count).toBe(3);
-            expect(historyDigestsEqual(verified.history, captureMessages(next).history)).toBe(true);
+            expect(historyDigestsEqual(verified.history, captureHistory(next).history)).toBe(true);
             expect(capturedMessagesUnchanged(next, verified)).toBe(true);
             // A verified member is still rechecked in full against the digest.
             (next[1]?.parts as Array<{ text: string }>)[0].text = "edited";
             expect(capturedMessagesUnchanged(next, verified)).toBe(false);
-            expect(captureWithLease(next, admitted.lease, captured.history)).toBeUndefined();
+            expect(captureHistoryWithLease(next, admitted.lease, captured.history)).toBeUndefined();
             // The prefix alone, with nothing after it, does not verify.
-            expect(captureWithLease(first.slice(0, 2), admitted.lease, captured.history)).toBe(
-                undefined,
-            );
+            expect(
+                captureHistoryWithLease(first.slice(0, 2), admitted.lease, captured.history),
+            ).toBe(undefined);
         } finally {
             admitted.lease.release();
         }
@@ -902,6 +908,39 @@ describe("digest-verified prefix capture", () => {
         }
         expect(verifiesAgainst(message("m1"), digest)).toBe(true);
         expect(counter.count).toBe(0);
+    });
+
+    it("hashes a string longer than one hash chunk by its content across slice boundaries", () => {
+        const chunk = 1 << 16;
+        // A surrogate pair straddles the first slice boundary, and a third slice is partial.
+        const long = `${"a".repeat(chunk - 1)}\ud83d\ude00${"b".repeat(chunk + 3)}`;
+        const digest = digestOf(message("m1", long));
+        expect(verifiesAgainst(message("m1", long), digest)).toBe(true);
+        const edits = [
+            `x${long.slice(1)}`,
+            `${long.slice(0, chunk - 1)}\ufffd\ufffd${long.slice(chunk + 1)}`,
+            `${long.slice(0, -1)}x`,
+            `${long}b`,
+            long.slice(0, -1),
+        ];
+        for (const edited of edits)
+            expect(verifiesAgainst(message("m1", edited), digest)).toBe(false);
+        // Strings on either side of the slice threshold verify only against themselves.
+        const buffered = message("m1", "c".repeat(chunk - 1));
+        const sliced = message("m1", "c".repeat(chunk));
+        expect(verifiesAgainst(buffered, digestOf(structuredClone(buffered)))).toBe(true);
+        expect(verifiesAgainst(sliced, digestOf(structuredClone(sliced)))).toBe(true);
+        expect(verifiesAgainst(sliced, digestOf(buffered))).toBe(false);
+    });
+
+    it("keeps snapshot-only captures free of history digests", () => {
+        const source = [message("m1"), message("m2")];
+        const snapshotOnly = captureMessages(source);
+        const withHistory = captureHistory(source);
+        expect(Object.keys(snapshotOnly).sort()).toEqual(["members", "rootSnapshot", "snapshots"]);
+        expect(snapshotOnly.snapshots).toEqual(withHistory.snapshots);
+        expect(snapshotOnly.rootSnapshot).toEqual(withHistory.rootSnapshot);
+        expect(capturedMessagesUnchanged(source, snapshotOnly)).toBe(true);
     });
 });
 

@@ -429,7 +429,10 @@ export function snapshotFieldsEqual(
     return true;
 }
 
-/** Pending text is hashed in chunks of about this many UTF-16 units. */
+/**
+ * Pending text is flushed once it reaches this many UTF-16 units, and a longer string is hashed
+ * in slices of this size, so one large member never builds a whole-member hash input.
+ */
 const HASH_CHUNK_UNITS = 1 << 16;
 
 /**
@@ -446,8 +449,18 @@ class TapeHasher {
     private bytes = 0;
 
     readonly push = (value: SnapshotField): void => {
-        if (typeof value === "string") this.text += `s${value.length}:${value}`;
-        else if (typeof value === "number") this.text += Object.is(value, -0) ? "-" : `n${value};`;
+        if (typeof value === "string") {
+            if (value.length < HASH_CHUNK_UNITS) {
+                this.text += `s${value.length}:${value}`;
+                if (this.text.length >= HASH_CHUNK_UNITS) this.flush();
+            } else {
+                this.text += `s${value.length}:`;
+                this.flush();
+                for (let start = 0; start < value.length; start += HASH_CHUNK_UNITS)
+                    this.hash.update(value.slice(start, start + HASH_CHUNK_UNITS), "utf16le");
+            }
+        } else if (typeof value === "number")
+            this.text += Object.is(value, -0) ? "-" : `n${value};`;
         else if (typeof value === "boolean") this.text += value ? "t" : "f";
         else if (value === null) this.text += "z";
         else if (value === ARRAY) this.text += "[";
@@ -551,7 +564,10 @@ export interface CapturedMessages {
     rootSnapshot: MessageContentSnapshot;
     /** The prior digest the leading members matched, when the capture was given one. */
     verified?: HistoryDigest;
-    /** Every member but the last, and the last alone: what a later pass verifies against. */
+}
+
+export interface CapturedHistory extends CapturedMessages {
+    /** `history` excludes the final member; `terminal` hashes it alone. */
     history: HistoryDigest;
     terminal?: HistoryDigest;
     /** The first taped member alone, compared against a prior pass's terminal. */
@@ -560,89 +576,99 @@ export interface CapturedMessages {
 
 const PREFIX_CHANGED = Symbol("prefix_changed");
 
+/** The caller reserves the inspection charge before allocating retained capture state. */
+export function captureMessages(messages: unknown, lease: CaptureLease): CapturedMessages {
+    return walkCapture(messages, lease);
+}
+
 /**
- * The caller reserves the inspection charge before allocating retained capture state. With a
- * `prefix`, the leading members are hashed against that digest instead of taped, so the charge
- * covers only the root and the members after it. A mismatch, or no member after the prefix,
- * returns `undefined` and the caller falls back to a full inspection and capture.
+ * With a `prefix`, capture charges only the root and members after the prefix; it verifies
+ * leading members instead of retaining them. A mismatch, or no member after the prefix, returns
+ * `undefined`.
  */
-export function captureMessages(messages: unknown, lease: CaptureLease): CapturedMessages;
-export function captureMessages(
+export function captureHistory(messages: unknown, lease: CaptureLease): CapturedHistory;
+export function captureHistory(
     messages: unknown,
     lease: CaptureLease,
     prefix: HistoryDigest,
-): CapturedMessages | undefined;
-export function captureMessages(
+): CapturedHistory | undefined;
+export function captureHistory(
     messages: unknown,
     lease: CaptureLease,
     prefix?: HistoryDigest,
-): CapturedMessages | undefined {
+): CapturedHistory | undefined {
+    const verifier = prefix && new PrefixVerifier(prefix);
+    const taped: TapedMember[] = [];
+    let captured: CapturedMessages;
+    try {
+        captured = walkCapture(messages, lease, { taped, verifier });
+    } catch (error) {
+        if (error === PREFIX_CHANGED) return undefined;
+        throw error;
+    }
+    const hasher = verifier?.continueHashing() ?? new TapeHasher();
+    for (let index = 0; index < taped.length - 1; index += 1)
+        hasher.add(taped[index] as TapedMember);
+    const single = (member: TapedMember | undefined): HistoryDigest | undefined => {
+        if (!member) return undefined;
+        const alone = new TapeHasher();
+        alone.add(member);
+        return alone.digest();
+    };
+    const boundary = single(taped[0]);
+    return {
+        ...captured,
+        verified: prefix,
+        history: hasher.digest(),
+        terminal: taped.length > 1 ? single(taped[taped.length - 1]) : boundary,
+        boundary,
+    };
+}
+
+/** `digest.verifier` validates leading members; a mismatch throws `PREFIX_CHANGED`. */
+function walkCapture(
+    messages: unknown,
+    lease: CaptureLease,
+    digest?: { taped: TapedMember[]; verifier?: PrefixVerifier },
+): CapturedMessages {
     if (lease.signal.aborted || lease.chargedBytes < ROOT_CAPTURE_BYTES)
         throw new CaptureBudgetExceeded("capture requires a live reservation");
     const walker = new ReferenceableWalk(
         Math.min(lease.chargedBytes, TRANSFORM_CAPTURE_MAX_BYTES),
         false,
     );
-    const verifier = prefix && new PrefixVerifier(prefix);
-    const verifiedCount = prefix?.count ?? 0;
+    const verifier = digest?.verifier;
+    const verifiedCount = verifier?.expected.count ?? 0;
     const members: unknown[] = [];
     const snapshots: (MessageContentSnapshot | undefined)[] = [];
-    const taped: TapedMember[] = [];
-    try {
-        const rootSnapshot = walker.recordOrCompare(() => {
-            const count = walker.members(messages, (slot, index) => {
-                if (index < verifiedCount) {
-                    try {
-                        verifier?.walk(slot.value, index);
-                    } catch (error) {
-                        if (
-                            error instanceof SourceRejected ||
-                            error instanceof CaptureBudgetExceeded
-                        )
-                            throw PREFIX_CHANGED;
-                        throw error;
-                    }
-                    defineSlot(snapshots, index, undefined);
-                } else {
-                    if (index === verifiedCount && verifier && !verifier.matches())
+    const rootSnapshot = walker.recordOrCompare(() => {
+        const count = walker.members(messages, (slot, index) => {
+            if (verifier && index < verifiedCount) {
+                try {
+                    verifier.walk(slot.value, index);
+                } catch (error) {
+                    if (error instanceof SourceRejected || error instanceof CaptureBudgetExceeded)
                         throw PREFIX_CHANGED;
-                    const before = walker.bytes;
-                    const snapshot = walker.recordOrCompare(() =>
-                        walker.walk(slot.value, `/${index}`),
-                    );
-                    defineSlot(snapshots, index, snapshot);
-                    defineSlot(taped, taped.length, {
+                    throw error;
+                }
+                defineSlot(snapshots, index, undefined);
+            } else {
+                if (index === verifiedCount && verifier && !verifier.matches())
+                    throw PREFIX_CHANGED;
+                const before = walker.bytes;
+                const snapshot = walker.recordOrCompare(() => walker.walk(slot.value, `/${index}`));
+                defineSlot(snapshots, index, snapshot);
+                if (digest)
+                    defineSlot(digest.taped, digest.taped.length, {
                         fields: snapshot.fields,
                         bytes: walker.bytes - before,
                     });
-                }
-                defineSlot(members, index, slot.value);
-            });
-            if (verifier && count <= verifiedCount) throw PREFIX_CHANGED;
+            }
+            defineSlot(members, index, slot.value);
         });
-        const hasher = verifier?.continueHashing() ?? new TapeHasher();
-        for (let index = 0; index < taped.length - 1; index += 1)
-            hasher.add(taped[index] as TapedMember);
-        const single = (member: TapedMember | undefined): HistoryDigest | undefined => {
-            if (!member) return undefined;
-            const alone = new TapeHasher();
-            alone.add(member);
-            return alone.digest();
-        };
-        const boundary = single(taped[0]);
-        return {
-            members,
-            snapshots,
-            rootSnapshot,
-            verified: prefix,
-            history: hasher.digest(),
-            terminal: taped.length > 1 ? single(taped[taped.length - 1]) : boundary,
-            boundary,
-        };
-    } catch (error) {
-        if (error === PREFIX_CHANGED) return undefined;
-        throw error;
-    }
+        if (verifier && count <= verifiedCount) throw PREFIX_CHANGED;
+    });
+    return { members, snapshots, rootSnapshot };
 }
 
 /** Membership is checked through own descriptors; an accessor or inherited slot cannot match. */

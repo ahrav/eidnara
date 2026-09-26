@@ -4231,4 +4231,88 @@ describe("capture scaled to the appended messages", () => {
         expect(bodies[2]?.tail_delta).toBeUndefined();
         expect(bodies[2]?.native_messages).toHaveLength(3);
     });
+
+    it("evicts the session-count victim even when the history budget evicts another session", async () => {
+        const capacity = __rustModeTransformTest.WIRE_CACHE_SESSION_CAPACITY;
+        const stamp = Date.now();
+        const sessionIdAt = (index: number): string => `rust-delta-capture-lru-${stamp}-${index}`;
+        const bodiesBySession = new Map<string, Record<string, unknown>[]>();
+        const client: RustModeModuleClient = {
+            call: async ({ sessionId, body }) => {
+                const request = body as Record<string, unknown>;
+                const list = bodiesBySession.get(sessionId) ?? [];
+                list.push(request);
+                bodiesBySession.set(sessionId, list);
+                return recipeResponse(request, []);
+            },
+        };
+        // One-message sessions fill the history budget exactly at the session-count capacity.
+        const transform = createRustModeTransform(makeDeps(), {
+            moduleClient: client,
+            retainedHistoryBudgetBytes: capacity * 16,
+        });
+        for (let index = 0; index < capacity; index += 1) {
+            const sessionId = sessionIdAt(index);
+            installRawRows(sessionId, rawRows(1));
+            await transform.run(sessionId, { messages: makeMessages(sessionId) });
+        }
+        // The two-message newcomer needs a count eviction and a byte eviction.
+        const newcomer = sessionIdAt(capacity);
+        installRawRows(newcomer, rawRows(2));
+        await transform.run(newcomer, { messages: rowMessages(newcomer, rawRows(2)) });
+
+        for (const evicted of [sessionIdAt(0), sessionIdAt(1)]) {
+            const input = makeMessages(evicted);
+            await transform.run(evicted, { messages: [...input] });
+            expect(bodiesBySession.get(evicted)?.[1]?.tail_delta).toBeUndefined();
+            expect(bodiesBySession.get(evicted)?.[1]?.native_messages).toEqual(input);
+        }
+    });
+
+    it("charges a fallback capture once after the prefix fails to verify", async () => {
+        const sessionId = `rust-delta-capture-fallback-charge-${Date.now()}`;
+        const rows = rawRows(5);
+        installRawRows(sessionId, rows);
+        const { client, bodies } = recordingClient((request) =>
+            recipeResponse(request, [folded(sessionId)]),
+        );
+        const admission = new TransformCaptureAdmission();
+        const reservations: number[][] = [];
+        const admit = admission.admit.bind(admission);
+        admission.admit = (id) => {
+            const admitted = admit(id);
+            if ("lease" in admitted) {
+                const pass: number[] = [];
+                reservations.push(pass);
+                const reserve = admitted.lease.reserve.bind(admitted.lease);
+                admitted.lease.reserve = (bytes) => {
+                    const reserved = reserve(bytes);
+                    if (reserved) pass.push(bytes);
+                    return reserved;
+                };
+            }
+            return admitted;
+        };
+        const transform = createRustModeTransform(makeDeps(), {
+            moduleClient: client,
+            captureAdmission: admission,
+        });
+        const history = rowMessages(
+            sessionId,
+            rows.slice(0, 4),
+            (row) => `${row.id} ${"x".repeat(4096)}`,
+        );
+        await transform.run(sessionId, { messages: [...history] });
+
+        (history[1]?.parts as Array<{ text: string }>)[0].text = "EDITED m-2";
+        const grown = [...history, ...rowMessages(sessionId, rows.slice(4))];
+        await transform.run(sessionId, { messages: [...grown] });
+        expect(bodies[1]?.tail_delta).toBeUndefined();
+        const full = inspectReferenceableMessages(grown);
+        if (!full.ok) throw new Error("valid source rejected");
+        // The first two reservations are the partial inspection and its full fallback.
+        const [partial, fallback] = reservations[1] as [number, number];
+        expect(partial).toBeLessThan(full.estimatedBytes);
+        expect(partial + fallback).toBe(full.estimatedBytes);
+    });
 });
