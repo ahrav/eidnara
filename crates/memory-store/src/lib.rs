@@ -1354,8 +1354,8 @@ pub struct HistorySummarizerPublishPredicate {
     pub chunk_fingerprint: String,
     pub selected_range_identities: Vec<HistorySummarizerSelectedMessageIdentity>,
     /// Cheap generation of the complete history_segment set captured when this firing
-    /// assembled its raw chunk. The revert epoch closes the sequence-reuse case that the
-    /// maximum alone cannot distinguish.
+    /// assembled its raw chunk. The revert epoch closes the sequence-reuse case that max alone
+    /// cannot distinguish.
     pub history_segment_set_generation: HistorySegmentSetGeneration,
 }
 
@@ -1381,16 +1381,13 @@ pub struct HistorySummarizerSideChannelStatus {
     pub last_failure: Option<String>,
 }
 
-/// A cheap, snapshot-consistent identifier for the history_segment set: its newest sequence,
-/// read by primary-key seek. A set change that keeps the maximum (a truncation followed by
-/// appends back to it) also bumps the session's `revert_epoch` and `row_version`, which fence
-/// publication on their own.
+/// A cheap, snapshot-consistent identifier for the history_segment set: its newest sequence.
+/// Generations compare by it alone; a change that keeps it (truncate, then append back) also
+/// bumps `revert_epoch` and `row_version`, which fence publication on their own.
 #[derive(Debug, Clone, Copy, Default, Eq, Serialize, Deserialize)]
 pub struct HistorySegmentSetGeneration {
     pub max_sequence: i64,
-    /// Retained for downgrade compatibility: a daemon that predates the max-only fence
-    /// requires the field to parse this metadata. New generations are written with 0; a
-    /// deserialized value is kept and ignored by the fences.
+    /// Kept so an older daemon can still parse this metadata. Written as 0; never compared.
     #[serde(default)]
     pub count: i64,
 }
@@ -1404,7 +1401,6 @@ impl HistorySegmentSetGeneration {
     }
 }
 
-/// Generations are equal when their newest sequences are, so no fence compares `count`.
 impl PartialEq for HistorySegmentSetGeneration {
     fn eq(&self, other: &Self) -> bool {
         self.max_sequence == other.max_sequence
@@ -2049,11 +2045,9 @@ pub struct ModuleMeta {
     /// tail-trim point, which advances on a coverage-extending SOFT too).
     #[serde(default)]
     pub folded_history_segment_seq: i64,
-    /// The sequences of the session's legacy (`legacy = 1`) history_segments, which a decay fold
-    /// reads by key instead of scanning the session for them. `None` means not captured: the
-    /// next fold captures the list with one scan and its commit persists it. A writer that may
-    /// add a legacy row clears it; a truncation filters it. A list naming a sequence that no
-    /// longer holds a legacy row is harmless, a list missing one is not.
+    /// Sequences of the session's `legacy = 1` history_segments, which a decay fold reads by key.
+    /// `None` until a fold captures it with one scan. Writers that may add a legacy row clear it
+    /// and truncation filters it: extra sequences are harmless, a missing one is not.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub legacy_history_segment_seqs: Option<Vec<i64>>,
     /// The first ordinal covered by the history_segment span reflected in `coverage_ordinal`.
@@ -5344,7 +5338,6 @@ pub enum ModuleStateSyncError {
     HistorySummarizerBusy { phase: HistorySummarizerPhase },
     #[error("invalid seed boundary {declared:?}: {detail}")]
     InvalidSeedBoundary { declared: String, detail: String },
-    /// The synced history_segments would leave the stored ranges out of strict order.
     #[error("invalid state-sync history_segments: {detail}")]
     InvalidHistorySegments { detail: String },
     #[error("serde: {0}")]
@@ -6482,8 +6475,7 @@ impl MemoryStore {
         self.inner.start_statement_reuse_probe();
     }
 
-    /// Starts recording rows produced and SQLite VM steps for every statement run on the
-    /// store's connection.
+    /// Starts recording rows and SQLite VM steps for every statement the store runs.
     #[cfg(any(test, feature = "test-support"))]
     pub fn start_statement_work_ledger(&self) {
         self.inner.start_statement_work_ledger();
@@ -7561,9 +7553,7 @@ impl MemoryStore {
     /// Load cache state and non-tag render overlays from one SQLite read transaction.
     /// No-write passes use this snapshot as their read linearization point; tag payloads use the
     /// separately validated module baseline so a stable pass does not stream every source blob.
-    ///
-    /// Only the overlay rows keyed by `block_ids` are read, each by primary key, so the read is
-    /// bounded by the pass's window rather than by the session's overlay count.
+    /// Only overlay rows keyed by `block_ids` are read, each by primary key.
     pub fn load_transform_snapshot(
         &self,
         session_id: &str,
@@ -10562,8 +10552,7 @@ impl MemoryStore {
             .with_conn(|conn| history_segment_edge_tx(conn, session_id, EdgeAt::Oldest))?)
     }
 
-    /// The history_segment whose range ends at `end_message`, on the end-message index. Ranges
-    /// are strictly increasing, so at most one row ends at an ordinal.
+    /// The history_segment ending at `end_message`; ranges strictly increase, so at most one.
     pub fn history_segment_ending_at(
         &self,
         session_id: &str,
@@ -10585,12 +10574,10 @@ impl MemoryStore {
         })?)
     }
 
-    /// Reads what a decay fold renders in one snapshot, without visiting rows the fold cannot
-    /// render. `horizon` receives the newest `pressure_window` non-legacy rows, newest first,
-    /// and returns how many newest non-legacy rows the fold needs; rows beyond both are not
-    /// read. Every legacy row is read: by `legacy_seqs` when given, which must include every
-    /// legacy sequence present (extra sequences are ignored), otherwise by one scan of the
-    /// session that the returned list lets the caller persist and skip next time.
+    /// Reads, in one snapshot, only the rows a decay fold can render. `horizon` gets the newest
+    /// `pressure_window` non-legacy rows, newest first, and returns how many newest non-legacy
+    /// rows the fold needs. Legacy rows are read by `legacy_seqs`, which must name every legacy
+    /// row (extras are ignored), or by one scan when `None`; the result returns the exact list.
     pub fn load_history_segment_fold(
         &self,
         session_id: &str,
@@ -10750,10 +10737,9 @@ impl MemoryStore {
             .map_err(Into::into)
     }
 
-    /// Read the newest `reference_rows` history_segments, the covered end, the set generation,
-    /// and the session revert epoch in one store snapshot for history_summarizer assembly. The
-    /// epoch is the fence carried by the firing until publish. Ranges are validated
-    /// strictly increasing at append, so the newest rows are all assembly needs.
+    /// Read the newest `reference_rows` history_segments, covered end, set generation, and revert
+    /// epoch in one snapshot for history_summarizer assembly; appends keep ranges strictly
+    /// increasing, so the newest rows suffice. The epoch fences the firing until publish.
     pub fn load_history_summarizer_assembly_snapshot(
         &self,
         session_id: &str,
@@ -11674,10 +11660,7 @@ impl MemoryStore {
     /// wholesale delete-then-insert (rather than an incremental upsert) keeps the
     /// stored `sequence` contiguous. Writes are serialized by the store's single-writer
     /// lease (the same one guarding the cache-state commit).
-    ///
-    /// Test support only: it leaves `ModuleMeta::legacy_history_segment_seqs` and the
-    /// publisher's set fence untouched, so a test that adds a legacy row or reshapes a set
-    /// under a live firing owns that metadata itself.
+    /// Test support only: leaves `legacy_history_segment_seqs` and the set fence to the caller.
     #[cfg(any(test, feature = "test-support"))]
     pub fn replace_history_segments(
         &self,
@@ -12015,10 +11998,7 @@ impl MemoryStore {
     /// The incoming `sequence` values are treated as producer-local hints; durable
     /// sequences are assigned contiguously after the current max so concurrent readers
     /// never observe gaps or rewritten history.
-    ///
-    /// Test support only: it leaves `ModuleMeta::legacy_history_segment_seqs` untouched, so a
-    /// test that appends a legacy row owns that list itself. Production appends go through
-    /// the history_summarizer publisher.
+    /// Test support only: leaves `legacy_history_segment_seqs` to the caller.
     #[cfg(any(test, feature = "test-support"))]
     pub fn append_history_segments(
         &self,
@@ -12399,7 +12379,7 @@ impl MemoryStore {
                 && history_summarizer.producer_run_id.as_deref() == Some(predicate.producer_run_id.as_str())
                 && history_summarizer.chunk_fingerprint == predicate.chunk_fingerprint
                 && history_summarizer.selected_range_identities == predicate.selected_range_identities
-                && history_summarizer.history_segment_set_generation.max_sequence == predicate.history_segment_set_generation.max_sequence;
+                && history_summarizer.history_segment_set_generation == predicate.history_segment_set_generation;
             if !predicate_matches {
                 return Ok(AbandonHistorySummarizerTxnOutcome::Unchanged);
             }
@@ -12569,12 +12549,13 @@ impl MemoryStore {
                 "SELECT COALESCE(MAX(sequence), 0) FROM history_segments WHERE session_id = ?1",
                 params![session_id],
                 |row| {
-                    Ok(HistorySegmentSetGeneration::new(row.get(0)?))
+                    Ok(HistorySegmentSetGeneration {
+                        max_sequence: row.get(0)?,
+                        count: 0,
+                    })
                 },
             )?;
-            if current_history_segment_set_generation.max_sequence
-                != predicate.history_segment_set_generation.max_sequence
-            {
+            if current_history_segment_set_generation != predicate.history_segment_set_generation {
                 return Ok(PublishTxnOutcome::FenceRejected(format!(
                     "history_segment set changed after firing (expected max sequence {}, found {})",
                     predicate.history_segment_set_generation.max_sequence,
@@ -15403,13 +15384,10 @@ impl MemoryStore {
     }
 }
 
-/// Refuses a state-sync batch that would leave the stored history_segments out of strict
-/// order, which the fold and append reads rely on, and otherwise returns the rows to write.
-/// `retained_sequence` is set when the sync keeps stored rows: rows at or below it, and rows
-/// whose sequence is already stored, are then not written. Each written row is checked
-/// against the other written rows and against its nearest stored neighbour on each side,
-/// read by primary-key seek. A neighbour the batch overwrites is covered by the in-batch
-/// check, so the work is bounded by the batch.
+/// Returns the state-sync rows to write, or refuses a batch that would break the strict range
+/// order the fold and append reads rely on. With `retained_sequence`, rows at or below it or
+/// already stored are skipped. Each written row is checked against the batch and its nearest
+/// stored neighbour on each side (overwritten neighbours are batch rows), so work is per row.
 fn validate_seed_history_segments_tx<'a>(
     tx: &GuardedConn<'_>,
     session_id: &str,
@@ -15898,15 +15876,14 @@ fn append_history_segments_tx(
         return Ok(AppendHistorySegmentsTxnOutcome::Appended);
     }
 
-    // Every append passes this check, so the stored set is strictly increasing by sequence
-    // and the newest row bounds every earlier range: an incoming range that starts after the
-    // tail's end overlaps nothing. Validating the whole batch before its first write keeps a
-    // rejected batch atomic and makes ordinal-overlap corruption impossible even if a caller
-    // bypassed the history_summarizer's optimistic publish fence. Negative and reversed
-    // ranges are refused earlier, when the rows are prepared.
     let tail = history_segment_edge_tx(tx, session_id, EdgeAt::Newest)?;
     let next_sequence = tail.as_ref().map_or(0, |tail| tail.sequence) + 1;
     let mut previous = tail.map(|tail| (tail.sequence, tail.end_message));
+    // Validate the whole append before writing its first row. This keeps a rejected
+    // batch atomic and makes ordinal-overlap corruption impossible even if a caller
+    // bypassed the history_summarizer's optimistic publish fence.
+    // Every append passes this check, so ranges strictly increase and the tail's end bounds every
+    // earlier range. Negative and reversed ranges are refused when the rows are prepared.
     for (index, history_segment) in history_segments.iter().enumerate() {
         if let Some((existing_sequence, previous_end)) = previous
             && history_segment.start_message <= previous_end

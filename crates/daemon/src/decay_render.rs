@@ -250,21 +250,18 @@ fn decay_pressure(importances_newest_first: &[i32], history_budget: f64) -> f64 
     }
 }
 
-/// Non-legacy rows, counted from the newest, whose importance can move the pressure: at
-/// pressure 1 index 250 is archived even at importance 100, since `249 >= Z4 * H50 * 4`,
-/// so every older row contributes no natural cost.
+/// Newest non-legacy rows whose importance can move the pressure: at pressure 1, index 250
+/// archives even at importance 100 (`249 >= Z4 * H50 * 4`), so older rows add no cost.
 pub(crate) const PRESSURE_WINDOW: usize = 249;
 
 /// The oldest curve index that can render at the pressure floor: `2484 >= Z4 * H50 * 4 / P_FLOOR`
 /// fails and `2485` passes.
 const MAX_RENDERABLE_INDEX: u32 = 2_484;
 
-/// How many newest non-legacy rows a render at `history_budget` can show: the largest curve
-/// index that importance 100 keeps out of the archive under the pressure these rows set, but
-/// never fewer than the pressure window. `newest_importances` holds the newest
-/// [`PRESSURE_WINDOW`] non-legacy importances, newest first, or all of them when fewer exist.
-/// A smaller budget only raises the pressure, so the count covers every retry the m0
-/// renderer makes at a raised multiplier.
+/// How many newest non-legacy rows a render at `history_budget` can show: at least
+/// [`PRESSURE_WINDOW`], else the largest index importance 100 keeps unarchived under the
+/// pressure of `newest_importances` (the newest window, newest first). Retries at a raised
+/// multiplier only raise the pressure, so the count covers them too.
 pub(crate) fn fold_horizon(newest_importances: &[i32], history_budget: f64) -> usize {
     let importances: Vec<i32> = newest_importances
         .iter()

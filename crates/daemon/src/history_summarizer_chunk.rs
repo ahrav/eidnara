@@ -943,8 +943,7 @@ pub fn assemble_history_summarizer_firing(
         .map(ChunkSnapshotOwnedItem::as_item)
         .collect();
     let chunk_fingerprint = compute_chunk_fingerprint(&fingerprint_items);
-    // Append validation keeps the stored ranges strictly increasing, so the tail range is the
-    // whole prior set the output validator needs.
+    // Appends keep ranges strictly increasing, so the tail is all the output validator needs.
     let prior_history_segments = history_segments
         .last()
         .map(stored_range)

@@ -7870,8 +7870,7 @@ impl HandlerCore {
             .filter(|message| initial_end.is_none_or(|end| message.ordinal > end))
             .filter(|message| final_end.is_some_and(|end| message.ordinal <= end))
             .count();
-        // Appends take the sequences above the newest one, so the rise of the newest sequence
-        // counts the rows the rounds created.
+        // Appends take sequences above the newest, so its rise counts the rows created.
         let history_segments_created = usize::try_from(
             final_snapshot.history_segment_set_generation.max_sequence
                 - initial_snapshot.history_segment_set_generation.max_sequence,

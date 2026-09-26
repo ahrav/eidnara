@@ -38,8 +38,7 @@ pub struct M0Composition {
     /// `docs_hash` records the project-docs version included in m0; it does not trigger HARD.
     /// The next natural HARD re-reads current docs.
     pub docs_hash: String,
-    /// The session's legacy history_segment sequences as this composition read them, for the
-    /// pass to persist in `ModuleMeta::legacy_history_segment_seqs`.
+    /// The legacy sequences this composition read, to persist in `ModuleMeta`.
     pub legacy_history_segment_seqs: Vec<i64>,
 }
 
@@ -180,10 +179,9 @@ pub fn compose_m0(
     memories: &[CanonicalMemory],
     estimate_tokens: impl Fn(&str) -> usize + Copy,
 ) -> Result<M0Composition, MemoryStoreError> {
-    // The fold reads only rows the decay curve can render: the newest non-legacy rows up to
-    // the horizon the budget sets and every legacy row. Rows older than the horizon are
-    // archived at every retry multiplier, so the render matches one over every row. Range
-    // validity is enforced when rows are appended, so coverage comes from the two ends.
+    // Read only rows the curve can render: newest non-legacy rows up to the budget's horizon,
+    // plus every legacy row. Older rows archive at every retry multiplier, so the bytes match a
+    // full read. Appends enforce range order, so coverage comes from the two ends.
     let fold = store.load_history_segment_fold(
         inputs.session_id,
         inputs.legacy_history_segment_seqs,

@@ -1892,8 +1892,7 @@ pub enum TransformError {
     ReductionConflict,
     #[error("{0}")]
     CoverageGap(String),
-    /// More history segments landed above the folded sequence during the pass than m1 reads.
-    /// The pass retries against a fresh signal, as it does on a CAS conflict.
+    /// More rows landed above the folded sequence mid-pass than m1 reads; retried like a CAS conflict.
     #[error("history_segment set moved under the pass: more new rows than the m1 row cap")]
     HistorySegmentSetMoved,
     #[error("search: {0}")]
@@ -1954,45 +1953,11 @@ fn revision_signal_for_context(
 
 fn compose_m0_for_context(
     store: &MemoryStore,
-    session_id: &str,
-    covered_system_messages: &[String],
-    meta: &ModuleMeta,
+    inputs: &crate::m0_compose::M0ComposeInputs<'_>,
     estimate_tokens: impl Fn(&str) -> usize + Copy,
     ctx: &ProducerContext<'_>,
 ) -> Result<crate::m0_compose::M0Composition, MemoryStoreError> {
-    compose_m0(
-        store,
-        &crate::m0_compose::M0ComposeInputs {
-            session_id,
-            project_path: ctx.project_path,
-            project_directory: ctx.project_directory,
-            now_ms: ctx.now_ms,
-            history_budget_tokens: ctx.history_budget_tokens,
-            covered_system_messages,
-            memory_enabled: ctx.memory_enabled,
-            user_profile_budget_tokens: ctx.user_profile_budget_tokens,
-            inject_docs: ctx.inject_docs,
-            temporal_awareness: ctx.temporal_awareness,
-            legacy_history_segment_seqs: meta.legacy_history_segment_seqs.as_deref(),
-        },
-        ctx.project_memory_rows(),
-        estimate_tokens,
-    )
-}
-
-/// Records a served m0 composition's watermarks, frozen atomically with its bytes.
-fn record_m0_composition(
-    meta: &mut ModuleMeta,
-    comp: crate::m0_compose::M0Composition,
-    ctx: &ProducerContext<'_>,
-) {
-    meta.coverage_ordinal = comp.coverage_ordinal;
-    meta.coverage_start_ordinal = comp.first_covered_ordinal;
-    meta.coverage_history_segment_seq = Some(comp.folded_history_segment_seq);
-    meta.folded_history_segment_seq = comp.folded_history_segment_seq;
-    meta.legacy_history_segment_seqs = Some(comp.legacy_history_segment_seqs);
-    meta.project_memory = ctx.project_memory_composition();
-    meta.expiry_cutoff_ms = ctx.now_ms;
+    compose_m0(store, inputs, ctx.project_memory_rows(), estimate_tokens)
 }
 
 /// The CAS retry reloads and reclassifies because classification depends on freshly loaded state.
@@ -2971,10 +2936,8 @@ fn apply_additive_only(
                 crate::token_cache::cached_estimate_tokens,
             )?;
             note_deliveries = m1.note_deliveries.clone();
-            // The folded sequence is the newest one the signal saw, so only rows appended
-            // since then sit above it. More of them than the row cap means the set grew under
-            // the pass. The retry reloads the signal; the notes this pass claimed stay unacked,
-            // so it claims them again.
+            // Rows above the signal's newest sequence past the row cap landed mid-pass. The retry
+            // reloads the signal and reclaims the notes this pass left unacked.
             let Some(m1_body) = m1.body.as_deref() else {
                 return Err(TransformError::HistorySegmentSetMoved);
             };
@@ -3330,8 +3293,7 @@ fn apply_once(
     let tagging_surface_requested =
         crate::tagging_surface_active(serializer_profile, req.tool_present);
     let seed_or_sync_started_at = Instant::now();
-    // Every overlay consumer looks rows up by a block of this projection, so only those
-    // rows are read.
+    // Every overlay consumer looks rows up by a projection block, so only those rows are read.
     let projection_block_ids: Vec<&str> = projection
         .blocks
         .iter()
@@ -4392,9 +4354,19 @@ fn apply_once(
                 );
                 let mut comp = compose_m0_for_context(
                     store,
-                    &req.session_id,
-                    &covered_system_messages,
-                    &meta,
+                    &crate::m0_compose::M0ComposeInputs {
+                        session_id: &req.session_id,
+                        project_path: ctx.project_path,
+                        project_directory: ctx.project_directory,
+                        now_ms: ctx.now_ms,
+                        history_budget_tokens: ctx.history_budget_tokens,
+                        covered_system_messages: &covered_system_messages,
+                        memory_enabled: ctx.memory_enabled,
+                        user_profile_budget_tokens: ctx.user_profile_budget_tokens,
+                        inject_docs: ctx.inject_docs,
+                        temporal_awareness: ctx.temporal_awareness,
+                        legacy_history_segment_seqs: meta.legacy_history_segment_seqs.as_deref(),
+                    },
                     estimate_tokens,
                     ctx,
                 )?;
@@ -4460,9 +4432,21 @@ fn apply_once(
                                 );
                             comp = compose_m0_for_context(
                                 store,
-                                &req.session_id,
-                                &recut_covered_system_messages,
-                                &meta,
+                                &crate::m0_compose::M0ComposeInputs {
+                                    session_id: &req.session_id,
+                                    project_path: ctx.project_path,
+                                    project_directory: ctx.project_directory,
+                                    now_ms: ctx.now_ms,
+                                    history_budget_tokens: ctx.history_budget_tokens,
+                                    covered_system_messages: &recut_covered_system_messages,
+                                    memory_enabled: ctx.memory_enabled,
+                                    user_profile_budget_tokens: ctx.user_profile_budget_tokens,
+                                    inject_docs: ctx.inject_docs,
+                                    temporal_awareness: ctx.temporal_awareness,
+                                    legacy_history_segment_seqs: meta
+                                        .legacy_history_segment_seqs
+                                        .as_deref(),
+                                },
                                 estimate_tokens,
                                 ctx,
                             )?;
@@ -4542,7 +4526,7 @@ fn apply_once(
                 } else {
                     render_m1_body(&note_body)
                 };
-                let mut rendered = vec![synth_region("m0", std::mem::take(&mut comp.m0_bytes))];
+                let mut rendered = vec![synth_region("m0", comp.m0_bytes)];
                 rendered.push(m1_unit);
                 rendered.extend(survivors);
                 rendered.extend(strip_survivors);
@@ -4581,7 +4565,13 @@ fn apply_once(
                     );
                     todo_ms += elapsed_ms(todo_started_at);
                 }
-                record_m0_composition(&mut meta, comp, ctx);
+                meta.coverage_ordinal = comp.coverage_ordinal;
+                meta.coverage_start_ordinal = comp.first_covered_ordinal;
+                meta.coverage_history_segment_seq = Some(comp.folded_history_segment_seq);
+                meta.folded_history_segment_seq = comp.folded_history_segment_seq;
+                meta.legacy_history_segment_seqs = Some(comp.legacy_history_segment_seqs);
+                meta.project_memory = ctx.project_memory_composition();
+                meta.expiry_cutoff_ms = ctx.now_ms; // FROZEN here, atomic with the m0 bytes
                 let applied_m1_signal = revision_signal_for_context(
                     store,
                     ctx.note_project_path,
@@ -4613,10 +4603,8 @@ fn apply_once(
                     crate::token_cache::cached_estimate_tokens,
                 )?;
                 note_deliveries = m1.note_deliveries.clone();
-                // m1 reads at most its row cap. More rows above the folded sequence than fit
-                // the hard window at P1 are never dropped from what the host sees: the pass
-                // folds them into m0 instead, whose bounded read renders the same bytes as a
-                // full one.
+                // Rows past m1's row cap are never dropped: the pass folds them into m0,
+                // whose bounded read renders the same bytes as a full one.
                 let served_m1_body = m1.body.as_deref().filter(|body| {
                     !soft_pressure_refold(
                         &core.frozen_units,
@@ -4637,11 +4625,23 @@ fn apply_once(
                         coverage_bounds.map(|(start, _)| start),
                         serializer_profile,
                     );
-                    let mut comp = compose_m0_for_context(
+                    let comp = compose_m0_for_context(
                         store,
-                        &req.session_id,
-                        &covered_system_messages,
-                        &meta,
+                        &crate::m0_compose::M0ComposeInputs {
+                            session_id: &req.session_id,
+                            project_path: ctx.project_path,
+                            project_directory: ctx.project_directory,
+                            now_ms: ctx.now_ms,
+                            history_budget_tokens: ctx.history_budget_tokens,
+                            covered_system_messages: &covered_system_messages,
+                            memory_enabled: ctx.memory_enabled,
+                            user_profile_budget_tokens: ctx.user_profile_budget_tokens,
+                            inject_docs: ctx.inject_docs,
+                            temporal_awareness: ctx.temporal_awareness,
+                            legacy_history_segment_seqs: meta
+                                .legacy_history_segment_seqs
+                                .as_deref(),
+                        },
                         estimate_tokens,
                         ctx,
                     )?;
@@ -4701,7 +4701,7 @@ fn apply_once(
                     } else {
                         render_m1_body(&m1.notes_block)
                     };
-                    let mut rendered = vec![synth_region("m0", std::mem::take(&mut comp.m0_bytes))];
+                    let mut rendered = vec![synth_region("m0", comp.m0_bytes)];
                     rendered.push(refold_m1_unit);
                     rendered.extend(survivors);
                     rendered.extend(strip_survivors);
@@ -4721,7 +4721,13 @@ fn apply_once(
                     if meta.descent_completed {
                         meta.lineage_descent_materialized = true;
                     }
-                    record_m0_composition(&mut meta, comp, ctx);
+                    meta.coverage_ordinal = comp.coverage_ordinal;
+                    meta.coverage_start_ordinal = comp.first_covered_ordinal;
+                    meta.coverage_history_segment_seq = Some(comp.folded_history_segment_seq);
+                    meta.folded_history_segment_seq = comp.folded_history_segment_seq;
+                    meta.legacy_history_segment_seqs = Some(comp.legacy_history_segment_seqs);
+                    meta.project_memory = ctx.project_memory_composition();
+                    meta.expiry_cutoff_ms = ctx.now_ms;
                     let applied_m1_signal = revision_signal_for_context(
                         store,
                         ctx.note_project_path,

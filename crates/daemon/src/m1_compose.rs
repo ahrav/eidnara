@@ -2,9 +2,8 @@ use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::time::Instant;
 
-use memory_store::{MemoryStore, MemoryStoreError, ModuleMeta, NoteDelivery, StoredNote};
-
 use context_core::decay::Tier;
+use memory_store::{MemoryStore, MemoryStoreError, ModuleMeta, NoteDelivery, StoredNote};
 
 use crate::decay_render::DecayRenderHistorySegment;
 use crate::m0_compose::trim_user_profile_to_budget;
@@ -16,9 +15,8 @@ use crate::memory_render::{
 /// sets for the default geometry.
 pub const DEFAULT_M1_ROW_CAP: usize = 259;
 
-/// The most history_segments m1 reads: `ceil(usable_hard / P1 cost)`, where the P1 cost
-/// (322) is a nominal per-row cost, not a bound on any row's rendered size. Rows beyond the
-/// cap force a fold into m0 instead of riding m1.
+/// The most history_segments m1 reads: `ceil(usable_hard / P1 cost)`, a nominal per-row cost
+/// (322), not a bound on row size. Rows beyond the cap force a fold into m0.
 pub fn m1_row_cap(usable_hard: Option<u64>) -> usize {
     usable_hard.map_or(DEFAULT_M1_ROW_CAP, |usable_hard| {
         usable_hard.div_ceil(u64::from(Tier::P1.cost())) as usize
@@ -91,8 +89,7 @@ pub fn m1_revision_signal_timed(
 /// Rendered M1 body plus state that the caller must publish after delivery.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct M1Composition {
-    /// `None` when more history_segments above the folded sequence exist than the row cap
-    /// admits: m1 cannot carry them all, so the caller must fold instead of serving m1.
+    /// `None` when more rows sit above the folded sequence than the row cap: the caller folds.
     pub body: Option<String>,
     pub new_coverage: Option<(String, u64)>,
     pub note_deliveries: Vec<NoteDelivery>,
@@ -154,9 +151,8 @@ fn render_note_delta(notes: &[StoredNote]) -> String {
 
 /// Composes new history_segments, a changed user profile, and newly claimed notes.
 ///
-/// HistorySegments above the folded sequence render oldest first; at most `row_cap` of them are
-/// read, newest first, and [`M1Composition::body`] is `None` when more exist. Store reads and
-/// note claims return their store error.
+/// Renders up to `row_cap` of the newest history_segments above the folded sequence, oldest
+/// first; [`M1Composition::body`] is `None` when more exist. Store failures return as-is.
 /// User profile budget units are tokens. Profile trimming receives 25 percent of that budget, clamped to at least one token.
 #[allow(clippy::too_many_arguments)]
 pub fn compose_m1(
