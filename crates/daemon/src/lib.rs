@@ -5485,6 +5485,11 @@ impl HandlerCore {
                     drop(guard);
                     return Some("recovering");
                 };
+                let selected_range_identities = loaded
+                    .meta
+                    .history_summarizer
+                    .selected_range_identities
+                    .clone();
                 // `usize::MAX` builds the full frozen ordinal range before `presented_input` truncates it to `token_budget` and withdraws the aliases the cut removes.
                 let mut chunk = history_summarizer_chunk::build_history_summarizer_chunk(
                     parsed.messages.as_slice(),
@@ -5619,6 +5624,7 @@ impl HandlerCore {
                                 range.from_ordinal,
                                 &config.model_chain,
                                 configured_budget,
+                                &selected_range_identities,
                             );
                         }
                     }
@@ -6314,6 +6320,7 @@ impl HandlerCore {
                         firing.from_ordinal,
                         &firing.model_chain,
                         firing.configured_token_budget,
+                        &firing.selected_range_identities,
                     );
                 }
                 outcome
@@ -18162,13 +18169,14 @@ fn project_slug(path: &Path) -> String {
         .to_string()
 }
 
-/// Counts a chunk failure on the idle state the failed firing left behind; a firing that kept a Publishing state or lost a race records nothing.
+/// Counts a chunk failure on the idle state the failed firing left behind; a firing that kept a Publishing state or lost a race records nothing, and neither does one whose selected messages a pass re-adopted meanwhile, since the failure belongs to bytes no longer in the chunk.
 fn record_history_summarizer_chunk_failure(
     store: &MemoryStore,
     session_id: &str,
     chunk_start: u64,
     model_chain: &[String],
     token_budget: usize,
+    selected: &[memory_store::HistorySummarizerSelectedMessageIdentity],
 ) {
     for attempt in 0..2 {
         let loaded = match store.load(session_id) {
@@ -18180,7 +18188,12 @@ fn record_history_summarizer_chunk_failure(
                 return;
             }
         };
-        if loaded.meta.history_summarizer.state != HistorySummarizerPhase::Idle {
+        if loaded.meta.history_summarizer.state != HistorySummarizerPhase::Idle
+            || selected.iter().any(|message| {
+                loaded.meta.block_identity_by_mid.get(&message.mid)
+                    != Some(&message.block_identities)
+            })
+        {
             return;
         }
         let mut meta = loaded.meta.clone();
@@ -42685,6 +42698,67 @@ mod tests {
                 }
             ),
             "{state:?}"
+        );
+    }
+
+    /// A failure counts only against the bytes the firing sent: a pass that re-adopted one of the chunk's messages after the firing abandoned, but before its cleanup finished, has already started the revised bytes at zero, and the old firing's failure is not theirs.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_late_chunk_failure_count_is_fenced_to_the_fired_identities() {
+        let producer = Arc::new(ProducerState::default());
+        let (_handler, store, _dir, _project) =
+            handler_with_store(Arc::clone(&producer), default_test_config());
+        let fired = vec![memory_store::BlockIdentity {
+            kind_tag: "text".to_string(),
+            byte_fingerprint: "fired".to_string(),
+        }];
+        let revised = vec![memory_store::BlockIdentity {
+            kind_tag: "text".to_string(),
+            byte_fingerprint: "revised".to_string(),
+        }];
+        let loaded = store.load("ses").unwrap();
+        let mut meta = loaded.meta;
+        meta.block_identity_by_mid
+            .insert("m1".to_string(), revised.clone());
+        store
+            .commit("ses", loaded.row_version, &loaded.core, &meta)
+            .unwrap();
+        let chain = default_test_config().model_chain;
+        let selected = |identities: Vec<memory_store::BlockIdentity>| {
+            vec![memory_store::HistorySummarizerSelectedMessageIdentity {
+                mid: "m1".to_string(),
+                block_identities: identities,
+            }]
+        };
+
+        record_history_summarizer_chunk_failure(&store, "ses", 1, &chain, 8_000, &selected(fired));
+        assert_eq!(
+            store
+                .load("ses")
+                .unwrap()
+                .meta
+                .history_summarizer
+                .chunk_retry,
+            None,
+            "the fired bytes are gone; their failure does not count against the revised ones"
+        );
+
+        record_history_summarizer_chunk_failure(
+            &store,
+            "ses",
+            1,
+            &chain,
+            8_000,
+            &selected(revised),
+        );
+        assert_eq!(
+            store
+                .load("ses")
+                .unwrap()
+                .meta
+                .history_summarizer
+                .chunk_retry
+                .map(|retry| retry.failures),
+            Some(1)
         );
     }
 

@@ -857,11 +857,20 @@ pub fn assemble_history_summarizer_firing(
     let token_budget = retry_token_budget(config.token_budget, chunk_failures);
     let mut chunk =
         build_history_summarizer_chunk(messages, live, chunk_start, token_budget, eligible_end);
-    // A placeholder firing calls no model, so its chunk can afford the result of a tool arc the budget cut at the chunk's opening.
+    // A placeholder firing calls no model, so its chunk can spend the configured budget the retry shrink withheld on reaching the result of a tool arc that opens the chunk; a result even that budget cannot hold leaves the chunk as built.
     if chunk_failures >= PLACEHOLDER_AFTER_FAILURES
         && let Some(reach) = placeholder_reach(&chunk.chunk, eligible_end)
     {
-        chunk = build_history_summarizer_chunk(messages, live, chunk_start, usize::MAX, reach + 1);
+        let reaching = build_history_summarizer_chunk(
+            messages,
+            live,
+            chunk_start,
+            config.token_budget,
+            reach + 1,
+        );
+        if reaching.chunk.end_index >= reach {
+            chunk = reaching;
+        }
     }
     let input_source = presented_input(&mut chunk, token_budget);
     if chunk.text.is_empty() || chunk.chunk.lines.is_empty() {
@@ -2031,6 +2040,66 @@ mod tests {
             placeholder.to_ordinal
         );
         assert_eq!(validated.unprocessed_from, placeholder.to_ordinal + 1);
+    }
+
+    /// Reaching the result stays within the configured budget: a result the full budget cannot hold leaves the shrunken chunk as built rather than rendering an oversized prompt nobody reads.
+    #[test]
+    fn placeholder_reach_stays_within_the_configured_budget() {
+        let mut messages = vec![
+            msg(
+                "m0",
+                0,
+                "assistant",
+                vec![
+                    text(&format!("calling a tool {}", "word ".repeat(200))),
+                    BlockKind::ToolCall {
+                        id: "call".to_string(),
+                        name: "read".to_string(),
+                        input: json!({"path":"one.rs"}),
+                        provider_executed: false,
+                    },
+                ],
+            ),
+            msg(
+                "m1",
+                1,
+                "user",
+                vec![
+                    BlockKind::ToolResult {
+                        id: "call".to_string(),
+                        tool_name: "read".to_string(),
+                        output: memory_store::ToolOutput::bare(memory_store::OutputKind::Text {
+                            text: "one".to_string(),
+                        }),
+                        provider_executed: false,
+                    },
+                    // Far past the 8_000-token configured budget on its own.
+                    text(&format!("and the user pastes {}", "word ".repeat(40_000))),
+                ],
+            ),
+        ];
+        messages.extend((2..40).map(|ordinal| {
+            let role = if ordinal % 2 == 0 {
+                "user"
+            } else {
+                "assistant"
+            };
+            msg(
+                &format!("m{ordinal}"),
+                ordinal,
+                role,
+                vec![text(&format!("message {ordinal} {}", "word ".repeat(200)))],
+            )
+        }));
+        let placeholder = assemble_messages_after_failures(messages, PLACEHOLDER_AFTER_FAILURES);
+        assert_eq!(
+            placeholder.chunk.chunk.completed_tool_arcs,
+            vec![crate::history_summarizer_validate::MessageRange { start: 0, end: 1 }]
+        );
+        assert_eq!(
+            placeholder.to_ordinal, 0,
+            "the result does not fit the configured budget, so the chunk is not rebuilt to it"
+        );
     }
 
     /// A shrunken chunk that opens with a tool invocation whose result the budget cut cannot stop before the arc; the placeholder firing has no model to spare tokens for, so its chunk reaches the result instead.
