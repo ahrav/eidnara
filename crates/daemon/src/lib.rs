@@ -2515,9 +2515,56 @@ struct RetainedNativeOutput {
     output: PreviousNativeOutput,
 }
 
-/// One retained native output per session. `take` returns it only for the revision and revert
-/// epoch it was served under. An entry over the per-entry cap is refused; the least recently
-/// stored sessions are evicted while the total exceeds the global budget.
+impl RetainedNativeOutput {
+    fn into_previous(
+        self,
+        revert_epoch: u64,
+        revision: Option<&Revision>,
+    ) -> Option<PreviousNativeOutput> {
+        (self.revert_epoch == revert_epoch && revision == Some(&self.output.revision))
+            .then_some(self.output)
+    }
+}
+
+/// A native output with its byte charge, built without the store lock because the charge walks
+/// every JSON node of the output.
+struct NativeOutputCandidate {
+    session_id: String,
+    entry: RetainedNativeOutput,
+}
+
+impl NativeOutputCandidate {
+    fn new(session_id: &str, revert_epoch: u64, output: PreviousNativeOutput) -> Self {
+        use crate::retained_size::{ARC_ALLOCATION_OVERHEAD_BYTES, cloned_string_retained_bytes};
+        let retained_bytes = output.values.iter().fold(
+            output
+                .values
+                .capacity()
+                .saturating_mul(size_of::<Arc<Value>>())
+                .saturating_add(size_of::<RetainedNativeOutput>())
+                .saturating_add(edit_recipe::MAX_REVISION_BYTES)
+                .saturating_add(cloned_string_retained_bytes(session_id).saturating_mul(2)),
+            |bytes, value| {
+                bytes
+                    .saturating_add(ARC_ALLOCATION_OVERHEAD_BYTES)
+                    .saturating_add(native_value_retained_bytes(value))
+            },
+        );
+        Self {
+            session_id: session_id.to_string(),
+            entry: RetainedNativeOutput {
+                revert_epoch,
+                retained_bytes,
+                output,
+            },
+        }
+    }
+}
+
+/// One retained native output per session. `RetainedNativeOutput::into_previous` returns it only
+/// for the revision and revert epoch it was served under. An entry over the per-entry cap is
+/// refused; the least recently stored sessions are evicted while the total exceeds the global
+/// budget.
 struct NativeOutputStore {
     sessions: HashMap<String, RetainedNativeOutput>,
     lru: VecDeque<String>,
@@ -2543,6 +2590,7 @@ impl NativeOutputStore {
         }
     }
 
+    /// Returning the entry lets callers release the store lock before dropping a large output.
     fn remove(&mut self, session_id: &str) -> Option<RetainedNativeOutput> {
         let entry = self.sessions.remove(session_id)?;
         self.retained_bytes = self.retained_bytes.saturating_sub(entry.retained_bytes);
@@ -2550,42 +2598,11 @@ impl NativeOutputStore {
         Some(entry)
     }
 
-    /// Removes the session's entry and returns its output only when it was built in `revert_epoch`
-    /// and served under `revision`. An entry from another epoch or revision is dropped whole.
-    fn take(
-        &mut self,
-        session_id: &str,
-        revert_epoch: u64,
-        revision: Option<&Revision>,
-    ) -> Option<PreviousNativeOutput> {
-        let entry = self.remove(session_id)?;
-        (entry.revert_epoch == revert_epoch && revision == Some(&entry.output.revision))
-            .then_some(entry.output)
-    }
-
-    /// Retains `output` as the session's next previous source.
-    fn store(
-        &mut self,
-        session_id: &str,
-        revert_epoch: u64,
-        output: PreviousNativeOutput,
-    ) -> NativeStoreOutcome {
-        use crate::retained_size::{ARC_ALLOCATION_OVERHEAD_BYTES, cloned_string_retained_bytes};
-        self.remove(session_id);
-        let retained_bytes = output.values.iter().fold(
-            output
-                .values
-                .capacity()
-                .saturating_mul(size_of::<Arc<Value>>())
-                .saturating_add(size_of::<RetainedNativeOutput>())
-                .saturating_add(edit_recipe::MAX_REVISION_BYTES)
-                .saturating_add(cloned_string_retained_bytes(session_id).saturating_mul(2)),
-            |bytes, value| {
-                bytes
-                    .saturating_add(ARC_ALLOCATION_OVERHEAD_BYTES)
-                    .saturating_add(native_value_retained_bytes(value))
-            },
-        );
+    /// Retains `candidate` as its session's next previous source.
+    fn store(&mut self, candidate: NativeOutputCandidate) -> NativeStoreOutcome {
+        let NativeOutputCandidate { session_id, entry } = candidate;
+        let retained_bytes = entry.retained_bytes;
+        self.remove(&session_id);
         if retained_bytes > self.max_entry_retained_bytes
             || retained_bytes > self.max_retained_bytes
         {
@@ -2599,15 +2616,8 @@ impl NativeOutputStore {
             };
         }
         self.retained_bytes = self.retained_bytes.saturating_add(retained_bytes);
-        self.sessions.insert(
-            session_id.to_string(),
-            RetainedNativeOutput {
-                revert_epoch,
-                retained_bytes,
-                output,
-            },
-        );
-        self.lru.push_back(session_id.to_string());
+        self.lru.push_back(session_id.clone());
+        self.sessions.insert(session_id, entry);
         let mut evicted = 0;
         while self.retained_bytes > self.max_retained_bytes {
             let Some(oldest) = self.lru.pop_front() else {
@@ -9162,15 +9172,14 @@ impl HandlerCore {
         let native_attach_started_at = Instant::now();
         let (encoded_messages, stored, recipe) = if parsed.serve_native {
             // The retained output stays a keep source only for the revision the caller says it applied.
-            let previous = self
+            let retained = self
                 .native_outputs
                 .lock()
                 .expect("native output store mutex")
-                .take(
-                    &parsed.session_id,
-                    revert_epoch,
-                    parsed.previous_output_revision.as_ref(),
-                );
+                .remove(&parsed.session_id);
+            let previous = retained.and_then(|entry| {
+                entry.into_previous(revert_epoch, parsed.previous_output_revision.as_ref())
+            });
             attach_native_messages_with_tags(
                 &mut response,
                 parsed,
@@ -9184,18 +9193,19 @@ impl HandlerCore {
             if let Some(transform::UserHintPass::Decided(outcome)) = response.user_hint.as_mut() {
                 outcome.attached = native_carries_user_hint(&values, outcome);
             }
+            let candidate = NativeOutputCandidate::new(
+                &parsed.session_id,
+                revert_epoch,
+                PreviousNativeOutput {
+                    revision: output_revision.clone(),
+                    values: values.clone(),
+                },
+            );
             let stored = self
                 .native_outputs
                 .lock()
                 .expect("native output store mutex")
-                .store(
-                    &parsed.session_id,
-                    revert_epoch,
-                    PreviousNativeOutput {
-                        revision: output_revision.clone(),
-                        values: values.clone(),
-                    },
-                );
+                .store(candidate);
             #[cfg(any(test, feature = "test-support", feature = "direct-host-fixture"))]
             {
                 *self
@@ -26358,18 +26368,30 @@ mod tests {
     #[test]
     fn native_output_store_enforces_entry_cap_lru_and_revert_epoch() {
         let revision = |name: &str| Revision::parse(name).unwrap();
-        let output = |name: &str, text_len: usize| PreviousNativeOutput {
-            revision: revision(name),
-            values: vec![Arc::new(json!("x".repeat(text_len)))],
+        let output = |session: &str, name: &str, epoch: u64, text_len: usize| {
+            NativeOutputCandidate::new(
+                session,
+                epoch,
+                PreviousNativeOutput {
+                    revision: revision(name),
+                    values: vec![Arc::new(json!("x".repeat(text_len)))],
+                },
+            )
         };
-        let charge =
-            |store: &NativeOutputStore, session: &str| store.sessions[session].retained_bytes;
-        let mut probe = NativeOutputStore::default();
-        assert_eq!(
-            probe.store("p", 0, output("r", 1024)),
-            NativeStoreOutcome::default()
-        );
-        let entry = charge(&probe, "p");
+        let take = |store: &mut NativeOutputStore,
+                    session: &str,
+                    epoch: u64,
+                    revision: Option<&Revision>| {
+            store
+                .remove(session)
+                .and_then(|entry| entry.into_previous(epoch, revision))
+        };
+        let probe = output("p", "r", 0, 1024);
+        let entry = probe.entry.retained_bytes;
+        let mut probe_store = NativeOutputStore::default();
+        assert_eq!(probe_store.store(probe), NativeStoreOutcome::default());
+        assert_eq!(probe_store.sessions["p"].retained_bytes, entry);
+        assert_eq!(probe_store.retained_bytes, entry);
         let refused = NativeStoreOutcome {
             refused: 1,
             evicted: 0,
@@ -26378,17 +26400,17 @@ mod tests {
         // Per entry: an output over the cap is refused and drops the session's earlier entry too.
         let mut store = NativeOutputStore::with_limits(entry * 3, entry);
         assert_eq!(
-            store.store("x", 0, output("r", 1024)),
+            store.store(output("x", "r", 0, 1024)),
             NativeStoreOutcome::default()
         );
-        assert_eq!(store.store("x", 0, output("r", 64 * 1024)), refused);
+        assert_eq!(store.store(output("x", "r", 0, 64 * 1024)), refused);
         assert!(store.sessions.is_empty() && store.lru.is_empty());
         assert_eq!(store.retained_bytes, 0);
 
         // Global: the least recently stored session goes first.
         for session in ["a", "b", "c"] {
             assert_eq!(
-                store.store(session, 0, output(session, 1024)),
+                store.store(output(session, session, 0, 1024)),
                 NativeStoreOutcome::default()
             );
         }
@@ -26396,13 +26418,13 @@ mod tests {
         // Storing a session again without a take replaces its charge instead of adding to it,
         // and moves it to the most recently stored end.
         assert_eq!(
-            store.store("a", 0, output("a", 1024)),
+            store.store(output("a", "a", 0, 1024)),
             NativeStoreOutcome::default()
         );
         assert_eq!(store.retained_bytes, entry * 3);
         assert_eq!(store.lru.len(), 3);
         assert_eq!(
-            store.store("d", 0, output("d", 1024)),
+            store.store(output("d", "d", 0, 1024)),
             NativeStoreOutcome {
                 refused: 0,
                 evicted: 1
@@ -26412,27 +26434,30 @@ mod tests {
         assert!(store.sessions.contains_key("a"));
         assert_eq!(store.retained_bytes, entry * 3);
 
-        // Only the served revision in the built epoch comes back; any other take drops the entry.
-        assert!(store.take("a", 0, Some(&revision("stale"))).is_none());
+        // `remove` returns a mismatched entry whole instead of dropping it inside the store.
+        let stale = store.remove("a").expect("stored entry");
+        assert_eq!(stale.retained_bytes, entry);
         assert!(!store.sessions.contains_key("a"));
-        assert!(store.take("c", 0, None).is_none());
+        assert_eq!(store.retained_bytes, entry * 2);
+        assert!(stale.into_previous(0, Some(&revision("stale"))).is_none());
+
+        // Only the served revision in the built epoch comes back; any other take drops the entry.
+        assert!(take(&mut store, "c", 0, None).is_none());
         assert!(!store.sessions.contains_key("c"));
-        let kept = store
-            .take("d", 0, Some(&revision("d")))
-            .expect("matching revision");
+        let kept = take(&mut store, "d", 0, Some(&revision("d"))).expect("matching revision");
         assert_eq!(kept.values[0].as_str().unwrap().len(), 1024);
         assert_eq!(store.retained_bytes, 0);
 
         // A revert-epoch bump evicts the session's entry even under its own revision.
-        store.store("e", 0, output("e", 1024));
-        assert!(store.take("e", 1, Some(&revision("e"))).is_none());
+        store.store(output("e", "e", 0, 1024));
+        assert!(take(&mut store, "e", 1, Some(&revision("e"))).is_none());
         assert!(store.sessions.is_empty() && store.lru.is_empty());
         assert_eq!(store.retained_bytes, 0);
 
         // An entry under an entry cap raised above the total budget is still refused.
         store.max_retained_bytes = entry - 1;
         store.max_entry_retained_bytes = entry * 2;
-        assert_eq!(store.store("f", 0, output("f", 1024)), refused);
+        assert_eq!(store.store(output("f", "f", 0, 1024)), refused);
         assert!(store.sessions.is_empty());
         assert_eq!(store.retained_bytes, 0);
     }
@@ -26452,11 +26477,11 @@ mod tests {
         };
         let mut store = NativeOutputStore::with_limits(TOTAL_BUDGET_BYTES, TOTAL_BUDGET_BYTES / 4);
         assert_eq!(
-            store.store("a", 0, output("a")),
+            store.store(NativeOutputCandidate::new("a", 0, output("a"))),
             NativeStoreOutcome::default()
         );
         assert_eq!(
-            store.store("b", 0, output("b")),
+            store.store(NativeOutputCandidate::new("b", 0, output("b"))),
             NativeStoreOutcome::default()
         );
         let charges = store.sessions["a"].retained_bytes + store.sessions["b"].retained_bytes;
@@ -26467,10 +26492,11 @@ mod tests {
         for _ in 0..2 {
             for session in ["a", "b"] {
                 let previous = store
-                    .take(session, 0, Some(&revision(session)))
+                    .remove(session)
+                    .and_then(|entry| entry.into_previous(0, Some(&revision(session))))
                     .unwrap_or_else(|| panic!("session {session} was evicted by the other"));
                 assert_eq!(
-                    store.store(session, 0, previous),
+                    store.store(NativeOutputCandidate::new(session, 0, previous)),
                     NativeStoreOutcome::default()
                 );
             }
