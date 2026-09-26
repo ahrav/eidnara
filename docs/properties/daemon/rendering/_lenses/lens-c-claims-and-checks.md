@@ -380,7 +380,7 @@ Every `fn` line re-read at `HEAD`. `†` marks `#[ignore]`.
 | Cluster | Tests | Lines | Notes |
 | --- | --- | --- | --- |
 | serialized-output cache | 5 | `:28596`, `:28622`, `:28660`, `:28698`, `:28726` | The invalidation-granularity family. `:28622` and `:28660` are the two byte-equality replays lens A leans on |
-| window tag read | 2 | `:24223`, `transform_read_bound.rs:517` | The tag baseline cache and its four tests are deleted. `window_tag_read_keeps_every_session_relative_tag_decision` compares every tag decision against a whole-session read; `every_pass_read_is_bounded_independent_of_history_size` bounds the three tag queries |
+| window tag read | 2 | `:24283`, `transform_read_bound.rs:541` | The tag baseline cache and its four tests are deleted. `window_tag_read_keeps_every_session_relative_tag_decision` compares every tag decision against a whole-session read; `every_pass_read_is_bounded_independent_of_history_size` bounds the three tag queries |
 | byte-identical replay through the output cache | 2 | `:27150`, `:27216` | Both named by lens A as the strongest evidence for composition order and determinism |
 | duplicate-`tool_use` belt | 2 | `:21504` (debug), `:21514` (release, `#[cfg(not(debug_assertions))]` at `:21512`) | Exactly one compiles per profile |
 | tag-imitation defence | 2 | `:13726`, `:13766` | `strip_leading_tag_imitations` and its code-span carve-out |

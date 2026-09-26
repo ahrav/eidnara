@@ -150,7 +150,7 @@ separate owners.
 - `lib.rs:22659` `cached_transform_response_writer_is_byte_identical_to_value_round_trip`
   (a one-message CK passthrough inserts its typed served value).
 - `edit_recipe.rs:1192` `revision_allocator_names_each_pass_once_and_refuses_exhaustion`.
-- `lib.rs:26412` `native_attachment_reuses_transform_tag_baseline_and_preserves_bytes`
+- `lib.rs:29092` `native_attachment_reuses_transform_tag_rows_and_preserves_bytes`
   replays the served array against the native attachment.
 - `crates/daemon/tests/direct_host.rs:50` and `:133` drive a real fixture host
   over the wire and reconstruct the served array with
