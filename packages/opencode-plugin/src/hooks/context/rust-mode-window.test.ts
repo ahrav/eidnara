@@ -899,6 +899,37 @@ describe("window-scoped fail-open", () => {
         });
     }
 
+    for (const status of [undefined, "session_busy"]) {
+        it(`serves raw when a rerun ${status ? `declines ${status}` : "fails"} after rediscovering the basis the daemon disowned`, async () => {
+            const sessionId = `fail-open-rerun-${status}-${Date.now()}`;
+            const anchor = { mid: "m-2", sequence: 5 };
+            const { client, bodies } = fakeDaemon({
+                pages: () => ({ anchors: [anchor] }),
+                transform: (body, index) => {
+                    if (index === 1) return { status: "boundary_unknown" };
+                    if (index > 1 && status) return { status };
+                    if (index > 1)
+                        throw new Error("request deadline expired after a possible send");
+                    return {
+                        base_revision: body.base_revision,
+                        output_revision: "fold-out",
+                        boundary: anchor,
+                        operations: [{ op: "insert", values: [folded(sessionId)] }],
+                    };
+                },
+            });
+            const transform = createRustModeTransform(makeDeps(), { moduleClient: client });
+            await transform.run(sessionId, { messages: hostArray(sessionId, 5) });
+            const grown = hostArray(sessionId, 8);
+            const output = { messages: [...grown] as unknown[] };
+            await transform.run(sessionId, output);
+            // Enabling state: both attempts declared the retained basis, and the rerun failed or declined.
+            expect(bodies.map((body) => body.boundary)).toEqual([anchor, anchor, anchor]);
+            expect(output.messages).toEqual(grown);
+            expect(transform.getState(sessionId).failureCount).toBe(status ? 0 : 1);
+        });
+    }
+
     it("serves raw against a mismatched basis anchor or a changed terminal message", async () => {
         const moved = `fail-open-moved-${Date.now()}`;
         const movedDaemon = failAfterFold(moved, { mid: "m-3", sequence: 6 });
