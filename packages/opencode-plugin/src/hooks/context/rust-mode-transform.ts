@@ -1295,7 +1295,8 @@ export function createRustModeTransform(
                 if (!unchanged) throw new PassDeclined(sessionId, "source_changed", phase);
             };
             // Tapes are never rebased: a verified prefix was declared at the retained basis anchor.
-            if (previous && verified)
+            // A rerun follows the daemon disowning an anchor, possibly that basis, so it never fails open.
+            if (previous && verified && !rerun)
                 failOpenSource = { previous, captured, boundaryIndex, recheck: recheckCapture };
             // The wire charge derives from the capture, so byte pressure declines before the next await.
             let wireBytes = 0;

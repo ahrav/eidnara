@@ -90,6 +90,22 @@ describe("eidnara_reduce availability (OpenCode DB)", () => {
         });
     });
 
+    it("keeps separate eidnara_reduce and todowrite verdicts for one session", () => {
+        dataHome = mkdtempSync(join(tmpdir(), "eidnara-eidnara-reduce-db-"));
+        process.env.XDG_DATA_HOME = dataHome;
+        const sessionId = "ses-db-two-tools";
+        clearEidnaraReduceAvailability(sessionId);
+        clearTodowriteAvailability(sessionId);
+        writeOpenCodeDbWithFirstUserTools(sessionId, { eidnara_reduce: true, todowrite: false });
+
+        // The allow resolves first, so a verdict cache shared across tools would allow todowrite too.
+        expect(resolveEidnaraReduceAvailability(sessionId)).toEqual({
+            callable: true,
+            frozen: true,
+        });
+        expect(resolveTodowriteAvailability(sessionId)).toEqual({ callable: false, frozen: true });
+    });
+
     it("breaks a time_created tie by id so the canonical first user message decides", () => {
         dataHome = mkdtempSync(join(tmpdir(), "eidnara-eidnara-reduce-db-"));
         process.env.XDG_DATA_HOME = dataHome;
