@@ -22368,7 +22368,13 @@ mod tests {
         ];
         sync_history_segments(&store, 1, &moved).unwrap();
         sync_history_segments(&store, 2, &[bounded_read_segment(4, 0)]).unwrap();
-        assert_eq!(store.load_history_segments("ses").unwrap().len(), 4);
+        let ranges: Vec<_> = store
+            .load_history_segments("ses")
+            .unwrap()
+            .iter()
+            .map(|row| (row.sequence, row.start_message, row.end_message))
+            .collect();
+        assert_eq!(ranges, [(1, 1, 1), (2, 2, 4), (3, 5, 6), (4, 7, 8)]);
     }
 
     /// On an initialized session a row at or below the folded sequence, or for a stored

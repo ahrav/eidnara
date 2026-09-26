@@ -1892,6 +1892,10 @@ pub enum TransformError {
     ReductionConflict,
     #[error("{0}")]
     CoverageGap(String),
+    /// More history segments landed above the folded sequence during the pass than m1 reads.
+    /// The pass retries against a fresh signal, as it does on a CAS conflict.
+    #[error("history_segment set moved under the pass: more new rows than the m1 row cap")]
+    HistorySegmentSetMoved,
     #[error("search: {0}")]
     Search(String),
     #[error("wire: {0}")]
@@ -2228,9 +2232,10 @@ fn apply_once_with_estimator_and_projection(
             boundary_divergence_retry,
             &mut boundary_divergence_detected,
         ) {
-            Err(TransformError::Store(MemoryStoreError::CasConflict { .. }))
-                if attempt < MAX_CAS_RETRIES =>
-            {
+            Err(
+                TransformError::Store(MemoryStoreError::CasConflict { .. })
+                | TransformError::HistorySegmentSetMoved,
+            ) if attempt < MAX_CAS_RETRIES => {
                 // A history_summarizer publish can win after detection but before the transform commit.
                 // The reload path preserves recut intent so a new m1 watermark cannot convert a proven inconsistency into an ordinary defer.
                 boundary_divergence_retry |= boundary_divergence_detected;
@@ -2951,6 +2956,8 @@ fn apply_additive_only(
             let mut additive_meta = meta.clone();
             additive_meta.folded_history_segment_seq = m1_signal.max_history_segment_seq;
             additive_meta.coverage_ordinal = None;
+            #[cfg(test)]
+            run_transform_attempt_hook(&format!("m1_compose:{}", req.session_id));
             let m1 = compose_m1(
                 store,
                 ctx.note_project_path,
@@ -2966,14 +2973,10 @@ fn apply_additive_only(
             note_deliveries = m1.note_deliveries.clone();
             // The folded sequence is the newest one the signal saw, so only rows appended
             // since then sit above it. More of them than the row cap means the set grew under
-            // the pass, which the commit's set fence also reports as a CAS conflict. The retry
-            // reloads the signal; the notes this pass claimed stay unacked, so it claims them
-            // again.
+            // the pass. The retry reloads the signal; the notes this pass claimed stay unacked,
+            // so it claims them again.
             let Some(m1_body) = m1.body.as_deref() else {
-                return Err(TransformError::Store(MemoryStoreError::CasConflict {
-                    expected: loaded.row_version,
-                    found: loaded.row_version.unwrap_or(0),
-                }));
+                return Err(TransformError::HistorySegmentSetMoved);
             };
             let profile_rendered = m1.profile_rendered;
             core.step(PassInput {
@@ -16291,6 +16294,74 @@ pub(crate) mod tests {
             folded,
             "a rejected pass records nothing"
         );
+    }
+
+    /// Rows past the m1 row cap that land mid-pass send the additive SOFT back for a retry,
+    /// which accounts for them and delivers the note the first attempt claimed.
+    #[test]
+    fn additive_soft_retries_when_rows_past_the_m1_cap_land_mid_pass() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = Arc::new(store(dir.path()));
+        let session = "additive-set-moved";
+        let mut ctx = pctx("git:proj", "/nonexistent-docs", 0);
+        ctx.compaction_enabled = false;
+        let mut request = req(session, "cfg0", vec![item("a", 1, "x")]);
+        // A 1,024-token hard window caps m1 at four rows.
+        request.geometry = Some(TransformGeometry {
+            usable_soft: 1_024,
+            usable_hard: 1_024,
+            derivation: "test".to_string(),
+        });
+        assert_eq!(transform(&s, &request, &ctx).unwrap().action, "HARD");
+        let note = s
+            .insert_project_note(memory_store::NoteWriteInput {
+                project_path: "git:proj",
+                route_project_root: None,
+                session_id: Some("writer"),
+                content: "claimed once",
+                surface_condition: Some("always"),
+                anchor_block_id: None,
+                anchor_ordinal: None,
+                compiled_provider: None,
+                compiled_config: None,
+                compiled_at: None,
+                compile_status: None,
+                now_ms: 1,
+            })
+            .unwrap();
+        s.with_fenced_conn_for_test(|conn| {
+            conn.execute("UPDATE notes SET status = 'ready' WHERE id = ?1", [note.id])
+        })
+        .unwrap();
+        s.arm_soft_refresh(session).unwrap();
+        let hook_store = Arc::clone(&s);
+        let appended = std::sync::atomic::AtomicUsize::new(0);
+        let appended = Arc::new(appended);
+        let hook_appended = Arc::clone(&appended);
+        install_transform_attempt_hook(&format!("m1_compose:{session}"), move || {
+            hook_appended.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let rows: Vec<_> = (1..=5).map(|seq| comp(seq, seq, seq, "a", "S")).collect();
+            hook_store.append_history_segments(session, &rows).unwrap();
+        });
+        let soft = transform(&s, &request, &ctx).unwrap();
+        assert_eq!(appended.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!((soft.action.as_str(), soft.committed), ("SOFT", true));
+        let deliveries = soft
+            .note_deliveries
+            .as_ref()
+            .expect("the retry delivers the note");
+        assert_eq!(
+            deliveries.iter().map(|d| d.note_id).collect::<Vec<_>>(),
+            vec![note.id]
+        );
+        assert!(
+            serde_json::to_string(&soft.messages())
+                .unwrap()
+                .contains("claimed once")
+        );
+        let meta = s.load(session).unwrap().meta;
+        assert_eq!(meta.folded_history_segment_seq, 5);
+        assert_eq!(meta.m1_history_segment_seq, Some(5));
     }
 
     #[test]
