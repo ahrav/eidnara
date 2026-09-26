@@ -3,7 +3,9 @@ use std::sync::Arc;
 use memory_store::{CoreState, ModuleMeta};
 
 use super::*;
-use crate::edit_recipe::{Keyed, Recipe, Revision, SourceBase, build_operations, canonical_len};
+use crate::edit_recipe::{
+    Keyed, Operation, Recipe, Revision, Source, SourceBase, build_operations, canonical_len,
+};
 use crate::test_support::descriptor;
 use crate::test_support::synthetic_history::SyntheticHistory;
 
@@ -76,25 +78,6 @@ fn resolve_in(
 ) -> Result<Resolved, String> {
     let snapshot = read_snapshot(store, SESSION, declared, window).unwrap();
     resolve(&snapshot, declared, window)
-}
-
-/// A keep of every processed message, then one previous-output keep and one insert.
-fn translated_keeps(processed: usize, cut: usize) -> Vec<Operation<u8>> {
-    let mut operations = vec![
-        Operation::Keep {
-            source: Source::Input,
-            start: 0,
-            count: processed as u64,
-        },
-        Operation::Keep {
-            source: Source::Previous,
-            start: 0,
-            count: 1,
-        },
-        Operation::Insert { values: vec![7] },
-    ];
-    translate_input_keeps(&mut operations, cut);
-    operations
 }
 
 struct Case {
@@ -224,23 +207,7 @@ fn each_resolution_outcome_has_its_cut_ordinals_and_keeps() {
         if resolved.resolution != Resolution::Unknown {
             assert_eq!(resolved.ordinals.len(), window.len() - cut, "{}", case.name);
         }
-        assert_eq!(
-            translated_keeps(window.len() - cut, cut)[..2],
-            [
-                Operation::Keep {
-                    source: Source::Input,
-                    start: case.keep_start,
-                    count: (window.len() - cut) as u64,
-                },
-                Operation::Keep {
-                    source: Source::Previous,
-                    start: 0,
-                    count: 1,
-                },
-            ],
-            "{}",
-            case.name
-        );
+        assert_eq!(cut as u64, case.keep_start, "{}", case.name);
     }
 }
 
@@ -507,8 +474,8 @@ fn message(mid: &str) -> Keyed<String, Arc<Value>> {
     }
 }
 
-/// WP-P05 and WP-P19: at a stale cut of four, input keeps built against the processed
-/// window, translated back by the cut, reconstruct the served array from the unsliced input.
+/// WP-P05 and WP-P19: at a stale cut of four, input keeps built against the submitted window
+/// start at the cut and reconstruct the served array from the unsliced input.
 #[test]
 fn a_stale_cut_keep_reconstructs_the_served_array_from_the_unsliced_input() {
     let (_dir, store) = open_store();
@@ -525,15 +492,8 @@ fn a_stale_cut_keep_reconstructs_the_served_array_from_the_unsliced_input() {
         .into_iter()
         .chain(submitted[cut..].iter().cloned())
         .collect();
-    let mut built = build_operations(&served, &submitted[cut..], Some(&previous), |a, b| a == b);
-    assert!(built.operations.iter().any(|op| matches!(
-        op,
-        Operation::Keep {
-            source: Source::Input,
-            ..
-        }
-    )));
-    translate_input_keeps(&mut built.operations, cut);
+    // The recipe is built against the submitted window, so its keeps are in its coordinates.
+    let built = build_operations(&served, &submitted, Some(&previous), |a, b| a == b);
     assert!(built.operations.contains(&Operation::Keep {
         source: Source::Input,
         start: cut as u64,

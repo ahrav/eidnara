@@ -331,3 +331,116 @@ async fn record_revision_2_goldens() {
     text.push('\n');
     std::fs::write(GOLDENS_PATH, text).unwrap();
 }
+
+/// The revision 3 plugin's per-session boundary: `None` until discovered, then the last
+/// response's rendered boundary (`Some(None)` sends the whole array).
+#[derive(Default)]
+struct Plugin {
+    boundary: Option<Option<Value>>,
+}
+
+impl Plugin {
+    /// Walks `transform.boundary` newest first and declares the first anchor the host holds;
+    /// an exhausted walk declares nothing.
+    async fn discover(&mut self, handler: &Handler, host: &Host) {
+        let mut before = None::<i64>;
+        self.boundary = Some(loop {
+            let mut request =
+                json!({ "method": "transform.boundary", "v": 3, "session_id": SESSION });
+            if let Some(before) = before {
+                request["before_sequence"] = json!(before);
+            }
+            let PreparedOutcome::Response(bytes) =
+                handler.dispatch_value(test_route(7), request).await
+            else {
+                panic!("discovery answers a page");
+            };
+            let page: Value = serde_json::from_slice(&bytes).unwrap();
+            let anchors = page["anchors"].as_array().unwrap().clone();
+            let Some(last) = anchors.last() else {
+                break None;
+            };
+            if let Some(found) = anchors
+                .iter()
+                .find(|found| host.messages.iter().any(|(mid, _, _)| found["mid"] == *mid))
+            {
+                break Some(found.clone());
+            }
+            before = last["sequence"].as_i64();
+        });
+    }
+
+    /// One pass: the window from the boundary when the host holds it, else one discovery.
+    async fn pass(&mut self, handler: &Handler, host: &Host) -> Value {
+        let mut discovered = false;
+        loop {
+            let at = match &self.boundary {
+                Some(Some(anchor)) => host
+                    .messages
+                    .iter()
+                    .position(|(mid, _, _)| anchor["mid"] == *mid),
+                Some(None) => Some(0),
+                None => None,
+            };
+            let Some(at) = at.filter(|_| !discovered || self.boundary.is_some()) else {
+                if discovered {
+                    return json!({ "status": "declined" });
+                }
+                self.discover(handler, host).await;
+                discovered = true;
+                continue;
+            };
+            let declared = self.boundary.clone().flatten();
+            let at = if declared.is_some() { at } else { 0 };
+            let mut body = pass_body(host.wire(at, false));
+            body["v"] = json!(3);
+            body["boundary"] = declared.unwrap_or(Value::Null);
+            let response = call(handler, body).await;
+            match response["status"].as_str() {
+                Some("ok") => {
+                    self.boundary = Some(
+                        response["boundary"]
+                            .as_object()
+                            .map(|_| response["boundary"].clone()),
+                    )
+                }
+                Some("boundary_unknown") if !discovered => {
+                    self.discover(handler, host).await;
+                    discovered = true;
+                    continue;
+                }
+                _ => {}
+            }
+            return response;
+        }
+    }
+}
+
+/// The revision 2 goldens replayed against revision 3: after every operation of every trace,
+/// the served array without ordinals, the m0 bytes, and the tag rows equal the recorded ones.
+#[tokio::test(flavor = "current_thread")]
+async fn revision_3_replays_the_revision_2_goldens() {
+    let goldens: Value =
+        serde_json::from_str(&std::fs::read_to_string(GOLDENS_PATH).unwrap()).unwrap();
+    let goldens = goldens.as_array().unwrap();
+    let traces = traces();
+    assert_eq!(goldens.len(), traces.len());
+    for ((name, ops), golden) in traces.into_iter().zip(goldens) {
+        assert_eq!(golden["trace"], name.as_str());
+        let (handler, store, _dir) = golden_handler();
+        let mut host = Host::default();
+        let mut plugin = Plugin::default();
+        for (index, op) in ops.iter().copied().enumerate() {
+            host.apply(op, &store);
+            let response = plugin.pass(&handler, &host).await;
+            let actual = step(op, &response, &store);
+            let expected = &golden["steps"][index];
+            for field in ["op", "status", "code", "action", "served", "m0", "tags"] {
+                assert_eq!(
+                    actual[field], expected[field],
+                    "{name} step {index} ({op:?}) {field}"
+                );
+            }
+        }
+    }
+}

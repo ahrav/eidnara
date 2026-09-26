@@ -132,7 +132,8 @@ fn dg_goldens_encode_native_output_deterministically() {
             .collect::<Vec<_>>();
         let request: TransformRequest = serde_json::from_value(json!({
             "kind": "transform",
-            "v": 2,
+            "v": 3,
+            "boundary": null,
             "serializer_profile": "opencode-aisdk",
             "session_id": format!("dg-native-{}", case.id),
             "render_config": "dg",

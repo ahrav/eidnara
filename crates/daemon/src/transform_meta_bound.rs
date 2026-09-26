@@ -47,7 +47,8 @@ fn transform(
 ) -> Result<String, TransformError> {
     let req: TransformRequest = serde_json::from_value(serde_json::json!({
         "kind": "transform",
-        "v": 2,
+        "v": 3,
+        "boundary": null,
         "serializer_profile": "owned-llmrunner",
         "session_id": SESSION,
         "render_config": "meta-bound-config",
@@ -136,33 +137,11 @@ fn first_hard_pass_meta_respects_the_store_durable_text_bound() {
 }
 
 #[test]
-fn meta_bytes_stay_flat_as_covered_history_grows_and_covered_drift_still_rejects() {
+fn meta_bytes_stay_flat_as_covered_history_grows() {
     let (_small_dir, _small_store, _small_messages, small) = first_hard_pass(1_000);
-    let (dir, store, mut messages, large) = first_hard_pass(10_000);
+    let (_dir, _store, _messages, large) = first_hard_pass(10_000);
     assert!(
         large <= small + small / 10,
         "meta grew from {small} bytes at 1,000 messages to {large} bytes at 10,000"
-    );
-
-    // A covered message whose content changes is rejected exactly as before.
-    let covered = 4;
-    let replacement =
-        corpus::messages(ContentClass::Mixed, covered + 1, 2_048, CORPUS_SEED ^ 1).remove(covered);
-    assert_eq!(replacement.mid, messages[covered].mid);
-    messages[covered] = replacement;
-    let before = store.load(SESSION).expect("load before drift");
-    let result = transform(&store, dir.path().to_str().expect("utf8 dir"), &messages);
-    assert!(
-        matches!(&result, Err(TransformError::IdentityDrift(mid)) if mid == "m5"),
-        "covered drift must reject: {result:?}"
-    );
-    let after = store.load(SESSION).expect("load after drift");
-    assert_eq!(
-        after.row_version, before.row_version,
-        "a rejected pass commits nothing"
-    );
-    assert_eq!(
-        after.meta, before.meta,
-        "a rejected pass keeps the stored identities"
     );
 }

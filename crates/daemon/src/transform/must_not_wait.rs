@@ -3,8 +3,7 @@
 use memory_store::MemoryStore;
 
 use super::tests::{
-    canonical_read, cc_req, comp, item, pctx, req, run, seed_astro_divergence, spine, store,
-    system_item, with_usage,
+    canonical_read, cc_req, comp, item, pctx, req, run, spine, store, system_item, with_usage,
 };
 use super::*;
 
@@ -227,24 +226,6 @@ fn boundary_absence_steps_once_then_reconciles_through_a_live_run() {
 }
 
 #[test]
-fn a_boundary_divergence_recut_rebuilds_through_a_live_run() {
-    let dir = tempfile::tempdir().unwrap();
-    let s = store(dir.path());
-    let request = seed_astro_divergence(&s, "astro-hold", 2_402);
-    // The seed diverges the stored coverage (425) from the published segment set (through 2,400).
-    assert_eq!(
-        s.load("astro-hold").unwrap().meta.coverage_ordinal,
-        Some(425)
-    );
-    let response = transform(&s, &request, &live_run("/nonexistent-docs", 0)).unwrap();
-    assert_eq!(
-        served(&response),
-        ("HARD", Some("boundary_divergence_recut"))
-    );
-    assert_eq!(response.coverage_ordinal, Some(2_400));
-}
-
-#[test]
 fn a_covered_system_message_absorbs_through_a_live_run() {
     let dir = tempfile::tempdir().unwrap();
     let s = store(dir.path());
@@ -327,14 +308,13 @@ fn a_project_memory_revision_is_a_hard_member_too() {
 }
 
 /// Each path's hard-fold and veto formula, written out independently of `activation_gates`.
-fn ordinary_path_reference(bits: [bool; 12], pass: scheduler::PassDecision) -> (bool, bool) {
+fn ordinary_path_reference(bits: [bool; 11], pass: scheduler::PassDecision) -> (bool, bool) {
     let [
         active,
         initialized,
         flush,
         render,
         first,
-        recut,
         ttl,
         absorb,
         external,
@@ -346,7 +326,7 @@ fn ordinary_path_reference(bits: [bool; 12], pass: scheduler::PassDecision) -> (
         pass,
         scheduler::PassDecision::Force85 | scheduler::PassDecision::Emergency95
     ) || latch;
-    let hard = first || recut || ttl || absorb || external || epoch;
+    let hard = first || ttl || absorb || external || epoch;
     let veto = active
         && pass == scheduler::PassDecision::Execute
         && !hard
@@ -358,13 +338,12 @@ fn ordinary_path_reference(bits: [bool; 12], pass: scheduler::PassDecision) -> (
     (hard, veto)
 }
 
-fn additive_path_reference(bits: [bool; 12], pass: scheduler::PassDecision) -> (bool, bool) {
+fn additive_path_reference(bits: [bool; 11], pass: scheduler::PassDecision) -> (bool, bool) {
     let [
         active,
         initialized,
         flush,
         render,
-        _,
         _,
         ttl,
         _,
@@ -387,15 +366,14 @@ fn additive_path_reference(bits: [bool; 12], pass: scheduler::PassDecision) -> (
 fn the_shared_gate_matches_each_paths_reference_formula_for_every_input() {
     use scheduler::PassDecision::*;
     for pass in [Defer, Execute, Force85, Emergency95] {
-        for mask in 0u32..1 << 12 {
-            let bits: [bool; 12] = std::array::from_fn(|index| mask & (1 << index) != 0);
+        for mask in 0u32..1 << 11 {
+            let bits: [bool; 11] = std::array::from_fn(|index| mask & (1 << index) != 0);
             let [
                 active,
                 initialized,
                 flush,
                 render,
                 first,
-                recut,
                 ttl,
                 absorb,
                 external,
@@ -410,7 +388,6 @@ fn the_shared_gate_matches_each_paths_reference_formula_for_every_input() {
                 soft_refresh_pending: flush,
                 render_config_changed: render,
                 first_fold_due: first,
-                boundary_divergence_recut: recut,
                 idle_ttl_fired: ttl,
                 system_absorb_hard_due: absorb,
                 external_revision_changed: external,
@@ -433,7 +410,6 @@ fn the_shared_gate_matches_each_paths_reference_formula_for_every_input() {
                 soft_refresh_pending: flush,
                 render_config_changed: render,
                 first_fold_due: false,
-                boundary_divergence_recut: false,
                 idle_ttl_fired: ttl,
                 system_absorb_hard_due: false,
                 external_revision_changed: external,

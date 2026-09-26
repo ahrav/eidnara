@@ -52,9 +52,9 @@ use memory_store::{
     LineageConstituent, LineageDescentDisposition, LineageDescentRequest, MaterializeReason,
     MemoryStore, MemoryStoreError, ModuleMeta, ModuleUsage, NoteDelivery, PassAction, PassRecord,
     PassSchedulerObservation, PendingAgentDrop, PendingChannel2Directive, PendingRewriteState,
-    ProjectMemoryComposition, ServedBlockFingerprint, StoredHistorySegment, TagMintInput, TagRow,
-    TailHygieneBaseline, TemporalMarkInput, TemporalMarkRow, TransformCommit,
-    TransformOverlayBatch, UserHintDecisionInput, UserHintRow,
+    ProjectMemoryComposition, ServedBlockFingerprint, TagMintInput, TagRow, TailHygieneBaseline,
+    TemporalMarkInput, TemporalMarkRow, TransformCommit, TransformOverlayBatch,
+    UserHintDecisionInput, UserHintRow,
 };
 use regex::Regex;
 use serde::{Deserialize, Serialize};
@@ -76,8 +76,8 @@ use crate::wire::{
 /// Maximum CAS retries before returning a conflict.
 /// On a shared store, each retry reloads state and recomputes the pass.
 const MAX_CAS_RETRIES: u32 = 8;
-/// The limit bounds consecutive passes that may suppress a coverage gap when the applied history_segment watermark is missing or stale.
-const BOUNDARY_DIVERGENCE_PENDING_PASS_LIMIT: u8 = 3;
+/// The transform application revision this daemon serves (`docs/host-wire-protocol.md` 7.10).
+pub const TRANSFORM_REVISION: u64 = 3;
 
 /// Real conversation items never use reserved synthetic-block IDs.
 #[cfg(test)]
@@ -724,12 +724,20 @@ impl ProducerContext<'_> {
     }
 }
 
+/// A history segment end anchor: the bare mid of the segment's end block and its `sequence`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct DeclaredTrim {
-    pub flat_boundary_id: String,
-    pub boundary_bare_message_id: String,
-    pub boundary_absolute_ordinal: u64,
-    pub next_absolute_ordinal: u64,
+pub struct BoundaryAnchor {
+    pub mid: String,
+    pub sequence: i64,
+}
+
+/// The coverage resolution a pass runs under (spec D2, D10, D11): the resolution of the
+/// submitted window and the messages its cut removed, so each attempt re-resolves the same
+/// submitted window from a fresh snapshot.
+#[derive(Debug, Clone, PartialEq)]
+pub struct WindowCoverage {
+    pub resolved: crate::window_coverage::Resolved,
+    cut_prefix: Vec<Arc<IngressMessage>>,
 }
 
 /// The host resolves context geometry into a shape shared by OpenCode and Claude Code.
@@ -741,25 +749,6 @@ pub struct TransformGeometry {
     pub derivation: String,
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
-pub struct TrimMismatch {
-    pub predicate: &'static str,
-    pub detail: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum BoundaryState {
-    LivePresent,
-    DeclaredTrimValidated,
-    Absent,
-}
-
-impl BoundaryState {
-    fn is_present(&self) -> bool {
-        matches!(self, Self::LivePresent | Self::DeclaredTrimValidated)
-    }
-}
-
 /// `boundary_present` is computed from durable state, not supplied by callers.
 /// The module computes `boundary_present` to select replay-frozen or reconcile behavior.
 /// Allowing caller-supplied `boundary_present` permits incorrect replay or reconciliation.
@@ -769,8 +758,16 @@ impl BoundaryState {
 pub struct TransformRequest {
     #[serde(default)]
     pub kind: String,
-    #[serde(default = "default_wire_version")]
-    pub v: u32,
+    /// The transform revision as received; anything but 3 is refused before the pass.
+    #[serde(default)]
+    pub v: Value,
+    /// `None` when the body omits `boundary`, `Some(None)` for `null`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub boundary: Option<Option<BoundaryAnchor>>,
+    /// Set once the window is resolved: the cut is applied and every message carries its
+    /// daemon-derived ordinal.
+    #[serde(skip)]
+    pub coverage: Option<Arc<WindowCoverage>>,
     /// The v2 wire requires `serializer_profile`; parsing it as a string permits typed errors for missing values.
     /// Unknown `serializer_profile` values return the typed contract error rather than Serde's malformed-request error.
     pub serializer_profile: String,
@@ -901,8 +898,6 @@ pub struct TransformRequest {
     /// Absent history-budget values use the bind-time fallback because routes can outlive config reloads.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub history_budget_tokens: Option<f64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub declared_trim: Option<DeclaredTrim>,
     /// `lineage_switched` comes from the lineage owner's composed fake-compaction edge.
     /// Missing edge fields preserve no-switch behavior; the module never infers a switch from summary text alone.
     #[serde(default)]
@@ -922,10 +917,6 @@ pub struct TransformRequest {
     /// Set when the body carries the retired `tail_delta` field; the handler refuses it.
     #[serde(skip)]
     pub(crate) tail_delta_retired: bool,
-}
-
-fn default_wire_version() -> u32 {
-    2
 }
 
 fn default_clear_reasoning_age() -> u64 {
@@ -968,8 +959,10 @@ fn default_protected_tags() -> usize {
 struct TransformRequestWire {
     #[serde(default)]
     kind: String,
-    #[serde(default = "default_wire_version")]
-    v: u32,
+    #[serde(default)]
+    v: Value,
+    #[serde(default, deserialize_with = "crate::deserialize_nullable")]
+    boundary: Option<Option<BoundaryAnchor>>,
     #[serde(default)]
     serializer_profile: Option<String>,
     session_id: String,
@@ -1056,8 +1049,6 @@ struct TransformRequestWire {
     #[serde(default)]
     history_budget_tokens: Option<f64>,
     #[serde(default)]
-    declared_trim: Option<DeclaredTrim>,
-    #[serde(default)]
     lineage_switched: bool,
     #[serde(default)]
     descent_edge_id: u64,
@@ -1096,6 +1087,8 @@ impl<'de> Deserialize<'de> for TransformRequest {
         Ok(Self {
             kind: wire.kind,
             v: wire.v,
+            boundary: wire.boundary,
+            coverage: None,
             serializer_profile: wire.serializer_profile.unwrap_or_default(),
             session_id: wire.session_id,
             render_config: wire.render_config,
@@ -1139,7 +1132,6 @@ impl<'de> Deserialize<'de> for TransformRequest {
             detected_context_limit: wire.detected_context_limit,
             detected_context_limit_model_key: wire.detected_context_limit_model_key,
             history_budget_tokens: wire.history_budget_tokens,
-            declared_trim: wire.declared_trim,
             lineage_switched: wire.lineage_switched,
             descent_edge_id: wire.descent_edge_id,
             prior_conversation_key: wire.prior_conversation_key,
@@ -1158,6 +1150,8 @@ pub enum TransformStatus {
     Ok,
     /// The session already has an active and a waiting pass; no recipe, no state change.
     SessionBusy,
+    /// The declared boundary names no history segment; no recipe, no state change.
+    BoundaryUnknown,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -1558,8 +1552,14 @@ pub struct TransformResponse {
     pub row_version: u64,
     pub surface_state: SurfaceState,
     pub committed: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub coverage_ordinal: Option<u64>,
+    /// The rendered coverage boundary after the pass; absent on `session_busy` and
+    /// `boundary_unknown`, `null` when the session holds no coverage.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::deserialize_nullable"
+    )]
+    pub boundary: Option<Option<BoundaryAnchor>>,
     /// The project-memory composition the served m0 was frozen with; absent until the first HARD and when memory is disabled.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub project_memory: Option<ProjectMemoryComposition>,
@@ -1572,9 +1572,6 @@ pub struct TransformResponse {
     pub lineage_descent_disposition: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub cache_ttl: Option<String>,
-    /// Native adapters use the prior lineage tail as the provisional ordinal base.
-    #[serde(skip_serializing_if = "Option::is_none", default)]
-    pub ordinal_continuation_base: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub history_summarizer: Option<HistorySummarizerDiagnostics>,
     /// The final approved CK output. Internal to the daemon: the wire carries an edit recipe built
@@ -1635,12 +1632,11 @@ impl TransformResponse {
             row_version: 0,
             surface_state: SurfaceState::Inactive,
             committed: false,
-            coverage_ordinal: None,
+            boundary: None,
             project_memory: None,
             lineage_switch_consumed_id: None,
             lineage_descent_disposition: None,
             cache_ttl: None,
-            ordinal_continuation_base: None,
             history_summarizer: None,
             messages: None,
             native_messages: None,
@@ -1656,6 +1652,10 @@ impl TransformResponse {
 
     pub fn session_busy() -> Self {
         Self::base(TransformStatus::SessionBusy, "SESSION_BUSY")
+    }
+
+    pub fn boundary_unknown() -> Self {
+        Self::base(TransformStatus::BoundaryUnknown, "BOUNDARY_UNKNOWN")
     }
 
     pub fn passthrough(messages: Vec<WireMessage>) -> Self {
@@ -1706,8 +1706,6 @@ pub struct TransformWithProjection {
     pub scheduler_pass: scheduler::PassDecision,
     /// The ring entry for this pass, committed with it or, for a stable pass, traced after it.
     pub pass_observation: PassSchedulerObservation,
-    pub boundary_state: BoundaryState,
-    pub trim_mismatch: Option<TrimMismatch>,
     pub revert_epoch: u64,
     pub reasoning_watermark: u64,
     pub mutation_exempt_mid: Option<String>,
@@ -1874,8 +1872,12 @@ pub enum TransformError {
     FrozenRedTargetVanish(String),
     #[error("minted boundary not present: {0}")]
     BoundaryNotPresent(String),
-    #[error("history_segment boundary ordinal mismatch: {0}")]
-    BoundaryOrdinalMismatch(String),
+    /// The submitted window is not admissible: the answer is `invalid_params`.
+    #[error("invalid window: {0}")]
+    InvalidWindow(String),
+    /// The declared boundary names no history segment: the answer is `boundary_unknown`.
+    #[error("the declared boundary names no history segment")]
+    BoundaryUnknown,
     /// Lineage descent violated anchor, epoch, or ordinal-continuation rules.
     #[error("lineage protocol error: {0}")]
     LineageProtocol(String),
@@ -1951,6 +1953,8 @@ pub(crate) fn transform_with_projection(
     req: &TransformRequest,
     ctx: &ProducerContext<'_>,
 ) -> Result<TransformWithProjection, TransformError> {
+    let window = tests::plugin_window(store, req);
+    let req = &window;
     let result = apply_once_with_estimator(
         store,
         req,
@@ -2135,37 +2139,154 @@ fn apply_once_with_estimator(
     estimate_tokens: impl Fn(&str) -> usize + Copy,
     output_cache: Option<&Mutex<SerializedOutputCache>>,
 ) -> Result<TransformWithProjection, TransformError> {
+    let mut resolved;
+    let req = if req.coverage.is_some() {
+        req
+    } else {
+        resolved = req.clone();
+        resolve_window(store, &mut resolved)?;
+        &resolved
+    };
     let mut attempt = 0;
-    let mut boundary_divergence_retry = false;
     loop {
-        let mut boundary_divergence_detected = false;
+        // Every attempt resolves the submitted window from a fresh snapshot, whose row version
+        // the pass's own load must match.
+        let resolve_started_at = Instant::now();
+        let (coverage_row_version, attempt_req) = resolve_attempt(store, req)?;
+        let coverage_resolve = elapsed_ms(resolve_started_at);
         match apply_once(
             store,
-            req,
+            &attempt_req,
             ctx,
             estimate_tokens,
             output_cache,
-            boundary_divergence_retry,
-            &mut boundary_divergence_detected,
+            coverage_row_version,
         ) {
             Err(
                 TransformError::Store(MemoryStoreError::CasConflict { .. })
                 | TransformError::HistorySegmentSetMoved,
             ) if attempt < MAX_CAS_RETRIES => {
-                // A history_summarizer publish can win after detection but before the transform commit.
-                // The reload path preserves recut intent so a new m1 watermark cannot convert a proven inconsistency into an ordinary defer.
-                boundary_divergence_retry |= boundary_divergence_detected;
                 attempt += 1;
                 continue;
             }
             Ok(mut output) => {
+                if let Some(timings) = output.response.timings.as_mut() {
+                    timings.coverage_resolve = coverage_resolve;
+                }
                 output.response.cache_ttl =
                     response_marker_ttl(req, &ctx.cache_ttl, ctx.cache_ttl_provenance);
+                output.response.boundary = Some(rendered_boundary(store, &req.session_id)?);
                 return Ok(output);
             }
             other => return other,
         }
     }
+}
+
+/// Resolves `req`'s submitted window against one coverage snapshot (spec D2, D10, D11): refuses
+/// a mid that appears twice in the window, applies the cut, and gives every remaining message
+/// its daemon-derived ordinal. An unknown anchor is `TransformError::BoundaryUnknown`. Writes
+/// nothing, and an error leaves `req` as it was.
+pub(crate) fn resolve_window(
+    store: &MemoryStore,
+    req: &mut TransformRequest,
+) -> Result<(), TransformError> {
+    let mut seen = HashSet::with_capacity(req.messages.len());
+    if let Some(duplicate) = req.messages.iter().find(|m| !seen.insert(m.mid.as_str())) {
+        return Err(TransformError::InvalidWindow(format!(
+            "message id {:?} appears twice in the window",
+            duplicate.mid
+        )));
+    }
+    let (_, resolved) = resolve_coverage(store, req, &[])?;
+    apply_resolution(req, resolved);
+    Ok(())
+}
+
+/// Resolves a resolved request's submitted window again from a fresh snapshot; the request is
+/// re-cut and re-stamped only when the resolution moved.
+fn resolve_attempt<'a>(
+    store: &MemoryStore,
+    req: &'a TransformRequest,
+) -> Result<(Option<u64>, Cow<'a, TransformRequest>), TransformError> {
+    let coverage = req.coverage.as_deref().expect("the request was resolved");
+    let (row_version, fresh) = resolve_coverage(store, req, &coverage.cut_prefix)?;
+    if fresh == coverage.resolved {
+        return Ok((row_version, Cow::Borrowed(req)));
+    }
+    let mut submitted = req.clone();
+    submitted.messages = coverage
+        .cut_prefix
+        .iter()
+        .chain(req.messages.iter())
+        .cloned()
+        .collect();
+    apply_resolution(&mut submitted, fresh);
+    Ok((row_version, Cow::Owned(submitted)))
+}
+
+fn resolve_coverage(
+    store: &MemoryStore,
+    req: &TransformRequest,
+    cut_prefix: &[Arc<IngressMessage>],
+) -> Result<(Option<u64>, crate::window_coverage::Resolved), TransformError> {
+    use crate::window_coverage::{self as coverage, DeclaredAnchor, Resolution, WindowMessage};
+    let window: Vec<WindowMessage<'_>> = cut_prefix
+        .iter()
+        .chain(req.messages.iter())
+        .map(|message| WindowMessage {
+            mid: &message.mid,
+            synthetic: message.ck.meta.synthetic || carries_synthetic_todo(message),
+        })
+        .collect();
+    let declared = req
+        .boundary
+        .as_ref()
+        .and_then(Option::as_ref)
+        .map(|anchor| DeclaredAnchor {
+            mid: &anchor.mid,
+            sequence: anchor.sequence,
+        });
+    let snapshot = coverage::read_snapshot(store, &req.session_id, declared, &window)?;
+    let resolved =
+        coverage::resolve(&snapshot, declared, &window).map_err(TransformError::InvalidWindow)?;
+    if resolved.resolution == Resolution::Unknown {
+        return Err(TransformError::BoundaryUnknown);
+    }
+    Ok((snapshot.row_version, resolved))
+}
+
+/// Slices off the cut and stamps each message with its ordinal; an ingress `ck.meta.ordinal`
+/// is cleared so no ordinal reaches the served output.
+fn apply_resolution(req: &mut TransformRequest, resolved: crate::window_coverage::Resolved) {
+    let cut_prefix = req.messages.drain(..resolved.cut()).collect();
+    for (message, &ordinal) in req.messages.iter_mut().zip(&resolved.ordinals) {
+        if message.ordinal != ordinal || message.ck.meta.ordinal.is_some() {
+            let message = Arc::make_mut(message);
+            message.ordinal = ordinal;
+            message.ck.meta.ordinal = None;
+        }
+    }
+    req.coverage = Some(Arc::new(WindowCoverage {
+        resolved,
+        cut_prefix,
+    }));
+}
+
+/// The rendered coverage boundary the response names (spec D5): the segment whose end block
+/// is the core boundary id.
+fn rendered_boundary(
+    store: &MemoryStore,
+    session_id: &str,
+) -> Result<Option<BoundaryAnchor>, TransformError> {
+    let rendered = store.coverage_snapshot(session_id, None, &[])?.rendered;
+    Ok(rendered.and_then(|row| {
+        let (mid, _) = split_block_id(&row.end_message_id)?;
+        Some(BoundaryAnchor {
+            mid: mid.to_string(),
+            sequence: row.sequence,
+        })
+    }))
 }
 
 #[cfg(test)]
@@ -2282,19 +2403,21 @@ impl std::ops::Deref for TransformIngress<'_> {
 fn normalize_synthetic_todo_ingress(req: &TransformRequest) -> TransformIngress<'_> {
     let mut normalized = TransformIngress::original(req);
     for message in &req.messages {
-        if message.ck.meta.synthetic
-            || !message.ck.content().iter().any(|block| match block.kind() {
-                wire::BlockKind::ToolCall { id, .. } | wire::BlockKind::ToolResult { id, .. } => {
-                    is_synthetic_todo_id(id)
-                }
-                _ => false,
-            })
-        {
-            continue;
+        if !message.ck.meta.synthetic && carries_synthetic_todo(message) {
+            normalized.projection.mark_synthetic(message);
         }
-        normalized.projection.mark_synthetic(message);
     }
     normalized
+}
+
+/// A message carrying the daemon's synthetic todo arc is synthetic whatever its ingress flag.
+fn carries_synthetic_todo(message: &IngressMessage) -> bool {
+    message.ck.content().iter().any(|block| match block.kind() {
+        wire::BlockKind::ToolCall { id, .. } | wire::BlockKind::ToolResult { id, .. } => {
+            is_synthetic_todo_id(id)
+        }
+        _ => false,
+    })
 }
 
 const CONTINUATION_SUMMARY_PREFIX: &str =
@@ -2415,49 +2538,6 @@ fn validate_lineage_anchor(
     Ok(())
 }
 
-fn rebase_descent_ordinals(
-    req: &TransformIngress<'_>,
-    base: u64,
-) -> Result<Option<TransformRequest>, TransformError> {
-    let Some(first) = req.projection.live_messages().next() else {
-        return Err(TransformError::LineageProtocol(
-            "descent replacement array has no real messages".to_string(),
-        ));
-    };
-    let expected_first = base.checked_add(1).ok_or_else(|| {
-        TransformError::LineageProtocol("descent ordinal base overflow".to_string())
-    })?;
-    if first.ordinal == expected_first {
-        return Ok(None);
-    }
-    // The offset keeps the first replacement ordinal at `base + 1` for 0- and 1-based input.
-    // Replacement arrays may begin at ordinal 0 or 1.
-    if first.ordinal > 1 {
-        return Err(TransformError::LineageProtocol(format!(
-            "descent replacement array starts at ordinal {}, expected a fresh origin (0 or 1) or continued ordinal {expected_first}",
-            first.ordinal
-        )));
-    }
-    let offset = expected_first
-        .checked_sub(first.ordinal)
-        .expect("first.ordinal <= 1 <= expected_first");
-    let mut rebased = req.request.clone();
-    for message in rebased.messages.iter_mut() {
-        let message = Arc::make_mut(message);
-        if message.ordinal < first.ordinal {
-            return Err(TransformError::LineageProtocol(format!(
-                "descent replacement array contains ordinal {} below its origin {}",
-                message.ordinal, first.ordinal
-            )));
-        }
-        message.ordinal = message.ordinal.checked_add(offset).ok_or_else(|| {
-            TransformError::LineageProtocol("descent ordinal overflow".to_string())
-        })?;
-        message.ck.meta.ordinal = Some(message.ordinal);
-    }
-    Ok(Some(rebased))
-}
-
 fn lineage_protocol_passthrough(
     req: &TransformIngress<'_>,
     projection: FlatProjection,
@@ -2476,8 +2556,6 @@ fn lineage_protocol_passthrough(
             Some(PassAction::Passthrough),
             None,
         ),
-        boundary_state: BoundaryState::Absent,
-        trim_mismatch: None,
         revert_epoch: 0,
         reasoning_watermark: 0,
         mutation_exempt_mid: None,
@@ -2693,7 +2771,6 @@ fn apply_additive_only(
         soft_refresh_pending: loaded.meta.soft_refresh_pending,
         render_config_changed,
         first_fold_due: false,
-        boundary_divergence_recut: false,
         idle_ttl_fired: scheduler_outcome.idle_ttl_fired,
         system_absorb_hard_due: false,
         external_revision_changed,
@@ -2996,8 +3073,6 @@ fn apply_additive_only(
         projection,
         scheduler_pass: scheduler_outcome.pass,
         pass_observation,
-        boundary_state: BoundaryState::Absent,
-        trim_mismatch: None,
         revert_epoch: meta.revert_epoch,
         reasoning_watermark: meta
             .reasoning_cleared_through_tag
@@ -3019,12 +3094,11 @@ fn apply_additive_only(
             row_version,
             surface_state: SurfaceState::Inactive,
             committed: commit_required,
-            coverage_ordinal: None,
+            boundary: None,
             project_memory: meta.project_memory.clone(),
             lineage_switch_consumed_id: None,
             lineage_descent_disposition: None,
             cache_ttl: None,
-            ordinal_continuation_base: meta.ordinal_continuation_base,
             history_summarizer: None,
             messages: Some(messages),
             native_messages: None,
@@ -3046,10 +3120,8 @@ fn apply_once(
     ctx: &ProducerContext<'_>,
     estimate_tokens: impl Fn(&str) -> usize + Copy,
     output_cache: Option<&Mutex<SerializedOutputCache>>,
-    boundary_divergence_retry: bool,
-    boundary_divergence_detected: &mut bool,
+    mut coverage_row_version: Option<u64>,
 ) -> Result<TransformWithProjection, TransformError> {
-    *boundary_divergence_detected = false;
     if !ctx.compaction_enabled {
         return apply_additive_only(store, req, ctx, estimate_tokens);
     }
@@ -3131,8 +3203,13 @@ fn apply_once(
         lineage_state.disposition = Some(outcome.disposition.as_str());
         lineage_state.ordinal_base = outcome.prior_last_ordinal;
         lineage_state.force_hard = outcome.materialization_required;
-        if let Some(base) = lineage_state.ordinal_base {
-            rebased_req = rebase_descent_ordinals(ingress_req, base)?;
+        if lineage_state.ordinal_base.is_some() {
+            // The descent moved the continuation base the window's ordinals derive from.
+            let (row_version, rebased) = resolve_attempt(store, ingress_req.request)?;
+            coverage_row_version = row_version;
+            if let Cow::Owned(rebased) = rebased {
+                rebased_req = Some(rebased);
+            }
         }
     }
     let rebased_ingress = rebased_req.as_ref().map(normalize_synthetic_todo_ingress);
@@ -3202,6 +3279,13 @@ fn apply_once(
     timings.store_channel1 = transform_snapshot.timings.channel1_ms;
     timings.store_overlay_frontier = transform_snapshot.timings.overlay_frontier_ms;
     let mut loaded = transform_snapshot.loaded;
+    if loaded.row_version != coverage_row_version {
+        return Err(TransformError::Store(MemoryStoreError::CasConflict {
+            expected: coverage_row_version,
+            found: loaded.row_version.unwrap_or(0),
+        }));
+    }
+    let coverage = req.coverage.as_deref().expect("the request was resolved");
     let overlay_frontier = transform_snapshot.overlay_frontier;
     let transition_detection_started_at = Instant::now();
     let transition_shapes = renderer_transition_shapes(
@@ -3226,7 +3310,11 @@ fn apply_once(
         .as_deref()
         .and_then(split_block_id)
         .map(|(mid, _)| mid);
-    if let Some(base) = loaded.meta.ordinal_continuation_base {
+    if let Some(base) = loaded
+        .meta
+        .ordinal_continuation_base
+        .filter(|_| coverage.resolved.resolution == crate::window_coverage::Resolution::FirstPass)
+    {
         let expected_boundary = base.checked_add(1).ok_or_else(|| {
             TransformError::LineageProtocol(
                 "durable ordinal continuation base overflow".to_string(),
@@ -3311,44 +3399,20 @@ fn apply_once(
         Vec::new()
     };
 
-    let coverage_resolve_started_at = Instant::now();
-    let (boundary_state, trim_mismatch) =
-        resolve_boundary_state(store, req, &loaded.core, &loaded.meta, &live)?;
-    timings.coverage_resolve += elapsed_ms(coverage_resolve_started_at);
-    let boundary_present = boundary_state.is_present();
+    // Revert through no anchor enters the pending-rewrite pass-through (spec D10 interim).
+    let boundary_present = !loaded.core.boundary_id.is_empty()
+        && live
+            .iter()
+            .any(|block| block.id() == loaded.core.boundary_id);
     let boundary_token = if boundary_present {
         loaded.core.boundary_id.clone()
     } else {
         "-".to_string()
     };
-
-    let mut has_history_segments_cache: Option<bool> = None;
-    let mut pending_rewrite_absent_shape = false;
-    if !boundary_present {
-        let needs_lineage_check = loaded.meta.pending_rewrite.is_some()
-            || !loaded.core.boundary_id.is_empty()
-            || loaded.meta.coverage_ordinal.is_some()
-            || {
-                let has_history_segments = store.has_history_segments(&req.session_id)?;
-                has_history_segments_cache = Some(has_history_segments);
-                has_history_segments
-            };
-        if needs_lineage_check {
-            // Only the oldest row decides the absent shape, so this reads the set's two ends,
-            // not the history.
-            let oldest = store
-                .history_segment_ends(&req.session_id)?
-                .map(|(oldest, _)| oldest);
-            let has_history_segments = oldest.is_some();
-            has_history_segments_cache = Some(has_history_segments);
-            pending_rewrite_absent_shape = loaded.row_version.is_some()
-                && has_durable_lineage(&loaded.core, &loaded.meta, has_history_segments)
-                && no_revert_prefix_survives(
-                    oldest.as_ref().map(|o| o.end_message_id.as_str()),
-                    &live,
-                );
-        }
-    }
+    let pending_rewrite_absent_shape = coverage.resolved.resolution
+        == crate::window_coverage::Resolution::Revert {
+            keep_through_seq: None,
+        };
 
     if pending_rewrite_absent_shape && loaded.meta.anchor_block_id.is_none() {
         let fingerprint = absent_shape_fingerprint(&live);
@@ -3425,7 +3489,6 @@ fn apply_once(
                     .reasoning_cleared_through_tag
                     .max(next_meta.reasoning_cleared_through_ordinal),
                 committed: fingerprint_changed,
-                trim_mismatch,
                 messages: passthrough_messages,
                 first_divergence,
                 surface_state,
@@ -3524,7 +3587,6 @@ fn apply_once(
                 .reasoning_cleared_through_tag
                 .max(meta.reasoning_cleared_through_ordinal),
             committed: true,
-            trim_mismatch,
             messages: passthrough_messages,
             first_divergence,
             surface_state,
@@ -3614,71 +3676,9 @@ fn apply_once(
     } else {
         usage_percentage
     };
-    let fallback_tail_allowance = 0;
-    let mut divergence_candidate = if req.is_subagent {
-        None
-    } else {
-        detect_boundary_divergence_candidate(
-            store,
-            &req.session_id,
-            &loaded.meta,
-            &live,
-            fallback_tail_allowance,
-        )?
-    };
-    let mut divergence_inputs_moved = false;
-    if divergence_candidate.is_some() && !boundary_divergence_retry {
-        let revalidated = revision_signal_for_context(
-            store,
-            ctx.note_project_path,
-            &req.session_id,
-            loaded.meta.user_profile_version,
-            ctx.memory_enabled,
-            Some(&mut m1_revision_read_timings),
-            ctx,
-        )?;
-        if post_end_revision_inputs_moved(&m1_signal, &revalidated) {
-            divergence_candidate = None;
-            divergence_inputs_moved = true;
-        }
-        m1_signal = revalidated;
-    }
-    let history_segment_revision_matches = loaded
-        .meta
-        .m1_history_segment_seq
-        .map_or(m1_signal.revision == loaded.meta.m1_revision, |applied| {
-            applied == m1_signal.max_history_segment_seq
-        });
-    let active_legitimate_publication_window = ctx.history_summarizer_active || ctx.wrapup_active;
-    let mut boundary_divergence_pending_count =
-        if req.is_subagent || divergence_inputs_moved || active_legitimate_publication_window {
-            loaded.meta.boundary_divergence_pending_count
-        } else if divergence_candidate.is_some() {
-            if boundary_divergence_retry || history_segment_revision_matches {
-                0
-            } else {
-                loaded
-                    .meta
-                    .boundary_divergence_pending_count
-                    .saturating_add(1)
-                    .min(BOUNDARY_DIVERGENCE_PENDING_PASS_LIMIT)
-            }
-        } else {
-            0
-        };
-    let boundary_divergence_recut = divergence_candidate.filter(|_| {
-        boundary_divergence_retry
-            || history_segment_revision_matches
-            || (!active_legitimate_publication_window
-                && boundary_divergence_pending_count >= BOUNDARY_DIVERGENCE_PENDING_PASS_LIMIT)
-    });
-    if boundary_divergence_recut.is_some() && !active_legitimate_publication_window {
-        boundary_divergence_pending_count = 0;
-    }
     let mut current_m1_digest = m1_signal.revision;
     let history_segment_seq_changed_since_meta = loaded.meta.initialized
         && m1_signal.max_history_segment_seq != meta_coverage_history_segment_seq(&loaded.meta);
-    *boundary_divergence_detected = boundary_divergence_recut.is_some();
     let memory_gate_digest_transition = !ctx.memory_enabled
         && !loaded.meta.memory_disabled
         && current_m1_digest != loaded.meta.m1_revision;
@@ -3756,14 +3756,8 @@ fn apply_once(
         scheduler_outcome.pass = scheduler::PassDecision::Execute;
         scheduler_outcome.deferred_execute = None;
     }
-    let first_fold_due = if loaded.core.boundary_id.is_empty() {
-        match has_history_segments_cache {
-            Some(value) => value,
-            None => store.has_history_segments(&req.session_id)?,
-        }
-    } else {
-        false
-    };
+    let first_fold_due =
+        loaded.core.boundary_id.is_empty() && store.has_history_segments(&req.session_id)?;
     let (render_config_changed, identity_observed, coordinator_identity) =
         render_config_change(&loaded.meta, req, &effective_render_config, transition_due);
     let reconcile_hard_due = loaded.core.reconcile_pending && !boundary_present;
@@ -3791,7 +3785,6 @@ fn apply_once(
         soft_refresh_pending: loaded.meta.soft_refresh_pending,
         render_config_changed,
         first_fold_due,
-        boundary_divergence_recut: boundary_divergence_recut.is_some(),
         idle_ttl_fired: scheduler_outcome.idle_ttl_fired,
         system_absorb_hard_due,
         external_revision_changed,
@@ -4032,9 +4025,6 @@ fn apply_once(
     if lineage_state.force_hard {
         materialize_reason = Some(MaterializeReason::LineageDescent);
     }
-    if boundary_divergence_recut.is_some() {
-        materialize_reason = Some(MaterializeReason::BoundaryDivergenceRecut);
-    }
     if transition_due {
         materialize_reason = Some(MaterializeReason::RendererTransition);
     }
@@ -4046,7 +4036,6 @@ fn apply_once(
     let mut meta = loaded.meta.clone();
     timings.state_clone = elapsed_ms(state_clone_started_at);
     let state_evolution_started_at = Instant::now();
-    meta.boundary_divergence_pending_count = boundary_divergence_pending_count;
     if !identity_observed && coordinator_identity {
         meta.last_provider_id = req.provider_id.clone().unwrap_or_default();
         meta.last_model_key = req.model_key.clone().unwrap_or_default();
@@ -4283,23 +4272,22 @@ fn apply_once(
                     )));
                 }
 
-                if let Some(coverage_end) = comp.coverage_ordinal {
+                if comp.coverage_ordinal.is_some() {
                     let minted = comp.boundary_id.as_str();
-                    validate_live_boundary_ordinal(minted, coverage_end, &live)?;
-                    if minted.is_empty()
-                        || !boundary_available(
-                            minted,
-                            &live,
-                            &boundary_state,
-                            req.declared_trim.as_ref(),
-                        )
-                    {
+                    if minted.is_empty() || !live.iter().any(|block| block.id() == minted) {
                         if loaded.core.reconcile_pending {
-                            // The declared exception to bounded pass reads (spec C3): a revert
-                            // truncation reads the history it may remove, O(removed history).
-                            let history_segments = store.load_history_segments(&req.session_id)?;
-                            let keep_through_seq =
-                                surviving_revert_prefix_seq(&history_segments, &live);
+                            // A revert keeps history through the effective anchor.
+                            let keep_through_seq = coverage
+                                .resolved
+                                .anchor
+                                .as_ref()
+                                .map(|anchor| anchor.sequence)
+                                .ok_or_else(|| {
+                                    TransformError::BoundaryNotPresent(format!(
+                                        "fold minted absent anchor {minted:?} and the window \
+                                         declares no surviving anchor to re-cut to"
+                                    ))
+                                })?;
                             let outcome = store.truncate_history_segments_for_revert(
                                 &req.session_id,
                                 keep_through_seq,
@@ -4369,16 +4357,10 @@ fn apply_once(
                                 )));
                             }
 
-                            if let Some(coverage_end) = comp.coverage_ordinal {
+                            if comp.coverage_ordinal.is_some() {
                                 let reminted = comp.boundary_id.as_str();
-                                validate_live_boundary_ordinal(reminted, coverage_end, &live)?;
                                 if reminted.is_empty()
-                                    || !boundary_available(
-                                        reminted,
-                                        &live,
-                                        &boundary_state,
-                                        req.declared_trim.as_ref(),
-                                    )
+                                    || !live.iter().any(|block| block.id() == reminted)
                                 {
                                     return Err(TransformError::BoundaryNotPresent(format!(
                                         "re-cut kept history_segments through sequence {keep_through_seq}, \
@@ -4565,17 +4547,9 @@ fn apply_once(
                         )));
                     }
 
-                    if let Some(coverage_end) = comp.coverage_ordinal {
+                    if comp.coverage_ordinal.is_some() {
                         let minted = comp.boundary_id.as_str();
-                        validate_live_boundary_ordinal(minted, coverage_end, &live)?;
-                        if minted.is_empty()
-                            || !boundary_available(
-                                minted,
-                                &live,
-                                &boundary_state,
-                                req.declared_trim.as_ref(),
-                            )
-                        {
+                        if minted.is_empty() || !live.iter().any(|block| block.id() == minted) {
                             return Err(TransformError::BoundaryNotPresent(format!(
                                 "fold minted anchor {minted:?} from the folded history_segment's \
                               end_message_id, but no live block carries that id; the anchor \
@@ -4676,22 +4650,14 @@ fn apply_once(
                             coverage_end
                         )));
                     }
-                    if let Some((id, coverage_end)) = m1.new_coverage.as_ref() {
-                        validate_live_boundary_ordinal(id, *coverage_end, &live)?;
-                        if id.is_empty()
-                            || !boundary_available(
-                                id,
-                                &live,
-                                &boundary_state,
-                                req.declared_trim.as_ref(),
-                            )
-                        {
-                            return Err(TransformError::BoundaryNotPresent(format!(
-                                "coverage-extending delta advanced the anchor to {id:?}, but no \
+                    if let Some((id, _)) = m1.new_coverage.as_ref()
+                        && (id.is_empty() || !live.iter().any(|block| block.id() == id))
+                    {
+                        return Err(TransformError::BoundaryNotPresent(format!(
+                            "coverage-extending delta advanced the anchor to {id:?}, but no \
                          live block carries that id; the anchor must be the flat block id \
                          (`<mid>#<index>`) of the last covered block"
-                            )));
-                        }
+                        )));
                     }
                     core.step(PassInput {
                         proposed: cache_stability::Action::Soft,
@@ -4763,16 +4729,6 @@ fn apply_once(
             ctx.execute_threshold_percentage,
             estimate_tokens,
         ));
-    }
-    if boundary_divergence_reset_allowed(
-        is_bust_pass,
-        active_legitimate_publication_window,
-        divergence_candidate.is_none(),
-        divergence_inputs_moved,
-        history_segment_revision_matches,
-        boundary_or_coverage_state_moved(&loaded.core, &core, &loaded.meta, &meta),
-    ) {
-        meta.boundary_divergence_pending_count = 0;
     }
     if lineage_anchor_failure {
         core.reconcile_pending = true;
@@ -5230,15 +5186,6 @@ fn apply_once(
             re_adoption.mid, re_adoption.old_hash_prefix, re_adoption.new_hash_prefix
         );
     }
-    if let Some(divergence) = boundary_divergence_recut {
-        eprintln!(
-            "daemon: boundary_divergence_recut session={} old_coverage={} new_coverage={} live_tail_allowance={}",
-            req.session_id,
-            divergence.old_coverage,
-            meta.coverage_ordinal.unwrap_or(divergence.new_coverage),
-            divergence.live_tail_allowance,
-        );
-    }
     if let Some(first_divergence) = &first_divergence {
         let detail = serde_json::to_string(first_divergence).expect("divergence is serializable");
         eprintln!(
@@ -5264,8 +5211,6 @@ fn apply_once(
         projection,
         scheduler_pass: scheduler_outcome.pass,
         pass_observation,
-        boundary_state,
-        trim_mismatch,
         revert_epoch: meta.revert_epoch,
         reasoning_watermark: meta
             .reasoning_cleared_through_tag
@@ -5286,12 +5231,11 @@ fn apply_once(
             row_version,
             surface_state,
             committed: commit_required,
-            coverage_ordinal: meta.coverage_ordinal,
+            boundary: None,
             project_memory: meta.project_memory.clone(),
             lineage_switch_consumed_id: lineage_state.acknowledge_edge,
             lineage_descent_disposition: lineage_state.disposition.map(str::to_string),
             cache_ttl: None,
-            ordinal_continuation_base: meta.ordinal_continuation_base,
             history_summarizer: None,
             messages: Some(wire_messages),
             native_messages: None,
@@ -5757,7 +5701,6 @@ struct ActivationGateInputs {
     soft_refresh_pending: bool,
     render_config_changed: bool,
     first_fold_due: bool,
-    boundary_divergence_recut: bool,
     idle_ttl_fired: bool,
     system_absorb_hard_due: bool,
     external_revision_changed: bool,
@@ -5775,7 +5718,6 @@ struct ActivationGates {
 /// The one definition of the must-not-wait set. A hard fold classifies `HARD` before the bust gate is read; the veto holds only an ordinary Execute pass while a run is live, never one a hard fold, an emergency arm, an explicit flush, a render-config change, a reconcile, or a first render forces.
 fn activation_gates(input: &ActivationGateInputs) -> ActivationGates {
     let hard_fold_requested = input.first_fold_due
-        || input.boundary_divergence_recut
         || input.idle_ttl_fired
         || input.system_absorb_hard_due
         || input.external_revision_changed
@@ -6145,13 +6087,6 @@ fn is_uncovered_leading_system(message: &IngressMessage, meta: &ModuleMeta) -> b
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct BoundaryDivergenceRecut {
-    old_coverage: u64,
-    new_coverage: u64,
-    live_tail_allowance: u64,
-}
-
 fn protected_tail_floor_ordinal(
     live: &[&FlatBlock],
     context_limit: f64,
@@ -6181,79 +6116,6 @@ fn protected_tail_floor_ordinal(
         }
     }
     floor_ordinal.max(1)
-}
-
-fn post_end_revision_inputs_moved(before: &M1RevisionSignal, after: &M1RevisionSignal) -> bool {
-    before.max_history_segment_seq != after.max_history_segment_seq
-        || before.revision != after.revision
-}
-
-fn boundary_or_coverage_state_moved(
-    before_core: &CoreState,
-    after_core: &CoreState,
-    before_meta: &ModuleMeta,
-    after_meta: &ModuleMeta,
-) -> bool {
-    before_core.boundary_id != after_core.boundary_id
-        || before_meta.coverage_ordinal != after_meta.coverage_ordinal
-        || before_meta.coverage_start_ordinal != after_meta.coverage_start_ordinal
-        || before_meta.folded_history_segment_seq != after_meta.folded_history_segment_seq
-}
-
-fn boundary_divergence_reset_allowed(
-    is_bust_pass: bool,
-    active_legitimate_publication_window: bool,
-    divergence_converged: bool,
-    divergence_inputs_moved: bool,
-    history_segment_revision_matches: bool,
-    boundary_or_coverage_moved: bool,
-) -> bool {
-    is_bust_pass
-        && !active_legitimate_publication_window
-        && (boundary_or_coverage_moved
-            || (!divergence_inputs_moved
-                && (divergence_converged || history_segment_revision_matches)))
-}
-
-fn detect_boundary_divergence_candidate(
-    store: &MemoryStore,
-    session_id: &str,
-    meta: &ModuleMeta,
-    live: &[&FlatBlock],
-    fallback_tail_allowance: u64,
-) -> Result<Option<BoundaryDivergenceRecut>, MemoryStoreError> {
-    if !meta.initialized {
-        return Ok(None);
-    }
-
-    let max_end = store.max_history_segment_end_ordinal(session_id)?;
-    let Ok(new_coverage) = u64::try_from(max_end) else {
-        return Ok(None);
-    };
-    let old_coverage = meta.coverage_ordinal.unwrap_or(0);
-    let newest_live = live
-        .iter()
-        .map(|block| block.ordinal)
-        .max()
-        .unwrap_or(old_coverage);
-
-    let live_tail_allowance =
-        meta.publication_floor_ordinal
-            .map_or(fallback_tail_allowance, |protected_tail_floor| {
-                newest_live
-                    .checked_sub(protected_tail_floor)
-                    .map_or(0, |span| span.saturating_add(1))
-            });
-    let coverage_gap = new_coverage.saturating_sub(old_coverage);
-    if coverage_gap <= live_tail_allowance {
-        return Ok(None);
-    }
-
-    Ok(Some(BoundaryDivergenceRecut {
-        old_coverage,
-        new_coverage,
-        live_tail_allowance,
-    }))
 }
 
 /// The first covered ordinal and the coverage end, from the set's oldest and newest rows.
@@ -6761,162 +6623,6 @@ fn first_uncovered_live_block<'a>(
     Ok(candidates().find(|block| key(block) == lowest))
 }
 
-fn validate_live_boundary_ordinal(
-    boundary_id: &str,
-    expected_ordinal: u64,
-    live: &[&FlatBlock],
-) -> Result<(), TransformError> {
-    let Some(block) = live.iter().find(|block| block.id() == boundary_id) else {
-        return Ok(());
-    };
-    if block.ordinal() == expected_ordinal {
-        return Ok(());
-    }
-    Err(TransformError::BoundaryOrdinalMismatch(format!(
-        "anchor {boundary_id:?} lives at ordinal {}, but the tail history_segment claims {expected_ordinal}",
-        block.ordinal(),
-    )))
-}
-
-fn boundary_available(
-    id: &str,
-    live: &[&FlatBlock],
-    boundary_state: &BoundaryState,
-    declared: Option<&DeclaredTrim>,
-) -> bool {
-    live.iter().any(|block| block.id() == id)
-        || matches!(boundary_state, BoundaryState::DeclaredTrimValidated)
-            && declared.is_some_and(|declared| declared.flat_boundary_id == id)
-}
-
-fn resolve_boundary_state(
-    store: &MemoryStore,
-    req: &TransformIngress<'_>,
-    core: &CoreState,
-    meta: &ModuleMeta,
-    live: &[&FlatBlock],
-) -> Result<(BoundaryState, Option<TrimMismatch>), TransformError> {
-    if !core.boundary_id.is_empty() && live.iter().any(|block| block.id() == core.boundary_id) {
-        if let Some(expected_ordinal) = meta.coverage_ordinal {
-            validate_live_boundary_ordinal(core.boundary_id.as_str(), expected_ordinal, live)?;
-        }
-        return Ok((BoundaryState::LivePresent, None));
-    }
-
-    let Some(declared) = req.declared_trim.as_ref() else {
-        return Ok((BoundaryState::Absent, None));
-    };
-
-    if declared.flat_boundary_id != core.boundary_id {
-        return Ok((
-            BoundaryState::Absent,
-            Some(trim_mismatch(
-                "boundary_identity",
-                format!(
-                    "declared boundary {:?} did not match durable boundary {:?}",
-                    declared.flat_boundary_id, core.boundary_id
-                ),
-            )),
-        ));
-    }
-
-    if meta.coverage_ordinal != Some(declared.boundary_absolute_ordinal) {
-        return Ok((
-            BoundaryState::Absent,
-            Some(trim_mismatch(
-                "coverage_ordinal",
-                format!(
-                    "declared boundary ordinal {} did not match durable coverage {:?}",
-                    declared.boundary_absolute_ordinal, meta.coverage_ordinal
-                ),
-            )),
-        ));
-    }
-
-    match store.newest_history_segment(&req.session_id)?.as_ref() {
-        Some(tail)
-            if tail.end_message_id == declared.flat_boundary_id
-                && tail.end_message == declared.boundary_absolute_ordinal as i64
-                && split_block_id(&tail.end_message_id)
-                    .map(|(mid, _)| mid == declared.boundary_bare_message_id)
-                    .unwrap_or(false) => {}
-        Some(tail) => {
-            return Ok((
-                BoundaryState::Absent,
-                Some(trim_mismatch(
-                    "tail_history_segment",
-                    format!(
-                        "tail history_segment ended at id {:?} ordinal {}, not declared id {:?} bare {:?} ordinal {}",
-                        tail.end_message_id,
-                        tail.end_message,
-                        declared.flat_boundary_id,
-                        declared.boundary_bare_message_id,
-                        declared.boundary_absolute_ordinal
-                    ),
-                )),
-            ));
-        }
-        None => {
-            return Ok((
-                BoundaryState::Absent,
-                Some(trim_mismatch(
-                    "tail_history_segment",
-                    "declared trim had no durable tail history_segment".to_string(),
-                )),
-            ));
-        }
-    }
-
-    let first_live_non_system = req
-        .projection
-        .live_messages()
-        .filter(|message| message.ck.role != "system")
-        .map(|message| message.ordinal)
-        .min();
-    if first_live_non_system != Some(declared.next_absolute_ordinal) {
-        return Ok((
-            BoundaryState::Absent,
-            Some(trim_mismatch(
-                "continuity",
-                format!(
-                    "first non-system live ordinal {:?} did not match declared next ordinal {}",
-                    first_live_non_system, declared.next_absolute_ordinal
-                ),
-            )),
-        ));
-    }
-
-    Ok((BoundaryState::DeclaredTrimValidated, None))
-}
-
-fn trim_mismatch(predicate: &'static str, detail: String) -> TrimMismatch {
-    TrimMismatch { predicate, detail }
-}
-
-fn surviving_revert_prefix_seq(
-    history_segments: &[StoredHistorySegment],
-    live: &[&FlatBlock],
-) -> i64 {
-    let live_ids: BTreeSet<&str> = live.iter().map(|block| block.id()).collect();
-    history_segments
-        .iter()
-        .take_while(|history_segment| live_ids.contains(history_segment.end_message_id.as_str()))
-        .map(|history_segment| history_segment.sequence)
-        .last()
-        .unwrap_or(-1)
-}
-
-/// Whether `surviving_revert_prefix_seq` keeps nothing, from the oldest row's end id alone:
-/// the surviving prefix is empty exactly when there is no history or the oldest row's end
-/// block is not live.
-fn no_revert_prefix_survives(oldest_end_message_id: Option<&str>, live: &[&FlatBlock]) -> bool {
-    oldest_end_message_id.is_none_or(|end_id| live.iter().all(|block| block.id() != end_id))
-}
-
-fn has_durable_lineage(core: &CoreState, meta: &ModuleMeta, has_history_segments: bool) -> bool {
-    has_history_segments || !core.boundary_id.is_empty() || meta.coverage_ordinal.is_some()
-}
-
 fn absent_shape_fingerprint(live: &[&FlatBlock]) -> String {
     let mut hasher = Sha256::new();
     for block in live {
@@ -6962,7 +6668,6 @@ struct PendingPassthroughArgs {
     revert_epoch: u64,
     reasoning_watermark: u64,
     committed: bool,
-    trim_mismatch: Option<TrimMismatch>,
     messages: Vec<ServedMessage>,
     first_divergence: Option<FirstDivergence>,
     surface_state: SurfaceState,
@@ -7012,7 +6717,6 @@ fn pending_passthrough_result(args: PendingPassthroughArgs) -> TransformWithProj
         revert_epoch,
         reasoning_watermark,
         committed,
-        trim_mismatch,
         messages,
         first_divergence,
         surface_state,
@@ -7037,8 +6741,6 @@ fn pending_passthrough_result(args: PendingPassthroughArgs) -> TransformWithProj
         projection,
         scheduler_pass: scheduler::PassDecision::Defer,
         pass_observation,
-        boundary_state: BoundaryState::Absent,
-        trim_mismatch,
         revert_epoch,
         reasoning_watermark,
         mutation_exempt_mid,
@@ -12566,6 +12268,75 @@ pub(crate) mod tests {
         )
     }
 
+    /// What the plugin sends for a request written with revision 2 ordinals, when the test
+    /// leaves `boundary` null: the window from the newest anchor present (the rendered boundary
+    /// first), declared, and with a filler message at every ordinal the test skipped, so the
+    /// daemon derives the ordinals the test wrote. A test that declares its own boundary, a
+    /// descent, or a request without increasing positive ordinals (a revision 3 body carries
+    /// none) is sent as written.
+    pub(crate) fn plugin_window(store: &MemoryStore, req: &TransformRequest) -> TransformRequest {
+        let mut window = req.clone();
+        let live = |message: &IngressMessage| {
+            !message.ck.meta.synthetic && !super::carries_synthetic_todo(message)
+        };
+        let ordinals = req
+            .messages
+            .iter()
+            .filter(|message| live(message))
+            .map(|message| message.ordinal)
+            .collect::<Vec<_>>();
+        let increasing = ordinals
+            .iter()
+            .all(|ordinal| (1..1 << 20).contains(ordinal))
+            && ordinals.windows(2).all(|pair| pair[0] < pair[1]);
+        if req.boundary != Some(None) || req.lineage_switched || !increasing {
+            return window;
+        }
+        let snapshot = store.coverage_snapshot(&req.session_id, None, &[]).unwrap();
+        let position = |end_id: &str| {
+            let (mid, _) = split_block_id(end_id)?;
+            req.messages.iter().position(|message| message.mid == mid)
+        };
+        let anchor = snapshot.rendered.as_ref().and_then(|rendered| {
+            store
+                .coverage_anchor_page(&req.session_id, i64::MIN..=i64::MAX, 4_096)
+                .unwrap()
+                .into_iter()
+                .find_map(|(sequence, end_id)| {
+                    let at = position(&end_id)?;
+                    let (mid, _) = split_block_id(&end_id)?;
+                    let end = store
+                        .load_history_segments(&req.session_id)
+                        .unwrap()
+                        .into_iter()
+                        .find(|segment| segment.sequence == sequence)?
+                        .end_message as u64;
+                    (req.messages[at].ordinal == end || rendered.sequence == sequence)
+                        .then(|| (at, end, mid.to_string(), sequence))
+                })
+        });
+        let (start, mut next) = match anchor {
+            Some((at, end, mid, sequence)) => {
+                window.boundary = Some(Some(BoundaryAnchor { mid, sequence }));
+                (at, end)
+            }
+            None => (0, snapshot.continuation_base.unwrap_or(0) + 1),
+        };
+        let mut messages = Vec::new();
+        for message in &req.messages[start..] {
+            if live(message) {
+                while next < message.ordinal {
+                    messages.push(Arc::new(item(&format!("pad-{next}"), next, "pad")));
+                    next += 1;
+                }
+                next = next.max(message.ordinal) + 1;
+            }
+            messages.push(Arc::clone(message));
+        }
+        window.messages = messages.into_iter().collect();
+        window
+    }
+
     pub(crate) fn item(id: &str, ordinal: u64, bytes: &str) -> IngressMessage {
         IngressMessage {
             mid: id.to_string(),
@@ -13101,7 +12872,9 @@ pub(crate) mod tests {
             auto_search_score_threshold: DEFAULT_AUTO_SEARCH_SCORE_THRESHOLD,
             auto_search_min_prompt_chars: 0,
             kind: "transform".to_string(),
-            v: 2,
+            v: Value::from(TRANSFORM_REVISION),
+            boundary: Some(None),
+            coverage: None,
             serializer_profile: "owned-llmrunner".to_string(),
             session_id: session.to_string(),
             render_config: cfg.to_string(),
@@ -13139,7 +12912,6 @@ pub(crate) mod tests {
             detected_context_limit: 0,
             detected_context_limit_model_key: None,
             history_budget_tokens: None,
-            declared_trim: None,
             lineage_switched: false,
             descent_edge_id: 0,
             prior_conversation_key: String::new(),
@@ -13174,124 +12946,6 @@ pub(crate) mod tests {
             importance: 50,
             ..Default::default()
         }
-    }
-
-    #[test]
-    fn no_revert_prefix_survives_matches_the_full_prefix_scan() {
-        let request = req(
-            "ses",
-            "cfg0",
-            vec![item("a", 1, "a"), item("b", 2, "b"), item("c", 3, "c")],
-        );
-        let ingress = normalize_synthetic_todo_ingress(&request);
-        let projection = ingress.projection.project().unwrap();
-        let live: Vec<&FlatBlock> = projection.blocks.iter().collect();
-        let sets: [&[StoredHistorySegment]; 5] = [
-            &[],
-            &[comp(0, 1, 1, "a", "S")],
-            &[comp(0, 1, 1, "gone", "S")],
-            &[comp(0, 1, 1, "gone", "S"), comp(1, 2, 2, "b", "S")],
-            &[comp(0, 1, 1, "a", "S"), comp(1, 2, 2, "gone", "S")],
-        ];
-        let expected = [true, false, true, true, false];
-        for (set, expected) in sets.into_iter().zip(expected) {
-            let oldest = set.first().map(|row| row.end_message_id.as_str());
-            assert_eq!(
-                no_revert_prefix_survives(oldest, &live),
-                expected,
-                "{set:?}"
-            );
-            assert_eq!(
-                surviving_revert_prefix_seq(set, &live) < 0,
-                expected,
-                "{set:?}"
-            );
-        }
-    }
-
-    fn astro_history_segments() -> Vec<StoredHistorySegment> {
-        let mut start = 1i64;
-        let mut history_segments = Vec::with_capacity(48);
-        for sequence in 0..48i64 {
-            let end = match sequence {
-                0 => 200,
-                1 => 425,
-                _ => {
-                    let slots = 48 - sequence;
-                    let remaining = 2_400 - start + 1;
-                    let size = (remaining + slots - 1) / slots;
-                    start + size - 1
-                }
-            };
-            history_segments.push(comp(
-                sequence,
-                start,
-                end,
-                &format!("m{end}"),
-                &format!("ASTRO-C{sequence}"),
-            ));
-            start = end + 1;
-        }
-        assert_eq!(history_segments.len(), 48);
-        assert_eq!(history_segments.last().unwrap().end_message, 2_400);
-        history_segments
-    }
-
-    fn astro_request(session_id: &str, tail_end: u64) -> TransformRequest {
-        let history_segments = astro_history_segments();
-        let mut messages = history_segments
-            .iter()
-            .map(|history_segment| {
-                let end = history_segment.end_message as u64;
-                item(&format!("m{end}"), end, &format!("raw anchor {end}"))
-            })
-            .collect::<Vec<_>>();
-        messages.extend((2_401..=tail_end).map(|ordinal| {
-            item(
-                &format!("m{ordinal}"),
-                ordinal,
-                &format!("live tail {ordinal}"),
-            )
-        }));
-        req(session_id, "cfg0", messages)
-    }
-
-    pub(crate) fn seed_astro_divergence(
-        store: &MemoryStore,
-        session_id: &str,
-        tail_end: u64,
-    ) -> TransformRequest {
-        seed_astro_divergence_from_request(store, astro_request(session_id, tail_end))
-    }
-
-    fn seed_astro_divergence_from_request(
-        store: &MemoryStore,
-        request: TransformRequest,
-    ) -> TransformRequest {
-        store
-            .replace_history_segments(&request.session_id, &astro_history_segments())
-            .unwrap();
-        let boot = run(store, &request, &spine());
-        assert_eq!(boot.action, "HARD");
-        assert_eq!(boot.coverage_ordinal, Some(2_400));
-        assert_eq!(boot.boundary_id, "m2400#0");
-
-        let loaded = store.load(&request.session_id).unwrap();
-        let mut core = loaded.core.clone();
-        core.boundary_id = "m425#0".to_string();
-        let covered_target = astro_history_segments()[2].end_message_id.clone();
-        core.frozen_units
-            .push(red_unit(&covered_target, "drop", "[dropped stale]"));
-        let mut meta = loaded.meta.clone();
-        meta.coverage_ordinal = Some(425);
-        meta.coverage_start_ordinal = Some(1);
-        meta.coverage_history_segment_seq = Some(1);
-        meta.folded_history_segment_seq = 1;
-        meta.publication_floor_ordinal = Some(2_401);
-        store
-            .commit(&request.session_id, loaded.row_version, &core, &meta)
-            .unwrap();
-        request
     }
 
     /// The producer context uses a throwaway project directory with no documentation files, so its docs are empty.
@@ -13602,7 +13256,6 @@ pub(crate) mod tests {
 
     fn unstamped_opencode_tool_pair(mid: &str, ordinal: u64, call_id: &str) -> IngressMessage {
         let native_message = json!({
-            "absolute_ordinal": ordinal,
             "info": { "id": mid, "role": "assistant" },
             "parts": [{
                 "type": "tool",
@@ -13623,6 +13276,7 @@ pub(crate) mod tests {
             .iter()
             .map(|block| wire::WireBlock::bare(block.kind().clone()))
             .collect();
+        projected.ordinal = ordinal;
         projected
     }
 
@@ -13780,7 +13434,7 @@ pub(crate) mod tests {
             Some(inserted_json.as_str())
         );
 
-        let removed_request = req(session, "cfg0", vec![item("a", 0, "a"), item("c", 3, "c")]);
+        let removed_request = req(session, "cfg0", vec![item("a", 0, "a"), item("c", 1, "c")]);
         let removed = run(&store, &removed_request, &spine());
         let removed_divergence = removed.first_divergence.as_ref().unwrap();
         assert_eq!(removed_divergence.kind, divergence::DivergenceKind::Removed);
@@ -15436,10 +15090,10 @@ pub(crate) mod tests {
             &pctx("git:proj", "/nonexistent-docs", 0),
         )
         .unwrap_err();
-        // Projection rejects the repeated mid before any block id is minted.
+        // Window resolution refuses the repeated mid before any snapshot is read (WP-P01).
         assert!(matches!(
             dup,
-            TransformError::Wire(WireError::DuplicateMid(mid)) if mid == "same"
+            TransformError::InvalidWindow(message) if message.contains("\"same\"")
         ));
 
         let dir = tempfile::tempdir().unwrap();
@@ -16672,14 +16326,16 @@ pub(crate) mod tests {
         let dir = tempfile::tempdir().unwrap();
         let s = store(dir.path());
         let ctx = smart_pctx();
+        // The covered arc ends before the anchor, so a window cut at the anchor never splits it.
         let mut messages = todowrite_arc("a", 1);
-        s.replace_history_segments("ses", &[comp(1, 1, 2, "a_result", "SUMMARY")])
+        messages.push(item("c3", 3, "covered"));
+        s.replace_history_segments("ses", &[comp(1, 1, 3, "c3", "SUMMARY")])
             .unwrap();
         let boot = transform(&s, &req("ses", "cfg0", messages.clone()), &ctx).unwrap();
         assert_eq!(boot.action, "HARD");
-        messages.extend(todowrite_arc("tail_old", 3));
-        messages.extend(todowrite_arc("tail_new", 5));
-        for ordinal in 7..(7 + crate::selection::RECENT_TOOL_SKELETON_WINDOW as u64) {
+        messages.extend(todowrite_arc("tail_old", 4));
+        messages.extend(todowrite_arc("tail_new", 6));
+        for ordinal in 8..(8 + crate::selection::RECENT_TOOL_SKELETON_WINDOW as u64) {
             messages.push(item(&format!("tail-{ordinal}"), ordinal, "tail"));
         }
         let mut loaded = s.load("ses").unwrap();
@@ -20422,7 +20078,7 @@ pub(crate) mod tests {
             remat.boundary_id, "a#0",
             "the surviving prefix is re-minted"
         );
-        assert_eq!(remat.coverage_ordinal, Some(1));
+        assert_eq!(s.load("ses").unwrap().meta.coverage_ordinal, Some(1));
         assert!(!remat.reconcile_pending);
         assert_eq!(tail_ids(&remat), vec!["t4"]);
         let loaded = s.load("ses").unwrap();
@@ -20446,7 +20102,7 @@ pub(crate) mod tests {
         let folded_again = run(&s, &req("ses", "cfg0", live_reverted), &spine());
         assert_eq!(folded_again.action, "SOFT");
         assert_eq!(folded_again.boundary_id, "t4#0");
-        assert_eq!(folded_again.coverage_ordinal, Some(2));
+        assert_eq!(s.load("ses").unwrap().meta.coverage_ordinal, Some(2));
         assert_eq!(tail_ids(&folded_again), Vec::<&str>::new());
     }
 
@@ -20503,7 +20159,7 @@ pub(crate) mod tests {
         let before_absent = s.load("ses").unwrap();
         let before_history_segments = s.load_history_segments("ses").unwrap();
 
-        let live_absent = vec![item("t9", 9, "post-revert")];
+        let live_absent = vec![item("t9", 1, "post-revert")];
         let armed = run(&s, &req("ses", "cfg0", live_absent.clone()), &spine());
         assert_eq!(armed.action, "PASSTHROUGH");
         assert!(armed.committed, "arming writes the one durable alarm row");
@@ -20841,678 +20497,6 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn astro_shape_boundary_divergence_recuts_full_history_segment_set_on_first_pass() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = store(dir.path());
-        let request = seed_astro_divergence(&store, "astro-divergence", 2_402);
-
-        let response = run(&store, &request, &spine());
-        assert_eq!(response.action, "HARD");
-        assert_eq!(
-            response.materialize_reason.as_deref(),
-            Some("boundary_divergence_recut")
-        );
-        assert_eq!(response.boundary_id, "m2400#0");
-        assert_eq!(response.coverage_ordinal, Some(2_400));
-        assert_eq!(tail_ids(&response), vec!["m2401", "m2402"]);
-        assert!(m0_bytes(&response).contains("ASTRO-C47"));
-
-        let healed = store.load("astro-divergence").unwrap();
-        assert_eq!(healed.meta.coverage_ordinal, Some(2_400));
-        assert_eq!(healed.meta.coverage_history_segment_seq, Some(47));
-        assert_eq!(healed.meta.folded_history_segment_seq, 47);
-        assert_eq!(healed.core.boundary_id, "m2400#0");
-        let stale_target = astro_history_segments()[2].end_message_id.clone();
-        assert!(
-            !frozen_red_targets(&healed.core).contains(&stale_target),
-            "the HARD recut must apply ordinary frozen-unit GC"
-        );
-    }
-
-    #[test]
-    fn astro_model_switch_keeps_reduced_native_tool_arcs_single_part() {
-        let native_tool_message = json!({
-            "absolute_ordinal": 2_414,
-            "info": {
-                "id": "m2414",
-                "role": "assistant",
-                "providerField": "preserve-assistant-envelope"
-            },
-            "parts": [
-                {
-                    "type": "tool",
-                    "tool": "read",
-                    "callID": "astro-call-a",
-                    "providerField": "preserve-call-a",
-                    "state": {
-                        "status": "completed",
-                        "input": { "path": "a.txt", "detail": "x".repeat(600) },
-                        "output": "A".repeat(2_000)
-                    }
-                },
-                {
-                    "type": "tool",
-                    "tool": "read",
-                    "callID": "astro-call-b",
-                    "providerField": "preserve-call-b",
-                    "state": {
-                        "status": "completed",
-                        "input": { "path": "b.txt", "detail": "y".repeat(600) },
-                        "output": "B".repeat(2_000)
-                    }
-                }
-            ]
-        });
-        let decoded = crate::codec::decode_opencode(std::slice::from_ref(&native_tool_message));
-        let mut tool_message = decoded.messages[0].clone();
-        // The host projects live CK ingress independently of the native sidecar, so it does not carry Rust decoder block-origin stamps.
-        *tool_message.ck.content_mut() = tool_message
-            .ck
-            .content()
-            .iter()
-            .map(|block| wire::WireBlock::bare(block.kind().clone()))
-            .collect();
-
-        let mut request = astro_request("astro-native-tools", 2_416);
-        request.serializer_profile = "opencode-aisdk".to_string();
-        request.provider_id = Some("openai".to_string());
-        request.model_key = Some("openai/gpt-5.6-sol".to_string());
-        request.serve_native = true;
-        request.native_messages = Some(vec![Arc::new(native_tool_message.clone())]);
-        *request
-            .messages
-            .iter_mut()
-            .find(|message| message.mid == "m2414")
-            .expect("ASTRO tail includes m2414") = Arc::new(tool_message);
-
-        let unchanged = crate::codec::encode_opencode_with_session(
-            &[request
-                .messages
-                .iter()
-                .find(|message| message.mid == "m2414")
-                .unwrap()
-                .ck
-                .clone()],
-            &decoded.sidecar,
-            Some(&request.session_id),
-            None,
-        );
-        assert_eq!(
-            serde_json::to_vec(&unchanged).unwrap(),
-            serde_json::to_vec(&vec![native_tool_message.clone()]).unwrap(),
-            "an unreduced host-projected tool message must remain byte-identical"
-        );
-
-        let dir = tempfile::tempdir().unwrap();
-        let store = store(dir.path());
-        let request = seed_astro_divergence_from_request(&store, request);
-        let healed = run(
-            &store,
-            &request,
-            &with_reductions(vec![
-                reduce(
-                    "m2414#0",
-                    "skeleton",
-                    r#"{"detail":"xxxxx…","path":"a.txt"}"#,
-                ),
-                reduce("m2414#1", "drop", "[dropped]"),
-                reduce(
-                    "m2414#2",
-                    "skeleton",
-                    r#"{"detail":"yyyyy…","path":"b.txt"}"#,
-                ),
-                reduce("m2414#3", "drop", "[dropped]"),
-            ]),
-        );
-        assert_eq!(healed.action, "HARD");
-        assert_eq!(
-            healed.materialize_reason.as_deref(),
-            Some("boundary_divergence_recut")
-        );
-        assert_eq!(message_index(&healed, "m2414"), 15);
-
-        let mut anthropic_request = request.clone();
-        anthropic_request.provider_id = Some("anthropic".to_string());
-        anthropic_request.model_key = Some("anthropic/claude-opus-5".to_string());
-        let switched = run(&store, &anthropic_request, &spine());
-        assert_eq!(switched.action, "HARD");
-        assert_eq!(switched.materialize_reason.as_deref(), Some("epoch_change"));
-        assert_eq!(message_index(&switched, "m2414"), 15);
-
-        let served = switched
-            .messages()
-            .iter()
-            .map(|message| (**message).clone())
-            .collect::<Vec<_>>();
-        let native = crate::codec::encode_opencode_with_session(
-            &served,
-            &decoded.sidecar,
-            Some(&anthropic_request.session_id),
-            None,
-        );
-        for message in &native {
-            let tool_ids = message["parts"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .filter(|part| part["type"] == "tool")
-                .map(|part| part["callID"].as_str().unwrap())
-                .collect::<Vec<_>>();
-            let unique_ids = tool_ids.iter().copied().collect::<HashSet<_>>();
-            assert_eq!(
-                tool_ids.len(),
-                unique_ids.len(),
-                "each native assistant message must own unique Anthropic tool_use ids: {tool_ids:?}"
-            );
-        }
-        let assistant = native
-            .iter()
-            .find(|message| message["info"]["id"] == "m2414")
-            .expect("served native ASTRO assistant");
-        let tool_ids = assistant["parts"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .filter(|part| part["type"] == "tool")
-            .map(|part| part["callID"].as_str().unwrap())
-            .collect::<Vec<_>>();
-        assert_eq!(tool_ids, vec!["astro-call-a", "astro-call-b"]);
-        assert!(assistant["parts"].as_array().unwrap().iter().all(|part| {
-            part["state"]["status"] == "completed"
-                && part["state"]["input"]["reduced"] == true
-                && part["state"]["output"] == "[dropped]"
-        }));
-    }
-
-    #[test]
-    fn boundary_divergence_recut_retries_after_interleaved_history_summarizer_publish() {
-        use std::cell::Cell;
-
-        let dir = tempfile::tempdir().unwrap();
-        let store = store(dir.path());
-        let request = seed_astro_divergence(&store, "astro-publish-race", 2_442);
-
-        let loaded = store.load("astro-publish-race").unwrap();
-        let selected_range_identities =
-            vec![memory_store::HistorySummarizerSelectedMessageIdentity {
-                mid: "m2400".to_string(),
-                block_identities: loaded.meta.block_identity_by_mid["m2400"].clone(),
-            }];
-        let generation = memory_store::HistorySegmentSetGeneration::new(47);
-        let predicate = memory_store::HistorySummarizerPublishPredicate {
-            firing_seq: 7,
-            producer_run_id: "race-run".to_string(),
-            chunk_fingerprint: "race-fingerprint".to_string(),
-            selected_range_identities: selected_range_identities.clone(),
-            history_segment_set_generation: generation,
-        };
-        let mut publishing_meta = loaded.meta.clone();
-        publishing_meta.history_summarizer = memory_store::HistorySummarizerDurableState {
-            state: memory_store::HistorySummarizerPhase::Publishing,
-            firing_seq: predicate.firing_seq,
-            chunk_range: Some(memory_store::HistorySummarizerChunkRange {
-                from_ordinal: 2_401,
-                to_ordinal: 2_440,
-            }),
-            chunk_fingerprint: predicate.chunk_fingerprint.clone(),
-            selected_range_identities,
-            producer_session_id: Some("race-producer".to_string()),
-            producer_run_id: Some(predicate.producer_run_id.clone()),
-            fired_at_ms: Some(1),
-            expected_revert_epoch: loaded.meta.revert_epoch,
-            history_segment_set_generation: generation,
-            ..Default::default()
-        };
-        let publish_row_version = store
-            .commit(
-                "astro-publish-race",
-                loaded.row_version,
-                &loaded.core,
-                &publishing_meta,
-            )
-            .unwrap();
-        let published_history_segment = comp(
-            48,
-            2_401,
-            2_440,
-            "m2440",
-            "INTERLEAVED-HISTORY_SUMMARIZER-PUBLISH",
-        );
-        let interleaved = Cell::new(false);
-        let estimate_with_publish = |text: &str| {
-            if !interleaved.replace(true) {
-                store
-                    .publish_history_summarizer_chunk(
-                        memory_store::HistorySummarizerPublishRequest {
-                            session_id: "astro-publish-race",
-                            expected_row_version: Some(publish_row_version),
-                            expected_revert_epoch: loaded.meta.revert_epoch,
-                            predicate: &predicate,
-                            project_path: "git:proj",
-                            history_segments: std::slice::from_ref(&published_history_segment),
-                            events: &[],
-                            primer_candidates: &[],
-                            user_memory_candidates: &[],
-                            publication_floor_ordinal: 2_441,
-                            chunk_transcript: None,
-                            memory_reviewer_nonadmission: None,
-                            memory_reviewer_activation: None,
-                            published_at_ms: 0,
-                        },
-                    )
-                    .unwrap();
-            }
-            tokenizer::estimate_tokens(text)
-        };
-        let response = apply_once_with_estimator(
-            &store,
-            &request,
-            &pctx("git:proj", "/nonexistent-docs", 0),
-            estimate_with_publish,
-            None,
-        )
-        .unwrap()
-        .response;
-
-        assert!(interleaved.get());
-        assert_eq!(response.action, "HARD");
-        assert_eq!(
-            response.materialize_reason.as_deref(),
-            Some("boundary_divergence_recut")
-        );
-        assert_eq!(response.coverage_ordinal, Some(2_440));
-        assert_eq!(response.boundary_id, "m2440#0");
-        let healed = store.load("astro-publish-race").unwrap();
-        assert_eq!(healed.meta.coverage_ordinal, Some(2_440));
-        assert_eq!(healed.meta.folded_history_segment_seq, 48);
-        assert_eq!(
-            store
-                .load_history_segments("astro-publish-race")
-                .unwrap()
-                .len(),
-            49
-        );
-    }
-
-    #[test]
-    fn publication_between_revision_and_history_segment_end_reads_does_not_detect_divergence() {
-        use std::sync::atomic::{AtomicBool, Ordering};
-
-        let dir = tempfile::tempdir().unwrap();
-        let store = store(dir.path());
-        let request = seed_astro_divergence(&store, "astro-torn-read", 2_442);
-        let loaded = store.load("astro-torn-read").unwrap();
-        let selected_range_identities =
-            vec![memory_store::HistorySummarizerSelectedMessageIdentity {
-                mid: "m2400".to_string(),
-                block_identities: loaded.meta.block_identity_by_mid["m2400"].clone(),
-            }];
-        let generation = memory_store::HistorySegmentSetGeneration::new(47);
-        let predicate = memory_store::HistorySummarizerPublishPredicate {
-            firing_seq: 8,
-            producer_run_id: "between-reads-run".to_string(),
-            chunk_fingerprint: "between-reads-fingerprint".to_string(),
-            selected_range_identities: selected_range_identities.clone(),
-            history_segment_set_generation: generation,
-        };
-        let mut publishing_meta = loaded.meta.clone();
-        publishing_meta.history_summarizer = memory_store::HistorySummarizerDurableState {
-            state: memory_store::HistorySummarizerPhase::Publishing,
-            firing_seq: predicate.firing_seq,
-            chunk_range: Some(memory_store::HistorySummarizerChunkRange {
-                from_ordinal: 2_401,
-                to_ordinal: 2_440,
-            }),
-            chunk_fingerprint: predicate.chunk_fingerprint.clone(),
-            selected_range_identities,
-            producer_session_id: Some("between-reads-producer".to_string()),
-            producer_run_id: Some(predicate.producer_run_id.clone()),
-            fired_at_ms: Some(1),
-            expected_revert_epoch: loaded.meta.revert_epoch,
-            history_segment_set_generation: generation,
-            ..Default::default()
-        };
-        let publish_row_version = store
-            .commit(
-                "astro-torn-read",
-                loaded.row_version,
-                &loaded.core,
-                &publishing_meta,
-            )
-            .unwrap();
-        let expected_revert_epoch = loaded.meta.revert_epoch;
-        let published_history_segment = comp(48, 2_401, 2_440, "m2440", "BETWEEN-SIGNAL-READS");
-        let hook_ran = Arc::new(AtomicBool::new(false));
-        let hook_ran_for_publish = Arc::clone(&hook_ran);
-        store.set_before_max_history_segment_end_read_hook(Box::new(move |store| {
-            hook_ran_for_publish.store(true, Ordering::SeqCst);
-            store
-                .publish_history_summarizer_chunk(memory_store::HistorySummarizerPublishRequest {
-                    session_id: "astro-torn-read",
-                    expected_row_version: Some(publish_row_version),
-                    expected_revert_epoch,
-                    predicate: &predicate,
-                    project_path: "git:proj",
-                    history_segments: std::slice::from_ref(&published_history_segment),
-                    events: &[],
-                    primer_candidates: &[],
-                    user_memory_candidates: &[],
-                    publication_floor_ordinal: 2_441,
-                    chunk_transcript: None,
-                    memory_reviewer_nonadmission: None,
-                    memory_reviewer_activation: None,
-                    published_at_ms: 0,
-                })
-                .unwrap();
-        }));
-
-        let response = run(&store, &request, &spine());
-
-        assert!(hook_ran.load(Ordering::SeqCst));
-        assert_eq!(response.action, "SOFT+");
-        assert_ne!(
-            response.materialize_reason.as_deref(),
-            Some("boundary_divergence_recut")
-        );
-        let after = store.load("astro-torn-read").unwrap();
-        assert_eq!(after.meta.coverage_ordinal, Some(425));
-        assert_eq!(after.meta.boundary_divergence_pending_count, 1);
-        assert_eq!(
-            store
-                .max_history_segment_end_ordinal("astro-torn-read")
-                .unwrap(),
-            2_440
-        );
-    }
-
-    #[test]
-    fn boundary_divergence_bust_reset_requires_structural_progress_or_convergence() {
-        let before_core = CoreState {
-            boundary_id: "old#0".to_string(),
-            ..CoreState::empty()
-        };
-        let before_meta = ModuleMeta {
-            coverage_ordinal: Some(10),
-            coverage_start_ordinal: Some(1),
-            folded_history_segment_seq: 4,
-            ..Default::default()
-        };
-        assert!(!boundary_or_coverage_state_moved(
-            &before_core,
-            &before_core,
-            &before_meta,
-            &before_meta,
-        ));
-        let mut after_core = before_core.clone();
-        after_core.boundary_id = "new#0".to_string();
-        assert!(boundary_or_coverage_state_moved(
-            &before_core,
-            &after_core,
-            &before_meta,
-            &before_meta,
-        ));
-
-        // A task-list-promoted bust on a still-damaged row retains evidence for bounded repair escalation.
-        // The synthetic splice moves no cache boundary.
-        assert!(!boundary_divergence_reset_allowed(
-            true, false, false, false, false, false,
-        ));
-        // A torn publication read does not prove that the row converged.
-        assert!(!boundary_divergence_reset_allowed(
-            true, false, false, true, false, false,
-        ));
-
-        // The repair-escalation counter resets only when the cache boundary or coverage changes.
-        assert!(boundary_divergence_reset_allowed(
-            true, false, false, false, false, true,
-        ));
-        // The convergence detector completes the stale episode when it reports convergence.
-        assert!(boundary_divergence_reset_allowed(
-            true, false, true, false, false, false,
-        ));
-        assert!(boundary_divergence_reset_allowed(
-            true, false, false, false, true, false,
-        ));
-
-        // Publication windows and non-bust passes retain the counter regardless of signals.
-        assert!(!boundary_divergence_reset_allowed(
-            true, true, true, false, false, true,
-        ));
-        assert!(!boundary_divergence_reset_allowed(
-            false, false, true, false, false, true,
-        ));
-    }
-
-    #[test]
-    fn active_wrapup_retains_divergence_count_until_the_window_closes() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = store(dir.path());
-        let request = seed_astro_divergence(&store, "astro-wrapup-window", 2_402);
-        let loaded = store.load("astro-wrapup-window").unwrap();
-        let mut stale = loaded.meta.clone();
-        stale.m1_revision ^= u64::MAX;
-        stale.m1_history_segment_seq = Some(1);
-        store
-            .commit(
-                "astro-wrapup-window",
-                loaded.row_version,
-                &loaded.core,
-                &stale,
-            )
-            .unwrap();
-
-        let first_counted = run(&store, &request, &spine());
-        assert_eq!(first_counted.action, "SOFT+");
-        assert_eq!(
-            store
-                .load("astro-wrapup-window")
-                .unwrap()
-                .meta
-                .boundary_divergence_pending_count,
-            1
-        );
-
-        let mut context = pctx("git:proj", "/nonexistent-docs", 0);
-        context.wrapup_active = true;
-        for _ in 0..usize::from(BOUNDARY_DIVERGENCE_PENDING_PASS_LIMIT) + 1 {
-            let deferred = transform(&store, &request, &context).unwrap();
-            assert_eq!(deferred.action, "SOFT+");
-            assert_ne!(
-                deferred.materialize_reason.as_deref(),
-                Some("boundary_divergence_recut")
-            );
-            assert_eq!(
-                store
-                    .load("astro-wrapup-window")
-                    .unwrap()
-                    .meta
-                    .boundary_divergence_pending_count,
-                1,
-                "an active wrapup retains rather than increments or resets the counter"
-            );
-        }
-
-        context.wrapup_active = false;
-        for expected_count in 2..BOUNDARY_DIVERGENCE_PENDING_PASS_LIMIT {
-            let deferred = transform(&store, &request, &context).unwrap();
-            assert_eq!(deferred.action, "SOFT+");
-            assert_eq!(
-                store
-                    .load("astro-wrapup-window")
-                    .unwrap()
-                    .meta
-                    .boundary_divergence_pending_count,
-                expected_count
-            );
-        }
-        let escalated = transform(&store, &request, &context).unwrap();
-        assert_eq!(escalated.action, "HARD");
-        assert_eq!(
-            escalated.materialize_reason.as_deref(),
-            Some("boundary_divergence_recut")
-        );
-        assert_eq!(
-            store
-                .load("astro-wrapup-window")
-                .unwrap()
-                .meta
-                .boundary_divergence_pending_count,
-            0
-        );
-    }
-
-    #[test]
-    fn missing_publication_floor_recuts_conservatively_and_backfills_on_hard() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = store(dir.path());
-        let mut request = astro_request("astro-missing-floor", 2_402);
-        for message in request.messages.iter_mut() {
-            let message = Arc::make_mut(message);
-            if let Some(wire::BlockKind::Text { text }) = message
-                .ck
-                .content_mut()
-                .first_mut()
-                .map(|block| block.kind_mut())
-            {
-                text.push_str(&" realistic raw history".repeat(512));
-            }
-        }
-        let request = seed_astro_divergence_from_request(&store, request);
-        let loaded = store.load("astro-missing-floor").unwrap();
-        let mut missing_floor = loaded.meta.clone();
-        missing_floor.publication_floor_ordinal = None;
-        store
-            .commit(
-                "astro-missing-floor",
-                loaded.row_version,
-                &loaded.core,
-                &missing_floor,
-            )
-            .unwrap();
-
-        let response = run(&store, &request, &spine());
-        assert_eq!(response.action, "HARD");
-        assert_eq!(
-            response.materialize_reason.as_deref(),
-            Some("boundary_divergence_recut")
-        );
-        assert_eq!(response.coverage_ordinal, Some(2_400));
-        assert!(
-            store
-                .load("astro-missing-floor")
-                .unwrap()
-                .meta
-                .publication_floor_ordinal
-                .is_some(),
-            "the recut HARD must freeze the estimator-derived floor"
-        );
-    }
-
-    #[test]
-    fn stale_full_state_sync_cannot_rewind_a_committed_divergence_recut() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = store(dir.path());
-        let request = seed_astro_divergence(&store, "astro-stale-state-sync", 2_402);
-        let recut = run(&store, &request, &spine());
-        assert_eq!(recut.action, "HARD");
-        let recut_bytes = serde_json::to_vec(&recut.messages).unwrap();
-        let after_recut = store.load("astro-stale-state-sync").unwrap();
-        let history_segments_after_recut = store
-            .load_history_segments("astro-stale-state-sync")
-            .unwrap();
-        let mut stale_history_segments = astro_history_segments()[..2].to_vec();
-        for history_segment in &mut stale_history_segments {
-            history_segment.content = format!("STALE-TS-{}", history_segment.sequence);
-            history_segment.p1 = Some(history_segment.content.clone());
-        }
-
-        store
-            .apply_authority_state_sync(ModuleStateSyncRequest {
-                session_id: "astro-stale-state-sync",
-                project_path: "git:proj",
-                shadow_generation: after_recut.meta.shadow_generation,
-                expected_shadow_seq: after_recut.meta.shadow_seq,
-                seed_boundary_id: Some("m425#0"),
-                drop_seeds: &[],
-                drop_seed_skipped: 0,
-                pending_agent_drops: &[],
-                pending_agent_drops_skipped: 0,
-                user_hint_seeds: &[],
-                auto_search_hint_skipped: 0,
-                user_hints_replace_session: false,
-                note_nudge_anchors: None,
-                todo_synthetic_anchor: None,
-                todo_synthetic_anchor_present: false,
-                emergency_latches: None,
-                pending_compaction_marker: None,
-                deferred_execute_state: None,
-                channel2_nudge_state: None,
-                strip_seeds: &[],
-                strip_seed_skipped: 0,
-                reasoning_cleared_through_tag: None,
-                history_segments: &stale_history_segments,
-                user_profile: &[],
-                user_profile_present: true,
-                workspace: None,
-                workspace_present: true,
-                last_todo_state: None,
-                project_memory_epoch: None,
-                user_profile_version: None,
-                acked_watermarks: Value::Null,
-            })
-            .unwrap();
-
-        let after_sync = store.load("astro-stale-state-sync").unwrap();
-        assert_eq!(after_sync.meta.coverage_ordinal, Some(2_400));
-        assert_eq!(after_sync.meta.folded_history_segment_seq, 47);
-        assert_eq!(after_sync.core.boundary_id, "m2400#0");
-        assert_eq!(
-            store
-                .load_history_segments("astro-stale-state-sync")
-                .unwrap(),
-            history_segments_after_recut
-        );
-        let deferred = run(&store, &request, &spine());
-        assert_eq!(deferred.action, "SOFT+");
-        assert_eq!(serde_json::to_vec(&deferred.messages).unwrap(), recut_bytes);
-    }
-
-    #[test]
-    fn fired_divergence_with_absent_new_anchor_fails_loud_without_commit() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = store(dir.path());
-        let full_request = seed_astro_divergence(&store, "astro-absent-anchor", 2_402);
-        let mut missing_anchor = full_request.clone();
-        missing_anchor
-            .messages
-            .retain(|message| message.mid != "m2400");
-        let before = store.load("astro-absent-anchor").unwrap();
-        let history_segments_before = store.load_history_segments("astro-absent-anchor").unwrap();
-
-        let error = transform(
-            &store,
-            &missing_anchor,
-            &pctx("git:proj", "/nonexistent-docs", 0),
-        )
-        .unwrap_err();
-
-        assert!(matches!(error, TransformError::BoundaryNotPresent(_)));
-        let after_error = store.load("astro-absent-anchor").unwrap();
-        assert_eq!(after_error.row_version, before.row_version);
-        assert_eq!(after_error.core, before.core);
-        assert_eq!(after_error.meta, before.meta);
-        assert_eq!(
-            store.load_history_segments("astro-absent-anchor").unwrap(),
-            history_segments_before
-        );
-
-        // After the producer restores the terminal history_segment anchor, the next pass commits the already-qualified recut without manual repair.
-        let recovered = run(&store, &full_request, &spine());
-        assert_eq!(recovered.action, "HARD");
-        assert_eq!(recovered.coverage_ordinal, Some(2_400));
-    }
-
-    #[test]
     fn interior_live_coverage_gap_fails_loud_not_silent_drop() {
         let dir = tempfile::tempdir().unwrap();
         let s = store(dir.path());
@@ -21524,7 +20508,7 @@ pub(crate) mod tests {
         let items = vec![
             item("m1", 1, "covered one"),
             item("m2", 2, "covered two"),
-            item("m4", 4, "present but uncovered"),
+            item("m3", 3, "present but uncovered"),
             item("m6", 6, "covered six"),
             item("m7", 7, "covered seven"),
             item("t8", 8, "tail"),
@@ -21537,7 +20521,7 @@ pub(crate) mod tests {
         .unwrap_err();
         assert!(matches!(err, TransformError::CoverageGap(_)));
         assert!(
-            err.to_string().contains("m4"),
+            err.to_string().contains("m3#0"),
             "the uncovered live message should be named in the loud failure: {err:?}"
         );
     }
@@ -21591,9 +20575,9 @@ pub(crate) mod tests {
             let dir = tempfile::tempdir().unwrap();
             let s = store(dir.path());
             let session = format!("lead-{}", profile.wire_id());
-            s.replace_history_segments(&session, &[comp(1, 1, 1, "m1", "SUMMARY")])
+            s.replace_history_segments(&session, &[comp(1, 2, 2, "m1", "SUMMARY")])
                 .unwrap();
-            let leading_system = system_item("sys0", 0, "identity lead");
+            let leading_system = system_item("sys0", 1, "identity lead");
             let r = run(
                 &s,
                 &profile_req(
@@ -21602,8 +20586,8 @@ pub(crate) mod tests {
                     "cfg0",
                     vec![
                         leading_system.clone(),
-                        item("m1", 1, "covered"),
-                        item("t2", 2, "tail"),
+                        item("m1", 2, "covered"),
+                        item("t2", 3, "tail"),
                     ],
                 ),
                 &spine(),
@@ -21923,25 +20907,16 @@ pub(crate) mod tests {
         );
         assert!(matches!(reserved, Err(TransformError::ReservedId)));
 
-        // non-monotonic ordinals
-        let bad = transform(
-            &s,
-            &req("ses", "cfg0", vec![item("a", 5, "x"), item("b", 5, "y")]),
-            &dc,
+        // The daemon derives ordinals, so the ingress values neither repeat nor overflow.
+        let ingress = req(
+            "ses",
+            "cfg0",
+            vec![item("a", 5, "x"), item("b", u64::MAX, "y")],
         );
-        assert!(matches!(bad, Err(TransformError::OrdinalViolation)));
-
-        // An ordinal above i64::MAX would wrap negative in the history_segments table.
-        let too_large = transform(
-            &s,
-            &req(
-                "ses",
-                "cfg0",
-                vec![item("a", 1, "x"), item("b", u64::MAX, "y")],
-            ),
-            &dc,
-        );
-        assert!(matches!(too_large, Err(TransformError::OrdinalOutOfRange)));
+        let mut resolved = ingress.clone();
+        resolve_window(&s, &mut resolved).unwrap();
+        let ordinals: Vec<u64> = resolved.messages.iter().map(|m| m.ordinal).collect();
+        assert_eq!(ordinals, vec![1, 2]);
     }
 
     #[test]
@@ -23298,92 +22273,6 @@ pub(crate) mod tests {
             .unwrap();
             assert_eq!(tail_bytes(&minted, "m1"), "<!-- +10m -->\n§1§ question");
             assert_eq!(s.overlay_watermark("temporal-frontier").unwrap(), Some(1));
-        });
-    }
-
-    #[test]
-    fn sparse_temporal_decision_stays_frozen_when_an_older_ordinal_returns() {
-        run_active_surface_test(|| {
-            let dir = tempfile::tempdir().unwrap();
-            let s = store(dir.path());
-            let first_messages = vec![wire_item("user", "m1", 1, &["start"])];
-            let first_request = active_cc_req("temporal-sparse", "cfg0", first_messages.clone());
-            run(&s, &first_request, &spine());
-            run(&s, &first_request, &spine());
-
-            let sparse = vec![
-                first_messages[0].clone(),
-                wire_item("user", "m3", 3, &["later"]),
-            ];
-            let sparse_request = active_cc_req("temporal-sparse", "cfg0", sparse.clone());
-            let first = transform(
-                &s,
-                &sparse_request,
-                &pctx("git:proj", "/nonexistent-docs", 721_000),
-            )
-            .unwrap();
-            let frozen = tail_bytes(&first, "m3").to_string();
-            assert_eq!(frozen, "§2§ later");
-
-            let restored = active_cc_req(
-                "temporal-sparse",
-                "cfg0",
-                vec![
-                    sparse[0].clone(),
-                    wire_item("assistant", "m2", 2, &["restored"]),
-                    sparse[1].clone(),
-                ],
-            );
-            let replay = transform(
-                &s,
-                &restored,
-                &pctx("git:proj", "/nonexistent-docs", 1_500_000),
-            )
-            .unwrap();
-            assert_eq!(tail_bytes(&replay, "m3").as_bytes(), frozen.as_bytes());
-            assert!(
-                s.load_temporal_marks("temporal-sparse")
-                    .unwrap()
-                    .iter()
-                    .all(|row| row.block_id != "m2#0")
-            );
-
-            let near = active_cc_req(
-                "temporal-sparse",
-                "cfg0",
-                vec![
-                    sparse[0].clone(),
-                    restored.messages[1].as_ref().clone(),
-                    sparse[1].clone(),
-                    wire_item("user", "m4", 4, &["nearby"]),
-                ],
-            );
-            let near_response =
-                transform(&s, &near, &pctx("git:proj", "/nonexistent-docs", 721_100)).unwrap();
-            assert_eq!(tail_bytes(&near_response, "m4"), "§4§ nearby");
-            let empty = s
-                .load_temporal_marks("temporal-sparse")
-                .unwrap()
-                .into_iter()
-                .find(|row| row.block_id == "m4#0")
-                .expect("empty temporal decision");
-            assert!(empty.marker_text.is_empty());
-
-            let false_window = transform(
-                &s,
-                &cc_req(
-                    "temporal-sparse",
-                    "cfg0",
-                    near.messages
-                        .iter()
-                        .map(|message| message.as_ref().clone())
-                        .collect(),
-                ),
-                &pctx("git:proj", "/nonexistent-docs", 2_000_000),
-            )
-            .unwrap();
-            assert_eq!(tail_bytes(&false_window, "m3"), "later");
-            assert_eq!(tail_bytes(&false_window, "m4"), "nearby");
         });
     }
 
@@ -24783,15 +23672,15 @@ pub(crate) mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = store(dir.path());
         let mut messages = vec![
-            item("covered", 0, "covered"),
-            item("a-held", 1, "a held"),
-            item("b-first", 2, "b first"),
-            item("a-first", 3, "a first"),
+            item("covered", 1, "covered"),
+            item("a-held", 2, "a held"),
+            item("b-first", 3, "b first"),
+            item("a-first", 4, "a first"),
         ];
         store
-            .replace_history_segments("ride-output", &[comp(1, 0, 0, "covered", "summary")])
+            .replace_history_segments("ride-output", &[comp(1, 1, 1, "covered", "summary")])
             .unwrap();
-        messages.extend((4..=22).map(|ordinal| {
+        messages.extend((5..=23).map(|ordinal| {
             item(
                 &format!("filler-{ordinal}"),
                 ordinal,
@@ -25735,14 +24624,17 @@ pub(crate) mod tests {
                     s.arm_soft_refresh("ses").unwrap();
                     let mut context = pctx("git:proj", "/nonexistent-docs", 0);
                     context.history_budget_tokens = budget;
-                    let request = req(
-                        "ses",
-                        "cfg0",
-                        vec![
-                            item("a", 1, "raw"),
-                            item("b", 2, "new"),
-                            item("c", 3, "tail"),
-                        ],
+                    let request = plugin_window(
+                        &s,
+                        &req(
+                            "ses",
+                            "cfg0",
+                            vec![
+                                item("a", 1, "raw"),
+                                item("b", 2, "new"),
+                                item("c", 3, "tail"),
+                            ],
+                        ),
                     );
                     let observed = std::cell::RefCell::new(Vec::new());
                     let estimate = |text: &str| {
@@ -26038,67 +24930,6 @@ pub(crate) mod tests {
         );
         // Prefix folding happens alongside tail reclaim.
         assert!(loaded.core.frozen_units.iter().any(|u| u.key == "m0"));
-    }
-
-    /// A leading system message is exempt from coverage continuity checks because the chunk builder never summarizes system content; a pinned prompt before the first chunk is not a live-coverage gap.
-    fn declared_trim_fixture() -> (
-        tempfile::TempDir,
-        MemoryStore,
-        TransformRequest,
-        ProducerContext<'static>,
-    ) {
-        let dir = tempfile::tempdir().unwrap();
-        let store = store(dir.path());
-        let core = CoreState {
-            version: 1,
-            boundary_id: "b#0".to_string(),
-            reconcile_pending: false,
-            frozen_units: vec![
-                synth_region("m0", "m0".to_string()),
-                synth_region("m1", M1_PLACEHOLDER.to_string()),
-            ],
-            pending_changes: Vec::new(),
-        };
-        let meta = ModuleMeta {
-            initialized: true,
-            last_render_config: fold_m0_content_epoch(
-                "cfg",
-                &M0ContentEpoch {
-                    upgrade_state: String::new(),
-                    memory_content_epoch: String::new(),
-                    memory_render_epoch: format!("mre{}", crate::MEMORY_RENDER_FORMAT_EPOCH),
-                    history_segment_render_epoch: format!(
-                        "cre{}",
-                        crate::HISTORY_SEGMENT_RENDER_FORMAT_EPOCH
-                    ),
-                    profile_render_epoch: String::new(),
-                    prompt_surface_epoch: String::new(),
-                    tagger_feature_epoch: String::new(),
-                    transition_epoch: String::new(),
-                },
-            ),
-            coverage_ordinal: Some(0),
-            folded_history_segment_seq: 0,
-            m1_revision: 0,
-            ..Default::default()
-        };
-        store.commit("decl", None, &core, &meta).unwrap();
-        store
-            .replace_history_segments("decl", &[comp(0, 0, 0, "b", "summary")])
-            .unwrap();
-        let mut request = req("decl", "cfg", vec![item("c", 1, "tail")]);
-        request.declared_trim = Some(DeclaredTrim {
-            flat_boundary_id: "b#0".to_string(),
-            boundary_bare_message_id: "b".to_string(),
-            boundary_absolute_ordinal: 0,
-            next_absolute_ordinal: 1,
-        });
-        (
-            dir,
-            store,
-            request,
-            pctx("git:proj", "/nonexistent-docs", 0),
-        )
     }
 
     #[test]
@@ -26819,192 +25650,6 @@ pub(crate) mod tests {
         );
     }
 
-    #[test]
-    fn seeded_boundary_validates_declared_trim_before_the_first_module_fold() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = store(dir.path());
-        let history_segments = vec![StoredHistorySegment {
-            sequence: 4,
-            start_message: 1,
-            end_message: 2,
-            start_message_id: "a#0".to_string(),
-            end_message_id: "b#0".to_string(),
-            title: "seeded".to_string(),
-            content: "seeded summary".to_string(),
-            p1: Some("seeded summary".to_string()),
-            importance: 50,
-            ..Default::default()
-        }];
-        store
-            .apply_authority_state_sync(ModuleStateSyncRequest {
-                session_id: "seeded-trim",
-                project_path: "git:proj",
-                shadow_generation: 0,
-                expected_shadow_seq: 0,
-                seed_boundary_id: Some("b#0"),
-                drop_seeds: &[],
-                drop_seed_skipped: 0,
-                strip_seeds: &[],
-                strip_seed_skipped: 0,
-                reasoning_cleared_through_tag: None,
-                history_segments: &history_segments,
-                user_profile: &[],
-                user_profile_present: true,
-                workspace: None,
-                workspace_present: true,
-                last_todo_state: None,
-                project_memory_epoch: None,
-                user_profile_version: None,
-                pending_agent_drops: &[],
-                pending_agent_drops_skipped: 0,
-                user_hint_seeds: &[],
-                auto_search_hint_skipped: 0,
-                user_hints_replace_session: false,
-                note_nudge_anchors: None,
-                todo_synthetic_anchor: None,
-                todo_synthetic_anchor_present: false,
-                emergency_latches: None,
-                pending_compaction_marker: None,
-                deferred_execute_state: None,
-                channel2_nudge_state: None,
-                acked_watermarks: Value::Null,
-            })
-            .unwrap();
-        let seeded = store.load("seeded-trim").unwrap();
-        assert_eq!(seeded.core.boundary_id, "b#0");
-        assert_eq!(seeded.meta.coverage_ordinal, Some(2));
-        assert_eq!(seeded.meta.coverage_start_ordinal, Some(1));
-        assert_eq!(seeded.meta.coverage_history_segment_seq, Some(4));
-        assert_eq!(seeded.meta.folded_history_segment_seq, 4);
-
-        let mut request = req("seeded-trim", "cfg", vec![item("c", 3, "live tail")]);
-        request.declared_trim = Some(DeclaredTrim {
-            flat_boundary_id: "b#0".to_string(),
-            boundary_bare_message_id: "b".to_string(),
-            boundary_absolute_ordinal: 2,
-            next_absolute_ordinal: 3,
-        });
-        let ctx = pctx("git:proj", dir.path().to_str().unwrap(), 1);
-        let first = transform_with_projection(&store, &request, &ctx).unwrap();
-        assert_eq!(first.boundary_state, BoundaryState::DeclaredTrimValidated);
-        assert_eq!(first.trim_mismatch, None);
-        assert!(!store.load("seeded-trim").unwrap().meta.shadow_quarantined);
-
-        let second = transform_with_projection(&store, &request, &ctx).unwrap();
-        assert_eq!(second.boundary_state, BoundaryState::DeclaredTrimValidated);
-        assert_eq!(first.response.messages, second.response.messages);
-    }
-
-    #[test]
-    fn declared_trim_validates_absent_boundary_and_preserves_defer_path() {
-        let (_dir, store, request, ctx) = declared_trim_fixture();
-        let result = transform_with_projection(&store, &request, &ctx).unwrap();
-        assert_eq!(result.boundary_state, BoundaryState::DeclaredTrimValidated);
-        assert!(result.trim_mismatch.is_none());
-        assert_eq!(result.response.action, "SOFT+");
-        assert_eq!(store.load("decl").unwrap().meta.pending_rewrite, None);
-    }
-
-    #[test]
-    fn declared_trim_predicate_failures_are_absent_with_trim_mismatch() {
-        type TrimCase = (
-            &'static str,
-            Box<dyn FnOnce(&mut TransformRequest, &MemoryStore)>,
-        );
-        let cases: Vec<TrimCase> = vec![
-            (
-                "boundary_identity",
-                Box::new(|request, _| {
-                    request.declared_trim.as_mut().unwrap().flat_boundary_id =
-                        "wrong#0".to_string();
-                }),
-            ),
-            (
-                "coverage_ordinal",
-                Box::new(|request, _| {
-                    request
-                        .declared_trim
-                        .as_mut()
-                        .unwrap()
-                        .boundary_absolute_ordinal = 99;
-                }),
-            ),
-            (
-                "tail_history_segment",
-                Box::new(|_, store| {
-                    store
-                        .replace_history_segments("decl", &[comp(0, 0, 0, "other", "summary")])
-                        .unwrap();
-                }),
-            ),
-            (
-                "continuity",
-                Box::new(|request, _| {
-                    request
-                        .declared_trim
-                        .as_mut()
-                        .unwrap()
-                        .next_absolute_ordinal = 2;
-                }),
-            ),
-        ];
-        for (predicate, mutate) in cases {
-            let (_dir, store, mut request, ctx) = declared_trim_fixture();
-            mutate(&mut request, &store);
-            let result = transform_with_projection(&store, &request, &ctx).unwrap();
-            assert_eq!(result.boundary_state, BoundaryState::Absent, "{predicate}");
-            assert_eq!(
-                result.trim_mismatch.as_ref().map(|m| m.predicate),
-                Some(predicate),
-                "{predicate}"
-            );
-        }
-    }
-
-    #[test]
-    fn declared_trim_continuity_exempts_covered_system_head() {
-        let (_dir, store, mut request, ctx) = declared_trim_fixture();
-        request
-            .messages
-            .insert(0, Arc::new(system_item("sys", 0, "covered system")));
-        let result = transform_with_projection(&store, &request, &ctx).unwrap();
-        assert_eq!(result.boundary_state, BoundaryState::DeclaredTrimValidated);
-        assert!(result.trim_mismatch.is_none());
-    }
-
-    #[test]
-    fn declared_trim_allows_minted_absent_anchor_only_when_validated() {
-        let (_dir, store, mut request, ctx) = declared_trim_fixture();
-        let mut loaded = store.load("decl").unwrap();
-        loaded.meta.last_render_config = "old".to_string();
-        store
-            .commit("decl", loaded.row_version, &loaded.core, &loaded.meta)
-            .unwrap();
-        request.render_config = "new".to_string();
-        let result = transform_with_projection(&store, &request, &ctx).unwrap();
-        assert_eq!(result.response.action, "HARD");
-        assert_eq!(result.boundary_state, BoundaryState::DeclaredTrimValidated);
-
-        let (_dir, store, mut invalid, ctx) = declared_trim_fixture();
-        let mut loaded = store.load("decl").unwrap();
-        loaded.meta.last_render_config = "old".to_string();
-        store
-            .commit("decl", loaded.row_version, &loaded.core, &loaded.meta)
-            .unwrap();
-        invalid.render_config = "new".to_string();
-        invalid
-            .declared_trim
-            .as_mut()
-            .unwrap()
-            .next_absolute_ordinal = 2;
-        let invalid_result = transform_with_projection(&store, &invalid, &ctx).unwrap();
-        assert_eq!(invalid_result.boundary_state, BoundaryState::Absent);
-        assert_eq!(
-            invalid_result.trim_mismatch.as_ref().map(|m| m.predicate),
-            Some("continuity")
-        );
-    }
-
     fn covered_system_entries(m0: &str) -> Vec<String> {
         const OPEN: &str = "<covered-system-message>";
         const CLOSE: &str = "</covered-system-message>";
@@ -27039,16 +25684,16 @@ pub(crate) mod tests {
     fn covered_system_fold_output_matches_byte_golden() {
         let dir = tempfile::tempdir().unwrap();
         let s = store(dir.path());
-        s.replace_history_segments("ses", &[comp(1, 0, 3, "m3", "SUMMARY")])
+        s.replace_history_segments("ses", &[comp(1, 1, 4, "m3", "SUMMARY")])
             .unwrap();
-        let tail_system = system_item("sys4", 4, "tail identity");
+        let tail_system = system_item("sys4", 5, "tail identity");
         let items = vec![
-            system_item("sys0", 0, "identity alpha"),
-            system_item("sys1", 1, "identity beta"),
-            system_item("sys2", 2, "identity alpha"),
-            item("m3", 3, "covered"),
+            system_item("sys0", 1, "identity alpha"),
+            system_item("sys1", 2, "identity beta"),
+            system_item("sys2", 3, "identity alpha"),
+            item("m3", 4, "covered"),
             tail_system.clone(),
-            item("t5", 5, "tail"),
+            item("t5", 6, "tail"),
         ];
 
         let r = run(&s, &cc_req("ses", "cfg0", items), &spine());
@@ -27078,21 +25723,21 @@ pub(crate) mod tests {
     fn covered_systems_absorb_into_m0_and_tail_system_survives() {
         let dir = tempfile::tempdir().unwrap();
         let s = store(dir.path());
-        s.replace_history_segments("ses", &[comp(1, 3, 3, "m3", "SUMMARY")])
+        s.replace_history_segments("ses", &[comp(1, 4, 4, "m3", "SUMMARY")])
             .unwrap();
-        let tail_system = system_item("sys4", 4, "tail identity");
+        let tail_system = system_item("sys4", 5, "tail identity");
         let items = vec![
-            system_item("sys0", 0, "identity alpha"),
-            system_item("sys1", 1, "identity beta"),
-            system_item("sys2", 2, "identity alpha"),
-            item("m3", 3, "covered"),
+            system_item("sys0", 1, "identity alpha"),
+            system_item("sys1", 2, "identity beta"),
+            system_item("sys2", 3, "identity alpha"),
+            item("m3", 4, "covered"),
             tail_system.clone(),
-            item("t5", 5, "tail"),
+            item("t5", 6, "tail"),
         ];
 
         let r = run(&s, &cc_req("ses", "cfg0", items.clone()), &spine());
         assert_eq!(r.action, "HARD");
-        assert_eq!(r.coverage_ordinal, Some(3));
+        assert_eq!(s.load("ses").unwrap().meta.coverage_ordinal, Some(4));
         assert_eq!(
             covered_system_entries(m0_bytes(&r)),
             vec!["identity alpha".to_string(), "identity beta".to_string()],
@@ -27145,84 +25790,6 @@ pub(crate) mod tests {
             !m0_bytes(&r).contains("<covered-system-messages>"),
             "empty covered system set must not render empty block bytes: {}",
             m0_bytes(&r)
-        );
-    }
-
-    #[test]
-    fn coverage_advance_over_system_promotes_to_hard_and_rederives_m0_block() {
-        let dir = tempfile::tempdir().unwrap();
-        let s = store(dir.path());
-        s.replace_history_segments("ses", &[comp(1, 3, 3, "m3", "S1")])
-            .unwrap();
-        let items = vec![
-            system_item("sys0", 0, "identity alpha"),
-            system_item("sys1", 1, "identity beta"),
-            system_item("sys2", 2, "identity alpha"),
-            item("m3", 3, "covered one"),
-            system_item("sys4", 4, "identity gamma"),
-            item("m5", 5, "covered two"),
-            system_item("sys6", 6, "tail identity"),
-        ];
-        let first = run(&s, &cc_req("ses", "cfg0", items.clone()), &spine());
-        assert_eq!(
-            covered_system_entries(m0_bytes(&first)),
-            vec!["identity alpha".to_string(), "identity beta".to_string()]
-        );
-
-        s.replace_history_segments(
-            "ses",
-            &[comp(1, 3, 3, "m3", "S1"), comp(2, 4, 5, "m5", "S2")],
-        )
-        .unwrap();
-        let advanced = run(&s, &cc_req("ses", "cfg0", items), &spine());
-        assert_eq!(
-            advanced.action, "HARD",
-            "coverage advance over a system message must recompose m0, not ride m1"
-        );
-        assert_eq!(advanced.coverage_ordinal, Some(5));
-        assert_eq!(
-            covered_system_entries(m0_bytes(&advanced)),
-            vec![
-                "identity alpha".to_string(),
-                "identity beta".to_string(),
-                "identity gamma".to_string(),
-            ],
-            "new m0 re-derives the larger covered-system set while preserving prior order"
-        );
-        assert_no_system_before_tail_system(&advanced, "tail identity");
-    }
-
-    #[test]
-    fn covered_system_content_drift_fails_identity_guard() {
-        let dir = tempfile::tempdir().unwrap();
-        let s = store(dir.path());
-        s.replace_history_segments("ses", &[comp(1, 1, 1, "m1", "SUMMARY")])
-            .unwrap();
-        let original = vec![
-            system_item("sys0", 0, "identity alpha"),
-            item("m1", 1, "covered"),
-            item("t2", 2, "tail"),
-        ];
-        let first = run(&s, &cc_req("ses", "cfg0", original), &spine());
-        assert_eq!(first.action, "HARD");
-
-        let drift = transform(
-            &s,
-            &cc_req(
-                "ses",
-                "cfg0",
-                vec![
-                    system_item("sys0", 0, "identity beta"),
-                    item("m1", 1, "covered"),
-                    item("t2", 2, "tail"),
-                ],
-            ),
-            &pctx("git:proj", "/nonexistent-docs", 0),
-        )
-        .unwrap_err();
-        assert!(
-            matches!(drift, TransformError::IdentityDrift(ref mid) if mid == "sys0"),
-            "covered system content drift must fail via IdentityDrift, got {drift:?}"
         );
     }
 
@@ -27433,12 +26000,12 @@ pub(crate) mod tests {
         assert_eq!(crate::PROFILE_EPOCH_CLAUDE_CODE_ANTHROPIC, 2);
         let dir = tempfile::tempdir().unwrap();
         let s = store(dir.path());
-        s.replace_history_segments("ses", &[comp(1, 1, 1, "m1", "SUMMARY")])
+        s.replace_history_segments("ses", &[comp(1, 2, 2, "m1", "SUMMARY")])
             .unwrap();
         let messages = vec![
-            system_item("sys0", 0, "identity alpha"),
-            item("m1", 1, "covered"),
-            item("t2", 2, "tail"),
+            system_item("sys0", 1, "identity alpha"),
+            item("m1", 2, "covered"),
+            item("t2", 3, "tail"),
         ];
         let current = cc_req("ses", "cfg0", messages.clone());
         let first = run(&s, &current, &spine());
@@ -27461,11 +26028,6 @@ pub(crate) mod tests {
         assert_eq!(
             transitioned.action, "HARD",
             "module-side profile epoch folding must hard once even when the caller's cfg is static"
-        );
-        assert!(
-            m0_bytes(&transitioned).contains("<covered-system-message>identity alpha"),
-            "the transition fold must recompose m0 with the covered-system block: {}",
-            m0_bytes(&transitioned)
         );
         assert!(!m0_bytes(&transitioned).contains("OLD-M0"));
         // Profile epoch 2 must be committed as the `mpe2` member of the effective render config so the next pass sees an unchanged config and stops folding.
@@ -28664,7 +27226,6 @@ pub(crate) mod tests {
     #[test]
     fn unmatched_native_pair_is_unique_before_transition_and_replays_after_salted_bust() {
         let native_message = json!({
-            "absolute_ordinal": 1,
             "info": { "id": "pair-message", "role": "assistant" },
             "parts": [{
                 "type": "tool",
@@ -28794,7 +27355,6 @@ pub(crate) mod tests {
     #[test]
     fn combined_v1_and_v2_shapes_share_one_transition_fold() {
         let native_message = json!({
-            "absolute_ordinal": 3,
             "info": { "id": "combined-message", "role": "assistant" },
             "parts": [
                 {
@@ -29124,10 +27684,10 @@ pub(crate) mod tests {
         )
         .unwrap();
         for mode in ["fresh", "pending", "lineage"] {
-            let mut messages = vec![item("foreign", 90, "new prompt")];
+            let mut messages = vec![item("foreign", 1, "new prompt")];
             for (mid, ordinal, mut ck) in [
-                ("replayed-call", 91, pair.assistant_msg.clone()),
-                ("replayed-result", 92, pair.tool_msg.clone()),
+                ("replayed-call", 2, pair.assistant_msg.clone()),
+                ("replayed-result", 3, pair.tool_msg.clone()),
             ] {
                 ck.meta.synthetic = false;
                 ck.meta.harness_id = Some(mid.to_string());
@@ -29254,11 +27814,11 @@ pub(crate) mod tests {
                 let firing_input = crate::history_summarizer_chunk::build_history_summarizer_chunk(
                     &original.messages,
                     &live,
-                    90,
+                    1,
                     1_000,
-                    91,
+                    2,
                 );
-                assert_eq!(firing_input.chunk.present_ordinals, [90, 91, 92]);
+                assert_eq!(firing_input.chunk.present_ordinals, [1, 2, 3]);
                 assert!(!firing_input.text.is_empty());
                 crate::attach_native_messages_with_tags(
                     &mut result.response,
@@ -30131,8 +28691,11 @@ pub(crate) mod tests {
             first.lineage_descent_disposition.as_deref(),
             Some("descended")
         );
-        assert_eq!(first.ordinal_continuation_base, Some(10));
-        assert_eq!(first.coverage_ordinal, Some(11));
+        assert_eq!(
+            store.load("B").unwrap().meta.ordinal_continuation_base,
+            Some(10)
+        );
+        assert_eq!(store.load("B").unwrap().meta.coverage_ordinal, Some(11));
         assert!(!first.reconcile_pending);
         assert_eq!(first.messages().len(), 4);
         assert!(first.messages()[0].meta.synthetic && first.messages()[1].meta.synthetic);
@@ -30202,7 +28765,7 @@ pub(crate) mod tests {
         let edited_response = run(&store, &edited, &spine());
         assert_eq!(edited_response.action, "SOFT+");
         assert!(edited_response.reconcile_pending);
-        assert_eq!(edited_response.coverage_ordinal, Some(11));
+        assert_eq!(store.load("B").unwrap().meta.coverage_ordinal, Some(11));
         assert_eq!(
             edited_response.messages().len(),
             4,
@@ -30421,96 +28984,6 @@ pub(crate) mod tests {
             mutated.messages.len(),
             "a mutated continuation anchor must fail closed without trimming live input"
         );
-    }
-
-    #[test]
-    fn lineage_rebase_preserves_unflagged_synthetic_head() {
-        let pair = crate::injection::build_synthetic_todo_pair(
-            r#"[{"content":"rebase replay","status":"pending","priority":"high"}]"#,
-        )
-        .unwrap();
-        let summary = continuation_summary("synthetic-rebase");
-        let mut observations = Vec::new();
-        for flagged in [false, true] {
-            let dir = tempfile::tempdir().unwrap();
-            let store = store(dir.path());
-            seed_fake_compaction_prior(&store, "A");
-            let descent = fake_compaction_request(
-                "B",
-                "A",
-                2,
-                601,
-                true,
-                fake_compaction_messages("2026-08-06", &summary),
-            );
-            assert_eq!(
-                run(&store, &descent, &spine())
-                    .lineage_descent_disposition
-                    .as_deref(),
-                Some("descended")
-            );
-            let mut head = pair.assistant_msg.clone();
-            head.content_mut()
-                .extend(pair.tool_msg.content().iter().cloned());
-            head.meta.synthetic = false;
-            head.meta.harness_id = Some("synthetic-head".into());
-            let mut messages = vec![IngressMessage {
-                mid: "synthetic-head".into(),
-                ordinal: 1,
-                ck: head,
-            }];
-            messages.extend(fake_compaction_messages("2026-08-06", &summary));
-            messages.push(item("succ-13", 3, "successor turn thirteen"));
-            let mut request: TransformRequest = serde_json::from_value(
-                serde_json::to_value(fake_compaction_request("B", "A", 2, 601, true, messages))
-                    .unwrap(),
-            )
-            .unwrap();
-            Arc::make_mut(&mut request.messages[0]).ck.meta.synthetic = flagged;
-            assert!(request.lineage_switched && !request.is_subagent);
-            let result = transform_with_projection(&store, &request, &smart_pctx()).unwrap();
-            assert_eq!(
-                result.response.lineage_descent_disposition.as_deref(),
-                Some("replay")
-            );
-            assert_eq!(result.response.ordinal_continuation_base, Some(10));
-            assert!(!result.response.reconcile_pending);
-            assert_eq!(request.messages[0].ordinal, 1);
-            let blocks = &result.projection.blocks;
-            let head = blocks.iter().find(|block| block.mid == "synthetic-head");
-            let next = blocks.iter().find(|block| block.mid != "synthetic-head");
-            let (head, next) = (head.unwrap(), next.unwrap());
-            assert_eq!(
-                head.ordinal, 11,
-                "the non-subagent pass must actually rebase"
-            );
-            assert_eq!(
-                next.ordinal, 11,
-                "synthetic head must not consume a live ordinal"
-            );
-            assert!(head.synthetic);
-            assert!(!next.synthetic);
-            assert!(
-                result
-                    .projection
-                    .blocks
-                    .iter()
-                    .filter(|block| block.mid == "synthetic-head")
-                    .all(|block| block.synthetic)
-            );
-            assert!(
-                !result
-                    .projection
-                    .identity_by_mid
-                    .contains_key("synthetic-head")
-            );
-            observations.push((
-                canonical_output(result.response.messages()),
-                served_output_fingerprints(result.response.messages()),
-                result.projection,
-            ));
-        }
-        assert_eq!(observations[0], observations[1]);
     }
 
     #[test]

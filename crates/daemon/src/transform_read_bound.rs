@@ -21,7 +21,8 @@ use crate::test_support::synthetic_history::{
 };
 use crate::transform::tests::{active_cc_req, assistant_tool_call, item, pctx, store, tool_result};
 use crate::transform::{
-    TransformRequest, install_transform_attempt_hook, transform_with_projection_cached,
+    BoundaryAnchor, TransformRequest, install_transform_attempt_hook,
+    transform_with_projection_cached,
 };
 
 const SESSION: &str = "read-bound";
@@ -84,6 +85,11 @@ const CLASSES: &[(&str, &str)] = &[
     ),
     (
         "SELECT COALESCE(MAX(end_message), 0) FROM history_segments WHERE session_id = ?1",
+        "coverage snapshot",
+    ),
+    // The null-boundary window-end match (spec D10), bounded by the window's mids.
+    (
+        "FROM json_each(?2) AS j CROSS JOIN history_segments AS h",
         "coverage snapshot",
     ),
     // Session state: the pass's cache_state row, and the lineage and assembly meta reads.
@@ -202,8 +208,23 @@ fn totals(phase: &str, h: usize, work: &[StatementWork]) -> Totals {
     out
 }
 
-/// The covered pair, then `TAIL` window messages ending in a tool call and its result.
+/// The window from the newest anchor, declared, then `TAIL` messages ending in a tool call
+/// and its result.
 fn request(h: usize, render_config: &str) -> TransformRequest {
+    let end = 2 * h as u64;
+    let mut request = first_request(h, render_config);
+    request.messages.remove(0);
+    request.boundary = Some(Some(BoundaryAnchor {
+        mid: format!("m{end}"),
+        sequence: h as i64,
+    }));
+    request
+}
+
+/// The first pass's window: the covered pair and the `TAIL` messages. The session is seeded
+/// with the ordinal continuation base the pair continues, so the unanchored first pass numbers
+/// it from `2h - 1` without the history before it.
+fn first_request(h: usize, render_config: &str) -> TransformRequest {
     let end = 2 * h as u64;
     let mut messages = vec![
         item(&format!("m{}", end - 1), end - 1, "covered question"),
@@ -322,10 +343,16 @@ fn measure(h: usize, overlays: usize, memories: usize) -> Measured {
         })
         .expect("seed user memories");
 
+    let empty = store.load(SESSION).expect("load empty");
+    let mut meta = empty.meta.clone();
+    meta.ordinal_continuation_base = Some(end - 2);
+    store
+        .commit(SESSION, None, &empty.core, &meta)
+        .expect("seed the continuation base");
     // The first fold captures the legacy list with its one declared scan; the second pass
     // mints the window's tags once the tag surface is durable.
+    assert_eq!(pass(&store, &first_request(h, "cfg0")), "HARD");
     let warm = request(h, "cfg0");
-    assert_eq!(pass(&store, &warm), "HARD");
     pass(&store, &warm);
     // A daemon restart: the measured passes run on a store with no process-local memo, so a
     // read the store remembers only in memory shows up as a cold full read.
@@ -347,12 +374,12 @@ fn measure(h: usize, overlays: usize, memories: usize) -> Measured {
         1,
         "H={h}: the legacy tag row is read"
     );
-    // Temporal marks: the pass's own marks on the covered pair and the six window user
-    // messages, plus the seeded row on the tool call.
+    // Temporal marks: the pass's own marks on the anchor and the six window user messages,
+    // plus the seeded row on the tool call.
     for (table, rows) in [
         ("user_hints", 1),
         ("channel1_appends", 1),
-        ("temporal_marks", TAIL + 1),
+        ("temporal_marks", TAIL),
     ] {
         assert_eq!(
             window_overlay_rows(&work, table),
@@ -385,19 +412,14 @@ fn measure(h: usize, overlays: usize, memories: usize) -> Measured {
 
     phases.push(("summarizer", summarizer_round(&store, h)));
 
-    // The host drops the covered pair: the boundary is absent while the durable lineage and
-    // the seeded history remain, so the pass decides the absent shape from the oldest row.
+    // The host drops the anchor and discovery finds no other: the null window with no
+    // surviving anchor is the pass-through revert.
     let mut absent = request(h, "cfg2");
-    absent.messages.drain(..2);
+    absent.messages.remove(0);
+    absent.boundary = Some(None);
     store.start_statement_work_ledger();
     assert_eq!(pass(&store, &absent), "PASSTHROUGH", "H={h}");
     let work = store.take_statement_work();
-    let oldest_edge = normalized(EDGE_STATEMENTS[1]);
-    assert!(
-        work.iter()
-            .any(|statement| normalized(&statement.sql) == oldest_edge),
-        "H={h}: the absent shape reads the oldest row"
-    );
     phases.push(("absent boundary", totals("absent boundary", h, &work)));
     for (phase, totals) in &phases {
         // The bound of this row is the host profile's line count, not H: state sync replaces

@@ -899,19 +899,106 @@ answer.
 
 ### 7.10 Transform application revision 3
 
-Transform application revision 3 is a separately named application revision of the `transform` method family on the Context route; the frame protocol stays v3 and the context application protocol (Section 7.8) stays 3. The `transform` request and response bodies of this revision are specified by the revision 3 transform landing; this section specifies the per-session admission outcome (Section 7.10.1) and the discovery method (Section 7.10.2).
+Transform application revision 3 is a separately named application revision of the `transform` method family on the Context route; the frame protocol stays v3 and the context application protocol (Section 7.8) stays 3. This section specifies the whole revision: the per-session admission outcome (Section 7.10.1), the discovery method (Section 7.10.2), the `transform` request (Section 7.10.3), its outcomes and errors (Section 7.10.4), and the response with the coordinates of its recipe (Section 7.10.5). Revision 3 is neither backward nor forward compatible with any earlier transform body: a daemon serves exactly this revision, and a consumer and daemon of one release speak it together.
 
 #### 7.10.1 Per-session admission and `session_busy`
 
 The daemon admits a transform pass through its global admission first; a pass the global bound refuses answers the `queue_full` error of Section 7.4, unchanged. An admitted pass then joins its session's lane, keyed by `session_id` whatever route carries the request. A lane holds at most one active pass and one waiting pass, and passes execute in the order they joined. A waiting pass holds the bytes its request was charged, but no unit of blocking work and no store connection; its wait counts against its own request deadline, and a cancelled or expired wait leaves the lane. An active pass keeps its place until every unit of its blocking work, every emergency wait, and its final settlement have finished, so a cancellation cannot let the next pass start while a unit of the cancelled pass can still commit. A paged pass refuses a concurrent unpaged pass of the same session with `authority_transform_page_in_progress` before that pass reaches the lane, and a waiting unpaged pass is refused the same way when it activates if a page stream of its session began staging while it waited; so while the waiting place is held by a paged pass, a further unpaged pass receives that error rather than `session_busy`.
 
-A pass that finds its session's lane holding an active and a waiting pass is answered at once with a response whose `status` is `"session_busy"` and whose `action` is `"SESSION_BUSY"`, carrying no recipe (`operations` absent) and `committed: false`. The daemon changes no session state for it: `row_version`, `meta`, and the stored history segments are as they were. `status` is the transform status discriminator (`"ok"`, `"session_busy"`); `"need_full_sync"` was retired by #829 and is never reused; `session_busy` is not an error code and is not retried by the transport. The daemon emits `session_busy` whatever transform revision the request negotiated. A consumer MUST treat it as a declined pass: it publishes nothing from the response and promotes no per-session state. The status set may grow: a consumer MUST treat a response whose `status` it does not recognize as a declined pass in the same way.
+A pass that finds its session's lane holding an active and a waiting pass is answered at once with a response whose `status` is `"session_busy"` and whose `action` is `"SESSION_BUSY"`, carrying no recipe (`operations` absent) and `committed: false`. The daemon changes no session state for it: `row_version`, `meta`, and the stored history segments are as they were. `status` is the transform status discriminator (`"ok"`, `"session_busy"`, `"boundary_unknown"`); `"need_full_sync"` was retired by #829 and is never reused; `session_busy` is not an error code and is not retried by the transport. The daemon emits `session_busy` whatever transform revision the request negotiated. A consumer MUST treat it as a declined pass: it publishes nothing from the response and promotes no per-session state. The status set may grow: a consumer MUST treat a response whose `status` it does not recognize as a declined pass in the same way.
 
 #### 7.10.2 `transform.boundary`
 
 `transform.boundary` is a read-only method on the Context route. Its body is `{"method": "transform.boundary", "v": 3, "session_id": string, "before_sequence"?: integer}`; the envelope's `kind` and `project_root` are also accepted. `v` MUST be `3`, `session_id` MUST be a non-blank string (not empty and not only whitespace) naming the route's bound session, and `before_sequence`, when present, MUST be an integer whose magnitude is at most `2^53 - 1` (a JavaScript safe integer); `null`, a fraction, a string, or a larger magnitude is refused. A body with any other field, or failing any of these rules, answers the `invalid_params` error. A route bound to another session answers `session_mismatch`, and an unbound route `route_unbound`. A daemon that does not implement this revision answers the method with `unrecognized_request_shape`, which a consumer MUST treat as a declined discovery, never as an exhausted one.
 
 The answer is `{"anchors": [{"mid": string, "sequence": integer}]}`. An anchor is a history segment's end message: `sequence` is the segment's primary key and `mid` the bare message id of its end block. A segment's end block id is an anchor only when it has the form `<mid>#<index>`, where `<mid>` is non-empty and contains no `#` and `<index>` is one or more ASCII digits. A `sequence` can be reused after a suffix removal, so an anchor is identified by its `(mid, sequence)` pair, not by `sequence` alone. The page lists the anchors whose `sequence` is at or below the rendered boundary (the segment whose end block is the core boundary id) and below `before_sequence` when present, newest first with strictly decreasing `sequence`, at most 4,096 of them. A segment newer than the rendered boundary is never listed, so a correct consumer never declares one; a daemon that holds no coverage answers an empty page. A consumer walks by passing the last `sequence` of a page as the next `before_sequence`; an empty page ends the walk. Every production writer of history segments appends at the newest sequence or removes a suffix, so an empty page is complete evidence for the anchor set as of the walk. A segment whose end block carries no message id is not an anchor and is not listed; such segments are skipped and never shorten a page, so an empty page still ends the walk only when no anchor remains. A segment whose `sequence` has a magnitude above `2^53 - 1` is not listed either, so every `sequence` in a response is a JavaScript safe integer. The method changes no state.
+
+#### 7.10.3 The `transform` request
+
+A `transform` request is one JSON object on the Context route, discriminated by `"kind": "transform"` or `"method": "transform"`, answering the route's bound session. Unknown fields are ignored. Its fields:
+
+| Field | Presence | Value |
+| --- | --- | --- |
+| `v` | required | the integer `3` |
+| `boundary` | required, may be `null` | `{"mid": string, "sequence": integer}`: the history segment whose end message the window starts at, as `transform.boundary` lists it; `null` submits the consumer's whole array |
+| `session_id` | required | the bound session |
+| `base_revision` | required | opaque revision token (1 to 128 UTF-8 bytes) naming this attempt's input snapshot |
+| `previous_output_revision` | optional | the revision of the consumer's retained, applied output, when it offers one |
+| `serializer_profile` | required | `owned-llmrunner`, `pi`, `opencode-aisdk`, or `claude-code-anthropic` |
+| `render_config` | required | string; a change is a render-configuration change |
+| `messages` | window, empty when absent | the window in CK form, in canonical order: `[{"mid": string, "ck": CK message}]` |
+| `serve_native` | optional, default `false` | `true` asks for the recipe over `native_messages`; only with `opencode-aisdk` |
+| `native_messages` | with `serve_native` | the same window in the harness's native form, one value per message, same order |
+| `usage` | optional | `{"current_total_input_tokens", "context_limit_tokens", "final_wire_input_tokens", "final_wire_trusted"}` |
+| `geometry` | optional | `{"usable_soft": integer, "usable_hard": integer, "derivation": string}` |
+| `prev_response_cache_usage` | optional | `{"cache_read_tokens", "cache_write_tokens"}`; a malformed value is dropped |
+| `mid_turn`, `is_subagent`, `tool_present` | optional, default `false` | booleans |
+| `todo_tool_present` | optional | boolean |
+| `provider_id`, `model_key`, `cache_ttl`, `system_prompt_hash`, `upgrade_state`, `provider_error` | optional | strings |
+| `prev_response_completed_at_ms`, `request_observed_at_ms` | optional | unsigned integers (milliseconds) |
+| `effective_execute_threshold`, `history_budget_tokens` | optional | numbers |
+| `protected_tags` (default 20), `clear_reasoning_age`, `detected_context_limit` | optional | unsigned integers |
+| `auto_search_enabled`, `auto_search_score_threshold`, `auto_search_min_prompt_chars`, `terse_text_compression_enabled`, `terse_text_compression_min_chars` | optional | the automatic-hint and compression switches |
+| `prompt_surface_preset`, `prompt_surface_model_key`, `prompt_surface_config_identity`, `prompt_surface_tool_descriptions`, `prompt_surface_guidance_override` | optional | the prompt-surface selection; a blank tool description is `invalid_params` |
+| `channel2_nudge_state`, `channel2_delivered_id`, `emergency_recovery_armed`, `emergency_recovery_no_head_escape`, `detected_context_limit_model_key` | optional | host delivery and recovery state |
+| `lineage_switched`, `descent_edge_id`, `prior_conversation_key`, `prior_epoch`, `new_epoch`, `constituents`, `compaction_observed` | optional | the lineage owner's descent edge; absent means no switch |
+| `transform_page_id`, `transform_generation`, `transform_page_index`, `transform_page_total`, `transform_page_complete`, `transform_page_digest` | paged requests only, all or none | the paging rule below |
+
+No field carries an ordinal. A message's ordinal is the daemon's: the head of a window with a non-null `boundary` takes the declared segment's end ordinal, each later non-synthetic message the next integer; with `null`, the first non-synthetic message is 1, or the session's lineage continuation base plus 1. A synthetic message followed by a non-synthetic one takes the ordinal before it (0, or the anchor's, when none precedes it); a trailing run of synthetic messages continues the numbering. An `ordinal` member of an ingress message or of its CK `meta` is ignored and never echoed. The removed carriers of earlier bodies (`absolute_ordinal`, `declared_trim`, `tail_delta`, `full_array_fingerprint`) are not fields of this revision; a body carrying `tail_delta` is refused with `transform_tail_delta_retired`.
+
+Window rules. With a non-null `boundary`, `messages` is the complete host suffix starting at the message `boundary.mid`, in both representations; the first message MUST be that mid. With `null`, `messages` is the whole host array. Message ids are unique within the window; the daemon refuses a repeated `mid` and does not look outside the window. `sequence` MUST be an integer whose magnitude is at most `2^53 - 1`.
+
+Paging rule. A request may be split into pages that share one `transform_page_id` and `transform_generation`, numbered by `transform_page_index` out of `transform_page_total`, the last marked `transform_page_complete: true`, each carrying the digest of its own content in `transform_page_digest`. The daemon concatenates the pages' `messages` and `native_messages` in page order. `v`, `boundary`, and every other non-array field are final-page scalars: a non-final page carries only `method`, `session_id`, `shadow_generation`, the paging fields, and array fields, and a non-final page with any other field answers `authority_transform_page_protocol_mismatch`. Every rule of this section applies to the request the pages assemble, so a final page without `boundary`, or with `v` other than 3, answers exactly as the unpaged request would.
+
+#### 7.10.4 Outcomes and errors
+
+The daemon resolves a window against one snapshot of the session's coverage, before any other work of the pass and without writing:
+
+- The declared segment is the rendered boundary: the window is served as submitted.
+- The declared segment is older than the rendered boundary and the rendered boundary's message is in the window: the daemon slices the window at that message and serves the rest (a stale slice); the consumer's coordinates are unchanged (Section 7.10.5).
+- The declared segment is older and the rendered boundary's message is not in the window: a revert through the declared segment. The pass defers with a pending reconcile, and a later pass removes the history after the declared segment and folds again.
+- `boundary` is `null` and the session holds coverage: the newest segment whose end message is in the window at its derived ordinal is taken as the anchor (a stale slice at it); with none, the pass is served as the raw window and the session's history is kept.
+- `boundary` is `null` and the session holds no coverage: a first pass.
+- The declared `sequence` names no segment, or the session has no rendered boundary: `{"status": "boundary_unknown", "action": "BOUNDARY_UNKNOWN", "committed": false}` with no recipe (`operations` absent) and no `boundary` member. The daemon changes no session state: `row_version`, `meta`, and the stored history segments are as they were. A consumer rediscovers through `transform.boundary` and sends the pass again; it treats a second `boundary_unknown` in one pass as a declined pass.
+
+A write that races the pass's commit makes the pass resolve again from a fresh snapshot. A revert whose removal committed before its fold commits (a conflict or a crash between the two) leaves no rendered boundary; the next pass declares from discovery, which then lists nothing, sends `null` with the whole array, and folds from the surviving history in one pass.
+
+Errors, each an application `Error` (Section 10.2) with a stable `code` and a human-readable `message`. Every refusal decided before the pass runs, which is every code below except `transform_failed` and `transform_output_too_large`, changes no session state:
+
+| Code | Cause |
+| --- | --- |
+| `transform_revision_unsupported` | `v` is absent or not the integer 3; the message is `expected transform revision 3, received <v>`, with `<v>` the received JSON value or `null` |
+| `invalid_params` | `boundary` absent; `boundary.sequence` outside the safe-integer range; a window whose first message is not `boundary.mid`; a declared segment whose end message is not `boundary.mid`; a declared segment newer than the rendered boundary; a repeated `mid` in the window; a blank prompt-surface tool description |
+| `bad_request` | a body that does not decode as a transform request |
+| `unknown_serializer_profile`, `serve_native_unsupported_profile` | a missing or unknown profile, or `serve_native` without `opencode-aisdk` |
+| `transform_base_revision_missing` | no `base_revision` |
+| `transform_tail_delta_retired` | a `tail_delta` field |
+| `route_unbound`, `session_mismatch`, `store_unavailable` | route and store preconditions |
+| `authority_transform_page_in_progress` | an unpaged pass while a page stream of its session is staging |
+| `transform_failed` | the pass itself failed; the message names the failure |
+| `transform_output_too_large` | the reconstructed output would exceed the wire body cap |
+
+`transform_revision_unsupported` is checked before every other rule, so a body of any earlier revision receives it. A consumer that receives it serves its raw array for that pass.
+
+#### 7.10.5 The response and recipe coordinates
+
+An `ok` response carries:
+
+| Field | Value |
+| --- | --- |
+| `status` | `"ok"` |
+| `action`, `decision` | the pass class, for example `HARD`, `SOFT`, `SOFT+`, `PASSTHROUGH` |
+| `base_revision` | the request's `base_revision` |
+| `output_revision` | a fresh revision naming this response's output |
+| `previous_output_revision` | present exactly when the recipe keeps from the consumer's previous output; it then equals the request's value |
+| `operations` | the recipe |
+| `boundary` | the rendered coverage boundary after the pass, `{"mid", "sequence"}` as `transform.boundary` lists it, or `null` when the session holds no coverage; the consumer declares it on its next pass |
+| `boundary_id`, `reconcile_pending`, `version`, `row_version`, `surface_state`, `committed` | the session's state after the pass |
+| `served_from`, `materialize_reason`, `first_divergence`, `timings`, `project_memory`, `cache_ttl`, `history_summarizer`, `host_directives`, `channel2_directive`, `note_deliveries`, `lineage_switch_consumed_id`, `lineage_descent_disposition` | optional diagnostics and host directives |
+
+No response member carries a message ordinal.
+
+The recipe is an ordered array of operations whose results, concatenated, are the output array: `{"op": "keep", "source": "input" | "previous", "start": integer, "count": integer}` copies `count` whole values starting at `start`, and `{"op": "insert", "values": [value, ...]}` inserts complete values. Omission deletes. The `input` source is the request's `native_messages` when `serve_native` is `true`, otherwise the CK values of `messages` (the daemon keeps only from `previous` for CK); the `previous` source is the output the consumer applied under `previous_output_revision`. Every `keep(source: input)` is in the coordinates of the submitted window: position `i` is the `i`-th submitted message, whatever the daemon sliced before processing. A consumer applies the recipe to its captured window, the host index of window position `i` being the window's start plus `i`, validates it whole against both sources and the reconstructed-size cap before building anything, and publishes the result as the whole new array.
 
 ## 8. Host and handler lifecycle
 

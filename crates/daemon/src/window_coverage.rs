@@ -1,8 +1,7 @@
-//! The per-session coverage authority of transform revision 3 (spec C5, D2, D5, D7, D10, D11,
-//! D20): what a declared anchor means against one store snapshot, the ordinals the window's
-//! messages receive from the effective anchor, where the recipe's input keeps point in the
-//! submitted window, and the anchor pages `transform.boundary` answers. Nothing here writes;
-//! the transform commit persists what the pass does with a resolution.
+//! The per-session coverage authority of transform revision 3 (spec C5, D2, D7, D10, D11): what
+//! a declared anchor means against one store snapshot, the ordinals the window's messages
+//! receive from the effective anchor, and the anchor pages `transform.boundary` answers.
+//! Nothing here writes; the transform commit persists what the pass does with a resolution.
 //!
 //! With no declared anchor, the store matches the k-th non-synthetic window message only at
 //! ordinal continuation base + k + 1 through the end-message index (the spec's C3 inventory
@@ -17,14 +16,13 @@
 use memory_store::{CoverageSnapshot, HistorySegmentEdge, MemoryStore, MemoryStoreError};
 use serde_json::{Value, json};
 
-use crate::edit_recipe::{Operation, Source};
 use crate::wire::split_block_id;
 
 /// Anchors per `transform.boundary` page.
 pub const BOUNDARY_PAGE_LIMIT: usize = 4_096;
 
 /// The largest integer JavaScript represents exactly, `2^53 - 1`.
-const MAX_SAFE_INTEGER: i64 = (1 << 53) - 1;
+pub(crate) const MAX_SAFE_INTEGER: i64 = (1 << 53) - 1;
 
 /// One submitted window message, in submitted order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -240,22 +238,6 @@ pub fn assign_ordinals(
         ordinals.push(ordinal);
     }
     ordinals
-}
-
-/// Moves input keeps built against the processed window into submitted-window coordinates
-/// (D5, D20): processed position i after cut c is submitted position c + i. Previous-output
-/// keeps and inserts are unchanged.
-pub fn translate_input_keeps<V>(operations: &mut [Operation<V>], cut: usize) {
-    for operation in operations {
-        if let Operation::Keep {
-            source: Source::Input,
-            start,
-            ..
-        } = operation
-        {
-            *start += cut as u64;
-        }
-    }
 }
 
 /// Validates a `transform.boundary` body: `v: 3`, a non-blank `session_id`, an optional

@@ -1814,10 +1814,6 @@ fn bool_is_false(value: &bool) -> bool {
     !*value
 }
 
-fn u8_is_zero(value: &u8) -> bool {
-    *value == 0
-}
-
 /// A response-side Channel-2 directive awaiting a gateway delivery acknowledgement.
 /// The text is stored verbatim because Claude Code does not retain the injected prompt block.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1995,11 +1991,6 @@ pub struct ModuleMeta {
     /// `None` identifies metadata written before the component watermark was persisted.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub m1_history_segment_seq: Option<i64>,
-    /// Counted coherent divergence observations suppressed by a pending history_segment revision.
-    /// Active history_summarizer and wrapup publication windows retain this value without incrementing or
-    /// resetting it; legacy or damaged rows resume escalation after those bounded windows close.
-    #[serde(default, skip_serializing_if = "u8_is_zero")]
-    pub boundary_divergence_pending_count: u8,
     /// The last materializing pass had cross-session memory disabled. The negative form keeps
     /// pre-field metadata and fresh default state compatible with the historical enabled mode.
     #[serde(default)]
@@ -19885,60 +19876,6 @@ mod tests {
 
         let v2 = store.commit("ses_a", Some(1), &core, &meta).unwrap();
         assert_eq!(v2, 2);
-    }
-
-    #[test]
-    fn boundary_divergence_counter_cas_loser_does_not_double_increment_and_survives_reopen() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
-        let session = "counter-cas";
-        let core = CoreState::empty();
-        let initial_meta = ModuleMeta {
-            boundary_divergence_pending_count: 0,
-            ..Default::default()
-        };
-        store.commit(session, None, &core, &initial_meta).unwrap();
-
-        let left = store.load(session).unwrap();
-        let right = store.load(session).unwrap();
-        assert_eq!(left.row_version, Some(1));
-        assert_eq!(right.row_version, Some(1));
-
-        let mut left_meta = left.meta.clone();
-        left_meta.boundary_divergence_pending_count = 1;
-        store
-            .commit(session, left.row_version, &left.core, &left_meta)
-            .unwrap();
-
-        let mut right_meta = right.meta.clone();
-        right_meta.boundary_divergence_pending_count = 1;
-        let loser = store.commit(session, right.row_version, &right.core, &right_meta);
-        assert!(matches!(
-            loser,
-            Err(MemoryStoreError::CasConflict {
-                expected: Some(1),
-                found: 2
-            })
-        ));
-        assert_eq!(
-            store
-                .load(session)
-                .unwrap()
-                .meta
-                .boundary_divergence_pending_count,
-            1
-        );
-
-        drop(store);
-        let reopened = MemoryStore::open(&descriptor(dir.path())).unwrap();
-        assert_eq!(
-            reopened
-                .load(session)
-                .unwrap()
-                .meta
-                .boundary_divergence_pending_count,
-            1
-        );
     }
 
     #[test]
