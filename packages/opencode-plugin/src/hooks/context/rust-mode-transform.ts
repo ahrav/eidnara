@@ -850,7 +850,8 @@ type PassDeclineReason =
     | "source_changed"
     | "invalidated"
     | "deleted"
-    | "internal_child";
+    | "internal_child"
+    | "daemon_session_busy";
 
 /**
  * A local refusal prevents publication without counting a daemon failure. Byte pressure and a
@@ -1613,6 +1614,10 @@ export function createRustModeTransform(
                     );
                 }
                 if (!response) throw new Error("rust module returned no transform response");
+                // The daemon's session lane already holds an active and a waiting pass for this session.
+                if (response.status === "session_busy") {
+                    throw new PassDeclined(sessionId, "daemon_session_busy");
+                }
                 return { response };
             };
             let transformSeriesRestarted = false;

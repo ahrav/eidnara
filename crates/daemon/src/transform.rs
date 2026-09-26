@@ -1168,6 +1168,8 @@ impl<'de> Deserialize<'de> for TransformRequest {
 pub enum TransformStatus {
     Ok,
     NeedFullSync,
+    /// The session already has an active and a waiting pass; no recipe, no state change.
+    SessionBusy,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -1673,6 +1675,10 @@ impl TransformResponse {
             "NEED_FULL_SYNC",
             full_array_fingerprint,
         )
+    }
+
+    pub fn session_busy() -> Self {
+        Self::base(TransformStatus::SessionBusy, "SESSION_BUSY", None)
     }
 
     pub fn passthrough(messages: Vec<WireMessage>, full_array_fingerprint: Option<String>) -> Self {

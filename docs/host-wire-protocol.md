@@ -897,6 +897,16 @@ claimed. Pi's status line shows pending or unconfirmed capture; OpenCode warns
 only when a checkpoint or drain fails. Notification failure never discards the
 answer.
 
+### 7.10 Transform application revision 3
+
+Transform application revision 3 is a separately named application revision of the `transform` method family on the Context route; the frame protocol stays v3 and the context application protocol (Section 7.8) stays 3. The `transform` request and response bodies of this revision are specified by the revision 3 transform landing; this section specifies the per-session admission outcome and the discovery method.
+
+#### 7.10.1 Per-session admission and `session_busy`
+
+The daemon admits a transform pass through its global admission first; a pass the global bound refuses answers the `queue_full` error of Section 7.4, unchanged. An admitted pass then joins its session's lane, keyed by `session_id` whatever route carries the request. A lane holds at most one active pass and one waiting pass, and passes execute in the order they joined. A waiting pass holds the bytes its request was charged, but no unit of blocking work and no store connection; its wait counts against its own request deadline, and a cancelled or expired wait leaves the lane. An active pass keeps its place until every unit of its blocking work, every emergency wait, and its final settlement have finished, so a cancellation cannot let the next pass start while a unit of the cancelled pass can still commit.
+
+A pass that finds its session's lane holding an active and a waiting pass is answered at once with a response whose `status` is `"session_busy"` and whose `action` is `"SESSION_BUSY"`, carrying no recipe (`operations` absent) and `committed: false`. The daemon changes no session state for it: `row_version`, `meta`, and the stored history segments are as they were. `status` is the transform status discriminator (`"ok"`, `"need_full_sync"`, `"session_busy"`); `session_busy` is not an error code and is not retried by the transport. A consumer MUST treat it as a declined pass: it publishes nothing from the response and promotes no per-session state.
+
 ## 8. Host and handler lifecycle
 
 ### 8.1 Startup and readiness

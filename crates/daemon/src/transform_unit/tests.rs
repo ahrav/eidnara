@@ -638,10 +638,20 @@ async fn admission_refuses_the_request_past_the_waiter_bound_and_declares_it() {
     assert_eq!(handler.transform_units.available_permits(), 0);
 
     let input = request(vec![ck("m1", 1, "queued unit")]);
-    let pool = TestPool::unbounded();
+    // Waiters of distinct sessions, so each session lane holds one pass and only the
+    // admission bound can refuse.
+    let queued_on = |index: usize| {
+        let route = test_route(50 + index as u16);
+        let session = format!("queued-{index}");
+        handler.bind_route(route, binding(project.to_str().unwrap(), &session));
+        let mut queued = input.clone();
+        queued["session_id"] = json!(session);
+        (route, queued)
+    };
     let mut waiting = Vec::new();
-    for _ in TRANSFORM_UNITS_AT_ONCE..TRANSFORM_ADMISSION_PERMITS {
-        let mut queued = Box::pin(metered_transform(&handler, input.clone(), &*runner, &pool));
+    for index in TRANSFORM_UNITS_AT_ONCE..TRANSFORM_ADMISSION_PERMITS {
+        let (route, queued) = queued_on(index);
+        let mut queued = Box::pin(handler.handle_transform_with_runner(route, queued, &*runner));
         poll_fn(|cx| {
             assert!(queued.as_mut().poll(cx).is_pending());
             Poll::Ready(())
@@ -697,7 +707,9 @@ async fn admission_refuses_the_request_past_the_waiter_bound_and_declares_it() {
     ));
 
     drop(waiting.pop());
-    let mut readmitted = Box::pin(metered_transform(&handler, input, &*runner, &pool));
+    let (route, readmitted) = queued_on(TRANSFORM_ADMISSION_PERMITS - 1);
+    let mut readmitted =
+        Box::pin(handler.handle_transform_with_runner(route, readmitted, &*runner));
     poll_fn(|cx| {
         assert!(readmitted.as_mut().poll(cx).is_pending());
         Poll::Ready(())
@@ -943,4 +955,154 @@ async fn synthetic_unit_failures_map_to_internal_error_and_release_resources() {
             }
         }
     }
+}
+
+/// Binds `route` to `ses` and returns a same-session request whose text names the pass.
+fn same_session_pass(handler: &Handler, project: &Path, route: u16, text: &str) -> Value {
+    handler.bind_route(test_route(route), binding(project.to_str().unwrap(), "ses"));
+    request(vec![ck("m1", 1, text)])
+}
+
+/// Polls `future` once, where it must park.
+async fn park<F: Future + Unpin>(future: &mut F) {
+    poll_fn(|cx| {
+        assert!(Pin::new(&mut *future).poll(cx).is_pending());
+        Poll::Ready(())
+    })
+    .await;
+}
+
+fn durable_state(store: &MemoryStore) -> (Option<u64>, Value, usize) {
+    let loaded = store.load("ses").unwrap();
+    (
+        loaded.row_version,
+        serde_json::to_value(&loaded.meta).unwrap(),
+        store.load_history_segments("ses").unwrap().len(),
+    )
+}
+
+/// WP-P04 and WP-P18: with the active pass held at a barrier, a second same-session pass on
+/// another route is admitted and waits, a third is refused `session_busy` without touching
+/// state, and the waiter executes only after the active pass has committed.
+#[tokio::test(flavor = "current_thread")]
+async fn session_lane_holds_one_waiter_refuses_a_third_and_runs_in_arrival_order() {
+    let (handler, store, _dir, project) =
+        handler_with_store(Arc::new(ProducerState::default()), default_test_config());
+    let handler = Arc::new(handler);
+    let runner = Arc::new(JoinedUnitRunner::default());
+    let (mut gate, hook) = BlockingGate::new();
+    runner.before_unit.lock().unwrap().push_back(hook);
+    let active = {
+        let (handler, runner) = (Arc::clone(&handler), Arc::clone(&runner));
+        let input = same_session_pass(&handler, &project, 31, "active pass");
+        tokio::spawn(async move {
+            handler
+                .handle_transform_with_runner(test_route(31), input, &*runner)
+                .await
+        })
+    };
+    gate.wait_entered().await;
+
+    let second_input = same_session_pass(&handler, &project, 32, "waiting pass");
+    let mut waiting =
+        Box::pin(handler.handle_transform_with_runner(test_route(32), second_input, &*runner));
+    park(&mut waiting).await;
+    assert_eq!(runner.submitted.load(Ordering::SeqCst), 1);
+    assert_eq!(handler.transform_units.available_permits(), 3);
+
+    let before = durable_state(&store);
+    let third_input = same_session_pass(&handler, &project, 33, "third pass");
+    let third = tool_body(
+        watchdog(handler.handle_transform_with_runner(test_route(33), third_input, &*runner)).await,
+    );
+    assert_eq!(third["status"], "session_busy");
+    assert!(third.get("operations").is_none());
+    assert_eq!(durable_state(&store), before);
+    assert_eq!(runner.submitted.load(Ordering::SeqCst), 1);
+
+    // The active pass's commit hook runs on its unit thread, before its lane place drops.
+    let submitted_at_first_commit = Arc::new(AtomicUsize::new(usize::MAX));
+    {
+        let (runner, seen) = (Arc::clone(&runner), Arc::clone(&submitted_at_first_commit));
+        *handler.after_transform_commit.lock().unwrap() = Some(Box::new(move || {
+            seen.store(runner.submitted.load(Ordering::SeqCst), Ordering::SeqCst);
+        }));
+    }
+    drop(gate);
+    let first = tool_body(watchdog(active).await.unwrap());
+    let second = tool_body(watchdog(waiting).await);
+    runner.join_all().await;
+    assert_eq!(submitted_at_first_commit.load(Ordering::SeqCst), 1);
+    assert_eq!(runner.submitted.load(Ordering::SeqCst), 2);
+    assert_eq!(first["committed"], true);
+    assert_eq!(second["committed"], true);
+    let (first_version, second_version) = (
+        first["row_version"].as_u64().unwrap(),
+        second["row_version"].as_u64().unwrap(),
+    );
+    assert!(
+        first_version < second_version,
+        "the waiter commits after the active pass"
+    );
+    assert_eq!(store.load("ses").unwrap().row_version, Some(second_version));
+    assert!(handler.transform_session_lanes.0.lock().unwrap().is_empty());
+}
+
+/// WP-P04 under cancellation: a cancelled pass whose unit is still blocked keeps its lane
+/// place until that unit abandons; the waiter holds no unit permit or store lock, and an
+/// abandoned wait gives its place back.
+#[tokio::test(flavor = "current_thread")]
+async fn cancelled_pass_keeps_its_lane_place_until_its_blocked_unit_finishes() {
+    let (handler, store, _dir, project) =
+        handler_with_store(Arc::new(ProducerState::default()), default_test_config());
+    let handler = Arc::new(handler);
+    let cancelled_runner = Arc::new(JoinedUnitRunner::default());
+    let (mut gate, hook) = BlockingGate::new();
+    cancelled_runner.before_unit.lock().unwrap().push_back(hook);
+    let cancelled = {
+        let (handler, runner) = (Arc::clone(&handler), Arc::clone(&cancelled_runner));
+        let input = same_session_pass(&handler, &project, 31, "cancelled pass");
+        tokio::spawn(async move {
+            handler
+                .handle_transform_with_runner(test_route(31), input, &*runner)
+                .await
+        })
+    };
+    gate.wait_entered().await;
+    cancelled.abort();
+    assert!(watchdog(cancelled).await.unwrap_err().is_cancelled());
+    cancelled_runner.worker.cancel.cancel();
+
+    let runner = JoinedUnitRunner::default();
+    // A waiter that gives up (its request deadline) leaves the lane as it found it.
+    let abandoned_input = same_session_pass(&handler, &project, 32, "abandoned wait");
+    let abandoned = tokio::time::timeout(
+        Duration::from_millis(20),
+        handler.handle_transform_with_runner(test_route(32), abandoned_input, &runner),
+    )
+    .await;
+    assert!(abandoned.is_err());
+
+    let next_input = same_session_pass(&handler, &project, 33, "next pass");
+    let mut next =
+        Box::pin(handler.handle_transform_with_runner(test_route(33), next_input.clone(), &runner));
+    park(&mut next).await;
+    assert_eq!(runner.submitted.load(Ordering::SeqCst), 0);
+    assert_eq!(handler.transform_units.available_permits(), 3);
+    // The waiter holds no store lock: the store answers while it waits.
+    assert!(store.load("ses").unwrap().row_version.is_none());
+    let busy = tool_body(
+        watchdog(handler.handle_transform_with_runner(test_route(33), next_input, &runner)).await,
+    );
+    assert_eq!(busy["status"], "session_busy");
+
+    drop(gate);
+    cancelled_runner.join_all().await;
+    assert!(store.load("ses").unwrap().row_version.is_none());
+    let next = tool_body(watchdog(next).await);
+    runner.join_all().await;
+    assert_eq!(next["committed"], true);
+    assert_eq!(runner.submitted.load(Ordering::SeqCst), 1);
+    assert_eq!(handler.transform_units.available_permits(), 4);
+    assert!(handler.transform_session_lanes.0.lock().unwrap().is_empty());
 }

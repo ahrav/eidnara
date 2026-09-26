@@ -153,7 +153,8 @@ use host_runtime::{BlockingWorkFailed, CancelSignal};
 
 use crate::transform_unit::{
     AdmissionPermit, HistorySummarizerFollowup, PageApplyGuard, PassContinuation, PassEntry,
-    PassHold, TRANSFORM_ADMISSION_PERMITS, TRANSFORM_UNITS_AT_ONCE, UnitOutcome, UnitPermit,
+    PassHold, SessionLanes, TRANSFORM_ADMISSION_PERMITS, TRANSFORM_UNITS_AT_ONCE, UnitOutcome,
+    UnitPermit,
 };
 
 use boundary::{BoundaryBlock, BoundaryContext, BoundaryMsg, Role, TriggerContext};
@@ -3048,6 +3049,8 @@ pub struct HandlerCore {
     transform_units: Arc<tokio::sync::Semaphore>,
     /// Admits the passes that may run or wait for a unit; see [`TRANSFORM_ADMISSION_PERMITS`].
     transform_admission: Arc<tokio::sync::Semaphore>,
+    /// Orders same-session passes after admission; see [`SessionLanes`].
+    transform_session_lanes: Arc<SessionLanes>,
     #[cfg(test)]
     transform_page_discard_logs: Mutex<Vec<String>>,
     /// The durable classify protocol behind `memory_classifier.run_task`; the scheduler
@@ -3983,6 +3986,7 @@ impl Handler {
             transform_pages: Mutex::new(TransformPageCoordinator::default()),
             transform_units: Arc::new(tokio::sync::Semaphore::new(TRANSFORM_UNITS_AT_ONCE)),
             transform_admission: Arc::new(tokio::sync::Semaphore::new(TRANSFORM_ADMISSION_PERMITS)),
+            transform_session_lanes: Arc::default(),
             #[cfg(test)]
             transform_page_discard_logs: Mutex::new(Vec::new()),
             missing_facade_command_id_sessions: Mutex::new(HashSet::new()),
@@ -4471,6 +4475,7 @@ impl Handler {
             transform_pages: Mutex::new(TransformPageCoordinator::default()),
             transform_units: Arc::new(tokio::sync::Semaphore::new(TRANSFORM_UNITS_AT_ONCE)),
             transform_admission: Arc::new(tokio::sync::Semaphore::new(TRANSFORM_ADMISSION_PERMITS)),
+            transform_session_lanes: Arc::default(),
             #[cfg(test)]
             transform_page_discard_logs: Mutex::new(Vec::new()),
             missing_facade_command_id_sessions: Mutex::new(HashSet::new()),
@@ -8945,6 +8950,19 @@ impl HandlerCore {
             Ok(admission) => admission,
             Err(outcome) => return outcome,
         };
+        // Refused before the lane, so an unpaged pass never waits behind an applying page.
+        if page_apply.is_none() && self.transform_page_in_progress(&binding.session) {
+            return PreparedOutcome::Error {
+                code: "authority_transform_page_in_progress".to_string(),
+                message: "transform is blocked until all transform pages arrive".to_string(),
+            };
+        }
+        let Some(lane) = self.transform_session_lanes.join(&parsed.session_id) else {
+            return respond_transform(&parsed, transform::TransformResponse::session_busy(), None);
+        };
+        let Ok(lane) = lane.activate().await else {
+            return unit_failed_error(BlockingWorkFailed::RuntimeStopped);
+        };
         apply_claude_code_config_controls(&mut parsed, &binding.config, serializer_profile);
         parsed
             .prompt_surface_tool_descriptions
@@ -9007,12 +9025,6 @@ impl HandlerCore {
         } else {
             None
         };
-        if page_apply.is_none() && self.transform_page_in_progress(&binding.session) {
-            return PreparedOutcome::Error {
-                code: "authority_transform_page_in_progress".to_string(),
-                message: "transform is blocked until all transform pages arrive".to_string(),
-            };
-        }
         let permit = match self.acquire_unit_permit().await {
             Ok(permit) => permit,
             Err(outcome) => return outcome,
@@ -9048,6 +9060,7 @@ impl HandlerCore {
             held: PassHold {
                 _charges: entry.meter.take_charges(),
                 _page_apply: page_apply,
+                _lane: lane,
             },
         };
         // From here the pass's store work runs on the blocking pool. The resident charges the

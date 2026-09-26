@@ -144,6 +144,8 @@ pub(crate) enum HistorySummarizerFollowup {
 pub(crate) struct PassHold {
     pub(crate) _charges: Vec<host_runtime::wire::ByteCharge>,
     pub(crate) _page_apply: Option<Arc<PageApplyGuard>>,
+    /// Last, so a waiting same-session pass wakes only after the page phase is released.
+    pub(crate) _lane: SessionPass,
 }
 
 /// Keeps a paged session's `Applying` phase until the pass has settled or has been given up.
@@ -200,3 +202,75 @@ pub(crate) const TRANSFORM_ADMISSION_PERMITS: usize =
 pub(crate) type UnitPermit = OwnedSemaphorePermit;
 
 pub(crate) type AdmissionPermit = OwnedSemaphorePermit;
+
+/// Per-session transform lanes (spec D3): at most one active and one waiting pass per session
+/// id, whatever route carries it; the waiter runs when the active pass's [`SessionPass`] drops.
+#[derive(Default)]
+pub(crate) struct SessionLanes(
+    pub(crate) std::sync::Mutex<std::collections::HashMap<String, SessionLane>>,
+);
+
+pub(crate) struct SessionLane {
+    gate: Arc<tokio::sync::Semaphore>,
+    passes: usize,
+}
+
+/// One pass's place in its session lane. It rides in the pass's [`PassHold`], so it is released
+/// after the last unit's thread finishes, never while a unit may still commit.
+pub(crate) struct SessionPass {
+    lanes: Arc<SessionLanes>,
+    session_id: String,
+    gate: Arc<tokio::sync::Semaphore>,
+    permit: Option<OwnedSemaphorePermit>,
+}
+
+impl SessionLanes {
+    /// Joins the session's lane without waiting; `None` when it already holds two passes.
+    pub(crate) fn join(self: &Arc<Self>, session_id: &str) -> Option<SessionPass> {
+        let mut lanes = self
+            .0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let lane = lanes
+            .entry(session_id.to_string())
+            .or_insert_with(|| SessionLane {
+                gate: Arc::new(tokio::sync::Semaphore::new(1)),
+                passes: 0,
+            });
+        if lane.passes >= 2 {
+            return None;
+        }
+        lane.passes += 1;
+        Some(SessionPass {
+            lanes: Arc::clone(self),
+            session_id: session_id.to_string(),
+            gate: Arc::clone(&lane.gate),
+            permit: None,
+        })
+    }
+}
+
+impl SessionPass {
+    /// Waits, abortably, until the pass is the session's active pass; the semaphore is FIFO.
+    pub(crate) async fn activate(mut self) -> Result<Self, tokio::sync::AcquireError> {
+        self.permit = Some(Arc::clone(&self.gate).acquire_owned().await?);
+        Ok(self)
+    }
+}
+
+impl Drop for SessionPass {
+    fn drop(&mut self) {
+        let mut lanes = self
+            .lanes
+            .0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        drop(self.permit.take());
+        if let Some(lane) = lanes.get_mut(&self.session_id) {
+            lane.passes -= 1;
+            if lane.passes == 0 {
+                lanes.remove(&self.session_id);
+            }
+        }
+    }
+}
