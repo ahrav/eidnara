@@ -1,6 +1,12 @@
-import { describe, expect, it, spyOn } from "bun:test";
+import { afterEach, describe, expect, it, spyOn } from "bun:test";
+import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
 import { BoundedSessionMap } from "../../shared/bounded-session-map";
 import * as logger from "../../shared/logger";
+import { Database } from "../../shared/sqlite";
+import { closeQuietly } from "../../shared/sqlite-helpers";
+import { closeReadOnlySessionDb } from "./read-session-db";
 import {
     createRustModeTransform,
     type RustModeModuleClient,
@@ -807,5 +813,186 @@ describe("work counters", () => {
         const large = await steadyWork(100_000, "work-large");
         expect(small[0]).toBe(5);
         expect(large).toEqual(small);
+    });
+});
+
+describe("window-scoped fail-open", () => {
+    const folded = (sessionId: string): MessageLike => ({
+        info: { id: "fold", role: "user", sessionID: sessionId },
+        parts: [{ type: "text", text: "folded" }],
+    });
+
+    /** Pass one discovers `m-2` and folds its window; every later transform fails for real, or declines with `status`. */
+    function failAfterFold(sessionId: string, rendered: Anchor, status?: string) {
+        return fakeDaemon({
+            pages: () => ({ anchors: [{ mid: "m-2", sequence: 5 }] }),
+            transform: (body, index) => {
+                if (index > 0 && status) return { status };
+                if (index > 0) throw new Error("request deadline expired after a possible send");
+                return {
+                    base_revision: body.base_revision,
+                    output_revision: "fold-out",
+                    boundary: rendered,
+                    operations: [{ op: "insert", values: [folded(sessionId)] }],
+                };
+            },
+        });
+    }
+
+    it("appends exactly the unacknowledged window suffix and promotes no basis", async () => {
+        const sessionId = `fail-open-window-${Date.now()}`;
+        const anchor = { mid: "m-2", sequence: 5 };
+        const { client, bodies } = failAfterFold(sessionId, anchor);
+        const transform = createRustModeTransform(makeDeps(), { moduleClient: client });
+        await transform.run(sessionId, { messages: hostArray(sessionId, 5) });
+        const grown = hostArray(sessionId, 8);
+        const output = { messages: [...grown] as unknown[] };
+        await transform.run(sessionId, output);
+        // The acknowledged prefix is host[2..5); only host[5..8) follows the applied output.
+        expect(bodies[1]?.boundary).toEqual(anchor);
+        expect(output.messages).toHaveLength(4);
+        expect(output.messages[0]).toEqual(folded(sessionId));
+        for (const [index, member] of grown.slice(5).entries())
+            expect(output.messages[index + 1]).toBe(member);
+        expect(transform.getState(sessionId).failureCount).toBe(1);
+        expect(transform.getState(sessionId).boundary).toEqual(anchor);
+
+        // The basis is still pass one's: a later failure appends from the same prefix.
+        const again = hostArray(sessionId, 9);
+        const againOutput = { messages: [...again] as unknown[] };
+        await transform.run(sessionId, againOutput);
+        expect(againOutput.messages).toHaveLength(5);
+        expect(againOutput.messages.slice(1)).toEqual(again.slice(5));
+    });
+
+    for (const [status, reason] of [
+        ["session_busy", "daemon_session_busy"],
+        ["status_added_later", "daemon_status_unrecognized"],
+    ]) {
+        it(`appends the unacknowledged window suffix on a ${status} decline`, async () => {
+            const sessionId = `fail-open-window-${status}-${Date.now()}`;
+            const anchor = { mid: "m-2", sequence: 5 };
+            const { client, bodies } = failAfterFold(sessionId, anchor, status);
+            const transform = createRustModeTransform(makeDeps(), { moduleClient: client });
+            const debug = spyOn(logger.sessionLog, "debug");
+            try {
+                await transform.run(sessionId, { messages: hostArray(sessionId, 5) });
+                const grown = hostArray(sessionId, 8);
+                const output = { messages: [...grown] as unknown[] };
+                await transform.run(sessionId, output);
+                expect(bodies[1]?.boundary).toEqual(anchor);
+                expect(output.messages).toHaveLength(4);
+                expect(output.messages[0]).toEqual(folded(sessionId));
+                for (const [index, member] of grown.slice(5).entries())
+                    expect(output.messages[index + 1]).toBe(member);
+                expect(transform.getState(sessionId).failureCount).toBe(0);
+                expect(transform.getState(sessionId).boundary).toEqual(anchor);
+                const passLines = logsOf(debug, sessionId).filter((line) =>
+                    line.startsWith("rust pass:"),
+                );
+                expect(passLines[1]).toContain(
+                    `decision=declined:${reason} reason=none served_from=last_applied in=6 out=4`,
+                );
+            } finally {
+                debug.mockRestore();
+            }
+        });
+    }
+
+    it("serves raw against a mismatched basis anchor or a changed terminal message", async () => {
+        const moved = `fail-open-moved-${Date.now()}`;
+        const movedDaemon = failAfterFold(moved, { mid: "m-3", sequence: 6 });
+        const movedTransform = createRustModeTransform(makeDeps(), {
+            moduleClient: movedDaemon.client,
+        });
+        await movedTransform.run(moved, { messages: hostArray(moved, 5) });
+        const movedHost = hostArray(moved, 7);
+        const movedOutput = { messages: [...movedHost] as unknown[] };
+        await movedTransform.run(moved, movedOutput);
+        // Enabling state: the failed pass declared an anchor other than the retained basis.
+        expect(movedDaemon.bodies[1]?.boundary).toEqual({ mid: "m-3", sequence: 6 });
+        expect(movedOutput.messages).toEqual(movedHost);
+
+        const edited = `fail-open-terminal-${Date.now()}`;
+        const editedDaemon = failAfterFold(edited, { mid: "m-2", sequence: 5 });
+        const editedTransform = createRustModeTransform(makeDeps(), {
+            moduleClient: editedDaemon.client,
+        });
+        await editedTransform.run(edited, { messages: hostArray(edited, 5) });
+        const editedHost = hostArray(edited, 7);
+        (editedHost[4]?.parts[0] as { text: string }).text = "terminal edited in place";
+        const editedOutput = { messages: [...editedHost] as unknown[] };
+        await editedTransform.run(edited, editedOutput);
+        expect(editedDaemon.bodies[1]?.boundary).toEqual({ mid: "m-2", sequence: 5 });
+        expect(editedOutput.messages).toEqual(editedHost);
+    });
+});
+
+describe("first-user tool policy", () => {
+    const dataHomes: string[] = [];
+    const originalDataHome = process.env.XDG_DATA_HOME;
+    afterEach(() => {
+        closeReadOnlySessionDb();
+        for (const home of dataHomes.splice(0)) rmSync(home, { recursive: true, force: true });
+        process.env.XDG_DATA_HOME = originalDataHome;
+    });
+
+    /** An OpenCode database whose earliest user row carries `tools`, or no row when absent. */
+    function installDb(sessionId: string, tools?: Record<string, boolean>): void {
+        const home = mkdtempSync(join(tmpdir(), "window-first-user-"));
+        dataHomes.push(home);
+        const path = join(home, "opencode", "opencode.db");
+        mkdirSync(dirname(path), { recursive: true });
+        const db = new Database(path);
+        db.exec(
+            "CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT NOT NULL, time_created INTEGER NOT NULL, time_updated INTEGER NOT NULL, data TEXT NOT NULL)",
+        );
+        if (tools)
+            db.prepare("INSERT INTO message VALUES (?, ?, 1, 1, ?)").run(
+                "m-0",
+                sessionId,
+                JSON.stringify({ id: "m-0", role: "user", tools }),
+            );
+        closeQuietly(db);
+        process.env.XDG_DATA_HOME = home;
+    }
+
+    /** A cold pass whose window starts past the session's first user message. */
+    async function toolPresent(sessionId: string, windowTools: Record<string, boolean>) {
+        const host = hostArray(sessionId, 6);
+        (host[3]?.info as { tools?: Record<string, boolean> }).tools = windowTools;
+        const { client, bodies } = fakeDaemon({
+            pages: () => ({ anchors: [{ mid: "m-3", sequence: 2 }] }),
+        });
+        const transform = createRustModeTransform(makeDeps(), { moduleClient: client });
+        await transform.run(sessionId, { messages: host });
+        expect(bodies[0]?.boundary).toEqual({ mid: "m-3", sequence: 2 });
+        return [bodies[0]?.tool_present, bodies[0]?.todo_tool_present];
+    }
+
+    it("takes the verdict from the earliest user row in both signal directions", async () => {
+        const denied = `first-user-deny-${Date.now()}`;
+        installDb(denied, { eidnara_reduce: false, todowrite: false });
+        expect(await toolPresent(denied, { eidnara_reduce: true, todowrite: true })).toEqual([
+            false,
+            false,
+        ]);
+        const allowed = `first-user-allow-${Date.now()}`;
+        installDb(allowed, {});
+        expect(await toolPresent(allowed, { eidnara_reduce: false, todowrite: false })).toEqual([
+            true,
+            true,
+        ]);
+    });
+
+    it("freezes fail-open without a database and stays fail-closed for an unpersisted session", async () => {
+        const home = mkdtempSync(join(tmpdir(), "window-no-db-"));
+        dataHomes.push(home);
+        process.env.XDG_DATA_HOME = home;
+        const missing = `first-user-no-db-${Date.now()}`;
+        expect(await toolPresent(missing, { eidnara_reduce: false })).toEqual([true, true]);
+        const unpersisted = `first-user-no-row-${Date.now()}`;
+        installDb(unpersisted);
+        expect(await toolPresent(unpersisted, { eidnara_reduce: true })).toEqual([false, false]);
     });
 });
