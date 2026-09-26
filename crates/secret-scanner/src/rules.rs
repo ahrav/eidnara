@@ -204,6 +204,19 @@ pub(crate) struct Rule {
     pub required_byte: Option<u8>,
     /// Added to each candidate's confidence before the minimum is applied.
     pub confidence_bonus: i8,
+    /// Which source-code value shapes the evaluator rejects for this rule.
+    pub code_reference_gate: Option<CodeReferenceGate>,
+}
+
+/// Keyed rules whose unquoted value can be source code naming a secret, as in
+/// `key = event.id`, rather than the secret itself.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CodeReferenceGate {
+    /// Rejects qualified identifier paths and `{name}` templates.
+    Assignment,
+    /// Also rejects the upstream rule's digit-free values and `name=value`
+    /// expressions whose right side is a scalar or a code reference.
+    GenericApiKey,
 }
 
 /// Verified rule collection with anchor and safelist indexes.
@@ -548,6 +561,11 @@ pub(crate) fn compile_rule(
     } else {
         0
     };
+    let code_reference_gate = match declaration.name.as_str() {
+        "magic-keyed-assignment" => Some(CodeReferenceGate::Assignment),
+        "generic-api-key" => Some(CodeReferenceGate::GenericApiKey),
+        _ => None,
+    };
     Ok(Rule {
         source,
         declaration,
@@ -557,6 +575,7 @@ pub(crate) fn compile_rule(
         unnamed_captures,
         required_byte,
         confidence_bonus,
+        code_reference_gate,
     })
 }
 
@@ -845,11 +864,11 @@ mod tests {
         for (profile, expected) in [
             (
                 ScanProfile::Conservative,
-                "b8a5f3d007cf151eb226f909ff3166387281aff12943c5b7c63b6460459b57ce",
+                "d4ccd4e42d05cfd7d784e2b53fef8224b6bd472872eb9dcc9162d5344987b9fd",
             ),
             (
                 ScanProfile::Comprehensive,
-                "9bbf7b0eb212cf6dcd0af6959f2dbf890453873c0af3e87b8b3ce39abd2374c8",
+                "46c1a5a4dc853c456ee1cd323393a6e07e7b2726b86a0b246c666a6272e2f3f2",
             ),
         ] {
             let digest = rules
