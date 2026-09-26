@@ -8978,17 +8978,26 @@ impl HandlerCore {
             Ok(admission) => admission,
             Err(outcome) => return outcome,
         };
+        let page_refused = || {
+            (page_apply.is_none() && self.transform_page_in_progress(&binding.session)).then(|| {
+                PreparedOutcome::Error {
+                    code: "authority_transform_page_in_progress".to_string(),
+                    message: "transform is blocked until all transform pages arrive".to_string(),
+                }
+            })
+        };
         // Refused before the lane, so an unpaged pass never waits behind an applying page.
-        if page_apply.is_none() && self.transform_page_in_progress(&binding.session) {
-            return PreparedOutcome::Error {
-                code: "authority_transform_page_in_progress".to_string(),
-                message: "transform is blocked until all transform pages arrive".to_string(),
-            };
+        if let Some(refused) = page_refused() {
+            return refused;
         }
         let Some(lane) = self.transform_session_lanes.join(&parsed.session_id) else {
             return respond_transform(&parsed, transform::TransformResponse::session_busy(), None);
         };
         let lane = lane.activate().await;
+        // Checked again: a page stream may have started staging while this pass waited.
+        if let Some(refused) = page_refused() {
+            return refused;
+        }
         apply_claude_code_config_controls(&mut parsed, &binding.config, serializer_profile);
         parsed
             .prompt_surface_tool_descriptions

@@ -257,8 +257,12 @@ impl SessionPass {
     /// Waits, abortably, until the pass is the session's active pass.
     pub(crate) async fn activate(mut self) -> Self {
         if let Some(waiting) = self.waiting.as_mut() {
-            // The wake-up is only ever consumed by a send, so the wait ends in a hand-off.
-            let _ = waiting.await;
+            // Only this pass's own Drop drops the sender unsent, so the wait ends in a hand-off.
+            let handed_off = waiting.await;
+            debug_assert!(
+                handed_off.is_ok(),
+                "a waiting lane sender was dropped unsent"
+            );
         }
         self.waiting = None;
         self

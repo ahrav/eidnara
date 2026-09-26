@@ -417,32 +417,34 @@ describe("Rust mode transform request", () => {
         expect(secondOutput.messages).toEqual(native);
     });
 
-    it("declines a daemon session_busy pass without publishing or promoting", async () => {
-        const sessionId = `rust-session-busy-${Date.now()}`;
-        installAvailabilityDb(sessionId, {});
-        installRawRows(sessionId, rawRows(1));
-        const { client, bodies } = recordingClient(() => ({
-            status: "session_busy",
-            action: "SESSION_BUSY",
-        }));
-        const transform = createRustModeTransform(makeDeps(), { moduleClient: client });
-        const messages = makeMessages(sessionId);
-        const output = { messages: [...messages] as unknown[] };
-        const debugSpy = spyOn(logger.sessionLog, "debug");
-        try {
-            await transform.run(sessionId, output);
-            expect(bodies).toHaveLength(1);
-            expect(output.messages).toEqual(messages);
-            expect(transform.getState(sessionId).initialized).toBe(false);
-            expect(transform.getState(sessionId).consecutiveFailures).toBe(0);
-            expect(transform.getState(sessionId).forceFullWire).toBe(false);
-            expect(sessionLogs(debugSpy, sessionId)).toContain(
-                `rust session ${sessionId} pass declined: daemon_session_busy`,
-            );
-        } finally {
-            debugSpy.mockRestore();
-        }
-    });
+    for (const [status, reason] of [
+        ["session_busy", "daemon_session_busy"],
+        ["status_added_later", "daemon_status_unrecognized"],
+    ]) {
+        it(`declines a daemon ${status} pass without publishing or promoting`, async () => {
+            const sessionId = `rust-session-${status}-${Date.now()}`;
+            installAvailabilityDb(sessionId, {});
+            installRawRows(sessionId, rawRows(1));
+            const { client, bodies } = recordingClient(() => ({ status }));
+            const transform = createRustModeTransform(makeDeps(), { moduleClient: client });
+            const messages = makeMessages(sessionId);
+            const output = { messages: [...messages] as unknown[] };
+            const debugSpy = spyOn(logger.sessionLog, "debug");
+            try {
+                await transform.run(sessionId, output);
+                expect(bodies).toHaveLength(1);
+                expect(output.messages).toEqual(messages);
+                expect(transform.getState(sessionId).initialized).toBe(false);
+                expect(transform.getState(sessionId).consecutiveFailures).toBe(0);
+                expect(transform.getState(sessionId).forceFullWire).toBe(false);
+                expect(sessionLogs(debugSpy, sessionId)).toContain(
+                    `rust session ${sessionId} pass declined: ${reason}`,
+                );
+            } finally {
+                debugSpy.mockRestore();
+            }
+        });
+    }
 
     it("declines a session_busy full-sync retry and keeps the full-sync flag", async () => {
         const sessionId = `rust-session-busy-retry-${Date.now()}`;

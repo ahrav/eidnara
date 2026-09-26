@@ -851,7 +851,8 @@ type PassDeclineReason =
     | "invalidated"
     | "deleted"
     | "internal_child"
-    | "daemon_session_busy";
+    | "daemon_session_busy"
+    | "daemon_status_unrecognized";
 
 /**
  * A local refusal prevents publication without counting a daemon failure. Byte pressure and a
@@ -1614,12 +1615,22 @@ export function createRustModeTransform(
                     );
                 }
                 if (!response) throw new Error("rust module returned no transform response");
-                // The daemon's session lane already holds an active and a waiting pass for this session.
-                if (response.status === "session_busy") {
+                // session_busy: the daemon's session lane already holds an active and a waiting pass for this session.
+                // An unrecognized status is declined the same way (Section 7.10.1 of the wire protocol).
+                const busy = response.status === "session_busy";
+                if (
+                    busy ||
+                    (response.status !== undefined &&
+                        response.status !== "ok" &&
+                        !isNeedFullSync(response))
+                ) {
                     // The daemon committed nothing, so the flag this dispatch set is undone.
                     assertCurrentPass();
                     state.forceFullWire = forceFullWireOnBusy;
-                    throw new PassDeclined(sessionId, "daemon_session_busy");
+                    throw new PassDeclined(
+                        sessionId,
+                        busy ? "daemon_session_busy" : "daemon_status_unrecognized",
+                    );
                 }
                 return { response };
             };

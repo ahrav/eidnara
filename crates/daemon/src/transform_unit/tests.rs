@@ -845,16 +845,30 @@ async fn emergency_cancellation_between_units_preserves_commit_and_releases_scra
     ));
     park(&mut waiter).await;
 
+    // The emergency pass's final settle unit blocks at a gate while both passes are polled.
+    let (mut gate, hook) = BlockingGate::new();
+    runner.before_unit.lock().unwrap().push_back(hook);
     runner.worker.cancel.cancel();
     producer.block_output.store(false, Ordering::SeqCst);
     producer.notify.notify_waiters();
-    park(&mut waiter).await;
-    assert_eq!(waiter_runner.submitted.load(Ordering::SeqCst), 0);
-    let outcome = watchdog(emergency).await;
+    let (lanes, waiter_submitted) = (&handler.transform_session_lanes, &waiter_runner.submitted);
+    let emergency = async {
+        let outcome = emergency.await;
+        (outcome, producer.starts.load(Ordering::SeqCst))
+    };
+    let ((outcome, starts), waited, ()) = watchdog(async {
+        tokio::join!(emergency, waiter, async move {
+            gate.wait_entered().await;
+            tokio::task::yield_now().await;
+            assert!(matches!(lanes.0.lock().unwrap().get("ses"), Some(Some(_))));
+            assert_eq!(waiter_submitted.load(Ordering::SeqCst), 0);
+            drop(gate);
+        })
+    })
+    .await;
     runner.join_all().await;
-    assert_eq!(waiter_runner.submitted.load(Ordering::SeqCst), 0);
-    assert_eq!(producer.starts.load(Ordering::SeqCst), 1);
-    let waited = tool_body(watchdog(waiter).await);
+    assert_eq!(starts, 1);
+    let waited = tool_body(waited);
     waiter_runner.join_all().await;
     assert_eq!(waited["committed"], true);
     handler.tasks.close();
@@ -1176,4 +1190,97 @@ async fn session_lane_activates_in_join_order_under_contention() {
     assert_eq!(expected.len(), completed.len());
     assert_eq!(*activations.lock().unwrap(), expected);
     assert!(lanes.0.lock().unwrap().is_empty());
+}
+
+/// Polls `future` once.
+async fn poll_once<F: Future + Unpin>(future: &mut F) -> Poll<F::Output> {
+    poll_fn(|cx| Poll::Ready(Pin::new(&mut *future).poll(cx))).await
+}
+
+/// A waiter dropped unpolled after its hand-off leaves no lane behind.
+#[tokio::test(flavor = "current_thread")]
+async fn session_lane_waiter_dropped_after_hand_off_releases_the_lane() {
+    let lanes = Arc::new(SessionLanes::default());
+    let (a, b) = (lanes.join("ses").unwrap(), lanes.join("ses").unwrap());
+    drop(a);
+    drop(b);
+    assert!(lanes.0.lock().unwrap().is_empty());
+    let mut next = Box::pin(lanes.join("ses").unwrap().activate());
+    assert!(poll_once(&mut next).await.is_ready());
+}
+
+/// A handed-off waiter dropped unpolled hands the lane on to the next waiter.
+#[tokio::test(flavor = "current_thread")]
+async fn session_lane_handed_off_waiter_dropped_unpolled_wakes_the_next() {
+    let lanes = Arc::new(SessionLanes::default());
+    let (a, b) = (lanes.join("ses").unwrap(), lanes.join("ses").unwrap());
+    drop(a);
+    let mut c = Box::pin(lanes.join("ses").unwrap().activate());
+    park(&mut c).await;
+    drop(b);
+    assert!(poll_once(&mut c).await.is_ready());
+}
+
+/// A waiter that leaves before its hand-off frees the waiting slot for a new pass.
+#[tokio::test(flavor = "current_thread")]
+async fn session_lane_waiter_leaving_before_hand_off_frees_the_slot() {
+    let lanes = Arc::new(SessionLanes::default());
+    let (a, b) = (lanes.join("ses").unwrap(), lanes.join("ses").unwrap());
+    drop(b);
+    assert!(matches!(lanes.0.lock().unwrap().get("ses"), Some(None)));
+    let mut d = Box::pin(lanes.join("ses").unwrap().activate());
+    assert!(lanes.join("ses").is_none());
+    park(&mut d).await;
+    drop(a);
+    assert!(poll_once(&mut d).await.is_ready());
+}
+
+/// An unpaged pass that waits in the lane while the session's page stream starts staging is
+/// refused when it activates.
+#[tokio::test(flavor = "current_thread")]
+async fn waiting_unpaged_pass_is_refused_when_a_page_stream_started_meanwhile() {
+    let (handler, _store, _dir, project) =
+        handler_with_store(Arc::new(ProducerState::default()), default_test_config());
+    let handler = Arc::new(handler);
+    let runner = Arc::new(JoinedUnitRunner::default());
+    let (mut gate, hook) = BlockingGate::new();
+    runner.before_unit.lock().unwrap().push_back(hook);
+    let active = {
+        let (handler, runner) = (Arc::clone(&handler), Arc::clone(&runner));
+        let input = same_session_pass(&handler, &project, 31, "active pass");
+        tokio::spawn(async move {
+            handler
+                .handle_transform_with_runner(test_route(31), input, &*runner)
+                .await
+        })
+    };
+    gate.wait_entered().await;
+    let unpaged = same_session_pass(&handler, &project, 32, "waiting pass");
+    let mut waiting =
+        Box::pin(handler.handle_transform_with_runner(test_route(32), unpaged, &*runner));
+    park(&mut waiting).await;
+
+    let full = same_session_pass(&handler, &project, 33, "first page");
+    let mut page =
+        json!({"method": "transform", "session_id": "ses", "messages": full["messages"]});
+    page["transform_page_id"] = json!("later-page");
+    page["transform_generation"] = json!(0);
+    page["transform_page_index"] = json!(0);
+    page["transform_page_total"] = json!(2);
+    page["transform_page_complete"] = json!(false);
+    page["transform_page_digest"] = json!(transform_page_content_digest(&page));
+    let staged =
+        watchdog(handler.handle_transform_with_runner(test_route(33), page, &*runner)).await;
+    assert!(matches!(staged, PreparedOutcome::Response(_)));
+    assert!(handler.transform_page_in_progress("ses"));
+
+    drop(gate);
+    assert_eq!(
+        tool_body(watchdog(active).await.unwrap())["committed"],
+        true
+    );
+    let refused = watchdog(waiting).await;
+    runner.join_all().await;
+    assert_eq!(error_code(refused), "authority_transform_page_in_progress");
+    assert_eq!(runner.submitted.load(Ordering::SeqCst), 1);
 }
