@@ -60,7 +60,7 @@ enum SearchCandidate {
 /// Stable sorting preserves history-before-note ties.
 /// Candidates sort before body and note verification to avoid scanning lower-ranked text.
 /// Verification skips non-matches until the limit is filled or candidates run out.
-/// Snippets contain at most 200 Unicode scalar values plus truncation ellipses.
+/// Snippets contain the match and at most 200 Unicode scalar values around it, plus truncation ellipses.
 ///
 /// # Errors
 ///
@@ -207,7 +207,7 @@ fn first_match(text: &str, query: &str) -> Option<Range<usize>> {
 
 const SEARCH_SNIPPET_CONTEXT: usize = 100;
 
-/// Returns up to `context` bytes on each side of `hit`, capped at `2 * context` chars.
+/// Returns `hit` with up to `context` bytes on each side, so at most `2 * context` chars around the match.
 ///
 /// An ellipsis marks each side where the window cuts `text`.
 pub(crate) fn snippet_around_match(text: &str, hit: Range<usize>, context: usize) -> String {
@@ -223,10 +223,9 @@ pub(crate) fn snippet_around_match(text: &str, hit: Range<usize>, context: usize
         end += 1;
     }
 
-    let snippet: String = text[start..end].chars().take(2 * context).collect();
     let prefix = if start > 0 { "…" } else { "" };
     let suffix = if end < text.len() { "…" } else { "" };
-    format!("{prefix}{}{suffix}", snippet.trim())
+    format!("{prefix}{}{suffix}", text[start..end].trim())
 }
 
 #[cfg(test)]

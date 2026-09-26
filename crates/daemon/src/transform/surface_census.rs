@@ -512,6 +512,23 @@ fn escaped_markup_before_a_prefix_match_does_not_keep_the_prefix() {
 }
 
 #[test]
+fn a_long_anchor_survives_the_centered_window() {
+    // A 40-hex commit SHA is a single token; the window must leave room for the whole anchor.
+    for len in [40, 45, 60] {
+        let anchor = "a".repeat(len);
+        let body = format!("{} {anchor} {}", "x".repeat(200), [FILLER; 6].join(" "));
+        let snippet = user_hint_snippet(body.clone(), &[&anchor]);
+        let rendered = render_user_hint(&[hint_result(&snippet)]).unwrap();
+        let line = hint_fragment_lines(&rendered)[0];
+        assert!(
+            first_whole_word(line, &anchor).is_some(),
+            "len {len}: {line:?}"
+        );
+        assert!(utf16_len(line) <= SURFACE1_HINT_BOUNDS.fragment_units);
+    }
+}
+
+#[test]
 fn whole_word_lookup_splits_where_lowercasing_splits() {
     // U+0130 lowercases to `i` plus a combining dot, which the tokenizer splits on.
     assert_eq!(

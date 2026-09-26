@@ -8653,8 +8653,11 @@ fn user_hint_snippet(body: String, anchors: &[&str]) -> String {
         if first_whole_word(prefix, anchor).is_some() {
             return body;
         }
-        let window =
-            crate::memory_tool::snippet_around_match(&body, hit, USER_HINT_FRAGMENT_CHAR_CAP / 2);
+        // The rendered window is `…` + left context + anchor + `…`, so a long anchor gets less context.
+        // Bytes bound UTF-16 units from above, so the byte length is a safe stand-in.
+        let context = (USER_HINT_FRAGMENT_CHAR_CAP / 2)
+            .min((USER_HINT_FRAGMENT_CHAR_CAP - 2).saturating_sub(hit.len()));
+        let window = crate::memory_tool::snippet_around_match(&body, hit, context);
         if first_whole_word(&user_hint_fragment(&window), anchor).is_some() {
             return window;
         }
