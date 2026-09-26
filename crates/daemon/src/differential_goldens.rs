@@ -103,6 +103,8 @@ fn dg_golden_vacuity_guard_rejects_one_byte_fixture_perturbation_per_family() {
     assert_eq!(observed, 3, "every DG family needs a vacuity mutation");
 }
 
+/// A determinism and length cross-check only: `wire_lens` from `canonical_len` must equal the
+/// serialized lengths. Served-bytes preservation rests on the goldens and the e2e byte-identity gate.
 #[test]
 fn dg_goldens_encode_native_output_deterministically() {
     let golden: Golden = serde_json::from_str(include_str!("../testdata/differential-golden.json"))

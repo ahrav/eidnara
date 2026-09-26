@@ -24971,7 +24971,7 @@ mod tests {
     }
 
     #[test]
-    fn same_length_edit_reaches_the_native_output() {
+    fn native_encode_carries_the_edited_sidecar_meta() {
         let baseline_ingress = vec![ck("frontier-1", 1, "aaa"), ck("frontier-2", 2, "bbb")];
         let baseline_native = vec![
             json!({ "info": { "id": "frontier-1", "role": "user", "meta": "aaa" }, "parts": [{ "type": "text", "text": "aaa" }] }),
