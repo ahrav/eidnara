@@ -722,7 +722,10 @@ drives repeated validation rejections.
 Guarantee: After the fault-free window opens, a session whose producer keeps
 returning invalid output for one chunk stops calling a model for that chunk
 within `PLACEHOLDER_AFTER_FAILURES` failed firings, and the next firing publishes
-a placeholder segment that moves folding past the chunk.
+a placeholder segment that moves folding past the chunk whenever the placeholder
+itself validates; the one placeholder shape that cannot validate is a chunk whose
+opening tool arc has its result at or past the eligible end, and that chunk keeps
+retrying the placeholder without a model call.
 Check: `always` - expire the backoff and fire `PLACEHOLDER_AFTER_FAILURES + 1`
 times against a producer whose output the gate rejects on every attempt for
 every model in the chain; the producer received exactly
@@ -791,9 +794,9 @@ or host setup failures retries every 60 seconds without bound: live model spend
 and log noise, and a session that never compacts while its status block reports
 healthy publishing. Distinct from a bad publish: no data is corrupted. A chunk
 that keeps failing validation costs `PLACEHOLDER_AFTER_FAILURES` failed model
-firings, then one placeholder firing that calls no model and moves folding past
-it (`lib.rs:43073-43077`), and the placeholder replaces a summary of those
-messages.
+firings, then one placeholder firing that calls no model and, when the
+placeholder validates, moves folding past it (`lib.rs:43073-43077`); the
+placeholder replaces a summary of those messages.
 Open questions:
 
 - Should a validation rejection increment `consecutive_publish_failures`, or does
