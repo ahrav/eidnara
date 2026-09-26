@@ -715,8 +715,8 @@ Type: liveness
 Reachability: default-production
 Status: active
 Exercised: partial - `handler_chunk_that_always_fails_stops_stalling_folding`
-(`lib.rs:43047`) drives repeated provider-reported refusals of one chunk across
-firings, and `handler_setup_failure_does_not_placeholder_the_chunk` (`:43104`)
+(`lib.rs:43059`) drives repeated provider-reported refusals of one chunk across
+firings, and `handler_setup_failure_does_not_placeholder_the_chunk` (`:43116`)
 holds that repeated harness setup failures never advance the ladder; no test
 drives repeated validation rejections.
 Guarantee: After the fault-free window opens, a session whose producer keeps
@@ -736,18 +736,18 @@ chunk, and `history_summarizer.chunk_retry` is `None`. Neither the cooldown nor
 counter this path never increments stays at zero. Stated in attempts, not in an
 unbounded "eventually", per the liveness rules.
 Fault/timing angle: The window is the 60-second backoff at `history_summarizer.rs:41`,
-re-evaluated at `lib.rs:5938`. Each expiry admits one more firing, each
+re-evaluated at `lib.rs:5940`. Each expiry admits one more firing, each
 costing a full model chain of live calls until the placeholder stage.
 Required faults and enabling state: A configured model chain; a producer that
 returns a well-formed document the gate rejects on every attempt, for every model
 in the chain; and N firing opportunities without N times 60 seconds of wall clock.
 The seam for that exists and is already used: the backoff gate compares the durable
 `failure_backoff_at_ms` against a caller-supplied `now`
-(`lib.rs:5933-5939`, with `now` arriving through `HistorySummarizerPrepareContext` at
-`:9582`), so expiring the durable field is equivalent to advancing the clock.
-The test helper `expire_history_summarizer_backoff` (`lib.rs:42230-42237`) already does
+(`lib.rs:5935-5941`, with `now` arriving through `HistorySummarizerPrepareContext` at
+`:9585`), so expiring the durable field is equivalent to advancing the clock.
+The test helper `expire_history_summarizer_backoff` (`lib.rs:42235-42242`) already does
 exactly this by committing `Some(now_ms() - 1)`, and
-`assert_seeded_phase_recovers_then_refires_after_backoff` (`:42239`) drives a
+`assert_seeded_phase_recovers_then_refires_after_backoff` (`:42244`) drives a
 refire through it. So each additional attempt costs no wall clock.
 Confidence: high - [evidence](evidence/hv-validation-rejection-retry-has-no-attempt-bound.md).
 Traced the whole rejection path: `history_summarizer.rs:1680-1703` abandons with a backoff;
@@ -762,10 +762,10 @@ Since the chunk retry ladder landed, the backoff still does not escalate, but th
 live model attempts on one chunk are bounded. A firing that ends in a
 validation rejection, a context-overflow producer failure, or a permanent
 failure the model provider reported increments the durable `chunk_retry` count
-for the chunk start (`lib.rs:6309`, `history_summarizer.rs:361-410`); a reattached
-run that ends the same way counts too (`lib.rs:5615`). Only the
+for the chunk start (`lib.rs:6311`, `history_summarizer.rs:361-416`); a reattached
+run that ends the same way counts too (`lib.rs:5616`). Only the
 firing's final error counts: a rejection or provider failure that falls back to
-the next model in the chain (`history_summarizer.rs:1959-1964`, `:1996-2001`)
+the next model in the chain (`history_summarizer.rs:1965-1970`, `:2002-2007`)
 and then publishes clears the count instead. The host classes harness setup
 and supervision failures permanent too, such as a missing credential or a
 harness that cannot start; `is_provider_reported_failure`
@@ -774,18 +774,19 @@ terminal whose status names the request (400, 413, 422). A Pi error stop drops
 the provider's text and a status-less OpenCode terminal keeps only a text
 classification, so neither separates a content refusal from an unknown model,
 and neither counts; counting them would publish placeholders over history a
-working model could summarize. The count is keyed by the model chain as well as
-the chunk start (`memory-store/src/lib.rs:541-546`), so a changed chain sends the
-bytes to the new models before any placeholder. A re-adopted tail message at or
+working model could summarize. The count is keyed by the model chain and the
+configured chunk token budget as well as the chunk start
+(`memory-store/src/lib.rs:541-549`), so a changed chain or a lowered budget sends
+the bytes to a model before any placeholder. A re-adopted tail message at or
 past the chunk start clears the count (`transform.rs:5596-5607`), since the retried
 bytes changed. Assembly varies the
 calibration seeds from `VARY_SEEDS_AFTER_FAILURES` failures, halves the chunk token budget per
 failure from `SHRINK_CHUNK_AFTER_FAILURES`, and from `PLACEHOLDER_AFTER_FAILURES`
 publishes a daemon-authored placeholder segment for the shrunken chunk without a
-model call (`history_summarizer_chunk.rs:572-662`); the placeholder stops before
+model call (`history_summarizer_chunk.rs:572-670`); the placeholder stops before
 a tool arc the shrunken chunk end splits, and reaches the result of one that opens
 the chunk. A reattachment presents the
-frozen range under the same reduced budget (`lib.rs:5488-5504`), so it withdraws
+frozen range under the same reduced budget (`lib.rs:5488-5505`), so it withdraws
 the aliases the live prompt withdrew. A publish clears the count. Transient,
 auth, and host setup failures do not count, so a chunk failing only with them
 still retries every 60 seconds without bound.
@@ -795,7 +796,7 @@ and log noise, and a session that never compacts while its status block reports
 healthy publishing. Distinct from a bad publish: no data is corrupted. A chunk
 that keeps failing validation costs `PLACEHOLDER_AFTER_FAILURES` failed model
 firings, then one placeholder firing that calls no model and, when the
-placeholder validates, moves folding past it (`lib.rs:43073-43077`); the
+placeholder validates, moves folding past it (`lib.rs:43085-43089`); the
 placeholder replaces a summary of those messages.
 Open questions:
 

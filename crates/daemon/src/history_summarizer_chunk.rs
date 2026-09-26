@@ -548,6 +548,8 @@ pub enum HistorySummarizerNoFireReason {
 pub struct AssembledHistorySummarizerFiring {
     pub prompt: String,
     pub model_chain: Vec<String>,
+    /// The configured chunk token budget this firing was assembled under, before any retry shrink.
+    pub configured_token_budget: usize,
     pub chunk: HistorySummarizerBuiltChunk,
 
     pub chunk_fingerprint: String,
@@ -594,13 +596,19 @@ fn retry_token_budget(token_budget: usize, failures: u32) -> usize {
     (token_budget >> halvings).max(1)
 }
 
+/// The failures counted for the chunk at `chunk_start` under the current `model_chain` and configured `token_budget`; a count kept under another configuration does not apply.
 pub fn chunk_failures(
     chunk_retry: Option<&HistorySummarizerChunkRetry>,
     chunk_start: u64,
     model_chain: &[String],
+    token_budget: usize,
 ) -> u32 {
     chunk_retry
-        .filter(|retry| retry.chunk_start == chunk_start && retry.model_chain == model_chain)
+        .filter(|retry| {
+            retry.chunk_start == chunk_start
+                && retry.model_chain == model_chain
+                && retry.token_budget == token_budget
+        })
         .map_or(0, |retry| retry.failures)
 }
 
@@ -614,7 +622,7 @@ pub fn firing_token_budget(
 ) -> usize {
     retry_token_budget(
         configured_budget,
-        chunk_failures(chunk_retry, chunk_start, model_chain),
+        chunk_failures(chunk_retry, chunk_start, model_chain, configured_budget),
     )
 }
 
@@ -844,6 +852,7 @@ pub fn assemble_history_summarizer_firing(
         snapshot.chunk_retry.as_ref(),
         chunk_start,
         &config.model_chain,
+        config.token_budget,
     );
     let token_budget = retry_token_budget(config.token_budget, chunk_failures);
     let mut chunk =
@@ -931,6 +940,7 @@ pub fn assemble_history_summarizer_firing(
         AssembledHistorySummarizerFiring {
             prompt,
             model_chain: config.model_chain,
+            configured_token_budget: config.token_budget,
             from_ordinal: chunk.chunk.start_index,
             to_ordinal: chunk.chunk.end_index,
 
@@ -1918,6 +1928,7 @@ mod tests {
             chunk_start: 0,
             failures,
             model_chain: vec!["prov/model".to_string()],
+            token_budget: 8_000,
         });
         store
             .commit("ses-retry", loaded.row_version, &loaded.core, &meta)

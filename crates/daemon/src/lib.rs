@@ -5493,10 +5493,11 @@ impl HandlerCore {
                     usize::MAX,
                     range.to_ordinal.saturating_add(1),
                 );
+                let configured_budget = derive_history_summarizer_chunk_tokens(
+                    config.history_summarizer_context_limit_tokens,
+                );
                 let token_budget = history_summarizer_chunk::firing_token_budget(
-                    derive_history_summarizer_chunk_tokens(
-                        config.history_summarizer_context_limit_tokens,
-                    ),
+                    configured_budget,
                     loaded.meta.history_summarizer.chunk_retry.as_ref(),
                     range.from_ordinal,
                     &config.model_chain,
@@ -5617,6 +5618,7 @@ impl HandlerCore {
                                 &session_id,
                                 range.from_ordinal,
                                 &config.model_chain,
+                                configured_budget,
                             );
                         }
                     }
@@ -6311,6 +6313,7 @@ impl HandlerCore {
                         &session_id,
                         firing.from_ordinal,
                         &firing.model_chain,
+                        firing.configured_token_budget,
                     );
                 }
                 outcome
@@ -18165,6 +18168,7 @@ fn record_history_summarizer_chunk_failure(
     session_id: &str,
     chunk_start: u64,
     model_chain: &[String],
+    token_budget: usize,
 ) {
     for attempt in 0..2 {
         let loaded = match store.load(session_id) {
@@ -18184,6 +18188,7 @@ fn record_history_summarizer_chunk_failure(
             &meta.history_summarizer,
             chunk_start,
             model_chain,
+            token_budget,
         );
         match store.commit(session_id, loaded.row_version, &loaded.core, &meta) {
             Ok(_) => return,
@@ -42654,6 +42659,7 @@ mod tests {
                 chunk_start: 1,
                 failures,
                 model_chain: default_test_config().model_chain,
+                token_budget: configured_budget,
             }),
             ..HistorySummarizerDurableState::default()
         };
@@ -42742,6 +42748,9 @@ mod tests {
                 chunk_start: 1,
                 failures: 2,
                 model_chain: default_test_config().model_chain,
+                token_budget: derive_history_summarizer_chunk_tokens(
+                    default_test_config().history_summarizer_context_limit_tokens,
+                ),
             }),
             ..HistorySummarizerDurableState::default()
         };
@@ -42767,6 +42776,9 @@ mod tests {
                 chunk_start: 1,
                 failures: 3,
                 model_chain: default_test_config().model_chain,
+                token_budget: derive_history_summarizer_chunk_tokens(
+                    default_test_config().history_summarizer_context_limit_tokens
+                ),
             }),
             "{state:?}"
         );

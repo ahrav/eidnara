@@ -536,13 +536,16 @@ pub struct HistorySummarizerChunkRange {
     pub to_ordinal: u64,
 }
 
-/// Consecutive failed firings on the chunk that starts at `chunk_start` under `model_chain`. Assembly reads it to vary the prompt, then shrink the chunk, so a chunk that fails deterministically cannot stall folding; a count kept under another chain does not apply, so a configuration fix sends the bytes to the new models first.
+/// Consecutive failed firings on the chunk that starts at `chunk_start` under `model_chain` and `token_budget`. Assembly reads it to vary the prompt, then shrink the chunk, so a chunk that fails deterministically cannot stall folding; a count kept under another chain does not apply, so a configuration fix sends the bytes to the new models first.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HistorySummarizerChunkRetry {
     pub chunk_start: u64,
     pub failures: u32,
     #[serde(default)]
     pub model_chain: Vec<String>,
+    /// The configured chunk token budget the failures were counted under; a lowered budget presents a smaller chunk, so the count starts over.
+    #[serde(default)]
+    pub token_budget: usize,
 }
 
 /// Content-sensitive identity for one message selected into a history_summarizer firing.
@@ -21494,6 +21497,7 @@ mod tests {
                     chunk_start: 10,
                     failures: 3,
                     model_chain: vec!["prov/model".to_string()],
+                    token_budget: 8_000,
                 }),
                 memory_reviewer_nonadmission: MemoryReviewerNonadmission::default(),
                 memory_reviewer_reservation: None,
@@ -21554,6 +21558,7 @@ mod tests {
                 chunk_start: 10,
                 failures: 3,
                 model_chain: vec!["prov/model".to_string()],
+                token_budget: 8_000,
             }),
             "abandonment keeps the chunk failure count",
         );

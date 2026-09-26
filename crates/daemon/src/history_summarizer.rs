@@ -357,22 +357,28 @@ pub fn abandon_with_detail(
     next
 }
 
-/// Counts one more failed firing on the chunk starting at `chunk_start` under `model_chain`; a count kept for another chunk or another chain restarts at one.
+/// Counts one more failed firing on the chunk starting at `chunk_start` under `model_chain` and the configured `token_budget`; a count kept for another chunk, chain, or budget restarts at one.
 pub fn record_chunk_failure(
     current: &HistorySummarizerDurableState,
     chunk_start: u64,
     model_chain: &[String],
+    token_budget: usize,
 ) -> HistorySummarizerDurableState {
     let failures = current
         .chunk_retry
         .as_ref()
-        .filter(|retry| retry.chunk_start == chunk_start && retry.model_chain == model_chain)
+        .filter(|retry| {
+            retry.chunk_start == chunk_start
+                && retry.model_chain == model_chain
+                && retry.token_budget == token_budget
+        })
         .map_or(0, |retry| retry.failures);
     let mut next = current.clone();
     next.chunk_retry = Some(HistorySummarizerChunkRetry {
         chunk_start,
         failures: failures.saturating_add(1),
         model_chain: model_chain.to_vec(),
+        token_budget,
     });
     next
 }
@@ -2614,43 +2620,68 @@ mod tests {
     #[test]
     fn chunk_failures_count_per_chunk_and_ignore_provider_errors() {
         let chain = vec!["prov/model".to_string()];
-        let once = record_chunk_failure(&HistorySummarizerDurableState::default(), 5, &chain);
-        let twice = record_chunk_failure(&once, 5, &chain);
+        let once =
+            record_chunk_failure(&HistorySummarizerDurableState::default(), 5, &chain, 8_000);
+        let twice = record_chunk_failure(&once, 5, &chain, 8_000);
         assert_eq!(
             twice.chunk_retry,
             Some(HistorySummarizerChunkRetry {
                 chunk_start: 5,
                 failures: 2,
                 model_chain: chain.clone(),
+                token_budget: 8_000,
             })
         );
         assert_eq!(
-            record_chunk_failure(&twice, 9, &chain).chunk_retry,
+            record_chunk_failure(&twice, 9, &chain, 8_000).chunk_retry,
             Some(HistorySummarizerChunkRetry {
                 chunk_start: 9,
                 failures: 1,
                 model_chain: chain.clone(),
+                token_budget: 8_000,
             }),
             "a different chunk restarts the count"
         );
         let other_chain = vec!["prov/other".to_string()];
         assert_eq!(
-            record_chunk_failure(&twice, 5, &other_chain).chunk_retry,
+            record_chunk_failure(&twice, 5, &other_chain, 8_000).chunk_retry,
             Some(HistorySummarizerChunkRetry {
                 chunk_start: 5,
                 failures: 1,
                 model_chain: other_chain.clone(),
+                token_budget: 8_000,
             }),
             "a different model chain restarts the count"
+        );
+        assert_eq!(
+            record_chunk_failure(&twice, 5, &chain, 4_000).chunk_retry,
+            Some(HistorySummarizerChunkRetry {
+                chunk_start: 5,
+                failures: 1,
+                model_chain: chain.clone(),
+                token_budget: 4_000,
+            }),
+            "a different configured budget restarts the count"
         );
         assert_eq!(
             crate::history_summarizer_chunk::chunk_failures(
                 twice.chunk_retry.as_ref(),
                 5,
-                &other_chain
+                &other_chain,
+                8_000
             ),
             0,
             "a count under another chain does not shrink the chunk the new chain sees"
+        );
+        assert_eq!(
+            crate::history_summarizer_chunk::chunk_failures(
+                twice.chunk_retry.as_ref(),
+                5,
+                &chain,
+                4_000
+            ),
+            0,
+            "a count under another budget does not shrink the chunk the new budget sees"
         );
         assert_eq!(
             abandon_with_detail(&twice, 1, None, AbandonClass::ProducerFailed).chunk_retry,
@@ -3535,6 +3566,7 @@ mod tests {
                 chunk_start: 2,
                 failures: 7,
                 model_chain: vec!["prov/model".to_string()],
+                token_budget: 8_000,
             }),
             ..Default::default()
         };
@@ -3580,11 +3612,12 @@ mod tests {
         assert_eq!(state.state, HistorySummarizerPhase::Idle);
         assert_eq!(state.chunk_retry, None, "{state:?}");
         assert_eq!(
-            record_chunk_failure(&state, 2, &["prov/model".to_string()]).chunk_retry,
+            record_chunk_failure(&state, 2, &["prov/model".to_string()], 8_000).chunk_retry,
             Some(HistorySummarizerChunkRetry {
                 chunk_start: 2,
                 failures: 1,
                 model_chain: vec!["prov/model".to_string()],
+                token_budget: 8_000,
             }),
             "the revised bytes start their own count"
         );
@@ -6288,6 +6321,7 @@ mod tests {
             chunk_start: 1,
             failures: 8,
             model_chain: vec!["prov/model".to_string()],
+            token_budget: 8_000,
         });
         let meta = test_meta_with_history_summarizer(awaiting);
         store
@@ -6306,6 +6340,7 @@ mod tests {
                 chunk_start: 1,
                 failures: 8,
                 model_chain: vec!["prov/model".to_string()],
+                token_budget: 8_000,
             }),
             "the refire is still a placeholder firing"
         );

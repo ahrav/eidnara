@@ -15491,6 +15491,7 @@ pub(crate) mod tests {
                 chunk_start,
                 failures: 8,
                 model_chain: vec!["prov/model".to_string()],
+                token_budget: 8_000,
             })
         };
 
