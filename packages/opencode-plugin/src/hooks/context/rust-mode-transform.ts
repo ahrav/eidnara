@@ -18,9 +18,7 @@ import {
 } from "./edit-recipe";
 import {
     resolveEidnaraReduceAvailability,
-    resolveEidnaraReduceAvailabilityFromMessages,
     resolveTodowriteAvailability,
-    resolveTodowriteAvailabilityFromMessages,
     type ToolAvailabilityVerdict,
     todowritePermissionDenied,
 } from "./eidnara-reduce-availability";
@@ -63,6 +61,7 @@ import {
     defaultTransformCaptureAdmission,
     filterMayHold,
     type HistoryDigest,
+    historyDigestsEqual,
     inspectReferenceableMessages,
     messageIdFilter,
     publicationRejection,
@@ -153,7 +152,9 @@ interface AppliedOutput {
 
 /**
  * A session's retained output: the capture basis of the window its last published pass submitted,
- * which a window declared at the same anchor verifies instead of re-taping, and the applied output.
+ * which lets the next capture of a window declared at the same anchor verify that prefix instead
+ * of taping it again and lets a failed pass at that anchor decide whether the applied output is
+ * still served, and the output that pass applied.
  */
 interface RetainedOutput {
     /** The acknowledgment basis: the anchor the submitted window started at. */
@@ -325,6 +326,23 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 function messageInfo(value: unknown): Record<string, unknown> {
     if (!isRecord(value)) return {};
     return isRecord(value.info) ? value.info : value;
+}
+
+/**
+ * A failed pass may serve the retained output only when every window message the previous pass
+ * submitted, its terminal included, is unchanged and in place. New messages may follow; an edit,
+ * removal, revert, or reorder of an acknowledged message leaves the retained output stale.
+ */
+function isAppendOnlyExtension(previous: RetainedOutput, captured: CapturedHistory): boolean {
+    return (
+        captured.members.length >= previous.rawCount &&
+        captured.verified !== undefined &&
+        historyDigestsEqual(captured.verified, previous.rawHistory) &&
+        (previous.rawCount === 0 ||
+            (previous.rawTerminal !== undefined &&
+                captured.boundary !== undefined &&
+                historyDigestsEqual(captured.boundary, previous.rawTerminal)))
+    );
 }
 
 /**
@@ -773,6 +791,16 @@ type PassDeclineReason =
     | "discovery_declined";
 
 /**
+ * Declines that try `serveLastApplied` before raw output, because raw output carries the whole
+ * uncompacted history.
+ */
+const LAST_APPLIED_DECLINES: ReadonlySet<PassDeclineReason> = new Set([
+    "capture_bytes",
+    "daemon_session_busy",
+    "daemon_status_unrecognized",
+]);
+
+/**
  * A local refusal prevents publication without counting a daemon failure. Byte pressure and a
  * polluted built-in prototype recur on every call for the affected session, so they log at warn.
  */
@@ -865,10 +893,21 @@ export function createRustModeTransform(
         );
     };
 
-    const markFailure = (sessionId: string, state: RustSessionState, error: unknown): void => {
+    const markFailure = (
+        sessionId: string,
+        state: RustSessionState,
+        error: unknown,
+        servedLastApplied: boolean,
+    ): void => {
         state.consecutiveFailures += 1;
         state.failureCount += 1;
-        sessionLog.warn(sessionId, "rust transform failed; serving the input unchanged:", error);
+        sessionLog.warn(
+            sessionId,
+            servedLastApplied
+                ? "rust transform failed; serving the last applied output with the messages appended since:"
+                : "rust transform failed; serving the input unchanged:",
+            error,
+        );
     };
 
     /** `rerun` resumes a pass on its validated root after its anchor drew `boundary_unknown`. */
@@ -1015,6 +1054,59 @@ export function createRustModeTransform(
         };
         const charge = (bytes: number, detail: string): void => {
             if (!lease.reserve(bytes)) throw new CaptureBudgetExceeded(detail);
+        };
+        let failOpenSource:
+            | { previous: RetainedOutput; captured: CapturedHistory; boundaryIndex: number }
+            | undefined;
+        let recheckWindow: ((phase: string) => void) | undefined;
+        /**
+         * Without native compaction a raw fail-open can overflow the provider window, so a failed
+         * pass declared at the retained basis republishes the applied output followed by the window
+         * messages after the acknowledged prefix. Messages are appended whole, so a tool part keeps
+         * its call and result together. No basis is promoted; any doubt serves the input unchanged.
+         */
+        const serveLastApplied = (): boolean => {
+            const source = failOpenSource;
+            const applied = source?.previous.applied;
+            if (!source || !applied || !recheckWindow) return false;
+            try {
+                recheckWindow("fail-open");
+                if (
+                    retainedOutputs.peek(sessionId) !== source.previous ||
+                    !isAppendOnlyExtension(source.previous, source.captured)
+                )
+                    return false;
+                if (!capturedMessagesUnchanged(applied.values, applied.capture)) {
+                    retainedOutputs.dropApplied(sessionId, source.previous);
+                    return false;
+                }
+                const served = [
+                    ...applied.values,
+                    ...source.captured.members.slice(source.previous.rawCount),
+                ];
+                if (
+                    publicationRejection(target, served.length) !== null ||
+                    !lease.reserve(served.length * CANDIDATE_SLOT_BYTES)
+                )
+                    return false;
+                const failure = publishInPlace(
+                    target,
+                    served,
+                    source.captured.members,
+                    source.boundaryIndex,
+                );
+                if (failure) {
+                    sessionLog.warn(
+                        sessionId,
+                        `rust transform fail-open publication failed: ${failure.detail}`,
+                    );
+                    return false;
+                }
+                return true;
+            } catch (error) {
+                sessionLog.debug(sessionId, "rust transform fail-open reuse declined:", error);
+                return false;
+            }
         };
         const scan = (stop: (id: string, index: number) => boolean): number => {
             const index = scanMessageIds(target, stop);
@@ -1201,6 +1293,10 @@ export function createRustModeTransform(
                 logStage(sessionId, "prefixGuard", startedAt, timings, `phase=${phase}`);
                 if (!unchanged) throw new PassDeclined(sessionId, "source_changed", phase);
             };
+            recheckWindow = recheckCapture;
+            // Tapes are never rebased: fail-open needs the anchor the retained basis was acknowledged at.
+            if (previous && sameBoundary(previous.basis, boundary))
+                failOpenSource = { previous, captured, boundaryIndex };
             // The wire charge derives from the capture, so byte pressure declines before the next await.
             let wireBytes = 0;
             for (let index = 0; index < messageWireBytes.length; index += 1)
@@ -1216,10 +1312,8 @@ export function createRustModeTransform(
             }
             const passUsageSnapshot = loadContextUsage(deps, sessionId);
             let model = modelFromMessages(messages);
-            // Both verdicts freeze from the first user message in the captured window before the DB is consulted; a session whose first user row is not yet persisted otherwise reads as provisional and fails closed.
-            resolveEidnaraReduceAvailabilityFromMessages(sessionId, messages);
+            // Both verdicts come from the session's earliest persisted user row, never the window's first user; a missing database freezes fail-open, and an unpersisted row or a read error stays provisional and fails closed.
             const reduceAvailability = resolveEidnaraReduceAvailability(sessionId);
-            resolveTodowriteAvailabilityFromMessages(sessionId, messages);
             const todoAvailability = resolveTodowriteAvailability(sessionId);
             const toolPresent = reduceAvailability.frozen && reduceAvailability.callable;
             const activeAgent = activeAgentFromMessages(messages);
@@ -1610,9 +1704,17 @@ export function createRustModeTransform(
                     sessionId,
                     error instanceof Error ? error.message : String(error),
                 );
+                if (
+                    error instanceof PassDeclined &&
+                    LAST_APPLIED_DECLINES.has(error.reason) &&
+                    serveLastApplied()
+                )
+                    servedFrom = "last_applied";
             } else {
                 decision = "error";
-                markFailure(sessionId, state, error);
+                const servedLastApplied = serveLastApplied();
+                if (servedLastApplied) servedFrom = "last_applied";
+                markFailure(sessionId, state, error, servedLastApplied);
             }
             finishPass(false);
         }

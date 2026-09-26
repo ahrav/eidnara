@@ -45,16 +45,28 @@
 > memo, its primers and annotators, the stored-message count, the
 > continuation shift, and the `message.removed` invalidation are deleted.
 > TE17 is preserved and scoped to the window; TE18 is invalidated; TE19 is
-> extended by the id scan; TE21 and TE22 are preserved. WP-E11 in #824 records
-> this tree's failure behavior as the WP-P11 baseline: a real failure serves
-> the input unchanged (`markFailure`, `rust-mode-transform.ts:1615`), and no
-> failed candidate is published. This includes the declines that main serves
-> from the last applied output (capture bytes, `session_busy`, and an
-> unrecognized status): they serve raw here. Each pass still reads its retained
-> record with `RetainedOutputs.get` (`:1122`), so a failing session counts as
-> used for eviction. Window-scoped fail-open (WP-P11) is the second
-> #832 change. Witnesses named in these notes are in
-> `rust-mode-window.test.ts` unless another file is named.
+> extended by the id scan; TE21 and TE22 are preserved. WP-E11 in #824 is the
+> WP-P11 baseline: a failed pass publishes no failed candidate, and the first
+> #832 change served the input unchanged. The second #832 change adds WP-P11:
+> a real failure, or a decline in `LAST_APPLIED_DECLINES` (capture bytes,
+> `session_busy`, or an unrecognized status, which main serves from the last
+> applied output), of a pass declared at the retained basis anchor serves exactly the applied output followed by the
+> window after the acknowledged prefix, and only when the prefix digest and
+> terminal tape match, the applied values are live, the owner, root, and
+> window recheck hold, and the slots can be charged (`serveLastApplied`,
+> `rust-mode-transform.ts:1044`; the source is recorded only at an equal
+> anchor, `:1274`); it promotes no basis and never rebases tapes. Each pass
+> reads its retained record with `RetainedOutputs.get`, so a session that
+> keeps failing open counts as used for eviction; the fail-open identity
+> recheck uses `peek`. WP-P14: tool
+> availability comes from the session database's earliest user row (`:1291`),
+> never the window's first user. Witnesses named in these notes are in
+> `rust-mode-window.test.ts` unless another file is named: "appends exactly
+> the unacknowledged window suffix and promotes no basis", "serves raw against
+> a mismatched basis anchor or a changed terminal message", "takes the verdict
+> from the earliest user row in both signal directions", and "freezes
+> fail-open without a database and stays fail-closed for an unpersisted
+> session".
 
 This directory is a client implementation supplement for
 [#533](https://github.com/ahrav/eidnara/issues/533), not the reusable 30-record
