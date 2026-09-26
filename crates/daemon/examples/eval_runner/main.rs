@@ -392,10 +392,14 @@ fn run_campaign(args: impl Iterator<Item = String>) -> io::Result<()> {
             "firings": run.aged.firings,
             "unreached_firings": run.aged.unreached_firings,
             "refused": run.aged.refused,
-            "turn_refused": run.aged.turn_refused.as_ref().map(|refused| json!({
-                "turn": refused.turn,
-                "code": refused.code,
-                "message": refused.message,
+            "turn_refused": run.aged.turn_refused.as_ref().map(|life| json!({
+                "turn": life.refused.turn,
+                "code": life.refused.code,
+                "message": life.refused.message,
+                "summarizer_failure": life.summarizer_failure.as_ref().map(|failure| json!({
+                    "turn": failure.turn,
+                    "failure": failure.detail,
+                })),
             })),
             "segments": run.aged.covered.len(),
         },

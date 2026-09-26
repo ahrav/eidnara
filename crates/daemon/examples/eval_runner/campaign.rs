@@ -100,15 +100,14 @@ pub enum RunError {
     TurnRefused {
         policy: &'static str,
         messages: usize,
-        refused: TurnRefused,
+        refused: RefusedLife,
     },
     /// A turn's diagnostics carry a summarizer failure that is not the
     /// cassette's redaction refusal.
     SummarizerFailed {
         policy: &'static str,
         messages: usize,
-        turn: usize,
-        failure: String,
+        failure: SummarizerFailure,
     },
     /// The recording backend started more calls than the daemon's
     /// diagnostics say it fired.
@@ -126,20 +125,33 @@ impl std::fmt::Display for RunError {
                 policy,
                 messages,
                 refused,
-            } => write!(
-                f,
-                "the host refused turn {} of the {messages}-message {policy} life: {}: {}",
-                refused.turn, refused.code, refused.message
-            ),
+            } => {
+                let RefusedLife {
+                    refused,
+                    summarizer_failure,
+                } = refused;
+                write!(
+                    f,
+                    "the host refused turn {} of the {messages}-message {policy} life: {}: {}",
+                    refused.turn, refused.code, refused.message
+                )?;
+                if let Some(failure) = summarizer_failure {
+                    write!(
+                        f,
+                        "; the summarizer had failed by turn {}: {}",
+                        failure.turn, failure.detail
+                    )?;
+                }
+                Ok(())
+            }
             Self::SummarizerFailed {
                 policy,
                 messages,
-                turn,
                 failure,
             } => write!(
                 f,
-                "the summarizer failed by turn {turn} of the {messages}-message {policy} life: \
-                 {failure}"
+                "the summarizer failed by turn {} of the {messages}-message {policy} life: {}",
+                failure.turn, failure.detail
             ),
             Self::FiringsUnaccounted {
                 messages,
@@ -171,6 +183,22 @@ fn publish_refused((path, kind): (PathBuf, std::io::ErrorKind)) -> RunError {
     RunError::Publish { path, kind }
 }
 
+/// The first non-redaction summarizer failure in a life's turn diagnostics.
+/// `turn` is the first turn whose diagnostics show the failure.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SummarizerFailure {
+    pub turn: usize,
+    pub detail: String,
+}
+
+/// A life the host ended by refusing a turn. `summarizer_failure` keeps a
+/// failure an earlier turn showed, so the refusal does not hide it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RefusedLife {
+    pub refused: TurnRefused,
+    pub summarizer_failure: Option<SummarizerFailure>,
+}
+
 /// What the aged world's recorded life established: how often the daemon's
 /// summarizer fired, whether a frame was refused, and the messages each of
 /// its segments covers, by sequence.
@@ -180,7 +208,7 @@ pub struct RecordedLife {
     /// Firings the daemon reported that never reached the backend.
     pub unreached_firings: u32,
     /// The turn the host refused, which left the aged world no recording.
-    pub turn_refused: Option<TurnRefused>,
+    pub turn_refused: Option<RefusedLife>,
     pub refused: bool,
     pub covered: BTreeMap<i64, Vec<EventId>>,
 }
@@ -546,7 +574,7 @@ struct Lived {
     unreached: u32,
     refusals: u32,
     /// The turn the host refused, which ended the life.
-    turn_refused: Option<TurnRefused>,
+    turn_refused: Option<RefusedLife>,
     stderr: String,
 }
 
@@ -595,7 +623,7 @@ fn live(
     };
     // A turn the host refuses ends the life there: no later turn and no task
     // turn is sent, and what the turns before it left is read as usual.
-    let (turns, pass, task_ms, turn_refused) = block_on(async {
+    let (turns, pass, task_ms, host_refusal) = block_on(async {
         let (turns, refused) = lifecycle(&fixture, world, usage).await;
         if refused.is_some() {
             return (turns, None, 0, refused);
@@ -634,7 +662,10 @@ fn live(
         if refused(diagnostics) {
             failures_seen = true;
         } else if failure.is_none() && diagnostics["last_failure"] != Value::Null {
-            failure = Some((index + 1, diagnostics["last_failure"].to_string()));
+            failure = Some(SummarizerFailure {
+                turn: index + 1,
+                detail: diagnostics["last_failure"].to_string(),
+            });
         }
     }
     let counters = fixture.counters(11);
@@ -663,17 +694,17 @@ fn live(
             (fired, 0)
         }
     };
-    // A refused life is accounted by its refusal; a failure its turns showed
-    // before it is part of that account.
-    if let Some((turn, failure)) = failure.filter(|_| turn_refused.is_none()) {
-        abandon(fixture, [root, home], charges)?;
-        return Err(RunError::SummarizerFailed {
-            policy,
-            messages,
-            turn,
-            failure,
-        });
-    }
+    let turn_refused = match life_end(host_refusal, failure) {
+        Ok(turn_refused) => turn_refused,
+        Err(failure) => {
+            abandon(fixture, [root, home], charges)?;
+            return Err(RunError::SummarizerFailed {
+                policy,
+                messages,
+                failure,
+            });
+        }
+    };
     // A turn's diagnostics describe the firings before it, so a refusal on
     // the last firing is in the cassette's counter and in no snapshot; a
     // failure the snapshots do show must be a refusal the counter has.
@@ -756,6 +787,51 @@ fn a_firing_that_never_reached_the_backend_is_counted_apart() {
     );
 }
 
+fn life_end(
+    host_refusal: Option<TurnRefused>,
+    failure: Option<SummarizerFailure>,
+) -> Result<Option<RefusedLife>, SummarizerFailure> {
+    match (host_refusal, failure) {
+        (Some(refused), summarizer_failure) => Ok(Some(RefusedLife {
+            refused,
+            summarizer_failure,
+        })),
+        (None, Some(failure)) => Err(failure),
+        (None, None) => Ok(None),
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn a_refused_life_keeps_the_summarizer_failure_before_it() {
+    let refused = TurnRefused {
+        turn: 980,
+        code: "host.transform_failed".to_string(),
+        message: "host returned a terminal error (message redacted)".to_string(),
+    };
+    let failure = SummarizerFailure {
+        turn: 200,
+        detail: "\"backend unavailable\"".to_string(),
+    };
+    assert_eq!(
+        life_end(Some(refused.clone()), Some(failure.clone())),
+        Ok(Some(RefusedLife {
+            refused: refused.clone(),
+            summarizer_failure: Some(failure.clone()),
+        })),
+        "a later refusal must not hide the failure"
+    );
+    assert_eq!(
+        life_end(Some(refused.clone()), None),
+        Ok(Some(RefusedLife {
+            refused,
+            summarizer_failure: None,
+        }))
+    );
+    assert_eq!(life_end(None, Some(failure.clone())), Err(failure));
+    assert_eq!(life_end(None, None), Ok(None));
+}
+
 /// Ends a life the campaign cannot read: the fixture is shut down whatever
 /// its exit, and its roots are vacated.
 fn abandon(
@@ -785,7 +861,7 @@ struct Recording {
     unreached: u32,
     refusals: u32,
     /// The turn the host refused, which left no whole recording.
-    turn_refused: Option<TurnRefused>,
+    turn_refused: Option<RefusedLife>,
 }
 
 /// Records one life of `world` under the summarizer into a cassette of its

@@ -1646,8 +1646,9 @@ manifest already sitting in the publish directory, all before anything runs
 (`RunError`). A life the shell cannot read is refused typed as well, never
 panicked on: a raw or replayed arm whose turn the host answers with an error
 (`TurnRefused`, naming the policy, the history's length, the turn, and the
-host's code), a turn whose summarizer diagnostics carry a failure other than
-the cassette's redaction refusal (`SummarizerFailed`), and a recording whose
+host's code, plus any summarizer failure an earlier turn showed), a turn whose
+summarizer diagnostics carry a failure other than the cassette's redaction
+refusal when no turn is refused (`SummarizerFailed`), and a recording whose
 backend started more calls than the daemon reported firings
 (`FiringsUnaccounted`). The daemon reports `fired` before a firing starts, and
 a firing that fails before its request (a session meta past its durable bound
@@ -1657,7 +1658,9 @@ the rest as `unreached_firings` in the summary. A recording life the host
 refuses a turn of leaves no whole cassette: the world's structured samples end
 `indeterminate` (the treatment was attempted and cannot be judged), the
 summary names the refused turn and code under `aged_summarizer.turn_refused`,
-and the report is published with the refusal rate over the firings that
+with the first summarizer failure an earlier turn showed under its
+`summarizer_failure` (`null` when there was none), and the report is published
+with the refusal rate over the firings that
 reached the backend before it. Under an approved profile it generates a one-session aged
 history (130 messages at S0) and
 a twelve-message natural-fresh history under another seed, compiles three
@@ -3627,7 +3630,7 @@ measured, and fewer than five usable preparations refuse the study with the
 count) `time_study` projects the pilot; the corpus must be the pilot
 composition for the study to say anything, and `StopForApproval` returns
 `RunError::StopForApproval` with nothing published. The commit times are the
-repository's own: the corpus is maintainer-curated identifiers of trusted
+repository's own: the corpus is maintainer-chosen identifiers of trusted
 upstreams, and a forge-side timestamp is not yet a seam.
 
 Per task (an `AnchorTerminal`: the graded outcomes plus the real-history
