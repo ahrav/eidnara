@@ -198,7 +198,6 @@ pub fn transform_request(world: &World, upto: usize, tail: Option<&str>, knobs: 
             "session_id": world.session,
             "serializer_profile": "opencode-aisdk",
             "render_config": "surface-config",
-            "full_array_fingerprint": format!("surface-fingerprint-{upto}-{}", tail.is_some()),
             "serve_native": true,
             "native_messages": native,
             "auto_search_enabled": true,

@@ -8,6 +8,14 @@
 > `every_pass_read_is_bounded_independent_of_history_size`. Statements below
 > that cite the cache describe removed code.
 
+> Invalidated in part by [#829](https://github.com/ahrav/eidnara/issues/829):
+> the delta channel is retired. `tail_delta`, `full_array_fingerprint`,
+> `need_full_sync`, `computeWireDelta`, `AppliedOutputBudget`, `wireCaches`,
+> the native delta frontier, and the snapshot delta fallback are deleted, with
+> the witnesses below that name them. TE25's budget is now the one
+> retained-output record per session described in that section's note, and
+> TE30 is invalidated.
+
 This file records the client and daemon behavior that the two-source recipe
 switch adds on `feat/transform-recipe-wire`, stacked on
 `feat/transform-recipe-builder` (`ed538110`). The eleven #533 records in
@@ -32,6 +40,15 @@ warnings` and `cargo +1.98 fmt --all -- --check` pass.
 - Request: `base_revision` is mandatory; the daemon refuses its absence with
   `transform_base_revision_missing` (`crates/daemon/src/lib.rs:8331-8336`).
   `previous_output_revision` names the output the client applied.
+- Request: since #829 a body that carries `tail_delta` is refused with the
+  terminal error `transform_tail_delta_retired` (`handle_transform_typed` in
+  `crates/daemon/src/lib.rs`; witness `transform_refuses_a_retired_tail_delta`),
+  so a pre-#829 plugin's suffix-only `messages` is never read as the whole
+  history. The current plugin never sends the field. Skew consequence: a
+  pre-#829 plugin's tail-delta passes are refused with
+  `transform_tail_delta_retired` until its wire state is invalidated, so M1
+  requires the daemon and plugin to be upgraded and restarted together (#824
+  C11: they ship from one commit).
 - Response: `base_revision`, `output_revision`, `operations`, and
   `previous_output_revision` only when a `previous` keep was used. `messages`
   and `native_messages` are daemon-internal (`#[serde(skip)]`); the native
@@ -106,10 +123,13 @@ The missing-native compatibility retry is deleted. Renamed witnesses:
 carries no recipe and does not retry" (one body, both IDs NACKed, no ACK,
 `failureCount` 1) replaces "nacks discarded delivery IDs and acks only IDs from
 the applied retry response"; `:1637` "nacks initial and retry delivery IDs when
-the full retry still cannot be applied" now drives the retry through
+the full retry still cannot be applied" drove the retry through
 `need_full_sync` and a wrong `base_revision`; `:1703` "fails a delta pass whose
-response carries no recipe and sends the next pass in full" replaces "retries
-with full arrays when a delta response omits native content".
+response carries no recipe and sends the next pass in full" replaced "retries
+with full arrays when a delta response omits native content". Invalidated in
+part by #829: `:1637` and `:1703` are deleted with the retry and the delta
+pass; the surviving witness is `rust-mode-transform.test.ts:1903` in the #829
+tree, and an `ok` response without a recipe NACKs every delivery with no retry.
 
 ### TE25 optional-output budget
 
@@ -130,6 +150,18 @@ side by `lib.rs:25199`
 (`previous_output_revision` absent after `native_attachments.remove`, present
 again on the following pass).
 
+After #829 the applied output and the input basis it was computed from share
+one record and one charge (`RetainedOutputs`, `rust-mode-transform.ts:181`),
+under the 64-session and 64 MiB (`RETAINED_OUTPUT_BUDGET_BYTES`, `:135`)
+limits. A retention over the budget first drops the applied output and keeps
+the basis, then drops the record. Eviction never touches a capture lease.
+Witnesses: `rust-mode-transform.test.ts:2041` "keeps one retained-output record
+per session under the session and byte limits", `:1405` "evicts the least
+recently retained session's output and offers it no previous source", `:1491`
+"never releases an active capture lease when the session count|byte budget
+evicts its session's output", and `:4141` "keeps the basis without the applied
+output, then drops the record, as the budget tightens".
+
 ### TE30 `inbound-baseline-independent-of-output-base`
 
 The delta-versus-full control now exists on the daemon: `lib.rs:25520`
@@ -143,6 +175,10 @@ the acknowledged input as its delta baseline (`computeWireDelta` over raw
 snapshots), and `measureInputLengths` (`rust-mode-transform.ts:366`) reuses the
 acknowledged prefix's lengths, so the input base and the applied output stay
 separate owners.
+
+Invalidated by #829: the tail-delta controls named above are deleted with the
+delta channel, and `measureInputLengths` now reuses lengths only for the
+members the capture verified against the retained digest.
 
 ## Daemon-side witnesses
 

@@ -61,6 +61,10 @@ Update, 2026-09-26: [#828](https://github.com/ahrav/eidnara/issues/828) deletes
 request from its full input. Citations of these symbols here are historical at
 their stated baseline.
 
+Update, 2026-09-26: [#829](https://github.com/ahrav/eidnara/issues/829) deletes
+`expand_transform_tail_delta`, so its epoch read no longer exists either; the
+remaining pre-commit consumer is `history_summarizer_active`.
+
 ## Failure scenario
 
 A consolidation reuses the pre-transform snapshot inside

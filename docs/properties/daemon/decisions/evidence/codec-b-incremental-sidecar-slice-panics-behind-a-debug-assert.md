@@ -1,5 +1,10 @@
 # codec-b-incremental-sidecar-slice-panics-behind-a-debug-assert
 
+Update, 2026-09-26: [#829](https://github.com/ahrav/eidnara/issues/829)
+deletes `decode_opencode_sidecar_incremental`, `NativeDeltaFrontier`, and
+`validated_native_prefix` with the delta channel, so this record is
+invalidated. The sections below are historical at their baseline.
+
 ## Discovery trigger
 
 The task brief asked me to check codec paths for panicking constructs

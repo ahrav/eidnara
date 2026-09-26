@@ -184,19 +184,6 @@ pub struct FlatProjection {
     pub identity_by_mid: BTreeMap<String, Vec<BlockIdentity>>,
 }
 
-impl FlatProjection {
-    #[cfg(test)]
-    pub(crate) fn differential_bytes(&self) -> Vec<u8> {
-        let wires = self
-            .blocks
-            .iter()
-            .map(|block| block.wire.as_ref())
-            .collect::<Vec<_>>();
-        serde_json::to_vec(&(&self.blocks, &self.identity_by_mid, wires))
-            .expect("flat projection differential bytes must serialize")
-    }
-}
-
 /// Projection failure caused by invalid identity syntax or tool-arc structure.
 #[derive(thiserror::Error, Debug, Clone, PartialEq, Eq)]
 pub enum WireError {

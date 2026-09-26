@@ -367,7 +367,7 @@ fn a_native_array_without_the_tail_is_lost_at_attachment(coverage: &mut Coverage
 /// whatever `user_hint` holds.
 #[test]
 fn the_user_hint_pass_leaves_the_wire_response_bytes_unchanged() {
-    let mut response = daemon::transform::TransformResponse::need_full_sync(None);
+    let mut response = daemon::transform::TransformResponse::passthrough(Vec::new());
     let bare = serde_json::to_vec(&response).unwrap();
     response.user_hint = Some(UserHintPass::Skipped {
         reason: UserHintSkip::AlreadyDecided,

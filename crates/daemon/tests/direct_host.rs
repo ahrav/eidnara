@@ -96,7 +96,6 @@ async fn readiness_permissions_catalog_and_real_unary_transform() {
             "session_id": session,
             "serializer_profile": "owned-llmrunner",
             "render_config": "direct-host-config",
-            "full_array_fingerprint": "direct-host-fingerprint",
             "messages": [{
                 "mid": "m1",
                 "ordinal": 1,
@@ -111,10 +110,7 @@ async fn readiness_permissions_catalog_and_real_unary_transform() {
     .await;
     assert_eq!(response["status"], "ok");
     assert_eq!(response["served_from"], "transform");
-    assert_eq!(
-        response["full_array_fingerprint"],
-        "direct-host-fingerprint"
-    );
+    assert!(response.get("full_array_fingerprint").is_none());
 
     client
         .close_route(primary)

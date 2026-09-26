@@ -15,7 +15,7 @@ use serde_json::{Value, json};
 use support::applied::applied_messages;
 use support::kernel_daemon::{DOMAIN, KernelDaemon, SESSION, insert_decision, state_kind};
 
-fn transform_request(fingerprint: &str) -> Value {
+fn transform_request() -> Value {
     json!({
         "method": "transform",
         "kind": "transform",
@@ -24,7 +24,6 @@ fn transform_request(fingerprint: &str) -> Value {
         "serializer_profile": "owned-llmrunner",
         "session_id": SESSION,
         "render_config": "canonical-memory",
-        "full_array_fingerprint": fingerprint,
         "messages": [{
             "mid": "m1",
             "ordinal": 1,
@@ -39,7 +38,7 @@ fn transform_request(fingerprint: &str) -> Value {
 
 /// Every request in this file carries the same input array, so the recipe applies against any of them.
 fn served_text(response: &Value) -> String {
-    serde_json::to_string(&applied_messages(&transform_request("applied"), response)).unwrap()
+    serde_json::to_string(&applied_messages(&transform_request(), response)).unwrap()
 }
 
 #[tokio::test]
@@ -131,7 +130,7 @@ async fn transform_composes_project_memory_from_canonical_rows_and_observes_abse
         .unwrap();
     let tip = daemon.tip();
 
-    let first = daemon.call(transform_request("first")).await;
+    let first = daemon.call(transform_request()).await;
     assert_eq!(first["status"], "ok", "{first}");
     assert_eq!(first["action"], "HARD", "{first}");
     let text = served_text(&first);
@@ -179,7 +178,7 @@ async fn transform_composes_project_memory_from_canonical_rows_and_observes_abse
     let quarantined_tip = daemon.tip();
     assert!(quarantined_tip > tip);
 
-    let second = daemon.call(transform_request("second")).await;
+    let second = daemon.call(transform_request()).await;
     assert_eq!(second["status"], "ok", "{second}");
     assert_eq!(second["action"], "HARD", "{second}");
     assert_eq!(
@@ -201,13 +200,13 @@ async fn transform_composes_project_memory_from_canonical_rows_and_observes_abse
     );
 
     // A pass with unchanged rows keeps the frozen m0.
-    let third = daemon.call(transform_request("third")).await;
+    let third = daemon.call(transform_request()).await;
     assert_eq!(third["status"], "ok", "{third}");
     assert_ne!(third["action"], "HARD", "{third}");
     assert_eq!(third["project_memory"], second["project_memory"]);
 
     // Unknown top-level fields such as `claim_lane` are ignored rather than rejected.
-    let mut with_lane = transform_request("third");
+    let mut with_lane = transform_request();
     with_lane["claim_lane"] = json!({"enabled": true, "snapshot_vector": null});
     let ignored = daemon.call(with_lane).await;
     assert_eq!(ignored["status"], "ok", "{ignored}");
@@ -281,7 +280,7 @@ async fn a_lagging_consumer_withholds_the_block_and_acknowledging_restores_it() 
         .mark_outbox_published_through(newest_boundary, 1)
         .unwrap();
 
-    let withheld = daemon.call(transform_request("withheld")).await;
+    let withheld = daemon.call(transform_request()).await;
     assert_eq!(withheld["status"], "ok", "{withheld}");
     assert_eq!(withheld["action"], "HARD", "{withheld}");
     assert!(
@@ -298,7 +297,7 @@ async fn a_lagging_consumer_withholds_the_block_and_acknowledging_restores_it() 
     store
         .acknowledge_outbox("indexer", daemon.tip(), 1)
         .unwrap();
-    let served = daemon.call(transform_request("served")).await;
+    let served = daemon.call(transform_request()).await;
     assert_eq!(served["status"], "ok", "{served}");
     assert_eq!(served["action"], "HARD", "{served}");
     assert_eq!(
@@ -335,7 +334,7 @@ async fn a_memory_disabled_pass_takes_no_canonical_read() {
         "Keep the public contract.",
     );
 
-    let response = daemon.call(transform_request("disabled")).await;
+    let response = daemon.call(transform_request()).await;
     assert_eq!(response["status"], "ok", "{response}");
     assert_eq!(response["action"], "HARD", "{response}");
     assert!(
@@ -409,7 +408,7 @@ async fn rows_past_the_configured_budget_are_dropped_by_the_reader() {
         "Keep the public contract.",
     );
 
-    let first = daemon.call(transform_request("first")).await;
+    let first = daemon.call(transform_request()).await;
     assert_eq!(first["status"], "ok", "{first}");
     let text = served_text(&first);
     assert!(
@@ -436,7 +435,7 @@ async fn rows_past_the_configured_budget_are_dropped_by_the_reader() {
             Ok(String::new())
         })
         .unwrap();
-    let second = daemon.call(transform_request("second")).await;
+    let second = daemon.call(transform_request()).await;
     assert_eq!(second["status"], "ok", "{second}");
     assert_ne!(second["action"], "HARD", "{second}");
     assert_eq!(
