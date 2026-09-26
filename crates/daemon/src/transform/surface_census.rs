@@ -514,7 +514,7 @@ fn escaped_markup_before_a_prefix_match_does_not_keep_the_prefix() {
 #[test]
 fn a_long_anchor_survives_the_centered_window() {
     // A 40-hex commit SHA is a single token; the window must leave room for the whole anchor.
-    for len in [40, 45, 60] {
+    for len in [40, 45, 60, 78] {
         let anchor = "a".repeat(len);
         let body = format!("{} {anchor} {}", "x".repeat(200), [FILLER; 6].join(" "));
         let snippet = user_hint_snippet(body.clone(), &[&anchor]);
