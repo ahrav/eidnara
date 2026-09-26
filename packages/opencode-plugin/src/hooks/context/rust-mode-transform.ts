@@ -153,8 +153,7 @@ interface AppliedOutput {
 
 /**
  * A session's retained output: the capture basis of the window its last published pass submitted,
- * which lets the next capture of a window declared at the same anchor verify that prefix instead
- * of taping it again, and the output that pass applied.
+ * which a window declared at the same anchor verifies instead of re-taping, and the applied output.
  */
 interface RetainedOutput {
     /** The acknowledgment basis: the anchor the submitted window started at. */
@@ -330,7 +329,7 @@ function messageInfo(value: unknown): Record<string, unknown> {
 }
 
 /**
- * Lengths for the submitted window: members the capture verified against the retained
+ * Lengths for the submitted native array: members the capture verified against the retained
  * digest keep the lengths measured when they were first sent, and only the rest are measured.
  */
 function measureInputLengths(
@@ -873,12 +872,17 @@ export function createRustModeTransform(
         sessionLog.warn(sessionId, "rust transform failed; serving the input unchanged:", error);
     };
 
-    /** `rerun` continues a pass from discovery after its known anchor drew `boundary_unknown`. */
+    /** `rerun` resumes a pass on its validated root after its anchor drew `boundary_unknown`. */
     const execute = async (
         sessionId: string,
         output: { messages: unknown[] },
         lease: CaptureLease,
-        rerun?: { deliveries: DeliveryPlan; timings: RustPassTimings; startedAt: number },
+        rerun?: {
+            deliveries: DeliveryPlan;
+            timings: RustPassTimings;
+            startedAt: number;
+            target: unknown[];
+        },
     ): Promise<DeliveryPlan> => {
         const passStartedAt = rerun?.startedAt ?? performance.now();
         const deliveries: DeliveryPlan = rerun?.deliveries ?? {
@@ -887,8 +891,7 @@ export function createRustModeTransform(
             attempted: new Set(),
             applied: new Set(),
         };
-        const target = readOwnDataProperty(output, "messages") as unknown[];
-        // A rerun leaves a changed container to the publish-time check, so the pass still logs its line.
+        const target = rerun?.target ?? (readOwnDataProperty(output, "messages") as unknown[]);
         const hostRejection = rerun ? null : publicationRejection(target, 0);
         if (hostRejection !== null) {
             sessionLog.debug(
@@ -1020,10 +1023,9 @@ export function createRustModeTransform(
             return index;
         };
         /**
-         * Walks `transform.boundary` newest first until a page names an anchor present in the host
-         * array, verified by one id scan; an empty page is exhaustion and sends `null`. Budget,
-         * timeout, a malformed or repeated page, or a daemon without the method declines, never `null`.
-         * The budget runs from the pass start, so a rediscovery gets only what the first attempt left.
+         * Walks `transform.boundary` newest first to an anchor the host holds (one id scan); an empty
+         * page sends `null`. Budget (from the pass start, so a rerun gets what is left), timeout, a
+         * malformed or repeated page, or a daemon without the method declines, never `null`.
          */
         const discover = async (
             projectRoot: string,
@@ -1153,10 +1155,9 @@ export function createRustModeTransform(
                 return inspection.messageWireBytes;
             };
             /**
-             * A window declared at the retained basis matches its acknowledged history before the
-             * former terminal against the digest rather than re-taping it, so the charge covers the
-             * root and the messages after it. The former terminal is taped again because the host
-             * may still be editing it in place. Any prefix change falls back to a full capture.
+             * A window declared at the retained basis checks its history before the former terminal
+             * against the digest instead of re-taping it; the former terminal, which the host may still
+             * edit in place, is taped again. Any prefix change falls back to a full capture.
              */
             const prefix =
                 previous && sameBoundary(previous.basis, boundary)
@@ -1317,7 +1318,7 @@ export function createRustModeTransform(
             deliveries.projectRoot = projectRoot;
             const wireBuildStartedAt = performance.now();
             // Compaction summaries stay out of the CK window, as the daemon's CK decoder expects;
-            // the kept messages carry their unfiltered window positions for synthetic tool call ids.
+            // kept messages carry unfiltered window positions (push returns a truthy length).
             const positions: number[] = [];
             const kept = messages.filter(
                 (message, i) => !isRawCompactionSummaryInfo(message.info) && positions.push(i + 1),
@@ -1489,6 +1490,7 @@ export function createRustModeTransform(
                     deliveries,
                     timings,
                     startedAt: passStartedAt,
+                    target,
                 });
             }
             // A missing or malformed boundary leaves the next pass to rediscover it.

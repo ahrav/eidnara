@@ -571,6 +571,26 @@ describe("boundary discovery", () => {
         expect(passes[0]).toContain("applied=false");
     });
 
+    it("declines cleanly when the host replaces its root array before a rerun", async () => {
+        let traps = 0;
+        const trapped = new Proxy([], {
+            get: (...args) => {
+                traps += 1;
+                return Reflect.get(...args);
+            },
+        });
+        for (const replacement of [null, trapped]) {
+            const sessionId = `discovery-replaced-${Date.now()}-${traps}`;
+            const { passes } = await rediscoveryPass(sessionId, (_, output) => {
+                (output as { messages: unknown }).messages = replacement;
+            });
+            expect(passes).toHaveLength(1);
+            expect(passes[0]).toContain("rediscovered=true");
+            expect(passes[0]).toContain("applied=false");
+        }
+        expect(traps).toBe(0);
+    });
+
     it("declines a rediscovery once a slow first send spent the pass's discovery budget", async () => {
         const sessionId = `discovery-slow-${Date.now()}`;
         const { cursors, bodies, lines, passes, output } = await rediscoveryPass(sessionId, () =>
