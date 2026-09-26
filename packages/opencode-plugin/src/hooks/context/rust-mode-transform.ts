@@ -333,6 +333,35 @@ function computeWireDelta(
     return { rawStart, wireStart, ckAfter, nativeAfter, after: previous.fingerprint };
 }
 
+/**
+ * A failed pass may serve the retained output only when every message the previous pass submitted,
+ * its terminal included, is unchanged and in place. New messages may follow; an edit, removal,
+ * revert, or reorder of an acknowledged message leaves the retained output stale.
+ */
+function isAppendOnlyExtension(
+    previous: RustWireCache,
+    snapshots: readonly MessageContentSnapshot[],
+): boolean {
+    const acknowledged = previous.rawContentSnapshots;
+    return (
+        acknowledged.length === previous.rawCount &&
+        snapshots.length >= acknowledged.length &&
+        acknowledged.every((snapshot, index) => snapshotFieldsEqual(snapshots[index], snapshot))
+    );
+}
+
+/**
+ * The fail-open array and the raw input share the appended suffix, so the fail-open array is
+ * larger than raw exactly when the retained output holds more bytes than its source prefix.
+ */
+function appliedOutputGrew(previous: RustWireCache, applied: AppliedOutput): boolean {
+    let appliedBytes = 0;
+    for (const length of applied.lengths) appliedBytes += length;
+    let prefixBytes = 0;
+    for (const length of previous.inputLengths) prefixBytes += length;
+    return appliedBytes > prefixBytes;
+}
+
 /** The pending cache for a pass; `applied` is attached on publication. */
 function buildWireCache(args: {
     messages: readonly MessageLike[];
@@ -908,10 +937,21 @@ export function createRustModeTransform(
         );
     };
 
-    const markFailure = (sessionId: string, state: RustSessionState, error: unknown): void => {
+    const markFailure = (
+        sessionId: string,
+        state: RustSessionState,
+        error: unknown,
+        servedLastApplied: boolean,
+    ): void => {
         state.consecutiveFailures += 1;
         state.failureCount += 1;
-        sessionLog.warn(sessionId, "rust transform failed; serving the input unchanged:", error);
+        sessionLog.warn(
+            sessionId,
+            servedLastApplied
+                ? "rust transform failed; serving the last applied output with the messages appended since:"
+                : "rust transform failed; serving the input unchanged:",
+            error,
+        );
     };
 
     const invalidateWireState = (sessionId: string): void => {
@@ -1073,6 +1113,47 @@ export function createRustModeTransform(
         const charge = (bytes: number, detail: string): void => {
             if (!lease.reserve(bytes)) throw new CaptureBudgetExceeded(detail);
         };
+        let failOpenSource: { captured: CapturedMessages; previous: RustWireCache } | undefined;
+        /**
+         * Without native compaction a raw fail-open can overflow the provider window, so a failed
+         * pass republishes the last applied output followed by the raw messages appended after the
+         * prefix that output was computed from. Messages are appended whole, so a tool part keeps
+         * its call and result together. Any doubt about the prefix serves the input unchanged.
+         */
+        const serveLastApplied = (): boolean => {
+            const source = failOpenSource;
+            const applied = source?.previous.applied;
+            if (!source || !applied) return false;
+            try {
+                if (
+                    states.get(sessionId) !== state ||
+                    state.wireInvalidations !== wireInvalidationsAtRead ||
+                    lease.signal.aborted ||
+                    wireCaches.peek(sessionId) !== source.previous ||
+                    !isAppendOnlyExtension(source.previous, source.captured.snapshots) ||
+                    appliedOutputGrew(source.previous, applied) ||
+                    readOwnDataProperty(output, "messages") !== target ||
+                    !capturedMessagesUnchanged(target, source.captured) ||
+                    hostArrayReplacementRejection(target) !== null
+                )
+                    return false;
+                if (!capturedMessagesUnchanged(applied.values, applied.capture)) {
+                    source.previous.applied = undefined;
+                    appliedOutputs.release(sessionId);
+                    return false;
+                }
+                const served = [
+                    ...applied.values,
+                    ...source.captured.members.slice(source.previous.rawCount),
+                ];
+                if (!lease.reserve(served.length * CANDIDATE_SLOT_BYTES)) return false;
+                replaceHostArrayContents(target, served);
+                return true;
+            } catch (error) {
+                sessionLog.warn(sessionId, "rust transform fail-open reuse declined:", error);
+                return false;
+            }
+        };
         try {
             // Source domain is validated synchronously before any message read.
             const prefixGuardStartedAt = performance.now();
@@ -1102,6 +1183,7 @@ export function createRustModeTransform(
             };
             // The delta decision and the charges it implies derive from the capture, so byte pressure declines before the first await.
             const previousWireCache = wireCaches.get(sessionId);
+            if (previousWireCache) failOpenSource = { captured, previous: previousWireCache };
             let wireDelta =
                 !state.forceFullWire && previousWireCache
                     ? computeWireDelta(previousWireCache, captured.snapshots)
@@ -1677,7 +1759,9 @@ export function createRustModeTransform(
                 );
             } else {
                 if (decision.toLowerCase() !== "need_full_sync") decision = "error";
-                markFailure(sessionId, state, error);
+                const servedLastApplied = serveLastApplied();
+                if (servedLastApplied) servedFrom = "last_applied";
+                markFailure(sessionId, state, error, servedLastApplied);
             }
             finishPass(false);
         }
