@@ -995,9 +995,10 @@ Exercised: yes - Duplicate names, key-directed substitution, container
 refusal, integrity refusal, and the cache-state policy test exist; the
 [single-pass tests](evidence/meta-json-preparation-scans-every-persisted-byte.md#single-pass-evidence)
 add byte identity of a clean stored `meta` against
-`serde_json::to_string(meta)`, a secret in a `block_identity_by_mid` value
-substituted and recorded, and a secret in a `block_identity_by_mid` key
-refused.
+`serde_json::to_string(meta)`, a secret in a nested `shadow_acked_watermarks`
+value substituted and recorded, and a secret in a nested key refused. Block
+identities no longer ride in `meta`; the same test holds their
+`block_identities` rows to the same contract.
 Guarantee: No byte reaches the `meta` column that the scanner did not walk,
 and the audit receipt matches the bytes stored.
 Check: `always` - For the `meta` text handed to [`json_content`][json-content]
@@ -1018,9 +1019,9 @@ an earlier value, which is the bypass the [comment][unique-doc] on
 [`parse_json_with_unique_names`][unique] states; or it substitutes without
 recording the detection.
 Required faults and enabling state: `meta` text with duplicate names at top
-level and nested; a secret in a `BTreeMap` key such as
-`block_identity_by_mid`; a secret under an integrity-named field such as
-`tail_hygiene_baseline.content_signature`; a protected key holding an
+level and nested; a secret in a nested object key such as a
+`shadow_acked_watermarks` name; a secret under an integrity-named field such
+as `tail_hygiene_baseline.content_signature`; a protected key holding an
 object; a clean `meta` compared byte-for-byte with the stored column.
 Confidence: high - [Evidence](evidence/meta-json-preparation-scans-every-persisted-byte.md).
 The [policy][policy], [`prepare_json_content_collecting`][prepare-collecting],
@@ -1828,9 +1829,11 @@ situation coverage: a stage's lines execute under a 69-byte body or a
 Fault/timing angle: None; a coverage record.
 Required faults and enabling state: A session at the production size class
 (the bench header's 1_400-message 2 KiB mixed point or the fixture's 2_500),
-reached by incremental growth because a first pass cannot commit it (the
-store's 512 KiB durable-text bound rejects a 1_400-message first HARD pass,
-pinned by [`transform_meta_bound.rs`][meta-bound]); an ingress body through
+reached by incremental growth or by history segments covering the older
+messages, because an uncovered first pass cannot commit it (the store's
+512 KiB durable-text bound rejects an uncovered first HARD pass near 1_600
+2 KiB messages; [`transform_meta_bound.rs`][meta-bound] commits 1_400 and
+10_000 covered messages); an ingress body through
 `Handler::handle`, not a typed request; a warm store for steady passes and a
 cold store for the first pass; a 64 MiB direction arena for the ring probes.
 Confidence: high - [Evidence](evidence/optimized-stage-is-measured-at-production-shape.md).
@@ -2911,7 +2914,7 @@ evaluation of this area and its disposition are recorded in
 [nextest]: ../../../../.config/nextest.toml#L4-L7
 [hp-header]: ../../../../crates/daemon/benches/hot_path.rs#L1-L10
 [hp-e2e]: ../../../../crates/daemon/benches/hot_path.rs#L282-L315
-[meta-bound]: ../../../../crates/daemon/src/transform_meta_bound.rs#L19-L102
+[meta-bound]: ../../../../crates/daemon/src/transform_meta_bound.rs#L130-L171
 [he-payload]: ../../../../crates/shm-transport/benches/hardware_envelope.rs#L220-L223
 [he-designated]: ../../../../crates/shm-transport/benches/hardware_envelope.rs#L211-L214
 [he-blocked]: ../../../../crates/shm-transport/benches/hardware_envelope.rs#L283-L286

@@ -38003,6 +38003,8 @@ mod tests {
             generation_invalidated: false,
             baseline_parts: Vec::new(),
             content_signature: String::new(),
+            excluded_prefix_len: 0,
+            excluded_prefix_digest: String::new(),
         });
         store
             .commit("ses", loaded.row_version, &loaded.core, &meta)

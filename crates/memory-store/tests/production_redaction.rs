@@ -789,11 +789,11 @@ fn durable_write_registry_references_real_bindings_and_checked_tests() {
     }
 }
 
-/// The `meta` column's byte and receipt contract: clean `meta` is stored as its own
-/// serialization byte for byte with no detection recorded; a secret planted in a nested
-/// map's value is substituted and recorded as exactly one detection on the `meta` scan; a
-/// secret planted in a nested map's key is refused with no row and no receipt, even when an
-/// earlier value in the same document carried a detection.
+/// The `meta` column's and the `block_identities` rows' byte and receipt contract: clean
+/// values are stored as their serialization byte for byte with no detection recorded; a
+/// secret planted in a nested map's value is substituted and recorded as exactly one
+/// detection on its field's scan; a secret planted in a nested map's key is refused with no
+/// row and no receipt, even when an earlier value in the same document carried a detection.
 #[test]
 fn cache_state_meta_is_stored_byte_identical_when_clean_and_scanned_to_every_nested_key() {
     let temp = tempfile::tempdir().unwrap();
@@ -809,28 +809,40 @@ fn cache_state_meta_is_stored_byte_identical_when_clean_and_scanned_to_every_nes
             )
             .unwrap()
     };
-    let meta_finding_counts = |connection: &Connection| -> Vec<i64> {
+    let stored_identities = |session: &str| -> String {
+        let connection = Connection::open(temp.path().join("memory.sqlite")).unwrap();
+        connection
+            .query_row(
+                "SELECT identities FROM block_identities WHERE session_id = ?1 AND mid = 'mid-1'",
+                [session],
+                |row| row.get(0),
+            )
+            .unwrap()
+    };
+    let finding_counts = |connection: &Connection, field: &str| -> Vec<i64> {
         connection
             .prepare(
                 "SELECT finding_count FROM field_scans WHERE scan_id IN \
-                 (SELECT scan_id FROM scan_owner_copies WHERE field_id = 'meta') \
+                 (SELECT scan_id FROM scan_owner_copies WHERE field_id = ?1) \
                  ORDER BY finding_count",
             )
             .unwrap()
-            .query_map([], |row| row.get(0))
+            .query_map([field], |row| row.get(0))
             .unwrap()
             .collect::<Result<_, _>>()
             .unwrap()
     };
+    let identity = |kind_tag: &str| {
+        vec![memory_store::BlockIdentity {
+            kind_tag: kind_tag.to_string(),
+            byte_fingerprint: "fp".to_string(),
+        }]
+    };
 
     let mut clean = ModuleMeta::default();
-    clean.block_identity_by_mid.insert(
-        "mid-1".to_string(),
-        vec![memory_store::BlockIdentity {
-            kind_tag: "text".to_string(),
-            byte_fingerprint: "fp".to_string(),
-        }],
-    );
+    clean
+        .block_identity_by_mid
+        .insert("mid-1".to_string(), identity("text"));
     clean.last_render_config = "render-v1".to_string();
     store
         .commit("clean", None, &CoreState::empty(), &clean)
@@ -840,75 +852,86 @@ fn cache_state_meta_is_stored_byte_identical_when_clean_and_scanned_to_every_nes
         serde_json::to_string(&clean).unwrap(),
         "clean meta is stored as its serialization, byte for byte"
     );
+    assert_eq!(
+        stored_identities("clean"),
+        serde_json::to_string(&identity("text")).unwrap(),
+        "a clean identity row is stored as its serialization, byte for byte"
+    );
     let connection = Connection::open(temp.path().join("memory.sqlite")).unwrap();
     assert_eq!(
-        meta_finding_counts(&connection),
+        finding_counts(&connection, "meta"),
         [0],
         "clean meta records one receipt with no finding"
+    );
+    assert_eq!(
+        finding_counts(&connection, "block_identities"),
+        [0],
+        "clean identities record one receipt with no finding"
     );
     drop(connection);
 
     // A secret under a nested map value is substituted and recorded.
-    let mut planted = ModuleMeta::default();
-    planted.block_identity_by_mid.insert(
-        "mid-1".to_string(),
-        vec![memory_store::BlockIdentity {
-            kind_tag: "password=planted-secret".to_string(),
-            byte_fingerprint: "fp".to_string(),
-        }],
-    );
+    let mut planted = ModuleMeta {
+        shadow_acked_watermarks: json!({ "note": "password=planted-secret" }),
+        ..ModuleMeta::default()
+    };
+    planted
+        .block_identity_by_mid
+        .insert("mid-1".to_string(), identity("password=planted-secret"));
     store
         .commit("planted", None, &CoreState::empty(), &planted)
         .unwrap();
-    let stored = stored_meta("planted");
-    assert!(!stored.contains("planted-secret"), "{stored}");
-    assert!(stored.contains("password=<REDACTED:password>"), "{stored}");
+    for stored in [stored_meta("planted"), stored_identities("planted")] {
+        assert!(!stored.contains("planted-secret"), "{stored}");
+        assert!(stored.contains("password=<REDACTED:password>"), "{stored}");
+    }
     let connection = Connection::open(temp.path().join("memory.sqlite")).unwrap();
-    assert_eq!(
-        meta_finding_counts(&connection),
-        [0, 1],
-        "the substitution left exactly one finding on the planted meta scan"
-    );
+    for field in ["meta", "block_identities"] {
+        assert_eq!(
+            finding_counts(&connection, field),
+            [0, 1],
+            "the substitution left exactly one finding on the planted {field} scan"
+        );
+    }
     drop(connection);
 
-    let mut keyed = ModuleMeta::default();
-    keyed.block_identity_by_mid.insert(
-        "a-mid".to_string(),
-        vec![memory_store::BlockIdentity {
-            kind_tag: "password=earlier-value".to_string(),
-            byte_fingerprint: "fp".to_string(),
-        }],
-    );
-    keyed.block_identity_by_mid.insert(
-        "password=key-secret".to_string(),
-        vec![memory_store::BlockIdentity {
-            kind_tag: "text".to_string(),
-            byte_fingerprint: "fp".to_string(),
-        }],
-    );
-    let audit_before_refusal = scan_audit_counts(temp.path());
-    let refused = store
-        .commit("keyed", None, &CoreState::empty(), &keyed)
-        .unwrap_err();
-    assert!(
-        matches!(refused, memory_store::MemoryStoreError::Redaction(_)),
-        "{refused:?}"
-    );
-    let connection = Connection::open(temp.path().join("memory.sqlite")).unwrap();
-    let keyed_rows: i64 = connection
-        .query_row(
-            "SELECT COUNT(*) FROM cache_state WHERE session_id = 'keyed'",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap();
-    assert_eq!(keyed_rows, 0, "a refused meta stores nothing");
-    assert_eq!(
-        scan_audit_counts(temp.path()),
-        audit_before_refusal,
-        "a refused meta leaves every scan-audit table unchanged, so the detection gathered \
-         before the refusal was discarded with the write"
-    );
+    let keyed_meta = ModuleMeta {
+        shadow_acked_watermarks: json!({ "a-note": "password=earlier-value", "password=key-secret": 1 }),
+        ..ModuleMeta::default()
+    };
+    let mut keyed_identities = ModuleMeta::default();
+    keyed_identities
+        .block_identity_by_mid
+        .insert("a-mid".to_string(), identity("password=earlier-value"));
+    keyed_identities
+        .block_identity_by_mid
+        .insert("password=key-secret".to_string(), identity("text"));
+    for keyed in [keyed_meta, keyed_identities] {
+        let audit_before_refusal = scan_audit_counts(temp.path());
+        let refused = store
+            .commit("keyed", None, &CoreState::empty(), &keyed)
+            .unwrap_err();
+        assert!(
+            matches!(refused, memory_store::MemoryStoreError::Redaction(_)),
+            "{refused:?}"
+        );
+        let connection = Connection::open(temp.path().join("memory.sqlite")).unwrap();
+        let keyed_rows: i64 = connection
+            .query_row(
+                "SELECT (SELECT COUNT(*) FROM cache_state WHERE session_id = 'keyed')
+                      + (SELECT COUNT(*) FROM block_identities WHERE session_id = 'keyed')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(keyed_rows, 0, "a refused commit stores nothing");
+        assert_eq!(
+            scan_audit_counts(temp.path()),
+            audit_before_refusal,
+            "a refused commit leaves every scan-audit table unchanged, so the detection \
+             gathered before the refusal was discarded with the write"
+        );
+    }
 }
 
 #[test]

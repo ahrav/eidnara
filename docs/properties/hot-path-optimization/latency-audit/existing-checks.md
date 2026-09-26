@@ -116,7 +116,8 @@ documents timer placement only and leaves W2 invalidated.
 | [`management_drop_alias_routes_are_rejected`][t-shape] | Retired aliases return `unrecognized_request_shape`. | unaudited |
 | [`indexing_embedding_git_and_mural_are_unreachable_from_every_route_shape`][t-shape2] | Internal names are not routable by `method`, `kind`, or facade. | unaudited |
 | [`transform_request_parses_full_flat_wire_envelope`][t-envelope] | `from_value::<TransformRequest>` accepts one full envelope. | unaudited |
-| [`first_hard_pass_meta_respects_the_store_durable_text_bound`][t-meta] | `from_value::<TransformRequest>` accepts a `kind`-only body under `bench-internals`; 1_000 messages commit and 1_400 fail with `InputLimit`. | unaudited |
+| [`first_hard_pass_meta_respects_the_store_durable_text_bound`][t-meta] | `from_value::<TransformRequest>` accepts a `kind`-only body; with history segments covering all but a 200-message tail, 1_400 and 10_000 messages commit a first HARD pass with `meta` under 128 KiB. | unaudited |
+| [`meta_bytes_stay_flat_as_covered_history_grows_and_covered_drift_still_rejects`][t-meta-flat] | Committed `meta` bytes at 10_000 covered messages stay within 10 percent of 1_000, and a changed covered message then fails with `IdentityDrift` and commits nothing. | unaudited |
 | [`readiness_permissions_catalog_and_real_unary_transform`][directhost] | One small `kind`-only transform is admitted through the real host. | unaudited |
 | [`typed_errors_and_stream_markers_have_no_prepared_body`][t-prep] (historical) | Error outcomes settle without an output reservation. | unaudited |
 | [`capacity_separates_permanent_from_transient_exhaustion`][t-budget] | `try_charge` above capacity is permanent and consumes nothing. | unaudited |
@@ -555,7 +556,8 @@ not a claim that no related check exists anywhere in the repository.
 [t-effect]: ../../../../crates/daemon/src/lib.rs#L20876
 [t-lanes]: ../../../../crates/daemon/src/lib.rs#L20518
 [t-direct-ring]: ../../../../crates/daemon/tests/direct_host.rs#L437
-[t-meta]: ../../../../crates/daemon/src/transform_meta_bound.rs#L19-L102
+[t-meta]: ../../../../crates/daemon/src/transform_meta_bound.rs#L130-L139
+[t-meta-flat]: ../../../../crates/daemon/src/transform_meta_bound.rs#L141-L171
 [directhost]: ../../../../crates/daemon/tests/direct_host.rs#L49
 [t-prep]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/tests/prepared_output.rs#L104
 [t-budget]: ../../../../crates/host-runtime/src/wire.rs#L839

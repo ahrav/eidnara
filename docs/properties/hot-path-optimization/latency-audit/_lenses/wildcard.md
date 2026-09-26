@@ -49,8 +49,9 @@ only; no test ran and nothing outside this file changed.
   [8259-8265][h-call], `prepare_history_summarizer_fire`, and response encoding in
   [`respond_transform`][respond]. The bench tops out at 1_000 messages because
   the store's 512 KiB durable-text bound rejects a 1_400-message first HARD
-  pass ([hot_path.rs:29-35][hp-counts], [291-293][hp-cliff]); that cliff is
-  pinned by [`transform_meta_bound.rs`][meta-bound]. The two
+  pass ([hot_path.rs:29-35][hp-counts], [291-293][hp-cliff]). That cliff was
+  pinned by [`transform_meta_bound.rs`][meta-bound], which now commits 1_400
+  and 10_000 messages once history segments cover the older ones. The two
   production-sized fixtures that do exist are `#[ignore]` and print to stderr:
   [`apply_once_stage_timings_large_fixture`][fx-1400] at 1_400 messages and
   [`full_module_pass_timing_fixture`][fx-2500] at 2_500 messages and 47_075
@@ -72,8 +73,9 @@ only; no test ran and nothing outside this file changed.
 - Fault/timing angle: none; a coverage record.
 - Required faults and enabling state: A session at the production size class
   (the bench header's 1_400-message, 2 KiB mixed point, or the fixture's
-  2_500), reached by incremental growth because a first pass cannot commit
-  it; an ingress body through `Handler::handle`, not a typed request; a warm
+  2_500), reached by incremental growth or by history segments covering the
+  older messages, because an uncovered first pass cannot commit it; an
+  ingress body through `Handler::handle`, not a typed request; a warm
   store with an existing row for steady passes and a cold store for the first
   pass; a 64 MiB direction arena for the ring probes.
 - Reachability: test-only - benches need `--features bench-internals`
@@ -475,7 +477,7 @@ only; no test ran and nothing outside this file changed.
 | [`pass_timing_line_is_parseable_for_an_empty_session`][t-line] | timing line key set and `key=value` shape | unaudited |
 | [`timings_are_present_and_old_responses_deserialize_without_them`][t-timings] | `timings` absent deserializes to default | unaudited |
 | [`emits discriminating pass and stage logs from ordinary Rust transforms`][ts-test] | plugin logs `rust module stages:` from response timings | unaudited |
-| [`first_hard_pass_meta_respects_the_store_durable_text_bound`][meta-bound] | 1_000 messages commit; 1_400 fail with `InputLimit` | unaudited |
+| [`first_hard_pass_meta_respects_the_store_durable_text_bound`][meta-bound] | 1_400 and 10_000 covered messages commit with `meta` under 128 KiB | unaudited |
 | [`cached_counts_match_the_tokenizer`][t-tc-match] | cached count equals tokenizer count, hit and miss | unaudited |
 | [`digest_keyed_hits_skip_retokenization`][t-tc-hits] | second lookup is a hit, not a miss | unaudited |
 | [`insert_current_rotates_at_capacity`][t-tc-rotate] | `current` never exceeds `GENERATION_CAP` | unaudited |
@@ -544,9 +546,10 @@ itself tooling only.
   on every load. The code matches. A merged-config cache contradicts the
   statement and must rewrite it or preserve the behavior.
 - [`hot_path.rs:29-35`][hp-counts] attributes the 512 KiB cliff to `meta`
-  growing about 460 bytes per message. The cliff is pinned by
+  growing about 460 bytes per message. The cliff was pinned by
   [`transform_meta_bound.rs`][meta-bound] at 1_000 ok and 1_400 refused; the
-  per-message figure is unverified here.
+  per-message figure is unverified here. The test now pins the covered case,
+  where 1_400 and 10_000 messages commit.
 
 ## Anchors
 
@@ -585,7 +588,7 @@ call site.
 [hp-e2e]: ../../../../../crates/daemon/benches/hot_path.rs#L221-L254
 [hp-cliff]: ../../../../../crates/daemon/benches/hot_path.rs#L291-L293
 [cargo-bench]: ../../../../../crates/daemon/Cargo.toml#L62-L75
-[meta-bound]: ../../../../../crates/daemon/src/transform_meta_bound.rs#L19-L102
+[meta-bound]: ../../../../../crates/daemon/src/transform_meta_bound.rs#L130-L171
 [bi-tc]: ../../../../../crates/daemon/src/lib.rs#L201-L209
 [bi-trim]: ../../../../../crates/daemon/src/lib.rs#L182-L190
 [he-payload]: ../../../../../crates/shm-transport/benches/hardware_envelope.rs#L220-L223

@@ -42,9 +42,12 @@ must reach before any "faster" claim is checkable.
   `project_memory`, `history_summarizer_active`, and guidance reads at
   [`:8203-8269`][h-run], and the response encoding in
   [`respond_transform`][respond]; none of that is in the bench.
-- The 1_400 and 1_000 points are pinned by
+- The 1_400 and 1_000 points were pinned by
   [`first_hard_pass_meta_respects_the_store_durable_text_bound`][meta-bound]
-  (1_000 commits, 1_400 fails). The retained test now runs as a normal daemon
+  (1_000 commits, 1_400 fails). Block identities have since moved to the
+  `block_identities` table and the tail hygiene baseline digests its covered
+  prefix, so the test now commits 1_400 and 10_000 messages whose history
+  segments cover all but a 200-message tail. It runs as a normal daemon
   library unit test, without the removed `bench-internals` feature gate.
 - The two production-sized fixtures are `#[ignore]` and print to stderr:
   [`apply_once_stage_timings_large_fixture`][fx-1400] (1_400 messages) and
@@ -79,10 +82,11 @@ improvement look the same.
 
 ## Timing windows and dependencies
 
-None in time. The dependency is on reaching the state: a first pass cannot
-commit a 1_400-message session, so the production size class is reachable
-only by incremental growth across committing passes, with a warm store for
-steady passes and a cold store for the first pass.
+None in time. The dependency is on reaching the state: an uncovered first
+pass cannot commit a 1_400-message session, so the production size class is
+reachable by incremental growth across committing passes or by history
+segments covering the older messages, with a warm store for steady passes and
+a cold store for the first pass.
 
 ## What a test must construct
 
@@ -120,11 +124,19 @@ specification enumerates the stages, and no name is built at run time.
 
 - Sources examined: [hot_path.rs:30-33][hp-e2e-counts],
   [`transform_meta_bound.rs`][meta-bound].
-- Findings: The test pins 1_000 ok and 1_400 refused with `InputLimit`. The
-  per-message figure appears only in the comment; no test or measurement
-  derives it.
-- Missing evidence: A `meta` byte count per message at both points.
-- Conclusion: unresolved, needs a measured `meta` size at 1_000 and 1_400.
+- Findings: The test pinned 1_000 ok and 1_400 refused with `InputLimit`.
+  Measured on `265df096` with that test's fixture (2 KiB mixed messages, no
+  history coverage), the 1_000-message first HARD pass committed 459_972
+  `meta` bytes, 460 bytes per message: `tail_hygiene_baseline` 213_300,
+  `served_output_fingerprint` 125_904, `block_identity_by_mid` 117_894.
+  After the move of block identities out of `meta`, the same uncovered
+  fixture commits 342_105 bytes at 1_000 and 512_824 at 1_500 and is refused
+  at 1_600. With segments covering all but a 200-message tail it commits
+  71_246 bytes at 1_000 and 71_867 at 10_000.
+- Missing evidence: None for the attribution. The uncovered measurements come
+  from a scratch run, not from a retained test.
+- Conclusion: verified for the pre-change fixture; the covered case is now
+  retained by [`transform_meta_bound.rs`][meta-bound].
 
 ## Retired W1 grouping for the typed-wire decode payoff
 
@@ -146,7 +158,7 @@ durable-text bound test is correctness coverage, not a performance claim.
 [hp-e2e]: ../../../../../crates/daemon/benches/hot_path.rs#L282-L315
 [hp-cliff]: ../../../../../crates/daemon/benches/hot_path.rs#L352-L354
 [cargo-bench]: ../../../../../crates/daemon/Cargo.toml#L62-L75
-[meta-bound]: ../../../../../crates/daemon/src/transform_meta_bound.rs#L19-L102
+[meta-bound]: ../../../../../crates/daemon/src/transform_meta_bound.rs#L130-L171
 [fx-1400]: ../../../../../crates/daemon/src/transform.rs#L12434-L12494
 [fx-2500]: ../../../../../crates/daemon/src/transform.rs#L28083-L28292
 [h-pre]: ../../../../../crates/daemon/src/lib.rs#L8189-L8206
