@@ -36,6 +36,8 @@ const MEMORIES: usize = 4;
 
 /// The D15 inventory rows, in report order.
 const ROWS: &[&str] = &[
+    // Holds the session state reads too: the pass's cache_state row and the lineage and
+    // assembly meta reads (see CLASSES).
     "coverage snapshot",
     "append range validation",
     "m0 segments",
@@ -84,17 +86,6 @@ const CLASSES: &[(&str, &str)] = &[
         "COALESCE(MAX(sequence), 0) FROM history_segments",
         "publication set fence",
     ),
-    // The edge lookups: newest, oldest, by end ordinal, by sequence, and its neighbours.
-    (
-        "SELECT sequence, start_message, end_message, start_message_id, end_message_id \
-         FROM history_segments WHERE session_id = ?1",
-        "coverage snapshot",
-    ),
-    (
-        "(SELECT h.start_message FROM history_segments AS h \
-         WHERE h.session_id = ?1 AND h.end_message >= j.value ORDER BY h.end_message LIMIT 1)",
-        "coverage snapshot",
-    ),
     (
         "SELECT COALESCE(MAX(end_message), 0) FROM history_segments WHERE session_id = ?1",
         "coverage snapshot",
@@ -128,6 +119,26 @@ const CLASSES: &[(&str, &str)] = &[
     ("ROLLBACK", "pass trace and ledgers"),
 ];
 
+/// The history_segments edge lookups and the uncovered-ordinal probe, matched as whole
+/// statements so a full read sharing their column list stays unclassified.
+const EDGE_STATEMENTS: &[&str] = &[
+    "SELECT sequence, start_message, end_message, start_message_id, end_message_id \
+     FROM history_segments WHERE session_id = ?1 ORDER BY sequence DESC LIMIT 1",
+    "SELECT sequence, start_message, end_message, start_message_id, end_message_id \
+     FROM history_segments WHERE session_id = ?1 ORDER BY sequence ASC LIMIT 1",
+    "SELECT sequence, start_message, end_message, start_message_id, end_message_id \
+     FROM history_segments WHERE session_id = ?1 AND end_message = ?2 LIMIT 1",
+    "SELECT sequence, start_message, end_message, start_message_id, end_message_id \
+     FROM history_segments WHERE session_id = ?1 AND sequence = ?2",
+    "SELECT sequence, start_message, end_message, start_message_id, end_message_id \
+     FROM history_segments WHERE session_id = ?1 AND sequence < ?2 ORDER BY sequence DESC LIMIT 1",
+    "SELECT sequence, start_message, end_message, start_message_id, end_message_id \
+     FROM history_segments WHERE session_id = ?1 AND sequence > ?2 ORDER BY sequence ASC LIMIT 1",
+    "SELECT j.value FROM json_each(?2) AS j WHERE COALESCE( (SELECT h.start_message \
+     FROM history_segments AS h WHERE h.session_id = ?1 AND h.end_message >= j.value \
+     ORDER BY h.end_message LIMIT 1), j.value + 1) > j.value",
+];
+
 /// The SQL text with its whitespace collapsed and padded by one space on each side.
 fn normalized(sql: &str) -> String {
     format!(" {} ", sql.split_whitespace().collect::<Vec<_>>().join(" "))
@@ -136,6 +147,12 @@ fn normalized(sql: &str) -> String {
 /// The inventory row of one statement, by its SQL text.
 fn classify(sql: &str) -> Option<&'static str> {
     let sql = normalized(sql);
+    if EDGE_STATEMENTS
+        .iter()
+        .any(|statement| sql.trim() == normalized(statement).trim())
+    {
+        return Some("coverage snapshot");
+    }
     CLASSES
         .iter()
         .find(|(needle, _)| sql.contains(needle))
@@ -146,7 +163,8 @@ fn classify(sql: &str) -> Option<&'static str> {
 /// work in one opcode (`COUNT(*)`, a whole-table clear), which `VM_STEP` does not see, and
 /// page counts grow with B-tree depth, so the shape itself is what is ruled out.
 /// The connection's temp schema is the one table read whole: it holds the storage layer's
-/// own fixed set of temp objects, not session data.
+/// own fixed set of temp objects, not session data. The check is textual: any WHERE in the
+/// statement, even one inside a subquery, hides a whole-table read in the outer query.
 fn whole_table(sql: &str) -> bool {
     let sql = normalized(sql);
     (sql.contains(" FROM ") || sql.starts_with(" UPDATE "))
@@ -156,6 +174,9 @@ fn whole_table(sql: &str) -> bool {
 
 /// Rows and VM steps per inventory row, summed over the statements of one phase.
 type Totals = BTreeMap<&'static str, (u64, u64)>;
+
+/// The totals of each phase of one measurement, in phase order.
+type Measured = Vec<(&'static str, Totals)>;
 
 fn totals(phase: &str, h: usize, work: &[StatementWork]) -> Totals {
     let mut out = Totals::new();
@@ -221,21 +242,65 @@ fn legacy_tag_rows(work: &[StatementWork]) -> u64 {
         .sum()
 }
 
-/// Seeds a session of `h` segments, `overlays` overlay rows per table, `h` tag rows outside
-/// the window plus one legacy row keyed by the request's tool call id, and `memories` active
-/// user memories, then measures each phase.
-fn measure(h: usize, overlays: usize, memories: usize) -> Vec<(&'static str, Totals)> {
+/// The rows the pass's window-keyed read of overlay `table` returned in `work`.
+fn window_overlay_rows(work: &[StatementWork], table: &str) -> u64 {
+    work.iter()
+        .filter(|statement| {
+            let sql = normalized(&statement.sql);
+            sql.contains(&format!(" FROM {table} "))
+                && sql.contains(" AND block_id IN (SELECT value FROM json_each(?2)) ")
+        })
+        .map(|statement| statement.rows)
+        .sum()
+}
+
+/// Seeds a session of `h` segments, `overlays` overlay rows per table off the window plus
+/// one per table on a window block, `h` tag rows outside the window plus one legacy row keyed
+/// by the request's tool call id, and `memories` active user memories, then measures each
+/// phase. The foreign tag ids sort below the window (`history-*`), between a window id and
+/// its `#` range (`m<end>!*`), and above the window (`zz-*`), so a range loose at either end
+/// reads rows that grow with `h`.
+fn measure(h: usize, overlays: usize, memories: usize) -> Measured {
     let dir = tempfile::tempdir().expect("store dir");
     let store = Arc::new(store(dir.path()));
     let history = SyntheticHistory::mixed(h);
     history.seed(&store, SESSION);
     seed_overlays(&store, SESSION, overlays);
+    let end = 2 * h as u64;
+    store
+        .with_fenced_conn_for_test(|tx| {
+            for (table, text) in [
+                ("temporal_marks", "marker_text, created_at"),
+                ("user_hints", "hint_text, created_at"),
+                ("channel1_appends", "reminder_text, fired_at_ms"),
+            ] {
+                tx.execute(
+                    &format!(
+                        "INSERT INTO {table} (session_id, block_id, {text}) VALUES (?1, ?2, ?3, 1)"
+                    ),
+                    rusqlite::params![
+                        SESSION,
+                        format!("m{}#0", end + 1),
+                        format!("{table} window")
+                    ],
+                )?;
+            }
+            Ok(())
+        })
+        .expect("seed window overlays");
     store
         .execute_tag_sql_for_test(&format!(
             "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < {h})
              INSERT INTO tags
                  (session_id, tag_number, block_id, kind, token_count, created_at_ms, source_bytes)
-             SELECT '{SESSION}', i, 'history-' || i || '#0', 'message', 1, 1, X'61' FROM n;
+             SELECT '{SESSION}', i,
+                    CASE i % 4
+                        WHEN 1 THEN 'm{end}!' || i
+                        WHEN 3 THEN 'zz-' || i || '#0'
+                        ELSE 'history-' || i || '#0'
+                    END,
+                    'message', 1, 1, X'61'
+               FROM n;
              INSERT INTO tags
                  (session_id, tag_number, block_id, kind, token_count, created_at_ms, source_bytes)
              VALUES ('{SESSION}', {h} + 1, '{CALL}', 'tool_call', 1, 1, X'61');"
@@ -275,6 +340,17 @@ fn measure(h: usize, overlays: usize, memories: usize) -> Vec<(&'static str, Tot
         1,
         "H={h}: the legacy tag row is read"
     );
+    for (table, rows) in [
+        ("user_hints", 1),
+        ("channel1_appends", 1),
+        ("temporal_marks", TAIL),
+    ] {
+        assert_eq!(
+            window_overlay_rows(&work, table),
+            rows,
+            "H={h}: {table} rows on the window"
+        );
+    }
     phases.push(("HARD", totals("HARD", h, &work)));
 
     // A write between the pass's reads and its commit fails the CAS; the retry reruns the
@@ -302,8 +378,11 @@ fn measure(h: usize, overlays: usize, memories: usize) -> Vec<(&'static str, Tot
     for (phase, totals) in &phases {
         // The bound of this row is the host profile's line count, not H: state sync replaces
         // the active memories wholesale and a HARD pass reads every one.
-        if let Some((rows, _)) = totals.get("active user memories") {
-            assert_eq!(*rows, memories as u64, "{phase} at H={h}");
+        let memory_rows = totals.get("active user memories").map(|(rows, _)| *rows);
+        if phase.starts_with("HARD") {
+            assert_eq!(memory_rows, Some(memories as u64), "{phase} at H={h}");
+        } else if let Some(rows) = memory_rows {
+            assert_eq!(rows, memories as u64, "{phase} at H={h}");
         }
     }
     phases
@@ -399,8 +478,6 @@ fn fold_row(row: &str) -> bool {
     matches!(row, "m0 segments" | "m1 segments")
 }
 
-type Measured = Vec<(&'static str, Totals)>;
-
 fn report(axis: &str, label: &str, phases: &Measured) {
     for (phase, totals) in phases {
         for row in ROWS {
@@ -495,12 +572,8 @@ fn every_pass_read_is_bounded_independent_of_history_size() {
         }
     }
     let memories = |row: &str| row == "active user memories";
-    assert_same("together", &together[0], &together[2], |row| {
-        fold_row(row) || memories(row)
-    });
-    assert_same("H only", &together[0], &history_only, |row| {
-        fold_row(row) || memories(row)
-    });
+    assert_same("together", &together[0], &together[2], fold_row);
+    assert_same("H only", &together[0], &history_only, fold_row);
     assert_same(
         "overlays and memories only",
         &together[0],

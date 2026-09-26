@@ -773,10 +773,10 @@ Type: safety
 Reachability: default-production
 Status: active
 Exercised: partial - `window_tag_read_keeps_every_session_relative_tag_decision`
-(`transform.rs:24155`) checks that the window tag read keeps every tag decision
+checks that the window tag read keeps every tag decision
 of a whole-session read, and
 `every_pass_read_is_bounded_independent_of_history_size`
-(`transform_read_bound.rs:440`) bounds the tag reads. The tag baseline cache is
+bounds the tag reads. The tag baseline cache is
 deleted. Nothing asserts uniqueness of `block_id` within one mint batch.
 Guarantee: A single tag-mint batch never contains the same `block_id` twice,
 and never contains a `block_id` that already has a durable `tags` row.
@@ -791,10 +791,9 @@ batch's `existing_tag_ids` snapshot (`:8595-8598`) matched the store.
 Required faults and enabling state: `tag_mint_enabled`, plus either a duplicate
 projection block id or a stale baseline. The first is impossible: `apply_once`
 returns `TransformError::DuplicateBlockId` at `:3354-3356`, before the mint at
-`:3806`. The second requires `load_cached_tags` to serve rows whose block-id
-set differs from the store's; both cached paths are additionally fenced on the
-trigger-backed `generation` (`:7529`, `:7540`), which a delete-and-reinsert
-advances even when count and max are unchanged.
+`:3806`. The second required the since-deleted `load_cached_tags` to serve
+rows whose block-id set differed from the store's; `load_window_tags` now reads
+the store on every pass, so no cached route remains.
 Confidence: medium - [evidence](evidence/render-a-mint-batch-block-ids-are-unique-per-pass.md).
 Verified the projection guard, the mint loop's non-updating filter, and both
 generation fences. Not verified: that the SQLite triggers advance `generation`
@@ -1973,10 +1972,10 @@ on its own: the loop's `existing_tag_ids` filter is a snapshot taken at
 two doors is shut by an upstream guard rather than by the mint, and the surviving
 trigger is the stale-baseline route.
 [render-a-mint-batch-block-ids-are-unique-per-pass](#render-a-mint-batch-block-ids-are-unique-per-pass)
-carries that residue and narrows it further: both cached hydration paths in
-`load_cached_tags` are fenced on a SQLite-trigger-backed `generation` (`:7529`,
-`:7540`), which a delete-and-reinsert advances even when count and max are
-unchanged, so the remaining question is entirely about the triggers themselves.
+carried that residue and narrowed it further: both cached hydration paths in
+`load_cached_tags` were fenced on a SQLite-trigger-backed `generation` (`:7529`,
+`:7540`). The cache is since deleted and `load_window_tags` reads the store on
+every pass, so the trigger question no longer applies.
 That is a Part 3 read and it is recorded as unresolved on both sides rather than
 answered here. The net effect on 4b is that its record's reachability now rests on
 one condition instead of two, which is a narrowing, not an invalidation.

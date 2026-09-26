@@ -1,5 +1,13 @@
 # Shared-input equivalence surface
 
+> Invalidated in part: the tag baseline cache (`load_cached_tags`,
+> `tag_baseline_cache()`, `TagBaselineCacheEntry`, `tag_cache_summary`,
+> `load_tags_after`, and the `tag_baseline_*` tests) is deleted. A pass reads
+> its tags from the store through `load_window_tags`, checked by
+> `window_tag_read_keeps_every_session_relative_tag_decision` and
+> `every_pass_read_is_bounded_independent_of_history_size`. Statements below
+> that cite the cache describe removed code.
+
 This lens records the equivalences that hold today between a cloned input and
 the artifact derived from it, at every place the per-turn `transform` pass
 copies the request or the projection and then consumes the copy read-only or

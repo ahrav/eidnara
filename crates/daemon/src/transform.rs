@@ -3440,14 +3440,19 @@ fn apply_once(
                 has_history_segments
             };
         if needs_lineage_check {
-            // The declared exception to bounded pass reads (spec C3): an absent boundary is a
-            // revert shape, and finding its surviving prefix reads O(removed history).
-            let history_segments = store.load_history_segments(&req.session_id)?;
-            let has_history_segments = !history_segments.is_empty();
+            // Only the oldest row decides the absent shape, so this reads the set's two ends,
+            // not the history.
+            let oldest = store
+                .history_segment_ends(&req.session_id)?
+                .map(|(oldest, _)| oldest);
+            let has_history_segments = oldest.is_some();
             has_history_segments_cache = Some(has_history_segments);
             pending_rewrite_absent_shape = loaded.row_version.is_some()
                 && has_durable_lineage(&loaded.core, &loaded.meta, has_history_segments)
-                && surviving_revert_prefix_seq(&history_segments, &live) < 0;
+                && no_revert_prefix_survives(
+                    oldest.as_ref().map(|o| o.end_message_id.as_str()),
+                    &live,
+                );
         }
     }
 
@@ -6995,6 +7000,13 @@ fn surviving_revert_prefix_seq(
         .unwrap_or(-1)
 }
 
+/// Whether `surviving_revert_prefix_seq` keeps nothing, from the oldest row's end id alone:
+/// the surviving prefix is empty exactly when there is no history or the oldest row's end
+/// block is not live.
+fn no_revert_prefix_survives(oldest_end_message_id: Option<&str>, live: &[&FlatBlock]) -> bool {
+    oldest_end_message_id.is_none_or(|end_id| live.iter().all(|block| block.id() != end_id))
+}
+
 fn has_durable_lineage(core: &CoreState, meta: &ModuleMeta, has_history_segments: bool) -> bool {
     has_history_segments || !core.boundary_id.is_empty() || meta.coverage_ordinal.is_some()
 }
@@ -7233,12 +7245,12 @@ fn load_window_tags(
         .blocks
         .iter()
         .filter_map(|block| block.tool_call_id.as_deref())
-        .collect::<BTreeSet<_>>();
+        .collect::<Vec<_>>();
     Ok(store
         .load_tags_for_window(
             &req.session_id,
             &message_ids.into_iter().collect::<Vec<_>>(),
-            &tool_call_ids.into_iter().collect::<Vec<_>>(),
+            &tool_call_ids,
             req.protected_tags,
         )?
         .into_iter()
@@ -13346,6 +13358,33 @@ pub(crate) mod tests {
             p1: Some(p1.to_string()),
             importance: 50,
             ..Default::default()
+        }
+    }
+
+    #[test]
+    fn no_revert_prefix_survives_matches_the_full_prefix_scan() {
+        let request = req(
+            "ses",
+            "cfg0",
+            vec![item("a", 1, "a"), item("b", 2, "b"), item("c", 3, "c")],
+        );
+        let ingress = normalize_synthetic_todo_ingress(&request);
+        let projection = ingress.projection.project().unwrap();
+        let live: Vec<&FlatBlock> = projection.blocks.iter().collect();
+        let sets: [&[StoredHistorySegment]; 5] = [
+            &[],
+            &[comp(0, 1, 1, "a", "S")],
+            &[comp(0, 1, 1, "gone", "S")],
+            &[comp(0, 1, 1, "gone", "S"), comp(1, 2, 2, "b", "S")],
+            &[comp(0, 1, 1, "a", "S"), comp(1, 2, 2, "gone", "S")],
+        ];
+        for set in sets {
+            let oldest = set.first().map(|row| row.end_message_id.as_str());
+            assert_eq!(
+                no_revert_prefix_survives(oldest, &live),
+                surviving_revert_prefix_seq(set, &live) < 0,
+                "{set:?}"
+            );
         }
     }
 

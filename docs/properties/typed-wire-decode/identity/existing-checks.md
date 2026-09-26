@@ -264,7 +264,7 @@ Source: `crates/daemon/src/lib.rs`, with HEAD line numbers.
 | 24059 | `differential_assert_rejects_frontier_inside_mutated_native_region` | Negative control for native frontier differential. | unaudited |
 | 24108 | `differential_assert_catches_corrupt_sidecar_key_derivation` | Negative control for sidecar key derivation. | unaudited |
 | 25162 | `unflagged_synthetic_delta_prepares_history_summarizer_and_native_output` | Exercises synthetic normalization at history_summarizer/native seams. | unaudited |
-| 25557 | `native_attachment_reuses_transform_tag_baseline_and_preserves_bytes` | Checks native attachment bytes and shared tag baseline. | unaudited |
+| 25557 | `native_attachment_reuses_transform_tag_baseline_and_preserves_bytes` | Deleted with the tag baseline cache. | invalidated |
 | 28294 | `ctx_expand_and_eidnara_note_facades_are_session_scoped` | Contains persisted history/facade session-scoping checks. | unaudited |
 | 29493 | `ctx_expand_verbose_range_separates_messages_and_previews_raw_parts` | Checks expanded message formatting and raw part visibility. | unaudited |
 

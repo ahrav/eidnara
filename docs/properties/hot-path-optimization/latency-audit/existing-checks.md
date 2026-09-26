@@ -170,13 +170,13 @@ not the handler.
 | [`duplicate_tool_use_assert_covers_incremental_native_suffix`][t-dup] | Tool-use ids are unique across the cached prefix and encoded suffix. | unaudited |
 | [`incremental_sidecar_carries_pins_across_three_generations`][t-sidecar] | Full and incremental order, metadata, and pins agree across three generations and repeated IDs. Sparse-prefix cases preserve order and missing metadata. | unaudited |
 | [`selection_input_shares_projected_wire_value`][selection-sharing] | Selection and history_summarizer inputs equal and point to the projected wire input; cloning selection preserves that pointer. | unaudited |
-| [`tag_baseline_cache_matches_cold_passes_across_drop_reset_and_remint`][t-tagcold] | Cold and cached passes serve equal bytes and equal durable rows across five passes. | unaudited |
-| [`poisoned_tag_baseline_refills_after_direct_sql_update`][t-poison] | A generation change refills the baseline. | unaudited |
-| [`tag_baseline_cache_keeps_interleaved_sessions_isolated`][t-interleave] | Two sessions do not share rows. | unaudited |
+| [`tag_baseline_cache_matches_cold_passes_across_drop_reset_and_remint`][t-tagcold] | Deleted with the tag baseline cache. | invalidated |
+| [`poisoned_tag_baseline_refills_after_direct_sql_update`][t-poison] | Deleted with the tag baseline cache. | invalidated |
+| [`tag_baseline_cache_keeps_interleaved_sessions_isolated`][t-interleave] | Deleted with the tag baseline cache. | invalidated |
 | [`tag_mint_tail_and_hygiene_share_baseline_rows`][t-tag-sharing] | Baseline and mint sources remain byte-equal and retain row/source pointers in the combined view and hygiene output. | unaudited |
 | [`failed_tag_mint_commit_preserves_baseline_and_rolls_back_store`][t-tag-rollback] | The second mint insert aborts. The cache retains its baseline pointer and contents; durable tags, generation, core, meta, row version, and temporal rows roll back. Successful retry does not publish pass rows; explicit refill reads committed sources. | unaudited |
-| [`tag_baseline_charge_counts_capacity_and_shared_row_headers`][t-tag-charge] | Spare row capacities, row handles, and row/slice Arc headers are charged. Shared rows are charged in full. | unaudited |
-| [`tag_baseline_cache_refuses_an_insert_larger_than_its_budget`][t-tag-refusal] | An oversized insert is refused. A replacement with spare source capacity removes the old entry and charge while loaded rows remain usable; readmission charges once. | unaudited |
+| [`tag_baseline_charge_counts_capacity_and_shared_row_headers`][t-tag-charge] | Deleted with the tag baseline cache. | invalidated |
+| [`tag_baseline_cache_refuses_an_insert_larger_than_its_budget`][t-tag-refusal] | Deleted with the tag baseline cache. | invalidated |
 | [`claude_code_first_requested_surface_tags_bootstrap_pass_one`][t-tag-bootstrap] | Initial active minting and replay preserve rendered bytes. | unaudited |
 | [`newest_tag_block_set_isolates_protected_and_applied_pending_rows`][t-tag-protection] | Bootstrap mints tag 29 without displacing stored tag 5 from protection. Stored rank 21 is dropped, while rank 20 and the second block at the newest stored ordinal stay pending. | unaudited |
 | [`measurement_is_identical_with_cold_and_warm_token_cache`][t-hyg-cold] | Cold and warm memo output is identical; warm memo reuse skips token-cache lookup. A fresh memo over the warm token cache preserves the full result with three lookups, three hits, and no tokenization. Clearing both caches preserves output. | unaudited |

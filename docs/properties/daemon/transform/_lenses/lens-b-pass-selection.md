@@ -1,5 +1,13 @@
 # Part 4b lens B: pass selection, eligibility, and budgeting
 
+> Invalidated in part: the tag baseline cache (`load_cached_tags`,
+> `tag_baseline_cache()`, `TagBaselineCacheEntry`, `tag_cache_summary`,
+> `load_tags_after`, and the `tag_baseline_*` tests) is deleted. A pass reads
+> its tags from the store through `load_window_tags`, checked by
+> `window_tag_read_keeps_every_session_relative_tag_decision` and
+> `every_pass_read_is_bounded_independent_of_history_size`. Statements below
+> that cite the cache describe removed code.
+
 One lens pass over sub-part 4b (transform pass engine). Attention focus: which
 passes and sub-passes are eligible for a given firing, what inputs that decision
 reads, what budget the firing has, and what the selection promises. The state

@@ -8627,7 +8627,9 @@ impl MemoryStore {
     /// `(session_id, block_id)` unique index; every row whose block id is one of
     /// `tool_call_ids`; and the session's newest `newest.max(1) + <rows of the first set>`
     /// rows on the primary key. Rows read are bounded by the inputs and `newest`, not by the
-    /// session's tag count.
+    /// session's tag count. The `+ <rows of the first set>` term is required: the caller ranks
+    /// the newest `newest` rows outside the window exactly, so a plain `newest` limit is short
+    /// by every window row it returns.
     pub fn load_tags_for_window(
         &self,
         session_id: &str,
@@ -10553,8 +10555,10 @@ impl MemoryStore {
             let Some(newest) = history_segment_edge_tx(conn, session_id, EdgeAt::Newest)? else {
                 return Ok(None);
             };
-            let oldest = history_segment_edge_tx(conn, session_id, EdgeAt::Oldest)?
-                .unwrap_or_else(|| newest.clone());
+            let oldest = history_segment_edge_tx(conn, session_id, EdgeAt::Oldest)?;
+            // One connection hold reads one snapshot: a newest row implies an oldest row.
+            debug_assert!(oldest.is_some(), "a newest history_segment has an oldest");
+            let oldest = oldest.unwrap_or_else(|| newest.clone());
             Ok(Some((oldest, newest)))
         })?)
     }
@@ -10708,7 +10712,8 @@ impl MemoryStore {
         self.max_history_segment_end_ordinal(session_id)
     }
 
-    /// The `ordinals` no history_segment covers, one output row per input ordinal. The store
+    /// The `ordinals` no history_segment covers, one row per uncovered input ordinal, in input
+    /// order (duplicates kept). The store
     /// guarantees at write time that ranges are strictly increasing, so the row with the
     /// smallest `end_message` at or after an ordinal is the only one that can cover it: one
     /// seek on the end-message index per ordinal.
@@ -10719,16 +10724,9 @@ impl MemoryStore {
     ) -> Result<Vec<i64>, MemoryStoreError> {
         let ordinals = serde_json::to_string(ordinals).expect("an integer array serializes");
         Ok(self.inner.with_conn(|conn| {
-            conn.prepare_cached(
-                "SELECT j.value FROM json_each(?2) AS j
-                  WHERE COALESCE(
-                          (SELECT h.start_message FROM history_segments AS h
-                            WHERE h.session_id = ?1 AND h.end_message >= j.value
-                            ORDER BY h.end_message LIMIT 1),
-                          j.value + 1) > j.value",
-            )?
-            .query_map(params![session_id, ordinals], |row| row.get(0))?
-            .collect::<Result<Vec<_>, _>>()
+            conn.prepare_cached(UNCOVERED_ORDINALS_SQL)?
+                .query_map(params![session_id, ordinals], |row| row.get(0))?
+                .collect::<Result<Vec<_>, _>>()
         })?)
     }
 
@@ -15988,6 +15986,14 @@ fn history_segment_edge_tx(
     }
     .optional()
 }
+
+/// The ordinals of the JSON array `?2` no history_segment of session `?1` covers.
+const UNCOVERED_ORDINALS_SQL: &str = "SELECT j.value FROM json_each(?2) AS j
+      WHERE COALESCE(
+              (SELECT h.start_message FROM history_segments AS h
+                WHERE h.session_id = ?1 AND h.end_message >= j.value
+                ORDER BY h.end_message LIMIT 1),
+              j.value + 1) > j.value";
 
 /// Tag rows of a block id `<mid>` or `<mid>#...` for each `<mid>` of the JSON array `?2`.
 /// '$' is the character after '#', so the range holds exactly the `<mid>#` prefix.
@@ -22160,6 +22166,19 @@ mod tests {
         assert_eq!(uncovered, [0, 4, 4, 6, 8, 9, 16, 100]);
         assert_eq!(store.uncovered_ordinals("none", &[0, 5]).unwrap(), [0, 5]);
         assert!(store.uncovered_ordinals("ses", &[]).unwrap().is_empty());
+        let plan = store
+            .inner
+            .with_conn(|conn| {
+                conn.prepare(&format!("EXPLAIN QUERY PLAN {UNCOVERED_ORDINALS_SQL}"))?
+                    .query_map(params!["ses", "[1]"], |row| row.get::<_, String>(3))?
+                    .collect::<Result<Vec<_>, _>>()
+            })
+            .unwrap();
+        assert!(
+            plan.iter()
+                .any(|detail| detail.contains("idx_history_segments_session_end_message")),
+            "the uncovered-ordinal probe must seek the end-message index: {plan:?}"
+        );
     }
 
     #[test]

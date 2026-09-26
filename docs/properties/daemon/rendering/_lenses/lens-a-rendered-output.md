@@ -1,5 +1,13 @@
 # Part 4e lens A: rendered output fidelity and tag/overlay composition
 
+> Invalidated in part: the tag baseline cache (`load_cached_tags`,
+> `tag_baseline_cache()`, `TagBaselineCacheEntry`, `tag_cache_summary`,
+> `load_tags_after`, and the `tag_baseline_*` tests) is deleted. A pass reads
+> its tags from the store through `load_window_tags`, checked by
+> `window_tag_read_keeps_every_session_relative_tag_decision` and
+> `every_pass_read_is_bounded_independent_of_history_size`. Statements below
+> that cite the cache describe removed code.
+
 One attention focus: whether the rendered artifact faithfully represents the
 underlying state, and what the composition can silently drop, duplicate, or
 misattribute. The nudge overlay's own lifecycle belongs to a sibling lens; this
@@ -16,7 +24,7 @@ Every line reference below was read back at `HEAD` before it was written. The
 region map's line numbers for `transform.rs` still hold at `e447c927`: the
 anchors `build_output_with_tags_inner` (`:11678`), `apply_surface_strips`
 (`:10371`), `compute_active_overlay_decisions` (`:8574`) and `load_cached_tags`
-(`:7639`) are all exactly where the map says. One correction to the map is
+(`:7639`, since deleted) were all exactly where the map says. One correction to the map is
 recorded under [Contract-vs-code leads](#contract-vs-code-leads).
 
 ## Rendering pipeline map
@@ -43,9 +51,10 @@ arguments up to two things that do not reach the bytes: `Instant::now()` for
 `eprintln!` in the duplicate-id belt (`:11241-11245`).
 
 The **inputs are not pure**, and this is where mutable process state enters.
-`tag_overlay` and `tag_numbers` derive from `load_cached_tags`
-(`:7639-7697`), which reads and writes the process-global
-`tag_baseline_cache()` singleton (`:7597-7600`), and the mint decision reads and
+`tag_overlay` and `tag_numbers` derived from `load_cached_tags`
+(`:7639-7697`), which read and wrote the process-global
+`tag_baseline_cache()` singleton (`:7597-7600`); both are since deleted and
+`load_window_tags` reads the tags from the store on every pass. The mint decision reads and
 writes the process-global `tag_mint_frontier_cache()` singleton (`:8014-8021`)
 inside `compute_active_overlay_decisions` (`:8601-8619`). Both are `OnceLock<Mutex<..>>`
 with a 64 MiB budget each (`:144-145`). `cache_snapshot` is likewise a copy of a
@@ -143,7 +152,9 @@ The second one reaches agent-visible bytes through `oldest_channel2_hint`
 
 ### Resolution and stability across renders
 
-- The tag baseline is hydrated by `load_cached_tags` (`:7639-7697`) with three
+- Invalidated: `load_cached_tags` is deleted; `load_window_tags` reads the
+  pass's tags from the store. The rest of this item describes removed code.
+  The tag baseline was hydrated by `load_cached_tags` (`:7639-7697`) with three
   paths: exact match on `(namespace, generation, count, max)` (`:7652-7654`),
   append-only tail (`:7655-7679`), cold reload (`:7682-7695`). Both cached paths
   are fenced on a SQLite-trigger-backed `generation` (`:7511-7515`,
@@ -370,13 +381,13 @@ Open questions:
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: partial — `tag_baseline_cache_matches_cold_passes_across_drop_reset_and_remint` (`transform.rs:23364`) and `tag_baseline_cache_keeps_interleaved_sessions_isolated` (`:23466`) cover the baseline paths. Nothing asserts uniqueness of `block_id` within one mint batch.
+Exercised: partial — `window_tag_read_keeps_every_session_relative_tag_decision` checks the window tag read against a whole-session read, and `every_pass_read_is_bounded_independent_of_history_size` bounds the tag reads. The tag baseline cache and its tests are deleted. Nothing asserts uniqueness of `block_id` within one mint batch.
 Guarantee: A single tag-mint batch never contains the same `block_id` twice, and never contains a `block_id` that already has a durable `tags` row.
 Check: `always` — before the commit, assert `tag_mint_work.inputs` has distinct `block_id`s and that none of them is present in the store's `tags` for this session. `always` because the store's skip branch desynchronises every later number in the batch whenever it fires.
 Fault/timing angle: The in-memory numbering at `:8029-8035` and the store's per-row numbering are separated by the whole pass; the `row_version` CAS closes the concurrent-writer window. The residual window is logical: whether the batch's `existing_tag_ids` snapshot (`:8595-8598`) matched the store.
-Required faults and enabling state: `tag_mint_enabled`, plus either a duplicate projection block id or a stale baseline. The first is impossible: `apply_once` returns `TransformError::DuplicateBlockId` at `:3354-3356`, before the mint at `:3806`. The second requires `load_cached_tags` to serve rows whose block-id set differs from the store's; both cached paths are additionally fenced on the trigger-backed `generation` (`:7529`, `:7540`), which a delete-and-reinsert advances even when count and max are unchanged.
+Required faults and enabling state: `tag_mint_enabled`, plus either a duplicate projection block id or a stale baseline. The first is impossible: `apply_once` returns `TransformError::DuplicateBlockId` at `:3354-3356`, before the mint at `:3806`. The second required the since-deleted `load_cached_tags` to serve rows whose block-id set differed from the store's; `load_window_tags` now reads the store on every pass, so no cached route remains.
 Confidence: medium — [evidence](evidence/render-a-mint-batch-block-ids-are-unique-per-pass.md). Verified the projection guard, the mint loop's non-updating filter, and both generation fences. Not verified: that the SQLite triggers advance `generation` for *every* `tags` mutation, which is `memory-store` and outside 4e.
-Existing check: `transform.rs:23364`, `:23466`; neither runs in CI.
+Existing check: `window_tag_read_keeps_every_session_relative_tag_decision`; the baseline-cache tests it replaced are deleted.
 Impact: This is the enabling condition for the sibling record [`speculative-tag-numbering-has-two-authorities`](../../transform/catalog.md#speculative-tag-numbering-has-two-authorities). If it holds, that record's divergence is unreachable through the public path; if the generation trigger has a gap, it is reachable.
 Open questions:
 

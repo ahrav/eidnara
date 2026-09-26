@@ -1,5 +1,13 @@
 # Transform Edit Responses: the recipe wire switch (#538 U3-U5)
 
+> Invalidated in part: the tag baseline cache (`load_cached_tags`,
+> `tag_baseline_cache()`, `TagBaselineCacheEntry`, `tag_cache_summary`,
+> `load_tags_after`, and the `tag_baseline_*` tests) is deleted. A pass reads
+> its tags from the store through `load_window_tags`, checked by
+> `window_tag_read_keeps_every_session_relative_tag_decision` and
+> `every_pass_read_is_bounded_independent_of_history_size`. Statements below
+> that cite the cache describe removed code.
+
 This file records the client and daemon behavior that the two-source recipe
 switch adds on `feat/transform-recipe-wire`, stacked on
 `feat/transform-recipe-builder` (`ed538110`). The eleven #533 records in

@@ -438,7 +438,7 @@ Every cited `fn` line was re-read at `HEAD`. `†` marks `#[ignore]`.
 | Cluster | Tests | Lines | Notes |
 | --- | --- | --- | --- |
 | serialized-output cache | 5 | `:28596`, `:28622`, `:28660`, `:28698`, `:28726` | The invalidation-granularity family. `:28622` and `:28660` are the two byte-equality replays lens A leans on |
-| window tag read | 2 | `:24155`, `transform_read_bound.rs:440` | The tag baseline cache and its four tests are deleted. `:24155` `window_tag_read_keeps_every_session_relative_tag_decision` compares every tag decision against a whole-session read; `transform_read_bound.rs:440` bounds the three tag queries |
+| window tag read | 2 | `:24223`, `transform_read_bound.rs:517` | The tag baseline cache and its four tests are deleted. `window_tag_read_keeps_every_session_relative_tag_decision` compares every tag decision against a whole-session read; `every_pass_read_is_bounded_independent_of_history_size` bounds the three tag queries |
 | reasoning clearing and exemption | 3 | `:18360`, `:18850`, `:19070` | The Anthropic-signed-block rules at `:12273`, `:10258` |
 | orphan-arc and served-fingerprint shape | 3 | `:14310`, `:14456`, `:27338` | `:14310` and `:27338` are the only tests whose oracle is `assert_no_orphaned_tool_arcs` |
 | byte-identical replay through the output cache | 2 | `:27150`, `:27216` | Lens A's strongest evidence for composition order and determinism |
@@ -501,7 +501,8 @@ use the `#[ignore = "reason"]` form, which a bare `#[ignore]` grep misses:
 `:13200` `apply_once_stage_timings_large_fixture` (4b, `fn` at `:13201`), `:23489`
 `tag_baseline_warm_hydration_50k` (`fn` at `:23490`), `:28387`
 `full_module_pass_timing_fixture` (`fn` at `:28388`). So **2 of the 25
-op-specific tests do not run even under a local `cargo test`.** Zero `#[ignore]`
+op-specific tests do not run even under a local `cargo test`.** Invalidated in
+part: `tag_baseline_warm_hydration_50k` is deleted with the tag baseline cache. Zero `#[ignore]`
 in the other six 4e files.
 
 **`should_panic`: 1.** `transform.rs:21503`, on
@@ -718,8 +719,8 @@ mechanically checked nowhere.
 
 **In-scope seams: two, and both are unusual in shape.**
 
-- **`poisoned_tag_baseline_refills_after_direct_sql_update` (`:23433`) corrupts
-  the store directly** rather than through a seam, which is the only fault
+- **`poisoned_tag_baseline_refills_after_direct_sql_update` (`:23433`, since
+  deleted with the tag baseline cache) corrupted the store directly** rather than through a seam, which is the only fault
   injection any 4e test performs. It is the model for the store-side capability
   the fault map ranks.
 - **`terse_text_compression.rs`'s frozen fixture is the seam.** `terse_text_compression-golden.json` is
