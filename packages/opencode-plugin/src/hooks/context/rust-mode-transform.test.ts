@@ -2808,8 +2808,9 @@ describe("bounded transform ownership", () => {
                 `rust session ${sessionId} pass declined: capture_bytes (transform capture byte budget exceeded: ordinal memo copy)`,
             );
             expect(bodies).toHaveLength(1);
+            // The declined pass republishes the first pass's empty output; nothing was appended since.
             expect(output.messages).toBe(array);
-            expect(output.messages[0]).toBe(messages[0]);
+            expect(output.messages).toHaveLength(0);
             expect(transform.getState(sessionId).ordinals).toEqual(priorMemo);
             expect(transform.getState(sessionId).failureCount).toBe(0);
             expect(admission.activePasses).toBe(1);
@@ -4069,5 +4070,362 @@ describe("fail-open after an applied pass", () => {
         const completedOutput = { messages: [...completed] as unknown[] };
         await pendingTransform.run(pendingSession, completedOutput);
         expect(completedOutput.messages).toEqual(completed);
+    });
+});
+
+describe("capture scaled to the appended messages", () => {
+    const folded = (sessionId: string): MessageLike => ({
+        info: { id: "fold-1", role: "user", sessionID: sessionId },
+        parts: [{ type: "text", text: "folded history" }],
+    });
+
+    /** An admission that records each pass's lease charge at release. */
+    function chargeRecordingAdmission(limits?: { maxPasses: number; maxBytes: number }) {
+        const admission = new TransformCaptureAdmission(limits);
+        const charges: number[] = [];
+        const admit = admission.admit.bind(admission);
+        admission.admit = (sessionId) => {
+            const admitted = admit(sessionId);
+            if ("lease" in admitted) {
+                const lease = admitted.lease;
+                const release = lease.release.bind(lease);
+                lease.release = () => {
+                    charges.push(lease.chargedBytes);
+                    release();
+                };
+            }
+            return admitted;
+        };
+        return { admission, charges };
+    }
+
+    function passLines(spy: Parameters<typeof sessionLogs>[0], sessionId: string): string[] {
+        return sessionLogs(spy, sessionId).filter((line) => line.startsWith("rust pass:"));
+    }
+
+    it("keeps capturing a history past the 64 MiB budget at a per-pass charge set by the append", async () => {
+        const sessionId = `rust-delta-capture-large-${Date.now()}`;
+        const rows = rawRows(3_000);
+        installRawRows(sessionId, rows);
+        const texts = new Map(rows.map((row) => [row.id, `${row.id} ${"x".repeat(24_000)}`]));
+        const { client, bodies } = recordingClient((request) =>
+            recipeResponse(request, [folded(sessionId)]),
+        );
+        const { admission, charges } = chargeRecordingAdmission();
+        const transform = createRustModeTransform(makeDeps(), {
+            moduleClient: client,
+            captureAdmission: admission,
+        });
+        const debugSpy = spyOn(logger.sessionLog, "debug");
+        let history: MessageLike[] = [];
+        try {
+            // Each pass gets fresh message objects, as a host that clones its history does.
+            for (let count = 200; count <= 3_000; count += 200) {
+                history = rowMessages(sessionId, rows.slice(0, count), (row) =>
+                    String(texts.get(row.id)),
+                );
+                const output = { messages: [...history] as unknown[] };
+                await transform.run(sessionId, output);
+                expect(output.messages).toEqual([folded(sessionId)]);
+            }
+            const appended = rowMessages(sessionId, rows.slice(0, 3_000), (row) =>
+                String(texts.get(row.id)),
+            );
+            appended.push(...rowMessages(sessionId, [{ ...rows[0], id: "m-3001" } as RawRow]));
+            await transform.run(sessionId, { messages: appended });
+            const lines = passLines(debugSpy, sessionId);
+            expect(lines).toHaveLength(16);
+            for (const line of lines) expect(line).toContain("applied=true");
+            // After the first pass only the former terminal and the appended messages are sent.
+            expect(lines[0]).toContain("wire_messages:200 ");
+            for (const line of lines.slice(1, 15)) expect(line).toContain("wire_messages:201 ");
+            expect(lines[15]).toContain("in=3001 out=1");
+            expect(lines[15]).toContain("wire_messages:2 ");
+        } finally {
+            debugSpy.mockRestore();
+        }
+        expect(Buffer.byteLength(JSON.stringify(history))).toBeGreaterThan(64 * 1024 * 1024);
+        expect(bodies.at(-1)?.native_messages).toHaveLength(2);
+        // The same 200-message append costs the same at 400 and at 3,000 messages.
+        expect(charges).toHaveLength(16);
+        const [, atFourHundred] = charges as [number, number];
+        const atThreeThousand = charges[14] as number;
+        expect(atThreeThousand).toBeLessThan(atFourHundred * 1.1);
+        expect(charges.at(-1)).toBeLessThan(2 * 1024 * 1024);
+        expect(admission.chargedBytes).toBe(0);
+    }, 60_000);
+
+    it("detects an in-place edit of an old message and falls back to a full capture", async () => {
+        const sessionId = `rust-delta-capture-edit-${Date.now()}`;
+        const rows = rawRows(5);
+        installRawRows(sessionId, rows);
+        const { client, bodies } = recordingClient((request) =>
+            recipeResponse(request, [folded(sessionId)]),
+        );
+        const transform = createRustModeTransform(makeDeps(), { moduleClient: client });
+        const history = rowMessages(sessionId, rows.slice(0, 4));
+        await transform.run(sessionId, { messages: [...history] });
+        await transform.run(sessionId, { messages: [...history] });
+        expect(bodies[1]?.tail_delta).toBeDefined();
+
+        // The same object, edited in place, must not verify against its retained digest.
+        (history[1]?.parts as Array<{ text: string }>)[0].text = "EDITED m-2";
+        const grown = [...history, ...rowMessages(sessionId, rows.slice(4))];
+        await transform.run(sessionId, { messages: [...grown] });
+        expect(bodies).toHaveLength(3);
+        expect(bodies[2]?.tail_delta).toBeUndefined();
+        expect(bodies[2]?.native_messages).toEqual(grown);
+        await transform.run(sessionId, { messages: [...grown] });
+        expect(bodies[3]?.tail_delta).toBeDefined();
+    });
+
+    it("rejects a verified prefix message edited while the pass awaits the daemon", async () => {
+        const sessionId = `rust-delta-capture-mid-pass-${Date.now()}`;
+        const rows = rawRows(4);
+        installRawRows(sessionId, rows);
+        const history = rowMessages(sessionId, rows);
+        const { client, bodies } = recordingClient((request, index) => {
+            if (index === 1) (history[0]?.parts as Array<{ text: string }>)[0].text = "EDITED";
+            return recipeResponse(request, [folded(sessionId)]);
+        });
+        const transform = createRustModeTransform(makeDeps(), { moduleClient: client });
+        const debugSpy = spyOn(logger.sessionLog, "debug");
+        try {
+            await transform.run(sessionId, { messages: [...history] });
+            const output = { messages: [...history] as unknown[] };
+            await transform.run(sessionId, output);
+            expect(bodies[1]?.tail_delta).toBeDefined();
+            expect(output.messages).toEqual(history);
+            expect(sessionLogs(debugSpy, sessionId)).toContain(
+                `rust session ${sessionId} pass declined: source_changed (publish)`,
+            );
+        } finally {
+            debugSpy.mockRestore();
+        }
+    });
+
+    it("still rejects a hostile message appended after a verified prefix", async () => {
+        const sessionId = `rust-delta-capture-hostile-${Date.now()}`;
+        const rows = rawRows(4);
+        installRawRows(sessionId, rows);
+        const { client, bodies } = recordingClient((request) =>
+            recipeResponse(request, [folded(sessionId)]),
+        );
+        const transform = createRustModeTransform(makeDeps(), { moduleClient: client });
+        const history = rowMessages(sessionId, rows.slice(0, 3));
+        await transform.run(sessionId, { messages: [...history] });
+        let reads = 0;
+        const accessor = rowMessages(sessionId, rows.slice(3))[0] as MessageLike;
+        Object.defineProperty(accessor, "parts", {
+            enumerable: true,
+            get: () => {
+                reads += 1;
+                return [];
+            },
+        });
+        const debugSpy = spyOn(logger.sessionLog, "debug");
+        try {
+            const cases: Array<[unknown[], string]> = [
+                [
+                    [...history, new Proxy(rowMessages(sessionId, rows.slice(3))[0] as object, {})],
+                    "proxy at /3",
+                ],
+                [[...history, accessor], "accessor at /3/parts"],
+                [[new Proxy(history[0] as object, {}), ...history.slice(1)], "proxy at /0"],
+            ];
+            for (const [messages, detail] of cases) {
+                const output = { messages: [...messages] };
+                await transform.run(sessionId, output);
+                expect(output.messages).toEqual(messages);
+                expect(sessionLogs(debugSpy, sessionId)).toContain(
+                    `rust session ${sessionId} pass declined: unsupported_source (${detail})`,
+                );
+            }
+        } finally {
+            debugSpy.mockRestore();
+        }
+        expect(reads).toBe(0);
+        expect(bodies).toHaveLength(1);
+    });
+
+    it("serves the last applied output plus the appended messages on a capture_bytes decline", async () => {
+        const sessionId = `rust-delta-capture-bytes-${Date.now()}`;
+        const rows = rawRows(4);
+        installRawRows(sessionId, rows);
+        const { client, bodies } = recordingClient((request) =>
+            recipeResponse(request, [folded(sessionId)]),
+        );
+        const { admission } = chargeRecordingAdmission({ maxPasses: 64, maxBytes: 512 * 1024 });
+        const transform = createRustModeTransform(makeDeps(), {
+            moduleClient: client,
+            captureAdmission: admission,
+        });
+        const warnSpy = spyOn(logger.sessionLog, "warn");
+        const debugSpy = spyOn(logger.sessionLog, "debug");
+        try {
+            await transform.run(sessionId, { messages: rowMessages(sessionId, rows.slice(0, 3)) });
+            // The appended message fits its capture but not its four-fold wire projection.
+            const grown = rowMessages(sessionId, rows, (row) =>
+                row.id === "m-4" ? "y".repeat(100_000) : `message ${row.id}`,
+            );
+            const output = { messages: [...grown] as unknown[] };
+            await transform.run(sessionId, output);
+            expect(bodies).toHaveLength(1);
+            expect(sessionLogs(warnSpy, sessionId)).toContain(
+                `rust session ${sessionId} pass declined: capture_bytes (transform capture byte budget exceeded: wire projection)`,
+            );
+            expect(output.messages).toEqual([folded(sessionId), grown[3]]);
+            expect(output.messages[1]).toBe(grown[3]);
+            expect(passLines(debugSpy, sessionId)[1]).toContain(
+                "decision=declined:capture_bytes reason=none served_from=last_applied in=4 out=2",
+            );
+            expect(transform.getState(sessionId).failureCount).toBe(0);
+
+            // An edit of an acknowledged message leaves no append-only source; the input is served.
+            const edited = rowMessages(sessionId, rows, (row) =>
+                row.id === "m-4" ? "y".repeat(100_000) : `EDITED ${row.id}`,
+            );
+            const editedOutput = { messages: [...edited] as unknown[] };
+            await transform.run(sessionId, editedOutput);
+            expect(editedOutput.messages).toEqual(edited);
+        } finally {
+            warnSpy.mockRestore();
+            debugSpy.mockRestore();
+        }
+    });
+
+    it("drops the wire cache when its digests exceed the retained history budget", async () => {
+        const sessionId = `rust-delta-capture-retained-${Date.now()}`;
+        const rows = rawRows(3);
+        installRawRows(sessionId, rows);
+        const { client, bodies } = recordingClient((request) =>
+            recipeResponse(request, [folded(sessionId)]),
+        );
+        const transform = createRustModeTransform(makeDeps(), {
+            moduleClient: client,
+            retainedHistoryBudgetBytes: 2 * 16,
+        });
+        await transform.run(sessionId, { messages: rowMessages(sessionId, rows.slice(0, 2)) });
+        await transform.run(sessionId, { messages: rowMessages(sessionId, rows) });
+        expect(bodies[1]?.tail_delta).toBeDefined();
+        await transform.run(sessionId, { messages: rowMessages(sessionId, rows) });
+        expect(bodies[2]?.tail_delta).toBeUndefined();
+        expect(bodies[2]?.native_messages).toHaveLength(3);
+    });
+
+    it("charges retained symbol descriptions against the retained history budget", async () => {
+        const sessionId = `rust-delta-capture-retained-symbol-${Date.now()}`;
+        const rows = rawRows(3);
+        installRawRows(sessionId, rows);
+        // The digest keeps the symbol, so its description stays retained with the wire cache.
+        const key = Symbol("d".repeat(1_000));
+        const withKey = (messages: MessageLike[]): unknown[] => {
+            Object.defineProperty(messages[0], key, { value: 1, enumerable: true, writable: true });
+            return messages;
+        };
+        const run = async (budget: number): Promise<Record<string, unknown> | undefined> => {
+            const { client, bodies } = recordingClient((request) =>
+                recipeResponse(request, [folded(sessionId)]),
+            );
+            const transform = createRustModeTransform(makeDeps(), {
+                moduleClient: client,
+                retainedHistoryBudgetBytes: budget,
+            });
+            await transform.run(sessionId, {
+                messages: withKey(rowMessages(sessionId, rows.slice(0, 2))),
+            });
+            await transform.run(sessionId, { messages: withKey(rowMessages(sessionId, rows)) });
+            return bodies[1];
+        };
+        // Two messages, one symbol slot, and the description fit a generous budget.
+        expect((await run(4_096))?.tail_delta).toBeDefined();
+        // Without the description, the same cache would fit 64 bytes; with it, the cache is dropped.
+        const refused = await run(64);
+        expect(refused?.tail_delta).toBeUndefined();
+        expect(refused?.native_messages).toHaveLength(3);
+    });
+
+    it("evicts the session-count victim even when the history budget evicts another session", async () => {
+        const capacity = __rustModeTransformTest.WIRE_CACHE_SESSION_CAPACITY;
+        const stamp = Date.now();
+        const sessionIdAt = (index: number): string => `rust-delta-capture-lru-${stamp}-${index}`;
+        const bodiesBySession = new Map<string, Record<string, unknown>[]>();
+        const client: RustModeModuleClient = {
+            call: async ({ sessionId, body }) => {
+                const request = body as Record<string, unknown>;
+                const list = bodiesBySession.get(sessionId) ?? [];
+                list.push(request);
+                bodiesBySession.set(sessionId, list);
+                return recipeResponse(request, []);
+            },
+        };
+        // One-message sessions fill the history budget exactly at the session-count capacity.
+        const transform = createRustModeTransform(makeDeps(), {
+            moduleClient: client,
+            retainedHistoryBudgetBytes: capacity * 16,
+        });
+        for (let index = 0; index < capacity; index += 1) {
+            const sessionId = sessionIdAt(index);
+            installRawRows(sessionId, rawRows(1));
+            await transform.run(sessionId, { messages: makeMessages(sessionId) });
+        }
+        // The two-message newcomer needs a count eviction and a byte eviction.
+        const newcomer = sessionIdAt(capacity);
+        installRawRows(newcomer, rawRows(2));
+        await transform.run(newcomer, { messages: rowMessages(newcomer, rawRows(2)) });
+
+        for (const evicted of [sessionIdAt(0), sessionIdAt(1)]) {
+            const input = makeMessages(evicted);
+            await transform.run(evicted, { messages: [...input] });
+            expect(bodiesBySession.get(evicted)?.[1]?.tail_delta).toBeUndefined();
+            expect(bodiesBySession.get(evicted)?.[1]?.native_messages).toEqual(input);
+        }
+    });
+
+    it("charges a fallback capture once after the prefix fails to verify", async () => {
+        const sessionId = `rust-delta-capture-fallback-charge-${Date.now()}`;
+        const rows = rawRows(5);
+        installRawRows(sessionId, rows);
+        const { client, bodies } = recordingClient((request) =>
+            recipeResponse(request, [folded(sessionId)]),
+        );
+        const admission = new TransformCaptureAdmission();
+        const reservations: number[][] = [];
+        const admit = admission.admit.bind(admission);
+        admission.admit = (id) => {
+            const admitted = admit(id);
+            if ("lease" in admitted) {
+                const pass: number[] = [];
+                reservations.push(pass);
+                const reserve = admitted.lease.reserve.bind(admitted.lease);
+                admitted.lease.reserve = (bytes) => {
+                    const reserved = reserve(bytes);
+                    if (reserved) pass.push(bytes);
+                    return reserved;
+                };
+            }
+            return admitted;
+        };
+        const transform = createRustModeTransform(makeDeps(), {
+            moduleClient: client,
+            captureAdmission: admission,
+        });
+        const history = rowMessages(
+            sessionId,
+            rows.slice(0, 4),
+            (row) => `${row.id} ${"x".repeat(4096)}`,
+        );
+        await transform.run(sessionId, { messages: [...history] });
+
+        (history[1]?.parts as Array<{ text: string }>)[0].text = "EDITED m-2";
+        const grown = [...history, ...rowMessages(sessionId, rows.slice(4))];
+        await transform.run(sessionId, { messages: [...grown] });
+        expect(bodies[1]?.tail_delta).toBeUndefined();
+        const full = inspectReferenceableMessages(grown);
+        if (!full.ok) throw new Error("valid source rejected");
+        // The first two reservations are the partial inspection and its full fallback.
+        const [partial, fallback] = reservations[1] as [number, number];
+        expect(partial).toBeLessThan(full.estimatedBytes);
+        expect(partial + fallback).toBe(full.estimatedBytes);
     });
 });
