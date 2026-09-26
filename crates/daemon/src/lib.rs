@@ -9311,6 +9311,11 @@ impl HandlerCore {
         let mutation_exempt_mid = result.mutation_exempt_mid;
         let lineage_anchor_mid = result.lineage_anchor_mid;
         let tag_numbers = result.tag_numbers;
+        // A descent pass rebased its ordinals; the snapshot keeps that copy so the next
+        // tail delta's reattached prefix passes continued-lineage validation.
+        let snapshot_request = result
+            .rebased_request
+            .map_or_else(|| Arc::clone(parsed), Arc::new);
         let mut response = result.response;
         response.history_summarizer = Some(diagnostics);
         let Some(output_revision) = self.output_revisions.allocate() else {
@@ -9388,7 +9393,7 @@ impl HandlerCore {
             .finish_ready(
                 &parsed.session_id,
                 env.snapshot_generation,
-                Arc::clone(parsed),
+                snapshot_request,
                 revert_epoch,
                 retained_bytes,
             );
@@ -27751,6 +27756,34 @@ mod tests {
         assert_eq!(descended["lineage_switch_consumed_id"], 101);
         assert_eq!(descended["timings"]["projection_projected_messages"], 2);
         assert!(store.load(target).unwrap().meta.descent_completed);
+        assert_eq!(descended["ordinal_continuation_base"], 10);
+
+        // The descent pass rebased its own copy to ordinals 11 and 12; the ready snapshot keeps
+        // the harness's 1 and 2. The harness shifts its memo by the returned base, so its next
+        // delta tail arrives at 13 and the pass must not fail continued-lineage validation on
+        // the unshifted snapshot prefix.
+        let mut follow_up = native_cache_request(
+            target,
+            vec![wire_with_role("lineage-next", 13, "user", "next turn")],
+            Vec::new(),
+            "lineage-target-fp-3",
+        );
+        follow_up.tail_delta = Some(json!({
+            "after": "lineage-target-fp-2",
+            "replace_from": 2,
+            "native_replace_from": 0,
+        }));
+        let followed =
+            call_transform_outcome(&handler, serde_json::to_value(follow_up).unwrap()).await;
+        let bytes = match followed {
+            PreparedOutcome::Response(bytes) => bytes,
+            PreparedOutcome::Error { code, message } => {
+                panic!("post-descent delta must be served, not rejected: {code}: {message}")
+            }
+            other => panic!("unexpected handler outcome: {other:?}"),
+        };
+        let followed: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(followed["status"], "ok", "{followed}");
     }
 
     #[tokio::test(flavor = "current_thread")]

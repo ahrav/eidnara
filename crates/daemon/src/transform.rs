@@ -1742,6 +1742,10 @@ pub struct TransformWithProjection {
     pub transition_consumed: bool,
     pub mutation_exempt_mid: Option<String>,
     pub lineage_anchor_mid: Option<String>,
+    /// The request a descent pass rebased to the durable ordinal base. The ready snapshot
+    /// retains it instead of the harness's origin-numbered copy, so the next tail delta
+    /// reattaches a prefix that continued-lineage validation accepts.
+    pub rebased_request: Option<TransformRequest>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2508,6 +2512,7 @@ fn lineage_protocol_passthrough(
         transition_consumed: false,
         mutation_exempt_mid: None,
         lineage_anchor_mid: None,
+        rebased_request: None,
         response: TransformResponse::passthrough(
             req.messages
                 .iter()
@@ -3031,6 +3036,7 @@ fn apply_additive_only(
         transition_consumed: transition_consumed(&core),
         mutation_exempt_mid: None,
         lineage_anchor_mid: None,
+        rebased_request: None,
         response: TransformResponse {
             status: TransformStatus::Ok,
             served_from: ServedFrom::Transform,
@@ -5320,6 +5326,7 @@ fn apply_once(
             channel2_directive: channel2_output.channel2_directive,
             note_deliveries: (!note_deliveries.is_empty()).then_some(note_deliveries),
         },
+        rebased_request: rebased_req,
     })
 }
 
@@ -7063,6 +7070,7 @@ fn pending_passthrough_result(args: PendingPassthroughArgs<'_>) -> TransformWith
         transition_consumed,
         mutation_exempt_mid,
         lineage_anchor_mid: None,
+        rebased_request: None,
         response,
     }
 }
