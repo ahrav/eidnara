@@ -610,9 +610,17 @@ pub fn firing_token_budget(
     retry_token_budget(configured_budget, chunk_failures(chunk_retry, chunk_start))
 }
 
-/// One segment covering the whole chunk, so coverage stays contiguous past messages no model would summarize.
+/// One segment covering the chunk, so coverage stays contiguous past messages no model would summarize. A shrunken chunk can end between a tool invocation and its result, a boundary validation refuses; the segment then stops before that arc and leaves it unprocessed.
 fn placeholder_output(chunk: &HistorySummarizerChunk, failures: u32) -> String {
-    let (start, end) = (chunk.start_index, chunk.end_index);
+    let start = chunk.start_index;
+    let mut end = chunk.end_index;
+    while let Some(arc) = chunk
+        .completed_tool_arcs
+        .iter()
+        .find(|arc| start < arc.start && arc.start <= end && end < arc.end)
+    {
+        end = arc.start - 1;
+    }
     let body = format!(
         "Messages {start}-{end} were not summarized: {failures} summarizer attempts on them failed."
     );
@@ -1951,6 +1959,33 @@ mod tests {
             placeholder.to_ordinal
         );
         assert_eq!(validated.unprocessed_from, placeholder.to_ordinal + 1);
+    }
+
+    /// A shrunken chunk can end between a tool invocation and its result; the placeholder stops before that arc so its terminal boundary validates, and leaves the arc unprocessed.
+    #[test]
+    fn placeholder_stops_before_a_tool_arc_the_chunk_end_splits() {
+        let placeholder = assemble_after_failures(SHRINK_CHUNK_AFTER_FAILURES);
+        let end = placeholder.to_ordinal;
+        assert!(
+            end >= 2,
+            "the shrunken chunk still spans several messages: {end}"
+        );
+        let mut chunk = placeholder.chunk.chunk.clone();
+        chunk.completed_tool_arcs = vec![crate::history_summarizer_validate::MessageRange {
+            start: end - 1,
+            end: end + 2,
+        }];
+        let output = placeholder_output(&chunk, PLACEHOLDER_AFTER_FAILURES);
+        let validated = crate::history_summarizer_validate::validate_history_summarizer_output(
+            &output,
+            &chunk,
+            &placeholder.prior_history_segments,
+            placeholder.validate_options,
+        )
+        .expect("the placeholder document validates");
+        assert_eq!(validated.history_segments.len(), 1);
+        assert_eq!(validated.history_segments[0].end_message, end - 2);
+        assert_eq!(validated.unprocessed_from, end - 1);
     }
 
     #[test]

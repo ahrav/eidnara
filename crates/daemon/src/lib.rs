@@ -5610,6 +5610,13 @@ impl HandlerCore {
                     .await;
                     if let Err(e) = result {
                         eprintln!("daemon: history_summarizer reattach failed for {session_id}: {e}");
+                        if history_summarizer::is_chunk_failure(&e) {
+                            record_history_summarizer_chunk_failure(
+                                &store,
+                                &session_id,
+                                range.from_ordinal,
+                            );
+                        }
                     }
                 });
                 // ever perform.
@@ -42663,6 +42670,94 @@ mod tests {
                     failure: memory_store::ExtractionFailure::UnknownAlias,
                 }
             ),
+            "{state:?}"
+        );
+    }
+
+    /// A reattached run that ends in a chunk failure counts toward the same ladder as a live one; otherwise a restart during every firing would retry the identical chunk forever.
+    #[tokio::test(flavor = "current_thread")]
+    async fn handler_reattach_counts_a_chunk_failure_toward_the_retry_ladder() {
+        let messages: Vec<IngressMessage> = (1..=3)
+            .map(|ordinal| {
+                wire_with_role(
+                    &format!("m{ordinal}"),
+                    ordinal,
+                    if ordinal % 2 == 1 {
+                        "user"
+                    } else {
+                        "assistant"
+                    },
+                    &format!("message {ordinal} {}", "word ".repeat(200)),
+                )
+            })
+            .collect();
+        let canonical_messages = transform_request(messages.clone(), 1, 200_000).messages;
+        let projection = crate::wire::project_messages(&canonical_messages).unwrap();
+        let frozen = history_summarizer_chunk::build_history_summarizer_chunk(
+            &canonical_messages,
+            &projection.blocks,
+            1,
+            usize::MAX,
+            2,
+        );
+        let producer = Arc::new(ProducerState::default());
+        producer
+            .outputs
+            .lock()
+            .unwrap()
+            .push_back("<output>not a history_segments document</output>".to_string());
+        let (handler, store, _dir, _project) =
+            handler_with_store(Arc::clone(&producer), default_test_config());
+        let fingerprint_items: Vec<_> = frozen.snapshot.iter().map(|item| item.as_item()).collect();
+        let loaded = store.load("ses").unwrap();
+        let mut meta = loaded.meta;
+        meta.block_identity_by_mid
+            .extend(projection.identity_by_mid.clone());
+        meta.history_summarizer = HistorySummarizerDurableState {
+            state: HistorySummarizerPhase::AwaitingProducer,
+            firing_seq: 1,
+            chunk_range: Some(HistorySummarizerChunkRange {
+                from_ordinal: 1,
+                to_ordinal: 1,
+            }),
+            chunk_fingerprint: history_summarizer::compute_chunk_fingerprint(&fingerprint_items),
+            selected_range_identities: vec![
+                memory_store::HistorySummarizerSelectedMessageIdentity {
+                    mid: "m1".to_string(),
+                    block_identities: projection.identity_by_mid["m1"].clone(),
+                },
+            ],
+            producer_session_id: Some("producer-session".to_string()),
+            producer_run_id: Some("run-reattach".to_string()),
+            fired_at_ms: Some(1),
+            chunk_retry: Some(memory_store::HistorySummarizerChunkRetry {
+                chunk_start: 1,
+                failures: 2,
+            }),
+            ..HistorySummarizerDurableState::default()
+        };
+        store
+            .commit("ses", loaded.row_version, &loaded.core, &meta)
+            .unwrap();
+
+        let response = call_transform(&handler, messages).await;
+        assert_eq!(response["history_summarizer"]["no_fire"], "reattaching");
+        wait_for_idle(&store).await;
+
+        let state = store.load("ses").unwrap().meta.history_summarizer;
+        assert!(
+            state
+                .last_failure
+                .as_deref()
+                .is_some_and(|failure| failure.starts_with("validate rejected")),
+            "{state:?}"
+        );
+        assert_eq!(
+            state.chunk_retry,
+            Some(memory_store::HistorySummarizerChunkRetry {
+                chunk_start: 1,
+                failures: 3,
+            }),
             "{state:?}"
         );
     }

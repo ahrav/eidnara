@@ -3049,4 +3049,50 @@ mod tests {
             );
         }
     }
+
+    /// A cleanup failure or a retained crash record decorates the provider's message; the decoration says nothing about what the provider reported.
+    #[test]
+    fn a_decorated_provider_failure_stays_provider_reported() {
+        use std::io;
+
+        use crate::model_execution::backend::{
+            BackendError, BackendTerminal, ErrorClass, Harness, OPENCODE_PROVIDER_ERROR_MESSAGE,
+            PI_PROVIDER_ERROR_MESSAGE, is_provider_reported_failure,
+        };
+
+        let provider = |message: &str| {
+            BackendTerminal::Failed(BackendError {
+                class: ErrorClass::Permanent,
+                message: message.to_owned(),
+                retry_after_secs: None,
+                provider_code: None,
+            })
+        };
+        let cleanup = Err(super::CleanupFailure {
+            kind: io::ErrorKind::PermissionDenied,
+        });
+        let decorated = [
+            super::merge_cleanup(provider(PI_PROVIDER_ERROR_MESSAGE), cleanup),
+            super::merge_record_retained(Harness::Pi, provider(PI_PROVIDER_ERROR_MESSAGE), true),
+            super::merge_cleanup(provider(OPENCODE_PROVIDER_ERROR_MESSAGE), cleanup),
+            super::merge_cleanup(
+                provider(&format!("{OPENCODE_PROVIDER_ERROR_MESSAGE} (status 400)")),
+                cleanup,
+            ),
+        ];
+        for terminal in decorated {
+            let BackendTerminal::Failed(error) = terminal else {
+                panic!("expected a failed terminal");
+            };
+            assert_ne!(error.message, PI_PROVIDER_ERROR_MESSAGE);
+            assert!(
+                is_provider_reported_failure(&error.message),
+                "{}",
+                error.message
+            );
+        }
+        assert!(!is_provider_reported_failure(&format!(
+            "{PI_PROVIDER_ERROR_MESSAGE} while the host was preparing the harness"
+        )));
+    }
 }

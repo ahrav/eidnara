@@ -129,11 +129,15 @@ pub(crate) const PI_PROVIDER_ERROR_MESSAGE: &str = "pi assistant stopped with re
 
 /// Whether a `BackendError::message` names a failure the model provider reported for the request, as opposed to one the host raised while preparing, launching, or supervising the harness.
 /// `ErrorClass::Permanent` covers both kinds; a caller that reacts to the request's content needs this distinction, because a host failure recurs for any request until the environment changes.
+/// `merge_cleanup` and `merge_record_retained` may append `; additionally ...` to either message; the decoration reports host cleanup, not the provider.
 pub fn is_provider_reported_failure(message: &str) -> bool {
-    message == PI_PROVIDER_ERROR_MESSAGE
+    let decorated = |rest: &str| rest.is_empty() || rest.starts_with("; additionally ");
+    message
+        .strip_prefix(PI_PROVIDER_ERROR_MESSAGE)
+        .is_some_and(decorated)
         || message
             .strip_prefix(OPENCODE_PROVIDER_ERROR_MESSAGE)
-            .is_some_and(|rest| rest.is_empty() || rest.starts_with(" (status "))
+            .is_some_and(|rest| decorated(rest) || rest.starts_with(" (status "))
 }
 
 /// Every backend run resolves to exactly one terminal classification.

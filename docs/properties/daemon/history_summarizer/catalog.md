@@ -754,29 +754,32 @@ Since the chunk retry ladder landed, the backoff still does not escalate, but th
 live model attempts on one chunk are bounded. A firing that ends in a
 validation rejection, a context-overflow producer failure, or a permanent
 failure the model provider reported increments the durable `chunk_retry` count
-for the chunk start (`lib.rs:6239`, `history_summarizer.rs:353-399`). Only the
+for the chunk start (`lib.rs:6307`, `history_summarizer.rs:361-407`); a reattached
+run that ends the same way counts too (`lib.rs:5614`). Only the
 firing's final error counts: a rejection or provider failure that falls back to
-the next model in the chain (`history_summarizer.rs:1866-1871`, `:1903-1908`)
+the next model in the chain (`history_summarizer.rs:1946-1951`, `:1983-1988`)
 and then publishes clears the count instead. The host classes harness setup
 and supervision failures permanent too, such as a missing credential or a
 harness that cannot start; `is_provider_reported_failure`
-(`host-runtime/src/model_execution/backend.rs:130-137`) excludes them, because
+(`host-runtime/src/model_execution/backend.rs:133-141`) excludes them, because
 they fail every chunk alike and counting them would publish placeholders over
 history a working model could summarize. Assembly varies the calibration seeds
 from `VARY_SEEDS_AFTER_FAILURES` failures, halves the chunk token budget per
 failure from `SHRINK_CHUNK_AFTER_FAILURES`, and from `PLACEHOLDER_AFTER_FAILURES`
 publishes a daemon-authored placeholder segment for the shrunken chunk without a
-model call (`history_summarizer_chunk.rs:572-623`). A reattachment presents the
-frozen range under the same reduced budget (`lib.rs:5488-5494`), so it withdraws
+model call (`history_summarizer_chunk.rs:572-631`); the placeholder stops before
+a tool arc the shrunken chunk end splits. A reattachment presents the
+frozen range under the same reduced budget (`lib.rs:5488-5503`), so it withdraws
 the aliases the live prompt withdrew. A publish clears the count. Transient,
 auth, and host setup failures do not count, so a chunk failing only with them
 still retries every 60 seconds without bound.
-Impact: Unbounded live model spend and log noise, and a session that never
-compacts while its status block reports healthy publishing. Distinct from a bad
-publish: no data is corrupted. With the ladder, a chunk that keeps failing
-validation costs `PLACEHOLDER_AFTER_FAILURES` failed model firings, then one
-placeholder firing that calls no model and moves folding past it
-(`lib.rs:42336-42343`), and the placeholder replaces a summary of those
+Impact: A chunk that fails only with the excluded transient, authentication,
+or host setup failures retries every 60 seconds without bound: live model spend
+and log noise, and a session that never compacts while its status block reports
+healthy publishing. Distinct from a bad publish: no data is corrupted. A chunk
+that keeps failing validation costs `PLACEHOLDER_AFTER_FAILURES` failed model
+firings, then one placeholder firing that calls no model and moves folding past
+it (`lib.rs:43063-43067`), and the placeholder replaces a summary of those
 messages.
 Open questions:
 
