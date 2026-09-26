@@ -643,3 +643,53 @@ fn a_long_run_of_unlisted_rows_does_not_end_the_walk() {
     let expected: Vec<i64> = (4_501..=5_000).rev().chain([1]).collect();
     assert_eq!(walked, expected);
 }
+
+/// Both anchor queries accept `<mid>#[0-9]+` with no other `#`, which agrees with
+/// `split_block_id` except for the pinned cases: a signed index, which `usize` parsing accepts,
+/// and an index past `usize`, which it refuses.
+#[test]
+fn the_sql_anchor_grammar_matches_split_block_id() {
+    let (_dir, store) = open_store();
+    // Row 1 ends at ordinal 2; row 3 is the rendered boundary.
+    seed_coverage(&store, 3, Some(3), None);
+    let overflow = format!("m#{}0", usize::MAX);
+    let cases = [
+        ("m1#0", true),
+        ("a#b#1", true),
+        ("m1#2x", true),
+        ("#1", true),
+        ("m#", true),
+        ("m1#", true),
+        ("m#+1", false),
+        (overflow.as_str(), false),
+    ];
+    for (id, agrees) in cases {
+        store
+            .with_fenced_conn_for_test(|conn| {
+                conn.execute(
+                    "UPDATE history_segments SET end_message_id = ?2
+                      WHERE session_id = ?1 AND sequence = 1",
+                    rusqlite::params![SESSION, id],
+                )
+            })
+            .unwrap();
+        let split = split_block_id(id).is_some();
+        let paged = store
+            .coverage_anchor_page(SESSION, i64::MAX, 10)
+            .unwrap()
+            .iter()
+            .any(|(sequence, _)| *sequence == 1);
+        let mid = id.rsplit_once('#').map_or(id, |(mid, _)| mid);
+        let intersected = store
+            .coverage_snapshot(SESSION, None, &["m1", mid])
+            .unwrap()
+            .newest_window_end
+            .is_some();
+        assert_eq!(paged, intersected, "{id}: the two queries disagree");
+        assert_eq!(
+            paged == split,
+            agrees,
+            "{id}: SQL {paged}, split_block_id {split}"
+        );
+    }
+}

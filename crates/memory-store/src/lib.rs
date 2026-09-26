@@ -10621,7 +10621,8 @@ impl MemoryStore {
     /// Reads the rows anchor resolution needs in one read transaction: the session row's
     /// version and coverage, the newest and rendered rows, the row at `declared_sequence`, and,
     /// when nothing is declared and a rendered row exists, the newest row whose end block
-    /// belongs to one of `live_mids`. `live_mids` are the window's non-synthetic message ids
+    /// belongs to one of `live_mids` and whose end id is an anchor as
+    /// [`Self::coverage_anchor_page`] defines it. `live_mids` are the window's non-synthetic message ids
     /// in order; the k-th (0-based) is matched at ordinal continuation base + k + 1, the
     /// ordinal it receives with no anchor, through one end-message index seek per mid.
     pub fn coverage_snapshot(
@@ -10660,6 +10661,8 @@ impl MemoryStore {
                            FROM json_each(?2) AS j CROSS JOIN history_segments AS h
                           WHERE h.session_id = ?1 AND h.end_message = ?3 + j.key + 1
                             AND substr(h.end_message_id, 1, length(j.value) + 1) = j.value || '#'
+                            AND h.end_message_id GLOB '?*#[0-9]*'
+                            AND h.end_message_id NOT GLOB '*#*[^0-9]*'
                           ORDER BY h.sequence DESC LIMIT 1",
                     )?
                     .query_row(
@@ -10692,16 +10695,14 @@ impl MemoryStore {
     pub fn coverage_anchor_page(
         &self,
         session_id: &str,
-        before_sequence: Option<i64>,
+        before_sequence: i64,
         limit: usize,
     ) -> Result<Vec<(i64, String)>, MemoryStoreError> {
         Ok(self.inner.with_conn(|conn| {
             let Some(rendered) = rendered_coverage_tx(conn, session_id)?.rendered else {
                 return Ok(Vec::new());
             };
-            let through = before_sequence.map_or(rendered.sequence, |before| {
-                rendered.sequence.min(before.saturating_sub(1))
-            });
+            let through = rendered.sequence.min(before_sequence.saturating_sub(1));
             conn.prepare_cached(
                 "SELECT sequence, end_message_id FROM history_segments
                   WHERE session_id = ?1 AND sequence <= ?2
@@ -16139,11 +16140,17 @@ fn rendered_coverage_tx(
                FROM cache_state WHERE session_id = ?1",
         )?
         .query_row(params![session_id], |row| {
+            let unsigned = |column: usize, value: i64| {
+                u64::try_from(value)
+                    .map_err(|_| rusqlite::Error::IntegralValueOutOfRange(column, value))
+            };
             Ok((
-                row.get::<_, i64>(0)?,
+                unsigned(0, row.get(0)?)?,
                 row.get::<_, Option<String>>(1)?,
                 row.get::<_, Option<i64>>(2)?,
-                row.get::<_, Option<i64>>(3)?,
+                row.get::<_, Option<i64>>(3)?
+                    .map(|base| unsigned(3, base))
+                    .transpose()?,
             ))
         })
         .optional()?;
@@ -16158,8 +16165,8 @@ fn rendered_coverage_tx(
         _ => None,
     };
     Ok(RenderedCoverage {
-        row_version: Some(row_version as u64),
-        continuation_base: base.map(|base| base as u64),
+        row_version: Some(row_version),
+        continuation_base: base,
         rendered,
     })
 }

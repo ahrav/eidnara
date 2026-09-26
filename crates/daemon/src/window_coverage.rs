@@ -106,10 +106,11 @@ pub fn read_snapshot(
 /// Resolves `declared` against `snapshot` and the original submitted `window`. An error is an
 /// `invalid_params` answer: a window that does not start at the declared mid, a declared row
 /// whose end block is not the declared mid, or a declared row newer than the rendered boundary,
-/// which discovery never returns. A declared row with no rendered boundary is `Unknown`, so the
-/// plugin rediscovers: a revert truncation commits on its own before its pass, so a pass that
-/// fails after it leaves `core.boundary_id` naming a removed row while older rows remain. With
-/// no boundary declared that state is `FirstPass`.
+/// which discovery never returns. A stored anchor with a negative end ordinal is an error too;
+/// it names corrupt storage, not the request. A declared row with no rendered boundary is
+/// `Unknown`, so the plugin rediscovers: a revert truncation commits on its own before its
+/// pass, so a pass that fails after it leaves `core.boundary_id` naming a removed row while
+/// older rows remain. With no boundary declared that state is `FirstPass`.
 pub fn resolve(
     snapshot: &CoverageSnapshot,
     declared: Option<DeclaredAnchor<'_>>,
@@ -194,9 +195,15 @@ pub fn resolve(
         }
     };
     let cut = resolution.cut();
+    let anchor_ordinal = u64::try_from(anchor.end_message).map_err(|_| {
+        format!(
+            "history segment {} has a negative end ordinal {}",
+            anchor.sequence, anchor.end_message
+        )
+    })?;
     Ok(Resolved {
         resolution,
-        ordinals: assign_ordinals(&window[cut..], Some(anchor.end_message as u64), None),
+        ordinals: assign_ordinals(&window[cut..], Some(anchor_ordinal), None),
         anchor: Some(anchor.clone()),
     })
 }
@@ -299,7 +306,7 @@ pub fn boundary_page(
     let anchors: Vec<Value> = store
         .coverage_anchor_page(
             session_id,
-            Some(before_sequence.unwrap_or(MAX_SAFE_INTEGER + 1)),
+            before_sequence.unwrap_or(MAX_SAFE_INTEGER + 1),
             BOUNDARY_PAGE_LIMIT,
         )?
         .iter()
