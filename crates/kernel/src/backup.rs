@@ -399,6 +399,8 @@ impl KernelStore {
             [],
         )
         .map_err(|_| KernelError::Io)?;
+        tx.execute(COLLAPSE_RELEASED_REFS_SQL, [])
+            .map_err(|_| KernelError::Io)?;
         // Past the reclaim grace a released reference no longer affects eligibility,
         // and reclamation only prunes references for artifacts it removes, so pins on
         // still-live artifacts accumulate without this.
@@ -1034,8 +1036,31 @@ pub(crate) fn release_capture_pin_in_tx(
         [capture_pin_id],
     )
     .map_err(super::map_sqlite)?;
+    tx.execute(
+        &format!(
+            "{COLLAPSE_RELEASED_REFS_SQL} AND evidence_id IN (
+                 SELECT evidence_id FROM capture_pin_refs WHERE capture_pin_id=?1
+             )"
+        ),
+        [capture_pin_id],
+    )
+    .map_err(super::map_sqlite)?;
     Ok(true)
 }
+
+/// Deletes every released reference that another released reference to the same evidence dominates.
+///
+/// Reclamation reads released references only through the latest `released_at` per evidence, so
+/// keeping one released row per evidence preserves every grace deadline while bounding the table by
+/// evidence count instead of capture count. Active references are never touched. Ties keep the
+/// later-inserted row so roots that ran the same history keep the same survivor.
+const COLLAPSE_RELEASED_REFS_SQL: &str = "DELETE FROM capture_pin_refs
+     WHERE released_at IS NOT NULL AND EXISTS(
+         SELECT 1 FROM capture_pin_refs k
+         WHERE k.evidence_id=capture_pin_refs.evidence_id AND k.released_at IS NOT NULL
+           AND (k.released_at>capture_pin_refs.released_at
+                OR (k.released_at=capture_pin_refs.released_at AND k.rowid>capture_pin_refs.rowid))
+     )";
 
 fn rollback_capture_pin(writer: &mut Connection, lease_epoch: u64, pin_id: &str) {
     let Ok(tx) = writer.transaction_with_behavior(TransactionBehavior::Immediate) else {
