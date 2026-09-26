@@ -1698,6 +1698,12 @@ the chunk API, so `lib.rs:12949`'s direct call to
 has no uniqueness check in any build profile.
 Open questions:
 
+- Update, #830. The chunk API, `encode_opencode_chunks_with_transition_state`,
+  and the incremental native path are deleted. Every native pass encodes
+  through `encode_opencode_impl`, whose `assert_unique_tool_use_ids` call now
+  covers the native array, so the no-check-in-any-profile clause no longer
+  holds. The release-behaviour gap stands.
+
 - Should the wire-level guard adopt the wire-level heal branch, or should the
   wire-level heal be removed in favour of failing loud in both? The two layers
   currently encode two different answers to the same question. (needs human
@@ -1874,6 +1880,10 @@ off-route, which makes this the moment to write the contract down rather than
 after it is wired up.
 Open questions:
 
+- Update, #830. `EncodedOpencodeChunk` and its `start_index` and `end_index`
+  fields are deleted with the incremental native attach; the OpenCode encoder
+  returns a plain `Vec` that collapses adjacent pairs, and no caller splices by
+  position. The contrast above and the question below are historical.
 - Should `encode_pi` adopt the `EncodedOpencodeChunk` shape so index mapping is
   explicit? Unresolved, needs a decision about whether the Pi leg is being
   wired up at all.

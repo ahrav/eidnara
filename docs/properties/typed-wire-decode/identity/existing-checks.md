@@ -76,7 +76,7 @@ Source: `crates/daemon/src/differential_goldens.rs`.
 | --- | --- | --- | --- |
 | 41 | `dg_goldens_match_ts_wire_surface_and_gate_labels` | Three-family wire values plus provenance and gate-label assertions. | unaudited |
 | 72 | `dg_golden_vacuity_guard_rejects_one_byte_fixture_perturbation_per_family` | Perturbs expected fixture comparisons; counts all three families. | unaudited |
-| 108 | `dg_goldens_exercise_incremental_native_differential_mode` | Runs golden inputs through incremental native differential setup. | unaudited |
+| 108 | `dg_goldens_exercise_incremental_native_differential_mode` | Runs golden inputs through incremental native differential setup. | renamed by #830 to `dg_goldens_encode_native_output_deterministically`, which compares two full native encodes; unaudited |
 
 Source: `crates/daemon/tests/prepared_output.rs`.
 
@@ -255,14 +255,14 @@ Source: `crates/daemon/src/lib.rs`, with HEAD line numbers.
 | 23008 | `native_cache_charge_keeps_raw_allocation_floor_beside_sidecar_estimate` | Checks ownership accounting beside identity cache state. | unaudited |
 | 23248 | `astro_scale_projection_cache_reuses_on_the_second_pass` | Checks projection reuse. | deleted by #828 with the mechanism it checked |
 | 23357 | `projection_cache_invalidators_are_mutation_checked_in_both_directions` | Perturbs projection cache inputs and invalidators. | deleted by #828 with the mechanism it checked |
-| 23536 | `incremental_native_cache_invalidates_every_byte_affecting_input` | Checks byte-affecting native input invalidation. | unaudited |
-| 23619 | `renderer_transition_class_sets_invalidate_with_consumed_boolean_stable` | Checks class-set invalidation beyond a stable boolean. | unaudited |
-| 23734 | `reduced_shell_rematches_across_three_incremental_sidecar_generations` | Checks reduced shell matching across generations. | unaudited |
+| 23536 | `incremental_native_cache_invalidates_every_byte_affecting_input` | Checks byte-affecting native input invalidation. | deleted by #830 with the mechanism it checked |
+| 23619 | `renderer_transition_class_sets_invalidate_with_consumed_boolean_stable` | Checks class-set invalidation beyond a stable boolean. | deleted by #830 with the mechanism it checked |
+| 23734 | `reduced_shell_rematches_across_three_incremental_sidecar_generations` | Checks reduced shell matching across generations. | renamed by #830 to `reduced_shell_rematches_across_three_sidecar_generations`; unaudited |
 | 23843 | `marker_representation_reconciles_after_changed_native_frontier` | Checks marker representation at changed frontier. | unaudited |
 | 23913 | `newest_reasoning_becomes_historical_after_watermark_tail_advance` | Checks reasoning state transition at a moved frontier. | unaudited |
-| 23988 | `frontier_vacuity_covers_opaque_repeats_eviction_and_same_length_edits` | Supplies opaque, eviction, and same-length frontier perturbations. | unaudited |
+| 23988 | `frontier_vacuity_covers_opaque_repeats_eviction_and_same_length_edits` | Supplies opaque, eviction, and same-length frontier perturbations. | renamed by #830 to `same_length_edit_reaches_the_native_output`, which keeps only the same-length edit; unaudited |
 | 24059 | `differential_assert_rejects_frontier_inside_mutated_native_region` | Negative control for native frontier differential. | unaudited |
-| 24108 | `differential_assert_catches_corrupt_sidecar_key_derivation` | Negative control for sidecar key derivation. | unaudited |
+| 24108 | `differential_assert_catches_corrupt_sidecar_key_derivation` | Negative control for sidecar key derivation. | deleted by #830 with the mechanism it checked |
 | 25162 | `unflagged_synthetic_delta_prepares_history_summarizer_and_native_output` | Exercises synthetic normalization at history_summarizer/native seams. | unaudited |
 | 25557 | `native_attachment_reuses_transform_tag_baseline_and_preserves_bytes` | Deleted with the tag baseline cache. | invalidated |
 | 28294 | `ctx_expand_and_eidnara_note_facades_are_session_scoped` | Contains persisted history/facade session-scoping checks. | unaudited |

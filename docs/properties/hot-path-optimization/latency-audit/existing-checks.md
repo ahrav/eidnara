@@ -172,8 +172,11 @@ projection, and the prefix-projection differential. Rows marked "deleted by
 | [`native_delta_ingress_core_is_independent_of_changed_output_messages`][t-native-ingress] | Equal but separately allocated ingress/output values share output chunks. Changed output cannot replace raw ingress. Snapshot fallback retains request pointers after native-cache eviction. Cached request charges match capacity-based walks including Arc headers. | unaudited |
 | [`native_cache_charge_keeps_raw_allocation_floor_beside_sidecar_estimate`][t-native-charge-floor] | A scalar-dense raw allocation exceeds its sidecar serialized-size estimate, so the shared raw pointer retains its ingress allocation charge. Full and degraded sidecars preserve ingress/output pointer deduplication, while equal values in distinct allocations retain distinct charges. Request charges remain independent. | unaudited |
 | [`differential_assert_rejects_frontier_inside_mutated_native_region`][t-native-reject] | The differential panics on a corrupt native frontier. | unaudited |
-| [`frontier_vacuity_covers_opaque_repeats_eviction_and_same_length_edits`][t-vacuity] | Same-length edits and repeats are not vacuously reused. | unaudited |
-| [`duplicate_tool_use_assert_covers_incremental_native_suffix`][t-dup] | Tool-use ids are unique across the cached prefix and encoded suffix. | unaudited |
+| [`same_length_edit_reaches_the_native_output`][t-vacuity] | #830 renamed it from `frontier_vacuity_covers_opaque_repeats_eviction_and_same_length_edits`: with no chunk reuse, a same-length edit reaches the full native encode. | unaudited |
+| [`duplicate_tool_use_assert_covers_the_full_native_encode`][t-dup] | #830 renamed it from `duplicate_tool_use_assert_covers_incremental_native_suffix`: the full native encode panics on a duplicated tool-use id. | unaudited |
+| [`native_output_store_enforces_entry_cap_lru_and_revert_epoch`][t-native-store] | The native previous-output store refuses an entry above its entry cap or its whole budget, evicts the least recently stored session past its global budget, returns an entry only for its served revision, and drops it on a stale revision or a revert-epoch bump. | unaudited |
+| [`multiple_large_sessions_do_not_ping_pong_under_the_native_output_total_budget`][t-native-pingpong] | Two sessions whose combined charge exceeds the former shared 64 MiB budget, scaled by 1024, both keep their previous output across alternating passes under the 256 MiB total. | unaudited |
+| [`native_previous_keeps_bind_the_applied_revision`][t-native-previous] | A native pass naming the applied revision keeps from the previous output; a stale revision gets literals, no resend field, and the same native array. | unaudited |
 | [`incremental_sidecar_carries_pins_across_three_generations`][t-sidecar] | Full and incremental order, metadata, and pins agree across three generations and repeated IDs. Sparse-prefix cases preserve order and missing metadata. | unaudited |
 | [`selection_input_shares_projected_wire_value`][selection-sharing] | Selection and history_summarizer inputs equal and point to the projected wire input; cloning selection preserves that pointer. | unaudited |
 | [`tag_baseline_cache_matches_cold_passes_across_drop_reset_and_remint`][t-tagcold] | Deleted with the tag baseline cache. | invalidated |
@@ -602,8 +605,11 @@ not a claim that no related check exists anywhere in the repository.
 [t-native-ingress]: ../../../../crates/daemon/src/lib.rs#L23251
 [t-native-charge-floor]: ../../../../crates/daemon/src/lib.rs#L23373
 [t-native-reject]: ../../../../crates/daemon/src/lib.rs#L24424
-[t-vacuity]: ../../../../crates/daemon/src/lib.rs#L24353
-[t-dup]: ../../../../crates/daemon/src/lib.rs#L24941
+[t-vacuity]: ../../../../crates/daemon/src/lib.rs#L24985
+[t-dup]: ../../../../crates/daemon/src/lib.rs#L25085
+[t-native-store]: ../../../../crates/daemon/src/lib.rs#L25216
+[t-native-pingpong]: ../../../../crates/daemon/src/lib.rs#L25269
+[t-native-previous]: ../../../../crates/daemon/src/lib.rs#L25302
 [t-sidecar]: ../../../../crates/daemon/src/codec/opencode.rs#L2083
 [t-tagcold]: ../../../../crates/daemon/src/transform.rs#L22516
 [t-poison]: ../../../../crates/daemon/src/transform.rs#L22652

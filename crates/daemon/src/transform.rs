@@ -202,7 +202,6 @@ pub(crate) const TAG_MINT_FRONTIER_CACHE_BUDGET_BYTES: usize = 64 * 1024 * 1024;
 pub struct ServedMessage {
     message: Arc<WireMessage>,
     canonical_bytes: Arc<[u8]>,
-    canonical_hash: [u8; 32],
     output_identity: Arc<str>,
     block_fingerprints: Arc<[(String, usize)]>,
     retained_bytes: usize,
@@ -261,9 +260,7 @@ impl ServedMessage {
                 (wire::fingerprint(&serialized), serialized.len())
             })
             .collect::<Vec<_>>();
-        let canonical_digest = Sha256::digest(&canonical_bytes);
-        let output_identity = format!("{canonical_digest:x}");
-        let canonical_hash: [u8; 32] = canonical_digest.into();
+        let output_identity = format!("{:x}", Sha256::digest(&canonical_bytes));
         let message = Arc::new(message);
         let output_identity: Arc<str> = Arc::from(output_identity);
         let block_fingerprints: Arc<[(String, usize)]> = Arc::from(block_fingerprints);
@@ -276,7 +273,6 @@ impl ServedMessage {
         Self {
             message,
             canonical_bytes,
-            canonical_hash,
             output_identity,
             block_fingerprints,
             retained_bytes,
@@ -290,10 +286,6 @@ impl ServedMessage {
             .saturating_add(identity.len());
         self.output_identity = Arc::from(identity);
         self
-    }
-
-    pub(crate) fn native_identity_basis(&self) -> (&str, &[u8; 32]) {
-        (&self.output_identity, &self.canonical_hash)
     }
 
     pub fn into_message(self) -> WireMessage {
@@ -1590,8 +1582,7 @@ pub struct TransformResponse {
     /// does not. Every `ok` response sets it to `Some`, including legitimately empty output.
     #[serde(skip)]
     pub messages: Option<Vec<ServedMessage>>,
-    /// Native output for the non-incremental attachment path, used to build its wire recipe.
-    /// Incremental attachment returns its output directly instead of populating this field.
+    /// This pass's full native encode, which the handler takes to build the wire recipe.
     #[serde(skip)]
     pub native_messages: Option<Vec<Arc<Value>>>,
     /// This pass's auto-search decision and its fate; daemon-internal, never
@@ -11727,29 +11718,6 @@ pub(crate) fn clear_served_native_reasoning_with_tags(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn clear_served_native_reasoning_from_served(
-    profile: SerializerProfile,
-    provider_accepts_empty_content: bool,
-    native_messages: &mut [Value],
-    served_messages: &[ServedMessage],
-    ingress_messages: &[Arc<IngressMessage>],
-    watermark: u64,
-    mid_turn: bool,
-    tag_numbers: &BTreeMap<String, u64>,
-) -> usize {
-    clear_served_native_reasoning_from_iter(
-        profile,
-        provider_accepts_empty_content,
-        native_messages,
-        served_messages.iter().map(Deref::deref),
-        ingress_messages,
-        watermark,
-        mid_turn,
-        tag_numbers,
-    )
-}
-
-#[allow(clippy::too_many_arguments)]
 fn clear_served_native_reasoning_from_iter<'a>(
     profile: SerializerProfile,
     provider_accepts_empty_content: bool,
@@ -13880,7 +13848,6 @@ pub(crate) mod tests {
             &hit.block_fingerprints,
             &served.block_fingerprints
         ));
-        assert_eq!(hit.canonical_hash, served.canonical_hash);
         assert_eq!((timings.cache_hits, timings.cache_misses), (1, 0));
 
         // `Some(None)`, a dirty item, a foreign identity, and an absent key all construct.
@@ -14199,10 +14166,6 @@ pub(crate) mod tests {
         ] {
             let served = ServedMessage::from_message(message);
             assert_eq!(served.canonical_bytes(), expected.as_bytes());
-            assert_eq!(
-                served.canonical_hash,
-                <[u8; 32]>::from(Sha256::digest(expected.as_bytes()))
-            );
             assert_eq!(
                 served.output_identity.as_ref(),
                 format!("{:x}", Sha256::digest(expected.as_bytes()))
@@ -22061,24 +22024,20 @@ pub(crate) mod tests {
         );
         request.serializer_profile = "opencode-aisdk".to_string();
         request.serve_native = true;
-        let cache = Mutex::new(crate::NativeAttachmentCache::new(1024 * 1024));
-        let mut first = TransformResponse::passthrough(healed_ck.clone());
-        let first_attachment = crate::attach_native_messages_incremental(
-            &mut first,
-            &request,
-            0,
-            &BTreeMap::new(),
-            None,
-            None,
-            true,
-            0,
-            &crate::edit_recipe::Revision::parse("test-output").unwrap(),
-            &cache,
-            crate::NativeCacheKeyMode::Normal,
-        );
-        assert_eq!(first_attachment.stats.encoded_messages, healed_ck.len());
-        assert!(first.native_messages.is_none());
-        let native = &first_attachment.output.values;
+        let encode = || {
+            let mut response = TransformResponse::passthrough(healed_ck.clone());
+            crate::attach_native_messages_with_tags(
+                &mut response,
+                &request,
+                0,
+                &BTreeMap::new(),
+                None,
+                None,
+                true,
+            );
+            response.native_messages.expect("native output")
+        };
+        let native = encode();
         let tool_ids = native
             .iter()
             .flat_map(|message| message["parts"].as_array().into_iter().flatten())
@@ -22089,28 +22048,7 @@ pub(crate) mod tests {
             tool_ids.iter().copied().collect::<HashSet<_>>().len()
         );
         assert_eq!(tool_ids, vec!["duplicate"]);
-
-        let mut replay = TransformResponse::passthrough(healed_ck.clone());
-        let replay_attachment = crate::attach_native_messages_incremental(
-            &mut replay,
-            &request,
-            0,
-            &BTreeMap::new(),
-            None,
-            None,
-            true,
-            0,
-            &crate::edit_recipe::Revision::parse("test-output").unwrap(),
-            &cache,
-            crate::NativeCacheKeyMode::Normal,
-        );
-        assert_eq!(replay_attachment.stats.reused_messages, healed_ck.len());
-        assert_eq!(replay_attachment.stats.encoded_messages, 0);
-        assert!(replay.native_messages.is_none());
-        assert_eq!(
-            replay_attachment.output.values,
-            first_attachment.output.values
-        );
+        assert_eq!(encode(), native);
     }
 
     #[test]
@@ -22254,29 +22192,6 @@ pub(crate) mod tests {
             Some("t3")
         );
 
-        let cache = Mutex::new(crate::NativeAttachmentCache::new(1024 * 1024));
-        let mut first_request = req(
-            "keep-fold-native",
-            "cfg0",
-            vec![item("a", 1, "raw"), todowrite_call("todo", 2, json!([]))],
-        );
-        first_request.serializer_profile = "opencode-aisdk".to_string();
-        first_request.serve_native = true;
-        let mut first_native = first.clone();
-        crate::attach_native_messages_incremental(
-            &mut first_native,
-            &first_request,
-            0,
-            &BTreeMap::new(),
-            None,
-            None,
-            true,
-            0,
-            &crate::edit_recipe::Revision::parse("test-output").unwrap(),
-            &cache,
-            crate::NativeCacheKeyMode::Normal,
-        );
-
         let mut moved_request = req(
             "keep-fold-native",
             "cfg0",
@@ -22289,7 +22204,7 @@ pub(crate) mod tests {
         moved_request.serializer_profile = "opencode-aisdk".to_string();
         moved_request.serve_native = true;
         let mut moved_native = moved.clone();
-        let attachment = crate::attach_native_messages_incremental(
+        crate::attach_native_messages_with_tags(
             &mut moved_native,
             &moved_request,
             0,
@@ -22297,14 +22212,8 @@ pub(crate) mod tests {
             None,
             None,
             true,
-            0,
-            &crate::edit_recipe::Revision::parse("test-output").unwrap(),
-            &cache,
-            crate::NativeCacheKeyMode::Normal,
         );
-        assert!(attachment.stats.encoded_messages > 0);
-        assert!(moved_native.native_messages.is_none());
-        let native = attachment.output.values;
+        let native = moved_native.native_messages.expect("native output");
         let tail_index = native
             .iter()
             .position(|message| message["info"]["id"] == "t3")

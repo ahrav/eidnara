@@ -652,7 +652,7 @@ newest first; the match filter as the sequences with enough matched tokens,
 best first; the threshold as met or not; and the capped selection the hint
 renders. `deferred` is the pass holding the hint back for an already served
 block, `applied` is the served block ending with the hint (the overlay's own
-idempotence test), and `attached` is `attach_native_messages_incremental`'s
+idempotence test), and `attached` is `native_carries_user_hint`'s
 check that the native output carries the hint on the message the block names.
 `Handler::core_for_test` and `HandlerCore::user_hint_outcome_for_test`
 (features `test-support` or `direct-host-fixture`) let the direct-host

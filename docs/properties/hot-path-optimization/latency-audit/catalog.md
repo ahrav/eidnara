@@ -47,6 +47,55 @@ cache leaves `TRANSFORM_SERVE_CACHE_COMBINED_BUDGET_BYTES` (768 MiB to
 compile-time assertion now requires the combined budget to equal the
 serialized-output and native-attachment budgets.
 
+## Native incremental attach retirement, 2026-09-26
+
+[#830](https://github.com/ahrav/eidnara/issues/830) deletes the native
+attachment cache (`NativeAttachmentCache`, its snapshot, session, context,
+and stats), the encoded chunks and their index ranges
+(`NativeEncodedChunk`, `EncodedOpencodeChunk`, and
+`encode_opencode_chunks_with_transition_state`'s `base_index`), the
+per-message key (`native_message_key`, `native_sidecar_hash`,
+`native_digest_field`, `NativeCacheKeyMode`, and `ServedMessage`'s
+`native_identity_basis` with the `canonical_hash` field only it read), the
+incremental attach `attach_native_messages_incremental` with its
+`ordinal_by_mid` and `native_reasoning_should_clear` helpers and
+`clear_served_native_reasoning_from_served`, and the incremental-versus-full
+differential with `EIDNARA_NATIVE_ATTACHMENT_DIFFERENTIAL`. Every native
+pass encodes its whole output with `encode_full_native_messages`. The pass's
+output goes into `NativeOutputStore` as one record per session: the output
+revision, the encoded values, their byte charge, and the revert epoch they
+were built in. The next pass takes the record; it is a recipe `previous`
+source only when the request's `previous_output_revision` names it and the
+epoch still matches, and any other take drops it. A missing or mismatched
+revision yields literals, never a resend request. A record above 64 MiB is
+refused, and the least recently stored sessions are evicted past 256 MiB.
+The CK `previous_output` path and the recipe format are unchanged. The
+sidecar memo went earlier with #829's cleanup (`46aa545a`). Citations of the
+deleted symbols below are historical and link to `2979106a`, the last commit
+before the deletion that has them.
+
+B1's native-chunk reuse clause is invalidated: no chunk is shared between
+passes, so there is no reuse decision to make by value or by pointer, and no
+incremental output to compare with the full encode. Its value clause holds
+by construction, since the full encode is the only native output. The
+replacing evidence is the unchanged edit-recipe fixtures and generated
+mutations, the differential goldens' native replay (now two full encodes
+that must match byte for byte with measured wire lengths), the handler
+checks that a matching revision keeps from the previous output and a stale
+revision serves the same output as literals, the store check that enforces
+the entry cap, the global LRU, and revert-epoch eviction, and the e2e
+byte-identity scenario. The wire keeps `native_cache_reused_messages`,
+which now reports zero; `native_cache_encoded_messages` counts the full
+encode, and `native_cache_refused_store` and `native_cache_evicted` count
+the store's refusals and evictions.
+
+`DECLARED_RETAINED_RESIDENT_BYTES` is unchanged: the store's 256 MiB global
+budget replaces the attachment cache's 256 MiB inside
+`TRANSFORM_SERVE_CACHE_COMBINED_BUDGET_BYTES`, and the compile-time
+assertion now requires the combined budget to equal the serialized-output
+cache and native-output store budgets. The per-entry cap drops from 192 MiB
+to 64 MiB.
+
 ## Scope and provenance
 
 This area extends the [parent supplement](../catalog.md) with the remaining
@@ -113,7 +162,7 @@ the [check inventory](existing-checks.md).
 | --- | --- | --- |
 | A1-A2 | default-production | Every request runs [`Handler::handle`][handle] and its body branch; an unpaged transform body the tree-parse walk admits enters the typed handler from its bytes, and every other body runs [`dispatch_value_with_inbound_bytes`][dispatch]. Refusal arms and the over-1 MiB probe need constructed input because the plugin [pages at 512 KiB][paging]. |
 | A3 | test-only | Pool pressure needs concurrent oversize parses; production occurrence is plausible but unverified. |
-| B1-B5 | default-production | Every pass with [`compaction_enabled`][cfg-compaction] (default true) projects, serves, and normalizes; the native incremental arm needs a native-cache hit, which the plugin's delta protocol produces on steady turns. The projection incremental arm is deleted ([#828](#projection-prefix-reuse-retirement-2026-09-26)). |
+| B1-B5 | default-production | Every pass with [`compaction_enabled`][cfg-compaction] (default true) projects, serves, and normalizes. The projection incremental arm is deleted ([#828](#projection-prefix-reuse-retirement-2026-09-26)) and the native incremental arm is deleted ([#830](#native-incremental-attach-retirement-2026-09-26)). |
 | C1, C2, C4, C5 | default-production | The [handler path][handler] runs for every transform request; the Emergency95 arm needs usage at the emergency threshold. |
 | C3 | explicit-config-only | The empty drain runs every pass, but outbox rows come from [`publish_history_summarizer_chunk`][publish], which needs a configured [`model_chain`][cfg-models]; `user_observation` rows also need [`user_memory_collection_enabled`][cfg-user-mem]. |
 | C6 | explicit-config-only | The same gate as C3; the due row also needs a failed inline delivery at publish time or a process end between the enqueue commit and the inline drain, which the [`test-support` seam][fail-sc] constructs. |
@@ -432,9 +481,11 @@ Open questions: None.
 Type: safety
 Reachability: default-production
 Status: active - [#828](#projection-prefix-reuse-retirement-2026-09-26)
-invalidates the prefix-reattachment and incremental-projection clauses, which
-are marked below and kept for traceability. The value clauses hold with every
-pass projecting its full input.
+invalidates the prefix-reattachment and incremental-projection clauses, and
+[#830](#native-incremental-attach-retirement-2026-09-26) invalidates the
+native-chunk reuse clauses; both are marked below and kept for traceability.
+The value clauses hold with every pass projecting its full input and
+encoding its full native output.
 Exercised: partial - The selection differential passes unchanged against its
 frozen reference. The [sharing check][selection-sharing] compares the selected
 inputs from all 48 frozen-corpus tool calls with the projected wire value and
@@ -489,17 +540,20 @@ with equal [`differential_bytes`][diff-bytes] (invalidated by #828: no
 incremental projection exists). Native attachment: under
 `serve_native`, `to_vec(incremental native_messages) ==
 to_vec(encode_full_native_messages(..))` as the [differential][native-diff]
-already compares; with complete prefix metadata, the incremental sidecar has
+already compares (invalidated by #830: every pass runs the full encode, so
+there is no incremental output); with complete prefix metadata, the incremental sidecar has
 the same `order`, `messages`, and pins as a full decode with the same inherited
 pins. With discarded prefix metadata, order still matches the full decode,
 while metadata remains sparse unless replaced by the suffix. Order keeps
 first-seen positions ([`remember_message`][remember]); and
 [`native_ingress_chunks`][ingress-chunks] shares a chunk for index `i`
-exactly when `chunk.value == native_messages[i]` by value. Served bytes: for
+exactly when `chunk.value == native_messages[i]` by value (invalidated by
+#830: no chunk outlives its pass). Served bytes: for
 every `ServedMessage`, `canonical_bytes ==
 serde_json::to_vec(&serde_json::to_value(&message))`, which sorts object keys
 because the workspace enables only [`raw_value`][serde-features];
-`canonical_hash == sha256(canonical_bytes)`; the prepared output writes
+`output_identity == hex(sha256(canonical_bytes))` (#830 deleted the raw
+`canonical_hash` copy with the native key that read it); the prepared output writes
 exactly `canonical_bytes` per [`Served` segment][segment-served]
 ([segment construction][segments]). Fingerprints retain the positional-first
 rule: the positional helper uses exact `WireBlock` equality without hashing
@@ -522,7 +576,7 @@ reading a projected input copy that is not the `wire.kind()` value
 ([`sel_item_from_flat`][sel-item] and
 [`sel_kind_for_flat`][sel-kind] both borrow the typed wire input, and
 `FlatBlock` holds no copy outside `wire`); chunk reuse decided by
-pointer identity; an incremental sidecar merge that changes first-seen order
+pointer identity (invalidated by #830); an incremental sidecar merge that changes first-seen order
 on a repeated mid ([sidecar merge][sidecar-merge]); a direct `to_vec(&message)`
 on a typed shell (rebuilt prefix, reduced, overlaid, or synthetic) that emits
 struct field order instead of sorted keys, which
@@ -532,9 +586,9 @@ avoids only by taking `messages` out before `to_value(response)`
 Required faults and enabling state: A second-pass projection cache hit
 (invalidated by #828); a delta body so the prefix is [reattached][reattach]
 (from the ready snapshot since #828) and the native prefix
-comes from the attachment cache; tool calls, tool results in a user message,
+comes from the attachment cache (invalidated by #830); tool calls, tool results in a user message,
 repeated call ids, and a suffix that repeats a prefix mid; a message equal by
-value but not by pointer to a cached chunk; a response holding a harness
+value but not by pointer to a cached chunk (invalidated by #830); a response holding a harness
 message with `original`, a rebuilt prefix message, a reduced message, a
 tag-overlaid message, and the synthetic m0 and m1.
 Confidence: high - [Evidence](evidence/derived-artifacts-are-ownership-independent.md).
@@ -566,7 +620,8 @@ Open questions:
   or a developer switch? The transform catalog's
   [portfolio evaluation][tc-g2] queued this as gap G2 and it is still open.
   (needs human input) #828 deletes the prefix switch and its asserts; the
-  question stands for the native switch alone.
+  question stands for the native switch alone. #830 deletes the native
+  switch and its assert, which closes the question.
 
 ### synthetic-normalization-is-scoped-to-the-pass
 
@@ -2752,10 +2807,10 @@ evaluation of this area and its disposition are recorded in
 [store-pc]: https://github.com/ahrav/eidnara/blob/704568ec/crates/daemon/src/lib.rs#L4863
 [history_summarizer-fire]: ../../../../crates/daemon/src/lib.rs#L5305
 [assemble]: ../../../../crates/daemon/src/history_summarizer_chunk.rs#L560
-[ingress-chunks]: ../../../../crates/daemon/src/lib.rs#L13707
-[gate-native]: ../../../../crates/daemon/src/lib.rs#L13763-L13768
-[native-attach]: ../../../../crates/daemon/src/lib.rs#L13771
-[native-diff]: ../../../../crates/daemon/src/lib.rs#L14004-L14020
+[ingress-chunks]: https://github.com/ahrav/eidnara/blob/2979106a/crates/daemon/src/lib.rs#L13860
+[gate-native]: https://github.com/ahrav/eidnara/blob/2979106a/crates/daemon/src/lib.rs#L13663-L13668
+[native-attach]: https://github.com/ahrav/eidnara/blob/2979106a/crates/daemon/src/lib.rs#L13691
+[native-diff]: https://github.com/ahrav/eidnara/blob/2979106a/crates/daemon/src/lib.rs#L13879-L13896
 [segments-take]: ../../../../crates/daemon/src/lib.rs#L15117-L15134
 [segments]: ../../../../crates/daemon/src/lib.rs#L15137-L15147
 [cached-boundary]: ../../../../crates/daemon/src/lib.rs#L17556
