@@ -8617,6 +8617,7 @@ fn run_user_hint_lexical_search(
                 matched.len(),
                 candidate.recency,
                 candidate.result,
+                matched,
             ))
         })
         .collect::<Vec<_>>();
@@ -8628,17 +8629,29 @@ fn run_user_hint_lexical_search(
             .then_with(|| right.2.cmp(&left.2))
             .then_with(|| left.3.id.cmp(&right.3.id))
     });
-    trace.matched = scored.iter().map(|(_, _, _, result)| result.id).collect();
+    trace.matched = scored
+        .iter()
+        .map(|(_, _, _, result, _)| result.id)
+        .collect();
     trace.threshold = scored
         .first()
-        .is_some_and(|(score, _, _, _)| *score >= score_threshold);
+        .is_some_and(|(score, _, _, _, _)| *score >= score_threshold);
     if !trace.threshold {
         return Ok(Vec::new());
     }
     let selected: Vec<_> = scored
         .into_iter()
         .take(USER_HINT_RESULT_LIMIT)
-        .map(|(_, _, _, result)| result)
+        .map(|(_, _, _, mut result, mut matched)| {
+            // Matched tokens are in sorted order, so the stable sort puts the rarest first and breaks ties by that order.
+            matched.sort_by_key(|token| *document_frequency.get(*token).unwrap_or(&0));
+            let anchors = matched
+                .iter()
+                .map(|token| token.as_str())
+                .collect::<Vec<_>>();
+            result.snippet = user_hint_snippet(std::mem::take(&mut result.snippet), &anchors);
+            result
+        })
         .collect();
     trace.selected = selected.iter().map(|result| result.id).collect();
     Ok(selected)
@@ -8762,6 +8775,89 @@ pub(crate) fn utf16_prefix(text: &str, limit: usize) -> &str {
     &text[..end]
 }
 
+/// Returns the first whole-word, case-insensitive occurrence of a `lexical_tokens` token.
+///
+/// A word ends where the tokenizer's lowercased text would split: U+0130 lowercases to `i` plus a
+/// combining dot, so it bounds a word instead of joining it.
+fn first_whole_word(text: &str, token: &str) -> Option<std::ops::Range<usize>> {
+    let is_word_char =
+        |ch: char| ch.is_alphanumeric() && ch.to_lowercase().all(char::is_alphanumeric);
+    let mut word_start = None;
+    for (index, character) in text.char_indices().chain([(text.len(), ' ')]) {
+        match (is_word_char(character), word_start) {
+            (true, None) => word_start = Some(index),
+            (false, Some(start)) => {
+                let word = &text[start..index];
+                // ASCII lowercasing is context-free, so it equals `str::to_lowercase` without allocating.
+                let matches = if word.is_ascii() {
+                    word.eq_ignore_ascii_case(token)
+                } else {
+                    word.to_lowercase() == token
+                };
+                if matches {
+                    return Some(start..index);
+                }
+                word_start = None;
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Anchors are ordered rarest first; the first anchor the served fragment can show decides the snippet.
+/// Whether a fragment shows the anchor is judged on the rendered text: escaping can push a match past the cap
+/// that the raw text kept, and compression drops filler words and compresses code whose fences fall outside
+/// the window. A window without its anchor carries less evidence than the prefix.
+fn user_hint_snippet(body: String, anchors: &[&str]) -> String {
+    let mut prefix_fragment = None;
+    for anchor in anchors {
+        let Some(hit) = first_whole_word(&body, anchor) else {
+            continue;
+        };
+        let prefix = prefix_fragment.get_or_insert_with(|| user_hint_fragment(&body));
+        if first_whole_word(prefix, anchor).is_some() {
+            return body;
+        }
+        // The rendered window is `…` + left context + anchor + `…`, so a long anchor gets less context.
+        // Bytes bound UTF-16 units from above, so the byte length is a safe stand-in.
+        let context = (USER_HINT_FRAGMENT_CHAR_CAP / 2)
+            .min((USER_HINT_FRAGMENT_CHAR_CAP - 2).saturating_sub(hit.len()));
+        let window = crate::memory_tool::snippet_around_match(&body, hit, context);
+        if first_whole_word(&user_hint_fragment(&window), anchor).is_some() {
+            return window;
+        }
+    }
+    body
+}
+
+fn user_hint_fragment(snippet: &str) -> String {
+    let compressed = crate::terse_text_compression::compress(
+        snippet,
+        crate::terse_text_compression::TerseTextCompressionLevel::Ultra,
+    );
+    one_line_fragment(
+        &neutralize_user_hint_markup(&compressed),
+        USER_HINT_FRAGMENT_CHAR_CAP,
+    )
+}
+
+/// Stored segment tiers are unescaped, and the hint lands in the user's own text block.
+/// Escaping and removing tag imitations keeps a fragment from closing the hint envelope or forging another marker.
+/// The fragment cap applies afterwards, so escaping cannot push a fragment past it.
+fn neutralize_user_hint_markup(text: &str) -> Cow<'_, str> {
+    let text = if text.contains('\u{a7}') {
+        Cow::Owned(strip_tag_notation(text))
+    } else {
+        Cow::Borrowed(text)
+    };
+    if text.contains(['&', '<', '>']) {
+        Cow::Owned(crate::decay_render::escape_xml_content(&text))
+    } else {
+        text
+    }
+}
+
 fn render_user_hint(results: &[crate::memory_tool::MemorySearchResult]) -> Option<String> {
     if results.is_empty() {
         return None;
@@ -8769,16 +8865,7 @@ fn render_user_hint(results: &[crate::memory_tool::MemorySearchResult]) -> Optio
     let lines = results
         .iter()
         .take(USER_HINT_RESULT_LIMIT)
-        .map(|result| {
-            let fragment = crate::terse_text_compression::compress(
-                &result.snippet,
-                crate::terse_text_compression::TerseTextCompressionLevel::Ultra,
-            );
-            format!(
-                "- {}",
-                one_line_fragment(&fragment, USER_HINT_FRAGMENT_CHAR_CAP)
-            )
-        })
+        .map(|result| format!("- {}", user_hint_fragment(&result.snippet)))
         .filter(|line| line.len() > 2)
         .collect::<Vec<_>>();
     if lines.is_empty() {
