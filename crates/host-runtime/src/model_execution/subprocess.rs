@@ -1719,12 +1719,16 @@ pub(crate) fn parse_failure(harness: Harness, detail: &str) -> BackendTerminal {
 /// Authentication and context-overflow classes are checked first because their phrasing can also mention retries.
 pub(crate) fn classify_failure_text(text: &str) -> ErrorClass {
     let lower = text.to_ascii_lowercase();
-    const AUTH: [&str; 5] = [
+    // Bedrock reports unrecognized and expired credentials as HTTP 403 exceptions.
+    // `AccessDeniedException` is also a 403 but denies one model or inference profile; an auth class would block every model of the provider, so it is checked before the 403 rule.
+    const AUTH: [&str; 7] = [
         "api key",
         "unauthorized",
         "authentication",
         "credential",
         "forbidden",
+        "unrecognizedclientexception",
+        "expiredtokenexception",
     ];
     const AUTH_CODES: [&str; 2] = ["401", "403"];
     const OVERFLOW: [&str; 20] = [
@@ -1749,7 +1753,8 @@ pub(crate) fn classify_failure_text(text: &str) -> ErrorClass {
         "model_context_window_exceeded",
         "context size has been exceeded",
     ];
-    const TRANSIENT: [&str; 8] = [
+    // Bedrock names: ThrottlingException, ServiceUnavailableException, InternalServerException, ModelErrorException, ModelTimeoutException, ModelNotReadyException.
+    const TRANSIENT: [&str; 16] = [
         "rate limit",
         "rate_limit",
         "overloaded",
@@ -1757,9 +1762,18 @@ pub(crate) fn classify_failure_text(text: &str) -> ErrorClass {
         "timed out",
         "temporarily",
         "try again",
+        "trying again",
         "unavailable",
+        "throttl",
+        "too many requests",
+        "internal server error",
+        "internalserverexception",
+        "bad gateway",
+        "modelerrorexception",
+        "modelnotreadyexception",
     ];
     const TRANSIENT_CODES: [&str; 3] = ["429", "503", "529"];
+    const SERVER_ERROR_CODES: [&str; 3] = ["500", "502", "504"];
     // Explicit rate-limit evidence outranks the broad authentication phrases: "rate limit exceeded for this API key" is a retry-after condition, not a missing credential.
     if ["rate limit", "rate_limit"]
         .iter()
@@ -1767,6 +1781,9 @@ pub(crate) fn classify_failure_text(text: &str) -> ErrorClass {
         || contains_status_code(&lower, "429")
     {
         return ErrorClass::Transient;
+    }
+    if lower.contains("accessdeniedexception") {
+        return ErrorClass::Permanent;
     }
     if AUTH.iter().any(|needle| lower.contains(needle))
         || AUTH_CODES
@@ -1782,6 +1799,9 @@ pub(crate) fn classify_failure_text(text: &str) -> ErrorClass {
         || TRANSIENT_CODES
             .iter()
             .any(|code| contains_status_code(&lower, code))
+        || SERVER_ERROR_CODES
+            .iter()
+            .any(|code| contains_server_error_code(&lower, code))
     {
         return ErrorClass::Transient;
     }
@@ -1791,11 +1811,37 @@ pub(crate) fn classify_failure_text(text: &str) -> ErrorClass {
 /// A substring match misreads `401` in `req-40123` or `req-x401abc`.
 /// Boundaries are non-alphanumeric on both sides, so `status 401`, `(401)`, and `401:` match while `x401abc` does not.
 fn contains_status_code(haystack: &str, code: &str) -> bool {
-    haystack.match_indices(code).any(|(index, _)| {
+    status_code_matches(haystack, code).next().is_some()
+}
+
+/// Stack traces, size limits, and log timestamps print `500`, `502`, and `504` as plain numbers, so a bounded match alone would retry deterministic failures.
+/// A server-error code counts only in parentheses or directly after the word `status`, `statuscode`, `http`, or `code`; spaces, `:`, `=`, quotes, and an HTTP version such as `/1.1` may separate the word from the code.
+/// `error` is not a status word: `validation error: 500 characters maximum` is a size limit.
+fn contains_server_error_code(haystack: &str, code: &str) -> bool {
+    status_code_matches(haystack, code).any(|index| {
+        let before = &haystack[..index];
+        if before.ends_with('(') && haystack[index + code.len()..].starts_with(')') {
+            return true;
+        }
+        let word = before
+            .trim_end_matches([' ', ':', '=', '"', '\''])
+            .trim_end_matches(|c: char| c.is_ascii_digit() || c == '.')
+            .trim_end_matches('/')
+            .rsplit(|c: char| !c.is_ascii_alphanumeric())
+            .next()
+            .unwrap_or_default();
+        matches!(word, "status" | "statuscode" | "http" | "code")
+    })
+}
+
+/// Yields the byte index of each occurrence of `code` bounded by non-alphanumeric characters or the ends of `haystack`.
+fn status_code_matches<'a>(haystack: &'a str, code: &'a str) -> impl Iterator<Item = usize> + 'a {
+    haystack.match_indices(code).filter_map(move |(index, _)| {
         let before = haystack[..index].chars().next_back();
         let after = haystack[index + code.len()..].chars().next();
-        before.is_none_or(|c| !c.is_ascii_alphanumeric())
-            && after.is_none_or(|c| !c.is_ascii_alphanumeric())
+        (before.is_none_or(|c| !c.is_ascii_alphanumeric())
+            && after.is_none_or(|c| !c.is_ascii_alphanumeric()))
+        .then_some(index)
     })
 }
 
@@ -2648,6 +2694,121 @@ mod tests {
         CREDENTIAL_VALUE_CAP_BYTES, CREDENTIAL_VARIABLES, CredentialMechanism, CredentialRowError,
         EnvSnapshot, credential_variable_mechanism, provider_row_spec,
     };
+
+    #[test]
+    fn bedrock_failure_text_classifies_retryable_and_credential_errors() {
+        use super::super::backend::ErrorClass::{
+            AuthRequired, ContextOverflow, Permanent, Transient,
+        };
+        use super::classify_failure_text;
+        let cases = [
+            (
+                "An error occurred (ThrottlingException) when calling the Converse operation: Too many requests, please wait before trying again.",
+                Transient,
+            ),
+            (
+                "ThrottlingException: Too many tokens, please wait before trying again.",
+                Transient,
+            ),
+            (
+                "AI_APICallError: Too many requests, please wait before trying again.",
+                Transient,
+            ),
+            (
+                "An error occurred (ServiceUnavailableException) when calling the ConverseStream operation: Bedrock is unable to process your request.",
+                Transient,
+            ),
+            (
+                "An error occurred (InternalServerException) when calling the Converse operation: The server encountered an error processing your request.",
+                Transient,
+            ),
+            ("InternalServerException: Internal Server Error", Transient),
+            (
+                "An error occurred (ModelErrorException) when calling the InvokeModel operation: The system encountered an unexpected error during processing. Try your request again.",
+                Transient,
+            ),
+            (
+                "ModelTimeoutException: The request took too long to process. Processing time exceeded the model timeout length.",
+                Transient,
+            ),
+            (
+                "An error occurred (ModelNotReadyException) when calling the Converse operation: Model is not ready for inference.",
+                Transient,
+            ),
+            ("AI_APICallError: Bad Gateway", Transient),
+            ("provider returned status 500", Transient),
+            ("upstream error (502)", Transient),
+            ("HTTP 504: gateway request failed", Transient),
+            ("request failed with status code 502", Transient),
+            (
+                r#"{"statusCode":500,"message":"upstream failed"}"#,
+                Transient,
+            ),
+            // HTTP/2 status lines carry no reason phrase, so the version and code are the only evidence.
+            ("HTTP/1.1 500", Transient),
+            ("HTTP/2 502", Transient),
+            // A 5xx number outside a status context is a count, a line number, or a timestamp field.
+            ("description must be at most 500 characters", Permanent),
+            (
+                "ValidationException: validation error: 500 characters maximum",
+                Permanent,
+            ),
+            (
+                "TypeError: model.stream is not a function\n    at run (/app/dist/cli.js:502:17)",
+                Permanent,
+            ),
+            (
+                "2026-09-25 06:50:23,504 fatal: unsupported model",
+                Permanent,
+            ),
+            // Access denial is scoped to one model or inference profile, so another model under the same credentials can still succeed.
+            (
+                "An error occurred (AccessDeniedException) when calling the Converse operation: You don't have access to the model with the specified model ID.",
+                Permanent,
+            ),
+            (
+                "AccessDeniedException: User: arn:aws:iam::123456789012:user/ci is not authorized to perform: bedrock:InvokeModel on resource: arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-v2",
+                Permanent,
+            ),
+            // Pi prints `<exception>: <status>: <body>` when the SDK message omits the body, so the 403 rides along with the exception name.
+            (
+                r#"AccessDeniedException: 403: {"message":"You don't have access to the model with the specified model ID."}"#,
+                Permanent,
+            ),
+            (
+                "An error occurred (UnrecognizedClientException) when calling the Converse operation: The security token included in the request is invalid.",
+                AuthRequired,
+            ),
+            (
+                "ExpiredTokenException: The security token included in the request is expired",
+                AuthRequired,
+            ),
+            (
+                "An error occurred (ValidationException) when calling the Converse operation: The provided model identifier is invalid.",
+                Permanent,
+            ),
+            (
+                "An error occurred (ValidationException) when calling the Converse operation: Input is too long for requested model.",
+                ContextOverflow,
+            ),
+            (
+                "ResourceNotFoundException: Could not resolve the foundation model from the provided model identifier.",
+                Permanent,
+            ),
+            ("request req-5001 failed validation", Permanent),
+            ("model id x500abc is not supported", Permanent),
+            ("unsupported parameter at offset 15002", Permanent),
+        ];
+        let mismatches: Vec<_> = cases
+            .iter()
+            .filter_map(|&(text, expected)| {
+                let actual = classify_failure_text(text);
+                (actual != expected)
+                    .then(|| format!("{text:?}: expected {expected:?}, got {actual:?}"))
+            })
+            .collect();
+        assert!(mismatches.is_empty(), "{}", mismatches.join("\n"));
+    }
 
     #[test]
     fn credential_variables_are_the_union_of_every_supported_row() {
