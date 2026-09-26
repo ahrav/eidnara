@@ -8446,18 +8446,12 @@ fn run_user_hint_lexical_search(
                 })
                 .sum::<f64>();
             let normalized = score / total_query_weight.max(f64::EPSILON);
-            // The rarest matched token anchors the served fragment; ties keep the first token in sorted order.
-            let anchor = matched
-                .iter()
-                .min_by_key(|token| *document_frequency.get(**token).unwrap_or(&0))
-                .map(|token| (*token).clone())
-                .unwrap_or_default();
             Some((
                 normalized,
                 matched.len(),
                 candidate.recency,
                 candidate.result,
-                anchor,
+                matched,
             ))
         })
         .collect::<Vec<_>>();
@@ -8482,8 +8476,14 @@ fn run_user_hint_lexical_search(
     let selected: Vec<_> = scored
         .into_iter()
         .take(USER_HINT_RESULT_LIMIT)
-        .map(|(_, _, _, mut result, anchor)| {
-            result.snippet = user_hint_snippet(std::mem::take(&mut result.snippet), &anchor);
+        .map(|(_, _, _, mut result, mut matched)| {
+            // Matched tokens are in sorted order, so the stable sort puts the rarest first and breaks ties by that order.
+            matched.sort_by_key(|token| *document_frequency.get(*token).unwrap_or(&0));
+            let anchors = matched
+                .iter()
+                .map(|token| token.as_str())
+                .collect::<Vec<_>>();
+            result.snippet = user_hint_snippet(std::mem::take(&mut result.snippet), &anchors);
             result
         })
         .collect();
@@ -8616,7 +8616,14 @@ fn first_whole_word(text: &str, token: &str) -> Option<std::ops::Range<usize>> {
         match (character.is_alphanumeric(), word_start) {
             (true, None) => word_start = Some(index),
             (false, Some(start)) => {
-                if text[start..index].to_lowercase() == token {
+                let word = &text[start..index];
+                // ASCII lowercasing is context-free, so it equals `str::to_lowercase` without allocating.
+                let matches = if word.is_ascii() {
+                    word.eq_ignore_ascii_case(token)
+                } else {
+                    word.to_lowercase() == token
+                };
+                if matches {
                     return Some(start..index);
                 }
                 word_start = None;
@@ -8627,18 +8634,29 @@ fn first_whole_word(text: &str, token: &str) -> Option<std::ops::Range<usize>> {
     None
 }
 
-/// Keeps the segment body when its prefix fragment already shows the anchor token.
-/// Otherwise the snippet is a window around the anchor's first occurrence, so the evidence survives the fragment cap.
-fn user_hint_snippet(body: String, anchor: &str) -> String {
-    let Some(hit) = first_whole_word(&body, anchor) else {
-        return body;
-    };
-    if utf16_len(&body[..hit.end]) < USER_HINT_FRAGMENT_CHAR_CAP
-        || first_whole_word(&user_hint_fragment(&body), anchor).is_some()
-    {
-        return body;
+/// Anchors are ordered rarest first; the first anchor the served fragment can show decides the snippet.
+/// A window is kept only when its rendered fragment still shows the anchor: compression drops filler words and
+/// compresses code whose fences fall outside the window, and a window without its anchor carries less evidence than the prefix.
+fn user_hint_snippet(body: String, anchors: &[&str]) -> String {
+    let mut prefix_fragment = None;
+    for anchor in anchors {
+        let Some(hit) = first_whole_word(&body, anchor) else {
+            continue;
+        };
+        if utf16_len(&body[..hit.end]) < USER_HINT_FRAGMENT_CHAR_CAP {
+            return body;
+        }
+        let prefix = prefix_fragment.get_or_insert_with(|| user_hint_fragment(&body));
+        if first_whole_word(prefix, anchor).is_some() {
+            return body;
+        }
+        let window =
+            crate::memory_tool::snippet_around_match(&body, hit, USER_HINT_FRAGMENT_CHAR_CAP / 2);
+        if first_whole_word(&user_hint_fragment(&window), anchor).is_some() {
+            return window;
+        }
     }
-    crate::memory_tool::snippet_around_match(&body, hit, USER_HINT_FRAGMENT_CHAR_CAP / 2)
+    body
 }
 
 fn user_hint_fragment(snippet: &str) -> String {
@@ -8646,7 +8664,26 @@ fn user_hint_fragment(snippet: &str) -> String {
         snippet,
         crate::terse_text_compression::TerseTextCompressionLevel::Ultra,
     );
-    one_line_fragment(&compressed, USER_HINT_FRAGMENT_CHAR_CAP)
+    one_line_fragment(
+        &neutralize_user_hint_markup(&compressed),
+        USER_HINT_FRAGMENT_CHAR_CAP,
+    )
+}
+
+/// Stored segment tiers are unescaped, and the hint lands in the user's own text block.
+/// Escaping and removing tag imitations keeps a fragment from closing the hint envelope or forging another marker.
+/// The fragment cap applies afterwards, so escaping cannot push a fragment past it.
+fn neutralize_user_hint_markup(text: &str) -> Cow<'_, str> {
+    let text = if text.contains('\u{a7}') {
+        Cow::Owned(strip_tag_notation(text))
+    } else {
+        Cow::Borrowed(text)
+    };
+    if text.contains(['&', '<', '>']) {
+        Cow::Owned(crate::decay_render::escape_xml_content(&text))
+    } else {
+        text
+    }
 }
 
 fn render_user_hint(results: &[crate::memory_tool::MemorySearchResult]) -> Option<String> {
