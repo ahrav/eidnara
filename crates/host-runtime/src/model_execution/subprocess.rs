@@ -3057,7 +3057,7 @@ mod tests {
 
         use crate::model_execution::backend::{
             BackendError, BackendTerminal, ErrorClass, Harness, OPENCODE_PROVIDER_ERROR_MESSAGE,
-            PI_PROVIDER_ERROR_MESSAGE, is_provider_reported_failure,
+            is_provider_reported_failure,
         };
 
         let provider = |message: &str| {
@@ -3071,20 +3071,16 @@ mod tests {
         let cleanup = Err(super::CleanupFailure {
             kind: io::ErrorKind::PermissionDenied,
         });
+        let refusal = format!("{OPENCODE_PROVIDER_ERROR_MESSAGE} (status 400)");
         let decorated = [
-            super::merge_cleanup(provider(PI_PROVIDER_ERROR_MESSAGE), cleanup),
-            super::merge_record_retained(Harness::Pi, provider(PI_PROVIDER_ERROR_MESSAGE), true),
-            super::merge_cleanup(provider(OPENCODE_PROVIDER_ERROR_MESSAGE), cleanup),
-            super::merge_cleanup(
-                provider(&format!("{OPENCODE_PROVIDER_ERROR_MESSAGE} (status 400)")),
-                cleanup,
-            ),
+            super::merge_cleanup(provider(&refusal), cleanup),
+            super::merge_record_retained(Harness::OpenCode, provider(&refusal), true),
         ];
         for terminal in decorated {
             let BackendTerminal::Failed(error) = terminal else {
                 panic!("expected a failed terminal");
             };
-            assert_ne!(error.message, PI_PROVIDER_ERROR_MESSAGE);
+            assert_ne!(error.message, refusal);
             assert!(
                 is_provider_reported_failure(&error.message),
                 "{}",
@@ -3092,15 +3088,16 @@ mod tests {
             );
         }
         assert!(!is_provider_reported_failure(&format!(
-            "{PI_PROVIDER_ERROR_MESSAGE} while the host was preparing the harness"
+            "{refusal} while the host was preparing the harness"
         )));
     }
 
-    /// A provider status that names the request's content counts against the chunk; one that names the configuration, such as an unknown model, recurs for any chunk until the configuration changes.
+    /// A provider status that names the request's content counts against the chunk; one that names the configuration, such as an unknown model, recurs for any chunk until the configuration changes, and a terminal without a status cannot tell the two apart.
     #[test]
     fn only_content_rejection_statuses_are_provider_reported() {
         use crate::model_execution::backend::{
-            OPENCODE_PROVIDER_ERROR_MESSAGE, is_provider_reported_failure,
+            OPENCODE_PROVIDER_ERROR_MESSAGE, PI_PROVIDER_ERROR_MESSAGE,
+            is_provider_reported_failure,
         };
 
         for status in [400, 413, 422] {
@@ -3115,8 +3112,9 @@ mod tests {
             let message = format!("{OPENCODE_PROVIDER_ERROR_MESSAGE} (status {status})");
             assert!(!is_provider_reported_failure(&message), "{message}");
         }
-        assert!(is_provider_reported_failure(
+        assert!(!is_provider_reported_failure(
             OPENCODE_PROVIDER_ERROR_MESSAGE
         ));
+        assert!(!is_provider_reported_failure(PI_PROVIDER_ERROR_MESSAGE));
     }
 }

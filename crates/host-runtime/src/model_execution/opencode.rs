@@ -476,9 +476,20 @@ mod tests {
 
     #[test]
     fn provider_errors_are_provider_reported() {
-        for data in [
-            serde_json::json!({"message": "Output blocked by content filtering policy", "statusCode": 400}),
-            serde_json::json!({"message": "Output blocked by content filtering policy"}),
+        for (data, reported) in [
+            (
+                serde_json::json!({"message": "Output blocked by content filtering policy", "statusCode": 400}),
+                true,
+            ),
+            // Without a status the text classification alone cannot separate a refusal from an unknown model.
+            (
+                serde_json::json!({"message": "Output blocked by content filtering policy"}),
+                false,
+            ),
+            (
+                serde_json::json!({"message": "model not found: prov/typo", "statusCode": 404}),
+                false,
+            ),
         ] {
             let terminal =
                 error_terminal(&serde_json::json!({"error": {"name": "APIError", "data": data}}));
@@ -486,8 +497,9 @@ mod tests {
                 panic!("expected a failed terminal");
             };
             assert_eq!(error.class, ErrorClass::Permanent);
-            assert!(
+            assert_eq!(
                 crate::model_execution::backend::is_provider_reported_failure(&error.message),
+                reported,
                 "{}",
                 error.message
             );

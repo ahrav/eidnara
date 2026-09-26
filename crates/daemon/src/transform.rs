@@ -5594,7 +5594,7 @@ fn apply_ingress_meta(
             .insert(re_adoption.mid.clone(), projected_vector(&re_adoption.mid));
     }
     // A re-adopted message changes the bytes a retried chunk at or before it would send; its failure count no longer describes those bytes.
-    if let Some(retry) = meta.history_summarizer.chunk_retry
+    if let Some(retry) = &meta.history_summarizer.chunk_retry
         && projection.blocks.iter().any(|block| {
             block.ordinal >= retry.chunk_start
                 && enforcement
@@ -15490,6 +15490,7 @@ pub(crate) mod tests {
             Some(memory_store::HistorySummarizerChunkRetry {
                 chunk_start,
                 failures: 8,
+                model_chain: vec!["prov/model".to_string()],
             })
         };
 

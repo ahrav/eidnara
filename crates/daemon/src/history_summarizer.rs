@@ -253,7 +253,7 @@ pub fn fire(
         // A fire clears the prior skip reason.
         last_no_fire: None,
         consecutive_publish_failures: current.consecutive_publish_failures,
-        chunk_retry: current.chunk_retry,
+        chunk_retry: current.chunk_retry.clone(),
         // A reservation left by an earlier firing is not this firing's to publish; its job stays a capped reservation the expiry sweep closes.
         memory_reviewer_reservation: None,
         ..current.carried_forward()
@@ -349,7 +349,7 @@ pub fn abandon_with_detail(
         failure_backoff_at_ms: Some(failure_backoff_at_ms),
         last_failure: detail.or_else(|| current.last_failure.clone()),
         consecutive_publish_failures: current.consecutive_publish_failures,
-        chunk_retry: current.chunk_retry,
+        chunk_retry: current.chunk_retry.clone(),
         memory_reviewer_reservation: current.memory_reviewer_reservation.clone(),
         ..current.carried_forward()
     };
@@ -357,19 +357,22 @@ pub fn abandon_with_detail(
     next
 }
 
-/// Counts one more failed firing on the chunk starting at `chunk_start`; a count kept for another chunk restarts at one.
+/// Counts one more failed firing on the chunk starting at `chunk_start` under `model_chain`; a count kept for another chunk or another chain restarts at one.
 pub fn record_chunk_failure(
     current: &HistorySummarizerDurableState,
     chunk_start: u64,
+    model_chain: &[String],
 ) -> HistorySummarizerDurableState {
     let failures = current
         .chunk_retry
-        .filter(|retry| retry.chunk_start == chunk_start)
+        .as_ref()
+        .filter(|retry| retry.chunk_start == chunk_start && retry.model_chain == model_chain)
         .map_or(0, |retry| retry.failures);
     let mut next = current.clone();
     next.chunk_retry = Some(HistorySummarizerChunkRetry {
         chunk_start,
         failures: failures.saturating_add(1),
+        model_chain: model_chain.to_vec(),
     });
     next
 }
@@ -496,7 +499,7 @@ fn keep_fields_other_writers_own(
     if next.firing_seq == durable.firing_seq {
         next.pending_eligibility = durable.pending_eligibility.clone();
     }
-    next.chunk_retry = durable.chunk_retry;
+    next.chunk_retry = durable.chunk_retry.clone();
     next.counters.published = durable.counters.published;
     next.counters.superseded_before_activation = durable.counters.superseded_before_activation;
     let in_flight = next.firing_seq;
@@ -2610,22 +2613,44 @@ mod tests {
 
     #[test]
     fn chunk_failures_count_per_chunk_and_ignore_provider_errors() {
-        let once = record_chunk_failure(&HistorySummarizerDurableState::default(), 5);
-        let twice = record_chunk_failure(&once, 5);
+        let chain = vec!["prov/model".to_string()];
+        let once = record_chunk_failure(&HistorySummarizerDurableState::default(), 5, &chain);
+        let twice = record_chunk_failure(&once, 5, &chain);
         assert_eq!(
             twice.chunk_retry,
             Some(HistorySummarizerChunkRetry {
                 chunk_start: 5,
                 failures: 2,
+                model_chain: chain.clone(),
             })
         );
         assert_eq!(
-            record_chunk_failure(&twice, 9).chunk_retry,
+            record_chunk_failure(&twice, 9, &chain).chunk_retry,
             Some(HistorySummarizerChunkRetry {
                 chunk_start: 9,
                 failures: 1,
+                model_chain: chain.clone(),
             }),
             "a different chunk restarts the count"
+        );
+        let other_chain = vec!["prov/other".to_string()];
+        assert_eq!(
+            record_chunk_failure(&twice, 5, &other_chain).chunk_retry,
+            Some(HistorySummarizerChunkRetry {
+                chunk_start: 5,
+                failures: 1,
+                model_chain: other_chain.clone(),
+            }),
+            "a different model chain restarts the count"
+        );
+        assert_eq!(
+            crate::history_summarizer_chunk::chunk_failures(
+                twice.chunk_retry.as_ref(),
+                5,
+                &other_chain
+            ),
+            0,
+            "a count under another chain does not shrink the chunk the new chain sees"
         );
         assert_eq!(
             abandon_with_detail(&twice, 1, None, AbandonClass::ProducerFailed).chunk_retry,
@@ -2648,7 +2673,8 @@ mod tests {
             ErrorClass::Permanent,
             provider_refusal
         )));
-        assert!(is_chunk_failure(&failed(
+        // Pi drops the provider's text, so its error stop cannot tell a refusal from an unknown model.
+        assert!(!is_chunk_failure(&failed(
             ErrorClass::Permanent,
             "pi assistant stopped with reason \"error\""
         )));
@@ -3508,6 +3534,7 @@ mod tests {
             chunk_retry: Some(HistorySummarizerChunkRetry {
                 chunk_start: 2,
                 failures: 7,
+                model_chain: vec!["prov/model".to_string()],
             }),
             ..Default::default()
         };
@@ -3553,10 +3580,11 @@ mod tests {
         assert_eq!(state.state, HistorySummarizerPhase::Idle);
         assert_eq!(state.chunk_retry, None, "{state:?}");
         assert_eq!(
-            record_chunk_failure(&state, 2).chunk_retry,
+            record_chunk_failure(&state, 2, &["prov/model".to_string()]).chunk_retry,
             Some(HistorySummarizerChunkRetry {
                 chunk_start: 2,
                 failures: 1,
+                model_chain: vec!["prov/model".to_string()],
             }),
             "the revised bytes start their own count"
         );
@@ -6259,6 +6287,7 @@ mod tests {
         awaiting.chunk_retry = Some(HistorySummarizerChunkRetry {
             chunk_start: 1,
             failures: 8,
+            model_chain: vec!["prov/model".to_string()],
         });
         let meta = test_meta_with_history_summarizer(awaiting);
         store
@@ -6276,6 +6305,7 @@ mod tests {
             Some(HistorySummarizerChunkRetry {
                 chunk_start: 1,
                 failures: 8,
+                model_chain: vec!["prov/model".to_string()],
             }),
             "the refire is still a placeholder firing"
         );

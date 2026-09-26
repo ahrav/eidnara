@@ -536,11 +536,13 @@ pub struct HistorySummarizerChunkRange {
     pub to_ordinal: u64,
 }
 
-/// Consecutive failed firings on the chunk that starts at `chunk_start`. Assembly reads it to vary the prompt, then shrink the chunk, so a chunk that fails deterministically cannot stall folding.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+/// Consecutive failed firings on the chunk that starts at `chunk_start` under `model_chain`. Assembly reads it to vary the prompt, then shrink the chunk, so a chunk that fails deterministically cannot stall folding; a count kept under another chain does not apply, so a configuration fix sends the bytes to the new models first.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HistorySummarizerChunkRetry {
     pub chunk_start: u64,
     pub failures: u32,
+    #[serde(default)]
+    pub model_chain: Vec<String>,
 }
 
 /// Content-sensitive identity for one message selected into a history_summarizer firing.
@@ -11645,7 +11647,7 @@ impl MemoryStore {
                 } else {
                     history_summarizer.consecutive_publish_failures
                 },
-                chunk_retry: history_summarizer.chunk_retry,
+                chunk_retry: history_summarizer.chunk_retry.clone(),
                 memory_reviewer_reservation: history_summarizer.memory_reviewer_reservation.clone(),
                 ..history_summarizer.carried_forward()
             };
@@ -21491,6 +21493,7 @@ mod tests {
                 chunk_retry: Some(HistorySummarizerChunkRetry {
                     chunk_start: 10,
                     failures: 3,
+                    model_chain: vec!["prov/model".to_string()],
                 }),
                 memory_reviewer_nonadmission: MemoryReviewerNonadmission::default(),
                 memory_reviewer_reservation: None,
@@ -21550,6 +21553,7 @@ mod tests {
             Some(HistorySummarizerChunkRetry {
                 chunk_start: 10,
                 failures: 3,
+                model_chain: vec!["prov/model".to_string()],
             }),
             "abandonment keeps the chunk failure count",
         );

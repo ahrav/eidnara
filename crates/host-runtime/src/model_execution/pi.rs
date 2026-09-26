@@ -755,13 +755,18 @@ fn message_requests_tools(message: &serde_json::Value) -> bool {
 mod tests {
     use super::*;
 
+    /// The emitted message drops `errorMessage`, so a content refusal and a model the provider does not know arrive as the same string; neither can count against the chunk.
     #[test]
-    fn only_a_provider_error_stop_is_provider_reported() {
-        for (stop_reason, reported) in [("error", true), ("aborted", false)] {
+    fn a_pi_error_stop_is_not_a_content_rejection() {
+        for (stop_reason, error_message) in [
+            ("error", "Output blocked by content filtering policy"),
+            ("error", "model not found: prov/typo"),
+            ("aborted", "Output blocked by content filtering policy"),
+        ] {
             let message = serde_json::json!({
                 "role": "assistant",
                 "stopReason": stop_reason,
-                "errorMessage": "Output blocked by content filtering policy",
+                "errorMessage": error_message,
                 "content": [],
             });
             let Some((_, BackendTerminal::Failed(error))) =
@@ -769,9 +774,9 @@ mod tests {
             else {
                 panic!("expected a failed terminal for {stop_reason}");
             };
-            assert_eq!(
-                backend::is_provider_reported_failure(&error.message),
-                reported,
+            assert_eq!(error.class, ErrorClass::Permanent);
+            assert!(
+                !backend::is_provider_reported_failure(&error.message),
                 "{}",
                 error.message
             );

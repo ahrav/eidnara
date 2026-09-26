@@ -5497,8 +5497,9 @@ impl HandlerCore {
                     derive_history_summarizer_chunk_tokens(
                         config.history_summarizer_context_limit_tokens,
                     ),
-                    loaded.meta.history_summarizer.chunk_retry,
+                    loaded.meta.history_summarizer.chunk_retry.as_ref(),
                     range.from_ordinal,
+                    &config.model_chain,
                 );
                 let _ = history_summarizer_chunk::presented_input(&mut chunk, token_budget);
                 let prior_history_segments = match store.load_history_segments(&session_id) {
@@ -5615,6 +5616,7 @@ impl HandlerCore {
                                 &store,
                                 &session_id,
                                 range.from_ordinal,
+                                &config.model_chain,
                             );
                         }
                     }
@@ -6308,6 +6310,7 @@ impl HandlerCore {
                         &store,
                         &session_id,
                         firing.from_ordinal,
+                        &firing.model_chain,
                     );
                 }
                 outcome
@@ -18161,6 +18164,7 @@ fn record_history_summarizer_chunk_failure(
     store: &MemoryStore,
     session_id: &str,
     chunk_start: u64,
+    model_chain: &[String],
 ) {
     for attempt in 0..2 {
         let loaded = match store.load(session_id) {
@@ -18176,8 +18180,11 @@ fn record_history_summarizer_chunk_failure(
             return;
         }
         let mut meta = loaded.meta.clone();
-        meta.history_summarizer =
-            history_summarizer::record_chunk_failure(&meta.history_summarizer, chunk_start);
+        meta.history_summarizer = history_summarizer::record_chunk_failure(
+            &meta.history_summarizer,
+            chunk_start,
+            model_chain,
+        );
         match store.commit(session_id, loaded.row_version, &loaded.core, &meta) {
             Ok(_) => return,
             Err(MemoryStoreError::CasConflict { .. }) if attempt == 0 => continue,
@@ -42646,6 +42653,7 @@ mod tests {
             chunk_retry: Some(memory_store::HistorySummarizerChunkRetry {
                 chunk_start: 1,
                 failures,
+                model_chain: default_test_config().model_chain,
             }),
             ..HistorySummarizerDurableState::default()
         };
@@ -42733,6 +42741,7 @@ mod tests {
             chunk_retry: Some(memory_store::HistorySummarizerChunkRetry {
                 chunk_start: 1,
                 failures: 2,
+                model_chain: default_test_config().model_chain,
             }),
             ..HistorySummarizerDurableState::default()
         };
@@ -42757,6 +42766,7 @@ mod tests {
             Some(memory_store::HistorySummarizerChunkRetry {
                 chunk_start: 1,
                 failures: 3,
+                model_chain: default_test_config().model_chain,
             }),
             "{state:?}"
         );

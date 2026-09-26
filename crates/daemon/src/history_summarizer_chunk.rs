@@ -594,9 +594,13 @@ fn retry_token_budget(token_budget: usize, failures: u32) -> usize {
     (token_budget >> halvings).max(1)
 }
 
-pub fn chunk_failures(chunk_retry: Option<HistorySummarizerChunkRetry>, chunk_start: u64) -> u32 {
+pub fn chunk_failures(
+    chunk_retry: Option<&HistorySummarizerChunkRetry>,
+    chunk_start: u64,
+    model_chain: &[String],
+) -> u32 {
     chunk_retry
-        .filter(|retry| retry.chunk_start == chunk_start)
+        .filter(|retry| retry.chunk_start == chunk_start && retry.model_chain == model_chain)
         .map_or(0, |retry| retry.failures)
 }
 
@@ -604,10 +608,14 @@ pub fn chunk_failures(chunk_retry: Option<HistorySummarizerChunkRetry>, chunk_st
 /// A reattachment uses the same budget because an in-flight firing does not change the durable count.
 pub fn firing_token_budget(
     configured_budget: usize,
-    chunk_retry: Option<HistorySummarizerChunkRetry>,
+    chunk_retry: Option<&HistorySummarizerChunkRetry>,
     chunk_start: u64,
+    model_chain: &[String],
 ) -> usize {
-    retry_token_budget(configured_budget, chunk_failures(chunk_retry, chunk_start))
+    retry_token_budget(
+        configured_budget,
+        chunk_failures(chunk_retry, chunk_start, model_chain),
+    )
 }
 
 /// The ordinal a placeholder chunk must reach when a tool arc that opens the chunk has its result past the chunk end, so its placeholder cannot stop before the arc; `None` when the chunk already ends outside such an arc or the result lies at or past `eligible_end`.
@@ -832,7 +840,11 @@ pub fn assemble_history_summarizer_firing(
             },
         ));
     }
-    let chunk_failures = chunk_failures(snapshot.chunk_retry, chunk_start);
+    let chunk_failures = chunk_failures(
+        snapshot.chunk_retry.as_ref(),
+        chunk_start,
+        &config.model_chain,
+    );
     let token_budget = retry_token_budget(config.token_budget, chunk_failures);
     let mut chunk =
         build_history_summarizer_chunk(messages, live, chunk_start, token_budget, eligible_end);
@@ -1905,6 +1917,7 @@ mod tests {
         meta.history_summarizer.chunk_retry = Some(memory_store::HistorySummarizerChunkRetry {
             chunk_start: 0,
             failures,
+            model_chain: vec!["prov/model".to_string()],
         });
         store
             .commit("ses-retry", loaded.row_version, &loaded.core, &meta)
