@@ -336,7 +336,11 @@ the shared-shell checks at `wire.rs:1749-1814`), and
 `decode_and_projection_fit_the_declared_pool` checks every projection block
 points into the request's shells; the projection now shares the shell whenever
 the effective synthetic flag matches (`wire.rs` `project_messages_from_state`).
-No input-drop sequence was added.
+No input-drop sequence was added. #828 deletes
+`reattach_shares_the_decoded_shell_and_unknown_envelope_fields_are_discarded`
+and the shared-shell checks at `wire.rs:1749-1814` with prefix reattachment;
+`projection_rebuilds_only_the_shell_whose_synthetic_flag_changes` still checks
+shell sharing through the projected blocks.
 Guarantee: Decoded requests and retained projections own their data, remain
 Send plus static, and share unchanged prefix shells without depending on the
 body buffer's lifetime.

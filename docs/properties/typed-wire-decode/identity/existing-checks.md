@@ -101,7 +101,7 @@ Source: `crates/daemon/src/wire.rs`.
 | 1578 | `empty_and_reserved_message_ids_are_rejected` | Rejects empty or hash-containing mids. | unaudited |
 | 1595 | `duplicate_message_ids_are_rejected_across_the_incremental_prefix` | Checks duplicate identity rejection across prefix boundary. | unaudited; #828 deletes the incremental arm and renames the test `duplicate_message_ids_are_rejected` |
 | 1624 | `reduced_tool_result_keeps_failure_variant_and_output_extras` | Preserves tool error class and output extras on reduction. | unaudited |
-| 1708 | `reattach_keeps_block_level_original_but_rebuilds_the_message_shell` | Pins old block-original versus message-shell behavior. | unaudited |
+| 1708 | `reattach_keeps_block_level_original_but_rebuilds_the_message_shell` | Pins old block-original versus message-shell behavior. | deleted by #828 with the mechanism it checked; renamed `reattach_shares_the_decoded_shell_and_unknown_envelope_fields_are_discarded` before #828 |
 | 1749 | `repeated_prefix_reattachment_shares_canonical_shells` | Checks repeated sharing without mutation of raw ingress. | deleted by #828 with the mechanism it checked |
 | 1796 | `shared_ingress_is_send_and_preserves_decode_refusals` | Compile-time Send/static and malformed-input assertions. | unaudited |
 | 1818 | `incremental_projection_checks_effective_synthetic_status` | Effective synthetic status invalidates unsafe prefix reuse. | deleted by #828 with the mechanism it checked |

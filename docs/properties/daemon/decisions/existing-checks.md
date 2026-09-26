@@ -446,10 +446,14 @@ cover tool-result pairing, and `wire.rs:1258` and `wire.rs:1283` assert
 reaches `wire.rs:629`.
 
 Update, 2026-09-26: [#828](https://github.com/ahrav/eidnara/issues/828) deletes
-`projection_retained_bytes_counts_wire_and_frontier_allocations_once` and
-`incremental_projection_reuses_prefix_storage_and_preserves_tool_arc_state`, and
-reduces `duplicate_message_ids_are_rejected_across_the_incremental_prefix` to
-its full-projection arm as `duplicate_message_ids_are_rejected`. The daemon
+`projection_retained_bytes_counts_wire_and_frontier_allocations_once`,
+`incremental_projection_reuses_prefix_storage_and_preserves_tool_arc_state`,
+`incremental_projection_checks_effective_synthetic_status`, and
+`reattach_keeps_block_level_original_but_rebuilds_the_message_shell` (by then
+named `reattach_shares_the_decoded_shell_and_unknown_envelope_fields_are_discarded`).
+It reduces `duplicate_message_ids_are_rejected_across_the_incremental_prefix` to
+its full-projection arm as `duplicate_message_ids_are_rejected`, so 8 of the 12
+`wire.rs` tests counted above remain. The daemon
 projects every request from its full input. Citations of these symbols here are
 historical at their stated baseline.
 
