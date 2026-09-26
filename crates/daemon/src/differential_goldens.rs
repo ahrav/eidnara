@@ -137,12 +137,10 @@ fn dg_goldens_exercise_incremental_native_differential_mode() {
             "render_config": "dg",
             "serve_native": true,
             "messages": ingress,
-            "full_array_fingerprint": format!("fp-{}", case.id),
         }))
         .expect("DG native transform request");
         let cache = Mutex::new(NativeAttachmentCache::new(1024 * 1024));
-        let mut first =
-            TransformResponse::passthrough(served.clone(), request.full_array_fingerprint.clone());
+        let mut first = TransformResponse::passthrough(served.clone());
         let first_attachment = attach_native_messages_incremental(
             &mut first,
             &request,
@@ -151,14 +149,12 @@ fn dg_goldens_exercise_incremental_native_differential_mode() {
             None,
             None,
             false,
-            None,
             0,
             &crate::edit_recipe::Revision::parse("test-output").unwrap(),
             &cache,
             NativeCacheKeyMode::Normal,
         );
-        let mut replay =
-            TransformResponse::passthrough(served.clone(), request.full_array_fingerprint.clone());
+        let mut replay = TransformResponse::passthrough(served.clone());
         let replay_attachment = attach_native_messages_incremental(
             &mut replay,
             &request,
@@ -167,7 +163,6 @@ fn dg_goldens_exercise_incremental_native_differential_mode() {
             None,
             None,
             false,
-            None,
             0,
             &crate::edit_recipe::Revision::parse("test-output").unwrap(),
             &cache,

@@ -664,8 +664,8 @@ impl HandlerCore {
     /// Checkpoints admitted raw text before any transform can fold it away.
     /// Reasoning/tool blocks and synthetic summaries never enter extraction.
     ///
-    /// Only the request's own `delta_messages` (the array tail after tail-delta
-    /// expansion) are considered. Memo-seen fragments skip the store.
+    /// Only the trailing `delta_messages` of the request are considered; the
+    /// transform passes the whole array. Memo-seen fragments skip the store.
     ///
     /// Only `pi` sources are taken from the transform. Pi joins text blocks with
     /// `\n` exactly as `native_capture_fragments` does and marks synthetic text

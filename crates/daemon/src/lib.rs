@@ -1691,16 +1691,11 @@ impl TransformRequest {
         self.effective_execute_threshold.unwrap_or_else(fallback)
     }
 
-    /// The estimate includes one ready snapshot's cache keys and `Arc`.
-    #[cfg(test)]
-    pub(crate) fn retained_bytes(&self) -> usize {
-        self.retained_bytes_with_charges(None)
-    }
-
-    fn retained_bytes_with_charges(&self, native_charge: Option<usize>) -> usize {
+    /// The ready snapshot's charge: the retained CK input and scalar fields, one snapshot's
+    /// cache keys, and its `Arc`. A snapshot never holds native messages, so none are charged.
+    pub(crate) fn snapshot_retained_bytes(&self) -> usize {
         use crate::retained_size::{
-            ARC_ALLOCATION_OVERHEAD_BYTES, btree_map_allocation_bytes,
-            cloned_string_retained_bytes, value_heap_bytes,
+            ARC_ALLOCATION_OVERHEAD_BYTES, btree_map_allocation_bytes, cloned_string_retained_bytes,
         };
         use std::mem::size_of;
 
@@ -1726,11 +1721,6 @@ impl TransformRequest {
                     .as_ref()
                     .map_or(0, String::capacity),
             )
-            .saturating_add(
-                self.full_array_fingerprint
-                    .as_ref()
-                    .map_or(0, String::capacity),
-            )
             .saturating_add(self.provider_error.as_ref().map_or(0, String::capacity))
             .saturating_add(self.channel2_nudge_state.capacity())
             .saturating_add(
@@ -1753,16 +1743,6 @@ impl TransformRequest {
                 .map(|(key, value)| key.capacity().saturating_add(value.capacity()))
                 .sum::<usize>(),
         );
-        let native_messages = native_charge.unwrap_or_else(|| {
-            self.native_messages.as_ref().map_or(0, |messages| {
-                retained_size::shared_value_vec_retained_bytes(
-                    messages.capacity(),
-                    messages
-                        .iter()
-                        .map(|message| native_value_retained_bytes(message)),
-                )
-            })
-        });
         let messages = self
             .messages
             .capacity()
@@ -1773,7 +1753,6 @@ impl TransformRequest {
                     .map(|message| retained_size::ingress_message_retained_bytes(message))
                     .sum::<usize>(),
             );
-        let tail_delta = self.tail_delta.as_ref().map_or(0, value_heap_bytes);
         let declared_trim = self.declared_trim.as_ref().map_or(0, |trim| {
             trim.flat_boundary_id
                 .capacity()
@@ -1800,9 +1779,7 @@ impl TransformRequest {
         size_of::<Self>()
             .saturating_add(direct_strings)
             .saturating_add(prompt_surface)
-            .saturating_add(native_messages)
             .saturating_add(messages)
-            .saturating_add(tail_delta)
             .saturating_add(declared_trim)
             .saturating_add(constituents)
             .saturating_add(ARC_ALLOCATION_OVERHEAD_BYTES)
@@ -2002,13 +1979,6 @@ impl TransformSnapshotCache {
                 TransformSnapshotLookup::Ready(ready)
             }
             None => TransformSnapshotLookup::Missing,
-        }
-    }
-
-    fn ready_delta_request(&self, session_id: &str) -> Option<Arc<TransformRequest>> {
-        match self.entries.get(session_id) {
-            Some(TransformSnapshot::Ready { request, .. }) => Some(Arc::clone(request)),
-            _ => None,
         }
     }
 
@@ -2283,6 +2253,7 @@ pub const PEAK_SEARCH_CONNECTIONS: u64 = 2;
 /// Each search projection connection holds `search_projection::CACHE_KIB` of page cache.
 /// The memory store's prepared-statement cache is bounded by `memory_store::STATEMENT_CACHE_CAPACITY` entries, not bytes: SQLite does not bound compiled-statement memory, so no byte figure is declared for it. A full 128-statement cache measured 861,472 bytes by `sqlite3_memory_used`.
 /// The MemoryReviewer host keeps its own bounded copy of the startup credentials and their keyed identities for the process lifetime (`memory_reviewer::worker::RETAINED_CREDENTIAL_BYTES`).
+/// A ready transform snapshot holds the CK input and scalar fields, never native messages or a delta fallback, so the snapshot and lease budgets bound exactly what `TransformRequest::snapshot_retained_bytes` charges.
 pub const DECLARED_RETAINED_RESIDENT_BYTES: u64 = TRANSFORM_SERVE_CACHE_COMBINED_BUDGET_BYTES
     as u64
     + TRANSFORM_SNAPSHOT_BUDGET_BYTES as u64
@@ -2306,14 +2277,6 @@ pub const DECLARED_RETAINED_RESIDENT_BYTES: u64 = TRANSFORM_SERVE_CACHE_COMBINED
     + memory_reviewer::worker::RETAINED_CREDENTIAL_BYTES
     + memory_capture::RETAINED_BYTES_BOUND;
 
-#[derive(Debug, Clone)]
-struct NativeDeltaFrontier {
-    after: String,
-    native_replace_from: usize,
-    native_prefix: Vec<Arc<Value>>,
-    native_prefix_retained_bytes: Vec<usize>,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct NativeAttachmentContext {
     session_id: String,
@@ -2334,36 +2297,13 @@ struct NativeEncodedChunk {
     wire_len: usize,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum NativeDeltaFallbackReason {
-    MissingCacheState,
-    FingerprintMismatch,
-    CacheContextMismatch,
-    InvalidFrontier,
-    NoReusableOutput,
-}
-
-impl NativeDeltaFallbackReason {
-    const fn as_str(self) -> &'static str {
-        match self {
-            Self::MissingCacheState => "missing_cache_state",
-            Self::FingerprintMismatch => "fingerprint_mismatch",
-            Self::CacheContextMismatch => "cache_context_mismatch",
-            Self::InvalidFrontier => "invalid_frontier",
-            Self::NoReusableOutput => "no_reusable_output",
-        }
-    }
-}
-
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 struct NativeAttachmentCacheStats {
     reused_messages: usize,
     encoded_messages: usize,
-    request_native_retained_bytes: usize,
     refused_store: usize,
     degraded_store: usize,
     evicted: usize,
-    delta_fallback_reason: Option<NativeDeltaFallbackReason>,
 }
 
 #[derive(Debug, Clone)]
@@ -2371,8 +2311,6 @@ struct NativeAttachmentCacheSnapshot {
     context: NativeAttachmentContext,
     /// The revision the caller applied these chunks under; a request advertising it may keep from them.
     output_revision: Option<Revision>,
-    full_array_fingerprint: Option<String>,
-    // Message order and `mid` identify a delta.
     sidecar: Arc<codec::DecodeSidecar>,
     message_keys: Vec<[u8; 32]>,
     // Hashes let a retained prefix keep its cache keys after the corresponding raw tree is dropped.
@@ -2380,11 +2318,6 @@ struct NativeAttachmentCacheSnapshot {
     // Sizes exist only for raw trees still present in `sidecar.messages`.
     sidecar_sizes: HashMap<String, usize>,
     chunks: Vec<NativeEncodedChunk>,
-    // `NativeAttachmentCacheSnapshot` preserves the acknowledged ingress because `native_replace_from` indexes it.
-    ingress_chunks: Vec<Arc<Value>>,
-    // The cache charges each suffix's deep retained-size walk when that suffix first enters the cache.
-    // Warm passes reuse prefix charges instead of traversing retained provider trees again.
-    ingress_chunk_retained_bytes: Vec<usize>,
 }
 
 impl NativeAttachmentCacheSnapshot {
@@ -2403,36 +2336,6 @@ impl NativeAttachmentCacheSnapshot {
                 self.chunks
                     .iter()
                     .map(|chunk| ARC_ALLOCATION_OVERHEAD_BYTES.saturating_add(chunk.retained_bytes))
-                    .sum::<usize>(),
-            );
-        // The sidecar's serialized-size estimate can be smaller than its raw allocation.
-        // Ingress and chunk charges retain that allocation floor even when the sidecar shares it.
-        let mut charged_values = self
-            .chunks
-            .iter()
-            .map(|chunk| Arc::as_ptr(&chunk.value))
-            .collect::<HashSet<_>>();
-        debug_assert_eq!(
-            self.ingress_chunks.len(),
-            self.ingress_chunk_retained_bytes.len()
-        );
-        let ingress_bytes = self
-            .ingress_chunks
-            .capacity()
-            .saturating_mul(size_of::<Arc<Value>>())
-            .saturating_add(
-                self.ingress_chunk_retained_bytes
-                    .capacity()
-                    .saturating_mul(size_of::<usize>()),
-            )
-            .saturating_add(
-                self.ingress_chunks
-                    .iter()
-                    .zip(&self.ingress_chunk_retained_bytes)
-                    .filter(|(value, _)| charged_values.insert(Arc::as_ptr(value)))
-                    .map(|(_, retained_bytes)| {
-                        ARC_ALLOCATION_OVERHEAD_BYTES.saturating_add(*retained_bytes)
-                    })
                     .sum::<usize>(),
             );
         let sidecar_core_bytes = size_of::<codec::DecodeSidecar>()
@@ -2487,11 +2390,6 @@ impl NativeAttachmentCacheSnapshot {
             .saturating_add(self.context.session_id.capacity())
             .saturating_add(self.context.serializer_profile.capacity())
             .saturating_add(self.context.render_config.capacity())
-            .saturating_add(
-                self.full_array_fingerprint
-                    .as_ref()
-                    .map_or(0, String::capacity),
-            )
             .saturating_add(size_of::<NativeAttachmentCacheSession>())
             .saturating_add(size_of::<usize>() * 3)
             .saturating_add(
@@ -2499,7 +2397,6 @@ impl NativeAttachmentCacheSnapshot {
             );
         // Encoded canonical bytes stand in for shared served-message allocations (hence the ×2).
         encoded_bytes
-            .saturating_add(ingress_bytes)
             .saturating_add(served_bytes.saturating_mul(2))
             .saturating_add(sidecar_core_bytes)
             .saturating_add(sidecar_bulk_bytes)
@@ -2582,37 +2479,6 @@ impl NativeAttachmentCache {
         self.retained_bytes = self.retained_bytes.saturating_sub(session.retained_bytes);
         self.lru.retain(|candidate| candidate != session_id);
         Some(session.snapshot)
-    }
-
-    fn delta_native_prefix(
-        &mut self,
-        session_id: &str,
-        revert_epoch: u64,
-        after: &str,
-        prefix_messages: usize,
-    ) -> Option<(Vec<Arc<Value>>, Vec<usize>)> {
-        if self
-            .sessions
-            .get(session_id)
-            .is_some_and(|session| session.revert_epoch != revert_epoch)
-        {
-            self.remove(session_id);
-        }
-        let prefix = self.sessions.get(session_id).and_then(|session| {
-            let snapshot = &session.snapshot;
-            (snapshot.full_array_fingerprint.as_deref() == Some(after)
-                && prefix_messages <= snapshot.ingress_chunks.len()
-                && prefix_messages <= snapshot.ingress_chunk_retained_bytes.len())
-            .then(|| {
-                (
-                    snapshot.ingress_chunks[..prefix_messages].to_vec(),
-                    snapshot.ingress_chunk_retained_bytes[..prefix_messages].to_vec(),
-                )
-            })
-        })?;
-        self.lru.retain(|candidate| candidate != session_id);
-        self.lru.push_back(session_id.to_string());
-        Some(prefix)
     }
 
     fn replace(
@@ -3371,7 +3237,6 @@ struct PassIntake {
     binding: SessionBinding,
     lineage_root: PathBuf,
     pass_load: Result<ModuleMeta, MemoryStoreError>,
-    native_delta_frontier: Option<NativeDeltaFrontier>,
     snapshot_generation: u64,
     entry: EntryTimings,
     held: PassHold,
@@ -3387,7 +3252,6 @@ struct PassEnv {
     project_path: String,
     note_project_path: String,
     project_memory: Option<canonical_memory::CanonicalMemoryRead>,
-    native_delta_frontier: Option<NativeDeltaFrontier>,
     snapshot_generation: u64,
     pass_now: i64,
     timings: PassTimings,
@@ -3417,7 +3281,6 @@ struct EntryTimings {
     handler_started_at: Instant,
     request_observed_to_handler: f64,
     pass_state_load_ms: f64,
-    delta_expand_ms: f64,
 }
 
 /// The handler-side timing brackets taken before the transform, reported with the response.
@@ -3448,13 +3311,6 @@ impl<'a> PassState<'a> {
         match load {
             Ok(meta) => Self::Loaded(meta),
             Err(_) => Self::Unavailable,
-        }
-    }
-
-    fn loaded(self) -> Option<&'a ModuleMeta> {
-        match self {
-            Self::Loaded(meta) => Some(meta),
-            Self::Unavailable | Self::Reload => None,
         }
     }
 }
@@ -4484,80 +4340,6 @@ impl HandlerCore {
             .expect("transform page mutex")
             .discard(session_id);
         self.refresh_oldest_queued_at_ms();
-    }
-
-    /// The ingress snapshot combines the ready transform snapshot's ingress prefix and a native
-    /// prefix with a validated caller tail; a session without a ready snapshot takes the full-sync branch.
-    fn expand_transform_tail_delta(
-        &self,
-        parsed: &mut TransformRequest,
-        pass_state: PassState<'_>,
-    ) -> Option<NativeDeltaFrontier> {
-        let delta = parsed.tail_delta.as_ref().and_then(Value::as_object)?;
-        let after = delta.get("after").and_then(Value::as_str)?.to_string();
-        let replace_from = delta
-            .get("replace_from")
-            .and_then(Value::as_u64)
-            .and_then(|value| usize::try_from(value).ok())?;
-        let native_replace_from = delta
-            .get("native_replace_from")
-            .and_then(Value::as_u64)
-            .and_then(|value| usize::try_from(value).ok())?;
-        parsed.full_array_fingerprint.as_ref()?;
-
-        // The persisted epoch is checked before the native prefix lookup so stale request
-        // state cannot select an outdated entry after a store-side rewrite;
-        // a pass without a loaded state takes the full-sync branch.
-        let current_revert_epoch = pass_state.loaded()?.revert_epoch;
-        let ready_request = self
-            .transform_snapshots
-            .lock()
-            .expect("transform snapshots mutex")
-            .ready_delta_request(&parsed.session_id)
-            .filter(|request| request.full_array_fingerprint.as_deref() == Some(after.as_str()))?;
-
-        let mut messages = (replace_from <= ready_request.messages.len())
-            .then(|| wire::IngressMessages(ready_request.messages[..replace_from].to_vec()))?;
-        let mut current_messages = std::mem::take(&mut parsed.messages);
-        messages.append(&mut current_messages);
-
-        let (native_prefix, native_prefix_retained_bytes) = if native_replace_from == 0 {
-            (Vec::new(), Vec::new())
-        } else {
-            self.native_attachments
-                .lock()
-                .expect("native attachment cache mutex")
-                .delta_native_prefix(
-                    &parsed.session_id,
-                    current_revert_epoch,
-                    &after,
-                    native_replace_from,
-                )
-                .or_else(|| {
-                    let previous_native = ready_request.native_messages.as_ref()?;
-                    (native_replace_from <= previous_native.len()).then(|| {
-                        let prefix = previous_native[..native_replace_from].to_vec();
-                        let retained_bytes = previous_native[..native_replace_from]
-                            .iter()
-                            .map(|message| native_value_retained_bytes(message))
-                            .collect();
-                        (prefix, retained_bytes)
-                    })
-                })?
-        };
-        let mut native_messages = native_prefix.clone();
-        let mut current_native = parsed.native_messages.take()?;
-        native_messages.append(&mut current_native);
-
-        parsed.messages = messages;
-        parsed.native_messages = Some(native_messages);
-        parsed.tail_delta = None;
-        Some(NativeDeltaFrontier {
-            after,
-            native_replace_from,
-            native_prefix,
-            native_prefix_retained_bytes,
-        })
     }
 
     fn transform_page_in_progress(&self, session_id: &str) -> bool {
@@ -8518,7 +8300,6 @@ impl HandlerCore {
     ) -> PreparedOutcome {
         let channel = entry.route;
         let handler_started_at = decode_started_at;
-        let mut delta_expand_ms = 0.0;
         let decode_started_at_ms =
             now_ms().saturating_sub(decode_started_at.elapsed().as_millis() as i64);
         let request_observed_to_handler = parsed
@@ -8544,9 +8325,6 @@ impl HandlerCore {
             .session_id
             .starts_with(history_summarizer::HISTORY_SUMMARIZER_CHILD_SESSION_PREFIX)
         {
-            if parsed.tail_delta.is_some() {
-                return need_full_sync_response(&parsed);
-            }
             ticket.accept();
             return self.passthrough_transform_response(&parsed);
         }
@@ -8556,9 +8334,6 @@ impl HandlerCore {
         {
             match self.resolve_binding(channel, &parsed.session_id) {
                 Ok(_) => {
-                    if parsed.tail_delta.is_some() {
-                        return need_full_sync_response(&parsed);
-                    }
                     ticket.accept();
                     return self.passthrough_transform_response(&parsed);
                 }
@@ -8675,21 +8450,6 @@ impl HandlerCore {
         let pass_state_load_started_at = Instant::now();
         let pass_load = store.load_meta(&parsed.session_id);
         let pass_state_load_ms = pass_state_load_started_at.elapsed().as_secs_f64() * 1_000.0;
-        let pass_state = PassState::from(&pass_load);
-        // Tail-delta expansion prepends the reattached prefix; only this many
-        // trailing messages are the request's own.
-        let request_messages = parsed.messages.len();
-        let native_delta_frontier = if parsed.tail_delta.is_some() {
-            let delta_expand_started_at = Instant::now();
-            let expanded = self.expand_transform_tail_delta(&mut parsed, pass_state);
-            delta_expand_ms = delta_expand_started_at.elapsed().as_secs_f64() * 1_000.0;
-            let Some(frontier) = expanded else {
-                return need_full_sync_response(&parsed);
-            };
-            Some(frontier)
-        } else {
-            None
-        };
         let permit = match self.acquire_unit_permit().await {
             Ok(permit) => permit,
             Err(outcome) => return outcome,
@@ -8703,7 +8463,7 @@ impl HandlerCore {
             Arc::clone(&store),
             &binding,
             &parsed,
-            request_messages,
+            parsed.messages.len(),
             entry.meter.reserve(),
         ) {
             self.spawn_tracked_task(checkpoint.run());
@@ -8714,13 +8474,11 @@ impl HandlerCore {
             binding,
             lineage_root,
             pass_load,
-            native_delta_frontier,
             snapshot_generation: 0,
             entry: EntryTimings {
                 handler_started_at,
                 request_observed_to_handler,
                 pass_state_load_ms,
-                delta_expand_ms,
             },
             held: PassHold {
                 _charges: entry.meter.take_charges(),
@@ -8989,7 +8747,6 @@ impl HandlerCore {
             binding,
             lineage_root,
             pass_load,
-            native_delta_frontier,
             snapshot_generation,
             entry,
         } = intake;
@@ -9023,7 +8780,6 @@ impl HandlerCore {
             project_path,
             note_project_path,
             project_memory,
-            native_delta_frontier,
             snapshot_generation,
             pass_now,
             timings: PassTimings {
@@ -9324,7 +9080,6 @@ impl HandlerCore {
                 mutation_exempt_mid.as_deref(),
                 lineage_anchor_mid.as_deref(),
                 transition_consumed,
-                env.native_delta_frontier.as_ref(),
                 revert_epoch,
                 &output_revision,
                 &self.native_attachments,
@@ -9371,13 +9126,14 @@ impl HandlerCore {
         self.record_response_observation(&parsed.session_id, now_ms());
         let response_observation_ms =
             response_observation_started_at.elapsed().as_secs_f64() * 1_000.0;
-        // Tail deltas are already expanded; charge the retained request tree, not the inbound suffix.
-        // The ready LRU and active-lease budget must account for the retained request tree their `Arc`s keep alive.
+        // The ready snapshot keeps the CK input and scalar fields wrapup reads, never the native
+        // payload; the ready LRU and active-lease budget charge exactly what its `Arc` keeps alive.
         let retained_size_started_at = Instant::now();
-        let retained_bytes = parsed.retained_bytes_with_charges(
-            (native_cache_stats.request_native_retained_bytes > 0)
-                .then_some(native_cache_stats.request_native_retained_bytes),
-        );
+        let snapshot = Arc::new(TransformRequest {
+            native_messages: None,
+            ..(**parsed).clone()
+        });
+        let retained_bytes = snapshot.snapshot_retained_bytes();
         let retained_size_ms = retained_size_started_at.elapsed().as_secs_f64() * 1_000.0;
         let snapshot_store_started_at = Instant::now();
         self.transform_snapshots
@@ -9386,7 +9142,7 @@ impl HandlerCore {
             .finish_ready(
                 &parsed.session_id,
                 env.snapshot_generation,
-                Arc::clone(parsed),
+                snapshot,
                 revert_epoch,
                 retained_bytes,
             );
@@ -9397,7 +9153,6 @@ impl HandlerCore {
             response_timings.request_observed_to_handler =
                 timings.entry.request_observed_to_handler;
             response_timings.pass_state_load = timings.entry.pass_state_load_ms;
-            response_timings.delta_expand = timings.entry.delta_expand_ms;
             response_timings.side_channel_drain = timings.side_channel_drain_ms;
             response_timings.trace_received = timings.trace_received_ms;
             response_timings.native_attach = native_attach_ms;
@@ -9429,7 +9184,6 @@ impl HandlerCore {
                 .iter()
                 .map(|message| message.ck.clone())
                 .collect(),
-            request.full_array_fingerprint.clone(),
         );
         let Some(output_revision) = self.output_revisions.allocate() else {
             return revision_exhausted_error();
@@ -13827,40 +13581,8 @@ fn native_attachment_context(
     }
 }
 
-fn validated_native_prefix(
-    request: &TransformRequest,
-    snapshot: &NativeAttachmentCacheSnapshot,
-    frontier: Option<&NativeDeltaFrontier>,
-) -> usize {
-    let native_len = request.native_messages.as_deref().map_or(0, <[_]>::len);
-    frontier
-        .filter(|frontier| {
-            Some(frontier.after.as_str()) == snapshot.full_array_fingerprint.as_deref()
-        })
-        .map(|frontier| frontier.native_replace_from)
-        .filter(|replace_from| *replace_from <= native_len)
-        .unwrap_or(0)
-}
-
-fn native_sidecar(
-    request: &TransformRequest,
-    snapshot: Option<&NativeAttachmentCacheSnapshot>,
-    trusted_prefix: usize,
-) -> Arc<codec::DecodeSidecar> {
+fn native_sidecar(request: &TransformRequest) -> Arc<codec::DecodeSidecar> {
     let native_messages = request.native_messages.as_deref().unwrap_or_default();
-    let Some(snapshot) = snapshot else {
-        return Arc::new(codec::opencode::decode_opencode_shared(native_messages, None, 0).sidecar);
-    };
-    if trusted_prefix == native_messages.len() && trusted_prefix == snapshot.sidecar.order.len() {
-        return Arc::clone(&snapshot.sidecar);
-    }
-    if trusted_prefix > 0 && trusted_prefix <= snapshot.sidecar.order.len() {
-        return Arc::new(codec::opencode::decode_opencode_sidecar_incremental(
-            native_messages,
-            &snapshot.sidecar,
-            trusted_prefix,
-        ));
-    }
     Arc::new(codec::opencode::decode_opencode_shared(native_messages, None, 0).sidecar)
 }
 
@@ -13996,60 +13718,6 @@ fn encode_full_native_messages(
     native_messages
 }
 
-fn native_ingress_chunks(
-    request: &TransformRequest,
-    encoded_chunks: &[NativeEncodedChunk],
-    frontier: Option<&NativeDeltaFrontier>,
-) -> (Vec<Arc<Value>>, Vec<usize>, usize) {
-    let native_messages = request.native_messages.as_deref().unwrap_or_default();
-    let reusable_prefix = frontier
-        .filter(|frontier| {
-            frontier.native_prefix.len() == frontier.native_replace_from
-                && frontier.native_prefix_retained_bytes.len() == frontier.native_replace_from
-                && frontier.native_replace_from <= native_messages.len()
-        })
-        .map_or(0, |frontier| frontier.native_replace_from);
-    let mut ingress_chunks = frontier
-        .filter(|_| reusable_prefix > 0)
-        .map(|frontier| frontier.native_prefix.clone())
-        .unwrap_or_default();
-    let mut ingress_chunk_retained_bytes = frontier
-        .filter(|_| reusable_prefix > 0)
-        .map(|frontier| frontier.native_prefix_retained_bytes.clone())
-        .unwrap_or_default();
-    ingress_chunks.reserve(native_messages.len().saturating_sub(reusable_prefix));
-    ingress_chunk_retained_bytes.reserve(native_messages.len().saturating_sub(reusable_prefix));
-    let output_chunks_by_start = encoded_chunks
-        .iter()
-        .filter(|chunk| chunk.end_index == chunk.start_index.saturating_add(1))
-        .map(|chunk| (chunk.start_index, chunk))
-        .collect::<HashMap<_, _>>();
-    let request_retained_bytes = retained_size::shared_value_vec_retained_bytes(
-        request.native_messages.as_ref().map_or(0, Vec::capacity),
-        native_messages.iter().enumerate().map(|(index, message)| {
-            if index < reusable_prefix {
-                return ingress_chunk_retained_bytes[index];
-            }
-            let request_value_retained_bytes = native_value_retained_bytes(message);
-            let shared_output = output_chunks_by_start
-                .get(&index)
-                .filter(|chunk| chunk.value.as_ref() == message.as_ref());
-            let (value, retained_bytes) = shared_output.map_or_else(
-                || (Arc::clone(message), request_value_retained_bytes),
-                |chunk| (Arc::clone(&chunk.value), chunk.retained_bytes),
-            );
-            ingress_chunks.push(value);
-            ingress_chunk_retained_bytes.push(retained_bytes);
-            request_value_retained_bytes
-        }),
-    );
-    (
-        ingress_chunks,
-        ingress_chunk_retained_bytes,
-        request_retained_bytes,
-    )
-}
-
 static NATIVE_ATTACHMENT_DIFFERENTIAL: OnceLock<bool> = OnceLock::new();
 
 fn native_attachment_differential_enabled() -> bool {
@@ -14088,13 +13756,12 @@ fn attach_native_messages_incremental(
     mutation_exempt_mid: Option<&str>,
     lineage_anchor_mid: Option<&str>,
     transition_consumed: bool,
-    native_delta_frontier: Option<&NativeDeltaFrontier>,
     revert_epoch: u64,
     output_revision: &Revision,
     cache: &Mutex<NativeAttachmentCache>,
     mode: NativeCacheKeyMode,
 ) -> NativeAttachment {
-    let mut cached = cache
+    let cached = cache
         .lock()
         .expect("native attachment cache mutex")
         .snapshot(&request.session_id, revert_epoch);
@@ -14112,11 +13779,7 @@ fn attach_native_messages_incremental(
             }
         })
     });
-    let trusted_prefix = cached
-        .as_ref()
-        .map(|snapshot| validated_native_prefix(request, snapshot, native_delta_frontier))
-        .unwrap_or(0);
-    let sidecar = native_sidecar(request, cached.as_ref(), trusted_prefix);
+    let sidecar = native_sidecar(request);
     let sidecar_positions = sidecar
         .order
         .iter()
@@ -14124,25 +13787,6 @@ fn attach_native_messages_incremental(
         .map(|(index, mid)| (mid.as_str(), index))
         .collect::<HashMap<_, _>>();
     let context = native_attachment_context(request, transition_consumed);
-    let delta_fallback_reason = native_delta_frontier.and_then(|frontier| {
-        let Some(snapshot) = cached.as_ref() else {
-            return Some(NativeDeltaFallbackReason::MissingCacheState);
-        };
-        if snapshot.full_array_fingerprint.as_deref() != Some(frontier.after.as_str()) {
-            return Some(NativeDeltaFallbackReason::FingerprintMismatch);
-        }
-        if snapshot.context != context {
-            return Some(NativeDeltaFallbackReason::CacheContextMismatch);
-        }
-        let native_len = request.native_messages.as_deref().map_or(0, <[_]>::len);
-        if frontier.native_replace_from > native_len
-            || frontier.native_prefix.len() != frontier.native_replace_from
-            || frontier.native_prefix_retained_bytes.len() != frontier.native_replace_from
-        {
-            return Some(NativeDeltaFallbackReason::InvalidFrontier);
-        }
-        None
-    });
     let mutation_exempt_mids = [mutation_exempt_mid, lineage_anchor_mid]
         .into_iter()
         .flatten()
@@ -14155,14 +13799,8 @@ fn attach_native_messages_incremental(
         .map(|message| message.mid.as_str());
     let ordinal_by_mid = ordinal_by_mid(request);
 
-    let mut sidecar_hashes = cached
-        .as_mut()
-        .map(|snapshot| std::mem::take(&mut snapshot.sidecar_hashes))
-        .unwrap_or_default();
-    let mut sidecar_sizes = cached
-        .as_mut()
-        .map(|snapshot| std::mem::take(&mut snapshot.sidecar_sizes))
-        .unwrap_or_default();
+    let mut sidecar_hashes = HashMap::new();
+    let mut sidecar_sizes = HashMap::new();
     let mut message_keys = Vec::with_capacity(response.messages().len());
     for (position, served) in response.messages().iter().enumerate() {
         let meta = codec::sidecar::meta_for_ck(&sidecar, served, position);
@@ -14179,23 +13817,9 @@ fn attach_native_messages_incremental(
             }
         });
         let sidecar_hash = slot.and_then(|slot| {
-            let trusted = sidecar_positions
-                .get(slot)
-                .is_some_and(|index| *index < trusted_prefix);
-            let cached_hash = trusted.then(|| sidecar_hashes.get(slot).copied()).flatten();
-            let cached_size = trusted.then(|| sidecar_sizes.get(slot).copied()).flatten();
-            let computed = (cached_hash.is_none() || cached_size.is_none())
-                .then(|| meta.map(native_sidecar_hash_and_size))
-                .flatten();
-            let hash = cached_hash.or_else(|| computed.map(|(hash, _)| hash))?;
-            if cached_size.is_none()
-                && let Some(retained_bytes) = computed.map(|(_, retained_bytes)| retained_bytes)
-            {
-                sidecar_sizes.insert(slot.to_string(), retained_bytes);
-            }
-            if cached_hash.is_none() {
-                sidecar_hashes.insert(slot.to_string(), hash);
-            }
+            let (hash, retained_bytes) = meta.map(native_sidecar_hash_and_size)?;
+            sidecar_sizes.insert(slot.to_string(), retained_bytes);
+            sidecar_hashes.insert(slot.to_string(), hash);
             Some(hash)
         });
         let mutation_exempt = slot.is_some_and(|mid| mutation_exempt_mids.contains(&mid));
@@ -14325,8 +13949,6 @@ fn attach_native_messages_incremental(
         .iter()
         .map(|chunk| Arc::clone(&chunk.value))
         .collect::<Vec<_>>();
-    let (ingress_chunks, ingress_chunk_retained_bytes, request_native_retained_bytes) =
-        native_ingress_chunks(request, &chunks, native_delta_frontier);
 
     if native_attachment_differential_enabled() {
         let full = encode_full_native_messages(
@@ -14354,11 +13976,6 @@ fn attach_native_messages_incremental(
     let mut stats = NativeAttachmentCacheStats {
         reused_messages: suffix_start,
         encoded_messages: message_keys.len().saturating_sub(suffix_start),
-        request_native_retained_bytes,
-        delta_fallback_reason: delta_fallback_reason.or_else(|| {
-            (native_delta_frontier.is_some() && suffix_start == 0)
-                .then_some(NativeDeltaFallbackReason::NoReusableOutput)
-        }),
         ..Default::default()
     };
     let served_bytes = response
@@ -14375,25 +13992,15 @@ fn attach_native_messages_incremental(
             NativeAttachmentCacheSnapshot {
                 context,
                 output_revision: Some(output_revision.clone()),
-                full_array_fingerprint: request.full_array_fingerprint.clone(),
                 sidecar,
                 message_keys,
                 sidecar_hashes,
                 sidecar_sizes,
                 chunks,
-                ingress_chunks,
-                ingress_chunk_retained_bytes,
             },
             &mut stats,
             served_bytes,
         );
-    if let Some(reason) = stats.delta_fallback_reason {
-        eprintln!(
-            "native-cache reuse unavailable session={} native_delta_fallback_reason={}",
-            request.session_id,
-            reason.as_str(),
-        );
-    }
     if let Some(transform::UserHintPass::Decided(outcome)) = response.user_hint.as_mut() {
         outcome.attached = native_carries_user_hint(&native_messages, outcome);
     }
@@ -14422,14 +14029,6 @@ fn native_carries_user_hint(native: &[Arc<Value>], outcome: &transform::UserHint
                 .as_str()
                 .is_some_and(|text| outcome.carried_by(text))
         })
-}
-
-fn need_full_sync_response(request: &TransformRequest) -> PreparedOutcome {
-    respond_transform(
-        request,
-        transform::TransformResponse::need_full_sync(request.full_array_fingerprint.clone()),
-        None,
-    )
 }
 
 fn revision_exhausted_error() -> PreparedOutcome {
@@ -15583,12 +15182,6 @@ fn respond_transform(
     mut response: transform::TransformResponse,
     recipe: Option<RecipeInputs<'_>>,
 ) -> PreparedOutcome {
-    if response.status == transform::TransformStatus::Ok && request.tail_delta.is_some() {
-        return PreparedOutcome::Error {
-            code: "transform_delta_unexpanded".to_string(),
-            message: "successful transform response retained an unexpanded tail_delta".to_string(),
-        };
-    }
     if response.status == transform::TransformStatus::Ok && recipe.is_none() {
         return PreparedOutcome::Error {
             code: "transform_recipe_omitted".to_string(),
@@ -18217,8 +17810,8 @@ fn test_route(channel_id: u16) -> RouteHandle {
     }
 }
 
-/// What a client retains per session: its last complete input arrays, so a tail delta can be
-/// expanded the way the client would, and the outputs it applied under their revisions.
+/// What a client retains per session: its last complete input arrays and the outputs it applied
+/// under their revisions.
 #[cfg(test)]
 #[derive(Default)]
 struct TestClientSession {
@@ -18261,8 +17854,7 @@ fn served_output_for_test(response: &Value) -> Vec<transform::ServedMessage> {
 
 #[cfg(test)]
 impl Handler {
-    /// Expands a tail delta against the retained input, records the complete arrays, and names the
-    /// attempt with a fresh `base_revision` unless the test supplied one. Advertises the applied
+    /// Records the complete arrays and names the attempt with a fresh `base_revision` unless the test supplied one. Advertises the applied
     /// output for the selected representation.
     fn test_client_prepare_request(&self, mut request: Value) -> Value {
         let Some(session_id) = request["session_id"].as_str().map(str::to_owned) else {
@@ -18280,24 +17872,9 @@ impl Handler {
             .map(|message| message.get("ck").cloned().unwrap_or(message))
             .collect();
         let suffix_native = request["native_messages"].as_array().cloned();
-        if let Some(delta) = request.get("tail_delta").filter(|delta| delta.is_object()) {
-            let replace_from = delta["replace_from"].as_u64().unwrap_or(0) as usize;
-            let native_replace_from = delta["native_replace_from"].as_u64().unwrap_or(0) as usize;
-            let mut ck = client.wire_input[..replace_from.min(client.wire_input.len())].to_vec();
-            ck.extend(suffix_ck);
-            client.wire_input = ck;
-            if let Some(suffix) = suffix_native {
-                let mut full = client.native_input
-                    [..native_replace_from.min(client.native_input.len())]
-                    .to_vec();
-                full.extend(suffix);
-                client.native_input = full;
-            }
-        } else {
-            client.wire_input = suffix_ck;
-            if let Some(suffix) = suffix_native {
-                client.native_input = suffix;
-            }
+        client.wire_input = suffix_ck;
+        if let Some(suffix) = suffix_native {
+            client.native_input = suffix;
         }
         if request.get("base_revision").is_none() {
             client.next_base += 1;
@@ -20732,10 +20309,6 @@ mod tests {
                 valid(&format!(r#","x":{{"a":1,"{RAW_VALUE_TOKEN}":1}}"#)),
             ),
             (
-                "raw-value token after a key under tail_delta",
-                valid(&format!(r#","tail_delta":{{"a":1,"{RAW_VALUE_TOKEN}":1}}"#)),
-            ),
-            (
                 "raw-value token after a key in a native message",
                 valid(&format!(
                     r#","native_messages":[{{"a":1,"{RAW_VALUE_TOKEN}":1}}]"#
@@ -20878,7 +20451,6 @@ mod tests {
                 "raw-value token with a sibling key",
                 "raw-value token inside an ignored array",
                 "raw-value token under the discriminator",
-                "raw-value token after a key under tail_delta",
                 "raw-value token after a key in a native message",
                 "nesting past the tree limit",
             ],
@@ -21398,14 +20970,6 @@ mod tests {
             string_bytes: 203,
             unbounded: "response",
             at_footprint: "response",
-            under_footprint: "invalid_params",
-        },
-        FrozenOutcome {
-            name: "raw-value token after a key under tail_delta",
-            footprint: 9980,
-            string_bytes: 212,
-            unbounded: "bad_request",
-            at_footprint: "bad_request",
             under_footprint: "invalid_params",
         },
         FrozenOutcome {
@@ -22062,6 +21626,65 @@ mod tests {
             assert_eq!((budget.count, budget.bytes), (0, 0));
         }
         assert!(matches!(cache.get("c"), TransformSnapshotLookup::Ready(_)));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn ready_snapshot_holds_no_native_payload_and_a_lease_pins_its_generation() {
+        assert_eq!(TRANSFORM_SNAPSHOT_BUDGET_BYTES, 64 * 1024 * 1024);
+        assert_eq!(ACTIVE_SNAPSHOT_LEASE_BUDGET_BYTES, 64 * 1024 * 1024);
+        assert_eq!(MAX_ACTIVE_SNAPSHOT_LEASES, 8);
+        let (handler, _store, _dir, _project) =
+            handler_with_store(Arc::new(ProducerState::default()), default_test_config());
+        let session = "ses";
+        let request = |text: &str| {
+            native_cache_request(
+                session,
+                vec![ck("snapshot-1", 1, text)],
+                vec![json!({
+                    "info": { "id": "snapshot-1", "role": "user" },
+                    "parts": [{ "type": "text", "text": text }],
+                    "provider_data": "p".repeat(64 * 1024),
+                })],
+            )
+        };
+        let first =
+            call_transform_request(&handler, serde_json::to_value(request("one")).unwrap()).await;
+        assert_eq!(first["status"], "ok", "{first}");
+        let lease = match handler.transform_snapshots.lock().unwrap().get(session) {
+            TransformSnapshotLookup::Ready(lease) => lease,
+            _ => panic!("the accepted pass must publish a ready snapshot"),
+        };
+        // The snapshot keeps the CK input and is charged for it alone, not the 64 KiB native payload.
+        assert!(lease.request.native_messages.is_none());
+        assert_eq!(lease.request.messages.len(), 1);
+        assert_eq!(
+            lease.retained_bytes,
+            lease.request.snapshot_retained_bytes()
+        );
+        assert!(lease.retained_bytes < 64 * 1024, "{}", lease.retained_bytes);
+        let pinned = lease.generation;
+
+        let second =
+            call_transform_request(&handler, serde_json::to_value(request("two")).unwrap()).await;
+        assert_eq!(second["status"], "ok", "{second}");
+        {
+            let snapshots = handler.transform_snapshots.lock().unwrap();
+            assert!(!snapshots.ready_generation_matches(session, pinned));
+            let budget = snapshots.active_leases.lock().unwrap();
+            assert_eq!((budget.count, budget.bytes), (1, lease.retained_bytes));
+        }
+        // Replacement never frees or changes a held snapshot.
+        assert_eq!(lease.generation, pinned);
+        assert_eq!(lease.request.messages[0].ck, ck("snapshot-1", 1, "one").ck);
+        let snapshots = Arc::clone(&handler.transform_snapshots.lock().unwrap().active_leases);
+        drop(lease);
+        assert_eq!(
+            {
+                let budget = snapshots.lock().unwrap();
+                (budget.count, budget.bytes)
+            },
+            (0, 0)
+        );
     }
 
     #[test]
@@ -23773,7 +23396,7 @@ mod tests {
                 .checkpoint_transform_sources(Arc::clone(&store), &pi, &request, 1)
                 .await,
             1,
-            "a tail delta checkpoints only the request's own messages"
+            "a checkpoint takes only the trailing messages it is asked for"
         );
         let pending = store
             .pending_memory_captures(project_key, "pi", now_ms())
@@ -24730,10 +24353,8 @@ mod tests {
 
     #[test]
     fn cached_transform_response_writer_is_byte_identical_to_value_round_trip() {
-        let response = transform::TransformResponse::passthrough(
-            vec![ck("wire-byte-cache", 1, "hello").ck],
-            Some("fingerprint".to_string()),
-        );
+        let response =
+            transform::TransformResponse::passthrough(vec![ck("wire-byte-cache", 1, "hello").ck]);
         let expected =
             serde_json::to_vec(&serde_json::to_value(response.clone()).unwrap()).unwrap();
         let request = transform_request(vec![ck("wire-byte-cache", 1, "hello")], 1, 100);
@@ -25416,7 +25037,6 @@ mod tests {
             "native-response-seam",
             vec![ck("seam-message", 1, "hello")],
             vec![native_text_message("seam-message", "user", "hello")],
-            "seam-fingerprint",
         );
         let response = transform::TransformResponse::passthrough(
             request
@@ -25424,7 +25044,6 @@ mod tests {
                 .iter()
                 .map(|message| message.ck.clone())
                 .collect(),
-            request.full_array_fingerprint.clone(),
         );
 
         let outcome = respond_transform(&request, response, None);
@@ -25432,11 +25051,10 @@ mod tests {
         assert_eq!(error_code(outcome), "transform_recipe_omitted");
     }
 
-    /// A pass whose request exceeds the ready-snapshot budget leaves no ready snapshot, so the
-    /// next tail delta is refused with `need_full_sync` and the full follow-up serves the bytes
-    /// a control handler that never received the refused delta serves.
+    /// A pass whose request exceeds the ready-snapshot budget leaves no ready snapshot, and the
+    /// full follow-up still serves the caller's native messages.
     #[tokio::test(flavor = "current_thread")]
-    async fn cold_soft_plus_over_ready_budget_refuses_the_next_tail_delta() {
+    async fn cold_soft_plus_over_ready_budget_serves_the_full_followup() {
         let first_native = json!({
             "info": {
                 "id": "m1",
@@ -25450,19 +25068,17 @@ mod tests {
             "info": { "id": "m2", "sessionID": "ses", "role": "user" },
             "parts": [{ "type": "text", "text": "next" }]
         });
-        let full_request = |fingerprint: &str| {
+        let full_request = || {
             let mut body = request(vec![ck("m1", 1, "hello")]);
             body["serializer_profile"] = json!("opencode-aisdk");
             body["serve_native"] = json!(true);
             body["native_messages"] = json!([first_native.clone()]);
-            body["full_array_fingerprint"] = json!(fingerprint);
             body
         };
         let mut full_followup = request(vec![ck("m1", 1, "hello"), ck("m2", 2, "next")]);
         full_followup["serializer_profile"] = json!("opencode-aisdk");
         full_followup["serve_native"] = json!(true);
         full_followup["native_messages"] = json!([first_native.clone(), second_native.clone()]);
-        full_followup["full_array_fingerprint"] = json!("cold-fp-2");
         let cold_start = |handler: &Handler| {
             handler.native_attachments.lock().unwrap().remove("ses");
             handler.transform_snapshots.lock().unwrap().remove("ses");
@@ -25472,51 +25088,33 @@ mod tests {
 
         let (handler, _store, _dir, _project) =
             handler_with_store(Arc::new(ProducerState::default()), default_test_config());
-        let initialized = call_transform_request(&handler, full_request("warmup")).await;
+        let initialized = call_transform_request(&handler, full_request()).await;
         assert_eq!(initialized["status"], "ok", "{initialized}");
         cold_start(&handler);
-        let cold = call_transform_request(&handler, full_request("cold-fp-1")).await;
+        let cold = call_transform_request(&handler, full_request()).await;
         assert_eq!(cold["status"], "ok", "{cold}");
         assert_eq!(cold["action"], "SOFT+", "{cold}");
-        assert!(
+        assert!(!matches!(
             handler
                 .transform_snapshots
                 .lock()
                 .unwrap()
-                .ready_delta_request("ses")
-                .is_none()
-        );
-
-        let mut delta = request(vec![ck("m2", 2, "next")]);
-        delta["serializer_profile"] = json!("opencode-aisdk");
-        delta["serve_native"] = json!(true);
-        delta["native_messages"] = json!([second_native]);
-        delta["full_array_fingerprint"] = json!("cold-fp-2");
-        delta["tail_delta"] = json!({
-            "after": "cold-fp-1",
-            "replace_from": 1,
-            "native_replace_from": 1,
-        });
-        let refused = call_transform_request(&handler, delta).await;
-        assert_eq!(refused["status"], "need_full_sync", "{refused}");
-        assert!(refused.get("operations").is_none(), "{refused}");
-        assert!(refused.get("output_revision").is_none(), "{refused}");
+                .entries
+                .get("ses"),
+            Some(TransformSnapshot::Ready { .. })
+        ));
 
         let followup = call_transform_request(&handler, full_followup.clone()).await;
         assert_eq!(followup["status"], "ok", "{followup}");
 
-        let (control, _control_store, _control_dir, _control_project) =
-            handler_with_store(Arc::new(ProducerState::default()), default_test_config());
-        let warmup = call_transform_request(&control, full_request("warmup")).await;
-        assert_eq!(warmup["status"], "ok", "{warmup}");
-        cold_start(&control);
-        let control_cold = call_transform_request(&control, full_request("cold-fp-1")).await;
-        assert_eq!(control_cold["status"], "ok", "{control_cold}");
-        let control_followup = call_transform_request(&control, full_followup).await;
-        assert_eq!(control_followup["status"], "ok", "{control_followup}");
+        let served = followup["native_messages"]
+            .as_array()
+            .expect("native output");
+        assert!(served.len() >= 2, "{followup}");
         assert_eq!(
-            serde_json::to_vec(&followup["native_messages"]).unwrap(),
-            serde_json::to_vec(&control_followup["native_messages"]).unwrap()
+            served[served.len() - 2..],
+            [first_native, second_native],
+            "{followup}"
         );
     }
 
@@ -25524,7 +25122,6 @@ mod tests {
         session_id: &str,
         messages: Vec<IngressMessage>,
         native_messages: Vec<Value>,
-        fingerprint: &str,
     ) -> TransformRequest {
         serde_json::from_value(json!({
             "kind": "transform",
@@ -25537,7 +25134,6 @@ mod tests {
             "serve_native": true,
             "messages": messages,
             "native_messages": native_messages,
-            "full_array_fingerprint": fingerprint,
         }))
         .unwrap()
     }
@@ -25597,15 +25193,7 @@ mod tests {
             }));
         }
 
-        (
-            native_cache_request(
-                session_id,
-                ingress,
-                native,
-                &format!("{session_id}-fixture-fingerprint"),
-            ),
-            served,
-        )
+        (native_cache_request(session_id, ingress, native), served)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -25641,25 +25229,7 @@ mod tests {
         revert_epoch: u64,
         mode: NativeCacheKeyMode,
     ) -> (transform::TransformResponse, NativeAttachmentCacheStats) {
-        let mut response = transform::TransformResponse::passthrough(
-            served,
-            request.full_array_fingerprint.clone(),
-        );
-        let native_delta_frontier = request
-            .tail_delta
-            .as_ref()
-            .and_then(Value::as_object)
-            .and_then(|delta| {
-                Some(NativeDeltaFrontier {
-                    after: delta.get("after")?.as_str()?.to_string(),
-                    native_replace_from: usize::try_from(
-                        delta.get("native_replace_from")?.as_u64()?,
-                    )
-                    .ok()?,
-                    native_prefix: Vec::new(),
-                    native_prefix_retained_bytes: Vec::new(),
-                })
-            });
+        let mut response = transform::TransformResponse::passthrough(served);
         let attachment = attach_native_messages_incremental(
             &mut response,
             request,
@@ -25668,7 +25238,6 @@ mod tests {
             None,
             None,
             transition_consumed,
-            native_delta_frontier.as_ref(),
             revert_epoch,
             &Revision::parse("test-output").unwrap(),
             cache,
@@ -25677,597 +25246,6 @@ mod tests {
         assert!(response.native_messages.is_none());
         response.native_messages = Some(attachment.output.values);
         (response, attachment.stats)
-    }
-
-    fn seed_handler_delta_snapshot(
-        handler: &Handler,
-        request: &TransformRequest,
-        revert_epoch: u64,
-    ) {
-        let served = request
-            .messages
-            .iter()
-            .map(|message| message.ck.clone())
-            .collect::<Vec<_>>();
-        run_native_cache_pass(
-            &handler.native_attachments,
-            request,
-            served,
-            &BTreeMap::new(),
-            false,
-            revert_epoch,
-            NativeCacheKeyMode::Normal,
-        );
-        let retained_bytes = serde_json::to_vec(request).unwrap().len();
-        let mut snapshots = handler
-            .transform_snapshots
-            .lock()
-            .expect("transform snapshots mutex");
-        let generation = snapshots.begin(&request.session_id);
-        snapshots.finish_ready(
-            &request.session_id,
-            generation,
-            Arc::new(request.clone()),
-            revert_epoch,
-            retained_bytes,
-        );
-    }
-
-    #[test]
-    fn incremental_native_cache_replays_complex_prefix_and_encodes_only_tail() {
-        let todo = injection::build_synthetic_todo_pair(
-            r#"[{"content":"Keep the pair","status":"in_progress","priority":"high"}]"#,
-        )
-        .unwrap();
-        let frozen_call = assistant_tool_call("call-frozen", 1);
-        let frozen_result = tool_result("result-frozen", 2, "[dropped]");
-        let reasoning = wire_reasoning("assistant-old", 3, "signed historical thinking");
-        let user = ck("user-one", 4, "prompt");
-        let mut served = vec![
-            WireMessage::synthetic_user_text("frozen m0".to_string()),
-            todo.assistant_msg,
-            todo.tool_msg,
-            frozen_call.ck.clone(),
-            frozen_result.ck.clone(),
-            reasoning.ck.clone(),
-            user.ck.clone(),
-        ];
-        let native = vec![
-            json!({
-                "info": { "id": "assistant-old", "role": "assistant" },
-                "parts": [
-                    { "type": "reasoning", "text": "signed historical thinking", "metadata": { "signature": "sig" } },
-                    { "type": "compaction", "summary": "keep marker representation" }
-                ]
-            }),
-            native_text_message("user-one", "user", "prompt"),
-        ];
-        let messages = vec![frozen_call, frozen_result, reasoning, user];
-        let first_request =
-            native_cache_request("native-complex", messages.clone(), native.clone(), "fp-1");
-        let (handler, _store, _dir, project) =
-            handler_with_store(Arc::new(ProducerState::default()), default_test_config());
-        handler.bind_route(
-            test_route(7),
-            binding(project.to_str().unwrap(), "native-complex"),
-        );
-        {
-            let mut snapshots = handler.transform_snapshots.lock().unwrap();
-            let generation = snapshots.begin(&first_request.session_id);
-            let retained_bytes = first_request.retained_bytes();
-            let request = Arc::new(first_request.clone());
-            snapshots.finish_ready("native-complex", generation, request, 0, retained_bytes);
-        }
-        let cache = &handler.native_attachments;
-        let tags = BTreeMap::from([("assistant-old".to_string(), 1)]);
-        let (first, first_stats) = run_native_cache_pass(
-            cache,
-            &first_request,
-            served.clone(),
-            &tags,
-            false,
-            0,
-            NativeCacheKeyMode::Normal,
-        );
-        assert_eq!(first_stats.reused_messages, 0);
-
-        let first_sidecar = Arc::clone(
-            &cache.lock().unwrap().sessions["native-complex"]
-                .snapshot
-                .sidecar,
-        );
-        for (mid, raw) in first_sidecar
-            .order
-            .iter()
-            .zip(first_request.native_messages.as_ref().unwrap())
-        {
-            assert!(Arc::ptr_eq(&first_sidecar.messages[mid].raw, raw));
-        }
-
-        let appended = ck("user-two", 5, "second prompt");
-        served.push(appended.ck.clone());
-        let mut next_messages = messages;
-        next_messages.push(appended);
-        let mut next_native = native;
-        next_native.push(native_text_message("user-two", "user", "second prompt"));
-        let mut second_request =
-            native_cache_request("native-complex", next_messages, next_native, "fp-2");
-        let (fresh, _) = run_native_cache_pass(
-            &Mutex::new(NativeAttachmentCache::default()),
-            &second_request,
-            served.clone(),
-            &tags,
-            false,
-            0,
-            NativeCacheKeyMode::Normal,
-        );
-        let fresh_request = serde_json::to_value(&second_request).unwrap();
-        let fresh_projection = wire::project_messages(&second_request.messages).unwrap();
-        second_request.messages = wire::IngressMessages(second_request.messages.split_off(4));
-        second_request.native_messages =
-            Some(second_request.native_messages.take().unwrap().split_off(2));
-        second_request.tail_delta = Some(json!({
-            "after": "fp-1",
-            "replace_from": 4,
-            "native_replace_from": 2,
-        }));
-        let pass_load = _store.load_meta(&second_request.session_id);
-        let pass_state = PassState::from(&pass_load);
-        let frontier = handler
-            .expand_transform_tail_delta(&mut second_request, pass_state)
-            .expect("cached native prefix must reattach");
-        assert_eq!(
-            serde_json::to_value(&second_request).unwrap(),
-            fresh_request
-        );
-        for (reattached, cached) in second_request.messages.iter().zip(&first_request.messages) {
-            assert!(Arc::ptr_eq(reattached, cached));
-        }
-        let shared_request = second_request.clone();
-        assert!(Arc::ptr_eq(
-            &shared_request.messages[0],
-            &second_request.messages[0]
-        ));
-        assert_eq!(
-            wire::project_messages(&shared_request.messages).unwrap(),
-            fresh_projection
-        );
-        for (reattached, cached) in second_request
-            .native_messages
-            .as_ref()
-            .unwrap()
-            .iter()
-            .zip(&frontier.native_prefix)
-        {
-            assert!(Arc::ptr_eq(reattached, cached));
-        }
-        let decoded_fresh = codec::decode_opencode(
-            &serde_json::from_value::<Vec<Value>>(fresh_request["native_messages"].clone())
-                .unwrap(),
-        );
-        let decoded_shared = codec::opencode::decode_opencode_shared(
-            second_request.native_messages.as_ref().unwrap(),
-            None,
-            0,
-        );
-        assert_eq!(decoded_shared, decoded_fresh);
-        assert_eq!(
-            crate::wire::project_messages(
-                &decoded_shared
-                    .messages
-                    .into_iter()
-                    .collect::<wire::IngressMessages>()
-            )
-            .unwrap()
-            .differential_bytes(),
-            crate::wire::project_messages(
-                &decoded_fresh
-                    .messages
-                    .into_iter()
-                    .collect::<wire::IngressMessages>()
-            )
-            .unwrap()
-            .differential_bytes(),
-        );
-        let mut second = transform::TransformResponse::passthrough(
-            served,
-            second_request.full_array_fingerprint.clone(),
-        );
-        let second_attachment = attach_native_messages_incremental(
-            &mut second,
-            &second_request,
-            1,
-            &tags,
-            None,
-            None,
-            false,
-            Some(&frontier),
-            0,
-            &Revision::parse("test-output").unwrap(),
-            cache,
-            NativeCacheKeyMode::Normal,
-        );
-        assert!(second.native_messages.is_none());
-        let second_stats = second_attachment.stats;
-        let second_native = second_attachment.output.values;
-        assert_eq!(second_stats.delta_fallback_reason, None);
-        assert_eq!(frontier.native_replace_from, 2);
-        let native_values = second_request.native_messages.as_ref().unwrap();
-        let native_charge = native_values.capacity() * std::mem::size_of::<Arc<Value>>()
-            + native_values.len() * retained_size::ARC_ALLOCATION_OVERHEAD_BYTES
-            + native_values
-                .iter()
-                .map(|value| retained_size::value_retained_bytes(value))
-                .sum::<usize>();
-        assert_eq!(second_stats.request_native_retained_bytes, native_charge);
-        assert_eq!(
-            second_request.retained_bytes(),
-            second_request
-                .retained_bytes_with_charges(Some(second_stats.request_native_retained_bytes)),
-        );
-        assert_eq!(
-            serde_json::to_vec(&second_native).unwrap(),
-            serde_json::to_vec(&fresh.native_messages).unwrap(),
-        );
-        assert_eq!(second.messages(), fresh.messages());
-        for (reattached, fresh_message) in second.messages().iter().zip(fresh.messages()) {
-            assert_eq!(
-                reattached.canonical_bytes(),
-                fresh_message.canonical_bytes()
-            );
-        }
-        assert!(second_stats.reused_messages >= 5, "{second_stats:?}");
-        assert!(second_stats.encoded_messages <= 2, "{second_stats:?}");
-        let second_sidecar = Arc::clone(
-            &cache.lock().unwrap().sessions["native-complex"]
-                .snapshot
-                .sidecar,
-        );
-        for mid in &first_sidecar.order {
-            assert!(Arc::ptr_eq(
-                &first_sidecar.messages[mid],
-                &second_sidecar.messages[mid]
-            ));
-        }
-        for (replayed, original) in second_native[..4]
-            .iter()
-            .zip(first.native_messages.as_ref().unwrap())
-        {
-            assert!(Arc::ptr_eq(replayed, original));
-        }
-        let (shared_replay, shared_stats) = run_native_cache_pass(
-            cache,
-            &second_request.clone(),
-            second
-                .messages()
-                .iter()
-                .map(|message| message.deref().clone())
-                .collect(),
-            &tags,
-            false,
-            0,
-            NativeCacheKeyMode::Normal,
-        );
-        assert_eq!(shared_stats.encoded_messages, 0);
-        assert_eq!(
-            shared_replay.native_messages.as_ref().unwrap(),
-            &second_native
-        );
-        assert_eq!(
-            serde_json::to_vec(shared_replay.messages()).unwrap(),
-            serde_json::to_vec(second.messages()).unwrap()
-        );
-        for (shared, reattached) in shared_replay.messages().iter().zip(second.messages()) {
-            assert_eq!(shared.canonical_bytes(), reattached.canonical_bytes());
-        }
-        let mut edited_output = shared_replay.native_messages.clone().unwrap();
-        let original_output = serde_json::to_vec(&shared_replay.native_messages).unwrap();
-        Arc::make_mut(&mut edited_output[0])["alias_mutation"] = json!(true);
-        assert!(!Arc::ptr_eq(&edited_output[0], &second_native[0]));
-        assert_eq!(serde_json::to_vec(&second_native).unwrap(), original_output);
-        let native = second_native;
-        let encoded = serde_json::to_string(&native).unwrap();
-        assert!(encoded.contains("syntheticTodoMarker"));
-        assert!(encoded.contains("keep marker representation"));
-        assert!(encoded.contains("[dropped]"));
-        assert!(native.iter().any(|message| {
-            message["parts"].as_array().is_some_and(|parts| {
-                parts.iter().any(|part| {
-                    part["type"] == json!("reasoning")
-                        && part["text"] == json!("signed historical thinking")
-                })
-            })
-        }));
-        assert_eq!(cache.lock().unwrap().stats("native-complex"), shared_stats);
-    }
-
-    #[test]
-    fn native_delta_ingress_core_is_independent_of_changed_output_messages() {
-        let ingress = vec![
-            ck("core-1", 1, "one"),
-            ck("core-2", 2, "two"),
-            ck("core-3", 3, "three"),
-        ];
-        let request = native_cache_request(
-            "native-prefix-core",
-            ingress.clone(),
-            vec![
-                native_text_message("core-1", "user", "one"),
-                native_text_message("core-2", "user", "two"),
-                native_text_message("core-3", "user", "three"),
-            ],
-            "native-prefix-core-fp",
-        );
-        let mut served = ingress
-            .iter()
-            .map(|message| message.ck.clone())
-            .collect::<Vec<_>>();
-        if let BlockKind::Text { text } = served[2].content_mut()[0].kind_mut() {
-            *text = "changed response tail".to_string();
-        }
-        let (handler, _store, _dir, project) =
-            handler_with_store(Arc::new(ProducerState::default()), default_test_config());
-        handler.bind_route(
-            test_route(7),
-            binding(project.to_str().unwrap(), "native-prefix-core"),
-        );
-        seed_handler_delta_snapshot(&handler, &request, 0);
-        let (response, stats) = run_native_cache_pass(
-            &handler.native_attachments,
-            &request,
-            served,
-            &BTreeMap::new(),
-            false,
-            0,
-            NativeCacheKeyMode::Normal,
-        );
-
-        let mut cache = handler.native_attachments.lock().unwrap();
-        assert_eq!(
-            cache.sessions["native-prefix-core"]
-                .snapshot
-                .ingress_chunks
-                .len(),
-            3
-        );
-        let (prefix, retained_bytes) = cache
-            .delta_native_prefix("native-prefix-core", 0, "native-prefix-core-fp", 3)
-            .expect("the raw ingress prefix remains attachable");
-        assert_eq!(prefix.len(), 3);
-        assert_eq!(retained_bytes.len(), 3);
-        assert_eq!(
-            prefix[2].as_ref(),
-            request.native_messages.as_ref().unwrap()[2].as_ref()
-        );
-        let output = response.native_messages.as_ref().unwrap();
-        assert!(Arc::ptr_eq(&prefix[0], &output[0]));
-        assert!(!Arc::ptr_eq(&prefix[2], &output[2]));
-        assert!(Arc::ptr_eq(
-            &prefix[2],
-            &request.native_messages.as_ref().unwrap()[2]
-        ));
-        assert_ne!(prefix[2], output[2]);
-
-        let native = request.native_messages.as_ref().unwrap();
-        let native_charge = native.capacity() * std::mem::size_of::<Arc<Value>>()
-            + native
-                .iter()
-                .map(|value| {
-                    retained_size::ARC_ALLOCATION_OVERHEAD_BYTES
-                        + retained_size::value_retained_bytes(value)
-                })
-                .sum::<usize>();
-        assert_eq!(stats.request_native_retained_bytes, native_charge);
-        assert_eq!(
-            request.retained_bytes(),
-            request.retained_bytes_with_charges(Some(native_charge)),
-        );
-        assert_eq!(
-            request.retained_bytes() - request.retained_bytes_with_charges(Some(0)),
-            native_charge,
-        );
-
-        cache.remove("native-prefix-core");
-        drop(cache);
-        let mut delta = native_cache_request(
-            "native-prefix-core",
-            vec![ck("core-4", 4, "four")],
-            vec![native_text_message("core-4", "user", "four")],
-            "native-prefix-core-next",
-        );
-        delta.tail_delta = Some(json!({
-            "after": "native-prefix-core-fp",
-            "replace_from": 3,
-            "native_replace_from": 3,
-        }));
-        let pass_load = _store.load_meta(&delta.session_id);
-        let pass_state = PassState::from(&pass_load);
-        let frontier = handler
-            .expand_transform_tail_delta(&mut delta, pass_state)
-            .expect("full snapshot must supply the evicted native prefix");
-        for (reattached, original) in delta.messages.iter().zip(&request.messages) {
-            assert!(Arc::ptr_eq(reattached, original));
-        }
-        let reattached = delta.native_messages.as_ref().unwrap();
-        for (index, original) in native.iter().enumerate() {
-            assert!(Arc::ptr_eq(&reattached[index], original));
-            assert!(Arc::ptr_eq(&frontier.native_prefix[index], original));
-        }
-        assert_eq!(reattached[2]["parts"][0]["text"], "three");
-        assert_eq!(reattached[3]["parts"][0]["text"], "four");
-    }
-
-    #[test]
-    fn native_cache_charge_keeps_raw_allocation_floor_beside_sidecar_estimate() {
-        let ingress = ck("dense-native", 1, "before");
-        let request = native_cache_request(
-            "native-charge-floor",
-            vec![ingress.clone()],
-            vec![json!({
-                "info": { "id": "dense-native", "role": "user" },
-                "parts": [{ "type": "text", "text": "before" }],
-                "provider_data": vec![0; 4096],
-            })],
-            "native-charge-floor-fp",
-        );
-        let mut served = ingress.ck;
-        *served.content_mut()[0].kind_mut() = BlockKind::Text {
-            text: "after".into(),
-        };
-        let cache = Mutex::new(NativeAttachmentCache::default());
-        let (_, stats) = run_native_cache_pass(
-            &cache,
-            &request,
-            vec![served],
-            &BTreeMap::new(),
-            false,
-            0,
-            NativeCacheKeyMode::Normal,
-        );
-        let mut snapshot = cache
-            .lock()
-            .unwrap()
-            .snapshot("native-charge-floor", 0)
-            .unwrap();
-        let raw = Arc::clone(&snapshot.sidecar.messages["dense-native"].raw);
-        assert!(Arc::ptr_eq(&raw, &snapshot.ingress_chunks[0]));
-        assert!(!Arc::ptr_eq(&raw, &snapshot.chunks[0].value));
-        let raw_charge = retained_size::ARC_ALLOCATION_OVERHEAD_BYTES
-            + retained_size::value_retained_bytes(&raw);
-        assert!(snapshot.sidecar_sizes["dense-native"] < raw_charge);
-        assert_eq!(
-            stats.request_native_retained_bytes,
-            request.native_messages.as_ref().unwrap().capacity()
-                * std::mem::size_of::<Arc<Value>>()
-                + raw_charge,
-        );
-
-        for sidecar_present in [true, false] {
-            if !sidecar_present {
-                assert!(snapshot.discard_optional_sidecar_trees());
-                assert!(snapshot.sidecar_sizes.is_empty());
-                assert!(snapshot.sidecar.messages.is_empty());
-            }
-            let with_raw_ingress = snapshot.retained_bytes(0);
-            let encoded = &snapshot.chunks[0];
-            snapshot.ingress_chunks[0] = Arc::clone(&encoded.value);
-            snapshot.ingress_chunk_retained_bytes[0] = encoded.retained_bytes;
-            let shared_output_charge = snapshot.retained_bytes(0);
-            assert_eq!(with_raw_ingress - shared_output_charge, raw_charge);
-
-            snapshot.ingress_chunks[0] = Arc::new(encoded.value.as_ref().clone());
-            assert_eq!(snapshot.ingress_chunks[0], encoded.value);
-            assert!(!Arc::ptr_eq(&snapshot.ingress_chunks[0], &encoded.value));
-            let distinct_charge = retained_size::value_retained_bytes(&snapshot.ingress_chunks[0]);
-            snapshot.ingress_chunk_retained_bytes[0] = distinct_charge;
-            assert_eq!(
-                snapshot.retained_bytes(0) - shared_output_charge,
-                distinct_charge + retained_size::ARC_ALLOCATION_OVERHEAD_BYTES,
-            );
-            snapshot.ingress_chunks[0] = Arc::clone(&raw);
-            snapshot.ingress_chunk_retained_bytes[0] =
-                raw_charge - retained_size::ARC_ALLOCATION_OVERHEAD_BYTES;
-        }
-    }
-
-    #[test]
-    fn giant_degraded_snapshot_refuses_tail_delta_without_a_full_request() {
-        const GIANT_MESSAGE_COUNT: usize = 5_001;
-        const GIANT_BLOCK_COUNT: usize = GIANT_MESSAGE_COUNT;
-        // The request holds each payload twice, as typed text and as a native `Value`, so
-        // the fixture needs more than half the 64 MiB snapshot budget in payload to exceed it.
-        const GIANT_NATIVE_WIRE_BYTES: usize = 40 * 1024 * 1024;
-        const SESSION_ID: &str = "native-giant-degraded";
-
-        let (request, served) = native_cache_fixture(
-            SESSION_ID,
-            GIANT_MESSAGE_COUNT,
-            GIANT_BLOCK_COUNT,
-            GIANT_NATIVE_WIRE_BYTES,
-        );
-        let request = Arc::new(request);
-        let producer = Arc::new(ProducerState::default());
-        let (handler, _store, _dir, project) = handler_with_store(producer, default_test_config());
-        handler.bind_route(
-            test_route(7),
-            binding(project.to_str().unwrap(), SESSION_ID),
-        );
-
-        let (first, first_stats) = run_native_cache_pass(
-            &handler.native_attachments,
-            &request,
-            served,
-            &BTreeMap::new(),
-            false,
-            0,
-            NativeCacheKeyMode::Normal,
-        );
-        assert_eq!(first_stats.reused_messages, 0);
-        assert_eq!(first_stats.degraded_store, 1, "{first_stats:?}");
-        assert_eq!(first_stats.refused_store, 0, "{first_stats:?}");
-        drop(first);
-
-        {
-            let cache = handler.native_attachments.lock().unwrap();
-            let entry = &cache.sessions[SESSION_ID];
-            let snapshot = &entry.snapshot;
-            assert!(entry.retained_bytes <= cache.max_entry_retained_bytes);
-            assert!(cache.retained_bytes <= cache.max_retained_bytes);
-            assert!(snapshot.sidecar.messages.is_empty());
-            assert!(snapshot.sidecar_sizes.is_empty());
-            assert_eq!(snapshot.sidecar.order.len(), GIANT_MESSAGE_COUNT);
-            assert_eq!(snapshot.sidecar.mid_pins.len(), GIANT_MESSAGE_COUNT);
-            assert_eq!(snapshot.sidecar_hashes.len(), GIANT_MESSAGE_COUNT);
-            assert_eq!(snapshot.ingress_chunks.len(), GIANT_MESSAGE_COUNT);
-        }
-
-        let request_charge = request.retained_bytes();
-        assert!(
-            request_charge > TRANSFORM_SNAPSHOT_BUDGET_BYTES,
-            "fixture must exceed the legacy full-request snapshot budget: charge={request_charge}"
-        );
-        {
-            let mut snapshots = handler.transform_snapshots.lock().unwrap();
-            let generation = snapshots.begin(SESSION_ID);
-            snapshots.finish_ready(
-                SESSION_ID,
-                generation,
-                Arc::clone(&request),
-                0,
-                request_charge,
-            );
-            assert!(
-                snapshots.ready_delta_request(SESSION_ID).is_none(),
-                "the fixture must not retain a full request"
-            );
-        }
-
-        let tail = ck(
-            &format!("{SESSION_ID}-{}", GIANT_MESSAGE_COUNT),
-            u64::try_from(GIANT_MESSAGE_COUNT + 1).unwrap(),
-            "new tail",
-        );
-        let tail_native = native_text_message(&tail.mid, "user", "new tail");
-        let mut delta = native_cache_request(
-            SESSION_ID,
-            vec![tail],
-            vec![tail_native],
-            "native-giant-degraded-next-fingerprint",
-        );
-        delta.tail_delta = Some(json!({
-            "after": request.full_array_fingerprint.as_deref().unwrap(),
-            "replace_from": GIANT_MESSAGE_COUNT,
-            "native_replace_from": GIANT_MESSAGE_COUNT,
-        }));
-
-        let pass_load = _store.load_meta(&delta.session_id);
-        let pass_state = PassState::from(&pass_load);
-        assert!(
-            handler
-                .expand_transform_tail_delta(&mut delta, pass_state)
-                .is_none(),
-            "without a retained full request the tail delta takes the full-sync path"
-        );
     }
 
     #[test]
@@ -26326,6 +25304,10 @@ mod tests {
             served_a.len(),
             "session A was evicted by session B and re-encoded from scratch"
         );
+        assert_eq!(
+            cache.lock().unwrap().stats("native-large-session-a"),
+            second_a_stats
+        );
         let (_second_b, second_b_stats) = run_native_cache_pass(
             &cache,
             &request_b,
@@ -26351,7 +25333,7 @@ mod tests {
             native_text_message("m3", "user", "three"),
         ];
         let baseline_request =
-            native_cache_request("native-invalidations", ingress.clone(), native, "fp-base");
+            native_cache_request("native-invalidations", ingress.clone(), native);
         let baseline_served = ingress
             .iter()
             .map(|message| message.ck.clone())
@@ -26448,12 +25430,8 @@ mod tests {
             todo.assistant_msg,
             todo.tool_msg,
         ];
-        let request = native_cache_request(
-            "native-transition-classes",
-            baseline_ingress,
-            Vec::new(),
-            "transition-fp",
-        );
+        let request =
+            native_cache_request("native-transition-classes", baseline_ingress, Vec::new());
 
         for class_set in [
             "poisoned_reasoning",
@@ -26558,7 +25536,6 @@ mod tests {
             "native-shell-rematch",
             decoded.messages.clone(),
             vec![raw_tool.clone()],
-            "shell-fp-1",
         );
         run_native_cache_pass(
             &cache,
@@ -26576,17 +25553,11 @@ mod tests {
         generation_2_messages.push(user_2);
         let mut generation_2_native = vec![raw_tool.clone()];
         generation_2_native.push(native_text_message("shell-user-2", "user", "second"));
-        let mut generation_2 = native_cache_request(
+        let generation_2 = native_cache_request(
             "native-shell-rematch",
             generation_2_messages,
             generation_2_native,
-            "shell-fp-2",
         );
-        generation_2.tail_delta = Some(json!({
-            "after": "shell-fp-1",
-            "replace_from": 1,
-            "native_replace_from": 1,
-        }));
         rewrite_first_tool_result(&mut served, "[dropped gen2]");
         run_native_cache_pass(
             &cache,
@@ -26610,20 +25581,14 @@ mod tests {
             .map(|message| message.as_ref().clone())
             .collect::<Vec<_>>();
         generation_3_native.push(native_text_message("shell-user-3", "user", "third"));
-        let mut generation_3 = native_cache_request(
+        let generation_3 = native_cache_request(
             "native-shell-rematch",
             generation_3_messages
                 .iter()
                 .map(|message| message.as_ref().clone())
                 .collect(),
             generation_3_native,
-            "shell-fp-3",
         );
-        generation_3.tail_delta = Some(json!({
-            "after": "shell-fp-2",
-            "replace_from": 2,
-            "native_replace_from": 2,
-        }));
         rewrite_first_tool_result(&mut served, "[dropped gen3]");
         let (response, _stats) = run_native_cache_pass(
             &cache,
@@ -26668,7 +25633,6 @@ mod tests {
             "native-marker-frontier",
             decoded.messages.clone(),
             first_native.clone(),
-            "marker-fp-1",
         );
         run_native_cache_pass(
             &cache,
@@ -26683,17 +25647,8 @@ mod tests {
         let mut changed_native = first_native;
         changed_native[2]["parts"][1]["summary"] = json!("marker-v2");
         changed_native[2]["parts"][1]["custom"] = json!(2);
-        let mut changed_request = native_cache_request(
-            "native-marker-frontier",
-            decoded.messages,
-            changed_native,
-            "marker-fp-2",
-        );
-        changed_request.tail_delta = Some(json!({
-            "after": "marker-fp-1",
-            "replace_from": 2,
-            "native_replace_from": 2,
-        }));
+        let changed_request =
+            native_cache_request("native-marker-frontier", decoded.messages, changed_native);
         let (response, stats) = run_native_cache_pass(
             &cache,
             &changed_request,
@@ -26725,7 +25680,6 @@ mod tests {
             "native-reasoning-movement",
             first_ingress.clone(),
             first_native.clone(),
-            "reasoning-fp-1",
         );
         first_request.mid_turn = true;
         let cache = Mutex::new(NativeAttachmentCache::new(1024 * 1024));
@@ -26756,14 +25710,8 @@ mod tests {
             "native-reasoning-movement",
             second_ingress.clone(),
             second_native,
-            "reasoning-fp-2",
         );
         second_request.mid_turn = true;
-        second_request.tail_delta = Some(json!({
-            "after": "reasoning-fp-1",
-            "replace_from": 1,
-            "native_replace_from": 1,
-        }));
         let (second, stats) = run_native_cache_pass_with_watermark(
             &cache,
             &second_request,
@@ -26800,7 +25748,6 @@ mod tests {
             "native-frontier-vacuity",
             baseline_ingress.clone(),
             baseline_native,
-            "opaque-repeat",
         );
         let baseline_served = baseline_ingress
             .iter()
@@ -26861,62 +25808,12 @@ mod tests {
 
     #[test]
     #[should_panic(expected = "incremental native attachment cache drift")]
-    fn differential_assert_rejects_frontier_inside_mutated_native_region() {
-        let ingress = vec![ck("inside-1", 1, "one"), ck("inside-2", 2, "two")];
-        let native = vec![
-            native_text_message("inside-1", "user", "one"),
-            native_text_message("inside-2", "user", "two"),
-        ];
-        let first_request = native_cache_request(
-            "native-inside-frontier",
-            ingress.clone(),
-            native,
-            "inside-fp-1",
-        );
-        let served = ingress
-            .iter()
-            .map(|message| message.ck.clone())
-            .collect::<Vec<_>>();
-        let cache = Mutex::new(NativeAttachmentCache::new(1024 * 1024));
-        run_native_cache_pass(
-            &cache,
-            &first_request,
-            served.clone(),
-            &BTreeMap::new(),
-            true,
-            0,
-            NativeCacheKeyMode::Normal,
-        );
-
-        let mut malformed = first_request;
-        malformed.full_array_fingerprint = Some("inside-fp-2".to_string());
-        Arc::make_mut(&mut malformed.native_messages.as_mut().unwrap()[0])["info"]["custom"] =
-            json!("mutated-before-frontier");
-        malformed.tail_delta = Some(json!({
-            "after": "inside-fp-1",
-            "replace_from": 2,
-            "native_replace_from": 1,
-        }));
-        run_native_cache_pass(
-            &cache,
-            &malformed,
-            served,
-            &BTreeMap::new(),
-            true,
-            0,
-            NativeCacheKeyMode::Normal,
-        );
-    }
-
-    #[test]
-    #[should_panic(expected = "incremental native attachment cache drift")]
     fn differential_assert_catches_corrupt_sidecar_key_derivation() {
         let ingress = vec![ck("m1", 1, "one")];
         let request = native_cache_request(
             "native-key-mutation",
             ingress.clone(),
             vec![native_text_message("m1", "user", "one")],
-            "fp-1",
         );
         let served = vec![ingress[0].ck.clone()];
         let cache = Mutex::new(NativeAttachmentCache::new(1024 * 1024));
@@ -26954,21 +25851,20 @@ mod tests {
         handler.bind_route(test_route(7), binding(project.to_str().unwrap(), session_a));
         handler.bind_route(test_route(8), binding(project.to_str().unwrap(), session_b));
         handler.bind_route(test_route(9), binding(project.to_str().unwrap(), session_c));
-        let initial = |session: &str, fill: &str| {
+        let request = |session: &str, fill: &str, tail: &str| {
             let request = native_cache_request(
                 session,
                 vec![
                     ck(&format!("{session}-prefix"), 1, &fill.repeat(4096)),
-                    ck(&format!("{session}-tail"), 2, "before"),
+                    ck(&format!("{session}-tail"), 2, tail),
                 ],
                 Vec::new(),
-                &format!("{session}-fp-1"),
             );
             serde_json::to_value(request).unwrap()
         };
 
         let response_a =
-            call_transform_request_on_channel(&handler, 7, initial(session_a, "a")).await;
+            call_transform_request_on_channel(&handler, 7, request(session_a, "a", "before")).await;
         assert_eq!(response_a["status"], "ok", "{response_a}");
         let entry_charge = {
             let mut native = handler.native_attachments.lock().unwrap();
@@ -26977,7 +25873,7 @@ mod tests {
             charge
         };
         let response_b =
-            call_transform_request_on_channel(&handler, 8, initial(session_b, "b")).await;
+            call_transform_request_on_channel(&handler, 8, request(session_b, "b", "before")).await;
         assert_eq!(response_b["status"], "ok", "{response_b}");
         {
             let native = handler.native_attachments.lock().unwrap();
@@ -26993,7 +25889,7 @@ mod tests {
             .unwrap()
             .max_retained_bytes = entry_charge - 1;
         let response_c =
-            call_transform_request_on_channel(&handler, 9, initial(session_c, "c")).await;
+            call_transform_request_on_channel(&handler, 9, request(session_c, "c", "before")).await;
         assert_eq!(response_c["status"], "ok", "{response_c}");
         assert_eq!(response_c["timings"]["native_cache_refused_store"], 1);
         assert!(
@@ -27005,211 +25901,17 @@ mod tests {
                 .contains_key(session_c)
         );
 
-        // The evicted session's warm delta re-encodes its native output instead of reusing it.
-        let mut warm_delta = native_cache_request(
-            session_a,
-            vec![ck("native-lru-a-tail", 2, "after")],
-            Vec::new(),
-            "native-lru-a-fp-2",
-        );
-        warm_delta.tail_delta = Some(json!({
-            "after": "native-lru-a-fp-1",
-            "replace_from": 1,
-            "native_replace_from": 0,
-        }));
-        let warm = call_transform_request_on_channel(
-            &handler,
-            7,
-            serde_json::to_value(warm_delta).unwrap(),
-        )
-        .await;
-        assert_eq!(warm["status"], "ok", "{warm}");
-        assert_eq!(warm["timings"]["projection_projected_messages"], 2);
-        assert_eq!(warm["timings"]["native_cache_reused_messages"], 0);
+        // The evicted session's next pass re-encodes its native output instead of reusing it.
+        let next =
+            call_transform_request_on_channel(&handler, 7, request(session_a, "a", "after")).await;
+        assert_eq!(next["status"], "ok", "{next}");
+        assert_eq!(next["timings"]["projection_projected_messages"], 2);
+        assert_eq!(next["timings"]["native_cache_reused_messages"], 0);
         assert!(
-            warm["timings"]["native_cache_encoded_messages"]
+            next["timings"]["native_cache_encoded_messages"]
                 .as_u64()
                 .unwrap()
                 > 0
-        );
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn handler_mismatched_native_delta_cache_serves_full_output() {
-        let (handler, _store, _dir, project) =
-            handler_with_store(Arc::new(ProducerState::default()), default_test_config());
-        let session = "native-delta-fingerprint-mismatch";
-        handler.bind_route(test_route(7), binding(project.to_str().unwrap(), session));
-
-        let initial = native_cache_request(
-            session,
-            vec![
-                ck("mismatch-prefix", 1, "prefix"),
-                ck("mismatch-tail", 2, "before"),
-            ],
-            vec![
-                native_text_message("mismatch-prefix", "user", "prefix"),
-                native_text_message("mismatch-tail", "user", "before"),
-            ],
-            "mismatch-fp-1",
-        );
-        let first =
-            call_transform_request_on_channel(&handler, 7, serde_json::to_value(initial).unwrap())
-                .await;
-        assert_eq!(first["status"], "ok", "{first}");
-        assert!(first["native_messages"].is_array(), "{first}");
-
-        handler
-            .native_attachments
-            .lock()
-            .unwrap()
-            .sessions
-            .get_mut(session)
-            .expect("initial native attachment snapshot")
-            .snapshot
-            .full_array_fingerprint = Some("stale-native-cache-fingerprint".to_string());
-
-        let mut delta = native_cache_request(
-            session,
-            vec![ck("mismatch-tail", 2, "after")],
-            vec![native_text_message("mismatch-tail", "user", "after")],
-            "mismatch-fp-2",
-        );
-        delta.tail_delta = Some(json!({
-            "after": "mismatch-fp-1",
-            "replace_from": 1,
-            "native_replace_from": 1,
-        }));
-        let response =
-            call_transform_request_on_channel(&handler, 7, serde_json::to_value(delta).unwrap())
-                .await;
-
-        assert_eq!(response["status"], "ok", "{response}");
-        assert!(
-            response["native_messages"].is_array(),
-            "a mismatched attachment snapshot must fall back to a full native serve: {response}"
-        );
-        // The encoded-prefix cache falls back to a full re-encode; the recipe layer still keeps
-        // equal messages from the output the client says it applied.
-        assert_eq!(
-            handler
-                .native_attachments
-                .lock()
-                .unwrap()
-                .stats(session)
-                .delta_fallback_reason
-                .map(NativeDeltaFallbackReason::as_str),
-            Some("fingerprint_mismatch")
-        );
-
-        let mut healed_delta = native_cache_request(
-            session,
-            vec![ck("mismatch-tail", 2, "after-heal")],
-            vec![native_text_message("mismatch-tail", "user", "after-heal")],
-            "mismatch-fp-3",
-        );
-        healed_delta.tail_delta = Some(json!({
-            "after": "mismatch-fp-2",
-            "replace_from": 1,
-            "native_replace_from": 1,
-        }));
-        let healed = call_transform_request_on_channel(
-            &handler,
-            7,
-            serde_json::to_value(healed_delta).unwrap(),
-        )
-        .await;
-        assert_eq!(healed["status"], "ok", "{healed}");
-        assert!(healed["previous_output_revision"].is_string(), "{healed}");
-        assert!(keeps_from(&healed, "previous") > 0, "{healed}");
-        assert!(healed["native_messages"].is_array(), "{healed}");
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn handler_native_delta_cache_eviction_self_heals_full_then_delta() {
-        let (handler, _store, _dir, project) =
-            handler_with_store(Arc::new(ProducerState::default()), default_test_config());
-        let session = "native-delta-eviction-heal";
-        handler.bind_route(test_route(7), binding(project.to_str().unwrap(), session));
-
-        let initial = native_cache_request(
-            session,
-            vec![ck("evict-prefix", 1, "prefix"), ck("evict-tail", 2, "zero")],
-            vec![
-                native_text_message("evict-prefix", "user", "prefix"),
-                native_text_message("evict-tail", "user", "zero"),
-            ],
-            "evict-fp-0",
-        );
-        let cold =
-            call_transform_request_on_channel(&handler, 7, serde_json::to_value(initial).unwrap())
-                .await;
-        assert!(cold["native_messages"].is_array(), "{cold}");
-
-        let delta_request = |after: &str, fingerprint: &str, text: &str| {
-            let mut delta = native_cache_request(
-                session,
-                vec![ck("evict-tail", 2, text)],
-                vec![native_text_message("evict-tail", "user", text)],
-                fingerprint,
-            );
-            delta.tail_delta = Some(json!({
-                "after": after,
-                "replace_from": 1,
-                "native_replace_from": 1,
-            }));
-            serde_json::to_value(delta).unwrap()
-        };
-
-        let pass_n = call_transform_request_on_channel(
-            &handler,
-            7,
-            delta_request("evict-fp-0", "evict-fp-1", "one"),
-        )
-        .await;
-        assert!(pass_n["previous_output_revision"].is_string(), "{pass_n}");
-        assert!(keeps_from(&pass_n, "previous") > 0, "{pass_n}");
-
-        handler.native_attachments.lock().unwrap().remove(session);
-        let pass_n_plus_1 = call_transform_request_on_channel(
-            &handler,
-            7,
-            delta_request("evict-fp-1", "evict-fp-2", "two"),
-        )
-        .await;
-        assert!(
-            pass_n_plus_1["native_messages"].is_array(),
-            "{pass_n_plus_1}"
-        );
-        assert!(
-            pass_n_plus_1.get("previous_output_revision").is_none(),
-            "an evicted cache leaves nothing to keep from: {pass_n_plus_1}"
-        );
-        assert_eq!(keeps_from(&pass_n_plus_1, "previous"), 0);
-        assert_eq!(
-            handler
-                .native_attachments
-                .lock()
-                .unwrap()
-                .stats(session)
-                .delta_fallback_reason
-                .map(NativeDeltaFallbackReason::as_str),
-            Some("missing_cache_state")
-        );
-
-        let pass_n_plus_2 = call_transform_request_on_channel(
-            &handler,
-            7,
-            delta_request("evict-fp-2", "evict-fp-3", "three"),
-        )
-        .await;
-        assert!(
-            pass_n_plus_2["previous_output_revision"].is_string(),
-            "{pass_n_plus_2}"
-        );
-        assert!(
-            keeps_from(&pass_n_plus_2, "previous") > 0,
-            "{pass_n_plus_2}"
         );
     }
 
@@ -27221,7 +25923,7 @@ mod tests {
         let call = assistant_tool_call("call-dup", 2);
         let result = tool_result("result-dup", 3, "first");
         let baseline = vec![text.clone(), call.clone(), result.clone()];
-        let request = native_cache_request("native-dup", baseline.clone(), Vec::new(), "fp-1");
+        let request = native_cache_request("native-dup", baseline.clone(), Vec::new());
         let cache = Mutex::new(NativeAttachmentCache::new(1024 * 1024));
         run_native_cache_pass(
             &cache,
@@ -27242,12 +25944,7 @@ mod tests {
         let mut next = baseline;
         next.push(duplicate_call);
         next.push(duplicate_result);
-        let mut next_request = native_cache_request("native-dup", next.clone(), Vec::new(), "fp-2");
-        next_request.tail_delta = Some(json!({
-            "after": "fp-1",
-            "replace_from": 3,
-            "native_replace_from": 0,
-        }));
+        let next_request = native_cache_request("native-dup", next.clone(), Vec::new());
         run_native_cache_pass(
             &cache,
             &next_request,
@@ -27260,689 +25957,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn handler_tail_delta_cross_frontier_tool_arc_matches_full_control() {
-        let (cached_handler, cached_store, _cached_dir, _cached_project) =
-            handler_with_store(Arc::new(ProducerState::default()), default_test_config());
-        let (control_handler, control_store, _control_dir, _control_project) =
-            handler_with_store(Arc::new(ProducerState::default()), default_test_config());
-        let initial_messages = vec![
-            wire_reasoning("reasoning-old", 1, "signed reasoning"),
-            assistant_tool_call("call-project", 2),
-            tool_result("result-project", 3, "first result"),
-        ];
-        for handler in [&cached_handler, &control_handler] {
-            let initial = native_cache_request(
-                "ses",
-                initial_messages.clone(),
-                Vec::new(),
-                "projection-handler-fp-1",
-            );
-            let response =
-                call_transform_request(handler, serde_json::to_value(initial).unwrap()).await;
-            assert_eq!(response["status"], "ok", "{response}");
-        }
-
-        let changed_messages = vec![
-            wire_reasoning("reasoning-old", 1, "signed reasoning"),
-            assistant_tool_call("call-project", 2),
-            tool_result("result-project", 3, "changed result"),
-        ];
-        let mut delta = native_cache_request(
-            "ses",
-            vec![changed_messages[2].clone()],
-            Vec::new(),
-            "projection-handler-fp-2",
-        );
-        delta.tail_delta = Some(json!({
-            "after": "projection-handler-fp-1",
-            "replace_from": 2,
-            "native_replace_from": 0,
-        }));
-        let cached =
-            call_transform_request(&cached_handler, serde_json::to_value(delta).unwrap()).await;
-        let full = call_transform_request(
-            &control_handler,
-            serde_json::to_value(native_cache_request(
-                "ses",
-                changed_messages,
-                Vec::new(),
-                "projection-handler-fp-2",
-            ))
-            .unwrap(),
-        )
-        .await;
-        assert_eq!(cached["status"], "ok", "{cached}");
-        assert_eq!(full["status"], "ok", "{full}");
-        assert_eq!(cached["timings"]["projection_projected_messages"], 3);
-        // The cached pass keeps its unchanged prefix from the previous output rather than resending it.
-        assert!(cached["previous_output_revision"].is_string(), "{cached}");
-        assert!(keeps_from(&cached, "previous") > 0, "{cached}");
-        assert_eq!(full["timings"]["projection_projected_messages"], 3);
-
-        for field in [
-            "action",
-            "decision",
-            "materialize_reason",
-            "boundary_id",
-            "coverage_ordinal",
-            "history_summarizer",
-            "native_messages",
-        ] {
-            assert_eq!(cached[field], full[field], "full-control drift in {field}");
-        }
-        // The changed tool result reaches the native array through the tool arc it completes.
-        let native_bytes = serde_json::to_string(&cached["native_messages"]).unwrap();
-        assert!(native_bytes.contains("changed result"), "{native_bytes}");
-        assert!(!native_bytes.contains("first result"), "{native_bytes}");
-        codec::opencode::assert_unique_tool_use_ids(
-            cached["native_messages"]
-                .as_array()
-                .expect("native response array")
-                .iter(),
-        );
-
-        let cached_state = cached_store.load("ses").unwrap();
-        let full_state = control_store.load("ses").unwrap();
-        assert_eq!(cached_state.core, full_state.core, "selection/core drift");
-        assert_eq!(
-            cached_state.meta.history_summarizer, full_state.meta.history_summarizer,
-            "history_summarizer boundary math drift"
-        );
-
-        let mut changed_context = native_cache_request(
-            "ses",
-            vec![tool_result("result-project", 3, "changed again")],
-            Vec::new(),
-            "projection-handler-fp-3",
-        );
-        changed_context.render_config = "cfg1".to_string();
-        changed_context.tail_delta = Some(json!({
-            "after": "projection-handler-fp-2",
-            "replace_from": 2,
-            "native_replace_from": 0,
-        }));
-        let third = call_transform_request(
-            &cached_handler,
-            serde_json::to_value(changed_context).unwrap(),
-        )
-        .await;
-        assert_eq!(third["status"], "ok", "{third}");
-        // The delta path projects its full expanded input; nothing is reused.
-        assert_eq!(third["timings"]["projection_reused_messages"], 0);
-        assert_eq!(third["timings"]["projection_projected_messages"], 3);
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn handler_delta_rechecks_durable_revert_epoch() {
-        let session = "projection-revert-epoch";
-        let (handler, store, _dir, project) =
-            handler_with_store(Arc::new(ProducerState::default()), default_test_config());
-        handler.bind_route(test_route(7), binding(project.to_str().unwrap(), session));
-        let initial = native_cache_request(
-            session,
-            vec![
-                ck("epoch-prefix", 1, "prefix"),
-                ck("epoch-tail", 2, "before"),
-            ],
-            Vec::new(),
-            "epoch-fp-1",
-        );
-        let first = call_transform_request(&handler, serde_json::to_value(initial).unwrap()).await;
-        assert_eq!(first["status"], "ok", "{first}");
-        let loaded = store.load(session).unwrap();
-        let mut bumped = loaded.meta.clone();
-        bumped.revert_epoch = bumped.revert_epoch.saturating_add(1);
-        store
-            .commit(session, loaded.row_version, &loaded.core, &bumped)
-            .unwrap();
-
-        let mut delta = native_cache_request(
-            session,
-            vec![ck("epoch-tail", 2, "after")],
-            Vec::new(),
-            "epoch-fp-2",
-        );
-        delta.tail_delta = Some(json!({
-            "after": "epoch-fp-1",
-            "replace_from": 1,
-            "native_replace_from": 0,
-        }));
-        let response = call_transform_request(&handler, serde_json::to_value(delta).unwrap()).await;
-        assert_eq!(response["status"], "ok", "{response}");
-        assert_eq!(response["timings"]["projection_projected_messages"], 2);
-        let cache = handler
-            .native_attachments
-            .lock()
-            .expect("native attachment cache mutex");
-        assert_eq!(cache.sessions[session].revert_epoch, bumped.revert_epoch);
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn handler_delta_reconcile_recut_refreshes_projection_epoch_and_frontier() {
-        let session = "projection-reconcile-recut";
-        let (handler, store, _dir, project) =
-            handler_with_store(Arc::new(ProducerState::default()), default_test_config());
-        handler.bind_route(test_route(7), binding(project.to_str().unwrap(), session));
-        store
-            .replace_history_segments(
-                session,
-                &[
-                    stored_comp(1, 1, 1, "a", "S0"),
-                    stored_comp(2, 2, 2, "t2", "S1"),
-                ],
-            )
-            .unwrap();
-        let initial_messages = vec![
-            ck("a", 1, "raw"),
-            ck("t2", 2, "turn two"),
-            ck("t3", 3, "tail"),
-        ];
-        let initial = native_cache_request(session, initial_messages, Vec::new(), "reconcile-fp-1");
-        let boot = call_transform_request(&handler, serde_json::to_value(initial).unwrap()).await;
-        assert_eq!(boot["action"], "HARD", "{boot}");
-
-        let mut reverted = native_cache_request(
-            session,
-            vec![ck("t4", 2, "new turn")],
-            Vec::new(),
-            "reconcile-fp-2",
-        );
-        reverted.tail_delta = Some(json!({
-            "after": "reconcile-fp-1",
-            "replace_from": 1,
-            "native_replace_from": 0,
-        }));
-        let soft = call_transform_request(&handler, serde_json::to_value(reverted).unwrap()).await;
-        assert_eq!(soft["reconcile_pending"], true, "{soft}");
-        let loaded = store.load(session).unwrap();
-        let mut meta = loaded.meta.clone();
-        meta.last_execute_ordinal = 99;
-        store
-            .commit(session, loaded.row_version, &loaded.core, &meta)
-            .unwrap();
-
-        let mut recut = native_cache_request(
-            session,
-            vec![ck("t4", 2, "new turn")],
-            Vec::new(),
-            "reconcile-fp-3",
-        );
-        recut.tail_delta = Some(json!({
-            "after": "reconcile-fp-2",
-            "replace_from": 1,
-            "native_replace_from": 0,
-        }));
-        let hard = call_transform_request(&handler, serde_json::to_value(recut).unwrap()).await;
-        assert_eq!(hard["action"], "HARD", "{hard}");
-        assert_eq!(hard["boundary_id"], "a#0");
-        assert_eq!(hard["coverage_ordinal"], 1);
-        assert_eq!(hard["reconcile_pending"], false);
-        let durable = store.load(session).unwrap();
-        assert_eq!(durable.meta.revert_epoch, 1);
-        let native = handler
-            .native_attachments
-            .lock()
-            .expect("native attachment cache mutex");
-        assert_eq!(
-            native.sessions[session].revert_epoch,
-            durable.meta.revert_epoch
-        );
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn handler_delta_boundary_divergence_recut_retries_cas_without_stale_projection() {
-        let session = "projection-boundary-recut-cas";
-        let (handler, store, _dir, project) =
-            handler_with_store(Arc::new(ProducerState::default()), default_test_config());
-        handler.bind_route(test_route(7), binding(project.to_str().unwrap(), session));
-        let mut previous = crate::transform::tests::seed_astro_divergence(&store, session, 2_442);
-        previous.serializer_profile = "opencode-aisdk".to_string();
-        previous.serve_native = true;
-        previous.native_messages = Some(Vec::new());
-        previous.full_array_fingerprint = Some("boundary-recut-fp-1".to_string());
-        let epoch = store.load(session).unwrap().meta.revert_epoch;
-        seed_handler_delta_snapshot(&handler, &previous, epoch);
-
-        let hook_fired = Arc::new(AtomicBool::new(false));
-        let hook_flag = Arc::clone(&hook_fired);
-        let hook_store = Arc::clone(&store);
-        let hook_session = session.to_string();
-        crate::transform::install_transform_attempt_hook(session, move || {
-            assert!(!hook_flag.swap(true, Ordering::SeqCst));
-            let loaded = hook_store.load(&hook_session).unwrap();
-            hook_store
-                .commit(
-                    &hook_session,
-                    loaded.row_version,
-                    &loaded.core,
-                    &loaded.meta,
-                )
-                .unwrap();
-        });
-
-        let replace_from = previous.messages.len() - 1;
-        let mut delta = native_cache_request(
-            session,
-            vec![previous.messages[replace_from].as_ref().clone()],
-            Vec::new(),
-            "boundary-recut-fp-2",
-        );
-        delta.tail_delta = Some(json!({
-            "after": "boundary-recut-fp-1",
-            "replace_from": replace_from,
-            "native_replace_from": 0,
-        }));
-        let response = call_transform_request(&handler, serde_json::to_value(delta).unwrap()).await;
-        assert_eq!(response["status"], "ok", "{response}");
-        assert!(hook_fired.load(Ordering::SeqCst));
-        assert_eq!(response["action"], "HARD");
-        assert_eq!(response["materialize_reason"], "boundary_divergence_recut");
-        assert_eq!(response["boundary_id"], "m2400#0");
-        assert_eq!(response["coverage_ordinal"], 2400);
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn handler_delta_tail_mutation_re_adopts_identity_from_cached_prefix() {
-        let session = "projection-tail-readopt";
-        let (handler, store, _dir, project) =
-            handler_with_store(Arc::new(ProducerState::default()), default_test_config());
-        handler.bind_route(test_route(7), binding(project.to_str().unwrap(), session));
-        store
-            .replace_history_segments(session, &[stored_comp(1, 1, 1, "covered", "SUMMARY")])
-            .unwrap();
-        let initial = native_cache_request(
-            session,
-            vec![ck("covered", 1, "covered"), ck("tail", 2, "before")],
-            Vec::new(),
-            "readopt-fp-1",
-        );
-        let first = call_transform_request(&handler, serde_json::to_value(initial).unwrap()).await;
-        assert_eq!(first["status"], "ok", "{first}");
-        let old_identity = store.load(session).unwrap().meta.block_identity_by_mid["tail"].clone();
-
-        let mut delta = native_cache_request(
-            session,
-            vec![ck("tail", 2, "after")],
-            Vec::new(),
-            "readopt-fp-2",
-        );
-        delta.tail_delta = Some(json!({
-            "after": "readopt-fp-1",
-            "replace_from": 1,
-            "native_replace_from": 0,
-        }));
-        let adopted = call_transform_request(&handler, serde_json::to_value(delta).unwrap()).await;
-        assert_eq!(adopted["status"], "ok", "{adopted}");
-        assert_eq!(adopted["first_divergence"]["kind"], "content_changed");
-        let durable = store.load(session).unwrap();
-        assert_eq!(durable.meta.tail_identity_re_adopt_count, 1);
-        assert_ne!(durable.meta.block_identity_by_mid["tail"], old_identity);
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn handler_delta_d5_lineage_descent_forces_full_projection() {
-        let target = "projection-lineage-target";
-        let source = "projection-lineage-source";
-        let (handler, store, _dir, project) =
-            handler_with_store(Arc::new(ProducerState::default()), default_test_config());
-        handler.bind_route(test_route(7), binding(project.to_str().unwrap(), target));
-        handler.bind_route(test_route(8), binding(project.to_str().unwrap(), source));
-        let source_messages = (1..=10)
-            .map(|ordinal| {
-                ck(
-                    &format!("prior-{ordinal}"),
-                    ordinal,
-                    &format!("turn {ordinal}"),
-                )
-            })
-            .collect::<Vec<_>>();
-        let source_request =
-            native_cache_request(source, source_messages, Vec::new(), "lineage-source-fp");
-        let source_response = call_transform_request_on_channel(
-            &handler,
-            8,
-            serde_json::to_value(source_request).unwrap(),
-        )
-        .await;
-        assert_eq!(source_response["status"], "ok", "{source_response}");
-        store
-            .append_history_segments(
-                source,
-                &[
-                    stored_comp(1, 1, 3, "prior-3", "history one through three"),
-                    stored_comp(2, 4, 6, "prior-6", "history four through six"),
-                ],
-            )
-            .unwrap();
-        let source_epoch = store.load(source).unwrap().meta.revert_epoch;
-        let summary = "This session is being continued from a previous conversation.\n\nSummary:\nDurable summary alpha\n\nFull transcript: /tmp/session.jsonl";
-        let compaction_user = IngressMessage {
-            mid: "lineage-summary".to_string(),
-            ordinal: 1,
-            ck: WireMessage::from_parts(
-                "user",
-                vec![
-                    WireBlock::bare(BlockKind::Text {
-                        text: "<system-reminder>Today's date: 2026-08-10</system-reminder>"
-                            .to_string(),
-                    }),
-                    WireBlock::bare(BlockKind::Text {
-                        text: summary.to_string(),
-                    }),
-                ],
-                None,
-                ProviderExtras::new(),
-                HarnessMeta {
-                    harness_id: Some("lineage-summary".to_string()),
-                    ..Default::default()
-                },
-            ),
-        };
-        let initial_messages = vec![
-            compaction_user,
-            wire_with_role("lineage-tail", 2, "assistant", "continued answer"),
-        ];
-        let configure_lineage = |request: &mut TransformRequest, subagent: bool| {
-            request.lineage_switched = true;
-            request.is_subagent = subagent;
-            request.descent_edge_id = 101;
-            request.prior_conversation_key = source.to_string();
-            request.prior_epoch = source_epoch;
-            request.new_epoch = source_epoch.saturating_add(1);
-            request.constituents = vec![(
-                source.to_string(),
-                target.to_string(),
-                source_epoch.saturating_add(1),
-            )];
-            request.compaction_observed = true;
-        };
-        let mut subagent = native_cache_request(
-            target,
-            initial_messages.clone(),
-            Vec::new(),
-            "lineage-target-fp-1",
-        );
-        configure_lineage(&mut subagent, true);
-        let passthrough =
-            call_transform_request(&handler, serde_json::to_value(subagent).unwrap()).await;
-        assert_eq!(passthrough["status"], "ok", "{passthrough}");
-
-        let mut descent = native_cache_request(
-            target,
-            vec![wire_with_role(
-                "lineage-tail",
-                2,
-                "assistant",
-                "continued answer changed",
-            )],
-            Vec::new(),
-            "lineage-target-fp-2",
-        );
-        configure_lineage(&mut descent, false);
-        descent.tail_delta = Some(json!({
-            "after": "lineage-target-fp-1",
-            "replace_from": 1,
-            "native_replace_from": 0,
-        }));
-        let descended =
-            call_transform_request(&handler, serde_json::to_value(descent).unwrap()).await;
-        assert_eq!(descended["status"], "ok", "{descended}");
-        assert_eq!(descended["lineage_descent_disposition"], "descended");
-        assert_eq!(descended["lineage_switch_consumed_id"], 101);
-        assert_eq!(descended["timings"]["projection_projected_messages"], 2);
-        assert!(store.load(target).unwrap().meta.descent_completed);
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn unflagged_synthetic_delta_prepares_history_summarizer_and_native_output() {
-        let mut observations = Vec::new();
-        for cached_prefix in [true, false] {
-            let producer = Arc::new(ProducerState::default());
-            producer.block_output.store(true, Ordering::SeqCst);
-            let config = default_test_config();
-            assert!(config.compaction_enabled);
-            assert!(!config.model_chain.is_empty());
-            let (handler, store, _dir, _project) =
-                handler_with_store(Arc::clone(&producer), config);
-            let pair = injection::build_synthetic_todo_pair(
-                r#"[{"content":"preserve delta replay","status":"pending","priority":"high"}]"#,
-            )
-            .unwrap();
-            let mut todo = pair.assistant_msg;
-            todo.meta.synthetic = false;
-            let BlockKind::ToolCall { id, .. } = todo.content_mut()[0].kind_mut() else {
-                panic!("todo call")
-            };
-            *id = "authored-todo".into();
-            let mut result = pair.tool_msg;
-            result.meta.synthetic = false;
-            let BlockKind::ToolResult { id, .. } = result.content_mut()[0].kind_mut() else {
-                panic!("todo result")
-            };
-            *id = "authored-todo".into();
-            let mut boot_request = native_cache_request(
-                "ses",
-                vec![
-                    IngressMessage {
-                        mid: "authored-todo".into(),
-                        ordinal: 1,
-                        ck: todo,
-                    },
-                    IngressMessage {
-                        mid: "authored-result".into(),
-                        ordinal: 2,
-                        ck: result,
-                    },
-                ],
-                Vec::new(),
-                "todo-replay-boot",
-            );
-            boot_request.todo_tool_present = Some(true);
-            let boot =
-                call_transform_request(&handler, serde_json::to_value(&boot_request).unwrap())
-                    .await;
-            assert_eq!(boot["action"], "HARD", "{boot}");
-            let frozen = store
-                .load("ses")
-                .unwrap()
-                .meta
-                .synthetic_todo
-                .expect("prior bust freezes a pair");
-            let mut suffix = big_messages_from(3);
-            for (mid, ordinal, mut ck) in [
-                ("replay-call", 83, frozen.assistant_msg),
-                ("replay-result", 84, frozen.tool_msg),
-            ] {
-                ck.meta.synthetic = false;
-                ck.meta.harness_id = Some(mid.into());
-                if mid == "replay-call" {
-                    ck.content_mut().push(WireBlock::bare(BlockKind::Text {
-                        text: "replayed synthetic carrier sentinel".into(),
-                    }));
-                }
-                suffix.push(IngressMessage {
-                    mid: mid.into(),
-                    ordinal,
-                    ck,
-                });
-            }
-            let mut delta = native_cache_request("ses", suffix, Vec::new(), "todo-replay-delta");
-            delta.todo_tool_present = Some(true);
-            delta.usage = Some(ModuleUsage {
-                current_total_input_tokens: 45_000,
-                context_limit_tokens: 50_000,
-                ..Default::default()
-            });
-            delta.tail_delta = Some(
-                json!({ "after": "todo-replay-boot", "replace_from": 2, "native_replace_from": 0 }),
-            );
-            assert!(
-                delta.messages[80..]
-                    .iter()
-                    .all(|message| !message.ck.meta.synthetic)
-            );
-            assert!(
-                delta.messages[80..]
-                    .iter()
-                    .all(
-                        |message| message.ck.content().iter().any(|block| match block.kind() {
-                            BlockKind::ToolCall { id, .. } | BlockKind::ToolResult { id, .. } =>
-                                id == &frozen.call_id,
-                            _ => false,
-                        })
-                    )
-            );
-            assert!(delta.serve_native);
-            let mut full_second = boot_request.clone();
-            full_second.messages.extend(delta.messages.iter().cloned());
-            let mut flagged_second: TransformRequest =
-                serde_json::from_value(serde_json::to_value(&full_second).unwrap()).unwrap();
-            Arc::make_mut(&mut flagged_second.messages[82])
-                .ck
-                .meta
-                .synthetic = true;
-            Arc::make_mut(&mut flagged_second.messages[83])
-                .ck
-                .meta
-                .synthetic = true;
-            let response =
-                call_transform_request(&handler, serde_json::to_value(&delta).unwrap()).await;
-            assert_eq!(response["status"], "ok", "{response}");
-            assert_eq!(response["history_summarizer"]["fired"], true, "{response}");
-            eprintln!("replayed-synthetic-pair-arrives-unflagged-on-a-delta-turn: reached");
-            assert!(
-                response["native_messages"]
-                    .as_array()
-                    .is_some_and(|messages| !messages.is_empty())
-            );
-            wait_for_count(&producer.starts, 1).await;
-            let first_prompt = producer.prompts.lock().unwrap()[0].clone();
-            assert_eq!(
-                format!("{:x}", Sha256::digest(first_prompt.as_bytes())),
-                "813b4fd06c4cce739fd415892cb229086016b9a07fd1305fcb6cc4d0e9a90018"
-            );
-            assert_eq!(prompt_ordinal_range(&first_prompt).unwrap().0, 1);
-            assert!(first_prompt.contains("message 3 "));
-            assert!(!first_prompt.contains("replayed synthetic carrier sentinel"));
-            producer.block_output.store(false, Ordering::SeqCst);
-            producer.notify.notify_waiters();
-            wait_for_idle(&store).await;
-
-            producer.block_output.store(true, Ordering::SeqCst);
-            let mut third = native_cache_request(
-                "ses",
-                big_messages_from(85),
-                Vec::new(),
-                "todo-replay-prefix",
-            );
-            third.todo_tool_present = Some(true);
-            third.usage = delta.usage.clone();
-            third.tail_delta = Some(
-                json!({ "after": "todo-replay-delta", "replace_from": 84, "native_replace_from": 0 }),
-            );
-            let mut reference = third.clone();
-            reference.messages = wire::IngressMessages(flagged_second.messages[..84].to_vec());
-            reference.messages.extend(third.messages.iter().cloned());
-            reference.tail_delta = None;
-            let mut reattached = third.clone();
-            let pass_load = store.load_meta(&reattached.session_id);
-            let pass_state = PassState::from(&pass_load);
-            handler
-                .expand_transform_tail_delta(&mut reattached, pass_state)
-                .expect("third delta reattaches");
-            // The ready snapshot reattaches the prefix as the harness sent it, pair unflagged;
-            // the pass marks the pair synthetic in its own projection.
-            let mut raw_full = reference.clone();
-            Arc::make_mut(&mut raw_full.messages[82]).ck.meta.synthetic = false;
-            Arc::make_mut(&mut raw_full.messages[83]).ck.meta.synthetic = false;
-            assert_eq!(reattached.messages, raw_full.messages);
-            let projection = crate::wire::project_messages(&reference.messages).unwrap();
-            let boundary = boundary_messages(&reattached, &projection, &handler.boundary_tokens);
-            let reference_boundary =
-                boundary_messages(&reference, &projection, &handler.boundary_tokens);
-            assert!(reference_boundary.messages.iter().all(|message| !matches!(
-                message.message_id.as_str(),
-                "replay-call" | "replay-result"
-            )));
-            assert_eq!(
-                boundary.messages.len(),
-                reference_boundary.messages.len() + 2
-            );
-            assert!(
-                boundary
-                    .messages
-                    .iter()
-                    .filter(|message| matches!(
-                        message.message_id.as_str(),
-                        "replay-call" | "replay-result"
-                    ))
-                    .all(|message| message.blocks.is_empty())
-            );
-            let live = projection
-                .blocks
-                .iter()
-                .filter(|block| !block.synthetic)
-                .cloned()
-                .collect::<Vec<_>>();
-            let chunk = crate::history_summarizer_chunk::build_history_summarizer_chunk(
-                &reattached.messages,
-                &live,
-                1,
-                100_000,
-                165,
-            );
-            let reference_chunk = crate::history_summarizer_chunk::build_history_summarizer_chunk(
-                &reference.messages,
-                &live,
-                1,
-                100_000,
-                165,
-            );
-            assert!(
-                !reference_chunk.chunk.present_ordinals.contains(&83)
-                    && !reference_chunk.chunk.present_ordinals.contains(&84)
-            );
-            assert!(
-                chunk.chunk.present_ordinals.contains(&83)
-                    && chunk.chunk.present_ordinals.contains(&84)
-            );
-            let third_response = call_transform_request(
-                &handler,
-                serde_json::to_value(if cached_prefix { third } else { reference }).unwrap(),
-            )
-            .await;
-            assert_eq!(third_response["status"], "ok", "{third_response}");
-            assert_eq!(
-                third_response["history_summarizer"]["fired"], true,
-                "{third_response}"
-            );
-            wait_for_count(&producer.starts, 2).await;
-            let third_prompt = producer.prompts.lock().unwrap()[1].clone();
-            assert_eq!(
-                format!("{:x}", Sha256::digest(third_prompt.as_bytes())),
-                "c0377979d652d86253f19839ae3ee23e4396f57de73e0c39432cf77458a9094d"
-            );
-            assert!(prompt_ordinal_range(&third_prompt).unwrap().0 > 1);
-            assert!(!third_prompt.contains("replayed synthetic carrier sentinel"));
-            let native = third_response["native_messages"]
-                .as_array()
-                .unwrap()
-                .clone();
-            assert!(!native.is_empty());
-            observations.push((
-                first_prompt,
-                third_prompt,
-                serde_json::to_vec(&native).unwrap(),
-            ));
-            producer.block_output.store(false, Ordering::SeqCst);
-            producer.notify.notify_waiters();
-            wait_for_idle(&store).await;
-        }
-        assert_eq!(observations[0], observations[1]);
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn handler_delta_normalization_matches_full_when_reserved_todo_starts_at_frontier() {
+    async fn handler_warm_normalization_matches_cold_when_a_reserved_todo_follows_the_prefix() {
         let (cached_handler, _cached_store, _cached_dir, _cached_project) =
             handler_with_store(Arc::new(ProducerState::default()), default_test_config());
         let (control_handler, _control_store, _control_dir, _control_project) =
@@ -27953,12 +25968,7 @@ mod tests {
             tool_result("result-ordinary", 3, "ordinary"),
         ];
         for handler in [&cached_handler, &control_handler] {
-            let request = native_cache_request(
-                "ses",
-                initial_messages.clone(),
-                Vec::new(),
-                "todo-normalize-fp-1",
-            );
+            let request = native_cache_request("ses", initial_messages.clone(), Vec::new());
             let response =
                 call_transform_request(handler, serde_json::to_value(request).unwrap()).await;
             assert_eq!(response["status"], "ok", "{response}");
@@ -27987,32 +25997,17 @@ mod tests {
                 ck: result,
             },
         ];
-        let mut delta = native_cache_request(
-            "ses",
-            changed_messages[1..].to_vec(),
-            Vec::new(),
-            "todo-normalize-fp-2",
-        );
-        delta.tail_delta = Some(json!({
-            "after": "todo-normalize-fp-1",
-            "replace_from": 1,
-            "native_replace_from": 0,
-        }));
+        let warm = native_cache_request("ses", changed_messages.clone(), Vec::new());
         let cached =
-            call_transform_request(&cached_handler, serde_json::to_value(delta).unwrap()).await;
+            call_transform_request(&cached_handler, serde_json::to_value(warm).unwrap()).await;
         let full = call_transform_request(
             &control_handler,
-            serde_json::to_value(native_cache_request(
-                "ses",
-                changed_messages,
-                Vec::new(),
-                "todo-normalize-fp-2",
-            ))
-            .unwrap(),
+            serde_json::to_value(native_cache_request("ses", changed_messages, Vec::new()))
+                .unwrap(),
         )
         .await;
         assert_eq!(cached["status"], "ok", "{cached}");
-        // The applied delta pass reconstructs the same native array the full pass emits.
+        // The warm pass reconstructs the same native array a cold daemon emits.
         assert_eq!(
             serde_json::to_vec(&cached["native_messages"]).unwrap(),
             serde_json::to_vec(&full["native_messages"]).unwrap()
@@ -28225,16 +26220,15 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn v2_wire_echoes_fingerprint_on_normal_and_child_passthrough() {
+    async fn v2_wire_serves_normal_and_child_passthrough_without_fingerprint() {
         let producer = Arc::new(ProducerState::default());
         let (handler, _store, _dir, _project) = handler_with_store(producer, default_test_config());
 
-        let mut normal_req = request_with_usage(vec![ck("m1", 1, "hello")], 1, 100);
-        normal_req["full_array_fingerprint"] = json!("fp-normal");
+        let normal_req = request_with_usage(vec![ck("m1", 1, "hello")], 1, 100);
         let normal = call_transform_request(&handler, normal_req).await;
         assert_eq!(normal["status"], "ok");
         assert_eq!(normal["served_from"], "transform");
-        assert_eq!(normal["full_array_fingerprint"], "fp-normal");
+        assert!(normal.get("full_array_fingerprint").is_none());
 
         let child_session = format!(
             "{}child",
@@ -28249,114 +26243,16 @@ mod tests {
                 "serializer_profile": "owned-llmrunner",
                 "session_id": child_session,
                 "render_config": "cfg0",
-                "full_array_fingerprint": "fp-child",
                 "messages": [ck("child-msg", 1, "raw child prompt")],
             }),
         )
         .await;
         assert_eq!(child["status"], "ok");
         assert_eq!(child["served_from"], "transform");
-        assert_eq!(child["full_array_fingerprint"], "fp-child");
+        assert!(child.get("full_array_fingerprint").is_none());
         assert_eq!(child["action"], "PASSTHROUGH");
         assert_eq!(child["messages"].as_array().unwrap().len(), 1);
         assert_eq!(child["messages"][0]["role"], "user");
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn child_passthrough_refuses_an_unexpanded_native_tail_delta() {
-        let producer = Arc::new(ProducerState::default());
-        let (handler, _store, _dir, _project) = handler_with_store(producer, default_test_config());
-        let session = format!(
-            "{}native-child",
-            history_summarizer::HISTORY_SUMMARIZER_CHILD_SESSION_PREFIX
-        );
-
-        let first = native_cache_request(
-            &session,
-            vec![
-                ck("child-prefix", 1, "prefix"),
-                ck("child-tail", 2, "before"),
-            ],
-            vec![
-                native_text_message("child-prefix", "user", "prefix"),
-                native_text_message("child-tail", "user", "before"),
-            ],
-            "child-fp-1",
-        );
-        let first = call_transform_request(&handler, serde_json::to_value(first).unwrap()).await;
-        assert_eq!(first["status"], "ok", "{first}");
-        assert_eq!(first["native_messages"].as_array().map(Vec::len), Some(2));
-
-        let mut delta = native_cache_request(
-            &session,
-            vec![ck("child-tail", 2, "after")],
-            vec![native_text_message("child-tail", "user", "after")],
-            "child-fp-2",
-        );
-        delta.tail_delta = Some(json!({
-            "after": "child-fp-1",
-            "replace_from": 1,
-            "native_replace_from": 1,
-        }));
-        let refused = call_transform_request(&handler, serde_json::to_value(delta).unwrap()).await;
-
-        assert_eq!(refused["status"], "need_full_sync", "{refused}");
-        // A refusal carries neither a recipe nor an output revision, so nothing can be applied.
-        assert!(refused.get("operations").is_none(), "{refused}");
-        assert!(refused.get("output_revision").is_none(), "{refused}");
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn registered_memory_classifier_passthrough_refuses_an_unexpanded_native_tail_delta() {
-        let producer = Arc::new(ProducerState::default());
-        let (handler, _store, _dir, project) = handler_with_store(producer, default_test_config());
-        let session = "native-memory_classifier";
-        handler.bind_route(test_route(7), binding(project.to_str().unwrap(), session));
-        let _registration = handler
-            .memory_classifier
-            .register_memory_classifier_run(session);
-
-        let first = native_cache_request(
-            session,
-            vec![
-                ck("memory_classifier-prefix", 1, "prefix"),
-                ck("memory_classifier-tail", 2, "before"),
-            ],
-            vec![
-                native_text_message("memory_classifier-prefix", "user", "prefix"),
-                native_text_message("memory_classifier-tail", "user", "before"),
-            ],
-            "memory_classifier-fp-1",
-        );
-        let first =
-            call_transform_request_on_channel(&handler, 7, serde_json::to_value(first).unwrap())
-                .await;
-        assert_eq!(first["status"], "ok", "{first}");
-        assert_eq!(first["native_messages"].as_array().map(Vec::len), Some(2));
-
-        let mut delta = native_cache_request(
-            session,
-            vec![ck("memory_classifier-tail", 2, "after")],
-            vec![native_text_message(
-                "memory_classifier-tail",
-                "user",
-                "after",
-            )],
-            "memory_classifier-fp-2",
-        );
-        delta.tail_delta = Some(json!({
-            "after": "memory_classifier-fp-1",
-            "replace_from": 1,
-            "native_replace_from": 1,
-        }));
-        let refused =
-            call_transform_request_on_channel(&handler, 7, serde_json::to_value(delta).unwrap())
-                .await;
-
-        assert_eq!(refused["status"], "need_full_sync", "{refused}");
-        // A refusal carries neither a recipe nor an output revision, so nothing can be applied.
-        assert!(refused.get("operations").is_none(), "{refused}");
-        assert!(refused.get("output_revision").is_none(), "{refused}");
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -28682,7 +26578,7 @@ mod tests {
     }
 
     /// A steady pass reads `cache_state` through the statement cache exactly twice: the
-    /// `meta` projection once before the transform, shared by the tail-delta expansion, the
+    /// `meta` projection once before the transform, shared by the
     /// projection-cache lookup, the last-response anchor, and the history_summarizer-active check;
     /// and the full row once after the commit in `prepare_history_summarizer_fire`. The interleave
     /// hook runs after the transform commit and before the post-commit load. Each run count
@@ -28742,8 +26638,7 @@ mod tests {
         );
     }
 
-    /// The pass-state load runs before the tail-delta expansion, outside the `delta_expand`
-    /// window, so it carries its own pass-trace bucket; the
+    /// The pass-state load carries its own pass-trace bucket; the
     /// phase timings otherwise shrink by the read's cost while `handler_total` does not.
     #[tokio::test(flavor = "current_thread")]
     async fn pass_state_load_has_its_own_timing_bucket() {
@@ -36929,76 +34824,6 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn tail_delta_returns_need_full_sync_success_without_store_write() {
-        let producer = Arc::new(ProducerState::default());
-        let (handler, store, _dir, _project) = handler_with_store(producer, default_test_config());
-
-        let mut delta = request(vec![ck("m1", 1, "hello")]);
-        delta["tail_delta"] = json!({ "after": "fp-old", "messages": [ck("m2", 2, "tail")] });
-        delta["full_array_fingerprint"] = json!("fp-delta");
-        let before = store.load("ses").unwrap().row_version;
-        let response = call_transform_request(&handler, delta).await;
-
-        assert_eq!(response["status"], "need_full_sync");
-        assert_eq!(response["served_from"], "transform");
-        assert_eq!(response["full_array_fingerprint"], "fp-delta");
-        assert_eq!(response["surface_state"], "inactive");
-        assert!(response["row_version"].is_u64());
-        assert!(response.get("messages").is_none());
-        assert_eq!(store.load("ses").unwrap().row_version, before);
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn tail_delta_reconstructs_the_acknowledged_prefix() {
-        let producer = Arc::new(ProducerState::default());
-        let (handler, _store, _dir, _project) = handler_with_store(producer, default_test_config());
-
-        let mut first = request(vec![ck("m1", 1, "hello")]);
-        first["full_array_fingerprint"] = json!("fp-m1");
-        first["native_messages"] = json!([]);
-        let first_response = call_transform_request(&handler, first).await;
-        assert_eq!(first_response["status"], "ok");
-
-        let mut delta = request(vec![ck("m2", 2, "tail")]);
-        delta["full_array_fingerprint"] = json!("fp-m2");
-        delta["native_messages"] = json!([]);
-        delta["tail_delta"] = json!({
-            "after": "fp-m1",
-            "replace_from": 1,
-            "native_replace_from": 0,
-        });
-        let response = call_transform_request(&handler, delta).await;
-        assert_eq!(response["status"], "ok");
-        assert_eq!(response["full_array_fingerprint"], "fp-m2");
-        assert!(response["messages"].is_array());
-
-        let producer = Arc::new(ProducerState::default());
-        let (direct_handler, _store, _dir, _project) =
-            handler_with_store(producer, default_test_config());
-        let mut direct = request(vec![ck("m1", 1, "hello"), ck("m2", 2, "tail")]);
-        direct["full_array_fingerprint"] = json!("fp-m2");
-        direct["native_messages"] = json!([]);
-        let direct_response = call_transform_request(&direct_handler, direct).await;
-        assert_eq!(response["messages"], direct_response["messages"]);
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn fingerprint_absent_success_omits_echo_field() {
-        let producer = Arc::new(ProducerState::default());
-        let (handler, _store, _dir, _project) = handler_with_store(producer, default_test_config());
-
-        let response = call_transform_request(
-            &handler,
-            request_with_usage(vec![ck("m1", 1, "hello")], 1, 100),
-        )
-        .await;
-        assert_eq!(response["status"], "ok");
-        assert!(response.get("full_array_fingerprint").is_none());
-        assert_eq!(response["surface_state"], "inactive");
-        assert!(response["row_version"].is_u64());
-    }
-
-    #[tokio::test(flavor = "current_thread")]
     async fn status_distinguishes_current_and_historical_divergence() {
         let producer = Arc::new(ProducerState::default());
         let (handler, _store, _dir, _project) = handler_with_store(producer, default_test_config());
@@ -40720,7 +38545,6 @@ mod tests {
         request["serializer_profile"] = json!("opencode-aisdk");
         request["serve_native"] = json!(true);
         request["native_messages"] = json!(native);
-        request["full_array_fingerprint"] = json!("rerun-fp");
         request["auto_search_enabled"] = json!(true);
         request["auto_search_score_threshold"] = json!(0.3);
         request["auto_search_min_prompt_chars"] = json!(20);

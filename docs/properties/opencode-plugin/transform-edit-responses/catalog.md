@@ -1,5 +1,23 @@
 # Transform Edit Responses: client execution (U3)
 
+> Dispositions for [#829](https://github.com/ahrav/eidnara/issues/829), which
+> retires the delta channel. Every transform request now carries `messages`
+> and `native_messages` for the whole captured array; `tail_delta`,
+> `full_array_fingerprint`, the `need_full_sync` status and its retry,
+> `forceFullWire`, `wireInvalidations`, and the wire fingerprints are deleted,
+> and `message.removed` resets only the ordinal memo. `wireCaches` and the
+> applied-output budget merge into one retained-output record per session
+> (`RetainedOutputs`, `rust-mode-transform.ts:177`) under the 64-session and
+> 64 MiB (`:135`) limits. Publication shrinks first (`publishInPlace`,
+> `transform-capture.ts:754`), and the all-slot preflight
+> (`hostArrayReplacementRejection`) and `replaceHostArrayContents` are deleted.
+> TE30 is invalidated as a delta and fingerprint contract. TE20 is invalidated
+> as an all-or-none failure contract; in-place identity and prepublication
+> validation are preserved. TE26 and TE27 are preserved; their `need_full_sync`
+> witnesses are invalidated. TE23 to TE25 inventories drop the delta
+> allocations. Line references in the records below stay bound to the #533
+> revision unless a record names the #829 tree.
+
 This directory is a client implementation supplement for
 [#533](https://github.com/ahrav/eidnara/issues/533), not the reusable 30-record
 companion named by the parent specification
@@ -79,14 +97,14 @@ revision named above.
 | TE17 `captured-input-stays-coherent` | safety | yes | Rechecks at ordinal, full-retry, and publish; ownership fences at directory, permission, and each page; a change between pages is refused at publication and NACKed |
 | TE18 `ordinal-memo-promotion-is-owned` | safety | yes | Shared memo equals its pre-pass copy on every rejected path; promoted only after replacement |
 | TE19 `referenceable-json-rejects-hooks-before-reading` | safety | yes | Zero trap and getter counts at the guard, the built-in prototype scan, the hook, the wrapper, and the rechecks |
-| TE20 `publication-is-current-and-atomic` | safety | yes | Container rejection and candidate slot charge before the first write; identity preserved on every outcome |
+| TE20 `publication-is-current-and-atomic` | safety | invalidated (#829) | All-or-none failure replaced by shrink-first (WP-P09); in-place identity and prepublication validation preserved |
 | TE21 `previous-base-is-applied-and-live` | safety | partial | Kept-prefix identity and fingerprint match; kept-prefix value validation awaits #538 |
 | TE22 `delivery-disposition-follows-publication` | safety | yes | Per-identity ACK and NACK tuples, including every delivery of a series refused at publication; ACK failure leaves published output |
 | TE23 `owner-admission-covers-live-captures` | safety | yes | Exact held charge, 1,000-message fixture, model-based lease sequences, release before ACK |
 | TE24 `capture-charge-outlives-cancellation` | safety | yes | Charge and slot held after abort until the owner settles; release exactly once |
 | TE26 `uncertain-send-never-replays-blindly` | safety | yes | One `transform` call after a thrown first send; bounded restart controls |
 | TE27 `bounded-recovery-after-pressure-clears` | liveness | yes | Settlement observed at zero counters, then one `run` dispatches |
-| TE30 `inbound-baseline-independent-of-output-base` | safety | partial | Two-pass scenarios and a forced full resend only; delta-versus-full control awaits #538 |
+| TE30 `inbound-baseline-independent-of-output-base` | safety | invalidated (#829) | No delta baseline remains; input versus applied-output provenance stays separate in the retained-output record |
 
 ## Records
 
@@ -141,7 +159,7 @@ Open questions: None.
 
 Type: safety
 Reachability: explicit-config-only
-Status: active
+Status: invalidated
 Exercised: yes - Frozen, proxied, subclassed, non-writable, and length-sealed containers are declined before dispatch; a candidate one byte over its slot charge is declined after the response with the host array unchanged; a source change between pages is refused at publication; clear, supersession, and invalidation before application preserve identity; the wrapper returns the current array after a throwing hook.
 Guarantee: the host array is replaced in place, all or none, only after candidate slot charge, boundary, ownership, invalidation, source, and container checks pass synchronously; the wrapper never rebinds `output.messages` to captured contents.
 Check: `always` - `buildNativeCandidate` (`rust-mode-transform.ts:1436-1445`), `assertNativeBoundary` (`:1446-1449`), the continuation shift (`:1450-1469`), `recheckCapture("publish")` (`:1471`), and `hostArrayReplacementRejection(target)` (`:1472-1475`) all run before `replaceHostArrayContents` (`:1479`); the replacement is a define loop over own slots plus one length define (`transform-capture.ts:480-485`) whose only precondition is that `hostArrayReplacementRejection` returned `null` (`:458-474`, `:476-479`); rejection preserves the current host array's identity and contents; the wrapper (`messages-transform.ts:57-83`) returns `output.messages` as it currently is and never assigns it.
@@ -153,6 +171,7 @@ Impact: a partial array reaches the model, or OpenCode's array identity is repla
 Open questions:
 
 - #538's recipe operations must add a malformed-final-operation candidate case; the current candidate builder is exercised through `native_messages` and `native_messages_delta` only.
+- Invalidated by #829 as an all-or-none contract. Publication now checks the container and the output slots `[0, S)` (`publicationRejection`, `transform-capture.ts:723`), shrinks the length to S, then writes the candidate (`publishInPlace`, `:754`). A non-configurable slot k with S <= k stops the shrink after `ArraySetLength` deleted every slot above k; the captured references above k are restored, no candidate slot is written, nothing is promoted, and one `publication_failed` decline is logged (`rust-mode-transform.ts:1512`). In-place identity, the recipe charge, the boundary assertion, the ownership and source rechecks, and the container check still precede the first write. Witnesses: `transform-capture.test.ts:1018` "shrinks first and leaves exactly the candidate in the original array object" (records the define order `length`, `0`, `1`), `:1049` "restores the captured references after a shrink stopped by a planted non-configurable slot" (the `TypeError`, length k + 1 before restoration), `:1085` "reports a throw while restoring the captured references as the same failed publication"; `rust-mode-transform.test.ts:3530` "leaves exactly a shorter candidate in the original array object" and `:3546` "restores the captured references and promotes nothing when a planted slot stops the shrink". WP-P09 and WP-P20 in #824 own the replacement contract.
 
 ### previous-base-is-applied-and-live
 
@@ -203,6 +222,7 @@ Open questions:
 
 - The retained `wireCaches` entries after transfer are bounded by the 64-session count, not by bytes; the byte budget for that optional-output state is TE25 in #538.
 - `states` (`rust-mode-transform.ts:788`) has no count or byte bound: `BoundedSessionMap` eviction has no callback into it, and only `clearSession` (`:1541`) deletes an entry, so the promoted `state.ordinals` memo of every undeleted session is retained for the process lifetime. No record or witness bounds it.
+- Inventory after #829: publication transfers the submitted input's digest, terminal digest, wire bounds, and input lengths plus the applied values and their capture to one retained-output record per session (`RetainedOutputs`, `rust-mode-transform.ts:177`), charged once under the 64-session and 64 MiB limits. The raw content snapshots, wire fingerprints, and delta frontier are no longer retained. The wire-projection charge now covers every captured message, since every request sends the whole array. Eviction drops the record only; `rust-mode-transform.test.ts:1413` "never releases an active capture lease when the session count|byte budget evicts its session's output" holds a lease across the eviction and asserts `activePasses` 1 and an unchanged charge.
 
 ### capture-charge-outlives-cancellation
 
@@ -220,6 +240,7 @@ Impact: a slow cancelled pass's memory is double-counted as free and the budget 
 Open questions:
 
 - Real daemon transport abort through the lease signal is not exercised; the tests use in-process clients that honor or ignore the signal.
+- After #829, `invalidateWireState` is `invalidateOrdinals` (`rust-mode-transform.ts:840`): it resets the ordinal memo and cancels the live lease so the pass cannot promote the memo it copied; it no longer touches retained output. The retained-output record adds no lease accounting.
 
 ### uncertain-send-never-replays-blindly
 
@@ -237,6 +258,7 @@ Impact: a duplicate transform mutates daemon state twice for one host turn.
 Open questions:
 
 - A real transport that writes the request and loses the response is not constructed; the fake throws before returning.
+- Preserved by #829. The `need_full_sync` witness (`:2335` "retains full-sync recovery after a failed retry until a full request publishes") is invalidated and deleted with the retry; `rust-mode-transform.test.ts:3597` "does not resend after an outcome-unknown transport failure and recovers on the next attempt" remains the witness.
 
 ### bounded-recovery-after-pressure-clears
 
@@ -251,13 +273,15 @@ Required faults and enabling state: a prior decline (count, byte, source change,
 Confidence: medium - [evidence](evidence/bounded-recovery-after-pressure-clears.md). Every named witness was read and ran green; each asserts zero counters or the blocker's release before the one recovery call, then a `calls` length increase of one.
 Existing check: `rust-mode-transform.test.ts:2874` "keeps every pass within the global count limit and declines without queueing" (marker: `activePasses` 0 and `chargedBytes` 0 after `Promise.all(passes)`, `failureCount` 0, then one `run` gives `calls` 3); `:2923` "declines on byte pressure alone while the aggregate charge stays within the budget" (marker: `chargedBytes` 0 after `await first`, then one `run` gives `calls` 2 and `initialized` true); `:2149` "recovers with a full request when byte pressure rejects a full-sync retry" (marker: `blocker.lease.release()`, then one `run` sends a full body and ACKs `applied`); `:2280` "charges every existing ordinal entry and ID before copying a warm memo" (marker: `chargedBytes` 0 after the blocker releases, then one `run` gives `bodies` 2 with `tail_delta`); `:2367` (8 cases; marker: `activePasses` 0 and `chargedBytes` 0, then one `run` gives `calls` 1 and `entries.size` equal to `rows.length`); `:3170` "shares default admission across factories and cancels the earlier session owner" (marker: default owner at 0, then the second factory dispatches once); `:3255` "does not resend after an outcome-unknown transport failure and recovers on the next attempt" (marker: `calls` 2, `consecutiveFailures` 0); `:3086` (next pass after a paused NACK dispatches once); `:803` "forces a full send after a dispatched delta pass is source-declined" (marker: `consecutiveFailures` 0 and `forceFullWire` true after the decline; one `run` sends `bodies[3]` without `tail_delta` and clears the flag).
 Impact: a session stays declined after the pressure that declined it is gone.
-Open questions: None.
+Open questions:
+
+- Preserved by #829. The `need_full_sync` witness `:2149` "recovers with a full request when byte pressure rejects a full-sync retry" and the forced-full witness `:803` are invalidated and deleted; `rust-mode-transform.test.ts:3129` "keeps every pass within the global count limit and declines without queueing" and `:3178` "declines on byte pressure alone while the aggregate charge stays within the budget" remain.
 
 ### inbound-baseline-independent-of-output-base
 
 Type: safety
 Reachability: explicit-config-only
-Status: active
+Status: invalidated
 Exercised: partial - The ACK-release test and the ack-supersession test publish output different from the input and then run later passes that dispatch; the prefix-mutation guard shows a full resend after an older input edit; a source-declined dispatched delta pass forces the next pass to resend the full history because the daemon committed its snapshot on response. No test compares a tail-delta result with a full-request control after changed output, and no optional-output-only eviction case exists.
 Guarantee: the accepted submitted input (wire cache snapshots and fingerprints) remains the inbound baseline for the next delta regardless of what output was applied.
 Check: `always` - After changed output and a raw-input append, the tail-delta and full-request control produce equal approved output; inbound fingerprints, frontiers, and guards still describe accepted submitted input, including after optional-output-only eviction.
@@ -269,6 +293,7 @@ Impact: the daemon's inbound baseline drifts toward applied output and deltas mi
 Open questions:
 
 - #538 must supply the delta/full control comparison and the optional-output-only eviction case; two transform calls do not establish equality.
+- Invalidated by #829: no delta baseline, fingerprint, or forced full resend remains, because every request sends the whole captured array (`rust-mode-transform.test.ts:373` "sends the whole captured array on every pass with no delta or fingerprint"). Input versus applied-output provenance stays necessary for WP-P11: the retained-output record keeps the submitted input's digest, terminal, wire bounds, and lengths apart from the applied values and their capture.
 
 ## Relationship map
 

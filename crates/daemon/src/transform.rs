@@ -858,8 +858,6 @@ pub struct TransformRequest {
     pub serve_native: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub native_messages: Option<Vec<Arc<Value>>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub full_array_fingerprint: Option<String>,
     /// Names this attempt's exact input snapshot; every `transform` request must carry one, and the
     /// response echoes it so the caller can bind the recipe to that snapshot.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -868,8 +866,6 @@ pub struct TransformRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub previous_output_revision: Option<crate::edit_recipe::Revision>,
     pub messages: wire::IngressMessages,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tail_delta: Option<Value>,
     #[serde(default)]
     pub usage: Option<ModuleUsage>,
     /// The previous response's actual provider cache counts, kept out of `usage` so pressure and fallback never read them.
@@ -1030,15 +1026,11 @@ struct TransformRequestWire {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     native_messages: Option<Vec<Arc<Value>>>,
     #[serde(default)]
-    full_array_fingerprint: Option<String>,
-    #[serde(default)]
     base_revision: Option<crate::edit_recipe::Revision>,
     #[serde(default)]
     previous_output_revision: Option<crate::edit_recipe::Revision>,
     #[serde(default)]
     messages: wire::IngressMessages,
-    #[serde(default)]
-    tail_delta: Option<Value>,
     #[serde(default)]
     usage: Option<ModuleUsage>,
     /// A malformed or negative count is dropped instead of refusing the pass it rides on.
@@ -1132,11 +1124,9 @@ impl<'de> Deserialize<'de> for TransformRequest {
             prompt_surface_guidance_override: wire.prompt_surface_guidance_override,
             serve_native: wire.serve_native,
             native_messages: wire.native_messages,
-            full_array_fingerprint: wire.full_array_fingerprint,
             base_revision: wire.base_revision,
             previous_output_revision: wire.previous_output_revision,
             messages,
-            tail_delta: wire.tail_delta,
             usage: wire.usage,
             prev_response_cache_usage: wire.prev_response_cache_usage,
             geometry: wire.geometry,
@@ -1167,7 +1157,6 @@ impl<'de> Deserialize<'de> for TransformRequest {
 #[serde(rename_all = "snake_case")]
 pub enum TransformStatus {
     Ok,
-    NeedFullSync,
     /// The session already has an active and a waiting pass; no recipe, no state change.
     SessionBusy,
 }
@@ -1218,8 +1207,6 @@ pub struct TransformTimings {
     pub request_observed_to_handler: f64,
     #[serde(default)]
     pub pass_state_load: f64,
-    #[serde(default)]
-    pub delta_expand: f64,
     #[serde(default)]
     pub side_channel_drain: f64,
     #[serde(default)]
@@ -1435,7 +1422,7 @@ pub fn format_pass_timing_line(
     };
     format!(
         "eidnara-pass-timing session={session} total={:.1} handler_total={:.1} request_observed_to_handler={:.1} \
-         pass_state_load={:.1} delta_expand={:.1} side_channel_drain={:.1} trace_received={:.1} projection_cache_lookup={:.1} projection_cache_store={:.1} \
+         pass_state_load={:.1} side_channel_drain={:.1} trace_received={:.1} projection_cache_lookup={:.1} projection_cache_store={:.1} \
          native_attach={:.1} trace_complete={:.1} response_observation={:.1} retained_size={:.1} snapshot_store={:.1} projection={:.1} \
          projection_reused_messages={} projection_projected_messages={} store_cache_state={:.1} store_tags={:.1} store_temporal={:.1} \
          store_user_hints={:.1} store_channel1={:.1} store_overlay_frontier={:.1} \
@@ -1462,7 +1449,6 @@ pub fn format_pass_timing_line(
         timings.handler_total,
         timings.request_observed_to_handler,
         timings.pass_state_load,
-        timings.delta_expand,
         timings.side_channel_drain,
         timings.trace_received,
         timings.projection_cache_lookup,
@@ -1555,8 +1541,6 @@ pub fn format_pass_timing_line(
 pub struct TransformResponse {
     pub status: TransformStatus,
     pub served_from: ServedFrom,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub full_array_fingerprint: Option<String>,
     pub action: String,
     #[serde(default)]
     pub decision: String,
@@ -1628,7 +1612,7 @@ pub struct TransformResponse {
 }
 
 impl TransformResponse {
-    /// Returns the output array for `ok` and passthrough responses and an empty slice for `need_full_sync`.
+    /// Returns the output array; an absent array reads as empty.
     pub fn messages(&self) -> &[ServedMessage] {
         self.messages.as_deref().unwrap_or(&[])
     }
@@ -1636,11 +1620,10 @@ impl TransformResponse {
     /// The single exhaustive literal for the wire response: both public
     /// constructors delegate here, so adding a field forces exactly one edit
     /// while keeping the compiler's exhaustive-literal check.
-    fn base(status: TransformStatus, action: &str, full_array_fingerprint: Option<String>) -> Self {
+    fn base(status: TransformStatus, action: &str) -> Self {
         Self {
             status,
             served_from: ServedFrom::Transform,
-            full_array_fingerprint,
             action: action.to_string(),
             decision: action.to_string(),
             materialize_reason: None,
@@ -1671,19 +1654,11 @@ impl TransformResponse {
         }
     }
 
-    pub fn need_full_sync(full_array_fingerprint: Option<String>) -> Self {
-        Self::base(
-            TransformStatus::NeedFullSync,
-            "NEED_FULL_SYNC",
-            full_array_fingerprint,
-        )
-    }
-
     pub fn session_busy() -> Self {
-        Self::base(TransformStatus::SessionBusy, "SESSION_BUSY", None)
+        Self::base(TransformStatus::SessionBusy, "SESSION_BUSY")
     }
 
-    pub fn passthrough(messages: Vec<WireMessage>, full_array_fingerprint: Option<String>) -> Self {
+    pub fn passthrough(messages: Vec<WireMessage>) -> Self {
         Self {
             messages: Some(
                 messages
@@ -1691,11 +1666,7 @@ impl TransformResponse {
                     .map(ServedMessage::from_message)
                     .collect(),
             ),
-            ..Self::base(
-                TransformStatus::Ok,
-                PassAction::Passthrough.as_str(),
-                full_array_fingerprint,
-            )
+            ..Self::base(TransformStatus::Ok, PassAction::Passthrough.as_str())
         }
     }
 }
@@ -2054,14 +2025,10 @@ fn pass_scheduler_observation(
     }
 }
 
-fn pass_record<'a>(
-    req: &'a TransformRequest,
-    observation: PassSchedulerObservation,
-) -> PassRecord<'a> {
+fn pass_record(req: &TransformRequest, observation: PassSchedulerObservation) -> PassRecord {
     PassRecord {
         observation,
         request_observed_at_ms: req.request_observed_at_ms,
-        full_array_fingerprint: req.full_array_fingerprint.as_deref(),
         supersession: Default::default(),
         applied_reductions: false,
     }
@@ -2513,7 +2480,6 @@ fn lineage_protocol_passthrough(
                 .iter()
                 .map(|message| req.rendered_message(message))
                 .collect(),
-            req.full_array_fingerprint.clone(),
         ),
     }
 }
@@ -3034,7 +3000,6 @@ fn apply_additive_only(
         response: TransformResponse {
             status: TransformStatus::Ok,
             served_from: ServedFrom::Transform,
-            full_array_fingerprint: req.full_array_fingerprint.clone(),
             action: action.clone(),
             decision: action,
             materialize_reason: materialize_reason.map(|reason| reason.as_str().to_string()),
@@ -3444,7 +3409,6 @@ fn apply_once(
             return Ok(pending_passthrough_result(PendingPassthroughArgs {
                 projection,
                 tag_numbers,
-                req,
                 mutation_exempt_mid: mutation_exempt_mid.map(str::to_string),
                 row_version,
                 project_memory: next_meta.project_memory.clone(),
@@ -3545,7 +3509,6 @@ fn apply_once(
         return Ok(pending_passthrough_result(PendingPassthroughArgs {
             projection,
             tag_numbers,
-            req,
             mutation_exempt_mid: mutation_exempt_mid.map(str::to_string),
             row_version,
             project_memory: meta.project_memory.clone(),
@@ -5291,7 +5254,6 @@ fn apply_once(
         response: TransformResponse {
             status: TransformStatus::Ok,
             served_from: ServedFrom::Transform,
-            full_array_fingerprint: req.full_array_fingerprint.clone(),
             action: result_action.clone(),
             decision: result_action,
             materialize_reason: materialize_reason.map(|reason| reason.as_str().to_string()),
@@ -6967,10 +6929,9 @@ fn pending_rewrite_detail(session_id: &str, fingerprint: &str, ambiguous: bool) 
     )
 }
 
-struct PendingPassthroughArgs<'a> {
+struct PendingPassthroughArgs {
     projection: FlatProjection,
     tag_numbers: BTreeMap<String, u64>,
-    req: &'a TransformRequest,
     mutation_exempt_mid: Option<String>,
     row_version: u64,
     project_memory: Option<ProjectMemoryComposition>,
@@ -7018,11 +6979,10 @@ fn pending_passthrough_messages(
         .collect()
 }
 
-fn pending_passthrough_result(args: PendingPassthroughArgs<'_>) -> TransformWithProjection {
+fn pending_passthrough_result(args: PendingPassthroughArgs) -> TransformWithProjection {
     let PendingPassthroughArgs {
         projection,
         tag_numbers,
-        req,
         mutation_exempt_mid,
         row_version,
         project_memory,
@@ -7038,8 +6998,7 @@ fn pending_passthrough_result(args: PendingPassthroughArgs<'_>) -> TransformWith
         pass_observation,
         total_started_at,
     } = args;
-    let mut response =
-        TransformResponse::passthrough(Vec::new(), req.full_array_fingerprint.clone());
+    let mut response = TransformResponse::passthrough(Vec::new());
     response.messages = Some(messages);
     response.row_version = row_version;
     response.project_memory = project_memory;
@@ -12140,7 +12099,7 @@ pub(crate) mod tests {
 
     #[test]
     fn cache_ttl_serde_round_trip_preserves_absent_and_empty_states() {
-        let absent = TransformResponse::passthrough(Vec::new(), None);
+        let absent = TransformResponse::passthrough(Vec::new());
         let absent_json = serde_json::to_value(&absent).unwrap();
         assert!(absent_json.get("cache_ttl").is_none());
         let absent_round_trip: TransformResponse = serde_json::from_value(absent_json).unwrap();
@@ -13188,11 +13147,9 @@ pub(crate) mod tests {
             prompt_surface_guidance_override: None,
             serve_native: false,
             native_messages: None,
-            full_array_fingerprint: None,
             base_revision: None,
             previous_output_revision: None,
             messages: messages.into_iter().collect(),
-            tail_delta: None,
             usage: None,
             geometry: None,
             provider_error: None,
@@ -13723,7 +13680,6 @@ pub(crate) mod tests {
         context.now_ms = 103;
         let mut force_request = with_usage(req(SESSION, "cfg0", messages), 90, 100);
         force_request.request_observed_at_ms = Some(100_003);
-        force_request.full_array_fingerprint = Some("force-fingerprint".to_string());
         transform(&store, &force_request, &context).unwrap();
 
         let history = store
@@ -17727,7 +17683,6 @@ pub(crate) mod tests {
             "serializer_profile": "owned-llmrunner",
             "session_id": "ses",
             "render_config": "cfg",
-            "full_array_fingerprint": "fp-full-array",
             "messages": [{ "mid": "m", "ordinal": 7, "ck": text_message("m", "hello") }],
             "usage": { "current_total_input_tokens": 1, "context_limit_tokens": 2 },
             "history_budget_tokens": 42_000.0,
@@ -17737,10 +17692,6 @@ pub(crate) mod tests {
         assert_eq!(parsed.kind, "transform");
         assert_eq!(parsed.v, 2);
         assert_eq!(parsed.serializer_profile, "owned-llmrunner");
-        assert_eq!(
-            parsed.full_array_fingerprint.as_deref(),
-            Some("fp-full-array")
-        );
         assert_eq!(parsed.messages[0].mid, "m");
         assert_eq!(parsed.usage.unwrap().context_limit_tokens, 2);
         assert_eq!(parsed.history_budget_tokens, Some(42_000.0));
@@ -17750,23 +17701,17 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn v2_defer_replays_messages_byte_identically_and_echoes_fingerprint() {
+    fn v2_defer_replays_messages_byte_identically() {
         let dir = tempfile::tempdir().unwrap();
         let s = store(dir.path());
-        let mut request = req("v2-defer", "cfg0", vec![item("a", 1, "raw")]);
-        request.full_array_fingerprint = Some("fp-v2-defer".to_string());
+        let request = req("v2-defer", "cfg0", vec![item("a", 1, "raw")]);
 
         let first = run(&s, &request, &spine());
         let second = run(&s, &request, &spine());
 
         assert_eq!(first.status, TransformStatus::Ok);
         assert_eq!(first.served_from, ServedFrom::Transform);
-        assert_eq!(first.full_array_fingerprint.as_deref(), Some("fp-v2-defer"));
         assert_eq!(second.action, "SOFT+");
-        assert_eq!(
-            second.full_array_fingerprint.as_deref(),
-            Some("fp-v2-defer")
-        );
         assert_eq!(
             serde_json::to_vec(&first.messages).unwrap(),
             serde_json::to_vec(&second.messages).unwrap(),
@@ -22106,12 +22051,8 @@ pub(crate) mod tests {
         );
         request.serializer_profile = "opencode-aisdk".to_string();
         request.serve_native = true;
-        request.full_array_fingerprint = Some("belt-release-fp".to_string());
         let cache = Mutex::new(crate::NativeAttachmentCache::new(1024 * 1024));
-        let mut first = TransformResponse::passthrough(
-            healed_ck.clone(),
-            request.full_array_fingerprint.clone(),
-        );
+        let mut first = TransformResponse::passthrough(healed_ck.clone());
         let first_attachment = crate::attach_native_messages_incremental(
             &mut first,
             &request,
@@ -22120,7 +22061,6 @@ pub(crate) mod tests {
             None,
             None,
             true,
-            None,
             0,
             &crate::edit_recipe::Revision::parse("test-output").unwrap(),
             &cache,
@@ -22140,10 +22080,7 @@ pub(crate) mod tests {
         );
         assert_eq!(tool_ids, vec!["duplicate"]);
 
-        let mut replay = TransformResponse::passthrough(
-            healed_ck.clone(),
-            request.full_array_fingerprint.clone(),
-        );
+        let mut replay = TransformResponse::passthrough(healed_ck.clone());
         let replay_attachment = crate::attach_native_messages_incremental(
             &mut replay,
             &request,
@@ -22152,7 +22089,6 @@ pub(crate) mod tests {
             None,
             None,
             true,
-            None,
             0,
             &crate::edit_recipe::Revision::parse("test-output").unwrap(),
             &cache,
@@ -22316,7 +22252,6 @@ pub(crate) mod tests {
         );
         first_request.serializer_profile = "opencode-aisdk".to_string();
         first_request.serve_native = true;
-        first_request.full_array_fingerprint = Some("todo-fold-fp-1".to_string());
         let mut first_native = first.clone();
         crate::attach_native_messages_incremental(
             &mut first_native,
@@ -22326,7 +22261,6 @@ pub(crate) mod tests {
             None,
             None,
             true,
-            None,
             0,
             &crate::edit_recipe::Revision::parse("test-output").unwrap(),
             &cache,
@@ -22344,7 +22278,6 @@ pub(crate) mod tests {
         );
         moved_request.serializer_profile = "opencode-aisdk".to_string();
         moved_request.serve_native = true;
-        moved_request.full_array_fingerprint = Some("todo-fold-fp-2".to_string());
         let mut moved_native = moved.clone();
         let attachment = crate::attach_native_messages_incremental(
             &mut moved_native,
@@ -22354,7 +22287,6 @@ pub(crate) mod tests {
             None,
             None,
             true,
-            None,
             0,
             &crate::edit_recipe::Revision::parse("test-output").unwrap(),
             &cache,
@@ -29598,7 +29530,6 @@ pub(crate) mod tests {
         let mut request = req("perf-full-module-pass", "cfg0", messages);
         request.serializer_profile = "opencode-aisdk".to_string();
         request.serve_native = true;
-        request.full_array_fingerprint = Some("perf-full-module-pass-0".to_string());
         let projection_started_at = Instant::now();
         let projection = project_messages(&request.messages).unwrap();
         let full_projection_ms = elapsed_ms(projection_started_at);
@@ -29752,8 +29683,7 @@ pub(crate) mod tests {
             .iter()
             .map(|message| message.deref().clone())
             .collect::<Vec<_>>();
-        let mut response =
-            TransformResponse::passthrough(served, request.full_array_fingerprint.clone());
+        let mut response = TransformResponse::passthrough(served);
         let attach_started_at = Instant::now();
         crate::attach_native_messages(&mut response, &request, 0, None);
         let attach_ms = elapsed_ms(attach_started_at);

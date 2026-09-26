@@ -8,6 +8,14 @@
 > `every_pass_read_is_bounded_independent_of_history_size`. Statements below
 > that cite the cache describe removed code.
 
+> Invalidated in part by [#829](https://github.com/ahrav/eidnara/issues/829):
+> the delta channel is retired. `tail_delta`, `full_array_fingerprint`,
+> `need_full_sync`, `computeWireDelta`, `AppliedOutputBudget`, `wireCaches`,
+> the native delta frontier, and the snapshot delta fallback are deleted, with
+> the witnesses below that name them. TE25's budget is now the one
+> retained-output record per session described in that section's note, and
+> TE30 is invalidated.
+
 This file records the client and daemon behavior that the two-source recipe
 switch adds on `feat/transform-recipe-wire`, stacked on
 `feat/transform-recipe-builder` (`ed538110`). The eleven #533 records in
@@ -130,6 +138,18 @@ side by `lib.rs:25199`
 (`previous_output_revision` absent after `native_attachments.remove`, present
 again on the following pass).
 
+After #829 the applied output and the input basis it was computed from share
+one record and one charge (`RetainedOutputs`, `rust-mode-transform.ts:177`),
+under the 64-session and 64 MiB (`RETAINED_OUTPUT_BUDGET_BYTES`, `:135`)
+limits. A retention over the budget first drops the applied output and keeps
+the basis, then drops the record. Eviction never touches a capture lease.
+Witnesses: `rust-mode-transform.test.ts:1963` "keeps one retained-output record
+per session under the session and byte limits", `:1376` "evicts the least
+recently retained session's output and offers it no previous source", `:1413`
+"never releases an active capture lease when the session count|byte budget
+evicts its session's output", and `:3992` "keeps the basis without the applied
+output, then drops the record, as the budget tightens".
+
 ### TE30 `inbound-baseline-independent-of-output-base`
 
 The delta-versus-full control now exists on the daemon: `lib.rs:25520`
@@ -143,6 +163,10 @@ the acknowledged input as its delta baseline (`computeWireDelta` over raw
 snapshots), and `measureInputLengths` (`rust-mode-transform.ts:366`) reuses the
 acknowledged prefix's lengths, so the input base and the applied output stay
 separate owners.
+
+Invalidated by #829: the tail-delta controls named above are deleted with the
+delta channel, and `measureInputLengths` now reuses lengths only for the
+members the capture verified against the retained digest.
 
 ## Daemon-side witnesses
 
