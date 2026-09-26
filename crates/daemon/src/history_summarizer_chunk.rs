@@ -817,34 +817,35 @@ pub fn assemble_history_summarizer_firing(
     let expected_revert_epoch = snapshot.revert_epoch;
     let history_segment_set_generation = snapshot.history_segment_set_generation;
     let eligible_end = config.boundary.eligible_head.end;
-    let chunk_start = if let Some(last_end) = snapshot.max_end_message.map(|end| end as u64) {
-        let Some(next_present) = messages
-            .iter()
-            .filter(|message| !message.ck.meta.synthetic)
-            .map(|message| message.ordinal)
-            .filter(|ordinal| *ordinal > last_end && *ordinal < eligible_end)
-            .min()
-        else {
-            return Ok(AssembleHistorySummarizerFiringOutcome::NoFire(
-                HistorySummarizerNoFireReason::EmptyChunk,
-            ));
+    let chunk_start =
+        if let Some(last_end) = history_segments.iter().map(|c| c.end_message as u64).max() {
+            let Some(next_present) = messages
+                .iter()
+                .filter(|message| !message.ck.meta.synthetic)
+                .map(|message| message.ordinal)
+                .filter(|ordinal| *ordinal > last_end && *ordinal < eligible_end)
+                .min()
+            else {
+                return Ok(AssembleHistorySummarizerFiringOutcome::NoFire(
+                    HistorySummarizerNoFireReason::EmptyChunk,
+                ));
+            };
+            next_present
+        } else {
+            let Some(first_live_eligible) = messages
+                .iter()
+                .filter(|message| !message.ck.meta.synthetic)
+                .filter(|message| message.ck.role != "system")
+                .map(|message| message.ordinal)
+                .filter(|ordinal| *ordinal < eligible_end)
+                .min()
+            else {
+                return Ok(AssembleHistorySummarizerFiringOutcome::NoFire(
+                    HistorySummarizerNoFireReason::EmptyChunk,
+                ));
+            };
+            first_live_eligible
         };
-        next_present
-    } else {
-        let Some(first_live_eligible) = messages
-            .iter()
-            .filter(|message| !message.ck.meta.synthetic)
-            .filter(|message| message.ck.role != "system")
-            .map(|message| message.ordinal)
-            .filter(|ordinal| *ordinal < eligible_end)
-            .min()
-        else {
-            return Ok(AssembleHistorySummarizerFiringOutcome::NoFire(
-                HistorySummarizerNoFireReason::EmptyChunk,
-            ));
-        };
-        first_live_eligible
-    };
     if chunk_start >= eligible_end {
         return Ok(AssembleHistorySummarizerFiringOutcome::NoFire(
             HistorySummarizerNoFireReason::EmptyEligibleRange {
