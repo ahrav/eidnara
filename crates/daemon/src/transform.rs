@@ -1710,7 +1710,6 @@ pub struct TransformWithProjection {
     pub trim_mismatch: Option<TrimMismatch>,
     pub revert_epoch: u64,
     pub reasoning_watermark: u64,
-    pub transition_consumed: bool,
     pub mutation_exempt_mid: Option<String>,
     pub lineage_anchor_mid: Option<String>,
 }
@@ -2472,7 +2471,6 @@ fn lineage_protocol_passthrough(
         trim_mismatch: None,
         revert_epoch: 0,
         reasoning_watermark: 0,
-        transition_consumed: false,
         mutation_exempt_mid: None,
         lineage_anchor_mid: None,
         response: TransformResponse::passthrough(
@@ -2994,7 +2992,6 @@ fn apply_additive_only(
         reasoning_watermark: meta
             .reasoning_cleared_through_tag
             .max(meta.reasoning_cleared_through_ordinal),
-        transition_consumed: transition_consumed(&core),
         mutation_exempt_mid: None,
         lineage_anchor_mid: None,
         response: TransformResponse {
@@ -3416,7 +3413,6 @@ fn apply_once(
                 reasoning_watermark: next_meta
                     .reasoning_cleared_through_tag
                     .max(next_meta.reasoning_cleared_through_ordinal),
-                transition_consumed: transition_consumed(&loaded.core),
                 committed: fingerprint_changed,
                 trim_mismatch,
                 messages: passthrough_messages,
@@ -3516,7 +3512,6 @@ fn apply_once(
             reasoning_watermark: meta
                 .reasoning_cleared_through_tag
                 .max(meta.reasoning_cleared_through_ordinal),
-            transition_consumed: transition_consumed(&loaded.core),
             committed: true,
             trim_mismatch,
             messages: passthrough_messages,
@@ -5248,7 +5243,6 @@ fn apply_once(
         reasoning_watermark: meta
             .reasoning_cleared_through_tag
             .max(meta.reasoning_cleared_through_ordinal),
-        transition_consumed: transition_consumed(&core),
         mutation_exempt_mid: mutation_exempt_mid.map(str::to_string),
         lineage_anchor_mid: lineage_anchor_mid.map(str::to_string),
         response: TransformResponse {
@@ -6937,7 +6931,6 @@ struct PendingPassthroughArgs {
     project_memory: Option<ProjectMemoryComposition>,
     revert_epoch: u64,
     reasoning_watermark: u64,
-    transition_consumed: bool,
     committed: bool,
     trim_mismatch: Option<TrimMismatch>,
     messages: Vec<ServedMessage>,
@@ -6988,7 +6981,6 @@ fn pending_passthrough_result(args: PendingPassthroughArgs) -> TransformWithProj
         project_memory,
         revert_epoch,
         reasoning_watermark,
-        transition_consumed,
         committed,
         trim_mismatch,
         messages,
@@ -7019,7 +7011,6 @@ fn pending_passthrough_result(args: PendingPassthroughArgs) -> TransformWithProj
         trim_mismatch,
         revert_epoch,
         reasoning_watermark,
-        transition_consumed,
         mutation_exempt_mid,
         lineage_anchor_mid: None,
         response,
@@ -10268,6 +10259,7 @@ fn transition_consumed_classes(core: &CoreState) -> BTreeSet<RendererTransitionC
     classes
 }
 
+#[cfg(test)]
 fn transition_consumed(core: &CoreState) -> bool {
     !transition_consumed_classes(core).is_empty()
 }
@@ -28264,9 +28256,10 @@ pub(crate) mod tests {
             replay.response.action, "SOFT+",
             "persisting consumption must prevent the salt from re-firing forever"
         );
-        assert!(first.transition_consumed);
-        assert!(replay.transition_consumed);
         assert!(transition_consumed(&post_salt.core));
+        assert!(transition_consumed(
+            &store.load("reasoning-transition").unwrap().core
+        ));
         assert_eq!(
             serde_json::to_vec(replay.response.messages()).unwrap(),
             healed_bytes,
@@ -28643,7 +28636,9 @@ pub(crate) mod tests {
             transform_with_projection(&store, &request, &pctx("git:proj", "/nonexistent-docs", 0))
                 .unwrap();
         assert_eq!(salted.response.action, "HARD");
-        assert!(salted.transition_consumed);
+        assert!(transition_consumed(
+            &store.load("pair-transition").unwrap().core
+        ));
         let salted_ck = salted
             .response
             .messages()
@@ -28795,7 +28790,6 @@ pub(crate) mod tests {
             folded.response.materialize_reason.as_deref(),
             Some("renderer_transition")
         );
-        assert!(folded.transition_consumed);
         let folded_state = store.load("combined-transition").unwrap();
         assert_eq!(
             transition_consumed_classes(&folded_state.core),
