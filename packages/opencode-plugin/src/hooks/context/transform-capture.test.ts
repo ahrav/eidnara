@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, spyOn } from "bun:test";
+import { Hash } from "node:crypto";
 import {
     CaptureBudgetExceeded,
     type CapturedHistory,
@@ -931,6 +932,20 @@ describe("digest-verified prefix capture", () => {
         expect(verifiesAgainst(buffered, digestOf(structuredClone(buffered)))).toBe(true);
         expect(verifiesAgainst(sliced, digestOf(structuredClone(sliced)))).toBe(true);
         expect(verifiesAgainst(sliced, digestOf(buffered))).toBe(false);
+    });
+
+    it("flushes the hash tape at the chunk threshold between scalar tokens", () => {
+        const chunk = 1 << 16;
+        const dense = message("m1");
+        dense.parts = [{ type: "numbers", values: Array.from({ length: 200_000 }, (_, i) => i) }];
+        const spy = spyOn(Hash.prototype, "update");
+        try {
+            digestOf(dense);
+            const longest = Math.max(...spy.mock.calls.map((call) => String(call[0]).length));
+            expect(longest).toBeLessThan(2 * chunk);
+        } finally {
+            spy.mockRestore();
+        }
     });
 
     it("keeps snapshot-only captures free of history digests", () => {

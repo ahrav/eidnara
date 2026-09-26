@@ -4313,6 +4313,38 @@ describe("capture scaled to the appended messages", () => {
         expect(bodies[2]?.native_messages).toHaveLength(3);
     });
 
+    it("charges retained symbol descriptions against the retained history budget", async () => {
+        const sessionId = `rust-delta-capture-retained-symbol-${Date.now()}`;
+        const rows = rawRows(3);
+        installRawRows(sessionId, rows);
+        // The digest keeps the symbol, so its description stays retained with the wire cache.
+        const key = Symbol("d".repeat(1_000));
+        const withKey = (messages: MessageLike[]): unknown[] => {
+            Object.defineProperty(messages[0], key, { value: 1, enumerable: true, writable: true });
+            return messages;
+        };
+        const run = async (budget: number): Promise<Record<string, unknown> | undefined> => {
+            const { client, bodies } = recordingClient((request) =>
+                recipeResponse(request, [folded(sessionId)]),
+            );
+            const transform = createRustModeTransform(makeDeps(), {
+                moduleClient: client,
+                retainedHistoryBudgetBytes: budget,
+            });
+            await transform.run(sessionId, {
+                messages: withKey(rowMessages(sessionId, rows.slice(0, 2))),
+            });
+            await transform.run(sessionId, { messages: withKey(rowMessages(sessionId, rows)) });
+            return bodies[1];
+        };
+        // Two messages, one symbol slot, and the description fit a generous budget.
+        expect((await run(4_096))?.tail_delta).toBeDefined();
+        // Without the description, the same cache would fit 64 bytes; with it, the cache is dropped.
+        const refused = await run(64);
+        expect(refused?.tail_delta).toBeUndefined();
+        expect(refused?.native_messages).toHaveLength(3);
+    });
+
     it("evicts the session-count victim even when the history budget evicts another session", async () => {
         const capacity = __rustModeTransformTest.WIRE_CACHE_SESSION_CAPACITY;
         const stamp = Date.now();

@@ -937,6 +937,13 @@ export function createRustModeTransform(
         appliedOutputs.release(sessionId);
         retainedHistories.release(sessionId);
     };
+    /** A digest keeps each symbol, and so its description, alive with the wire cache. */
+    const retainedSymbolBytes = (digest: HistoryDigest | undefined): number => {
+        let bytes = 0;
+        for (const symbol of digest?.symbols ?? [])
+            bytes += CANDIDATE_SLOT_BYTES + (symbol.description?.length ?? 0) * 2;
+        return bytes;
+    };
     /** Count eviction uses `releaseWireCache`: a history eviction can free the slot `set` would evict, and a refused retention skips `set`. */
     const storeWireCache = (sessionId: string, cache: RustWireCache): void => {
         if (!wireCaches.has(sessionId) && wireCaches.size >= WIRE_CACHE_SESSION_CAPACITY) {
@@ -945,8 +952,8 @@ export function createRustModeTransform(
         }
         const charge =
             cache.rawCount * HISTORY_ENTRY_RETAINED_BYTES +
-            (cache.rawHistory.symbols.length + (cache.rawTerminal?.symbols.length ?? 0)) *
-                CANDIDATE_SLOT_BYTES;
+            retainedSymbolBytes(cache.rawHistory) +
+            retainedSymbolBytes(cache.rawTerminal);
         if (!retainedHistories.retain(sessionId, charge)) {
             releaseWireCache(sessionId);
             return;

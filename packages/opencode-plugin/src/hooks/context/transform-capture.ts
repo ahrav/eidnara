@@ -450,10 +450,8 @@ class TapeHasher {
 
     readonly push = (value: SnapshotField): void => {
         if (typeof value === "string") {
-            if (value.length < HASH_CHUNK_UNITS) {
-                this.text += `s${value.length}:${value}`;
-                if (this.text.length >= HASH_CHUNK_UNITS) this.flush();
-            } else {
+            if (value.length < HASH_CHUNK_UNITS) this.text += `s${value.length}:${value}`;
+            else {
                 this.text += `s${value.length}:`;
                 this.flush();
                 for (let start = 0; start < value.length; start += HASH_CHUNK_UNITS)
@@ -472,6 +470,8 @@ class TapeHasher {
             this.text += "y";
             this.symbols[this.symbols.length] = value;
         }
+        // A dense run of scalars is bounded here; a member boundary alone could buffer megabytes.
+        if (this.text.length >= HASH_CHUNK_UNITS) this.flush();
     };
 
     /** Closes one member whose walk spent `bytes`. */
