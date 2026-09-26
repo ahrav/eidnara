@@ -777,6 +777,8 @@ const TRANSFORM_PAGE_ARRAY_FIELDS: [&str; 6] = [
     "ts_messages",
     "normalizations",
 ];
+/// One ready-snapshot budget serves every session's wrapup. A snapshot charges only its CK
+/// input and scalar fields, never native payload, so 64 MiB holds several large sessions.
 const TRANSFORM_SNAPSHOT_BUDGET_BYTES: usize = 64 * 1024 * 1024;
 const BOUNDARY_TOKEN_CACHE_BUDGET_BYTES: usize = 16 * 1024 * 1024;
 const ACTIVE_SNAPSHOT_LEASE_BUDGET_BYTES: usize = TRANSFORM_SNAPSHOT_BUDGET_BYTES;
@@ -9018,6 +9020,9 @@ impl HandlerCore {
         let mutation_exempt_mid = result.mutation_exempt_mid;
         let lineage_anchor_mid = result.lineage_anchor_mid;
         let tag_numbers = result.tag_numbers;
+        // A descent pass rebased its ordinals; the snapshot keeps that copy so wrapup compares
+        // them against the durable history-segment ends.
+        let snapshot_request = result.rebased_request.as_ref().map_or(&**parsed, |r| r);
         let mut response = result.response;
         response.history_summarizer = Some(diagnostics);
         let Some(output_revision) = self.output_revisions.allocate() else {
@@ -9081,7 +9086,7 @@ impl HandlerCore {
             response_observation_started_at.elapsed().as_secs_f64() * 1_000.0;
         // The ready snapshot keeps the CK input and scalar fields wrapup reads, never the native
         // payload; the ready LRU and active-lease budget charge what its `Arc` keeps alive.
-        let snapshot = Arc::new(parsed.ready_snapshot());
+        let snapshot = Arc::new(snapshot_request.ready_snapshot());
         let retained_size_started_at = Instant::now();
         let retained_bytes = snapshot.snapshot_retained_bytes();
         let retained_size_ms = retained_size_started_at.elapsed().as_secs_f64() * 1_000.0;

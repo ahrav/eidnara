@@ -294,12 +294,12 @@ not adequacy verdicts; every check is `unaudited`.
 
 `#[ignore]`: none found in any 4f file, matching both `#[ignore]` and
 `#[ignore = "..."]`. `transform.rs` carries two ignored manual timing tests,
-`apply_once_stage_timings_large_fixture` (`transform.rs:12675-12676`) and
-`full_module_pass_timing_fixture` (`transform.rs:29718-29719`); the tag
+`apply_once_stage_timings_large_fixture` (`transform.rs:12689-12690`) and
+`full_module_pass_timing_fixture` (`transform.rs:29777-29778`); the tag
 baseline cache's `tag_baseline_warm_hydration_50k` is deleted, and
 `every_pass_read_is_bounded_independent_of_history_size`
 (`transform_read_bound.rs`) bounds the tag reads instead. `lib.rs` carries
-one, `history_summarizer_trigger_token_reuse_benchmark` (`lib.rs:19772-19773`), which
+one, `history_summarizer_trigger_token_reuse_benchmark` (`lib.rs:19770-19771`), which
 calls `boundary::check_history_segment_trigger_retokenized_reference`.
 
 `should_panic`: none found in any 4f file. One test has a panic oracle written a
@@ -446,10 +446,14 @@ cover tool-result pairing, and `wire.rs:1258` and `wire.rs:1283` assert
 reaches `wire.rs:629`.
 
 Update, 2026-09-26: [#828](https://github.com/ahrav/eidnara/issues/828) deletes
-`projection_retained_bytes_counts_wire_and_frontier_allocations_once` and
-`incremental_projection_reuses_prefix_storage_and_preserves_tool_arc_state`, and
-reduces `duplicate_message_ids_are_rejected_across_the_incremental_prefix` to
-its full-projection arm as `duplicate_message_ids_are_rejected`. The daemon
+`projection_retained_bytes_counts_wire_and_frontier_allocations_once`,
+`incremental_projection_reuses_prefix_storage_and_preserves_tool_arc_state`,
+`incremental_projection_checks_effective_synthetic_status`, and
+`reattach_keeps_block_level_original_but_rebuilds_the_message_shell` (by then
+named `reattach_shares_the_decoded_shell_and_unknown_envelope_fields_are_discarded`).
+It reduces `duplicate_message_ids_are_rejected_across_the_incremental_prefix` to
+its full-projection arm as `duplicate_message_ids_are_rejected`, so 8 of the 12
+`wire.rs` tests counted above remain. The daemon
 projects every request from its full input. Citations of these symbols here are
 historical at their stated baseline.
 

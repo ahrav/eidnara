@@ -22,9 +22,13 @@ the incremental builder paths (`project_incremental`,
 `EIDNARA_PREFIX_PROJECTION_DIFFERENTIAL`. Every pass projects its full CK
 input with `MessageProjection::project`. A tail delta reattaches its prefix
 only from the latest-ready request snapshot; without one it takes the
-full-sync path. Interim until #829 deletes the delta channel: a session whose
-request charge exceeds the 64 MiB ready-snapshot budget now gets
-`need_full_sync` on every delta turn, which the projection cache used to serve.
+full-sync path. Every session shares one ready-snapshot budget, so #828
+raised `TRANSFORM_SNAPSHOT_BUDGET_BYTES` from 64 MiB to 256 MiB, the budget
+the projection cache had. At 64 MiB, two sessions whose snapshots together
+exceeded it evicted each other on alternating turns and refused every delta.
+#829 deletes the delta channel, so the ready snapshot serves only wrapup and
+holds no native payload; the budget returns to 64 MiB and the alternating-
+session delta test is deleted with the delta path.
 The tag-mint frontier memo no longer keys on the full-array
 fingerprint. Citations of the deleted symbols below are historical and link
 to `704568ec`, the last commit that has them.
@@ -41,11 +45,14 @@ deleted symbols in passing; the notes in those records say what replaced
 them. The wire keeps `projection_cache_lookup`, `projection_cache_store`,
 and `projection_reused_messages` in `TransformTimings`; they now report zero.
 
-`DECLARED_RETAINED_RESIDENT_BYTES` drops by 512 MiB: the 256 MiB projection
-cache leaves `TRANSFORM_SERVE_CACHE_COMBINED_BUDGET_BYTES` (768 MiB to
-512 MiB), and the 256 MiB active projection lease budget leaves the sum. A
-compile-time assertion now requires the combined budget to equal the
-serialized-output and native-attachment budgets.
+`DECLARED_RETAINED_RESIDENT_BYTES` dropped by 128 MiB under #828, from
+3,172,345,368 to 3,038,127,640: the 256 MiB projection cache left
+`TRANSFORM_SERVE_CACHE_COMBINED_BUDGET_BYTES` (768 MiB to 512 MiB), the
+256 MiB active projection lease budget left the sum, and the ready-snapshot
+budget and `ACTIVE_SNAPSHOT_LEASE_BUDGET_BYTES`, which equals it, each rose
+by 192 MiB. #829 returns both to 64 MiB, taking a further 384 MiB off the sum. A
+compile-time assertion now requires the combined budget to
+equal the serialized-output and native-attachment budgets.
 
 ## Scope and provenance
 
@@ -449,19 +456,23 @@ test proves pointer sharing for
 reattached values, sidecar envelopes, metadata, and encoded prefix chunks.
 The [ingress-core check][native-ingress-sharing] covers snapshot fallback,
 value-based output reuse, and cold request allocation accounting. The complex
-replay also checks the warm request charge against its own allocation sizes.
+replay also checks the warm request charge against its own allocation sizes
+(invalidated by #828: the warm charge came from the projection cache store).
 The [cache-charge check][native-charge-floor] preserves an allocation-based
 charge alongside the sidecar's smaller serialized-size estimate. Broader
 projection and served-segment comparisons remain in the shared-input suites.
 The [canonical-shell check][shell-sharing] proves repeated reattachment and
-incremental projection retain shell pointers without mutating raw ingress.
+incremental projection retain shell pointers without mutating raw ingress
+(invalidated by #828: the check is deleted with reattachment).
 The [decode check][shell-decode] asserts `Send + 'static` and unchanged malformed
 input errors. The complex replay also compares fresh, reattached, and shared
-projections, served bytes, shell pointers, and cold and warm shell charges.
+projections, served bytes, shell pointers, and cold and warm shell charges
+(the shell charges are invalidated by #828 with the projection cache).
 The [shell metadata check][shell-metadata] reparses nonempty origin and provider
 extras with non-default, non-synthetic harness metadata. It checks that replay
 drops only the unknown message field while retaining every block and known
-shell field. The exact allocation oracle includes nonzero metadata heap terms.
+shell field. The exact allocation oracle includes nonzero metadata heap terms
+(invalidated by #828: the check is deleted with reattachment).
 The [served-byte witnesses][served-byte-witnesses] compare literal canonical
 bytes and measured `Served` segment writes for original, latent-edited, typed,
 and block-edited shells. The frozen wire corpus also runs with fully typed
@@ -540,15 +551,21 @@ tag-overlaid message, and the synthetic m0 and m1.
 Confidence: high - [Evidence](evidence/derived-artifacts-are-ownership-independent.md).
 Both differential gates ([prefix][gate-prefix], [native][gate-native]), the
 [flatten][flatten] fields, [`from_message_reusing`][served-reusing], the
-sorted-key cause, and the segment writer are source-verified.
+sorted-key cause, and the segment writer are source-verified. #828 deletes
+the prefix gate; the native gate and the rest stand.
 Existing check: [Shared-input checks](existing-checks.md#shared-input-equivalence)
-include both differentials, fingerprint reuse, pinned fingerprint IDs, the
+include both differentials (the prefix differential is deleted by #828),
+fingerprint reuse, pinned fingerprint IDs, the
 selection-sharing check, sidecar order/pin equality, native prefix sharing,
 and fresh/full native byte equality. Projection and request snapshot caches
 charge shell backing, content capacity, retained block JSON, and Arc counters
-using the existing conservative full-charge-per-holder rule. Cached prefix
+using the existing conservative full-charge-per-holder rule (#828 deletes the
+projection cache; the request snapshot cache keeps the rule). Cached prefix
 charges can exceed the canonical shell's smaller footprint; only suffix sizes
-are recomputed. Cache budgets are unchanged. Canonical serialization uses
+are recomputed (invalidated by #828: every pass charges its whole request).
+Cache budgets are unchanged (invalidated by #828: the combined serve-cache
+budget falls from 768 MiB to 512 MiB and the ready-snapshot budget rises from
+64 MiB to 256 MiB). Canonical serialization uses
 serde formatter spans rather than a materialized `Value` round trip; keys
 without escapes order by their raw bytes, and an object already in order is
 not sorted, so a retained-original shell whose keys carry no escapes decodes
@@ -2242,7 +2259,11 @@ Open questions:
 
 Type: safety
 Reachability: default-production
-Status: active
+Status: active - [#828](#projection-prefix-reuse-retirement-2026-09-26)
+deletes the projection cache, so settlement no longer stores a projection and
+every pass takes the full projection path. The projection-cache clauses are
+marked below and kept for traceability; the lineage, guidance, and
+serialized-output clauses stand.
 Exercised: partial - [The aborted-waiter test][unit-abort-test] observes a real
 commit before lineage insertion, aborts the waiter while the unit remains held,
 then checks lineage, guidance-pin removal, reopened core state, and fresh
@@ -2257,13 +2278,15 @@ next pass's `ProducerContext` construction for the same session:
 `transform_session_roots` contains the lineage root, or
 `module_knows_transform_session` repopulates it from the durable table;
 the projection cache holds the entry settlement would have stored, or the
-next pass takes the full projection path;
+next pass takes the full projection path (invalidated by #828: every pass
+takes the full path);
 `guidance_dates` holds no entry for the session, or the next pass's
 `ProducerContext.guidance_date` equals a fresh
 computation; and the serialized-output cache holds no entry from a pass the
 store rejected, which the transform catalog's
 [output-cache record][tc-output] already constrains. `always` because the
-four updates run on every committing pass whatever the execution topology.
+four updates run on every committing pass whatever the execution topology
+(three since #828 removes the projection-cache store).
 Fault/timing angle: Waiter cancellation can land while the worker is committed
 but held before bookkeeping. [The first unit][unit-first-live] keeps lineage
 and guidance removal on the worker; ordinary settlement shares that unit.
@@ -2273,7 +2296,7 @@ different interruption and is not proof of successful bookkeeping.
 Required faults and enabling state: A committing pass with a pinned guidance
 date; an abort injected between commit and bookkeeping (W11); a second pass
 on the same session that reads `ProducerContext.guidance_date` and the
-projection cache.
+projection cache (the projection cache read is deleted by #828).
 Confidence: high - [Evidence](evidence/committed-transform-bookkeeping-is-applied-or-recomputed.md).
 The first unit, reloaded reruns, guidance invalidation, settlement, and owned
 environment are source-verified. The first permit precedes snapshot `begin` on
@@ -2289,7 +2312,8 @@ assertion; the removal was restored before the workspace runs.
 Existing check: [Transform-unit checks](existing-checks.md#transform-unit-implementation-evidence-2026-09-13)
 cover the abort, Emergency95 cancellation, and real-host cleanup; unaudited.
 Impact: The next pass carries a stale guidance line or a stale projection
-cache entry after a relocated transform is aborted mid-bookkeeping.
+cache entry after a relocated transform is aborted mid-bookkeeping. Since
+#828 no projection cache entry exists to go stale.
 Open questions: None for transform ownership or late-cancel policy. The host
 joins units. On 2026-09-13 the owner accepts cancellation after durable commit,
 skipped later Emergency95 units with recomputed or superseded derived state,

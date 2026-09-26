@@ -1721,6 +1721,10 @@ pub struct TransformWithProjection {
     pub transition_consumed: bool,
     pub mutation_exempt_mid: Option<String>,
     pub lineage_anchor_mid: Option<String>,
+    /// The request a descent pass rebased to the durable ordinal base. The ready snapshot
+    /// retains it instead of the harness's origin-numbered copy, so wrapup compares its
+    /// ordinals against the durable history-segment ends.
+    pub rebased_request: Option<TransformRequest>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1897,7 +1901,12 @@ impl From<WireError> for TransformError {
 
 impl From<MemoryStoreError> for TransformError {
     fn from(e: MemoryStoreError) -> Self {
-        TransformError::Store(e)
+        match e {
+            MemoryStoreError::HistorySegmentRangesOutOfOrder { .. } => {
+                TransformError::CoverageGap(e.to_string())
+            }
+            e => TransformError::Store(e),
+        }
     }
 }
 
@@ -2483,6 +2492,7 @@ fn lineage_protocol_passthrough(
         transition_consumed: false,
         mutation_exempt_mid: None,
         lineage_anchor_mid: None,
+        rebased_request: None,
         response: TransformResponse::passthrough(
             req.messages
                 .iter()
@@ -3005,6 +3015,7 @@ fn apply_additive_only(
         transition_consumed: transition_consumed(&core),
         mutation_exempt_mid: None,
         lineage_anchor_mid: None,
+        rebased_request: None,
         response: TransformResponse {
             status: TransformStatus::Ok,
             served_from: ServedFrom::Transform,
@@ -3201,7 +3212,7 @@ fn apply_once(
     timings.store_user_hints = transform_snapshot.timings.user_hints_ms;
     timings.store_channel1 = transform_snapshot.timings.channel1_ms;
     timings.store_overlay_frontier = transform_snapshot.timings.overlay_frontier_ms;
-    let loaded = transform_snapshot.loaded;
+    let mut loaded = transform_snapshot.loaded;
     let overlay_frontier = transform_snapshot.overlay_frontier;
     let transition_detection_started_at = Instant::now();
     let transition_shapes = renderer_transition_shapes(
@@ -3773,7 +3784,12 @@ fn apply_once(
         == Some(SerializerProfile::ClaudeCodeAnthropic)
         && history_segment_seq_changed_since_meta
     {
-        let new_coverage = stored_coverage_bounds(store, &req.session_id)?.map(|(_, end)| end);
+        let new_coverage = stored_coverage_bounds(
+            store,
+            &req.session_id,
+            &mut loaded.meta.history_segments_ordered,
+        )?
+        .map(|(_, end)| end);
         coverage_advance_covers_new_system(req, loaded.meta.coverage_ordinal, new_coverage)
     } else {
         false
@@ -4235,7 +4251,11 @@ fn apply_once(
         match plan {
             PassPlan::Reject => return Err(TransformError::UnknownShape(UNKNOWN_SHAPE)),
             PassPlan::Hard | PassPlan::MigrateHard => {
-                let coverage_bounds = stored_coverage_bounds(store, &req.session_id)?;
+                let coverage_bounds = stored_coverage_bounds(
+                    store,
+                    &req.session_id,
+                    &mut meta.history_segments_ordered,
+                )?;
                 let covered_system_messages = covered_system_messages_for_coverage(
                     req,
                     coverage_bounds.map(|(_, end)| end),
@@ -4312,8 +4332,11 @@ fn apply_once(
                                 ctx,
                             )?;
                             current_m1_digest = m1_signal.revision;
-                            let recut_coverage_bounds =
-                                stored_coverage_bounds(store, &req.session_id)?;
+                            let recut_coverage_bounds = stored_coverage_bounds(
+                                store,
+                                &req.session_id,
+                                &mut meta.history_segments_ordered,
+                            )?;
                             let recut_covered_system_messages =
                                 covered_system_messages_for_coverage(
                                     req,
@@ -4508,7 +4531,11 @@ fn apply_once(
                 // An unserved body folds; the empty default is never rendered.
                 let m1_body = served_m1_body.unwrap_or_default();
                 if served_m1_body.is_none() {
-                    let coverage_bounds = stored_coverage_bounds(store, &req.session_id)?;
+                    let coverage_bounds = stored_coverage_bounds(
+                        store,
+                        &req.session_id,
+                        &mut meta.history_segments_ordered,
+                    )?;
                     let covered_system_messages = covered_system_messages_for_coverage(
                         req,
                         coverage_bounds.map(|(_, end)| end),
@@ -5290,6 +5317,7 @@ fn apply_once(
             channel2_directive: channel2_output.channel2_directive,
             note_deliveries: (!note_deliveries.is_empty()).then_some(note_deliveries),
         },
+        rebased_request: rebased_req,
     })
 }
 
@@ -6243,22 +6271,24 @@ fn detect_boundary_divergence_candidate(
 }
 
 /// The first covered ordinal and the coverage end, from the set's oldest and newest rows.
-/// Ranges are validated strictly increasing at append, so the two ends bound the set.
+/// The two ends bound the set only when its ranges are in strict order, so a set out of
+/// order fails as a coverage gap instead of trimming the tail at the wrong ordinal. The
+/// order scan reads the session once: `ordered` is `ModuleMeta::history_segments_ordered`,
+/// set on a pass and committed with the pass's meta, so no restart repeats the scan.
 pub(crate) fn stored_coverage_bounds(
     store: &MemoryStore,
     session_id: &str,
+    ordered: &mut bool,
 ) -> Result<Option<(u64, u64)>, TransformError> {
+    if !*ordered {
+        if let Some(violation) = store.history_segment_order_violation(session_id)? {
+            return Err(TransformError::CoverageGap(violation));
+        }
+        *ordered = true;
+    }
     let Some((oldest, newest)) = store.history_segment_ends(session_id)? else {
         return Ok(None);
     };
-    for edge in [&oldest, &newest] {
-        if edge.start_message < 0 || edge.end_message < edge.start_message {
-            return Err(TransformError::CoverageGap(format!(
-                "history_segment coverage range {}..={} is invalid; ordinals must be non-negative and end must not precede start",
-                edge.start_message, edge.end_message
-            )));
-        }
-    }
     Ok(Some((
         oldest.start_message as u64,
         newest.end_message as u64,
@@ -7030,6 +7060,7 @@ fn pending_passthrough_result(args: PendingPassthroughArgs) -> TransformWithProj
         transition_consumed,
         mutation_exempt_mid,
         lineage_anchor_mid: None,
+        rebased_request: None,
         response,
     }
 }
@@ -7110,14 +7141,13 @@ fn reanchor_kept_synthetic_todo_if_folded_or_shrunk(
     Ok(())
 }
 
-/// The tag rows a pass consumes: rows of the request's messages (block ids `<mid>` and
-/// `<mid>#...`), legacy rows keyed by the projection's tool call ids, and the session's newest
-/// `protected_tags.max(1)` rows plus one per window row.
+/// Window rows are the request messages' rows and the projection's tool-call-id rows.
 ///
-/// The newest rows keep session-relative protection exact (WP-E09): a ranking excludes at
-/// most one row per window block, so the newest `protected_tags` rows outside the window and
-/// the session's maximum tag number are always among the rows read, and every newest-K
-/// decision matches a read of the whole session.
+/// The newest non-window rows keep session-relative protection exact.
+/// A ranking sets aside only window rows, and every window row is read.
+/// So the newest `protected_tags` rows a ranking keeps are always among the rows read.
+/// The read also includes the session's maximum tag number, so every newest-K decision
+/// matches a full read.
 fn load_window_tags(
     store: &MemoryStore,
     req: &TransformIngress<'_>,
@@ -20786,6 +20816,36 @@ pub(crate) mod tests {
         assert_eq!(s.load_history_segments("ses").unwrap().len(), 1);
     }
 
+    /// A fold fails with a coverage error when stored ranges are not strictly ordered, and
+    /// commits nothing.
+    #[test]
+    fn a_fold_over_stored_ranges_out_of_order_fails_closed() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = store(dir.path());
+        s.replace_history_segments("ses", &[comp(1, 1, 1, "a", "S1"), comp(2, 2, 2, "b", "S2")])
+            .unwrap();
+        s.with_fenced_conn_for_test(|conn| {
+            conn.execute(
+                "UPDATE history_segments SET end_message = 5
+                  WHERE session_id = 'ses' AND sequence = 1",
+                [],
+            )
+        })
+        .unwrap();
+        let live = vec![
+            item("a", 1, "first"),
+            item("b", 2, "second"),
+            item("t3", 3, "turn three"),
+        ];
+        let ctx = pctx("git:proj", "/nonexistent-docs", 0);
+        let fold = transform(&s, &req("ses", "cfg0", live), &ctx);
+        assert!(
+            matches!(&fold, Err(TransformError::CoverageGap(detail)) if detail.contains("strictly increasing")),
+            "{fold:?}"
+        );
+        assert_eq!(s.load("ses").unwrap().row_version, None);
+    }
+
     #[test]
     fn first_fold_error_leaves_state_unchanged_and_the_hard_retries_visibly() {
         // If the first-fold HARD fires and the fold errors, transform returns Err without committing, leaving the boundary empty and the history_segment present.
@@ -21546,6 +21606,45 @@ pub(crate) mod tests {
         assert!(
             err.to_string().contains("m4"),
             "the uncovered live message should be named in the loud failure: {err:?}"
+        );
+    }
+
+    /// Stored ranges `1..=3`, `4..=100`, and `6..=7` overlap: coverage from the end rows
+    /// stops at 7, and the raw tail would replay the summarized 8..=100.
+    #[test]
+    fn overlapping_stored_ranges_fail_loud() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = store(dir.path());
+        s.replace_history_segments("ses", &[comp(1, 1, 3, "m3#0", "S1")])
+            .unwrap();
+        s.with_fenced_conn_for_test(|tx| {
+            for (sequence, start, end) in [(2i64, 4i64, 100i64), (3, 6, 7)] {
+                tx.execute(
+                    "INSERT INTO history_segments
+                         (session_id, sequence, start_message, end_message, end_message_id,
+                          title, content)
+                     VALUES ('ses', ?1, ?2, ?3, ?4, 'S', 'S')",
+                    rusqlite::params![sequence, start, end, format!("m{end}#0")],
+                )?;
+            }
+            Ok(())
+        })
+        .unwrap();
+        let items = vec![
+            item("m1", 1, "covered one"),
+            item("m3", 3, "covered three"),
+            item("m7", 7, "covered seven"),
+            item("m50", 50, "summarized fifty"),
+            item("t101", 101, "tail"),
+        ];
+        let result = transform(
+            &s,
+            &req("ses", "cfg0", items),
+            &pctx("git:proj", "/nonexistent-docs", 0),
+        );
+        assert!(
+            matches!(&result, Err(TransformError::CoverageGap(detail)) if detail.contains("overlap")),
+            "an overlapping stored set must fail loud: {result:?}"
         );
     }
 

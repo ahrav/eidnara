@@ -87,7 +87,18 @@ Source: `crates/daemon/tests/prepared_output.rs`.
 
 ## Wire projection, synthetic exclusion, and mutation
 
-Source: `crates/daemon/src/wire.rs`.
+Source: `crates/daemon/src/wire.rs`. Lines are at the header HEAD `2e4433e6`.
+#828 deletes the rows marked below and shrinks the file to 1,145 lines, so
+every surviving row has moved; after #828 the surviving tests sit at
+`repeated_call_id_within_owner_message_shares_one_arc_identity` 696,
+`reasoning_joins_the_arc_its_adjacent_call_was_assigned` 730,
+`user_carried_tool_result_pairs_with_prior_assistant_call` 811,
+`user_carried_tool_result_without_prior_call_still_rejects` 876,
+`opaque_and_media_inside_tool_result_content_are_accepted_and_projected` 901,
+`empty_and_reserved_message_ids_are_rejected` 975,
+`duplicate_message_ids_are_rejected` 992,
+`reduced_tool_result_keeps_failure_variant_and_output_extras` 1005, and
+`shared_ingress_is_send_and_preserves_decode_refusals` 1125.
 
 | Line | Test | Check semantics or message | Status |
 | --- | --- | --- | --- |
@@ -99,11 +110,11 @@ Source: `crates/daemon/src/wire.rs`.
 | 1447 | `opaque_and_media_inside_tool_result_content_are_accepted_and_projected` | Checks nested result payload projection. | unaudited |
 | 1521 | `incremental_projection_reuses_prefix_storage_and_preserves_tool_arc_state` | Compares incremental state and prefix sharing. | deleted by #828 with the mechanism it checked |
 | 1578 | `empty_and_reserved_message_ids_are_rejected` | Rejects empty or hash-containing mids. | unaudited |
-| 1595 | `duplicate_message_ids_are_rejected_across_the_incremental_prefix` | Checks duplicate identity rejection across prefix boundary. | unaudited; #828 deletes the incremental arm and renames the test `duplicate_message_ids_are_rejected` |
+| 1595 | `duplicate_message_ids_are_rejected_across_the_incremental_prefix` | Checks duplicate identity rejection across prefix boundary. | unaudited; #828 deletes the incremental arm and renames the test `duplicate_message_ids_are_rejected`, now at `wire.rs:992` |
 | 1624 | `reduced_tool_result_keeps_failure_variant_and_output_extras` | Preserves tool error class and output extras on reduction. | unaudited |
-| 1708 | `reattach_keeps_block_level_original_but_rebuilds_the_message_shell` | Pins old block-original versus message-shell behavior. | unaudited |
+| 1708 | `reattach_keeps_block_level_original_but_rebuilds_the_message_shell` | Pins old block-original versus message-shell behavior. | deleted by #828 with the mechanism it checked; renamed `reattach_shares_the_decoded_shell_and_unknown_envelope_fields_are_discarded` before #828 |
 | 1749 | `repeated_prefix_reattachment_shares_canonical_shells` | Checks repeated sharing without mutation of raw ingress. | deleted by #828 with the mechanism it checked |
-| 1796 | `shared_ingress_is_send_and_preserves_decode_refusals` | Compile-time Send/static and malformed-input assertions. | unaudited |
+| 1796 | `shared_ingress_is_send_and_preserves_decode_refusals` | Compile-time Send/static and malformed-input assertions. | unaudited; at `wire.rs:1125` after #828 |
 | 1818 | `incremental_projection_checks_effective_synthetic_status` | Effective synthetic status invalidates unsafe prefix reuse. | deleted by #828 with the mechanism it checked |
 
 Source: `crates/memory-store/src/lib.rs`.
@@ -264,7 +275,7 @@ Source: `crates/daemon/src/lib.rs`, with HEAD line numbers.
 | 24059 | `differential_assert_rejects_frontier_inside_mutated_native_region` | Negative control for native frontier differential. | unaudited |
 | 24108 | `differential_assert_catches_corrupt_sidecar_key_derivation` | Negative control for sidecar key derivation. | unaudited |
 | 25162 | `unflagged_synthetic_delta_prepares_history_summarizer_and_native_output` | Exercises synthetic normalization at history_summarizer/native seams. | unaudited |
-| 25557 | `native_attachment_reuses_transform_tag_baseline_and_preserves_bytes` | Deleted with the tag baseline cache. | invalidated |
+| 29092 | `native_attachment_reuses_transform_tag_rows_and_preserves_bytes` | Checks native attachment bytes against the window tag rows (renamed from `..._tag_baseline_...` with the tag baseline cache). | unaudited |
 | 28294 | `ctx_expand_and_eidnara_note_facades_are_session_scoped` | Contains persisted history/facade session-scoping checks. | unaudited |
 | 29493 | `ctx_expand_verbose_range_separates_messages_and_previews_raw_parts` | Checks expanded message formatting and raw part visibility. | unaudited |
 
