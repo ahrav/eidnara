@@ -1616,6 +1616,9 @@ export function createRustModeTransform(
                 if (!response) throw new Error("rust module returned no transform response");
                 // The daemon's session lane already holds an active and a waiting pass for this session.
                 if (response.status === "session_busy") {
+                    // The daemon committed nothing, so the flag this dispatch set is undone.
+                    assertCurrentPass();
+                    state.forceFullWire = forceFullWireOnBusy;
                     throw new PassDeclined(sessionId, "daemon_session_busy");
                 }
                 return { response };
@@ -1648,6 +1651,7 @@ export function createRustModeTransform(
                 return result.response;
             };
             // The daemon commits its native-output snapshot on response, so a pass that exits after dispatch without committing its cache must resend the full history.
+            let forceFullWireOnBusy = state.forceFullWire;
             state.forceFullWire = true;
             let response = await sendTransformSeriesWithSingleRestart(body, "");
             captureResponseTelemetry(response);
@@ -1655,6 +1659,7 @@ export function createRustModeTransform(
                 // A cleared or superseded session must not receive the flag.
                 assertCurrentPass();
                 state.forceFullWire = true;
+                forceFullWireOnBusy = true;
                 // The retry names a fresh input snapshot; the recipe it receives binds to that one.
                 baseRevision = nextBaseRevision();
                 if (wireDelta) {

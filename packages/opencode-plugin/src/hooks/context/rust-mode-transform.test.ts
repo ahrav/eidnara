@@ -435,6 +435,34 @@ describe("Rust mode transform request", () => {
             expect(output.messages).toEqual(messages);
             expect(transform.getState(sessionId).initialized).toBe(false);
             expect(transform.getState(sessionId).consecutiveFailures).toBe(0);
+            expect(transform.getState(sessionId).forceFullWire).toBe(false);
+            expect(sessionLogs(debugSpy, sessionId)).toContain(
+                `rust session ${sessionId} pass declined: daemon_session_busy`,
+            );
+        } finally {
+            debugSpy.mockRestore();
+        }
+    });
+
+    it("declines a session_busy full-sync retry and keeps the full-sync flag", async () => {
+        const sessionId = `rust-session-busy-retry-${Date.now()}`;
+        installAvailabilityDb(sessionId, {});
+        installRawRows(sessionId, rawRows(1));
+        const { client, bodies } = recordingClient((_request, index) =>
+            index === 0
+                ? { status: "need_full_sync" }
+                : { status: "session_busy", action: "SESSION_BUSY" },
+        );
+        const transform = createRustModeTransform(makeDeps(), { moduleClient: client });
+        const messages = makeMessages(sessionId);
+        const output = { messages: [...messages] as unknown[] };
+        const debugSpy = spyOn(logger.sessionLog, "debug");
+        try {
+            await transform.run(sessionId, output);
+            expect(bodies).toHaveLength(2);
+            expect(output.messages).toEqual(messages);
+            expect(transform.getState(sessionId).consecutiveFailures).toBe(0);
+            expect(transform.getState(sessionId).forceFullWire).toBe(true);
             expect(sessionLogs(debugSpy, sessionId)).toContain(
                 `rust session ${sessionId} pass declined: daemon_session_busy`,
             );

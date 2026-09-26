@@ -8988,9 +8988,7 @@ impl HandlerCore {
         let Some(lane) = self.transform_session_lanes.join(&parsed.session_id) else {
             return respond_transform(&parsed, transform::TransformResponse::session_busy(), None);
         };
-        let Ok(lane) = lane.activate().await else {
-            return unit_failed_error(BlockingWorkFailed::RuntimeStopped);
-        };
+        let lane = lane.activate().await;
         apply_claude_code_config_controls(&mut parsed, &binding.config, serializer_profile);
         parsed
             .prompt_surface_tool_descriptions

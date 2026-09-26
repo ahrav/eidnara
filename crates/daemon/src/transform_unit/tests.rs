@@ -804,7 +804,7 @@ async fn emergency_cancellation_between_units_preserves_commit_and_releases_scra
     let pool = TestPool::with_capacity(4 * 1024 * 1024);
     let mut emergency = Box::pin(metered_transform(
         &handler,
-        request_with_usage(messages, 48_000, 50_000),
+        request_with_usage(messages.clone(), 48_000, 50_000),
         &runner,
         &pool,
     ));
@@ -836,19 +836,33 @@ async fn emergency_cancellation_between_units_preserves_commit_and_releases_scra
             .unwrap()
             .contains_key("ses")
     );
+    // A same-session pass parks in the lane while the emergency pass is between units.
+    let waiter_runner = JoinedUnitRunner::default();
+    let mut waiter = Box::pin(handler.handle_transform_with_runner(
+        test_route(7),
+        request(messages.clone()),
+        &waiter_runner,
+    ));
+    park(&mut waiter).await;
 
     runner.worker.cancel.cancel();
     producer.block_output.store(false, Ordering::SeqCst);
     producer.notify.notify_waiters();
+    park(&mut waiter).await;
+    assert_eq!(waiter_runner.submitted.load(Ordering::SeqCst), 0);
     let outcome = watchdog(emergency).await;
     runner.join_all().await;
+    assert_eq!(waiter_runner.submitted.load(Ordering::SeqCst), 0);
+    assert_eq!(producer.starts.load(Ordering::SeqCst), 1);
+    let waited = tool_body(watchdog(waiter).await);
+    waiter_runner.join_all().await;
+    assert_eq!(waited["committed"], true);
     handler.tasks.close();
     watchdog(handler.tasks.wait()).await;
     assert_eq!(error_code(outcome), "cancelled");
     let persisted = store.load("ses").unwrap();
     assert!(persisted.row_version >= committed.row_version);
     assert!(persisted.meta.initialized);
-    assert_eq!(producer.starts.load(Ordering::SeqCst), 1);
     assert_eq!(runner.submitted.load(Ordering::SeqCst), 2);
     assert_eq!(runner.completed.load(Ordering::SeqCst), 2);
     assert_eq!(handler.transform_units.available_permits(), 4);
@@ -1105,4 +1119,61 @@ async fn cancelled_pass_keeps_its_lane_place_until_its_blocked_unit_finishes() {
     assert_eq!(runner.submitted.load(Ordering::SeqCst), 1);
     assert_eq!(handler.transform_units.available_permits(), 4);
     assert!(handler.transform_session_lanes.0.lock().unwrap().is_empty());
+}
+
+/// WP-P04 on the multi-thread runtime: passes activate in the order they joined, and a waiter
+/// that gives up at any point, even as the lane is handed to it, never wedges the lane.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn session_lane_activates_in_join_order_under_contention() {
+    let lanes = Arc::new(SessionLanes::default());
+    let joins = Arc::new(Mutex::new(Vec::new()));
+    let activations = Arc::new(Mutex::new(Vec::new()));
+    let tasks: Vec<_> = (0..400usize)
+        .map(|task| {
+            let (lanes, joins, activations) = (
+                Arc::clone(&lanes),
+                Arc::clone(&joins),
+                Arc::clone(&activations),
+            );
+            tokio::spawn(async move {
+                let pass = loop {
+                    let mut joins = joins.lock().unwrap();
+                    if let Some(pass) = lanes.join("ses") {
+                        joins.push(task);
+                        break pass;
+                    }
+                    drop(joins);
+                    tokio::task::yield_now().await;
+                };
+                if task % 7 == 0 {
+                    // Gives up after at most a few polls, racing the hand-off.
+                    let _ = tokio::time::timeout(
+                        Duration::from_micros(task as u64 % 50),
+                        pass.activate(),
+                    )
+                    .await;
+                    return None;
+                }
+                let pass = pass.activate().await;
+                activations.lock().unwrap().push(task);
+                tokio::task::yield_now().await;
+                drop(pass);
+                Some(task)
+            })
+        })
+        .collect();
+    let mut completed = std::collections::HashSet::new();
+    for task in tasks {
+        completed.extend(watchdog(task).await.unwrap());
+    }
+    let expected: Vec<usize> = joins
+        .lock()
+        .unwrap()
+        .iter()
+        .copied()
+        .filter(|task| completed.contains(task))
+        .collect();
+    assert_eq!(expected.len(), completed.len());
+    assert_eq!(*activations.lock().unwrap(), expected);
+    assert!(lanes.0.lock().unwrap().is_empty());
 }
