@@ -1720,7 +1720,7 @@ pub(crate) fn parse_failure(harness: Harness, detail: &str) -> BackendTerminal {
 pub(crate) fn classify_failure_text(text: &str) -> ErrorClass {
     let lower = text.to_ascii_lowercase();
     // Bedrock reports unrecognized and expired credentials as HTTP 403 exceptions.
-    // `AccessDeniedException` is absent: it denies one model or inference profile, and an auth class would block every model of the provider.
+    // `AccessDeniedException` is also a 403 but denies one model or inference profile; an auth class would block every model of the provider, so it is checked before the 403 rule.
     const AUTH: [&str; 7] = [
         "api key",
         "unauthorized",
@@ -1782,6 +1782,9 @@ pub(crate) fn classify_failure_text(text: &str) -> ErrorClass {
     {
         return ErrorClass::Transient;
     }
+    if lower.contains("accessdeniedexception") {
+        return ErrorClass::Permanent;
+    }
     if AUTH.iter().any(|needle| lower.contains(needle))
         || AUTH_CODES
             .iter()
@@ -1812,7 +1815,8 @@ fn contains_status_code(haystack: &str, code: &str) -> bool {
 }
 
 /// Stack traces, size limits, and log timestamps print `500`, `502`, and `504` as plain numbers, so a bounded match alone would retry deterministic failures.
-/// A server-error code counts only in parentheses or directly after the word `status`, `statuscode`, `http`, `code`, or `error`; spaces, `:`, `=`, and quotes may separate the word from the code.
+/// A server-error code counts only in parentheses or directly after the word `status`, `statuscode`, `http`, or `code`; spaces, `:`, `=`, quotes, and an HTTP version such as `/1.1` may separate the word from the code.
+/// `error` is not a status word: `validation error: 500 characters maximum` is a size limit.
 fn contains_server_error_code(haystack: &str, code: &str) -> bool {
     status_code_matches(haystack, code).any(|index| {
         let before = &haystack[..index];
@@ -1821,10 +1825,12 @@ fn contains_server_error_code(haystack: &str, code: &str) -> bool {
         }
         let word = before
             .trim_end_matches([' ', ':', '=', '"', '\''])
+            .trim_end_matches(|c: char| c.is_ascii_digit() || c == '.')
+            .trim_end_matches('/')
             .rsplit(|c: char| !c.is_ascii_alphanumeric())
             .next()
             .unwrap_or_default();
-        matches!(word, "status" | "statuscode" | "http" | "code" | "error")
+        matches!(word, "status" | "statuscode" | "http" | "code")
     })
 }
 
@@ -2738,8 +2744,15 @@ mod tests {
                 r#"{"statusCode":500,"message":"upstream failed"}"#,
                 Transient,
             ),
+            // HTTP/2 status lines carry no reason phrase, so the version and code are the only evidence.
+            ("HTTP/1.1 500", Transient),
+            ("HTTP/2 502", Transient),
             // A 5xx number outside a status context is a count, a line number, or a timestamp field.
             ("description must be at most 500 characters", Permanent),
+            (
+                "ValidationException: validation error: 500 characters maximum",
+                Permanent,
+            ),
             (
                 "TypeError: model.stream is not a function\n    at run (/app/dist/cli.js:502:17)",
                 Permanent,
@@ -2755,6 +2768,11 @@ mod tests {
             ),
             (
                 "AccessDeniedException: User: arn:aws:iam::123456789012:user/ci is not authorized to perform: bedrock:InvokeModel on resource: arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-v2",
+                Permanent,
+            ),
+            // Pi prints `<exception>: <status>: <body>` when the SDK message omits the body, so the 403 rides along with the exception name.
+            (
+                r#"AccessDeniedException: 403: {"message":"You don't have access to the model with the specified model ID."}"#,
                 Permanent,
             ),
             (
