@@ -174,10 +174,9 @@ type OwnedRetainedOutput = { applied?: AppliedOutput; charge: number };
 
 /**
  * Holds one retained output per session under a session-count and a byte limit, evicting the
- * least recently retained record first. A record over the budget is retained without its applied
- * output when its basis fits, and refused otherwise; refusal costs the next pass its verified
- * prefix and `previous` source. Eviction drops the record alone; capture leases belong to the
- * admission owner and are never released here.
+ * least recently used record first; a record is used when it is retained or read with `get`.
+ * Failed passes serving the last applied output refresh its session. Eviction never releases a
+ * capture lease.
  */
 class RetainedOutputs {
     private readonly records = new Map<string, RetainedOutput>();
@@ -188,6 +187,16 @@ class RetainedOutputs {
         private readonly maxBytes: number,
     ) {}
 
+    /** Returns the record and moves it to the back of the eviction order. */
+    get(sessionId: string): RetainedOutput | undefined {
+        const record = this.records.get(sessionId);
+        if (record === undefined) return undefined;
+        this.records.delete(sessionId);
+        this.records.set(sessionId, record);
+        return record;
+    }
+
+    /** Returns the record without changing the eviction order. */
     peek(sessionId: string): RetainedOutput | undefined {
         return this.records.get(sessionId);
     }
@@ -1050,7 +1059,7 @@ export function createRustModeTransform(
         try {
             // Source domain is validated synchronously before any message read.
             const prefixGuardStartedAt = performance.now();
-            const previous = retainedOutputs.peek(sessionId);
+            const previous = retainedOutputs.get(sessionId);
             // A full fallback inspection walks a superset of the partial one, so it pays only the difference.
             let inspectedBytes = 0;
             const inspect = (skip: number): number[] => {
