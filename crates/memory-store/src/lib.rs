@@ -6144,12 +6144,63 @@ impl<'a> FacadeMutationTxn<'a> {
     }
 }
 
+const ORDERED_HISTORY_SEGMENT_SESSIONS_MAX: usize = 4096;
+const ORDERED_HISTORY_SEGMENT_SESSION_ID_BYTES_MAX: usize = 256 * 1024;
+/// A hash table of `ORDERED_HISTORY_SEGMENT_SESSIONS_MAX` entries holds at most twice that
+/// many buckets.
+pub const ORDERED_HISTORY_SEGMENTS_MEMO_RETAINED_BYTES_BOUND: usize =
+    ORDERED_HISTORY_SEGMENT_SESSION_ID_BYTES_MAX
+        + 2 * ORDERED_HISTORY_SEGMENT_SESSIONS_MAX * (std::mem::size_of::<String>() + 1)
+        + 64;
+
+/// Session ids whose history_segment ranges passed the order check. Forgetting a session only
+/// costs one rescan, so the memo starts over at either cap instead of tracking recency.
+#[derive(Debug, Default)]
+struct OrderedHistorySegmentSessions {
+    sessions: HashSet<String>,
+    id_bytes: usize,
+}
+
+impl OrderedHistorySegmentSessions {
+    fn contains(&self, session_id: &str) -> bool {
+        self.sessions.contains(session_id)
+    }
+
+    fn insert(&mut self, session_id: String) {
+        let bytes = session_id.capacity();
+        if bytes > ORDERED_HISTORY_SEGMENT_SESSION_ID_BYTES_MAX
+            || self.sessions.contains(&session_id)
+        {
+            return;
+        }
+        if self.sessions.len() == ORDERED_HISTORY_SEGMENT_SESSIONS_MAX
+            || self.id_bytes + bytes > ORDERED_HISTORY_SEGMENT_SESSION_ID_BYTES_MAX
+        {
+            self.sessions.clear();
+            self.id_bytes = 0;
+        }
+        self.id_bytes += bytes;
+        self.sessions.insert(session_id);
+    }
+
+    #[cfg(test)]
+    fn retained_bytes(&self) -> usize {
+        let buckets = (self.sessions.capacity() * 8)
+            .div_ceil(7)
+            .next_power_of_two();
+        self.id_bytes + buckets * (std::mem::size_of::<String>() + 1) + 16
+    }
+}
+
 pub struct MemoryStore {
     inner: SqliteStore,
     connection_profile: ConnectionProfile,
     // Distinguishes independent stores in the process-local tail hygiene memo. Production
     // opens one store for the module lifetime; tests and embedded callers may open several.
     tag_cache_namespace: u64,
+    /// Sessions with strictly ordered stored `history_segment` ranges; see
+    /// [`MemoryStore::history_segment_order_violation`].
+    ordered_history_segment_sessions: Mutex<OrderedHistorySegmentSessions>,
     /// The caller identity used by note ownership triggers. It is installed only while a
     /// fenced note mutation is executing and is tagged with the installing thread, so an
     /// unwrapped SQL writer or a concurrent thread reads an empty project.
@@ -6621,6 +6672,7 @@ impl MemoryStore {
             inner,
             connection_profile,
             tag_cache_namespace: NEXT_TAG_CACHE_NAMESPACE.fetch_add(1, Ordering::Relaxed),
+            ordered_history_segment_sessions: Mutex::default(),
             note_caller_project,
             facade_authority_scope,
             facade_mutation_lock: Mutex::new(()),
@@ -8622,14 +8674,9 @@ impl MemoryStore {
         })?)
     }
 
-    /// Loads, deduplicated in tag-number order, three row sets: every row whose block id is
-    /// one of `message_ids` or starts with `<message id>#`, as ranges on the
-    /// `(session_id, block_id)` unique index; every row whose block id is one of
-    /// `tool_call_ids`; and the session's newest `newest.max(1) + <rows of the first set>`
-    /// rows on the primary key. Rows read are bounded by the inputs and `newest`, not by the
-    /// session's tag count. The `+ <rows of the first set>` term is required: the caller ranks
-    /// the newest `newest` rows outside the window exactly, so a plain `newest` limit is short
-    /// by every window row it returns.
+    /// Returns window rows and the session's newest `newest.max(1)` non-window rows by tag.
+    /// A window row's block ID is `<mid>` or starts with `<mid>#` for a `message_ids` entry.
+    /// A block ID equal to a `tool_call_ids` entry also marks a window row.
     pub fn load_tags_for_window(
         &self,
         session_id: &str,
@@ -8641,35 +8688,34 @@ impl MemoryStore {
         let tool_call_ids = serde_json::to_string(tool_call_ids).expect("string ids serialize");
         Ok(self.inner.with_conn(|conn| {
             let mut rows = BTreeMap::new();
-            let window = conn
-                .prepare_cached(WINDOW_TAGS_SQL)?
-                .query_map(params![session_id, message_ids], tag_row_from_sql)?
-                .collect::<Result<Vec<_>, _>>()?;
-            let window_rows = window.len();
-            let legacy = conn
-                .prepare_cached(
-                    "SELECT tag_number, block_id, kind, token_count, created_at_ms, source_bytes
-                       FROM tags
-                      WHERE session_id = ?1 AND block_id IN (SELECT value FROM json_each(?2))",
-                )?
-                .query_map(params![session_id, tool_call_ids], tag_row_from_sql)?
-                .collect::<Result<Vec<_>, _>>()?;
-            let newest = conn
-                .prepare_cached(
-                    "SELECT tag_number, block_id, kind, token_count, created_at_ms, source_bytes
-                       FROM tags
-                      WHERE session_id = ?1
-                      ORDER BY tag_number DESC LIMIT ?2",
-                )?
-                .query_map(
-                    params![
-                        session_id,
-                        sql_limit(newest.max(1).saturating_add(window_rows))
-                    ],
-                    tag_row_from_sql,
-                )?
-                .collect::<Result<Vec<_>, _>>()?;
-            for row in window.into_iter().chain(legacy).chain(newest) {
+            let mut window = conn.prepare_cached(WINDOW_TAGS_SQL)?;
+            for row in window.query_map(params![session_id, message_ids], tag_row_from_sql)? {
+                let row = row?;
+                rows.insert(row.tag_number, row);
+            }
+            let mut legacy = conn.prepare_cached(
+                "SELECT tag_number, block_id, kind, token_count, created_at_ms, source_bytes
+                   FROM tags
+                  WHERE session_id = ?1 AND block_id IN (SELECT value FROM json_each(?2))",
+            )?;
+            for row in legacy.query_map(params![session_id, tool_call_ids], tag_row_from_sql)? {
+                let row = row?;
+                rows.insert(row.tag_number, row);
+            }
+            let read = serde_json::to_string(&rows.keys().collect::<Vec<_>>())
+                .expect("an integer array serializes");
+            let mut newest_rows = conn.prepare_cached(
+                "SELECT tag_number, block_id, kind, token_count, created_at_ms, source_bytes
+                   FROM tags
+                  WHERE session_id = ?1
+                    AND tag_number NOT IN (SELECT value FROM json_each(?2))
+                  ORDER BY tag_number DESC LIMIT ?3",
+            )?;
+            for row in newest_rows.query_map(
+                params![session_id, read, sql_limit(newest.max(1))],
+                tag_row_from_sql,
+            )? {
+                let row = row?;
                 rows.insert(row.tag_number, row);
             }
             Ok(rows.into_values().collect())
@@ -10543,10 +10589,57 @@ impl MemoryStore {
             .with_conn(|conn| history_segment_edge_tx(conn, session_id, EdgeAt::Newest))?)
     }
 
-    /// The oldest and the newest history_segment by sequence, two primary-key seeks on one
-    /// connection hold. The store owns the write-side guarantee that stored ranges are
-    /// strictly increasing (append and replace reject overlapping and non-increasing ranges),
-    /// so these two rows bound the covered ordinals of the whole set.
+    /// Returns a stored `history_segment` range that violates strict order, or `None`.
+    /// Rows must have non-negative, strictly increasing, non-overlapping ranges by sequence.
+    /// Store writers preserve that order, so a passing session is remembered for this store's
+    /// lifetime; a violating set is rescanned on every call.
+    pub fn history_segment_order_violation(
+        &self,
+        session_id: &str,
+    ) -> Result<Option<String>, MemoryStoreError> {
+        let ordered = || {
+            self.ordered_history_segment_sessions
+                .lock()
+                .expect("ordered history_segment memo mutex")
+        };
+        if ordered().contains(session_id) {
+            return Ok(None);
+        }
+        let violation = self.inner.with_conn(|conn| {
+            let mut stmt = conn.prepare_cached(
+                "SELECT sequence, start_message, end_message FROM history_segments
+                  WHERE session_id = ?1 ORDER BY sequence ASC",
+            )?;
+            let mut rows = stmt.query(params![session_id])?;
+            let mut previous: Option<(i64, i64)> = None;
+            while let Some(row) = rows.next()? {
+                let (sequence, start, end): (i64, i64, i64) =
+                    (row.get(0)?, row.get(1)?, row.get(2)?);
+                if start < 0 || end < start {
+                    return Ok(Some(format!(
+                        "history_segment {sequence} range {start}..={end} is invalid; ordinals must be non-negative and end must not precede start"
+                    )));
+                }
+                if let Some((previous_sequence, previous_end)) = previous
+                    && start <= previous_end
+                {
+                    return Ok(Some(format!(
+                        "history_segment coverage overlap: history_segment {previous_sequence} ends at ordinal {previous_end} but history_segment {sequence} starts at {start}; ranges must be strictly increasing"
+                    )));
+                }
+                previous = Some((sequence, end));
+            }
+            Ok(None)
+        })?;
+        if violation.is_none() {
+            ordered().insert(session_id.to_string());
+        }
+        Ok(violation)
+    }
+
+    /// Reads the oldest and newest `history_segment` rows by sequence with two primary-key
+    /// seeks in one snapshot. They bound the whole set's coverage only for a set in strict
+    /// order.
     pub fn history_segment_ends(
         &self,
         session_id: &str,
@@ -22094,6 +22187,34 @@ mod tests {
     }
 
     #[test]
+    fn window_tag_read_returns_each_row_from_one_statement() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
+        let ids = ["old-1#0", "old-2#0", "w1#0", "w1#1", "call-a", "w2#0"];
+        let inputs = ids
+            .map(|block_id| TagMintInput {
+                block_id: block_id.to_string(),
+                kind: "message".to_string(),
+                token_count: 1,
+                source_bytes: block_id.as_bytes().to_vec(),
+            })
+            .to_vec();
+        store.seed_tags_for_test("ses", &inputs, 1).unwrap();
+        store.start_statement_work_ledger();
+        let read = store
+            .load_tags_for_window("ses", &["w1", "w2"], &["call-a"], 1)
+            .unwrap();
+        let tag_rows = store
+            .take_statement_work()
+            .into_iter()
+            .filter(|statement| statement.sql.split_whitespace().any(|word| word == "tags"))
+            .map(|statement| statement.rows)
+            .sum::<u64>();
+        assert_eq!(tag_rows, read.len() as u64, "{read:?}");
+        assert!(read.iter().any(|row| row.block_id == "w2#0"));
+    }
+
+    #[test]
     fn window_tag_read_takes_exact_block_ids_and_their_hash_prefix_on_the_index() {
         let dir = tempfile::tempdir().unwrap();
         let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
@@ -22115,12 +22236,8 @@ mod tests {
             .into_iter()
             .map(|row| row.block_id)
             .collect::<Vec<_>>();
-        // The newest read of 1 + 3 window rows adds "m10#0", "m1$", and "other#0";
-        // "m1!x" and "m1 " sort inside the old `<mid>`..`<mid>$` range and stay unread.
-        assert_eq!(
-            read,
-            ["m1", "m1#0", "m1#a#b", "m10#0", "m1$", "call-a", "other#0"]
-        );
+        // "m1!x" and "m1 " sort below "m1$" but lack the "m1#" prefix, so they stay unread.
+        assert_eq!(read, ["m1", "m1#0", "m1#a#b", "call-a", "other#0"]);
         let plan = store
             .inner
             .with_conn(|conn| {
@@ -22178,6 +22295,119 @@ mod tests {
             plan.iter()
                 .any(|detail| detail.contains("idx_history_segments_session_end_message")),
             "the uncovered-ordinal probe must seek the end-message index: {plan:?}"
+        );
+    }
+
+    #[test]
+    fn history_segment_order_check_scans_a_valid_session_once_and_rechecks_a_violation() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
+        let segment = |sequence: i64, start: i64, end: i64| StoredHistorySegment {
+            sequence,
+            start_message: start,
+            end_message: end,
+            end_message_id: format!("m{end}#0"),
+            title: "s".to_string(),
+            content: "s".to_string(),
+            ..Default::default()
+        };
+        assert_eq!(
+            store.history_segment_order_violation("empty").unwrap(),
+            None
+        );
+        store
+            .replace_history_segments("ok", &[segment(1, 1, 3), segment(2, 5, 9)])
+            .unwrap();
+        store
+            .replace_history_segments("overlap", &[segment(1, 1, 3)])
+            .unwrap();
+        store
+            .replace_history_segments("reversed", &[segment(1, 1, 3)])
+            .unwrap();
+        store
+            .inner
+            .with_conn_fenced(|tx| {
+                for (session, sequence, start, end) in [
+                    ("overlap", 2i64, 4i64, 100i64),
+                    ("overlap", 3, 6, 7),
+                    ("reversed", 2, 9, 8),
+                ] {
+                    tx.execute(
+                        "INSERT INTO history_segments
+                             (session_id, sequence, start_message, end_message, title, content)
+                         VALUES (?1, ?2, ?3, ?4, 's', 's')",
+                        params![session, sequence, start, end],
+                    )?;
+                }
+                Ok(())
+            })
+            .unwrap();
+
+        assert_eq!(store.history_segment_order_violation("ok").unwrap(), None);
+        store.start_statement_work_ledger();
+        assert_eq!(store.history_segment_order_violation("ok").unwrap(), None);
+        assert!(
+            store.take_statement_work().is_empty(),
+            "a checked session is answered from memory"
+        );
+
+        for (session, needle) in [("overlap", "overlap"), ("reversed", "invalid")] {
+            for _ in 0..2 {
+                store.start_statement_work_ledger();
+                let violation = store.history_segment_order_violation(session).unwrap();
+                assert!(
+                    violation
+                        .as_deref()
+                        .is_some_and(|detail| detail.contains(needle)),
+                    "{session}: {violation:?}"
+                );
+                assert!(
+                    !store.take_statement_work().is_empty(),
+                    "{session}: a violation is not remembered, so a repaired set is rechecked"
+                );
+            }
+        }
+        store
+            .replace_history_segments("overlap", &[segment(1, 1, 3), segment(2, 4, 100)])
+            .unwrap();
+        assert_eq!(
+            store.history_segment_order_violation("overlap").unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn history_segment_order_memo_stays_within_its_retained_bound() {
+        let mut memo = OrderedHistorySegmentSessions::default();
+        let long = "s".repeat(1024);
+        for i in 0..4 * ORDERED_HISTORY_SEGMENT_SESSIONS_MAX {
+            memo.insert(format!("{long}{i}"));
+            assert!(memo.sessions.len() <= ORDERED_HISTORY_SEGMENT_SESSIONS_MAX);
+            assert!(memo.id_bytes <= ORDERED_HISTORY_SEGMENT_SESSION_ID_BYTES_MAX);
+            assert!(memo.retained_bytes() <= ORDERED_HISTORY_SEGMENTS_MEMO_RETAINED_BYTES_BOUND);
+        }
+        assert!(memo.contains(&format!(
+            "{long}{}",
+            4 * ORDERED_HISTORY_SEGMENT_SESSIONS_MAX - 1
+        )));
+        let mut memo = OrderedHistorySegmentSessions::default();
+        for i in 0..4 * ORDERED_HISTORY_SEGMENT_SESSIONS_MAX {
+            memo.insert(format!("s{i}"));
+            assert!(memo.retained_bytes() <= ORDERED_HISTORY_SEGMENTS_MEMO_RETAINED_BYTES_BOUND);
+        }
+        assert!(memo.contains(&format!(
+            "s{}",
+            4 * ORDERED_HISTORY_SEGMENT_SESSIONS_MAX - 1
+        )));
+        assert!(
+            !memo.contains("s0"),
+            "the memo starts over at its entry cap"
+        );
+        let oversized = "x".repeat(ORDERED_HISTORY_SEGMENT_SESSION_ID_BYTES_MAX + 1);
+        memo.insert(oversized.clone());
+        assert!(
+            !memo.contains(&oversized),
+            "an id over the whole budget is not kept"
         );
     }
 

@@ -6353,22 +6353,18 @@ fn detect_boundary_divergence_candidate(
 }
 
 /// The first covered ordinal and the coverage end, from the set's oldest and newest rows.
-/// Ranges are validated strictly increasing at append, so the two ends bound the set.
+/// The two ends bound the set only when its ranges are in strict order, so a set out of
+/// order fails as a coverage gap instead of trimming the tail at the wrong ordinal.
 pub(crate) fn stored_coverage_bounds(
     store: &MemoryStore,
     session_id: &str,
 ) -> Result<Option<(u64, u64)>, TransformError> {
+    if let Some(violation) = store.history_segment_order_violation(session_id)? {
+        return Err(TransformError::CoverageGap(violation));
+    }
     let Some((oldest, newest)) = store.history_segment_ends(session_id)? else {
         return Ok(None);
     };
-    for edge in [&oldest, &newest] {
-        if edge.start_message < 0 || edge.end_message < edge.start_message {
-            return Err(TransformError::CoverageGap(format!(
-                "history_segment coverage range {}..={} is invalid; ordinals must be non-negative and end must not precede start",
-                edge.start_message, edge.end_message
-            )));
-        }
-    }
     Ok(Some((
         oldest.start_message as u64,
         newest.end_message as u64,
@@ -7223,14 +7219,13 @@ fn reanchor_kept_synthetic_todo_if_folded_or_shrunk(
     Ok(())
 }
 
-/// The tag rows a pass consumes: rows of the request's messages (block ids `<mid>` and
-/// `<mid>#...`), legacy rows keyed by the projection's tool call ids, and the session's newest
-/// `protected_tags.max(1)` rows plus one per window row.
+/// Window rows are the request messages' rows and the projection's tool-call-id rows.
 ///
-/// The newest rows keep session-relative protection exact (WP-E09): a ranking excludes at
-/// most one row per window block, so the newest `protected_tags` rows outside the window and
-/// the session's maximum tag number are always among the rows read, and every newest-K
-/// decision matches a read of the whole session.
+/// The newest non-window rows keep session-relative protection exact.
+/// A ranking sets aside only window rows, and every window row is read.
+/// So the newest `protected_tags` rows a ranking keeps are always among the rows read.
+/// The read also includes the session's maximum tag number, so every newest-K decision
+/// matches a full read.
 fn load_window_tags(
     store: &MemoryStore,
     req: &TransformIngress<'_>,
@@ -21729,6 +21724,45 @@ pub(crate) mod tests {
         assert!(
             err.to_string().contains("m4"),
             "the uncovered live message should be named in the loud failure: {err:?}"
+        );
+    }
+
+    /// Stored ranges `1..=3`, `4..=100`, and `6..=7` overlap: coverage from the end rows
+    /// stops at 7, and the raw tail would replay the summarized 8..=100.
+    #[test]
+    fn overlapping_stored_ranges_fail_loud() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = store(dir.path());
+        s.replace_history_segments("ses", &[comp(1, 1, 3, "m3#0", "S1")])
+            .unwrap();
+        s.with_fenced_conn_for_test(|tx| {
+            for (sequence, start, end) in [(2i64, 4i64, 100i64), (3, 6, 7)] {
+                tx.execute(
+                    "INSERT INTO history_segments
+                         (session_id, sequence, start_message, end_message, end_message_id,
+                          title, content)
+                     VALUES ('ses', ?1, ?2, ?3, ?4, 'S', 'S')",
+                    rusqlite::params![sequence, start, end, format!("m{end}#0")],
+                )?;
+            }
+            Ok(())
+        })
+        .unwrap();
+        let items = vec![
+            item("m1", 1, "covered one"),
+            item("m3", 3, "covered three"),
+            item("m7", 7, "covered seven"),
+            item("m50", 50, "summarized fifty"),
+            item("t101", 101, "tail"),
+        ];
+        let result = transform(
+            &s,
+            &req("ses", "cfg0", items),
+            &pctx("git:proj", "/nonexistent-docs", 0),
+        );
+        assert!(
+            matches!(&result, Err(TransformError::CoverageGap(detail)) if detail.contains("overlap")),
+            "an overlapping stored set must fail loud: {result:?}"
         );
     }
 
