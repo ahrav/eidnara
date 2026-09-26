@@ -13,6 +13,7 @@ import {
     fnv1a32,
     messageIdFilter,
     scanMessageIds,
+    TransformCaptureAdmission,
 } from "./transform-capture";
 
 function makeDeps(): RustModeTransformDeps {
@@ -464,18 +465,162 @@ describe("boundary discovery", () => {
         expect(cursors).toHaveLength(1);
         const host = hostArray(sessionId, 6);
         const output = { messages: [...host] as unknown[] };
-        await transform.run(sessionId, output);
+        const debug = spyOn(logger.sessionLog, "debug");
+        try {
+            await transform.run(sessionId, output);
+            // One pass: one pass line, with the rediscovery visible in it.
+            const passes = logsOf(debug, sessionId).filter((line) => line.startsWith("rust pass:"));
+            expect(passes).toHaveLength(1);
+            expect(passes[0]).toContain("decision=declined:boundary_unknown");
+            expect(passes[0]).toContain("rediscovered=true");
+        } finally {
+            debug.mockRestore();
+        }
         // One rediscovery, then the second boundary_unknown declines the pass.
         expect(cursors).toHaveLength(2);
         expect(bodies).toHaveLength(3);
         expect(output.messages).toEqual(host);
-        expect(transform.getState(sessionId).boundary).toEqual({ mid: "m-2", sequence: 7 });
+        expect(transform.getState(sessionId).passCount).toBe(2);
+        // The next pass starts with discovery.
+        expect(transform.getState(sessionId).boundary).toBeUndefined();
 
         // A pass that already discovered declines its first boundary_unknown.
         const cold = createRustModeTransform(makeDeps(), { moduleClient: client });
         await cold.run(`${sessionId}-cold`, { messages: hostArray(`${sessionId}-cold`, 5) });
         expect(bodies).toHaveLength(4);
         expect(cursors).toHaveLength(3);
+    });
+
+    it("declines boundary_unknown after discovering a stored anchor the host lost", async () => {
+        const sessionId = `discovery-lost-${Date.now()}`;
+        const { client, bodies, cursors } = fakeDaemon({
+            pages: (before) =>
+                before === undefined ? { anchors: [{ mid: "m-2", sequence: 7 }] } : { anchors: [] },
+            transform: (body, index) =>
+                index === 0
+                    ? keepAll(body, { mid: "m-3", sequence: 8 })
+                    : { status: "boundary_unknown" },
+        });
+        const transform = createRustModeTransform(makeDeps(), { moduleClient: client });
+        await transform.run(sessionId, { messages: hostArray(sessionId, 5) });
+        expect(transform.getState(sessionId).boundary).toEqual({ mid: "m-3", sequence: 8 });
+        // Enabling state: the stored anchor m-3 is gone from the host, so the scan misses it.
+        const host = hostArray(sessionId, 6).filter((entry) => entry.info.id !== "m-3");
+        const output = { messages: [...host] as unknown[] };
+        await transform.run(sessionId, output);
+        // Exactly one discovery walk (one cursor sequence) and one send, then a decline.
+        expect(cursors).toEqual([undefined, undefined]);
+        expect(bodies).toHaveLength(2);
+        expect(bodies[1]?.boundary).toEqual({ mid: "m-2", sequence: 7 });
+        expect(output.messages).toEqual(host);
+        expect(transform.getState(sessionId).boundary).toBeUndefined();
+    });
+
+    it("refunds the first attempt so a rediscovered window near the byte limit still publishes", async () => {
+        const run = async (maxBytes: number, unknownAt: number | undefined) => {
+            const sessionId = "discovery-refund";
+            let sends = 0;
+            const { client, bodies, cursors } = fakeDaemon({
+                pages: () => ({ anchors: [{ mid: "m-2", sequence: 7 }] }),
+                transform: (body) => {
+                    sends += 1;
+                    return sends === unknownAt
+                        ? { status: "boundary_unknown" }
+                        : keepAll(body, { mid: "m-2", sequence: 7 });
+                },
+            });
+            const admission = new TransformCaptureAdmission({ maxPasses: 4, maxBytes });
+            const transform = createRustModeTransform(makeDeps(), {
+                moduleClient: client,
+                captureAdmission: admission,
+            });
+            await transform.run(sessionId, { messages: hostArray(sessionId, 5) });
+            const host = hostArray(sessionId, 6);
+            const output = { messages: [...host] as unknown[] };
+            const debug = spyOn(logger.sessionLog, "debug");
+            try {
+                await transform.run(sessionId, output);
+                const line = logsOf(debug, sessionId).find((text) => text.startsWith("rust pass:"));
+                return { line: line ?? "", output, bodies, cursors };
+            } finally {
+                debug.mockRestore();
+            }
+        };
+        // A known-anchor pass's charge, measured with room to spare.
+        const probe = await run(Number.MAX_SAFE_INTEGER, undefined);
+        const charged = Number(/charged:(\d+)/.exec(probe.line)?.[1]);
+        expect(charged).toBeGreaterThan(0);
+        // The rerun adds a 4-byte filter slot per host message; a doubled charge does not fit.
+        const limited = await run(charged + 6 * 4 + 64, 2);
+        expect(limited.cursors).toHaveLength(2);
+        expect(limited.bodies).toHaveLength(3);
+        expect(limited.line).toContain("applied=true");
+        expect(limited.line).toContain("rediscovered=true");
+        expect(limited.output.messages).toEqual(hostArray("discovery-refund", 6).slice(2));
+    });
+
+    it("declines when the host moves the discovered anchor before the window is copied", async () => {
+        const sessionId = `discovery-moved-${Date.now()}`;
+        const page = Promise.withResolvers<unknown>();
+        const reached = Promise.withResolvers<void>();
+        const bodies: Body[] = [];
+        const client: RustModeModuleClient = {
+            // Not async: discovery awaits this promise directly, so tick order is fixed.
+            call: ({ method, body }) => {
+                if (method === "transform.boundary") {
+                    reached.resolve();
+                    return page.promise;
+                }
+                bodies.push(body as Body);
+                return Promise.resolve(keepAll(body as Body, { mid: "m-2", sequence: 7 }));
+            },
+        };
+        const transform = createRustModeTransform(makeDeps(), { moduleClient: client });
+        const output = { messages: hostArray(sessionId, 6) as unknown[] };
+        const debug = spyOn(logger.sessionLog, "debug");
+        try {
+            const pass = transform.run(sessionId, output);
+            await reached.promise;
+            page.resolve({ anchors: [{ mid: "m-2", sequence: 7 }] });
+            // Runs after discovery's scan fixes index 2 and before the capture resumes.
+            queueMicrotask(() => output.messages.splice(0, 1));
+            await pass;
+            expect(logsOf(debug, sessionId)).toContain(
+                `rust session ${sessionId} pass declined: source_changed (boundary moved)`,
+            );
+        } finally {
+            debug.mockRestore();
+        }
+        expect(bodies).toHaveLength(0);
+        expect(transform.getState(sessionId).boundary).toBeUndefined();
+    });
+
+    it("names a callID-less tool call by its unfiltered window position after a compaction summary", async () => {
+        const sessionId = `ck-position-${Date.now()}`;
+        const host: MessageLike[] = [
+            message(sessionId, "m-0"),
+            {
+                info: {
+                    id: "m-1",
+                    role: "assistant",
+                    sessionID: sessionId,
+                    summary: true,
+                    finish: "stop",
+                },
+                parts: [{ type: "text", text: "summary" }],
+            },
+            {
+                info: { id: "m-2", role: "assistant", sessionID: sessionId },
+                parts: [{ type: "tool", tool: "read", state: { status: "pending", input: {} } }],
+            },
+        ];
+        const { client, bodies } = fakeDaemon({});
+        const transform = createRustModeTransform(makeDeps(), { moduleClient: client });
+        await transform.run(sessionId, { messages: [...host] });
+        const ck = bodies[0]?.messages as Array<{ mid: string; ck: { content: unknown[] } }>;
+        expect(ck.map((entry) => entry.mid)).toEqual(["m-0", "m-2"]);
+        // The native decoder numbers the tool part's message 3, counting the summary.
+        expect(JSON.stringify(ck[1]?.ck.content)).toContain('"id":"synth-tool-3-0-read-');
     });
 
     it("serves raw and logs an upgrade hint when the daemon refuses the revision", async () => {

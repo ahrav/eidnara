@@ -38,7 +38,7 @@
 > sends transform revision 3 windows. The plugin locates the window with one
 > backward id scan (`scanMessageIds`, `transform-capture.ts:97`), discovers an
 > unknown boundary through `transform.boundary` (`discover`,
-> `rust-mode-transform.ts:1016`), copies `host[boundaryIndex..length)` through
+> `rust-mode-transform.ts:1017`), copies `host[boundaryIndex..length)` through
 > own descriptors (`copyWindow`, `transform-capture.ts:148`) before the walk,
 > sends `v: 3` with `boundary` and no ordinal, and publishes shrink-first with
 > the window as the captured slots (`publishInPlace`, `:826`). The ordinal
@@ -47,7 +47,7 @@
 > TE17 is preserved and scoped to the window; TE18 is invalidated; TE19 is
 > extended by the id scan; TE21 and TE22 are preserved. WP-E11 in #824 records
 > this tree's failure behavior as the WP-P11 baseline: a real failure serves
-> the input unchanged (`markFailure`, `rust-mode-transform.ts:1588`), and no
+> the input unchanged (`markFailure`, `rust-mode-transform.ts:1604`), and no
 > failed candidate is published. Window-scoped fail-open (WP-P11) is the second
 > #832 change. Witnesses named in these notes are in
 > `rust-mode-window.test.ts` unless another file is named.
@@ -159,7 +159,7 @@ Open questions:
 
 - The directory and permission awaits (`rust-mode-transform.ts:1087`, `:1096`) are ownership fences only. Clear, invalidation, and supersession are exercised at the page fence (`:1299`) and the ordinal yield; no witness lands one of those faults during the directory or permission await specifically.
 - Preserved by #829. The `need_full_sync` retry and its `retry-wire-build` recheck are deleted with the delta channel, and with them the witness `:2594` "does not dispatch a need_full_sync retry after mutation|supersession|clear|invalidation of the valid first send". The wire-build, series-restart, and page rechecks and their witnesses remain; #832 deletes the ordinal recheck with the ordinal memo.
-- Preserved by #832 and scoped to the captured window. The capture is the private copy of `host[boundaryIndex..length)`, taken in the synchronous section that fixed `boundaryIndex` (`rust-mode-transform.ts:1112`); `recheckCapture` (`:1177`) verifies the same root, its own `then` and the built-in prototypes, the captured length, and every window slot reference and tape at wire build (`:1297`), series restart (`:1451`), and publication (`:1519`). The full-history retry and ordinal-prime clauses are invalidated. The directory await now precedes the capture because discovery routes through it, so a cold pass reads the directory before it can refuse a hostile window. A root property outside the window is not captured state. Witnesses: "declines prefix deletion|same-length reorder|root rebinding|interior window omission during the await with no candidate write and no promotion" (4 cases; marker: the pending body declared `m-6` with a four-message window before the mutation; `output.messages` equals the mutated array, holds no candidate, and `boundary` stays `m-6`); `rust-mode-transform.test.ts` "preserves a host member|append|rebind|metadata during transport with shared|distinct source" (metadata now publishes and keeps the property).
+- Preserved by #832 and scoped to the captured window. The capture is the private copy of `host[boundaryIndex..length)`, taken synchronously once `boundaryIndex` is fixed (`rust-mode-transform.ts:1114`), and declined as `source_changed` when its head is no longer the declared mid because discovery awaited after fixing it; `recheckCapture` (`:1183`) verifies the same root, its own `then` and the built-in prototypes, the captured length, and every window slot reference and tape at wire build (`:1303`), series restart (`:1458`), and publication (`:1535`). The full-history retry and ordinal-prime clauses are invalidated. The directory await now precedes the capture because discovery routes through it, so a cold pass reads the directory before it can refuse a hostile window. A root property outside the window is not captured state. Witnesses: "declines prefix deletion|same-length reorder|root rebinding|interior window omission during the await with no candidate write and no promotion" (4 cases; marker: the pending body declared `m-6` with a four-message window before the mutation; `output.messages` equals the mutated array, holds no candidate, and `boundary` stays `m-6`); "declines when the host moves the discovered anchor before the window is copied" (marker: the splice runs in a microtask after discovery's scan and before the capture resumes; no body is sent); `rust-mode-transform.test.ts` "preserves a host member|append|rebind|metadata during transport with shared|distinct source" (metadata now publishes and keeps the property).
 
 ### ordinal-memo-promotion-is-owned
 
@@ -176,7 +176,7 @@ Existing check: `rust-mode-transform.test.ts:2367` "rejects mutation|supersessio
 Impact: a rejected pass leaves ordinals in the shared memo that the next pass trusts, producing mismatched ordinals or a spurious `need_full_sync`.
 Open questions:
 
-- Invalidated by #832: the ordinal memo, `primeOrdinalMemo`, `annotateOrdinals`, the stored-message count, the continuation shift, and the `message.removed` invalidation are deleted, and no request carries an ordinal ("sends the declared window in both representations and publishes the recipe at boundaryIndex + i" asserts the body text holds no `ordinal`). The per-session state that promotes only on accepted publication is now the declared `boundary` (`rust-mode-transform.ts:1562`). Earlier, #829 deleted the `need_full_sync` retry with the delta channel, and with it the witness "does not dispatch a need_full_sync retry after mutation|supersession|clear|invalidation of the valid first send"; there is no `need_full_sync` to answer spuriously.
+- Invalidated by #832: the ordinal memo, `primeOrdinalMemo`, `annotateOrdinals`, the stored-message count, the continuation shift, and the `message.removed` invalidation are deleted, and no request carries an ordinal ("sends the declared window in both representations and publishes the recipe at boundaryIndex + i" asserts the body text holds no `ordinal`). The per-session state that promotes only on accepted publication is now the declared `boundary` (`rust-mode-transform.ts:1578`). Earlier, #829 deleted the `need_full_sync` retry with the delta channel, and with it the witness "does not dispatch a need_full_sync retry after mutation|supersession|clear|invalidation of the valid first send"; there is no `need_full_sync` to answer spuriously.
 
 ### referenceable-json-rejects-hooks-before-reading
 

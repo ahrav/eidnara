@@ -850,6 +850,31 @@ describe("buildPagedModuleTransformPayloads byte reuse", () => {
         expect(JSON.parse(units[0]?.chunk as string)).toEqual(carrier);
     });
 
+    for (const boundary of [{ mid: "m0", sequence: 4 }, null]) {
+        it(`carries v and boundary ${JSON.stringify(boundary)} on the final page only`, () => {
+            const body = {
+                method: "transform",
+                session_id: "ses-final-scalars",
+                v: 3,
+                boundary,
+                messages: Array.from({ length: 80 }, (_, index) => ({
+                    mid: `m${index}`,
+                    ck: { text: "x".repeat(8_000) },
+                })),
+            };
+            const pages = buildPagedModuleTransformPayloads(body).map(
+                ({ page }) => page as Record<string, unknown>,
+            );
+            expect(pages.length).toBeGreaterThan(1);
+            for (const page of pages.slice(0, -1)) {
+                expect(Object.hasOwn(page, "v")).toBe(false);
+                expect(Object.hasOwn(page, "boundary")).toBe(false);
+            }
+            expect(pages.at(-1)?.v).toBe(3);
+            expect(pages.at(-1)?.boundary).toEqual(boundary);
+        });
+    }
+
     it("returns paging sizes that match a later stringify of each page", () => {
         const body = {
             method: "transform",

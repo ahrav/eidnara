@@ -283,8 +283,7 @@ function parseAnchorPage(
     reply: unknown,
     before: number | undefined,
 ): TransformBoundary[] | undefined {
-    const value = isRecord(reply) && isRecord(reply.result) ? reply.result : reply;
-    const anchors = isRecord(value) ? value.anchors : undefined;
+    const anchors = isRecord(reply) ? reply.anchors : undefined;
     if (!Array.isArray(anchors)) return undefined;
     const page: TransformBoundary[] = [];
     let bound = before ?? Number.POSITIVE_INFINITY;
@@ -395,6 +394,7 @@ function formatRustPassLog(args: {
     moduleElapsedMs: number;
     rowVersion: number;
     emergencyWaitMs?: number;
+    rediscovered?: boolean;
     timings?: RustPassTimings;
 }): string {
     const timings = args.timings ?? emptyRustPassTimings();
@@ -402,7 +402,7 @@ function formatRustPassLog(args: {
         timings.prefixGuard + timings.clone + timings.wireBuild + timings.transport + timings.apply;
     const unattributed = Math.max(0, args.elapsedMs - measured);
     const rowVersion = Number.isSafeInteger(args.rowVersion) ? args.rowVersion : 0;
-    return `rust pass: decision=${args.decision} reason=${args.reason} served_from=${args.servedFrom} in=${args.inputCount} out=${args.outputCount} applied=${args.applied} row_version=${rowVersion} emergency_wait=${(args.emergencyWaitMs ?? 0).toFixed(1)} elapsed=${args.elapsedMs.toFixed(1)} ms module=${args.moduleElapsedMs.toFixed(1)} ms stages=prefix_guard:${timings.prefixGuard.toFixed(1)} clone:${timings.clone.toFixed(1)} wire_build:${timings.wireBuild.toFixed(1)} wire_messages:${timings.wireMessages} transport:${timings.transport.toFixed(1)} transport_pages:${timings.transportPages} transport_bytes:${timings.transportBytes} apply:${timings.apply.toFixed(1)} other:${unattributed.toFixed(1)} work=scanned:${timings.scannedItems} charged:${timings.chargedBytes} retained:${timings.retainedBytes}`;
+    return `rust pass: decision=${args.decision} reason=${args.reason} served_from=${args.servedFrom} in=${args.inputCount} out=${args.outputCount} applied=${args.applied} row_version=${rowVersion} emergency_wait=${(args.emergencyWaitMs ?? 0).toFixed(1)} rediscovered=${args.rediscovered === true} elapsed=${args.elapsedMs.toFixed(1)} ms module=${args.moduleElapsedMs.toFixed(1)} ms stages=prefix_guard:${timings.prefixGuard.toFixed(1)} clone:${timings.clone.toFixed(1)} wire_build:${timings.wireBuild.toFixed(1)} wire_messages:${timings.wireMessages} transport:${timings.transport.toFixed(1)} transport_pages:${timings.transportPages} transport_bytes:${timings.transportBytes} apply:${timings.apply.toFixed(1)} other:${unattributed.toFixed(1)} work=scanned:${timings.scannedItems} charged:${timings.chargedBytes} retained:${timings.retainedBytes}`;
 }
 
 function isSyntheticUserMessage(message: MessageLike | undefined): boolean {
@@ -749,8 +749,9 @@ function buildTransformBody(args: {
 }
 
 const CANDIDATE_SLOT_BYTES = 8;
-/** Discovery walks within the transform deadline less a reserve for the transform itself. */
+/** Discovery walks from the pass start within the transform deadline less a reserve for the transform itself. */
 const DISCOVERY_BUDGET_MS = TRANSFORM_SEND_TIMEOUT_MS - 4_000;
+if (DISCOVERY_BUDGET_MS <= 0) throw new Error("the transform deadline leaves no discovery budget");
 /** Charged on top of the heuristic estimate because the estimator undercounts relative to the provider's tokenizer. */
 const INVOCATION_HEADROOM_PERMILLE = 250;
 /** WIRE_PROJECTION_FACTOR accounts for the CK text, the native text, the paging parse copy, and the page texts. */
@@ -795,8 +796,6 @@ interface DeliveryPlan {
     projectRoot: string;
     attempted: Set<string>;
     applied: Set<string>;
-    /** The daemon answered `boundary_unknown` to an anchor this pass had not discovered. */
-    rediscover?: boolean;
 }
 
 async function deliverTransformNotes(
@@ -874,15 +873,15 @@ export function createRustModeTransform(
         sessionLog.warn(sessionId, "rust transform failed; serving the input unchanged:", error);
     };
 
-    /** `rediscover` reruns a pass whose declared anchor the daemon did not know, under the same lease. */
+    /** `rerun` continues a pass from discovery after its known anchor drew `boundary_unknown`. */
     const execute = async (
         sessionId: string,
         output: { messages: unknown[] },
         lease: CaptureLease,
-        rediscover: boolean,
+        rerun?: { deliveries: DeliveryPlan; timings: RustPassTimings; startedAt: number },
     ): Promise<DeliveryPlan> => {
-        const passStartedAt = performance.now();
-        const deliveries: DeliveryPlan = {
+        const passStartedAt = rerun?.startedAt ?? performance.now();
+        const deliveries: DeliveryPlan = rerun?.deliveries ?? {
             sessionId,
             projectRoot: "",
             attempted: new Set(),
@@ -898,7 +897,7 @@ export function createRustModeTransform(
             return deliveries;
         }
         const state = ensureState(states, sessionId);
-        const timings = emptyRustPassTimings();
+        const timings = rerun?.timings ?? emptyRustPassTimings();
         let inputCount = 0;
         let decision = "error";
         let materializeReason = "none";
@@ -924,6 +923,7 @@ export function createRustModeTransform(
                     moduleElapsedMs,
                     rowVersion,
                     emergencyWaitMs,
+                    rediscovered: rerun !== undefined,
                     timings,
                 }),
             );
@@ -1004,7 +1004,7 @@ export function createRustModeTransform(
                     sessionLog.debug(sessionId, `rust module stages (slow pass): ${detail}`);
             }
         };
-        state.passCount += 1;
+        if (!rerun) state.passCount += 1;
         // Clearing a session replaces its state object; supersession, clearing, and ordinal invalidation abort the capture lease.
         const assertCurrentPass = (): void => {
             if (states.get(sessionId) !== state) throw new PassDeclined(sessionId, "cleared");
@@ -1026,7 +1026,7 @@ export function createRustModeTransform(
         const discover = async (
             projectRoot: string,
         ): Promise<{ boundary: TransformBoundary | null; index: number }> => {
-            const deadline = performance.now() + DISCOVERY_BUDGET_MS;
+            const deadline = passStartedAt + DISCOVERY_BUDGET_MS;
             let filter: Uint32Array | undefined;
             let before: number | undefined;
             for (;;) {
@@ -1065,13 +1065,14 @@ export function createRustModeTransform(
                     throw new PassDeclined(sessionId, "discovery_declined", "malformed page");
                 const last = page.at(-1);
                 if (!last) return { boundary: null, index: 0 };
-                if (!filter) timings.scannedItems += target.length;
-                filter ??= messageIdFilter(target, (bytes) => lease.reserve(bytes));
-                const hashes = filter;
-                if (!hashes) throw new CaptureBudgetExceeded("membership filter");
+                if (!filter) {
+                    timings.scannedItems += target.length;
+                    filter = messageIdFilter(target, (bytes) => lease.reserve(bytes));
+                    if (!filter) throw new CaptureBudgetExceeded("membership filter");
+                }
                 const wanted = new Set<string>();
                 for (const anchor of page)
-                    if (filterMayHold(hashes, anchor.mid)) wanted.add(anchor.mid);
+                    if (filterMayHold(filter, anchor.mid)) wanted.add(anchor.mid);
                 const found = new Map<string, number>();
                 if (wanted.size > 0)
                     scan((id, index) => {
@@ -1107,21 +1108,25 @@ export function createRustModeTransform(
             }
             assertCurrentPass();
             // One discovery per pass: an unknown boundary, or one the scan cannot find, needs it.
-            const known = rediscover ? undefined : state.boundary;
-            let located: { boundary: TransformBoundary | null; index: number } = {
-                boundary: known ?? null,
-                index: known ? scan((id) => id === known.mid) : known === null ? 0 : -1,
-            };
-            if (located.index < 0) located = await discover(options.projectRoot ?? directory);
-            const boundary = located.boundary;
-            const boundaryIndex = located.index;
-            // The window is copied, inspected, and taped in the synchronous section that fixed `boundaryIndex`.
+            const known = state.boundary;
+            let boundary = known ?? null;
+            let boundaryIndex = known ? scan((id) => id === known.mid) : 0;
+            const discovered = known === undefined || boundaryIndex < 0;
+            if (discovered)
+                ({ boundary, index: boundaryIndex } = await discover(
+                    options.projectRoot ?? directory,
+                ));
+            // The window is copied, inspected, and taped in one synchronous section.
             const prefixGuardStartedAt = performance.now();
             const previous = retainedOutputs.get(sessionId);
             const capturedLength = target.length;
             const window = copyWindow(target, boundaryIndex, capturedLength);
             if (!window)
                 throw new PassDeclined(sessionId, "unsupported_source", "window slot accessor");
+            // Discovery fixed `boundaryIndex` before an await, so the host may have moved the anchor.
+            const head = readOwnDataProperty(readOwnDataProperty(window[0], "info"), "id");
+            if (boundary && head !== boundary.mid)
+                throw new PassDeclined(sessionId, "source_changed", "boundary moved");
             // A full fallback inspection walks a superset of the partial one, so it pays only the difference.
             let inspectedBytes = 0;
             const inspect = (skip: number): number[] => {
@@ -1310,8 +1315,9 @@ export function createRustModeTransform(
             deliveries.projectRoot = projectRoot;
             const wireBuildStartedAt = performance.now();
             // Compaction summaries stay out of the CK window, as the daemon's CK decoder expects.
-            const encodedInput = encodeOpenCodeMessagesToCk(
-                messages.filter((message) => !isRawCompactionSummaryInfo(message.info)),
+            // Encoding before filtering names synthetic tool calls by unfiltered window position.
+            const encodedInput = encodeOpenCodeMessagesToCk(messages).filter(
+                (_, index) => !isRawCompactionSummaryInfo(messages[index]?.info),
             );
             timings.wireMessages = messages.length;
             charge(messages.length * LENGTH_SLOT_BYTES, "input lengths");
@@ -1469,12 +1475,21 @@ export function createRustModeTransform(
             };
             const response = await sendTransformSeriesWithSingleRestart(body, "");
             if (response.status === "boundary_unknown") {
-                if (known === undefined)
+                state.boundary = undefined;
+                if (discovered || rerun)
                     throw new PassDeclined(sessionId, "boundary_unknown", "after discovery");
-                return { ...deliveries, rediscover: true };
+                // Nothing of this attempt is kept, so the rerun pays only for its own capture.
+                lease.refund();
+                return execute(sessionId, output, lease, {
+                    deliveries,
+                    timings,
+                    startedAt: passStartedAt,
+                });
             }
             // A missing or malformed boundary leaves the next pass to rediscover it.
             const nextBoundary = parseBoundary(response.boundary);
+            if (nextBoundary === undefined && response.boundary !== undefined)
+                sessionLog.warn(sessionId, "rust transform response boundary is malformed");
             captureResponseTelemetry(response);
             const appliedDeliveryPassIds = new Set(noteDeliveryPassIds(response));
             const applyStartedAt = performance.now();
@@ -1614,8 +1629,7 @@ export function createRustModeTransform(
         }
         const lease = admission.lease;
         // execute settles before admission is released; only route metadata reaches delivery.
-        return execute(sessionId, output, lease, false)
-            .then((plan) => (plan.rediscover ? execute(sessionId, output, lease, true) : plan))
+        return execute(sessionId, output, lease)
             .finally(lease.release.bind(lease))
             .then(deliverTransformNotes.bind(undefined, options.moduleClient));
     };

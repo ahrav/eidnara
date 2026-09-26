@@ -210,8 +210,7 @@ pub fn resolve(
 /// Ordinals for a processed window (D11). A non-synthetic message counts one up from the
 /// head: the anchored head receives `anchor_ordinal`, and with no anchor the first
 /// non-synthetic message is `continuation_base + 1` (or 1). Synthetic messages follow the
-/// rule `annotateOrdinals` in `packages/opencode-plugin/src/hooks/context/module-wire.ts`
-/// applies to its unresolved synthetic messages, case for case: one with a non-synthetic
+/// rule revision 2 plugins applied to unresolved synthetic messages, case for case: one with a non-synthetic
 /// message after it borrows the ordinal of the message before it, or, with none before it,
 /// 0 (the anchor's ordinal in an anchored window); the trailing run after the last
 /// non-synthetic message continues dense numbering from the message before it.

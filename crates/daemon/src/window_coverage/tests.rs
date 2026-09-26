@@ -363,7 +363,7 @@ fn the_null_anchor_intersection_matches_mids_at_their_positional_ordinals() {
     );
 }
 
-/// The plugin's `annotateOrdinals` loops, transcribed: non-synthetic messages are its memoized
+/// The revision 2 plugin's ordinal loops, transcribed: non-synthetic messages are its memoized
 /// (resolved) messages, numbered from the head; synthetic messages are unresolved. With no
 /// resolved message at all, the plugin's provisional base is the ordinal before the head.
 fn plugin_ordinal_model(synthetic: &[bool], anchor: Option<u64>, base: Option<u64>) -> Vec<u64> {
@@ -405,7 +405,7 @@ fn plugin_ordinal_model(synthetic: &[bool], anchor: Option<u64>, base: Option<u6
 /// WP-P03: the synthetic rule matches the plugin's for every synthetic pattern up to eight
 /// messages, anchored, unanchored, and under a lineage continuation base. The domain is D11's:
 /// every non-synthetic message is persisted (resolved in the plugin's memo) and every synthetic
-/// one is unpersisted. `annotateOrdinals` also numbers an unpersisted suffix densely, synthetic
+/// one is unpersisted. That plugin also numbered an unpersisted suffix densely, synthetic
 /// messages included, which D11 does not adopt: after a resolved `a` at 1, the unpersisted
 /// suffix `[s, b]` is `[2, 3]` in the plugin and `[1, 2]` here.
 #[test]

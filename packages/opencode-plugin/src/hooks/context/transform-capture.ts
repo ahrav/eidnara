@@ -834,6 +834,7 @@ export function publishInPlace(
             Object.defineProperty(target, "length", { value: next.length });
     } catch (error) {
         const shrunkLength = target.length;
+        // E.g. boundaryIndex 3 and k 4 leave length 5, so first = 2 and window[2..] lands at 5.
         const first = Math.max(0, shrunkLength - boundaryIndex);
         let restoreError: unknown;
         try {
@@ -862,6 +863,8 @@ export interface CaptureLease {
     /** Owner-wide headroom shared by every lease, not this lease's own remainder; zero once released. */
     readonly remainingBytes: number;
     reserve(bytes: number): boolean;
+    /** Returns every byte this lease holds to the owner and keeps the lease live. */
+    refund(): void;
     requestCancel(reason: string): void;
     release(): void;
 }
@@ -921,6 +924,10 @@ export class TransformCaptureAdmission {
                 owner.chargedBytesTotal += additional;
                 bytes += additional;
                 return true;
+            },
+            refund() {
+                owner.chargedBytesTotal -= bytes;
+                bytes = 0;
             },
             requestCancel(reason) {
                 if (!controller.signal.aborted) controller.abort(new Error(reason));
