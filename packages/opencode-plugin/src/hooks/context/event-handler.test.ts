@@ -108,20 +108,20 @@ interface Harness {
     deps: EventHandlerDeps;
     calls: {
         cache: string[];
-        wire: string[];
+        ordinals: string[];
         deleted: Array<{ sessionId: string; directory?: string }>;
     };
     handle: (type: string, properties?: unknown) => Promise<void>;
 }
 
 function buildHarness(): Harness {
-    const calls: Harness["calls"] = { cache: [], wire: [], deleted: [] };
+    const calls: Harness["calls"] = { cache: [], ordinals: [], deleted: [] };
     const deps: EventHandlerDeps = {
         contextUsageMap: new BoundedSessionMap<ContextUsageEntry>(8),
         internalChildSessions: new Set<string>(),
         subagentSessions: new Set<string>(),
         onSessionCacheInvalidated: (id) => calls.cache.push(id),
-        onRustOrdinalsInvalidated: (id) => calls.wire.push(id),
+        onRustOrdinalsInvalidated: (id) => calls.ordinals.push(id),
         onSessionDeleted: (sessionId, directory) => calls.deleted.push({ sessionId, directory }),
     };
     const handler = createEventHandler(deps);
@@ -375,13 +375,13 @@ describe("createEventHandler — message.updated", () => {
 });
 
 describe("createEventHandler — message.removed", () => {
-    it("invalidates the wire and session caches and removes the plugin marker", async () => {
+    it("invalidates the ordinal memo and session caches and removes the plugin marker", async () => {
         injectPluginMarker();
         const { calls, handle } = buildHarness();
 
         await handle("message.removed", { sessionID: SESSION, messageID: RETAINED_ID });
 
-        expect(calls.wire).toEqual([SESSION]);
+        expect(calls.ordinals).toEqual([SESSION]);
         expect(calls.cache).toEqual([SESSION]);
         expect(rowCounts()).toEqual({ messages: 2, parts: 0 });
     });

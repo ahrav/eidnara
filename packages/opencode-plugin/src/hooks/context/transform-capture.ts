@@ -726,6 +726,7 @@ export function publicationRejection(
 ): HostArrayRejectionReason | null {
     if (types.isProxy(target)) return "proxy";
     if (!Array.isArray(target)) return "not_array";
+    // D21 lists the sealed and frozen checks although non-extensibility already implies them.
     if (!Object.isExtensible(target) || Object.isSealed(target) || Object.isFrozen(target))
         return "not_extensible";
     if (!Object.getOwnPropertyDescriptor(target, "length")?.writable) return "length_not_writable";
@@ -768,10 +769,14 @@ export function publishInPlace(
         } catch (thrown) {
             restoreError = thrown;
         }
+        const restored =
+            restoreError === undefined
+                ? `restored ${members.length - shrunkLength} captured references`
+                : `restoring captured references failed (${String(restoreError)})`;
         return {
             error,
             shrunkLength,
-            detail: `shrink to ${next.length} stopped at length ${shrunkLength} (${String(error)}); ${restoreError === undefined ? `restored ${members.length - shrunkLength} captured references` : `restoring captured references failed (${String(restoreError)})`}`,
+            detail: `shrink to ${next.length} stopped at length ${shrunkLength} (${String(error)}); ${restored}`,
         };
     }
     for (let index = 0; index < next.length; index += 1) defineSlot(target, index, next[index]);

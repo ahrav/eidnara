@@ -115,7 +115,7 @@
             "contract_refs": [
                 "U5-PORT"
             ],
-            "quarantined": "the large-tail invariant reads false against the paged module wire; the paging bound and tail preservation need re-derivation"
+            "quarantined": "the 160k-token tail exceeds the memory store's 512 KiB MAX_DURABLE_TEXT_BYTES, so the daemon rejects the pass with InputLimit and serves raw"
         },
         {
             "path": "tests/rust-park-self-heal.test.ts",

@@ -415,6 +415,7 @@ describe("Rust mode transform request", () => {
             expect("tail_delta" in body).toBe(false);
             expect("full_array_fingerprint" in body).toBe(false);
             expect(body.messages).toHaveLength(1);
+            expect(body.native_messages).toHaveLength(secondInput.length);
         }
         const secondWire = JSON.parse(serializedJsonText(bodies[1]!)!) as Record<string, unknown>;
         expect(secondWire.native_messages).toEqual(makeMessages(sessionId));
@@ -1404,7 +1405,7 @@ describe("Rust mode transform transport", () => {
     it("evicts the least recently retained session's output and offers it no previous source", async () => {
         const capacity = __rustModeTransformTest.RETAINED_OUTPUT_SESSION_CAPACITY;
         const stamp = Date.now();
-        const sessionIdAt = (index: number): string => `rust-wire-cache-lru-${stamp}-${index}`;
+        const sessionIdAt = (index: number): string => `rust-retained-output-lru-${stamp}-${index}`;
         const bodiesBySession = new Map<string, Record<string, unknown>[]>();
         const client: RustModeModuleClient = {
             call: async ({ sessionId, body }) => {
@@ -1508,7 +1509,7 @@ describe("Rust mode transform transport", () => {
     }
 
     it("pages a multi-frame pass as a full send of the whole array", async () => {
-        const sessionId = `rust-wire-paged-delta-${Date.now()}`;
+        const sessionId = `rust-paged-full-send-${Date.now()}`;
         const rows = rawRows(3);
         installRawRows(sessionId, rows);
         const { client, bodies } = recordingClient((request) =>
@@ -2016,7 +2017,7 @@ describe("recipe application", () => {
         // Re-retaining a session replaces its record and charge instead of adding a second one.
         const a = record(50, 30);
         expect(outputs.retain("a", a)).toBe(true);
-        expect(outputs.size).toBe(2);
+        expect(outputs.peek("a")).toBe(a);
         expect(outputs.usedBytes).toBe(80);
         // Dropping the applied output keeps the basis and gives back only the applied share.
         outputs.dropApplied("a", a);
@@ -2030,11 +2031,19 @@ describe("recipe application", () => {
         // The session limit evicts the oldest record even when bytes fit.
         expect(outputs.retain("d", record(1))).toBe(true);
         expect(outputs.retain("e", record(1))).toBe(true);
-        expect(outputs.size).toBe(3);
         expect(outputs.peek("a")).toBeUndefined();
+        expect(outputs.usedBytes).toBe(62);
         expect(outputs.retain("f", record(101))).toBe(false);
         expect(outputs.peek("f")).toBeUndefined();
-        outputs.release("c");
+        // A record over the whole budget is retained without its applied output when its basis fits.
+        const g = record(120, 90);
+        expect(outputs.retain("g", g)).toBe(true);
+        expect(outputs.peek("g")).toBe(g);
+        expect(g.applied).toBeUndefined();
+        expect(g.charge).toBe(30);
+        expect(outputs.usedBytes).toBe(32);
+        expect(outputs.retain("h", record(150, 40))).toBe(false);
+        outputs.release("g");
         expect(outputs.usedBytes).toBe(2);
     });
 });

@@ -154,19 +154,23 @@ interface AppliedOutput {
  * decide whether the applied output is still served, and the output that pass applied.
  */
 interface RetainedOutput {
-    rawCount: number;
+    readonly rawCount: number;
     /** Digest of every submitted message but the last. */
-    rawHistory: HistoryDigest;
+    readonly rawHistory: HistoryDigest;
     /** The former terminal alone; the host may edit it in place, so it is compared separately. */
-    rawTerminal?: HistoryDigest;
+    readonly rawTerminal?: HistoryDigest;
     /** Inspection wire bounds of the submitted messages, reused for the verified prefix. */
-    wireBytes: readonly number[];
+    readonly wireBytes: readonly number[];
     /** Canonical JSON length of each submitted native message, reused for the verified prefix. */
-    inputLengths: readonly number[];
-    applied?: AppliedOutput;
+    readonly inputLengths: readonly number[];
+    /** Cleared only by `RetainedOutputs`, which owns the charge. */
+    readonly applied?: AppliedOutput;
     /** One charge for the whole record, the applied output's included. */
-    charge: number;
+    readonly charge: number;
 }
+
+/** The fields `RetainedOutputs` alone may change, keeping `used` equal to the summed charges. */
+type OwnedRetainedOutput = { applied?: AppliedOutput; charge: number };
 
 /**
  * Holds one retained output per session under a session-count and a byte limit, evicting the
@@ -187,9 +191,14 @@ class RetainedOutputs {
         return this.records.get(sessionId);
     }
 
+    /** Retains `record`; one over the whole budget is retained without its applied output, else refused. */
     retain(sessionId: string, record: RetainedOutput): boolean {
         this.release(sessionId);
-        if (record.charge > this.maxBytes) return false;
+        if (record.charge > this.maxBytes) {
+            if (!record.applied || record.charge - record.applied.charge > this.maxBytes)
+                return false;
+            this.clearApplied(record);
+        }
         for (const [oldest] of this.records) {
             if (this.records.size < this.maxSessions && this.used + record.charge <= this.maxBytes)
                 break;
@@ -202,11 +211,9 @@ class RetainedOutputs {
 
     /** Keeps the record's basis and gives back the applied output's share of the charge. */
     dropApplied(sessionId: string, record: RetainedOutput): void {
-        const applied = record.applied;
-        if (!applied || this.records.get(sessionId) !== record) return;
-        record.applied = undefined;
-        this.used -= applied.charge;
-        record.charge -= applied.charge;
+        if (!record.applied || this.records.get(sessionId) !== record) return;
+        this.used -= record.applied.charge;
+        this.clearApplied(record);
     }
 
     release(sessionId: string): void {
@@ -216,8 +223,10 @@ class RetainedOutputs {
         this.used -= record.charge;
     }
 
-    get size(): number {
-        return this.records.size;
+    private clearApplied(record: RetainedOutput): void {
+        const owned = record as OwnedRetainedOutput;
+        owned.charge -= owned.applied?.charge ?? 0;
+        owned.applied = undefined;
     }
 
     get usedBytes(): number {
@@ -1230,10 +1239,8 @@ export function createRustModeTransform(
              * Prime the memo asynchronously, recheck the captured messages, then annotate them
              * synchronously so no message read follows an await without a fresh guard.
              */
-            const resolveOrdinals = async (
-                base: number | undefined,
-                detail: string,
-            ): Promise<OrdinalResolution> => {
+            const resolveOrdinals = async (detail: string): Promise<OrdinalResolution> => {
+                const base = stagedMemo.continuationBase;
                 // Annotated shells and their memo entries coexist with the staged copy.
                 charge(messages.length * ORDINAL_ENTRY_RETAINED_BYTES * 2, "ordinal annotation");
                 const startedAt = performance.now();
@@ -1265,14 +1272,11 @@ export function createRustModeTransform(
                 }
                 return resolved;
             };
-            let resolved = await resolveOrdinals(stagedMemo.continuationBase, "attempt=first");
+            let resolved = await resolveOrdinals("attempt=first");
             if (!resolved.ok) {
                 // A memo generation the scan cannot match forces a full re-prime without an anchor.
                 stagedMemo.memoGeneration = -1;
-                resolved = await resolveOrdinals(
-                    stagedMemo.continuationBase,
-                    "fallback=clean_full",
-                );
+                resolved = await resolveOrdinals("fallback=clean_full");
             }
             if (!resolved.ok) {
                 throw new Error(
@@ -1538,11 +1542,7 @@ export function createRustModeTransform(
                         (applied?.charge ?? 0),
                 };
                 // A refused retention keeps the pass; the next pass loses its verified prefix, or only its `previous` source.
-                if (!retainedOutputs.retain(sessionId, record) && applied) {
-                    record.charge -= applied.charge;
-                    record.applied = undefined;
-                    retainedOutputs.retain(sessionId, record);
-                }
+                retainedOutputs.retain(sessionId, record);
                 state.ordinals = stagedMemo;
                 state.initialized = true;
                 state.consecutiveFailures = 0;
