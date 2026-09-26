@@ -777,7 +777,9 @@ const TRANSFORM_PAGE_ARRAY_FIELDS: [&str; 6] = [
     "ts_messages",
     "normalizations",
 ];
-const TRANSFORM_SNAPSHOT_BUDGET_BYTES: usize = 64 * 1024 * 1024;
+/// One ready-snapshot budget serves every session's tail deltas, so it holds several large
+/// sessions at once. A snapshot charges both its CK and native payloads.
+const TRANSFORM_SNAPSHOT_BUDGET_BYTES: usize = 256 * 1024 * 1024;
 const BOUNDARY_TOKEN_CACHE_BUDGET_BYTES: usize = 16 * 1024 * 1024;
 const ACTIVE_SNAPSHOT_LEASE_BUDGET_BYTES: usize = TRANSFORM_SNAPSHOT_BUDGET_BYTES;
 const MAX_ACTIVE_SNAPSHOT_LEASES: usize = 8;
@@ -26174,8 +26176,7 @@ mod tests {
     fn giant_degraded_snapshot_refuses_tail_delta_without_a_full_request() {
         const GIANT_MESSAGE_COUNT: usize = 5_001;
         const GIANT_BLOCK_COUNT: usize = GIANT_MESSAGE_COUNT;
-        // The request holds each payload twice, as typed text and as a native `Value`, so
-        // the fixture needs more than half the 64 MiB snapshot budget in payload to exceed it.
+        // This payload makes the native snapshot exceed its entry budget, so the store degrades.
         const GIANT_NATIVE_WIRE_BYTES: usize = 40 * 1024 * 1024;
         const SESSION_ID: &str = "native-giant-degraded";
 
@@ -26222,12 +26223,10 @@ mod tests {
         }
 
         let request_charge = request.retained_bytes();
-        assert!(
-            request_charge > TRANSFORM_SNAPSHOT_BUDGET_BYTES,
-            "fixture must exceed the legacy full-request snapshot budget: charge={request_charge}"
-        );
         {
             let mut snapshots = handler.transform_snapshots.lock().unwrap();
+            // A ready budget below the charge stands in for a request too large to snapshot.
+            snapshots.max_ready_bytes = request_charge - 1;
             let generation = snapshots.begin(SESSION_ID);
             snapshots.finish_ready(
                 SESSION_ID,
@@ -26268,6 +26267,67 @@ mod tests {
                 .is_none(),
             "without a retained full request the tail delta takes the full-sync path"
         );
+    }
+
+    /// All sessions share the ready-snapshot budget. Two sessions that together exceed
+    /// 64 MiB must each keep the snapshot their next tail delta expands from.
+    #[test]
+    fn alternating_sessions_keep_their_delta_prefix_under_the_shared_snapshot_budget() {
+        const SESSION_NATIVE_WIRE_BYTES: usize = 20 * 1024 * 1024;
+        let (handler, store, _dir, project) =
+            handler_with_store(Arc::new(ProducerState::default()), default_test_config());
+        let requests = ["snapshot-shared-a", "snapshot-shared-b"].map(|session| {
+            handler.bind_route(test_route(7), binding(project.to_str().unwrap(), session));
+            native_cache_fixture(session, 512, 1_536, SESSION_NATIVE_WIRE_BYTES).0
+        });
+        let charges = requests.each_ref().map(TransformRequest::retained_bytes);
+        assert!(
+            charges[0].saturating_add(charges[1]) > 64 * 1024 * 1024,
+            "both sessions together must charge more than 64 MiB: {charges:?}"
+        );
+        for (request, charge) in requests.iter().zip(charges) {
+            let mut snapshots = handler.transform_snapshots.lock().unwrap();
+            let generation = snapshots.begin(&request.session_id);
+            snapshots.finish_ready(
+                &request.session_id,
+                generation,
+                Arc::new(request.clone()),
+                0,
+                charge,
+            );
+        }
+
+        for request in &requests {
+            let native_len = request.native_messages.as_ref().unwrap().len();
+            let tail_mid = format!("{}-tail", request.session_id);
+            let mut delta = native_cache_request(
+                &request.session_id,
+                vec![ck(
+                    &tail_mid,
+                    u64::try_from(request.messages.len() + 1).unwrap(),
+                    "tail",
+                )],
+                vec![native_text_message(&tail_mid, "user", "tail")],
+                &format!("{}-next", request.session_id),
+            );
+            delta.tail_delta = Some(json!({
+                "after": request.full_array_fingerprint.as_deref().unwrap(),
+                "replace_from": request.messages.len(),
+                "native_replace_from": native_len,
+            }));
+            let pass_load = store.load_meta(&delta.session_id);
+            let frontier = handler
+                .expand_transform_tail_delta(&mut delta, PassState::from(&pass_load))
+                .unwrap_or_else(|| {
+                    panic!(
+                        "{} lost its ready snapshot to the other session",
+                        request.session_id
+                    )
+                });
+            assert_eq!(delta.messages.len(), request.messages.len() + 1);
+            assert_eq!(frontier.native_prefix.len(), native_len);
+            assert!(Arc::ptr_eq(&delta.messages[0], &request.messages[0]));
+        }
     }
 
     #[test]
