@@ -2598,11 +2598,16 @@ impl NativeOutputStore {
         Some(entry)
     }
 
-    /// Retains `candidate` as its session's next previous source.
-    fn store(&mut self, candidate: NativeOutputCandidate) -> NativeStoreOutcome {
+    /// Retains `candidate` as its session's next previous source. The displaced and evicted
+    /// entries come back whole so the caller drops them after releasing the store lock.
+    fn store(
+        &mut self,
+        candidate: NativeOutputCandidate,
+    ) -> (NativeStoreOutcome, Vec<RetainedNativeOutput>) {
         let NativeOutputCandidate { session_id, entry } = candidate;
         let retained_bytes = entry.retained_bytes;
-        self.remove(&session_id);
+        let mut disposed: Vec<RetainedNativeOutput> =
+            self.remove(&session_id).into_iter().collect();
         if retained_bytes > self.max_entry_retained_bytes
             || retained_bytes > self.max_retained_bytes
         {
@@ -2610,10 +2615,13 @@ impl NativeOutputStore {
                 "native-output-store refused_store session={session_id} byte_charge={retained_bytes} entry_cap={} total_budget={}",
                 self.max_entry_retained_bytes, self.max_retained_bytes,
             );
-            return NativeStoreOutcome {
-                refused: 1,
-                evicted: 0,
-            };
+            return (
+                NativeStoreOutcome {
+                    refused: 1,
+                    evicted: 0,
+                },
+                disposed,
+            );
         }
         self.retained_bytes = self.retained_bytes.saturating_add(retained_bytes);
         self.lru.push_back(session_id.clone());
@@ -2629,13 +2637,17 @@ impl NativeOutputStore {
                     "native-output-store evicted session={oldest} byte_charge={} retained_bytes={} total_budget={}",
                     entry.retained_bytes, self.retained_bytes, self.max_retained_bytes,
                 );
+                disposed.push(entry);
             }
             evicted += 1;
         }
-        NativeStoreOutcome {
-            refused: 0,
-            evicted,
-        }
+        (
+            NativeStoreOutcome {
+                refused: 0,
+                evicted,
+            },
+            disposed,
+        )
     }
 }
 
@@ -4222,10 +4234,13 @@ impl HandlerCore {
                 .lock()
                 .expect("serialized output cache mutex")
                 .remove(&session_id);
-            self.native_outputs
+            // Bound to a local so the output drops after the store guard.
+            let retired_native = self
+                .native_outputs
                 .lock()
                 .expect("native output store mutex")
                 .remove(&session_id);
+            drop(retired_native);
             self.boundary_tokens
                 .lock()
                 .expect("boundary token cache mutex")
@@ -4507,10 +4522,12 @@ impl HandlerCore {
             .lock()
             .expect("serialized output cache mutex")
             .remove(session);
-        self.native_outputs
+        let retired_native = self
+            .native_outputs
             .lock()
             .expect("native output store mutex")
             .remove(session);
+        drop(retired_native);
         self.boundary_tokens
             .lock()
             .expect("boundary token cache mutex")
@@ -6476,10 +6493,12 @@ impl HandlerCore {
             .lock()
             .expect("serialized output cache mutex")
             .remove(&session_id);
-        self.native_outputs
+        let retired_native = self
+            .native_outputs
             .lock()
             .expect("native output store mutex")
             .remove(&session_id);
+        drop(retired_native);
         self.boundary_tokens
             .lock()
             .expect("boundary token cache mutex")
@@ -9201,11 +9220,12 @@ impl HandlerCore {
                     values: values.clone(),
                 },
             );
-            let stored = self
+            let (stored, evicted) = self
                 .native_outputs
                 .lock()
                 .expect("native output store mutex")
                 .store(candidate);
+            drop(evicted);
             #[cfg(any(test, feature = "test-support", feature = "direct-host-fixture"))]
             {
                 *self
@@ -26389,7 +26409,7 @@ mod tests {
         let probe = output("p", "r", 0, 1024);
         let entry = probe.entry.retained_bytes;
         let mut probe_store = NativeOutputStore::default();
-        assert_eq!(probe_store.store(probe), NativeStoreOutcome::default());
+        assert_eq!(probe_store.store(probe).0, NativeStoreOutcome::default());
         assert_eq!(probe_store.sessions["p"].retained_bytes, entry);
         assert_eq!(probe_store.retained_bytes, entry);
         let refused = NativeStoreOutcome {
@@ -26400,17 +26420,21 @@ mod tests {
         // Per entry: an output over the cap is refused and drops the session's earlier entry too.
         let mut store = NativeOutputStore::with_limits(entry * 3, entry);
         assert_eq!(
-            store.store(output("x", "r", 0, 1024)),
+            store.store(output("x", "r", 0, 1024)).0,
             NativeStoreOutcome::default()
         );
-        assert_eq!(store.store(output("x", "r", 0, 64 * 1024)), refused);
+        // The displaced earlier entry comes back to the caller instead of dropping in the store.
+        let (outcome, displaced) = store.store(output("x", "r", 0, 64 * 1024));
+        assert_eq!(outcome, refused);
+        assert_eq!(displaced.len(), 1);
+        assert_eq!(displaced[0].retained_bytes, entry);
         assert!(store.sessions.is_empty() && store.lru.is_empty());
         assert_eq!(store.retained_bytes, 0);
 
         // Global: the least recently stored session goes first.
         for session in ["a", "b", "c"] {
             assert_eq!(
-                store.store(output(session, session, 0, 1024)),
+                store.store(output(session, session, 0, 1024)).0,
                 NativeStoreOutcome::default()
             );
         }
@@ -26418,18 +26442,22 @@ mod tests {
         // Storing a session again without a take replaces its charge instead of adding to it,
         // and moves it to the most recently stored end.
         assert_eq!(
-            store.store(output("a", "a", 0, 1024)),
+            store.store(output("a", "a", 0, 1024)).0,
             NativeStoreOutcome::default()
         );
         assert_eq!(store.retained_bytes, entry * 3);
         assert_eq!(store.lru.len(), 3);
+        // The evicted session's entry is handed back whole for the caller to drop outside the lock.
+        let (outcome, evicted) = store.store(output("d", "d", 0, 1024));
         assert_eq!(
-            store.store(output("d", "d", 0, 1024)),
+            outcome,
             NativeStoreOutcome {
                 refused: 0,
                 evicted: 1
             }
         );
+        assert_eq!(evicted.len(), 1);
+        assert_eq!(evicted[0].output.revision, revision("b"));
         assert!(!store.sessions.contains_key("b"));
         assert!(store.sessions.contains_key("a"));
         assert_eq!(store.retained_bytes, entry * 3);
@@ -26457,7 +26485,7 @@ mod tests {
         // An entry under an entry cap raised above the total budget is still refused.
         store.max_retained_bytes = entry - 1;
         store.max_entry_retained_bytes = entry * 2;
-        assert_eq!(store.store(output("f", "f", 0, 1024)), refused);
+        assert_eq!(store.store(output("f", "f", 0, 1024)).0, refused);
         assert!(store.sessions.is_empty());
         assert_eq!(store.retained_bytes, 0);
     }
@@ -26477,11 +26505,15 @@ mod tests {
         };
         let mut store = NativeOutputStore::with_limits(TOTAL_BUDGET_BYTES, TOTAL_BUDGET_BYTES / 4);
         assert_eq!(
-            store.store(NativeOutputCandidate::new("a", 0, output("a"))),
+            store
+                .store(NativeOutputCandidate::new("a", 0, output("a")))
+                .0,
             NativeStoreOutcome::default()
         );
         assert_eq!(
-            store.store(NativeOutputCandidate::new("b", 0, output("b"))),
+            store
+                .store(NativeOutputCandidate::new("b", 0, output("b")))
+                .0,
             NativeStoreOutcome::default()
         );
         let charges = store.sessions["a"].retained_bytes + store.sessions["b"].retained_bytes;
@@ -26496,7 +26528,9 @@ mod tests {
                     .and_then(|entry| entry.into_previous(0, Some(&revision(session))))
                     .unwrap_or_else(|| panic!("session {session} was evicted by the other"));
                 assert_eq!(
-                    store.store(NativeOutputCandidate::new(session, 0, previous)),
+                    store
+                        .store(NativeOutputCandidate::new(session, 0, previous))
+                        .0,
                     NativeStoreOutcome::default()
                 );
             }
