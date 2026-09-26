@@ -1719,14 +1719,14 @@ pub(crate) fn parse_failure(harness: Harness, detail: &str) -> BackendTerminal {
 /// Authentication and context-overflow classes are checked first because their phrasing can also mention retries.
 pub(crate) fn classify_failure_text(text: &str) -> ErrorClass {
     let lower = text.to_ascii_lowercase();
-    // Bedrock reports denied, unrecognized, and expired credentials as HTTP 403 exceptions.
-    const AUTH: [&str; 8] = [
+    // Bedrock reports unrecognized and expired credentials as HTTP 403 exceptions.
+    // `AccessDeniedException` is absent: it denies one model or inference profile, and an auth class would block every model of the provider.
+    const AUTH: [&str; 7] = [
         "api key",
         "unauthorized",
         "authentication",
         "credential",
         "forbidden",
-        "accessdeniedexception",
         "unrecognizedclientexception",
         "expiredtokenexception",
     ];
@@ -1772,7 +1772,8 @@ pub(crate) fn classify_failure_text(text: &str) -> ErrorClass {
         "modelerrorexception",
         "modelnotreadyexception",
     ];
-    const TRANSIENT_CODES: [&str; 6] = ["429", "500", "502", "503", "504", "529"];
+    const TRANSIENT_CODES: [&str; 3] = ["429", "503", "529"];
+    const SERVER_ERROR_CODES: [&str; 3] = ["500", "502", "504"];
     // Explicit rate-limit evidence outranks the broad authentication phrases: "rate limit exceeded for this API key" is a retry-after condition, not a missing credential.
     if ["rate limit", "rate_limit"]
         .iter()
@@ -1795,6 +1796,9 @@ pub(crate) fn classify_failure_text(text: &str) -> ErrorClass {
         || TRANSIENT_CODES
             .iter()
             .any(|code| contains_status_code(&lower, code))
+        || SERVER_ERROR_CODES
+            .iter()
+            .any(|code| contains_server_error_code(&lower, code))
     {
         return ErrorClass::Transient;
     }
@@ -1804,11 +1808,34 @@ pub(crate) fn classify_failure_text(text: &str) -> ErrorClass {
 /// A substring match misreads `401` in `req-40123` or `req-x401abc`.
 /// Boundaries are non-alphanumeric on both sides, so `status 401`, `(401)`, and `401:` match while `x401abc` does not.
 fn contains_status_code(haystack: &str, code: &str) -> bool {
-    haystack.match_indices(code).any(|(index, _)| {
+    status_code_matches(haystack, code).next().is_some()
+}
+
+/// Stack traces, size limits, and log timestamps print `500`, `502`, and `504` as plain numbers, so a bounded match alone would retry deterministic failures.
+/// A server-error code counts only in parentheses or directly after the word `status`, `statuscode`, `http`, `code`, or `error`; spaces, `:`, `=`, and quotes may separate the word from the code.
+fn contains_server_error_code(haystack: &str, code: &str) -> bool {
+    status_code_matches(haystack, code).any(|index| {
+        let before = &haystack[..index];
+        if before.ends_with('(') && haystack[index + code.len()..].starts_with(')') {
+            return true;
+        }
+        let word = before
+            .trim_end_matches([' ', ':', '=', '"', '\''])
+            .rsplit(|c: char| !c.is_ascii_alphanumeric())
+            .next()
+            .unwrap_or_default();
+        matches!(word, "status" | "statuscode" | "http" | "code" | "error")
+    })
+}
+
+/// Yields the byte index of each occurrence of `code` bounded by non-alphanumeric characters or the ends of `haystack`.
+fn status_code_matches<'a>(haystack: &'a str, code: &'a str) -> impl Iterator<Item = usize> + 'a {
+    haystack.match_indices(code).filter_map(move |(index, _)| {
         let before = haystack[..index].chars().next_back();
         let after = haystack[index + code.len()..].chars().next();
-        before.is_none_or(|c| !c.is_ascii_alphanumeric())
-            && after.is_none_or(|c| !c.is_ascii_alphanumeric())
+        (before.is_none_or(|c| !c.is_ascii_alphanumeric())
+            && after.is_none_or(|c| !c.is_ascii_alphanumeric()))
+        .then_some(index)
     })
 }
 
@@ -2706,9 +2733,29 @@ mod tests {
             ("provider returned status 500", Transient),
             ("upstream error (502)", Transient),
             ("HTTP 504: gateway request failed", Transient),
+            ("request failed with status code 502", Transient),
+            (
+                r#"{"statusCode":500,"message":"upstream failed"}"#,
+                Transient,
+            ),
+            // A 5xx number outside a status context is a count, a line number, or a timestamp field.
+            ("description must be at most 500 characters", Permanent),
+            (
+                "TypeError: model.stream is not a function\n    at run (/app/dist/cli.js:502:17)",
+                Permanent,
+            ),
+            (
+                "2026-09-25 06:50:23,504 fatal: unsupported model",
+                Permanent,
+            ),
+            // Access denial is scoped to one model or inference profile, so another model under the same credentials can still succeed.
             (
                 "An error occurred (AccessDeniedException) when calling the Converse operation: You don't have access to the model with the specified model ID.",
-                AuthRequired,
+                Permanent,
+            ),
+            (
+                "AccessDeniedException: User: arn:aws:iam::123456789012:user/ci is not authorized to perform: bedrock:InvokeModel on resource: arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-v2",
+                Permanent,
             ),
             (
                 "An error occurred (UnrecognizedClientException) when calling the Converse operation: The security token included in the request is invalid.",
@@ -2734,9 +2781,15 @@ mod tests {
             ("model id x500abc is not supported", Permanent),
             ("unsupported parameter at offset 15002", Permanent),
         ];
-        for (text, expected) in cases {
-            assert_eq!(classify_failure_text(text), expected, "{text}");
-        }
+        let mismatches: Vec<_> = cases
+            .iter()
+            .filter_map(|&(text, expected)| {
+                let actual = classify_failure_text(text);
+                (actual != expected)
+                    .then(|| format!("{text:?}: expected {expected:?}, got {actual:?}"))
+            })
+            .collect();
+        assert!(mismatches.is_empty(), "{}", mismatches.join("\n"));
     }
 
     #[test]
