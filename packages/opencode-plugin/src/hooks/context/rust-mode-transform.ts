@@ -855,6 +855,16 @@ type PassDeclineReason =
     | "daemon_status_unrecognized";
 
 /**
+ * Declines that try `serveLastApplied` before raw output, because raw output carries the whole
+ * uncompacted history.
+ */
+const LAST_APPLIED_DECLINES: ReadonlySet<PassDeclineReason> = new Set([
+    "capture_bytes",
+    "daemon_session_busy",
+    "daemon_status_unrecognized",
+]);
+
+/**
  * A local refusal prevents publication without counting a daemon failure. Byte pressure and a
  * polluted built-in prototype recur on every call for the affected session, so they log at warn.
  */
@@ -1856,10 +1866,9 @@ export function createRustModeTransform(
                     sessionId,
                     error instanceof Error ? error.message : String(error),
                 );
-                // Byte pressure recurs on every pass, so serving raw would send the whole history.
                 if (
                     error instanceof PassDeclined &&
-                    error.reason === "capture_bytes" &&
+                    LAST_APPLIED_DECLINES.has(error.reason) &&
                     serveLastApplied()
                 )
                     servedFrom = "last_applied";

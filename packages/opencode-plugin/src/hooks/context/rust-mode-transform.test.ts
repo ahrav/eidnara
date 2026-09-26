@@ -4002,6 +4002,44 @@ describe("fail-open after an applied pass", () => {
         }
     });
 
+    for (const [status, reason] of [
+        ["session_busy", "daemon_session_busy"],
+        ["status_added_later", "daemon_status_unrecognized"],
+    ]) {
+        it(`serves the last applied output plus the appended messages on a ${status} decline`, async () => {
+            const sessionId = `rust-fail-open-${status}-${Date.now()}`;
+            const rows = rawRows(5);
+            installRawRows(sessionId, rows);
+            const { client, bodies } = recordingClient((request, index) =>
+                index === 0 ? recipeResponse(request, [folded(sessionId)]) : { status },
+            );
+            const transform = createRustModeTransform(makeDeps(), { moduleClient: client });
+            const debugSpy = spyOn(logger.sessionLog, "debug");
+            try {
+                await transform.run(sessionId, {
+                    messages: rowMessages(sessionId, rows.slice(0, 3)),
+                });
+
+                const grown = rowMessages(sessionId, rows);
+                const output = { messages: [...grown] as unknown[] };
+                await transform.run(sessionId, output);
+                expect(bodies).toHaveLength(2);
+                expect(output.messages).toEqual([folded(sessionId), grown[3], grown[4]]);
+                expect(output.messages[1]).toBe(grown[3]);
+                expect(transform.getState(sessionId).failureCount).toBe(0);
+                expect(transform.getState(sessionId).consecutiveFailures).toBe(0);
+                const passLines = sessionLogs(debugSpy, sessionId).filter((line) =>
+                    line.startsWith("rust pass:"),
+                );
+                expect(passLines[1]).toContain(
+                    `decision=declined:${reason} reason=none served_from=last_applied in=5 out=3`,
+                );
+            } finally {
+                debugSpy.mockRestore();
+            }
+        });
+    }
+
     it("serves the input unchanged after an in-place edit of an acknowledged message", async () => {
         const sessionId = `rust-fail-open-edit-${Date.now()}`;
         const rows = rawRows(4);
