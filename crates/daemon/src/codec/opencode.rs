@@ -56,10 +56,8 @@ pub(crate) fn decode_opencode_shared(messages: &[Arc<Value>]) -> DecodedHarnessM
         let stable_key = string_field(info, "id")
             .or_else(|| string_field(raw_message, "id"))
             .unwrap_or_else(|| format!("opencode-hash-{}", stable_hash_prefix(raw_message, 24)));
-        let mid = sidecar
-            .inherit_pin(&stable_key)
-            .unwrap_or_else(|| stable_key.clone());
-        sidecar.pin_mid(stable_key.clone(), mid.clone());
+        // Each call decodes the whole array with no prior sidecar, so the stable key is the mid.
+        let mid = stable_key.clone();
 
         let role = string_field(info, "role")
             .or_else(|| string_field(raw_message, "role"))

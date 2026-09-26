@@ -13723,12 +13723,6 @@ fn attach_native_messages_incremental(
         request.native_messages.as_deref().unwrap_or_default(),
     )
     .sidecar;
-    let sidecar_positions = sidecar
-        .order
-        .iter()
-        .enumerate()
-        .map(|(index, mid)| (mid.as_str(), index))
-        .collect::<HashMap<_, _>>();
     let context = native_attachment_context(request, transition_consumed);
     let mutation_exempt_mids = [mutation_exempt_mid, lineage_anchor_mid]
         .into_iter()
@@ -13744,21 +13738,12 @@ fn attach_native_messages_incremental(
 
     let mut message_keys = Vec::with_capacity(response.messages().len());
     for (position, served) in response.messages().iter().enumerate() {
+        // The sidecar is decoded from this request alone, so every `order` entry has metadata and
+        // a served message without metadata has no native slot.
         let meta = codec::sidecar::meta_for_ck(&sidecar, served, position);
-        let slot = meta.map(|meta| meta.mid.as_str()).or_else(|| {
-            if served.meta.synthetic {
-                None
-            } else {
-                served
-                    .meta
-                    .harness_id
-                    .as_deref()
-                    .filter(|mid| sidecar_positions.contains_key(*mid))
-                    .or_else(|| sidecar.order.get(position).map(String::as_str))
-            }
-        });
-        let sidecar_hash = slot.and(meta).map(native_sidecar_hash);
-        let mutation_exempt = slot.is_some_and(|mid| mutation_exempt_mids.contains(&mid));
+        let sidecar_hash = meta.map(native_sidecar_hash);
+        let mutation_exempt =
+            meta.is_some_and(|meta| mutation_exempt_mids.contains(&meta.mid.as_str()));
         let (tag_number, reasoning_should_clear) = native_reasoning_should_clear(
             served,
             request,
