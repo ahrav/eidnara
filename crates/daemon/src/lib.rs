@@ -17502,6 +17502,8 @@ mod tests {
     mod blocking_unit_tests;
     #[path = "request_budget/host_tests.rs"]
     mod request_budget_host_tests;
+    #[path = "transform/revision_goldens.rs"]
+    mod revision_goldens;
     #[path = "window_coverage/dispatch_tests.rs"]
     mod window_coverage_dispatch_tests;
 
