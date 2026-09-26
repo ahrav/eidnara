@@ -729,8 +729,9 @@ retrying the placeholder without a model call.
 Check: `always` - expire the backoff and fire `PLACEHOLDER_AFTER_FAILURES + 1`
 times against a producer whose output the gate rejects on every attempt for
 every model in the chain; the producer received exactly
-`PLACEHOLDER_AFTER_FAILURES` prompts, the stored history segments cover the
-chunk, and `history_summarizer.chunk_retry` is `None`. Neither the cooldown nor
+`PLACEHOLDER_AFTER_FAILURES` prompts per configured model (each failed firing
+walks the whole chain before its terminal rejection counts), the stored history
+segments cover the chunk, and `history_summarizer.chunk_retry` is `None`. Neither the cooldown nor
 `publish_health_degraded` is part of the bound: `failure_backoff_at_ms` stays at
 `HISTORY_SUMMARIZER_FAILURE_BACKOFF_MS` past the last failure and the health
 counter this path never increments stays at zero. Stated in attempts, not in an
