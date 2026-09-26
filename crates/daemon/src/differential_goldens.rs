@@ -1,12 +1,11 @@
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
-use std::sync::Mutex;
 
 use crate::transform::{TransformRequest, TransformResponse};
 use crate::wire::{IngressMessage, WireMessage};
 
-use super::{NativeAttachmentCache, NativeCacheKeyMode, attach_native_messages_incremental};
+use super::{NativeOutput, attach_native_messages_with_tags};
 
 #[derive(Debug, Deserialize)]
 struct Golden {
@@ -104,8 +103,10 @@ fn dg_golden_vacuity_guard_rejects_one_byte_fixture_perturbation_per_family() {
     assert_eq!(observed, 3, "every DG family needs a vacuity mutation");
 }
 
+/// A determinism and length cross-check only: `wire_lens` from `canonical_len` must equal the
+/// serialized lengths. Served-bytes preservation rests on the goldens and the e2e byte-identity gate.
 #[test]
-fn dg_goldens_exercise_incremental_native_differential_mode() {
+fn dg_goldens_encode_native_output_deterministically() {
     let golden: Golden = serde_json::from_str(include_str!("../testdata/differential-golden.json"))
         .expect("parse differential golden");
     for case in &golden.cases {
@@ -139,60 +140,36 @@ fn dg_goldens_exercise_incremental_native_differential_mode() {
             "messages": ingress,
         }))
         .expect("DG native transform request");
-        let cache = Mutex::new(NativeAttachmentCache::new(1024 * 1024));
-        let mut first = TransformResponse::passthrough(served.clone());
-        let first_attachment = attach_native_messages_incremental(
-            &mut first,
-            &request,
-            0,
-            &BTreeMap::new(),
-            None,
-            None,
-            false,
-            0,
-            &crate::edit_recipe::Revision::parse("test-output").unwrap(),
-            &cache,
-            NativeCacheKeyMode::Normal,
-        );
-        let mut replay = TransformResponse::passthrough(served.clone());
-        let replay_attachment = attach_native_messages_incremental(
-            &mut replay,
-            &request,
-            0,
-            &BTreeMap::new(),
-            None,
-            None,
-            false,
-            0,
-            &crate::edit_recipe::Revision::parse("test-output").unwrap(),
-            &cache,
-            NativeCacheKeyMode::Normal,
-        );
-        assert!(!first_attachment.output.values.is_empty(), "{}", case.id);
+        let encode = || {
+            let mut response = TransformResponse::passthrough(served.clone());
+            attach_native_messages_with_tags(
+                &mut response,
+                &request,
+                0,
+                &BTreeMap::new(),
+                None,
+                None,
+            );
+            NativeOutput::measure(response.native_messages.expect("native output"))
+        };
+        let (first, replay) = (encode(), encode());
+        assert!(!first.values.is_empty(), "{}", case.id);
         assert_eq!(
-            serde_json::to_vec(&first_attachment.output.values).unwrap(),
-            serde_json::to_vec(&replay_attachment.output.values).unwrap(),
+            serde_json::to_vec(&first.values).unwrap(),
+            serde_json::to_vec(&replay.values).unwrap(),
             "native replay drift in {}",
             case.id
         );
-        for attachment in [&first_attachment, &replay_attachment] {
-            assert_eq!(
-                attachment.output.wire_lens,
-                attachment
-                    .output
-                    .values
-                    .iter()
-                    .map(|value| serde_json::to_vec(value).unwrap().len())
-                    .collect::<Vec<_>>(),
-                "native wire lengths in {}",
-                case.id
-            );
-        }
-        let stats = replay_attachment.stats;
-        assert_eq!(stats.encoded_messages, 0, "{} missed cache", case.id);
-        assert_eq!(stats.reused_messages, served.len(), "{} prefix", case.id);
-        assert!(first.native_messages.is_none(), "{}", case.id);
-        assert!(replay.native_messages.is_none(), "{}", case.id);
+        assert_eq!(
+            first.wire_lens,
+            first
+                .values
+                .iter()
+                .map(|value| serde_json::to_vec(value).unwrap().len())
+                .collect::<Vec<_>>(),
+            "native wire lengths in {}",
+            case.id
+        );
     }
 }
 

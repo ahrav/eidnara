@@ -142,10 +142,13 @@ the victim's charge (`storeWireCache`). Witness:
 `rust-mode-transform.test.ts:1782` "evicts the least recently retained applied
 output once the optional budget is exceeded". The end-to-end eviction path
 (budget or count) followed by a full-input recipe is covered on the daemon
-side by `lib.rs:25199`
-`handler_native_delta_cache_eviction_self_heals_full_then_delta`
-(`previous_output_revision` absent after `native_attachments.remove`, present
-again on the following pass).
+side by `lib.rs:25169`
+`handler_native_cache_adopts_the_bumped_durable_revert_epoch`
+(`previous_output_revision` absent and no `previous` keeps after the store drops
+the entry) and `lib.rs:25302` `native_previous_keeps_bind_the_applied_revision`
+(present again when the request names the stored revision). The self-heal
+test this line cited went with #829's delta channel, and #830 replaced the
+`native_attachments` cache with `NativeOutputStore`.
 
 After #829 the applied output and the input basis it was computed from share
 one record and one charge (`RetainedOutputs`, `rust-mode-transform.ts:181`),

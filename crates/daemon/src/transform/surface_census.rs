@@ -182,8 +182,8 @@ fn surface1_stages_are_anchored_to_production_symbols_in_pinned_order() {
         ),
         (
             Surface1Stage::Attachment,
-            "daemon::attach_native_messages_incremental",
-            type_name_of_val(&crate::attach_native_messages_incremental).to_string(),
+            "daemon::attach_native_messages_with_tags",
+            type_name_of_val(&crate::attach_native_messages_with_tags).to_string(),
         ),
     ];
     let stages = rows.iter().map(|(stage, _, _)| *stage).collect::<Vec<_>>();

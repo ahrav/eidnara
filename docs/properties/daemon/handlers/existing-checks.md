@@ -285,9 +285,9 @@ native cache's ingress chunks with their retained-byte entries. Absent from
 release builds. No named test.
 
 **Compile-time assertions: one, and it is the strongest guard in scope.**
-`:2309-2314`, a `const _: () = assert!(...)` requiring
-`SERIALIZED_OUTPUT_CACHE_BUDGET_BYTES + NATIVE_ATTACHMENT_CACHE_BUDGET_BYTES +
-PROJECTION_CACHE_BUDGET_BYTES <= TRANSFORM_SERVE_CACHE_COMBINED_BUDGET_BYTES`. A
+`crates/daemon/src/lib.rs:2252-2255`, a `const _: () = assert!(...)` requiring
+`SERIALIZED_OUTPUT_CACHE_BUDGET_BYTES + NATIVE_OUTPUT_BUDGET_BYTES ==
+TRANSFORM_SERVE_CACHE_COMBINED_BUDGET_BYTES`. A
 budget change that breaks the aggregate ceiling fails the build rather than
 production. It constrains **declared constants**, not observed retention, and the
 observed-retention side is documented as approximate:
