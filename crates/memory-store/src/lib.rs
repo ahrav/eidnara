@@ -2484,6 +2484,25 @@ pub struct HistorySegmentEdge {
     pub end_message_id: String,
 }
 
+/// What anchor resolution reads for one pass, in one read transaction, by
+/// [`MemoryStore::coverage_snapshot`].
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CoverageSnapshot {
+    /// The session row's CAS version; `None` when the session has no row.
+    pub row_version: Option<u64>,
+    /// `meta.ordinal_continuation_base`.
+    pub continuation_base: Option<u64>,
+    pub newest: Option<HistorySegmentEdge>,
+    /// The rendered boundary: the row ending at `meta.coverage_ordinal` whose end block is
+    /// `core.boundary_id`. `None` when the daemon holds no coverage.
+    pub rendered: Option<HistorySegmentEdge>,
+    /// The row at the declared sequence, when one was declared.
+    pub declared: Option<HistorySegmentEdge>,
+    /// With no declared sequence and a rendered boundary: the newest row ending at one of the
+    /// window's messages (see [`MemoryStore::coverage_snapshot`]).
+    pub newest_window_end: Option<HistorySegmentEdge>,
+}
+
 /// The rows a decay fold renders plus the set's two ends, read in one snapshot by
 /// [`MemoryStore::load_history_segment_fold`].
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -6166,6 +6185,8 @@ pub struct MemoryStore {
     #[cfg(any(test, feature = "test-support"))]
     before_max_history_segment_end_read_hook: BeforeMaxHistorySegmentEndReadHook,
     #[cfg(any(test, feature = "test-support"))]
+    coverage_snapshot_hook: std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    #[cfg(any(test, feature = "test-support"))]
     tag_number_query_count: std::sync::atomic::AtomicUsize,
     #[cfg(any(test, feature = "test-support"))]
     authority_seed_transaction_count: std::sync::atomic::AtomicUsize,
@@ -6631,6 +6652,8 @@ impl MemoryStore {
             before_max_history_segment_end_read_hook: std::sync::Arc::new(std::sync::Mutex::new(
                 None,
             )),
+            #[cfg(any(test, feature = "test-support"))]
+            coverage_snapshot_hook: std::sync::Mutex::new(None),
             #[cfg(any(test, feature = "test-support"))]
             tag_number_query_count: std::sync::atomic::AtomicUsize::new(0),
             #[cfg(any(test, feature = "test-support"))]
@@ -7216,6 +7239,16 @@ impl MemoryStore {
             .before_max_history_segment_end_read_hook
             .lock()
             .expect("max history_segment-end read hook mutex") = Some(hook);
+    }
+
+    /// Install a one-shot callback that [`Self::coverage_snapshot`] runs inside its read
+    /// transaction, after the session row and the rendered row and before the declared row.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn set_coverage_snapshot_hook(&self, hook: Box<dyn FnOnce() + Send>) {
+        *self
+            .coverage_snapshot_hook
+            .lock()
+            .expect("coverage snapshot hook mutex") = Some(hook);
     }
 
     /// Install a test callback while cleanup of a matching pending history_summarizer run holds
@@ -10582,6 +10615,96 @@ impl MemoryStore {
     ) -> Result<Option<HistorySegmentEdge>, MemoryStoreError> {
         Ok(self.inner.with_conn(|conn| {
             history_segment_edge_tx(conn, session_id, EdgeAt::Sequence(sequence))
+        })?)
+    }
+
+    /// Reads the rows anchor resolution needs in one read transaction: the session row's
+    /// version and coverage, the newest and rendered rows, the row at `declared_sequence`, and,
+    /// when nothing is declared and a rendered row exists, the newest row whose end block
+    /// belongs to one of `live_mids`. `live_mids` are the window's non-synthetic message ids
+    /// in order; the k-th (0-based) is matched at ordinal continuation base + k + 1, the
+    /// ordinal it receives with no anchor, through one end-message index seek per mid.
+    pub fn coverage_snapshot(
+        &self,
+        session_id: &str,
+        declared_sequence: Option<i64>,
+        live_mids: &[&str],
+    ) -> Result<CoverageSnapshot, MemoryStoreError> {
+        Ok(self.inner.with_conn(|conn| {
+            let (row_version, continuation_base, rendered) =
+                rendered_coverage_tx(conn, session_id)?;
+            let newest = history_segment_edge_tx(conn, session_id, EdgeAt::Newest)?;
+            #[cfg(any(test, feature = "test-support"))]
+            if let Some(hook) = self
+                .coverage_snapshot_hook
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .take()
+            {
+                hook();
+            }
+            let declared = match declared_sequence {
+                Some(sequence) => {
+                    history_segment_edge_tx(conn, session_id, EdgeAt::Sequence(sequence))?
+                }
+                None => None,
+            };
+            let newest_window_end = match (declared_sequence, &rendered) {
+                (None, Some(_)) => conn
+                    .prepare_cached(
+                        "SELECT h.sequence, h.start_message, h.end_message, h.start_message_id,
+                                h.end_message_id
+                           FROM json_each(?2) AS j CROSS JOIN history_segments AS h
+                          WHERE h.session_id = ?1 AND h.end_message = ?3 + j.key + 1
+                            AND substr(h.end_message_id, 1, length(j.value) + 1) = j.value || '#'
+                          ORDER BY h.sequence DESC LIMIT 1",
+                    )?
+                    .query_row(
+                        params![
+                            session_id,
+                            serde_json::to_string(live_mids).expect("strings serialize"),
+                            continuation_base.unwrap_or(0) as i64
+                        ],
+                        history_segment_edge_from_row,
+                    )
+                    .optional()?,
+                _ => None,
+            };
+            Ok(CoverageSnapshot {
+                row_version,
+                continuation_base,
+                newest,
+                rendered,
+                declared,
+                newest_window_end,
+            })
+        })?)
+    }
+
+    /// At most `limit` `(sequence, end_message_id)` pairs of rows at or below the rendered
+    /// boundary and below `before_sequence`, newest first, in one read transaction; empty
+    /// when the daemon holds no coverage.
+    pub fn coverage_anchor_page(
+        &self,
+        session_id: &str,
+        before_sequence: Option<i64>,
+        limit: usize,
+    ) -> Result<Vec<(i64, String)>, MemoryStoreError> {
+        Ok(self.inner.with_conn(|conn| {
+            let Some(rendered) = rendered_coverage_tx(conn, session_id)?.2 else {
+                return Ok(Vec::new());
+            };
+            let through = before_sequence.map_or(rendered.sequence, |before| {
+                rendered.sequence.min(before.saturating_sub(1))
+            });
+            conn.prepare_cached(
+                "SELECT sequence, end_message_id FROM history_segments
+                  WHERE session_id = ?1 AND sequence <= ?2 ORDER BY sequence DESC LIMIT ?3",
+            )?
+            .query_map(params![session_id, through, sql_limit(limit)], |row| {
+                Ok((row.get(0)?, row.get(1)?))
+            })?
+            .collect()
         })?)
     }
 
@@ -15970,21 +16093,61 @@ fn history_segment_edge_tx(
             Some(sequence),
         ),
     };
-    let edge = |row: &rusqlite::Row<'_>| {
-        Ok(HistorySegmentEdge {
-            sequence: row.get(0)?,
-            start_message: row.get(1)?,
-            end_message: row.get(2)?,
-            start_message_id: row.get(3)?,
-            end_message_id: row.get(4)?,
-        })
-    };
     let mut statement = conn.prepare_cached(&sql)?;
     match key {
-        Some(key) => statement.query_row(params![session_id, key], edge),
-        None => statement.query_row(params![session_id], edge),
+        Some(key) => statement.query_row(params![session_id, key], history_segment_edge_from_row),
+        None => statement.query_row(params![session_id], history_segment_edge_from_row),
     }
     .optional()
+}
+
+fn history_segment_edge_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<HistorySegmentEdge> {
+    Ok(HistorySegmentEdge {
+        sequence: row.get(0)?,
+        start_message: row.get(1)?,
+        end_message: row.get(2)?,
+        start_message_id: row.get(3)?,
+        end_message_id: row.get(4)?,
+    })
+}
+
+/// The session row's version and continuation base, and the rendered boundary row: the row
+/// ending at `meta.coverage_ordinal` whose end block is `core.boundary_id`.
+fn rendered_coverage_tx(
+    conn: &GuardedConn<'_>,
+    session_id: &str,
+) -> rusqlite::Result<(Option<u64>, Option<u64>, Option<HistorySegmentEdge>)> {
+    let row = conn
+        .prepare_cached(
+            "SELECT row_version, json_extract(core_state, '$.boundary_id'),
+                    json_extract(meta, '$.coverage_ordinal'),
+                    json_extract(meta, '$.ordinal_continuation_base')
+               FROM cache_state WHERE session_id = ?1",
+        )?
+        .query_row(params![session_id], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, Option<String>>(1)?,
+                row.get::<_, Option<i64>>(2)?,
+                row.get::<_, Option<i64>>(3)?,
+            ))
+        })
+        .optional()?;
+    let Some((row_version, boundary_id, coverage, base)) = row else {
+        return Ok((None, None, None));
+    };
+    let rendered = match (boundary_id, coverage) {
+        (Some(boundary_id), Some(coverage)) if !boundary_id.is_empty() => {
+            history_segment_edge_tx(conn, session_id, EdgeAt::EndMessage(coverage))?
+                .filter(|row| row.end_message_id == boundary_id)
+        }
+        _ => None,
+    };
+    Ok((
+        Some(row_version as u64),
+        base.map(|base| base as u64),
+        rendered,
+    ))
 }
 
 /// The ordinals of the JSON array `?2` no history_segment of session `?1` covers.

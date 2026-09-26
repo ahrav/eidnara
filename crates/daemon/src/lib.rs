@@ -73,6 +73,7 @@ mod tail_hygiene;
 pub mod terse_text_compression;
 mod token_cache;
 pub(crate) mod transform_unit;
+pub mod window_coverage;
 pub mod wire;
 
 pub mod transform;
@@ -6763,6 +6764,33 @@ impl HandlerCore {
             }
         };
         Ok((session_id.to_string(), binding))
+    }
+
+    /// `transform.boundary` (Section 7.10.2 of the wire protocol): one read-only anchor page.
+    fn handle_transform_boundary_value(
+        &self,
+        channel: RouteHandle,
+        request: &Value,
+    ) -> PreparedOutcome {
+        let (session_id, before_sequence) = match window_coverage::parse_boundary_request(request) {
+            Ok(parsed) => parsed,
+            Err(message) => return invalid_params_error(message),
+        };
+        if let Err(outcome) =
+            self.management_binding_version(channel, request, "transform.boundary", 3)
+        {
+            return outcome;
+        }
+        let Some(store) = self.store() else {
+            return store_unavailable_error();
+        };
+        match window_coverage::boundary_page(&store, session_id, before_sequence) {
+            Ok(page) => respond(page),
+            Err(error) => PreparedOutcome::Error {
+                code: "store_load_failed".to_string(),
+                message: error.to_string(),
+            },
+        }
     }
 
     fn handle_todo_state_set_value(
@@ -13956,6 +13984,7 @@ impl HandlerCore {
                     self.handle_transform_dispatch(entry, request, inbound_bytes)
                         .await
                 }
+                "transform.boundary" => self.handle_transform_boundary_value(channel, &request),
                 "state_sync" => self.handle_state_sync_value(channel, request),
                 "agent_drops.append" => self.handle_agent_drops_value(channel, request),
                 "note.evaluate" => note_evaluation_protocol_retired(),
@@ -18824,6 +18853,8 @@ mod tests {
     mod blocking_unit_tests;
     #[path = "request_budget/host_tests.rs"]
     mod request_budget_host_tests;
+    #[path = "window_coverage/dispatch_tests.rs"]
+    mod window_coverage_dispatch_tests;
 
     use super::*;
     use crate::metered_decode::{
