@@ -574,13 +574,25 @@ fn a_stale_cut_keep_reconstructs_the_served_array_from_the_unsliced_input() {
     assert_eq!(applied.values, values(&served));
 }
 
+/// A null-anchor hit on a row above the rendered one is not cut at: the newest hit at or below
+/// the rendered row is the stale slice, so the newer row's messages are folded, not dropped.
+#[test]
+fn a_null_anchor_hit_above_the_rendered_row_is_not_cut_at() {
+    let (_dir, store) = open_store();
+    seed_coverage(&store, 16, Some(15), None);
+    let names = mids(1, 32);
+    let resolved = resolve_in(&store, None, &window(&names)).unwrap();
+    assert_eq!(resolved.resolution, Resolution::StaleSlice { cut: 29 });
+}
+
 /// WP-P07: the null-anchor intersection and the anchor page visit the same rows at fixed W
 /// whatever the stored history's length H.
 #[test]
 fn intersection_and_page_work_is_independent_of_history_length() {
     let measure = |segments: usize| {
         let (_dir, store) = open_store();
-        seed_coverage(&store, segments, Some(segments), None);
+        // One row sits above the rendered one, so the rendered-row bound is part of the plan.
+        seed_coverage(&store, segments, Some(segments - 1), None);
         let names = mids(1, 32);
         let window = window(&names);
         store.start_statement_work_ledger();

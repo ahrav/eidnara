@@ -514,7 +514,7 @@ async fn a_panic_plus_reopen_after_the_unanchored_revert_removal_converges() {
 
 /// A publish during a null-boundary pass cannot move its cut: only rows the rendered boundary
 /// covers are stale-slice candidates, so the newer row is folded rather than cut at, and m3 is
-/// not dropped. The ready snapshot holds the window the pass served.
+/// not dropped. The ready snapshot holds the resolved window the pass folded (its input).
 #[tokio::test(flavor = "current_thread")]
 async fn a_publish_during_a_null_boundary_pass_keeps_the_cut_at_the_rendered_boundary() {
     let (handler, store, _dir) = handler_for("rev3-cut");
@@ -545,6 +545,9 @@ async fn a_publish_during_a_null_boundary_pass_keeps_the_cut_at_the_rendered_bou
     assert!(published.load(std::sync::atomic::Ordering::SeqCst));
     assert_eq!(served_mids(&served), ["m5", "m6", "m7"]);
     assert_eq!(served["boundary"], anchor("m4", 2));
+    // The fold rendered segment 2 (m3..m4), so m3 is covered rather than dropped.
+    let core = store.load("rev3-cut").unwrap().core;
+    assert!(core.boundary_id.starts_with("m4#"), "{}", core.boundary_id);
     assert_eq!(
         ready_snapshot_mids(&handler),
         ["m2", "m3", "m4", "m5", "m6", "m7"]

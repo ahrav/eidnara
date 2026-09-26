@@ -1423,6 +1423,9 @@ pub struct TruncateOutcome {
     pub row_version: u64,
     /// The summarizer state this transaction left, counts and timeline included; a caller that commits its own meta over the result carries it forward.
     pub history_summarizer: HistorySummarizerDurableState,
+    /// No segment survived, so the lineage continuation was cleared with them; a caller that
+    /// commits its own meta over the result clears it too.
+    pub lineage_reset: bool,
 }
 
 pub struct HistorySummarizerPublishRequest<'a> {
@@ -11946,6 +11949,7 @@ impl MemoryStore {
                 last_recut: reset_meta.last_recut,
                 row_version: next_version,
                 history_summarizer: reset_meta.history_summarizer,
+                lineage_reset: true,
             })))
         })?;
         match outcome {
@@ -12005,6 +12009,7 @@ impl MemoryStore {
                     last_recut: meta.last_recut,
                     row_version: current.max(0) as u64,
                     history_summarizer: meta.history_summarizer,
+                    lineage_reset: false,
                 })));
             }
 
@@ -12065,7 +12070,8 @@ impl MemoryStore {
             if let Some(seqs) = meta.legacy_history_segment_seqs.as_mut() {
                 seqs.retain(|sequence| *sequence <= keep_through_seq);
             }
-            if surviving_tail.is_none() {
+            let lineage_reset = surviving_tail.is_none();
+            if lineage_reset {
                 meta.forget_lineage_continuation();
             }
             let meta_json = match serde_json::to_string(&meta) {
@@ -12129,6 +12135,7 @@ impl MemoryStore {
                 last_recut,
                 row_version: next,
                 history_summarizer: meta.history_summarizer,
+                lineage_reset,
             })))
         })?;
 

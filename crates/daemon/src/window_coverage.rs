@@ -9,9 +9,10 @@
 //! present segment end sits at a stored ordinal above its window position and is missed, and
 //! the answer is `Revert { keep_through_seq: None }`. The plugin's exhaustive mid-based
 //! discovery walk (D10, D19) is the primary guard; this query is a second check that can miss
-//! only when history before the hit was removed. A hit is not bounded by the rendered row:
-//! D10 answers any hit as `StaleSlice` at the newest hit, and bounding it would turn a present
-//! anchor above the rendered row into a reset.
+//! only when history before the hit was removed. A hit is bounded by the rendered row, as
+//! discovery is: a newer row is not rendered yet, and cutting at it would drop the messages it
+//! summarizes. With an intact prefix any hit above the rendered row implies the rendered row
+//! also hits, so the bound never turns a hit into a reset.
 
 use memory_store::{CoverageSnapshot, HistorySegmentEdge, MemoryStore, MemoryStoreError};
 use serde_json::{Value, json};
