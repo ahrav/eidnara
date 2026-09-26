@@ -2251,7 +2251,6 @@ impl BoundaryTokenCache {
     }
 }
 
-// The ingress FlatProjection uses a separate cache so an oversized native snapshot can drop sidecar trees without discarding the projection.
 // The charged total remains bounded so one oversized session cannot cause unbounded cache growth.
 const NATIVE_ATTACHMENT_CACHE_BUDGET_BYTES: usize = 256 * 1024 * 1024;
 const NATIVE_ATTACHMENT_CACHE_ENTRY_BUDGET_BYTES: usize = 192 * 1024 * 1024;
@@ -4487,8 +4486,8 @@ impl HandlerCore {
         self.refresh_oldest_queued_at_ms();
     }
 
-    /// The ingress snapshot combines bounded projection and native cores with a validated caller tail.
-    /// Entries that fit the bounded snapshot limit may fall back to their full transform snapshot.
+    /// The ingress snapshot combines the ready transform snapshot's ingress prefix and a native
+    /// prefix with a validated caller tail; a session without a ready snapshot takes the full-sync branch.
     fn expand_transform_tail_delta(
         &self,
         parsed: &mut TransformRequest,
@@ -4506,22 +4505,19 @@ impl HandlerCore {
             .and_then(|value| usize::try_from(value).ok())?;
         parsed.full_array_fingerprint.as_ref()?;
 
-        // The persisted epoch is checked before the bounded projection and native cores so
-        // stale request state cannot select an outdated entry after a store-side rewrite;
+        // The persisted epoch is checked before the native prefix lookup so stale request
+        // state cannot select an outdated entry after a store-side rewrite;
         // a pass without a loaded state takes the full-sync branch.
         let current_revert_epoch = pass_state.loaded()?.revert_epoch;
-        let fallback_request = self
+        let ready_request = self
             .transform_snapshots
             .lock()
             .expect("transform snapshots mutex")
             .ready_delta_request(&parsed.session_id)
-            .filter(|request| request.full_array_fingerprint.as_deref() == Some(after.as_str()));
+            .filter(|request| request.full_array_fingerprint.as_deref() == Some(after.as_str()))?;
 
-        let mut messages = {
-            let request = fallback_request.as_ref()?;
-            (replace_from <= request.messages.len())
-                .then(|| wire::IngressMessages(request.messages[..replace_from].to_vec()))?
-        };
+        let mut messages = (replace_from <= ready_request.messages.len())
+            .then(|| wire::IngressMessages(ready_request.messages[..replace_from].to_vec()))?;
         let mut current_messages = std::mem::take(&mut parsed.messages);
         messages.append(&mut current_messages);
 
@@ -4538,8 +4534,7 @@ impl HandlerCore {
                     native_replace_from,
                 )
                 .or_else(|| {
-                    let request = fallback_request.as_ref()?;
-                    let previous_native = request.native_messages.as_ref()?;
+                    let previous_native = ready_request.native_messages.as_ref()?;
                     (native_replace_from <= previous_native.len()).then(|| {
                         let prefix = previous_native[..native_replace_from].to_vec();
                         let retained_bytes = previous_native[..native_replace_from]
@@ -25437,6 +25432,94 @@ mod tests {
         assert_eq!(error_code(outcome), "transform_recipe_omitted");
     }
 
+    /// A pass whose request exceeds the ready-snapshot budget leaves no ready snapshot, so the
+    /// next tail delta is refused with `need_full_sync` and the full follow-up serves the bytes
+    /// an uncached control handler serves.
+    #[tokio::test(flavor = "current_thread")]
+    async fn cold_soft_plus_over_ready_budget_refuses_the_next_tail_delta() {
+        let first_native = json!({
+            "info": {
+                "id": "m1",
+                "sessionID": "ses",
+                "role": "user",
+                "customInfo": "preserve-me"
+            },
+            "parts": [{ "type": "text", "text": "hello", "customPart": 7 }]
+        });
+        let second_native = json!({
+            "info": { "id": "m2", "sessionID": "ses", "role": "user" },
+            "parts": [{ "type": "text", "text": "next" }]
+        });
+        let full_request = |fingerprint: &str| {
+            let mut body = request(vec![ck("m1", 1, "hello")]);
+            body["serializer_profile"] = json!("opencode-aisdk");
+            body["serve_native"] = json!(true);
+            body["native_messages"] = json!([first_native.clone()]);
+            body["full_array_fingerprint"] = json!(fingerprint);
+            body
+        };
+        let mut full_followup = request(vec![ck("m1", 1, "hello"), ck("m2", 2, "next")]);
+        full_followup["serializer_profile"] = json!("opencode-aisdk");
+        full_followup["serve_native"] = json!(true);
+        full_followup["native_messages"] = json!([first_native.clone(), second_native.clone()]);
+        full_followup["full_array_fingerprint"] = json!("cold-fp-2");
+        let cold_start = |handler: &Handler| {
+            handler.native_attachments.lock().unwrap().remove("ses");
+            handler.transform_snapshots.lock().unwrap().remove("ses");
+            handler.serialized_outputs.lock().unwrap().remove("ses");
+            handler.transform_snapshots.lock().unwrap().max_ready_bytes = 1;
+        };
+
+        let (handler, _store, _dir, _project) =
+            handler_with_store(Arc::new(ProducerState::default()), default_test_config());
+        let initialized = call_transform_request(&handler, full_request("warmup")).await;
+        assert_eq!(initialized["status"], "ok", "{initialized}");
+        cold_start(&handler);
+        let cold = call_transform_request(&handler, full_request("cold-fp-1")).await;
+        assert_eq!(cold["status"], "ok", "{cold}");
+        assert_eq!(cold["action"], "SOFT+", "{cold}");
+        assert!(
+            handler
+                .transform_snapshots
+                .lock()
+                .unwrap()
+                .ready_delta_request("ses")
+                .is_none()
+        );
+
+        let mut delta = request(vec![ck("m2", 2, "next")]);
+        delta["serializer_profile"] = json!("opencode-aisdk");
+        delta["serve_native"] = json!(true);
+        delta["native_messages"] = json!([second_native]);
+        delta["full_array_fingerprint"] = json!("cold-fp-2");
+        delta["tail_delta"] = json!({
+            "after": "cold-fp-1",
+            "replace_from": 1,
+            "native_replace_from": 1,
+        });
+        let refused = call_transform_request(&handler, delta).await;
+        assert_eq!(refused["status"], "need_full_sync", "{refused}");
+        assert!(refused.get("operations").is_none(), "{refused}");
+        assert!(refused.get("output_revision").is_none(), "{refused}");
+
+        let followup = call_transform_request(&handler, full_followup.clone()).await;
+        assert_eq!(followup["status"], "ok", "{followup}");
+
+        let (control, _control_store, _control_dir, _control_project) =
+            handler_with_store(Arc::new(ProducerState::default()), default_test_config());
+        let warmup = call_transform_request(&control, full_request("warmup")).await;
+        assert_eq!(warmup["status"], "ok", "{warmup}");
+        cold_start(&control);
+        let control_cold = call_transform_request(&control, full_request("cold-fp-1")).await;
+        assert_eq!(control_cold["status"], "ok", "{control_cold}");
+        let control_followup = call_transform_request(&control, full_followup).await;
+        assert_eq!(control_followup["status"], "ok", "{control_followup}");
+        assert_eq!(
+            serde_json::to_vec(&followup["native_messages"]).unwrap(),
+            serde_json::to_vec(&control_followup["native_messages"]).unwrap()
+        );
+    }
+
     fn native_cache_request(
         session_id: &str,
         messages: Vec<IngressMessage>,
@@ -26862,6 +26945,95 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn handler_small_native_lru_eviction_and_refusal_still_serve() {
+        let (handler, _store, _dir, project) =
+            handler_with_store(Arc::new(ProducerState::default()), default_test_config());
+        let session_a = "native-lru-a";
+        let session_b = "native-lru-b";
+        let session_c = "native-lru-oversized";
+        handler.bind_route(test_route(7), binding(project.to_str().unwrap(), session_a));
+        handler.bind_route(test_route(8), binding(project.to_str().unwrap(), session_b));
+        handler.bind_route(test_route(9), binding(project.to_str().unwrap(), session_c));
+        let initial = |session: &str, fill: &str| {
+            let request = native_cache_request(
+                session,
+                vec![
+                    ck(&format!("{session}-prefix"), 1, &fill.repeat(4096)),
+                    ck(&format!("{session}-tail"), 2, "before"),
+                ],
+                Vec::new(),
+                &format!("{session}-fp-1"),
+            );
+            serde_json::to_value(request).unwrap()
+        };
+
+        let response_a =
+            call_transform_request_on_channel(&handler, 7, initial(session_a, "a")).await;
+        assert_eq!(response_a["status"], "ok", "{response_a}");
+        let entry_charge = {
+            let mut native = handler.native_attachments.lock().unwrap();
+            let charge = native.sessions[session_a].retained_bytes;
+            native.max_retained_bytes = charge;
+            charge
+        };
+        let response_b =
+            call_transform_request_on_channel(&handler, 8, initial(session_b, "b")).await;
+        assert_eq!(response_b["status"], "ok", "{response_b}");
+        {
+            let native = handler.native_attachments.lock().unwrap();
+            assert!(!native.sessions.contains_key(session_a));
+            assert!(native.sessions.contains_key(session_b));
+        }
+
+        // A native snapshot over the whole budget is refused, and the pass is still served.
+        assert!(entry_charge > 1);
+        handler
+            .native_attachments
+            .lock()
+            .unwrap()
+            .max_retained_bytes = entry_charge - 1;
+        let response_c =
+            call_transform_request_on_channel(&handler, 9, initial(session_c, "c")).await;
+        assert_eq!(response_c["status"], "ok", "{response_c}");
+        assert_eq!(response_c["timings"]["native_cache_refused_store"], 1);
+        assert!(
+            !handler
+                .native_attachments
+                .lock()
+                .unwrap()
+                .sessions
+                .contains_key(session_c)
+        );
+
+        // The evicted session's warm delta re-encodes its native output instead of reusing it.
+        let mut warm_delta = native_cache_request(
+            session_a,
+            vec![ck("native-lru-a-tail", 2, "after")],
+            Vec::new(),
+            "native-lru-a-fp-2",
+        );
+        warm_delta.tail_delta = Some(json!({
+            "after": "native-lru-a-fp-1",
+            "replace_from": 1,
+            "native_replace_from": 0,
+        }));
+        let warm = call_transform_request_on_channel(
+            &handler,
+            7,
+            serde_json::to_value(warm_delta).unwrap(),
+        )
+        .await;
+        assert_eq!(warm["status"], "ok", "{warm}");
+        assert_eq!(warm["timings"]["native_cache_reused_messages"], 0);
+        assert!(
+            warm["timings"]["native_cache_encoded_messages"]
+                .as_u64()
+                .unwrap()
+                > 0
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn handler_mismatched_native_delta_cache_serves_full_output() {
         let (handler, _store, _dir, project) =
             handler_with_store(Arc::new(ProducerState::default()), default_test_config());
@@ -27144,7 +27316,6 @@ mod tests {
         // The cached pass keeps its unchanged prefix from the previous output rather than resending it.
         assert!(cached["previous_output_revision"].is_string(), "{cached}");
         assert!(keeps_from(&cached, "previous") > 0, "{cached}");
-        assert_eq!(full["timings"]["projection_reused_messages"], 0);
         assert_eq!(full["timings"]["projection_projected_messages"], 3);
 
         for field in [
@@ -27195,12 +27366,13 @@ mod tests {
         )
         .await;
         assert_eq!(third["status"], "ok", "{third}");
+        // The delta path projects its full expanded input; nothing is reused.
         assert_eq!(third["timings"]["projection_reused_messages"], 0);
         assert_eq!(third["timings"]["projection_projected_messages"], 3);
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn handler_delta_rechecks_durable_revert_epoch_before_projection_reuse() {
+    async fn handler_delta_rechecks_durable_revert_epoch() {
         let session = "projection-revert-epoch";
         let (handler, store, _dir, project) =
             handler_with_store(Arc::new(ProducerState::default()), default_test_config());
@@ -27236,7 +27408,6 @@ mod tests {
         }));
         let response = call_transform_request(&handler, serde_json::to_value(delta).unwrap()).await;
         assert_eq!(response["status"], "ok", "{response}");
-        assert_eq!(response["timings"]["projection_reused_messages"], 0);
         assert_eq!(response["timings"]["projection_projected_messages"], 2);
         let cache = handler
             .native_attachments
@@ -27517,7 +27688,6 @@ mod tests {
         assert_eq!(descended["status"], "ok", "{descended}");
         assert_eq!(descended["lineage_descent_disposition"], "descended");
         assert_eq!(descended["lineage_switch_consumed_id"], 101);
-        assert_eq!(descended["timings"]["projection_reused_messages"], 0);
         assert_eq!(descended["timings"]["projection_projected_messages"], 2);
         assert!(store.load(target).unwrap().meta.descent_completed);
     }
@@ -28572,7 +28742,7 @@ mod tests {
     }
 
     /// The pass-state load runs before the tail-delta expansion, outside the `delta_expand`
-    /// and `projection_cache_lookup` windows, so it carries its own pass-trace bucket; the
+    /// window, so it carries its own pass-trace bucket; the
     /// phase timings otherwise shrink by the read's cost while `handler_total` does not.
     #[tokio::test(flavor = "current_thread")]
     async fn pass_state_load_has_its_own_timing_bucket() {

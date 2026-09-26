@@ -1224,6 +1224,7 @@ pub struct TransformTimings {
     pub side_channel_drain: f64,
     #[serde(default)]
     pub trace_received: f64,
+    // Kept for wire neutrality; always zero until the wire change removes them.
     #[serde(default)]
     pub projection_cache_lookup: f64,
     #[serde(default)]
@@ -1240,6 +1241,7 @@ pub struct TransformTimings {
     pub snapshot_store: f64,
     #[serde(default)]
     pub projection: f64,
+    // Kept for wire neutrality; always zero until the wire change removes it.
     #[serde(default)]
     pub projection_reused_messages: usize,
     #[serde(default)]
@@ -1987,7 +1989,7 @@ pub(crate) fn transform_with_projection_cached(
     ctx: &ProducerContext<'_>,
     output_cache: &Mutex<SerializedOutputCache>,
 ) -> Result<TransformWithProjection, TransformError> {
-    let result = apply_once_with_estimator_and_projection(
+    let result = apply_once_with_estimator(
         store,
         req,
         ctx,
@@ -2082,17 +2084,6 @@ fn pending_rewrite_pass_observation(
     )
 }
 
-#[cfg(test)]
-fn apply_once_with_estimator(
-    store: &MemoryStore,
-    req: &TransformRequest,
-    ctx: &ProducerContext<'_>,
-    estimate_tokens: impl Fn(&str) -> usize + Copy,
-    output_cache: Option<&Mutex<SerializedOutputCache>>,
-) -> Result<TransformWithProjection, TransformError> {
-    apply_once_with_estimator_and_projection(store, req, ctx, estimate_tokens, output_cache)
-}
-
 /// The provider marker represents the daemon's assumed cache lifetime as a Claude Code TTL.
 ///
 /// The input lifetime controls when the daemon assumes a cache is dead; the output marker is limited to `5m|1h`.
@@ -2162,7 +2153,7 @@ fn response_marker_ttl(
         })
 }
 
-fn apply_once_with_estimator_and_projection(
+fn apply_once_with_estimator(
     store: &MemoryStore,
     req: &TransformRequest,
     ctx: &ProducerContext<'_>,

@@ -22,7 +22,10 @@ the incremental builder paths (`project_incremental`,
 `EIDNARA_PREFIX_PROJECTION_DIFFERENTIAL`. Every pass projects its full CK
 input with `MessageProjection::project`. A tail delta reattaches its prefix
 only from the latest-ready request snapshot; without one it takes the
-full-sync path. The tag-mint frontier memo no longer keys on the full-array
+full-sync path. Interim until #829 deletes the delta channel: a session whose
+request charge exceeds the 64 MiB ready-snapshot budget now gets
+`need_full_sync` on every delta turn, which the projection cache used to serve.
+The tag-mint frontier memo no longer keys on the full-array
 fingerprint. Citations of the deleted symbols below are historical and link
 to `704568ec`, the last commit that has them.
 
