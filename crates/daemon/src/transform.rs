@@ -2239,9 +2239,10 @@ fn served_output_fingerprints(messages: &[ServedMessage]) -> Vec<ServedBlockFing
         for (block_index, (content_hash, serialized_len)) in
             message.block_fingerprints.iter().enumerate()
         {
+            // The stored fingerprint keeps the first 128 bits (32 hex) of the block hash.
             fingerprints.push(ServedBlockFingerprint {
                 block_id: wire::block_id(&message_id, block_index),
-                content_hash: content_hash.clone(),
+                content_hash: content_hash[..32].to_string(),
                 serialized_len: *serialized_len,
             });
         }
@@ -13660,6 +13661,58 @@ pub(crate) mod tests {
             forced_fps, loaded.meta.served_output_fingerprint,
             "stored divergence fingerprints must match forced re-hash of served output"
         );
+    }
+
+    /// A row an earlier build wrote carries 64-hex block and hygiene part hashes. The next pass
+    /// reads it, attributes one content change, and stores 32-hex block hashes; the pass after
+    /// is stable. The hygiene baseline measures invalid against the 64-hex parts until the next
+    /// cache-busting pass replaces it (`an_earlier_builds_64_hex_baseline_...` in tail_hygiene).
+    #[test]
+    fn a_row_with_64_hex_block_hashes_diverges_once_then_is_stable() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(dir.path());
+        let session = "hash-width-upgrade";
+        let request = active_cc_req(
+            session,
+            "cfg0",
+            vec![
+                wire_item("user", "m0", 0, &["plan the work"]),
+                wire_item("assistant", "m1", 1, &["working on it"]),
+            ],
+        );
+        run(&store, &request, &spine());
+        let loaded = store.load(session).unwrap();
+        let mut meta = loaded.meta.clone();
+        let widen = |hash: &mut String| {
+            assert_eq!(hash.len(), 32);
+            hash.push_str(&"0".repeat(32));
+        };
+        assert!(!meta.served_output_fingerprint.is_empty());
+        meta.served_output_fingerprint
+            .iter_mut()
+            .for_each(|block| widen(&mut block.content_hash));
+        let baseline = meta.tail_hygiene_baseline.as_mut().unwrap();
+        assert!(!baseline.baseline_parts.is_empty());
+        baseline
+            .baseline_parts
+            .iter_mut()
+            .for_each(|part| widen(&mut part.content_hash));
+        store
+            .commit(session, loaded.row_version, &loaded.core, &meta)
+            .unwrap();
+
+        let upgraded = run(&store, &request, &spine());
+        let divergence = upgraded.first_divergence.as_ref().unwrap();
+        assert_eq!(divergence.index, 0);
+        assert_eq!(divergence.kind, divergence::DivergenceKind::ContentChanged);
+        let stored = store.load(session).unwrap().meta;
+        assert!(
+            stored
+                .served_output_fingerprint
+                .iter()
+                .all(|block| block.content_hash.len() == 32)
+        );
+        assert!(run(&store, &request, &spine()).first_divergence.is_none());
     }
 
     fn synthetic_text(r: &TransformResponse, index: usize) -> &str {

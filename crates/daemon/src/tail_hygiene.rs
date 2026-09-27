@@ -614,8 +614,10 @@ fn part_measurement(kind: TailHygienePartKind, content: &str, tokens: PartTokens
         PartTokens::Bpe => crate::token_cache::count_with_digest(digest.into(), content) as i64,
         PartTokens::Image => estimate_image_tokens(content),
     };
+    // The stored hash keeps the first 128 bits: one hash is stored per live-tail part.
+    let prefix: [u8; 16] = digest[..16].try_into().expect("SHA-256 has 32 bytes");
     MeasuredPart {
-        content_hash: format!("{digest:x}"),
+        content_hash: format!("{:032x}", u128::from_be_bytes(prefix)),
         kind,
         tokens,
     }
@@ -987,37 +989,14 @@ fn excluded_prefix_len(parts: &[TailHygienePartMeasurement]) -> usize {
         .count()
 }
 
-/// Empty for no parts, which is also the stored default. Each part is hashed in the
-/// field-named form stored digests were computed over, not the compact stored form, so a
-/// digest written before the compact encoding still matches.
+/// Empty for no parts, which is also the stored default.
 fn parts_digest(parts: &[TailHygienePartMeasurement]) -> String {
-    #[derive(serde::Serialize)]
-    struct DigestPart<'a> {
-        key: &'a str,
-        content_hash: &'a str,
-        kind: TailHygienePartKind,
-        tokens: i64,
-        u_tokens: i64,
-        tag_number: Option<i64>,
-        tag_status: Option<&'a str>,
-        protected: bool,
-    }
     if parts.is_empty() {
         return String::new();
     }
     let mut input = Vec::new();
     for part in parts {
-        let part = DigestPart {
-            key: &part.key,
-            content_hash: &part.content_hash,
-            kind: part.kind,
-            tokens: part.tokens,
-            u_tokens: part.u_tokens,
-            tag_number: part.tag_number,
-            tag_status: part.tag_status.as_deref(),
-            protected: part.protected,
-        };
-        serde_json::to_writer(&mut input, &part).expect("hygiene parts are serializable");
+        serde_json::to_writer(&mut input, part).expect("hygiene parts are serializable");
         input.push(0);
     }
     hex_digest(input)
@@ -1169,31 +1148,6 @@ mod tests {
     use serde::{Deserialize, Serialize};
     use serde_json::{Value, json};
     use std::sync::Arc;
-
-    /// The excluded-prefix digest hashes each part in the field-named form, so a digest
-    /// stored before the compact meta encoding still matches the same parts.
-    #[test]
-    fn parts_digest_hashes_the_field_named_form() {
-        let part = TailHygienePartMeasurement {
-            key: "m1#0".to_string(),
-            content_hash: "ab".repeat(32),
-            kind: TailHygienePartKind::Excluded,
-            tokens: 7,
-            u_tokens: 0,
-            tag_number: None,
-            tag_status: None,
-            protected: false,
-        };
-        let named = format!(
-            "{{\"key\":\"m1#0\",\"content_hash\":\"{}\",\"kind\":\"excluded\",\"tokens\":7,\
-             \"u_tokens\":0,\"tag_number\":null,\"tag_status\":null,\"protected\":false}}\0",
-            "ab".repeat(32)
-        );
-        assert_eq!(
-            parts_digest(&[part.clone(), part]),
-            hex_digest(named.repeat(2))
-        );
-    }
 
     fn message(mid: &str, ordinal: u64, role: &str, blocks: Vec<BlockKind>) -> Arc<IngressMessage> {
         Arc::new(IngressMessage {
@@ -1347,11 +1301,11 @@ mod tests {
             format!(
                 "{:x}",
                 Sha256::digest(serde_json::to_vec(block.wire.as_ref()).unwrap())
-            )
+            )[..32]
         );
         assert_eq!(
             measured.parts[0].content_hash,
-            hex_digest(format!("text\0{content}"))
+            hex_digest(format!("text\0{content}"))[..32]
         );
         assert_eq!(measured.t, estimated_tokens(&content));
         assert_eq!(crate::token_cache::local_stats().misses - before.misses, 1);
@@ -1454,14 +1408,15 @@ mod tests {
             for ((part, block), (kind, content)) in
                 measured.parts.iter().zip(&projection.blocks).zip(expected)
             {
-                let expected = format!("{:x}", Sha256::digest(format!("{kind}\0{content}")));
+                let expected =
+                    format!("{:x}", Sha256::digest(format!("{kind}\0{content}")))[..32].to_string();
                 assert_eq!(part.content_hash, expected);
                 assert_ne!(
                     part.content_hash,
                     format!(
                         "{:x}",
                         Sha256::digest(serde_json::to_vec(block.wire.as_ref()).unwrap())
-                    )
+                    )[..32]
                 );
                 assert_eq!(memo.entries[&part.key].measured.content_hash, expected);
             }
@@ -1594,7 +1549,7 @@ mod tests {
             let prefix = if excluded { "excluded" } else { "text" };
             assert_eq!(
                 measured.parts[0].content_hash,
-                format!("{:x}", Sha256::digest(format!("{prefix}\0{content}"))),
+                format!("{:x}", Sha256::digest(format!("{prefix}\0{content}")))[..32],
                 "{change}"
             );
             assert_eq!(
@@ -2252,6 +2207,52 @@ mod tests {
         assert!(invalid.generation_invalidated);
     }
 
+    /// An earlier build stored 64-hex part hashes and digested them in that form. Against it
+    /// a later walk measures invalid, the path any non-append change takes, and the next
+    /// cache-busting walk replaces it with an evaluable 32-hex baseline.
+    #[test]
+    fn an_earlier_builds_64_hex_baseline_invalidates_until_the_next_bust() {
+        let mut memo = TailHygieneMemo::default();
+        let messages = [
+            text("covered", 1, "covered history"),
+            text("live", 2, "live tail"),
+        ];
+        let tags = vec![tag(1, "live#0")];
+        let mut measure = || {
+            measure_tail_hygiene(
+                &project_messages(&messages).unwrap(),
+                &CoreState::empty(),
+                Some(1),
+                &tags,
+                0,
+                &HashSet::new(),
+                &mut memo,
+            )
+        };
+        let mut earlier = refresh_tail_hygiene_baseline(measure(), true, None, 10);
+        assert_eq!(earlier.excluded_prefix_len, 1);
+        for part in &mut earlier.baseline_parts {
+            assert_eq!(part.content_hash.len(), 32);
+            part.content_hash.push_str(&"0".repeat(32));
+        }
+        earlier.excluded_prefix_digest = "0".repeat(64);
+
+        let invalid = refresh_tail_hygiene_baseline(measure(), false, Some(&earlier), 20);
+        assert!(!invalid.evaluable);
+        assert!(invalid.generation_invalidated);
+        let rebuilt = refresh_tail_hygiene_baseline(measure(), true, Some(&invalid), 30);
+        assert!(rebuilt.evaluable && !rebuilt.generation_invalidated);
+        assert_eq!(rebuilt.baseline_generation, earlier.baseline_generation + 1);
+        assert!(
+            rebuilt
+                .baseline_parts
+                .iter()
+                .all(|part| part.content_hash.len() == 32)
+        );
+        let next = refresh_tail_hygiene_baseline(measure(), false, Some(&rebuilt), 40);
+        assert!(next.evaluable);
+    }
+
     #[derive(Debug, Deserialize)]
     struct HygieneGolden {
         schema: u32,
@@ -2525,11 +2526,11 @@ mod tests {
         // The fixture messages are daemon-built typed blocks, so their part hashes
         // follow the canonical block bytes: span-sorted key order with a false
         // `provider_executed` omitted. Plugin-shaped blocks keep their bytes; see the
-        // projection golden. The parts hash in their compact stored form; hashed in the
-        // field-named form the same parts give the pre-compaction digest 9e452c89...03f3d.
+        // projection golden. The digest covers the stored form: 128-bit part hashes with an
+        // absent tag omitted.
         assert_eq!(
             format!("{:x}", frozen.finalize()),
-            "add4209aabc4040a79462976a2dfd8cbe3d408d12d3d7e3b628855f6d7fe3e22"
+            "46613095a98ae6c70e2ccfb977e606fb82c4ad23cbe8131d89ee1cf7eeaf2b55"
         );
     }
 
@@ -2714,7 +2715,7 @@ mod tests {
         for (part, block) in reduced.parts.iter().zip(&projection.blocks) {
             assert_eq!(
                 part.content_hash,
-                format!("{:x}", Sha256::digest(format!("excluded\0{}", block.bytes)))
+                format!("{:x}", Sha256::digest(format!("excluded\0{}", block.bytes)))[..32]
             );
         }
     }
