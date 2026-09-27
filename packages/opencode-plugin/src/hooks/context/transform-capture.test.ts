@@ -973,6 +973,41 @@ describe("digest-verified prefix capture", () => {
     });
 });
 
+describe("tape digest encoding", () => {
+    const digestOf = (text: string): HistoryDigest => {
+        const captured = captureHistory([message("m1", text), message("m2")]).history;
+        captureLease?.release();
+        captureLease = undefined;
+        return captured;
+    };
+
+    it("keeps long strings distinct whether they hash as UTF-8 or UTF-16", () => {
+        const long = "x".repeat(400);
+        const texts = [
+            long,
+            `${"x".repeat(399)}y`,
+            `\ud800${"x".repeat(399)}`,
+            `\ufffd${"x".repeat(399)}`,
+            `\ud83d\ude00${"x".repeat(398)}`,
+            `u400:${"x".repeat(395)}`,
+            "x".repeat(255),
+            `${"\u00e9".repeat(200)}${"x".repeat(200)}`,
+        ];
+        const digests = texts.map(digestOf);
+        for (let left = 0; left < digests.length; left += 1) {
+            for (let right = left + 1; right < digests.length; right += 1)
+                expect(
+                    historyDigestsEqual(
+                        digests[left] as HistoryDigest,
+                        digests[right] as HistoryDigest,
+                    ),
+                ).toBe(false);
+        }
+        // The same content in fresh strings hashes the same.
+        expect(historyDigestsEqual(digestOf(long), digestOf("xx".repeat(200)))).toBe(true);
+    });
+});
+
 describe("host array replacement contract", () => {
     it.each([
         { prototype: Array.prototype },
