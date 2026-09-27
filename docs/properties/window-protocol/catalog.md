@@ -273,7 +273,9 @@ arm requires `req.lineage_switched` and a `NO_SURVIVOR` resolution
 (`pending_rewrite_absent_shape`, `crates/daemon/src/transform.rs:3318-3319`;
 `meta.pending_rewrite = Some` at `:3413`, `f2442b2f`). Since #833 (D10) the
 null-anchor no-survivor shape without `lineage_switched` resets instead
-(`reset_no_survivor`, called from `:1959`, defined at `:2038`).
+(`reset_no_survivor`, called from `:1959`, defined at `:2038`) when compaction
+is enabled; a compaction-off pass serves additively and keeps the history
+(`a_compaction_off_pass_that_matches_no_anchor_keeps_the_history`).
 Status: active
 Exercised: yes - #833 moves every pre-disposition `pending_rewrite` test onto
 a lineage switch (`switched()`), so each reaches the arm only with

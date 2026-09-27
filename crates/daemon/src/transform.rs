@@ -1692,6 +1692,8 @@ pub enum TransformError {
     SyntheticTodoAnchorMissing(String),
     #[error("frozen reduction target vanished while its message is live: {0}")]
     FrozenRedTargetVanish(String),
+    #[error("block identity changed for mid {0}, which a frozen unit targets")]
+    FrozenTargetDrift(String),
     #[error("minted boundary not present: {0}")]
     BoundaryNotPresent(String),
     /// The submitted window is not admissible: the answer is `invalid_params`.
@@ -1956,7 +1958,8 @@ fn apply_once_with_estimator(
         let resolve_started_at = Instant::now();
         let (coverage_row_version, attempt_req) = resolve_attempt(store, req)?;
         let coverage_resolve = elapsed_ms(resolve_started_at);
-        if !req.lineage_switched
+        if ctx.compaction_enabled
+            && !req.lineage_switched
             && attempt_req
                 .coverage
                 .as_deref()
@@ -5213,6 +5216,11 @@ fn enforce_block_identity(
             basis_re_adoptions.push(mid.clone());
             continue;
         }
+        // A frozen payload is derived from its target's earlier content; rendering it over the
+        // changed message would serve that earlier content.
+        if frozen_unit_targets_mid(core, mid) && is_tail_mid(meta, req, mid) {
+            return Err(TransformError::FrozenTargetDrift(mid.clone()));
+        }
         re_adoptions.push(TailIdentityReAdoption {
             mid: mid.clone(),
             old_hash_prefix: block_identity_hash_prefix(stored),
@@ -5245,6 +5253,31 @@ fn enforce_block_identity(
     Ok(IdentityEnforcement {
         tail_re_adoptions: re_adoptions,
         basis_re_adoptions: Some(basis_re_adoptions),
+    })
+}
+
+fn is_tail_mid(meta: &ModuleMeta, req: &TransformIngress<'_>, mid: &str) -> bool {
+    req.projection
+        .live_messages()
+        .find(|message| message.mid == mid)
+        .is_some_and(|message| is_tail(message.ordinal, meta.coverage_ordinal))
+}
+
+fn frozen_unit_targets_mid(core: &CoreState, mid: &str) -> bool {
+    let strip_suffix = format!(":{mid}");
+    core.frozen_units.iter().any(|unit| {
+        let target = unit
+            .key
+            .strip_prefix(RED_KEY_PREFIX)
+            .or_else(|| unit.key.strip_prefix(CAV_KEY_PREFIX));
+        if target.is_some_and(|target| {
+            split_block_id(target).is_some_and(|(unit_mid, _)| unit_mid == mid)
+        }) {
+            return true;
+        }
+        unit.key
+            .strip_prefix("strip:")
+            .is_some_and(|key| key.ends_with(&strip_suffix))
     })
 }
 
@@ -14949,6 +14982,119 @@ pub(crate) mod tests {
         );
     }
 
+    /// A compaction-off pass whose window holds no covered message is served additively and keeps
+    /// the session's history segments and revert epoch; the no-survivor reset runs only on the
+    /// compaction path.
+    #[test]
+    fn a_compaction_off_pass_that_matches_no_anchor_keeps_the_history() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = store(dir.path());
+        let session = "no-survivor-compaction-off";
+        let covered = || vec![item("anchor", 1, "stable"), item("tail", 2, "one")];
+        let ctx = pctx("git:proj", "/nonexistent-docs", 0);
+        transform(&s, &req(session, "cfg0", covered()), &ctx).unwrap();
+        s.replace_history_segments(session, &[comp(1, 1, 2, "tail", "covers the tail")])
+            .unwrap();
+        transform(&s, &req(session, "cfg0", covered()), &ctx).unwrap();
+        let segments = s.load_history_segments(session).unwrap();
+        let before = s.load(session).unwrap();
+        assert!(
+            !segments.is_empty(),
+            "enabling state: the session holds history"
+        );
+        assert!(
+            !before.core.boundary_id.is_empty(),
+            "enabling state: the session folded"
+        );
+
+        let compacted = req(
+            session,
+            "cfg0",
+            vec![item("native-summary", 1, "summary of the session")],
+        );
+        let mut resolved = plugin_window(&s, &compacted);
+        resolve_window(&s, &mut resolved).unwrap();
+        assert_eq!(
+            resolved.coverage.as_deref().unwrap().resolved.resolution,
+            NO_SURVIVOR,
+            "enabling state: no anchor survives in the window"
+        );
+
+        let mut off = pctx("git:proj", "/nonexistent-docs", 0);
+        off.compaction_enabled = false;
+        let served = transform(&s, &compacted, &off).unwrap();
+        assert_eq!(served.status, TransformStatus::Ok);
+        assert_eq!(s.load_history_segments(session).unwrap(), segments);
+        let after = s.load(session).unwrap();
+        assert_eq!(after.meta.revert_epoch, before.meta.revert_epoch);
+    }
+
+    #[test]
+    fn an_edited_tail_message_that_a_frozen_unit_targets_refuses_the_pass() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = store(dir.path());
+        let ctx = pctx("git:proj", "/nonexistent-docs", 0);
+        for (name, frozen_unit) in [
+            ("reduction", red_unit("tail#0", "drop", "[dropped]")),
+            (
+                "terse_text_compression",
+                terse_text_compression_unit("tail#0", 1, "compressed"),
+            ),
+            ("strip", strip_unit("placeholder", "tail", "[dropped]")),
+        ] {
+            let session = format!("frozen-tail-drift-{name}");
+            let request = |tail: &str| {
+                let mut request = req(
+                    &session,
+                    "cfg0",
+                    vec![item("anchor", 1, "stable"), item("tail", 2, tail)],
+                );
+                request.terse_text_compression_enabled = true;
+                request
+            };
+            transform(&s, &request("before the edit"), &ctx).unwrap();
+            s.replace_history_segments(&session, &[comp(1, 1, 1, "anchor", "covers the anchor")])
+                .unwrap();
+            transform(&s, &request("before the edit"), &ctx).unwrap();
+            let loaded = s.load(&session).unwrap();
+            assert_eq!(
+                loaded.meta.coverage_ordinal,
+                Some(1),
+                "enabling state: {name}"
+            );
+            assert!(
+                loaded.meta.block_identity_by_mid.contains_key("tail"),
+                "enabling state: {name}"
+            );
+            let payload = frozen_unit.frozen_payload.clone();
+            let mut core = loaded.core.clone();
+            core.frozen_units.push(frozen_unit);
+            s.commit(&session, loaded.row_version, &core, &loaded.meta)
+                .unwrap();
+            let committed = s.load(&session).unwrap();
+
+            let edited = transform(&s, &request("after the edit"), &ctx);
+            if let Ok(served) = &edited {
+                let texts: Vec<&str> = served
+                    .messages()
+                    .iter()
+                    .filter_map(|message| wire::text_from_message(message))
+                    .collect();
+                assert!(
+                    !texts.contains(&payload.as_str()),
+                    "{name}: the frozen payload replaced the edited tail: {texts:?}"
+                );
+            }
+            assert!(
+                matches!(edited, Err(TransformError::FrozenTargetDrift(ref mid)) if mid == "tail"),
+                "{name}: {edited:?}"
+            );
+            let after = s.load(&session).unwrap();
+            assert_eq!(after.row_version, committed.row_version, "{name}");
+            assert_eq!(after.core, committed.core, "{name}");
+        }
+    }
+
     /// Rows past the m1 row cap that land mid-pass send the additive SOFT back for a retry,
     /// which accounts for them and delivers the note the first attempt claimed.
     #[test]
@@ -22271,7 +22417,7 @@ pub(crate) mod tests {
                 &pctx("git:proj", "/nonexistent-docs", 0),
             )
             .unwrap_err();
-            assert!(matches!(err, TransformError::FrozenRedTargetVanish(_)));
+            assert!(matches!(err, TransformError::FrozenTargetDrift(ref mid) if mid == "m1"));
             let tags = store_c.load_tags_for_session("reject").unwrap();
             assert_eq!(
                 tags.iter()

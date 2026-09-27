@@ -104,8 +104,9 @@ differ still rejects, and the stamped row rejects covered drift.
 `module_meta_basis_stamp_defaults_split_stored_rows_from_built_metas`
 (memory-store lib.rs) pins the stamp's serde defaults.
 
-Update, 2026-09-27: [#833](https://github.com/ahrav/eidnara/issues/833) deletes covered-drift rejection: `identity_drift_requires_reject`,
-`frozen_unit_targets_mid`, and `TransformError::IdentityDrift`. Block identities
-are pruned to the window inside the transform's meta CAS, and a changed
-identity is re-adopted. Citations of these symbols here are historical at their
-stated baseline.
+Update, 2026-09-27: [#833](https://github.com/ahrav/eidnara/issues/833) deletes covered-drift rejection: `identity_drift_requires_reject` and
+`TransformError::IdentityDrift`. Block identities are pruned to the window
+inside the transform's meta CAS, and a changed identity is re-adopted, except
+for a tail message that a frozen unit targets (`frozen_unit_targets_mid`),
+which refuses the pass with `TransformError::FrozenTargetDrift`. Citations of the
+deleted symbols here are historical at their stated baseline.

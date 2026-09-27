@@ -405,7 +405,8 @@ Required faults and enabling state: An error inside the mutation region.
 `IdentityDrift` (`:5786`), `ReductionConflict` (`:6820`), `FrozenRedTargetVanish`
 (`:5814`) are all reachable from a crafted array. Update, 2026-09-27:
 [#833](https://github.com/ahrav/eidnara/issues/833) deletes `IdentityDrift` with
-covered-drift rejection; the other errors remain.
+covered-drift rejection; the other errors remain, and a changed identity of a
+tail message that a frozen unit targets raises `FrozenTargetDrift`.
 Confidence: high - [evidence](evidence/engine-terminal-cas-is-the-sole-core-meta-writer.md). Traced
 every `store.` call in `:3222-5697` and confirmed only `:3312`, `:4646`, `:3609`,
 `:3720`, `:5565` write.
