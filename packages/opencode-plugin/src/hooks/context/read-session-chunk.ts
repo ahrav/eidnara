@@ -14,14 +14,12 @@ import {
 } from "./read-session-formatting";
 import {
     countRawSessionMessageOrdinalsFromDb,
-    countStoredRawSessionMessagesFromDb,
     type RawMessage,
     type RawMessageOrdinalAnchor,
     type RawMessageOrdinalEntry,
     type RawMessageParts,
     readRawSessionMessageByIdFromDb,
     readRawSessionMessageOrdinalByIdFromDb,
-    readRawSessionMessageOrdinalPageFromDb,
     readRawSessionMessagePageFromDb,
     readRawSessionMessagePartsByIdFromDb,
     readRawSessionMessagesFromDb,
@@ -124,8 +122,6 @@ export interface RawMessageProvider {
     ) => RawMessageOrdinalEntry[];
     /** `getMessageCount` falls back to `readMessages().length` when no fast count is available. */
     getMessageCount?: () => number;
-    /** The stored row count includes compaction summaries for ordinal drift detection. */
-    getStoredMessageCount?: () => number;
 }
 
 /**
@@ -357,55 +353,6 @@ export function primeInMemoryTailRawMessageCache(args: {
     activeRawMessageCache.set(sessionId, messages);
     activeAbsoluteCountCache?.set(sessionId, absoluteMessageCount);
     return true;
-}
-
-/**
- * Orders entries by `(timeCreated, id)` using code-unit id comparison. The anchor filter and
- * the page sort must share one order, or an entry that falls on different sides of the anchor
- * under the two orders is never paged.
- */
-function compareOrdinalAnchors(
-    left: RawMessageOrdinalAnchor,
-    right: RawMessageOrdinalAnchor,
-): number {
-    if (left.timeCreated !== right.timeCreated) return left.timeCreated - right.timeCreated;
-    if (left.id < right.id) return -1;
-    if (left.id > right.id) return 1;
-    return 0;
-}
-
-export function readRawSessionMessageOrdinalPage(
-    sessionId: string,
-    after: RawMessageOrdinalAnchor | null,
-    limit: number,
-): RawMessageOrdinalEntry[] {
-    const provider = activeRawMessageProvider(sessionId);
-    if (provider?.readMessageOrdinalPage) return provider.readMessageOrdinalPage(after, limit);
-    if (provider) {
-        const rows = provider
-            .readMessages()
-            .map((message) => ({
-                id: message.id,
-                timeCreated: message.createdAt ?? message.ordinal,
-                contributesOrdinal: true,
-                hasValidInfo: true,
-            }))
-            .filter((row) => !after || compareOrdinalAnchors(row, after) > 0)
-            .sort(compareOrdinalAnchors);
-        return rows.slice(0, Math.max(1, Math.floor(limit)));
-    }
-    if (!refreshOpenCodeDbPresence()) return [];
-    return withReadOnlySessionDb((db) =>
-        readRawSessionMessageOrdinalPageFromDb(db, sessionId, after, limit),
-    );
-}
-
-export function getRawSessionStoredMessageCount(sessionId: string): number {
-    const provider = activeRawMessageProvider(sessionId);
-    if (provider?.getStoredMessageCount) return provider.getStoredMessageCount();
-    if (provider) return provider.readMessages().length;
-    if (!refreshOpenCodeDbPresence()) return 0;
-    return withReadOnlySessionDb((db) => countStoredRawSessionMessagesFromDb(db, sessionId));
 }
 
 export function readRawSessionMessagePartsById(

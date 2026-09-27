@@ -1426,6 +1426,9 @@ pub struct TruncateOutcome {
     pub row_version: u64,
     /// The summarizer state this transaction left, counts and timeline included; a caller that commits its own meta over the result carries it forward.
     pub history_summarizer: HistorySummarizerDurableState,
+    /// No segment survived, so the lineage continuation was cleared with them; a caller that
+    /// commits its own meta over the result clears it too.
+    pub lineage_reset: bool,
 }
 
 pub struct HistorySummarizerPublishRequest<'a> {
@@ -1813,12 +1816,15 @@ pub struct ServedBlockFingerprint {
     pub serialized_len: usize,
 }
 
-fn bool_is_false(value: &bool) -> bool {
-    !*value
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CoveredSystemMessage {
+    /// The ordinal of the content's first occurrence.
+    pub ordinal: u64,
+    pub content: String,
 }
 
-fn u8_is_zero(value: &u8) -> bool {
-    *value == 0
+fn bool_is_false(value: &bool) -> bool {
+    !*value
 }
 
 /// A response-side Channel-2 directive awaiting a gateway delivery acknowledgement.
@@ -1998,11 +2004,6 @@ pub struct ModuleMeta {
     /// `None` identifies metadata written before the component watermark was persisted.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub m1_history_segment_seq: Option<i64>,
-    /// Counted coherent divergence observations suppressed by a pending history_segment revision.
-    /// Active history_summarizer and wrapup publication windows retain this value without incrementing or
-    /// resetting it; legacy or damaged rows resume escalation after those bounded windows close.
-    #[serde(default, skip_serializing_if = "u8_is_zero")]
-    pub boundary_divergence_pending_count: u8,
     /// The last materializing pass had cross-session memory disabled. The negative form keeps
     /// pre-field metadata and fresh default state compatible with the historical enabled mode.
     #[serde(default)]
@@ -2243,6 +2244,11 @@ pub struct ModuleMeta {
     /// the served block set for that pass, so it stays bounded by the output size.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub served_output_fingerprint: Vec<ServedBlockFingerprint>,
+    /// Covered system messages, one per distinct content in first-ordinal order. A fold
+    /// window starts at its anchor; preceding system messages reach later folds only through
+    /// this list.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub covered_system_messages: Vec<CoveredSystemMessage>,
 
     /// Tracks which shadow reset generation this record belongs to. Operations created
     /// before the most recent reset are rejected so they cannot write rows from an older
@@ -2280,6 +2286,15 @@ impl ModuleMeta {
     pub fn served_history_segment_seq(&self) -> i64 {
         self.additive_served_history_segment_seq
             .unwrap_or_else(|| self.rendered_history_segment_seq())
+    }
+
+    /// Drops the lineage continuation a descent wrote. A revert that removes every segment
+    /// is the reset of spec D10, and the next pass numbers its window from 1.
+    pub fn forget_lineage_continuation(&mut self) {
+        self.ordinal_continuation_base = None;
+        self.anchor_block_id = None;
+        self.anchor_content_hash = None;
+        self.descent_completed = false;
     }
 }
 
@@ -2510,12 +2525,13 @@ pub struct CoverageSnapshot {
     pub continuation_base: Option<u64>,
     pub newest: Option<HistorySegmentEdge>,
     /// The rendered boundary: the row ending at `meta.coverage_ordinal` whose end block is
-    /// `core.boundary_id`. `None` when the daemon holds no coverage.
+    /// `core.boundary_id`, or the newest row after an interrupted revert truncate (spec D10).
+    /// `None` when the daemon holds no coverage.
     pub rendered: Option<HistorySegmentEdge>,
     /// The row at the declared sequence, when one was declared.
     pub declared: Option<HistorySegmentEdge>,
-    /// With no declared sequence and a rendered boundary: the newest row ending at one of the
-    /// window's messages (see [`MemoryStore::coverage_snapshot`]).
+    /// With no declared sequence and a rendered boundary: the newest row at or below the rendered
+    /// one ending at one of the window's messages (see [`MemoryStore::coverage_snapshot`]).
     pub newest_window_end: Option<HistorySegmentEdge>,
 }
 
@@ -10726,7 +10742,7 @@ impl MemoryStore {
 
     /// Reads the rows anchor resolution needs in one read transaction: the session row's
     /// version and coverage, the newest and rendered rows, the row at `declared_sequence`, and,
-    /// when nothing is declared and a rendered row exists, the newest row whose end block
+    /// when nothing is declared and a rendered row exists, the newest row at or below it whose end block
     /// belongs to one of `live_mids` and whose end id is an anchor as
     /// [`Self::coverage_anchor_page`] defines it. `live_mids` are the window's non-synthetic message ids
     /// in order; the k-th (0-based) is matched at ordinal continuation base + k + 1, the
@@ -10759,8 +10775,11 @@ impl MemoryStore {
                 }
                 None => None,
             };
+            // Only rows the rendered boundary covers can be a stale slice: a newer row was published
+            // after the host's view, and cutting at it would drop the messages it summarizes. The
+            // unary `+` keeps the planner on the end-message seek, so the work stays independent of H.
             let newest_window_end = match (declared_sequence, &rendered) {
-                (None, Some(_)) => conn
+                (None, Some(rendered)) => conn
                     .prepare_cached(
                         "SELECT h.sequence, h.start_message, h.end_message, h.start_message_id,
                                 h.end_message_id
@@ -10769,13 +10788,15 @@ impl MemoryStore {
                             AND substr(h.end_message_id, 1, length(j.value) + 1) = j.value || '#'
                             AND h.end_message_id GLOB '?*#[0-9]*'
                             AND h.end_message_id NOT GLOB '*#*[^0-9]*'
+                            AND +h.sequence <= ?4
                           ORDER BY h.sequence DESC LIMIT 1",
                     )?
                     .query_row(
                         params![
                             session_id,
                             serde_json::to_string(live_mids).expect("strings serialize"),
-                            continuation_base.unwrap_or(0) as i64
+                            continuation_base.unwrap_or(0) as i64,
+                            rendered.sequence
                         ],
                         history_segment_edge_from_row,
                     )
@@ -11530,6 +11551,7 @@ impl MemoryStore {
             target_meta.pending_rewrite_ambiguous = false;
             target_meta.pending_rewrite_last_failure = None;
             target_meta.served_output_fingerprint.clear();
+            target_meta.covered_system_messages.clear();
             target_meta.anchor_block_id = Some(anchor.block_id.clone());
             target_meta.anchor_content_hash = Some(anchor.content_hash.clone());
             target_meta.ordinal_continuation_base = Some(prior_last);
@@ -12065,6 +12087,7 @@ impl MemoryStore {
                 last_recut: reset_meta.last_recut,
                 row_version: next_version,
                 history_summarizer: reset_meta.history_summarizer,
+                lineage_reset: true,
             })))
         })?;
         match outcome {
@@ -12124,6 +12147,7 @@ impl MemoryStore {
                     last_recut: meta.last_recut,
                     row_version: current.max(0) as u64,
                     history_summarizer: meta.history_summarizer,
+                    lineage_reset: false,
                 })));
             }
 
@@ -12183,6 +12207,10 @@ impl MemoryStore {
             meta.last_recut = last_recut.clone();
             if let Some(seqs) = meta.legacy_history_segment_seqs.as_mut() {
                 seqs.retain(|sequence| *sequence <= keep_through_seq);
+            }
+            let lineage_reset = surviving_tail.is_none();
+            if lineage_reset {
+                meta.forget_lineage_continuation();
             }
             let meta_json = match serde_json::to_string(&meta) {
                 Ok(json) => json,
@@ -12245,6 +12273,7 @@ impl MemoryStore {
                 last_recut,
                 row_version: next,
                 history_summarizer: meta.history_summarizer,
+                lineage_reset,
             })))
         })?;
 
@@ -16241,7 +16270,9 @@ fn history_segment_edge_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Hi
 }
 
 /// The session row's version and continuation base, and the rendered boundary row: the row
-/// ending at `meta.coverage_ordinal` whose end block is `core.boundary_id`.
+/// ending at `meta.coverage_ordinal` whose end block is `core.boundary_id`. While
+/// `core.reconcile_pending` is set and that row is gone, a revert's truncate committed before
+/// its fold did, and the newest surviving row is the rendered boundary (spec D10).
 #[derive(Default)]
 struct RenderedCoverage {
     row_version: Option<u64>,
@@ -16257,7 +16288,8 @@ fn rendered_coverage_tx(
         .prepare_cached(
             "SELECT row_version, json_extract(core_state, '$.boundary_id'),
                     json_extract(meta, '$.coverage_ordinal'),
-                    json_extract(meta, '$.ordinal_continuation_base')
+                    json_extract(meta, '$.ordinal_continuation_base'),
+                    json_extract(core_state, '$.reconcile_pending')
                FROM cache_state WHERE session_id = ?1",
         )?
         .query_row(params![session_id], |row| {
@@ -16272,16 +16304,28 @@ fn rendered_coverage_tx(
                 row.get::<_, Option<i64>>(3)?
                     .map(|base| unsigned(3, base))
                     .transpose()?,
+                row.get::<_, Option<bool>>(4)?.unwrap_or(false),
             ))
         })
         .optional()?;
-    let Some((row_version, boundary_id, coverage, base)) = row else {
+    let Some((row_version, boundary_id, coverage, base, reconcile_pending)) = row else {
         return Ok(RenderedCoverage::default());
     };
     let rendered = match (boundary_id, coverage) {
         (Some(boundary_id), Some(coverage)) if !boundary_id.is_empty() => {
-            history_segment_edge_tx(conn, session_id, EdgeAt::EndMessage(coverage))?
+            match history_segment_edge_tx(conn, session_id, EdgeAt::EndMessage(coverage))?
                 .filter(|row| row.end_message_id == boundary_id)
+            {
+                // Only `truncate_history_segments_for_revert` removes the `core.boundary_id`
+                // row while the flag is set; `lineage_anchor_failure` also sets the flag but
+                // leaves the row. The truncate bumps `revert_epoch`, which rejects every
+                // publication fired before it, and the next committing pass is the fold itself,
+                // so no row lands above the kept anchor before the fold.
+                None if reconcile_pending => {
+                    history_segment_edge_tx(conn, session_id, EdgeAt::Newest)?
+                }
+                rendered => rendered,
+            }
         }
         _ => None,
     };
@@ -19974,60 +20018,6 @@ mod tests {
 
         let v2 = store.commit("ses_a", Some(1), &core, &meta).unwrap();
         assert_eq!(v2, 2);
-    }
-
-    #[test]
-    fn boundary_divergence_counter_cas_loser_does_not_double_increment_and_survives_reopen() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
-        let session = "counter-cas";
-        let core = CoreState::empty();
-        let initial_meta = ModuleMeta {
-            boundary_divergence_pending_count: 0,
-            ..Default::default()
-        };
-        store.commit(session, None, &core, &initial_meta).unwrap();
-
-        let left = store.load(session).unwrap();
-        let right = store.load(session).unwrap();
-        assert_eq!(left.row_version, Some(1));
-        assert_eq!(right.row_version, Some(1));
-
-        let mut left_meta = left.meta.clone();
-        left_meta.boundary_divergence_pending_count = 1;
-        store
-            .commit(session, left.row_version, &left.core, &left_meta)
-            .unwrap();
-
-        let mut right_meta = right.meta.clone();
-        right_meta.boundary_divergence_pending_count = 1;
-        let loser = store.commit(session, right.row_version, &right.core, &right_meta);
-        assert!(matches!(
-            loser,
-            Err(MemoryStoreError::CasConflict {
-                expected: Some(1),
-                found: 2
-            })
-        ));
-        assert_eq!(
-            store
-                .load(session)
-                .unwrap()
-                .meta
-                .boundary_divergence_pending_count,
-            1
-        );
-
-        drop(store);
-        let reopened = MemoryStore::open(&descriptor(dir.path())).unwrap();
-        assert_eq!(
-            reopened
-                .load(session)
-                .unwrap()
-                .meta
-                .boundary_divergence_pending_count,
-            1
-        );
     }
 
     #[test]
@@ -26102,6 +26092,31 @@ mod tests {
         let loaded = store.load_history_segments("ses").unwrap();
         assert_eq!(loaded[0].p1.as_deref(), Some("rewritten"));
         assert!(loaded[0].claims.is_empty(), "no claim outlives its p1");
+    }
+
+    /// A meta row a revision 2 daemon wrote still carries `boundary_divergence_pending_count`;
+    /// the retired field is ignored and the row loads.
+    #[test]
+    fn a_legacy_meta_row_with_the_retired_divergence_counter_loads() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
+        let meta = ModuleMeta {
+            coverage_ordinal: Some(3),
+            ..Default::default()
+        };
+        store
+            .commit("ses", None, &CoreState::empty(), &meta)
+            .unwrap();
+        let raw = rusqlite::Connection::open(dir.path().join("memory.sqlite")).unwrap();
+        raw.execute(
+            "UPDATE cache_state
+                SET meta = json_set(meta, '$.boundary_divergence_pending_count', 2)
+              WHERE session_id = 'ses'",
+            [],
+        )
+        .unwrap();
+        drop(raw);
+        assert_eq!(store.load("ses").unwrap().meta, meta);
     }
 
     #[test]

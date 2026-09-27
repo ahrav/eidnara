@@ -17,11 +17,7 @@ import {
     resolveTrustedContextLimit,
 } from "./event-resolvers";
 import { chargeInvocation } from "./invocation-budget";
-import {
-    MODULE_ORDINAL_PAGE_SIZE,
-    MODULE_PAGE_MAX_BYTES,
-    ORDINAL_ENTRY_RETAINED_BYTES,
-} from "./module-wire";
+import { MODULE_PAGE_MAX_BYTES } from "./module-wire";
 import { setRawMessageProvider } from "./read-session-chunk";
 import { closeReadOnlySessionDb } from "./read-session-db";
 import type { RawMessage } from "./read-session-raw";
@@ -83,7 +79,6 @@ function installRawRows(sessionId: string, rows: RawRow[]): void {
                             (row.timeCreated === after.timeCreated && row.id > after.id),
                     )
                     .slice(0, limit),
-            getStoredMessageCount: () => rows.length,
         }),
     );
 }
@@ -132,6 +127,7 @@ function recipeResponse(
 ): Record<string, unknown> {
     recipeOutputCounter += 1;
     return {
+        boundary: null,
         ...extra,
         base_revision: request.base_revision,
         output_revision: `out-${recipeOutputCounter}`,
@@ -155,20 +151,32 @@ type RecordedCall = {
     body: unknown;
     generationSensitive: boolean | undefined;
     signal?: AbortSignal;
+    timeoutMs?: number;
 };
 
+/**
+ * Records every call but discovery in `calls`; `transform.boundary` pages come from `pages`, an
+ * empty page by default, and are recorded in `discoveries`.
+ */
 function recordingClient(
     respond: (body: Record<string, unknown>, index: number) => unknown,
     respondDisposition?: (method: string, body: Record<string, unknown>) => unknown,
+    pages: (body: Record<string, unknown>, index: number) => unknown = () => ({ anchors: [] }),
 ): {
     client: RustModeModuleClient;
     bodies: Record<string, unknown>[];
     calls: RecordedCall[];
+    discoveries: RecordedCall[];
 } {
     const bodies: Record<string, unknown>[] = [];
     const calls: RecordedCall[] = [];
+    const discoveries: RecordedCall[] = [];
     const client: RustModeModuleClient = {
-        call: async ({ method, body, generationSensitive, signal }) => {
+        call: async ({ method, body, generationSensitive, signal, timeoutMs }) => {
+            if (method === "transform.boundary") {
+                discoveries.push({ method, body, generationSensitive, signal, timeoutMs });
+                return pages(body as Record<string, unknown>, discoveries.length - 1);
+            }
             calls.push({ method, body, generationSensitive, signal });
             if (method !== "transform") {
                 return (
@@ -182,7 +190,7 @@ function recordingClient(
             return respond(request, bodies.length - 1);
         },
     };
-    return { client, bodies, calls };
+    return { client, bodies, calls, discoveries };
 }
 
 function installAvailabilityDb(sessionId: string, firstUserTools?: Record<string, unknown>): void {
@@ -231,6 +239,7 @@ function sessionLogs(
 }
 
 const bodyDefaults = {
+    boundary: null,
     input: [] as unknown[],
     nativeMessages: [] as unknown[],
     passInputs: {},
@@ -290,7 +299,8 @@ describe("Rust mode transform request", () => {
         expect(body).toMatchObject({
             method: "transform",
             kind: "transform",
-            v: 2,
+            v: 3,
+            boundary: null,
             serializer_profile: "opencode-aisdk",
             serve_native: true,
             render_config: "provider:anthropic|model:anthropic/opus|system:abc",
@@ -310,6 +320,8 @@ describe("Rust mode transform request", () => {
             "detected_context_limit",
             "tail_delta",
             "full_array_fingerprint",
+            "declared_trim",
+            "absolute_ordinal",
         ]) {
             expect(absent in body).toBe(false);
         }
@@ -360,7 +372,7 @@ describe("Rust mode transform request", () => {
             expect(passLines[0]).toContain("emergency_wait=1234.5");
             expect(passLines[1]).toContain("emergency_wait=0.0");
             expect(passLines[0]).toMatch(
-                /reason=first_render .* stages=prefix_guard:[\d.]+ ordinal_resolve:[\d.]+ clone:[\d.]+ wire_build:[\d.]+ wire_messages:1 transport:[\d.]+ transport_pages:1 transport_bytes:\d+ apply:[\d.]+ other:[\d.]+$/,
+                /reason=first_render .* stages=prefix_guard:[\d.]+ clone:[\d.]+ wire_build:[\d.]+ wire_messages:1 transport:[\d.]+ transport_pages:1 transport_bytes:\d+ apply:[\d.]+ other:[\d.]+ work=scanned:\d+ charged:\d+ retained:\d+$/,
             );
             expect(passLines[1]).toContain("decision=SOFT+");
             expect(passLines[1]).toContain("served_from=cache");
@@ -519,7 +531,7 @@ describe("Rust mode transform request", () => {
         expect(bodies[0]?.todo_tool_present).toBe(false);
     });
 
-    it("seeds the eidnara_reduce verdict from the live message array before the first user row persists", async () => {
+    it("keeps the verdict provisional before the first user row persists, whatever the window's user says", async () => {
         const sessionId = `rust-eidnara-reduce-from-messages-${Date.now()}`;
         installAvailabilityDb(sessionId);
         installRawRows(sessionId, rawRows(1));
@@ -535,7 +547,7 @@ describe("Rust mode transform request", () => {
         await transform.run(sessionId, { messages: messages as unknown[] });
 
         expect(bodies).toHaveLength(1);
-        expect(bodies[0]?.tool_present).toBe(true);
+        expect(bodies[0]?.tool_present).toBe(false);
     });
 
     it("omits usage when the host holds no context-usage sample", async () => {
@@ -1081,41 +1093,6 @@ describe("Rust mode transform transport", () => {
         expect(deleteSession).toHaveBeenCalledWith(other, "/tmp/project");
     });
 
-    it("resets the ordinal memo on invalidation and leaves the retained output in place", async () => {
-        const sessionId = `rust-invalidate-ordinals-${Date.now()}`;
-        installRawRows(sessionId, rawRows(1));
-        const { client, bodies } = recordingClient((request) => recipeResponse(request, []));
-        const transform = createRustModeTransform(makeDeps(), {
-            moduleClient: client,
-        });
-        for (let pass = 0; pass < 2; pass += 1) {
-            const input = makeMessages(sessionId);
-            await transform.run(sessionId, { messages: [...input] });
-        }
-        const primed = transform.getState(sessionId).ordinals;
-        expect(primed.entries.size).toBe(1);
-        expect(primed.anchor).not.toBeNull();
-        const retainedRevision = bodies[1]?.previous_output_revision;
-        expect(retainedRevision).toBeDefined();
-
-        transform.invalidateOrdinals(sessionId);
-        const reset = transform.getState(sessionId).ordinals;
-        expect(reset.entries.size).toBe(0);
-        expect(reset.anchor).toBeNull();
-        expect(reset.storedCount).toBeNull();
-        expect(reset.canonicalCount).toBe(0);
-        const input = makeMessages(sessionId);
-        await transform.run(sessionId, { messages: [...input] });
-
-        // The retained output is not wire state that removal touches: the next pass still offers it.
-        expect(bodies[2]?.previous_output_revision).toBeDefined();
-        expect(bodies[2]?.previous_output_revision).not.toBe(retainedRevision);
-        expect(bodies[2]?.messages).toHaveLength(1);
-        expect(bodies[2]?.native_messages).toEqual(input);
-        expect(transform.getState(sessionId).ordinals.entries.size).toBe(1);
-        expect(transform.getState(sessionId).passCount).toBe(3);
-    });
-
     it("supersedes an older pass that finishes preflight after a newer pass starts", async () => {
         const sessionId = `rust-overlapping-preflight-${Date.now()}`;
         installRawRows(sessionId, rawRows(1));
@@ -1212,7 +1189,8 @@ describe("Rust mode transform transport", () => {
         const release = Promise.withResolvers<void>();
         const bodies: Record<string, unknown>[] = [];
         const client: RustModeModuleClient = {
-            call: async ({ body }) => {
+            call: async ({ method, body }) => {
+                if (method === "transform.boundary") return { anchors: [] };
                 const request = body as Record<string, unknown>;
                 bodies.push(request);
                 if (bodies.length === 2) {
@@ -1248,167 +1226,14 @@ describe("Rust mode transform transport", () => {
         expect(transform.getState(sessionId).passCount).toBe(1);
     });
 
-    it("re-primes persisted ordinals after the continuation base when the memo is reset", async () => {
-        const sessionId = `rust-continuation-reprime-${Date.now()}`;
-        installRawRows(sessionId, rawRows(2));
-        const { client, bodies } = recordingClient((request) =>
-            recipeResponse(request, [], { ordinal_continuation_base: 10 }),
-        );
-        const transform = createRustModeTransform(makeDeps(), {
-            moduleClient: client,
-        });
-        const ordinalsOf = (body: Record<string, unknown> | undefined): number[] => {
-            if (!body) throw new Error("missing recorded transform request");
-            return (body.messages as Array<{ ordinal: number }>).map((message) => message.ordinal);
-        };
-
-        const first = rowMessages(sessionId, rawRows(2));
-        await transform.run(sessionId, { messages: [...first] });
-        expect(ordinalsOf(bodies[0])).toEqual([1, 2]);
-        const shiftedMemo = transform.getState(sessionId).ordinals;
-        expect(shiftedMemo).toEqual({
-            generation: 0,
-            memoGeneration: 0,
-            entries: new Map([
-                ["m-1", 11],
-                ["m-2", 12],
-            ]),
-            anchor: { timeCreated: 2, id: "m-2" },
-            storedCount: 2,
-            canonicalCount: 12,
-            continuationBase: 10,
-        });
-
-        await transform.run(sessionId, { messages: [...first] });
-        expect(ordinalsOf(bodies[1])).toEqual([11, 12]);
-        expect(transform.getState(sessionId).ordinals).toEqual(shiftedMemo);
-
-        shiftedMemo.continuationBase = 100;
-        shiftedMemo.canonicalCount = 102;
-        shiftedMemo.entries.clear();
-        expect(transform.getState(sessionId).ordinals.continuationBase).toBe(10);
-        expect(transform.getState(sessionId).ordinals.canonicalCount).toBe(12);
-        expect(transform.getState(sessionId).ordinals.entries.get("m-2")).toBe(12);
-
-        transform.invalidateOrdinals(sessionId);
-        expect(transform.getState(sessionId).ordinals).toEqual({
-            generation: 0,
-            memoGeneration: 0,
-            entries: new Map(),
-            anchor: null,
-            storedCount: null,
-            canonicalCount: 0,
-            continuationBase: 10,
-        });
-        const second = rowMessages(sessionId, rawRows(2));
-        await transform.run(sessionId, { messages: [...second] });
-        expect(ordinalsOf(bodies[2])).toEqual([11, 12]);
-        expect(transform.getState(sessionId).ordinals.entries.get("m-1")).toBe(11);
-        expect(transform.getState(sessionId).consecutiveFailures).toBe(0);
-
-        transform.clearSession(sessionId);
-        expect(transform.getState(sessionId).ordinals).toEqual({
-            generation: 0,
-            memoGeneration: 0,
-            entries: new Map(),
-        });
-    });
-
-    it("discards a partly shifted ordinal memo before host publication when shifting throws", async () => {
-        const sessionId = "rust-continuation-shift-failure";
-        installRawRows(sessionId, rawRows(2));
-        const { client, calls } = recordingClient((request, index) => ({
-            ...recipeResponse(request, []),
-            ...(index > 0
-                ? {
-                      ordinal_continuation_base: 10,
-                      note_deliveries: [{ transform_pass_id: `shift-${index}` }],
-                  }
-                : {}),
-        }));
-        const transform = createRustModeTransform(makeDeps(), {
-            moduleClient: client,
-        });
-        const messages = rowMessages(sessionId, rawRows(2));
-        await transform.run(sessionId, { messages: [...messages] });
-        const priorMemo = transform.getState(sessionId).ordinals;
-        const output = { messages: [...messages] };
-        const array = output.messages;
-        const set = Map.prototype.set;
-        let shiftFailed = false;
-        const setSpy = spyOn(Map.prototype, "set").mockImplementation(function (
-            this: Map<unknown, unknown>,
-            key,
-            value,
-        ) {
-            if (key === "m-2" && value === 12) {
-                shiftFailed = true;
-                throw new Error("ordinal shift failed");
-            }
-            return set.call(this, key, value);
-        });
-        try {
-            await transform.run(sessionId, output);
-        } finally {
-            setSpy.mockRestore();
-        }
-        expect(shiftFailed).toBe(true);
-        // The failed pass republishes the first pass's empty output; nothing was appended since.
-        expect(output.messages).toBe(array);
-        expect(output.messages).toHaveLength(0);
-        expect(transform.getState(sessionId).ordinals).toEqual(priorMemo);
-        expect(calls.map((call) => call.method)).toEqual([
-            "transform",
-            "transform",
-            "transform.nack",
-        ]);
-        expect(calls[2]?.body).toMatchObject({ transform_pass_id: "shift-1" });
-        const retry = { messages: [...messages] };
-        await transform.run(sessionId, retry);
-        expect(retry.messages).toHaveLength(0);
-        expect(transform.getState(sessionId).ordinals.entries).toEqual(
-            new Map([
-                ["m-1", 11],
-                ["m-2", 12],
-            ]),
-        );
-        expect(calls.at(-1)?.method).toBe("transform.ack");
-        expect(calls.at(-1)?.body).toMatchObject({ transform_pass_id: "shift-2" });
-    });
-
-    it("rejects ordinal continuation overflow before publication and recovers on a valid response", async () => {
-        const sessionId = "rust-continuation-overflow";
-        installRawRows(sessionId, rawRows(1));
-        const { client, calls } = recordingClient((request, index) => ({
-            ...recipeResponse(request, []),
-            ordinal_continuation_base: index === 0 ? Number.MAX_SAFE_INTEGER : 10,
-            note_deliveries: [{ transform_pass_id: `overflow-${index}` }],
-        }));
-        const transform = createRustModeTransform(makeDeps(), {
-            moduleClient: client,
-        });
-        const input = makeMessages(sessionId);
-        const output = { messages: [...input] as unknown[] };
-        const array = output.messages;
-        await transform.run(sessionId, output);
-        expect(output.messages).toBe(array);
-        expect(output.messages[0]).toBe(input[0]);
-        expect(transform.getState(sessionId).ordinals.entries.size).toBe(0);
-        expect(transform.getState(sessionId).failureCount).toBe(1);
-        expect(calls.map((call) => call.method)).toEqual(["transform", "transform.nack"]);
-        await transform.run(sessionId, output);
-        expect(output.messages).toHaveLength(0);
-        expect(transform.getState(sessionId).ordinals.entries.get("m-1")).toBe(11);
-        expect(calls.at(-1)?.method).toBe("transform.ack");
-    });
-
     it("evicts the least recently retained session's output and offers it no previous source", async () => {
         const capacity = __rustModeTransformTest.RETAINED_OUTPUT_SESSION_CAPACITY;
         const stamp = Date.now();
         const sessionIdAt = (index: number): string => `rust-retained-output-lru-${stamp}-${index}`;
         const bodiesBySession = new Map<string, Record<string, unknown>[]>();
         const client: RustModeModuleClient = {
-            call: async ({ sessionId, body }) => {
+            call: async ({ method, sessionId, body }) => {
+                if (method === "transform.boundary") return { anchors: [] };
                 const request = body as Record<string, unknown>;
                 const list = bodiesBySession.get(sessionId) ?? [];
                 list.push(request);
@@ -1447,7 +1272,8 @@ describe("Rust mode transform transport", () => {
         let failNext = false;
         const bodiesBySession = new Map<string, Record<string, unknown>[]>();
         const client: RustModeModuleClient = {
-            call: async ({ sessionId, body }) => {
+            call: async ({ method, sessionId, body }) => {
+                if (method === "transform.boundary") return { anchors: [] };
                 const request = body as Record<string, unknown>;
                 const list = bodiesBySession.get(sessionId) ?? [];
                 list.push(request);
@@ -1503,7 +1329,8 @@ describe("Rust mode transform transport", () => {
             const bodiesBySession = new Map<string, Record<string, unknown>[]>();
             let heldSignal: AbortSignal | undefined;
             const client: RustModeModuleClient = {
-                call: async ({ sessionId, body, signal }) => {
+                call: async ({ method, sessionId, body, signal }) => {
+                    if (method === "transform.boundary") return { anchors: [] };
                     const request = body as Record<string, unknown>;
                     const list = bodiesBySession.get(sessionId) ?? [];
                     list.push(request);
@@ -2302,68 +2129,10 @@ describe("whole-array sends after host mutation", () => {
 });
 
 describe("bounded transform ownership", () => {
-    it("rejects a getter installed after ordinal resolution before encoding", async () => {
-        const sessionId = "rust-ordinal-microtask-initial";
-        installAvailabilityDb(sessionId, {});
-        const rows = rawRows(1);
-        const messages = makeMessages(sessionId);
-        let armed = true;
-        let installed = false;
-        let getterCalls = 0;
-        const getter = () => {
-            getterCalls += 1;
-            return "changed after ordinal validation";
-        };
-        unregisters.push(
-            setRawMessageProvider(sessionId, {
-                readMessages: () => rows as unknown as RawMessage[],
-                readMessageOrdinalPage: (after, limit) =>
-                    rows
-                        .filter((row) => !after || row.timeCreated > after.timeCreated)
-                        .slice(0, limit),
-                getStoredMessageCount: () => {
-                    if (armed) {
-                        armed = false;
-                        // The scan and prime continuations run first; the third microtask follows annotation but precedes the caller's encoding.
-                        queueMicrotask(() =>
-                            queueMicrotask(() =>
-                                queueMicrotask(() => {
-                                    installed = true;
-                                    Object.defineProperty(messages[0]!.parts[0], "text", {
-                                        get: getter,
-                                        enumerable: true,
-                                        configurable: true,
-                                    });
-                                }),
-                            ),
-                        );
-                    }
-                    return rows.length;
-                },
-            }),
-        );
-        const { client, bodies, calls } = recordingClient((request) =>
-            recipeResponse(request, request.native_messages as unknown[]),
-        );
-        const transform = createRustModeTransform(makeDeps(), {
-            moduleClient: client,
-        });
-        const memoBefore = transform.getState(sessionId).ordinals;
-        const output = { messages: messages as unknown[] };
-        await transform.run(sessionId, output);
-        expect(installed).toBe(true);
-        expect(getterCalls).toBe(0);
-        expect(bodies).toHaveLength(0);
-        expect(output.messages).toBe(messages);
-        expect(transform.getState(sessionId).ordinals).toEqual(memoBefore);
-        expect(calls.some((call) => call.method === "transform.ack")).toBe(false);
-        expect(defaultTransformCaptureAdmission.chargedBytes).toBe(0);
-    });
-
     it.each([
         "x",
         "\u001f",
-    ])("budgets escaped wire text before preflight for %j", async (character) => {
+    ])("budgets escaped wire text before any transform dispatch for %j", async (character) => {
         const sessionId = `rust-escaped-wire-${character.charCodeAt(0)}`;
         installAvailabilityDb(sessionId, {});
         installRawRows(sessionId, rawRows(1));
@@ -2385,7 +2154,8 @@ describe("bounded transform ownership", () => {
         const output = { messages: messages as unknown[] };
         try {
             await transform.run(sessionId, output);
-            expect(directoryRead.mock.calls.length > 0).toBe(character === "x");
+            // The directory names the discovery route, so it is read before the window is captured.
+            expect(directoryRead.mock.calls.length > 0).toBe(true);
             expect(bodies.length > 0).toBe(character === "x");
             expect(transform.getState(sessionId).initialized).toBe(character === "x");
             if (character !== "x") expect(output.messages).toEqual(messages);
@@ -2451,7 +2221,7 @@ describe("bounded transform ownership", () => {
         expect(admission.chargedBytes).toBe(0);
     });
 
-    for (const fault of ["mutation", "accessor", "invalidation"] as const) {
+    for (const fault of ["mutation", "accessor"] as const) {
         it.each([
             "reconnect",
             "attempt-mismatch",
@@ -2503,7 +2273,6 @@ describe("bounded transform ownership", () => {
                     enumerable: true,
                     configurable: true,
                 });
-            else transform.invalidateOrdinals(sessionId);
             reconnect.resolve(
                 restart === "reconnect"
                     ? {
@@ -2591,7 +2360,7 @@ describe("bounded transform ownership", () => {
                     expect(sessionLogs(logSpy, sessionId)).toContain(
                         `rust session ${sessionId} pass declined: capture_bytes (transform capture byte budget exceeded: recipe output array)`,
                     );
-                    expect(transform.getState(sessionId).ordinals.entries.size).toBe(0);
+                    expect(transform.getState(sessionId).boundary).toBeUndefined();
                 }
                 expect(calls.at(-1)?.body).toMatchObject({
                     transform_pass_id: "candidate",
@@ -2604,14 +2373,15 @@ describe("bounded transform ownership", () => {
         });
     }
 
-    for (const cancellation of ["supersede", "clear", "invalidate"] as const) {
+    for (const cancellation of ["supersede", "clear"] as const) {
         it(`propagates ${cancellation} to the transport signal and waits for rejection before release`, async () => {
             const sessionId = `rust-signal-${cancellation}`;
             installRawRows(sessionId, rawRows(1));
             const started = Promise.withResolvers<AbortSignal>();
             const admission = new TransformCaptureAdmission();
             const client: RustModeModuleClient = {
-                call: ({ signal }) => {
+                call: ({ method, signal }) => {
+                    if (method === "transform.boundary") return Promise.resolve({ anchors: [] });
                     if (!signal) throw new Error("missing capture signal");
                     started.resolve(signal);
                     return new Promise((_resolve, reject) => {
@@ -2639,7 +2409,6 @@ describe("bounded transform ownership", () => {
             expect(admission.chargedBytes).toBeGreaterThan(0);
             let superseding: Promise<void> | undefined;
             if (cancellation === "clear") transform.clearSession(sessionId);
-            else if (cancellation === "invalidate") transform.invalidateOrdinals(sessionId);
             else superseding = transform.run(sessionId, output);
             expect(signal.aborted).toBe(true);
             expect(admission.activePasses).toBe(1);
@@ -2653,65 +2422,6 @@ describe("bounded transform ownership", () => {
             expect(transform.getState(sessionId).failureCount).toBe(0);
         });
     }
-
-    it("charges every existing ordinal entry and ID before copying a warm memo", async () => {
-        const sessionId = "rust-warm-memo-budget";
-        const rows = rawRows(2);
-        rows[1].id = "persisted-only-".repeat(400);
-        installRawRows(sessionId, rows);
-        const admission = new TransformCaptureAdmission({
-            maxPasses: 64,
-            maxBytes: 1024 * 1024,
-        });
-        const { client, bodies } = recordingClient((request) => recipeResponse(request, []));
-        const transform = createRustModeTransform(makeDeps(), {
-            moduleClient: client,
-            captureAdmission: admission,
-        });
-        const messages = makeMessages(sessionId);
-        await transform.run(sessionId, { messages: [...messages] });
-        expect(bodies).toHaveLength(1);
-        const priorMemo = transform.getState(sessionId).ordinals;
-        expect(priorMemo.entries.size).toBe(2);
-        const inspection = inspectReferenceableMessages(messages);
-        if (!inspection.ok) throw new Error("invalid budget fixture");
-        const memoBytes = rows.reduce(
-            (sum, row) => sum + ORDINAL_ENTRY_RETAINED_BYTES + row.id.length * 2,
-            0,
-        );
-        const blocker = admission.admit("rust-warm-memo-budget-blocker");
-        if (!("lease" in blocker)) throw new Error("blocker admission failed");
-        const logSpy = spyOn(logger.sessionLog, "warn");
-        try {
-            expect(
-                blocker.lease.reserve(
-                    admission.remainingBytes - inspection.estimatedBytes - memoBytes + 1,
-                ),
-            ).toBe(true);
-            const output = { messages: [...messages] };
-            const array = output.messages;
-            await transform.run(sessionId, output);
-            expect(sessionLogs(logSpy, sessionId)).toContain(
-                `rust session ${sessionId} pass declined: capture_bytes (transform capture byte budget exceeded: ordinal memo copy)`,
-            );
-            expect(bodies).toHaveLength(1);
-            // The declined pass republishes the first pass's empty output; nothing was appended since.
-            expect(output.messages).toBe(array);
-            expect(output.messages).toHaveLength(0);
-            expect(transform.getState(sessionId).ordinals).toEqual(priorMemo);
-            expect(transform.getState(sessionId).failureCount).toBe(0);
-            expect(admission.activePasses).toBe(1);
-            expect(admission.chargedBytes).toBe(blocker.lease.chargedBytes);
-        } finally {
-            blocker.lease.release();
-            logSpy.mockRestore();
-        }
-        expect(admission.chargedBytes).toBe(0);
-        await transform.run(sessionId, { messages: [...messages] });
-        expect(bodies).toHaveLength(2);
-        expect(bodies[1]?.previous_output_revision).toBeDefined();
-        expect(transform.getState(sessionId).ordinals).toEqual(priorMemo);
-    });
 
     it("reuses the input lengths of the verified prefix without measuring it again", async () => {
         const sessionId = "rust-verified-input-lengths";
@@ -2762,93 +2472,6 @@ describe("bounded transform ownership", () => {
     };
 
     for (const sharedArray of [true, false]) {
-        for (const fault of ["mutation", "supersession", "clear", "invalidation"] as const) {
-            it(`rejects ${fault} at the persisted ordinal yield with ${sharedArray ? "shared" : "distinct"} arrays`, async () => {
-                const sessionId = `rust-scan-${fault}-${sharedArray}`;
-                const rows = rawRows(MODULE_ORDINAL_PAGE_SIZE + 1);
-                const pageRead = Promise.withResolvers<void>();
-                const pageSizes: number[] = [];
-                unregisters.push(
-                    setRawMessageProvider(sessionId, {
-                        readMessages: () => {
-                            throw new Error("must use ordinal pages");
-                        },
-                        readMessageOrdinalPage: (after, limit) => {
-                            const start = after?.timeCreated ?? 0;
-                            const page = rows.slice(start, start + limit);
-                            pageSizes.push(page.length);
-                            if (start === 0) pageRead.resolve();
-                            return page;
-                        },
-                        getStoredMessageCount: () => rows.length,
-                    }),
-                );
-                const admission = new TransformCaptureAdmission();
-                const { client, calls, bodies } = recordingClient((request) =>
-                    recipeResponse(request, request.native_messages as unknown[]),
-                );
-                const transform = createRustModeTransform(makeDeps(), {
-                    moduleClient: client,
-                    captureAdmission: admission,
-                });
-                const messages = rowMessages(sessionId, rows.slice(-1));
-                const member = messages[0];
-                const output = { messages: sharedArray ? messages : [...messages] };
-                const array = output.messages;
-                const pass = transform.run(sessionId, output);
-                await Promise.race([pageRead.promise, pass]);
-                expect(pageSizes).toEqual([MODULE_ORDINAL_PAGE_SIZE]);
-                expect(calls).toHaveLength(0);
-                expect(transform.getState(sessionId).ordinals.entries.size).toBe(0);
-                const heldBytes = admission.chargedBytes;
-                expect(heldBytes).toBeGreaterThan(
-                    MODULE_ORDINAL_PAGE_SIZE * ORDINAL_ENTRY_RETAINED_BYTES,
-                );
-                switch (fault) {
-                    case "mutation":
-                        (member.parts[0] as { text: string }).text = "edited at scan yield";
-                        break;
-                    case "supersession": {
-                        const newerMessages = rowMessages(sessionId, rows.slice(-1));
-                        const newerOutput = { messages: [...newerMessages] };
-                        const newerArray = newerOutput.messages;
-                        await transform.run(sessionId, newerOutput);
-                        expect(newerOutput.messages).toBe(newerArray);
-                        expect(newerOutput.messages[0]).toBe(newerMessages[0]);
-                        break;
-                    }
-                    case "clear":
-                        transform.clearSession(sessionId);
-                        break;
-                    case "invalidation":
-                        transform.invalidateOrdinals(sessionId);
-                        break;
-                }
-                expect(admission.activePasses).toBe(1);
-                expect(admission.chargedBytes).toBe(heldBytes);
-                await pass;
-                expect(pageSizes).toEqual(
-                    fault === "mutation"
-                        ? [MODULE_ORDINAL_PAGE_SIZE, 1]
-                        : [MODULE_ORDINAL_PAGE_SIZE],
-                );
-                expect(calls).toHaveLength(0);
-                expect(output.messages).toBe(array);
-                expect(output.messages).toHaveLength(1);
-                expect(output.messages[0]).toBe(member);
-                expect(transform.getState(sessionId).ordinals.entries.size).toBe(0);
-                expect(transform.getState(sessionId).initialized).toBe(false);
-                expect(transform.getState(sessionId).failureCount).toBe(0);
-                expect(admission.activePasses).toBe(0);
-                expect(admission.chargedBytes).toBe(0);
-                const recoveryInput = rowMessages(sessionId, rows.slice(-1));
-                await transform.run(sessionId, { messages: [...recoveryInput] });
-                expect(calls).toHaveLength(1);
-                expect(bodies[0]?.native_messages).toEqual(recoveryInput);
-                expect(transform.getState(sessionId).ordinals.entries.size).toBe(rows.length);
-            });
-        }
-
         for (const change of ["member", "append", "rebind", "metadata"] as const) {
             it(`preserves a host ${change} during transport with ${sharedArray ? "shared" : "distinct"} source`, async () => {
                 const sessionId = `rust-host-${change}-${sharedArray}`;
@@ -2882,15 +2505,23 @@ describe("bounded transform ownership", () => {
                 );
                 await pass;
                 expect(output.messages).toBe(currentArray);
-                expect(output.messages).toHaveLength(change === "append" ? 2 : 1);
-                expect(output.messages.at(-1)).toBe(change === "metadata" ? original : current);
-                if (change === "metadata")
+                if (change === "metadata") {
+                    // A root property outside the window is not captured state: the pass publishes around it.
+                    expect(output.messages).toHaveLength(0);
                     expect(output.messages).toHaveProperty("bookkeeping", "host edit");
+                    expect(calls.map((call) => call.method)).toEqual([
+                        "transform",
+                        "transform.ack",
+                    ]);
+                    return;
+                }
+                expect(output.messages).toHaveLength(change === "append" ? 2 : 1);
+                expect(output.messages.at(-1)).toBe(current);
                 if (change === "append") expect(output.messages[0]).toBe(original);
                 if (change === "rebind") expect(originalArray[0]).toBe(original);
                 if (!sharedArray) expect(messages[0]).toBe(original);
                 expect(calls.map((call) => call.method)).toEqual(["transform", "transform.nack"]);
-                expect(transform.getState(sessionId).ordinals.entries.size).toBe(0);
+                expect(transform.getState(sessionId).boundary).toBeUndefined();
                 expect(transform.getState(sessionId).failureCount).toBe(0);
             });
         }
@@ -2953,6 +2584,8 @@ describe("bounded transform ownership", () => {
                 const logSpy = spyOn(logger.sessionLog, "debug");
                 const client: RustModeModuleClient = {
                     call: ({ method, body }) => {
+                        if (method === "transform.boundary")
+                            return Promise.resolve({ anchors: [] });
                         methods.push(method);
                         if (method !== "transform") return Promise.resolve({ ok: true });
                         if (window === "pre-apply")
@@ -2993,7 +2626,7 @@ describe("bounded transform ownership", () => {
                         window === "source-await" ? [] : ["transform", "transform.nack"],
                     );
                     if (window === "pre-apply") expect(transportProcessedBeforeInstall).toBe(true);
-                    expect(transform.getState(sessionId).ordinals.entries.size).toBe(0);
+                    expect(transform.getState(sessionId).boundary).toBeUndefined();
                     expect(transform.getState(sessionId).failureCount).toBe(0);
                 } finally {
                     directory.resolve({ data: { directory: "/tmp/project" } });
@@ -3040,7 +2673,7 @@ describe("bounded transform ownership", () => {
                 .filter((call) => call.method === "transform.nack")
                 .map((call) => (call.body as { transform_pass_id: string }).transform_pass_id),
         ).toEqual(delivered);
-        expect(transform.getState(sessionId).ordinals.entries.size).toBe(0);
+        expect(transform.getState(sessionId).boundary).toBeUndefined();
         expect(transform.getState(sessionId).failureCount).toBe(0);
     });
 
@@ -3162,46 +2795,7 @@ describe("bounded transform ownership", () => {
         expect(member.parts[0]).toMatchObject({ text: "edited during transport" });
         expect(calls.map((call) => call.method)).toEqual(["transform", "transform.nack"]);
         expect(transform.getState(sessionId).failureCount).toBe(0);
-        expect(transform.getState(sessionId).ordinals.entries.size).toBe(0);
-    });
-
-    it("rejects publication and promotes no memo when the ordinals are invalidated mid-flight", async () => {
-        const sessionId = `rust-invalidate-mid-flight-${Date.now()}`;
-        installRawRows(sessionId, rawRows(1));
-        const started = Promise.withResolvers<void>();
-        const response = Promise.withResolvers<unknown>();
-        const { client, bodies, calls } = recordingClient(() => {
-            started.resolve();
-            return response.promise;
-        });
-        const transform = createRustModeTransform(makeDeps(), {
-            moduleClient: client,
-        });
-        const messages = makeMessages(sessionId);
-        const output = { messages: [...messages] as unknown[] };
-        const array = output.messages;
-        const member = messages[0];
-        const pass = transform.run(sessionId, output);
-        await Promise.race([
-            started.promise,
-            pass.then(() => {
-                throw new Error("transport not reached");
-            }),
-        ]);
-        expect(calls).toHaveLength(1);
-        transform.invalidateOrdinals(sessionId);
-        response.resolve(
-            recipeForLast(bodies, [{ info: { id: "stale" }, parts: [] }], {
-                note_deliveries: [{ transform_pass_id: "pass-stale" }],
-            }),
-        );
-        await pass;
-        expect(output.messages).toBe(array);
-        expect(output.messages).toHaveLength(1);
-        expect(output.messages[0]).toBe(member);
-        expect(calls.map((call) => call.method)).toEqual(["transform", "transform.nack"]);
-        expect(transform.getState(sessionId).ordinals.entries.size).toBe(0);
-        expect(transform.getState(sessionId).failureCount).toBe(0);
+        expect(transform.getState(sessionId).boundary).toBeUndefined();
     });
 
     it("stops an in-flight pass when the session is cleared and keeps the host array intact", async () => {
@@ -3297,16 +2891,11 @@ describe("bounded transform ownership", () => {
         const largeInspection = inspectReferenceableMessages(largeMessages);
         const smallInspection = inspectReferenceableMessages(smallMessages);
         if (!largeInspection.ok || !smallInspection.ok) throw new Error("invalid budget fixture");
-        // Capture walk, wire projection, the two memo copies, and one retained length slot per message.
+        // Capture walk, wire projection, and one window slot plus one retained length slot per message.
         const heldCharge =
             largeInspection.estimatedBytes +
             largeInspection.messageWireBytes.reduce((sum, bytes) => sum + 4 * bytes, 0) +
-            largeMessages.length * ORDINAL_ENTRY_RETAINED_BYTES * 2 +
-            rows.reduce(
-                (sum, row) => sum + 2 * ORDINAL_ENTRY_RETAINED_BYTES + row.id.length * 2,
-                0,
-            ) +
-            largeMessages.length * 8;
+            largeMessages.length * 16;
         const maxBytes = heldCharge + smallInspection.estimatedBytes - 1;
         const admission = new TransformCaptureAdmission({
             maxPasses: 64,
@@ -3436,7 +3025,7 @@ describe("bounded transform ownership", () => {
         expect(admission.chargedBytes).toBe(0);
         expect(admission.remainingBytes).toBe(64 * 1024 * 1024);
         expect(transform.getState(sessionId).initialized).toBe(true);
-        expect(transform.getState(sessionId).ordinals.entries.get("m-1")).toBe(1);
+        expect(transform.getState(sessionId).boundary).toBeNull();
         expect(calls.map((call) => call.method)).toEqual(["transform", "transform.ack"]);
         expect(calls[1]?.body).toMatchObject({ transform_pass_id: "pass-first" });
         const secondInput = rowMessages(sessionId, rawRows(2));
@@ -3510,7 +3099,7 @@ describe("bounded transform ownership", () => {
             expect(admission.activePasses).toBe(0);
             expect(admission.chargedBytes).toBe(0);
             expect(admission.remainingBytes).toBe(64 * 1024 * 1024);
-            expect(transform.getState(sessionId).ordinals.entries.size).toBe(0);
+            expect(transform.getState(sessionId).boundary).toBeUndefined();
             expect(transform.getState(sessionId).initialized).toBe(false);
             const next = makeMessages(sessionId);
             await transform.run(sessionId, { messages: [...next] });
@@ -3590,7 +3179,7 @@ describe("bounded transform ownership", () => {
             expect(calls.map((call) => call.method)).toEqual(["transform", "transform.nack"]);
             expect(firstOutput.messages).toBe(firstArray);
             expect(firstOutput.messages[0]).toBe(input[0]);
-            expect(firstFactory.getState(sessionId).ordinals.entries.size).toBe(0);
+            expect(firstFactory.getState(sessionId).boundary).toBeUndefined();
             expect(defaultTransformCaptureAdmission.activePasses).toBe(0);
             expect(defaultTransformCaptureAdmission.chargedBytes).toBe(0);
             await secondFactory.run(sessionId, secondOutput);
@@ -3635,7 +3224,8 @@ describe("bounded transform ownership", () => {
         expect(secondOutput.messages).toBe(array);
         expect(secondOutput.messages[0]).toBe(returned[0]);
         expect(secondOutput.messages[1]).toBe(returned[1]);
-        expect(transform.getState(sessionId).ordinals.entries.size).toBe(2);
+        // The second response names no boundary, so the next pass rediscovers it.
+        expect(transform.getState(sessionId).boundary).toBeUndefined();
     });
 
     it("leaves exactly a shorter candidate in the original array object", async () => {
@@ -3672,7 +3262,6 @@ describe("bounded transform ownership", () => {
         const k = 3;
         Object.defineProperty(array, k, { value: members[k], configurable: false });
         expect(candidate.length).toBeLessThanOrEqual(k);
-        const memoBefore = transform.getState(sessionId).ordinals;
         const warnSpy = spyOn(logger.sessionLog, "warn");
         let warnings: string[];
         try {
@@ -3691,13 +3280,13 @@ describe("bounded transform ownership", () => {
         expect(warnings).toEqual([
             expect.stringMatching(
                 new RegExp(
-                    `^rust session ${sessionId} pass declined: publication_failed \\(shrink to 1 stopped at length ${k + 1} \\(TypeError: .*\\); restored 2 captured references\\)$`,
+                    `^rust session ${sessionId} pass declined: publication_failed \\(shrink to 1 stopped at length ${k + 1} \\(TypeError: .*\\); restored 2 captured window references\\)$`,
                 ),
             ),
         ]);
-        // Nothing was promoted: no memo, no retained output, and the delivery is refused.
+        // Nothing was promoted: no boundary, no retained output, and the delivery is refused.
         const state = transform.getState(sessionId);
-        expect(state.ordinals).toEqual(memoBefore);
+        expect(state.boundary).toBeUndefined();
         expect(state.initialized).toBe(false);
         expect(state.failureCount).toBe(0);
         expect(calls.map((call) => call.method)).toEqual(["transform", "transform.nack"]);
@@ -3877,43 +3466,6 @@ describe("fail-open after an applied pass", () => {
         expect(transform.getState(sessionId).failureCount).toBe(1);
     });
 
-    it("serves the input unchanged when the applied output grew over its source prefix", async () => {
-        const sessionId = `rust-fail-open-grown-${Date.now()}`;
-        const rows = rawRows(5);
-        installRawRows(sessionId, rows);
-        const memory: MessageLike = {
-            info: { id: "memory-1", role: "user", sessionID: sessionId },
-            parts: [{ type: "text", text: "remembered context ".repeat(64) }],
-        };
-        const acknowledged = rowMessages(sessionId, rows.slice(0, 3));
-        const { client } = recordingClient((request, index) => {
-            if (index > 0) throw new Error("request deadline expired after a possible send");
-            // A compaction-off answer that has not folded yet adds memory ahead of the history.
-            return recipeResponse(request, [memory, ...acknowledged]);
-        });
-        const transform = createRustModeTransform(makeDeps(), { moduleClient: client });
-        const debugSpy = spyOn(logger.sessionLog, "debug");
-        try {
-            const first = { messages: [...acknowledged] as unknown[] };
-            await transform.run(sessionId, first);
-            expect(first.messages).toHaveLength(4);
-
-            const grown = rowMessages(sessionId, rows);
-            const output = { messages: [...grown] as unknown[] };
-            await transform.run(sessionId, output);
-            expect(output.messages).toEqual(grown);
-            expect(output.messages[0]).toBe(grown[0]);
-            expect(transform.getState(sessionId).failureCount).toBe(1);
-
-            const passLines = sessionLogs(debugSpy, sessionId).filter((line) =>
-                line.startsWith("rust pass:"),
-            );
-            expect(passLines[1]).toContain("served_from=raw in=5 out=5");
-        } finally {
-            debugSpy.mockRestore();
-        }
-    });
-
     it("keeps a tool call and its result together at the boundary", async () => {
         const sessionId = `rust-fail-open-tool-${Date.now()}`;
         const rows = rawRows(4);
@@ -3991,7 +3543,7 @@ describe("capture verified against the retained prefix", () => {
     /** Each pass's count of leading members its capture verified against the retained digest. */
     function verifiedCounts(spy: Parameters<typeof sessionLogs>[0], sessionId: string): number[] {
         return sessionLogs(spy, sessionId).flatMap((line) => {
-            const match = /phase=capture verified=(\d+)$/.exec(line);
+            const match = /phase=capture boundary_index=\d+ verified=(\d+)$/.exec(line);
             return match ? [Number(match[1])] : [];
         });
     }
@@ -4011,7 +3563,7 @@ describe("capture verified against the retained prefix", () => {
             await transform.run(sessionId, { messages: [...history] });
 
             // The same object, edited in place, must not verify against its retained digest.
-            (history[1]?.parts as Array<{ text: string }>)[0].text = "EDITED m-2";
+            (history[1] as { parts: Array<{ text: string }> }).parts[0].text = "EDITED m-2";
             const grown = [...history, ...rowMessages(sessionId, rows.slice(4))];
             await transform.run(sessionId, { messages: [...grown] });
             expect(bodies).toHaveLength(3);
@@ -4029,7 +3581,8 @@ describe("capture verified against the retained prefix", () => {
         installRawRows(sessionId, rows);
         const history = rowMessages(sessionId, rows);
         const { client, bodies } = recordingClient((request, index) => {
-            if (index === 1) (history[0]?.parts as Array<{ text: string }>)[0].text = "EDITED";
+            if (index === 1)
+                (history[0] as { parts: Array<{ text: string }> }).parts[0].text = "EDITED";
             return recipeResponse(request, [folded(sessionId)]);
         });
         const transform = createRustModeTransform(makeDeps(), { moduleClient: client });
@@ -4238,14 +3791,14 @@ describe("capture verified against the retained prefix", () => {
         );
         await transform.run(sessionId, { messages: [...history] });
 
-        (history[1]?.parts as Array<{ text: string }>)[0].text = "EDITED m-2";
+        (history[1] as { parts: Array<{ text: string }> }).parts[0].text = "EDITED m-2";
         const grown = [...history, ...rowMessages(sessionId, rows.slice(4))];
         await transform.run(sessionId, { messages: [...grown] });
         expect(bodies[1]?.native_messages).toEqual(grown);
         const full = inspectReferenceableMessages(grown);
         if (!full.ok) throw new Error("valid source rejected");
-        // The first two reservations are the partial inspection and its full fallback.
-        const [partial, fallback] = reservations[1] as [number, number];
+        // After the window slots, the next two reservations are the partial inspection and its full fallback.
+        const [, partial, fallback] = reservations[1] as [number, number, number];
         expect(partial).toBeLessThan(full.estimatedBytes);
         expect(partial + fallback).toBe(full.estimatedBytes);
     });

@@ -46,7 +46,7 @@ const CONNECT_BACKOFF_INITIAL_MS = 1_000;
 const CONNECT_BACKOFF_MAX_MS = 30_000;
 const HANDSHAKE_TIMEOUT_MS = 2_000;
 const MODULE_SEND_TIMEOUT_MS = 15_000;
-const TRANSFORM_SEND_TIMEOUT_MS = 5_000;
+export const TRANSFORM_SEND_TIMEOUT_MS = 5_000;
 /** Consumers use this deadline for the module's exported `history_summarizer::MAX_WRAPUP_REQUEST_BUDGET`. */
 export const MAX_WRAPUP_REQUEST_BUDGET_MS = 3_800_000;
 const SERIAL_LANE_MAX_WAITERS = 16;
@@ -738,9 +738,9 @@ export class HostModuleTransport {
             );
         }
         const wrapupInFlight = (this.wrapupSessions.get(args.sessionId) ?? 0) > 0;
-        // The transform cap is a hard ceiling: a caller-supplied `timeoutMs` shortens it but never lifts it, because the transform runs on the prompt path and its send must settle within one bounded budget.
+        // The transform deadline class, which `transform.boundary` discovery shares, is a hard ceiling: a caller-supplied `timeoutMs` shortens it but never lifts it, because both run on the prompt path and must settle within one bounded budget.
         const operationTimeoutMs =
-            args.method === "transform"
+            args.method === "transform" || args.method === "transform.boundary"
                 ? Math.min(args.timeoutMs ?? this.requestTimeoutMs, TRANSFORM_SEND_TIMEOUT_MS)
                 : (args.timeoutMs ??
                   (args.method === "session.wrapup" ||

@@ -534,7 +534,6 @@ describe("logger", () => {
             const unregister = setRawMessageProvider(sessionId, {
                 readMessages: () => [row],
                 readMessageOrdinalPage: after => after ? [] : [row],
-                getStoredMessageCount: () => 1,
             });
             const results = [];
             try {
@@ -550,7 +549,8 @@ describe("logger", () => {
                         contextUsageMap, clearReasoningAge: 50, cacheTtl: "5m", compactionOff: true,
                         directory: process.env.LOGGER_SCENARIO_ROOT, sessionDirectoryBySession: new Map(),
                         isSubagentSession: () => false, systemPromptHashFor: () => "",
-                    }, { moduleClient: { call: async ({ body }) => {
+                    }, { moduleClient: { call: async ({ method, body }) => {
+                        if (method === "transform.boundary") return { anchors: [] };
                         calls++;
                         if (fail) throw new Error("provider\\nfailed\\u0007");
                         return {
