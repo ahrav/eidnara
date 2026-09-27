@@ -1415,7 +1415,9 @@ merge are Rust; living the world through the harness is TypeScript.
    - `--summarizer-dump <file>` has the fixture append every summarizer
      request (`{"system", "prompt"}`, one JSON line each) to that file through
      `EIDNARA_FIXTURE_SUMMARIZER_DUMP`, so gate B reads the daemon's own chunk
-     prompts for the world gate A lived.
+     prompts for the world gate A lived. A line the fixture cannot write
+     fails that summarizer call as a typed backend error, so a dump never
+     covers less than the run it records.
    - Without a summarizer model, the fixture's scripted summarizer writes each
      segment's `p1` and `p2` as the presented lines' own words and `p3` as the
      range, so a segment that decays past P2 serves no prose. At 120 subjects

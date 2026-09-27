@@ -451,6 +451,28 @@ fn the_fixture_answers_a_summarizer_prompt_through_the_named_command_and_dumps_i
     assert_eq!(fixture.counters(5)["failed"], 1);
     fixture.shutdown();
 
+    // A dump that cannot be written fails the call, typed, rather than
+    // leaving gate B a file that does not cover the run.
+    let root = tempfile::tempdir().unwrap();
+    let fixture = Launch::at(root.path().to_path_buf())
+        .env("EIDNARA_FIXTURE_SUMMARIZER_COMMAND", &answering)
+        .env(
+            "EIDNARA_FIXTURE_SUMMARIZER_DUMP",
+            &dir.path()
+                .join("missing")
+                .join("dump.jsonl")
+                .display()
+                .to_string(),
+        )
+        .start();
+    let items = runtime.block_on(run(&fixture, "undumpable", &prompt));
+    assert_ne!(
+        unit_types(&items),
+        ["run_started", "assistant_message", "run_finished"]
+    );
+    assert_eq!(fixture.counters(5)["failed"], 1);
+    fixture.shutdown();
+
     let (_root, fixture) = launch("");
     let items = runtime.block_on(run(&fixture, "scripted", &prompt));
     assert!(

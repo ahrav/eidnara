@@ -385,20 +385,24 @@ mod unix {
             // whatever the scheduled behavior; the controls script transport
             // outcomes, not what a summary says.
             let summary = scripted_summary(&request.prompt);
-            if summary.is_some()
-                && let Some(path) = std::env::var_os(SUMMARIZER_DUMP_ENV)
-            {
-                use std::io::Write;
-                let line = serde_json::json!({"system": request.system, "prompt": request.prompt});
-                let written = std::fs::OpenOptions::new()
-                    .create(true)
-                    .append(true)
-                    .open(&path)
-                    .and_then(|mut file| writeln!(file, "{line}"));
-                if let Err(error) = written {
-                    eprintln!("summarizer dump {}: {error}", path.display());
-                }
-            }
+            // A requested dump is gate B's record of the run; a line it
+            // cannot hold fails the call, typed, rather than leaving a file
+            // that does not cover what the run measured.
+            let undumped = summary
+                .as_ref()
+                .and_then(|_| std::env::var_os(SUMMARIZER_DUMP_ENV))
+                .and_then(|path| {
+                    use std::io::Write;
+                    let line =
+                        serde_json::json!({"system": request.system, "prompt": request.prompt});
+                    std::fs::OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open(&path)
+                        .and_then(|mut file| writeln!(file, "{line}"))
+                        .err()
+                        .map(|error| format!("summarizer dump {}: {error}", path.display()))
+                });
             let commanded = summary
                 .as_ref()
                 .and_then(|_| std::env::var_os(SUMMARIZER_COMMAND_ENV))
@@ -416,6 +420,10 @@ mod unix {
             let shutdown = self.shutdown.clone();
             let counters = Arc::clone(&self.counters);
             Box::pin(async move {
+                if let Some(error) = undumped {
+                    counters.failed.fetch_add(1, Ordering::SeqCst);
+                    return ControlledBackend::terminal_error(&error);
+                }
                 match behavior {
                     NextBehavior::Success => {
                         let text = match commanded {
