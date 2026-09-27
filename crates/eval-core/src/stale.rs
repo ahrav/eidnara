@@ -300,10 +300,11 @@ pub struct FactPair {
     pub question: String,
 }
 
-/// A coding session in which the user sets project values and later changes
-/// every one of them: two statements to each restatement, the evaluator's
-/// correction regime, with the restatements left at the end closing the
-/// session. Values are distinct five-digit numbers, so a whole-word match
+/// A coding session in which the user first sets every project value, then
+/// later changes every one. The two phases guarantee a long-harness
+/// summarizer publishes the first statements before their corrections: gate
+/// A needs the stale prose in an earlier segment and the correction in a
+/// later one. Values are distinct five-digit numbers, so a whole-word match
 /// finds one value and nothing else.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -357,50 +358,47 @@ pub fn fact_world(root_seed: u64, subjects: usize) -> FactWorld {
             format!("{}.{}", slug(component), slug(attribute)),
         )
     };
-    let mut turns = Vec::new();
-    let mut pairs: Vec<FactPair> = Vec::new();
-    let mut unrestated: Vec<usize> = Vec::new();
-    let mut next = 0;
-    while next < subjects || !unrestated.is_empty() {
-        let turn = turns.len() as u32;
-        let restate = !unrestated.is_empty() && (next == subjects || turn % 3 == 2);
-        let user = if restate {
-            let pick = draw(
-                crate::stream::ChoiceKind::RestatementTarget,
-                format!("turn:{turn}"),
-                0,
-            ) % unrestated.len() as u64;
-            let pair = &mut pairs[unrestated.remove(pick as usize)];
-            pair.live_value = value(format!("live:{}", pair.task));
-            pair.restatement = format!(
-                "Change of plan: set the {} to {} instead.",
-                pair.subject, pair.live_value
-            );
-            pair.restating_turn = turn;
-            pair.restatement.clone()
-        } else {
-            let (name, key) = subject(next);
-            let task = format!("stale-{next}");
-            let stale_value = value(format!("stale:{task}"));
-            let stale_statement = format!("Set the {name} to {stale_value}.");
-            pairs.push(FactPair {
-                task,
-                question: format!("What is the {name} now? Reply with just the value."),
-                subject: name,
-                key,
-                stale_value,
-                live_value: String::new(),
-                stale_statement: stale_statement.clone(),
-                restatement: String::new(),
-                stale_turn: turn,
-                restating_turn: 0,
-            });
-            unrestated.push(next);
-            next += 1;
-            stale_statement
-        };
+    let mut turns = Vec::with_capacity(subjects * 2);
+    let mut pairs = Vec::with_capacity(subjects);
+    for index in 0..subjects {
+        let (name, key) = subject(index);
+        let task = format!("stale-{index}");
+        let stale_value = value(format!("stale:{task}"));
+        let stale_statement = format!("Set the {name} to {stale_value}.");
+        pairs.push(FactPair {
+            task,
+            question: format!("What is the {name} now? Reply with just the value."),
+            subject: name,
+            key,
+            stale_value,
+            live_value: String::new(),
+            stale_statement: stale_statement.clone(),
+            restatement: String::new(),
+            stale_turn: index as u32,
+            restating_turn: 0,
+        });
         turns.push(FactTurn {
-            user,
+            user: stale_statement,
+            assistant: ACKNOWLEDGEMENT.to_string(),
+        });
+    }
+    let mut pending: Vec<usize> = (0..subjects).collect();
+    while !pending.is_empty() {
+        let turn = turns.len() as u32;
+        let pick = draw(
+            crate::stream::ChoiceKind::RestatementTarget,
+            format!("turn:{turn}"),
+            0,
+        ) % pending.len() as u64;
+        let pair = &mut pairs[pending.remove(pick as usize)];
+        pair.live_value = value(format!("live:{}", pair.task));
+        pair.restatement = format!(
+            "Change of plan: set the {} to {} instead.",
+            pair.subject, pair.live_value
+        );
+        pair.restating_turn = turn;
+        turns.push(FactTurn {
+            user: pair.restatement.clone(),
             assistant: ACKNOWLEDGEMENT.to_string(),
         });
     }

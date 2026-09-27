@@ -61,14 +61,18 @@ fn the_fact_world_restates_every_subject_once_with_a_value_of_its_own() {
             .iter()
             .all(|turn| turn.assistant == ACKNOWLEDGEMENT)
     );
-    // Two statements to each restatement while subjects remain, as the
-    // evaluator's correction regime; the rest close the session.
-    let restatements: Vec<bool> = world
-        .turns
-        .iter()
-        .map(|turn| turn.user.starts_with("Change of plan"))
-        .collect();
-    assert_eq!(&restatements[..6], [false, false, true, false, false, true]);
+    // Every statement is published before any restatement, so the correction
+    // lands in a later summarizer chunk.
+    assert!(
+        world.turns[..24]
+            .iter()
+            .all(|turn| !turn.user.starts_with("Change of plan"))
+    );
+    assert!(
+        world.turns[24..]
+            .iter()
+            .all(|turn| turn.user.starts_with("Change of plan"))
+    );
     assert_eq!(fact_world(SEED, MAX_SUBJECTS).pairs.len(), MAX_SUBJECTS);
 }
 

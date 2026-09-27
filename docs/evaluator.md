@@ -1378,11 +1378,11 @@ one is Rust:
    - The assistant answers every turn with `Noted.`, so each value is stated
      once. Values are distinct five-digit numbers, so a whole-word match finds
      one value and nothing else, and no ordinal marker collides with one.
-   - Two statements come to each restatement, the evaluator's correction
-     regime. Each restatement targets a stated, not yet restated subject drawn
-     by `keyed_draw`, so the distance to its correction varies. The
-     restatements still pending when the statements run out close the
-     session.
+   - Every subject is stated first. The second half restates them in an order
+     drawn by `keyed_draw`. The phase boundary guarantees the daemon publishes
+     the stale statement before the real summarizer sees its correction; the
+     test needs two coexisting segment rows to measure render-time replacement,
+     not a single chunk the summarizer can fix before publication.
    - Every pair asks `What is the <subject> now? Reply with just the value.`
 2. `bun packages/e2e-tests/scripts/stale-preference.ts --world <file> --out
    <capture>` (`captureStaleWorld` in `packages/e2e-tests/src/stale-preference.ts`)

@@ -97,14 +97,19 @@ function usage(options: StaleDriverOptions, turn: number) {
     };
 }
 
-/** Waits until no summarizer firing is in flight for the session. */
+/** Waits until no summarizer firing is in flight for the session; a real model can take minutes. */
 async function quiesce(h: RustTestHarness, sessionId: string): Promise<void> {
     let quiet = 0;
-    const deadline = Date.now() + 120_000;
+    const deadline = Date.now() + 900_000;
+    let summarizer: Record<string, unknown> = {};
     while (quiet < 3) {
-        if (Date.now() > deadline) throw new Error("the history summarizer did not settle");
+        if (Date.now() > deadline) {
+            throw new Error(
+                `the history summarizer did not settle: ${JSON.stringify(summarizer).slice(0, 2_000)}`,
+            );
+        }
         const status = await h.host.primaryStatus(sessionId, h.env.workdir);
-        const summarizer = (status.history_summarizer ?? {}) as Record<string, unknown>;
+        summarizer = (status.history_summarizer ?? {}) as Record<string, unknown>;
         quiet =
             summarizer.fired_at_ms == null && summarizer.producer_run_id == null ? quiet + 1 : 0;
         await Bun.sleep(200);
