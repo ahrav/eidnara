@@ -237,16 +237,16 @@ fn active_scan_audit_expires_with_its_session_note_owner() {
         )
         .unwrap();
     // The history_segment prepares session_id, start_message_id, end_message_id, title,
-    // content, and the claim's key, value, and anchor as fields of their own, never the
-    // claims JSON as one; only content carries a detection.
+    // content, and the claim's key, value, anchor, and `key = value` pair as fields of
+    // their own, never the claims JSON as one; only content carries a detection.
     assert_eq!(
         scan_audit_counts(temp.path()),
         ScanAuditCounts {
             batches: 1,
             owner_scopes: 1,
             domain_owners: 1,
-            field_scans: 8,
-            owner_copies: 8,
+            field_scans: 9,
+            owner_copies: 9,
             detections: 1,
         }
     );
@@ -1787,6 +1787,13 @@ fn history_segment_content_redacts_and_new_message_identities_reject() {
             ordinal: 1,
             anchor: Some(anchor),
         })
+        // A key that makes its `key = value` pair a secret assignment is dropped.
+        .chain([Claim {
+            key: "api.key".to_string(),
+            value: "abc".to_string(),
+            ordinal: 1,
+            anchor: None,
+        }])
         .collect(),
         ..StoredHistorySegment::default()
     };

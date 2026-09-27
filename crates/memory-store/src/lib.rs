@@ -4699,30 +4699,39 @@ fn prepare_history_segment(
 
 /// Scans each claim's key, value, and anchor as a field of its own, never the
 /// JSON blob, redacting rather than rejecting so a claim never fails its
-/// segment's write, and drops an anchor the redacted trimmed `p1` no longer
-/// contains, so a stored anchor always lies inside the stored `p1`.
+/// segment's write; drops an anchor the redacted trimmed `p1` no longer
+/// contains, so a stored anchor always lies inside the stored `p1`; and drops
+/// a claim whose `key = value` pair the scanner flags.
 fn prepare_claims(
     write: &mut PreparedWrite,
     claims: &[Claim],
     p1: &str,
 ) -> Result<Vec<Claim>, MemoryStoreError> {
-    claims
-        .iter()
-        .map(|claim| {
-            let anchor = claim
-                .anchor
-                .as_deref()
-                .map(|anchor| write.content("claim_anchor", anchor))
-                .transpose()?
-                .filter(|anchor| !anchor.is_empty() && p1.contains(anchor.as_str()));
-            Ok(Claim {
-                key: write.content("claim_key", &claim.key)?,
-                value: write.content("claim_value", &claim.value)?,
-                ordinal: claim.ordinal,
-                anchor,
-            })
-        })
-        .collect()
+    let mut prepared = Vec::with_capacity(claims.len());
+    for claim in claims {
+        let anchor = claim
+            .anchor
+            .as_deref()
+            .map(|anchor| write.content("claim_anchor", anchor))
+            .transpose()?
+            .filter(|anchor| !anchor.is_empty() && p1.contains(anchor.as_str()));
+        let key = write.content("claim_key", &claim.key)?;
+        let value = write.content("claim_value", &claim.value)?;
+        // A correction serves `key = value` together, and a key such as `api.key` makes that
+        // pair read as a secret assignment even when neither half does alone. Such a claim is
+        // dropped, so no served correction holds text the scanner would redact.
+        let pair = format!("{key} = {value}");
+        if write.content("claim_pair", &pair)? != pair {
+            continue;
+        }
+        prepared.push(Claim {
+            key,
+            value,
+            ordinal: claim.ordinal,
+            anchor,
+        });
+    }
+    Ok(prepared)
 }
 
 /// A stored `claims` cell as claims. A cell that does not read as a claim
