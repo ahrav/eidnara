@@ -1,3 +1,4 @@
+import { type ConfigAdmission, loadUserTierConfigDetailed } from "@eidnara/opencode/config";
 import { isCompactionEnabled } from "@eidnara/opencode/config/agent-disable";
 import { isRecord } from "@eidnara/opencode/shared/record-type-guard";
 import { readJsoncLenient } from "./jsonc-config";
@@ -6,19 +7,20 @@ export interface EidnaraModes {
     enabled: boolean;
     compactionEnabled: boolean;
     memoryEnabled: boolean;
+    admission: ConfigAdmission;
 }
 
 /**
  * Reads the shared user config only: setup edits global host settings, so a project-tier opt-out must not switch a native manager back on for every other project.
- * A missing or unreadable config, or no user tier at all (`undefined`), resolves to the schema defaults (everything enabled).
  */
 export function readEidnaraModes(configPath: string | undefined): EidnaraModes {
-    const config = configPath === undefined ? {} : readJsoncLenient(configPath).value;
+    const { config, admission } = loadUserTierConfigDetailed(configPath);
     const enabled = config.enabled !== false;
     return {
         enabled,
-        compactionEnabled: enabled && isCompactionEnabled(config),
-        memoryEnabled: enabled && (!isRecord(config.memory) || config.memory.enabled !== false),
+        compactionEnabled: compactionEnabledFor(config),
+        memoryEnabled: enabled && config.memory.enabled !== false,
+        admission,
     };
 }
 
@@ -41,9 +43,14 @@ export function projectModeOverrides(projectConfigPath: string, shared: EidnaraM
 }
 
 /** With `enabled: false` the plugin skips every hook, so a native manager must stay on whatever the compaction setting says. */
-export function compactionEnabledFor(config: { enabled?: unknown; compaction?: unknown }): boolean {
+export function compactionEnabledFor(config: {
+    enabled?: unknown;
+    compaction?: unknown;
+    history_summarizer?: unknown;
+}): boolean {
     if (config.enabled === false) return false;
     return isCompactionEnabled({
         compaction: isRecord(config.compaction) ? config.compaction : null,
+        history_summarizer: config.history_summarizer,
     });
 }

@@ -18,22 +18,64 @@ function write(name: string, body: string): string {
 }
 
 describe("readEidnaraModes", () => {
-    it("derives every mode from the shared config and defaults to enabled", () => {
+    const admitted = { status: "admitted" } as const;
+    const model = `"history_summarizer":{"model":"anthropic/claude-haiku-4-5"}`;
+
+    it("derives every mode from the shared config through the plugin loader", () => {
         expect(readEidnaraModes(join(tmpdir(), "missing-eidnara.jsonc"))).toEqual({
+            enabled: true,
+            compactionEnabled: false,
+            memoryEnabled: true,
+            admission: admitted,
+        });
+        expect(readEidnaraModes(write("m.jsonc", `{${model}}`))).toEqual({
             enabled: true,
             compactionEnabled: true,
             memoryEnabled: true,
+            admission: admitted,
         });
-        expect(readEidnaraModes(write("a.jsonc", `{"compaction":{"enabled":false}}`))).toEqual({
+        expect(
+            readEidnaraModes(write("a.jsonc", `{"compaction":{"enabled":false},${model}}`)),
+        ).toEqual({
             enabled: true,
             compactionEnabled: false,
             memoryEnabled: true,
+            admission: admitted,
         });
-        expect(readEidnaraModes(write("b.jsonc", `{"enabled":false}`))).toEqual({
+        expect(readEidnaraModes(write("b.jsonc", `{"enabled":false,${model}}`))).toEqual({
             enabled: false,
             compactionEnabled: false,
             memoryEnabled: false,
+            admission: admitted,
         });
+    });
+
+    it("forwards the summarizer chain after substitution and reference exclusion", () => {
+        const previous = process.env.EIDNARA_MODES_MODEL;
+        process.env.EIDNARA_MODES_MODEL = "anthropic/claude-haiku-4-5";
+        try {
+            const referenced = readEidnaraModes(
+                write("r.jsonc", `{"history_summarizer":{"model":"{env:EIDNARA_MODES_MODEL}"}}`),
+            );
+            expect(referenced.compactionEnabled).toBe(false);
+            expect(referenced.admission).toEqual(admitted);
+        } finally {
+            if (previous === undefined) delete process.env.EIDNARA_MODES_MODEL;
+            else process.env.EIDNARA_MODES_MODEL = previous;
+        }
+    });
+
+    it("reports a rejected user tier as unresolved", () => {
+        for (const [name, body] of [
+            ["malformed.jsonc", `{${model}`],
+            ["unknown.jsonc", `{"history_summarizer":{"model":"a/b","modle":"c/d"}}`],
+            ["string-flag.jsonc", `{"compaction":{"enabled":"false"},${model}}`],
+        ] as const) {
+            expect([name, readEidnaraModes(write(name, body)).admission.status]).toEqual([
+                name,
+                "unresolved",
+            ]);
+        }
     });
 });
 

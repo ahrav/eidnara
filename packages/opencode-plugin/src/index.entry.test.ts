@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { getEidnaraStorageDir } from "./shared/data-path";
@@ -123,6 +123,11 @@ describe("plugin entry bundle", () => {
         outdir = mkdtempSync(join(PACKAGE_ROOT, ".entry-smoke-dist-"));
         projectDirectory = mkdtempSync(join(tmpdir(), "eidnara-entry-project-"));
         configHome = mkdtempSync(join(tmpdir(), "eidnara-entry-config-"));
+        mkdirSync(join(configHome, "eidnara"));
+        writeFileSync(
+            join(configHome, "eidnara", "eidnara.jsonc"),
+            JSON.stringify({ history_summarizer: { model: "anthropic/claude-haiku-4-5" } }),
+        );
         dataHome = mkdtempSync(join(tmpdir(), "eidnara-entry-data-"));
         for (const key of ["XDG_CONFIG_HOME", "XDG_DATA_HOME", "EIDNARA_MODEL_EXECUTION_CHILD"]) {
             savedEnv[key] = process.env[key];

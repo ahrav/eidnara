@@ -8,7 +8,12 @@
 //! Projects may only raise the execute threshold or close the user-memory gate.
 //! No environment variable supplies a configuration value.
 //!
-//! The Rust module uses stricter model-selection policy than the TypeScript implementation.
+//! The summarizer chain, the admission verdict, and [`DaemonConfig::eidnara_folds`] match the
+//! TypeScript plugin loader for every input the shared parity fixture
+//! (`packages/opencode-plugin/src/config/__fixtures__/fold-authority-parity.json`) covers. Each
+//! tier is `eidnara.jsonc`, or `eidnara.json` when no `.jsonc` file exists. The four chain keys
+//! take literal model ids: a blank value, or one holding a `{env:` or `{file:` reference, is
+//! excluded with a warning.
 
 use std::fs;
 use std::io;
@@ -115,6 +120,18 @@ pub struct DaemonConfig {
     pub cache_ttl: String,
     /// Per-model TTL overrides use exact, bare, dash-stripped, provider-wildcard, then default matching.
     pub cache_ttl_by_model: std::collections::BTreeMap<String, String>,
+    /// When `admission` is `Unresolved`, the other fields retain the project's last admitted
+    /// resolution, or defaults if the project has none.
+    pub admission: ConfigAdmission,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum ConfigAdmission {
+    #[default]
+    Admitted,
+    Unresolved {
+        reason: String,
+    },
 }
 
 impl Default for DaemonConfig {
@@ -140,6 +157,7 @@ impl Default for DaemonConfig {
             smart_drops: false,
             cache_ttl: "5m".to_string(),
             cache_ttl_by_model: std::collections::BTreeMap::new(),
+            admission: ConfigAdmission::Admitted,
         }
     }
 }
@@ -157,6 +175,10 @@ pub struct ResolvedCacheTtl {
 }
 
 impl DaemonConfig {
+    pub fn eidnara_folds(&self) -> bool {
+        self.compaction_enabled && !self.model_chain.is_empty()
+    }
+
     /// The resolver preserves whether the model walk matched an entry while resolving the effective cache TTL.
     ///
     /// The default TTL schedules host-side expiry but does not set provider cache markers.
@@ -237,7 +259,7 @@ struct TierConfig {
 pub struct ConfigCache {
     user: TierConfig,
     project: TierConfig,
-    effective: DaemonConfig,
+    admitted: std::collections::BTreeMap<PathBuf, DaemonConfig>,
 }
 
 impl ConfigCache {
@@ -259,6 +281,17 @@ impl ConfigCache {
         self.effective_for_user_path(Some(user_path), project_root)
     }
 
+    #[cfg(test)]
+    pub(crate) fn effective_for_config_home(
+        &mut self,
+        config_home: &Path,
+        project_root: &Path,
+    ) -> (DaemonConfig, Vec<String>) {
+        let user_path =
+            user_config_base_from(config_home.to_str(), None).map(|base| discover_tier(&base));
+        self.effective_with_warnings(user_path.as_deref(), project_root)
+    }
+
     fn effective_for_user_path(
         &mut self,
         user_path: Option<&Path>,
@@ -276,12 +309,23 @@ impl ConfigCache {
         user_path: Option<&Path>,
         project_root: &Path,
     ) -> (DaemonConfig, Vec<String>) {
-        let project_path = project_root.join(".eidnara").join("eidnara.jsonc");
+        let project_path = discover_tier(&project_root.join(".eidnara").join("eidnara"));
         let user = match user_path {
             Some(user_path) => read_tier_cached(&mut self.user, user_path.to_path_buf()),
             None => None,
         };
         let project = read_tier_cached(&mut self.project, project_path);
+        let mut rejections = Vec::new();
+        if user_path.is_some()
+            && let Some(warning) = &self.user.warning
+        {
+            rejections.push(warning.clone());
+        }
+        for (tier, user_tier) in [(user.as_ref(), true), (project.as_ref(), false)] {
+            if let Some(tier) = tier {
+                authority_rejections(tier, user_tier, &mut rejections);
+            }
+        }
         let (mut effective, mut warnings) =
             merge_tiers_with_warnings(user.as_ref(), project.as_ref());
         for tier in [&self.user, &self.project] {
@@ -290,34 +334,54 @@ impl ConfigCache {
         if let Some(user_path) = user_path {
             resolve_user_guidance_override(&mut effective, user.as_ref(), user_path, &mut warnings);
         }
-        self.effective = effective;
-        (self.effective.clone(), warnings)
+        if rejections.is_empty() {
+            self.admitted
+                .insert(project_root.to_path_buf(), effective.clone());
+            return (effective, warnings);
+        }
+        let reason = rejections.join("; ");
+        warnings.push(format!(
+            "configuration unresolved ({reason}); the last admitted configuration stays in effect"
+        ));
+        let mut kept = self.admitted.get(project_root).cloned().unwrap_or_default();
+        kept.admission = ConfigAdmission::Unresolved { reason };
+        (kept, warnings)
     }
 }
 
 fn user_config_path() -> Option<PathBuf> {
-    user_config_path_from(
+    user_config_base_from(
         std::env::var("XDG_CONFIG_HOME").ok().as_deref(),
         std::env::var("HOME").ok().as_deref(),
     )
+    .map(|base| discover_tier(&base))
 }
 
 /// A CWD-relative fallback would let the untrusted project tree supply user-tier-only keys, so empty and relative values yield no user tier.
-fn user_config_path_from(xdg_config_home: Option<&str>, home: Option<&str>) -> Option<PathBuf> {
+fn user_config_base_from(xdg_config_home: Option<&str>, home: Option<&str>) -> Option<PathBuf> {
     let absolute = |value: Option<&str>| {
         value
             .filter(|v| !v.is_empty() && Path::new(v).is_absolute())
             .map(PathBuf::from)
     };
     if let Some(xdg) = absolute(xdg_config_home) {
-        return Some(xdg.join("eidnara").join("eidnara.jsonc"));
+        return Some(xdg.join("eidnara").join("eidnara"));
     }
     Some(
         absolute(home)?
             .join(".config")
             .join("eidnara")
-            .join("eidnara.jsonc"),
+            .join("eidnara"),
     )
+}
+
+fn discover_tier(base: &Path) -> PathBuf {
+    let jsonc = base.with_extension("jsonc");
+    if jsonc.exists() {
+        return jsonc;
+    }
+    let json = base.with_extension("json");
+    if json.exists() { json } else { jsonc }
 }
 
 /// Largest config tier file read. A project controls its own `.eidnara`
@@ -777,50 +841,21 @@ pub(crate) fn merge_tiers_with_warnings(
 /// unchanged.
 fn apply_key(cfg: &mut DaemonConfig, tier: &Value, key: ConfigKey, warnings: &mut Vec<String>) {
     let pointer = key.pointer();
-    let trimmed_str = |value: &Value| {
-        value
-            .as_str()
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(ToOwned::to_owned)
-    };
-    let extend_models = |chain: &mut Vec<String>| {
-        if let Some(models) = tier.pointer(pointer).and_then(Value::as_array) {
-            chain.extend(models.iter().filter_map(trimmed_str));
-        }
-    };
     match key {
         ConfigKey::HistorySummarizerModuleModel => {
-            if let Some(model) = tier.pointer(pointer).and_then(trimmed_str) {
-                cfg.model_chain.push(model);
-            }
+            let models = chain_models(tier, pointer, warnings);
+            cfg.model_chain.extend(models);
         }
         ConfigKey::HistorySummarizerModuleFallbackModels => {
-            if tier
-                .pointer(ConfigKey::HistorySummarizerModuleModel.pointer())
-                .and_then(trimmed_str)
-                .is_some()
-            {
-                extend_models(&mut cfg.model_chain);
+            let models = chain_models(tier, pointer, warnings);
+            if module_model_selected(tier) {
+                cfg.model_chain.extend(models);
             }
         }
-        ConfigKey::HistorySummarizerModel => {
-            if tier
-                .pointer(ConfigKey::HistorySummarizerModuleModel.pointer())
-                .and_then(trimmed_str)
-                .is_none()
-                && let Some(model) = tier.pointer(pointer).and_then(trimmed_str)
-            {
-                cfg.model_chain.push(model);
-            }
-        }
-        ConfigKey::HistorySummarizerFallbackModels => {
-            if tier
-                .pointer(ConfigKey::HistorySummarizerModuleModel.pointer())
-                .and_then(trimmed_str)
-                .is_none()
-            {
-                extend_models(&mut cfg.model_chain);
+        ConfigKey::HistorySummarizerModel | ConfigKey::HistorySummarizerFallbackModels => {
+            let models = chain_models(tier, pointer, warnings);
+            if !module_model_selected(tier) {
+                cfg.model_chain.extend(models);
             }
         }
         ConfigKey::ExecuteThresholdPercentage => {
@@ -988,6 +1023,122 @@ fn apply_key(cfg: &mut DaemonConfig, tier: &Value, key: ConfigKey, warnings: &mu
 fn dedup_preserving_order(chain: &mut Vec<String>) {
     let mut seen = std::collections::HashSet::new();
     chain.retain(|model| seen.insert(model.clone()));
+}
+
+fn literal_chain_model(value: &str) -> Option<&str> {
+    let value = value.trim();
+    (!value.is_empty() && !value.contains("{env:") && !value.contains("{file:")).then_some(value)
+}
+
+fn chain_models(tier: &Value, pointer: &str, warnings: &mut Vec<String>) -> Vec<String> {
+    let values: Vec<&str> = match tier.pointer(pointer) {
+        Some(Value::String(value)) => vec![value],
+        Some(Value::Array(items)) => items.iter().filter_map(Value::as_str).collect(),
+        _ => Vec::new(),
+    };
+    values
+        .into_iter()
+        .filter_map(|value| {
+            let model = literal_chain_model(value);
+            if model.is_none() {
+                warnings.push(format!(
+                    "ignoring a {pointer} value: summarizer chain keys take a literal, non-blank model id without {{env:}} or {{file:}} references"
+                ));
+            }
+            model.map(ToOwned::to_owned)
+        })
+        .collect()
+}
+
+fn module_model_selected(tier: &Value) -> bool {
+    tier.pointer(ConfigKey::HistorySummarizerModuleModel.pointer())
+        .and_then(Value::as_str)
+        .and_then(literal_chain_model)
+        .is_some()
+}
+
+const AUTHORITY_BLOCKS: [&str; 2] = ["history_summarizer", "compaction"];
+
+const PLUGIN_CONFIG_SCHEMA: &str = include_str!("../../../assets/eidnara.schema.json");
+
+fn known_block_key(block: &str, key: &str) -> bool {
+    static SCHEMA: std::sync::OnceLock<Value> = std::sync::OnceLock::new();
+    let schema = SCHEMA.get_or_init(|| {
+        serde_json::from_str(PLUGIN_CONFIG_SCHEMA).expect("the plugin config schema asset parses")
+    });
+    let declared = schema
+        .get("properties")
+        .and_then(|properties| properties.get(block))
+        .and_then(|block| block.get("properties"))
+        .is_some_and(|properties| properties.get(key).is_some());
+    declared
+        || ConfigKey::ALL.iter().any(|config_key| {
+            config_key
+                .pointer()
+                .strip_prefix('/')
+                .and_then(|pointer| pointer.split_once('/'))
+                == Some((block, key))
+        })
+}
+
+fn authority_rejections(tier: &Value, user_tier: bool, rejections: &mut Vec<String>) {
+    let tier_name = if user_tier { "user" } else { "project" };
+    if !tier.is_object() {
+        if user_tier {
+            rejections.push("the user tier is not a JSON object".to_string());
+        }
+        return;
+    }
+    for block in AUTHORITY_BLOCKS {
+        match tier.get(block) {
+            Some(Value::Object(entries)) => {
+                for key in entries.keys().filter(|key| !known_block_key(block, key)) {
+                    rejections.push(format!("unknown key {block}.{key} in the {tier_name} tier"));
+                }
+            }
+            Some(_) if user_tier => {
+                rejections.push(format!("{block} in the user tier is not an object"));
+            }
+            _ => {}
+        }
+    }
+    if !user_tier {
+        return;
+    }
+    let pointer = ConfigKey::CompactionEnabled.pointer();
+    if tier
+        .pointer(pointer)
+        .is_some_and(|value| !value.is_boolean())
+    {
+        rejections.push(format!("{pointer} is not a literal boolean"));
+    }
+    for key in [
+        ConfigKey::HistorySummarizerModuleModel,
+        ConfigKey::HistorySummarizerModel,
+    ] {
+        if tier
+            .pointer(key.pointer())
+            .is_some_and(|value| !value.is_string())
+        {
+            rejections.push(format!("{} is not a string", key.pointer()));
+        }
+    }
+    for key in [
+        ConfigKey::HistorySummarizerModuleFallbackModels,
+        ConfigKey::HistorySummarizerFallbackModels,
+    ] {
+        let valid = match tier.pointer(key.pointer()) {
+            None | Some(Value::String(_)) => true,
+            Some(Value::Array(items)) => items.iter().all(Value::is_string),
+            Some(_) => false,
+        };
+        if !valid {
+            rejections.push(format!(
+                "{} is not a string or an array of strings",
+                key.pointer()
+            ));
+        }
+    }
 }
 
 fn positive_usize_at(value: &Value, pointer: &str) -> Option<usize> {
@@ -1279,12 +1430,12 @@ mod tests {
             (
                 Some("/xdg"),
                 Some("/home/u"),
-                Some(PathBuf::from("/xdg/eidnara/eidnara.jsonc")),
+                Some(PathBuf::from("/xdg/eidnara/eidnara")),
             ),
             (
                 None,
                 Some("/home/u"),
-                Some(PathBuf::from("/home/u/.config/eidnara/eidnara.jsonc")),
+                Some(PathBuf::from("/home/u/.config/eidnara/eidnara")),
             ),
             // An empty or relative XDG_CONFIG_HOME would resolve the trusted
             // user tier against the process working directory, so it is
@@ -1292,12 +1443,12 @@ mod tests {
             (
                 Some(""),
                 Some("/home/u"),
-                Some(PathBuf::from("/home/u/.config/eidnara/eidnara.jsonc")),
+                Some(PathBuf::from("/home/u/.config/eidnara/eidnara")),
             ),
             (
                 Some("rel/config"),
                 Some("/home/u"),
-                Some(PathBuf::from("/home/u/.config/eidnara/eidnara.jsonc")),
+                Some(PathBuf::from("/home/u/.config/eidnara/eidnara")),
             ),
             // Without a usable home there is no user tier at all rather than
             // a CWD-relative one.
@@ -1306,7 +1457,7 @@ mod tests {
             (None, Some("rel/home"), None),
         ] {
             assert_eq!(
-                user_config_path_from(xdg, home),
+                user_config_base_from(xdg, home),
                 expected,
                 "xdg={xdg:?} home={home:?}"
             );
@@ -2210,7 +2361,11 @@ mod tests {
             effective.memory_enabled,
             "a malformed tier contributes nothing and the default stands"
         );
-        assert_eq!(warnings.len(), 2, "{warnings:?}");
+        assert!(matches!(
+            effective.admission,
+            ConfigAdmission::Unresolved { .. }
+        ));
+        assert_eq!(warnings.len(), 3, "{warnings:?}");
         assert!(
             warnings[0].contains(&user.display().to_string())
                 && warnings[0].contains("not valid JSONC"),
@@ -2256,5 +2411,163 @@ mod tests {
         });
         let cfg = merge_tiers(Some(&user), None);
         assert_eq!(cfg.model_chain, vec!["a", "b", "c"]);
+    }
+}
+
+#[cfg(test)]
+mod fold_authority_parity {
+    use super::*;
+
+    const FIXTURE: &str = include_str!(
+        "../../../packages/opencode-plugin/src/config/__fixtures__/fold-authority-parity.json"
+    );
+
+    type Outcome = (Option<Vec<String>>, String, Option<bool>);
+
+    fn rows() -> Vec<Value> {
+        let fixture: Value = serde_json::from_str(FIXTURE).expect("the parity fixture parses");
+        let rows = fixture["rows"].as_array().expect("rows").clone();
+        assert!(!rows.is_empty());
+        rows
+    }
+
+    fn expected(row: &Value) -> Outcome {
+        (
+            serde_json::from_value(row["expected_chain"].clone()).expect("expected_chain"),
+            row["expected_admission"]
+                .as_str()
+                .expect("admission")
+                .to_string(),
+            row["expected_eidnara_folds"].as_bool(),
+        )
+    }
+
+    fn outcome(config: &DaemonConfig) -> Outcome {
+        match &config.admission {
+            ConfigAdmission::Admitted => (
+                Some(config.model_chain.clone()),
+                "admitted".to_string(),
+                Some(config.eidnara_folds()),
+            ),
+            ConfigAdmission::Unresolved { .. } => (None, "unresolved".to_string(), None),
+        }
+    }
+
+    fn write_tier(dir: &Path, files: &Value) {
+        std::fs::create_dir_all(dir).unwrap();
+        for (name, text) in files.as_object().expect("tier files") {
+            std::fs::write(dir.join(name), text.as_str().expect("file text")).unwrap();
+        }
+    }
+
+    fn materialize(row: &Value) -> (tempfile::TempDir, tempfile::TempDir) {
+        let home = tempfile::tempdir().unwrap();
+        let project = tempfile::tempdir().unwrap();
+        write_tier(&home.path().join("eidnara"), &row["user_tier_files"]);
+        write_tier(&project.path().join(".eidnara"), &row["project_tier_files"]);
+        (home, project)
+    }
+
+    fn load_through_the_file_path(row: &Value) -> Outcome {
+        let (home, project) = materialize(row);
+        let (config, _) =
+            ConfigCache::default().effective_for_config_home(home.path(), project.path());
+        outcome(&config)
+    }
+
+    #[test]
+    fn every_fixture_row_matches_through_the_configuration_cache() {
+        for row in rows() {
+            assert_eq!(
+                load_through_the_file_path(&row),
+                expected(&row),
+                "{}",
+                row["name"]
+            );
+        }
+    }
+
+    #[test]
+    fn the_pre_parsed_merge_seam_fails_the_fixture() {
+        let parsed = |files: &Value| {
+            files
+                .get("eidnara.jsonc")
+                .and_then(Value::as_str)
+                .and_then(|text| serde_json::from_str::<Value>(&strip_jsonc(text)).ok())
+        };
+        let mismatches = rows()
+            .iter()
+            .filter(|row| {
+                let (config, _) = merge_tiers_with_warnings(
+                    parsed(&row["user_tier_files"]).as_ref(),
+                    parsed(&row["project_tier_files"]).as_ref(),
+                );
+                outcome(&config) != expected(row)
+            })
+            .count();
+        assert!(mismatches > 0);
+    }
+
+    #[test]
+    fn jsonc_only_discovery_fails_the_fixture() {
+        let mismatches = rows()
+            .iter()
+            .filter(|row| {
+                let (home, project) = materialize(row);
+                for dir in [home.path().join("eidnara"), project.path().join(".eidnara")] {
+                    let _ = std::fs::remove_file(dir.join("eidnara.json"));
+                }
+                let (config, _) =
+                    ConfigCache::default().effective_for_config_home(home.path(), project.path());
+                outcome(&config) != expected(row)
+            })
+            .count();
+        assert!(mismatches > 0);
+    }
+
+    #[test]
+    fn a_rejected_reload_keeps_the_last_admitted_configuration() {
+        let home = tempfile::tempdir().unwrap();
+        let project = tempfile::tempdir().unwrap();
+        let user = home.path().join("eidnara").join("eidnara.jsonc");
+        std::fs::create_dir_all(user.parent().unwrap()).unwrap();
+
+        let mut cache = ConfigCache::default();
+        std::fs::write(&user, r#"{ "history_summarizer": { "model": "model-a" } "#).unwrap();
+        let (never_admitted, _) = cache.effective_for_config_home(home.path(), project.path());
+        assert!(matches!(
+            never_admitted.admission,
+            ConfigAdmission::Unresolved { .. }
+        ));
+        assert!(never_admitted.model_chain.is_empty());
+
+        std::fs::write(&user, r#"{ "history_summarizer": { "model": "model-a" } }"#).unwrap();
+        let (admitted, _) = cache.effective_for_config_home(home.path(), project.path());
+        assert_eq!(admitted.admission, ConfigAdmission::Admitted);
+        assert!(admitted.eidnara_folds());
+
+        std::fs::write(
+            &user,
+            r#"{ "compaction": { "enabled": "false" }, "history_summarizer": { "model": "model-b" } }"#,
+        )
+        .unwrap();
+        filetime::set_file_mtime(
+            &user,
+            filetime::FileTime::from_unix_time(
+                filetime::FileTime::from_last_modification_time(&std::fs::metadata(&user).unwrap())
+                    .unix_seconds()
+                    + 2,
+                0,
+            ),
+        )
+        .unwrap();
+        let (rejected, warnings) = cache.effective_for_config_home(home.path(), project.path());
+        let ConfigAdmission::Unresolved { reason } = &rejected.admission else {
+            panic!("a string compaction.enabled is unresolved: {rejected:?}");
+        };
+        assert!(reason.contains("/compaction/enabled"), "{reason}");
+        assert!(warnings.iter().any(|warning| warning.contains(reason)));
+        assert_eq!(rejected.model_chain, vec!["model-a"]);
+        assert!(rejected.eidnara_folds());
     }
 }

@@ -4,6 +4,7 @@ import {
     eidnaraProjectConfigBasePath,
     eidnaraUserConfigBasePath,
 } from "@eidnara/opencode/config/config-paths";
+import { screenUserTierText } from "@eidnara/opencode/config/fold-authority";
 import type { LoadOutcome } from "@eidnara/opencode/config/load-outcome";
 import {
     constrainProjectThresholdOverrides,
@@ -97,6 +98,10 @@ function loadConfigFile(path: string, scope: "user" | "project"): LoadedConfigFi
             throw new Error(`config root must be a JSON object, got ${redactConfigValue(parsed)}`);
         }
         const config = parsed;
+        const screen =
+            scope === "user"
+                ? screenUserTierText(rawText, config)
+                : { rejections: [], warnings: [] };
         const unsafeKeyWarnings = rejectedKeyPaths.map(
             (keyPath) =>
                 `Ignored unsafe config key "${keyPath}" (security: prototype-pollution keys are not allowed).`,
@@ -105,9 +110,12 @@ function loadConfigFile(path: string, scope: "user" | "project"): LoadedConfigFi
             path,
             scope,
             config,
-            warnings: [...substituted.warnings, ...unsafeKeyWarnings].map(
-                (warning) => `${path}: ${warning}`,
-            ),
+            warnings: [
+                ...substituted.warnings,
+                ...unsafeKeyWarnings,
+                ...screen.rejections,
+                ...screen.warnings,
+            ].map((warning) => `${path}: ${warning}`),
             loadOutcome:
                 rejectedKeyPaths.length > 0
                     ? "schema-recovery"

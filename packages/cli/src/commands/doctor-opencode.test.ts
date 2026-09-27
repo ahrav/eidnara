@@ -83,6 +83,11 @@ function installIsolatedHome(): { configDir: string; opencodeConfigPath: string 
     delete process.env.OPENCODE_CONFIG_CONTENT;
     delete process.env.OPENCODE_DISABLE_AUTOCOMPACT;
 
+    mkdirSync(join(configHome, "eidnara"), { recursive: true });
+    writeJsonc(join(configHome, "eidnara", "eidnara.jsonc"), {
+        history_summarizer: { model: "anthropic/claude-haiku-4-5" },
+    });
+
     const opencodeConfigPath = join(configDir, "opencode.jsonc");
     return { configDir, opencodeConfigPath };
 }

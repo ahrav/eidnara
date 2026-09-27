@@ -82,12 +82,16 @@ jobs:
               - 'packages/shm-native/Cargo.toml'
               - 'packages/shm-native/build.rs'
               - 'packages/shm-native/src/**'
+              # `crates/daemon/src/config.rs` embeds the plugin config schema.
+              - 'assets/eidnara.schema.json'
             test:
               - *rust
               - '.config/nextest.toml'
               - 'release/**'
               - 'docs/host-wire-protocol.md'
               - 'docs/payload-pool-protocol.md'
+              # The daemon's loader-parity test reads the plugin's shared fixture.
+              - 'packages/opencode-plugin/src/config/__fixtures__/fold-authority-parity.json'
               - 'docs/properties/search-projection/*/fault-map.md'
               - 'docs/properties/search-projection/witness-matrix.md'
               - 'docs/properties/search-projection/spec-traceability.md'
@@ -120,6 +124,7 @@ jobs:
               - 'bun.lock'
               - 'tsconfig.json'
               - 'crates/*/gen/**'
+              - 'assets/eidnara.schema.json'
 
   gates:
     name: gates

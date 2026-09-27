@@ -168,6 +168,17 @@ impl FixtureProcess {
         Launch::at(root).start()
     }
 
+    pub fn start_folding_at(root: PathBuf) -> Self {
+        let config_home = root.join("config-home");
+        std::fs::create_dir_all(config_home.join("eidnara")).expect("user tier directory");
+        std::fs::write(
+            config_home.join("eidnara").join("eidnara.jsonc"),
+            r#"{ "history_summarizer": { "model": "test/model" } }"#,
+        )
+        .expect("user tier");
+        Launch::at(root).config_home(&config_home).start()
+    }
+
     fn start_at_inner(
         root: PathBuf,
         root_owner: Option<tempfile::TempDir>,

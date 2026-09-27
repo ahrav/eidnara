@@ -1,0 +1,443 @@
+{
+    "description": "Shared fold-authority parity fixture. The Rust daemon (crates/daemon/src/config.rs) and the TypeScript plugin (packages/opencode-plugin/src/config/index.ts) load every row through their production loaders and must produce the same summarizer chain, admission, and Eidnara-folds predicate.",
+    "contract": [
+        "A row's user_tier_files are written to $XDG_CONFIG_HOME/eidnara and its project_tier_files to <project>/.eidnara; each key is a file name and each value is the file's text. env holds the only variables {env:} substitution may read.",
+        "expected_chain is the ordered, deduplicated user-tier summarizer chain. expected_admission is admitted or unresolved. expected_eidnara_folds is compaction.enabled !== false and a non-empty chain. An unresolved row withholds its documents, so its chain and predicate are null.",
+        "Supported input, the limit parity is claimed for: every tier file is a regular UTF-8 file of at most 1 MiB (1,048,576 bytes) whose final path component is not a symlink, and the user tier is valid JSONC before variable substitution. The daemon reads each tier with O_NOFOLLOW and that bound and reports a larger or symlinked tier as unreadable; the plugin follows symlinks and reads any size.",
+        "Unknown keys inside history_summarizer or compaction in either tier are rejected on both sides. The plugin also rejects unknown keys elsewhere, while the daemon ignores them and reads its own keys outside the plugin schema (for example history_summarizer.context_limit_tokens and memory.user_profile_budget_tokens), so keys outside those two blocks are outside the parity contract.",
+        "The four chain keys (model, fallback_models, module_model, module_fallback_models) take literal model ids: a blank value or one containing {env: or {file: is excluded with a warning on both sides, while the rest of the document keeps the plugin's substitution. compaction.enabled must be a literal boolean."
+    ],
+    "rows": [
+        {
+            "name": "no configuration",
+            "user_tier_files": {},
+            "project_tier_files": {},
+            "env": {},
+            "expected_chain": [],
+            "expected_admission": "admitted",
+            "expected_eidnara_folds": false
+        },
+        {
+            "name": "model only",
+            "user_tier_files": {
+                "eidnara.jsonc": "{\n    \"history_summarizer\": {\n        \"model\": \"anthropic/claude-haiku-4-5\"\n    }\n}\n"
+            },
+            "project_tier_files": {},
+            "env": {},
+            "expected_chain": [
+                "anthropic/claude-haiku-4-5"
+            ],
+            "expected_admission": "admitted",
+            "expected_eidnara_folds": true
+        },
+        {
+            "name": "module_model only",
+            "user_tier_files": {
+                "eidnara.jsonc": "{\n    \"history_summarizer\": {\n        \"module_model\": \"google/gemini-3.5-flash\"\n    }\n}\n"
+            },
+            "project_tier_files": {},
+            "env": {},
+            "expected_chain": [
+                "google/gemini-3.5-flash"
+            ],
+            "expected_admission": "admitted",
+            "expected_eidnara_folds": true
+        },
+        {
+            "name": "module_model with a string module fallback replaces the ordinary chain",
+            "user_tier_files": {
+                "eidnara.jsonc": "{\n    \"history_summarizer\": {\n        \"module_model\": \"google/gemini-3.5-flash\",\n        \"module_fallback_models\": \"ollama-cloud/kimi-k2.7-code\",\n        \"model\": \"anthropic/claude-haiku-4-5\",\n        \"fallback_models\": [\n            \"openai/gpt-5.6-mini\"\n        ]\n    }\n}\n"
+            },
+            "project_tier_files": {},
+            "env": {},
+            "expected_chain": [
+                "google/gemini-3.5-flash",
+                "ollama-cloud/kimi-k2.7-code"
+            ],
+            "expected_admission": "admitted",
+            "expected_eidnara_folds": true
+        },
+        {
+            "name": "module_model with an array of module fallbacks",
+            "user_tier_files": {
+                "eidnara.jsonc": "{\n    \"history_summarizer\": {\n        \"module_model\": \"google/gemini-3.5-flash\",\n        \"module_fallback_models\": [\n            \"ollama-cloud/kimi-k2.7-code\",\n            \"google/gemini-3.5-flash\"\n        ]\n    }\n}\n"
+            },
+            "project_tier_files": {},
+            "env": {},
+            "expected_chain": [
+                "google/gemini-3.5-flash",
+                "ollama-cloud/kimi-k2.7-code"
+            ],
+            "expected_admission": "admitted",
+            "expected_eidnara_folds": true
+        },
+        {
+            "name": "fallback_models only as a string",
+            "user_tier_files": {
+                "eidnara.jsonc": "{\n    \"history_summarizer\": {\n        \"fallback_models\": \"openai/gpt-5.6-mini\"\n    }\n}\n"
+            },
+            "project_tier_files": {},
+            "env": {},
+            "expected_chain": [
+                "openai/gpt-5.6-mini"
+            ],
+            "expected_admission": "admitted",
+            "expected_eidnara_folds": true
+        },
+        {
+            "name": "fallback_models only as an array",
+            "user_tier_files": {
+                "eidnara.jsonc": "{\n    \"history_summarizer\": {\n        \"fallback_models\": [\n            \"openai/gpt-5.6-mini\",\n            \"ollama-cloud/kimi-k2.7-code\",\n            \"openai/gpt-5.6-mini\"\n        ]\n    }\n}\n"
+            },
+            "project_tier_files": {},
+            "env": {},
+            "expected_chain": [
+                "openai/gpt-5.6-mini",
+                "ollama-cloud/kimi-k2.7-code"
+            ],
+            "expected_admission": "admitted",
+            "expected_eidnara_folds": true
+        },
+        {
+            "name": "chain values are trimmed and deduplicated",
+            "user_tier_files": {
+                "eidnara.jsonc": "{\n    \"history_summarizer\": {\n        \"model\": \"  anthropic/claude-haiku-4-5 \",\n        \"fallback_models\": [\n            \"anthropic/claude-haiku-4-5\",\n            \"openai/gpt-5.6-mini  \"\n        ]\n    }\n}\n"
+            },
+            "project_tier_files": {},
+            "env": {},
+            "expected_chain": [
+                "anthropic/claude-haiku-4-5",
+                "openai/gpt-5.6-mini"
+            ],
+            "expected_admission": "admitted",
+            "expected_eidnara_folds": true
+        },
+        {
+            "name": "a mixed-type fallback array is unresolved",
+            "user_tier_files": {
+                "eidnara.jsonc": "{\n    \"history_summarizer\": {\n        \"model\": \"anthropic/claude-haiku-4-5\",\n        \"fallback_models\": [\n            \"openai/gpt-5.6-mini\",\n            3\n        ]\n    }\n}\n"
+            },
+            "project_tier_files": {},
+            "env": {},
+            "expected_chain": null,
+            "expected_admission": "unresolved",
+            "expected_eidnara_folds": null
+        },
+        {
+            "name": "compaction disabled with a model",
+            "user_tier_files": {
+                "eidnara.jsonc": "{\n    \"compaction\": {\n        \"enabled\": false\n    },\n    \"history_summarizer\": {\n        \"model\": \"anthropic/claude-haiku-4-5\"\n    }\n}\n"
+            },
+            "project_tier_files": {},
+            "env": {},
+            "expected_chain": [
+                "anthropic/claude-haiku-4-5"
+            ],
+            "expected_admission": "admitted",
+            "expected_eidnara_folds": false
+        },
+        {
+            "name": "a model only in the project tier",
+            "user_tier_files": {},
+            "project_tier_files": {
+                "eidnara.jsonc": "{\n    \"history_summarizer\": {\n        \"model\": \"anthropic/claude-haiku-4-5\",\n        \"module_model\": \"google/gemini-3.5-flash\"\n    }\n}\n"
+            },
+            "env": {},
+            "expected_chain": [],
+            "expected_admission": "admitted",
+            "expected_eidnara_folds": false
+        },
+        {
+            "name": "a blank model",
+            "user_tier_files": {
+                "eidnara.jsonc": "{\n    \"history_summarizer\": {\n        \"model\": \"\"\n    }\n}\n"
+            },
+            "project_tier_files": {},
+            "env": {},
+            "expected_chain": [],
+            "expected_admission": "admitted",
+            "expected_eidnara_folds": false
+        },
+        {
+            "name": "a whitespace model with a fallback",
+            "user_tier_files": {
+                "eidnara.jsonc": "{\n    \"history_summarizer\": {\n        \"model\": \"   \",\n        \"fallback_models\": [\n            \"openai/gpt-5.6-mini\"\n        ]\n    }\n}\n"
+            },
+            "project_tier_files": {},
+            "env": {},
+            "expected_chain": [
+                "openai/gpt-5.6-mini"
+            ],
+            "expected_admission": "admitted",
+            "expected_eidnara_folds": true
+        },
+        {
+            "name": "an env reference in model is excluded",
+            "user_tier_files": {
+                "eidnara.jsonc": "{\n    \"history_summarizer\": {\n        \"model\": \"{env:EIDNARA_FIXTURE_MODEL}\"\n    }\n}\n"
+            },
+            "project_tier_files": {},
+            "env": {
+                "EIDNARA_FIXTURE_MODEL": "anthropic/claude-haiku-4-5"
+            },
+            "expected_chain": [],
+            "expected_admission": "admitted",
+            "expected_eidnara_folds": false
+        },
+        {
+            "name": "an env reference in module_model leaves the ordinary chain",
+            "user_tier_files": {
+                "eidnara.jsonc": "{\n    \"history_summarizer\": {\n        \"module_model\": \"{env:EIDNARA_FIXTURE_MODEL}\",\n        \"module_fallback_models\": [\n            \"ollama-cloud/kimi-k2.7-code\"\n        ],\n        \"model\": \"openai/gpt-5.6-mini\"\n    }\n}\n"
+            },
+            "project_tier_files": {},
+            "env": {
+                "EIDNARA_FIXTURE_MODEL": "google/gemini-3.5-flash"
+            },
+            "expected_chain": [
+                "openai/gpt-5.6-mini"
+            ],
+            "expected_admission": "admitted",
+            "expected_eidnara_folds": true
+        },
+        {
+            "name": "a file reference in a fallback is excluded",
+            "user_tier_files": {
+                "eidnara.jsonc": "{\n    \"history_summarizer\": {\n        \"model\": \"anthropic/claude-haiku-4-5\",\n        \"fallback_models\": [\n            \"{file:fallback-model.txt}\",\n            \"openai/gpt-5.6-mini\"\n        ]\n    }\n}\n",
+                "fallback-model.txt": "google/gemini-3.5-flash\n"
+            },
+            "project_tier_files": {},
+            "env": {},
+            "expected_chain": [
+                "anthropic/claude-haiku-4-5",
+                "openai/gpt-5.6-mini"
+            ],
+            "expected_admission": "admitted",
+            "expected_eidnara_folds": true
+        },
+        {
+            "name": "an env reference in compaction.enabled is unresolved",
+            "user_tier_files": {
+                "eidnara.jsonc": "{\n    \"compaction\": {\n        \"enabled\": \"{env:EIDNARA_FIXTURE_FLAG}\"\n    },\n    \"history_summarizer\": {\n        \"model\": \"anthropic/claude-haiku-4-5\"\n    }\n}\n"
+            },
+            "project_tier_files": {},
+            "env": {
+                "EIDNARA_FIXTURE_FLAG": "false"
+            },
+            "expected_chain": null,
+            "expected_admission": "unresolved",
+            "expected_eidnara_folds": null
+        },
+        {
+            "name": "a string compaction.enabled is unresolved",
+            "user_tier_files": {
+                "eidnara.jsonc": "{\n    \"compaction\": {\n        \"enabled\": \"false\"\n    },\n    \"history_summarizer\": {\n        \"model\": \"anthropic/claude-haiku-4-5\"\n    }\n}\n"
+            },
+            "project_tier_files": {},
+            "env": {},
+            "expected_chain": null,
+            "expected_admission": "unresolved",
+            "expected_eidnara_folds": null
+        },
+        {
+            "name": "an unquoted env reference in compaction.enabled is unresolved",
+            "user_tier_files": {
+                "eidnara.jsonc": "{\n    \"compaction\": { \"enabled\": {env:EIDNARA_FIXTURE_FLAG} },\n    \"history_summarizer\": { \"model\": \"anthropic/claude-haiku-4-5\" }\n}\n"
+            },
+            "project_tier_files": {},
+            "env": {
+                "EIDNARA_FIXTURE_FLAG": "true"
+            },
+            "expected_chain": null,
+            "expected_admission": "unresolved",
+            "expected_eidnara_folds": null
+        },
+        {
+            "name": "a malformed user tier is unresolved",
+            "user_tier_files": {
+                "eidnara.jsonc": "{ \"history_summarizer\": { \"model\": \"anthropic/claude-haiku-4-5\" }\n"
+            },
+            "project_tier_files": {},
+            "env": {},
+            "expected_chain": null,
+            "expected_admission": "unresolved",
+            "expected_eidnara_folds": null
+        },
+        {
+            "name": "a malformed project tier leaves the user chain",
+            "user_tier_files": {
+                "eidnara.jsonc": "{\n    \"history_summarizer\": {\n        \"model\": \"anthropic/claude-haiku-4-5\"\n    }\n}\n"
+            },
+            "project_tier_files": {
+                "eidnara.jsonc": "{ \"memory\": {\n"
+            },
+            "env": {},
+            "expected_chain": [
+                "anthropic/claude-haiku-4-5"
+            ],
+            "expected_admission": "admitted",
+            "expected_eidnara_folds": true
+        },
+        {
+            "name": "a null summarizer block is unresolved",
+            "user_tier_files": {
+                "eidnara.jsonc": "{\n    \"history_summarizer\": null\n}\n"
+            },
+            "project_tier_files": {},
+            "env": {},
+            "expected_chain": null,
+            "expected_admission": "unresolved",
+            "expected_eidnara_folds": null
+        },
+        {
+            "name": "a non-object compaction block is unresolved",
+            "user_tier_files": {
+                "eidnara.jsonc": "{\n    \"compaction\": \"off\",\n    \"history_summarizer\": {\n        \"model\": \"anthropic/claude-haiku-4-5\"\n    }\n}\n"
+            },
+            "project_tier_files": {},
+            "env": {},
+            "expected_chain": null,
+            "expected_admission": "unresolved",
+            "expected_eidnara_folds": null
+        },
+        {
+            "name": "null blocks in the project tier are ignored",
+            "user_tier_files": {
+                "eidnara.jsonc": "{\n    \"history_summarizer\": {\n        \"model\": \"anthropic/claude-haiku-4-5\"\n    }\n}\n"
+            },
+            "project_tier_files": {
+                "eidnara.jsonc": "{\n    \"history_summarizer\": null,\n    \"compaction\": null\n}\n"
+            },
+            "env": {},
+            "expected_chain": [
+                "anthropic/claude-haiku-4-5"
+            ],
+            "expected_admission": "admitted",
+            "expected_eidnara_folds": true
+        },
+        {
+            "name": "an unknown key beside the chain keys is unresolved",
+            "user_tier_files": {
+                "eidnara.jsonc": "{\n    \"history_summarizer\": {\n        \"model\": \"anthropic/claude-haiku-4-5\",\n        \"models\": [\n            \"openai/gpt-5.6-mini\"\n        ]\n    }\n}\n"
+            },
+            "project_tier_files": {},
+            "env": {},
+            "expected_chain": null,
+            "expected_admission": "unresolved",
+            "expected_eidnara_folds": null
+        },
+        {
+            "name": "an unknown key in the compaction block is unresolved",
+            "user_tier_files": {
+                "eidnara.jsonc": "{\n    \"compaction\": {\n        \"enabled\": true,\n        \"auto\": false\n    },\n    \"history_summarizer\": {\n        \"model\": \"anthropic/claude-haiku-4-5\"\n    }\n}\n"
+            },
+            "project_tier_files": {},
+            "env": {},
+            "expected_chain": null,
+            "expected_admission": "unresolved",
+            "expected_eidnara_folds": null
+        },
+        {
+            "name": "an unknown summarizer key in the project tier is unresolved",
+            "user_tier_files": {
+                "eidnara.jsonc": "{\n    \"history_summarizer\": {\n        \"model\": \"anthropic/claude-haiku-4-5\"\n    }\n}\n"
+            },
+            "project_tier_files": {
+                "eidnara.jsonc": "{\n    \"history_summarizer\": {\n        \"modle\": \"openai/gpt-5.6-mini\"\n    }\n}\n"
+            },
+            "env": {},
+            "expected_chain": null,
+            "expected_admission": "unresolved",
+            "expected_eidnara_folds": null
+        },
+        {
+            "name": "an invalid preferred .jsonc beside a valid .json is unresolved",
+            "user_tier_files": {
+                "eidnara.jsonc": "{ invalid\n",
+                "eidnara.json": "{\n    \"history_summarizer\": {\n        \"model\": \"anthropic/claude-haiku-4-5\"\n    }\n}\n"
+            },
+            "project_tier_files": {},
+            "env": {},
+            "expected_chain": null,
+            "expected_admission": "unresolved",
+            "expected_eidnara_folds": null
+        },
+        {
+            "name": "a .json user tier",
+            "user_tier_files": {
+                "eidnara.json": "{\n    \"history_summarizer\": {\n        \"model\": \"anthropic/claude-haiku-4-5\"\n    }\n}\n"
+            },
+            "project_tier_files": {},
+            "env": {},
+            "expected_chain": [
+                "anthropic/claude-haiku-4-5"
+            ],
+            "expected_admission": "admitted",
+            "expected_eidnara_folds": true
+        },
+        {
+            "name": "a .json project tier is read",
+            "user_tier_files": {
+                "eidnara.jsonc": "{\n    \"history_summarizer\": {\n        \"model\": \"anthropic/claude-haiku-4-5\"\n    }\n}\n"
+            },
+            "project_tier_files": {
+                "eidnara.json": "{\n    \"history_summarizer\": {\n        \"bogus\": true\n    }\n}\n"
+            },
+            "env": {},
+            "expected_chain": null,
+            "expected_admission": "unresolved",
+            "expected_eidnara_folds": null
+        },
+        {
+            "name": "a non-object user tier is unresolved",
+            "user_tier_files": {
+                "eidnara.jsonc": "[]\n"
+            },
+            "project_tier_files": {},
+            "env": {},
+            "expected_chain": null,
+            "expected_admission": "unresolved",
+            "expected_eidnara_folds": null
+        },
+        {
+            "name": "a non-string model is unresolved",
+            "user_tier_files": {
+                "eidnara.jsonc": "{\n    \"history_summarizer\": {\n        \"model\": 5\n    }\n}\n"
+            },
+            "project_tier_files": {},
+            "env": {},
+            "expected_chain": null,
+            "expected_admission": "unresolved",
+            "expected_eidnara_folds": null
+        },
+        {
+            "name": "substitution elsewhere in the document keeps working",
+            "user_tier_files": {
+                "eidnara.jsonc": "{\n    \"cache_ttl\": \"{env:EIDNARA_FIXTURE_TTL}\",\n    \"history_summarizer\": {\n        \"model\": \"anthropic/claude-haiku-4-5\"\n    }\n}\n"
+            },
+            "project_tier_files": {},
+            "env": {
+                "EIDNARA_FIXTURE_TTL": "10m"
+            },
+            "expected_chain": [
+                "anthropic/claude-haiku-4-5"
+            ],
+            "expected_admission": "admitted",
+            "expected_eidnara_folds": true
+        },
+        {
+            "name": "a reference inside a comment is ignored",
+            "user_tier_files": {
+                "eidnara.jsonc": "// {env:EIDNARA_FIXTURE_MODEL}\n{\n    \"history_summarizer\": {\n        \"model\": \"anthropic/claude-haiku-4-5\"\n    }\n}\n"
+            },
+            "project_tier_files": {},
+            "env": {
+                "EIDNARA_FIXTURE_MODEL": "openai/gpt-5.6-mini"
+            },
+            "expected_chain": [
+                "anthropic/claude-haiku-4-5"
+            ],
+            "expected_admission": "admitted",
+            "expected_eidnara_folds": true
+        }
+    ]
+}

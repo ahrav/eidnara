@@ -1,8 +1,11 @@
 import { describe, expect, it } from "bun:test";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+import { parseConfigJsonc } from "../shared/jsonc-parser";
+import { isCompactionEnabled } from "./agent-disable";
+import { type ConfigAdmission, normalizeSummarizerChain } from "./fold-authority";
 import { loadPluginConfig, loadPluginConfigDetailed } from "./index";
 import { REMOVED_CONFIG_KEYS } from "./schema/eidnara";
 
@@ -87,14 +90,30 @@ function loadDetailedWithUserAndProjectConfig(
     projectConfigText: string,
     extraEnv: Record<string, string> = {},
 ) {
+    return loadDetailedWithTierFiles(
+        { "eidnara.jsonc": userConfigText },
+        { "eidnara.jsonc": projectConfigText },
+        extraEnv,
+    );
+}
+
+function loadDetailedWithTierFiles(
+    userFiles: Record<string, string>,
+    projectFiles: Record<string, string>,
+    extraEnv: Record<string, string> = {},
+) {
     const xdg = mkdtempSync(join(tmpdir(), "eidnara-config-test-"));
     const projectDir = mkdtempSync(join(tmpdir(), "eidnara-config-proj-"));
     const fs = require("node:fs") as typeof import("node:fs");
     const configDir = join(xdg, "eidnara");
     fs.mkdirSync(configDir, { recursive: true });
     fs.mkdirSync(join(projectDir, ".eidnara"), { recursive: true });
-    writeFileSync(join(configDir, "eidnara.jsonc"), userConfigText, "utf-8");
-    writeFileSync(join(projectDir, ".eidnara", "eidnara.jsonc"), projectConfigText, "utf-8");
+    for (const [name, text] of Object.entries(userFiles)) {
+        writeFileSync(join(configDir, name), text, "utf-8");
+    }
+    for (const [name, text] of Object.entries(projectFiles)) {
+        writeFileSync(join(projectDir, ".eidnara", name), text, "utf-8");
+    }
 
     const origXdg = process.env.XDG_CONFIG_HOME;
     const savedEnv: Record<string, string | undefined> = {};
@@ -1041,5 +1060,71 @@ describe("loadPluginConfigDetailed — prompt-surface registration owner", () =>
             rmSync(xdg, { recursive: true, force: true });
             rmSync(projectDir, { recursive: true, force: true });
         }
+    });
+});
+
+describe("fold-authority parity fixture", () => {
+    interface ParityRow {
+        name: string;
+        user_tier_files: Record<string, string>;
+        project_tier_files: Record<string, string>;
+        env: Record<string, string>;
+        expected_chain: string[] | null;
+        expected_admission: "admitted" | "unresolved";
+        expected_eidnara_folds: boolean | null;
+    }
+    const fixture = JSON.parse(
+        readFileSync(join(import.meta.dir, "__fixtures__", "fold-authority-parity.json"), "utf-8"),
+    ) as { rows: ParityRow[] };
+
+    function outcome(load: () => { config: unknown; admission: ConfigAdmission }) {
+        let loaded: { config: unknown; admission: ConfigAdmission };
+        try {
+            loaded = load();
+        } catch {
+            return { chain: null, admission: "unresolved", folds: null };
+        }
+        if (loaded.admission.status === "unresolved") {
+            return { chain: null, admission: "unresolved", folds: null };
+        }
+        const config = loaded.config as Parameters<typeof isCompactionEnabled>[0];
+        return {
+            chain: normalizeSummarizerChain(config.history_summarizer),
+            admission: "admitted",
+            folds: isCompactionEnabled(config),
+        };
+    }
+
+    const expected = (row: ParityRow) => ({
+        chain: row.expected_chain,
+        admission: row.expected_admission,
+        folds: row.expected_eidnara_folds,
+    });
+
+    it("every row matches through the production loader", () => {
+        expect(fixture.rows.length).toBeGreaterThan(0);
+        for (const row of fixture.rows) {
+            const actual = outcome(() =>
+                loadDetailedWithTierFiles(row.user_tier_files, row.project_tier_files, row.env),
+            );
+            expect({ name: row.name, ...actual }).toEqual({ name: row.name, ...expected(row) });
+        }
+    });
+
+    it("rejects a raw lenient read that skips the loader pipeline", () => {
+        const mismatches = fixture.rows.filter((row) => {
+            const actual = outcome(() => {
+                const text = row.user_tier_files["eidnara.jsonc"];
+                let config: unknown = {};
+                try {
+                    config = text === undefined ? {} : parseConfigJsonc(text);
+                } catch {
+                    config = {};
+                }
+                return { config, admission: { status: "admitted" } as const };
+            });
+            return !Bun.deepEquals(actual, expected(row));
+        });
+        expect(mismatches.length).toBeGreaterThan(0);
     });
 });

@@ -574,7 +574,12 @@ describe("runSetup", () => {
         const code = await runSetup({ prompts, env, host });
 
         expect(code).toBe(0);
-        expect(seen).toEqual({ enabled: true, compactionEnabled: false, memoryEnabled: false });
+        expect(seen).toEqual({
+            enabled: true,
+            compactionEnabled: false,
+            memoryEnabled: false,
+            admission: { status: "admitted" },
+        });
         const config = parseJsonc(readFileSync(configPath, "utf-8")) as {
             compaction?: { enabled?: boolean };
             memory?: { enabled?: boolean };
@@ -625,7 +630,12 @@ describe("runSetup", () => {
         const code = await runSetup({ prompts, env, host });
 
         expect(code).toBe(0);
-        expect(seen).toEqual({ enabled: false, compactionEnabled: false, memoryEnabled: false });
+        expect(seen).toEqual({
+            enabled: false,
+            compactionEnabled: false,
+            memoryEnabled: false,
+            admission: { status: "admitted" },
+        });
         expect(prompts.messages.join("\n")).toContain(
             "warn:Eidnara is disabled (`enabled: false`)",
         );
@@ -742,6 +752,7 @@ describe("runSetup", () => {
                 enabled: false,
                 compactionEnabled: false,
                 memoryEnabled: false,
+                admission: { status: "admitted" },
             });
             expect(prompts.messages.join("\n")).toContain(
                 "overrides enabled: true, memory.enabled: true;",

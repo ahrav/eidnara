@@ -168,7 +168,7 @@ fn run(messages: u32, phrase_of: impl Fn(i64) -> &'static str, prompt: &str, kno
         let identities = identities(&world, &segments);
         let root = tempfile::tempdir().unwrap();
         seed_store(root.path(), &world.session, &segments);
-        let fixture = FixtureProcess::start_at(root.path().to_path_buf());
+        let fixture = FixtureProcess::start_folding_at(root.path().to_path_buf());
         let pass = pass(&fixture, &world, prompt, knobs).await;
         let _ = fixture.shutdown();
         let mut ledger = SurfaceLedger::default();
@@ -399,7 +399,7 @@ fn a_turn_the_host_refuses_is_returned_with_its_code() {
         // 2,000 messages.
         let world = world(2_400);
         let root = tempfile::tempdir().unwrap();
-        let fixture = FixtureProcess::start_at(root.path().to_path_buf());
+        let fixture = FixtureProcess::start_folding_at(root.path().to_path_buf());
         let refused = try_pass(&fixture, &world, PROMPT, &Knobs::default())
             .await
             .err()
@@ -421,7 +421,7 @@ fn a_repeated_pass_reports_the_frozen_decision_as_unjoinable() {
         let identities = identities(&world, &segments);
         let root = tempfile::tempdir().unwrap();
         seed_store(root.path(), &world.session, &segments);
-        let fixture = FixtureProcess::start_at(root.path().to_path_buf());
+        let fixture = FixtureProcess::start_folding_at(root.path().to_path_buf());
         let first = pass(&fixture, &world, PROMPT, &Knobs::default()).await;
         let second = pass(&fixture, &world, PROMPT, &Knobs::default()).await;
         let _ = fixture.shutdown();

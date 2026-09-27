@@ -1,4 +1,4 @@
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync } from "node:fs";
 
 import {
     detectConfigFile,
@@ -8,8 +8,10 @@ import {
 import { setOutputReserveConfig } from "../shared/models-dev-cache";
 import type { PromptSurfaceConfig } from "../shared/prompt-surface";
 import { isRecord } from "../shared/record-type-guard";
+import { readRegularFileSync } from "../shared/regular-file";
 import { setWindowOverlayPath } from "../shared/window-geometry";
 import { eidnaraProjectConfigBasePath, eidnaraUserConfigBasePath } from "./config-paths";
+import { type ConfigAdmission, screenUserTierText } from "./fold-authority";
 import type { LoadOutcome } from "./load-outcome";
 import {
     constrainProjectThresholdOverrides,
@@ -25,6 +27,7 @@ import {
 import { redactConfigIssuePath } from "./schema/issue-path";
 import { type SubstituteFailure, substituteConfigVariables } from "./variable";
 
+export type { ConfigAdmission } from "./fold-authority";
 export type { LoadOutcome } from "./load-outcome";
 
 export interface EidnaraPluginConfig extends EidnaraConfig {
@@ -52,6 +55,7 @@ export interface LoadResultDetailed {
     /** The loader captures USER-tier defaults and overrides before merging project routing. */
     registrationPromptSurface: PromptSurfaceConfig;
     loadOutcome: LoadOutcome;
+    admission: ConfigAdmission;
     sources: {
         userConfig: LoadOutcome;
         projectConfig: LoadOutcome;
@@ -70,6 +74,7 @@ interface LoadedConfigFileDetailed extends LoadedConfigFile {
      * are warnings but not failures.
      */
     substitutionFailures: SubstituteFailure[];
+    authorityRejections: string[];
 }
 
 /**
@@ -89,19 +94,23 @@ function loadConfigFileDetailed(
         return null;
     }
 
+    const failed = (warning: string, outcome: LoadOutcome): LoadedConfigFileDetailed => ({
+        config: {},
+        warnings: [warning],
+        outcome,
+        source,
+        substitutionFailures: [],
+        authorityRejections: source === "user" ? [warning] : [],
+    });
+
     let rawText: string;
     try {
-        rawText = readFileSync(configPath, "utf-8");
+        rawText = readRegularFileSync(configPath);
     } catch (error) {
-        return {
-            config: {},
-            warnings: [
-                `${configPath}: failed to read config: ${error instanceof Error ? error.message : String(error)}`,
-            ],
-            outcome: "project-file-io-error",
-            source,
-            substitutionFailures: [],
-        };
+        return failed(
+            `${configPath}: failed to read config: ${error instanceof Error ? error.message : String(error)}`,
+            "project-file-io-error",
+        );
     }
 
     try {
@@ -122,6 +131,10 @@ function loadConfigFileDetailed(
         }
         const config: Record<string, unknown> = parsed;
         const prefix = (warning: string) => `${configPath}: ${warning}`;
+        const screen =
+            source === "user"
+                ? screenUserTierText(rawText, config)
+                : { rejections: [], warnings: [] };
         const substitutionWarnings = substituted.warnings.map(prefix);
         const substitutionFailures = substituted.failures.map((failure) => ({
             ...failure,
@@ -134,7 +147,11 @@ function loadConfigFileDetailed(
         );
         return {
             config,
-            warnings: [...substitutionWarnings, ...unsafeKeyWarnings],
+            warnings: [
+                ...substitutionWarnings,
+                ...unsafeKeyWarnings,
+                ...screen.warnings.map(prefix),
+            ],
             outcome:
                 rejectedKeyPaths.length > 0
                     ? "schema-recovery"
@@ -143,17 +160,13 @@ function loadConfigFileDetailed(
                       : "ok",
             source,
             substitutionFailures,
+            authorityRejections: screen.rejections.map(prefix),
         };
     } catch (error) {
-        return {
-            config: {},
-            warnings: [
-                `${configPath}: failed to load config: ${error instanceof Error ? error.message : String(error)}`,
-            ],
-            outcome: "project-file-parse-error",
-            source,
-            substitutionFailures: [],
-        };
+        return failed(
+            `${configPath}: failed to load config: ${error instanceof Error ? error.message : String(error)}`,
+            "project-file-parse-error",
+        );
     }
 }
 
@@ -545,8 +558,34 @@ export function loadPluginConfigDetailed(directory: string): LoadResultDetailed 
         config,
         registrationPromptSurface: trustedBaseConfig.prompt_surface,
         loadOutcome: combinedOutcome({ sources, substitutionFailures, recoveredTopLevelKeys }),
+        admission: admissionOf(userLoaded),
         sources,
         substitutionFailures,
         recoveredTopLevelKeys,
     };
+}
+
+function admissionOf(userLoaded: LoadedConfigFileDetailed | null): ConfigAdmission {
+    const rejections = userLoaded?.authorityRejections ?? [];
+    return rejections.length === 0
+        ? { status: "admitted" }
+        : { status: "unresolved", reason: rejections.join("; ") };
+}
+
+export function loadUserTierConfigDetailed(configPath: string | undefined): {
+    config: EidnaraPluginConfig & { configWarnings?: string[] };
+    admission: ConfigAdmission;
+} {
+    const loaded = configPath === undefined ? null : loadConfigFileDetailed(configPath, "user");
+    try {
+        return { config: parsePluginConfig(loaded?.config ?? {}), admission: admissionOf(loaded) };
+    } catch (error) {
+        return {
+            config: parsePluginConfig({}),
+            admission: {
+                status: "unresolved",
+                reason: error instanceof Error ? error.message : String(error),
+            },
+        };
+    }
 }

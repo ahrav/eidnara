@@ -24,6 +24,8 @@ const HIDDEN_AGENT_ACTIVATION_FIELDS = ["disable"] as const;
 const HISTORY_SUMMARIZER_USER_ONLY_FIELDS = [
     "model",
     "fallback_models",
+    "module_model",
+    "module_fallback_models",
     "disallowed_tools",
 ] as const;
 const PROMPT_SURFACE_USER_ONLY_FIELDS = ["guidance_override_path", "tool_descriptions"] as const;
