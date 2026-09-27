@@ -103,7 +103,8 @@ Required faults and enabling state: an uppercase key; a dotless key; a 129-byte 
 Confidence: high - [evidence](evidence/accepted-claim-satisfies-contract-grammar.md). Verified the D-4 order in `check_claim_set` and that the value bound counts unescaped bytes; a mutation run replacing the span check with a whole-message check made the property test fail
 Existing check: `crates/daemon/src/history_summarizer_citations.rs::tests::{each_claim_rule_drops_only_its_own_claim, a_segment_keeps_the_last_claim_per_key_then_the_first_eight, cite_acceptance_is_value_inside_the_cited_span}`; `crates/daemon/src/history_summarizer_citations_golden.rs::claims_attach_to_the_accepted_segment_their_cite_names`; `crates/daemon/src/history_summarizer_validate.rs::tests::{the_value_bound_counts_unescaped_bytes, the_provisional_last_segment_carries_its_claims}`; the rewritten-key case in `crates/memory-store/tests/production_redaction.rs::history_segment_content_redacts_and_new_message_identities_reject`
 Impact: A claim with a bad key or a value the cited message never stated would correct history with an invented value
-Open questions: None.
+Open questions:
+- D-2 writes the key as an attribute, `<claim key="...">`; the prompt and `parse_claims` use a `<key>` child element, and no recorded decision amends D-2. The two sides agree with each other, so the grammar and bound checks above are unaffected. Needs the spec text updated or the difference recorded as intended (needs human input)
 
 ### claims-constants-match-prompt-fixture
 
