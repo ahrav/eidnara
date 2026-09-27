@@ -143,6 +143,7 @@ fn capture(request: Value) -> StaleCapture {
     StaleCapture {
         schema: STALE_CAPTURE_SCHEMA.to_string(),
         harness: "opencode".to_string(),
+        summarizer: "fixture/scripted".to_string(),
         world,
         segments: segments(),
         requests: BTreeMap::from([("stale-0".to_string(), request)]),
@@ -176,7 +177,7 @@ fn arms_change_the_served_history_where_d7_and_d8_put_their_bytes() {
     );
     assert_eq!((pair.restating_ordinal, pair.stale_tier), (5, 1));
     assert_eq!(pair.delivery, StaleDelivery::Both);
-    let stale = "Set the billing service port to 34827.";
+    let stale = "34827";
     let arm = |parts| history_text(&with_parts(&served, parts));
     // (b): the override sentence heads the m1 delta; m0 is untouched.
     let (m0, m1) = arm(&pair.arms.precedence_line);
@@ -209,6 +210,7 @@ fn arms_change_the_served_history_where_d7_and_d8_put_their_bytes() {
     let (m0, _) = arm(&pair.arms.omission_oracle);
     assert_eq!(m0, M0.replacen(stale, "", 1));
     assert!(!carries(&m0, "34827"));
+    assert_eq!(export.summarizer, "fixture/scripted");
 }
 
 #[test]

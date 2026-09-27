@@ -1392,9 +1392,19 @@ one is Rust:
    - Each world turn is the user's prompt. The mock provider answers with the
      world's acknowledgement and reports input tokens that grow each turn up
      to 90 percent of a 200,000-token limit, so the daemon's own summarizer
-     (the fixture's scripted backend, which writes each segment's `p1` and
-     `p2` as the presented lines' own words and `p3` as the range) folds the
-     older history the way a long session does.
+     folds the older history the way a long session does.
+   - `--summarizer-model <bedrock id>` has a real model write the segments.
+     The driver starts the fixture with `EIDNARA_FIXTURE_SUMMARIZER_COMMAND`
+     naming `scripts/bedrock-summarizer.ts`, so the fixture answers each
+     summarizer prompt by that command (the prompt on stdin, the answer on
+     stdout, through the AWS CLI's Converse call) instead of its script. The
+     daemon's validator and publication judge the answer as they judge any
+     provider's.
+   - Without the option, the fixture's scripted summarizer writes each
+     segment's `p1` and `p2` as the presented lines' own words and `p3` as the
+     range, so a segment that decays past P2 serves no prose. At 120 subjects
+     almost every m0 segment renders at P3 or P4, which is why a gate-A run
+     names a real summarizer.
    - After the session, each pair's question is sent as a turn of its own,
      and the provider request OpenCode sends for it is captured whole. That
      request holds the system prompt with the Eidnara guidance, the served
@@ -1411,11 +1421,12 @@ one is Rust:
 under `EIDNARA_EVAL_S0_BUDGET_MS`, like the S0 campaign, and checks every
 located pair against its request.
 
-**Arms.** A pair is located when its stale statement sits in the served
-history: the m0 part first, then the m1 part. That part is the one D-7 would
-rewrite. A pair whose statement sits only in the raw tail, or whose segment
-rendered without prose, is `unlocatable`: no rendering can change it, so it
-has no arms and is never dropped. `arms` returns arms (b) through (e) as the
+**Arms.** A pair is located when its stale value sits in the served history:
+the m0 part first, then the m1 part. That part is the one D-7 would rewrite.
+The value is the one token of the stale statement that a paraphrasing
+summarizer keeps. A pair whose value sits only in the raw tail, or whose
+segment rendered without it, is `unlocatable`: no rendering can change it,
+so it has no arms and is never dropped. `arms` returns arms (b) through (e) as the
 text parts they replace, and `with_parts(request, parts)` builds an arm's
 request. Arm (a) is the request as served.
 
@@ -1425,14 +1436,14 @@ request. Arm (a) is the request as served.
   `<session-history-since>` holding that block alone.
 - (c) `footer`: one D-7 footer line, `[corrections: <key> = <live> @<N>]`, at
   the end of the stale segment's body, stale prose kept.
-- (d) `anchored_replacement`: the stale statement replaced by
-  `[corrected @<N>: <key> = <live>]`.
-- (e) `omission_oracle`: the stale statement removed from the served history.
+- (d) `anchored_replacement`: the stale value replaced by
+  `[corrected @<N>: <key> = <live>]`, the smallest anchor D-7 could hold.
+- (e) `omission_oracle`: the stale value removed from the served history.
 
 `N` is the restating message's ordinal in the harness session: every world
 turn is one user and one assistant message, numbered from one. The raw tail
 and the hint are never changed, since a renderer change reaches neither, so
-(e) removes the statement from the history only. The override sentence is:
+(e) removes the value from the history only. The override sentence is:
 
 ```text
 Later statements supersede earlier ones: where two statements in this history disagree, the later one is current.
@@ -1467,16 +1478,16 @@ quantities `gen/gen-statistics-golden.ts` pins.
 
 | Field | Meaning |
 | --- | --- |
-| `schema`, `harness`, `root_seed` | The export schema, the harness that served the requests, and the world's seed as a decimal. |
+| `schema`, `harness`, `summarizer`, `root_seed` | The export schema, the harness that served the requests, the model that wrote the segments (`fixture/scripted` for the script), and the world's seed as a decimal. |
 | `pairs[].task`, `pairs[].question`, `pairs[].key` | The task id (`stale-<i>`), the question the pair asks, and the claim key the arms name. |
 | `pairs[].stale_value`, `pairs[].live_value` | The two values the grader reads. |
 | `pairs[].restating_ordinal` | The restatement's ordinal in the harness session, the `N` of every marker. |
 | `pairs[].stale_tier` | `1..=4`: the first stored tier (`p1` to `p4`) of the stale segment whose text is the rendered body; `0` when none matches. The fixture writes `p2` equal to `p1`, so P2 renders read as `1`, and its `p3` is the range alone, so a P3 render is unlocatable. |
 | `pairs[].delivery` | `StaleDelivery` over every text part of the request: history, raw tail, and hint. |
-| `pairs[].history`, `pairs[].stale_span` | The part holding the stale statement (`messages[message].content[part]`) and the statement's UTF-8 byte span there. |
+| `pairs[].history`, `pairs[].stale_span` | The part holding the stale value (`messages[message].content[part]`) and the value's UTF-8 byte span there. |
 | `pairs[].request` | The provider request as the harness sent it: arm (a). |
 | `pairs[].arms` | Arms (b) through (e) as the parts they replace. |
-| `unlocatable` | Task id to `{delivery, request}` for every pair whose served history does not hold the stale statement. |
+| `unlocatable` | Task id to `{delivery, request}` for every pair whose served history does not hold the stale value. |
 | `stale_delivered` | Pairs, located or not, whose request carries the stale value anywhere. |
 
 A request is Anthropic Messages shaped, as OpenCode sends it to its

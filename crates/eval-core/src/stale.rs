@@ -108,8 +108,8 @@ pub struct PartText {
 /// replaces; arm (a) is the request as served. (b) puts the D-8 override
 /// sentence in a `<memory-updates>` block at the head of the m1 delta, where
 /// D-8 puts it; (c) appends one D-7 footer line to the stale segment's body,
-/// stale prose kept; (d) replaces the stale statement with the D-7 marker;
-/// (e) removes it.
+/// stale prose kept; (d) replaces the stale value with the D-7 marker; (e)
+/// removes it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Arms {
@@ -159,16 +159,16 @@ impl<'a> Served<'a> {
         }
     }
 
-    /// The part holding `statement` and its span there: m0 first, then m1.
-    fn locate(&self, statement: &str) -> Option<(HistoryAt, &'a str, ServedSpan)> {
+    /// The part holding `phrase` and its span there: m0 first, then m1.
+    fn locate(&self, phrase: &str) -> Option<(HistoryAt, &'a str, ServedSpan)> {
         [self.m0, self.m1]
             .into_iter()
             .flatten()
-            .find_map(|(at, text)| locate(text, statement).map(|span| (at, text, span)))
+            .find_map(|(at, text)| locate(text, phrase).map(|span| (at, text, span)))
     }
 }
 
-/// Builds arms (b) through (e) for the stale statement at `stale` in the part
+/// Builds arms (b) through (e) for the stale value at `stale` in the part
 /// `at` of `served`. `key` must satisfy the D-7 grammar and the span must lie
 /// on character boundaries of that part.
 pub fn arms(
@@ -433,6 +433,8 @@ pub struct SegmentTiers {
 pub struct StaleCapture {
     pub schema: String,
     pub harness: String,
+    /// The model that wrote the daemon's segments, or `fixture/scripted`.
+    pub summarizer: String,
     pub world: FactWorld,
     pub segments: Vec<SegmentTiers>,
     pub requests: BTreeMap<String, Value>,
@@ -508,8 +510,8 @@ fn rendered_tier(history: &str, stale: ServedSpan, segments: &[SegmentTiers]) ->
 /// One stale-preference pair as the export carries it: the question, the
 /// claim key its arms name, both values, the restating message's ordinal,
 /// the tier the stale segment rendered at, what the served request delivered,
-/// the served request itself (arm (a)), the part holding the stale statement
-/// and its span there, and arms (b) through (e) as the parts they replace.
+/// the served request itself (arm (a)), the part holding the stale value and
+/// its span there, and arms (b) through (e) as the parts they replace.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct StalePair {
@@ -528,7 +530,7 @@ pub struct StalePair {
     pub arms: Arms,
 }
 
-/// A pair whose served history does not hold the stale statement, so no
+/// A pair whose served history does not hold the stale value, so no
 /// rendering can change it: what the whole request delivered, and the
 /// request.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -544,6 +546,7 @@ pub struct Unlocatable {
 pub struct StaleExport {
     pub schema: String,
     pub harness: String,
+    pub summarizer: String,
     pub root_seed: String,
     pub pairs: Vec<StalePair>,
     pub unlocatable: BTreeMap<String, Unlocatable>,
@@ -565,8 +568,10 @@ pub enum CaptureError {
 debug_display!(CaptureError);
 
 /// The export of one capture. A pair is located when the served history (the
-/// m0 part, then the m1 part) carries the stale statement; that part is the
-/// one arms (c) through (e) vary. The delivery is
+/// m0 part, then the m1 part) carries the stale value, the one token of the
+/// stale statement a summarizer that paraphrases keeps; that part is the one
+/// arms (c) through (e) vary, and the value's span is what (d) and (e)
+/// replace. The delivery is
 /// over every text part of the request: the history, the raw tail, and the
 /// search hint.
 pub fn export_capture(capture: &StaleCapture) -> Result<StaleExport, CaptureError> {
@@ -578,6 +583,7 @@ pub fn export_capture(capture: &StaleCapture) -> Result<StaleExport, CaptureErro
     let mut export = StaleExport {
         schema: STALE_EXPORT_SCHEMA.to_string(),
         harness: capture.harness.clone(),
+        summarizer: capture.summarizer.clone(),
         root_seed: capture.world.root_seed.clone(),
         pairs: Vec::new(),
         unlocatable: BTreeMap::new(),
@@ -600,7 +606,7 @@ pub fn export_capture(capture: &StaleCapture) -> Result<StaleExport, CaptureErro
         let delivery = StaleDelivery::of(&served, &pair.stale_value, &pair.live_value);
         export.stale_delivered += u32::from(delivery.stale_delivered());
         let served_history = Served::of(&parts);
-        let located = served_history.locate(&pair.stale_statement);
+        let located = served_history.locate(&pair.stale_value);
         let Some((history, text, stale_span)) = located else {
             export.unlocatable.insert(
                 pair.task.clone(),

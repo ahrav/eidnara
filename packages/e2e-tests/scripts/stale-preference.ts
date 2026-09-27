@@ -3,7 +3,7 @@
  * daemon, and writes the capture `eval_runner stale-arms` reads:
  *
  *     bun scripts/stale-preference.ts --world <stale-world.json> --out <capture.json>
- *         [--context-limit <tokens>] [--tokens-per-turn <tokens>]
+ *         [--context-limit <tokens>] [--tokens-per-turn <tokens>] [--summarizer-model <bedrock id>]
  */
 
 import { readFileSync, renameSync, writeFileSync } from "node:fs";
@@ -16,6 +16,7 @@ const { values } = parseArgs({
         out: { type: "string" },
         "context-limit": { type: "string" },
         "tokens-per-turn": { type: "string" },
+        "summarizer-model": { type: "string" },
     },
 });
 if (!values.world || !values.out) {
@@ -31,6 +32,7 @@ const capture = await captureStaleWorld(world, {
     ...DEFAULT_STALE_DRIVER,
     modelContextLimit: Number(values["context-limit"] ?? DEFAULT_STALE_DRIVER.modelContextLimit),
     tokensPerTurn: Number(values["tokens-per-turn"] ?? DEFAULT_STALE_DRIVER.tokensPerTurn),
+    summarizerModel: values["summarizer-model"],
     progress: (done, total) => {
         if (done % 25 === 0 || done === total) console.error(`${done}/${total}`);
     },

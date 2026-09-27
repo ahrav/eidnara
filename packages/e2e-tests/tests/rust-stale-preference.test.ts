@@ -88,7 +88,7 @@ describe.skipIf(!rustPrereqs.ok || !budget)("stale preference through OpenCode a
                 const bytes = Buffer.from(served, "utf8");
                 expect(
                     bytes.subarray(pair.stale_span.start, pair.stale_span.end).toString("utf8"),
-                ).toBe(world_pair?.stale_statement ?? "");
+                ).toBe(world_pair?.stale_value ?? "");
                 // The restating message is the ordinal every marker names: in the raw
                 // tail under its ordinal (a hint the host appended may follow), or inside a served segment whose range holds it
                 // (a segment demoted to its title serves no prose).
@@ -108,7 +108,7 @@ describe.skipIf(!rustPrereqs.ok || !budget)("stale preference through OpenCode a
                 expect(replaced?.text).toContain(
                     `[corrected @${pair.restating_ordinal}: ${pair.key} = ${pair.live_value}]`,
                 );
-                expect(replaced?.text.includes(world_pair?.stale_statement ?? "")).toBe(false);
+                expect(replaced?.text.includes(world_pair?.stale_value ?? "")).toBe(false);
                 expect(pair.arms.footer[0]?.text).toContain(
                     `[corrections: ${pair.key} = ${pair.live_value} @${pair.restating_ordinal}]`,
                 );

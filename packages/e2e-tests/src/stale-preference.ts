@@ -12,7 +12,7 @@
 
 import { Database } from "bun:sqlite";
 import { existsSync } from "node:fs";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { RustTestHarness } from "./rust-harness";
 
 export const STALE_CAPTURE_SCHEMA = "eval-stale-capture/v1";
@@ -54,6 +54,8 @@ export interface SegmentTiers {
 export interface StaleCapture {
     schema: string;
     harness: "opencode";
+    /** The model that wrote the segments, or `fixture/scripted`. */
+    summarizer: string;
     world: FactWorld;
     segments: SegmentTiers[];
     requests: Record<string, unknown>;
@@ -65,6 +67,13 @@ export interface StaleDriverOptions {
     /** Input tokens the mock reports per turn, up to `pressureCeiling` of the limit. */
     tokensPerTurn: number;
     pressureCeiling: number;
+    /**
+     * The Bedrock model that writes the daemon's segments, through
+     * `scripts/bedrock-summarizer.ts`; unset, the fixture's scripted summarizer writes each
+     * segment's `p1` and `p2` as the presented lines and `p3` as the range, which serves no prose
+     * once a segment decays past P2.
+     */
+    summarizerModel?: string;
     /** Called after each world turn and each question, for progress. */
     progress?: (done: number, total: number) => void;
 }
@@ -131,6 +140,15 @@ export async function captureStaleWorld(
     const h = await RustTestHarness.create({
         modelContextLimit: options.modelContextLimit,
         eidnaraConfig: { history_summarizer: { model: "fixture/deterministic" } },
+        daemonEnv: options.summarizerModel
+            ? {
+                  EIDNARA_FIXTURE_SUMMARIZER_COMMAND: resolve(
+                      import.meta.dir,
+                      "../scripts/bedrock-summarizer.ts",
+                  ),
+                  EIDNARA_STALE_SUMMARIZER_MODEL: options.summarizerModel,
+              }
+            : undefined,
     });
     try {
         const sessionId = await h.createSession();
@@ -160,6 +178,7 @@ export async function captureStaleWorld(
         return {
             schema: STALE_CAPTURE_SCHEMA,
             harness: "opencode",
+            summarizer: options.summarizerModel ?? "fixture/scripted",
             world,
             segments: storedSegments(h.env.dataDir),
             requests,
