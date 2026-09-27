@@ -1,0 +1,1128 @@
+-- Baseline schema of the memory store, applied once to a pristine file behind
+-- the `fence` and `format_marker` tables the storage crate installs first.
+-- The bytes of this file are part of the store identity `storage::open_sqlite`
+-- checks on every open; there is no upgrade path, so a schema change before
+-- genesis edits this file and discards development databases.
+--
+-- Triggers below call the scalar functions `note_caller_project`,
+-- `facade_authority_domain`, and `facade_authority_route`, which
+-- `MemoryStore::open` registers after the baseline is applied; SQLite resolves
+-- a trigger's functions when the trigger fires, not when it is created.
+
+CREATE TABLE cache_state (
+            session_id   TEXT PRIMARY KEY,
+            row_version  INTEGER NOT NULL,
+            core_state   TEXT NOT NULL,
+            meta         TEXT NOT NULL
+        , last_activity_at INTEGER NOT NULL DEFAULT 0);
+
+-- The ordered block identity vector of each producer message id a session's
+-- transform has recorded, as a JSON array of `BlockIdentity`. It lives beside
+-- `cache_state` instead of inside `meta` so the metadata blob stays bounded
+-- as the session grows; the transform commit rewrites only changed rows.
+-- `scan_version` is the row version of the commit whose scanned document wrote
+-- the row and names that document's receipt owner, retired once no row names
+-- it; it is NULL for a lineage copy, whose bytes the descent's lineage links
+-- cover.
+CREATE TABLE block_identities (
+    session_id TEXT NOT NULL,
+    mid        TEXT NOT NULL,
+    identities TEXT NOT NULL,
+    scan_version INTEGER,
+    PRIMARY KEY (session_id, mid)
+) WITHOUT ROWID;
+
+-- Automatic capture keeps input until a kernel receipt is confirmed. Completed
+-- identities remain replayable; only their source and prepared-output bytes go.
+-- `abandoned_at_ms` is terminal: the row keeps its identity and last error but
+-- releases its text and leaves every pending selection and quota count.
+CREATE TABLE memory_capture_jobs (
+    job_id TEXT PRIMARY KEY,
+    project TEXT NOT NULL,
+    harness TEXT NOT NULL CHECK (length(harness) > 0),
+    session_id TEXT NOT NULL,
+    message_id TEXT NOT NULL,
+    role TEXT NOT NULL CHECK (role IN ('user','assistant')),
+    text TEXT NOT NULL,
+    prepared_json TEXT,
+    attempts INTEGER NOT NULL DEFAULT 0,
+    failures INTEGER NOT NULL DEFAULT 0,
+    paused_until_ms INTEGER NOT NULL DEFAULT 0,
+    retry_at_ms INTEGER NOT NULL DEFAULT 0,
+    last_error TEXT,
+    commit_seq INTEGER,
+    abandoned_at_ms INTEGER,
+    created_at_ms INTEGER NOT NULL,
+    CHECK (commit_seq IS NULL OR (text='' AND prepared_json IS NULL)),
+    CHECK (abandoned_at_ms IS NULL OR (commit_seq IS NULL AND text='' AND prepared_json IS NULL AND last_error IS NOT NULL))
+);
+CREATE INDEX idx_memory_capture_pending ON memory_capture_jobs(project,harness,created_at_ms)
+    WHERE commit_seq IS NULL AND abandoned_at_ms IS NULL;
+CREATE INDEX idx_memory_capture_session_project ON memory_capture_jobs(session_id,project);
+-- Covers the project status aggregate, whose predicate columns are indexed by
+-- expression so the row (and its prepared payload) is never read.
+CREATE INDEX idx_memory_capture_project ON memory_capture_jobs(project,commit_seq,abandoned_at_ms,last_error,prepared_json IS NOT NULL);
+
+CREATE TABLE history_segments (
+            session_id        TEXT NOT NULL,
+            sequence          INTEGER NOT NULL,
+            start_message     INTEGER NOT NULL,
+            end_message       INTEGER NOT NULL,
+            start_message_id  TEXT NOT NULL DEFAULT '',
+            end_message_id    TEXT NOT NULL DEFAULT '',
+            title             TEXT NOT NULL,
+            content           TEXT NOT NULL,
+            p1                TEXT,
+            p2                TEXT,
+            p3                TEXT,
+            p4                TEXT,
+            importance        INTEGER NOT NULL DEFAULT 50,
+            episode_type      TEXT,
+            legacy            INTEGER NOT NULL DEFAULT 0,
+            created_at        INTEGER NOT NULL DEFAULT 0, start_date TEXT, end_date TEXT,
+            claims            TEXT NOT NULL DEFAULT '[]',
+            PRIMARY KEY (session_id, sequence)
+        );
+
+CREATE TABLE user_memories (
+            id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+            content              TEXT NOT NULL,
+            status               TEXT NOT NULL DEFAULT 'active',
+            promoted_at          INTEGER NOT NULL DEFAULT 0,
+            source_candidate_ids TEXT DEFAULT '[]',
+            created_at           INTEGER NOT NULL DEFAULT 0,
+            updated_at           INTEGER NOT NULL DEFAULT 0
+        );
+
+CREATE INDEX idx_user_memories_status
+            ON user_memories(status);
+
+CREATE TABLE workspaces (
+            id               INTEGER PRIMARY KEY AUTOINCREMENT,
+            name             TEXT NOT NULL UNIQUE,
+            created_at       INTEGER NOT NULL DEFAULT 0,
+            updated_at       INTEGER NOT NULL DEFAULT 0,
+            share_categories TEXT NOT NULL DEFAULT '["CONSTRAINTS"]'
+        );
+
+CREATE TABLE workspace_members (
+            workspace_id  INTEGER NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+            project_path  TEXT NOT NULL,
+            display_name  TEXT NOT NULL,
+            display_path  TEXT NOT NULL,
+            added_at      INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (workspace_id, project_path)
+        );
+
+CREATE UNIQUE INDEX idx_workspace_member_unique
+            ON workspace_members(project_path);
+
+CREATE TABLE pending_agent_drops (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id  TEXT NOT NULL,
+            target_id   TEXT NOT NULL,
+            queued_at   INTEGER NOT NULL DEFAULT 0, command_id TEXT,
+            UNIQUE(session_id, target_id)
+        );
+
+CREATE INDEX idx_pending_agent_drops_session
+            ON pending_agent_drops(session_id, queued_at, id);
+
+CREATE TABLE pass_trace (
+            session_id             TEXT PRIMARY KEY,
+            last_received_at_ms    INTEGER NOT NULL,
+            last_completed_at_ms   INTEGER NOT NULL,
+            last_reject_error      TEXT NULL,
+            last_reject_at_ms      INTEGER NULL,
+            reject_count           INTEGER NOT NULL DEFAULT 0,
+            receive_count          INTEGER NOT NULL DEFAULT 0
+        , first_divergence TEXT NULL, last_divergence TEXT NULL, scheduler_history TEXT NOT NULL DEFAULT '[]', scheduler_interesting_history TEXT NOT NULL DEFAULT '[]');
+
+CREATE TABLE chunk_transcripts (
+            session_id          TEXT NOT NULL,
+            history_segment_seq     INTEGER NOT NULL,
+            start_ordinal       INTEGER NOT NULL,
+            end_ordinal         INTEGER NOT NULL,
+            transcript_deflate  BLOB NOT NULL,
+            created_at_ms       INTEGER NOT NULL,
+            PRIMARY KEY (session_id, history_segment_seq)
+        );
+
+CREATE INDEX idx_chunk_transcripts_session_range
+            ON chunk_transcripts(session_id, start_ordinal, end_ordinal, history_segment_seq);
+
+CREATE TABLE tags (
+            session_id     TEXT NOT NULL,
+            tag_number    INTEGER NOT NULL,
+            block_id      TEXT NOT NULL,
+            kind          TEXT NOT NULL CHECK (kind IN ('message', 'tool_call', 'tool_result')),
+            token_count   INTEGER NOT NULL DEFAULT 0,
+            created_at_ms INTEGER NOT NULL DEFAULT 0, source_bytes BLOB NOT NULL DEFAULT X'',
+            PRIMARY KEY (session_id, tag_number),
+            UNIQUE(session_id, block_id)
+        );
+
+CREATE TABLE channel1_appends (
+            session_id     TEXT NOT NULL,
+            block_id       TEXT NOT NULL,
+            reminder_text  TEXT NOT NULL,
+            fired_at_ms    INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (session_id, block_id)
+        );
+
+CREATE INDEX idx_channel1_appends_session
+            ON channel1_appends(session_id, fired_at_ms, block_id);
+
+CREATE TABLE reduce_command_ledger (
+            session_id   TEXT NOT NULL,
+            command_id   TEXT NOT NULL,
+            queued_at_ms INTEGER NOT NULL, first_applied_at_ms INTEGER, disposition TEXT
+            CHECK (disposition IS NULL OR disposition IN ('no_targets')),
+            PRIMARY KEY (session_id, command_id)
+        );
+
+CREATE INDEX idx_reduce_command_ledger_session_newest
+            ON reduce_command_ledger(session_id, queued_at_ms DESC, command_id DESC);
+
+CREATE TABLE user_hints (
+            session_id  TEXT NOT NULL,
+            block_id    TEXT NOT NULL,
+            hint_text   TEXT NOT NULL,
+            created_at  INTEGER NOT NULL,
+            PRIMARY KEY (session_id, block_id)
+        );
+
+CREATE INDEX idx_user_hints_session_created
+            ON user_hints(session_id, created_at, block_id);
+
+CREATE TABLE overlay_frontiers (
+            session_id        TEXT PRIMARY KEY,
+            max_seen_ordinal  INTEGER NOT NULL DEFAULT 0
+        );
+
+CREATE TABLE temporal_marks (
+            session_id   TEXT NOT NULL,
+            block_id     TEXT NOT NULL,
+            marker_text  TEXT NOT NULL,
+            created_at   INTEGER NOT NULL,
+            PRIMARY KEY (session_id, block_id)
+        );
+
+CREATE INDEX idx_temporal_marks_session_created
+            ON temporal_marks(session_id, created_at, block_id);
+
+CREATE TABLE wrapup_commands (
+            session_id   TEXT NOT NULL,
+            command_id   TEXT NOT NULL,
+            disposition  TEXT NOT NULL
+                CHECK (disposition IN ('completed', 'nothing_to_compact', 'failed')),
+            rounds       INTEGER NOT NULL,
+            summary      TEXT NOT NULL,
+            created_at   INTEGER NOT NULL,
+            PRIMARY KEY (session_id, command_id)
+        );
+
+CREATE INDEX idx_wrapup_commands_session_created
+            ON wrapup_commands(session_id, created_at, command_id);
+
+CREATE INDEX idx_pending_agent_drops_command
+            ON pending_agent_drops(session_id, command_id, id);
+
+CREATE TABLE recomp_commands (
+            session_id   TEXT NOT NULL,
+            command_id   TEXT NOT NULL,
+            disposition  TEXT NOT NULL CHECK (disposition IN ('started', 'already_in_progress', 'nothing_to_do')),
+            created_at   INTEGER NOT NULL,
+            PRIMARY KEY (session_id, command_id)
+        );
+
+CREATE INDEX idx_recomp_commands_session_created
+            ON recomp_commands(session_id, created_at, command_id);
+
+CREATE TABLE changefeed (
+            feed_seq            INTEGER PRIMARY KEY AUTOINCREMENT,
+            domain              TEXT NOT NULL CHECK (domain = 'notes'),
+            op                  TEXT NOT NULL CHECK (op IN ('insert', 'update', 'tombstone')),
+            module_row_id       INTEGER NOT NULL,
+            full_row_snapshot   JSON NOT NULL,
+            content_hash        TEXT
+        );
+
+CREATE INDEX idx_changefeed_domain_seq
+            ON changefeed(domain, feed_seq);
+
+CREATE TABLE authority (
+            context_store_uuid TEXT NOT NULL,
+            project            TEXT NOT NULL,
+            domain             TEXT NOT NULL CHECK (domain IN ('memories', 'notes')),
+            state               TEXT NOT NULL CHECK (state IN ('TS', 'PREPARING', 'MODULE', 'DRAINING')),
+            generation         INTEGER NOT NULL DEFAULT 0,
+            captured_upper_bound INTEGER,
+            drain_generation   INTEGER,
+            drain_cursor       INTEGER NOT NULL DEFAULT 0,
+            step_seed          INTEGER NOT NULL DEFAULT 0,
+            step_memories      INTEGER NOT NULL DEFAULT 0,
+            step_notes         INTEGER NOT NULL DEFAULT 0,
+            step_history_segments  INTEGER NOT NULL DEFAULT 0,
+            step_reconcile     INTEGER NOT NULL DEFAULT 0,
+            step_verify        INTEGER NOT NULL DEFAULT 0,
+            step_flip          INTEGER NOT NULL DEFAULT 0,
+            coordinator_lease TEXT,
+            lease_expires_at  INTEGER,
+            checksum_expected TEXT,
+            checksum_actual   TEXT,
+            checksum_ok       INTEGER, coordinator_token TEXT, note_eval_protocol_epoch INTEGER NOT NULL DEFAULT 1,
+            PRIMARY KEY (context_store_uuid, project, domain)
+        );
+
+CREATE INDEX idx_authority_project
+            ON authority(context_store_uuid, project, state);
+
+CREATE TABLE notes (
+            id                         INTEGER PRIMARY KEY AUTOINCREMENT,
+            type                       TEXT NOT NULL DEFAULT 'smart'
+                CHECK (type IN ('session', 'smart')),
+            project_path               TEXT NOT NULL,
+            session_id                 TEXT,
+            content                    TEXT NOT NULL,
+            status                     TEXT NOT NULL DEFAULT 'active'
+                CHECK (status IN ('active', 'pending', 'ready', 'surfacing', 'surfaced', 'dismissed')),
+            surface_condition          TEXT,
+            ready_at                   INTEGER,
+            ready_reason               TEXT,
+            manifest_json              TEXT,
+            compiled_check             TEXT,
+            check_hash                 TEXT,
+            check_cron                 TEXT,
+            check_failure_count       INTEGER NOT NULL DEFAULT 0,
+            check_network_failure_count INTEGER NOT NULL DEFAULT 0,
+            check_quarantined_until   INTEGER,
+            check_next_due_at         INTEGER,
+            check_compiled_at         INTEGER,
+            check_false_since_at      INTEGER,
+            check_last_liveness_at    INTEGER,
+            last_checked_at           INTEGER,
+            check_status               TEXT NOT NULL DEFAULT 'uncompiled',
+            check_version              INTEGER NOT NULL DEFAULT 0,
+            policy_version            INTEGER NOT NULL DEFAULT 1,
+            harness                    TEXT NOT NULL DEFAULT 'module',
+            anchor_block_id            TEXT,
+            anchor_ordinal             INTEGER,
+            dismissed_at              INTEGER,
+            dismissal_resolution       TEXT,
+            status_version             INTEGER NOT NULL DEFAULT 0,
+            created_at_ms             INTEGER NOT NULL DEFAULT 0,
+            updated_at_ms             INTEGER NOT NULL DEFAULT 0,
+            context_store_uuid        TEXT,
+            context_row_id            INTEGER, source_revision INTEGER NOT NULL DEFAULT 0, state_version INTEGER NOT NULL DEFAULT 0, compiled_source_revision INTEGER, compiled_project_path TEXT, compiled_provider TEXT, compiled_config TEXT, compiled_at INTEGER, compile_status TEXT
+            CHECK (compile_status IN ('compiled', 'plain', 'refused') OR compile_status IS NULL),
+            UNIQUE(context_store_uuid, context_row_id)
+        );
+
+CREATE INDEX idx_notes_scope_status
+            ON notes(project_path, session_id, status, updated_at_ms DESC, id DESC);
+
+CREATE INDEX idx_notes_due
+            ON notes(project_path, status, check_next_due_at, id);
+
+CREATE TABLE note_deliveries (
+            delivery_id                 TEXT PRIMARY KEY,
+            note_id                     INTEGER NOT NULL,
+            session_id                  TEXT NOT NULL,
+            delivered_pass_fingerprint  TEXT NOT NULL,
+            transform_pass_id           TEXT NOT NULL DEFAULT '',
+            acked_at                    INTEGER,
+            created_at_ms               INTEGER NOT NULL DEFAULT 0, project_path TEXT NOT NULL DEFAULT '', disposition TEXT
+            CHECK(disposition IS NULL OR disposition IN ('acked','nacked','superseded')),
+            UNIQUE(note_id, session_id, delivered_pass_fingerprint)
+        );
+
+CREATE TRIGGER notes_ownership_insert
+        BEFORE INSERT ON notes
+        WHEN NEW.project_path = '' OR note_caller_project() IS NOT NEW.project_path
+        BEGIN
+            SELECT RAISE(ABORT, 'note ownership insert is outside the caller project');
+        END;
+
+CREATE TRIGGER notes_ownership_update
+        BEFORE UPDATE ON notes
+        WHEN (NEW.id IS NOT OLD.id OR NEW.type IS NOT OLD.type
+              OR NEW.session_id IS NOT OLD.session_id OR NEW.project_path IS NOT OLD.project_path
+              OR NEW.context_store_uuid IS NOT OLD.context_store_uuid
+              OR NEW.context_row_id IS NOT OLD.context_row_id)
+          AND NOT (note_caller_project() IS OLD.project_path
+                   OR note_caller_project() IS NEW.project_path)
+        BEGIN
+            SELECT RAISE(ABORT, 'note ownership update is outside the old or new project');
+        END;
+
+CREATE TRIGGER notes_ownership_delete
+        BEFORE DELETE ON notes
+        WHEN note_caller_project() IS NOT OLD.project_path
+        BEGIN
+            SELECT RAISE(ABORT, 'note ownership delete is outside the row project');
+        END;
+
+CREATE TABLE authority_seed_rows (
+            context_store_uuid TEXT NOT NULL,
+            project TEXT NOT NULL,
+            domain TEXT NOT NULL CHECK(domain = 'notes'),
+            source_row_id INTEGER NOT NULL,
+            snapshot_json TEXT NOT NULL,
+            PRIMARY KEY(context_store_uuid, project, domain, source_row_id)
+        );
+
+CREATE INDEX idx_note_deliveries_retry
+            ON note_deliveries(project_path, session_id, disposition, created_at_ms, note_id);
+
+CREATE TABLE authority_route_bindings (
+            route_project_root TEXT PRIMARY KEY,
+            context_store_uuid TEXT NOT NULL,
+            project            TEXT NOT NULL
+        );
+
+CREATE INDEX idx_authority_route_bindings_authority
+            ON authority_route_bindings(context_store_uuid, project);
+
+CREATE TABLE memory_classifier_receipts (
+            project TEXT NOT NULL CHECK (length(project) > 0),
+            producer TEXT NOT NULL CHECK (length(producer) BETWEEN 1 AND 256),
+            operation_key TEXT NOT NULL CHECK (length(operation_key) BETWEEN 1 AND 256),
+            database_incarnation_id TEXT NOT NULL CHECK (length(database_incarnation_id) > 0),
+            authority_generation INTEGER NOT NULL CHECK (authority_generation >= 0),
+            request_encoding_version INTEGER NOT NULL CHECK (request_encoding_version = 1),
+            request_digest TEXT NOT NULL CHECK (length(request_digest) = 64),
+            ledger_session TEXT NOT NULL CHECK (length(ledger_session) > 0),
+            command_id TEXT NOT NULL CHECK (length(command_id) BETWEEN 1 AND 256),
+            state TEXT NOT NULL CHECK (state IN ('in_progress', 'complete')),
+            generation INTEGER NOT NULL CHECK (generation >= 1),
+            terminal_kind TEXT CHECK (terminal_kind IN ('complete', 'failed', 'cancelled', 'unknown')),
+            result_json TEXT,
+            created_at_ms INTEGER NOT NULL,
+            updated_at_ms INTEGER NOT NULL,
+            PRIMARY KEY (project, producer, operation_key),
+            CHECK (
+                (state = 'in_progress' AND result_json IS NULL AND terminal_kind IS NULL)
+                OR (state = 'complete' AND result_json IS NOT NULL AND terminal_kind IS NOT NULL)
+            )
+        );
+
+CREATE TABLE memory_classifier_attempts (
+            project TEXT NOT NULL,
+            producer TEXT NOT NULL,
+            operation_key TEXT NOT NULL,
+            generation INTEGER NOT NULL CHECK (generation >= 1),
+            attempt_index INTEGER NOT NULL CHECK (attempt_index >= 0),
+            model TEXT NOT NULL CHECK (length(model) > 0),
+            prompt_template_version INTEGER NOT NULL CHECK (prompt_template_version >= 1),
+            system_prompt_hash TEXT NOT NULL CHECK (length(system_prompt_hash) = 64),
+            schema_version INTEGER NOT NULL CHECK (schema_version >= 1),
+            child_session TEXT NOT NULL CHECK (length(child_session) > 0),
+            project_root TEXT NOT NULL CHECK (length(project_root) > 0),
+            harness TEXT NOT NULL CHECK (length(harness) > 0),
+            dispatched_at_ms INTEGER NOT NULL,
+            run_handle TEXT,
+            terminal_kind TEXT CHECK (terminal_kind IN ('complete', 'failed', 'cancelled', 'unknown', 'not_sent')),
+            terminal_at_ms INTEGER,
+            session_released_at_ms INTEGER,
+            PRIMARY KEY (project, producer, operation_key, generation, attempt_index),
+            FOREIGN KEY (project, producer, operation_key)
+                REFERENCES memory_classifier_receipts(project, producer, operation_key),
+            CHECK ((terminal_kind IS NULL) = (terminal_at_ms IS NULL))
+        );
+
+CREATE INDEX idx_memory_classifier_attempts_project_dispatched
+            ON memory_classifier_attempts(project, dispatched_at_ms);
+
+-- MemoryReviewer review work. `memory_reviewer_store_identity` holds the store's own durable
+-- incarnation, written once at genesis; a replaced file gets a new one. Job rows
+-- are permanent receipts for the incarnation: `state` moves reserved -> ready ->
+-- terminal and nothing deletes a row. `(project, causal_identity)` is the causal
+-- review identity, so identical inputs deduplicate onto one row across firings.
+CREATE TABLE memory_reviewer_store_identity (
+            id INTEGER PRIMARY KEY CHECK (id = 0),
+            database_incarnation_id TEXT NOT NULL CHECK (length(database_incarnation_id) = 32),
+            created_at_ms INTEGER NOT NULL
+        );
+
+CREATE TRIGGER memory_reviewer_store_identity_no_update BEFORE UPDATE ON memory_reviewer_store_identity
+BEGIN SELECT RAISE(ABORT, 'the store incarnation is immutable'); END;
+
+CREATE TRIGGER memory_reviewer_store_identity_no_delete BEFORE DELETE ON memory_reviewer_store_identity
+BEGIN SELECT RAISE(ABORT, 'the store incarnation is immutable'); END;
+
+-- REPLACE runs as delete-then-insert and skips the delete trigger unless
+-- `recursive_triggers` is on, so a second insert is refused outright.
+CREATE TRIGGER memory_reviewer_store_identity_no_reinsert BEFORE INSERT ON memory_reviewer_store_identity
+WHEN EXISTS (SELECT 1 FROM memory_reviewer_store_identity)
+BEGIN SELECT RAISE(ABORT, 'the store incarnation is immutable'); END;
+
+-- `job_id` is the task id a MemoryReviewer claim persists; a declared integer key survives a
+-- rebuild, where a hidden rowid may be renumbered.
+CREATE TABLE memory_reviewer_jobs (
+            job_id INTEGER PRIMARY KEY,
+            project TEXT NOT NULL CHECK (length(project) > 0),
+            causal_identity TEXT NOT NULL CHECK (length(causal_identity) = 64),
+            producer TEXT NOT NULL CHECK (length(producer) BETWEEN 1 AND 64),
+            firing_id TEXT NOT NULL CHECK (length(firing_id) BETWEEN 1 AND 256),
+            ordinal INTEGER NOT NULL CHECK (ordinal >= 0),
+            target_json TEXT NOT NULL CHECK (length(target_json) BETWEEN 1 AND 1024),
+            question_template TEXT NOT NULL CHECK (length(question_template) BETWEEN 1 AND 256),
+            input_fingerprint TEXT NOT NULL CHECK (length(input_fingerprint) = 64),
+            state TEXT NOT NULL CHECK (state IN ('reserved', 'ready', 'terminal')),
+            input_json TEXT CHECK (input_json IS NULL OR length(input_json) <= 8192),
+            outcome TEXT CHECK (outcome IN ('expired', 'nonadmitted', 'failed', 'unknown', 'completed', 'abstained')),
+            queue_deadline_ms INTEGER NOT NULL,
+            allowance_bytes INTEGER NOT NULL CHECK (allowance_bytes >= 0),
+            receipt_charge_bytes INTEGER NOT NULL CHECK (receipt_charge_bytes > 0),
+            created_at_ms INTEGER NOT NULL,
+            updated_at_ms INTEGER NOT NULL,
+            UNIQUE (project, causal_identity),
+            CHECK ((state = 'terminal') = (outcome IS NOT NULL)),
+            CHECK (state <> 'ready' OR input_json IS NOT NULL),
+            CHECK (state <> 'reserved' OR input_json IS NULL)
+        );
+
+CREATE INDEX idx_memory_reviewer_jobs_pending
+            ON memory_reviewer_jobs(project, state, queue_deadline_ms);
+
+CREATE INDEX idx_memory_reviewer_jobs_state
+            ON memory_reviewer_jobs(state, queue_deadline_ms);
+
+-- Caller text in a job row is identity: a detected secret refuses the row at every
+-- entry point, including transaction-local composition, instead of being redacted.
+-- Fingerprinted causal fields never reach a column; `reserve_memory_reviewer_job_in_tx` scans them.
+CREATE TRIGGER memory_reviewer_jobs_reject_secret_insert BEFORE INSERT ON memory_reviewer_jobs
+BEGIN
+    SELECT reject_transaction_text(NEW.producer),
+           reject_transaction_text(NEW.firing_id),
+           reject_transaction_text(NEW.target_json),
+           reject_transaction_text(NEW.question_template),
+           reject_transaction_text(COALESCE(NEW.input_json, ''));
+END;
+
+CREATE TRIGGER memory_reviewer_jobs_reject_secret_update BEFORE UPDATE OF input_json ON memory_reviewer_jobs
+BEGIN
+    SELECT reject_transaction_text(COALESCE(NEW.input_json, ''));
+END;
+
+-- One frozen Memory Classifier selection page per project, retained until its
+-- selection deadline. `state` moves frozen -> enqueued | expired | failed_slot; only
+-- `frozen` counts against capacity, and a capacity deferral leaves it frozen. A frozen
+-- page keeps its references and continuation cursor so an enqueue commits both or
+-- neither; a terminal row drops both and keeps its receipt charge, so the table is
+-- bounded by the metadata quota the same way `memory_reviewer_jobs` is.
+CREATE TABLE memory_reviewer_frozen_selections (
+            project TEXT NOT NULL CHECK (length(project) > 0),
+            slot_id TEXT NOT NULL CHECK (length(slot_id) BETWEEN 1 AND 256),
+            selection_attempt TEXT NOT NULL CHECK (length(selection_attempt) BETWEEN 1 AND 256),
+            page_json TEXT CHECK (page_json IS NULL OR length(page_json) BETWEEN 1 AND 65536),
+            reference_count INTEGER NOT NULL CHECK (reference_count BETWEEN 1 AND 8),
+            next_cursor TEXT CHECK (next_cursor IS NULL OR length(next_cursor) <= 512),
+            state TEXT NOT NULL CHECK (state IN ('frozen', 'enqueued', 'expired', 'failed_slot')),
+            selection_deadline_ms INTEGER NOT NULL,
+            allowance_bytes INTEGER NOT NULL CHECK (allowance_bytes >= 0),
+            receipt_charge_bytes INTEGER NOT NULL CHECK (receipt_charge_bytes > 0),
+            created_at_ms INTEGER NOT NULL,
+            updated_at_ms INTEGER NOT NULL,
+            PRIMARY KEY (project, slot_id, selection_attempt),
+            CHECK ((state = 'frozen') = (page_json IS NOT NULL)),
+            CHECK (state = 'frozen' OR next_cursor IS NULL)
+        );
+
+CREATE INDEX idx_memory_reviewer_frozen_selections_state
+            ON memory_reviewer_frozen_selections(project, state, selection_deadline_ms);
+
+-- One keyset continuation per project and selection task: where the next
+-- selection resumes. It advances in the same transaction that enqueues a
+-- page or completes an empty slot, never on a deferred or expired page, and a
+-- NULL cursor means the last pass reached the end so the next one starts over.
+CREATE TABLE history_summarizer_pending_publications (
+            session_id          TEXT PRIMARY KEY,
+            firing_seq          INTEGER NOT NULL,
+            payload_deflate     BLOB NOT NULL,
+            created_at_ms       INTEGER NOT NULL
+        );
+
+CREATE TABLE memory_reviewer_selection_cursors (
+            project TEXT NOT NULL CHECK (length(project) > 0),
+            slot_id TEXT NOT NULL CHECK (length(slot_id) BETWEEN 1 AND 256),
+            cursor TEXT CHECK (cursor IS NULL OR length(cursor) <= 512),
+            updated_at_ms INTEGER NOT NULL,
+            PRIMARY KEY (project, slot_id)
+        );
+
+CREATE INDEX idx_memory_reviewer_frozen_selections_deadline
+            ON memory_reviewer_frozen_selections(state, selection_deadline_ms);
+
+CREATE TRIGGER memory_reviewer_frozen_selections_reject_secret_insert
+BEFORE INSERT ON memory_reviewer_frozen_selections
+BEGIN
+    SELECT reject_transaction_text(NEW.slot_id),
+           reject_transaction_text(NEW.selection_attempt),
+           reject_transaction_text(COALESCE(NEW.page_json, ''));
+END;
+
+-- The slot id and cursor are caller text bound into the same family: a detected secret
+-- refuses the row on insert and on the upsert that advances the cursor.
+CREATE TRIGGER memory_reviewer_selection_cursors_reject_secret_insert
+BEFORE INSERT ON memory_reviewer_selection_cursors
+BEGIN
+    SELECT reject_transaction_text(NEW.slot_id),
+           reject_transaction_text(COALESCE(NEW.cursor, ''));
+END;
+
+CREATE TRIGGER memory_reviewer_selection_cursors_reject_secret_update
+BEFORE UPDATE OF cursor ON memory_reviewer_selection_cursors
+BEGIN SELECT reject_transaction_text(COALESCE(NEW.cursor, '')); END;
+
+-- One MemoryReviewer receipt per admitted job: the run deadline and execution cutoff are
+-- written at the first claim and inherited unchanged by every takeover; the
+-- generation fences every later write; completion selects exactly one Kernel result.
+-- Attempt rows are the KTD7 markers. Every committed row stays consumed, sent or not,
+-- and the count across generations is the attempt allowance.
+CREATE TABLE memory_reviewer_receipts (
+            project TEXT NOT NULL CHECK (length(project) > 0),
+            causal_identity TEXT NOT NULL CHECK (length(causal_identity) = 64),
+            database_incarnation_id TEXT NOT NULL CHECK (length(database_incarnation_id) = 32),
+            kernel_incarnation_id TEXT NOT NULL CHECK (length(kernel_incarnation_id) = 32),
+            authority_generation INTEGER NOT NULL CHECK (authority_generation >= 0),
+            authority_context_store TEXT NOT NULL CHECK (length(authority_context_store) BETWEEN 1 AND 256),
+            state TEXT NOT NULL CHECK (state IN ('in_progress', 'complete')),
+            generation INTEGER NOT NULL CHECK (generation >= 1),
+            claim_id TEXT NOT NULL CHECK (length(claim_id) BETWEEN 1 AND 200),
+            run_deadline_ms INTEGER NOT NULL,
+            execution_cutoff_ms INTEGER NOT NULL CHECK (execution_cutoff_ms < run_deadline_ms),
+            cancelled_at_ms INTEGER,
+            terminal_kind TEXT CHECK (terminal_kind IN ('complete', 'abstained', 'failed', 'cancelled', 'unknown', 'expired')),
+            selected_generation INTEGER CHECK (selected_generation IS NULL OR selected_generation >= 1),
+            selected_candidate_id TEXT CHECK (selected_candidate_id IS NULL OR length(selected_candidate_id) BETWEEN 1 AND 256),
+            selected_payload_digest TEXT CHECK (selected_payload_digest IS NULL OR length(selected_payload_digest) = 64),
+            selected_project_digest TEXT CHECK (selected_project_digest IS NULL OR length(selected_project_digest) = 64),
+            abstained_reason TEXT CHECK (abstained_reason IS NULL OR abstained_reason IN (
+                'owner_sensitive', 'wrong_scope', 'secret', 'expectation_changed', 'undisclosed_citation',
+                'partial_disclosure', 'model_declined', 'budget_exhausted', 'invalid_proposal')),
+            created_at_ms INTEGER NOT NULL,
+            updated_at_ms INTEGER NOT NULL,
+            PRIMARY KEY (project, causal_identity),
+            FOREIGN KEY (project, causal_identity) REFERENCES memory_reviewer_jobs(project, causal_identity),
+            CHECK ((state = 'complete') = (terminal_kind IS NOT NULL)),
+            CHECK ((selected_candidate_id IS NULL) = (selected_payload_digest IS NULL)),
+            CHECK ((selected_candidate_id IS NULL) = (selected_project_digest IS NULL)),
+            CHECK ((selected_candidate_id IS NULL) = (selected_generation IS NULL)),
+            CHECK ((terminal_kind IS 'complete') = (selected_candidate_id IS NOT NULL)),
+            CHECK ((terminal_kind IS 'abstained') = (abstained_reason IS NOT NULL))
+        );
+
+-- Receipts survive for the store incarnation; the expiry sweep reads only the in-progress ones by deadline.
+CREATE INDEX idx_memory_reviewer_receipts_state
+            ON memory_reviewer_receipts(state, run_deadline_ms);
+
+CREATE TABLE memory_reviewer_attempts (
+            project TEXT NOT NULL,
+            causal_identity TEXT NOT NULL,
+            generation INTEGER NOT NULL CHECK (generation >= 1),
+            attempt_index INTEGER NOT NULL CHECK (attempt_index >= 0),
+            body_digest TEXT NOT NULL CHECK (length(body_digest) = 64),
+            request_bytes INTEGER NOT NULL CHECK (request_bytes BETWEEN 1 AND 262144),
+            provider TEXT NOT NULL CHECK (length(provider) BETWEEN 1 AND 128),
+            model TEXT NOT NULL CHECK (length(model) BETWEEN 1 AND 256),
+            credential_id TEXT NOT NULL CHECK (length(credential_id) BETWEEN 1 AND 256),
+            policy_union_digest TEXT NOT NULL CHECK (length(policy_union_digest) = 64),
+            attempt_deadline_ms INTEGER NOT NULL,
+            committed_at_ms INTEGER NOT NULL,
+            terminal_kind TEXT CHECK (terminal_kind IN ('complete', 'failed', 'cancelled', 'unknown', 'not_dispatched')),
+            terminal_at_ms INTEGER,
+            -- Provider response bytes this attempt consumed, written once with its terminal: the raw body the
+            -- transport delivered and the assistant text the decoder measured. NULL under a terminal means
+            -- the consumption is unknown and the attempt counts as having spent the whole per-job ceiling.
+            raw_response_bytes INTEGER CHECK (raw_response_bytes IS NULL OR raw_response_bytes BETWEEN 0 AND 1048576),
+            decoded_text_bytes INTEGER CHECK (decoded_text_bytes IS NULL OR decoded_text_bytes BETWEEN 0 AND 65536),
+            PRIMARY KEY (project, causal_identity, generation, attempt_index),
+            FOREIGN KEY (project, causal_identity) REFERENCES memory_reviewer_receipts(project, causal_identity),
+            CHECK ((terminal_kind IS NULL) = (terminal_at_ms IS NULL)),
+            CHECK (terminal_kind IS NOT NULL OR (raw_response_bytes IS NULL AND decoded_text_bytes IS NULL))
+        );
+
+CREATE TRIGGER memory_reviewer_receipts_no_delete BEFORE DELETE ON memory_reviewer_receipts
+BEGIN SELECT RAISE(ABORT, 'memory_reviewer receipts survive for the store incarnation'); END;
+
+CREATE TRIGGER memory_reviewer_receipts_deadlines_immutable
+BEFORE UPDATE OF run_deadline_ms, execution_cutoff_ms, created_at_ms, database_incarnation_id, kernel_incarnation_id, authority_generation, authority_context_store
+ON memory_reviewer_receipts
+BEGIN SELECT RAISE(ABORT, 'memory_reviewer receipt deadlines, incarnations, and authority are written once'); END;
+
+-- The selected candidate is caller text a completion writes once: a detected secret
+-- refuses the completion instead of being redacted, as every other MemoryReviewer identity is.
+CREATE TRIGGER memory_reviewer_receipts_reject_secret_update BEFORE UPDATE OF selected_candidate_id ON memory_reviewer_receipts
+BEGIN
+    SELECT reject_transaction_text(COALESCE(NEW.selected_candidate_id, ''));
+END;
+
+CREATE TRIGGER memory_reviewer_attempts_no_delete BEFORE DELETE ON memory_reviewer_attempts
+BEGIN SELECT RAISE(ABORT, 'a committed memory_reviewer attempt stays consumed'); END;
+
+CREATE TRIGGER memory_reviewer_attempts_marker_immutable
+BEFORE UPDATE OF generation, attempt_index, body_digest, request_bytes, provider, model,
+    credential_id, policy_union_digest, attempt_deadline_ms, committed_at_ms
+ON memory_reviewer_attempts
+BEGIN SELECT RAISE(ABORT, 'a memory_reviewer attempt marker is written once'); END;
+
+-- A terminal and the response usage recorded beside it are written once; a second write
+-- can neither move a consumed attempt back to in flight nor revise what it consumed.
+CREATE TRIGGER memory_reviewer_attempts_terminal_immutable
+BEFORE UPDATE OF terminal_kind, terminal_at_ms, raw_response_bytes, decoded_text_bytes
+ON memory_reviewer_attempts
+WHEN OLD.terminal_kind IS NOT NULL
+BEGIN SELECT RAISE(ABORT, 'a memory_reviewer attempt terminal and its response usage are written once'); END;
+
+CREATE TRIGGER memory_reviewer_attempts_reject_secret_insert BEFORE INSERT ON memory_reviewer_attempts
+BEGIN
+    SELECT reject_transaction_text(NEW.provider),
+           reject_transaction_text(NEW.model),
+           reject_transaction_text(NEW.credential_id);
+END;
+
+CREATE TABLE transform_session_roots (
+            session_id  TEXT NOT NULL,
+            project_root TEXT NOT NULL,
+            observed_at INTEGER NOT NULL,
+            PRIMARY KEY(session_id, project_root)
+        );
+
+CREATE INDEX idx_transform_session_roots_observed
+            ON transform_session_roots(observed_at);
+
+CREATE TRIGGER notes_facade_authority_insert
+        BEFORE INSERT ON notes
+        WHEN facade_authority_domain() = 'notes'
+          AND EXISTS (
+              SELECT 1 FROM authority_route_bindings binding
+              JOIN authority authority
+                ON authority.context_store_uuid = binding.context_store_uuid
+               AND authority.project = binding.project
+             WHERE binding.route_project_root = facade_authority_route()
+               AND authority.domain = 'notes'
+               AND authority.project = NEW.project_path
+               AND authority.state != 'MODULE'
+          )
+        BEGIN SELECT RAISE(ABORT, 'authority_draining'); END;
+
+CREATE TRIGGER notes_facade_authority_update
+        BEFORE UPDATE ON notes
+        WHEN facade_authority_domain() = 'notes'
+          AND EXISTS (
+              SELECT 1 FROM authority_route_bindings binding
+              JOIN authority authority
+                ON authority.context_store_uuid = binding.context_store_uuid
+               AND authority.project = binding.project
+             WHERE binding.route_project_root = facade_authority_route()
+               AND authority.domain = 'notes'
+               AND authority.project IN (OLD.project_path, NEW.project_path)
+               AND authority.state != 'MODULE'
+          )
+        BEGIN SELECT RAISE(ABORT, 'authority_draining'); END;
+
+CREATE TRIGGER notes_facade_authority_delete
+        BEFORE DELETE ON notes
+        WHEN facade_authority_domain() = 'notes'
+          AND EXISTS (
+              SELECT 1 FROM authority_route_bindings binding
+              JOIN authority authority
+                ON authority.context_store_uuid = binding.context_store_uuid
+               AND authority.project = binding.project
+             WHERE binding.route_project_root = facade_authority_route()
+               AND authority.domain = 'notes'
+               AND authority.project = OLD.project_path
+               AND authority.state != 'MODULE'
+          )
+        BEGIN SELECT RAISE(ABORT, 'authority_draining'); END;
+
+CREATE TABLE history_segment_events (
+            id                    INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id            TEXT NOT NULL,
+            history_segment_id        INTEGER,
+            at_history_segment        INTEGER,
+            kind                  TEXT NOT NULL,
+            fields_json           TEXT NOT NULL DEFAULT '{}',
+            created_at             INTEGER NOT NULL DEFAULT 0,
+            harness                TEXT NOT NULL DEFAULT 'module'
+        );
+
+CREATE INDEX idx_history_segment_events_session
+            ON history_segment_events(session_id, id);
+
+CREATE TABLE primer_candidates (
+            id                       INTEGER PRIMARY KEY AUTOINCREMENT,
+            project_path             TEXT NOT NULL,
+            harness                  TEXT NOT NULL DEFAULT 'module',
+            session_id               TEXT NOT NULL,
+            question                 TEXT NOT NULL,
+            normalized_question      TEXT NOT NULL,
+            source_history_segment_start INTEGER,
+            source_history_segment_end   INTEGER,
+            source_start_message_id  TEXT NOT NULL DEFAULT '',
+            source_end_message_id    TEXT NOT NULL DEFAULT '',
+            source_message_time      INTEGER NOT NULL DEFAULT 0,
+            created_at               INTEGER NOT NULL DEFAULT 0,
+            UNIQUE(project_path, harness, session_id, source_start_message_id, source_end_message_id)
+        );
+
+CREATE INDEX idx_primer_candidates_project
+            ON primer_candidates(project_path, created_at, id);
+
+CREATE TABLE user_memory_candidates (
+            id                       INTEGER PRIMARY KEY AUTOINCREMENT,
+            content                  TEXT NOT NULL,
+            session_id               TEXT NOT NULL,
+            source_history_segment_start INTEGER,
+            source_history_segment_end   INTEGER,
+            created_at               INTEGER NOT NULL DEFAULT 0
+        );
+
+CREATE INDEX idx_user_memory_candidates_session
+            ON user_memory_candidates(session_id, created_at, id);
+
+CREATE TABLE history_summarizer_side_channel_outbox (
+            session_id          TEXT NOT NULL,
+            firing_seq         INTEGER NOT NULL,
+            kind               TEXT NOT NULL
+                CHECK (kind IN ('event', 'primer', 'user_observation')),
+            source_start       INTEGER NOT NULL,
+            source_end         INTEGER NOT NULL,
+            item_index         INTEGER NOT NULL,
+            payload_json       TEXT NOT NULL,
+            attempt_count      INTEGER NOT NULL DEFAULT 0,
+            next_attempt_at_ms INTEGER NOT NULL DEFAULT 0,
+            last_attempt_at_ms INTEGER,
+            last_error         TEXT,
+            delivered_at_ms    INTEGER,
+            created_at_ms      INTEGER NOT NULL,
+            PRIMARY KEY (session_id, firing_seq, kind, source_start, source_end, item_index)
+        );
+
+CREATE INDEX idx_history_summarizer_side_channel_outbox_due
+            ON history_summarizer_side_channel_outbox(
+                session_id, kind, delivered_at_ms, next_attempt_at_ms, firing_seq, item_index
+            );
+
+CREATE TABLE facade_mutation_ledger (
+            identity_scope TEXT NOT NULL,
+            tool           TEXT NOT NULL,
+            action         TEXT NOT NULL,
+            command_id     TEXT NOT NULL,
+            response_json  BLOB NOT NULL,
+            created_at_ms  INTEGER NOT NULL,
+            PRIMARY KEY (identity_scope, tool, action, command_id)
+        );
+
+CREATE INDEX idx_facade_mutation_ledger_scope_newest
+            ON facade_mutation_ledger(identity_scope, created_at_ms DESC, tool, action, command_id);
+
+CREATE INDEX idx_history_segments_session_end_message
+            ON history_segments(session_id, end_message);
+
+CREATE INDEX idx_notes_project_status_updated
+            ON notes(project_path, status, updated_at_ms DESC, id DESC);
+
+CREATE INDEX idx_history_summarizer_side_channel_outbox_order
+            ON history_summarizer_side_channel_outbox(
+                session_id, kind, delivered_at_ms,
+                firing_seq, source_start, source_end, item_index, next_attempt_at_ms
+            );
+
+CREATE TABLE tag_cache_generations (
+            session_id TEXT PRIMARY KEY,
+            generation INTEGER NOT NULL DEFAULT 0,
+            tag_count INTEGER NOT NULL DEFAULT 0,
+            max_tag_number INTEGER NOT NULL DEFAULT 0
+        );
+
+CREATE TRIGGER tags_cache_generation_insert AFTER INSERT ON tags BEGIN
+            INSERT INTO tag_cache_generations(session_id, generation, tag_count, max_tag_number)
+            VALUES (NEW.session_id, 1, 1, NEW.tag_number)
+            ON CONFLICT(session_id) DO UPDATE SET
+                generation = generation + 1,
+                tag_count = tag_count + 1,
+                max_tag_number = MAX(max_tag_number, NEW.tag_number);
+        END;
+
+CREATE TRIGGER tags_cache_generation_delete AFTER DELETE ON tags BEGIN
+            INSERT INTO tag_cache_generations(session_id, generation, tag_count, max_tag_number)
+            VALUES (
+                OLD.session_id,
+                1,
+                (SELECT COUNT(*) FROM tags WHERE session_id = OLD.session_id),
+                (SELECT COALESCE(MAX(tag_number), 0) FROM tags WHERE session_id = OLD.session_id)
+            )
+            ON CONFLICT(session_id) DO UPDATE SET
+                generation = generation + 1,
+                tag_count = excluded.tag_count,
+                max_tag_number = excluded.max_tag_number;
+        END;
+
+CREATE TRIGGER tags_cache_generation_update AFTER UPDATE ON tags BEGIN
+            INSERT INTO tag_cache_generations(session_id, generation, tag_count, max_tag_number)
+            VALUES (
+                OLD.session_id,
+                1,
+                (SELECT COUNT(*) FROM tags WHERE session_id = OLD.session_id),
+                (SELECT COALESCE(MAX(tag_number), 0) FROM tags WHERE session_id = OLD.session_id)
+            )
+            ON CONFLICT(session_id) DO UPDATE SET
+                generation = generation + 1,
+                tag_count = excluded.tag_count,
+                max_tag_number = excluded.max_tag_number;
+            INSERT INTO tag_cache_generations(session_id, generation, tag_count, max_tag_number)
+            VALUES (
+                NEW.session_id,
+                1,
+                (SELECT COUNT(*) FROM tags WHERE session_id = NEW.session_id),
+                (SELECT COALESCE(MAX(tag_number), 0) FROM tags WHERE session_id = NEW.session_id)
+            )
+            ON CONFLICT(session_id) DO UPDATE SET
+                generation = generation + 1,
+                tag_count = excluded.tag_count,
+                max_tag_number = excluded.max_tag_number;
+        END;
+
+
+CREATE TRIGGER notes_feed_insert AFTER INSERT ON notes BEGIN
+            INSERT INTO changefeed(domain, op, module_row_id, full_row_snapshot, content_hash)
+            VALUES ('notes', 'insert', NEW.id,
+                json_object(
+                    'id', NEW.id, 'type', NEW.type, 'project_path', NEW.project_path,
+                    'session_id', NEW.session_id, 'content', NEW.content, 'status', NEW.status,
+                    'surface_condition', NEW.surface_condition, 'ready_at', NEW.ready_at,
+                    'ready_reason', NEW.ready_reason, 'manifest_json', NEW.manifest_json,
+                    'compiled_check', NEW.compiled_check, 'check_hash', NEW.check_hash,
+                    'check_cron', NEW.check_cron, 'check_failure_count', NEW.check_failure_count,
+                    'check_network_failure_count', NEW.check_network_failure_count,
+                    'check_quarantined_until', NEW.check_quarantined_until,
+                    'check_next_due_at', NEW.check_next_due_at, 'check_compiled_at', NEW.check_compiled_at,
+                    'check_false_since_at', NEW.check_false_since_at,
+                    'check_last_liveness_at', NEW.check_last_liveness_at,
+                    'last_checked_at', NEW.last_checked_at, 'check_status', NEW.check_status,
+                    'check_version', NEW.check_version, 'policy_version', NEW.policy_version,
+                    'harness', NEW.harness, 'anchor_block_id', NEW.anchor_block_id,
+                    'anchor_ordinal', NEW.anchor_ordinal, 'dismissed_at', NEW.dismissed_at,
+                    'dismissal_resolution', NEW.dismissal_resolution,
+                    'status_version', NEW.status_version, 'created_at_ms', NEW.created_at_ms,
+                    'updated_at_ms', NEW.updated_at_ms, 'context_store_uuid', NEW.context_store_uuid,
+                    'context_row_id', NEW.context_row_id,
+                    'source_revision', NEW.source_revision, 'state_version', NEW.state_version,
+                    'compiled_source_revision', NEW.compiled_source_revision,
+                    'compiled_project_path', NEW.compiled_project_path,
+                    'compiled_provider', NEW.compiled_provider,
+                    'compiled_config', NEW.compiled_config,
+                    'compiled_at', NEW.compiled_at, 'compile_status', NEW.compile_status), NULL);
+        END;
+
+CREATE TRIGGER notes_feed_update AFTER UPDATE ON notes
+        WHEN NEW.id IS NOT OLD.id OR NEW.type IS NOT OLD.type
+          OR NEW.project_path IS NOT OLD.project_path OR NEW.session_id IS NOT OLD.session_id
+          OR NEW.content IS NOT OLD.content OR NEW.status IS NOT OLD.status
+          OR NEW.surface_condition IS NOT OLD.surface_condition OR NEW.ready_at IS NOT OLD.ready_at
+          OR NEW.ready_reason IS NOT OLD.ready_reason OR NEW.manifest_json IS NOT OLD.manifest_json
+          OR NEW.compiled_check IS NOT OLD.compiled_check OR NEW.check_hash IS NOT OLD.check_hash
+          OR NEW.check_cron IS NOT OLD.check_cron
+          OR NEW.check_failure_count IS NOT OLD.check_failure_count
+          OR NEW.check_network_failure_count IS NOT OLD.check_network_failure_count
+          OR NEW.check_quarantined_until IS NOT OLD.check_quarantined_until
+          OR NEW.check_next_due_at IS NOT OLD.check_next_due_at
+          OR NEW.check_compiled_at IS NOT OLD.check_compiled_at
+          OR NEW.check_false_since_at IS NOT OLD.check_false_since_at
+          OR NEW.check_last_liveness_at IS NOT OLD.check_last_liveness_at
+          OR NEW.last_checked_at IS NOT OLD.last_checked_at OR NEW.check_status IS NOT OLD.check_status
+          OR NEW.check_version IS NOT OLD.check_version OR NEW.policy_version IS NOT OLD.policy_version
+          OR NEW.harness IS NOT OLD.harness OR NEW.anchor_block_id IS NOT OLD.anchor_block_id
+          OR NEW.anchor_ordinal IS NOT OLD.anchor_ordinal OR NEW.dismissed_at IS NOT OLD.dismissed_at
+          OR NEW.dismissal_resolution IS NOT OLD.dismissal_resolution
+          OR NEW.status_version IS NOT OLD.status_version
+          OR NEW.created_at_ms IS NOT OLD.created_at_ms OR NEW.updated_at_ms IS NOT OLD.updated_at_ms
+          OR NEW.context_store_uuid IS NOT OLD.context_store_uuid
+          OR NEW.context_row_id IS NOT OLD.context_row_id
+          OR NEW.source_revision IS NOT OLD.source_revision
+          OR NEW.state_version IS NOT OLD.state_version
+          OR NEW.compiled_source_revision IS NOT OLD.compiled_source_revision
+          OR NEW.compiled_project_path IS NOT OLD.compiled_project_path
+          OR NEW.compiled_provider IS NOT OLD.compiled_provider
+          OR NEW.compiled_config IS NOT OLD.compiled_config
+          OR NEW.compiled_at IS NOT OLD.compiled_at
+          OR NEW.compile_status IS NOT OLD.compile_status
+        BEGIN
+            INSERT INTO changefeed(domain, op, module_row_id, full_row_snapshot, content_hash)
+            VALUES ('notes', 'update', NEW.id,
+                json_object(
+                    'id', NEW.id, 'type', NEW.type, 'project_path', NEW.project_path,
+                    'session_id', NEW.session_id, 'content', NEW.content, 'status', NEW.status,
+                    'surface_condition', NEW.surface_condition, 'ready_at', NEW.ready_at,
+                    'ready_reason', NEW.ready_reason, 'manifest_json', NEW.manifest_json,
+                    'compiled_check', NEW.compiled_check, 'check_hash', NEW.check_hash,
+                    'check_cron', NEW.check_cron, 'check_failure_count', NEW.check_failure_count,
+                    'check_network_failure_count', NEW.check_network_failure_count,
+                    'check_quarantined_until', NEW.check_quarantined_until,
+                    'check_next_due_at', NEW.check_next_due_at, 'check_compiled_at', NEW.check_compiled_at,
+                    'check_false_since_at', NEW.check_false_since_at,
+                    'check_last_liveness_at', NEW.check_last_liveness_at,
+                    'last_checked_at', NEW.last_checked_at, 'check_status', NEW.check_status,
+                    'check_version', NEW.check_version, 'policy_version', NEW.policy_version,
+                    'harness', NEW.harness, 'anchor_block_id', NEW.anchor_block_id,
+                    'anchor_ordinal', NEW.anchor_ordinal, 'dismissed_at', NEW.dismissed_at,
+                    'dismissal_resolution', NEW.dismissal_resolution,
+                    'status_version', NEW.status_version, 'created_at_ms', NEW.created_at_ms,
+                    'updated_at_ms', NEW.updated_at_ms, 'context_store_uuid', NEW.context_store_uuid,
+                    'context_row_id', NEW.context_row_id,
+                    'source_revision', NEW.source_revision, 'state_version', NEW.state_version,
+                    'compiled_source_revision', NEW.compiled_source_revision,
+                    'compiled_project_path', NEW.compiled_project_path,
+                    'compiled_provider', NEW.compiled_provider,
+                    'compiled_config', NEW.compiled_config,
+                    'compiled_at', NEW.compiled_at, 'compile_status', NEW.compile_status), NULL);
+        END;
+
+CREATE TRIGGER notes_feed_delete AFTER DELETE ON notes BEGIN
+            INSERT INTO changefeed(domain, op, module_row_id, full_row_snapshot, content_hash)
+            VALUES ('notes', 'tombstone', OLD.id,
+                json_object(
+                    'id', OLD.id, 'type', OLD.type, 'project_path', OLD.project_path,
+                    'session_id', OLD.session_id, 'content', OLD.content, 'status', OLD.status,
+                    'surface_condition', OLD.surface_condition, 'ready_at', OLD.ready_at,
+                    'ready_reason', OLD.ready_reason, 'manifest_json', OLD.manifest_json,
+                    'compiled_check', OLD.compiled_check, 'check_hash', OLD.check_hash,
+                    'check_cron', OLD.check_cron, 'check_failure_count', OLD.check_failure_count,
+                    'check_network_failure_count', OLD.check_network_failure_count,
+                    'check_quarantined_until', OLD.check_quarantined_until,
+                    'check_next_due_at', OLD.check_next_due_at, 'check_compiled_at', OLD.check_compiled_at,
+                    'check_false_since_at', OLD.check_false_since_at,
+                    'check_last_liveness_at', OLD.check_last_liveness_at,
+                    'last_checked_at', OLD.last_checked_at, 'check_status', OLD.check_status,
+                    'check_version', OLD.check_version, 'policy_version', OLD.policy_version,
+                    'harness', OLD.harness, 'anchor_block_id', OLD.anchor_block_id,
+                    'anchor_ordinal', OLD.anchor_ordinal, 'dismissed_at', OLD.dismissed_at,
+                    'dismissal_resolution', OLD.dismissal_resolution,
+                    'status_version', OLD.status_version, 'created_at_ms', OLD.created_at_ms,
+                    'updated_at_ms', OLD.updated_at_ms, 'context_store_uuid', OLD.context_store_uuid,
+                    'context_row_id', OLD.context_row_id,
+                    'source_revision', OLD.source_revision, 'state_version', OLD.state_version,
+                    'compiled_source_revision', OLD.compiled_source_revision,
+                    'compiled_project_path', OLD.compiled_project_path,
+                    'compiled_provider', OLD.compiled_provider,
+                    'compiled_config', OLD.compiled_config,
+                    'compiled_at', OLD.compiled_at, 'compile_status', OLD.compile_status), NULL);
+        END;
+
+CREATE TABLE note_eval_claims (
+            claim_id TEXT NOT NULL,
+            project TEXT NOT NULL,
+            task_kind TEXT NOT NULL,
+            note_id INTEGER NOT NULL,
+            phase TEXT NOT NULL CHECK (task_kind <> 'note_evaluation'
+                OR phase IN ('compile', 'due', 'liveness', 'fallback')),
+            acquisition_id TEXT NOT NULL,
+            evaluator_instance TEXT NOT NULL,
+            evaluator_slot INTEGER NOT NULL,
+            registration_generation INTEGER NOT NULL,
+            source_revision INTEGER NOT NULL,
+            state_version INTEGER NOT NULL,
+            policy_version INTEGER NOT NULL,
+            protocol_epoch INTEGER NOT NULL,
+            authority_generation INTEGER NOT NULL,
+            expires_at INTEGER NOT NULL,
+            created_at_ms INTEGER NOT NULL,
+            completion_id TEXT,
+            terminal_kind TEXT,
+            terminal_response TEXT,
+            terminal_at_ms INTEGER,
+            PRIMARY KEY (task_kind, claim_id),
+            UNIQUE (project, task_kind, acquisition_id)
+        );
+
+CREATE UNIQUE INDEX idx_note_eval_claims_active_note
+            ON note_eval_claims(project, task_kind, note_id) WHERE terminal_kind IS NULL;
+
+CREATE UNIQUE INDEX idx_note_eval_claims_active_slot
+            ON note_eval_claims(project, task_kind, evaluator_instance, evaluator_slot)
+            WHERE terminal_kind IS NULL;
+
+CREATE TABLE note_eval_acquisitions (
+            project TEXT NOT NULL,
+            task_kind TEXT NOT NULL,
+            acquisition_id TEXT NOT NULL,
+            decision TEXT NOT NULL,
+            created_at_ms INTEGER NOT NULL,
+            expires_at INTEGER NOT NULL,
+            PRIMARY KEY (project, task_kind, acquisition_id)
+        );
+
+CREATE INDEX idx_primer_candidates_session
+            ON primer_candidates(session_id, id);
+
+CREATE TABLE scan_batches (
+            scan_batch_id TEXT PRIMARY KEY CHECK (length(scan_batch_id) = 32),
+            owner_kind TEXT NOT NULL,
+            created_at_ms INTEGER NOT NULL
+        );
+
+CREATE TABLE scan_owner_scopes (
+            owner_scope_id TEXT PRIMARY KEY CHECK (length(owner_scope_id) = 32),
+            scope_kind TEXT NOT NULL CHECK (length(scope_kind) > 0),
+            scope_key TEXT NOT NULL CHECK (length(scope_key) = 64),
+            UNIQUE (scope_kind, scope_key)
+        );
+
+CREATE TABLE scan_domain_owners (
+            domain_owner_id TEXT PRIMARY KEY CHECK (length(domain_owner_id) = 32),
+            owner_scope_id TEXT NOT NULL
+                REFERENCES scan_owner_scopes(owner_scope_id) ON DELETE CASCADE,
+            owner_kind TEXT NOT NULL,
+            owner_key TEXT NOT NULL CHECK (length(owner_key) = 64),
+            UNIQUE (owner_scope_id, owner_kind, owner_key)
+        );
+
+CREATE TABLE field_scans (
+            scan_id TEXT PRIMARY KEY CHECK (length(scan_id) = 32),
+            scan_batch_id TEXT NOT NULL REFERENCES scan_batches(scan_batch_id)
+                ON DELETE CASCADE,
+            detector_id TEXT NOT NULL,
+            detector_revision TEXT NOT NULL,
+            semantic_digest TEXT CHECK (semantic_digest IS NULL OR length(semantic_digest) = 64),
+            finding_count INTEGER NOT NULL CHECK (finding_count >= 0)
+        );
+
+CREATE INDEX idx_field_scans_batch
+            ON field_scans(scan_batch_id, scan_id);
+
+CREATE TABLE scan_owner_copies (
+            owner_copy_id TEXT PRIMARY KEY CHECK (length(owner_copy_id) = 32),
+            scan_id TEXT NOT NULL REFERENCES field_scans(scan_id) ON DELETE CASCADE,
+            domain_owner_id TEXT NOT NULL
+                REFERENCES scan_domain_owners(domain_owner_id) ON DELETE CASCADE,
+            owner_kind TEXT NOT NULL,
+            field_id TEXT NOT NULL CHECK (length(field_id) > 0)
+        );
+
+CREATE INDEX idx_scan_owner_copies_scan
+            ON scan_owner_copies(scan_id, owner_copy_id);
+
+CREATE INDEX idx_scan_owner_copies_domain_owner
+            ON scan_owner_copies(domain_owner_id, owner_copy_id);
+
+CREATE TABLE scan_detections (
+            scan_id TEXT NOT NULL REFERENCES field_scans(scan_id) ON DELETE CASCADE,
+            detection_ordinal INTEGER NOT NULL CHECK (detection_ordinal >= 0),
+            exactness TEXT NOT NULL CHECK (exactness = 'exact'),
+            -- Labels derive from key names, so the set is open; the shape
+            -- stays bounded so a label cannot carry secret text.
+            label_id TEXT NOT NULL CHECK (
+                length(label_id) BETWEEN 1 AND 64
+                AND label_id NOT GLOB '*[^abcdefghijklmnopqrstuvwxyz0-9_]*'
+            ),
+            span_kind TEXT NOT NULL CHECK (span_kind = 'value'),
+            -- 'substitute': the span was replaced before storage.
+            -- 'preserve': an existing identity was stored verbatim; rejecting it
+            --             retroactively would orphan rows already keyed by it.
+            -- 'reject': reserved; rejected writes roll back with their receipts.
+            action TEXT NOT NULL CHECK (action IN ('substitute', 'preserve', 'reject')),
+            PRIMARY KEY (scan_id, detection_ordinal)
+        ) WITHOUT ROWID;

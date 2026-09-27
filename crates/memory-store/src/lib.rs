@@ -24455,6 +24455,9 @@ mod tests {
     /// One transcript row as eviction orders it: `(created_at_ms, history_segment_seq, bytes)`.
     type TranscriptRow = (i64, i64, i64);
 
+    /// The per-session transcript cap the eviction contract names, written out as a literal.
+    const TRANSCRIPT_CAP: i64 = 8_388_608;
+
     fn transcript_rows(store: &MemoryStore, session_id: &str) -> Vec<TranscriptRow> {
         store
             .inner
@@ -24495,10 +24498,7 @@ mod tests {
             sum,
             "{session_id} total"
         );
-        assert!(
-            sum <= MAX_SESSION_TRANSCRIPT_COMPRESSED_BYTES,
-            "{session_id}"
-        );
+        assert!(sum <= TRANSCRIPT_CAP, "{session_id}");
     }
 
     fn model_publish(model: &mut Vec<TranscriptRow>, written: &[TranscriptRow]) {
@@ -24507,46 +24507,50 @@ mod tests {
             model.push(*row);
         }
         model.sort_unstable();
-        while model.iter().map(|row| row.2).sum::<i64>() > MAX_SESSION_TRANSCRIPT_COMPRESSED_BYTES {
+        while model.iter().map(|row| row.2).sum::<i64>() > TRANSCRIPT_CAP {
             model.remove(0);
         }
+    }
+
+    /// Writes one publication's transcript rows through the publisher's writer and returns
+    /// them as the model records them.
+    fn publish_transcripts(
+        store: &MemoryStore,
+        session_id: &str,
+        first_sequence: i64,
+        count: i64,
+        created_at: i64,
+        bytes: usize,
+    ) -> Vec<TranscriptRow> {
+        let segments: Vec<StoredHistorySegment> = (0..count)
+            .map(|idx| StoredHistorySegment {
+                start_message: first_sequence + idx,
+                end_message: first_sequence + idx,
+                created_at,
+                ..Default::default()
+            })
+            .collect();
+        let blobs = ChunkTranscriptBlobs {
+            transcript_deflate: vec![0; bytes],
+        };
+        store
+            .inner
+            .with_conn_fenced(|tx| {
+                insert_chunk_transcripts_tx(tx, session_id, first_sequence, &segments, &blobs)
+            })
+            .unwrap();
+        let len = i64::try_from(bytes).unwrap();
+        (0..count)
+            .map(|idx| (created_at, first_sequence + idx, len))
+            .collect()
     }
 
     #[test]
     fn transcript_total_equals_the_stored_sum_after_every_writer_and_eviction() {
         let dir = tempfile::tempdir().unwrap();
         let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
-        // Digest bytes are incompressible, so the stored length is the requested length.
-        let blob = |len: usize, salt: &str| ChunkTranscriptBlobs {
-            transcript_deflate: (0u64..)
-                .flat_map(|i| md5::compute(format!("{salt}:{i}")).0)
-                .take(len)
-                .collect(),
-        };
-        let publish = |session_id: &str,
-                       first_sequence: i64,
-                       count: i64,
-                       created_at: i64,
-                       blobs: &ChunkTranscriptBlobs|
-         -> Vec<TranscriptRow> {
-            let segments: Vec<StoredHistorySegment> = (0..count)
-                .map(|idx| StoredHistorySegment {
-                    start_message: first_sequence + idx,
-                    end_message: first_sequence + idx,
-                    created_at,
-                    ..Default::default()
-                })
-                .collect();
-            store
-                .inner
-                .with_conn_fenced(|tx| {
-                    insert_chunk_transcripts_tx(tx, session_id, first_sequence, &segments, blobs)
-                })
-                .unwrap();
-            let len = i64::try_from(blobs.transcript_deflate.len()).unwrap();
-            (0..count)
-                .map(|idx| (created_at, first_sequence + idx, len))
-                .collect()
+        let publish = |session_id, first_sequence, count, created_at, bytes| {
+            publish_transcripts(&store, session_id, first_sequence, count, created_at, bytes)
         };
         let run = |sql: &str| {
             store
@@ -24554,31 +24558,37 @@ mod tests {
                 .with_conn_fenced(|tx| tx.execute(sql, []))
                 .unwrap()
         };
-        let large = blob(200 * 1024, "large");
+        const LARGE: usize = 200 * 1024;
         let mut a = Vec::new();
+        let mut b = Vec::new();
 
-        model_publish(&mut a, &publish("A", 1, 20, 5_000, &large));
+        model_publish(&mut a, &publish("A", 1, 20, 5_000, LARGE));
         assert_transcripts(&store, "A", &a);
         assert_eq!(a.len(), 20, "4000 KiB stays under the cap");
+        // B holds a sequence that A's eviction removes, so a victim query that drops its
+        // session predicate deletes B's row.
+        model_publish(&mut b, &publish("B", 21, 1, 1_000, 10));
+        assert_transcripts(&store, "B", &b);
 
         // A 28-segment batch past 8 MiB whose clock reads older than the rows before it:
         // the victims are the oldest by `created_at_ms`, then by sequence, so the batch's
         // own first rows go first.
-        let batch = publish("A", 21, 28, 4_000, &large);
-        model_publish(&mut a, &batch);
+        model_publish(&mut a, &publish("A", 21, 28, 4_000, LARGE));
         assert_transcripts(&store, "A", &a);
         assert_eq!(a.first().map(|row| row.1), Some(29));
         assert_eq!(a.len(), 40);
+        assert_transcripts(&store, "B", &b);
 
         // A republished sequence takes the conflict path of the insert.
-        model_publish(
-            &mut a,
-            &publish("A", 10, 1, 6_000, &blob(50 * 1024, "small")),
-        );
+        model_publish(&mut a, &publish("A", 10, 1, 6_000, 50 * 1024));
         assert_transcripts(&store, "A", &a);
 
-        let mut b = Vec::new();
-        model_publish(&mut b, &publish("B", 1, 2, 1_000, &blob(10, "b")));
+        run("UPDATE chunk_transcripts SET session_id = 'B'
+              WHERE session_id = 'A' AND history_segment_seq = 40");
+        let moved = a.iter().position(|row| row.1 == 40).unwrap();
+        b.push(a.remove(moved));
+        b.sort_unstable();
+        assert_transcripts(&store, "A", &a);
         assert_transcripts(&store, "B", &b);
 
         run("DELETE FROM chunk_transcripts WHERE session_id = 'A' AND history_segment_seq > 30");
@@ -24601,6 +24611,15 @@ mod tests {
         assert_transcripts(&store, "A", &[]);
         assert_eq!(transcript_total(&store, "A"), None);
         assert_transcripts(&store, "B", &b);
+
+        // Exactly the cap stays; one byte past it evicts the oldest row.
+        let mut d = Vec::new();
+        model_publish(&mut d, &publish("D", 1, 32, 1_000, 256 * 1024));
+        assert_transcripts(&store, "D", &d);
+        assert_eq!(transcript_total(&store, "D"), Some(TRANSCRIPT_CAP));
+        model_publish(&mut d, &publish("D", 33, 1, 2_000, 1));
+        assert_transcripts(&store, "D", &d);
+        assert_eq!(d.first().map(|row| row.1), Some(2));
     }
 
     fn seed_tags(store: &MemoryStore, session_id: &str, count: i64) {
@@ -24609,23 +24628,26 @@ mod tests {
             .with_conn_fenced(|tx| {
                 tx.execute(
                     "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < ?2)
-                     INSERT INTO tags(session_id, tag_number, block_id, kind)
-                     SELECT ?1, i, 'b' || i, 'message' FROM n",
+                     INSERT INTO tags(session_id, tag_number, block_id, kind, token_count)
+                     SELECT ?1, i, 'b' || i, 'message', i * 3 FROM n",
                     params![session_id, count],
                 )
             })
             .unwrap();
     }
 
-    fn tag_count_and_max(store: &MemoryStore, session_id: &str) -> (i64, i64) {
+    fn tag_rows(store: &MemoryStore, session_id: &str) -> Vec<(i64, String, String, i64)> {
         store
             .inner
             .with_conn(|conn| {
-                conn.query_row(
-                    "SELECT COUNT(*), COALESCE(MAX(tag_number), 0) FROM tags WHERE session_id = ?1",
-                    params![session_id],
-                    |r| Ok((r.get(0)?, r.get(1)?)),
-                )
+                conn.prepare(
+                    "SELECT tag_number, block_id, kind, token_count FROM tags
+                      WHERE session_id = ?1 ORDER BY tag_number",
+                )?
+                .query_map(params![session_id], |r| {
+                    Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+                })?
+                .collect()
             })
             .unwrap()
     }
@@ -24637,12 +24659,21 @@ mod tests {
             let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
             seed_tags(&store, "bulk", tags);
             seed_tags(&store, "kept", 7);
-            assert_eq!(tag_count_and_max(&store, "bulk"), (tags, tags));
+            assert_eq!(
+                tag_rows(&store, "bulk").len(),
+                usize::try_from(tags).unwrap()
+            );
+            let kept = tag_rows(&store, "kept");
             store.start_statement_work_ledger();
             store.delete_session("bulk", "/project").unwrap();
             let work = store.take_statement_work();
-            assert_eq!(tag_count_and_max(&store, "bulk"), (0, 0));
-            assert_eq!(tag_count_and_max(&store, "kept"), (7, 7));
+            assert!(tag_rows(&store, "bulk").is_empty());
+            assert_eq!(tag_rows(&store, "kept"), kept);
+            let tag_delete = work
+                .iter()
+                .find(|run| run.sql.starts_with("DELETE FROM \"tags\""))
+                .expect("the ledger records the tag delete");
+            assert!(tag_delete.vm_steps > u64::try_from(tags).unwrap());
             work.iter().map(|run| run.vm_steps).sum()
         };
         let small = delete_work(10_000);

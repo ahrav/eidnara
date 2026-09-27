@@ -342,25 +342,7 @@ fn publishing_state(firing_seq: u64) -> HistorySummarizerDurableState {
 }
 
 fn aliases() -> FrozenAliasTable {
-    let mut table = FrozenAliasTable::default();
-    for (ordinal, presented) in [
-        (2u64, "bun install runs before every build"),
-        (3, "the workspace uses bun"),
-        (4, "done"),
-    ] {
-        table.issue(FrozenAlias {
-            message_id: format!("m{ordinal}"),
-            ordinal,
-            block_ids: vec![format!("m{ordinal}#0"), format!("m{ordinal}#1")],
-            block_hashes: vec![
-                format!("{:064x}", ordinal),
-                format!("{:064x}", ordinal * 100),
-            ],
-            presented: presented.to_string(),
-            ..FrozenAlias::default()
-        });
-    }
-    table
+    aliases_from(2)
 }
 
 /// Two facts citing one block: the first cites `s1` twice at distinct ranges and `s2`; the second cites `s1` again at a range the first already cited.
@@ -970,68 +952,67 @@ fn identical_inputs_neither_duplicate_a_job_nor_reopen_a_settled_one() {
     );
 }
 
-/// With the activation gate unevaluated or closed, 3,000 accepted chunks reserve no review job and hold no capacity; the production publication then records `memory_reviewer_unavailable` for its chunk.
-#[test]
-fn a_gate_that_is_not_open_reserves_no_job_for_any_accepted_chunk() {
+/// A frozen alias table for the three messages from `start`, cited as `s1`..`s3`.
+fn aliases_from(start: u64) -> FrozenAliasTable {
+    let mut table = FrozenAliasTable::default();
+    for (ordinal, presented) in (start..).zip([
+        "bun install runs before every build",
+        "the workspace uses bun",
+        "done",
+    ]) {
+        table.issue(FrozenAlias {
+            message_id: format!("m{ordinal}"),
+            ordinal,
+            block_ids: vec![format!("m{ordinal}#0"), format!("m{ordinal}#1")],
+            block_hashes: vec![
+                format!("{:064x}", ordinal),
+                format!("{:064x}", ordinal * 100),
+            ],
+            presented: presented.to_string(),
+            ..FrozenAlias::default()
+        });
+    }
+    table
+}
+
+/// Publishes the firing awaiting its producer over messages `start..=start + 2` through the production path, with an accepted fact set that cites `s1` and `s2` and history over `start..=start + 1`.
+fn publish_accepted_chunk(
+    rig: &Rig,
+    target: &HandoffTarget,
+    start: u64,
+) -> Result<(), HistorySummarizerDriveError> {
     use crate::history_summarizer_producer::ProducerOutput;
     use crate::history_summarizer_validate::{ChunkLine, HistorySummarizerChunk, ValidateOptions};
 
-    let mut rig = Rig::open();
-    rig.gate = Arc::new(MemoryReviewerStatus::default());
-    assert_eq!(
-        rig.gate.activation_state(),
-        ActivationState::Closed("unknown")
-    );
-    for chunk in 0..3_000 {
-        if chunk == 1_500 {
-            rig.close_gate();
-        }
-        assert_eq!(
-            rig.handoff(t0() + chunk).unwrap(),
-            Handoff::Nonadmission(MemoryReviewerNonadmissionCode::MemoryReviewerUnavailable),
-            "chunk {chunk}"
-        );
-    }
-    assert_eq!(rig.state().memory_reviewer_reservation, None);
-    let headroom = rig.store.memory_reviewer_headroom(PROJECT).unwrap();
-    assert_eq!(headroom.pending_jobs, 0, "no job is reserved or charged");
-    assert!(
-        rig.store
-            .ready_memory_reviewer_jobs(PROJECT, 8, t0())
-            .unwrap()
-            .is_empty()
-    );
-
-    let mut awaiting = publishing_state(3);
-    awaiting.state = HistorySummarizerPhase::AwaitingProducer;
-    awaiting.history_segment_set_generation = HistorySegmentSetGeneration::default();
-    rig.persist(awaiting);
+    let end = start + 2;
     let chunk = HistorySummarizerChunk {
-        aliases: aliases(),
-        start_index: 2,
-        end_index: 4,
-        lines: (2..=4)
+        aliases: aliases_from(start),
+        start_index: start,
+        end_index: end,
+        lines: (start..=end)
             .map(|ordinal| ChunkLine {
                 ordinal,
                 message_id: format!("m{ordinal}"),
                 anchorable: true,
             })
             .collect(),
-        present_ordinals: vec![2, 3, 4],
+        present_ordinals: (start..=end).collect(),
         tool_only_ranges: vec![],
         completed_tool_arcs: vec![],
     };
-    let target = rig.target();
+    let text = format!(
+        r#"<output><history_segments><history_segment start="{start}" end="{}" title="arc" episode_type="feature" importance="60"><p1>arc</p1><p2>arc</p2><p3>arc</p3><p4 /></history_segment></history_segments><facts><PROJECT_RULES>
+* [s1:0-11] [s2:0-22] Run bun install before building.
+</PROJECT_RULES></facts><meta><unprocessed_from>{end}</unprocessed_from></meta></output>"#,
+        start + 1
+    );
     publish_output_from_awaiting(PublishOutputRequest {
         store: &rig.store,
         session_id: SESSION,
         project_path: PROJECT,
         awaiting: rig.state(),
         output: ProducerOutput {
-            text: r#"<output><history_segments><history_segment start="2" end="3" title="arc" episode_type="feature" importance="60"><p1>arc</p1><p2>arc</p2><p3>arc</p3><p4 /></history_segment></history_segments><facts><PROJECT_RULES>
-* [s1:0-11] [s2:0-22] Run bun install before building.
-</PROJECT_RULES></facts><meta><unprocessed_from>4</unprocessed_from></meta></output>"#
-                .to_string(),
+            text,
             length_capped: false,
         },
         observed_chunk_fingerprint: "fp",
@@ -1048,27 +1029,164 @@ fn a_gate_that_is_not_open_reserves_no_job_for_any_accepted_chunk() {
         failure_backoff_at_ms: 0,
         completion_now_ms: t0,
         publication_fence: None,
-        memory_reviewer_handoff: Some(&target),
+        memory_reviewer_handoff: Some(target),
         model: "test/model",
     })
-    .expect("an accepted set publishes without a reservation");
-    let state = rig.state();
-    assert_eq!(state.state, HistorySummarizerPhase::Idle);
-    assert_eq!(state.memory_reviewer_reservation, None);
-    assert_eq!(state.memory_reviewer_nonadmission.count, 1);
+    .map(|_| ())
+}
+
+/// Moves the gate through the three states that are not `open`: unevaluated, closed, and an `open` evaluation gone stale. `step` runs `per_state` times per state.
+fn for_each_state_that_is_not_open(rig: &mut Rig, per_state: u64, mut step: impl FnMut(&Rig, u64)) {
+    rig.gate = Arc::new(MemoryReviewerStatus::default());
+    for index in 0..3 * per_state {
+        match index / per_state {
+            0 => {}
+            1 if index % per_state == 0 => rig.close_gate(),
+            2 if index % per_state == 0 => {
+                rig.gate.set_activation(ActivationState::Open);
+                rig.gate.expire_for_test();
+            }
+            _ => {}
+        }
+        let expected = ["unknown", "identity_mismatch", "stale"][(index / per_state) as usize];
+        assert_eq!(
+            rig.gate.activation_state(),
+            ActivationState::Closed(expected)
+        );
+        step(rig, index);
+    }
+}
+
+/// While the activation gate is not `open`, 3,000 distinct accepted chunks reach the reservation decision the publication path takes before it publishes; none reserves, charges, or persists a reservation, and each carries `memory_reviewer_unavailable` into its publication.
+#[test]
+fn a_gate_that_is_not_open_reserves_no_job_for_any_accepted_chunk() {
+    let mut rig = Rig::open();
+    let facts_before = rig.store.memory_reviewer_status_facts().unwrap();
+    let headroom_before = rig.store.memory_reviewer_headroom(PROJECT).unwrap();
+    for_each_state_that_is_not_open(&mut rig, 1_000, |rig, chunk| {
+        let mut validated = validated_range(2, 4);
+        validated.extraction = crate::history_summarizer_citations::ExtractionOutcome::Accepted {
+            count: validated.facts.len(),
+        };
+        for fact in &mut validated.facts {
+            fact.content = format!("{} (chunk {chunk})", fact.content);
+        }
+        let loaded = rig.store.load(SESSION).unwrap();
+        let publishing_row_version = loaded.row_version.unwrap();
+        let target = rig.target();
+        let decision = memory_reviewer_decision_before_publish(MemoryReviewerDecisionRequest {
+            store: &rig.store,
+            session_id: SESSION,
+            project_path: PROJECT,
+            publishing: &loaded.meta.history_summarizer,
+            publishing_row_version,
+            validated: &validated,
+            aliases: &aliases(),
+            pending: pending_publication(&validated),
+            memory_reviewer_handoff: Some(&target),
+            failure_started_at_ms: t0(),
+            failure_backoff_at_ms: 0,
+            completion_now_ms: t0,
+        })
+        .unwrap_or_else(|error| panic!("chunk {chunk}: {error}"));
+        assert_eq!(
+            decision.memory_reviewer_nonadmission,
+            Some(MemoryReviewerNonadmissionCode::MemoryReviewerUnavailable),
+            "chunk {chunk}"
+        );
+        assert!(
+            decision.memory_reviewer_activation.is_none(),
+            "chunk {chunk}"
+        );
+        assert_eq!(decision.publishing_row_version, publishing_row_version);
+        assert_eq!(
+            rig.state().memory_reviewer_reservation,
+            None,
+            "chunk {chunk}"
+        );
+    });
+    assert_eq!(rig.pending(), None);
     assert_eq!(
-        state
-            .memory_reviewer_nonadmission
-            .latest
-            .map(|latest| latest.code),
-        Some(MemoryReviewerNonadmissionCode::MemoryReviewerUnavailable)
+        rig.store.memory_reviewer_status_facts().unwrap(),
+        facts_before,
+        "no job row exists in any state and nothing is charged"
     );
     assert_eq!(
-        rig.store
-            .memory_reviewer_headroom(PROJECT)
-            .unwrap()
-            .pending_jobs,
-        0
+        rig.store.memory_reviewer_headroom(PROJECT).unwrap(),
+        headroom_before
+    );
+}
+
+/// Successive accepted chunks published through the production path while the gate is not `open` each record `memory_reviewer_unavailable` under their own firing, and no job row appears.
+#[test]
+fn every_accepted_chunk_published_while_the_gate_is_not_open_records_the_nonadmission() {
+    let mut rig = Rig::open();
+    let facts_before = rig.store.memory_reviewer_status_facts().unwrap();
+    for_each_state_that_is_not_open(&mut rig, 10, |rig, chunk| {
+        let firing_seq = 3 + chunk;
+        let start = 2 + 2 * chunk;
+        let prior = rig.state();
+        let mut awaiting = publishing_state(firing_seq);
+        awaiting.state = HistorySummarizerPhase::AwaitingProducer;
+        awaiting.chunk_range = Some(HistorySummarizerChunkRange {
+            from_ordinal: start,
+            to_ordinal: start + 2,
+        });
+        awaiting.history_segment_set_generation =
+            HistorySegmentSetGeneration::new(i64::try_from(chunk).unwrap());
+        awaiting.memory_reviewer_nonadmission = prior.memory_reviewer_nonadmission;
+        rig.persist(awaiting);
+
+        publish_accepted_chunk(rig, &rig.target(), start)
+            .unwrap_or_else(|error| panic!("chunk {chunk}: {error}"));
+        let state = rig.state();
+        assert_eq!(state.state, HistorySummarizerPhase::Idle, "chunk {chunk}");
+        assert_eq!(state.memory_reviewer_reservation, None, "chunk {chunk}");
+        assert_eq!(state.memory_reviewer_nonadmission.count, chunk + 1);
+        let latest = state.memory_reviewer_nonadmission.latest.unwrap();
+        assert_eq!(latest.firing_seq, firing_seq);
+        assert_eq!(
+            latest.code,
+            MemoryReviewerNonadmissionCode::MemoryReviewerUnavailable
+        );
+    });
+    assert_eq!(rig.store.load_history_segments(SESSION).unwrap().len(), 30);
+    assert_eq!(
+        rig.store.memory_reviewer_status_facts().unwrap(),
+        memory_store::MemoryReviewerStatusFacts {
+            nonadmissions: 30,
+            latest_nonadmission_memory_reviewer_unavailable: 1,
+            ..facts_before
+        },
+        "no job row exists in any state and nothing is charged"
+    );
+}
+
+/// A job an abandoned firing left reserved is not adopted while the gate is closed: the next firing with identical facts records `memory_reviewer_unavailable` and the job keeps its binding.
+#[test]
+fn a_closed_gate_adopts_no_orphaned_reservation() {
+    let rig = Rig::open();
+    let first = activation(rig.handoff(t0()).unwrap());
+    rig.persist(abandon_with_detail(
+        &rig.state(),
+        t0() + 1,
+        Some("crash".to_string()),
+        AbandonClass::ProducerFailed,
+    ));
+    rig.persist(next_publishing_firing(&rig, 2, 4));
+    rig.close_gate();
+    let headroom_before = rig.store.memory_reviewer_headroom(PROJECT).unwrap();
+    assert_eq!(
+        rig.handoff(t0() + 10).unwrap(),
+        Handoff::Nonadmission(MemoryReviewerNonadmissionCode::MemoryReviewerUnavailable)
+    );
+    assert_eq!(rig.state().memory_reviewer_reservation, None);
+    let job = rig.job(&first.causal_identity);
+    assert_eq!(job.state, MemoryReviewerJobState::Reserved);
+    assert_eq!(job.producer, first.producer);
+    assert_eq!(
+        rig.store.memory_reviewer_headroom(PROJECT).unwrap(),
+        headroom_before
     );
 }
 
@@ -1085,6 +1203,10 @@ fn a_reservation_held_when_the_gate_closes_still_republishes_and_settles() {
     assert_eq!(rig.reservation(), reservation);
 
     rig.reopen();
+    assert_eq!(
+        handle_restart_load(&rig.store, SESSION, t0() + 60_000).unwrap(),
+        RestartAction::RepublishReserved { firing_seq: 3 }
+    );
     let target = rig.target();
     assert_eq!(
         rig.republish(Some(&target), t0() + 2),
@@ -1094,6 +1216,22 @@ fn a_reservation_held_when_the_gate_closes_still_republishes_and_settles() {
         rig.job(&reservation.causal_identity).state,
         MemoryReviewerJobState::Ready(_)
     ));
+    let after = rig.store.load(SESSION).unwrap();
+    assert_eq!(after.meta.publication_floor_ordinal, Some(5));
+    assert_eq!(
+        after.meta.history_summarizer.state,
+        HistorySummarizerPhase::Idle
+    );
+    assert_eq!(
+        after.meta.history_summarizer.memory_reviewer_reservation,
+        None
+    );
+    assert_eq!(rig.pending(), None);
+    assert_eq!(rig.store.load_history_segments(SESSION).unwrap().len(), 1);
+    assert_eq!(
+        handle_restart_load(&rig.store, SESSION, t0() + 60_000).unwrap(),
+        RestartAction::Done
+    );
 
     let rig = Rig::open();
     let _ = activation(rig.handoff(t0()).unwrap());
@@ -1111,6 +1249,11 @@ fn a_reservation_held_when_the_gate_closes_still_republishes_and_settles() {
         rig.job(&reservation.causal_identity).state,
         MemoryReviewerJobState::Terminal(MemoryReviewerJobOutcome::Nonadmitted)
     );
+    let after = rig.state();
+    assert_eq!(after.state, HistorySummarizerPhase::Idle);
+    assert_eq!(after.memory_reviewer_reservation, None);
+    assert_eq!(rig.pending(), None);
+    assert!(rig.store.load_history_segments(SESSION).unwrap().is_empty());
 }
 
 #[test]

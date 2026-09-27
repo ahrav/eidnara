@@ -453,91 +453,23 @@ fn a_file_with_a_different_baseline_is_refused_as_a_baseline_mismatch() {
     );
 }
 
-/// The digest of the preceding Memory Store baseline, which holds the tag counter table and
-/// its three triggers in place of the chunk transcript totals, and those tag counter objects.
+/// The preceding Memory Store baseline, frozen byte for byte, and its digest. It holds the
+/// tag counter table and its three triggers in place of the chunk transcript totals.
+const PRIOR_BASELINE: &str = include_str!("fixtures/prior_baseline.sql");
 const PRIOR_BASELINE_DIGEST: &str =
     "70babc6b334441e5f52234100ff155c9d1a76d31c4f72c678b984d40a21b5d07";
-const PRIOR_TAG_COUNTERS: &str = r#"CREATE TABLE tag_cache_generations (
-            session_id TEXT PRIMARY KEY,
-            generation INTEGER NOT NULL DEFAULT 0,
-            tag_count INTEGER NOT NULL DEFAULT 0,
-            max_tag_number INTEGER NOT NULL DEFAULT 0
-        );
-
-CREATE TRIGGER tags_cache_generation_insert AFTER INSERT ON tags BEGIN
-            INSERT INTO tag_cache_generations(session_id, generation, tag_count, max_tag_number)
-            VALUES (NEW.session_id, 1, 1, NEW.tag_number)
-            ON CONFLICT(session_id) DO UPDATE SET
-                generation = generation + 1,
-                tag_count = tag_count + 1,
-                max_tag_number = MAX(max_tag_number, NEW.tag_number);
-        END;
-
-CREATE TRIGGER tags_cache_generation_delete AFTER DELETE ON tags BEGIN
-            INSERT INTO tag_cache_generations(session_id, generation, tag_count, max_tag_number)
-            VALUES (
-                OLD.session_id,
-                1,
-                (SELECT COUNT(*) FROM tags WHERE session_id = OLD.session_id),
-                (SELECT COALESCE(MAX(tag_number), 0) FROM tags WHERE session_id = OLD.session_id)
-            )
-            ON CONFLICT(session_id) DO UPDATE SET
-                generation = generation + 1,
-                tag_count = excluded.tag_count,
-                max_tag_number = excluded.max_tag_number;
-        END;
-
-CREATE TRIGGER tags_cache_generation_update AFTER UPDATE ON tags BEGIN
-            INSERT INTO tag_cache_generations(session_id, generation, tag_count, max_tag_number)
-            VALUES (
-                OLD.session_id,
-                1,
-                (SELECT COUNT(*) FROM tags WHERE session_id = OLD.session_id),
-                (SELECT COALESCE(MAX(tag_number), 0) FROM tags WHERE session_id = OLD.session_id)
-            )
-            ON CONFLICT(session_id) DO UPDATE SET
-                generation = generation + 1,
-                tag_count = excluded.tag_count,
-                max_tag_number = excluded.max_tag_number;
-            INSERT INTO tag_cache_generations(session_id, generation, tag_count, max_tag_number)
-            VALUES (
-                NEW.session_id,
-                1,
-                (SELECT COUNT(*) FROM tags WHERE session_id = NEW.session_id),
-                (SELECT COALESCE(MAX(tag_number), 0) FROM tags WHERE session_id = NEW.session_id)
-            )
-            ON CONFLICT(session_id) DO UPDATE SET
-                generation = generation + 1,
-                tag_count = excluded.tag_count,
-                max_tag_number = excluded.max_tag_number;
-        END;"#;
-
-/// The prior baseline text, rebuilt by putting the tag counter objects back where the
-/// transcript totals stand; the digest check proves the rebuild is byte-exact.
-fn prior_baseline() -> String {
-    let current = include_str!("../baseline.sql");
-    let start = current
-        .find("CREATE TABLE chunk_transcript_totals")
-        .expect("the totals table is in the baseline");
-    let end_marker = "CREATE TRIGGER chunk_transcripts_total_update";
-    let update = current.find(end_marker).expect("the update trigger");
-    let end = update + current[update..].find("END;").expect("the trigger ends") + "END;".len();
-    let prior = format!(
-        "{}{PRIOR_TAG_COUNTERS}{}",
-        &current[..start],
-        &current[end..]
-    );
-    assert_eq!(storage::baseline_digest(&prior), PRIOR_BASELINE_DIGEST);
-    prior
-}
 
 /// A store laid down under the prior baseline refuses to open and is left byte-identical.
 #[test]
 fn a_store_created_under_the_prior_baseline_refuses_to_open_untouched() {
+    assert_eq!(
+        storage::baseline_digest(PRIOR_BASELINE),
+        PRIOR_BASELINE_DIGEST
+    );
     assert_ne!(memory_store::baseline_digest(), PRIOR_BASELINE_DIGEST);
     let dir = tempfile::tempdir().unwrap();
     let descriptor = MemoryStore::test_descriptor(dir.path(), "eidnara-test");
-    drop(storage::open_sqlite(&descriptor, &prior_baseline()).unwrap());
+    drop(storage::open_sqlite(&descriptor, PRIOR_BASELINE).unwrap());
     let before = std::fs::read(dir.path().join("memory.sqlite")).unwrap();
 
     let Err(error) = MemoryStore::open(&descriptor) else {
