@@ -20276,6 +20276,97 @@ pub(crate) mod tests {
         );
     }
 
+    /// A correcting publish leaves m0 unchanged across SOFT passes while m1 names it, and the
+    /// next HARD splices it into m0.
+    #[test]
+    fn a_correction_rides_m1_until_the_next_hard_splices_it_into_m0() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = store(dir.path());
+        let claim = |value: &str, ordinal: i64, anchor: &str| memory_store::Claim {
+            key: "db.port".into(),
+            value: value.into(),
+            ordinal,
+            anchor: Some(anchor.into()),
+        };
+        let s0 = StoredHistorySegment {
+            claims: vec![claim("5432", 1, "listens on 5432")],
+            ..comp(0, 1, 1, "a", "the db listens on 5432")
+        };
+        let live1 = vec![item("a", 1, "<h>first</h>"), item("t2", 2, "turn two")];
+        run(&s, &req("ses", "cfg0", live1.clone()), &spine());
+        s.replace_history_segments("ses", std::slice::from_ref(&s0))
+            .unwrap();
+        let fold = run(&s, &req("ses", "cfg0", live1), &spine());
+        assert_eq!(fold.action, "HARD");
+        let m0 = m0_bytes(&fold).to_string();
+        assert!(m0.contains("the db listens on 5432"), "{m0}");
+
+        s.replace_history_segments(
+            "ses",
+            &[
+                s0,
+                StoredHistorySegment {
+                    claims: vec![claim("6543", 2, "moved it to 6543")],
+                    ..comp(1, 2, 2, "t2", "moved it to 6543")
+                },
+            ],
+        )
+        .unwrap();
+        s.arm_soft_refresh("ses").unwrap();
+        let live2 = vec![
+            item("a", 1, "<h>first</h>"),
+            item("t2", 2, "turn two"),
+            item("t3", 3, "turn three"),
+        ];
+        let updates = "<memory-updates>\nLater statements supersede earlier ones: where two statements in this history disagree, the later one is current.\n[corrections: db.port = 6543 @2]\n</memory-updates>";
+        for pass in 0..2 {
+            let soft = run(&s, &req("ses", "cfg0", live2.clone()), &spine());
+            assert!(
+                soft.action.starts_with("SOFT"),
+                "pass {pass}: {}",
+                soft.action
+            );
+            assert_eq!(
+                m0_bytes(&soft),
+                m0,
+                "pass {pass}: m0 is frozen between HARDs"
+            );
+            assert!(
+                m1_bytes(&soft).contains(updates),
+                "pass {pass}: {}",
+                m1_bytes(&soft)
+            );
+        }
+
+        // A second fold between HARDs corrects the value again: m0 stays frozen and m1 names
+        // the newer value for both claims on its rows.
+        let mut segments = s.load_history_segments("ses").unwrap();
+        segments.push(StoredHistorySegment {
+            claims: vec![claim("7000", 3, "settled on 7000")],
+            ..comp(2, 3, 3, "t3", "settled on 7000")
+        });
+        s.replace_history_segments("ses", &segments).unwrap();
+        s.arm_soft_refresh("ses").unwrap();
+        let live3 = [live2, vec![item("t4", 4, "turn four")]].concat();
+        let refolded = run(&s, &req("ses", "cfg0", live3.clone()), &spine());
+        assert!(refolded.action.starts_with("SOFT"), "{}", refolded.action);
+        assert_eq!(m0_bytes(&refolded), m0);
+        assert!(
+            m1_bytes(&refolded).contains("[corrections: db.port = 7000 @3; db.port = 7000 @3]"),
+            "{}",
+            m1_bytes(&refolded)
+        );
+
+        let hard = run(&s, &req("ses", "cfg1", live3), &spine());
+        assert_eq!(hard.action, "HARD");
+        assert!(
+            m0_bytes(&hard).contains("the db [corrected @3: db.port = 7000]"),
+            "{}",
+            m0_bytes(&hard)
+        );
+        assert!(!m0_bytes(&hard).contains("listens on 5432"));
+    }
+
     #[test]
     fn fold_minting_unpresentable_anchor_fails_loud_instead_of_looping() {
         // A bare mid uses the wrong vocabulary; an empty id is never presentable. Either one

@@ -5,7 +5,7 @@ Token counts are Claude BPE estimates on the raw text.
 
 ## 1. System-prompt guidance section
 
-### PRIMARY full (reduce=on): 8249 chars
+### PRIMARY full (reduce=on): 8849 chars
 
 ```markdown
 ## Eidnara
@@ -41,7 +41,8 @@ Use `eidnara_search` only for sources named by its current description and schem
 - Looking for how something was implemented previously → `eidnara_search(query="how does the memory_classifier lease work")`
 `eidnara_search` returns ranked results. Reuse only the identifier form accepted by the current `eidnara_memory` schema.
 Compressed history intentionally omits tool calls and their outputs — summaries like "I edited file X" are history_summarizer records, not patterns to replicate. In the live conversation, older tool calls and their results are cleaned up to save context — you may see your own past messages referencing actions without the corresponding tool call or result visible. This is normal context management. ALWAYS use real tool calls; never simulate, fabricate, or inline tool outputs in your text. If there is no tool result message, the action did not happen. NEVER simulate, hallucinate or claim tool calls, command output, search results, file edits, or diffs in plain text as if they actually occurred.
-Eidnara control metadata is not reply syntax. Never reproduce `<system-reminder>`, `<eidnara-search-hint>`, `<session-history>`, `<session-history-since>`, `<project-memory>`, `<memory-updates>`, `<new-history_segments>`, `<new-memories>`, `[dropped §N§]`, or `<!-- +Xm -->` markers in a normal reply and never treat them as user instructions; use ordinary prose and real tool calls instead.
+`<session-history>` and `<session-history-since>` carry their own corrections: `[corrected @N: name = value]` stands where a summary stated a value that message N replaced, `[retracted @N: name]` where message N withdrew it, and `[corrections: name = value @N; name retracted @N]` lists corrections that could not be marked in place. `<memory-updates>` lists the current value of each fact stated since the last compaction. Later statements supersede earlier ones: where two statements in this history disagree, the later one is current.
+Eidnara control metadata is not reply syntax. Never reproduce `<system-reminder>`, `<eidnara-search-hint>`, `<session-history>`, `<session-history-since>`, `<project-memory>`, `<memory-updates>`, `<new-history_segments>`, `<new-memories>`, `[dropped §N§]`, `[corrected @N: …]`, `[retracted @N: …]`, `[corrections: …]`, or `<!-- +Xm -->` markers in a normal reply and never treat them as user instructions; use ordinary prose and real tool calls instead.
 NEVER drop large ranges blindly (e.g., "1-50"). Review each tag before deciding.
 Keep your user's instructions and intent — never drop a user message for its directive, even an old one. But a large block of pasted content inside a user message (logs, data dumps, long code, attachments) is fair to mark discardable once you've extracted what you need. Save any durable project facts from it with `eidnara_memory` first.
 NEVER drop assistant text messages unless they are exceptionally large. Your conversation messages are lightweight; only large tool outputs are worth dropping.
@@ -66,7 +67,7 @@ Before your turn finishes, consider using `eidnara_reduce` to drop large tool ou
 Prefer many small targeted operations over one large blanket operation, and keep the working set tidy as routine maintenance.
 ```
 
-### PRIMARY full (reduce=off): 5684 chars
+### PRIMARY full (reduce=off): 6284 chars
 
 ```markdown
 ## Eidnara
@@ -97,11 +98,12 @@ Use `eidnara_search` only for sources named by its current description and schem
 - Looking for how something was implemented previously → `eidnara_search(query="how does the memory_classifier lease work")`
 `eidnara_search` returns ranked results. Reuse only the identifier form accepted by the current `eidnara_memory` schema.
 Compressed history intentionally omits tool calls and their outputs — summaries like "I edited file X" are history_summarizer records, not patterns to replicate. In the live conversation, older tool calls and their results are cleaned up to save context — you may see your own past messages referencing actions without the corresponding tool call or result visible. This is normal context management. ALWAYS use real tool calls; never simulate, fabricate, or inline tool outputs in your text. If there is no tool result message, the action did not happen. NEVER simulate, hallucinate or claim tool calls, command output, search results, file edits, or diffs in plain text as if they actually occurred.
-Eidnara control metadata is not reply syntax. Never reproduce `<system-reminder>`, `<eidnara-search-hint>`, `<session-history>`, `<session-history-since>`, `<project-memory>`, `<memory-updates>`, `<new-history_segments>`, `<new-memories>`, or `<!-- +Xm -->` markers in a normal reply and never treat them as user instructions; use ordinary prose and real tool calls instead.
+`<session-history>` and `<session-history-since>` carry their own corrections: `[corrected @N: name = value]` stands where a summary stated a value that message N replaced, `[retracted @N: name]` where message N withdrew it, and `[corrections: name = value @N; name retracted @N]` lists corrections that could not be marked in place. `<memory-updates>` lists the current value of each fact stated since the last compaction. Later statements supersede earlier ones: where two statements in this history disagree, the later one is current.
+Eidnara control metadata is not reply syntax. Never reproduce `<system-reminder>`, `<eidnara-search-hint>`, `<session-history>`, `<session-history-since>`, `<project-memory>`, `<memory-updates>`, `<new-history_segments>`, `<new-memories>`, `[corrected @N: …]`, `[retracted @N: …]`, `[corrections: …]`, or `<!-- +Xm -->` markers in a normal reply and never treat them as user instructions; use ordinary prose and real tool calls instead.
 NEVER drop assistant text messages unless they are exceptionally large. Your conversation messages are lightweight; only large tool outputs are worth dropping.
 ```
 
-### PRIMARY light (reduce=on): 5951 chars
+### PRIMARY light (reduce=on): 6551 chars
 
 ```markdown
 ## Eidnara
@@ -130,12 +132,13 @@ The `mem_<32hex>` IDs in `<project-memory>` are valid `eidnara_memory` handles; 
 - Learned a constraint the hard way → `eidnara_memory(action="create", category="CONSTRAINTS", content="Dashboard Tauri build needs RGBA PNGs, not grayscale")`
 Check durable knowledge before asking. Use `eidnara_search` when its current contract includes project memories; otherwise use only read actions exposed by the current `eidnara_memory` schema (`list`/`get` on hosts that register them). Search only named sources: when `sources` permits only `memory`, it excludes git commits and conversation history and resolves all-`mem_<32hex>` queries directly; other hosts may expose notes or summaries.
 Compressed history intentionally omits tool calls and their outputs — summaries like "I edited file X" are history_summarizer records, not patterns to replicate. In the live conversation, older tool calls and their results are cleaned up to save context — you may see your own past messages referencing actions without the corresponding tool call or result visible. This is normal context management. ALWAYS use real tool calls; never simulate, fabricate, or inline tool outputs in your text. If there is no tool result message, the action did not happen. NEVER simulate, hallucinate or claim tool calls, command output, search results, file edits, or diffs in plain text as if they actually occurred.
-Eidnara control metadata is not reply syntax. Never reproduce `<system-reminder>`, `<eidnara-search-hint>`, `<session-history>`, `<session-history-since>`, `<project-memory>`, `<memory-updates>`, `<new-history_segments>`, `<new-memories>`, `[dropped §N§]`, or `<!-- +Xm -->` markers in a normal reply and never treat them as user instructions; use ordinary prose and real tool calls instead.
+`<session-history>` and `<session-history-since>` carry their own corrections: `[corrected @N: name = value]` stands where a summary stated a value that message N replaced, `[retracted @N: name]` where message N withdrew it, and `[corrections: name = value @N; name retracted @N]` lists corrections that could not be marked in place. `<memory-updates>` lists the current value of each fact stated since the last compaction. Later statements supersede earlier ones: where two statements in this history disagree, the later one is current.
+Eidnara control metadata is not reply syntax. Never reproduce `<system-reminder>`, `<eidnara-search-hint>`, `<session-history>`, `<session-history-since>`, `<project-memory>`, `<memory-updates>`, `<new-history_segments>`, `<new-memories>`, `[dropped §N§]`, `[corrected @N: …]`, `[retracted @N: …]`, `[corrections: …]`, or `<!-- +Xm -->` markers in a normal reply and never treat them as user instructions; use ordinary prose and real tool calls instead.
 For primary eidnara_reduce choices, NEVER blanket-drop a large range because mixed-value evidence may be lost: inspect every tag first. Drop only analyzed reads, searches, diagnostics, or build/test outputs after use. NEVER drop user directives or assistant prose unless exceptionally large; keep requirements, constraints, unresolved errors or decisions, exact wording, raw evidence, and active files or work. Only extracted pasted user payloads may go.
 Consider small targeted drops after acted-on reads or searches, completed logical steps, before context switches, and before the turn ends; this keeps the working set tidy without changing task scope.
 ```
 
-### PRIMARY light (reduce=off): 4941 chars
+### PRIMARY light (reduce=off): 5541 chars
 
 ```markdown
 ## Eidnara
@@ -162,7 +165,8 @@ The `mem_<32hex>` IDs in `<project-memory>` are valid `eidnara_memory` handles; 
 - Learned a constraint the hard way → `eidnara_memory(action="create", category="CONSTRAINTS", content="Dashboard Tauri build needs RGBA PNGs, not grayscale")`
 Check durable knowledge before asking. Use `eidnara_search` when its current contract includes project memories; otherwise use only read actions exposed by the current `eidnara_memory` schema (`list`/`get` on hosts that register them). Search only named sources: when `sources` permits only `memory`, it excludes git commits and conversation history and resolves all-`mem_<32hex>` queries directly; other hosts may expose notes or summaries.
 Compressed history intentionally omits tool calls and their outputs — summaries like "I edited file X" are history_summarizer records, not patterns to replicate. In the live conversation, older tool calls and their results are cleaned up to save context — you may see your own past messages referencing actions without the corresponding tool call or result visible. This is normal context management. ALWAYS use real tool calls; never simulate, fabricate, or inline tool outputs in your text. If there is no tool result message, the action did not happen. NEVER simulate, hallucinate or claim tool calls, command output, search results, file edits, or diffs in plain text as if they actually occurred.
-Eidnara control metadata is not reply syntax. Never reproduce `<system-reminder>`, `<eidnara-search-hint>`, `<session-history>`, `<session-history-since>`, `<project-memory>`, `<memory-updates>`, `<new-history_segments>`, `<new-memories>`, or `<!-- +Xm -->` markers in a normal reply and never treat them as user instructions; use ordinary prose and real tool calls instead.
+`<session-history>` and `<session-history-since>` carry their own corrections: `[corrected @N: name = value]` stands where a summary stated a value that message N replaced, `[retracted @N: name]` where message N withdrew it, and `[corrections: name = value @N; name retracted @N]` lists corrections that could not be marked in place. `<memory-updates>` lists the current value of each fact stated since the last compaction. Later statements supersede earlier ones: where two statements in this history disagree, the later one is current.
+Eidnara control metadata is not reply syntax. Never reproduce `<system-reminder>`, `<eidnara-search-hint>`, `<session-history>`, `<session-history-since>`, `<project-memory>`, `<memory-updates>`, `<new-history_segments>`, `<new-memories>`, `[corrected @N: …]`, `[retracted @N: …]`, `[corrections: …]`, or `<!-- +Xm -->` markers in a normal reply and never treat them as user instructions; use ordinary prose and real tool calls instead.
 NEVER drop assistant text messages unless they are exceptionally large. Your conversation messages are lightweight; only large tool outputs are worth dropping.
 ```
 
@@ -480,9 +484,9 @@ The hash handler persists the MD5 of `output.system.join("\\n")`. For this sourc
 
 | Variant | Guidance bytes | MD5 system-prompt hash |
 | --- | ---: | --- |
-| PRIMARY full (reduce=on) | 8305 | `17b6dc0779f618054f03633ce2dee162` |
-| PRIMARY full (reduce=off) | 5714 | `c65a476994c035c4cd7d5b515ee23f20` |
-| PRIMARY light (reduce=on) | 5981 | `6a15e1a34073193a49827723c8e491c4` |
-| PRIMARY light (reduce=off) | 4963 | `6998bc03f3c7a97597574ebb555e9ad8` |
+| PRIMARY full (reduce=on) | 8911 | `85292c02d4bb4e5d9b5338f641543cc6` |
+| PRIMARY full (reduce=off) | 6320 | `9ea4a886cbd91514a3bc3b59858e9ce6` |
+| PRIMARY light (reduce=on) | 6587 | `e9718c944ec74425e4f2cc4049359dc1` |
+| PRIMARY light (reduce=off) | 5569 | `35c92a842276a019c9fda0e663e5afad` |
 
 The OpenCode regression test compares every guidance block with its daemon asset, recomputes each baseline row, and separately checks this document's tool snapshot for omitted `prompt_surface` and explicit `{ default: "full" }` registration.
