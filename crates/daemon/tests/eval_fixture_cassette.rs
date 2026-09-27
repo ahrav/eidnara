@@ -550,16 +550,22 @@ fn a_hanging_summarizer_command_is_killed_by_shutdown() {
         shutting_down.elapsed() < BUDGET,
         "shutdown waited on the hanging command"
     );
-    // `kill -0` on a reaped or dead pid fails; the grandchild did not
-    // outlive the fixture.
-    std::thread::sleep(std::time::Duration::from_millis(200));
-    let alive = std::process::Command::new("kill")
-        .args(["-0", &pid.to_string()])
-        .status()
-        .unwrap()
-        .success();
-    assert!(
-        !alive,
-        "the summarizer grandchild {pid} outlived the fixture"
-    );
+    // The grandchild did not outlive the fixture: it is gone, or a zombie
+    // its reaper has not collected yet, before the budget runs out.
+    let deadline = std::time::Instant::now() + BUDGET;
+    loop {
+        let state = std::process::Command::new("ps")
+            .args(["-o", "stat=", "-p", &pid.to_string()])
+            .output()
+            .unwrap();
+        let state = String::from_utf8_lossy(&state.stdout).trim().to_string();
+        if state.is_empty() || state.starts_with('Z') {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the summarizer grandchild {pid} outlived the fixture: {state}"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
 }
