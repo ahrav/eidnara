@@ -17,7 +17,7 @@ async fn competing_pass_counter_survives_direct_primary_lifecycle_and_reopen() {
     let session = "module-counter";
     let core = CoreState::empty();
     let initial = ModuleMeta {
-        boundary_divergence_pending_count: 0,
+        pending_rewrite_trip_count: 0,
         ..Default::default()
     };
     store
@@ -27,13 +27,13 @@ async fn competing_pass_counter_survives_direct_primary_lifecycle_and_reopen() {
     let winner = store.load(session).expect("winner snapshot");
     let loser = store.load(session).expect("loser snapshot");
     let mut winner_meta = winner.meta.clone();
-    winner_meta.boundary_divergence_pending_count = 1;
+    winner_meta.pending_rewrite_trip_count = 1;
     store
         .commit(session, winner.row_version, &winner.core, &winner_meta)
         .expect("winner commits");
 
     let mut loser_meta = loser.meta.clone();
-    loser_meta.boundary_divergence_pending_count = 1;
+    loser_meta.pending_rewrite_trip_count = 1;
     assert!(matches!(
         store.commit(session, loser.row_version, &loser.core, &loser_meta),
         Err(MemoryStoreError::CasConflict {
@@ -59,7 +59,7 @@ async fn competing_pass_counter_survives_direct_primary_lifecycle_and_reopen() {
             .load(session)
             .expect("state reloads")
             .meta
-            .boundary_divergence_pending_count,
+            .pending_rewrite_trip_count,
         1
     );
 }

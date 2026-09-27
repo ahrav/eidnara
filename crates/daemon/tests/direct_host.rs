@@ -91,8 +91,9 @@ async fn readiness_permissions_catalog_and_real_unary_transform() {
         primary,
         json!({
             "kind": "transform",
+            "v": 3,
+            "boundary": null,
             "base_revision": "direct-host-base-1",
-            "v": 2,
             "session_id": session,
             "serializer_profile": "owned-llmrunner",
             "render_config": "direct-host-config",
@@ -142,7 +143,7 @@ async fn direct_primary_replays_transform_state_across_fixture_restart() {
                 &[StoredHistorySegment {
                     sequence: 1,
                     start_message: 1,
-                    end_message: 10,
+                    end_message: 1,
                     end_message_id: "m10#0".to_owned(),
                     title: "Seeded history_segment".to_owned(),
                     content: summary.to_owned(),
@@ -157,8 +158,9 @@ async fn direct_primary_replays_transform_state_across_fixture_restart() {
 
     let request = json!({
         "kind": "transform",
+        "v": 3,
+        "boundary": null,
         "base_revision": "restart-base-1",
-        "v": 2,
         "session_id": "restart-transform",
         "serializer_profile": "owned-llmrunner",
         "render_config": "restart-config",
@@ -223,10 +225,17 @@ async fn direct_primary_replays_transform_state_across_fixture_restart() {
         )
         .await;
     wait_for_store(&client, route, "restart-transform").await;
-    let replay = request_json(&client, route, request.clone()).await;
+    // The plugin declares the boundary the first response named and sends the window from it.
+    let mut replay_request = request.clone();
+    replay_request["boundary"] = materialized["boundary"].clone();
+    assert_eq!(
+        replay_request["boundary"],
+        json!({"mid": "m10", "sequence": 1})
+    );
+    let replay = request_json(&client, route, replay_request.clone()).await;
     assert_eq!(replay["action"], "SOFT+", "{replay}");
     assert_eq!(replay["project_memory"], materialized["project_memory"]);
-    let replay_messages = applied_messages(&request, &replay);
+    let replay_messages = applied_messages(&replay_request, &replay);
     let replay_m0 = replay_messages
         .iter()
         .find(|message| message["meta"]["synthetic"] == true)
@@ -498,7 +507,7 @@ async fn refused_bodies_emit_one_terminal_and_leave_no_dispatch_state() {
     let (code, message) = refuse(dense).await;
     assert_eq!(code, "host.invalid_params", "{message}");
     let mut complete = format!(
-        r#"{{"kind":"transform","v":2,"session_id":"{session}","serializer_profile":"owned-llmrunner","render_config":"direct-host-config","messages":[],"junk":"#
+        r#"{{"kind":"transform","session_id":"{session}","serializer_profile":"owned-llmrunner","render_config":"direct-host-config","messages":[],"junk":"#
     )
     .into_bytes();
     complete.extend_from_slice(&dense_values());
@@ -524,8 +533,9 @@ async fn refused_bodies_emit_one_terminal_and_leave_no_dispatch_state() {
         primary,
         json!({
             "kind": "transform",
+            "v": 3,
+            "boundary": null,
             "base_revision": "direct-host-base-2",
-            "v": 2,
             "session_id": session,
             "serializer_profile": "owned-llmrunner",
             "render_config": "direct-host-config",

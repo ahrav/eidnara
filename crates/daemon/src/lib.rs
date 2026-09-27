@@ -1699,6 +1699,7 @@ impl TransformRequest {
         Self {
             native_messages: None,
             serve_native: false,
+            coverage: None,
             ..self.clone()
         }
     }
@@ -1779,11 +1780,11 @@ impl TransformRequest {
                     .map(|message| retained_size::ingress_message_retained_bytes(message))
                     .sum::<usize>(),
             );
-        let declared_trim = self.declared_trim.as_ref().map_or(0, |trim| {
-            trim.flat_boundary_id
-                .capacity()
-                .saturating_add(trim.boundary_bare_message_id.capacity())
-        });
+        let boundary = self
+            .boundary
+            .as_ref()
+            .and_then(Option::as_ref)
+            .map_or(0, |anchor| anchor.mid.capacity());
         let constituents = self
             .constituents
             .capacity()
@@ -1806,7 +1807,7 @@ impl TransformRequest {
             .saturating_add(direct_strings)
             .saturating_add(prompt_surface)
             .saturating_add(messages)
-            .saturating_add(declared_trim)
+            .saturating_add(boundary)
             .saturating_add(constituents)
             .saturating_add(ARC_ALLOCATION_OVERHEAD_BYTES)
             .saturating_add(cache_metadata)
@@ -8218,6 +8219,30 @@ impl HandlerCore {
             .and_then(|observed| i64::try_from(observed).ok())
             .map(|observed| decode_started_at_ms.saturating_sub(observed) as f64)
             .unwrap_or(0.0);
+        if parsed.v != transform::TRANSFORM_REVISION {
+            return PreparedOutcome::Error {
+                code: "transform_revision_unsupported".to_string(),
+                message: format!(
+                    "expected transform revision {}, received {}",
+                    transform::TRANSFORM_REVISION,
+                    parsed.v
+                ),
+            };
+        }
+        match &parsed.boundary {
+            None => {
+                return invalid_params_error(
+                    "transform revision 3 requires boundary: null or {mid, sequence}",
+                );
+            }
+            Some(Some(anchor))
+                if !(-window_coverage::MAX_SAFE_INTEGER..=window_coverage::MAX_SAFE_INTEGER)
+                    .contains(&anchor.sequence) =>
+            {
+                return invalid_params_error("boundary.sequence must be a JavaScript safe integer");
+            }
+            Some(_) => {}
+        }
         let serializer_profile = SerializerProfile::parse(&parsed.serializer_profile);
         if serializer_profile.is_none() {
             return unknown_serializer_profile_error();
@@ -8660,13 +8685,18 @@ impl HandlerCore {
         let PassIntake {
             held,
             store,
-            parsed,
+            mut parsed,
             binding,
             lineage_root,
             pass_load,
             snapshot_generation,
             entry,
         } = intake;
+        // Resolve first (spec D2): every consumer of the pass reads the cut window and the
+        // ordinals the daemon derived for it.
+        if let Err(error) = transform::resolve_window(&store, &mut parsed) {
+            return Err(window_refusal(&parsed, error));
+        }
         let route_project_root = binding.project_root.to_string_lossy().to_string();
         let project_path = Self::authority_project_path(&store, &route_project_root, "memories")?;
         let note_project_path = Self::authority_project_path(&store, &route_project_root, "notes")?;
@@ -8789,6 +8819,11 @@ impl HandlerCore {
     }
 
     fn reject_transform(env: &PassEnv, error: crate::transform::TransformError) -> PreparedOutcome {
+        if let transform::TransformError::BoundaryUnknown
+        | transform::TransformError::InvalidWindow(_) = error
+        {
+            return window_refusal(&env.parsed, error);
+        }
         let message = error.to_string();
         let _ = env
             .store
@@ -8928,7 +8963,7 @@ impl HandlerCore {
     ) -> PreparedHistorySummarizerAction {
         self.prepare_history_summarizer_fire(
             Arc::clone(&env.store),
-            &env.parsed,
+            pass.result.served_request.as_deref().unwrap_or(&env.parsed),
             &env.binding,
             &env.project_path,
             &pass.result.projection,
@@ -8970,10 +9005,13 @@ impl HandlerCore {
             }
         }
         let TransformedPass {
-            result,
+            mut result,
             trigger_timings,
             ..
         } = pass;
+        // Everything after the pass reads the window it served.
+        let served_request = result.served_request.take();
+        let parsed = served_request.as_deref().unwrap_or(parsed);
         let timings = &env.timings;
         let post_attach_started_at = Instant::now();
         let revert_epoch = result.revert_epoch;
@@ -8981,9 +9019,6 @@ impl HandlerCore {
         let mutation_exempt_mid = result.mutation_exempt_mid;
         let lineage_anchor_mid = result.lineage_anchor_mid;
         let tag_numbers = result.tag_numbers;
-        // A descent pass rebased its ordinals; the snapshot keeps that copy so wrapup compares
-        // them against the durable history-segment ends.
-        let snapshot_request = result.rebased_request.as_ref().map_or(&**parsed, |r| r);
         let mut response = result.response;
         response.history_summarizer = Some(diagnostics);
         let Some(output_revision) = self.output_revisions.allocate() else {
@@ -9071,7 +9106,7 @@ impl HandlerCore {
             response_observation_started_at.elapsed().as_secs_f64() * 1_000.0;
         // The ready snapshot keeps the CK input and scalar fields wrapup reads, never the native
         // payload; the ready LRU and active-lease budget charge what its `Arc` keeps alive.
-        let snapshot = Arc::new(snapshot_request.ready_snapshot());
+        let snapshot = Arc::new(parsed.ready_snapshot());
         let retained_size_started_at = Instant::now();
         let retained_bytes = snapshot.snapshot_retained_bytes();
         let retained_size_ms = retained_size_started_at.elapsed().as_secs_f64() * 1_000.0;
@@ -9123,6 +9158,8 @@ impl HandlerCore {
                 .map(|message| message.ck.clone())
                 .collect(),
         );
+        // A child session holds no coverage.
+        response.boundary = Some(None);
         let Some(output_revision) = self.output_revisions.allocate() else {
             return revision_exhausted_error();
         };
@@ -13415,6 +13452,23 @@ pub(crate) fn now_ms() -> i64 {
         .unwrap_or(0)
 }
 
+/// The answer to a window the coverage resolution refused: `boundary_unknown` or `invalid_params`.
+fn window_refusal(request: &TransformRequest, error: transform::TransformError) -> PreparedOutcome {
+    match error {
+        transform::TransformError::BoundaryUnknown => respond_transform(
+            request,
+            transform::TransformResponse::boundary_unknown(),
+            None,
+        ),
+        transform::TransformError::InvalidWindow(message) => invalid_params_error(message),
+        // A store error from the handler's resolution in `start_transform_pass`.
+        other => PreparedOutcome::Error {
+            code: "transform_failed".to_string(),
+            message: other.to_string(),
+        },
+    }
+}
+
 fn unknown_serializer_profile_error() -> PreparedOutcome {
     PreparedOutcome::Error {
         code: "unknown_serializer_profile".to_string(),
@@ -17383,6 +17437,18 @@ impl Handler {
         let Some(session_id) = request["session_id"].as_str().map(str::to_owned) else {
             return request;
         };
+        // A null boundary over revision 2 ordinals is sent as the plugin would send it.
+        if request["boundary"].is_null()
+            && request.get("native_messages").is_none()
+            && let (Some(store), Ok(parsed)) = (
+                self.store(),
+                serde_json::from_value::<TransformRequest>(request.clone()),
+            )
+        {
+            let window = transform::tests::plugin_window(&store, &parsed);
+            request["messages"] = serde_json::to_value(&window.messages).unwrap();
+            request["boundary"] = serde_json::to_value(&window.boundary).unwrap();
+        }
         let mut clients = self.test_client.lock().expect("test client mutex");
         let client = clients.entry(session_id).or_default();
         let native = request["serve_native"] == true;
@@ -17502,6 +17568,10 @@ mod tests {
     mod blocking_unit_tests;
     #[path = "request_budget/host_tests.rs"]
     mod request_budget_host_tests;
+    #[path = "transform/revision_3.rs"]
+    mod revision_3;
+    #[path = "transform/revision_goldens.rs"]
+    mod revision_goldens;
     #[path = "window_coverage/dispatch_tests.rs"]
     mod window_coverage_dispatch_tests;
 
@@ -19680,7 +19750,7 @@ mod tests {
         let message = serde_json::to_string(&ck("m1", 1, "seed block + new_messages")).unwrap();
         let valid = |extra: &str| {
             format!(
-                r#"{{"kind":"transform","base_revision":"test-base","v":2,"serializer_profile":"owned-llmrunner","session_id":"ses","render_config":"cfg0","messages":[{message}]{extra}}}"#
+                r#"{{"kind":"transform","base_revision":"test-base","v":3,"boundary":null,"serializer_profile":"owned-llmrunner","session_id":"ses","render_config":"cfg0","messages":[{message}]{extra}}}"#
             )
             .into_bytes()
         };
@@ -19998,6 +20068,8 @@ mod tests {
         let messages = whole["messages"].take();
         let first = json!({
             "kind": "transform",
+            "v": 3,
+            "boundary": null,
             "base_revision": "test-base",
             "session_id": "ses",
             "messages": [messages[0].clone()],
@@ -20595,13 +20667,14 @@ mod tests {
                     | "raw-value token under the discriminator"
             );
             let frozen = FrozenOutcome {
+                // `base_revision` (22 string bytes), then revision 3's `boundary` (8).
                 footprint: frozen.footprint
                     + if has_revision {
-                        256 + 22 * FROZEN_STRING_COPIES
+                        2 * 256 + 30 * FROZEN_STRING_COPIES
                     } else {
                         0
                     },
-                string_bytes: frozen.string_bytes + if has_revision { 22 } else { 0 },
+                string_bytes: frozen.string_bytes + if has_revision { 30 } else { 0 },
                 ..*frozen
             };
             assert_eq!(
@@ -20942,7 +21015,7 @@ mod tests {
                 dense_values()
             ),
             format!(
-                r#"{{"kind":"transform","v":2,"session_id":"ses","serializer_profile":"owned-llmrunner","render_config":"cfg","messages":[],"junk":[{}]}}"#,
+                r#"{{"kind":"transform","v":3,"boundary":null,"session_id":"ses","serializer_profile":"owned-llmrunner","render_config":"cfg","messages":[],"junk":[{}]}}"#,
                 dense_values()
             ),
         ];
@@ -22087,8 +22160,9 @@ mod tests {
     fn capture_transform_request(messages: &[IngressMessage]) -> TransformRequest {
         serde_json::from_value(json!({
             "kind": "transform",
+            "v": 3,
+            "boundary": null,
             "base_revision": "test-base",
-            "v": 2,
             "serializer_profile": "opencode-aisdk",
             "session_id": "ses",
             "render_config": "cfg0",
@@ -23394,8 +23468,9 @@ mod tests {
     fn claude_code_config_controls_fill_request_without_changing_default_request_bytes() {
         let value = json!({
             "kind": "transform",
+            "v": 3,
+            "boundary": null,
             "base_revision": "test-base",
-            "v": 2,
             "serializer_profile": "claude-code-anthropic",
             "session_id": "config-controls",
             "render_config": "cfg",
@@ -23468,8 +23543,9 @@ mod tests {
         fn decision(wire_threshold: Option<f64>, config_threshold: f64) -> scheduler::BaseDecision {
             let mut request = json!({
                 "kind": "transform",
+                "v": 3,
+                "boundary": null,
                 "base_revision": "test-base",
-                "v": 2,
                 "serializer_profile": "owned-llmrunner",
                 "session_id": "threshold-wire",
                 "render_config": "cfg",
@@ -23681,8 +23757,9 @@ mod tests {
     ) -> Value {
         json!({
             "kind": "transform",
+            "v": 3,
+            "boundary": null,
             "base_revision": "test-base",
-            "v": 2,
             "serializer_profile": "owned-llmrunner",
             "session_id": "ses",
             "render_config": "cfg0",
@@ -23739,6 +23816,9 @@ mod tests {
             .await
         {
             PreparedOutcome::Response(bytes) => serde_json::from_slice(&bytes).unwrap(),
+            PreparedOutcome::Error { code, message } => {
+                panic!("unexpected handler error {code}: {message}")
+            }
             other => panic!("unexpected handler outcome: {other:?}"),
         }
     }
@@ -24791,8 +24871,9 @@ mod tests {
     ) -> TransformRequest {
         serde_json::from_value(json!({
             "kind": "transform",
+            "v": 3,
+            "boundary": null,
             "base_revision": "test-base",
-            "v": 2,
             "serializer_profile": "opencode-aisdk",
             "session_id": session_id,
             "render_config": "cfg0",
@@ -25665,8 +25746,9 @@ mod tests {
             &handler,
             json!({
                 "kind": "transform",
+                "v": 3,
+                "boundary": null,
                 "base_revision": "test-base",
-                "v": 2,
                 "serializer_profile": "owned-llmrunner",
                 "session_id": child_session,
                 "render_config": "cfg0",
@@ -25678,6 +25760,8 @@ mod tests {
         assert_eq!(child["served_from"], "transform");
         assert!(child.get("full_array_fingerprint").is_none());
         assert_eq!(child["action"], "PASSTHROUGH");
+        assert_eq!(child["boundary"], Value::Null);
+        assert!(child.as_object().unwrap().contains_key("boundary"));
         assert_eq!(child["messages"].as_array().unwrap().len(), 1);
         assert_eq!(child["messages"][0]["role"], "user");
     }
@@ -25696,8 +25780,9 @@ mod tests {
         }
         let opencode_request = json!({
             "kind": "transform",
+            "v": 3,
+            "boundary": null,
             "base_revision": "test-base",
-            "v": 2,
             "serializer_profile": "opencode-aisdk",
             "session_id": "ses",
             "render_config": "cfg0",
@@ -25731,8 +25816,9 @@ mod tests {
             8,
             json!({
                 "kind": "transform",
+                "v": 3,
+                "boundary": null,
                 "base_revision": "test-base",
-                "v": 2,
                 "serializer_profile": "claude-code-anthropic",
                 "tool_present": true,
                 "session_id": "cc-ses",
@@ -25759,8 +25845,9 @@ mod tests {
             9,
             json!({
                 "kind": "transform",
+                "v": 3,
+                "boundary": null,
                 "base_revision": "test-base",
-                "v": 2,
                 "serializer_profile": "pi",
                 "session_id": "pi-ses",
                 "render_config": "cfg0",
@@ -25799,8 +25886,9 @@ mod tests {
         let request_for = |messages: Vec<IngressMessage>, input_tokens: u64, context_limit: u64| {
             json!({
                 "kind": "transform",
+                "v": 3,
+                "boundary": null,
                 "base_revision": "test-base",
-                "v": 2,
                 "serializer_profile": "claude-code-anthropic",
                 "tool_present": true,
                 "session_id": "ses",
@@ -25900,11 +25988,7 @@ mod tests {
         let (handler, store, _dir, _project) = handler_with_store(producer, default_test_config());
 
         let _ = error_frame(
-            call_transform_outcome(
-                &handler,
-                request(vec![ck("m2", 2, "two"), ck("m1", 1, "one")]),
-            )
-            .await,
+            call_transform_outcome(&handler, request(vec![ck("eidnara_rejected", 1, "one")])).await,
         );
         let first = store.load_pass_trace("ses").unwrap().unwrap();
         tokio::time::sleep(Duration::from_millis(2)).await;
@@ -25933,14 +26017,11 @@ mod tests {
 
         for pass in 1..=4u64 {
             let (code, message) = error_frame(
-                call_transform_outcome(
-                    &handler,
-                    request(vec![ck("m2", 2, "two"), ck("m1", 1, "one")]),
-                )
-                .await,
+                call_transform_outcome(&handler, request(vec![ck("eidnara_rejected", 1, "one")]))
+                    .await,
             );
             assert_eq!(code, "transform_failed");
-            assert_eq!(message, "live-source ordinals not strictly increasing");
+            assert_eq!(message, "non-synthetic item used a reserved eidnara_* id");
 
             let trace = store.load_pass_trace("ses").unwrap().unwrap();
             assert_eq!(trace.receive_count, pass);
@@ -25958,7 +26039,7 @@ mod tests {
         assert_eq!(trace.last_completed_at_ms, 0);
         assert_eq!(
             trace.last_reject_error.as_deref(),
-            Some("live-source ordinals not strictly increasing")
+            Some("non-synthetic item used a reserved eidnara_* id")
         );
     }
 
@@ -26111,11 +26192,7 @@ mod tests {
         let (handler, store, _dir, _project) = handler_with_store(producer, default_test_config());
 
         let (code, _) = error_frame(
-            call_transform_outcome(
-                &handler,
-                request(vec![ck("m2", 2, "two"), ck("m1", 1, "one")]),
-            )
-            .await,
+            call_transform_outcome(&handler, request(vec![ck("eidnara_rejected", 1, "one")])).await,
         );
         assert_eq!(code, "transform_failed", "rejected pass");
         let messages = vec![ck("m1", 1, "one")];
@@ -26181,11 +26258,7 @@ mod tests {
         let (handler, _store, _dir, _project) = handler_with_store(producer, default_test_config());
 
         let _ = error_frame(
-            call_transform_outcome(
-                &handler,
-                request(vec![ck("m2", 2, "two"), ck("m1", 1, "one")]),
-            )
-            .await,
+            call_transform_outcome(&handler, request(vec![ck("eidnara_rejected", 1, "one")])).await,
         );
 
         let status =
@@ -26214,7 +26287,7 @@ mod tests {
         assert_eq!(status["pass_trace"]["reject_count"], 1);
         assert_eq!(
             status["pass_trace"]["last_reject_error"],
-            json!("live-source ordinals not strictly increasing")
+            json!("non-synthetic item used a reserved eidnara_* id")
         );
 
         let health =
@@ -26428,8 +26501,9 @@ mod tests {
             &handler,
             json!({
                 "kind": "transform",
+                "v": 3,
+                "boundary": null,
                 "base_revision": "test-base",
-                "v": 2,
                 "serializer_profile": "opencode-aisdk",
                 "session_id": "ses",
                 "render_config": "cfg",
@@ -28449,7 +28523,7 @@ mod tests {
             handler
                 .handle_transform_for_test(
                     test_route(8),
-                    request(vec![ck("m2", 2, "two"), ck("m1", 1, "one")]),
+                    request(vec![ck("eidnara_rejected", 1, "one")]),
                 )
                 .await,
         );
@@ -29010,8 +29084,9 @@ mod tests {
             8,
             json!({
                 "kind": "transform",
+                "v": 3,
+                "boundary": null,
                 "base_revision": "test-base",
-                "v": 2,
                 "serializer_profile": "owned-llmrunner",
                 "session_id": key_a,
                 "render_config": "cfg0",
@@ -29025,8 +29100,9 @@ mod tests {
             9,
             json!({
                 "kind": "transform",
+                "v": 3,
+                "boundary": null,
                 "base_revision": "test-base",
-                "v": 2,
                 "serializer_profile": "owned-llmrunner",
                 "session_id": key_b,
                 "render_config": "cfg0",
@@ -29045,8 +29121,9 @@ mod tests {
             10,
             json!({
                 "kind": "transform",
+                "v": 3,
+                "boundary": null,
                 "base_revision": "test-base",
-                "v": 2,
                 "serializer_profile": "owned-llmrunner",
                 "session_id": suffix_key,
                 "render_config": "cfg0",
@@ -29875,6 +29952,8 @@ mod tests {
     fn transform_page_scalar_digest_covers_non_array_fields_only() {
         let base = json!({
             "kind": "transform",
+            "v": 3,
+            "boundary": null,
             "base_revision": "test-base",
             "session_id": "ses",
             "render_config": "cfg-a",
@@ -34834,15 +34913,11 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn handler_autonomous_cycle_fires_publishes_and_next_pass_folds_across_start_ordinals() {
-        // A system lead at ordinal zero is skipped: the chunk starts at the first user message.
-        let cases: [(&str, Vec<IngressMessage>, u64); 3] = [
+        // The daemon numbers the window from 1; a system lead is skipped, so the chunk starts at
+        // the first user message.
+        let cases: [(&str, Vec<IngressMessage>, u64); 2] = [
             ("one_based", big_messages(), 1),
-            ("zero_based", big_messages_from(0), 0),
-            (
-                "zero_based_system_lead",
-                zero_based_messages_with_system_lead(),
-                1,
-            ),
+            ("system_lead", zero_based_messages_with_system_lead(), 2),
         ];
         for (case, messages, expected_start) in cases {
             let producer = Arc::new(ProducerState::default());
@@ -39347,7 +39422,7 @@ mod tests {
                         memory_store::HistorySegmentSetGeneration::default(),
                 },
                 project_path: "git:proj",
-                history_segments: &[stored_comp(1, 10, 20, "m20", "summary")],
+                history_segments: &[stored_comp(1, 1, 20, "m20", "summary")],
                 events: std::slice::from_ref(&event),
                 primer_candidates: &[],
                 user_memory_candidates: &[],
@@ -39374,7 +39449,11 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(1_100)).await;
         let _ = call_transform(
             &handler,
-            vec![ck("m21", 21, "follow up"), ck("m22", 22, "small reply")],
+            vec![
+                ck("m20", 20, "covered"),
+                ck("m21", 21, "follow up"),
+                ck("m22", 22, "small reply"),
+            ],
         )
         .await;
         assert_eq!(store.load_history_segment_events("ses").unwrap().len(), 1);
@@ -39640,8 +39719,9 @@ mod tests {
         let messages = [ck("m1", 1, "seed block + new_messages payload")];
         let req = serde_json::json!({
             "kind": "transform",
+            "v": 3,
+            "boundary": null,
             "base_revision": "test-base",
-            "v": 2,
             "serializer_profile": "owned-llmrunner",
             "session_id": session,
             "render_config": "cfg0",

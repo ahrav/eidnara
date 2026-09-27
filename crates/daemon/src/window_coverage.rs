@@ -1,8 +1,7 @@
-//! The per-session coverage authority of transform revision 3 (spec C5, D2, D5, D7, D10, D11,
-//! D20): what a declared anchor means against one store snapshot, the ordinals the window's
-//! messages receive from the effective anchor, where the recipe's input keeps point in the
-//! submitted window, and the anchor pages `transform.boundary` answers. Nothing here writes;
-//! the transform commit persists what the pass does with a resolution.
+//! The per-session coverage authority of transform revision 3 (spec C5, D2, D7, D10, D11): what
+//! a declared anchor means against one store snapshot, the ordinals the window's messages
+//! receive from the effective anchor, and the anchor pages `transform.boundary` answers.
+//! Nothing here writes; the transform commit persists what the pass does with a resolution.
 //!
 //! With no declared anchor, the store matches the k-th non-synthetic window message only at
 //! ordinal continuation base + k + 1 through the end-message index (the spec's C3 inventory
@@ -10,21 +9,21 @@
 //! present segment end sits at a stored ordinal above its window position and is missed, and
 //! the answer is `Revert { keep_through_seq: None }`. The plugin's exhaustive mid-based
 //! discovery walk (D10, D19) is the primary guard; this query is a second check that can miss
-//! only when history before the hit was removed. A hit is not bounded by the rendered row:
-//! D10 answers any hit as `StaleSlice` at the newest hit, and bounding it would turn a present
-//! anchor above the rendered row into a reset.
+//! only when history before the hit was removed. A hit is bounded by the rendered row, as
+//! discovery is: a newer row is not rendered yet, and cutting at it would drop the messages it
+//! summarizes. With an intact prefix any hit above the rendered row implies the rendered row
+//! also hits, so the bound never turns a hit into a reset.
 
 use memory_store::{CoverageSnapshot, HistorySegmentEdge, MemoryStore, MemoryStoreError};
 use serde_json::{Value, json};
 
-use crate::edit_recipe::{Operation, Source};
 use crate::wire::split_block_id;
 
 /// Anchors per `transform.boundary` page.
 pub const BOUNDARY_PAGE_LIMIT: usize = 4_096;
 
 /// The largest integer JavaScript represents exactly, `2^53 - 1`.
-const MAX_SAFE_INTEGER: i64 = (1 << 53) - 1;
+pub(crate) const MAX_SAFE_INTEGER: i64 = (1 << 53) - 1;
 
 /// One submitted window message, in submitted order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -108,9 +107,9 @@ pub fn read_snapshot(
 /// whose end block is not the declared mid, or a declared row newer than the rendered boundary,
 /// which discovery never returns. A stored anchor with a negative end ordinal is an error too;
 /// it names corrupt storage, not the request. A declared row with no rendered boundary is
-/// `Unknown`, so the plugin rediscovers: a revert truncation commits on its own before its
-/// pass, so a pass that fails after it leaves `core.boundary_id` naming a removed row while
-/// older rows remain. With no boundary declared that state is `FirstPass`.
+/// `Unknown`, so the plugin rediscovers. A revert truncate that committed before its fold
+/// leaves the newest surviving row rendered (see [`CoverageSnapshot::rendered`]), so the
+/// retry or the next pass resolves against it and its HARD folds from it (spec D10).
 pub fn resolve(
     snapshot: &CoverageSnapshot,
     declared: Option<DeclaredAnchor<'_>>,
@@ -240,22 +239,6 @@ pub fn assign_ordinals(
         ordinals.push(ordinal);
     }
     ordinals
-}
-
-/// Moves input keeps built against the processed window into submitted-window coordinates
-/// (D5, D20): processed position i after cut c is submitted position c + i. Previous-output
-/// keeps and inserts are unchanged.
-pub fn translate_input_keeps<V>(operations: &mut [Operation<V>], cut: usize) {
-    for operation in operations {
-        if let Operation::Keep {
-            source: Source::Input,
-            start,
-            ..
-        } = operation
-        {
-            *start += cut as u64;
-        }
-    }
 }
 
 /// Validates a `transform.boundary` body: `v: 3`, a non-blank `session_id`, an optional

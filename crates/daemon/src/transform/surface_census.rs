@@ -95,7 +95,8 @@ fn auto_search_is_enabled_by_the_wire_default_and_drives_the_hint_query() {
 
     let minimal: TransformRequest = serde_json::from_value(json!({
         "kind": "transform",
-        "v": 2,
+        "v": 3,
+        "boundary": null,
         "serializer_profile": "claude-code-anthropic",
         "session_id": SESSION,
         "render_config": "cfg0",

@@ -3,7 +3,9 @@ use std::sync::Arc;
 use memory_store::{CoreState, ModuleMeta};
 
 use super::*;
-use crate::edit_recipe::{Keyed, Recipe, Revision, SourceBase, build_operations, canonical_len};
+use crate::edit_recipe::{
+    Keyed, Operation, Recipe, Revision, Source, SourceBase, build_operations, canonical_len,
+};
 use crate::test_support::descriptor;
 use crate::test_support::synthetic_history::SyntheticHistory;
 
@@ -76,25 +78,6 @@ fn resolve_in(
 ) -> Result<Resolved, String> {
     let snapshot = read_snapshot(store, SESSION, declared, window).unwrap();
     resolve(&snapshot, declared, window)
-}
-
-/// A keep of every processed message, then one previous-output keep and one insert.
-fn translated_keeps(processed: usize, cut: usize) -> Vec<Operation<u8>> {
-    let mut operations = vec![
-        Operation::Keep {
-            source: Source::Input,
-            start: 0,
-            count: processed as u64,
-        },
-        Operation::Keep {
-            source: Source::Previous,
-            start: 0,
-            count: 1,
-        },
-        Operation::Insert { values: vec![7] },
-    ];
-    translate_input_keeps(&mut operations, cut);
-    operations
 }
 
 struct Case {
@@ -224,23 +207,7 @@ fn each_resolution_outcome_has_its_cut_ordinals_and_keeps() {
         if resolved.resolution != Resolution::Unknown {
             assert_eq!(resolved.ordinals.len(), window.len() - cut, "{}", case.name);
         }
-        assert_eq!(
-            translated_keeps(window.len() - cut, cut)[..2],
-            [
-                Operation::Keep {
-                    source: Source::Input,
-                    start: case.keep_start,
-                    count: (window.len() - cut) as u64,
-                },
-                Operation::Keep {
-                    source: Source::Previous,
-                    start: 0,
-                    count: 1,
-                },
-            ],
-            "{}",
-            case.name
-        );
+        assert_eq!(cut as u64, case.keep_start, "{}", case.name);
     }
 }
 
@@ -264,8 +231,8 @@ fn impossible_declarations_are_invalid_params() {
     assert!(error.contains("does not start at"), "{error}");
 }
 
-/// A declared row that survives a revert truncation which left `core.boundary_id` naming a
-/// removed row is `Unknown`, a decline that makes the plugin rediscover, not `invalid_params`.
+/// Without a pending reconcile, a missing rendered row is `Unknown`, a decline that makes the
+/// plugin rediscover, not `invalid_params`.
 #[test]
 fn a_declared_row_without_a_rendered_boundary_is_unknown() {
     let (_dir, store) = open_store();
@@ -278,6 +245,39 @@ fn a_declared_row_without_a_rendered_boundary_is_unknown() {
     assert_eq!(resolved.resolution, Resolution::Unknown);
     let resolved = resolve_in(&store, None, &window(&submitted)).unwrap();
     assert_eq!(resolved.resolution, Resolution::FirstPass);
+}
+
+/// With the reconcile pending, a revert truncate that removed the rendered row leaves the
+/// newest surviving row as the rendered boundary (spec D10): the declared survivor is `Normal`
+/// and discovery lists it.
+#[test]
+fn a_pending_reconcile_renders_the_newest_row_the_truncate_left() {
+    let (_dir, store) = open_store();
+    seed_coverage(&store, 5, Some(5), None);
+    store
+        .with_fenced_conn_for_test(|conn| {
+            conn.execute(
+                "UPDATE cache_state SET core_state = json_set(core_state, '$.reconcile_pending', json('true'))
+                  WHERE session_id = ?1",
+                [SESSION],
+            )
+        })
+        .unwrap();
+    store
+        .truncate_history_segments_for_revert(SESSION, 3, Some(1))
+        .unwrap();
+    let submitted = mids(6, 8);
+    let snapshot = store
+        .coverage_snapshot(SESSION, Some(3), &["m6", "m7", "m8"])
+        .unwrap();
+    assert_eq!(snapshot.rendered.map(|row| row.sequence), Some(3));
+    let resolved = resolve_in(&store, anchor("m6", 3), &window(&submitted)).unwrap();
+    assert_eq!(resolved.resolution, Resolution::Normal);
+    let page = boundary_page(&store, SESSION, None).unwrap();
+    assert_eq!(
+        page["anchors"][0],
+        serde_json::json!({ "mid": "m6", "sequence": 3 })
+    );
 }
 
 /// WP-P02 snapshot clause: a publish that commits between the session-row read and the
@@ -507,8 +507,8 @@ fn message(mid: &str) -> Keyed<String, Arc<Value>> {
     }
 }
 
-/// WP-P05 and WP-P19: at a stale cut of four, input keeps built against the processed
-/// window, translated back by the cut, reconstruct the served array from the unsliced input.
+/// WP-P05 and WP-P19: at a stale cut of four, input keeps built against the submitted window
+/// start at the cut and reconstruct the served array from the unsliced input.
 #[test]
 fn a_stale_cut_keep_reconstructs_the_served_array_from_the_unsliced_input() {
     let (_dir, store) = open_store();
@@ -525,15 +525,8 @@ fn a_stale_cut_keep_reconstructs_the_served_array_from_the_unsliced_input() {
         .into_iter()
         .chain(submitted[cut..].iter().cloned())
         .collect();
-    let mut built = build_operations(&served, &submitted[cut..], Some(&previous), |a, b| a == b);
-    assert!(built.operations.iter().any(|op| matches!(
-        op,
-        Operation::Keep {
-            source: Source::Input,
-            ..
-        }
-    )));
-    translate_input_keeps(&mut built.operations, cut);
+    // The recipe is built against the submitted window, so its keeps are in its coordinates.
+    let built = build_operations(&served, &submitted, Some(&previous), |a, b| a == b);
     assert!(built.operations.contains(&Operation::Keep {
         source: Source::Input,
         start: cut as u64,
@@ -581,13 +574,25 @@ fn a_stale_cut_keep_reconstructs_the_served_array_from_the_unsliced_input() {
     assert_eq!(applied.values, values(&served));
 }
 
+/// A null-anchor hit on a row above the rendered one is not cut at: the newest hit at or below
+/// the rendered row is the stale slice, so the newer row's messages are folded, not dropped.
+#[test]
+fn a_null_anchor_hit_above_the_rendered_row_is_not_cut_at() {
+    let (_dir, store) = open_store();
+    seed_coverage(&store, 16, Some(15), None);
+    let names = mids(1, 32);
+    let resolved = resolve_in(&store, None, &window(&names)).unwrap();
+    assert_eq!(resolved.resolution, Resolution::StaleSlice { cut: 29 });
+}
+
 /// WP-P07: the null-anchor intersection and the anchor page visit the same rows at fixed W
 /// whatever the stored history's length H.
 #[test]
 fn intersection_and_page_work_is_independent_of_history_length() {
     let measure = |segments: usize| {
         let (_dir, store) = open_store();
-        seed_coverage(&store, segments, Some(segments), None);
+        // One row sits above the rendered one, so the rendered-row bound is part of the plan.
+        seed_coverage(&store, segments, Some(segments - 1), None);
         let names = mids(1, 32);
         let window = window(&names);
         store.start_statement_work_ledger();

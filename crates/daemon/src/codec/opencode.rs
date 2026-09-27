@@ -36,9 +36,8 @@ pub(crate) fn decode_opencode(messages: &[MessageV2Json]) -> DecodedHarnessMessa
 /// Decodes shared messages.
 ///
 /// Each envelope is retained in `HarnessMessageMeta::raw` through an `Arc`
-/// clone, so callers that already share values pay no deep copy. Explicit
-/// absolute ordinals win. A missing ordinal is `index + 1` with saturating
-/// arithmetic. The last compaction part becomes the extracted boundary and is
+/// clone, so callers that already share values pay no deep copy. A message's
+/// ordinal is its window position, `index + 1` with saturating arithmetic. The last compaction part becomes the extracted boundary and is
 /// omitted from CK content. Unknown parts remain opaque.
 pub(crate) fn decode_opencode_shared(messages: &[Arc<Value>]) -> DecodedHarnessMessages {
     let mut sidecar = DecodeSidecar::new(HARNESS);
@@ -48,11 +47,7 @@ pub(crate) fn decode_opencode_shared(messages: &[Arc<Value>]) -> DecodedHarnessM
 
     for (message_index, raw_message) in messages.iter().enumerate() {
         let info = raw_message.get("info").unwrap_or(raw_message.as_ref());
-        let explicit_ordinal = raw_message
-            .get("absolute_ordinal")
-            .and_then(Value::as_u64)
-            .or_else(|| info.get("absolute_ordinal").and_then(Value::as_u64));
-        let ordinal = explicit_ordinal.unwrap_or_else(|| (message_index as u64).saturating_add(1));
+        let ordinal = (message_index as u64).saturating_add(1);
         let stable_key = string_field(info, "id")
             .or_else(|| string_field(raw_message, "id"))
             .unwrap_or_else(|| format!("opencode-hash-{}", stable_hash_prefix(raw_message, 24)));
@@ -1797,7 +1792,6 @@ mod tests {
     #[test]
     fn hard_epoch_fold_with_head_todo_coalesces_unmatched_reduced_tool_arc() {
         let raw = vec![json!({
-            "absolute_ordinal": 2_752,
             "info": { "id": "first-tail-assistant", "role": "assistant" },
             "parts": [
                 { "type": "step-start" },

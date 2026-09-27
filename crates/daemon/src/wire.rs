@@ -23,6 +23,9 @@ pub use memory_store::{
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct IngressMessage {
     pub mid: String,
+    /// Derived by the daemon from the pass's effective anchor; transform revision 3 carries no
+    /// ordinal, so the wire value, when present, is overwritten.
+    #[serde(default)]
     pub ordinal: u64,
     pub ck: WireMessage,
 }
