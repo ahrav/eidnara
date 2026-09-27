@@ -21907,7 +21907,7 @@ mod tests {
     }
 
     /// Audit ids keep the 32 lowercase hex shape the columns check, and their 12-hex time
-    /// prefix lies between the clock read before and after the write that minted them, for ids
+    /// prefix lies within a few seconds of the clock reads around the write that minted them, for ids
     /// minted in Rust and for per-row link copies minted in SQL.
     #[test]
     fn audit_ids_are_lowercase_hex_with_a_time_prefix_from_their_write() {
@@ -21917,20 +21917,24 @@ mod tests {
                     .bytes()
                     .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
         };
-        let now = || hex_digest(opaque_id_time_prefix());
-        let assert_minted_between = |ids: &[String], before: &str, after: &str| {
+        let millis = |prefix: &str| u64::from_str_radix(prefix, 16).unwrap();
+        let now = || millis(&hex_digest(opaque_id_time_prefix()));
+        // The wall clock can step, so each bracket allows a few seconds on either side.
+        const SLACK_MS: u64 = 5_000;
+        let assert_minted_between = |ids: &[String], before: u64, after: u64| {
             assert!(!ids.is_empty());
             for id in ids {
                 assert!(is_id(id), "{id}");
+                let minted = millis(&id[..12]);
                 assert!(
-                    before <= &id[..12] && &id[..12] <= after,
+                    before.saturating_sub(SLACK_MS) <= minted && minted <= after + SLACK_MS,
                     "{before} {id} {after}"
                 );
             }
         };
         let before = now();
         let ids: Vec<String> = (0..64).map(|_| opaque_id().unwrap()).collect();
-        assert_minted_between(&ids, &before, &now());
+        assert_minted_between(&ids, before, now());
         assert_eq!(ids.iter().collect::<BTreeSet<_>>().len(), ids.len());
 
         let dir = tempfile::tempdir().unwrap();
@@ -21959,7 +21963,7 @@ mod tests {
         let first = column(copies);
         let first_scans = column("SELECT scan_id FROM field_scans");
         for minted in [&first, &first_scans] {
-            assert_minted_between(&minted.iter().cloned().collect::<Vec<_>>(), &before, &after);
+            assert_minted_between(&minted.iter().cloned().collect::<Vec<_>>(), before, after);
         }
         let mut link = PreparedWrite::new(DurableWriteFamily::HistorySegments);
         link.domain_owner("session", "ses_ids", "second");
@@ -21979,7 +21983,7 @@ mod tests {
             ["2"],
             "enabling state: the first write's scan gained a link copy"
         );
-        assert_minted_between(&linked, &before, &after);
+        assert_minted_between(&linked, before, after);
     }
 
     #[test]
@@ -26004,9 +26008,10 @@ mod tests {
         assert_eq!(store.load("ses").unwrap().meta, meta);
     }
 
-    /// Rollback safety of the per-block meta entries: a row this build writes, with 128-bit
-    /// hashes and absent tags omitted, deserializes into copies of the d68aedf34 definitions,
-    /// and a row those definitions wrote (64-hex hashes, explicit nulls) loads here.
+    /// Rollback safety of the per-block meta entries only: a row this build writes, with
+    /// 128-bit hashes and absent tags omitted, deserializes into copies of the d68aedf34
+    /// per-block definitions, and a row those definitions wrote (64-hex hashes, explicit
+    /// nulls) loads here. The rest of `ModuleMeta` is not compared against d68aedf34.
     #[test]
     fn per_block_meta_entries_read_both_ways_across_the_d68aedf34_definitions() {
         #[derive(Debug, PartialEq, Serialize, Deserialize)]

@@ -13664,9 +13664,10 @@ pub(crate) mod tests {
     }
 
     /// A row an earlier build wrote carries 64-hex block and hygiene part hashes. The next pass
-    /// reads it, attributes one content change, and stores 32-hex block hashes; the pass after
-    /// is stable. The hygiene baseline measures invalid against the 64-hex parts until the next
-    /// cache-busting pass replaces it (`an_earlier_builds_64_hex_baseline_...` in tail_hygiene).
+    /// reads it, attributes one content change without a HARD, and stores 32-hex block hashes;
+    /// the pass after is stable and not HARD. Neither pass busts the cache, so the stored 64-hex
+    /// hygiene baseline stays until a bust replaces it; `an_earlier_builds_64_hex_baseline_...`
+    /// in tail_hygiene covers how it measures meanwhile.
     #[test]
     fn a_row_with_64_hex_block_hashes_diverges_once_then_is_stable() {
         let dir = tempfile::tempdir().unwrap();
@@ -13705,6 +13706,7 @@ pub(crate) mod tests {
         let divergence = upgraded.first_divergence.as_ref().unwrap();
         assert_eq!(divergence.index, 0);
         assert_eq!(divergence.kind, divergence::DivergenceKind::ContentChanged);
+        assert_ne!(upgraded.action, "HARD");
         let stored = store.load(session).unwrap().meta;
         assert!(
             stored
@@ -13712,7 +13714,19 @@ pub(crate) mod tests {
                 .iter()
                 .all(|block| block.content_hash.len() == 32)
         );
-        assert!(run(&store, &request, &spine()).first_divergence.is_none());
+        assert!(
+            stored
+                .tail_hygiene_baseline
+                .as_ref()
+                .unwrap()
+                .baseline_parts
+                .iter()
+                .all(|part| part.content_hash.len() == 64),
+            "a pass that does not bust the cache keeps the stored hygiene baseline"
+        );
+        let stable = run(&store, &request, &spine());
+        assert!(stable.first_divergence.is_none());
+        assert_ne!(stable.action, "HARD");
     }
 
     fn synthetic_text(r: &TransformResponse, index: usize) -> &str {

@@ -2209,48 +2209,63 @@ mod tests {
 
     /// An earlier build stored 64-hex part hashes and digested them in that form. Against it
     /// a later walk measures invalid, the path any non-append change takes, and the next
-    /// cache-busting walk replaces it with an evaluable 32-hex baseline.
+    /// cache-busting walk replaces it with an evaluable 32-hex baseline. With an excluded
+    /// prefix the digest mismatch invalidates first; without one the digest is empty in both
+    /// builds and the part-hash comparison invalidates.
     #[test]
     fn an_earlier_builds_64_hex_baseline_invalidates_until_the_next_bust() {
-        let mut memo = TailHygieneMemo::default();
+        let widen = |parts: &mut [TailHygienePartMeasurement]| {
+            for part in parts {
+                assert_eq!(part.content_hash.len(), 32);
+                part.content_hash.push_str(&"0".repeat(32));
+            }
+        };
         let messages = [
             text("covered", 1, "covered history"),
             text("live", 2, "live tail"),
         ];
         let tags = vec![tag(1, "live#0")];
-        let mut measure = || {
-            measure_tail_hygiene(
-                &project_messages(&messages).unwrap(),
-                &CoreState::empty(),
-                Some(1),
-                &tags,
-                0,
-                &HashSet::new(),
-                &mut memo,
-            )
-        };
-        let mut earlier = refresh_tail_hygiene_baseline(measure(), true, None, 10);
-        assert_eq!(earlier.excluded_prefix_len, 1);
-        for part in &mut earlier.baseline_parts {
-            assert_eq!(part.content_hash.len(), 32);
-            part.content_hash.push_str(&"0".repeat(32));
-        }
-        earlier.excluded_prefix_digest = "0".repeat(64);
+        for coverage in [Some(1), None] {
+            let mut memo = TailHygieneMemo::default();
+            let mut measure = || {
+                measure_tail_hygiene(
+                    &project_messages(&messages).unwrap(),
+                    &CoreState::empty(),
+                    coverage,
+                    &tags,
+                    0,
+                    &HashSet::new(),
+                    &mut memo,
+                )
+            };
+            let first = measure();
+            let mut earlier = refresh_tail_hygiene_baseline(first.clone(), true, None, 10);
+            let prefix_len = usize::from(coverage.is_some());
+            assert_eq!(earlier.excluded_prefix_len, prefix_len);
+            widen(&mut earlier.baseline_parts);
+            let mut earlier_prefix = first.parts[..prefix_len].to_vec();
+            widen(&mut earlier_prefix);
+            earlier.excluded_prefix_digest = parts_digest(&earlier_prefix);
+            assert_eq!(
+                earlier.excluded_prefix_digest.is_empty(),
+                coverage.is_none()
+            );
 
-        let invalid = refresh_tail_hygiene_baseline(measure(), false, Some(&earlier), 20);
-        assert!(!invalid.evaluable);
-        assert!(invalid.generation_invalidated);
-        let rebuilt = refresh_tail_hygiene_baseline(measure(), true, Some(&invalid), 30);
-        assert!(rebuilt.evaluable && !rebuilt.generation_invalidated);
-        assert_eq!(rebuilt.baseline_generation, earlier.baseline_generation + 1);
-        assert!(
-            rebuilt
-                .baseline_parts
-                .iter()
-                .all(|part| part.content_hash.len() == 32)
-        );
-        let next = refresh_tail_hygiene_baseline(measure(), false, Some(&rebuilt), 40);
-        assert!(next.evaluable);
+            let invalid = refresh_tail_hygiene_baseline(measure(), false, Some(&earlier), 20);
+            assert!(!invalid.evaluable, "{coverage:?}");
+            assert!(invalid.generation_invalidated, "{coverage:?}");
+            let rebuilt = refresh_tail_hygiene_baseline(measure(), true, Some(&invalid), 30);
+            assert!(rebuilt.evaluable && !rebuilt.generation_invalidated);
+            assert_eq!(rebuilt.baseline_generation, earlier.baseline_generation + 1);
+            assert!(
+                rebuilt
+                    .baseline_parts
+                    .iter()
+                    .all(|part| part.content_hash.len() == 32)
+            );
+            let next = refresh_tail_hygiene_baseline(measure(), false, Some(&rebuilt), 40);
+            assert!(next.evaluable, "{coverage:?}");
+        }
     }
 
     #[derive(Debug, Deserialize)]
@@ -2527,7 +2542,9 @@ mod tests {
         // follow the canonical block bytes: span-sorted key order with a false
         // `provider_executed` omitted. Plugin-shaped blocks keep their bytes; see the
         // projection golden. The digest covers the stored form: 128-bit part hashes with an
-        // absent tag omitted.
+        // absent tag omitted. The re-baseline was checked by temporarily storing full SHA-256
+        // part hashes and serializing absent tags as explicit nulls: this corpus then gave the
+        // earlier digest 9e452c8910bdbc75db4a6fc9f7920659d921a48092f7ea59fcea355315503f3d.
         assert_eq!(
             format!("{:x}", frozen.finalize()),
             "46613095a98ae6c70e2ccfb977e606fb82c4ad23cbe8131d89ee1cf7eeaf2b55"
