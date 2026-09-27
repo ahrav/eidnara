@@ -414,7 +414,9 @@ fn longest_escaped_string(body: &[u8]) -> usize {
     let mut escaped = false;
     let mut current = 0;
     let mut has_escape = false;
-    for &byte in body {
+    let mut index = 0;
+    while let Some(&byte) = body.get(index) {
+        index += 1;
         if !in_string {
             if byte == b'"' {
                 in_string = true;
@@ -436,7 +438,10 @@ fn longest_escaped_string(body: &[u8]) -> usize {
                 longest = longest.max(current);
             }
         } else {
-            current += 1;
+            // Only a quote or a backslash ends a run of plain string bytes.
+            let run = memchr::memchr2(b'"', b'\\', &body[index..]).unwrap_or(body.len() - index);
+            current += 1 + run;
+            index += run;
         }
     }
     if in_string && has_escape {
@@ -481,7 +486,9 @@ pub(crate) fn footprint_floor(body: &[u8]) -> usize {
     let mut in_string = false;
     let mut escaped = false;
     let mut in_number = false;
-    for &byte in body {
+    let mut index = 0;
+    while let Some(&byte) = body.get(index) {
+        index += 1;
         if in_string {
             if escaped {
                 escaped = false;
@@ -489,6 +496,8 @@ pub(crate) fn footprint_floor(body: &[u8]) -> usize {
                 escaped = true;
             } else if byte == b'"' {
                 in_string = false;
+            } else {
+                index += memchr::memchr2(b'"', b'\\', &body[index..]).unwrap_or(body.len() - index);
             }
             continue;
         }
@@ -1156,6 +1165,95 @@ mod tests {
             let _ = decode_metered::<Value>(body.as_bytes(), &meter);
             assert_eq!(footprint_of(body.as_bytes()), meter.needed(), "{body}");
         }
+    }
+
+    /// The byte-at-a-time scans the string-skipping ones replaced, kept as the reference.
+    fn reference_scans(body: &[u8]) -> (usize, usize) {
+        let (mut values, mut longest, mut current) = (0, 0, 0);
+        let (mut in_string, mut escaped, mut in_number, mut has_escape) =
+            (false, false, false, false);
+        for &byte in body {
+            if in_string {
+                if escaped {
+                    escaped = false;
+                } else if byte == b'\\' {
+                    escaped = true;
+                    has_escape = true;
+                } else if byte == b'"' {
+                    in_string = false;
+                    if has_escape {
+                        longest = longest.max(current);
+                    }
+                    continue;
+                }
+                current += 1;
+                continue;
+            }
+            match byte {
+                b'"' => {
+                    values += 1;
+                    (in_string, in_number, current, has_escape) = (true, false, 0, false);
+                }
+                b'[' | b'{' | b't' | b'f' | b'n' => {
+                    values += 1;
+                    in_number = false;
+                }
+                b'-' | b'0'..=b'9' => {
+                    values += usize::from(!in_number);
+                    in_number = true;
+                }
+                b'.' | b'e' | b'E' | b'+' => {}
+                _ => in_number = false,
+            }
+        }
+        if in_string && has_escape {
+            longest = longest.max(current);
+        }
+        let floor = if values == 0 {
+            0
+        } else {
+            values * NODE_BYTES + VALUE_ENVELOPE_BYTES
+        };
+        (floor, longest)
+    }
+
+    proptest::proptest! {
+        /// Skipping string bytes counts the same values and escaped lengths as reading every
+        /// byte, on well-formed and malformed bodies, unterminated strings and trailing
+        /// backslashes included.
+        #[test]
+        fn string_skipping_scans_match_the_byte_scans(
+            body in proptest::collection::vec(
+                proptest::sample::select(b"\"\\ab:,[]{}-1.eEtfn \n".to_vec()),
+                0..64,
+            ),
+        ) {
+            let (floor, longest) = reference_scans(&body);
+            proptest::prop_assert_eq!(footprint_floor(&body), floor);
+            proptest::prop_assert_eq!(longest_escaped_string(&body), longest);
+        }
+    }
+
+    #[test]
+    fn string_skipping_scans_match_the_byte_scans_on_long_strings() {
+        let plain = "a".repeat(10_000);
+        let escaped = format!("{plain}\\n{plain}");
+        for body in [
+            format!(r#""{escaped}""#),
+            format!(r#"{{"k":"{escaped}","n":[1,-2.5e3,true]}}"#),
+            format!(r#"["{plain}","{escaped}",null]"#),
+            format!(r#"["{escaped}\""#),
+            format!(r#"["{plain}\"#),
+        ] {
+            let body = body.as_bytes();
+            let (floor, longest) = reference_scans(body);
+            assert_eq!(footprint_floor(body), floor);
+            assert_eq!(longest_escaped_string(body), longest);
+        }
+        assert_eq!(
+            longest_escaped_string(format!(r#""{escaped}""#).as_bytes()),
+            20_002
+        );
     }
 
     /// The byte scan counts the values the meter visits; the floor excludes string bytes,

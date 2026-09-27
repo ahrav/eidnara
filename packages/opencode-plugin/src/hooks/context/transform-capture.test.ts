@@ -289,6 +289,20 @@ describe("referenceable JSON domain guard", () => {
         );
     });
 
+    it("charges the same bytes without the escape estimate, which only the wire bounds read", () => {
+        const escaped = {
+            ...message("m1"),
+            text: 'quote " slash \\ newline \n control \u0001 lone \ud800',
+        };
+        const source = [escaped, message("m2")];
+        const full = inspectReferenceableMessages(source);
+        const bare = inspectReferenceableMessages(source, undefined, 0, false);
+        if (!full.ok || !bare.ok) throw new Error("fixture rejected");
+        expect(bare.estimatedBytes).toBe(full.estimatedBytes);
+        expect(bare.messageWireBytes[0]).toBeLessThan(full.messageWireBytes[0] ?? 0);
+        expect(bare.messageWireBytes[1]).toBe(full.messageWireBytes[1]);
+    });
+
     it("rejects an accessor without invoking it", () => {
         const counter = trapCounter();
         const hooked = message("m1");
@@ -956,6 +970,41 @@ describe("digest-verified prefix capture", () => {
         expect(snapshotOnly.snapshots).toEqual(withHistory.snapshots);
         expect(snapshotOnly.rootSnapshot).toEqual(withHistory.rootSnapshot);
         expect(capturedMessagesUnchanged(source, snapshotOnly)).toBe(true);
+    });
+});
+
+describe("tape digest encoding", () => {
+    const digestOf = (text: string): HistoryDigest => {
+        const captured = captureHistory([message("m1", text), message("m2")]).history;
+        captureLease?.release();
+        captureLease = undefined;
+        return captured;
+    };
+
+    it("keeps long strings distinct whether they hash as UTF-8 or UTF-16", () => {
+        const long = "x".repeat(400);
+        const texts = [
+            long,
+            `${"x".repeat(399)}y`,
+            `\ud800${"x".repeat(399)}`,
+            `\ufffd${"x".repeat(399)}`,
+            `\ud83d\ude00${"x".repeat(398)}`,
+            `u400:${"x".repeat(395)}`,
+            "x".repeat(255),
+            `${"\u00e9".repeat(200)}${"x".repeat(200)}`,
+        ];
+        const digests = texts.map(digestOf);
+        for (let left = 0; left < digests.length; left += 1) {
+            for (let right = left + 1; right < digests.length; right += 1)
+                expect(
+                    historyDigestsEqual(
+                        digests[left] as HistoryDigest,
+                        digests[right] as HistoryDigest,
+                    ),
+                ).toBe(false);
+        }
+        // The same content in fresh strings hashes the same.
+        expect(historyDigestsEqual(digestOf(long), digestOf("xx".repeat(200)))).toBe(true);
     });
 });
 

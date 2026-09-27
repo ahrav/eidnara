@@ -2,9 +2,10 @@
 //! or a history_summarizer prepare and publish runs is recorded by the store's statement-work
 //! ledger, classified into one inventory row by its SQL text, and checked against that row's
 //! bound while the stored history, the overlays, and the active user memories grow, together
-//! and apart. The guard against a new full read is the H-independence check: its rows and VM
-//! steps would grow with the seeded tables. Classification only names the row; a statement no
-//! needle names fails the test, and history_segments reads are named by their exact shapes.
+//! and apart. The guard against a new full read is the H-independence check: its rows, VM
+//! steps, and decoded bytes would grow with the seeded tables. Classification only names the
+//! row; a statement no needle names fails the test, and history_segments reads are named by
+//! their exact shapes.
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
@@ -34,6 +35,10 @@ const MAX_K: u64 = crate::decay_render::MAX_RENDERABLE_INDEX as u64;
 const CALL: &str = "call-read-bound";
 /// Active user memories seeded when the axis holds them fixed.
 const MEMORIES: usize = 4;
+/// Most bytes one history_segments row read by m0 or m1 decodes: eleven text columns, each
+/// held to memory-store's `MAX_DURABLE_TEXT_BYTES` (512 KiB) by `prepare_history_segment`,
+/// and six integer columns at 8 bytes.
+const SEGMENT_ROW_BYTES: u64 = 11 * 512 * 1024 + 6 * 8;
 
 /// The D15 inventory rows, in report order.
 const ROWS: &[&str] = &[
@@ -86,6 +91,11 @@ const CLASSES: &[(&str, &str)] = &[
     ),
     (
         "SELECT COALESCE(MAX(end_message), 0) FROM history_segments WHERE session_id = ?1",
+        "coverage snapshot",
+    ),
+    // The first-fold probe of a session with no rendered boundary, one index seek.
+    (
+        "SELECT EXISTS(SELECT 1 FROM history_segments WHERE session_id = ?1)",
         "coverage snapshot",
     ),
     // The null-boundary window-end match (spec D10), bounded by the window's mids.
@@ -184,8 +194,9 @@ fn whole_table(sql: &str) -> bool {
         && !sql.contains(" FROM temp.sqlite_schema ")
 }
 
-/// Rows and VM steps per inventory row, summed over the statements of one phase.
-type Totals = BTreeMap<&'static str, (u64, u64)>;
+/// Rows, VM steps, and decoded bytes per inventory row, summed over the statements of one
+/// phase.
+type Totals = BTreeMap<&'static str, (u64, u64, u64)>;
 
 /// The totals of each phase of one measurement, in phase order.
 type Measured = Vec<(&'static str, Totals)>;
@@ -205,6 +216,7 @@ fn totals(phase: &str, h: usize, work: &[StatementWork]) -> Totals {
         let entry = out.entry(row).or_default();
         entry.0 += statement.rows;
         entry.1 += statement.vm_steps;
+        entry.2 += statement.bytes;
     }
     out
 }
@@ -253,7 +265,7 @@ fn pass(store: &MemoryStore, request: &TransformRequest) -> String {
     let dir = "/nonexistent-docs";
     let ctx = pctx("git:read-bound", dir, 1_700_000_000_000);
     let request = crate::transform::tests::resolved(store, request);
-    transform_with_projection_cached(store, &request, &ctx, &Mutex::default())
+    transform_with_projection_cached(store, &request, &ctx)
         .expect("pass")
         .response
         .action
@@ -415,18 +427,22 @@ fn measure(h: usize, overlays: usize, memories: usize) -> Measured {
     phases.push(("summarizer", summarizer_round(&store, h)));
 
     // The host drops the anchor and discovery finds no other: the null window with no
-    // surviving anchor is the pass-through revert.
+    // surviving anchor resets the session and serves the window as a first pass (spec D10).
+    // The reset removes the whole history, the declared O(removed history) exception, so the
+    // bounded phase is the pass after it.
     let mut absent = request(h, "cfg2");
     absent.messages.remove(0);
     absent.boundary = Some(None);
+    assert_eq!(pass(&store, &absent), "HARD", "H={h}");
+    assert!(store.load_history_segments(SESSION).unwrap().is_empty());
     store.start_statement_work_ledger();
-    assert_eq!(pass(&store, &absent), "PASSTHROUGH", "H={h}");
+    pass(&store, &absent);
     let work = store.take_statement_work();
-    phases.push(("absent boundary", totals("absent boundary", h, &work)));
+    phases.push(("after reset", totals("after reset", h, &work)));
     for (phase, totals) in &phases {
         // The bound of this row is the host profile's line count, not H: state sync replaces
         // the active memories wholesale and a HARD pass reads every one.
-        let memory_rows = totals.get("active user memories").map(|(rows, _)| *rows);
+        let memory_rows = totals.get("active user memories").map(|(rows, ..)| *rows);
         if phase.starts_with("HARD") {
             assert_eq!(memory_rows, Some(memories as u64), "{phase} at H={h}");
         } else if let Some(rows) = memory_rows {
@@ -529,14 +545,17 @@ fn fold_row(row: &str) -> bool {
 fn report(axis: &str, label: &str, phases: &Measured) {
     for (phase, totals) in phases {
         for row in ROWS {
-            if let Some((rows, steps)) = totals.get(row) {
-                eprintln!("read-bound {axis} | {label} | {phase} | {row} | {rows} | {steps}");
+            if let Some((rows, steps, bytes)) = totals.get(row) {
+                eprintln!(
+                    "read-bound {axis} | {label} | {phase} | {row} | {rows} | {steps} | {bytes}"
+                );
             }
         }
     }
 }
 
-/// Asserts every row outside `skip` is equal between two measurements of the same request.
+/// Asserts every row outside `skip` reads the same rows in the same VM steps in two
+/// measurements of the same request; decoded bytes are checked by [`assert_bytes_bound`].
 fn assert_same(axis: &str, small: &Measured, large: &Measured, skip: impl Fn(&str) -> bool) {
     for ((phase, small), (_, large)) in small.iter().zip(large) {
         let rows = small
@@ -547,7 +566,7 @@ fn assert_same(axis: &str, small: &Measured, large: &Measured, skip: impl Fn(&st
             if *row == "scan ledger" {
                 // Scan ids are random, so a statement's B-tree walk varies by a few steps
                 // from run to run at any H; the rows it touches do not.
-                let ((small_rows, small_steps), (large_rows, large_steps)) =
+                let ((small_rows, small_steps, _), (large_rows, large_steps, _)) =
                     (small[row], large[row]);
                 assert_eq!(small_rows, large_rows, "{axis} {phase} {row}: rows");
                 assert!(
@@ -555,8 +574,51 @@ fn assert_same(axis: &str, small: &Measured, large: &Measured, skip: impl Fn(&st
                     "{axis} {phase} {row}: {small_steps} steps vs {large_steps}"
                 );
             } else {
-                assert_eq!(small.get(row), large.get(row), "{axis} {phase} {row}");
+                let work =
+                    |totals: &Totals| totals.get(row).map(|(rows, steps, _)| (*rows, *steps));
+                assert_eq!(work(small), work(large), "{axis} {phase} {row}");
             }
+        }
+    }
+}
+
+/// Decimal digits of the largest message ordinal of a session of `h` segments.
+fn ordinal_width(h: usize) -> u64 {
+    u64::from((2 * h as u64 + TAIL).ilog10() + 1)
+}
+
+/// The declared bytes bound of each inventory row at `large_h`, from the row's bytes at
+/// `small_h` (spec D15): the rows are the same, so only the decimal ordinals, sequences, and
+/// tag numbers written into their values can grow, and a value made only of digits grows at
+/// most by the width ratio. A read that grew with H would scale by H instead. m0 and m1 are
+/// held to their row caps times `SEGMENT_ROW_BYTES` instead. The coverage snapshot's session
+/// row also carries the frozen fold render, rendered from the m0 rows and measured well under
+/// their decoded bytes, so that row's bound adds the largest m0 read of `large`.
+fn assert_bytes_bound(
+    axis: &str,
+    (small_h, small): (usize, &Measured),
+    (large_h, large): (usize, &Measured),
+) {
+    let (from, to) = (ordinal_width(small_h), ordinal_width(large_h));
+    let fold_bytes = large
+        .iter()
+        .filter_map(|(_, totals)| totals.get("m0 segments").map(|(.., bytes)| *bytes))
+        .max()
+        .unwrap_or(0);
+    for ((phase, small), (_, large)) in small.iter().zip(large) {
+        for (row, (.., bytes)) in large.iter().filter(|(row, _)| !fold_row(row)) {
+            let base = small.get(row).map_or(0, |(.., bytes)| *bytes);
+            let bound = base * to / from
+                + if *row == "coverage snapshot" {
+                    fold_bytes
+                } else {
+                    0
+                };
+            eprintln!("read-bound bytes {axis} | {phase} | {row} | {bytes} | {bound}");
+            assert!(
+                *bytes <= bound,
+                "{axis} {phase} {row}: {bytes} bytes at H={large_h} over {bound}"
+            );
         }
     }
 }
@@ -567,7 +629,7 @@ fn every_pass_read_is_bounded_independent_of_history_size() {
     let together = sizes.map(|h| measure(h, h, MEMORIES));
     let history_only = measure(50_000, 100, MEMORIES);
     let overlays_only = measure(100, 5_000, 10 * MEMORIES);
-    eprintln!("read-bound axis | size | phase | row | rows | vm_steps");
+    eprintln!("read-bound axis | size | phase | row | rows | vm_steps | bytes");
     for (h, phases) in sizes.iter().zip(&together) {
         report("together", &format!("H=overlays={h}"), phases);
     }
@@ -602,7 +664,7 @@ fn every_pass_read_is_bounded_independent_of_history_size() {
     let legacy = SyntheticHistory::mixed(50_000).legacy_count() as u64;
     for ((phase, middle), (_, large)) in together[1].iter().zip(&together[2]) {
         for row in large.keys().filter(|row| fold_row(row)) {
-            let (rows_read, _) = large[row];
+            let (rows_read, _, bytes) = large[row];
             let cap = if *row == "m0 segments" {
                 249 + MAX_K + legacy
             } else {
@@ -612,16 +674,32 @@ fn every_pass_read_is_bounded_independent_of_history_size() {
                 rows_read <= cap,
                 "{phase} {row}: {rows_read} rows over {cap}"
             );
+            eprintln!(
+                "read-bound bytes fold | {phase} | {row} | {bytes} | {}",
+                cap * SEGMENT_ROW_BYTES
+            );
+            assert!(
+                bytes <= cap * SEGMENT_ROW_BYTES,
+                "{phase} {row}: {bytes} bytes over {cap} rows of {SEGMENT_ROW_BYTES}"
+            );
+            let work = |totals: &Totals| totals.get(row).map(|(rows, steps, _)| (*rows, *steps));
             assert_eq!(
-                middle.get(row),
-                large.get(row),
+                work(middle),
+                work(large),
                 "{phase} {row}: H=5,000 vs 50,000"
+            );
+            let middle_bytes = middle.get(row).map_or(0, |(.., bytes)| *bytes);
+            assert!(
+                bytes * ordinal_width(5_000) <= middle_bytes * ordinal_width(50_000),
+                "{phase} {row}: {bytes} bytes at H=50,000 vs {middle_bytes} at 5,000"
             );
         }
     }
     let memories = |row: &str| row == "active user memories";
     assert_same("together", &together[0], &together[2], fold_row);
     assert_same("H only", &together[0], &history_only, fold_row);
+    assert_bytes_bound("together", (100, &together[0]), (50_000, &together[2]));
+    assert_bytes_bound("H only", (100, &together[0]), (50_000, &history_only));
     assert_same(
         "overlays and memories only",
         &together[0],

@@ -129,6 +129,53 @@ async fn readiness_permissions_catalog_and_real_unary_transform() {
     fixture.shutdown();
 }
 
+/// The plugin sends a transform body unpaged up to the daemon's 32 MiB transform limit. One
+/// 3 MB body, above the 1 MiB facade frame limit and with no `transform_page_id`, is one
+/// request frame through the real admission and commits.
+#[tokio::test]
+async fn one_unpaged_three_mb_transform_body_commits() {
+    let fixture = FixtureProcess::start();
+    let client = fixture.client().await;
+    let session = "direct-unpaged";
+    let route = fixture
+        .open_route(&client, "context", TargetKind::ToolProvider, session)
+        .await;
+    wait_for_store(&client, route, session).await;
+    let text = "x".repeat(10 * 1024);
+    let messages: Vec<Value> = (1..=300)
+        .map(|ordinal| {
+            json!({
+                "mid": format!("m{ordinal}"),
+                "ordinal": ordinal,
+                "ck": {
+                    "role": if ordinal % 2 == 1 { "user" } else { "assistant" },
+                    "content": [{"kind": {"type": "text", "text": text}}],
+                    "meta": {"harness_id": format!("m{ordinal}")}
+                }
+            })
+        })
+        .collect();
+    let body = json!({
+        "kind": "transform",
+        "v": 3,
+        "boundary": null,
+        "base_revision": "direct-unpaged-base",
+        "session_id": session,
+        "serializer_profile": "owned-llmrunner",
+        "render_config": "direct-unpaged-config",
+        "messages": messages,
+    });
+    let length = serde_json::to_vec(&body).unwrap().len();
+    assert!((2 << 20..4 << 20).contains(&length), "{length}");
+    assert!(body.get("transform_page_id").is_none());
+    let response = request_json(&client, route, body).await;
+    assert_eq!(response["status"], "ok", "{}", response["status"]);
+    assert_eq!(response["served_from"], "transform");
+    assert_eq!(response["committed"], true);
+    client.close().await.expect("managed client closes");
+    fixture.shutdown();
+}
+
 #[tokio::test]
 async fn direct_primary_replays_transform_state_across_fixture_restart() {
     let root = tempfile::tempdir().expect("persistent fixture root");

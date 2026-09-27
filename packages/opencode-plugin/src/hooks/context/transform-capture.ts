@@ -462,13 +462,15 @@ export interface ReferenceableInspection {
 /**
  * Byte-limit exhaustion throws CaptureBudgetExceeded. The first `skip` members are left to a
  * digest-verified capture: only their root slots are inspected, and their wire bounds read zero.
+ * Without `estimateWire`, the wire bounds leave out string escapes; `estimatedBytes` is the same.
  */
 export function inspectReferenceableMessages(
     messages: unknown,
     maxBytes = TRANSFORM_CAPTURE_MAX_BYTES,
     skip = 0,
+    estimateWire = true,
 ): ReferenceableInspection | { ok: false; rejection: ReferenceableRejection } {
-    const walker = new ReferenceableWalk(maxBytes);
+    const walker = new ReferenceableWalk(maxBytes, estimateWire);
     const messageWireBytes: number[] = [];
     try {
         walker.members(messages, (slot, index) => {
@@ -504,12 +506,16 @@ export function snapshotFieldsEqual(
  * in slices of this size, so one large member never builds a whole-member hash input.
  */
 const HASH_CHUNK_UNITS = 1 << 16;
+/** Below this length a string stays in the pending text, which saves a hash update per key. */
+const UTF8_HASH_MIN_UNITS = 256;
 
 /**
  * Streams member tapes into one SHA-256 chain. Every token is self-delimiting: a string carries
  * its UTF-16 length, a number ends at `;`, and a member ends at `|`. The text is hashed as
  * UTF-16 code units, which keeps lone surrogates and makes the digest independent of chunking.
- * Symbols other than the tape markers cannot be hashed by identity, so they are kept in order.
+ * A well-formed string of [`UTF8_HASH_MIN_UNITS`, `HASH_CHUNK_UNITS`) units is hashed as UTF-8
+ * after a `u` token instead: UTF-8 is injective on well-formed text, and the UTF-16 length still
+ * ends it. Symbols other than the tape markers cannot be hashed by identity, so they are kept in order.
  */
 class TapeHasher {
     private readonly hash = createHash("sha256");
@@ -520,7 +526,15 @@ class TapeHasher {
 
     readonly push = (value: SnapshotField): void => {
         if (typeof value === "string") {
-            if (value.length < HASH_CHUNK_UNITS) this.text += `s${value.length}:${value}`;
+            if (
+                value.length >= UTF8_HASH_MIN_UNITS &&
+                value.length < HASH_CHUNK_UNITS &&
+                (value as string & { isWellFormed(): boolean }).isWellFormed()
+            ) {
+                this.text += `u${value.length}:`;
+                this.flush();
+                this.hash.update(value, "utf8");
+            } else if (value.length < HASH_CHUNK_UNITS) this.text += `s${value.length}:${value}`;
             else {
                 this.text += `s${value.length}:`;
                 this.flush();

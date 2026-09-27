@@ -2280,7 +2280,7 @@ pub const PEAK_SEARCH_CONNECTIONS: u64 = 2;
 /// Each search projection connection holds `search_projection::CACHE_KIB` of page cache.
 /// The memory store's prepared-statement cache is bounded by `memory_store::STATEMENT_CACHE_CAPACITY` entries, not bytes: SQLite does not bound compiled-statement memory, so no byte figure is declared for it. A full 128-statement cache measured 861,472 bytes by `sqlite3_memory_used`.
 /// The MemoryReviewer host keeps its own bounded copy of the startup credentials and their keyed identities for the process lifetime (`memory_reviewer::worker::RETAINED_CREDENTIAL_BYTES`).
-/// The transform-serving combined budget is the serialized-output cache plus the native previous-output store, which refuses an entry above `NATIVE_OUTPUT_ENTRY_BUDGET_BYTES` and evicts sessions past `NATIVE_OUTPUT_BUDGET_BYTES`.
+/// The transform-serving combined budget is the CK previous-output store plus the native previous-output store, which refuses an entry above `NATIVE_OUTPUT_ENTRY_BUDGET_BYTES` and evicts sessions past `NATIVE_OUTPUT_BUDGET_BYTES`.
 /// A ready transform snapshot holds the CK input and scalar fields, never native messages or a delta fallback, so the snapshot and lease budgets bound what `TransformRequest::snapshot_retained_bytes` charges.
 pub const DECLARED_RETAINED_RESIDENT_BYTES: u64 = TRANSFORM_SERVE_CACHE_COMBINED_BUDGET_BYTES
     as u64
@@ -6291,6 +6291,8 @@ impl HandlerCore {
                 };
             }
         };
+        // The transform's no-survivor reset skips these clears, so each cache must also stay
+        // valid across the `revert_epoch` bump alone.
         self.serialized_outputs
             .lock()
             .expect("serialized output cache mutex")
@@ -8475,7 +8477,7 @@ impl HandlerCore {
     /// Emergency95 pass, the settle. Those all run on one thread, so an abort of the handler
     /// future cannot fall between the commit and what the commit implies.
     ///
-    /// Every committing unit invalidates the guidance pin; `apply_once` replaces serialized outputs.
+    /// Every committing unit invalidates the guidance pin.
     /// Lineage follows the first successful transform. Projection and attachments are recomputable.
     /// Response observations are advisory. A newer `begin` supersedes an unfinished `finish_ready` generation.
     /// Cancellation before `begin` preserves the session's prior `Ready` snapshot.
@@ -8817,7 +8819,7 @@ impl HandlerCore {
                 .remove(&parsed.session_id)
                 .unwrap_or_default(),
         };
-        transform_with_projection_cached(store, parsed, &producer_ctx, &self.serialized_outputs)
+        transform_with_projection_cached(store, parsed, &producer_ctx)
     }
 
     fn reject_transform(env: &PassEnv, error: crate::transform::TransformError) -> PreparedOutcome {
@@ -29047,11 +29049,16 @@ mod tests {
         assert_eq!(boot["action"], "HARD");
         assert_eq!(boot["boundary_id"], "m1#0");
 
-        let raw = call_transform_request(
-            &handler,
-            request_with_usage(vec![ck("foreign", 90, "other conversation")], 95, 100),
-        )
-        .await;
+        // Only a lineage switch arms pending_rewrite for a window with no surviving anchor.
+        let mut switched =
+            request_with_usage(vec![ck("foreign", 90, "other conversation")], 95, 100);
+        switched["lineage_switched"] = json!(true);
+        switched["descent_edge_id"] = json!(1);
+        switched["prior_conversation_key"] = json!("prior");
+        switched["prior_epoch"] = json!(1);
+        switched["new_epoch"] = json!(2);
+        switched["constituents"] = json!([["prior", "ses", 2]]);
+        let raw = call_transform_request(&handler, switched).await;
         assert_eq!(raw["action"], "PASSTHROUGH");
         assert_eq!(raw["history_summarizer"]["no_fire"], "pending_rewrite");
         assert_eq!(producer.connects.load(Ordering::SeqCst), 0);

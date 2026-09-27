@@ -361,6 +361,128 @@ describe("boundary discovery", () => {
         expect(bodies[0]?.native_messages).toEqual(host.slice(3));
     });
 
+    /** Runs one pass and returns its `work=scanned` counter. */
+    async function scannedItems(
+        sessionId: string,
+        host: unknown[],
+        pages: Parameters<typeof fakeDaemon>[0]["pages"],
+    ): Promise<{ scanned: number; bodies: Body[]; cursors: Array<number | undefined> }> {
+        const { client, bodies, cursors } = fakeDaemon({ pages });
+        const transform = createRustModeTransform(makeDeps(), { moduleClient: client });
+        const debug = spyOn(logger.sessionLog, "debug");
+        try {
+            await transform.run(sessionId, { messages: host });
+            const line = logsOf(debug, sessionId).find((text) => text.startsWith("rust pass:"));
+            const work = /work=scanned:(\d+) /.exec(line ?? "");
+            if (!work) throw new Error(`no work counters in ${line}`);
+            return { scanned: Number(work[1]), bodies, cursors };
+        } finally {
+            debug.mockRestore();
+        }
+    }
+
+    it("finds a cold start's anchor with one backward scan of the window's distance", async () => {
+        for (const covered of [10_000, 100_000]) {
+            const sessionId = `discovery-cold-${covered}-${Date.now()}`;
+            const host: unknown[] = Array.from({ length: covered }, (_, index) => ({
+                info: { id: `c-${index}` },
+            }));
+            host.push(...hostArray(sessionId, 5));
+            const { scanned, bodies, cursors } = await scannedItems(sessionId, host, () => ({
+                anchors: [
+                    { mid: "reverted", sequence: 9 },
+                    { mid: "m-0", sequence: 8 },
+                    { mid: "c-7", sequence: 1 },
+                ],
+            }));
+            expect(cursors).toEqual([undefined]);
+            // Five window slots, not the host length a membership filter would cost.
+            expect(scanned).toBe(5);
+            expect(bodies[0]?.boundary).toEqual({ mid: "m-0", sequence: 8 });
+        }
+    });
+
+    it("matches a cold start's first page by the daemon's top-level id fallback", async () => {
+        const sessionId = `discovery-top-level-${Date.now()}`;
+        const host: unknown[] = hostArray(sessionId, 5);
+        host[1] = { id: "top-1", info: { role: "user", sessionID: sessionId }, parts: [] };
+        const { scanned, bodies, cursors } = await scannedItems(sessionId, host, () => ({
+            anchors: [{ mid: "top-1", sequence: 3 }],
+        }));
+        expect(cursors).toEqual([undefined]);
+        expect(scanned).toBe(4);
+        expect(bodies[0]?.boundary).toEqual({ mid: "top-1", sequence: 3 });
+    });
+
+    it("builds the membership filter only after the first page misses the whole host", async () => {
+        const sessionId = `discovery-filter-${Date.now()}`;
+        const host = hostArray(sessionId, 8);
+        const { scanned, bodies, cursors } = await scannedItems(sessionId, [...host], (before) =>
+            before === undefined
+                ? { anchors: [{ mid: "reverted", sequence: 90 }] }
+                : { anchors: [{ mid: "m-3", sequence: 12 }] },
+        );
+        expect(cursors).toEqual([undefined, 90]);
+        // The missed scan (8), the filter over every host id (8), and the verifying scan to m-3 (5).
+        expect(scanned).toBe(21);
+        expect(bodies[0]?.boundary).toEqual({ mid: "m-3", sequence: 12 });
+    });
+
+    // A host that orders anchors against their sequence breaks D16. Both discovery paths then
+    // declare the anchor latest in the host; the rendered boundary's mid sits before that
+    // window, so the daemon reverts through the declared row (window_coverage tests: "the
+    // rendered boundary's message is gone from the window"). Two anchors sharing a mid declare
+    // the newer sequence.
+    it("declares the anchor latest in the host on either path, the newer of two sharing a mid", async () => {
+        const firstPage = [
+            { mid: "m-1", sequence: 9 },
+            { mid: "m-3", sequence: 8 },
+        ];
+        for (const [name, pages] of [
+            ["first page", () => ({ anchors: firstPage })],
+            [
+                "filter",
+                (before: number | undefined) =>
+                    before === undefined
+                        ? { anchors: [{ mid: "reverted", sequence: 90 }] }
+                        : { anchors: firstPage },
+            ],
+        ] as const) {
+            const sessionId = `discovery-order-${name}-${Date.now()}`;
+            const host = hostArray(sessionId, 6);
+            const { bodies } = await scannedItems(sessionId, [...host], pages);
+            expect(bodies[0]?.boundary, name).toEqual({ mid: "m-3", sequence: 8 });
+            expect(bodies[0]?.native_messages, name).toEqual(host.slice(3));
+        }
+        for (const [name, pages] of [
+            [
+                "first page",
+                () => ({
+                    anchors: [
+                        { mid: "m-3", sequence: 9 },
+                        { mid: "m-3", sequence: 8 },
+                    ],
+                }),
+            ],
+            [
+                "filter",
+                (before: number | undefined) =>
+                    before === undefined
+                        ? { anchors: [{ mid: "reverted", sequence: 90 }] }
+                        : {
+                              anchors: [
+                                  { mid: "m-3", sequence: 9 },
+                                  { mid: "m-3", sequence: 8 },
+                              ],
+                          },
+            ],
+        ] as const) {
+            const sessionId = `discovery-duplicate-${name}-${Date.now()}`;
+            const { bodies } = await scannedItems(sessionId, hostArray(sessionId, 6), pages);
+            expect(bodies[0]?.boundary, name).toEqual({ mid: "m-3", sequence: 9 });
+        }
+    });
+
     it("sends null with the whole array only after an empty page", async () => {
         const sessionId = `discovery-exhausted-${Date.now()}`;
         const host = hostArray(sessionId, 4);

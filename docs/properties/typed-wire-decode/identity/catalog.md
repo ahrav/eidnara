@@ -231,7 +231,7 @@ Reachability: default-production
 Status: active
 Exercised: not yet - no old/new decode campaign reloads a stored hygiene baseline.
 Guarantee: Unchanged plugin-domain inputs preserve durable hygiene part identities, content signatures, and refresh decisions across typed decode and memo reset.
-Check: `always` - With identical core, coverage, tags, protection, prior baseline, clock, and bust flag, compare old/new full part tuples and measurement `(u,t,content_signature)`; for a block-byte-derived excluded part assert `content_hash == hex(H(UTF8("excluded\0") || baseline_block_bytes))`, signature equals the hash of ordered `key:content_hash\0` entries, and refreshed baseline fields equal the frozen old result, because zero-token parts still participate in durable prefix identity.
+Check: `always` - With identical core, coverage, tags, protection, prior baseline, clock, and bust flag, compare old/new full part tuples and measurement `(u,t,content_signature)`; for a block-byte-derived excluded part assert `content_hash` is the first 32 characters of `hex(H(UTF8("excluded\0") || baseline_block_bytes))`, signature equals the hash of ordered `key:content_hash\0` entries, and refreshed baseline fields equal the frozen old result, because zero-token parts still participate in durable prefix identity.
 Fault/timing angle: A serializer change moves an excluded part's hash while token totals stay zero, invalidating a loaded baseline on a non-busting pass.
 Required faults and enabling state: A persisted nonempty evaluable baseline containing an excluded plugin block; cold and warm memos; unchanged and append-only replay; a controlled content mutation; daemon-built and legacy unknown-envelope cases classified separately.
 Confidence: high - [evidence](evidence/durable-hygiene-baseline-preserves-content-identity.md). The stored schema, kind-prefixed hashing, ordered signature, and prefix invalidation are verified at HEAD; preservation remains a proposed check.
@@ -241,6 +241,7 @@ Open questions:
 
 - Which outcome is required when daemon-built block ordering or false omission changes an excluded part hash in a persisted baseline? No semantic invalidation exception is granted by the plan. (needs human input)
 - Unknown-envelope legacy baselines can retain hashes of discarded fields. Their upgrade handling must be reconciled with frozen behavior before implementation. (needs human input)
+- #833 stores each part hash as its first 128 bits (32 hex) so the meta row stays under its bound at W = 300. A baseline an earlier build stored with 64-hex hashes measures invalid on the next non-bust pass and is replaced by the next bust, one invalidation per session; witness `an_earlier_builds_64_hex_baseline_invalidates_until_the_next_bust` in `crates/daemon/src/tail_hygiene.rs`. This is a deliberate upgrade transition, not an unchanged-input preservation.
 
 ### durable-lineage-anchor-preserves-validation
 

@@ -1809,6 +1809,8 @@ pub struct NoteNudgeAnchorSeed {
     pub text: String,
 }
 
+/// One entry per served block. `content_hash` is the first 128 bits of the block's SHA-256 in
+/// lowercase hex, which is enough to detect a changed block and keeps the O(W) list small.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ServedBlockFingerprint {
     pub block_id: String,
@@ -1850,7 +1852,9 @@ pub enum TailHygienePartKind {
 
 /// One typed part from the rendered-tail hygiene walk. Persisting its measurements lets later
 /// passes record newly appended content and update which content is considered recent without
-/// tokenizing the historical prefix again.
+/// tokenizing the historical prefix again. One entry is stored per live-tail part, so an absent
+/// tag is omitted; a reader without `skip_serializing_if` still reads a missing `Option` as
+/// `None`. `content_hash` is the first 128 bits of the part's SHA-256 in lowercase hex.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TailHygienePartMeasurement {
     pub key: String,
@@ -1858,7 +1862,9 @@ pub struct TailHygienePartMeasurement {
     pub kind: TailHygienePartKind,
     pub tokens: i64,
     pub u_tokens: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub tag_number: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub tag_status: Option<String>,
     pub protected: bool,
 }
@@ -3189,11 +3195,12 @@ impl ActiveWriteTransaction<'_> {
             "INSERT INTO scan_owner_copies(
                  owner_copy_id,scan_id,domain_owner_id,owner_kind,field_id
              )
-             SELECT lower(hex(randomblob(16))),scan_id,?1,?2,field_id
+             SELECT ?4 || lower(hex(randomblob(10))),scan_id,?1,?2,field_id
                FROM scan_owner_copies
               WHERE scan_id=?3
               GROUP BY scan_id,field_id",
         )?;
+        let link_prefix = hex_digest(opaque_id_time_prefix());
         for link in &prepared.existing_scan_links {
             let domain_owner_id = domain_owner_ids
                 .iter()
@@ -3203,7 +3210,12 @@ impl ActiveWriteTransaction<'_> {
                         "existing scan link references an unregistered durable owner".to_string(),
                     )))
                 })?;
-            insert_link.execute(params![domain_owner_id, prepared.owner_kind, link.scan_id])?;
+            insert_link.execute(params![
+                domain_owner_id,
+                prepared.owner_kind,
+                link.scan_id,
+                link_prefix
+            ])?;
         }
         Ok(())
     }
@@ -3227,18 +3239,26 @@ fn persisted_detection_labels(detections: &[Detection]) -> Vec<&str> {
 
 const MAX_PERSISTED_DETECTION_LABELS: usize = 64;
 
-/// Thirty-two lowercase hex characters from sixteen random bytes, the shape every audit
-/// identifier column checks. Generated in Rust so an audit write spends no statement on an
-/// identifier; the per-row link copy below keeps SQLite's `randomblob` because it needs one
-/// value per selected row.
+/// Thirty-two lowercase hex characters, the shape every audit identifier column checks: six
+/// bytes of big-endian creation milliseconds, then ten random bytes. The time prefix keeps one
+/// batch's rows on a few index leaves, so writing them and the next pass's retirement dirty
+/// O(rows per leaf) pages instead of one page per row. Generated in Rust so an audit write
+/// spends no statement on an identifier; the per-row link copy below binds the same prefix and
+/// appends SQLite's `randomblob` because it needs one value per selected row.
 fn opaque_id() -> rusqlite::Result<String> {
     let mut bytes = [0u8; 16];
-    getrandom::getrandom(&mut bytes).map_err(|error| {
+    bytes[..6].copy_from_slice(&opaque_id_time_prefix());
+    getrandom::getrandom(&mut bytes[6..]).map_err(|error| {
         rusqlite::Error::ToSqlConversionFailure(Box::new(MemoryStoreError::Serde(format!(
             "random source unavailable for an audit identifier: {error}"
         ))))
     })?;
     Ok(hex_digest(bytes))
+}
+
+fn opaque_id_time_prefix() -> [u8; 6] {
+    let millis = u64::try_from(current_time_ms()).unwrap_or(0).to_be_bytes();
+    millis[2..].try_into().expect("six low bytes")
 }
 
 /// Deletes the audit rows that lost their last owner, restricted to `scan_ids`.
@@ -21975,6 +21995,86 @@ mod tests {
         );
     }
 
+    /// Audit ids keep the 32 lowercase hex shape the columns check, and their 12-hex time
+    /// prefix lies within a few seconds of the clock reads around the write that minted them, for ids
+    /// minted in Rust and for per-row link copies minted in SQL.
+    #[test]
+    fn audit_ids_are_lowercase_hex_with_a_time_prefix_from_their_write() {
+        let is_id = |id: &str| {
+            id.len() == 32
+                && id
+                    .bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        };
+        let millis = |prefix: &str| u64::from_str_radix(prefix, 16).unwrap();
+        let now = || millis(&hex_digest(opaque_id_time_prefix()));
+        // The wall clock can step, so each bracket allows a few seconds on either side.
+        const SLACK_MS: u64 = 5_000;
+        let assert_minted_between = |ids: &[String], before: u64, after: u64| {
+            assert!(!ids.is_empty());
+            for id in ids {
+                assert!(is_id(id), "{id}");
+                let minted = millis(&id[..12]);
+                assert!(
+                    before.saturating_sub(SLACK_MS) <= minted && minted <= after + SLACK_MS,
+                    "{before} {id} {after}"
+                );
+            }
+        };
+        let before = now();
+        let ids: Vec<String> = (0..64).map(|_| opaque_id().unwrap()).collect();
+        assert_minted_between(&ids, before, now());
+        assert_eq!(ids.iter().collect::<BTreeSet<_>>().len(), ids.len());
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
+        let column = |sql: &str| -> BTreeSet<String> {
+            store
+                .inner
+                .with_conn(|conn| {
+                    let mut statement = conn.prepare(sql)?;
+                    let rows = statement
+                        .query_map([], |row| row.get(0))?
+                        .collect::<rusqlite::Result<BTreeSet<_>>>()?;
+                    Ok(rows)
+                })
+                .unwrap()
+        };
+        let copies = "SELECT owner_copy_id FROM scan_owner_copies";
+        let mut write = PreparedWrite::new(DurableWriteFamily::HistorySegments);
+        write.domain_owner("session", "ses_ids", "first");
+        write.content("content", "plain text").unwrap();
+        let before = now();
+        write
+            .execute(&store.inner, |_| Ok(WriteDisposition::Applied(())))
+            .unwrap();
+        let after = now();
+        let first = column(copies);
+        let first_scans = column("SELECT scan_id FROM field_scans");
+        for minted in [&first, &first_scans] {
+            assert_minted_between(&minted.iter().cloned().collect::<Vec<_>>(), before, after);
+        }
+        let mut link = PreparedWrite::new(DurableWriteFamily::HistorySegments);
+        link.domain_owner("session", "ses_ids", "second");
+        link.content("content", "other text").unwrap();
+        link.link_existing_scans("session", "ses_ids", "second", first_scans.clone());
+        let before = now();
+        link.execute(&store.inner, |_| Ok(WriteDisposition::Applied(())))
+            .unwrap();
+        let after = now();
+        let linked: Vec<String> = column(copies).difference(&first).cloned().collect();
+        let first_scan_copies = column(&format!(
+            "SELECT COUNT(*) || '' FROM scan_owner_copies WHERE scan_id IN ('{}')",
+            first_scans.into_iter().collect::<Vec<_>>().join("','")
+        ));
+        assert_eq!(
+            first_scan_copies.into_iter().collect::<Vec<_>>(),
+            ["2"],
+            "enabling state: the first write's scan gained a link copy"
+        );
+        assert_minted_between(&linked, before, after);
+    }
+
     #[test]
     fn history_segments_roundtrip_chronological_with_tiers_and_legacy() {
         let dir = tempfile::tempdir().unwrap();
@@ -26117,6 +26217,142 @@ mod tests {
         .unwrap();
         drop(raw);
         assert_eq!(store.load("ses").unwrap().meta, meta);
+    }
+
+    /// Rollback safety of the per-block meta entries only: a row this build writes, with
+    /// 128-bit hashes and absent tags omitted, deserializes into copies of the d68aedf34
+    /// per-block definitions, and a row those definitions wrote (64-hex hashes, explicit
+    /// nulls) loads here. The rest of `ModuleMeta` is not compared against d68aedf34.
+    #[test]
+    fn per_block_meta_entries_read_both_ways_across_the_d68aedf34_definitions() {
+        #[derive(Debug, PartialEq, Serialize, Deserialize)]
+        struct BaseServedBlockFingerprint {
+            block_id: String,
+            content_hash: String,
+            serialized_len: usize,
+        }
+        #[derive(Debug, PartialEq, Serialize, Deserialize)]
+        struct BaseTailHygienePartMeasurement {
+            key: String,
+            content_hash: String,
+            kind: TailHygienePartKind,
+            tokens: i64,
+            u_tokens: i64,
+            tag_number: Option<i64>,
+            tag_status: Option<String>,
+            protected: bool,
+        }
+        let base_part = |part: &TailHygienePartMeasurement| BaseTailHygienePartMeasurement {
+            key: part.key.clone(),
+            content_hash: part.content_hash.clone(),
+            kind: part.kind,
+            tokens: part.tokens,
+            u_tokens: part.u_tokens,
+            tag_number: part.tag_number,
+            tag_status: part.tag_status.clone(),
+            protected: part.protected,
+        };
+        let base_block = |block: &ServedBlockFingerprint| BaseServedBlockFingerprint {
+            block_id: block.block_id.clone(),
+            content_hash: block.content_hash.clone(),
+            serialized_len: block.serialized_len,
+        };
+        let meta_with = |hash: &str| {
+            let part = |index: i64, tagged: bool| TailHygienePartMeasurement {
+                key: format!("m{index:07}#0\u{0}tool_call"),
+                content_hash: hash.to_string(),
+                kind: TailHygienePartKind::ToolInput,
+                tokens: 40,
+                u_tokens: if tagged { 40 } else { 0 },
+                tag_number: tagged.then_some(index),
+                tag_status: tagged.then(|| "active".to_string()),
+                protected: index == 0,
+            };
+            ModuleMeta {
+                tail_hygiene_baseline: Some(TailHygieneBaseline {
+                    baseline_parts: (0..4).map(|index| part(index, index % 2 == 0)).collect(),
+                    ..Default::default()
+                }),
+                served_output_fingerprint: (0..3)
+                    .map(|index| ServedBlockFingerprint {
+                        block_id: format!("m{index:07}#0"),
+                        content_hash: hash.to_string(),
+                        serialized_len: 182,
+                    })
+                    .collect(),
+                ..Default::default()
+            }
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
+        let raw = rusqlite::Connection::open(dir.path().join("memory.sqlite")).unwrap();
+        let stored = || -> serde_json::Value {
+            let text: String = raw
+                .query_row(
+                    "SELECT meta FROM cache_state WHERE session_id = 'ses'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            serde_json::from_str(&text).unwrap()
+        };
+
+        let new = meta_with("81aa6b79b3e4142e2e791c2bcd59fee2");
+        store
+            .commit("ses", None, &CoreState::empty(), &new)
+            .unwrap();
+        let row = stored();
+        let parts: Vec<BaseTailHygienePartMeasurement> =
+            serde_json::from_value(row["tail_hygiene_baseline"]["baseline_parts"].clone()).unwrap();
+        let blocks: Vec<BaseServedBlockFingerprint> =
+            serde_json::from_value(row["served_output_fingerprint"].clone()).unwrap();
+        let new_baseline = new.tail_hygiene_baseline.as_ref().unwrap();
+        assert_eq!(
+            parts,
+            new_baseline
+                .baseline_parts
+                .iter()
+                .map(base_part)
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            blocks,
+            new.served_output_fingerprint
+                .iter()
+                .map(base_block)
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            row["tail_hygiene_baseline"]["baseline_parts"][1]
+                .get("tag_number")
+                .is_none()
+        );
+
+        let old = meta_with(&"81aa6b79".repeat(8));
+        let mut row = serde_json::to_value(&old).unwrap();
+        let old_baseline = old.tail_hygiene_baseline.as_ref().unwrap();
+        row["tail_hygiene_baseline"]["baseline_parts"] = serde_json::to_value(
+            old_baseline
+                .baseline_parts
+                .iter()
+                .map(base_part)
+                .collect::<Vec<_>>(),
+        )
+        .unwrap();
+        row["served_output_fingerprint"] = serde_json::to_value(
+            old.served_output_fingerprint
+                .iter()
+                .map(base_block)
+                .collect::<Vec<_>>(),
+        )
+        .unwrap();
+        assert!(row["tail_hygiene_baseline"]["baseline_parts"][1]["tag_number"].is_null());
+        raw.execute(
+            "UPDATE cache_state SET meta = ?1 WHERE session_id = 'ses'",
+            [row.to_string()],
+        )
+        .unwrap();
+        assert_eq!(store.load("ses").unwrap().meta, old);
     }
 
     #[test]

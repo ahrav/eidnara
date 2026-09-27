@@ -345,6 +345,8 @@ export interface RustModeTransformOptions {
     captureAdmission?: TransformCaptureAdmission;
     /** Retained-output budget across sessions; tests inject a smaller one. */
     retainedOutputBudgetBytes?: number;
+    /** Largest transform body sent unpaged; tests inject the page limit to exercise paging. */
+    unpagedTransformMaxBytes?: number;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -1167,7 +1169,7 @@ export function createRustModeTransform(
             return index;
         };
         /**
-         * Walks `transform.boundary` newest first to an anchor the host holds (one id scan); an empty
+         * Walks `transform.boundary` newest first to an anchor the host holds; an empty
          * page sends `null`. Budget (from the pass start, so a rerun gets what is left), timeout, a
          * malformed or repeated page, or a daemon without the method declines, never `null`.
          */
@@ -1213,10 +1215,28 @@ export function createRustModeTransform(
                     throw new PassDeclined(sessionId, "discovery_declined", "malformed page");
                 const last = page.at(-1);
                 if (!last) return { boundary: null, index: 0 };
+                // Both paths declare the held anchor latest in the host, the newest by sequence
+                // when two share a mid. Host order follows segment sequence (D16: writers append
+                // or truncate a suffix), so that is the newest held anchor; if a host breaks the
+                // order, the daemon re-validates the declared anchor (D10) and reverts to it.
                 if (!filter) {
+                    // D17: one backward id scan against the first page stops at the first hit.
+                    const anchors = new Map<string, TransformBoundary>();
+                    for (const anchor of page)
+                        if (!anchors.has(anchor.mid)) anchors.set(anchor.mid, anchor);
+                    let hit: TransformBoundary | undefined;
+                    const index = scan((id) => {
+                        hit = anchors.get(id);
+                        return hit !== undefined;
+                    });
+                    // `hit` is set by the last callback, so it is defined only when the scan stopped on one.
+                    if (hit) return { boundary: hit, index };
+                    // The whole host holds none of this page; later pages probe the filter.
                     timings.scannedItems += target.length;
                     filter = messageIdFilter(target, (bytes) => lease.reserve(bytes));
                     if (!filter) throw new CaptureBudgetExceeded("membership filter");
+                    before = last.sequence;
+                    continue;
                 }
                 const wanted = new Set<string>();
                 for (const anchor of page)
@@ -1227,10 +1247,13 @@ export function createRustModeTransform(
                         if (wanted.has(id) && !found.has(id)) found.set(id, index);
                         return found.size === wanted.size;
                     });
+                let held: { boundary: TransformBoundary; index: number } | undefined;
                 for (const anchor of page) {
                     const index = found.get(anchor.mid);
-                    if (index !== undefined) return { boundary: anchor, index };
+                    if (index !== undefined && index > (held?.index ?? -1))
+                        held = { boundary: anchor, index };
                 }
+                if (held) return held;
                 before = last.sequence;
             }
         };
@@ -1529,7 +1552,10 @@ export function createRustModeTransform(
                 payload: Record<string, unknown>,
                 detail: string,
             ): Promise<TransformSeriesResult> => {
-                const series = buildPagedModuleTransformPayloads(payload);
+                const series = buildPagedModuleTransformPayloads(
+                    payload,
+                    options.unpagedTransformMaxBytes,
+                );
                 const paged = series.some(
                     (entry) => typeof entry.page.transform_page_id === "string",
                 );
@@ -1677,9 +1703,12 @@ export function createRustModeTransform(
                 const candidate = application.values;
                 let applied: AppliedOutput | undefined;
                 try {
+                    // Only the charge is read here, so the per-unit escape scan is skipped.
                     const inspection = inspectReferenceableMessages(
                         candidate,
                         lease.remainingBytes,
+                        0,
+                        false,
                     );
                     if (inspection.ok && lease.reserve(inspection.estimatedBytes)) {
                         applied = {

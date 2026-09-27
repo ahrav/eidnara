@@ -2,6 +2,10 @@ import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { type RustPassLine, RustTestHarness } from "../src/rust-harness";
 import { rustPrereqs } from "../src/rust-scenario-support";
 
+/** About 400 KB of prose: large, yet under the store's 512 KiB durable text limit. */
+const TAIL_TOKENS = 100_000;
+const TAIL_BYTES_FLOOR = 350_000;
+
 describe.skipIf(!rustPrereqs.ok)("rust transport: whole-array sends with a large tail", () => {
     let h: RustTestHarness;
 
@@ -19,8 +23,10 @@ describe.skipIf(!rustPrereqs.ok)("rust transport: whole-array sends with a large
         await h?.dispose();
     });
 
-    // Quarantined: the 160k-token tail exceeds the memory store's 512 KiB MAX_DURABLE_TEXT_BYTES, so the daemon answers "store: durable text rejected: InputLimit" and the pass serves raw. The small whole-array sends pass; the large-tail step needs a tail under that limit. Deferred in the #829 PR.
-    it.skip("keeps module paging bounded while preserving a large provider-visible tail", async () => {
+    // The tail stays under the memory store's 512 KiB MAX_DURABLE_TEXT_BYTES (a 160k-token tail is refused
+    // with InputLimit and served raw). With no coverage every pass sends the whole array, and a body under
+    // the daemon's 32 MiB transform limit travels as one unpaged request.
+    it("sends the whole array unpaged while preserving a large provider-visible tail", async () => {
         const sessionId = await h.createSession();
         await h.sendPrompt(sessionId, "establish the initial module snapshot");
         await h.waitForRustPasses(1);
@@ -47,7 +53,7 @@ describe.skipIf(!rustPrereqs.ok)("rust transport: whole-array sends with a large
         );
         expect(primed.inputCount).toBeGreaterThan(1_000);
         expect(primed.servedFrom).toBe("transform");
-        expect(primed.transportPages).toBeGreaterThan(1);
+        expect(primed.transportPages).toBe(1);
 
         let settled = primed;
         for (let probe = 0; !settled.applied && probe < 3; probe += 1) {
@@ -66,7 +72,7 @@ describe.skipIf(!rustPrereqs.ok)("rust transport: whole-array sends with a large
 
         const providerBytesBeforeLargeTail = h.lastMainWireBytes();
         const before = h.readRustPasses().length;
-        await h.sendPrompt(sessionId, `large tail send: ${h.ballast(160_000)}`, {
+        await h.sendPrompt(sessionId, `large tail send: ${h.ballast(TAIL_TOKENS)}`, {
             timeoutMs: 300_000,
         });
         const largeTail = (await h.waitForRustPasses(before + 1)).at(-1)!;
@@ -76,14 +82,13 @@ describe.skipIf(!rustPrereqs.ok)("rust transport: whole-array sends with a large
         const historyBytes = 1_000 * 1024;
         expect(smallSends.every((pass) => pass.applied)).toBe(true);
         expect(smallSends.every((pass) => pass.transportBytes > historyBytes)).toBe(true);
-        expect(smallSends.every((pass) => pass.transportPages > 1)).toBe(true);
+        expect(smallSends.every((pass) => pass.transportPages === 1)).toBe(true);
 
         expect(largeTail.applied).toBe(true);
-        expect(largeTail.transportBytes).toBeGreaterThan(historyBytes + 160_000);
-        expect(largeTail.transportPages).toBeGreaterThan(1);
-        expect(largeTail.transportBytes).toBeGreaterThan(512 * 1024);
+        expect(largeTail.transportBytes).toBeGreaterThan(historyBytes + TAIL_BYTES_FLOOR);
+        expect(largeTail.transportPages).toBe(1);
         expect(providerBytesAfterLargeTail).toBeGreaterThan(
-            providerBytesBeforeLargeTail + 512 * 1024,
+            providerBytesBeforeLargeTail + TAIL_BYTES_FLOOR,
         );
         expect(h.lastMainWireSerialized()).toContain("large tail send");
     }, 600_000);

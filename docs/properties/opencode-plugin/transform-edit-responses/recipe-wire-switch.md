@@ -116,6 +116,12 @@ against raw client bases (`wire_passthrough_recipe_matches_typed_output_not_raw_
 `recipe_matching_compares_served_payload_fields` checks that unknown envelope
 fields disappear while provider-extra changes remain significant.
 
+Preserved by #832 and scoped to the captured window. The retained applied
+output and its capture cover the window the pass sent, and a recipe that
+keeps from it publishes entry `i` at host index `boundaryIndex + i`.
+Witness: `rust-mode-window.test.ts:182` "sends the declared window in both
+representations and publishes the recipe at boundaryIndex + i".
+
 ### TE22 `delivery-disposition-follows-publication`
 
 The missing-native compatibility retry is deleted. Renamed witnesses:
@@ -191,9 +197,9 @@ members the capture verified against the retained digest.
 - `edit_recipe.rs:1192` `revision_allocator_names_each_pass_once_and_refuses_exhaustion`.
 - `lib.rs:29092` `native_attachment_reuses_transform_tag_rows_and_preserves_bytes`
   replays the served array against the native attachment.
-- `crates/daemon/tests/direct_host.rs:50` and `:133` drive a real fixture host
+- `crates/daemon/tests/direct_host.rs:50` and `:180` drive a real fixture host
   over the wire and reconstruct the served array with
-  `tests/support/applied.rs`; `:133` proves the persisted-state replay after a
+  `tests/support/applied.rs`; `:180` proves the persisted-state replay after a
   fixture restart reconstructs the same frozen m0.
 - `crates/daemon/tests/transform_canonical_memory.rs` reads project memory
   through the reconstructed array.

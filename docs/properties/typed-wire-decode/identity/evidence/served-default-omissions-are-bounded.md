@@ -97,3 +97,13 @@ behavior changes; the affected daemon-side identities are that message's
 change once for such a message. This is typed-envelope normalization of a
 daemon-built value, not one of the two R5 omissions, and is listed in the PR
 description for the owner.
+
+Update, 2026-09-27: [#833](https://github.com/ahrav/eidnara/issues/833) deletes the serialized-output per-message memo and its lookup:
+`SerializedOutputCacheEntry`, `SerializedOutputCacheSnapshot`,
+`SerializedOutputCacheStats`, `cached_or_serialize_output`, `cached_output_item`,
+`record_output_item`, `message_output_identity`, the `ServedMessage`
+`output_identity` field with `with_output_identity`, and the frozen-unit tail
+index (`by_tail_mid`, `for_tail_message`) only the memo read. Every served
+message renders through the former miss path, and `SerializedOutputCache`
+keeps only the revision-bound previous CK output. Citations of these symbols
+here are historical at their stated baseline.

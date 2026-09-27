@@ -8,6 +8,11 @@ import {
 
 /** The module facade accepts request pages up to 512 KiB. */
 export const MODULE_PAGE_MAX_BYTES = 512 * 1024;
+/**
+ * A transform body up to the daemon's 32 MiB transform limit (`MAX_TRANSFORM_FRAME_BYTES`) is sent
+ * unpaged; paging is optional (host-wire-protocol.md section 7.10.3) and costs a digest per page.
+ */
+export const MODULE_UNPAGED_TRANSFORM_MAX_BYTES = 32 * 1024 * 1024;
 /** Chunking splits large values so each message fits one page. */
 export const MODULE_ITEM_CONTINUATION_CHUNK_BYTES = 64 * 1024;
 // The module reassembles this envelope for live transform requests.
@@ -404,11 +409,12 @@ function itemByteLengthBound(value: unknown): number {
 
 export function buildPagedModuleTransformPayloads(
     body: Record<string, unknown>,
+    unpagedMaxBytes = MODULE_UNPAGED_TRANSFORM_MAX_BYTES,
 ): ModuleTransformWirePage[] {
     const unpaged = serializeJsonBody(body);
     const unpagedText = serializedJsonText(unpaged);
     const unpagedBytes = Buffer.byteLength(unpagedText, "utf8");
-    if (unpagedBytes <= MODULE_PAGE_MAX_BYTES) {
+    if (unpagedBytes <= unpagedMaxBytes) {
         return [{ page: unpaged, bytes: unpagedBytes }];
     }
     // The per-item byte bound matches its in-page bytes only after every nested value is plain JSON.

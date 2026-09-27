@@ -277,26 +277,6 @@ fn explicit_flush_on_the_additive_only_path_reports_m1_delta() {
 }
 
 #[test]
-fn identity_drift_on_a_covered_message_refuses_the_pass_without_replaying_frozen_bytes() {
-    let dir = tempfile::tempdir().unwrap();
-    let (s, mut messages) = pending(dir.path());
-    let before = s.load(SESSION).unwrap();
-    messages[1] = item("fold-target", 2, "beta, rewritten");
-    let refused = transform(
-        &s,
-        &quiet(&messages, "cfg0"),
-        &live_run("/nonexistent-docs", 0),
-    );
-    assert!(
-        matches!(refused, Err(TransformError::IdentityDrift(ref mid)) if mid == "fold-target"),
-        "{refused:?}"
-    );
-    let after = s.load(SESSION).unwrap();
-    assert_eq!(after.row_version, before.row_version);
-    assert_eq!(rendered(&s), 2);
-}
-
-#[test]
 fn a_project_memory_revision_is_a_hard_member_too() {
     let dir = tempfile::tempdir().unwrap();
     let (s, messages) = pending(dir.path());
