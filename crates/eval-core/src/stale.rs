@@ -109,7 +109,10 @@ pub struct PartText {
 /// sentence in a `<memory-updates>` block at the head of the m1 delta, where
 /// D-8 puts it; (c) appends one D-7 footer line to the stale segment's body,
 /// stale prose kept; (d) replaces the stale value in that body with the D-7
-/// marker; (e) removes it from that body.
+/// marker; (e) removes it from that body. `positive_control` is no rendering:
+/// every text part with the live value in it, the live value written as the
+/// stale one, so every served statement agrees on the stale value and a
+/// harness that can register a stale answer registers one there.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Arms {
@@ -117,6 +120,7 @@ pub struct Arms {
     pub footer: PartText,
     pub anchored_replacement: PartText,
     pub omission_oracle: PartText,
+    pub positive_control: Vec<PartText>,
 }
 
 const M0_OPEN: &str = "<session-history>";
@@ -282,7 +286,27 @@ fn arms(
             &format!("[corrected @{live_ordinal}: {key} = {live}]"),
         )),
         omission_oracle: part(replaced(text, values, "")),
+        positive_control: Vec::new(),
     }
+}
+
+/// The positive control's parts: every text part with the live value in it,
+/// the live value written as the stale one.
+fn positive_control(parts: &[(HistoryAt, &str)], pair: &FactPair) -> Vec<PartText> {
+    parts
+        .iter()
+        .filter_map(|(at, text)| {
+            let whole = ServedSpan {
+                start: 0,
+                end: text.len(),
+            };
+            let lives = occurrences(text, whole, &pair.live_value);
+            (!lives.is_empty()).then(|| PartText {
+                at: *at,
+                text: replaced(text, &lives, &pair.stale_value),
+            })
+        })
+        .collect()
 }
 
 /// Where a request serves a message: a segment of the m0 history, a segment
@@ -665,8 +689,11 @@ debug_display!(CaptureError);
 /// occurrence of the value in that body and nowhere else. The delivery is
 /// over every text part of the request.
 pub fn export_capture(capture: &StaleCapture) -> Result<StaleExport, CaptureError> {
-    for found in [&capture.schema, &capture.world.schema] {
-        if ![STALE_CAPTURE_SCHEMA, STALE_WORLD_SCHEMA].contains(&found.as_str()) {
+    for (found, expected) in [
+        (&capture.schema, STALE_CAPTURE_SCHEMA),
+        (&capture.world.schema, STALE_WORLD_SCHEMA),
+    ] {
+        if found != expected {
             return Err(CaptureError::Schema {
                 found: found.clone(),
             });
@@ -694,11 +721,13 @@ pub fn export_capture(capture: &StaleCapture) -> Result<StaleExport, CaptureErro
     // Every turn is one user and one assistant message, numbered from one.
     let ordinal = |turn: u32| 2 * u64::from(turn) + 1;
     for pair in &capture.world.pairs {
-        let task = || pair.task.clone();
-        let request = capture
-            .requests
-            .get(&pair.task)
-            .ok_or_else(|| CaptureError::MissingRequest { task: task() })?;
+        let request =
+            capture
+                .requests
+                .get(&pair.task)
+                .ok_or_else(|| CaptureError::MissingRequest {
+                    task: pair.task.clone(),
+                })?;
         let parts = text_parts(request);
         let joined = parts.iter().map(|(_, t)| *t).collect::<Vec<_>>().join("\n");
         let delivery = StaleDelivery::of(&joined, &pair.stale_value, &pair.live_value);
@@ -708,7 +737,9 @@ pub fn export_capture(capture: &StaleCapture) -> Result<StaleExport, CaptureErro
             .m1
             .as_ref()
             .map(|(at, text, _)| (*at, *text))
-            .ok_or_else(|| CaptureError::NoM1 { task: task() })?;
+            .ok_or_else(|| CaptureError::NoM1 {
+                task: pair.task.clone(),
+            })?;
         let located = served
             .segment_of(ordinal(pair.stale_turn))
             .map(|(block, at, text, segment)| {
@@ -718,7 +749,7 @@ pub fn export_capture(capture: &StaleCapture) -> Result<StaleExport, CaptureErro
             .filter(|(.., spans)| !spans.is_empty());
         let Some((stale_block, history, text, segment, stale_spans)) = located else {
             export.unlocatable.insert(
-                task(),
+                pair.task.clone(),
                 Unlocatable {
                     delivery,
                     request: request.clone(),
@@ -745,7 +776,7 @@ pub fn export_capture(capture: &StaleCapture) -> Result<StaleExport, CaptureErro
             })
             .any(|t| carries(t, &pair.stale_value));
         export.pairs.push(StalePair {
-            task: task(),
+            task: pair.task.clone(),
             question: pair.question.clone(),
             key: pair.key.clone(),
             stale_value: pair.stale_value.clone(),
@@ -757,15 +788,18 @@ pub fn export_capture(capture: &StaleCapture) -> Result<StaleExport, CaptureErro
             delivery,
             stale_elsewhere,
             history,
-            arms: arms(
-                history,
-                text,
-                segment,
-                &stale_spans,
-                m1,
-                pair,
-                restating_ordinal,
-            ),
+            arms: Arms {
+                positive_control: positive_control(&parts, pair),
+                ..arms(
+                    history,
+                    text,
+                    segment,
+                    &stale_spans,
+                    m1,
+                    pair,
+                    restating_ordinal,
+                )
+            },
             stale_spans,
             request: request.clone(),
         });
@@ -774,7 +808,7 @@ pub fn export_capture(capture: &StaleCapture) -> Result<StaleExport, CaptureErro
 }
 
 /// Merges exports of independent harness sessions: one schema, harness, and
-/// summarizer, no world twice. Task ids gain the session's one-based
+/// summarizer, no world twice, and no input that is itself a merge. Task ids gain the session's one-based
 /// position (`world-2:stale-5`), so equal per-world ids cannot collide.
 pub fn merge_exports(exports: Vec<StaleExport>) -> Result<StaleExport, CaptureError> {
     let mut exports = exports.into_iter();
@@ -795,6 +829,11 @@ pub fn merge_exports(exports: Vec<StaleExport>) -> Result<StaleExport, CaptureEr
         {
             return Err(CaptureError::Unmergeable {
                 reason: "schema, harness, or summarizer differs",
+            });
+        }
+        if export.root_seed.contains(',') {
+            return Err(CaptureError::Unmergeable {
+                reason: "an input is itself a merge",
             });
         }
         if !seeds.insert(export.root_seed.clone()) {

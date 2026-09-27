@@ -1415,19 +1415,21 @@ merge are Rust; living the world through the harness is TypeScript.
      range, so a segment that decays past P2 serves no prose. At 120 subjects
      almost every m0 segment renders at P3 or P4. A gate-A run therefore names
      a real summarizer and uses small worlds (step 4).
-   - The daemon runs with a 30-second cache TTL. After the session the driver
-     waits 40 seconds, so the first question turn is a HARD pass that
-     re-freezes m0 over every published segment, as when a user comes back to
-     a long session.
+   - The daemon runs with a 30-second cache TTL, and the driver waits 40
+     seconds after the session, as when a user comes back to it. The daemon
+     decides whether that pass re-freezes m0. The export records which block
+     served each stale statement and each restatement (`stale_block`,
+     `restatement`), so a run that stayed in m1 is visible, not assumed.
    - Each pair's question is then sent as a turn of its own. The provider
      request OpenCode sends for it is captured whole: the system prompt with
      the Eidnara guidance, the served `<session-history>` (m0) and
      `<session-history-since>` (m1) parts, the raw tail with its ordinal
      markers, the auto-search hint the host appended, and the tool
      definitions.
-   - The turn is then reverted through OpenCode, so every question is asked of
-     the session as it stood after the world. The next captured request is
-     checked to carry no earlier question.
+   - The mock replies `Let me check.`, and the turn is then reverted through
+     OpenCode, so every question is asked of the session as it stood after the
+     world. The next captured request is checked to carry neither the earlier
+     question nor that reply.
    - The daemon's stored segments are read from its store for the tier. The
      capture (`eval-stale-capture/v1`, `StaleCapture`) names the harness
      (`opencode`) and the summarizer.
@@ -1484,7 +1486,15 @@ turn is one user and one assistant message, numbered from one.
 A renderer change reaches neither the heading, a later segment's history
 ("from 34827 to 94225"), the raw tail, nor the hint, so no arm changes them.
 `stale_elsewhere` records whether the stale value is still served there once
-(d) or (e) has run.
+(d) or (e) has run. An analysis reports flagged pairs as their own stratum,
+since for them (e) is not a clean omission.
+
+`positive_control` is no rendering. It holds every text part that serves the
+live value, with the live value written as the stale one, so every served
+statement agrees on the stale value. A served model that answers the stale
+value there shows the harness and the grader can register a stale answer.
+Arms that all score zero stale answers are then a finding about the
+renderings, not a ceiling of the harness.
 
 The override sentence is:
 
@@ -1528,7 +1538,7 @@ quantities `gen/gen-statistics-golden.ts` pins.
 | `pairs[].delivery`, `pairs[].stale_elsewhere` | `StaleDelivery` over every text part of the request (history, raw tail, and hint), and whether the stale value is served outside the stale segment's body. |
 | `pairs[].history`, `pairs[].stale_spans` | The part holding the stale segment (`messages[message].content[part]`) and the value's UTF-8 byte spans in its body. |
 | `pairs[].request` | The provider request as the harness sent it: arm (a). |
-| `pairs[].arms` | Arms (b) through (e), each the one part it replaces. |
+| `pairs[].arms` | Arms (b) through (e), each the one part it replaces, and `positive_control`, the parts the control replaces. |
 | `unlocatable` | Task id to `{delivery, request}` for every pair whose stale segment serves no stale value. |
 | `stale_delivered` | Pairs, located or not, whose request carries the stale value anywhere. |
 

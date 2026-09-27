@@ -105,6 +105,9 @@ function usage(options: StaleDriverOptions, turn: number) {
     };
 }
 
+/** The mock's reply to a question turn, which the driver reverts. */
+const QUESTION_REPLY = "Let me check.";
+
 /** Waits until no summarizer firing is in flight for the session; a real model can take minutes. */
 async function quiesce(h: RustTestHarness, sessionId: string): Promise<void> {
     let quiet = 0;
@@ -199,14 +202,16 @@ export async function captureStaleWorld(
         const requests: Record<string, unknown> = {};
         let previous: string | undefined;
         for (const pair of world.pairs) {
-            h.mock.setDefault({ text: pair.live_value, usage: usage(options, world.turns.length) });
+            // The reply carries no value; the revert below removes it before the next question.
+            h.mock.setDefault({ text: QUESTION_REPLY, usage: usage(options, world.turns.length) });
             await h.sendPrompt(sessionId, pair.question);
             const body = h.mainRequests().at(-1)?.body;
             if (!body || !lastUserText(body).includes(pair.question)) {
                 throw new Error(`no captured request for ${pair.task}'s question`);
             }
-            if (previous && JSON.stringify(body.messages).includes(previous)) {
-                throw new Error(`${pair.task}'s request still carries the reverted question`);
+            const messages = JSON.stringify(body.messages);
+            if (previous && (messages.includes(previous) || messages.includes(QUESTION_REPLY))) {
+                throw new Error(`${pair.task}'s request still carries the reverted turn`);
             }
             previous = pair.question;
             requests[pair.task] = body;

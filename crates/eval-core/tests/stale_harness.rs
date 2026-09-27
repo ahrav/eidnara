@@ -392,3 +392,62 @@ fn string_content_parts_are_read_and_replaced() {
         &pair.stale_value
     ));
 }
+
+#[test]
+fn the_positive_control_writes_the_live_value_as_the_stale_one_wherever_it_is_served() {
+    let pair = pair();
+    let served = request(
+        &m0(&stale_body(&pair)),
+        &m1_with(&pair),
+        &format!("§3§ Set the {} to {}.", pair.subject, pair.live_value),
+    );
+    let exported = export_capture(&capture(served.clone(), vec![]))
+        .unwrap()
+        .pairs
+        .remove(0);
+    let at: Vec<HistoryAt> = exported
+        .arms
+        .positive_control
+        .iter()
+        .map(|p| p.at)
+        .collect();
+    assert_eq!(
+        at,
+        [
+            HistoryAt {
+                message: 0,
+                part: 1
+            },
+            HistoryAt {
+                message: 1,
+                part: 0
+            }
+        ],
+        "the m1 delta and the raw tail carry the live value; m0 does not"
+    );
+    let parts: Vec<_> = exported.arms.positive_control.iter().collect();
+    let control = with_parts(&served, &parts);
+    let everything = serde_json::to_string(&control["messages"]).unwrap();
+    assert!(!carries(&everything, &pair.live_value));
+    assert!(carries(&part(&control, 0, 1), &pair.stale_value));
+}
+
+#[test]
+fn a_merge_refuses_an_input_that_is_itself_a_merge_and_a_swapped_schema() {
+    let pair = pair();
+    let served = request(&m0(&stale_body(&pair)), M1_PLACEHOLDER, "§3§ Set it.");
+    let one = export_capture(&capture(served.clone(), vec![])).unwrap();
+    let mut two = one.clone();
+    two.root_seed = "7".to_string();
+    let merged = merge_exports(vec![one.clone(), two]).unwrap();
+    assert!(matches!(
+        merge_exports(vec![merged]),
+        Err(CaptureError::Unmergeable { .. })
+    ));
+    let mut swapped = capture(served, vec![]);
+    swapped.schema = STALE_WORLD_SCHEMA.to_string();
+    assert!(matches!(
+        export_capture(&swapped),
+        Err(CaptureError::Schema { .. })
+    ));
+}

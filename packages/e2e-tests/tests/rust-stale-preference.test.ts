@@ -31,11 +31,12 @@ interface ExportPair {
     delivery: string;
     history: { message: number; part: number };
     stale_spans: Array<{ start: number; end: number }>;
+    stale_elsewhere: boolean;
     request: { messages: Array<{ content: Array<{ text?: string }> }> };
     arms: Record<
         "precedence_line" | "footer" | "anchored_replacement" | "omission_oracle",
         PartText
-    >;
+    > & { positive_control: PartText[] };
 }
 
 function evalRunner(binary: string, args: string[]): Record<string, unknown> {
@@ -92,13 +93,13 @@ describe.skipIf(!rustPrereqs.ok || !budget)("stale preference through OpenCode a
                 const served =
                     pair.request.messages[pair.history.message]?.content[pair.history.part]?.text ??
                     "";
-                // Spans are UTF-8 byte ranges, as eval-core computes them.
+                // Spans are UTF-8 byte ranges, as eval-core computes them; every one is the value.
                 const bytes = Buffer.from(served, "utf8");
-                expect(
-                    bytes
-                        .subarray(pair.stale_spans[0]?.start, pair.stale_spans[0]?.end)
-                        .toString("utf8"),
-                ).toBe(world_pair?.stale_value ?? "");
+                for (const span of pair.stale_spans) {
+                    expect(bytes.subarray(span.start, span.end).toString("utf8")).toBe(
+                        world_pair?.stale_value ?? "",
+                    );
+                }
                 // The restating message is the ordinal every marker names: in the raw
                 // tail under its ordinal (a hint the host appended may follow), or inside a served segment whose range holds it
                 // (a segment demoted to its title serves no prose).
@@ -115,14 +116,19 @@ describe.skipIf(!rustPrereqs.ok || !budget)("stale preference through OpenCode a
                 );
                 expect(raw || folded).toBe(true);
                 const replaced = pair.arms.anchored_replacement;
-                expect(replaced?.text).toContain(
+                expect(replaced.text).toContain(
                     `[corrected @${pair.restating_ordinal}: ${pair.key} = ${pair.live_value}]`,
                 );
-                expect(replaced?.text.includes(world_pair?.stale_value ?? "")).toBe(false);
+                // (d) rewrites the stale segment's body only; the value may stay in a heading
+                // or a later segment, which `stale_elsewhere` reports.
+                if (!pair.stale_elsewhere) {
+                    expect(replaced.text.includes(world_pair?.stale_value ?? "")).toBe(false);
+                }
                 expect(pair.arms.footer.text).toContain(
                     `[corrections: ${pair.key} = ${pair.live_value} @${pair.restating_ordinal}]`,
                 );
                 expect(pair.arms.precedence_line.text).toContain("<memory-updates>");
+                expect(pair.arms.positive_control.length).toBeGreaterThan(0);
             }
         } finally {
             rmSync(root, { recursive: true, force: true });
