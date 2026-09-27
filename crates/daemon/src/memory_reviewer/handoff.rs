@@ -29,6 +29,7 @@ use crate::history_summarizer_citations::FrozenAliasTable;
 use crate::history_summarizer_validate::FactCandidate;
 
 use super::broker::QuestionTemplate;
+use super::lifecycle::{ActivationState, MemoryReviewerStatus};
 use super::steps::STEP_VERSION;
 
 /// The producer name every History Summarizer reservation carries.
@@ -44,6 +45,8 @@ pub struct HandoffTarget {
     pub project_digest: String,
     pub domain_id: String,
     pub kernel_incarnation: String,
+    /// The activation gate as the MemoryReviewer worker last evaluated it.
+    pub gate: Arc<MemoryReviewerStatus>,
 }
 
 /// What the firing carries into publication after the handoff.
@@ -260,6 +263,7 @@ enum ReservedRow {
 }
 
 fn reserved_row(
+    target: &HandoffTarget,
     request: &HandoffRequest<'_>,
     producer: &ProducerBinding,
     inputs: &CausalInputs,
@@ -288,6 +292,11 @@ fn reserved_row(
             }
             _ => ReservedRow::Done(Handoff::Settled),
         });
+    }
+    if target.gate.activation_state() != ActivationState::Open {
+        return Ok(ReservedRow::Done(Handoff::Nonadmission(
+            MemoryReviewerNonadmissionCode::MemoryReviewerUnavailable,
+        )));
     }
     let existing = match request.store.reserve_memory_reviewer_job(
         request.project,
@@ -429,7 +438,7 @@ pub fn reserve_and_stage(
         firing_id: format!("{key}#{}", firing.firing_seq),
         ordinal: chunk_ordinal,
     };
-    let job = match reserved_row(request, &producer, &inputs)? {
+    let job = match reserved_row(target, request, &producer, &inputs)? {
         ReservedRow::Job(job) => *job,
         ReservedRow::Done(handoff) => return Ok(handoff),
     };

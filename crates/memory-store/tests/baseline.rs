@@ -15,6 +15,7 @@ const EXPECTED_OBJECTS: &[(&str, &str)] = &[
     ("index", "idx_authority_route_bindings_authority"),
     ("index", "idx_changefeed_domain_seq"),
     ("index", "idx_channel1_appends_session"),
+    ("index", "idx_chunk_transcripts_session_age"),
     ("index", "idx_chunk_transcripts_session_range"),
     ("index", "idx_facade_mutation_ledger_scope_newest"),
     ("index", "idx_field_scans_batch"),
@@ -59,6 +60,7 @@ const EXPECTED_OBJECTS: &[(&str, &str)] = &[
     ("table", "cache_state"),
     ("table", "changefeed"),
     ("table", "channel1_appends"),
+    ("table", "chunk_transcript_totals"),
     ("table", "chunk_transcripts"),
     ("table", "facade_mutation_ledger"),
     ("table", "fence"),
@@ -92,7 +94,6 @@ const EXPECTED_OBJECTS: &[(&str, &str)] = &[
     ("table", "scan_domain_owners"),
     ("table", "scan_owner_copies"),
     ("table", "scan_owner_scopes"),
-    ("table", "tag_cache_generations"),
     ("table", "tags"),
     ("table", "temporal_marks"),
     ("table", "transform_session_roots"),
@@ -102,6 +103,9 @@ const EXPECTED_OBJECTS: &[(&str, &str)] = &[
     ("table", "workspace_members"),
     ("table", "workspaces"),
     ("table", "wrapup_commands"),
+    ("trigger", "chunk_transcripts_total_delete"),
+    ("trigger", "chunk_transcripts_total_insert"),
+    ("trigger", "chunk_transcripts_total_update"),
     ("trigger", "memory_reviewer_attempts_marker_immutable"),
     ("trigger", "memory_reviewer_attempts_no_delete"),
     ("trigger", "memory_reviewer_attempts_reject_secret_insert"),
@@ -135,9 +139,6 @@ const EXPECTED_OBJECTS: &[(&str, &str)] = &[
     ("trigger", "notes_ownership_delete"),
     ("trigger", "notes_ownership_insert"),
     ("trigger", "notes_ownership_update"),
-    ("trigger", "tags_cache_generation_delete"),
-    ("trigger", "tags_cache_generation_insert"),
-    ("trigger", "tags_cache_generation_update"),
 ];
 
 /// The objects `storage::open_sqlite` installs ahead of the consumer's baseline,
@@ -444,6 +445,38 @@ fn a_file_with_a_different_baseline_is_refused_as_a_baseline_mismatch() {
             MemoryStoreError::Store(StoreError::Baseline(message))
                 if message.contains("does not match the baseline digest")
         ),
+        "{error}"
+    );
+    assert_eq!(
+        std::fs::read(dir.path().join("memory.sqlite")).unwrap(),
+        before
+    );
+}
+
+/// The preceding Memory Store baseline, frozen byte for byte, and its digest. It holds the
+/// tag counter table and its three triggers in place of the chunk transcript totals.
+const PRIOR_BASELINE: &str = include_str!("fixtures/prior_baseline.sql");
+const PRIOR_BASELINE_DIGEST: &str =
+    "70babc6b334441e5f52234100ff155c9d1a76d31c4f72c678b984d40a21b5d07";
+
+/// A store laid down under the prior baseline refuses to open and is left byte-identical.
+#[test]
+fn a_store_created_under_the_prior_baseline_refuses_to_open_untouched() {
+    assert_eq!(
+        storage::baseline_digest(PRIOR_BASELINE),
+        PRIOR_BASELINE_DIGEST
+    );
+    assert_ne!(memory_store::baseline_digest(), PRIOR_BASELINE_DIGEST);
+    let dir = tempfile::tempdir().unwrap();
+    let descriptor = MemoryStore::test_descriptor(dir.path(), "eidnara-test");
+    drop(storage::open_sqlite(&descriptor, PRIOR_BASELINE).unwrap());
+    let before = std::fs::read(dir.path().join("memory.sqlite")).unwrap();
+
+    let Err(error) = MemoryStore::open(&descriptor) else {
+        panic!("a prior-baseline store must not open");
+    };
+    assert!(
+        matches!(&error, MemoryStoreError::Store(StoreError::Baseline(_))),
         "{error}"
     );
     assert_eq!(

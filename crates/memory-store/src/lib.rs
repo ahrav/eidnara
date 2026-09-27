@@ -16432,10 +16432,15 @@ fn insert_chunk_transcripts_tx(
         return Ok(());
     }
     let mut insert = tx.prepare_cached(
-        "INSERT OR REPLACE INTO chunk_transcripts
+        "INSERT INTO chunk_transcripts
            (session_id, history_segment_seq, start_ordinal, end_ordinal,
             transcript_deflate, created_at_ms)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+         ON CONFLICT(session_id, history_segment_seq) DO UPDATE SET
+            start_ordinal = excluded.start_ordinal,
+            end_ordinal = excluded.end_ordinal,
+            transcript_deflate = excluded.transcript_deflate,
+            created_at_ms = excluded.created_at_ms",
     )?;
     for (idx, history_segment) in history_segments.iter().enumerate() {
         insert.execute(params![
@@ -16453,21 +16458,32 @@ fn insert_chunk_transcripts_tx(
 
 fn evict_chunk_transcripts_tx(tx: &GuardedConn<'_>, session_id: &str) -> rusqlite::Result<()> {
     loop {
-        let total: i64 = tx.query_row(
-            "SELECT COALESCE(SUM(LENGTH(transcript_deflate)), 0)
-               FROM chunk_transcripts WHERE session_id = ?1",
-            params![session_id],
-            |r| r.get(0),
-        )?;
+        let total: i64 = tx
+            .query_row(
+                "SELECT compressed_bytes FROM chunk_transcript_totals WHERE session_id = ?1",
+                params![session_id],
+                |r| r.get(0),
+            )
+            .optional()?
+            .unwrap_or(0);
         if total <= MAX_SESSION_TRANSCRIPT_COMPRESSED_BYTES {
             return Ok(());
         }
-        tx.execute(
+        let deleted = tx.execute(
             "DELETE FROM chunk_transcripts WHERE session_id = ?1 AND history_segment_seq = (
                 SELECT history_segment_seq FROM chunk_transcripts WHERE session_id = ?1
                 ORDER BY created_at_ms ASC, history_segment_seq ASC LIMIT 1)",
             params![session_id],
         )?;
+        // The victim query finds a row while the session holds one, so a pass that deletes
+        // nothing means the session is empty and its true total is zero.
+        if deleted == 0 {
+            tx.execute(
+                "UPDATE chunk_transcript_totals SET compressed_bytes = 0 WHERE session_id = ?1",
+                params![session_id],
+            )?;
+            return Ok(());
+        }
     }
 }
 
@@ -19492,6 +19508,10 @@ mod tests {
             "INSERT INTO channel1_appends(session_id, block_id, reminder_text) VALUES (?1, 'b0', 'r')",
         ),
         (
+            "chunk_transcript_totals",
+            "INSERT INTO chunk_transcript_totals(session_id) VALUES (?1)",
+        ),
+        (
             "chunk_transcripts",
             "INSERT INTO chunk_transcripts(session_id, history_segment_seq, start_ordinal, end_ordinal, transcript_deflate, created_at_ms)
              VALUES (?1, 1, 1, 2, x'00', 1)",
@@ -19553,10 +19573,6 @@ mod tests {
         (
             "reduce_command_ledger",
             "INSERT INTO reduce_command_ledger(session_id, command_id, queued_at_ms) VALUES (?1, 'c', 1)",
-        ),
-        (
-            "tag_cache_generations",
-            "INSERT INTO tag_cache_generations(session_id) VALUES (?1)",
         ),
         (
             "tags",
@@ -24442,6 +24458,315 @@ mod tests {
                 .pending_count,
             0,
             "a rejected CAS must not leave side-channel work behind"
+        );
+    }
+
+    /// One transcript row as eviction orders it: `(created_at_ms, history_segment_seq, bytes)`.
+    type TranscriptRow = (i64, i64, i64);
+
+    /// The per-session transcript cap the eviction contract names, written out as a literal.
+    const TRANSCRIPT_CAP: i64 = 8_388_608;
+
+    fn transcript_rows(store: &MemoryStore, session_id: &str) -> Vec<TranscriptRow> {
+        store
+            .inner
+            .with_conn(|conn| {
+                conn.prepare(
+                    "SELECT created_at_ms, history_segment_seq, LENGTH(transcript_deflate)
+                       FROM chunk_transcripts WHERE session_id = ?1
+                      ORDER BY created_at_ms, history_segment_seq",
+                )?
+                .query_map(params![session_id], |r| {
+                    Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+                })?
+                .collect()
+            })
+            .unwrap()
+    }
+
+    fn transcript_total(store: &MemoryStore, session_id: &str) -> Option<i64> {
+        store
+            .inner
+            .with_conn(|conn| {
+                conn.query_row(
+                    "SELECT compressed_bytes FROM chunk_transcript_totals WHERE session_id = ?1",
+                    params![session_id],
+                    |r| r.get(0),
+                )
+                .optional()
+            })
+            .unwrap()
+    }
+
+    fn assert_transcripts(store: &MemoryStore, session_id: &str, expected: &[TranscriptRow]) {
+        let rows = transcript_rows(store, session_id);
+        assert_eq!(rows, expected, "{session_id} rows");
+        let sum: i64 = rows.iter().map(|row| row.2).sum();
+        assert_eq!(
+            transcript_total(store, session_id).unwrap_or(0),
+            sum,
+            "{session_id} total"
+        );
+        assert!(sum <= TRANSCRIPT_CAP, "{session_id}");
+    }
+
+    fn model_publish(model: &mut Vec<TranscriptRow>, written: &[TranscriptRow]) {
+        for row in written {
+            model.retain(|kept| kept.1 != row.1);
+            model.push(*row);
+        }
+        model.sort_unstable();
+        while model.iter().map(|row| row.2).sum::<i64>() > TRANSCRIPT_CAP {
+            model.remove(0);
+        }
+    }
+
+    /// Writes one publication's transcript rows through the publisher's writer and returns
+    /// them as the model records them.
+    fn publish_transcripts(
+        store: &MemoryStore,
+        session_id: &str,
+        first_sequence: i64,
+        count: i64,
+        created_at: i64,
+        bytes: usize,
+    ) -> Vec<TranscriptRow> {
+        let segments: Vec<StoredHistorySegment> = (0..count)
+            .map(|idx| StoredHistorySegment {
+                start_message: first_sequence + idx,
+                end_message: first_sequence + idx,
+                created_at,
+                ..Default::default()
+            })
+            .collect();
+        let blobs = ChunkTranscriptBlobs {
+            transcript_deflate: vec![0; bytes],
+        };
+        store
+            .inner
+            .with_conn_fenced(|tx| {
+                insert_chunk_transcripts_tx(tx, session_id, first_sequence, &segments, &blobs)
+            })
+            .unwrap();
+        let len = i64::try_from(bytes).unwrap();
+        (0..count)
+            .map(|idx| (created_at, first_sequence + idx, len))
+            .collect()
+    }
+
+    #[test]
+    fn transcript_total_equals_the_stored_sum_after_every_writer_and_eviction() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
+        let publish = |session_id, first_sequence, count, created_at, bytes| {
+            publish_transcripts(&store, session_id, first_sequence, count, created_at, bytes)
+        };
+        let run = |sql: &str| {
+            store
+                .inner
+                .with_conn_fenced(|tx| tx.execute(sql, []))
+                .unwrap()
+        };
+        const LARGE: usize = 200 * 1024;
+        let mut a = Vec::new();
+        let mut b = Vec::new();
+
+        model_publish(&mut a, &publish("A", 1, 20, 5_000, LARGE));
+        assert_transcripts(&store, "A", &a);
+        assert_eq!(a.len(), 20, "4000 KiB stays under the cap");
+        // B holds a sequence that A's eviction removes, so a victim query that drops its
+        // session predicate deletes B's row.
+        model_publish(&mut b, &publish("B", 21, 1, 1_000, 10));
+        assert_transcripts(&store, "B", &b);
+
+        // A 28-segment batch past 8 MiB whose clock reads older than the rows before it:
+        // the victims are the oldest by `created_at_ms`, then by sequence, so the batch's
+        // own first rows go first.
+        model_publish(&mut a, &publish("A", 21, 28, 4_000, LARGE));
+        assert_transcripts(&store, "A", &a);
+        assert_eq!(a.first().map(|row| row.1), Some(29));
+        assert_eq!(a.len(), 40);
+        assert_transcripts(&store, "B", &b);
+
+        // A republished sequence takes the conflict path of the insert.
+        model_publish(&mut a, &publish("A", 10, 1, 6_000, 50 * 1024));
+        assert_transcripts(&store, "A", &a);
+
+        run("UPDATE chunk_transcripts SET session_id = 'B'
+              WHERE session_id = 'A' AND history_segment_seq = 40");
+        let moved = a.iter().position(|row| row.1 == 40).unwrap();
+        b.push(a.remove(moved));
+        b.sort_unstable();
+        assert_transcripts(&store, "A", &a);
+        assert_transcripts(&store, "B", &b);
+
+        run("DELETE FROM chunk_transcripts WHERE session_id = 'A' AND history_segment_seq > 30");
+        a.retain(|row| row.1 <= 30);
+        assert_transcripts(&store, "A", &a);
+
+        run("INSERT INTO chunk_transcripts (
+                 session_id, history_segment_seq, start_ordinal, end_ordinal,
+                 transcript_deflate, created_at_ms
+             )
+             SELECT 'C', history_segment_seq, start_ordinal, end_ordinal,
+                    transcript_deflate, created_at_ms
+               FROM chunk_transcripts WHERE session_id = 'A'");
+        assert_transcripts(&store, "C", &a);
+
+        run("DELETE FROM chunk_transcripts WHERE session_id = 'C'");
+        assert_transcripts(&store, "C", &[]);
+
+        store.delete_session("A", "/project").unwrap();
+        assert_transcripts(&store, "A", &[]);
+        assert_eq!(transcript_total(&store, "A"), None);
+        assert_transcripts(&store, "B", &b);
+
+        // Exactly the cap stays; one byte past it evicts the oldest row.
+        let mut d = Vec::new();
+        model_publish(&mut d, &publish("D", 1, 32, 1_000, 256 * 1024));
+        assert_transcripts(&store, "D", &d);
+        assert_eq!(transcript_total(&store, "D"), Some(TRANSCRIPT_CAP));
+        model_publish(&mut d, &publish("D", 33, 1, 2_000, 1));
+        assert_transcripts(&store, "D", &d);
+        assert_eq!(d.first().map(|row| row.1), Some(2));
+    }
+
+    #[test]
+    fn a_transcript_delete_reads_no_column_stored_at_or_after_the_blob() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
+        let (root, blob, program) = store
+            .inner
+            .with_conn_fenced(|tx| {
+                let root: i64 = tx.query_row(
+                    "SELECT rootpage FROM sqlite_master
+                      WHERE type = 'table' AND name = 'chunk_transcripts'",
+                    [],
+                    |r| r.get(0),
+                )?;
+                // SQLite records store ordinary and STORED generated columns in declaration
+                // order; `hidden = 2` identifies VIRTUAL generated columns.
+                let blob: i64 = tx.query_row(
+                    "SELECT COUNT(*) FROM pragma_table_xinfo('chunk_transcripts')
+                      WHERE hidden <> 2
+                        AND cid < (SELECT cid FROM pragma_table_xinfo('chunk_transcripts')
+                                    WHERE name = 'transcript_deflate')",
+                    [],
+                    |r| r.get(0),
+                )?;
+                let program: Vec<(i64, String, i64, i64)> = tx
+                    .prepare("EXPLAIN DELETE FROM chunk_transcripts WHERE session_id = ?1")?
+                    .query_map(params!["A"], |r| {
+                        Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+                    })?
+                    .collect::<rusqlite::Result<_>>()?;
+                Ok((root, blob, program))
+            })
+            .unwrap();
+        // EXPLAIN lists trigger subprograms after the main program, each restarting at address 0.
+        let main: Vec<_> = program
+            .iter()
+            .enumerate()
+            .take_while(|(index, op)| *index == 0 || op.0 > program[index - 1].0)
+            .map(|(_, op)| op)
+            .collect();
+        let table_cursors: Vec<i64> = main
+            .iter()
+            .filter(|op| (op.1 == "OpenWrite" || op.1 == "OpenRead") && op.3 == root)
+            .map(|op| op.2)
+            .collect();
+        assert!(!table_cursors.is_empty(), "{main:?}");
+        let reads: Vec<i64> = main
+            .iter()
+            .filter(|op| op.1 == "Column" && table_cursors.contains(&op.2))
+            .map(|op| op.3)
+            .collect();
+        assert!(!reads.is_empty(), "{main:?}");
+        assert!(
+            reads.iter().all(|&column| column < blob),
+            "the delete reads stored columns {reads:?}; transcript_deflate is stored at {blob}"
+        );
+    }
+
+    #[test]
+    fn eviction_against_a_total_above_its_rows_terminates() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
+        publish_transcripts(&store, "A", 1, 4, 1_000, 1024);
+        store
+            .inner
+            .with_conn_fenced(|tx| {
+                tx.execute(
+                    "UPDATE chunk_transcript_totals SET compressed_bytes = compressed_bytes + ?1
+                      WHERE session_id = 'A'",
+                    params![2 * TRANSCRIPT_CAP],
+                )
+            })
+            .unwrap();
+        let (done, finished) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            publish_transcripts(&store, "A", 5, 1, 2_000, 1024);
+            let _ = done.send(store);
+        });
+        let store = finished
+            .recv_timeout(std::time::Duration::from_secs(30))
+            .expect("eviction returns once the session's rows are exhausted");
+        assert_transcripts(&store, "A", &[]);
+        assert_eq!(transcript_total(&store, "A"), Some(0));
+    }
+
+    fn seed_tags(store: &MemoryStore, session_id: &str, count: i64) {
+        store
+            .inner
+            .with_conn_fenced(|tx| {
+                tx.execute(
+                    "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < ?2)
+                     INSERT INTO tags(
+                         session_id, tag_number, block_id, kind, token_count,
+                         created_at_ms, source_bytes
+                     )
+                     SELECT ?1, i, 'b' || i, 'message', i * 3, 1000 + i, CAST('src' || i AS BLOB)
+                       FROM n",
+                    params![session_id, count],
+                )
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn a_bulk_tag_delete_costs_work_linear_in_its_tags() {
+        let delete_work = |tags: i64| -> u64 {
+            let dir = tempfile::tempdir().unwrap();
+            let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
+            seed_tags(&store, "bulk", tags);
+            seed_tags(&store, "kept", 7);
+            assert_eq!(
+                store.load_tags_for_session("bulk").unwrap().len(),
+                usize::try_from(tags).unwrap()
+            );
+            let kept = store.load_tags_for_session("kept").unwrap();
+            assert!(
+                kept.iter()
+                    .all(|row| row.created_at_ms > 0 && !row.source_bytes.is_empty())
+            );
+            store.start_statement_work_ledger();
+            store.delete_session("bulk", "/project").unwrap();
+            let work = store.take_statement_work();
+            assert!(store.load_tags_for_session("bulk").unwrap().is_empty());
+            assert_eq!(store.load_tags_for_session("kept").unwrap(), kept);
+            let tag_delete = work
+                .iter()
+                .find(|run| run.sql.starts_with("DELETE FROM \"tags\""))
+                .expect("the ledger records the tag delete");
+            assert!(tag_delete.vm_steps > u64::try_from(tags).unwrap());
+            work.iter().map(|run| run.vm_steps).sum()
+        };
+        let small = delete_work(10_000);
+        let large = delete_work(100_000);
+        println!("delete_session vm_steps: 10k tags = {small}, 100k tags = {large}");
+        assert!(
+            large <= small * 11,
+            "100k tags cost {large} steps, more than 11 x {small}"
         );
     }
 

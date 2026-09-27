@@ -752,6 +752,44 @@ async fn a_closed_gate_reports_the_mismatched_term_and_its_live_value_once_per_c
     assert_eq!(rig.status.closed_reason(), None);
 }
 
+/// The Memory Store baseline digest of the preceding store baseline.
+const PRIOR_MEMSTORE_BASELINE_DIGEST: &str =
+    "70babc6b334441e5f52234100ff155c9d1a76d31c4f72c678b984d40a21b5d07";
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_record_written_for_the_prior_memory_store_baseline_closes_the_gate_naming_the_term() {
+    // The worker logs exactly the reason it records, once per change of reason.
+    let rig = Rig::open().await;
+    let worker = rig.worker();
+    let cancel = CancellationToken::new();
+    assert_ne!(
+        memory_store::baseline_digest(),
+        PRIOR_MEMSTORE_BASELINE_DIGEST
+    );
+    let mut record = rig.activation_record();
+    record["memstore_baseline_digest"] = serde_json::json!(PRIOR_MEMSTORE_BASELINE_DIGEST);
+    rig.write_activation_record(record);
+    assert_eq!(worker.pass(&cancel).await, 0);
+    assert_eq!(
+        rig.status.reported().activation_state.0,
+        ActivationState::Closed("identity_mismatch")
+    );
+    assert_eq!(
+        rig.status.closed_reason(),
+        Some(format!(
+            "activation record names another memory store baseline; the live value is {}",
+            memory_store::baseline_digest()
+        ))
+    );
+
+    rig.write_activation();
+    assert_eq!(worker.pass(&cancel).await, 0, "no job is ready");
+    assert_eq!(
+        rig.status.reported().activation_state.0,
+        ActivationState::Open
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_gate_stays_closed_until_the_host_has_derived_the_credential_identities() {
     // The record names the credential by the keyed identity the host derives once the incarnation key exists; before that nothing can vouch for the named credential, so a matching record must not open the gate.
