@@ -192,4 +192,6 @@ keeps only the revision-bound previous CK output. Citations of these symbols
 here are historical at their stated baseline.
 It deletes `serialized_output_cache_revert_epoch_bump_evicts_session` with the
 entries it checked; `SerializedOutputCache::take_previous_output` still refuses
-an output recorded under another revert epoch. The record is invalidated.
+an output recorded under another revert epoch, which
+`serialized_output_cache_take_under_a_new_epoch_returns_nothing` pins. The
+record is invalidated.

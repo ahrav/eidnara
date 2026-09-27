@@ -75,7 +75,7 @@ use crate::wire::{
 
 /// Maximum CAS retries before returning a conflict.
 /// On a shared store, each retry reloads state and recomputes the pass.
-const MAX_CAS_RETRIES: u32 = 8;
+pub(crate) const MAX_CAS_RETRIES: u32 = 8;
 /// The transform application revision this daemon serves (`docs/host-wire-protocol.md` 7.10).
 pub const TRANSFORM_REVISION: u64 = 3;
 
@@ -368,7 +368,7 @@ impl<'de> Deserialize<'de> for ServedMessage {
 }
 
 #[derive(Debug)]
-struct SerializedOutputSession {
+pub(crate) struct SerializedOutputSession {
     revert_epoch: u64,
     retained_bytes: usize,
     previous_output: (crate::edit_recipe::Revision, Arc<Vec<ServedMessage>>),
@@ -421,11 +421,13 @@ impl SerializedOutputCache {
         (self.retained_bytes, self.sessions.len())
     }
 
-    pub(crate) fn remove(&mut self, session_id: &str) {
-        if let Some(session) = self.sessions.remove(session_id) {
+    pub(crate) fn remove(&mut self, session_id: &str) -> Option<SerializedOutputSession> {
+        let session = self.sessions.remove(session_id);
+        if let Some(session) = &session {
             self.retained_bytes = self.retained_bytes.saturating_sub(session.retained_bytes);
         }
         self.lru.retain(|candidate| candidate != session_id);
+        session
     }
 
     /// Hands out the retained applied output for this pass's recipe and clears it, so a pass that
@@ -435,11 +437,9 @@ impl SerializedOutputCache {
         session_id: &str,
         revert_epoch: u64,
     ) -> Option<(crate::edit_recipe::Revision, Arc<Vec<ServedMessage>>)> {
-        let epoch = self.sessions.get(session_id)?.revert_epoch;
-        let session = self.sessions.remove(session_id)?;
-        self.retained_bytes = self.retained_bytes.saturating_sub(session.retained_bytes);
-        self.lru.retain(|candidate| candidate != session_id);
-        (epoch == revert_epoch).then_some(session.previous_output)
+        self.remove(session_id)
+            .filter(|session| session.revert_epoch == revert_epoch)
+            .map(|session| session.previous_output)
     }
 
     /// Retains this pass's ordered output as the next request's `previous` source, evicting the
@@ -1777,13 +1777,11 @@ pub(crate) fn transform_with_projection(
 ) -> Result<TransformWithProjection, TransformError> {
     let mut window = tests::plugin_window(store, req);
     resolve_window(store, &mut window)?;
-    let req = &window;
-    let result =
-        apply_once_with_estimator(store, req, ctx, crate::token_cache::cached_estimate_tokens);
-    record_stable_pass_trace(store, req, &result);
-    result
+    transform_with_projection_cached(store, &window, ctx)
 }
 
+/// The production pipeline entry. The name is historical: the pass takes no cache now, and the
+/// property catalogs cite it by this name.
 pub(crate) fn transform_with_projection_cached(
     store: &MemoryStore,
     req: &TransformRequest,
@@ -1963,9 +1961,17 @@ fn apply_once_with_estimator(
                 .as_deref()
                 .is_some_and(|coverage| coverage.resolved.resolution == NO_SURVIVOR)
         {
-            reset_no_survivor(store, &req.session_id, coverage_row_version, attempt)?;
-            attempt += 1;
-            continue;
+            // A committed reset leaves no coverage, so it does not consume a retry.
+            match reset_no_survivor(store, &req.session_id, coverage_row_version) {
+                Ok(()) => continue,
+                Err(TransformError::Store(MemoryStoreError::CasConflict { .. }))
+                    if attempt < MAX_CAS_RETRIES =>
+                {
+                    attempt += 1;
+                    continue;
+                }
+                Err(error) => return Err(error),
+            }
         }
         match apply_once(
             store,
@@ -2014,32 +2020,37 @@ const NO_SURVIVOR: crate::window_coverage::Resolution =
 /// the first anchor (spec D10): the `session.recomp` reset, after which the same request
 /// resolves again as a first pass. The host already removed that history, and every segment
 /// writer appends at the newest sequence or removes a suffix, so no anchor can return. A CAS
-/// conflict re-resolves like any other; the next resolution decides again.
+/// conflict re-resolves like any other; the next resolution decides again. Unlike
+/// `session.recomp`, this leaves the handler caches alone: each per-session handler cache must
+/// stay valid across a `revert_epoch` bump, by an epoch check or a content hash.
 fn reset_no_survivor(
     store: &MemoryStore,
     session_id: &str,
     row_version: Option<u64>,
-    attempt: u32,
 ) -> Result<(), TransformError> {
     // The reset's CAS fails if a writer moved the row after this read, so the range is exact.
-    let removed = store.history_segment_ends(session_id)?;
+    let range = removed_sequence_range(store.history_segment_ends(session_id)?);
     #[cfg(test)]
     run_transform_attempt_hook(session_id);
-    match store.reset_session_for_recomp(session_id, row_version) {
-        Ok(reset) => {
-            let range = removed.map_or_else(
-                || "none".to_string(),
-                |(oldest, newest)| format!("{}..={}", oldest.sequence, newest.sequence),
-            );
-            eprintln!(
-                "daemon: revert before the first anchor reset {session_id}: removed history_segment sequences {range}; epoch {}",
-                reset.revert_epoch
-            );
-            Ok(())
-        }
-        Err(MemoryStoreError::CasConflict { .. }) if attempt < MAX_CAS_RETRIES => Ok(()),
-        Err(error) => Err(error.into()),
-    }
+    let reset = store.reset_session_for_recomp(session_id, row_version)?;
+    eprintln!(
+        "daemon: revert before the first anchor reset {session_id}: removed history_segment sequences {range}; epoch {}",
+        reset.revert_epoch
+    );
+    Ok(())
+}
+
+/// The logged `history_segments` sequence range a reset deletes.
+pub(crate) fn removed_sequence_range(
+    ends: Option<(
+        memory_store::HistorySegmentEdge,
+        memory_store::HistorySegmentEdge,
+    )>,
+) -> String {
+    ends.map_or_else(
+        || "none".to_string(),
+        |(oldest, newest)| format!("{}..={}", oldest.sequence, newest.sequence),
+    )
 }
 
 /// Resolves `req`'s submitted window against one coverage snapshot (spec D2, D10, D11): refuses
@@ -2155,6 +2166,8 @@ type TransformAttemptHook = Arc<dyn Fn() + Send + Sync>;
 static TRANSFORM_ATTEMPT_HOOKS: OnceLock<Mutex<HashMap<String, TransformAttemptHook>>> =
     OnceLock::new();
 
+/// Installs a one-shot hook for `session_id`. It fires before the store write of the
+/// no-survivor reset or of a transform commit, whichever the session reaches first.
 #[cfg(test)]
 pub(crate) fn install_transform_attempt_hook(
     session_id: &str,
@@ -3974,7 +3987,6 @@ fn apply_once(
         materialize_reason =
             lineage_anchor_failure.then_some(MaterializeReason::LineageAnchorMismatch);
     }
-    prune_block_identities(&mut meta, req, plan);
 
     let is_provider_prefix_mutation_pass = matches!(
         plan,
@@ -4952,6 +4964,8 @@ fn apply_once(
         ctx.now_ms,
         first_fold_due,
     );
+    // After the pressure refold, so the HARD that completes a revert prunes (spec D12).
+    prune_block_identities(&mut meta, req, plan);
     let state_changed = core != loaded.core || meta != loaded.meta;
     if state_changed {
         meta.last_committed_pass_at_ms = ctx.now_ms;
@@ -5226,22 +5240,23 @@ fn block_identity_hash_prefix(vector: &[BlockIdentity]) -> String {
     wire::fingerprint(&serialized).chars().take(12).collect()
 }
 
-/// Keeps only the processed window's identities (spec D12), inside the pass's meta CAS. A revert
-/// keeps the whole map until the HARD that completes it. A writer that loses the CAS reloads the
-/// map with the row, so it never restores identities another commit pruned.
+/// Keeps only the submitted window's identities (spec D12), inside the pass's meta CAS. The
+/// submitted window is the resolved messages plus any cut prefix, the window D10 resolves
+/// against. A revert keeps the whole map until the HARD that completes it. A writer that loses
+/// the CAS reloads the map with the row, so it never restores identities another commit pruned.
 fn prune_block_identities(meta: &mut ModuleMeta, req: &TransformRequest, plan: PassPlan) {
+    let coverage = req.coverage.as_deref();
     let revert = matches!(
-        req.coverage
-            .as_deref()
-            .map(|coverage| coverage.resolved.resolution),
+        coverage.map(|coverage| coverage.resolved.resolution),
         Some(crate::window_coverage::Resolution::Revert { .. })
     );
     if revert && !matches!(plan, PassPlan::Hard | PassPlan::MigrateHard) {
         return;
     }
-    let window: HashSet<&str> = req
-        .messages
+    let cut_prefix = coverage.map_or(&[][..], |coverage| &coverage.cut_prefix[..]);
+    let window: HashSet<&str> = cut_prefix
         .iter()
+        .chain(&req.messages)
         .map(|message| message.mid.as_str())
         .collect();
     meta.block_identity_by_mid
@@ -10561,15 +10576,9 @@ fn build_output_with_tags(
             continue;
         }
 
-        let lineage_anchor_exempt = meta
-            .anchor_block_id
-            .as_deref()
-            .and_then(split_block_id)
-            .is_some_and(|(anchor_mid, _)| anchor_mid == msg.mid);
-        let mutation_exempt =
-            mutation_exempt_mid == Some(msg.mid.as_str()) || lineage_anchor_exempt;
+        let mutation_exempt = mutation_exempt_mid == Some(msg.mid.as_str()) || keep_lineage_anchor;
         let reasoning_mutation_exempt =
-            reasoning_mutation_exempt_mid == Some(msg.mid.as_str()) || lineage_anchor_exempt;
+            reasoning_mutation_exempt_mid == Some(msg.mid.as_str()) || keep_lineage_anchor;
         let trailing_blank_mutation_exempt =
             reasoning_mutation_exempt_mid == Some(msg.mid.as_str());
         let first_assistant_in_run = msg.ck.role == "assistant" && !prev_assistant;
@@ -19720,6 +19729,12 @@ pub(crate) mod tests {
         assert_eq!(after_arm.core.boundary_id, before_absent.core.boundary_id);
         assert!(!after_arm.core.reconcile_pending);
         assert_eq!(after_arm.meta.revert_epoch, before_absent.meta.revert_epoch);
+        // A pass-through commit does not prune identities (spec D12).
+        assert!(!before_absent.meta.block_identity_by_mid.is_empty());
+        assert_eq!(
+            after_arm.meta.block_identity_by_mid,
+            before_absent.meta.block_identity_by_mid
+        );
         assert_eq!(
             s.load_history_segments("ses").unwrap(),
             before_history_segments
@@ -27862,6 +27877,36 @@ pub(crate) mod tests {
             before,
             "taking the output releases its charge"
         );
+    }
+
+    /// A take under a later revert epoch clears the entry and hands out nothing.
+    #[test]
+    fn serialized_output_cache_take_under_a_new_epoch_returns_nothing() {
+        let mut cache = SerializedOutputCache::new(1024 * 1024);
+        let output = Arc::new(vec![ServedMessage::from_message(
+            WireMessage::synthetic_user_text("served"),
+        )]);
+        let revision = crate::edit_recipe::Revision::parse("rev-1").unwrap();
+        cache.record_previous_output("ses", 3, revision, output);
+        assert!(cache.take_previous_output("ses", 4).is_none());
+        assert_eq!(cache.metrics(), (0, 0));
+    }
+
+    /// Under a budget that fits one output, a second session's record evicts the first.
+    #[test]
+    fn serialized_output_cache_evicts_the_least_recently_recorded_session() {
+        let output = || {
+            Arc::new(vec![ServedMessage::from_message(
+                WireMessage::synthetic_user_text("served"),
+            )])
+        };
+        let revision = || crate::edit_recipe::Revision::parse("rev-1").unwrap();
+        let mut cache = SerializedOutputCache::new(previous_output_retained_bytes(&output()));
+        cache.record_previous_output("a", 1, revision(), output());
+        cache.record_previous_output("b", 1, revision(), output());
+        assert_eq!(cache.metrics().1, 1);
+        assert!(cache.take_previous_output("a", 1).is_none());
+        assert!(cache.take_previous_output("b", 1).is_some());
     }
 
     fn seed_fake_compaction_prior(store: &MemoryStore, key: &str) {

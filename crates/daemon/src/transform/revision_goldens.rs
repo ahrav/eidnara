@@ -438,16 +438,26 @@ async fn revision_3_replays_the_revision_2_goldens() {
         let mut plugin = Plugin::default();
         let mut fresh = None;
         let mut refused = false;
+        let mut tags_before = Vec::new();
+        let mut pre_reset_tags = Vec::new();
         for (index, op) in ops.iter().copied().enumerate() {
             host.apply(op, &store);
             let response = plugin.pass(&handler, &host).await;
             let actual = step(op, &response, &store);
             if golden["steps"][index]["action"] == "PASSTHROUGH" && fresh.is_none() {
                 fresh = Some((golden_handler(), Plugin::default()));
+                pre_reset_tags = std::mem::take(&mut tags_before);
             }
+            tags_before = actual["tags"].as_array().unwrap().clone();
             refused |= golden["steps"][index]["code"] == "transform_failed";
             if refused && fresh.is_none() {
+                // Covered drift is served (spec D25): the host messages after the boundary.
                 assert_eq!(actual["status"], "ok", "{name} step {index} ({op:?})");
+                assert_eq!(
+                    served_mids(&actual["served"]),
+                    tail_mids(&host, &response["boundary"]),
+                    "{name} step {index} ({op:?}) served"
+                );
                 continue;
             }
             let expected = match fresh.as_mut() {
@@ -460,6 +470,12 @@ async fn revision_3_replays_the_revision_2_goldens() {
             for field in ["op", "status", "code", "action", "served", "m0", "tags"] {
                 if fresh.is_some() && field == "tags" {
                     // Tag rows are session-wide and outlive the reset, so tag numbers continue.
+                    assert_minted_after_reset(
+                        &pre_reset_tags,
+                        &actual[field],
+                        &expected[field],
+                        &format!("{name} step {index} ({op:?})"),
+                    );
                     continue;
                 }
                 if fresh.is_some() && field == "served" {
@@ -477,6 +493,65 @@ async fn revision_3_replays_the_revision_2_goldens() {
             }
         }
     }
+}
+
+/// After a reset the pre-reset tag rows stay as they were, and the rows minted since are what a
+/// fresh session mints for blocks the pre-reset rows do not already tag, numbered uniquely above
+/// every pre-reset number.
+fn assert_minted_after_reset(pre: &[Value], actual: &Value, fresh: &Value, at: &str) {
+    let actual = actual.as_array().unwrap();
+    assert!(pre.iter().all(|row| actual.contains(row)), "{at} tags");
+    let minted: Vec<&Value> = actual.iter().filter(|row| !pre.contains(row)).collect();
+    let floor = pre
+        .iter()
+        .filter_map(|row| row[0].as_i64())
+        .max()
+        .unwrap_or(0);
+    let numbers: HashSet<i64> = minted.iter().filter_map(|row| row[0].as_i64()).collect();
+    assert_eq!(numbers.len(), minted.len(), "{at} tag numbers");
+    assert!(numbers.iter().all(|n| *n > floor), "{at} tag numbers");
+    let blank = |row: &Value| json!([row[1], row[2]]);
+    let tagged: Vec<Value> = pre.iter().map(blank).collect();
+    let sorted = |mut rows: Vec<Value>| {
+        rows.sort_by_key(Value::to_string);
+        rows
+    };
+    let expected = fresh
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(blank)
+        .filter(|row| !tagged.contains(row))
+        .collect();
+    assert_eq!(
+        sorted(minted.into_iter().map(blank).collect()),
+        sorted(expected),
+        "{at} tags"
+    );
+}
+
+/// The harness ids of a served array's non-synthetic messages.
+fn served_mids(served: &Value) -> Vec<String> {
+    served
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|message| message["meta"]["synthetic"] != true)
+        .map(|message| message["meta"]["harness_id"].as_str().unwrap().to_string())
+        .collect()
+}
+
+/// The host's mids after `boundary`, or all of them under a `null` boundary.
+fn tail_mids(host: &Host, boundary: &Value) -> Vec<String> {
+    let after = host
+        .messages
+        .iter()
+        .position(|(mid, _, _)| boundary["mid"] == *mid)
+        .map_or(0, |at| at + 1);
+    host.messages[after..]
+        .iter()
+        .map(|(mid, _, _)| mid.clone())
+        .collect()
 }
 
 /// `served` as JSON with every `§<digits>§` tag number blanked.

@@ -185,16 +185,16 @@ pub fn seed_active_summarizer(store: &MemoryStore, session_id: &str) {
 /// Deterministic xorshift64* generator for synthetic row content.
 ///
 /// This generator is reproducible, not cryptographically secure.
-pub(crate) struct Rng(u64);
+struct Rng(u64);
 
 impl Rng {
     /// Creates a generator, mapping seed zero to one to avoid the absorbing state.
-    pub fn new(seed: u64) -> Self {
+    fn new(seed: u64) -> Self {
         Self(seed.max(1))
     }
 
     /// Advances the generator and returns the next 64-bit value.
-    pub fn next(&mut self) -> u64 {
+    fn next(&mut self) -> u64 {
         // xorshift64* — deterministic, dependency-free.
         let mut x = self.0;
         x ^= x >> 12;
@@ -209,7 +209,7 @@ impl Rng {
     /// # Panics
     ///
     /// Panics when `items` is empty.
-    pub fn pick<'a, T>(&mut self, items: &'a [T]) -> &'a T {
+    fn pick<'a, T>(&mut self, items: &'a [T]) -> &'a T {
         &items[(self.next() as usize) % items.len()]
     }
 }

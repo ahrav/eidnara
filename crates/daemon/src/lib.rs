@@ -6289,6 +6289,8 @@ impl HandlerCore {
                 };
             }
         };
+        // The transform's no-survivor reset skips these clears, so each cache must also stay
+        // valid across the `revert_epoch` bump alone.
         self.serialized_outputs
             .lock()
             .expect("serialized output cache mutex")
