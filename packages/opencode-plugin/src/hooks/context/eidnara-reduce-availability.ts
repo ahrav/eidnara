@@ -105,39 +105,11 @@ function verdictFromToolsMap(tools: unknown, toolName: string): boolean | null {
 }
 
 /**
- * The resolver prefers the in-memory transform message array over the OpenCode DB.
- * The resolver caches verdicts derived from the first user message.
- */
-function resolveToolAvailabilityFromMessages(
-    sessionId: string,
-    toolName: string,
-    messages: ReadonlyArray<{ info?: { role?: string; tools?: unknown } }>,
-): ToolAvailabilityVerdict {
-    if (toolName === EIDNARA_REDUCE_TOOL && !eidnaraReduceRegisteredGlobally) {
-        return { callable: false, frozen: true };
-    }
-    const key = cacheKey(toolName, sessionId);
-    const cached = availabilityBySession.get(key);
-    if (cached !== undefined) return { callable: cached, frozen: true };
-
-    for (const message of messages) {
-        if (message.info?.role !== "user") continue;
-        // First user message decides: explicit signal, or no-signal → available.
-        // The first user message always produces a frozen verdict.
-        const verdict = verdictFromToolsMap(message.info.tools, toolName) ?? true;
-        availabilityBySession.set(key, verdict);
-        return { callable: verdict, frozen: true };
-    }
-    // When no user message exists, the resolver fails open without freezing so the first user message can set the verdict.
-    return { callable: true, frozen: false };
-}
-
-/**
  * The resolver reads the OpenCode DB and fails open when it is unavailable or unreadable.
  * read fails.
  */
 function resolveToolAvailability(sessionId: string, toolName: string): ToolAvailabilityVerdict {
-    // Process-global registration override (see resolveToolAvailabilityFromMessages).
+    // Process-global registration override: an unregistered tool is never callable.
     if (toolName === EIDNARA_REDUCE_TOOL && !eidnaraReduceRegisteredGlobally) {
         return { callable: false, frozen: true };
     }
@@ -178,13 +150,6 @@ function resolveToolAvailability(sessionId: string, toolName: string): ToolAvail
 /** Drop a cached verdict for one tool of one session (test/reset helper). */
 function clearToolAvailability(sessionId: string, toolName: string): void {
     availabilityBySession.delete(cacheKey(toolName, sessionId));
-}
-
-export function resolveEidnaraReduceAvailabilityFromMessages(
-    sessionId: string,
-    messages: ReadonlyArray<{ info?: { role?: string; tools?: unknown } }>,
-): EidnaraReduceAvailabilityVerdict {
-    return resolveToolAvailabilityFromMessages(sessionId, EIDNARA_REDUCE_TOOL, messages);
 }
 
 export function resolveEidnaraReduceAvailability(
@@ -437,13 +402,6 @@ export function hasLoggedEidnaraReducePermissionDeny(sessionId: string): boolean
 
 export function markEidnaraReducePermissionDenyLogged(sessionId: string): void {
     eidnaraReducePermissionDenyLogged.set(sessionId, true);
-}
-
-export function resolveTodowriteAvailabilityFromMessages(
-    sessionId: string,
-    messages: ReadonlyArray<{ info?: { role?: string; tools?: unknown } }>,
-): ToolAvailabilityVerdict {
-    return resolveToolAvailabilityFromMessages(sessionId, TODOWRITE_TOOL, messages);
 }
 
 export function resolveTodowriteAvailability(sessionId: string): ToolAvailabilityVerdict {

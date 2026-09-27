@@ -572,9 +572,6 @@ export function createEidnaraHook(deps: EidnaraDeps) {
         onSessionCacheInvalidated: (sessionId: string) => {
             deps.onSessionCacheInvalidated?.(sessionId);
         },
-        onRustOrdinalsInvalidated: (sessionId: string) => {
-            rustTransform.invalidateOrdinals(sessionId);
-        },
         onNewestResponseRemoved: (sessionId: string, model) => {
             if (model) liveModelBySession.set(sessionId, model);
             else liveModelBySession.delete(sessionId);
