@@ -1415,7 +1415,9 @@ merge are Rust; living the world through the harness is TypeScript.
    - `--summarizer-dump <file>` has the fixture append every summarizer
      request (`{"system", "prompt"}`, one JSON line each) to that file through
      `EIDNARA_FIXTURE_SUMMARIZER_DUMP`, so gate B reads the daemon's own chunk
-     prompts for the world gate A lived.
+     prompts for the world gate A lived. A line the fixture cannot write
+     fails that summarizer call as a typed backend error, so a dump never
+     covers less than the run it records.
    - Without a summarizer model, the fixture's scripted summarizer writes each
      segment's `p1` and `p2` as the presented lines' own words and `p3` as the
      range, so a segment that decays past P2 serves no prose. At 120 subjects
@@ -1445,8 +1447,9 @@ merge are Rust; living the world through the harness is TypeScript.
    (`WorldMismatch`), a foreign schema, a missing request, and a request with
    no m1 part (`NoM1`), since arm (b) goes there.
 4. `eval_runner stale-merge --inputs <export,...> --publish <dir>`
-   (`merge_exports`) combines independent harness sessions. It requires one
-   schema, harness, and summarizer, two or more inputs, and refuses a world
+   (`merge_exports`) combines independent harness sessions. It requires
+   this build's export schema on every input, one harness and summarizer,
+   two or more inputs, and refuses a world
    twice or an input that is itself a merge. It prefixes
    every task with `world-N:`, joins the decimal seeds, and sums the counts.
    M0 uses several small sessions, so decay keeps their stale segments' prose

@@ -49,7 +49,7 @@ try {
         }
         if (attempt === 3) {
             throw new Error(
-                `converse failed: ${run.error?.message ?? ""} ${run.stderr.slice(-2000)}`,
+                `converse failed: ${run.error?.message ?? ""} ${(run.stderr ?? "").slice(-2000)}`,
             );
         }
         await Bun.sleep(10_000 * attempt);

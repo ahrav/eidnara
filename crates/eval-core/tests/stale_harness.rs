@@ -445,6 +445,18 @@ fn a_merge_refuses_an_input_that_is_itself_a_merge_and_a_swapped_schema() {
         merge_exports(vec![one.clone()]),
         Err(CaptureError::Unmergeable { .. })
     ));
+    // Two inputs agreeing on a schema this build does not read are refused
+    // as such, not merged under it.
+    let mut foreign = one.clone();
+    foreign.schema = "eval-stale-preference-export/v0".to_string();
+    let mut foreign_two = two.clone();
+    foreign_two.schema = foreign.schema.clone();
+    assert_eq!(
+        merge_exports(vec![foreign.clone(), foreign_two]).unwrap_err(),
+        CaptureError::Schema {
+            found: foreign.schema
+        }
+    );
     let merged = merge_exports(vec![one.clone(), two]).unwrap();
     assert!(matches!(
         merge_exports(vec![merged]),
