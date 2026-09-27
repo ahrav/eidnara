@@ -6,6 +6,9 @@ import { BoundedSessionMap } from "../../shared/bounded-session-map";
 import * as logger from "../../shared/logger";
 import { Database } from "../../shared/sqlite";
 import { closeQuietly } from "../../shared/sqlite-helpers";
+import { canonicalJsonLength } from "./edit-recipe";
+import * as eventResolvers from "./event-resolvers";
+import { chargeInvocation } from "./invocation-budget";
 import { closeReadOnlySessionDb } from "./read-session-db";
 import {
     createRustModeTransform,
@@ -817,6 +820,8 @@ describe("work counters", () => {
 });
 
 describe("window-scoped fail-open", () => {
+    const GATED_MODEL = { providerID: "eidnara-test", modelID: "gated-window" };
+
     const folded = (sessionId: string): MessageLike => ({
         info: { id: "fold", role: "user", sessionID: sessionId },
         parts: [{ type: "text", text: "folded" }],
@@ -927,6 +932,91 @@ describe("window-scoped fail-open", () => {
             expect(bodies.map((body) => body.boundary)).toEqual([anchor, anchor, anchor]);
             expect(output.messages).toEqual(grown);
             expect(transform.getState(sessionId).failureCount).toBe(status ? 0 : 1);
+
+            // No pass has published since the daemon disowned the basis, so the next call that
+            // rediscovers it and fails still serves raw.
+            const next = hostArray(sessionId, 9);
+            const nextOutput = { messages: [...next] as unknown[] };
+            await transform.run(sessionId, nextOutput);
+            expect(bodies.at(-1)?.boundary).toEqual(anchor);
+            expect(bodies).toHaveLength(4);
+            expect(nextOutput.messages).toEqual(next);
+        });
+    }
+
+    for (const fits of [false, true]) {
+        it(`${fits ? "serves the last applied output when it and the appended suffix fit" : "serves raw when the last applied output plus the appended suffix exceeds"} the context limit`, async () => {
+            const sessionId = `fail-open-budget-${fits}-${Date.now()}`;
+            const anchor = { mid: "m-2", sequence: 5 };
+            const gated = (count: number): MessageLike[] =>
+                hostArray(sessionId, count).map((member) => {
+                    (member.info as Record<string, unknown>).model = GATED_MODEL;
+                    return member;
+                });
+            // The retained output grew past its three-message input, as an inserted expansion does.
+            const expanded: MessageLike = {
+                info: { id: "fold", role: "user", sessionID: sessionId },
+                parts: [{ type: "text", text: "x".repeat(4_000) }],
+            };
+            const bytes = (values: readonly unknown[]): number =>
+                values.map(canonicalJsonLength).reduce((sum, length) => sum + length, 0);
+            const charged = (values: readonly unknown[]): number =>
+                chargeInvocation(values.map(canonicalJsonLength), {
+                    headroomPermille: 250,
+                    profile: "opencode-heuristic",
+                }).chargedTokens;
+            const grown = gated(8);
+            const fallback = [expanded, ...grown.slice(5)];
+            const limit = fits ? charged(fallback) : charged([expanded]);
+            const { client, bodies } = fakeDaemon({
+                pages: () => ({ anchors: [anchor] }),
+                transform: (body, index) => {
+                    if (index > 0)
+                        throw new Error("request deadline expired after a possible send");
+                    return {
+                        base_revision: body.base_revision,
+                        output_revision: "expanded-out",
+                        boundary: anchor,
+                        operations: [{ op: "insert", values: [expanded] }],
+                    };
+                },
+            });
+            const limitSpy = spyOn(eventResolvers, "resolveTrustedContextLimit").mockImplementation(
+                (providerID, modelID) =>
+                    providerID === GATED_MODEL.providerID && modelID === GATED_MODEL.modelID
+                        ? limit
+                        : undefined,
+            );
+            const debug = spyOn(logger.sessionLog, "debug");
+            try {
+                const transform = createRustModeTransform(makeDeps(), { moduleClient: client });
+                const first = { messages: gated(5) as unknown[] };
+                await transform.run(sessionId, first);
+                // Enabling state: the expansion alone fits the limit and was published.
+                expect(first.messages).toEqual([expanded]);
+                // Enabling state: the fallback is larger than the window it replaces, so only fitting admits it.
+                expect(bytes(fallback)).toBeGreaterThan(bytes(grown.slice(2)));
+                expect(charged(fallback) <= limit).toBe(fits);
+
+                const output = { messages: [...grown] as unknown[] };
+                await transform.run(sessionId, output);
+                expect(bodies[1]?.boundary).toEqual(anchor);
+                const logs = logsOf(debug, sessionId);
+                const passLines = logs.filter((line) => line.startsWith("rust pass:"));
+                if (fits) {
+                    expect(output.messages).toEqual(fallback);
+                    expect(passLines[1]).toContain("served_from=last_applied in=6 out=4");
+                } else {
+                    expect(output.messages).toEqual(grown);
+                    expect(passLines[1]).toContain("served_from=raw in=6 out=8");
+                    expect(logs).toContain(
+                        `rust transform fail-open declined: invocation_budget (${charged(fallback)} charged tokens over ${limit}, growing from ${bytes(grown.slice(2))} to ${bytes(fallback)} bytes)`,
+                    );
+                }
+            } finally {
+                debug.mockRestore();
+                limitSpy.mockRestore();
+            }
         });
     }
 
