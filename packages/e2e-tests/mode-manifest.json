@@ -111,11 +111,10 @@
         {
             "path": "tests/rust-multi-frame-delta.test.ts",
             "tier": "rust-only",
-            "rationale": "every pass sends the whole captured array, and a large provider-visible tail stays intact across multi-page sends",
+            "rationale": "with no coverage every pass sends the whole captured array as one unpaged request, and a large provider-visible tail under the store's durable text limit stays intact",
             "contract_refs": [
                 "U5-PORT"
-            ],
-            "quarantined": "the 160k-token tail exceeds the memory store's 512 KiB MAX_DURABLE_TEXT_BYTES, so the daemon rejects the pass with InputLimit and serves raw"
+            ]
         },
         {
             "path": "tests/rust-park-self-heal.test.ts",
