@@ -490,22 +490,27 @@ describe("boundary discovery", () => {
         // The next pass starts with discovery.
         expect(transform.getState(sessionId).boundary).toBeUndefined();
 
-        // A pass that already discovered declines its first boundary_unknown.
+        // A cold pass rediscovers once, then declines a second `boundary_unknown`.
         const cold = createRustModeTransform(makeDeps(), { moduleClient: client });
         await cold.run(`${sessionId}-cold`, { messages: hostArray(`${sessionId}-cold`, 5) });
-        expect(bodies).toHaveLength(4);
-        expect(cursors).toHaveLength(3);
+        expect(bodies).toHaveLength(5);
+        expect(cursors).toHaveLength(4);
     });
 
-    it("declines boundary_unknown after discovering a stored anchor the host lost", async () => {
+    it("rediscovers and publishes when an anchor it just discovered draws boundary_unknown", async () => {
         const sessionId = `discovery-lost-${Date.now()}`;
+        // The daemon drops segment 7 between the walk and the send; the next walk lists 6.
         const { client, bodies, cursors } = fakeDaemon({
-            pages: (before) =>
-                before === undefined ? { anchors: [{ mid: "m-2", sequence: 7 }] } : { anchors: [] },
+            pages: (_before, index) =>
+                index < 2
+                    ? { anchors: [{ mid: "m-2", sequence: 7 }] }
+                    : { anchors: [{ mid: "m-1", sequence: 6 }] },
             transform: (body, index) =>
                 index === 0
                     ? keepAll(body, { mid: "m-3", sequence: 8 })
-                    : { status: "boundary_unknown" },
+                    : index === 1
+                      ? { status: "boundary_unknown" }
+                      : keepAll(body, { mid: "m-1", sequence: 6 }),
         });
         const transform = createRustModeTransform(makeDeps(), { moduleClient: client });
         await transform.run(sessionId, { messages: hostArray(sessionId, 5) });
@@ -514,12 +519,14 @@ describe("boundary discovery", () => {
         const host = hostArray(sessionId, 6).filter((entry) => entry.info.id !== "m-3");
         const output = { messages: [...host] as unknown[] };
         await transform.run(sessionId, output);
-        // Exactly one discovery walk (one cursor sequence) and one send, then a decline.
-        expect(cursors).toEqual([undefined, undefined]);
-        expect(bodies).toHaveLength(2);
+        // One walk, `boundary_unknown`, one more walk, then publication at the new anchor.
+        expect(cursors).toEqual([undefined, undefined, undefined]);
+        expect(bodies).toHaveLength(3);
         expect(bodies[1]?.boundary).toEqual({ mid: "m-2", sequence: 7 });
-        expect(output.messages).toEqual(host);
-        expect(transform.getState(sessionId).boundary).toBeUndefined();
+        expect(bodies[2]?.boundary).toEqual({ mid: "m-1", sequence: 6 });
+        expect(bodies[2]?.native_messages).toEqual(host.slice(1));
+        expect(output.messages).toEqual(host.slice(1));
+        expect(transform.getState(sessionId).boundary).toEqual({ mid: "m-1", sequence: 6 });
     });
 
     /** A pass with a known anchor `m-2` whose first send answers through `unknown`; returns its pass lines. */
@@ -1025,5 +1032,66 @@ describe("first-user tool policy", () => {
         const unpersisted = `first-user-no-row-${Date.now()}`;
         installDb(unpersisted);
         expect(await toolPresent(unpersisted, { eidnara_reduce: true })).toEqual([false, false]);
+    });
+
+    /** `todo_tool_present` for a pass over a user turn run by `plan`, whose agent config denies todowrite. */
+    async function todoPresentUnderPlan(
+        sessionId: string,
+        anchor: Anchor | null,
+        assistant: Record<string, unknown>,
+    ) {
+        installDb(sessionId, {});
+        const host: MessageLike[] = [
+            { info: { id: "m-0", role: "user", sessionID: sessionId, agent: "plan" }, parts: [] },
+            ...Array.from({ length: 5 }, (_, index) => ({
+                info: {
+                    id: `m-${index + 1}`,
+                    role: "assistant",
+                    sessionID: sessionId,
+                    ...assistant,
+                },
+                parts: [{ type: "text", text: `step ${index + 1}` }],
+            })),
+        ];
+        const deps = makeDeps();
+        deps.client = {
+            app: {
+                agents: async () => ({
+                    data: [
+                        {
+                            name: "plan",
+                            permission: [{ permission: "todowrite", pattern: "*", action: "deny" }],
+                        },
+                    ],
+                }),
+            },
+            session: { get: async () => ({ data: { directory: "/tmp/project" } }) },
+        } as never;
+        const { client, bodies } = fakeDaemon({
+            pages: () => ({ anchors: anchor ? [anchor] : [] }),
+        });
+        await createRustModeTransform(deps, { moduleClient: client }).run(sessionId, {
+            messages: host,
+        });
+        expect(bodies[0]?.boundary).toEqual(anchor);
+        return bodies[0]?.todo_tool_present;
+    }
+
+    it("keeps the agent's todowrite deny for a window that starts after the newest user message", async () => {
+        const stamp = Date.now();
+        // Control: the whole array holds the user message that names `plan`.
+        expect(await todoPresentUnderPlan(`agent-whole-${stamp}`, null, { mode: "plan" })).toBe(
+            false,
+        );
+        const past = { mid: "m-3", sequence: 4 };
+        // The window holds only assistant messages, which OpenCode stamps with the agent's name.
+        expect(await todoPresentUnderPlan(`agent-mode-${stamp}`, past, { mode: "plan" })).toBe(
+            false,
+        );
+        expect(await todoPresentUnderPlan(`agent-field-${stamp}`, past, { agent: "plan" })).toBe(
+            false,
+        );
+        // No message in the window names an agent, so the permission evidence is missing.
+        expect(await todoPresentUnderPlan(`agent-none-${stamp}`, past, {})).toBe(false);
     });
 });

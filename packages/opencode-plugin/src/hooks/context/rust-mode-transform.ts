@@ -95,22 +95,36 @@ export interface RustModeTransformDeps extends SessionDirectoryDeps {
     isInternalChildSession?: (sessionId: string) => boolean;
 }
 
-function activeAgentFromMessages(messages: readonly MessageLike[]): string | undefined {
+function nonEmptyString(value: unknown): string | undefined {
+    return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
+function activeAgentFromMessages(messages: readonly MessageLike[]): string | undefined | null {
+    let assistantAgent: string | undefined;
     for (let index = messages.length - 1; index >= 0; index -= 1) {
-        const info = messages[index]?.info as { role?: unknown; agent?: unknown } | undefined;
-        if (info?.role !== "user") continue;
-        return typeof info.agent === "string" && info.agent.length > 0 ? info.agent : undefined;
+        const info = messages[index]?.info as
+            | { role?: unknown; agent?: unknown; mode?: unknown }
+            | undefined;
+        if (info?.role === "user") return nonEmptyString(info.agent);
+        if (info?.role === "assistant")
+            assistantAgent ??= nonEmptyString(info.agent) ?? nonEmptyString(info.mode);
     }
-    return undefined;
+    return assistantAgent ?? null;
 }
 
 async function resolveCombinedTodowriteVerdict(
     deps: RustModeTransformDeps,
     sessionId: string,
-    activeAgent: string | undefined,
+    activeAgent: string | undefined | null,
     availability: ToolAvailabilityVerdict,
 ): Promise<boolean> {
-    if (!availability.frozen || !availability.callable || deps.compactionOff === true) return false;
+    if (
+        activeAgent === null ||
+        !availability.frozen ||
+        !availability.callable ||
+        deps.compactionOff === true
+    )
+        return false;
 
     return !(await todowritePermissionDenied(deps.client, sessionId, activeAgent));
 }
@@ -1201,12 +1215,11 @@ export function createRustModeTransform(
             if (deps.isInternalChildSession?.(sessionId))
                 throw new PassDeclined(sessionId, "internal_child");
             assertCurrentPass();
-            // One discovery per pass: an unknown boundary, or one the scan cannot find, needs it.
+            // An unknown boundary, or one the scan cannot find, needs a discovery walk.
             const known = state.boundary;
             let boundary = known ?? null;
             let boundaryIndex = known ? scan((id) => id === known.mid) : 0;
-            const discovered = known === undefined || boundaryIndex < 0;
-            if (discovered)
+            if (known === undefined || boundaryIndex < 0)
                 ({ boundary, index: boundaryIndex } = await discover(
                     options.projectRoot ?? directory,
                 ));
@@ -1572,8 +1585,9 @@ export function createRustModeTransform(
             if (response.status === "boundary_unknown") {
                 assertCurrentPass();
                 state.boundary = undefined;
-                if (discovered || rerun)
-                    throw new PassDeclined(sessionId, "boundary_unknown", "after discovery");
+                // Section 7.10.4: the first `boundary_unknown` rediscovers, whether or not this attempt walked; the second declines.
+                if (rerun)
+                    throw new PassDeclined(sessionId, "boundary_unknown", "after rediscovery");
                 // Nothing of this attempt is kept, so the rerun pays only for its own capture.
                 lease.refund();
                 return execute(sessionId, output, lease, {
