@@ -3171,11 +3171,12 @@ impl ActiveWriteTransaction<'_> {
             "INSERT INTO scan_owner_copies(
                  owner_copy_id,scan_id,domain_owner_id,owner_kind,field_id
              )
-             SELECT lower(hex(randomblob(16))),scan_id,?1,?2,field_id
+             SELECT ?4 || lower(hex(randomblob(10))),scan_id,?1,?2,field_id
                FROM scan_owner_copies
               WHERE scan_id=?3
               GROUP BY scan_id,field_id",
         )?;
+        let link_prefix = hex_digest(opaque_id_time_prefix());
         for link in &prepared.existing_scan_links {
             let domain_owner_id = domain_owner_ids
                 .iter()
@@ -3185,7 +3186,12 @@ impl ActiveWriteTransaction<'_> {
                         "existing scan link references an unregistered durable owner".to_string(),
                     )))
                 })?;
-            insert_link.execute(params![domain_owner_id, prepared.owner_kind, link.scan_id])?;
+            insert_link.execute(params![
+                domain_owner_id,
+                prepared.owner_kind,
+                link.scan_id,
+                link_prefix
+            ])?;
         }
         Ok(())
     }
@@ -3209,18 +3215,28 @@ fn persisted_detection_labels(detections: &[Detection]) -> Vec<&str> {
 
 const MAX_PERSISTED_DETECTION_LABELS: usize = 64;
 
-/// Thirty-two lowercase hex characters from sixteen random bytes, the shape every audit
-/// identifier column checks. Generated in Rust so an audit write spends no statement on an
-/// identifier; the per-row link copy below keeps SQLite's `randomblob` because it needs one
-/// value per selected row.
+/// Thirty-two lowercase hex characters, the shape every audit identifier column checks: six
+/// bytes of big-endian creation milliseconds, then ten random bytes. The time prefix keeps one
+/// batch's rows on a few index leaves, so writing them and the next pass's retirement dirty
+/// O(rows per leaf) pages instead of one page per row. Generated in Rust so an audit write
+/// spends no statement on an identifier; the per-row link copy below binds the same prefix and
+/// appends SQLite's `randomblob` because it needs one value per selected row.
 fn opaque_id() -> rusqlite::Result<String> {
     let mut bytes = [0u8; 16];
-    getrandom::getrandom(&mut bytes).map_err(|error| {
+    bytes[..6].copy_from_slice(&opaque_id_time_prefix());
+    getrandom::getrandom(&mut bytes[6..]).map_err(|error| {
         rusqlite::Error::ToSqlConversionFailure(Box::new(MemoryStoreError::Serde(format!(
             "random source unavailable for an audit identifier: {error}"
         ))))
     })?;
     Ok(hex_digest(bytes))
+}
+
+fn opaque_id_time_prefix() -> [u8; 6] {
+    let millis = u64::try_from(current_time_ms()).unwrap_or(0).to_be_bytes();
+    [
+        millis[2], millis[3], millis[4], millis[5], millis[6], millis[7],
+    ]
 }
 
 /// Deletes the audit rows that lost their last owner, restricted to `scan_ids`.
@@ -21884,6 +21900,68 @@ mod tests {
             ],
             "each detection receipt must carry the disposition its field actually took"
         );
+    }
+
+    /// Audit ids keep the 32 lowercase hex shape the columns check, and their 12-hex time
+    /// prefix never decreases, for ids minted in Rust and for per-row link copies minted in SQL.
+    #[test]
+    fn audit_ids_are_lowercase_hex_with_a_non_decreasing_time_prefix() {
+        let is_id = |id: &str| {
+            id.len() == 32
+                && id
+                    .bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        };
+        let before = hex_digest(opaque_id_time_prefix());
+        let ids: Vec<String> = (0..64).map(|_| opaque_id().unwrap()).collect();
+        assert!(ids.iter().all(|id| is_id(id)), "{ids:?}");
+        assert!(ids.windows(2).all(|pair| pair[0][..12] <= pair[1][..12]));
+        assert!(before.as_str() <= &ids[0][..12]);
+        assert_eq!(ids.iter().collect::<BTreeSet<_>>().len(), ids.len());
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
+        let mut write = PreparedWrite::new(DurableWriteFamily::HistorySegments);
+        write.domain_owner("session", "ses_ids", "first");
+        write.content("content", "plain text").unwrap();
+        write
+            .execute(&store.inner, |_| Ok(WriteDisposition::Applied(())))
+            .unwrap();
+        let column = |sql: &str| -> BTreeSet<String> {
+            store
+                .inner
+                .with_conn(|conn| {
+                    let mut statement = conn.prepare(sql)?;
+                    let rows = statement
+                        .query_map([], |row| row.get(0))?
+                        .collect::<rusqlite::Result<BTreeSet<_>>>()?;
+                    Ok(rows)
+                })
+                .unwrap()
+        };
+        let copies = "SELECT owner_copy_id FROM scan_owner_copies";
+        let first = column(copies);
+        let first_scans = column("SELECT scan_id FROM field_scans");
+        let mut link = PreparedWrite::new(DurableWriteFamily::HistorySegments);
+        link.domain_owner("session", "ses_ids", "second");
+        link.content("content", "other text").unwrap();
+        link.link_existing_scans("session", "ses_ids", "second", first_scans.clone());
+        link.execute(&store.inner, |_| Ok(WriteDisposition::Applied(())))
+            .unwrap();
+        let linked: Vec<String> = column(copies).difference(&first).cloned().collect();
+        let first_scan_copies = column(&format!(
+            "SELECT COUNT(*) || '' FROM scan_owner_copies WHERE scan_id IN ('{}')",
+            first_scans.into_iter().collect::<Vec<_>>().join("','")
+        ));
+        assert_eq!(
+            first_scan_copies.into_iter().collect::<Vec<_>>(),
+            ["2"],
+            "enabling state: the first write's scan gained a link copy"
+        );
+        for id in &linked {
+            assert!(is_id(id), "{id}");
+            assert!(ids[63][..12] <= id[..12]);
+        }
     }
 
     #[test]
