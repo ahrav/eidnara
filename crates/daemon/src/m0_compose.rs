@@ -693,6 +693,122 @@ mod bounded_read_tests {
         assert!(legacy_falsified, "skipping legacy rows went undetected");
     }
 
+    /// The rows the m0 compose loads at `budget`: its fold read, issued as `compose_m0` issues it.
+    fn loaded_rows(store: &MemoryStore, budget: f64) -> Vec<StoredHistorySegment> {
+        store
+            .load_history_segment_fold(SESSION, None, PRESSURE_WINDOW, |newest| {
+                let importances: Vec<i32> = newest.iter().map(|row| row.importance).collect();
+                fold_horizon(&importances, budget)
+            })
+            .expect("fold read")
+            .history_segments
+    }
+
+    /// Up to H = 50,000 and N = 10^6 messages under both correction regimes, claims add no
+    /// store statement, row, or VM step to an m0 or m1 compose, and the claims pass visits at
+    /// most eight claims per loaded row.
+    #[test]
+    fn the_claims_pass_adds_no_store_work_and_visits_at_most_eight_claims_per_loaded_row() {
+        use crate::test_support::synthetic_history::ClaimRegime;
+        let budgets = [20.0, 60_000.0, 10_000_000.0];
+        for (segments, span) in [(100, 2), (4_000, 2), (50_000, 20)] {
+            let work = |regime: ClaimRegime| {
+                let history = SyntheticHistory::mixed(segments).with_claims(span, regime);
+                let dir = tempfile::tempdir().unwrap();
+                let store = open(dir.path());
+                history.seed(&store, SESSION);
+                let legacy = bounded_m0(&store, 60_000.0, None).legacy_history_segment_seqs;
+                let measured = |read: &dyn Fn()| {
+                    store.start_statement_work_ledger();
+                    read();
+                    store
+                        .take_statement_work()
+                        .into_iter()
+                        .map(|w| (w.sql, w.rows, w.vm_steps))
+                        .collect::<Vec<_>>()
+                };
+                let m0 = budgets.map(|budget| {
+                    measured(&|| {
+                        bounded_m0(&store, budget, Some(&legacy));
+                    })
+                });
+                let m1 = [1, 200.min(segments)].map(|new_rows| {
+                    measured(&|| {
+                        m1_above(&store, (segments - new_rows) as i64);
+                    })
+                });
+                let visited = budgets.map(|budget| {
+                    let rows = loaded_rows(&store, budget);
+                    (
+                        rows.iter().map(|row| row.claims.len()).sum::<usize>(),
+                        rows.len(),
+                    )
+                });
+                ((m0, m1), visited)
+            };
+            let (plain, _) = work(ClaimRegime::None);
+            for regime in [ClaimRegime::EveryThirdMessage, ClaimRegime::HalfPercent] {
+                let (claimed, visited) = work(regime);
+                let messages = segments as i64 * span;
+                assert!(
+                    claimed == plain,
+                    "H = {segments}, N = {messages}: {regime:?} changes store work"
+                );
+                for (entries, rows) in visited {
+                    assert!(
+                        entries <= 8 * rows,
+                        "{regime:?}: {entries} claims over {rows} rows"
+                    );
+                }
+                if regime == ClaimRegime::EveryThirdMessage {
+                    assert!(visited.iter().all(|(entries, _)| *entries > 0));
+                }
+            }
+        }
+    }
+
+    /// The loaded set is a newest suffix of the store, so every claim it holds has its
+    /// store-wide live claim inside it: a stale claim never renders as live because its
+    /// corrector fell outside the read. Holds for the m0 fold at every budget and for m1's rows
+    /// above the folded sequence.
+    #[test]
+    fn every_loaded_claim_has_its_store_wide_live_claim_in_the_loaded_set() {
+        use crate::decay_render::live_claims;
+        use crate::test_support::synthetic_history::ClaimRegime;
+        let history = SyntheticHistory::mixed(4_000).with_claims(2, ClaimRegime::EveryThirdMessage);
+        let dir = tempfile::tempdir().unwrap();
+        let store = open(dir.path());
+        history.seed(&store, SESSION);
+        let all = store.load_history_segments(SESSION).expect("every row");
+        let store_live = live_claims(&all);
+        let mut loaded: Vec<Vec<StoredHistorySegment>> = [20.0, 60_000.0, 10_000_000.0]
+            .into_iter()
+            .map(|budget| loaded_rows(&store, budget))
+            .collect();
+        for folded in [3_999, 3_900, 3_741] {
+            loaded.push(
+                store
+                    .load_history_segments_above(
+                        SESSION,
+                        folded,
+                        crate::m1_compose::DEFAULT_M1_ROW_CAP,
+                    )
+                    .expect("m1 read")
+                    .history_segments,
+            );
+        }
+        for rows in &loaded {
+            assert!(
+                !rows.is_empty() && rows.len() < all.len(),
+                "a strict suffix"
+            );
+            let live = live_claims(rows);
+            for claim in rows.iter().flat_map(|row| &row.claims) {
+                assert_eq!(live[claim.key.as_str()], store_live[claim.key.as_str()]);
+            }
+        }
+    }
+
     /// The m0 and m1 reads' statement work is equal at two history lengths that share their
     /// newest rows, so it does not grow with H.
     #[test]
