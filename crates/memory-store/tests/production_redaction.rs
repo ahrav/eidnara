@@ -1787,13 +1787,22 @@ fn history_segment_content_redacts_and_new_message_identities_reject() {
             ordinal: 1,
             anchor: Some(anchor),
         })
-        // A key that makes its `key = value` pair a secret assignment is dropped.
-        .chain([Claim {
-            key: "api.key".to_string(),
-            value: "abc".to_string(),
-            ordinal: 1,
-            anchor: None,
-        }])
+        // A key that makes its `key = value` pair a secret assignment is dropped, and so is a
+        // key the scanner rewrites.
+        .chain([
+            Claim {
+                key: "api.key".to_string(),
+                value: "abc".to_string(),
+                ordinal: 1,
+                anchor: None,
+            },
+            Claim {
+                key: format!("auth.{}", secret("key-secret")),
+                value: "5432".to_string(),
+                ordinal: 1,
+                anchor: None,
+            },
+        ])
         .collect(),
         ..StoredHistorySegment::default()
     };
