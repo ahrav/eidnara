@@ -411,6 +411,16 @@ describe("boundary discovery", () => {
             ],
         }),
         "a malformed page": () => ({ anchors: [{ mid: "", sequence: 1 }] }),
+        "an oversized page": (before) => ({
+            // A second, empty page would end the walk with `null`; the first page must decline on its own.
+            anchors:
+                before === undefined
+                    ? Array.from({ length: 4097 }, (_, i) => ({
+                          mid: `gone-${i}`,
+                          sequence: 5000 - i,
+                      }))
+                    : [],
+        }),
         "an unsafe sequence": () => ({ anchors: [{ mid: "gone", sequence: 2 ** 53 }] }),
         "a timeout": () => {
             throw Object.assign(new Error("module transport deadline expired"), {
@@ -629,6 +639,39 @@ describe("boundary discovery", () => {
         expect(bodies).toHaveLength(2);
         expect(passes[0]).toContain("rediscovered=true");
         expect(output.messages).toEqual(hostArray(sessionId, 6));
+    });
+
+    it("releases the first attempt's captured window before the rerun captures again", async () => {
+        const sessionId = `discovery-unwound-${Date.now()}`;
+        let firstWindow: WeakRef<object> | undefined;
+        let releasedBeforeRerun: boolean | undefined;
+        let sends = 0;
+        // Not `fakeDaemon`: that fake retains every body, which would hold the first window itself.
+        const client: RustModeModuleClient = {
+            call: async ({ method, body }) => {
+                if (method === "transform.boundary")
+                    return { anchors: [{ mid: "m-2", sequence: 7 }] };
+                if (method !== "transform") return { ok: true };
+                sends += 1;
+                const request = body as Body;
+                if (sends === 2) {
+                    firstWindow = new WeakRef(request.native_messages as object);
+                    return { status: "boundary_unknown" };
+                }
+                if (sends === 3) {
+                    Bun.gc(true);
+                    releasedBeforeRerun = firstWindow?.deref() === undefined;
+                }
+                return keepAll(request, { mid: "m-2", sequence: 7 });
+            },
+        };
+        const transform = createRustModeTransform(makeDeps(), { moduleClient: client });
+        // A retained, verified previous output arms the fail-open source and the recheck closures.
+        await transform.run(sessionId, { messages: hostArray(sessionId, 5) });
+        await transform.run(sessionId, { messages: hostArray(sessionId, 6) });
+        expect(sends).toBe(3);
+        // Enabling state: the rerun ran and could observe the first attempt's members array.
+        expect(releasedBeforeRerun).toBe(true);
     });
 
     it("refunds the first attempt so a rediscovered window near the byte limit still publishes", async () => {

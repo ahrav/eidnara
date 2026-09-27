@@ -292,13 +292,16 @@ function parseBoundary(value: unknown): TransformBoundary | null | undefined {
         : undefined;
 }
 
-/** One `transform.boundary` page, newest first and strictly below `before`; `undefined` when malformed. */
+/** `transform.boundary` lists at most this many anchors per page (docs/host-wire-protocol.md). */
+const MAX_ANCHOR_PAGE = 4096;
+
+/** One `transform.boundary` page, newest first and strictly below `before`; `undefined` when malformed or over the page cap. */
 function parseAnchorPage(
     reply: unknown,
     before: number | undefined,
 ): TransformBoundary[] | undefined {
     const anchors = isRecord(reply) ? reply.anchors : undefined;
-    if (!Array.isArray(anchors)) return undefined;
+    if (!Array.isArray(anchors) || anchors.length > MAX_ANCHOR_PAGE) return undefined;
     const page: TransformBoundary[] = [];
     let bound = before ?? Number.POSITIVE_INFINITY;
     for (const entry of anchors) {
@@ -1591,7 +1594,8 @@ export function createRustModeTransform(
                 // Section 7.10.4: the first `boundary_unknown` rediscovers, whether or not this attempt walked; the second declines.
                 if (rerun)
                     throw new PassDeclined(sessionId, "boundary_unknown", "after rediscovery");
-                // Nothing of this attempt is kept, so the rerun pays only for its own capture.
+                // Nothing of this attempt is kept, so the rerun pays only for its own capture. The
+                // `return` is not awaited: this frame, its window, and its capture are gone before the rerun captures.
                 lease.refund();
                 return execute(sessionId, output, lease, {
                     deliveries,
