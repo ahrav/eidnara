@@ -1,4 +1,4 @@
-import { applyEdits, type JSONPath, modify } from "jsonc-parser";
+import { visit } from "jsonc-parser";
 
 import { parseConfigJsonc } from "../shared/jsonc-parser";
 import { isRecord } from "../shared/record-type-guard";
@@ -74,24 +74,24 @@ function writtenTierRejections(written: unknown): string[] {
     return rejections;
 }
 
-function excludedChainPaths(written: unknown): JSONPath[] {
-    const summarizer = isRecord(written) ? written.history_summarizer : undefined;
-    if (!isRecord(summarizer)) return [];
-    const paths: JSONPath[] = [];
-    for (const key of [...CHAIN_MODEL_KEYS, ...CHAIN_FALLBACK_KEYS]) {
-        const value = summarizer[key];
-        if (typeof value === "string" && literalChainModel(value) === undefined) {
-            paths.push(["history_summarizer", key]);
-        } else if (Array.isArray(value)) {
-            for (let index = value.length - 1; index >= 0; index--) {
-                const item = value[index];
-                if (typeof item === "string" && literalChainModel(item) === undefined) {
-                    paths.push(["history_summarizer", key, index]);
-                }
+const CHAIN_KEYS: readonly string[] = [...CHAIN_MODEL_KEYS, ...CHAIN_FALLBACK_KEYS];
+
+function excludedChainValues(rawText: string): { offset: number; length: number; key: string }[] {
+    const spans: { offset: number; length: number; key: string }[] = [];
+    visit(rawText, {
+        onLiteralValue: (value, offset, length, _line, _column, pathSupplier) => {
+            const [block, key, index, ...rest] = pathSupplier();
+            const chainValue =
+                block === "history_summarizer" &&
+                CHAIN_KEYS.includes(String(key)) &&
+                (index === undefined || typeof index === "number") &&
+                rest.length === 0;
+            if (chainValue && typeof value === "string" && literalChainModel(value) === undefined) {
+                spans.push({ offset, length, key: String(key) });
             }
-        }
-    }
-    return paths;
+        },
+    });
+    return spans;
 }
 
 export function screenUserTier(rawText: string): {
@@ -111,10 +111,10 @@ export function screenUserTier(rawText: string): {
     }
     let text = rawText;
     const warnings: string[] = [];
-    for (const path of excludedChainPaths(written)) {
-        text = applyEdits(text, modify(text, path, undefined, {}));
+    for (const { offset, length, key } of excludedChainValues(rawText).reverse()) {
+        text = `${text.slice(0, offset)}""${text.slice(offset + length)}`;
         warnings.push(
-            `Ignoring a history_summarizer.${String(path[1])} value: summarizer chain keys take a literal, non-blank model id without {env:} or {file:} references.`,
+            `Ignoring a history_summarizer.${key} value: summarizer chain keys take a literal, non-blank model id without {env:} or {file:} references.`,
         );
     }
     return { text, rejections: writtenTierRejections(written), warnings };
@@ -122,6 +122,6 @@ export function screenUserTier(rawText: string): {
 
 export function rejectedAuthorityKeys(paths: readonly (readonly PropertyKey[])[]): string[] {
     return paths
-        .filter((path) => path.length > 1 && AUTHORITY_BLOCKS.includes(String(path[0])))
+        .filter((path) => path.length === 2 && AUTHORITY_BLOCKS.includes(String(path[0])))
         .map((path) => `a prototype-pollution key inside ${String(path[0])}`);
 }

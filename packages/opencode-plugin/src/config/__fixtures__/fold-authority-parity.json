@@ -565,6 +565,74 @@
             "expected_chain": null,
             "expected_admission": "unresolved",
             "expected_eidnara_folds": null
+        },
+        {
+            "name": "a duplicate chain key keeps its last literal value",
+            "user_tier_files": {
+                "eidnara.jsonc": "{ \"history_summarizer\": { \"model\": \"{file:fallback-model.txt}\", \"model\": \"anthropic/claude-haiku-4-5\" } }\n",
+                "fallback-model.txt": "google/gemini-3.5-flash\n"
+            },
+            "project_tier_files": {},
+            "env": {},
+            "expected_chain": [
+                "anthropic/claude-haiku-4-5"
+            ],
+            "expected_admission": "admitted",
+            "expected_eidnara_folds": true
+        },
+        {
+            "name": "a duplicate chain key whose last value is a reference is excluded",
+            "user_tier_files": {
+                "eidnara.jsonc": "{ \"history_summarizer\": { \"model\": \"anthropic/claude-haiku-4-5\", \"model\": \"{file:fallback-model.txt}\" } }\n",
+                "fallback-model.txt": "google/gemini-3.5-flash\n"
+            },
+            "project_tier_files": {},
+            "env": {},
+            "expected_chain": [],
+            "expected_admission": "admitted",
+            "expected_eidnara_folds": false
+        },
+        {
+            "name": "a minified array with a blank element",
+            "user_tier_files": {
+                "eidnara.jsonc": "{\"history_summarizer\":{\"model\":\"anthropic/claude-haiku-4-5\",\"fallback_models\":[\"openai/gpt-5.6-mini\",\"\"]}}"
+            },
+            "project_tier_files": {},
+            "env": {},
+            "expected_chain": [
+                "anthropic/claude-haiku-4-5",
+                "openai/gpt-5.6-mini"
+            ],
+            "expected_admission": "admitted",
+            "expected_eidnara_folds": true
+        },
+        {
+            "name": "comments and trailing commas around an excluded value",
+            "user_tier_files": {
+                "eidnara.jsonc": "{\n    // summarizer\n    \"history_summarizer\": {\n        \"model\": \"{env:EIDNARA_FIXTURE_MODEL}\", /* excluded */\n        \"fallback_models\": [\"openai/gpt-5.6-mini\",],\n    },\n}\n"
+            },
+            "project_tier_files": {},
+            "env": {
+                "EIDNARA_FIXTURE_MODEL": "anthropic/claude-haiku-4-5"
+            },
+            "expected_chain": [
+                "openai/gpt-5.6-mini"
+            ],
+            "expected_admission": "admitted",
+            "expected_eidnara_folds": true
+        },
+        {
+            "name": "a nested prototype-pollution key is outside the authority blocks' keys",
+            "user_tier_files": {
+                "eidnara.jsonc": "{ \"history_summarizer\": { \"model\": \"anthropic/claude-haiku-4-5\", \"tools\": { \"__proto__\": false } } }\n"
+            },
+            "project_tier_files": {},
+            "env": {},
+            "expected_chain": [
+                "anthropic/claude-haiku-4-5"
+            ],
+            "expected_admission": "admitted",
+            "expected_eidnara_folds": true
         }
     ]
 }
