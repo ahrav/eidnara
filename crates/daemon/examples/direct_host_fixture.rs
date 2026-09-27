@@ -387,10 +387,12 @@ mod unix {
             let summary = scripted_summary(&request.prompt);
             // A requested dump is gate B's record of the run; a line it
             // cannot hold fails the call, typed, rather than leaving a file
-            // that does not cover what the run measured.
+            // that does not cover what the run measured. An empty variable,
+            // which the driver always sets, asks for no dump.
             let undumped = summary
                 .as_ref()
                 .and_then(|_| std::env::var_os(SUMMARIZER_DUMP_ENV))
+                .filter(|path| !path.is_empty())
                 .and_then(|path| {
                     use std::io::Write;
                     let line =
