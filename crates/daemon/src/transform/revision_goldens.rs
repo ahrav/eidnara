@@ -543,11 +543,15 @@ fn served_mids(served: &Value) -> Vec<String> {
 
 /// The host's mids after `boundary`, or all of them under a `null` boundary.
 fn tail_mids(host: &Host, boundary: &Value) -> Vec<String> {
-    let after = host
-        .messages
-        .iter()
-        .position(|(mid, _, _)| boundary["mid"] == *mid)
-        .map_or(0, |at| at + 1);
+    let after = if boundary.is_null() {
+        0
+    } else {
+        host.messages
+            .iter()
+            .position(|(mid, _, _)| boundary["mid"] == *mid)
+            .expect("the boundary mid is in the host array")
+            + 1
+    };
     host.messages[after..]
         .iter()
         .map(|(mid, _, _)| mid.clone())

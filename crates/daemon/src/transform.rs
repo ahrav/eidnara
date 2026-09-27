@@ -1949,6 +1949,7 @@ fn apply_once_with_estimator(
     estimate_tokens: impl Fn(&str) -> usize + Copy,
 ) -> Result<TransformWithProjection, TransformError> {
     let mut attempt = 0;
+    let mut reset_row_version = None;
     loop {
         // Every attempt resolves the submitted window from a fresh snapshot, whose row version
         // the pass's own load must match.
@@ -1961,9 +1962,19 @@ fn apply_once_with_estimator(
                 .as_deref()
                 .is_some_and(|coverage| coverage.resolved.resolution == NO_SURVIVOR)
         {
-            // A committed reset leaves no coverage, so it does not consume a retry.
+            // A committed reset leaves no coverage, so it does not consume a retry. Only another
+            // writer's segments bring a second no-survivor resolution; the pass fails on it.
+            if let Some(expected) = reset_row_version {
+                return Err(TransformError::Store(MemoryStoreError::CasConflict {
+                    expected: Some(expected),
+                    found: coverage_row_version.unwrap_or_default(),
+                }));
+            }
             match reset_no_survivor(store, &req.session_id, coverage_row_version) {
-                Ok(()) => continue,
+                Ok(row_version) => {
+                    reset_row_version = Some(row_version);
+                    continue;
+                }
                 Err(TransformError::Store(MemoryStoreError::CasConflict { .. }))
                     if attempt < MAX_CAS_RETRIES =>
                 {
@@ -2022,12 +2033,13 @@ const NO_SURVIVOR: crate::window_coverage::Resolution =
 /// writer appends at the newest sequence or removes a suffix, so no anchor can return. A CAS
 /// conflict re-resolves like any other; the next resolution decides again. Unlike
 /// `session.recomp`, this leaves the handler caches alone: each per-session handler cache must
-/// stay valid across a `revert_epoch` bump, by an epoch check or a content hash.
+/// stay valid across a `revert_epoch` bump, by an epoch check or a content hash. Returns the
+/// reset row's version.
 fn reset_no_survivor(
     store: &MemoryStore,
     session_id: &str,
     row_version: Option<u64>,
-) -> Result<(), TransformError> {
+) -> Result<u64, TransformError> {
     // The reset's CAS fails if a writer moved the row after this read, so the range is exact.
     let range = removed_sequence_range(store.history_segment_ends(session_id)?);
     #[cfg(test)]
@@ -2037,7 +2049,7 @@ fn reset_no_survivor(
         "daemon: revert before the first anchor reset {session_id}: removed history_segment sequences {range}; epoch {}",
         reset.revert_epoch
     );
-    Ok(())
+    Ok(reset.row_version)
 }
 
 /// The logged `history_segments` sequence range a reset deletes.

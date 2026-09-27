@@ -522,17 +522,15 @@ async fn a_cas_conflict_on_the_no_survivor_reset_resolves_again_and_resets_once(
     assert!(store.load_history_segments(session()).unwrap().is_empty());
 }
 
-/// A revert under pressure defers once with the reconcile pending and prunes no identity (spec
-/// 7.10.4); the HARD that follows prunes the identities to the window (spec D12).
-#[tokio::test(flavor = "current_thread")]
-async fn a_revert_under_pressure_defers_then_folds_and_prunes_to_the_window() {
-    let (handler, store, _dir) = folded().await;
-    // The refold mints the newest segment's end, which must be live in the reverted window.
+/// A revert under pressure with a pending todo injection, over the folded session plus segment
+/// 3, whose end is `end`. The revert's first pass defers with the reconcile pending and prunes
+/// no identity (spec 7.10.4); returns the second pass's answer.
+async fn pressured_revert(handler: &Handler, store: &MemoryStore, end: &str) -> Value {
     store
         .append_history_segments(
             session(),
             &[StoredHistorySegment {
-                end_message_id: "n3#0".to_string(),
+                end_message_id: end.to_string(),
                 ..segment(3, 5, 6)
             }],
         )
@@ -549,46 +547,73 @@ async fn a_revert_under_pressure_defers_then_folds_and_prunes_to_the_window() {
     reverted["history_budget_tokens"] = json!(1.0);
     reverted["todo_tool_present"] = json!(true);
     assert_eq!(
-        resolution(&store, &reverted).resolution,
+        resolution(store, &reverted).resolution,
         Resolution::Revert {
             keep_through_seq: Some(1)
         }
     );
-    let identities = identity_mids(&store);
-    let deferred = call(&handler, reverted.clone()).await;
+    let identities = identity_mids(store);
+    let deferred = call(handler, reverted.clone()).await;
     assert_eq!(deferred["action"], "SOFT+", "{deferred}");
     assert_eq!(deferred["reconcile_pending"], true, "{deferred}");
-    let kept = identity_mids(&store);
+    let kept = identity_mids(store);
     assert!(identities.iter().all(|mid| kept.contains(mid)), "{kept:?}");
-    let folded = call(&handler, reverted).await;
-    assert_eq!(folded["action"], "HARD", "{folded}");
-    assert_eq!(folded["reconcile_pending"], false, "{folded}");
-    assert_eq!(identity_mids(&store), ["m2", "n3"]);
+    call(handler, reverted).await
+}
+
+/// The revert's HARD after its defer prunes the identities to the window (spec D12), whether
+/// segment 3 ended at a mid live in the reverted window or at one the revert removed.
+#[tokio::test(flavor = "current_thread")]
+async fn a_revert_under_pressure_defers_then_folds_and_prunes_to_the_window() {
+    for end in ["n3#0", "m6#0"] {
+        let (handler, store, _dir) = folded().await;
+        let folded = pressured_revert(&handler, &store, end).await;
+        assert_eq!(folded["status"], "ok", "{end}: {folded}");
+        assert_eq!(folded["action"], "HARD", "{end}: {folded}");
+        assert_eq!(folded["reconcile_pending"], false, "{end}: {folded}");
+        assert_eq!(identity_mids(&store), ["m2", "n3"], "{end}");
+    }
+}
+
+/// Arms `id`'s attempt hook to run `step` on each firing with its 1-based count, re-arming
+/// while `step` returns true. The hook runs on the pass's thread, where `session()` is not the
+/// test's session. Returns the firing count.
+fn arm_steps(
+    id: &'static str,
+    step: impl Fn(u32) -> bool + Send + Sync + 'static,
+) -> Arc<std::sync::atomic::AtomicU32> {
+    type Step = Arc<dyn Fn(u32) -> bool + Send + Sync>;
+    fn arm(id: &'static str, fired: Arc<std::sync::atomic::AtomicU32>, step: Step) {
+        install_transform_attempt_hook(id, move || {
+            let count = fired.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+            if step(count) {
+                arm(id, Arc::clone(&fired), Arc::clone(&step));
+            }
+        });
+    }
+    let fired = Arc::new(std::sync::atomic::AtomicU32::new(0));
+    arm(id, Arc::clone(&fired), Arc::new(step));
+    fired
+}
+
+/// A commit that moves `id`'s row version under the pass.
+fn bump(store: &MemoryStore, id: &str) {
+    let loaded = store.load(id).unwrap();
+    store
+        .commit(id, loaded.row_version, &loaded.core, &loaded.meta)
+        .unwrap();
 }
 
 /// A reset that loses its CAS on every attempt surfaces the conflict once the retry budget is
-/// spent; a committed reset never consumes a retry.
+/// spent.
 #[tokio::test(flavor = "current_thread")]
 async fn a_no_survivor_reset_that_always_loses_its_cas_surfaces_the_conflict() {
-    // The hook runs on the pass's thread, where `session()` is not this test's session.
-    fn arm(store: Arc<MemoryStore>, conflicts: Arc<std::sync::atomic::AtomicU32>) {
-        install_transform_attempt_hook("rev3-reset-cas-exhausted", move || {
-            let loaded = store.load("rev3-reset-cas-exhausted").unwrap();
-            store
-                .commit(
-                    "rev3-reset-cas-exhausted",
-                    loaded.row_version,
-                    &loaded.core,
-                    &loaded.meta,
-                )
-                .unwrap();
-            conflicts.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            arm(Arc::clone(&store), Arc::clone(&conflicts));
-        });
-    }
     let (handler, store, _dir) = folded_as("rev3-reset-cas-exhausted").await;
-    let conflicts = Arc::new(std::sync::atomic::AtomicU32::new(0));
-    arm(Arc::clone(&store), Arc::clone(&conflicts));
+    let hook_store = Arc::clone(&store);
+    let fired = arm_steps("rev3-reset-cas-exhausted", move |_| {
+        bump(&hook_store, "rev3-reset-cas-exhausted");
+        true
+    });
     let served = call(&handler, body(&["x1", "x2"], Value::Null)).await;
     install_transform_attempt_hook(session(), || {});
     assert_eq!(served["status"], "error", "{served}");
@@ -598,8 +623,74 @@ async fn a_no_survivor_reset_that_always_loses_its_cas_surfaces_the_conflict() {
         "{served}"
     );
     assert_eq!(
-        conflicts.load(std::sync::atomic::Ordering::SeqCst),
+        fired.load(std::sync::atomic::Ordering::SeqCst),
         crate::transform::MAX_CAS_RETRIES + 1
+    );
+    assert_eq!(store.load_history_segments(session()).unwrap().len(), 2);
+}
+
+/// A committed reset spends no retry: the full budget of transform conflicts after it still
+/// ends in a committed first pass.
+#[tokio::test(flavor = "current_thread")]
+async fn a_committed_reset_leaves_the_whole_retry_budget_to_the_pass() {
+    let (handler, store, _dir) = folded_as("rev3-reset-then-conflicts").await;
+    let hook_store = Arc::clone(&store);
+    let retries = crate::transform::MAX_CAS_RETRIES;
+    // Firing 1 is the reset; firings 2 through `retries + 1` are the pass's transform commits.
+    let fired = arm_steps("rev3-reset-then-conflicts", move |count| {
+        if count > 1 {
+            bump(&hook_store, "rev3-reset-then-conflicts");
+        }
+        count <= retries
+    });
+    let served = call(&handler, body(&["x1", "x2"], Value::Null)).await;
+    assert_eq!(fired.load(std::sync::atomic::Ordering::SeqCst), retries + 1);
+    assert_eq!(served["status"], "ok", "{served}");
+    assert_eq!(served["boundary"], Value::Null);
+    assert_eq!(served_mids(&served), ["x1", "x2"]);
+    assert!(store.load_history_segments(session()).unwrap().is_empty());
+}
+
+/// One reset per pass: a writer that restores the pre-reset coverage before the pass commits
+/// brings a second no-survivor resolution, which fails the pass instead of resetting again.
+#[tokio::test(flavor = "current_thread")]
+async fn a_second_no_survivor_resolution_in_one_pass_fails_with_a_cas_conflict() {
+    let (handler, store, _dir) = folded_as("rev3-reset-twice").await;
+    let before = store.load("rev3-reset-twice").unwrap();
+    let segments = store.load_history_segments("rev3-reset-twice").unwrap();
+    let hook_store = Arc::clone(&store);
+    // Firing 1 is the reset; firing 2, at the transform commit, restores the folded session.
+    let fired = arm_steps("rev3-reset-twice", move |count| {
+        if count == 2 {
+            hook_store
+                .replace_history_segments("rev3-reset-twice", &segments)
+                .unwrap();
+            let loaded = hook_store.load("rev3-reset-twice").unwrap();
+            hook_store
+                .commit(
+                    "rev3-reset-twice",
+                    loaded.row_version,
+                    &before.core,
+                    &before.meta,
+                )
+                .unwrap();
+        }
+        count < 2
+    });
+    let window = body(&["x1", "x2"], Value::Null);
+    let served = call(&handler, window.clone()).await;
+    assert_eq!(fired.load(std::sync::atomic::Ordering::SeqCst), 2);
+    assert_eq!(served["status"], "error", "{served}");
+    assert_eq!(served["code"], "transform_failed", "{served}");
+    assert!(
+        served["message"].as_str().unwrap().contains("cas conflict"),
+        "{served}"
+    );
+    assert_eq!(
+        resolution(&store, &window).resolution,
+        Resolution::Revert {
+            keep_through_seq: None
+        }
     );
     assert_eq!(store.load_history_segments(session()).unwrap().len(), 2);
 }
