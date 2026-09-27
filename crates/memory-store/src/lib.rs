@@ -16432,10 +16432,15 @@ fn insert_chunk_transcripts_tx(
         return Ok(());
     }
     let mut insert = tx.prepare_cached(
-        "INSERT OR REPLACE INTO chunk_transcripts
+        "INSERT INTO chunk_transcripts
            (session_id, history_segment_seq, start_ordinal, end_ordinal,
             transcript_deflate, created_at_ms)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+         ON CONFLICT(session_id, history_segment_seq) DO UPDATE SET
+            start_ordinal = excluded.start_ordinal,
+            end_ordinal = excluded.end_ordinal,
+            transcript_deflate = excluded.transcript_deflate,
+            created_at_ms = excluded.created_at_ms",
     )?;
     for (idx, history_segment) in history_segments.iter().enumerate() {
         insert.execute(params![
@@ -16453,12 +16458,14 @@ fn insert_chunk_transcripts_tx(
 
 fn evict_chunk_transcripts_tx(tx: &GuardedConn<'_>, session_id: &str) -> rusqlite::Result<()> {
     loop {
-        let total: i64 = tx.query_row(
-            "SELECT COALESCE(SUM(LENGTH(transcript_deflate)), 0)
-               FROM chunk_transcripts WHERE session_id = ?1",
-            params![session_id],
-            |r| r.get(0),
-        )?;
+        let total: i64 = tx
+            .query_row(
+                "SELECT compressed_bytes FROM chunk_transcript_totals WHERE session_id = ?1",
+                params![session_id],
+                |r| r.get(0),
+            )
+            .optional()?
+            .unwrap_or(0);
         if total <= MAX_SESSION_TRANSCRIPT_COMPRESSED_BYTES {
             return Ok(());
         }
@@ -19492,6 +19499,10 @@ mod tests {
             "INSERT INTO channel1_appends(session_id, block_id, reminder_text) VALUES (?1, 'b0', 'r')",
         ),
         (
+            "chunk_transcript_totals",
+            "INSERT INTO chunk_transcript_totals(session_id) VALUES (?1)",
+        ),
+        (
             "chunk_transcripts",
             "INSERT INTO chunk_transcripts(session_id, history_segment_seq, start_ordinal, end_ordinal, transcript_deflate, created_at_ms)
              VALUES (?1, 1, 1, 2, x'00', 1)",
@@ -19553,10 +19564,6 @@ mod tests {
         (
             "reduce_command_ledger",
             "INSERT INTO reduce_command_ledger(session_id, command_id, queued_at_ms) VALUES (?1, 'c', 1)",
-        ),
-        (
-            "tag_cache_generations",
-            "INSERT INTO tag_cache_generations(session_id) VALUES (?1)",
         ),
         (
             "tags",
@@ -24442,6 +24449,208 @@ mod tests {
                 .pending_count,
             0,
             "a rejected CAS must not leave side-channel work behind"
+        );
+    }
+
+    /// One transcript row as eviction orders it: `(created_at_ms, history_segment_seq, bytes)`.
+    type TranscriptRow = (i64, i64, i64);
+
+    fn transcript_rows(store: &MemoryStore, session_id: &str) -> Vec<TranscriptRow> {
+        store
+            .inner
+            .with_conn(|conn| {
+                conn.prepare(
+                    "SELECT created_at_ms, history_segment_seq, LENGTH(transcript_deflate)
+                       FROM chunk_transcripts WHERE session_id = ?1
+                      ORDER BY created_at_ms, history_segment_seq",
+                )?
+                .query_map(params![session_id], |r| {
+                    Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+                })?
+                .collect()
+            })
+            .unwrap()
+    }
+
+    fn transcript_total(store: &MemoryStore, session_id: &str) -> Option<i64> {
+        store
+            .inner
+            .with_conn(|conn| {
+                conn.query_row(
+                    "SELECT compressed_bytes FROM chunk_transcript_totals WHERE session_id = ?1",
+                    params![session_id],
+                    |r| r.get(0),
+                )
+                .optional()
+            })
+            .unwrap()
+    }
+
+    fn assert_transcripts(store: &MemoryStore, session_id: &str, expected: &[TranscriptRow]) {
+        let rows = transcript_rows(store, session_id);
+        assert_eq!(rows, expected, "{session_id} rows");
+        let sum: i64 = rows.iter().map(|row| row.2).sum();
+        assert_eq!(
+            transcript_total(store, session_id).unwrap_or(0),
+            sum,
+            "{session_id} total"
+        );
+        assert!(
+            sum <= MAX_SESSION_TRANSCRIPT_COMPRESSED_BYTES,
+            "{session_id}"
+        );
+    }
+
+    fn model_publish(model: &mut Vec<TranscriptRow>, written: &[TranscriptRow]) {
+        for row in written {
+            model.retain(|kept| kept.1 != row.1);
+            model.push(*row);
+        }
+        model.sort_unstable();
+        while model.iter().map(|row| row.2).sum::<i64>() > MAX_SESSION_TRANSCRIPT_COMPRESSED_BYTES {
+            model.remove(0);
+        }
+    }
+
+    #[test]
+    fn transcript_total_equals_the_stored_sum_after_every_writer_and_eviction() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
+        // Digest bytes are incompressible, so the stored length is the requested length.
+        let blob = |len: usize, salt: &str| ChunkTranscriptBlobs {
+            transcript_deflate: (0u64..)
+                .flat_map(|i| md5::compute(format!("{salt}:{i}")).0)
+                .take(len)
+                .collect(),
+        };
+        let publish = |session_id: &str,
+                       first_sequence: i64,
+                       count: i64,
+                       created_at: i64,
+                       blobs: &ChunkTranscriptBlobs|
+         -> Vec<TranscriptRow> {
+            let segments: Vec<StoredHistorySegment> = (0..count)
+                .map(|idx| StoredHistorySegment {
+                    start_message: first_sequence + idx,
+                    end_message: first_sequence + idx,
+                    created_at,
+                    ..Default::default()
+                })
+                .collect();
+            store
+                .inner
+                .with_conn_fenced(|tx| {
+                    insert_chunk_transcripts_tx(tx, session_id, first_sequence, &segments, blobs)
+                })
+                .unwrap();
+            let len = i64::try_from(blobs.transcript_deflate.len()).unwrap();
+            (0..count)
+                .map(|idx| (created_at, first_sequence + idx, len))
+                .collect()
+        };
+        let run = |sql: &str| {
+            store
+                .inner
+                .with_conn_fenced(|tx| tx.execute(sql, []))
+                .unwrap()
+        };
+        let large = blob(200 * 1024, "large");
+        let mut a = Vec::new();
+
+        model_publish(&mut a, &publish("A", 1, 20, 5_000, &large));
+        assert_transcripts(&store, "A", &a);
+        assert_eq!(a.len(), 20, "4000 KiB stays under the cap");
+
+        // A 28-segment batch past 8 MiB whose clock reads older than the rows before it:
+        // the victims are the oldest by `created_at_ms`, then by sequence, so the batch's
+        // own first rows go first.
+        let batch = publish("A", 21, 28, 4_000, &large);
+        model_publish(&mut a, &batch);
+        assert_transcripts(&store, "A", &a);
+        assert_eq!(a.first().map(|row| row.1), Some(29));
+        assert_eq!(a.len(), 40);
+
+        // A republished sequence takes the conflict path of the insert.
+        model_publish(
+            &mut a,
+            &publish("A", 10, 1, 6_000, &blob(50 * 1024, "small")),
+        );
+        assert_transcripts(&store, "A", &a);
+
+        let mut b = Vec::new();
+        model_publish(&mut b, &publish("B", 1, 2, 1_000, &blob(10, "b")));
+        assert_transcripts(&store, "B", &b);
+
+        run("DELETE FROM chunk_transcripts WHERE session_id = 'A' AND history_segment_seq > 30");
+        a.retain(|row| row.1 <= 30);
+        assert_transcripts(&store, "A", &a);
+
+        run("INSERT INTO chunk_transcripts (
+                 session_id, history_segment_seq, start_ordinal, end_ordinal,
+                 transcript_deflate, created_at_ms
+             )
+             SELECT 'C', history_segment_seq, start_ordinal, end_ordinal,
+                    transcript_deflate, created_at_ms
+               FROM chunk_transcripts WHERE session_id = 'A'");
+        assert_transcripts(&store, "C", &a);
+
+        run("DELETE FROM chunk_transcripts WHERE session_id = 'C'");
+        assert_transcripts(&store, "C", &[]);
+
+        store.delete_session("A", "/project").unwrap();
+        assert_transcripts(&store, "A", &[]);
+        assert_eq!(transcript_total(&store, "A"), None);
+        assert_transcripts(&store, "B", &b);
+    }
+
+    fn seed_tags(store: &MemoryStore, session_id: &str, count: i64) {
+        store
+            .inner
+            .with_conn_fenced(|tx| {
+                tx.execute(
+                    "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < ?2)
+                     INSERT INTO tags(session_id, tag_number, block_id, kind)
+                     SELECT ?1, i, 'b' || i, 'message' FROM n",
+                    params![session_id, count],
+                )
+            })
+            .unwrap();
+    }
+
+    fn tag_count_and_max(store: &MemoryStore, session_id: &str) -> (i64, i64) {
+        store
+            .inner
+            .with_conn(|conn| {
+                conn.query_row(
+                    "SELECT COUNT(*), COALESCE(MAX(tag_number), 0) FROM tags WHERE session_id = ?1",
+                    params![session_id],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+            })
+            .unwrap()
+    }
+
+    #[test]
+    fn a_bulk_tag_delete_costs_work_linear_in_its_tags() {
+        let delete_work = |tags: i64| -> u64 {
+            let dir = tempfile::tempdir().unwrap();
+            let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
+            seed_tags(&store, "bulk", tags);
+            seed_tags(&store, "kept", 7);
+            assert_eq!(tag_count_and_max(&store, "bulk"), (tags, tags));
+            store.start_statement_work_ledger();
+            store.delete_session("bulk", "/project").unwrap();
+            let work = store.take_statement_work();
+            assert_eq!(tag_count_and_max(&store, "bulk"), (0, 0));
+            assert_eq!(tag_count_and_max(&store, "kept"), (7, 7));
+            work.iter().map(|run| run.vm_steps).sum()
+        };
+        let small = delete_work(10_000);
+        let large = delete_work(100_000);
+        println!("delete_session vm_steps: 10k tags = {small}, 100k tags = {large}");
+        assert!(
+            large <= small * 11,
+            "100k tags cost {large} steps, more than 11 x {small}"
         );
     }
 

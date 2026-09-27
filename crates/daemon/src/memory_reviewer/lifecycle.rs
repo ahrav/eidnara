@@ -158,12 +158,21 @@ impl MemoryReviewerStatus {
         } else {
             published.block.clone()
         };
-        block.activation_state = ActivationStateText(match &**self.activation.load() {
+        block.activation_state = ActivationStateText(self.activation_state_at(now));
+        block
+    }
+
+    /// The activation state [`Self::reported`] carries, with an expired evaluation reported as `stale`.
+    pub fn activation_state(&self) -> ActivationState {
+        self.activation_state_at(Instant::now())
+    }
+
+    fn activation_state_at(&self, now: Instant) -> ActivationState {
+        match &**self.activation.load() {
             None => ActivationState::Closed("unknown"),
             Some(evaluation) if now >= evaluation.stale_at => ActivationState::Closed("stale"),
             Some(evaluation) => evaluation.state,
-        });
-        block
+        }
     }
 
     pub fn set_activation(&self, state: ActivationState) {

@@ -5457,6 +5457,7 @@ impl HandlerCore {
             project_digest: binding.kernel_project.digest().to_string(),
             domain_id: canonical_memory::MEMORY_DOMAIN_ID.to_string(),
             kernel_incarnation,
+            gate: Arc::clone(&self.memory_reviewer_status),
         })
     }
 
@@ -14237,7 +14238,7 @@ impl memory_classifier_scheduler::SchedulerHost for SchedulerBridge {
                 std::collections::btree_map::Entry::Occupied(_) => {}
             }
         }
-        let memory_reviewer_open = self.memory_reviewer_status.reported().activation_state.0
+        let memory_reviewer_open = self.memory_reviewer_status.activation_state()
             == memory_reviewer::lifecycle::ActivationState::Open
             && memory_reviewer::selection::PRODUCTION_SELECTION_OPEN;
         Ok(by_project
