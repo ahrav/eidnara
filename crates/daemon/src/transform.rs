@@ -1710,12 +1710,8 @@ pub struct TransformWithProjection {
     pub reasoning_watermark: u64,
     pub mutation_exempt_mid: Option<String>,
     pub lineage_anchor_mid: Option<String>,
-    /// The request a descent pass rebased to the durable ordinal base. The ready snapshot
-    /// retains it instead of the harness's origin-numbered copy, so wrapup compares its
-    /// ordinals against the durable history-segment ends.
-    pub rebased_request: Option<TransformRequest>,
-    /// The window the pass served when a retry re-resolved it to another cut; `None` when it
-    /// served the request it was given.
+    /// The window the pass served when a retry re-resolved it to another cut or a descent pass
+    /// rebased it to the durable ordinal base; `None` when it served the request it was given.
     pub served_request: Option<Box<TransformRequest>>,
 }
 
@@ -2177,7 +2173,9 @@ fn apply_once_with_estimator(
                 // reset's truth. A store error fails the committed pass: the plugin serves raw
                 // once and declares its retained anchor, which resolves against the new state.
                 output.response.boundary = Some(rendered_boundary(store, &req.session_id)?);
-                if let Cow::Owned(served) = attempt_req {
+                if let Cow::Owned(served) = attempt_req
+                    && output.served_request.is_none()
+                {
                     output.served_request = Some(Box::new(served));
                 }
                 return Ok(output);
@@ -2564,7 +2562,6 @@ fn lineage_protocol_passthrough(
         reasoning_watermark: 0,
         mutation_exempt_mid: None,
         lineage_anchor_mid: None,
-        rebased_request: None,
         served_request: None,
         response: TransformResponse::passthrough(
             req.messages
@@ -3084,7 +3081,6 @@ fn apply_additive_only(
             .max(meta.reasoning_cleared_through_ordinal),
         mutation_exempt_mid: None,
         lineage_anchor_mid: None,
-        rebased_request: None,
         served_request: None,
         response: TransformResponse {
             status: TransformStatus::Ok,
@@ -5221,7 +5217,6 @@ fn apply_once(
             .max(meta.reasoning_cleared_through_ordinal),
         mutation_exempt_mid: mutation_exempt_mid.map(str::to_string),
         lineage_anchor_mid: lineage_anchor_mid.map(str::to_string),
-        served_request: None,
         response: TransformResponse {
             status: TransformStatus::Ok,
             served_from: ServedFrom::Transform,
@@ -5252,7 +5247,7 @@ fn apply_once(
             channel2_directive: channel2_output.channel2_directive,
             note_deliveries: (!note_deliveries.is_empty()).then_some(note_deliveries),
         },
-        rebased_request: rebased_req,
+        served_request: rebased_req.map(Box::new),
     })
 }
 
@@ -6750,7 +6745,6 @@ fn pending_passthrough_result(args: PendingPassthroughArgs) -> TransformWithProj
         reasoning_watermark,
         mutation_exempt_mid,
         lineage_anchor_mid: None,
-        rebased_request: None,
         served_request: None,
         response,
     }

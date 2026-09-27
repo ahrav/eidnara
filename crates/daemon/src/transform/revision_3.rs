@@ -480,6 +480,16 @@ async fn a_revert_through_no_anchor_outside_the_pending_rewrite_arm_removes_ever
     assert_eq!(hard["action"], "HARD", "{hard}");
     assert_eq!(hard["reconcile_pending"], false);
     assert_eq!(hard["boundary"], Value::Null);
+    // `Revert { None }` stamps the window without the continuation base the reset clears, so
+    // what the pass served and hands the summarizer is numbered as the next first pass numbers it.
+    let TransformSnapshotLookup::Ready(lease) =
+        handler.transform_snapshots.lock().unwrap().get(session())
+    else {
+        panic!("the reset pass publishes a ready snapshot");
+    };
+    let ordinals: Vec<u64> = lease.request.messages.iter().map(|m| m.ordinal).collect();
+    assert_eq!(ordinals, [1, 2]);
+    drop(lease);
     assert_reset_converges(&handler, &store, epoch, window).await;
 }
 

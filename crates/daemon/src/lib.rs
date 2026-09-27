@@ -9019,9 +9019,6 @@ impl HandlerCore {
         let mutation_exempt_mid = result.mutation_exempt_mid;
         let lineage_anchor_mid = result.lineage_anchor_mid;
         let tag_numbers = result.tag_numbers;
-        // A descent pass rebased its ordinals; the snapshot keeps that copy so wrapup compares
-        // them against the durable history-segment ends.
-        let snapshot_request = result.rebased_request.as_ref().map_or(parsed, |r| r);
         let mut response = result.response;
         response.history_summarizer = Some(diagnostics);
         let Some(output_revision) = self.output_revisions.allocate() else {
@@ -9109,7 +9106,7 @@ impl HandlerCore {
             response_observation_started_at.elapsed().as_secs_f64() * 1_000.0;
         // The ready snapshot keeps the CK input and scalar fields wrapup reads, never the native
         // payload; the ready LRU and active-lease budget charge what its `Arc` keeps alive.
-        let snapshot = Arc::new(snapshot_request.ready_snapshot());
+        let snapshot = Arc::new(parsed.ready_snapshot());
         let retained_size_started_at = Instant::now();
         let retained_bytes = snapshot.snapshot_retained_bytes();
         let retained_size_ms = retained_size_started_at.elapsed().as_secs_f64() * 1_000.0;
