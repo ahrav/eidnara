@@ -1400,6 +1400,10 @@ one is Rust:
      stdout, through the AWS CLI's Converse call) instead of its script. The
      daemon's validator and publication judge the answer as they judge any
      provider's.
+   - `--summarizer-dump <file>` has the fixture append every summarizer
+     request (`{"system", "prompt"}`, one JSON line each) to that file through
+     `EIDNARA_FIXTURE_SUMMARIZER_DUMP`, so gate B reads the daemon's own chunk
+     prompts for the world gate A lived.
    - Without the option, the fixture's scripted summarizer writes each
      segment's `p1` and `p2` as the presented lines' own words and `p3` as the
      range, so a segment that decays past P2 serves no prose. At 120 subjects

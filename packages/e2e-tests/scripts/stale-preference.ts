@@ -17,6 +17,7 @@ const { values } = parseArgs({
         "context-limit": { type: "string" },
         "tokens-per-turn": { type: "string" },
         "summarizer-model": { type: "string" },
+        "summarizer-dump": { type: "string" },
     },
 });
 if (!values.world || !values.out) {
@@ -33,6 +34,7 @@ const capture = await captureStaleWorld(world, {
     modelContextLimit: Number(values["context-limit"] ?? DEFAULT_STALE_DRIVER.modelContextLimit),
     tokensPerTurn: Number(values["tokens-per-turn"] ?? DEFAULT_STALE_DRIVER.tokensPerTurn),
     summarizerModel: values["summarizer-model"],
+    summarizerDump: values["summarizer-dump"],
     progress: (done, total) => {
         if (done % 25 === 0 || done === total) console.error(`${done}/${total}`);
     },

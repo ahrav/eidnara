@@ -56,7 +56,7 @@ describe.skipIf(!rustPrereqs.ok || !budget)("stale preference through OpenCode a
                 "--subjects",
                 `${SUBJECTS}`,
                 "--seed",
-                "6840319362188525570",
+                "6840316923092140034",
                 "--publish",
                 root,
             ]);

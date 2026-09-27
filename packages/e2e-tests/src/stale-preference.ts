@@ -74,6 +74,8 @@ export interface StaleDriverOptions {
      * once a segment decays past P2.
      */
     summarizerModel?: string;
+    /** JSONL path for every daemon summarizer request, when gate B needs it. */
+    summarizerDump?: string;
     /** Called after each world turn and each question, for progress. */
     progress?: (done: number, total: number) => void;
 }
@@ -152,6 +154,9 @@ export async function captureStaleWorld(
                       "../scripts/bedrock-summarizer.ts",
                   ),
                   EIDNARA_STALE_SUMMARIZER_MODEL: options.summarizerModel,
+                  ...(options.summarizerDump
+                      ? { EIDNARA_FIXTURE_SUMMARIZER_DUMP: resolve(options.summarizerDump) }
+                      : {}),
               }
             : undefined,
     });

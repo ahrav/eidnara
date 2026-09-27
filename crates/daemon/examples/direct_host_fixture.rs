@@ -306,6 +306,7 @@ mod unix {
     /// stdin and prints the summarizer's answer, so a harness run can serve
     /// segments a real model wrote.
     const SUMMARIZER_COMMAND_ENV: &str = "EIDNARA_FIXTURE_SUMMARIZER_COMMAND";
+    const SUMMARIZER_DUMP_ENV: &str = "EIDNARA_FIXTURE_SUMMARIZER_DUMP";
 
     fn commanded_summary(
         command: &std::ffi::OsStr,
@@ -354,6 +355,19 @@ mod unix {
             // whatever the scheduled behavior; the controls script transport
             // outcomes, not what a summary says.
             let summary = scripted_summary(&request.prompt);
+            if summary.is_some()
+                && let Some(path) = std::env::var_os(SUMMARIZER_DUMP_ENV)
+            {
+                use std::io::Write;
+                let line = serde_json::json!({"system": request.system, "prompt": request.prompt});
+                if let Ok(mut file) = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(path)
+                {
+                    let _ = writeln!(file, "{line}");
+                }
+            }
             let commanded = summary
                 .as_ref()
                 .and_then(|_| std::env::var_os(SUMMARIZER_COMMAND_ENV))
