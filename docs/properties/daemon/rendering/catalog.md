@@ -2030,3 +2030,18 @@ both `wire.rs:440-451`, which is what keeps
 true today, and the codec question behind
 [nudge-b-synthetic-namespace-reclassifies-ingress-without-a-report](#nudge-b-synthetic-namespace-reclassifies-ingress-without-a-report),
 namely whether any production path lets a non-module actor choose a tool-call id.
+
+Update, 2026-09-27: [#833](https://github.com/ahrav/eidnara/issues/833) deletes the serialized-output per-message memo and its lookup:
+`SerializedOutputCacheEntry`, `SerializedOutputCacheSnapshot`,
+`SerializedOutputCacheStats`, `cached_or_serialize_output`, `cached_output_item`,
+`record_output_item`, `message_output_identity`, the `ServedMessage`
+`output_identity` field with `with_output_identity`, and the frozen-unit tail
+index (`by_tail_mid`, `for_tail_message`) only the memo read. Every served
+message renders through the former miss path, and `SerializedOutputCache`
+keeps only the revision-bound previous CK output. Citations of these symbols
+here are historical at their stated baseline.
+It renames `historical_full_drop_replays_byte_identically_through_output_cache`
+and `duplicate_tool_full_drop_replays_byte_identically_through_output_cache` to
+`historical_full_drop_re_renders_byte_identically` and
+`duplicate_tool_full_drop_re_renders_byte_identically`; each compares two
+renders of the same inputs.

@@ -289,6 +289,20 @@ describe("referenceable JSON domain guard", () => {
         );
     });
 
+    it("charges the same bytes without the escape estimate, which only the wire bounds read", () => {
+        const escaped = {
+            ...message("m1"),
+            text: 'quote " slash \\ newline \n control \u0001 lone \ud800',
+        };
+        const source = [escaped, message("m2")];
+        const full = inspectReferenceableMessages(source);
+        const bare = inspectReferenceableMessages(source, undefined, 0, false);
+        if (!full.ok || !bare.ok) throw new Error("fixture rejected");
+        expect(bare.estimatedBytes).toBe(full.estimatedBytes);
+        expect(bare.messageWireBytes[0]).toBeLessThan(full.messageWireBytes[0] ?? 0);
+        expect(bare.messageWireBytes[1]).toBe(full.messageWireBytes[1]);
+    });
+
     it("rejects an accessor without invoking it", () => {
         const counter = trapCounter();
         const hooked = message("m1");
@@ -959,6 +973,41 @@ describe("digest-verified prefix capture", () => {
     });
 });
 
+describe("tape digest encoding", () => {
+    const digestOf = (text: string): HistoryDigest => {
+        const captured = captureHistory([message("m1", text), message("m2")]).history;
+        captureLease?.release();
+        captureLease = undefined;
+        return captured;
+    };
+
+    it("keeps long strings distinct whether they hash as UTF-8 or UTF-16", () => {
+        const long = "x".repeat(400);
+        const texts = [
+            long,
+            `${"x".repeat(399)}y`,
+            `\ud800${"x".repeat(399)}`,
+            `\ufffd${"x".repeat(399)}`,
+            `\ud83d\ude00${"x".repeat(398)}`,
+            `u400:${"x".repeat(395)}`,
+            "x".repeat(255),
+            `${"\u00e9".repeat(200)}${"x".repeat(200)}`,
+        ];
+        const digests = texts.map(digestOf);
+        for (let left = 0; left < digests.length; left += 1) {
+            for (let right = left + 1; right < digests.length; right += 1)
+                expect(
+                    historyDigestsEqual(
+                        digests[left] as HistoryDigest,
+                        digests[right] as HistoryDigest,
+                    ),
+                ).toBe(false);
+        }
+        // The same content in fresh strings hashes the same.
+        expect(historyDigestsEqual(digestOf(long), digestOf("xx".repeat(200)))).toBe(true);
+    });
+});
+
 describe("host array replacement contract", () => {
     it.each([
         { prototype: Array.prototype },
@@ -981,7 +1030,7 @@ describe("host array replacement contract", () => {
             inspection = inspectReferenceableMessages(next);
             hostRejection = publicationRejection(target, next.length);
             // Own-slot definitions never consult inherited accessors.
-            expect(publishInPlace(target, next, [])).toBeUndefined();
+            expect(publishInPlace(target, next, [], 0)).toBeUndefined();
         } finally {
             if (saved) Object.defineProperty(prototype, "0", saved);
             else Reflect.deleteProperty(prototype, "0");
@@ -1030,7 +1079,7 @@ describe("host array replacement contract", () => {
         }) as typeof Object.defineProperty);
         try {
             expect(
-                publishInPlace(target, [kept, "new1"], ["old0", "old1", "old2"]),
+                publishInPlace(target, [kept, "new1"], ["old0", "old1", "old2"], 0),
             ).toBeUndefined();
         } finally {
             spy.mockRestore();
@@ -1039,9 +1088,9 @@ describe("host array replacement contract", () => {
         expect(order).toEqual(["length", "0", "1"]);
         expect(target).toEqual([kept, "new1"]);
         expect(target[0]).toBe(kept);
-        expect(publishInPlace(target, [], [])).toBeUndefined();
+        expect(publishInPlace(target, [], [], 0)).toBeUndefined();
         expect(target).toEqual([]);
-        expect(publishInPlace(target, ["a", "b"], [])).toBeUndefined();
+        expect(publishInPlace(target, ["a", "b"], [], 0)).toBeUndefined();
         expect(target).toEqual(["a", "b"]);
         expect(Object.getOwnPropertyDescriptor(target, "length")?.writable).toBe(true);
     });
@@ -1068,7 +1117,7 @@ describe("host array replacement contract", () => {
         }) as typeof Object.defineProperty);
         let failure: ReturnType<typeof publishInPlace>;
         try {
-            failure = publishInPlace(target, candidate, members);
+            failure = publishInPlace(target, candidate, members, 0);
         } finally {
             spy.mockRestore();
         }
@@ -1076,11 +1125,30 @@ describe("host array replacement contract", () => {
         expect(failure?.shrunkLength).toBe(k + 1);
         expect(lengths).toEqual([k + 1]);
         expect(failure?.detail).toContain(`shrink to 1 stopped at length ${k + 1}`);
-        expect(failure?.detail).toContain("restored 2 captured references");
+        expect(failure?.detail).toContain("restored 2 captured window references");
         // The original prefix through k, then the captured references; no candidate slot was written.
         expect(target).toEqual(members);
         expect(target).not.toContain(candidate[0]);
     });
+
+    for (const [k, expected, restored] of [
+        [1, ["c0", "c1", "w0", "w1", "w2"], 3],
+        [4, ["c0", "c1", "c2", "w0", "w1", "w2"], 1],
+    ] as const) {
+        it(`appends the captured window after a shrink stopped at ${k < 3 ? "a covered" : "a window"} slot`, () => {
+            const covered = ["c0", "c1", "c2"];
+            const window = ["w0", "w1", "w2"];
+            const target: unknown[] = [...covered, ...window];
+            Object.defineProperty(target, k, { value: target[k], configurable: false });
+            const candidate = [{ id: "candidate" }];
+            const failure = publishInPlace(target, candidate, window, covered.length);
+            expect(failure?.shrunkLength).toBe(k + 1);
+            expect(failure?.detail).toContain(`restored ${restored} captured window references`);
+            // The prefix through k, then the window; covered slots between k and the boundary are lost.
+            expect(target).toEqual([...expected]);
+            expect(target).not.toContain(candidate[0]);
+        });
+    }
 
     it("reports a throw while restoring the captured references as the same failed publication", () => {
         const members = ["m0", "m1", "m2", "m3"];
@@ -1092,11 +1160,11 @@ describe("host array replacement contract", () => {
                 throw new RangeError("allocation failed");
             },
         });
-        const failure = publishInPlace(target, [], hostile);
+        const failure = publishInPlace(target, [], hostile, 0);
         expect(failure?.error).toBeInstanceOf(TypeError);
         expect(failure?.shrunkLength).toBe(2);
         expect(failure?.detail).toContain(
-            "restoring captured references failed (RangeError: allocation failed)",
+            "restoring captured window references failed (RangeError: allocation failed)",
         );
         expect(target).toEqual(["m0", "m1"]);
     });

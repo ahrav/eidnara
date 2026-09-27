@@ -299,57 +299,6 @@ export function readRawSessionMessageIdOrdinalsFromDb(
     return ordinalById;
 }
 
-/** The keyset page supports incremental maintenance of shadow message ordinals. */
-export function readRawSessionMessageOrdinalPageFromDb(
-    db: SqliteReader,
-    sessionId: string,
-    after: RawMessageOrdinalAnchor | null,
-    limit: number,
-): RawMessageOrdinalEntry[] {
-    const pageSize = Math.max(1, Math.floor(limit));
-    const rows = (
-        after
-            ? db
-                  .prepare(
-                      `SELECT id, data, time_created
-                       FROM message
-                       WHERE session_id = ?
-                         AND (time_created, id) > (?, ?)
-                       ORDER BY time_created ASC, id ASC
-                       LIMIT ?`,
-                  )
-                  .all(sessionId, after.timeCreated, after.id, pageSize)
-            : db
-                  .prepare(
-                      `SELECT id, data, time_created
-                       FROM message
-                       WHERE session_id = ?
-                       ORDER BY time_created ASC, id ASC
-                       LIMIT ?`,
-                  )
-                  .all(sessionId, pageSize)
-    ).filter(isRawMessageRow);
-
-    return rows.flatMap((row) => {
-        if (typeof row.time_created !== "number") return [];
-        const info = parseJsonRecord(row.data);
-        return {
-            id: row.id,
-            timeCreated: row.time_created,
-            contributesOrdinal: !isRawCompactionSummaryInfo(info),
-            hasValidInfo: info !== null,
-        };
-    });
-}
-
-/** The count includes compaction-summary rows. */
-export function countStoredRawSessionMessagesFromDb(db: SqliteReader, sessionId: string): number {
-    const row = db
-        .prepare("SELECT COUNT(*) AS count FROM message WHERE session_id = ?")
-        .get(sessionId) as { count?: number } | null;
-    return typeof row?.count === "number" ? row.count : 0;
-}
-
 interface AnchorRow {
     time_created: number;
     id: string;

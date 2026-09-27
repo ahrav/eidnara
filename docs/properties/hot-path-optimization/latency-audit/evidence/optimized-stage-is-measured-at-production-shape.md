@@ -173,3 +173,12 @@ durable-text bound test is correctness coverage, not a performance claim.
 [evidence]: ../../../../../crates/host-runtime/benches/support/evidence.rs#L1-L8
 [evidence-manifest]: ../../../../../crates/host-runtime/benches/support/evidence.rs#L103-L131
 [pm-body]: ../../../../../crates/host-runtime/tests/support/perf_measurement.rs#L16-L19
+
+Update, 2026-09-27: [#833](https://github.com/ahrav/eidnara/issues/833) replaces
+`first_hard_pass_meta_respects_the_store_durable_text_bound` and
+`meta_bytes_stay_flat_as_covered_history_grows` with
+`a_hundred_thousand_message_session_commits_a_three_hundred_message_window` and
+the legacy-row prune tests in `transform_meta_bound.rs`: block identities are
+pruned to the window, so the meta bound no longer depends on the covered
+history. `test_support/transform_corpus.rs` is deleted with its one consumer.
+Citations of the old tests here are historical at their stated baseline.

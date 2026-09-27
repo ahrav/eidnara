@@ -1426,6 +1426,9 @@ pub struct TruncateOutcome {
     pub row_version: u64,
     /// The summarizer state this transaction left, counts and timeline included; a caller that commits its own meta over the result carries it forward.
     pub history_summarizer: HistorySummarizerDurableState,
+    /// No segment survived, so the lineage continuation was cleared with them; a caller that
+    /// commits its own meta over the result clears it too.
+    pub lineage_reset: bool,
 }
 
 pub struct HistorySummarizerPublishRequest<'a> {
@@ -1806,6 +1809,8 @@ pub struct NoteNudgeAnchorSeed {
     pub text: String,
 }
 
+/// One entry per served block. `content_hash` is the first 128 bits of the block's SHA-256 in
+/// lowercase hex, which is enough to detect a changed block and keeps the O(W) list small.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ServedBlockFingerprint {
     pub block_id: String,
@@ -1813,12 +1818,15 @@ pub struct ServedBlockFingerprint {
     pub serialized_len: usize,
 }
 
-fn bool_is_false(value: &bool) -> bool {
-    !*value
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CoveredSystemMessage {
+    /// The ordinal of the content's first occurrence.
+    pub ordinal: u64,
+    pub content: String,
 }
 
-fn u8_is_zero(value: &u8) -> bool {
-    *value == 0
+fn bool_is_false(value: &bool) -> bool {
+    !*value
 }
 
 /// A response-side Channel-2 directive awaiting a gateway delivery acknowledgement.
@@ -1844,7 +1852,9 @@ pub enum TailHygienePartKind {
 
 /// One typed part from the rendered-tail hygiene walk. Persisting its measurements lets later
 /// passes record newly appended content and update which content is considered recent without
-/// tokenizing the historical prefix again.
+/// tokenizing the historical prefix again. One entry is stored per live-tail part, so an absent
+/// tag is omitted; a reader without `skip_serializing_if` still reads a missing `Option` as
+/// `None`. `content_hash` is the first 128 bits of the part's SHA-256 in lowercase hex.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TailHygienePartMeasurement {
     pub key: String,
@@ -1852,7 +1862,9 @@ pub struct TailHygienePartMeasurement {
     pub kind: TailHygienePartKind,
     pub tokens: i64,
     pub u_tokens: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub tag_number: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub tag_status: Option<String>,
     pub protected: bool,
 }
@@ -1998,11 +2010,6 @@ pub struct ModuleMeta {
     /// `None` identifies metadata written before the component watermark was persisted.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub m1_history_segment_seq: Option<i64>,
-    /// Counted coherent divergence observations suppressed by a pending history_segment revision.
-    /// Active history_summarizer and wrapup publication windows retain this value without incrementing or
-    /// resetting it; legacy or damaged rows resume escalation after those bounded windows close.
-    #[serde(default, skip_serializing_if = "u8_is_zero")]
-    pub boundary_divergence_pending_count: u8,
     /// The last materializing pass had cross-session memory disabled. The negative form keeps
     /// pre-field metadata and fresh default state compatible with the historical enabled mode.
     #[serde(default)]
@@ -2243,6 +2250,11 @@ pub struct ModuleMeta {
     /// the served block set for that pass, so it stays bounded by the output size.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub served_output_fingerprint: Vec<ServedBlockFingerprint>,
+    /// Covered system messages, one per distinct content in first-ordinal order. A fold
+    /// window starts at its anchor; preceding system messages reach later folds only through
+    /// this list.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub covered_system_messages: Vec<CoveredSystemMessage>,
 
     /// Tracks which shadow reset generation this record belongs to. Operations created
     /// before the most recent reset are rejected so they cannot write rows from an older
@@ -2280,6 +2292,15 @@ impl ModuleMeta {
     pub fn served_history_segment_seq(&self) -> i64 {
         self.additive_served_history_segment_seq
             .unwrap_or_else(|| self.rendered_history_segment_seq())
+    }
+
+    /// Drops the lineage continuation a descent wrote. A revert that removes every segment
+    /// is the reset of spec D10, and the next pass numbers its window from 1.
+    pub fn forget_lineage_continuation(&mut self) {
+        self.ordinal_continuation_base = None;
+        self.anchor_block_id = None;
+        self.anchor_content_hash = None;
+        self.descent_completed = false;
     }
 }
 
@@ -2510,12 +2531,13 @@ pub struct CoverageSnapshot {
     pub continuation_base: Option<u64>,
     pub newest: Option<HistorySegmentEdge>,
     /// The rendered boundary: the row ending at `meta.coverage_ordinal` whose end block is
-    /// `core.boundary_id`. `None` when the daemon holds no coverage.
+    /// `core.boundary_id`, or the newest row after an interrupted revert truncate (spec D10).
+    /// `None` when the daemon holds no coverage.
     pub rendered: Option<HistorySegmentEdge>,
     /// The row at the declared sequence, when one was declared.
     pub declared: Option<HistorySegmentEdge>,
-    /// With no declared sequence and a rendered boundary: the newest row ending at one of the
-    /// window's messages (see [`MemoryStore::coverage_snapshot`]).
+    /// With no declared sequence and a rendered boundary: the newest row at or below the rendered
+    /// one ending at one of the window's messages (see [`MemoryStore::coverage_snapshot`]).
     pub newest_window_end: Option<HistorySegmentEdge>,
 }
 
@@ -3173,11 +3195,12 @@ impl ActiveWriteTransaction<'_> {
             "INSERT INTO scan_owner_copies(
                  owner_copy_id,scan_id,domain_owner_id,owner_kind,field_id
              )
-             SELECT lower(hex(randomblob(16))),scan_id,?1,?2,field_id
+             SELECT ?4 || lower(hex(randomblob(10))),scan_id,?1,?2,field_id
                FROM scan_owner_copies
               WHERE scan_id=?3
               GROUP BY scan_id,field_id",
         )?;
+        let link_prefix = hex_digest(opaque_id_time_prefix());
         for link in &prepared.existing_scan_links {
             let domain_owner_id = domain_owner_ids
                 .iter()
@@ -3187,7 +3210,12 @@ impl ActiveWriteTransaction<'_> {
                         "existing scan link references an unregistered durable owner".to_string(),
                     )))
                 })?;
-            insert_link.execute(params![domain_owner_id, prepared.owner_kind, link.scan_id])?;
+            insert_link.execute(params![
+                domain_owner_id,
+                prepared.owner_kind,
+                link.scan_id,
+                link_prefix
+            ])?;
         }
         Ok(())
     }
@@ -3211,18 +3239,26 @@ fn persisted_detection_labels(detections: &[Detection]) -> Vec<&str> {
 
 const MAX_PERSISTED_DETECTION_LABELS: usize = 64;
 
-/// Thirty-two lowercase hex characters from sixteen random bytes, the shape every audit
-/// identifier column checks. Generated in Rust so an audit write spends no statement on an
-/// identifier; the per-row link copy below keeps SQLite's `randomblob` because it needs one
-/// value per selected row.
+/// Thirty-two lowercase hex characters, the shape every audit identifier column checks: six
+/// bytes of big-endian creation milliseconds, then ten random bytes. The time prefix keeps one
+/// batch's rows on a few index leaves, so writing them and the next pass's retirement dirty
+/// O(rows per leaf) pages instead of one page per row. Generated in Rust so an audit write
+/// spends no statement on an identifier; the per-row link copy below binds the same prefix and
+/// appends SQLite's `randomblob` because it needs one value per selected row.
 fn opaque_id() -> rusqlite::Result<String> {
     let mut bytes = [0u8; 16];
-    getrandom::getrandom(&mut bytes).map_err(|error| {
+    bytes[..6].copy_from_slice(&opaque_id_time_prefix());
+    getrandom::getrandom(&mut bytes[6..]).map_err(|error| {
         rusqlite::Error::ToSqlConversionFailure(Box::new(MemoryStoreError::Serde(format!(
             "random source unavailable for an audit identifier: {error}"
         ))))
     })?;
     Ok(hex_digest(bytes))
+}
+
+fn opaque_id_time_prefix() -> [u8; 6] {
+    let millis = u64::try_from(current_time_ms()).unwrap_or(0).to_be_bytes();
+    millis[2..].try_into().expect("six low bytes")
 }
 
 /// Deletes the audit rows that lost their last owner, restricted to `scan_ids`.
@@ -4693,9 +4729,9 @@ fn prepare_history_segment(
     // claims; the loaded set then holds claims only on its newest non-legacy suffix.
     if history_segment.legacy != 1 {
         prepared.claims = prepare_claims(
-            write,
             &history_segment.claims,
             prepared.p1.as_deref().unwrap_or_default().trim(),
+            |field_id, input| write.content(field_id, input),
         )?;
     }
     Ok(prepared)
@@ -4707,30 +4743,30 @@ fn prepare_history_segment(
 /// contains, so a stored anchor always lies inside the stored `p1`; and drops
 /// a claim whose key the scanner rewrites or whose `key = value` pair it flags.
 fn prepare_claims(
-    write: &mut PreparedWrite,
     claims: &[Claim],
     p1: &str,
+    mut scan: impl FnMut(&'static str, &str) -> Result<String, MemoryStoreError>,
 ) -> Result<Vec<Claim>, MemoryStoreError> {
     let mut prepared = Vec::with_capacity(claims.len());
     for claim in claims {
         let anchor = claim
             .anchor
             .as_deref()
-            .map(|anchor| write.content("claim_anchor", anchor))
+            .map(|anchor| scan("claim_anchor", anchor))
             .transpose()?
             .filter(|anchor| !anchor.is_empty() && p1.contains(anchor.as_str()));
-        let key = write.content("claim_key", &claim.key)?;
+        let key = scan("claim_key", &claim.key)?;
         // Liveness matches keys byte for byte, and two keys redacted to one placeholder would
         // supersede each other, so a rewritten key drops its claim.
         if key != claim.key {
             continue;
         }
-        let value = write.content("claim_value", &claim.value)?;
+        let value = scan("claim_value", &claim.value)?;
         // A correction serves `key = value` together, and a key such as `api.key` makes that
         // pair read as a secret assignment even when neither half does alone. Such a claim is
         // dropped, so no served correction holds text the scanner would redact.
         let pair = format!("{key} = {value}");
-        if write.content("claim_pair", &pair)? != pair {
+        if scan("claim_pair", &pair)? != pair {
             continue;
         }
         prepared.push(Claim {
@@ -4759,6 +4795,29 @@ fn claims_from_cell(cell: Option<&str>) -> Vec<Claim> {
 /// The `claims` cell a row stores: a JSON array, `[]` when empty, never NULL.
 fn claims_cell(claims: &[Claim]) -> String {
     serde_json::to_string(claims).expect("claims serialize")
+}
+
+/// A lineage copy re-scans claim text to apply detector rules introduced
+/// after the row was written. A `p1` the scanner rewrites copies `[]`,
+/// because the anchors were checked against the old `p1`.
+fn redact_transaction_claims(
+    cell: Option<&str>,
+    p1: Option<&str>,
+) -> Result<String, MemoryStoreError> {
+    if cell == Some("[]") {
+        return Ok("[]".to_string());
+    }
+    if let Some(p1) = p1
+        && prepare_transaction_content(p1)? != p1
+    {
+        return Ok("[]".to_string());
+    }
+    let prepared = prepare_claims(
+        &claims_from_cell(cell),
+        p1.unwrap_or_default().trim(),
+        |_, input| prepare_transaction_content(input),
+    )?;
+    Ok(claims_cell(&prepared))
 }
 
 fn prepare_history_segments(
@@ -6704,6 +6763,18 @@ impl MemoryStore {
                     let input = context.get::<String>(0)?;
                     prepare_transaction_content(&input)
                         .map_err(|error| rusqlite::Error::UserFunctionError(Box::new(error)))
+                },
+            )?;
+            conn.create_scalar_function(
+                "redact_transaction_claims",
+                2,
+                FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_DETERMINISTIC,
+                |context| {
+                    redact_transaction_claims(
+                        context.get_raw(0).as_str().ok(),
+                        context.get_raw(1).as_str().ok(),
+                    )
+                    .map_err(|error| rusqlite::Error::UserFunctionError(Box::new(error)))
                 },
             )?;
             conn.create_scalar_function(
@@ -10691,7 +10762,7 @@ impl MemoryStore {
 
     /// Reads the rows anchor resolution needs in one read transaction: the session row's
     /// version and coverage, the newest and rendered rows, the row at `declared_sequence`, and,
-    /// when nothing is declared and a rendered row exists, the newest row whose end block
+    /// when nothing is declared and a rendered row exists, the newest row at or below it whose end block
     /// belongs to one of `live_mids` and whose end id is an anchor as
     /// [`Self::coverage_anchor_page`] defines it. `live_mids` are the window's non-synthetic message ids
     /// in order; the k-th (0-based) is matched at ordinal continuation base + k + 1, the
@@ -10724,8 +10795,11 @@ impl MemoryStore {
                 }
                 None => None,
             };
+            // Only rows the rendered boundary covers can be a stale slice: a newer row was published
+            // after the host's view, and cutting at it would drop the messages it summarizes. The
+            // unary `+` keeps the planner on the end-message seek, so the work stays independent of H.
             let newest_window_end = match (declared_sequence, &rendered) {
-                (None, Some(_)) => conn
+                (None, Some(rendered)) => conn
                     .prepare_cached(
                         "SELECT h.sequence, h.start_message, h.end_message, h.start_message_id,
                                 h.end_message_id
@@ -10734,13 +10808,15 @@ impl MemoryStore {
                             AND substr(h.end_message_id, 1, length(j.value) + 1) = j.value || '#'
                             AND h.end_message_id GLOB '?*#[0-9]*'
                             AND h.end_message_id NOT GLOB '*#*[^0-9]*'
+                            AND +h.sequence <= ?4
                           ORDER BY h.sequence DESC LIMIT 1",
                     )?
                     .query_row(
                         params![
                             session_id,
                             serde_json::to_string(live_mids).expect("strings serialize"),
-                            continuation_base.unwrap_or(0) as i64
+                            continuation_base.unwrap_or(0) as i64,
+                            rendered.sequence
                         ],
                         history_segment_edge_from_row,
                     )
@@ -11495,6 +11571,7 @@ impl MemoryStore {
             target_meta.pending_rewrite_ambiguous = false;
             target_meta.pending_rewrite_last_failure = None;
             target_meta.served_output_fingerprint.clear();
+            target_meta.covered_system_messages.clear();
             target_meta.anchor_block_id = Some(anchor.block_id.clone());
             target_meta.anchor_content_hash = Some(anchor.content_hash.clone());
             target_meta.ordinal_continuation_base = Some(prior_last);
@@ -11694,13 +11771,7 @@ impl MemoryStore {
                          importance,
                          CASE WHEN episode_type IS NULL THEN NULL
                               ELSE reject_transaction_text(episode_type) END,
-                         legacy, created_at,
-                         -- The claims were scanned field by field when their row was
-                         -- inserted and are not re-scanned here: the column has no rows
-                         -- from before insert-time scanning. A copy whose p1 the re-scan
-                         -- changes keeps none, so no copied anchor falls outside its p1.
-                         CASE WHEN p1 IS NULL OR redact_transaction_text(p1) = p1
-                              THEN claims ELSE '[]' END
+                         legacy, created_at, redact_transaction_claims(claims, p1)
                    FROM history_segments WHERE session_id = ?2",
                 params![request.target_key, source_key],
             )?;
@@ -12036,6 +12107,7 @@ impl MemoryStore {
                 last_recut: reset_meta.last_recut,
                 row_version: next_version,
                 history_summarizer: reset_meta.history_summarizer,
+                lineage_reset: true,
             })))
         })?;
         match outcome {
@@ -12095,6 +12167,7 @@ impl MemoryStore {
                     last_recut: meta.last_recut,
                     row_version: current.max(0) as u64,
                     history_summarizer: meta.history_summarizer,
+                    lineage_reset: false,
                 })));
             }
 
@@ -12154,6 +12227,10 @@ impl MemoryStore {
             meta.last_recut = last_recut.clone();
             if let Some(seqs) = meta.legacy_history_segment_seqs.as_mut() {
                 seqs.retain(|sequence| *sequence <= keep_through_seq);
+            }
+            let lineage_reset = surviving_tail.is_none();
+            if lineage_reset {
+                meta.forget_lineage_continuation();
             }
             let meta_json = match serde_json::to_string(&meta) {
                 Ok(json) => json,
@@ -12216,6 +12293,7 @@ impl MemoryStore {
                 last_recut,
                 row_version: next,
                 history_summarizer: meta.history_summarizer,
+                lineage_reset,
             })))
         })?;
 
@@ -16212,7 +16290,9 @@ fn history_segment_edge_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Hi
 }
 
 /// The session row's version and continuation base, and the rendered boundary row: the row
-/// ending at `meta.coverage_ordinal` whose end block is `core.boundary_id`.
+/// ending at `meta.coverage_ordinal` whose end block is `core.boundary_id`. While
+/// `core.reconcile_pending` is set and that row is gone, a revert's truncate committed before
+/// its fold did, and the newest surviving row is the rendered boundary (spec D10).
 #[derive(Default)]
 struct RenderedCoverage {
     row_version: Option<u64>,
@@ -16228,7 +16308,8 @@ fn rendered_coverage_tx(
         .prepare_cached(
             "SELECT row_version, json_extract(core_state, '$.boundary_id'),
                     json_extract(meta, '$.coverage_ordinal'),
-                    json_extract(meta, '$.ordinal_continuation_base')
+                    json_extract(meta, '$.ordinal_continuation_base'),
+                    json_extract(core_state, '$.reconcile_pending')
                FROM cache_state WHERE session_id = ?1",
         )?
         .query_row(params![session_id], |row| {
@@ -16243,16 +16324,28 @@ fn rendered_coverage_tx(
                 row.get::<_, Option<i64>>(3)?
                     .map(|base| unsigned(3, base))
                     .transpose()?,
+                row.get::<_, Option<bool>>(4)?.unwrap_or(false),
             ))
         })
         .optional()?;
-    let Some((row_version, boundary_id, coverage, base)) = row else {
+    let Some((row_version, boundary_id, coverage, base, reconcile_pending)) = row else {
         return Ok(RenderedCoverage::default());
     };
     let rendered = match (boundary_id, coverage) {
         (Some(boundary_id), Some(coverage)) if !boundary_id.is_empty() => {
-            history_segment_edge_tx(conn, session_id, EdgeAt::EndMessage(coverage))?
+            match history_segment_edge_tx(conn, session_id, EdgeAt::EndMessage(coverage))?
                 .filter(|row| row.end_message_id == boundary_id)
+            {
+                // Only `truncate_history_segments_for_revert` removes the `core.boundary_id`
+                // row while the flag is set; `lineage_anchor_failure` also sets the flag but
+                // leaves the row. The truncate bumps `revert_epoch`, which rejects every
+                // publication fired before it, and the next committing pass is the fold itself,
+                // so no row lands above the kept anchor before the fold.
+                None if reconcile_pending => {
+                    history_segment_edge_tx(conn, session_id, EdgeAt::Newest)?
+                }
+                rendered => rendered,
+            }
         }
         _ => None,
     };
@@ -19948,60 +20041,6 @@ mod tests {
     }
 
     #[test]
-    fn boundary_divergence_counter_cas_loser_does_not_double_increment_and_survives_reopen() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
-        let session = "counter-cas";
-        let core = CoreState::empty();
-        let initial_meta = ModuleMeta {
-            boundary_divergence_pending_count: 0,
-            ..Default::default()
-        };
-        store.commit(session, None, &core, &initial_meta).unwrap();
-
-        let left = store.load(session).unwrap();
-        let right = store.load(session).unwrap();
-        assert_eq!(left.row_version, Some(1));
-        assert_eq!(right.row_version, Some(1));
-
-        let mut left_meta = left.meta.clone();
-        left_meta.boundary_divergence_pending_count = 1;
-        store
-            .commit(session, left.row_version, &left.core, &left_meta)
-            .unwrap();
-
-        let mut right_meta = right.meta.clone();
-        right_meta.boundary_divergence_pending_count = 1;
-        let loser = store.commit(session, right.row_version, &right.core, &right_meta);
-        assert!(matches!(
-            loser,
-            Err(MemoryStoreError::CasConflict {
-                expected: Some(1),
-                found: 2
-            })
-        ));
-        assert_eq!(
-            store
-                .load(session)
-                .unwrap()
-                .meta
-                .boundary_divergence_pending_count,
-            1
-        );
-
-        drop(store);
-        let reopened = MemoryStore::open(&descriptor(dir.path())).unwrap();
-        assert_eq!(
-            reopened
-                .load(session)
-                .unwrap()
-                .meta
-                .boundary_divergence_pending_count,
-            1
-        );
-    }
-
-    #[test]
     fn transform_session_root_lineage_is_cache_committed_and_pruned_on_reopen() {
         let dir = tempfile::tempdir().unwrap();
         let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
@@ -21954,6 +21993,86 @@ mod tests {
             ],
             "each detection receipt must carry the disposition its field actually took"
         );
+    }
+
+    /// Audit ids keep the 32 lowercase hex shape the columns check, and their 12-hex time
+    /// prefix lies within a few seconds of the clock reads around the write that minted them, for ids
+    /// minted in Rust and for per-row link copies minted in SQL.
+    #[test]
+    fn audit_ids_are_lowercase_hex_with_a_time_prefix_from_their_write() {
+        let is_id = |id: &str| {
+            id.len() == 32
+                && id
+                    .bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        };
+        let millis = |prefix: &str| u64::from_str_radix(prefix, 16).unwrap();
+        let now = || millis(&hex_digest(opaque_id_time_prefix()));
+        // The wall clock can step, so each bracket allows a few seconds on either side.
+        const SLACK_MS: u64 = 5_000;
+        let assert_minted_between = |ids: &[String], before: u64, after: u64| {
+            assert!(!ids.is_empty());
+            for id in ids {
+                assert!(is_id(id), "{id}");
+                let minted = millis(&id[..12]);
+                assert!(
+                    before.saturating_sub(SLACK_MS) <= minted && minted <= after + SLACK_MS,
+                    "{before} {id} {after}"
+                );
+            }
+        };
+        let before = now();
+        let ids: Vec<String> = (0..64).map(|_| opaque_id().unwrap()).collect();
+        assert_minted_between(&ids, before, now());
+        assert_eq!(ids.iter().collect::<BTreeSet<_>>().len(), ids.len());
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
+        let column = |sql: &str| -> BTreeSet<String> {
+            store
+                .inner
+                .with_conn(|conn| {
+                    let mut statement = conn.prepare(sql)?;
+                    let rows = statement
+                        .query_map([], |row| row.get(0))?
+                        .collect::<rusqlite::Result<BTreeSet<_>>>()?;
+                    Ok(rows)
+                })
+                .unwrap()
+        };
+        let copies = "SELECT owner_copy_id FROM scan_owner_copies";
+        let mut write = PreparedWrite::new(DurableWriteFamily::HistorySegments);
+        write.domain_owner("session", "ses_ids", "first");
+        write.content("content", "plain text").unwrap();
+        let before = now();
+        write
+            .execute(&store.inner, |_| Ok(WriteDisposition::Applied(())))
+            .unwrap();
+        let after = now();
+        let first = column(copies);
+        let first_scans = column("SELECT scan_id FROM field_scans");
+        for minted in [&first, &first_scans] {
+            assert_minted_between(&minted.iter().cloned().collect::<Vec<_>>(), before, after);
+        }
+        let mut link = PreparedWrite::new(DurableWriteFamily::HistorySegments);
+        link.domain_owner("session", "ses_ids", "second");
+        link.content("content", "other text").unwrap();
+        link.link_existing_scans("session", "ses_ids", "second", first_scans.clone());
+        let before = now();
+        link.execute(&store.inner, |_| Ok(WriteDisposition::Applied(())))
+            .unwrap();
+        let after = now();
+        let linked: Vec<String> = column(copies).difference(&first).cloned().collect();
+        let first_scan_copies = column(&format!(
+            "SELECT COUNT(*) || '' FROM scan_owner_copies WHERE scan_id IN ('{}')",
+            first_scans.into_iter().collect::<Vec<_>>().join("','")
+        ));
+        assert_eq!(
+            first_scan_copies.into_iter().collect::<Vec<_>>(),
+            ["2"],
+            "enabling state: the first write's scan gained a link copy"
+        );
+        assert_minted_between(&linked, before, after);
     }
 
     #[test]
@@ -26075,6 +26194,167 @@ mod tests {
         assert!(loaded[0].claims.is_empty(), "no claim outlives its p1");
     }
 
+    /// A meta row a revision 2 daemon wrote still carries `boundary_divergence_pending_count`;
+    /// the retired field is ignored and the row loads.
+    #[test]
+    fn a_legacy_meta_row_with_the_retired_divergence_counter_loads() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
+        let meta = ModuleMeta {
+            coverage_ordinal: Some(3),
+            ..Default::default()
+        };
+        store
+            .commit("ses", None, &CoreState::empty(), &meta)
+            .unwrap();
+        let raw = rusqlite::Connection::open(dir.path().join("memory.sqlite")).unwrap();
+        raw.execute(
+            "UPDATE cache_state
+                SET meta = json_set(meta, '$.boundary_divergence_pending_count', 2)
+              WHERE session_id = 'ses'",
+            [],
+        )
+        .unwrap();
+        drop(raw);
+        assert_eq!(store.load("ses").unwrap().meta, meta);
+    }
+
+    /// Rollback safety of the per-block meta entries only: a row this build writes, with
+    /// 128-bit hashes and absent tags omitted, deserializes into copies of the d68aedf34
+    /// per-block definitions, and a row those definitions wrote (64-hex hashes, explicit
+    /// nulls) loads here. The rest of `ModuleMeta` is not compared against d68aedf34.
+    #[test]
+    fn per_block_meta_entries_read_both_ways_across_the_d68aedf34_definitions() {
+        #[derive(Debug, PartialEq, Serialize, Deserialize)]
+        struct BaseServedBlockFingerprint {
+            block_id: String,
+            content_hash: String,
+            serialized_len: usize,
+        }
+        #[derive(Debug, PartialEq, Serialize, Deserialize)]
+        struct BaseTailHygienePartMeasurement {
+            key: String,
+            content_hash: String,
+            kind: TailHygienePartKind,
+            tokens: i64,
+            u_tokens: i64,
+            tag_number: Option<i64>,
+            tag_status: Option<String>,
+            protected: bool,
+        }
+        let base_part = |part: &TailHygienePartMeasurement| BaseTailHygienePartMeasurement {
+            key: part.key.clone(),
+            content_hash: part.content_hash.clone(),
+            kind: part.kind,
+            tokens: part.tokens,
+            u_tokens: part.u_tokens,
+            tag_number: part.tag_number,
+            tag_status: part.tag_status.clone(),
+            protected: part.protected,
+        };
+        let base_block = |block: &ServedBlockFingerprint| BaseServedBlockFingerprint {
+            block_id: block.block_id.clone(),
+            content_hash: block.content_hash.clone(),
+            serialized_len: block.serialized_len,
+        };
+        let meta_with = |hash: &str| {
+            let part = |index: i64, tagged: bool| TailHygienePartMeasurement {
+                key: format!("m{index:07}#0\u{0}tool_call"),
+                content_hash: hash.to_string(),
+                kind: TailHygienePartKind::ToolInput,
+                tokens: 40,
+                u_tokens: if tagged { 40 } else { 0 },
+                tag_number: tagged.then_some(index),
+                tag_status: tagged.then(|| "active".to_string()),
+                protected: index == 0,
+            };
+            ModuleMeta {
+                tail_hygiene_baseline: Some(TailHygieneBaseline {
+                    baseline_parts: (0..4).map(|index| part(index, index % 2 == 0)).collect(),
+                    ..Default::default()
+                }),
+                served_output_fingerprint: (0..3)
+                    .map(|index| ServedBlockFingerprint {
+                        block_id: format!("m{index:07}#0"),
+                        content_hash: hash.to_string(),
+                        serialized_len: 182,
+                    })
+                    .collect(),
+                ..Default::default()
+            }
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
+        let raw = rusqlite::Connection::open(dir.path().join("memory.sqlite")).unwrap();
+        let stored = || -> serde_json::Value {
+            let text: String = raw
+                .query_row(
+                    "SELECT meta FROM cache_state WHERE session_id = 'ses'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            serde_json::from_str(&text).unwrap()
+        };
+
+        let new = meta_with("81aa6b79b3e4142e2e791c2bcd59fee2");
+        store
+            .commit("ses", None, &CoreState::empty(), &new)
+            .unwrap();
+        let row = stored();
+        let parts: Vec<BaseTailHygienePartMeasurement> =
+            serde_json::from_value(row["tail_hygiene_baseline"]["baseline_parts"].clone()).unwrap();
+        let blocks: Vec<BaseServedBlockFingerprint> =
+            serde_json::from_value(row["served_output_fingerprint"].clone()).unwrap();
+        let new_baseline = new.tail_hygiene_baseline.as_ref().unwrap();
+        assert_eq!(
+            parts,
+            new_baseline
+                .baseline_parts
+                .iter()
+                .map(base_part)
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            blocks,
+            new.served_output_fingerprint
+                .iter()
+                .map(base_block)
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            row["tail_hygiene_baseline"]["baseline_parts"][1]
+                .get("tag_number")
+                .is_none()
+        );
+
+        let old = meta_with(&"81aa6b79".repeat(8));
+        let mut row = serde_json::to_value(&old).unwrap();
+        let old_baseline = old.tail_hygiene_baseline.as_ref().unwrap();
+        row["tail_hygiene_baseline"]["baseline_parts"] = serde_json::to_value(
+            old_baseline
+                .baseline_parts
+                .iter()
+                .map(base_part)
+                .collect::<Vec<_>>(),
+        )
+        .unwrap();
+        row["served_output_fingerprint"] = serde_json::to_value(
+            old.served_output_fingerprint
+                .iter()
+                .map(base_block)
+                .collect::<Vec<_>>(),
+        )
+        .unwrap();
+        assert!(row["tail_hygiene_baseline"]["baseline_parts"][1]["tag_number"].is_null());
+        raw.execute(
+            "UPDATE cache_state SET meta = ?1 WHERE session_id = 'ses'",
+            [row.to_string()],
+        )
+        .unwrap();
+        assert_eq!(store.load("ses").unwrap().meta, old);
+    }
+
     #[test]
     fn truncate_history_segments_for_revert_deletes_suffix_and_bumps_epoch() {
         let dir = tempfile::tempdir().unwrap();
@@ -30016,7 +30296,9 @@ mod lineage_descent_tests {
                 // legacy secret the re-scan rewrites, so its claims cannot follow.
                 conn.execute(
                     "UPDATE history_segments
-                        SET claims = '[{\"key\":\"k.v\",\"value\":\"1\",\"ordinal\":1,\"anchor\":\"history\"}]',
+                        SET claims = '[{\"key\":\"k.v\",\"value\":\"1\",\"ordinal\":1,\"anchor\":\"history\"},'
+                                  || '{\"key\":\"k.w\",\"value\":\"pass' || 'word=legacy-claim-secret\",'
+                                  || '\"ordinal\":1,\"anchor\":null}]',
                             p1 = CASE sequence WHEN 2 THEN 'pass' || 'word=legacy-p1-secret' ELSE p1 END
                       WHERE session_id = 'A'",
                     [],
@@ -30126,10 +30408,11 @@ mod lineage_descent_tests {
                 .iter()
                 .map(|row| row.claims.len())
                 .collect::<Vec<_>>(),
-            [1, 0, 0],
+            [2, 0, 0],
             "a copy keeps its claims only when the re-scan leaves its p1 unchanged"
         );
         assert_eq!(copied[0].claims[0].anchor.as_deref(), Some("history"));
+        assert_eq!(copied[0].claims[1].value, "password=<REDACTED:password>");
         let inherited_notes = store.read_notes("git:project", "B", 10, 0).unwrap();
         assert_eq!(inherited_notes.len(), 1);
         assert_ne!(inherited_notes[0].id, source_note.id);

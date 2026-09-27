@@ -91,8 +91,9 @@ async fn readiness_permissions_catalog_and_real_unary_transform() {
         primary,
         json!({
             "kind": "transform",
+            "v": 3,
+            "boundary": null,
             "base_revision": "direct-host-base-1",
-            "v": 2,
             "session_id": session,
             "serializer_profile": "owned-llmrunner",
             "render_config": "direct-host-config",
@@ -128,6 +129,53 @@ async fn readiness_permissions_catalog_and_real_unary_transform() {
     fixture.shutdown();
 }
 
+/// The plugin sends a transform body unpaged up to the daemon's 32 MiB transform limit. One
+/// 3 MB body, above the 1 MiB facade frame limit and with no `transform_page_id`, is one
+/// request frame through the real admission and commits.
+#[tokio::test]
+async fn one_unpaged_three_mb_transform_body_commits() {
+    let fixture = FixtureProcess::start();
+    let client = fixture.client().await;
+    let session = "direct-unpaged";
+    let route = fixture
+        .open_route(&client, "context", TargetKind::ToolProvider, session)
+        .await;
+    wait_for_store(&client, route, session).await;
+    let text = "x".repeat(10 * 1024);
+    let messages: Vec<Value> = (1..=300)
+        .map(|ordinal| {
+            json!({
+                "mid": format!("m{ordinal}"),
+                "ordinal": ordinal,
+                "ck": {
+                    "role": if ordinal % 2 == 1 { "user" } else { "assistant" },
+                    "content": [{"kind": {"type": "text", "text": text}}],
+                    "meta": {"harness_id": format!("m{ordinal}")}
+                }
+            })
+        })
+        .collect();
+    let body = json!({
+        "kind": "transform",
+        "v": 3,
+        "boundary": null,
+        "base_revision": "direct-unpaged-base",
+        "session_id": session,
+        "serializer_profile": "owned-llmrunner",
+        "render_config": "direct-unpaged-config",
+        "messages": messages,
+    });
+    let length = serde_json::to_vec(&body).unwrap().len();
+    assert!((2 << 20..4 << 20).contains(&length), "{length}");
+    assert!(body.get("transform_page_id").is_none());
+    let response = request_json(&client, route, body).await;
+    assert_eq!(response["status"], "ok", "{}", response["status"]);
+    assert_eq!(response["served_from"], "transform");
+    assert_eq!(response["committed"], true);
+    client.close().await.expect("managed client closes");
+    fixture.shutdown();
+}
+
 #[tokio::test]
 async fn direct_primary_replays_transform_state_across_fixture_restart() {
     let root = tempfile::tempdir().expect("persistent fixture root");
@@ -142,7 +190,7 @@ async fn direct_primary_replays_transform_state_across_fixture_restart() {
                 &[StoredHistorySegment {
                     sequence: 1,
                     start_message: 1,
-                    end_message: 10,
+                    end_message: 1,
                     end_message_id: "m10#0".to_owned(),
                     title: "Seeded history_segment".to_owned(),
                     content: summary.to_owned(),
@@ -157,8 +205,9 @@ async fn direct_primary_replays_transform_state_across_fixture_restart() {
 
     let request = json!({
         "kind": "transform",
+        "v": 3,
+        "boundary": null,
         "base_revision": "restart-base-1",
-        "v": 2,
         "session_id": "restart-transform",
         "serializer_profile": "owned-llmrunner",
         "render_config": "restart-config",
@@ -223,10 +272,17 @@ async fn direct_primary_replays_transform_state_across_fixture_restart() {
         )
         .await;
     wait_for_store(&client, route, "restart-transform").await;
-    let replay = request_json(&client, route, request.clone()).await;
+    // The plugin declares the boundary the first response named and sends the window from it.
+    let mut replay_request = request.clone();
+    replay_request["boundary"] = materialized["boundary"].clone();
+    assert_eq!(
+        replay_request["boundary"],
+        json!({"mid": "m10", "sequence": 1})
+    );
+    let replay = request_json(&client, route, replay_request.clone()).await;
     assert_eq!(replay["action"], "SOFT+", "{replay}");
     assert_eq!(replay["project_memory"], materialized["project_memory"]);
-    let replay_messages = applied_messages(&request, &replay);
+    let replay_messages = applied_messages(&replay_request, &replay);
     let replay_m0 = replay_messages
         .iter()
         .find(|message| message["meta"]["synthetic"] == true)
@@ -498,7 +554,7 @@ async fn refused_bodies_emit_one_terminal_and_leave_no_dispatch_state() {
     let (code, message) = refuse(dense).await;
     assert_eq!(code, "host.invalid_params", "{message}");
     let mut complete = format!(
-        r#"{{"kind":"transform","v":2,"session_id":"{session}","serializer_profile":"owned-llmrunner","render_config":"direct-host-config","messages":[],"junk":"#
+        r#"{{"kind":"transform","session_id":"{session}","serializer_profile":"owned-llmrunner","render_config":"direct-host-config","messages":[],"junk":"#
     )
     .into_bytes();
     complete.extend_from_slice(&dense_values());
@@ -524,8 +580,9 @@ async fn refused_bodies_emit_one_terminal_and_leave_no_dispatch_state() {
         primary,
         json!({
             "kind": "transform",
+            "v": 3,
+            "boundary": null,
             "base_revision": "direct-host-base-2",
-            "v": 2,
             "session_id": session,
             "serializer_profile": "owned-llmrunner",
             "render_config": "direct-host-config",

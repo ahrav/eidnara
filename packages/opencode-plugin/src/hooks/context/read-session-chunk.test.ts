@@ -14,7 +14,6 @@ import {
     getRawSessionMessageIdsThrough,
     primeTailRawMessageCache,
     readRawSessionMessageById,
-    readRawSessionMessageOrdinalPage,
     readRawSessionMessages,
     readSessionChunk,
     setRawMessageProvider,
@@ -549,32 +548,6 @@ describe("readSessionChunk", () => {
 
             releaseInner();
             expect(readRawSessionMessages("ses-inactive-release")).toEqual([]);
-        });
-    });
-
-    it("pages provider ordinal entries with the ordering the anchor filter uses", () => {
-        // "B" sorts before "a" by code unit (66 < 97) but after it under locale collation.
-        const provider = {
-            readMessages: () => [providerMessage("a", 1, 5), providerMessage("B", 2, 5)],
-        };
-
-        withRawMessageProvider("ses-ordinal-page", provider, () => {
-            const firstPage = readRawSessionMessageOrdinalPage("ses-ordinal-page", null, 1);
-            expect(firstPage.map((entry) => entry.id)).toEqual(["B"]);
-
-            const secondPage = readRawSessionMessageOrdinalPage(
-                "ses-ordinal-page",
-                { timeCreated: firstPage[0].timeCreated, id: firstPage[0].id },
-                1,
-            );
-            expect(secondPage.map((entry) => entry.id)).toEqual(["a"]);
-
-            const thirdPage = readRawSessionMessageOrdinalPage(
-                "ses-ordinal-page",
-                { timeCreated: secondPage[0].timeCreated, id: secondPage[0].id },
-                1,
-            );
-            expect(thirdPage).toEqual([]);
         });
     });
 

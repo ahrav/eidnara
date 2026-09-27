@@ -204,3 +204,10 @@ now rather than after a design change.
 - Missing evidence: none.
 - Conclusion: resolved with answer. There is a usable oracle today; there is no
   report.
+
+Update, 2026-09-27: [#833](https://github.com/ahrav/eidnara/issues/833) removes
+`build_identity`, `build_identity_max`, `build_frozen_unit_scan`,
+`build_cache_lookup`, `build_serialize_misses`, `build_identity_messages`,
+`cache_hits`, `cache_misses`, and `cache_dirty_skips` from the pass timing line
+with the serialized-output memo they measured. Citations of these fields here
+are historical at their stated baseline.

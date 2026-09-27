@@ -7,7 +7,6 @@
 
 use memory_store::{Claim, HistorySummarizerPhase, MemoryStore, StoredHistorySegment};
 
-use super::transform_corpus::Rng;
 use crate::history_summarizer_citations::CLAIMS_PER_SEGMENT;
 
 /// How often a synthetic session's user corrects an earlier value. Every claim names one of
@@ -242,4 +241,36 @@ pub fn seed_active_summarizer(store: &MemoryStore, session_id: &str) {
     store
         .commit(session_id, loaded.row_version, &loaded.core, &meta)
         .expect("commit active summarizer");
+}
+
+/// Deterministic xorshift64* generator for synthetic row content.
+///
+/// This generator is reproducible, not cryptographically secure.
+struct Rng(u64);
+
+impl Rng {
+    /// Creates a generator, mapping seed zero to one to avoid the absorbing state.
+    fn new(seed: u64) -> Self {
+        Self(seed.max(1))
+    }
+
+    /// Advances the generator and returns the next 64-bit value.
+    fn next(&mut self) -> u64 {
+        // xorshift64* — deterministic, dependency-free.
+        let mut x = self.0;
+        x ^= x >> 12;
+        x ^= x << 25;
+        x ^= x >> 27;
+        self.0 = x;
+        x.wrapping_mul(0x2545_F491_4F6C_DD1D)
+    }
+
+    /// Selects one item with modulo reduction.
+    ///
+    /// # Panics
+    ///
+    /// Panics when `items` is empty.
+    fn pick<'a, T>(&mut self, items: &'a [T]) -> &'a T {
+        &items[(self.next() as usize) % items.len()]
+    }
 }

@@ -6,7 +6,6 @@
 use serde_json::{Value, json};
 
 pub mod synthetic_history;
-pub(crate) mod transform_corpus;
 
 /// `StoreFixture` keeps backing directory alive for `store`.
 pub struct StoreFixture {
@@ -45,7 +44,8 @@ impl InProcessFixture {
     pub fn handle_transform(&self) -> Value {
         json!({
             "kind": "transform",
-            "v": 2,
+            "v": 3,
+            "boundary": null,
             "serializer_profile": "owned-llmrunner",
             "session_id": self.session_id,
             "render_config": "fixture-config",

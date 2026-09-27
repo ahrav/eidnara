@@ -462,6 +462,15 @@ Open questions:
   deliberately permitted. Whether that is safe depends on the validated end
   boundary, which is the sibling validation lens's question. Unresolved, needs
   cross-lens reconciliation.
+- Update, 2026-09-27: #833 (spec D12) prunes the session's
+  `block_identities` rows to the submitted window inside the transform's
+  meta CAS, so a selected mid outside the window has no row at publish.
+  The fence reads the missing row as drift and rejects. Witnesses:
+  `crates/daemon/src/transform.rs:19708`
+  `a_prune_that_commits_first_fences_the_publication_out` (the publisher
+  loses its CAS, then gets `FenceRejected` at the reloaded row version,
+  and no segment is written) and `:19741`
+  `a_publication_that_commits_first_makes_the_transform_reload_and_match_the_serial_run`.
 
 ### publish-admits-awaiting-producer-phase-at-commit
 

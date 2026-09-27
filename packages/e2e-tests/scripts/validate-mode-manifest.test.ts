@@ -162,7 +162,6 @@ describe("mode manifest validator", () => {
         expect(quarantined).toEqual([
             "tests/rust-eidnara-reduce-roundtrip.test.ts",
             "tests/rust-fm-oc-3.test.ts",
-            "tests/rust-multi-frame-delta.test.ts",
             "tests/rust-removal-self-heal.test.ts",
         ]);
     });

@@ -506,9 +506,8 @@ pub fn parse_history_segment_output(
 /// `<claim>` elements, and why the block is unreadable when it is. A tag
 /// without its partner is a truncated block, and a second block or material
 /// that is no claim element is a malformed one; either rejects the block
-/// whole. A claim missing its key, citation, or value is read with that part
-/// empty and fails validation on its own; of a repeated element, the first is
-/// read.
+/// whole. Validation drops a claim whose value element is missing or
+/// unterminated; only an explicit empty value is a retraction.
 fn parse_claims(text: &str) -> (bool, Vec<ClaimCandidate>, Option<ExtractionFailure>) {
     let (opens, closes) = (
         text.matches("<claims>").count(),
@@ -541,7 +540,7 @@ fn parse_claims(text: &str) -> (bool, Vec<ClaimCandidate>, Option<ExtractionFail
             ClaimCandidate {
                 key: element(inner, "key").unwrap_or_default(),
                 cite: element(inner, "cite").unwrap_or_default(),
-                value: element(inner, "value").unwrap_or_default(),
+                value: element(inner, "value"),
                 anchor: element(inner, "anchor"),
             }
         })
@@ -2090,6 +2089,57 @@ full narrative
             kept.history_segments[1].claims,
             [claim("k.final", "world", 3, None)]
         );
+    }
+
+    /// Only an explicit `<value></value>` retracts. The parser drops a claim whose
+    /// value element is missing, unterminated, or malformed, so the earlier value
+    /// for its key stays in force.
+    #[test]
+    fn an_unreadable_value_drops_its_claim_instead_of_retracting() {
+        let valid = r#"<claim><key>k.v</key><cite>[s1:0-5]</cite><value>hello</value></claim>"#;
+        let validate = |second: &str| {
+            validate_history_summarizer_output(
+                &xml(
+                    &[(1, 2, "first"), (3, 4, "final")],
+                    5,
+                    &format!("<claims>{valid}{second}</claims>"),
+                ),
+                &aliased_chunk(1, 4),
+                &[],
+                ValidateOptions::default(),
+            )
+            .unwrap()
+        };
+        let claim = |value: &str| memory_store::Claim {
+            key: "k.v".into(),
+            value: value.into(),
+            ordinal: 1,
+            anchor: None,
+        };
+        for unreadable in [
+            r#"<claim><key>k.v</key><cite>[s1:0-5]</cite></claim>"#,
+            r#"<claim><key>k.v</key><cite>[s1:0-5]</cite><value>hello</claim>"#,
+            r#"<claim><key>k.v</key><cite>[s1:0-5]</cite><value >hello</value></claim>"#,
+        ] {
+            let validated = validate(unreadable);
+            assert_eq!(
+                validated.history_segments[0].claims,
+                [claim("hello")],
+                "{unreadable}"
+            );
+            assert_eq!(
+                validated.claims_outcome,
+                ClaimsOutcome::Accepted {
+                    kept: 1,
+                    dropped: 1,
+                    anchor_missing: 1
+                },
+                "{unreadable}"
+            );
+        }
+        let retracted =
+            validate(r#"<claim><key>k.v</key><cite>[s1:0-5]</cite><value></value></claim>"#);
+        assert_eq!(retracted.history_segments[0].claims, [claim("")]);
     }
 
     /// The 128-byte value bound applies after XML unescaping.

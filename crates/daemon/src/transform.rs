@@ -48,13 +48,13 @@ use crate::wire;
 use cache_stability::{CoreState, FrozenUnit, PassInput};
 use context_core::{ClassifierInput, PassPlan, PersistedShape, classify};
 use memory_store::{
-    BlockIdentity, BlockIdentityBasis, Channel1AppendRow, DeferredExecuteState, LineageAnchor,
-    LineageConstituent, LineageDescentDisposition, LineageDescentRequest, MaterializeReason,
-    MemoryStore, MemoryStoreError, ModuleMeta, ModuleUsage, NoteDelivery, PassAction, PassRecord,
-    PassSchedulerObservation, PendingAgentDrop, PendingChannel2Directive, PendingRewriteState,
-    ProjectMemoryComposition, ServedBlockFingerprint, StoredHistorySegment, TagMintInput, TagRow,
-    TailHygieneBaseline, TemporalMarkInput, TemporalMarkRow, TransformCommit,
-    TransformOverlayBatch, UserHintDecisionInput, UserHintRow,
+    BlockIdentity, BlockIdentityBasis, Channel1AppendRow, CoveredSystemMessage,
+    DeferredExecuteState, LineageAnchor, LineageConstituent, LineageDescentDisposition,
+    LineageDescentRequest, MaterializeReason, MemoryStore, MemoryStoreError, ModuleMeta,
+    ModuleUsage, NoteDelivery, PassAction, PassRecord, PassSchedulerObservation, PendingAgentDrop,
+    PendingChannel2Directive, PendingRewriteState, ProjectMemoryComposition,
+    ServedBlockFingerprint, TagMintInput, TagRow, TailHygieneBaseline, TemporalMarkInput,
+    TemporalMarkRow, TransformCommit, TransformOverlayBatch, UserHintDecisionInput, UserHintRow,
 };
 use regex::Regex;
 use serde::{Deserialize, Serialize};
@@ -75,9 +75,9 @@ use crate::wire::{
 
 /// Maximum CAS retries before returning a conflict.
 /// On a shared store, each retry reloads state and recomputes the pass.
-const MAX_CAS_RETRIES: u32 = 8;
-/// The limit bounds consecutive passes that may suppress a coverage gap when the applied history_segment watermark is missing or stale.
-const BOUNDARY_DIVERGENCE_PENDING_PASS_LIMIT: u8 = 3;
+pub(crate) const MAX_CAS_RETRIES: u32 = 8;
+/// The transform application revision this daemon serves (`docs/host-wire-protocol.md` 7.10).
+pub const TRANSFORM_REVISION: u64 = 3;
 
 /// Real conversation items never use reserved synthetic-block IDs.
 #[cfg(test)]
@@ -197,12 +197,11 @@ pub(crate) const SERIALIZED_OUTPUT_CACHE_BUDGET_BYTES: usize = 256 * 1024 * 1024
 /// declaration counts its enforced budget.
 pub(crate) const TAG_MINT_FRONTIER_CACHE_BUDGET_BYTES: usize = 64 * 1024 * 1024;
 
-/// The typed value stays behind an `Arc`, so a cache hit does not clone large tool output trees.
+/// The typed value stays behind an `Arc`, so a retained previous output does not clone large tool output trees.
 #[derive(Debug, Clone)]
 pub struct ServedMessage {
     message: Arc<WireMessage>,
     canonical_bytes: Arc<[u8]>,
-    output_identity: Arc<str>,
     block_fingerprints: Arc<[(String, usize)]>,
     retained_bytes: usize,
 }
@@ -260,32 +259,16 @@ impl ServedMessage {
                 (wire::fingerprint(&serialized), serialized.len())
             })
             .collect::<Vec<_>>();
-        let output_identity = format!("{:x}", Sha256::digest(&canonical_bytes));
         let message = Arc::new(message);
-        let output_identity: Arc<str> = Arc::from(output_identity);
         let block_fingerprints: Arc<[(String, usize)]> = Arc::from(block_fingerprints);
-        let retained_bytes = served_message_retained_bytes(
-            &message,
-            &canonical_bytes,
-            &output_identity,
-            &block_fingerprints,
-        );
+        let retained_bytes =
+            served_message_retained_bytes(&message, &canonical_bytes, &block_fingerprints);
         Self {
             message,
             canonical_bytes,
-            output_identity,
             block_fingerprints,
             retained_bytes,
         }
-    }
-
-    fn with_output_identity(mut self, identity: &str) -> Self {
-        self.retained_bytes = self
-            .retained_bytes
-            .saturating_sub(self.output_identity.len())
-            .saturating_add(identity.len());
-        self.output_identity = Arc::from(identity);
-        self
     }
 
     pub fn into_message(self) -> WireMessage {
@@ -323,7 +306,6 @@ pub fn served_message_for_test(message: WireMessage) -> ServedMessage {
 fn served_message_retained_bytes(
     message: &Arc<WireMessage>,
     canonical_bytes: &Arc<[u8]>,
-    output_identity: &Arc<str>,
     block_fingerprints: &Arc<[(String, usize)]>,
 ) -> usize {
     use crate::retained_size::{ARC_ALLOCATION_OVERHEAD_BYTES, wire_message_retained_bytes};
@@ -333,8 +315,6 @@ fn served_message_retained_bytes(
         .saturating_add(wire_message_retained_bytes(message))
         .saturating_add(ARC_ALLOCATION_OVERHEAD_BYTES)
         .saturating_add(canonical_bytes.len())
-        .saturating_add(ARC_ALLOCATION_OVERHEAD_BYTES)
-        .saturating_add(output_identity.len())
         .saturating_add(ARC_ALLOCATION_OVERHEAD_BYTES)
         .saturating_add(
             block_fingerprints
@@ -387,31 +367,11 @@ impl<'de> Deserialize<'de> for ServedMessage {
     }
 }
 
-#[derive(Debug, Clone)]
-struct SerializedOutputCacheEntry {
-    identity: String,
-    served: Option<ServedMessage>,
-}
-
-#[derive(Debug, Clone, Default)]
-struct SerializedOutputCacheSnapshot {
-    entries: HashMap<String, SerializedOutputCacheEntry>,
-}
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub(crate) struct SerializedOutputCacheStats {
-    pub reused_items: usize,
-    pub serialized_items: usize,
-}
-
 #[derive(Debug)]
-struct SerializedOutputSession {
+pub(crate) struct SerializedOutputSession {
     revert_epoch: u64,
     retained_bytes: usize,
-    entries: HashMap<String, SerializedOutputCacheEntry>,
-    #[cfg_attr(not(test), allow(dead_code))]
-    stats: SerializedOutputCacheStats,
-    previous_output: Option<(crate::edit_recipe::Revision, Arc<Vec<ServedMessage>>)>,
+    previous_output: (crate::edit_recipe::Revision, Arc<Vec<ServedMessage>>),
 }
 
 fn previous_output_retained_bytes(output: &Arc<Vec<ServedMessage>>) -> usize {
@@ -429,6 +389,10 @@ fn previous_output_retained_bytes(output: &Arc<Vec<ServedMessage>>) -> usize {
     })
 }
 
+/// The revision-bound previous CK output per session (spec D13): one applied output per
+/// session, bound to the revert epoch it was served under, evicted least recently recorded
+/// first under one global byte budget. Every pass renders its window afresh; nothing here is
+/// reused to build output.
 #[derive(Debug)]
 pub(crate) struct SerializedOutputCache {
     sessions: HashMap<String, SerializedOutputSession>,
@@ -453,68 +417,17 @@ impl SerializedOutputCache {
         }
     }
 
-    fn entries_retained_bytes(
-        session_id: &str,
-        entries: &HashMap<String, SerializedOutputCacheEntry>,
-    ) -> usize {
-        use crate::retained_size::{cloned_string_retained_bytes, hash_map_allocation_bytes};
-        use std::mem::size_of;
-
-        hash_map_allocation_bytes(entries)
-            .saturating_add(
-                entries
-                    .iter()
-                    .map(|(key, entry)| {
-                        key.capacity()
-                            .saturating_add(entry.identity.capacity())
-                            .saturating_add(
-                                entry
-                                    .served
-                                    .as_ref()
-                                    .map_or(0, ServedMessage::retained_bytes),
-                            )
-                    })
-                    .sum::<usize>(),
-            )
-            .saturating_add(size_of::<SerializedOutputSession>())
-            .saturating_add(size_of::<usize>() * 3)
-            .saturating_add(cloned_string_retained_bytes(session_id).saturating_mul(2))
-    }
-
     pub(crate) fn metrics(&self) -> (usize, usize) {
-        let entry_count = self
-            .sessions
-            .values()
-            .map(|session| session.entries.len())
-            .sum();
-        (self.retained_bytes, entry_count)
+        (self.retained_bytes, self.sessions.len())
     }
 
-    pub(crate) fn remove(&mut self, session_id: &str) {
-        if let Some(session) = self.sessions.remove(session_id) {
+    pub(crate) fn remove(&mut self, session_id: &str) -> Option<SerializedOutputSession> {
+        let session = self.sessions.remove(session_id);
+        if let Some(session) = &session {
             self.retained_bytes = self.retained_bytes.saturating_sub(session.retained_bytes);
         }
         self.lru.retain(|candidate| candidate != session_id);
-    }
-
-    fn snapshot(&mut self, session_id: &str, revert_epoch: u64) -> SerializedOutputCacheSnapshot {
-        if self
-            .sessions
-            .get(session_id)
-            .is_some_and(|session| session.revert_epoch != revert_epoch)
-        {
-            self.remove(session_id);
-        }
-        let entries = self
-            .sessions
-            .get(session_id)
-            .map(|session| session.entries.clone())
-            .unwrap_or_default();
-        if !entries.is_empty() {
-            self.lru.retain(|candidate| candidate != session_id);
-            self.lru.push_back(session_id.to_string());
-        }
-        SerializedOutputCacheSnapshot { entries }
+        session
     }
 
     /// Hands out the retained applied output for this pass's recipe and clears it, so a pass that
@@ -524,19 +437,13 @@ impl SerializedOutputCache {
         session_id: &str,
         revert_epoch: u64,
     ) -> Option<(crate::edit_recipe::Revision, Arc<Vec<ServedMessage>>)> {
-        let session = self.sessions.get_mut(session_id)?;
-        if session.revert_epoch != revert_epoch {
-            self.remove(session_id);
-            return None;
-        }
-        let previous = session.previous_output.take()?;
-        let charge = previous_output_retained_bytes(&previous.1);
-        session.retained_bytes = session.retained_bytes.saturating_sub(charge);
-        self.retained_bytes = self.retained_bytes.saturating_sub(charge);
-        Some(previous)
+        self.remove(session_id)
+            .filter(|session| session.revert_epoch == revert_epoch)
+            .map(|session| session.previous_output)
     }
 
-    /// Retains this pass's ordered output as the next request's `previous` source.
+    /// Retains this pass's ordered output as the next request's `previous` source, evicting the
+    /// least recently recorded sessions to fit; an output over the whole budget is not kept.
     pub(crate) fn record_previous_output(
         &mut self,
         session_id: &str,
@@ -544,67 +451,12 @@ impl SerializedOutputCache {
         revision: crate::edit_recipe::Revision,
         output: Arc<Vec<ServedMessage>>,
     ) {
-        let Some(session) = self
-            .sessions
-            .get_mut(session_id)
-            .filter(|session| session.revert_epoch == revert_epoch)
-        else {
-            return;
-        };
-        let charge = previous_output_retained_bytes(&output);
-        let displaced = session
-            .previous_output
-            .as_ref()
-            .map_or(0, |(_, output)| previous_output_retained_bytes(output));
-        let retained_bytes = self
-            .retained_bytes
-            .saturating_sub(displaced)
-            .saturating_add(charge);
-        if retained_bytes > self.max_retained_bytes {
-            return;
-        }
-        session.previous_output = Some((revision, output));
-        session.retained_bytes = session
-            .retained_bytes
-            .saturating_sub(displaced)
-            .saturating_add(charge);
-        self.retained_bytes = retained_bytes;
-    }
-
-    fn replace(
-        &mut self,
-        session_id: &str,
-        revert_epoch: u64,
-        entries: HashMap<String, SerializedOutputCacheEntry>,
-        stats: SerializedOutputCacheStats,
-    ) {
-        let previous_output = self
-            .sessions
-            .get(session_id)
-            .filter(|session| session.revert_epoch == revert_epoch)
-            .and_then(|session| session.previous_output.clone());
         self.remove(session_id);
-        let previous_charge = previous_output
-            .as_ref()
-            .map_or(0, |(_, output)| previous_output_retained_bytes(output));
-        let retained_bytes =
-            Self::entries_retained_bytes(session_id, &entries).saturating_add(previous_charge);
-        if retained_bytes > self.max_retained_bytes {
+        let charge = previous_output_retained_bytes(&output);
+        if charge > self.max_retained_bytes {
             return;
         }
-        self.retained_bytes = self.retained_bytes.saturating_add(retained_bytes);
-        self.sessions.insert(
-            session_id.to_string(),
-            SerializedOutputSession {
-                revert_epoch,
-                retained_bytes,
-                entries,
-                stats,
-                previous_output,
-            },
-        );
-        self.lru.push_back(session_id.to_string());
-        while self.retained_bytes > self.max_retained_bytes {
+        while self.retained_bytes.saturating_add(charge) > self.max_retained_bytes {
             let Some(oldest) = self.lru.pop_front() else {
                 break;
             };
@@ -612,14 +464,16 @@ impl SerializedOutputCache {
                 self.retained_bytes = self.retained_bytes.saturating_sub(session.retained_bytes);
             }
         }
-    }
-
-    #[cfg(test)]
-    fn stats(&self, session_id: &str) -> SerializedOutputCacheStats {
-        self.sessions
-            .get(session_id)
-            .map(|session| session.stats)
-            .unwrap_or_default()
+        self.retained_bytes = self.retained_bytes.saturating_add(charge);
+        self.sessions.insert(
+            session_id.to_string(),
+            SerializedOutputSession {
+                revert_epoch,
+                retained_bytes: charge,
+                previous_output: (revision, output),
+            },
+        );
+        self.lru.push_back(session_id.to_string());
     }
 }
 
@@ -724,12 +578,20 @@ impl ProducerContext<'_> {
     }
 }
 
+/// A history segment end anchor: the bare mid of the segment's end block and its `sequence`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct DeclaredTrim {
-    pub flat_boundary_id: String,
-    pub boundary_bare_message_id: String,
-    pub boundary_absolute_ordinal: u64,
-    pub next_absolute_ordinal: u64,
+pub struct BoundaryAnchor {
+    pub mid: String,
+    pub sequence: i64,
+}
+
+/// The coverage resolution a pass runs under (spec D2, D10, D11): the resolution of the
+/// submitted window and the messages its cut removed, so each attempt re-resolves the same
+/// submitted window from a fresh snapshot.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct WindowCoverage {
+    pub resolved: crate::window_coverage::Resolved,
+    cut_prefix: Vec<Arc<IngressMessage>>,
 }
 
 /// The host resolves context geometry into a shape shared by OpenCode and Claude Code.
@@ -741,25 +603,6 @@ pub struct TransformGeometry {
     pub derivation: String,
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
-pub struct TrimMismatch {
-    pub predicate: &'static str,
-    pub detail: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum BoundaryState {
-    LivePresent,
-    DeclaredTrimValidated,
-    Absent,
-}
-
-impl BoundaryState {
-    fn is_present(&self) -> bool {
-        matches!(self, Self::LivePresent | Self::DeclaredTrimValidated)
-    }
-}
-
 /// `boundary_present` is computed from durable state, not supplied by callers.
 /// The module computes `boundary_present` to select replay-frozen or reconcile behavior.
 /// Allowing caller-supplied `boundary_present` permits incorrect replay or reconciliation.
@@ -769,8 +612,16 @@ impl BoundaryState {
 pub struct TransformRequest {
     #[serde(default)]
     pub kind: String,
-    #[serde(default = "default_wire_version")]
-    pub v: u32,
+    /// The transform revision as received; anything but 3 is refused before the pass.
+    #[serde(default)]
+    pub v: Value,
+    /// `None` when the body omits `boundary`, `Some(None)` for `null`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub boundary: Option<Option<BoundaryAnchor>>,
+    /// Set once the window is resolved: the cut is applied and every message carries its
+    /// daemon-derived ordinal.
+    #[serde(skip)]
+    pub(crate) coverage: Option<Arc<WindowCoverage>>,
     /// The v2 wire requires `serializer_profile`; parsing it as a string permits typed errors for missing values.
     /// Unknown `serializer_profile` values return the typed contract error rather than Serde's malformed-request error.
     pub serializer_profile: String,
@@ -901,8 +752,6 @@ pub struct TransformRequest {
     /// Absent history-budget values use the bind-time fallback because routes can outlive config reloads.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub history_budget_tokens: Option<f64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub declared_trim: Option<DeclaredTrim>,
     /// `lineage_switched` comes from the lineage owner's composed fake-compaction edge.
     /// Missing edge fields preserve no-switch behavior; the module never infers a switch from summary text alone.
     #[serde(default)]
@@ -922,10 +771,6 @@ pub struct TransformRequest {
     /// Set when the body carries the retired `tail_delta` field; the handler refuses it.
     #[serde(skip)]
     pub(crate) tail_delta_retired: bool,
-}
-
-fn default_wire_version() -> u32 {
-    2
 }
 
 fn default_clear_reasoning_age() -> u64 {
@@ -968,8 +813,10 @@ fn default_protected_tags() -> usize {
 struct TransformRequestWire {
     #[serde(default)]
     kind: String,
-    #[serde(default = "default_wire_version")]
-    v: u32,
+    #[serde(default)]
+    v: Value,
+    #[serde(default, deserialize_with = "crate::deserialize_nullable")]
+    boundary: Option<Option<BoundaryAnchor>>,
     #[serde(default)]
     serializer_profile: Option<String>,
     session_id: String,
@@ -1056,8 +903,6 @@ struct TransformRequestWire {
     #[serde(default)]
     history_budget_tokens: Option<f64>,
     #[serde(default)]
-    declared_trim: Option<DeclaredTrim>,
-    #[serde(default)]
     lineage_switched: bool,
     #[serde(default)]
     descent_edge_id: u64,
@@ -1096,6 +941,8 @@ impl<'de> Deserialize<'de> for TransformRequest {
         Ok(Self {
             kind: wire.kind,
             v: wire.v,
+            boundary: wire.boundary,
+            coverage: None,
             serializer_profile: wire.serializer_profile.unwrap_or_default(),
             session_id: wire.session_id,
             render_config: wire.render_config,
@@ -1139,7 +986,6 @@ impl<'de> Deserialize<'de> for TransformRequest {
             detected_context_limit: wire.detected_context_limit,
             detected_context_limit_model_key: wire.detected_context_limit_model_key,
             history_budget_tokens: wire.history_budget_tokens,
-            declared_trim: wire.declared_trim,
             lineage_switched: wire.lineage_switched,
             descent_edge_id: wire.descent_edge_id,
             prior_conversation_key: wire.prior_conversation_key,
@@ -1158,6 +1004,8 @@ pub enum TransformStatus {
     Ok,
     /// The session already has an active and a waiting pass; no recipe, no state change.
     SessionBusy,
+    /// The declared boundary names no history segment; no recipe, no state change.
+    BoundaryUnknown,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -1315,16 +1163,6 @@ pub struct TransformTimings {
     #[serde(default)]
     pub build_output: f64,
     #[serde(default)]
-    pub build_identity: f64,
-    #[serde(default)]
-    pub build_identity_max: f64,
-    #[serde(default)]
-    pub build_frozen_unit_scan: f64,
-    #[serde(default)]
-    pub build_cache_lookup: f64,
-    #[serde(default)]
-    pub build_serialize_misses: f64,
-    #[serde(default)]
     pub build_tail_loop: f64,
     #[serde(default)]
     pub divergence: f64,
@@ -1375,14 +1213,6 @@ pub struct TransformTimings {
     pub projection_blocks: usize,
     #[serde(default)]
     pub tail_messages_emitted: usize,
-    #[serde(default)]
-    pub build_identity_messages: usize,
-    #[serde(default)]
-    pub cache_hits: usize,
-    #[serde(default)]
-    pub cache_misses: usize,
-    #[serde(default)]
-    pub cache_dirty_skips: usize,
 }
 
 /// Record this pass's token-cache counter deltas into `timings`.
@@ -1436,16 +1266,14 @@ pub fn format_pass_timing_line(
          decide={:.1} seed_or_sync={:.1} compose_m0m1={:.1} selection={:.1} \
          transition_detection={:.3} emergency_reasoning_exclusions={} todo={:.1} \
          blocks_by_mid={:.1} build_frozen_unit_index={:.1} full_drop_tool_ids={:.1} \
-         build_output={:.1} build_identity={:.1} build_identity_max={:.1} build_frozen_unit_scan={:.1} \
-         build_cache_lookup={:.1} build_serialize_misses={:.1} build_tail_loop={:.1} \
+         build_output={:.1} build_tail_loop={:.1} \
            divergence={:.1} store_commit={:.1} trigger_ms={:.1} trigger_boundary_build={:.1} trigger_eval={:.1} \
              trigger_cache_store={:.1} trigger_token_cache_hits={} trigger_tokenized_blocks={} emergency_wait={:.1} \
              post_attach_ms={:.1} native_cache_reused_messages={} native_cache_encoded_messages={} \
             native_cache_refused_store={} native_cache_degraded_store={} native_cache_evicted={} \
              response_encode={response_encode_ms:.1} response_meta_encode={:.1} response_size_account={:.1} response_splice={:.1} \
              frozen_units={} tail_units_matched={} \
-           projection_blocks={} tail_messages_emitted={} build_identity_messages={} \
-           cache_hits={} cache_misses={} cache_dirty_skips={}",
+           projection_blocks={} tail_messages_emitted={}",
         timings.total,
         timings.handler_total,
         timings.request_observed_to_handler,
@@ -1503,11 +1331,6 @@ pub fn format_pass_timing_line(
         timings.build_frozen_unit_index,
         timings.full_drop_tool_ids,
         timings.build_output,
-        timings.build_identity,
-        timings.build_identity_max,
-        timings.build_frozen_unit_scan,
-        timings.build_cache_lookup,
-        timings.build_serialize_misses,
         timings.build_tail_loop,
         timings.divergence,
         timings.store_commit,
@@ -1531,10 +1354,6 @@ pub fn format_pass_timing_line(
         timings.tail_units_matched,
         timings.projection_blocks,
         timings.tail_messages_emitted,
-        timings.build_identity_messages,
-        timings.cache_hits,
-        timings.cache_misses,
-        timings.cache_dirty_skips,
     )
 }
 
@@ -1558,8 +1377,14 @@ pub struct TransformResponse {
     pub row_version: u64,
     pub surface_state: SurfaceState,
     pub committed: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub coverage_ordinal: Option<u64>,
+    /// The rendered coverage boundary after the pass; absent on `session_busy` and
+    /// `boundary_unknown`, `null` when the session holds no coverage.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::deserialize_nullable"
+    )]
+    pub boundary: Option<Option<BoundaryAnchor>>,
     /// The project-memory composition the served m0 was frozen with; absent until the first HARD and when memory is disabled.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub project_memory: Option<ProjectMemoryComposition>,
@@ -1572,9 +1397,6 @@ pub struct TransformResponse {
     pub lineage_descent_disposition: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub cache_ttl: Option<String>,
-    /// Native adapters use the prior lineage tail as the provisional ordinal base.
-    #[serde(skip_serializing_if = "Option::is_none", default)]
-    pub ordinal_continuation_base: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub history_summarizer: Option<HistorySummarizerDiagnostics>,
     /// The final approved CK output. Internal to the daemon: the wire carries an edit recipe built
@@ -1635,12 +1457,11 @@ impl TransformResponse {
             row_version: 0,
             surface_state: SurfaceState::Inactive,
             committed: false,
-            coverage_ordinal: None,
+            boundary: None,
             project_memory: None,
             lineage_switch_consumed_id: None,
             lineage_descent_disposition: None,
             cache_ttl: None,
-            ordinal_continuation_base: None,
             history_summarizer: None,
             messages: None,
             native_messages: None,
@@ -1656,6 +1477,10 @@ impl TransformResponse {
 
     pub fn session_busy() -> Self {
         Self::base(TransformStatus::SessionBusy, "SESSION_BUSY")
+    }
+
+    pub fn boundary_unknown() -> Self {
+        Self::base(TransformStatus::BoundaryUnknown, "BOUNDARY_UNKNOWN")
     }
 
     pub fn passthrough(messages: Vec<WireMessage>) -> Self {
@@ -1706,16 +1531,13 @@ pub struct TransformWithProjection {
     pub scheduler_pass: scheduler::PassDecision,
     /// The ring entry for this pass, committed with it or, for a stable pass, traced after it.
     pub pass_observation: PassSchedulerObservation,
-    pub boundary_state: BoundaryState,
-    pub trim_mismatch: Option<TrimMismatch>,
     pub revert_epoch: u64,
     pub reasoning_watermark: u64,
     pub mutation_exempt_mid: Option<String>,
     pub lineage_anchor_mid: Option<String>,
-    /// The request a descent pass rebased to the durable ordinal base. The ready snapshot
-    /// retains it instead of the harness's origin-numbered copy, so wrapup compares its
-    /// ordinals against the durable history-segment ends.
-    pub rebased_request: Option<TransformRequest>,
+    /// The window the pass served when a retry re-resolved it to another cut or a descent pass
+    /// rebased it to the durable ordinal base; `None` when it served the request it was given.
+    pub served_request: Option<Box<TransformRequest>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1866,16 +1688,20 @@ pub enum TransformError {
     Wire(WireError),
     #[error("duplicate flattened block id: {0}")]
     DuplicateBlockId(String),
-    #[error("CK message block identity drift for mid {0}")]
-    IdentityDrift(String),
     #[error("synthetic todo anchor mid {0} is missing from the live tail")]
     SyntheticTodoAnchorMissing(String),
     #[error("frozen reduction target vanished while its message is live: {0}")]
     FrozenRedTargetVanish(String),
+    #[error("block identity changed for mid {0}, which a frozen unit targets")]
+    FrozenTargetDrift(String),
     #[error("minted boundary not present: {0}")]
     BoundaryNotPresent(String),
-    #[error("history_segment boundary ordinal mismatch: {0}")]
-    BoundaryOrdinalMismatch(String),
+    /// The submitted window is not admissible: the answer is `invalid_params`.
+    #[error("invalid window: {0}")]
+    InvalidWindow(String),
+    /// The declared boundary names no history segment: the answer is `boundary_unknown`.
+    #[error("the declared boundary names no history segment")]
+    BoundaryUnknown,
     /// Lineage descent violated anchor, epoch, or ordinal-continuation rules.
     #[error("lineage protocol error: {0}")]
     LineageProtocol(String),
@@ -1951,30 +1777,20 @@ pub(crate) fn transform_with_projection(
     req: &TransformRequest,
     ctx: &ProducerContext<'_>,
 ) -> Result<TransformWithProjection, TransformError> {
-    let result = apply_once_with_estimator(
-        store,
-        req,
-        ctx,
-        crate::token_cache::cached_estimate_tokens,
-        None,
-    );
-    record_stable_pass_trace(store, req, &result);
-    result
+    let mut window = tests::plugin_window(store, req);
+    resolve_window(store, &mut window)?;
+    transform_with_projection_cached(store, &window, ctx)
 }
 
+/// The production pipeline entry. The name is historical: the pass takes no cache now, and the
+/// property catalogs cite it by this name.
 pub(crate) fn transform_with_projection_cached(
     store: &MemoryStore,
     req: &TransformRequest,
     ctx: &ProducerContext<'_>,
-    output_cache: &Mutex<SerializedOutputCache>,
 ) -> Result<TransformWithProjection, TransformError> {
-    let result = apply_once_with_estimator(
-        store,
-        req,
-        ctx,
-        crate::token_cache::cached_estimate_tokens,
-        Some(output_cache),
-    );
+    let result =
+        apply_once_with_estimator(store, req, ctx, crate::token_cache::cached_estimate_tokens);
     record_stable_pass_trace(store, req, &result);
     result
 }
@@ -2133,39 +1949,229 @@ fn apply_once_with_estimator(
     req: &TransformRequest,
     ctx: &ProducerContext<'_>,
     estimate_tokens: impl Fn(&str) -> usize + Copy,
-    output_cache: Option<&Mutex<SerializedOutputCache>>,
 ) -> Result<TransformWithProjection, TransformError> {
     let mut attempt = 0;
-    let mut boundary_divergence_retry = false;
+    let mut reset_row_version = None;
     loop {
-        let mut boundary_divergence_detected = false;
+        // Every attempt resolves the submitted window from a fresh snapshot, whose row version
+        // the pass's own load must match.
+        let resolve_started_at = Instant::now();
+        let (coverage_row_version, attempt_req) = resolve_attempt(store, req)?;
+        let coverage_resolve = elapsed_ms(resolve_started_at);
+        if ctx.compaction_enabled
+            && !req.lineage_switched
+            && attempt_req
+                .coverage
+                .as_deref()
+                .is_some_and(|coverage| coverage.resolved.resolution == NO_SURVIVOR)
+        {
+            // A committed reset leaves no coverage, so it does not consume a retry. Only another
+            // writer's segments bring a second no-survivor resolution; the pass fails on it.
+            if let Some(expected) = reset_row_version {
+                return Err(TransformError::Store(MemoryStoreError::CasConflict {
+                    expected: Some(expected),
+                    found: coverage_row_version.unwrap_or_default(),
+                }));
+            }
+            match reset_no_survivor(store, &req.session_id, coverage_row_version) {
+                Ok(row_version) => {
+                    reset_row_version = Some(row_version);
+                    continue;
+                }
+                Err(TransformError::Store(MemoryStoreError::CasConflict { .. }))
+                    if attempt < MAX_CAS_RETRIES =>
+                {
+                    attempt += 1;
+                    continue;
+                }
+                Err(error) => return Err(error),
+            }
+        }
         match apply_once(
             store,
-            req,
+            &attempt_req,
             ctx,
             estimate_tokens,
-            output_cache,
-            boundary_divergence_retry,
-            &mut boundary_divergence_detected,
+            coverage_row_version,
         ) {
             Err(
                 TransformError::Store(MemoryStoreError::CasConflict { .. })
                 | TransformError::HistorySegmentSetMoved,
             ) if attempt < MAX_CAS_RETRIES => {
-                // A history_summarizer publish can win after detection but before the transform commit.
-                // The reload path preserves recut intent so a new m1 watermark cannot convert a proven inconsistency into an ordinary defer.
-                boundary_divergence_retry |= boundary_divergence_detected;
                 attempt += 1;
                 continue;
             }
             Ok(mut output) => {
+                if let Some(timings) = output.response.timings.as_mut() {
+                    timings.coverage_resolve = coverage_resolve;
+                }
                 output.response.cache_ttl =
                     response_marker_ttl(req, &ctx.cache_ttl, ctx.cache_ttl_provenance);
+                // The boundary as the store holds it after the commit. Publishers only append
+                // segments; `session.recomp` is the one writer outside the session's lane that
+                // moves `core.boundary_id`, and a reset read here answers `null`, which is the
+                // reset's truth. A store error fails the committed pass: the plugin serves raw
+                // once and declares its retained anchor, which resolves against the new state.
+                output.response.boundary = Some(rendered_boundary(store, &req.session_id)?);
+                if let Cow::Owned(served) = attempt_req
+                    && output.served_request.is_none()
+                {
+                    output.served_request = Some(Box::new(served));
+                }
                 return Ok(output);
             }
             other => return other,
         }
     }
+}
+
+const NO_SURVIVOR: crate::window_coverage::Resolution =
+    crate::window_coverage::Resolution::Revert {
+        keep_through_seq: None,
+    };
+
+/// A `null` window that matches no segment while the session holds coverage is a revert before
+/// the first anchor (spec D10): the `session.recomp` reset, after which the same request
+/// resolves again as a first pass. The host already removed that history, and every segment
+/// writer appends at the newest sequence or removes a suffix, so no anchor can return. A CAS
+/// conflict re-resolves like any other; the next resolution decides again. Unlike
+/// `session.recomp`, this leaves the handler caches alone: each per-session handler cache must
+/// stay valid across a `revert_epoch` bump, by an epoch check or a content hash. Returns the
+/// reset row's version.
+fn reset_no_survivor(
+    store: &MemoryStore,
+    session_id: &str,
+    row_version: Option<u64>,
+) -> Result<u64, TransformError> {
+    // The reset's CAS fails if a writer moved the row after this read, so the range is exact.
+    let range = removed_sequence_range(store.history_segment_ends(session_id)?);
+    #[cfg(test)]
+    run_transform_attempt_hook(session_id);
+    let reset = store.reset_session_for_recomp(session_id, row_version)?;
+    eprintln!(
+        "daemon: revert before the first anchor reset {session_id}: removed history_segment sequences {range}; epoch {}",
+        reset.revert_epoch
+    );
+    Ok(reset.row_version)
+}
+
+/// The logged `history_segments` sequence range a reset deletes.
+pub(crate) fn removed_sequence_range(
+    ends: Option<(
+        memory_store::HistorySegmentEdge,
+        memory_store::HistorySegmentEdge,
+    )>,
+) -> String {
+    ends.map_or_else(
+        || "none".to_string(),
+        |(oldest, newest)| format!("{}..={}", oldest.sequence, newest.sequence),
+    )
+}
+
+/// Resolves `req`'s submitted window against one coverage snapshot (spec D2, D10, D11): refuses
+/// a mid that appears twice in the window, applies the cut, and gives every remaining message
+/// its daemon-derived ordinal. An unknown anchor is `TransformError::BoundaryUnknown`. Writes
+/// nothing, and an error leaves `req` as it was.
+pub(crate) fn resolve_window(
+    store: &MemoryStore,
+    req: &mut TransformRequest,
+) -> Result<(), TransformError> {
+    let mut seen = HashSet::with_capacity(req.messages.len());
+    if let Some(duplicate) = req.messages.iter().find(|m| !seen.insert(m.mid.as_str())) {
+        return Err(TransformError::InvalidWindow(format!(
+            "message id {:?} appears twice in the window",
+            duplicate.mid
+        )));
+    }
+    let (_, resolved) = resolve_coverage(store, req, &[])?;
+    apply_resolution(req, resolved);
+    Ok(())
+}
+
+/// Resolves a resolved request's submitted window again from a fresh snapshot; the request is
+/// re-cut and re-stamped only when the resolution moved.
+fn resolve_attempt<'a>(
+    store: &MemoryStore,
+    req: &'a TransformRequest,
+) -> Result<(Option<u64>, Cow<'a, TransformRequest>), TransformError> {
+    let coverage = req.coverage.as_deref().expect("the request was resolved");
+    let (row_version, fresh) = resolve_coverage(store, req, &coverage.cut_prefix)?;
+    if fresh == coverage.resolved {
+        return Ok((row_version, Cow::Borrowed(req)));
+    }
+    let mut submitted = req.clone();
+    submitted.messages = coverage
+        .cut_prefix
+        .iter()
+        .chain(req.messages.iter())
+        .cloned()
+        .collect();
+    apply_resolution(&mut submitted, fresh);
+    Ok((row_version, Cow::Owned(submitted)))
+}
+
+fn resolve_coverage(
+    store: &MemoryStore,
+    req: &TransformRequest,
+    cut_prefix: &[Arc<IngressMessage>],
+) -> Result<(Option<u64>, crate::window_coverage::Resolved), TransformError> {
+    use crate::window_coverage::{self as coverage, DeclaredAnchor, Resolution, WindowMessage};
+    let window: Vec<WindowMessage<'_>> = cut_prefix
+        .iter()
+        .chain(req.messages.iter())
+        .map(|message| WindowMessage {
+            mid: &message.mid,
+            synthetic: message.ck.meta.synthetic || carries_synthetic_todo(message),
+        })
+        .collect();
+    let declared = req
+        .boundary
+        .as_ref()
+        .and_then(Option::as_ref)
+        .map(|anchor| DeclaredAnchor {
+            mid: &anchor.mid,
+            sequence: anchor.sequence,
+        });
+    let snapshot = coverage::read_snapshot(store, &req.session_id, declared, &window)?;
+    let resolved =
+        coverage::resolve(&snapshot, declared, &window).map_err(TransformError::InvalidWindow)?;
+    if resolved.resolution == Resolution::Unknown {
+        return Err(TransformError::BoundaryUnknown);
+    }
+    Ok((snapshot.row_version, resolved))
+}
+
+/// Slices off the cut and stamps each message with its ordinal; an ingress `ck.meta.ordinal`
+/// is cleared so no ordinal reaches the served output.
+fn apply_resolution(req: &mut TransformRequest, resolved: crate::window_coverage::Resolved) {
+    let cut_prefix = req.messages.drain(..resolved.cut()).collect();
+    for (message, &ordinal) in req.messages.iter_mut().zip(&resolved.ordinals) {
+        if message.ordinal != ordinal || message.ck.meta.ordinal.is_some() {
+            let message = Arc::make_mut(message);
+            message.ordinal = ordinal;
+            message.ck.meta.ordinal = None;
+        }
+    }
+    req.coverage = Some(Arc::new(WindowCoverage {
+        resolved,
+        cut_prefix,
+    }));
+}
+
+/// The rendered coverage boundary the response names (spec D5): the segment whose end block
+/// is the core boundary id.
+fn rendered_boundary(
+    store: &MemoryStore,
+    session_id: &str,
+) -> Result<Option<BoundaryAnchor>, TransformError> {
+    let rendered = store.coverage_snapshot(session_id, None, &[])?.rendered;
+    Ok(rendered.and_then(|row| {
+        let (mid, _) = split_block_id(&row.end_message_id)?;
+        Some(BoundaryAnchor {
+            mid: mid.to_string(),
+            sequence: row.sequence,
+        })
+    }))
 }
 
 #[cfg(test)]
@@ -2175,6 +2181,8 @@ type TransformAttemptHook = Arc<dyn Fn() + Send + Sync>;
 static TRANSFORM_ATTEMPT_HOOKS: OnceLock<Mutex<HashMap<String, TransformAttemptHook>>> =
     OnceLock::new();
 
+/// Installs a one-shot hook for `session_id`. It fires before the store write of the
+/// no-survivor reset or of a transform commit, whichever the session reaches first.
 #[cfg(test)]
 pub(crate) fn install_transform_attempt_hook(
     session_id: &str,
@@ -2234,9 +2242,10 @@ fn served_output_fingerprints(messages: &[ServedMessage]) -> Vec<ServedBlockFing
         for (block_index, (content_hash, serialized_len)) in
             message.block_fingerprints.iter().enumerate()
         {
+            // The stored fingerprint keeps the first 128 bits (32 hex) of the block hash.
             fingerprints.push(ServedBlockFingerprint {
                 block_id: wire::block_id(&message_id, block_index),
-                content_hash: content_hash.clone(),
+                content_hash: content_hash[..32].to_string(),
                 serialized_len: *serialized_len,
             });
         }
@@ -2282,19 +2291,21 @@ impl std::ops::Deref for TransformIngress<'_> {
 fn normalize_synthetic_todo_ingress(req: &TransformRequest) -> TransformIngress<'_> {
     let mut normalized = TransformIngress::original(req);
     for message in &req.messages {
-        if message.ck.meta.synthetic
-            || !message.ck.content().iter().any(|block| match block.kind() {
-                wire::BlockKind::ToolCall { id, .. } | wire::BlockKind::ToolResult { id, .. } => {
-                    is_synthetic_todo_id(id)
-                }
-                _ => false,
-            })
-        {
-            continue;
+        if !message.ck.meta.synthetic && carries_synthetic_todo(message) {
+            normalized.projection.mark_synthetic(message);
         }
-        normalized.projection.mark_synthetic(message);
     }
     normalized
+}
+
+/// A message carrying the daemon's synthetic todo arc is synthetic whatever its ingress flag.
+fn carries_synthetic_todo(message: &IngressMessage) -> bool {
+    message.ck.content().iter().any(|block| match block.kind() {
+        wire::BlockKind::ToolCall { id, .. } | wire::BlockKind::ToolResult { id, .. } => {
+            is_synthetic_todo_id(id)
+        }
+        _ => false,
+    })
 }
 
 const CONTINUATION_SUMMARY_PREFIX: &str =
@@ -2350,6 +2361,25 @@ fn continuation_summary_anchor(
         content_hash,
         ordinal: first.ordinal,
     })
+}
+
+/// The lineage anchor is the message at continuation base + 1. A window anchored past it
+/// does not carry it, and `Revert { None }` resets the lineage with the history.
+fn lineage_anchor_gates(resolved: &crate::window_coverage::Resolved, meta: &ModuleMeta) -> bool {
+    use crate::window_coverage::Resolution;
+    if resolved.resolution
+        == (Resolution::Revert {
+            keep_through_seq: None,
+        })
+    {
+        return false;
+    }
+    match (&resolved.anchor, meta.ordinal_continuation_base) {
+        (Some(anchor), Some(base)) => {
+            u64::try_from(anchor.end_message).is_ok_and(|end| end <= base.saturating_add(1))
+        }
+        _ => true,
+    }
 }
 
 fn validate_lineage_anchor(
@@ -2415,49 +2445,6 @@ fn validate_lineage_anchor(
     Ok(())
 }
 
-fn rebase_descent_ordinals(
-    req: &TransformIngress<'_>,
-    base: u64,
-) -> Result<Option<TransformRequest>, TransformError> {
-    let Some(first) = req.projection.live_messages().next() else {
-        return Err(TransformError::LineageProtocol(
-            "descent replacement array has no real messages".to_string(),
-        ));
-    };
-    let expected_first = base.checked_add(1).ok_or_else(|| {
-        TransformError::LineageProtocol("descent ordinal base overflow".to_string())
-    })?;
-    if first.ordinal == expected_first {
-        return Ok(None);
-    }
-    // The offset keeps the first replacement ordinal at `base + 1` for 0- and 1-based input.
-    // Replacement arrays may begin at ordinal 0 or 1.
-    if first.ordinal > 1 {
-        return Err(TransformError::LineageProtocol(format!(
-            "descent replacement array starts at ordinal {}, expected a fresh origin (0 or 1) or continued ordinal {expected_first}",
-            first.ordinal
-        )));
-    }
-    let offset = expected_first
-        .checked_sub(first.ordinal)
-        .expect("first.ordinal <= 1 <= expected_first");
-    let mut rebased = req.request.clone();
-    for message in rebased.messages.iter_mut() {
-        let message = Arc::make_mut(message);
-        if message.ordinal < first.ordinal {
-            return Err(TransformError::LineageProtocol(format!(
-                "descent replacement array contains ordinal {} below its origin {}",
-                message.ordinal, first.ordinal
-            )));
-        }
-        message.ordinal = message.ordinal.checked_add(offset).ok_or_else(|| {
-            TransformError::LineageProtocol("descent ordinal overflow".to_string())
-        })?;
-        message.ck.meta.ordinal = Some(message.ordinal);
-    }
-    Ok(Some(rebased))
-}
-
 fn lineage_protocol_passthrough(
     req: &TransformIngress<'_>,
     projection: FlatProjection,
@@ -2476,13 +2463,11 @@ fn lineage_protocol_passthrough(
             Some(PassAction::Passthrough),
             None,
         ),
-        boundary_state: BoundaryState::Absent,
-        trim_mismatch: None,
         revert_epoch: 0,
         reasoning_watermark: 0,
         mutation_exempt_mid: None,
         lineage_anchor_mid: None,
-        rebased_request: None,
+        served_request: None,
         response: TransformResponse::passthrough(
             req.messages
                 .iter()
@@ -2693,7 +2678,6 @@ fn apply_additive_only(
         soft_refresh_pending: loaded.meta.soft_refresh_pending,
         render_config_changed,
         first_fold_due: false,
-        boundary_divergence_recut: false,
         idle_ttl_fired: scheduler_outcome.idle_ttl_fired,
         system_absorb_hard_due: false,
         external_revision_changed,
@@ -2758,6 +2742,7 @@ fn apply_additive_only(
         None,
         &IdentityEnforcement::default(),
     );
+    prune_block_identities(&mut meta, req, plan);
     let cc_u1_active = crate::cc_u1_active(serializer_profile, req.tool_present);
     meta.cc_u1_active = cc_u1_active;
     meta.tagging_surface_active = tagging_surface_requested;
@@ -2996,15 +2981,13 @@ fn apply_additive_only(
         projection,
         scheduler_pass: scheduler_outcome.pass,
         pass_observation,
-        boundary_state: BoundaryState::Absent,
-        trim_mismatch: None,
         revert_epoch: meta.revert_epoch,
         reasoning_watermark: meta
             .reasoning_cleared_through_tag
             .max(meta.reasoning_cleared_through_ordinal),
         mutation_exempt_mid: None,
         lineage_anchor_mid: None,
-        rebased_request: None,
+        served_request: None,
         response: TransformResponse {
             status: TransformStatus::Ok,
             served_from: ServedFrom::Transform,
@@ -3019,12 +3002,11 @@ fn apply_additive_only(
             row_version,
             surface_state: SurfaceState::Inactive,
             committed: commit_required,
-            coverage_ordinal: None,
+            boundary: None,
             project_memory: meta.project_memory.clone(),
             lineage_switch_consumed_id: None,
             lineage_descent_disposition: None,
             cache_ttl: None,
-            ordinal_continuation_base: meta.ordinal_continuation_base,
             history_summarizer: None,
             messages: Some(messages),
             native_messages: None,
@@ -3045,11 +3027,8 @@ fn apply_once(
     req: &TransformRequest,
     ctx: &ProducerContext<'_>,
     estimate_tokens: impl Fn(&str) -> usize + Copy,
-    output_cache: Option<&Mutex<SerializedOutputCache>>,
-    boundary_divergence_retry: bool,
-    boundary_divergence_detected: &mut bool,
+    mut coverage_row_version: Option<u64>,
 ) -> Result<TransformWithProjection, TransformError> {
-    *boundary_divergence_detected = false;
     if !ctx.compaction_enabled {
         return apply_additive_only(store, req, ctx, estimate_tokens);
     }
@@ -3131,8 +3110,13 @@ fn apply_once(
         lineage_state.disposition = Some(outcome.disposition.as_str());
         lineage_state.ordinal_base = outcome.prior_last_ordinal;
         lineage_state.force_hard = outcome.materialization_required;
-        if let Some(base) = lineage_state.ordinal_base {
-            rebased_req = rebase_descent_ordinals(ingress_req, base)?;
+        if outcome.loaded.row_version != coverage_row_version {
+            // A committed descent can move the continuation base.
+            let (row_version, rebased) = resolve_attempt(store, ingress_req.request)?;
+            coverage_row_version = row_version;
+            if let Cow::Owned(rebased) = rebased {
+                rebased_req = Some(rebased);
+            }
         }
     }
     let rebased_ingress = rebased_req.as_ref().map(normalize_synthetic_todo_ingress);
@@ -3202,6 +3186,13 @@ fn apply_once(
     timings.store_channel1 = transform_snapshot.timings.channel1_ms;
     timings.store_overlay_frontier = transform_snapshot.timings.overlay_frontier_ms;
     let mut loaded = transform_snapshot.loaded;
+    if loaded.row_version != coverage_row_version {
+        return Err(TransformError::Store(MemoryStoreError::CasConflict {
+            expected: coverage_row_version,
+            found: loaded.row_version.unwrap_or(0),
+        }));
+    }
+    let coverage = req.coverage.as_deref().expect("the request was resolved");
     let overlay_frontier = transform_snapshot.overlay_frontier;
     let transition_detection_started_at = Instant::now();
     let transition_shapes = renderer_transition_shapes(
@@ -3226,7 +3217,10 @@ fn apply_once(
         .as_deref()
         .and_then(split_block_id)
         .map(|(mid, _)| mid);
-    if let Some(base) = loaded.meta.ordinal_continuation_base {
+    // Only an unanchored first pass numbers its window from the continuation base; an
+    // anchored window takes its ordinals from the anchor.
+    let first_pass = coverage.resolved.resolution == crate::window_coverage::Resolution::FirstPass;
+    if first_pass && let Some(base) = loaded.meta.ordinal_continuation_base {
         let expected_boundary = base.checked_add(1).ok_or_else(|| {
             TransformError::LineageProtocol(
                 "durable ordinal continuation base overflow".to_string(),
@@ -3250,7 +3244,9 @@ fn apply_once(
         }
     }
     let mut lineage_anchor_failure = false;
-    if let Err(detail) = validate_lineage_anchor(&loaded.meta, req, &projection) {
+    if lineage_anchor_gates(&coverage.resolved, &loaded.meta)
+        && let Err(detail) = validate_lineage_anchor(&loaded.meta, req, &projection)
+    {
         lineage_anchor_failure = true;
         eprintln!(
             "daemon: lineage anchor validation failed closed for {}: {detail}",
@@ -3311,44 +3307,19 @@ fn apply_once(
         Vec::new()
     };
 
-    let coverage_resolve_started_at = Instant::now();
-    let (boundary_state, trim_mismatch) =
-        resolve_boundary_state(store, req, &loaded.core, &loaded.meta, &live)?;
-    timings.coverage_resolve += elapsed_ms(coverage_resolve_started_at);
-    let boundary_present = boundary_state.is_present();
+    // A revert through no anchor reaches this pass only with `lineage_switched`; every other
+    // one was reset before the pass ran (spec D10).
+    let boundary_present = !loaded.core.boundary_id.is_empty()
+        && live
+            .iter()
+            .any(|block| block.id() == loaded.core.boundary_id);
     let boundary_token = if boundary_present {
         loaded.core.boundary_id.clone()
     } else {
         "-".to_string()
     };
-
-    let mut has_history_segments_cache: Option<bool> = None;
-    let mut pending_rewrite_absent_shape = false;
-    if !boundary_present {
-        let needs_lineage_check = loaded.meta.pending_rewrite.is_some()
-            || !loaded.core.boundary_id.is_empty()
-            || loaded.meta.coverage_ordinal.is_some()
-            || {
-                let has_history_segments = store.has_history_segments(&req.session_id)?;
-                has_history_segments_cache = Some(has_history_segments);
-                has_history_segments
-            };
-        if needs_lineage_check {
-            // Only the oldest row decides the absent shape, so this reads the set's two ends,
-            // not the history.
-            let oldest = store
-                .history_segment_ends(&req.session_id)?
-                .map(|(oldest, _)| oldest);
-            let has_history_segments = oldest.is_some();
-            has_history_segments_cache = Some(has_history_segments);
-            pending_rewrite_absent_shape = loaded.row_version.is_some()
-                && has_durable_lineage(&loaded.core, &loaded.meta, has_history_segments)
-                && no_revert_prefix_survives(
-                    oldest.as_ref().map(|o| o.end_message_id.as_str()),
-                    &live,
-                );
-        }
-    }
+    let pending_rewrite_absent_shape =
+        req.lineage_switched && coverage.resolved.resolution == NO_SURVIVOR;
 
     if pending_rewrite_absent_shape && loaded.meta.anchor_block_id.is_none() {
         let fingerprint = absent_shape_fingerprint(&live);
@@ -3425,7 +3396,6 @@ fn apply_once(
                     .reasoning_cleared_through_tag
                     .max(next_meta.reasoning_cleared_through_ordinal),
                 committed: fingerprint_changed,
-                trim_mismatch,
                 messages: passthrough_messages,
                 first_divergence,
                 surface_state,
@@ -3524,7 +3494,6 @@ fn apply_once(
                 .reasoning_cleared_through_tag
                 .max(meta.reasoning_cleared_through_ordinal),
             committed: true,
-            trim_mismatch,
             messages: passthrough_messages,
             first_divergence,
             surface_state,
@@ -3614,71 +3583,9 @@ fn apply_once(
     } else {
         usage_percentage
     };
-    let fallback_tail_allowance = 0;
-    let mut divergence_candidate = if req.is_subagent {
-        None
-    } else {
-        detect_boundary_divergence_candidate(
-            store,
-            &req.session_id,
-            &loaded.meta,
-            &live,
-            fallback_tail_allowance,
-        )?
-    };
-    let mut divergence_inputs_moved = false;
-    if divergence_candidate.is_some() && !boundary_divergence_retry {
-        let revalidated = revision_signal_for_context(
-            store,
-            ctx.note_project_path,
-            &req.session_id,
-            loaded.meta.user_profile_version,
-            ctx.memory_enabled,
-            Some(&mut m1_revision_read_timings),
-            ctx,
-        )?;
-        if post_end_revision_inputs_moved(&m1_signal, &revalidated) {
-            divergence_candidate = None;
-            divergence_inputs_moved = true;
-        }
-        m1_signal = revalidated;
-    }
-    let history_segment_revision_matches = loaded
-        .meta
-        .m1_history_segment_seq
-        .map_or(m1_signal.revision == loaded.meta.m1_revision, |applied| {
-            applied == m1_signal.max_history_segment_seq
-        });
-    let active_legitimate_publication_window = ctx.history_summarizer_active || ctx.wrapup_active;
-    let mut boundary_divergence_pending_count =
-        if req.is_subagent || divergence_inputs_moved || active_legitimate_publication_window {
-            loaded.meta.boundary_divergence_pending_count
-        } else if divergence_candidate.is_some() {
-            if boundary_divergence_retry || history_segment_revision_matches {
-                0
-            } else {
-                loaded
-                    .meta
-                    .boundary_divergence_pending_count
-                    .saturating_add(1)
-                    .min(BOUNDARY_DIVERGENCE_PENDING_PASS_LIMIT)
-            }
-        } else {
-            0
-        };
-    let boundary_divergence_recut = divergence_candidate.filter(|_| {
-        boundary_divergence_retry
-            || history_segment_revision_matches
-            || (!active_legitimate_publication_window
-                && boundary_divergence_pending_count >= BOUNDARY_DIVERGENCE_PENDING_PASS_LIMIT)
-    });
-    if boundary_divergence_recut.is_some() && !active_legitimate_publication_window {
-        boundary_divergence_pending_count = 0;
-    }
     let mut current_m1_digest = m1_signal.revision;
     let history_segment_seq_changed_since_meta = loaded.meta.initialized
         && m1_signal.max_history_segment_seq != meta_coverage_history_segment_seq(&loaded.meta);
-    *boundary_divergence_detected = boundary_divergence_recut.is_some();
     let memory_gate_digest_transition = !ctx.memory_enabled
         && !loaded.meta.memory_disabled
         && current_m1_digest != loaded.meta.m1_revision;
@@ -3756,14 +3663,8 @@ fn apply_once(
         scheduler_outcome.pass = scheduler::PassDecision::Execute;
         scheduler_outcome.deferred_execute = None;
     }
-    let first_fold_due = if loaded.core.boundary_id.is_empty() {
-        match has_history_segments_cache {
-            Some(value) => value,
-            None => store.has_history_segments(&req.session_id)?,
-        }
-    } else {
-        false
-    };
+    let first_fold_due =
+        loaded.core.boundary_id.is_empty() && store.has_history_segments(&req.session_id)?;
     let (render_config_changed, identity_observed, coordinator_identity) =
         render_config_change(&loaded.meta, req, &effective_render_config, transition_due);
     let reconcile_hard_due = loaded.core.reconcile_pending && !boundary_present;
@@ -3791,7 +3692,6 @@ fn apply_once(
         soft_refresh_pending: loaded.meta.soft_refresh_pending,
         render_config_changed,
         first_fold_due,
-        boundary_divergence_recut: boundary_divergence_recut.is_some(),
         idle_ttl_fired: scheduler_outcome.idle_ttl_fired,
         system_absorb_hard_due,
         external_revision_changed,
@@ -4032,9 +3932,6 @@ fn apply_once(
     if lineage_state.force_hard {
         materialize_reason = Some(MaterializeReason::LineageDescent);
     }
-    if boundary_divergence_recut.is_some() {
-        materialize_reason = Some(MaterializeReason::BoundaryDivergenceRecut);
-    }
     if transition_due {
         materialize_reason = Some(MaterializeReason::RendererTransition);
     }
@@ -4046,7 +3943,6 @@ fn apply_once(
     let mut meta = loaded.meta.clone();
     timings.state_clone = elapsed_ms(state_clone_started_at);
     let state_evolution_started_at = Instant::now();
-    meta.boundary_divergence_pending_count = boundary_divergence_pending_count;
     if !identity_observed && coordinator_identity {
         meta.last_provider_id = req.provider_id.clone().unwrap_or_default();
         meta.last_model_key = req.model_key.clone().unwrap_or_default();
@@ -4097,10 +3993,15 @@ fn apply_once(
     }
     apply_scheduler_meta(&mut meta, &scheduler_outcome);
 
-    if lineage_anchor_failure {
+    let revert_unreconciled = matches!(
+        coverage.resolved.resolution,
+        crate::window_coverage::Resolution::Revert { .. }
+    ) && !loaded.core.reconcile_pending;
+    if lineage_anchor_failure || revert_unreconciled {
         core.reconcile_pending = true;
         plan = PassPlan::Defer;
-        materialize_reason = Some(MaterializeReason::LineageAnchorMismatch);
+        materialize_reason =
+            lineage_anchor_failure.then_some(MaterializeReason::LineageAnchorMismatch);
     }
 
     let is_provider_prefix_mutation_pass = matches!(
@@ -4243,7 +4144,8 @@ fn apply_once(
                     &req.session_id,
                     &mut meta.history_segments_ordered,
                 )?;
-                let covered_system_messages = covered_system_messages_for_coverage(
+                let covered_system_messages = record_covered_systems(
+                    &mut meta,
                     req,
                     coverage_bounds.map(|(_, end)| end),
                     coverage_bounds.map(|(start, _)| start),
@@ -4283,23 +4185,18 @@ fn apply_once(
                     )));
                 }
 
-                if let Some(coverage_end) = comp.coverage_ordinal {
+                if comp.coverage_ordinal.is_some() {
                     let minted = comp.boundary_id.as_str();
-                    validate_live_boundary_ordinal(minted, coverage_end, &live)?;
-                    if minted.is_empty()
-                        || !boundary_available(
-                            minted,
-                            &live,
-                            &boundary_state,
-                            req.declared_trim.as_ref(),
-                        )
-                    {
+                    if minted.is_empty() || !live.iter().any(|block| block.id() == minted) {
                         if loaded.core.reconcile_pending {
-                            // The declared exception to bounded pass reads (spec C3): a revert
-                            // truncation reads the history it may remove, O(removed history).
-                            let history_segments = store.load_history_segments(&req.session_id)?;
-                            let keep_through_seq =
-                                surviving_revert_prefix_seq(&history_segments, &live);
+                            // A revert keeps history through the effective anchor; with none
+                            // (a revert through no anchor that the pending-rewrite arm does not
+                            // take), it removes every segment, as the reset of spec D10 does.
+                            let keep_through_seq = coverage
+                                .resolved
+                                .anchor
+                                .as_ref()
+                                .map_or(-1, |anchor| anchor.sequence);
                             let outcome = store.truncate_history_segments_for_revert(
                                 &req.session_id,
                                 keep_through_seq,
@@ -4309,6 +4206,9 @@ fn apply_once(
                             meta.revert_epoch = outcome.revert_epoch;
                             meta.last_recut = outcome.last_recut;
                             meta.history_summarizer = outcome.history_summarizer;
+                            if outcome.lineage_reset {
+                                meta.forget_lineage_continuation();
+                            }
                             m1_signal = revision_signal_for_context(
                                 store,
                                 ctx.note_project_path,
@@ -4324,13 +4224,13 @@ fn apply_once(
                                 &req.session_id,
                                 &mut meta.history_segments_ordered,
                             )?;
-                            let recut_covered_system_messages =
-                                covered_system_messages_for_coverage(
-                                    req,
-                                    recut_coverage_bounds.map(|(_, end)| end),
-                                    recut_coverage_bounds.map(|(start, _)| start),
-                                    serializer_profile,
-                                );
+                            let recut_covered_system_messages = record_covered_systems(
+                                &mut meta,
+                                req,
+                                recut_coverage_bounds.map(|(_, end)| end),
+                                recut_coverage_bounds.map(|(start, _)| start),
+                                serializer_profile,
+                            );
                             comp = compose_m0_for_context(
                                 store,
                                 &crate::m0_compose::M0ComposeInputs {
@@ -4369,16 +4269,10 @@ fn apply_once(
                                 )));
                             }
 
-                            if let Some(coverage_end) = comp.coverage_ordinal {
+                            if comp.coverage_ordinal.is_some() {
                                 let reminted = comp.boundary_id.as_str();
-                                validate_live_boundary_ordinal(reminted, coverage_end, &live)?;
                                 if reminted.is_empty()
-                                    || !boundary_available(
-                                        reminted,
-                                        &live,
-                                        &boundary_state,
-                                        req.declared_trim.as_ref(),
-                                    )
+                                    || !live.iter().any(|block| block.id() == reminted)
                                 {
                                     return Err(TransformError::BoundaryNotPresent(format!(
                                         "re-cut kept history_segments through sequence {keep_through_seq}, \
@@ -4523,7 +4417,8 @@ fn apply_once(
                         &req.session_id,
                         &mut meta.history_segments_ordered,
                     )?;
-                    let covered_system_messages = covered_system_messages_for_coverage(
+                    let covered_system_messages = record_covered_systems(
+                        &mut meta,
                         req,
                         coverage_bounds.map(|(_, end)| end),
                         coverage_bounds.map(|(start, _)| start),
@@ -4565,17 +4460,9 @@ fn apply_once(
                         )));
                     }
 
-                    if let Some(coverage_end) = comp.coverage_ordinal {
+                    if comp.coverage_ordinal.is_some() {
                         let minted = comp.boundary_id.as_str();
-                        validate_live_boundary_ordinal(minted, coverage_end, &live)?;
-                        if minted.is_empty()
-                            || !boundary_available(
-                                minted,
-                                &live,
-                                &boundary_state,
-                                req.declared_trim.as_ref(),
-                            )
-                        {
+                        if minted.is_empty() || !live.iter().any(|block| block.id() == minted) {
                             return Err(TransformError::BoundaryNotPresent(format!(
                                 "fold minted anchor {minted:?} from the folded history_segment's \
                               end_message_id, but no live block carries that id; the anchor \
@@ -4676,22 +4563,14 @@ fn apply_once(
                             coverage_end
                         )));
                     }
-                    if let Some((id, coverage_end)) = m1.new_coverage.as_ref() {
-                        validate_live_boundary_ordinal(id, *coverage_end, &live)?;
-                        if id.is_empty()
-                            || !boundary_available(
-                                id,
-                                &live,
-                                &boundary_state,
-                                req.declared_trim.as_ref(),
-                            )
-                        {
-                            return Err(TransformError::BoundaryNotPresent(format!(
-                                "coverage-extending delta advanced the anchor to {id:?}, but no \
+                    if let Some((id, _)) = m1.new_coverage.as_ref()
+                        && (id.is_empty() || !live.iter().any(|block| block.id() == id))
+                    {
+                        return Err(TransformError::BoundaryNotPresent(format!(
+                            "coverage-extending delta advanced the anchor to {id:?}, but no \
                          live block carries that id; the anchor must be the flat block id \
                          (`<mid>#<index>`) of the last covered block"
-                            )));
-                        }
+                        )));
                     }
                     core.step(PassInput {
                         proposed: cache_stability::Action::Soft,
@@ -4704,6 +4583,13 @@ fn apply_once(
                     if let Some((_, ord)) = m1.new_coverage {
                         meta.coverage_ordinal = Some(ord);
                         meta.coverage_history_segment_seq = Some(m1_signal.max_history_segment_seq);
+                        meta.covered_system_messages = covered_system_messages_for_coverage(
+                            req,
+                            &meta.covered_system_messages,
+                            meta.coverage_ordinal,
+                            meta.coverage_start_ordinal,
+                            serializer_profile,
+                        );
                         prune_covered_red_units(&mut core, &live, meta.coverage_ordinal);
                         prune_covered_terse_text_compression_units(
                             &mut core,
@@ -4763,16 +4649,6 @@ fn apply_once(
             ctx.execute_threshold_percentage,
             estimate_tokens,
         ));
-    }
-    if boundary_divergence_reset_allowed(
-        is_bust_pass,
-        active_legitimate_publication_window,
-        divergence_candidate.is_none(),
-        divergence_inputs_moved,
-        history_segment_revision_matches,
-        boundary_or_coverage_state_moved(&loaded.core, &core, &loaded.meta, &meta),
-    ) {
-        meta.boundary_divergence_pending_count = 0;
     }
     if lineage_anchor_failure {
         core.reconcile_pending = true;
@@ -4946,12 +4822,6 @@ fn apply_once(
         no_trim_meta = Some(output_meta);
     }
     let output_meta = no_trim_meta.as_ref().unwrap_or(&meta);
-    let output_cache_snapshot = output_cache.map(|cache| {
-        cache
-            .lock()
-            .expect("serialized output cache mutex")
-            .snapshot(&req.session_id, meta.revert_epoch)
-    });
     let mut built_output = build_output_with_tags(
         &core,
         output_meta,
@@ -4964,8 +4834,6 @@ fn apply_once(
         meta.reasoning_cleared_through_tag
             .max(meta.reasoning_cleared_through_ordinal),
         transition_committed,
-        output_cache_snapshot.as_ref(),
-        is_bust_pass,
         true,
     )?;
     let new_merged_reasoning_units = new_merged_reasoning_strip_units(
@@ -4988,8 +4856,6 @@ fn apply_once(
             meta.reasoning_cleared_through_tag
                 .max(meta.reasoning_cleared_through_ordinal),
             transition_committed,
-            output_cache_snapshot.as_ref(),
-            true,
             true,
         )?;
     }
@@ -5014,45 +4880,11 @@ fn apply_once(
             meta.reasoning_cleared_through_tag
                 .max(meta.reasoning_cleared_through_ordinal),
             transition_committed,
-            output_cache_snapshot.as_ref(),
-            true,
             true,
         )?;
-    }
-    #[cfg(test)]
-    if output_cache.is_some() {
-        let fresh = build_output_with_tags(
-            &core,
-            output_meta,
-            &projection,
-            req,
-            (tagging_active || auto_search_active).then_some(&tag_overlay),
-            tail_reclaim_enabled && !req.is_subagent,
-            mutation_exempt_mid,
-            &tag_numbers,
-            meta.reasoning_cleared_through_tag
-                .max(meta.reasoning_cleared_through_ordinal),
-            transition_committed,
-            None,
-            true,
-            true,
-        )?;
-        let cached_bytes = built_output
-            .messages
-            .iter()
-            .map(ServedMessage::canonical_bytes)
-            .collect::<Vec<_>>();
-        let fresh_bytes = fresh
-            .messages
-            .iter()
-            .map(ServedMessage::canonical_bytes)
-            .collect::<Vec<_>>();
-        assert_eq!(cached_bytes, fresh_bytes, "serialized output cache drift");
     }
     let BuiltOutput {
         messages: wire_messages,
-        cache_entries: output_cache_entries,
-        cache_stats: output_cache_stats,
         timings: build_timings,
     } = built_output;
     #[cfg(test)]
@@ -5061,16 +4893,7 @@ fn apply_once(
     timings.blocks_by_mid = build_timings.blocks_by_mid;
     timings.build_frozen_unit_index = build_timings.frozen_unit_index;
     timings.full_drop_tool_ids = build_timings.full_drop_tool_ids;
-    timings.build_identity = build_timings.identity;
-    timings.build_identity_max = build_timings.identity_max;
-    timings.build_frozen_unit_scan = build_timings.frozen_unit_scan;
-    timings.build_cache_lookup = build_timings.cache_lookup;
-    timings.build_serialize_misses = build_timings.serialize_misses;
     timings.build_tail_loop = build_timings.tail_loop;
-    timings.build_identity_messages = build_timings.identity_messages;
-    timings.cache_hits = build_timings.cache_hits;
-    timings.cache_misses = build_timings.cache_misses;
-    timings.cache_dirty_skips = build_timings.cache_dirty_skips;
     timings.tail_messages_emitted = wire_messages
         .iter()
         .filter(|message| !message.meta.synthetic)
@@ -5157,6 +4980,8 @@ fn apply_once(
         ctx.now_ms,
         first_fold_due,
     );
+    // After the pressure refold, so the HARD that completes a revert prunes (spec D12).
+    prune_block_identities(&mut meta, req, plan);
     let state_changed = core != loaded.core || meta != loaded.meta;
     if state_changed {
         meta.last_committed_pass_at_ms = ctx.now_ms;
@@ -5213,30 +5038,10 @@ fn apply_once(
         loaded.row_version.unwrap_or(0)
     };
     timings.store_commit = elapsed_ms(store_commit_started_at);
-    if let Some(cache) = output_cache {
-        cache
-            .lock()
-            .expect("serialized output cache mutex")
-            .replace(
-                &req.session_id,
-                meta.revert_epoch,
-                output_cache_entries,
-                output_cache_stats,
-            );
-    }
     for re_adoption in &identity_enforcement.tail_re_adoptions {
         eprintln!(
             "daemon: identity re-adopted for tail mid {} old_hash={} new_hash={}",
             re_adoption.mid, re_adoption.old_hash_prefix, re_adoption.new_hash_prefix
-        );
-    }
-    if let Some(divergence) = boundary_divergence_recut {
-        eprintln!(
-            "daemon: boundary_divergence_recut session={} old_coverage={} new_coverage={} live_tail_allowance={}",
-            req.session_id,
-            divergence.old_coverage,
-            meta.coverage_ordinal.unwrap_or(divergence.new_coverage),
-            divergence.live_tail_allowance,
         );
     }
     if let Some(first_divergence) = &first_divergence {
@@ -5264,8 +5069,6 @@ fn apply_once(
         projection,
         scheduler_pass: scheduler_outcome.pass,
         pass_observation,
-        boundary_state,
-        trim_mismatch,
         revert_epoch: meta.revert_epoch,
         reasoning_watermark: meta
             .reasoning_cleared_through_tag
@@ -5286,12 +5089,11 @@ fn apply_once(
             row_version,
             surface_state,
             committed: commit_required,
-            coverage_ordinal: meta.coverage_ordinal,
+            boundary: None,
             project_memory: meta.project_memory.clone(),
             lineage_switch_consumed_id: lineage_state.acknowledge_edge,
             lineage_descent_disposition: lineage_state.disposition.map(str::to_string),
             cache_ttl: None,
-            ordinal_continuation_base: meta.ordinal_continuation_base,
             history_summarizer: None,
             messages: Some(wire_messages),
             native_messages: None,
@@ -5303,7 +5105,7 @@ fn apply_once(
             channel2_directive: channel2_output.channel2_directive,
             note_deliveries: (!note_deliveries.is_empty()).then_some(note_deliveries),
         },
-        rebased_request: rebased_req,
+        served_request: rebased_req.map(Box::new),
     })
 }
 
@@ -5414,8 +5216,10 @@ fn enforce_block_identity(
             basis_re_adoptions.push(mid.clone());
             continue;
         }
-        if identity_drift_requires_reject(meta, req, core, mid) {
-            return Err(TransformError::IdentityDrift(mid.clone()));
+        // A frozen payload is derived from its target's earlier content; rendering it over the
+        // changed message would serve that earlier content.
+        if frozen_unit_targets_mid(core, mid) && is_tail_mid(meta, req, mid) {
+            return Err(TransformError::FrozenTargetDrift(mid.clone()));
         }
         re_adoptions.push(TailIdentityReAdoption {
             mid: mid.clone(),
@@ -5452,20 +5256,11 @@ fn enforce_block_identity(
     })
 }
 
-fn identity_drift_requires_reject(
-    meta: &ModuleMeta,
-    req: &TransformIngress<'_>,
-    core: &CoreState,
-    mid: &str,
-) -> bool {
-    let covered = req
-        .projection
+fn is_tail_mid(meta: &ModuleMeta, req: &TransformIngress<'_>, mid: &str) -> bool {
+    req.projection
         .live_messages()
         .find(|message| message.mid == mid)
-        .is_some_and(|message| !is_tail(message.ordinal, meta.coverage_ordinal));
-    let boundary_anchor = core.boundary_id == mid
-        || split_block_id(&core.boundary_id).is_some_and(|(anchor_mid, _)| anchor_mid == mid);
-    covered || boundary_anchor || frozen_unit_targets_mid(core, mid)
+        .is_some_and(|message| is_tail(message.ordinal, meta.coverage_ordinal))
 }
 
 fn frozen_unit_targets_mid(core: &CoreState, mid: &str) -> bool {
@@ -5489,6 +5284,29 @@ fn frozen_unit_targets_mid(core: &CoreState, mid: &str) -> bool {
 fn block_identity_hash_prefix(vector: &[BlockIdentity]) -> String {
     let serialized = serde_json::to_string(vector).expect("block identities are serializable");
     wire::fingerprint(&serialized).chars().take(12).collect()
+}
+
+/// Keeps only the submitted window's identities (spec D12), inside the pass's meta CAS. The
+/// submitted window is the resolved messages plus any cut prefix, the window D10 resolves
+/// against. A revert keeps the whole map until the HARD that completes it. A writer that loses
+/// the CAS reloads the map with the row, so it never restores identities another commit pruned.
+fn prune_block_identities(meta: &mut ModuleMeta, req: &TransformRequest, plan: PassPlan) {
+    let coverage = req.coverage.as_deref();
+    let revert = matches!(
+        coverage.map(|coverage| coverage.resolved.resolution),
+        Some(crate::window_coverage::Resolution::Revert { .. })
+    );
+    if revert && !matches!(plan, PassPlan::Hard | PassPlan::MigrateHard) {
+        return;
+    }
+    let cut_prefix = coverage.map_or(&[][..], |coverage| &coverage.cut_prefix[..]);
+    let window: HashSet<&str> = cut_prefix
+        .iter()
+        .chain(&req.messages)
+        .map(|message| message.mid.as_str())
+        .collect();
+    meta.block_identity_by_mid
+        .retain(|mid, _| window.contains(mid.as_str()));
 }
 
 fn apply_ingress_meta(
@@ -5757,7 +5575,6 @@ struct ActivationGateInputs {
     soft_refresh_pending: bool,
     render_config_changed: bool,
     first_fold_due: bool,
-    boundary_divergence_recut: bool,
     idle_ttl_fired: bool,
     system_absorb_hard_due: bool,
     external_revision_changed: bool,
@@ -5775,7 +5592,6 @@ struct ActivationGates {
 /// The one definition of the must-not-wait set. A hard fold classifies `HARD` before the bust gate is read; the veto holds only an ordinary Execute pass while a run is live, never one a hard fold, an emergency arm, an explicit flush, a render-config change, a reconcile, or a first render forces.
 fn activation_gates(input: &ActivationGateInputs) -> ActivationGates {
     let hard_fold_requested = input.first_fold_due
-        || input.boundary_divergence_recut
         || input.idle_ttl_fired
         || input.system_absorb_hard_due
         || input.external_revision_changed
@@ -6145,13 +5961,6 @@ fn is_uncovered_leading_system(message: &IngressMessage, meta: &ModuleMeta) -> b
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct BoundaryDivergenceRecut {
-    old_coverage: u64,
-    new_coverage: u64,
-    live_tail_allowance: u64,
-}
-
 fn protected_tail_floor_ordinal(
     live: &[&FlatBlock],
     context_limit: f64,
@@ -6181,79 +5990,6 @@ fn protected_tail_floor_ordinal(
         }
     }
     floor_ordinal.max(1)
-}
-
-fn post_end_revision_inputs_moved(before: &M1RevisionSignal, after: &M1RevisionSignal) -> bool {
-    before.max_history_segment_seq != after.max_history_segment_seq
-        || before.revision != after.revision
-}
-
-fn boundary_or_coverage_state_moved(
-    before_core: &CoreState,
-    after_core: &CoreState,
-    before_meta: &ModuleMeta,
-    after_meta: &ModuleMeta,
-) -> bool {
-    before_core.boundary_id != after_core.boundary_id
-        || before_meta.coverage_ordinal != after_meta.coverage_ordinal
-        || before_meta.coverage_start_ordinal != after_meta.coverage_start_ordinal
-        || before_meta.folded_history_segment_seq != after_meta.folded_history_segment_seq
-}
-
-fn boundary_divergence_reset_allowed(
-    is_bust_pass: bool,
-    active_legitimate_publication_window: bool,
-    divergence_converged: bool,
-    divergence_inputs_moved: bool,
-    history_segment_revision_matches: bool,
-    boundary_or_coverage_moved: bool,
-) -> bool {
-    is_bust_pass
-        && !active_legitimate_publication_window
-        && (boundary_or_coverage_moved
-            || (!divergence_inputs_moved
-                && (divergence_converged || history_segment_revision_matches)))
-}
-
-fn detect_boundary_divergence_candidate(
-    store: &MemoryStore,
-    session_id: &str,
-    meta: &ModuleMeta,
-    live: &[&FlatBlock],
-    fallback_tail_allowance: u64,
-) -> Result<Option<BoundaryDivergenceRecut>, MemoryStoreError> {
-    if !meta.initialized {
-        return Ok(None);
-    }
-
-    let max_end = store.max_history_segment_end_ordinal(session_id)?;
-    let Ok(new_coverage) = u64::try_from(max_end) else {
-        return Ok(None);
-    };
-    let old_coverage = meta.coverage_ordinal.unwrap_or(0);
-    let newest_live = live
-        .iter()
-        .map(|block| block.ordinal)
-        .max()
-        .unwrap_or(old_coverage);
-
-    let live_tail_allowance =
-        meta.publication_floor_ordinal
-            .map_or(fallback_tail_allowance, |protected_tail_floor| {
-                newest_live
-                    .checked_sub(protected_tail_floor)
-                    .map_or(0, |span| span.saturating_add(1))
-            });
-    let coverage_gap = new_coverage.saturating_sub(old_coverage);
-    if coverage_gap <= live_tail_allowance {
-        return Ok(None);
-    }
-
-    Ok(Some(BoundaryDivergenceRecut {
-        old_coverage,
-        new_coverage,
-        live_tail_allowance,
-    }))
 }
 
 /// The first covered ordinal and the coverage end, from the set's oldest and newest rows.
@@ -6295,29 +6031,63 @@ fn system_content_for_m0(message: &WireMessage) -> String {
     crate::served_json::canonical_blocks_text(message.content()).unwrap_or_default()
 }
 
+/// `absorbed` entries before the first live message precede the projection window.
 fn covered_system_messages_for_coverage(
+    req: &TransformIngress<'_>,
+    absorbed: &[CoveredSystemMessage],
+    coverage_ordinal: Option<u64>,
+    coverage_start_ordinal: Option<u64>,
+    profile: Option<SerializerProfile>,
+) -> Vec<CoveredSystemMessage> {
+    let covered = |ordinal: u64| {
+        !is_tail(ordinal, coverage_ordinal)
+            && (profile == Some(SerializerProfile::ClaudeCodeAnthropic)
+                || coverage_start_ordinal.is_none_or(|start| ordinal >= start))
+    };
+    let window_start = req.projection.live_messages().next().map(|m| m.ordinal);
+    let mut covered_messages: Vec<CoveredSystemMessage> = absorbed
+        .iter()
+        .filter(|entry| covered(entry.ordinal) && window_start.is_none_or(|s| entry.ordinal < s))
+        .cloned()
+        .collect();
+    let mut seen: HashSet<String> = covered_messages
+        .iter()
+        .map(|entry| entry.content.clone())
+        .collect();
+    for message in req
+        .projection
+        .live_messages()
+        .filter(|message| message.ck.role == "system" && covered(message.ordinal))
+    {
+        let content = system_content_for_m0(&message.ck);
+        if seen.insert(content.clone()) {
+            covered_messages.push(CoveredSystemMessage {
+                ordinal: message.ordinal,
+                content,
+            });
+        }
+    }
+    covered_messages
+}
+
+fn record_covered_systems(
+    meta: &mut ModuleMeta,
     req: &TransformIngress<'_>,
     coverage_ordinal: Option<u64>,
     coverage_start_ordinal: Option<u64>,
     profile: Option<SerializerProfile>,
 ) -> Vec<String> {
-    let mut seen = HashSet::new();
-    let mut covered = Vec::new();
-    for message in req.projection.live_messages().filter(|message| {
-        if message.ck.role != "system" || is_tail(message.ordinal, coverage_ordinal) {
-            return false;
-        }
-        if profile == Some(SerializerProfile::ClaudeCodeAnthropic) {
-            return true;
-        }
-        coverage_start_ordinal.is_none_or(|start| message.ordinal >= start)
-    }) {
-        let content = system_content_for_m0(&message.ck);
-        if seen.insert(content.clone()) {
-            covered.push(content);
-        }
-    }
-    covered
+    meta.covered_system_messages = covered_system_messages_for_coverage(
+        req,
+        &meta.covered_system_messages,
+        coverage_ordinal,
+        coverage_start_ordinal,
+        profile,
+    );
+    meta.covered_system_messages
+        .iter()
+        .map(|entry| entry.content.clone())
+        .collect()
 }
 
 fn coverage_advance_covers_new_system(
@@ -6761,162 +6531,6 @@ fn first_uncovered_live_block<'a>(
     Ok(candidates().find(|block| key(block) == lowest))
 }
 
-fn validate_live_boundary_ordinal(
-    boundary_id: &str,
-    expected_ordinal: u64,
-    live: &[&FlatBlock],
-) -> Result<(), TransformError> {
-    let Some(block) = live.iter().find(|block| block.id() == boundary_id) else {
-        return Ok(());
-    };
-    if block.ordinal() == expected_ordinal {
-        return Ok(());
-    }
-    Err(TransformError::BoundaryOrdinalMismatch(format!(
-        "anchor {boundary_id:?} lives at ordinal {}, but the tail history_segment claims {expected_ordinal}",
-        block.ordinal(),
-    )))
-}
-
-fn boundary_available(
-    id: &str,
-    live: &[&FlatBlock],
-    boundary_state: &BoundaryState,
-    declared: Option<&DeclaredTrim>,
-) -> bool {
-    live.iter().any(|block| block.id() == id)
-        || matches!(boundary_state, BoundaryState::DeclaredTrimValidated)
-            && declared.is_some_and(|declared| declared.flat_boundary_id == id)
-}
-
-fn resolve_boundary_state(
-    store: &MemoryStore,
-    req: &TransformIngress<'_>,
-    core: &CoreState,
-    meta: &ModuleMeta,
-    live: &[&FlatBlock],
-) -> Result<(BoundaryState, Option<TrimMismatch>), TransformError> {
-    if !core.boundary_id.is_empty() && live.iter().any(|block| block.id() == core.boundary_id) {
-        if let Some(expected_ordinal) = meta.coverage_ordinal {
-            validate_live_boundary_ordinal(core.boundary_id.as_str(), expected_ordinal, live)?;
-        }
-        return Ok((BoundaryState::LivePresent, None));
-    }
-
-    let Some(declared) = req.declared_trim.as_ref() else {
-        return Ok((BoundaryState::Absent, None));
-    };
-
-    if declared.flat_boundary_id != core.boundary_id {
-        return Ok((
-            BoundaryState::Absent,
-            Some(trim_mismatch(
-                "boundary_identity",
-                format!(
-                    "declared boundary {:?} did not match durable boundary {:?}",
-                    declared.flat_boundary_id, core.boundary_id
-                ),
-            )),
-        ));
-    }
-
-    if meta.coverage_ordinal != Some(declared.boundary_absolute_ordinal) {
-        return Ok((
-            BoundaryState::Absent,
-            Some(trim_mismatch(
-                "coverage_ordinal",
-                format!(
-                    "declared boundary ordinal {} did not match durable coverage {:?}",
-                    declared.boundary_absolute_ordinal, meta.coverage_ordinal
-                ),
-            )),
-        ));
-    }
-
-    match store.newest_history_segment(&req.session_id)?.as_ref() {
-        Some(tail)
-            if tail.end_message_id == declared.flat_boundary_id
-                && tail.end_message == declared.boundary_absolute_ordinal as i64
-                && split_block_id(&tail.end_message_id)
-                    .map(|(mid, _)| mid == declared.boundary_bare_message_id)
-                    .unwrap_or(false) => {}
-        Some(tail) => {
-            return Ok((
-                BoundaryState::Absent,
-                Some(trim_mismatch(
-                    "tail_history_segment",
-                    format!(
-                        "tail history_segment ended at id {:?} ordinal {}, not declared id {:?} bare {:?} ordinal {}",
-                        tail.end_message_id,
-                        tail.end_message,
-                        declared.flat_boundary_id,
-                        declared.boundary_bare_message_id,
-                        declared.boundary_absolute_ordinal
-                    ),
-                )),
-            ));
-        }
-        None => {
-            return Ok((
-                BoundaryState::Absent,
-                Some(trim_mismatch(
-                    "tail_history_segment",
-                    "declared trim had no durable tail history_segment".to_string(),
-                )),
-            ));
-        }
-    }
-
-    let first_live_non_system = req
-        .projection
-        .live_messages()
-        .filter(|message| message.ck.role != "system")
-        .map(|message| message.ordinal)
-        .min();
-    if first_live_non_system != Some(declared.next_absolute_ordinal) {
-        return Ok((
-            BoundaryState::Absent,
-            Some(trim_mismatch(
-                "continuity",
-                format!(
-                    "first non-system live ordinal {:?} did not match declared next ordinal {}",
-                    first_live_non_system, declared.next_absolute_ordinal
-                ),
-            )),
-        ));
-    }
-
-    Ok((BoundaryState::DeclaredTrimValidated, None))
-}
-
-fn trim_mismatch(predicate: &'static str, detail: String) -> TrimMismatch {
-    TrimMismatch { predicate, detail }
-}
-
-fn surviving_revert_prefix_seq(
-    history_segments: &[StoredHistorySegment],
-    live: &[&FlatBlock],
-) -> i64 {
-    let live_ids: BTreeSet<&str> = live.iter().map(|block| block.id()).collect();
-    history_segments
-        .iter()
-        .take_while(|history_segment| live_ids.contains(history_segment.end_message_id.as_str()))
-        .map(|history_segment| history_segment.sequence)
-        .last()
-        .unwrap_or(-1)
-}
-
-/// Whether `surviving_revert_prefix_seq` keeps nothing, from the oldest row's end id alone:
-/// the surviving prefix is empty exactly when there is no history or the oldest row's end
-/// block is not live.
-fn no_revert_prefix_survives(oldest_end_message_id: Option<&str>, live: &[&FlatBlock]) -> bool {
-    oldest_end_message_id.is_none_or(|end_id| live.iter().all(|block| block.id() != end_id))
-}
-
-fn has_durable_lineage(core: &CoreState, meta: &ModuleMeta, has_history_segments: bool) -> bool {
-    has_history_segments || !core.boundary_id.is_empty() || meta.coverage_ordinal.is_some()
-}
-
 fn absent_shape_fingerprint(live: &[&FlatBlock]) -> String {
     let mut hasher = Sha256::new();
     for block in live {
@@ -6962,7 +6576,6 @@ struct PendingPassthroughArgs {
     revert_epoch: u64,
     reasoning_watermark: u64,
     committed: bool,
-    trim_mismatch: Option<TrimMismatch>,
     messages: Vec<ServedMessage>,
     first_divergence: Option<FirstDivergence>,
     surface_state: SurfaceState,
@@ -7012,7 +6625,6 @@ fn pending_passthrough_result(args: PendingPassthroughArgs) -> TransformWithProj
         revert_epoch,
         reasoning_watermark,
         committed,
-        trim_mismatch,
         messages,
         first_divergence,
         surface_state,
@@ -7037,13 +6649,11 @@ fn pending_passthrough_result(args: PendingPassthroughArgs) -> TransformWithProj
         projection,
         scheduler_pass: scheduler::PassDecision::Defer,
         pass_observation,
-        boundary_state: BoundaryState::Absent,
-        trim_mismatch,
         revert_epoch,
         reasoning_watermark,
         mutation_exempt_mid,
         lineage_anchor_mid: None,
-        rebased_request: None,
+        served_request: None,
         response,
     }
 }
@@ -10385,54 +9995,27 @@ struct BuildOutputTimings {
     blocks_by_mid: f64,
     frozen_unit_index: f64,
     full_drop_tool_ids: f64,
-    identity: f64,
-    identity_max: f64,
-    frozen_unit_scan: f64,
-    cache_lookup: f64,
-    serialize_misses: f64,
     tail_loop: f64,
-    identity_messages: usize,
-    cache_hits: usize,
-    cache_misses: usize,
-    cache_dirty_skips: usize,
 }
 
 struct FrozenUnitIndex<'a> {
     by_key: HashMap<&'a str, &'a FrozenUnit>,
     red_by_block_id: HashMap<&'a str, &'a FrozenUnit>,
-    by_tail_mid: HashMap<&'a str, Vec<&'a FrozenUnit>>,
 }
 
 impl<'a> FrozenUnitIndex<'a> {
     fn new(frozen_units: &'a [FrozenUnit]) -> Self {
         let mut by_key = HashMap::with_capacity(frozen_units.len());
         let mut red_by_block_id = HashMap::with_capacity(frozen_units.len());
-        let mut by_tail_mid: HashMap<&str, Vec<&FrozenUnit>> = HashMap::new();
         for unit in frozen_units {
             by_key.entry(unit.key.as_str()).or_insert(unit);
             if let Some(block_id) = unit.key.strip_prefix(RED_KEY_PREFIX) {
                 red_by_block_id.entry(block_id).or_insert(unit);
             }
-            let target_mid = unit
-                .key
-                .strip_prefix(RED_KEY_PREFIX)
-                .or_else(|| unit.key.strip_prefix(CAV_KEY_PREFIX))
-                .and_then(split_block_id)
-                .map(|(mid, _)| mid)
-                .or_else(|| {
-                    unit.key
-                        .strip_prefix("strip:")
-                        .and_then(|rest| rest.rsplit_once(':'))
-                        .map(|(_, mid)| mid)
-                });
-            if let Some(mid) = target_mid {
-                by_tail_mid.entry(mid).or_default().push(unit);
-            }
         }
         Self {
             by_key,
             red_by_block_id,
-            by_tail_mid,
         }
     }
 }
@@ -10460,186 +10043,11 @@ impl<'a> FrozenUnitLookup<'a> {
             }),
         }
     }
-
-    fn for_tail_message(&self, mid: &str) -> Cow<'_, [&'a FrozenUnit]> {
-        match self {
-            Self::Indexed(index) => {
-                Cow::Borrowed(index.by_tail_mid.get(mid).map(Vec::as_slice).unwrap_or(&[]))
-            }
-            Self::Scan(frozen_units) => Cow::Owned(
-                frozen_units
-                    .iter()
-                    .filter(|unit| {
-                        unit.key
-                            .strip_prefix(RED_KEY_PREFIX)
-                            .or_else(|| unit.key.strip_prefix(CAV_KEY_PREFIX))
-                            .and_then(split_block_id)
-                            .map(|(unit_mid, _)| unit_mid == mid)
-                            .unwrap_or_else(|| {
-                                unit.key
-                                    .strip_prefix("strip:")
-                                    .is_some_and(|key| key.ends_with(&format!(":{mid}")))
-                            })
-                    })
-                    .collect(),
-            ),
-        }
-    }
 }
 
 struct BuiltOutput {
     messages: Vec<ServedMessage>,
-    cache_entries: HashMap<String, SerializedOutputCacheEntry>,
-    cache_stats: SerializedOutputCacheStats,
     timings: BuildOutputTimings,
-}
-
-fn digest_field(hasher: &mut Sha256, value: &[u8]) {
-    hasher.update(value.len().to_le_bytes());
-    hasher.update(value);
-}
-
-#[allow(clippy::too_many_arguments)]
-fn message_output_identity(
-    frozen_units: &FrozenUnitLookup<'_>,
-    projection: &FlatProjection,
-    req: &TransformRequest,
-    message: &IngressMessage,
-    blocks: &[&FlatBlock],
-    tag_overlay: Option<&TagOverlayState>,
-    tag_numbers: &BTreeMap<String, u64>,
-    reasoning_watermark: u64,
-    full_drop_ids: &HashSet<String>,
-    mutation_exempt: bool,
-    reasoning_mutation_exempt: bool,
-    trailing_blank_mutation_exempt: bool,
-    first_assistant_in_run: bool,
-    frozen_unit_scan_ms: &mut f64,
-) -> String {
-    let mut hasher = Sha256::new();
-    digest_field(&mut hasher, message.mid.as_bytes());
-    digest_field(&mut hasher, message.ck.role.as_bytes());
-    let shallow = serde_json::to_vec(&(
-        &message.ck.origin,
-        &message.ck.provider_extras,
-        &message.ck.meta,
-    ))
-    .expect("CK message metadata must serialize");
-    digest_field(&mut hasher, &shallow);
-    if let Some(identities) = projection.identity_by_mid.get(&message.mid) {
-        for identity in identities {
-            digest_field(&mut hasher, identity.kind_tag.as_bytes());
-            digest_field(&mut hasher, identity.byte_fingerprint.as_bytes());
-        }
-    }
-
-    digest_field(&mut hasher, req.serializer_profile.as_bytes());
-    digest_field(
-        &mut hasher,
-        req.provider_id.as_deref().unwrap_or_default().as_bytes(),
-    );
-    digest_field(&mut hasher, &[req.is_subagent as u8]);
-    digest_field(&mut hasher, &[req.terse_text_compression_enabled as u8]);
-    digest_field(&mut hasher, &[request_accepts_empty_content(req) as u8]);
-    digest_field(&mut hasher, &[mutation_exempt as u8]);
-    digest_field(&mut hasher, &[reasoning_mutation_exempt as u8]);
-    digest_field(&mut hasher, &[trailing_blank_mutation_exempt as u8]);
-    digest_field(&mut hasher, &[first_assistant_in_run as u8]);
-    let message_tag = message_tag_number(message, tag_numbers);
-    digest_field(&mut hasher, &message_tag.to_le_bytes());
-    digest_field(
-        &mut hasher,
-        &((message_tag > 0 && message_tag <= reasoning_watermark) as u8).to_le_bytes(),
-    );
-
-    let frozen_unit_scan_started_at = Instant::now();
-    for unit in frozen_units.for_tail_message(&message.mid).iter() {
-        digest_field(&mut hasher, unit.key.as_bytes());
-        digest_field(&mut hasher, unit.kind.as_bytes());
-        digest_field(&mut hasher, unit.frozen_payload.as_bytes());
-    }
-
-    *frozen_unit_scan_ms += elapsed_ms(frozen_unit_scan_started_at);
-
-    for block in blocks {
-        digest_field(&mut hasher, block.id.as_bytes());
-        for value in [
-            tag_overlay
-                .and_then(|overlay| overlay.tag_by_block_id.get(&block.id))
-                .map(ToString::to_string),
-            tag_overlay.and_then(|overlay| overlay.temporal_by_block_id.get(&block.id).cloned()),
-            tag_overlay.and_then(|overlay| overlay.user_hint_by_block_id.get(&block.id).cloned()),
-            tag_overlay.and_then(|overlay| overlay.channel1_by_block_id.get(&block.id).cloned()),
-        ] {
-            digest_field(&mut hasher, value.as_deref().unwrap_or_default().as_bytes());
-        }
-        let full_drop = match block.wire.kind() {
-            wire::BlockKind::ToolCall { id, .. } | wire::BlockKind::ToolResult { id, .. } => {
-                full_drop_ids.contains(id)
-            }
-            _ => false,
-        };
-        digest_field(&mut hasher, &[full_drop as u8]);
-    }
-    format!("{:x}", hasher.finalize())
-}
-
-fn cached_output_item(
-    snapshot: Option<&SerializedOutputCacheSnapshot>,
-    key: &str,
-    identity: &str,
-    dirty: bool,
-) -> Option<Option<ServedMessage>> {
-    (!dirty)
-        .then(|| snapshot?.entries.get(key))
-        .flatten()
-        .filter(|entry| entry.identity == identity)
-        .map(|entry| entry.served.clone())
-}
-
-fn cached_or_serialize_output(
-    snapshot: Option<&SerializedOutputCacheSnapshot>,
-    key: &str,
-    identity: &str,
-    dirty: bool,
-    timings: &mut BuildOutputTimings,
-    build: impl FnOnce() -> WireMessage,
-) -> (ServedMessage, bool) {
-    let cache_lookup_started_at = Instant::now();
-    let cached = cached_output_item(snapshot, key, identity, dirty).flatten();
-    timings.cache_lookup += elapsed_ms(cache_lookup_started_at);
-    if dirty && snapshot.is_some() {
-        timings.cache_dirty_skips = timings.cache_dirty_skips.saturating_add(1);
-    }
-    match cached {
-        Some(served) => {
-            timings.cache_hits = timings.cache_hits.saturating_add(1);
-            (served, true)
-        }
-        None => {
-            timings.cache_misses = timings.cache_misses.saturating_add(1);
-            let serialization_started_at = Instant::now();
-            let served = ServedMessage::from_message(build());
-            timings.serialize_misses += elapsed_ms(serialization_started_at);
-            (served, false)
-        }
-    }
-}
-
-fn record_output_item(
-    entries: &mut HashMap<String, SerializedOutputCacheEntry>,
-    stats: &mut SerializedOutputCacheStats,
-    key: String,
-    identity: String,
-    served: Option<ServedMessage>,
-    reused: bool,
-) {
-    if reused {
-        stats.reused_items = stats.reused_items.saturating_add(1);
-    } else {
-        stats.serialized_items = stats.serialized_items.saturating_add(1);
-    }
-    entries.insert(key, SerializedOutputCacheEntry { identity, served });
 }
 
 fn duplicate_tool_use_locations(messages: &[ServedMessage]) -> Vec<(String, usize, usize)> {
@@ -11079,8 +10487,6 @@ fn build_output(
         meta.reasoning_cleared_through_tag
             .max(meta.reasoning_cleared_through_ordinal),
         transition_renderer_active(core),
-        None,
-        true,
         true,
     )
     .map(|built| {
@@ -11092,8 +10498,7 @@ fn build_output(
     })
 }
 
-// Provider and durable-watermark arguments stay explicit: they affect cache
-// identity and differ across replay paths.
+// Provider and durable-watermark arguments stay explicit: they differ across replay paths.
 #[allow(clippy::too_many_arguments)]
 fn build_output_with_tags(
     core: &CoreState,
@@ -11106,15 +10511,11 @@ fn build_output_with_tags(
     tag_numbers: &BTreeMap<String, u64>,
     reasoning_watermark: u64,
     renderer_transition_active: bool,
-    cache_snapshot: Option<&SerializedOutputCacheSnapshot>,
-    prefix_dirty: bool,
     use_frozen_unit_index: bool,
 ) -> Result<BuiltOutput, TransformError> {
     let build_output_started_at = Instant::now();
     let mut build_timings = BuildOutputTimings::default();
     let mut out = Vec::with_capacity(4 + req.messages.len());
-    let mut cache_entries = HashMap::new();
-    let mut cache_stats = SerializedOutputCacheStats::default();
     let frozen_unit_index_started_at = Instant::now();
     let frozen_units = if use_frozen_unit_index {
         FrozenUnitLookup::Indexed(FrozenUnitIndex::new(&core.frozen_units))
@@ -11128,46 +10529,14 @@ fn build_output_with_tags(
 
     if !req.is_subagent {
         if let Some(unit) = frozen_units.by_key("m0") {
-            let key = "synthetic:m0".to_string();
-            let identity = "m0".to_string();
-            let (served, reused) = cached_or_serialize_output(
-                cache_snapshot,
-                &key,
-                &identity,
-                prefix_dirty,
-                &mut build_timings,
-                || synthetic_m0_message(unit.frozen_payload.clone()),
-            );
-            record_output_item(
-                &mut cache_entries,
-                &mut cache_stats,
-                key,
-                identity,
-                Some(served.clone()),
-                reused,
-            );
-            out.push(served);
+            out.push(ServedMessage::from_message(synthetic_m0_message(
+                unit.frozen_payload.clone(),
+            )));
         }
         if let Some(unit) = frozen_units.by_key("m1") {
-            let key = "synthetic:m1".to_string();
-            let identity = "m1".to_string();
-            let (served, reused) = cached_or_serialize_output(
-                cache_snapshot,
-                &key,
-                &identity,
-                prefix_dirty,
-                &mut build_timings,
-                || WireMessage::synthetic_user_text(unit.frozen_payload.clone()),
-            );
-            record_output_item(
-                &mut cache_entries,
-                &mut cache_stats,
-                key,
-                identity,
-                Some(served.clone()),
-                reused,
-            );
-            out.push(served);
+            out.push(ServedMessage::from_message(
+                WireMessage::synthetic_user_text(unit.frozen_payload.clone()),
+            ));
         }
     }
 
@@ -11222,27 +10591,9 @@ fn build_output_with_tags(
             .as_ref()
             .filter(|pair| pair.anchor_mid.is_none())
     {
-        for (suffix, message) in [("call", &pair.assistant_msg), ("result", &pair.tool_msg)] {
-            let key = format!("todo:{}:{suffix}", pair.call_id);
-            let identity = key.clone();
-            let (served, reused) = cached_or_serialize_output(
-                cache_snapshot,
-                &key,
-                &identity,
-                false,
-                &mut build_timings,
-                || message.clone(),
-            );
-            record_output_item(
-                &mut cache_entries,
-                &mut cache_stats,
-                key,
-                identity,
-                Some(served.clone()),
-                reused,
-            );
-            prev_assistant = served.role == "assistant";
-            out.push(served);
+        for message in [&pair.assistant_msg, &pair.tool_msg] {
+            prev_assistant = message.role == "assistant";
+            out.push(ServedMessage::from_message(message.clone()));
         }
     }
 
@@ -11271,15 +10622,9 @@ fn build_output_with_tags(
             continue;
         }
 
-        let lineage_anchor_exempt = meta
-            .anchor_block_id
-            .as_deref()
-            .and_then(split_block_id)
-            .is_some_and(|(anchor_mid, _)| anchor_mid == msg.mid);
-        let mutation_exempt =
-            mutation_exempt_mid == Some(msg.mid.as_str()) || lineage_anchor_exempt;
+        let mutation_exempt = mutation_exempt_mid == Some(msg.mid.as_str()) || keep_lineage_anchor;
         let reasoning_mutation_exempt =
-            reasoning_mutation_exempt_mid == Some(msg.mid.as_str()) || lineage_anchor_exempt;
+            reasoning_mutation_exempt_mid == Some(msg.mid.as_str()) || keep_lineage_anchor;
         let trailing_blank_mutation_exempt =
             reasoning_mutation_exempt_mid == Some(msg.mid.as_str());
         let first_assistant_in_run = msg.ck.role == "assistant" && !prev_assistant;
@@ -11287,38 +10632,7 @@ fn build_output_with_tags(
             .get(msg.mid.as_str())
             .map(Vec::as_slice)
             .unwrap_or(&[]);
-        let key = format!("tail:{}", msg.mid);
-        let identity_started_at = Instant::now();
-        let identity = message_output_identity(
-            &frozen_units,
-            projection,
-            req,
-            msg,
-            blocks,
-            tag_overlay,
-            tag_numbers,
-            reasoning_watermark,
-            &full_drop_ids,
-            mutation_exempt,
-            reasoning_mutation_exempt,
-            trailing_blank_mutation_exempt,
-            first_assistant_in_run,
-            &mut build_timings.frozen_unit_scan,
-        );
-        let identity_ms = elapsed_ms(identity_started_at);
-        build_timings.identity += identity_ms;
-        build_timings.identity_max = build_timings.identity_max.max(identity_ms);
-        build_timings.identity_messages = build_timings.identity_messages.saturating_add(1);
-
-        let cache_lookup_started_at = Instant::now();
-        let cached = cached_output_item(cache_snapshot, &key, &identity, false);
-        build_timings.cache_lookup += elapsed_ms(cache_lookup_started_at);
-        let (served, reused) = if let Some(cached) = cached {
-            build_timings.cache_hits = build_timings.cache_hits.saturating_add(1);
-            (cached, true)
-        } else {
-            build_timings.cache_misses = build_timings.cache_misses.saturating_add(1);
-            let serialization_started_at = Instant::now();
+        let served = {
             let mut rendered = if blocks.is_empty() {
                 let mut rebuilt = msg.ck.clone();
                 apply_tag_overlay_to_message(
@@ -11446,53 +10760,29 @@ fn build_output_with_tags(
             let present = !rendered.content().is_empty()
                 || rendered.meta.synthetic
                 || !blocks_by_mid.contains_key(msg.mid.as_str());
-            let output = if present {
-                if let Some(profile) = serializer_profile {
-                    if message_strip_unit(core, "merged_reasoning", &msg.mid).is_some() {
-                        apply_serializer_residual_to_message(
-                            profile,
-                            req.provider_id.as_deref(),
-                            reasoning_mutation_exempt,
-                            first_assistant_in_run,
-                            &mut rendered,
-                        );
-                    }
-                    apply_frozen_trailing_blank_decision(
-                        core,
+            if !present {
+                continue;
+            }
+            if let Some(profile) = serializer_profile {
+                if message_strip_unit(core, "merged_reasoning", &msg.mid).is_some() {
+                    apply_serializer_residual_to_message(
                         profile,
                         req.provider_id.as_deref(),
-                        trailing_blank_mutation_exempt,
-                        &msg.mid,
+                        reasoning_mutation_exempt,
+                        first_assistant_in_run,
                         &mut rendered,
                     );
                 }
-                (
-                    Some(
-                        ServedMessage::from_message_reusing(
-                            rendered,
-                            (!blocks.is_empty()).then_some(blocks),
-                        )
-                        .with_output_identity(&identity),
-                    ),
-                    false,
-                )
-            } else {
-                (None, false)
-            };
-            build_timings.serialize_misses += elapsed_ms(serialization_started_at);
-            output
-        };
-
-        record_output_item(
-            &mut cache_entries,
-            &mut cache_stats,
-            key,
-            identity,
-            served.clone(),
-            reused,
-        );
-        let Some(served) = served else {
-            continue;
+                apply_frozen_trailing_blank_decision(
+                    core,
+                    profile,
+                    req.provider_id.as_deref(),
+                    trailing_blank_mutation_exempt,
+                    &msg.mid,
+                    &mut rendered,
+                );
+            }
+            ServedMessage::from_message_reusing(rendered, (!blocks.is_empty()).then_some(blocks))
         };
         prev_assistant = served.role == "assistant";
         out.push(served);
@@ -11504,27 +10794,9 @@ fn build_output_with_tags(
                     && synthetic_todo_render_anchor.as_deref() == Some(msg.mid.as_str())
             })
         {
-            for (suffix, message) in [("call", &pair.assistant_msg), ("result", &pair.tool_msg)] {
-                let key = format!("todo:{}:{suffix}", pair.call_id);
-                let identity = key.clone();
-                let (served, reused) = cached_or_serialize_output(
-                    cache_snapshot,
-                    &key,
-                    &identity,
-                    false,
-                    &mut build_timings,
-                    || message.clone(),
-                );
-                record_output_item(
-                    &mut cache_entries,
-                    &mut cache_stats,
-                    key,
-                    identity,
-                    Some(served.clone()),
-                    reused,
-                );
-                prev_assistant = served.role == "assistant";
-                out.push(served);
+            for message in [&pair.assistant_msg, &pair.tool_msg] {
+                prev_assistant = message.role == "assistant";
+                out.push(ServedMessage::from_message(message.clone()));
             }
             inserted_synthetic_todo = true;
         }
@@ -11558,8 +10830,6 @@ fn build_output_with_tags(
     build_timings.total = elapsed_ms(build_output_started_at);
     Ok(BuiltOutput {
         messages: out,
-        cache_entries,
-        cache_stats,
         timings: build_timings,
     })
 }
@@ -12442,11 +11712,6 @@ pub(crate) mod tests {
             "store_memories",
             "build_output",
             "build_frozen_unit_index",
-            "build_identity",
-            "build_identity_max",
-            "build_frozen_unit_scan",
-            "build_cache_lookup",
-            "build_serialize_misses",
             "build_tail_loop",
             "divergence",
             "store_commit",
@@ -12476,10 +11741,6 @@ pub(crate) mod tests {
             "tail_units_matched",
             "projection_blocks",
             "tail_messages_emitted",
-            "build_identity_messages",
-            "cache_hits",
-            "cache_misses",
-            "cache_dirty_skips",
         ] {
             assert_eq!(fields[key], "0", "{key} renders as an integer");
         }
@@ -12506,7 +11767,7 @@ pub(crate) mod tests {
         let second = run(&store, &request, &[]);
         let second_timings = second.timings.expect("second apply_once records timings");
         eprintln!(
-            "apply_once-large n={MESSAGE_COUNT} first_total={:.1} first_projection={:.1} first_decide={:.1} first_tag_overlay={:.1} first_unit_mint={:.1} first_temporal={:.1} first_terse_text_compression={:.1} first_compose={:.1} first_selection={:.1} first_todo={:.1} first_frozen_scan={:.1} first_frozen_index={:.1} first_build_output={:.1} first_store_commit={:.1}",
+            "apply_once-large n={MESSAGE_COUNT} first_total={:.1} first_projection={:.1} first_decide={:.1} first_tag_overlay={:.1} first_unit_mint={:.1} first_temporal={:.1} first_terse_text_compression={:.1} first_compose={:.1} first_selection={:.1} first_todo={:.1} first_frozen_index={:.1} first_build_output={:.1} first_store_commit={:.1}",
             first_timings.total,
             first_timings.projection,
             first_timings.decide,
@@ -12517,13 +11778,12 @@ pub(crate) mod tests {
             first_timings.compose_m0m1,
             first_timings.selection,
             first_timings.todo,
-            first_timings.build_frozen_unit_scan,
             first_timings.build_frozen_unit_index,
             first_timings.build_output,
             first_timings.store_commit,
         );
         eprintln!(
-            "apply_once-large-second n={MESSAGE_COUNT} total={:.1} projection={:.1} reused={} projected={} decide={:.1} tag_overlay={:.1} unit_mint={:.1} temporal={:.1} terse_text_compression={:.1} compose={:.1} selection={:.1} todo={:.1} frozen_scan={:.1} frozen_index={:.1} build_output={:.1} store_commit={:.1} store_tags={:.1} store_temporal={:.1} coverage_resolve={:.1} seed_or_sync={:.1}",
+            "apply_once-large-second n={MESSAGE_COUNT} total={:.1} projection={:.1} reused={} projected={} decide={:.1} tag_overlay={:.1} unit_mint={:.1} temporal={:.1} terse_text_compression={:.1} compose={:.1} selection={:.1} todo={:.1} frozen_index={:.1} build_output={:.1} store_commit={:.1} store_tags={:.1} store_temporal={:.1} coverage_resolve={:.1} seed_or_sync={:.1}",
             second_timings.total,
             second_timings.projection,
             second_timings.projection_reused_messages,
@@ -12536,7 +11796,6 @@ pub(crate) mod tests {
             second_timings.compose_m0m1,
             second_timings.selection,
             second_timings.todo,
-            second_timings.build_frozen_unit_scan,
             second_timings.build_frozen_unit_index,
             second_timings.build_output,
             second_timings.store_commit,
@@ -12564,6 +11823,82 @@ pub(crate) mod tests {
                 ..Default::default()
             },
         )
+    }
+
+    /// `req` resolved as the handler resolves it before the pass.
+    pub(crate) fn resolved(store: &MemoryStore, req: &TransformRequest) -> TransformRequest {
+        let mut req = req.clone();
+        resolve_window(store, &mut req).expect("the window resolves");
+        req
+    }
+
+    /// What the plugin sends for a request written with revision 2 ordinals, when the test
+    /// leaves `boundary` null: the window from the newest anchor present (the rendered boundary
+    /// first), declared, and with a filler message at every ordinal the test skipped, so the
+    /// daemon derives the ordinals the test wrote. A test that declares its own boundary, a
+    /// descent, or a request without increasing positive ordinals (a revision 3 body carries
+    /// none) is sent as written.
+    pub(crate) fn plugin_window(store: &MemoryStore, req: &TransformRequest) -> TransformRequest {
+        let mut window = req.clone();
+        let live = |message: &IngressMessage| {
+            !message.ck.meta.synthetic && !super::carries_synthetic_todo(message)
+        };
+        let ordinals = req
+            .messages
+            .iter()
+            .filter(|message| live(message))
+            .map(|message| message.ordinal)
+            .collect::<Vec<_>>();
+        let increasing = ordinals
+            .iter()
+            .all(|ordinal| (1..1 << 20).contains(ordinal))
+            && ordinals.windows(2).all(|pair| pair[0] < pair[1]);
+        if req.boundary != Some(None) || req.lineage_switched || !increasing {
+            return window;
+        }
+        let snapshot = store.coverage_snapshot(&req.session_id, None, &[]).unwrap();
+        let position = |end_id: &str| {
+            let (mid, _) = split_block_id(end_id)?;
+            req.messages.iter().position(|message| message.mid == mid)
+        };
+        let anchor = snapshot.rendered.as_ref().and_then(|rendered| {
+            store
+                .coverage_anchor_page(&req.session_id, i64::MIN..=i64::MAX, 4_096)
+                .unwrap()
+                .into_iter()
+                .find_map(|(sequence, end_id)| {
+                    let at = position(&end_id)?;
+                    let (mid, _) = split_block_id(&end_id)?;
+                    let end = store
+                        .load_history_segments(&req.session_id)
+                        .unwrap()
+                        .into_iter()
+                        .find(|segment| segment.sequence == sequence)?
+                        .end_message as u64;
+                    (req.messages[at].ordinal == end || rendered.sequence == sequence)
+                        .then(|| (at, end, mid.to_string(), sequence))
+                })
+        });
+        let (start, mut next) = match anchor {
+            Some((at, end, mid, sequence)) => {
+                window.boundary = Some(Some(BoundaryAnchor { mid, sequence }));
+                (at, end)
+            }
+            None => (0, snapshot.continuation_base.unwrap_or(0) + 1),
+        };
+        let mut messages = Vec::new();
+        for message in &req.messages[start..] {
+            if live(message) {
+                while next < message.ordinal {
+                    messages.push(Arc::new(item(&format!("pad-{next}"), next, "pad")));
+                    next += 1;
+                }
+                next = next.max(message.ordinal) + 1;
+            }
+            messages.push(Arc::clone(message));
+        }
+        window.messages = messages.into_iter().collect();
+        window
     }
 
     pub(crate) fn item(id: &str, ordinal: u64, bytes: &str) -> IngressMessage {
@@ -13101,7 +12436,9 @@ pub(crate) mod tests {
             auto_search_score_threshold: DEFAULT_AUTO_SEARCH_SCORE_THRESHOLD,
             auto_search_min_prompt_chars: 0,
             kind: "transform".to_string(),
-            v: 2,
+            v: Value::from(TRANSFORM_REVISION),
+            boundary: Some(None),
+            coverage: None,
             serializer_profile: "owned-llmrunner".to_string(),
             session_id: session.to_string(),
             render_config: cfg.to_string(),
@@ -13139,7 +12476,6 @@ pub(crate) mod tests {
             detected_context_limit: 0,
             detected_context_limit_model_key: None,
             history_budget_tokens: None,
-            declared_trim: None,
             lineage_switched: false,
             descent_edge_id: 0,
             prior_conversation_key: String::new(),
@@ -13174,124 +12510,6 @@ pub(crate) mod tests {
             importance: 50,
             ..Default::default()
         }
-    }
-
-    #[test]
-    fn no_revert_prefix_survives_matches_the_full_prefix_scan() {
-        let request = req(
-            "ses",
-            "cfg0",
-            vec![item("a", 1, "a"), item("b", 2, "b"), item("c", 3, "c")],
-        );
-        let ingress = normalize_synthetic_todo_ingress(&request);
-        let projection = ingress.projection.project().unwrap();
-        let live: Vec<&FlatBlock> = projection.blocks.iter().collect();
-        let sets: [&[StoredHistorySegment]; 5] = [
-            &[],
-            &[comp(0, 1, 1, "a", "S")],
-            &[comp(0, 1, 1, "gone", "S")],
-            &[comp(0, 1, 1, "gone", "S"), comp(1, 2, 2, "b", "S")],
-            &[comp(0, 1, 1, "a", "S"), comp(1, 2, 2, "gone", "S")],
-        ];
-        let expected = [true, false, true, true, false];
-        for (set, expected) in sets.into_iter().zip(expected) {
-            let oldest = set.first().map(|row| row.end_message_id.as_str());
-            assert_eq!(
-                no_revert_prefix_survives(oldest, &live),
-                expected,
-                "{set:?}"
-            );
-            assert_eq!(
-                surviving_revert_prefix_seq(set, &live) < 0,
-                expected,
-                "{set:?}"
-            );
-        }
-    }
-
-    fn astro_history_segments() -> Vec<StoredHistorySegment> {
-        let mut start = 1i64;
-        let mut history_segments = Vec::with_capacity(48);
-        for sequence in 0..48i64 {
-            let end = match sequence {
-                0 => 200,
-                1 => 425,
-                _ => {
-                    let slots = 48 - sequence;
-                    let remaining = 2_400 - start + 1;
-                    let size = (remaining + slots - 1) / slots;
-                    start + size - 1
-                }
-            };
-            history_segments.push(comp(
-                sequence,
-                start,
-                end,
-                &format!("m{end}"),
-                &format!("ASTRO-C{sequence}"),
-            ));
-            start = end + 1;
-        }
-        assert_eq!(history_segments.len(), 48);
-        assert_eq!(history_segments.last().unwrap().end_message, 2_400);
-        history_segments
-    }
-
-    fn astro_request(session_id: &str, tail_end: u64) -> TransformRequest {
-        let history_segments = astro_history_segments();
-        let mut messages = history_segments
-            .iter()
-            .map(|history_segment| {
-                let end = history_segment.end_message as u64;
-                item(&format!("m{end}"), end, &format!("raw anchor {end}"))
-            })
-            .collect::<Vec<_>>();
-        messages.extend((2_401..=tail_end).map(|ordinal| {
-            item(
-                &format!("m{ordinal}"),
-                ordinal,
-                &format!("live tail {ordinal}"),
-            )
-        }));
-        req(session_id, "cfg0", messages)
-    }
-
-    pub(crate) fn seed_astro_divergence(
-        store: &MemoryStore,
-        session_id: &str,
-        tail_end: u64,
-    ) -> TransformRequest {
-        seed_astro_divergence_from_request(store, astro_request(session_id, tail_end))
-    }
-
-    fn seed_astro_divergence_from_request(
-        store: &MemoryStore,
-        request: TransformRequest,
-    ) -> TransformRequest {
-        store
-            .replace_history_segments(&request.session_id, &astro_history_segments())
-            .unwrap();
-        let boot = run(store, &request, &spine());
-        assert_eq!(boot.action, "HARD");
-        assert_eq!(boot.coverage_ordinal, Some(2_400));
-        assert_eq!(boot.boundary_id, "m2400#0");
-
-        let loaded = store.load(&request.session_id).unwrap();
-        let mut core = loaded.core.clone();
-        core.boundary_id = "m425#0".to_string();
-        let covered_target = astro_history_segments()[2].end_message_id.clone();
-        core.frozen_units
-            .push(red_unit(&covered_target, "drop", "[dropped stale]"));
-        let mut meta = loaded.meta.clone();
-        meta.coverage_ordinal = Some(425);
-        meta.coverage_start_ordinal = Some(1);
-        meta.coverage_history_segment_seq = Some(1);
-        meta.folded_history_segment_seq = 1;
-        meta.publication_floor_ordinal = Some(2_401);
-        store
-            .commit(&request.session_id, loaded.row_version, &core, &meta)
-            .unwrap();
-        request
     }
 
     /// The producer context uses a throwaway project directory with no documentation files, so its docs are empty.
@@ -13602,7 +12820,6 @@ pub(crate) mod tests {
 
     fn unstamped_opencode_tool_pair(mid: &str, ordinal: u64, call_id: &str) -> IngressMessage {
         let native_message = json!({
-            "absolute_ordinal": ordinal,
             "info": { "id": mid, "role": "assistant" },
             "parts": [{
                 "type": "tool",
@@ -13623,6 +12840,7 @@ pub(crate) mod tests {
             .iter()
             .map(|block| wire::WireBlock::bare(block.kind().clone()))
             .collect();
+        projected.ordinal = ordinal;
         projected
     }
 
@@ -13780,7 +12998,7 @@ pub(crate) mod tests {
             Some(inserted_json.as_str())
         );
 
-        let removed_request = req(session, "cfg0", vec![item("a", 0, "a"), item("c", 3, "c")]);
+        let removed_request = req(session, "cfg0", vec![item("a", 0, "a"), item("c", 1, "c")]);
         let removed = run(&store, &removed_request, &spine());
         let removed_divergence = removed.first_divergence.as_ref().unwrap();
         assert_eq!(removed_divergence.kind, divergence::DivergenceKind::Removed);
@@ -13802,82 +13020,6 @@ pub(crate) mod tests {
         );
         assert!(last_divergence["pass_id"].is_number());
         assert!(last_divergence["timestamp_ms"].is_number());
-    }
-
-    #[test]
-    fn positive_output_cache_hit_reuses_owned_artifacts_without_constructing() {
-        let message: WireMessage = serde_json::from_str(
-            r#"{"role":"user","content":[{"kind":{"type":"text","text":"cached"}}]}"#,
-        )
-        .unwrap();
-        let served = ServedMessage::from_message(message.clone());
-        let mut entries = HashMap::new();
-        entries.insert(
-            "synthetic:m0".to_string(),
-            SerializedOutputCacheEntry {
-                identity: "identity-a".to_string(),
-                served: Some(served.clone()),
-            },
-        );
-        entries.insert(
-            "synthetic:m1".to_string(),
-            SerializedOutputCacheEntry {
-                identity: "identity-b".to_string(),
-                served: None,
-            },
-        );
-        let snapshot = SerializedOutputCacheSnapshot { entries };
-        let mut timings = BuildOutputTimings::default();
-
-        // A clean matching positive entry never invokes the constructor closure and
-        // returns pointer-equal owned artifacts.
-        let (hit, reused) = cached_or_serialize_output(
-            Some(&snapshot),
-            "synthetic:m0",
-            "identity-a",
-            false,
-            &mut timings,
-            || unreachable!("a positive hit must not construct"),
-        );
-        assert!(reused);
-        assert!(Arc::ptr_eq(&hit.message, &served.message));
-        assert!(Arc::ptr_eq(&hit.canonical_bytes, &served.canonical_bytes));
-        assert!(Arc::ptr_eq(&hit.output_identity, &served.output_identity));
-        assert!(Arc::ptr_eq(
-            &hit.block_fingerprints,
-            &served.block_fingerprints
-        ));
-        assert_eq!((timings.cache_hits, timings.cache_misses), (1, 0));
-
-        // `Some(None)`, a dirty item, a foreign identity, and an absent key all construct.
-        let constructed = std::cell::Cell::new(0);
-        for (key, identity, dirty) in [
-            ("synthetic:m1", "identity-b", false),
-            ("synthetic:m0", "identity-a", true),
-            ("synthetic:m0", "identity-other", false),
-            ("synthetic:m9", "identity-a", false),
-        ] {
-            let (fresh, reused) = cached_or_serialize_output(
-                Some(&snapshot),
-                key,
-                identity,
-                dirty,
-                &mut timings,
-                || {
-                    constructed.set(constructed.get() + 1);
-                    message.clone()
-                },
-            );
-            assert!(!reused, "{key}/{identity}/{dirty}");
-            assert!(!Arc::ptr_eq(
-                &fresh.canonical_bytes,
-                &served.canonical_bytes
-            ));
-            assert_eq!(fresh.canonical_bytes(), served.canonical_bytes());
-        }
-        assert_eq!(constructed.get(), 4);
-        assert_eq!((timings.cache_hits, timings.cache_misses), (1, 4));
-        assert_eq!(timings.cache_dirty_skips, 1);
     }
 
     /// Daemon-built blocks carry no ingress text, so their canonical bytes come from
@@ -14002,7 +13144,7 @@ pub(crate) mod tests {
             .split_once("    fn from_message_reusing(")
             .unwrap()
             .1
-            .split_once("    fn with_output_identity(")
+            .split_once("    pub fn into_message(")
             .unwrap()
             .0;
         assert_eq!(
@@ -14165,10 +13307,6 @@ pub(crate) mod tests {
         ] {
             let served = ServedMessage::from_message(message);
             assert_eq!(served.canonical_bytes(), expected.as_bytes());
-            assert_eq!(
-                served.output_identity.as_ref(),
-                format!("{:x}", Sha256::digest(expected.as_bytes()))
-            );
             let output = crate::dispatch::PreparedOutput::transform_recipe(
                 json!({"operations": null}),
                 vec![crate::dispatch::RecipeSegment::Insert(vec![
@@ -14374,7 +13512,7 @@ pub(crate) mod tests {
             .split_once("    fn from_message_reusing(")
             .unwrap()
             .1
-            .split_once("    fn with_output_identity(")
+            .split_once("    pub fn into_message(")
             .unwrap()
             .0;
         assert!(!constructor.contains("serde_json::to_value"));
@@ -14556,6 +13694,72 @@ pub(crate) mod tests {
             forced_fps, loaded.meta.served_output_fingerprint,
             "stored divergence fingerprints must match forced re-hash of served output"
         );
+    }
+
+    /// A row an earlier build wrote carries 64-hex block and hygiene part hashes. The next pass
+    /// reads it, attributes one content change without a HARD, and stores 32-hex block hashes;
+    /// the pass after is stable and not HARD. Neither pass busts the cache, so the stored 64-hex
+    /// hygiene baseline stays until a bust replaces it; `an_earlier_builds_64_hex_baseline_...`
+    /// in tail_hygiene covers how it measures meanwhile.
+    #[test]
+    fn a_row_with_64_hex_block_hashes_diverges_once_then_is_stable() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(dir.path());
+        let session = "hash-width-upgrade";
+        let request = active_cc_req(
+            session,
+            "cfg0",
+            vec![
+                wire_item("user", "m0", 0, &["plan the work"]),
+                wire_item("assistant", "m1", 1, &["working on it"]),
+            ],
+        );
+        run(&store, &request, &spine());
+        let loaded = store.load(session).unwrap();
+        let mut meta = loaded.meta.clone();
+        let widen = |hash: &mut String| {
+            assert_eq!(hash.len(), 32);
+            hash.push_str(&"0".repeat(32));
+        };
+        assert!(!meta.served_output_fingerprint.is_empty());
+        meta.served_output_fingerprint
+            .iter_mut()
+            .for_each(|block| widen(&mut block.content_hash));
+        let baseline = meta.tail_hygiene_baseline.as_mut().unwrap();
+        assert!(!baseline.baseline_parts.is_empty());
+        baseline
+            .baseline_parts
+            .iter_mut()
+            .for_each(|part| widen(&mut part.content_hash));
+        store
+            .commit(session, loaded.row_version, &loaded.core, &meta)
+            .unwrap();
+
+        let upgraded = run(&store, &request, &spine());
+        let divergence = upgraded.first_divergence.as_ref().unwrap();
+        assert_eq!(divergence.index, 0);
+        assert_eq!(divergence.kind, divergence::DivergenceKind::ContentChanged);
+        assert_ne!(upgraded.action, "HARD");
+        let stored = store.load(session).unwrap().meta;
+        assert!(
+            stored
+                .served_output_fingerprint
+                .iter()
+                .all(|block| block.content_hash.len() == 32)
+        );
+        assert!(
+            stored
+                .tail_hygiene_baseline
+                .as_ref()
+                .unwrap()
+                .baseline_parts
+                .iter()
+                .all(|part| part.content_hash.len() == 64),
+            "a pass that does not bust the cache keeps the stored hygiene baseline"
+        );
+        let stable = run(&store, &request, &spine());
+        assert!(stable.first_divergence.is_none());
+        assert_ne!(stable.action, "HARD");
     }
 
     fn synthetic_text(r: &TransformResponse, index: usize) -> &str {
@@ -15358,74 +14562,12 @@ pub(crate) mod tests {
             after.row_version,
             "a replay of the re-adopted bytes commits nothing"
         );
-
-        let drift = transform(
-            &s,
-            &req(
-                session,
-                "cfg0",
-                vec![
-                    wire_item("assistant", "covered", 1, &["changed"]),
-                    wire_item("tool", "result", 2, &["r"]),
-                    item("tail", 3, "tail"),
-                ],
-            ),
-            &pctx("git:proj", "/nonexistent-docs", 3),
-        )
-        .unwrap_err();
-        assert!(
-            matches!(drift, TransformError::IdentityDrift(ref mid) if mid == "covered"),
-            "a stamped row rejects covered drift, got {drift:?}"
-        );
-
-        let mut tags_differ = s.load(session).unwrap();
-        let mut legacy = serde_json::to_value(&tags_differ.meta).unwrap();
-        legacy
-            .as_object_mut()
-            .unwrap()
-            .remove("block_identity_basis");
-        tags_differ.meta = serde_json::from_value(legacy).unwrap();
-        tags_differ.meta.block_identity_by_mid.insert(
-            "covered".to_string(),
-            vec![BlockIdentity {
-                kind_tag: "text".to_string(),
-                byte_fingerprint: wire::fingerprint(REPLAY_BASIS_COVERED_BYTES),
-            }],
-        );
-        s.commit(
-            session,
-            tags_differ.row_version,
-            &tags_differ.core,
-            &tags_differ.meta,
-        )
-        .unwrap();
-        let drift = transform(
-            &s,
-            &req(session, "cfg0", messages()),
-            &pctx("git:proj", "/nonexistent-docs", 4),
-        )
-        .unwrap_err();
-        assert!(
-            matches!(drift, TransformError::IdentityDrift(ref mid) if mid == "covered"),
-            "a replay-basis row whose block tags differ still rejects, got {drift:?}"
-        );
     }
 
     #[test]
-    fn enforcement_rejects_drift_duplicates_and_vanished_reduction_targets() {
+    fn enforcement_rejects_duplicates_and_vanished_reduction_targets() {
         let dir = tempfile::tempdir().unwrap();
         let s = store(dir.path());
-        s.replace_history_segments("ses", &[comp(1, 1, 1, "a", "SUMMARY")])
-            .unwrap();
-        run(&s, &req("ses", "cfg0", vec![item("a", 1, "one")]), &spine());
-        let drift = transform(
-            &s,
-            &req("ses", "cfg0", vec![item("a", 1, "two")]),
-            &pctx("git:proj", "/nonexistent-docs", 0),
-        )
-        .unwrap_err();
-        assert!(matches!(drift, TransformError::IdentityDrift(mid) if mid == "a"));
-
         let dup = transform(
             &s,
             &req(
@@ -15436,10 +14578,10 @@ pub(crate) mod tests {
             &pctx("git:proj", "/nonexistent-docs", 0),
         )
         .unwrap_err();
-        // Projection rejects the repeated mid before any block id is minted.
+        // Window resolution refuses the repeated mid before any snapshot is read (WP-P01).
         assert!(matches!(
             dup,
-            TransformError::Wire(WireError::DuplicateMid(mid)) if mid == "same"
+            TransformError::InvalidWindow(message) if message.contains("\"same\"")
         ));
 
         let dir = tempfile::tempdir().unwrap();
@@ -15476,74 +14618,6 @@ pub(crate) mod tests {
             vanished,
             TransformError::FrozenRedTargetVanish(id) if id == "live#1"
         ));
-    }
-
-    #[test]
-    fn boundary_anchor_and_frozen_tail_identity_drift_still_reject() {
-        let dir = tempfile::tempdir().unwrap();
-        let s = store(dir.path());
-        let original = vec![item("anchor", 1, "stable"), item("tail", 2, "before")];
-        let projection = project_messages(
-            &original
-                .clone()
-                .into_iter()
-                .collect::<wire::IngressMessages>(),
-        )
-        .unwrap();
-        let meta = ModuleMeta {
-            initialized: true,
-            coverage_ordinal: Some(1),
-            block_identity_by_mid: projection.identity_by_mid.clone(),
-            ..Default::default()
-        };
-        let anchor_core = CoreState {
-            boundary_id: "anchor#0".to_string(),
-            ..CoreState::empty()
-        };
-        s.commit("identity-anchor", None, &anchor_core, &meta)
-            .unwrap();
-        let anchor_error = transform(
-            &s,
-            &req(
-                "identity-anchor",
-                "cfg0",
-                vec![item("anchor", 1, "changed"), item("tail", 2, "before")],
-            ),
-            &pctx("git:proj", "/nonexistent-docs", 0),
-        )
-        .unwrap_err();
-        assert!(matches!(anchor_error, TransformError::IdentityDrift(mid) if mid == "anchor"));
-
-        for (name, frozen_unit) in [
-            ("reduction", red_unit("tail#0", "drop", "[dropped]")),
-            (
-                "terse_text_compression",
-                terse_text_compression_unit("tail#0", 1, "compressed"),
-            ),
-            ("strip", strip_unit("placeholder", "tail", "[dropped]")),
-        ] {
-            let session = format!("identity-frozen-{name}");
-            let core = CoreState {
-                boundary_id: "anchor#0".to_string(),
-                frozen_units: vec![frozen_unit],
-                ..CoreState::empty()
-            };
-            s.commit(&session, None, &core, &meta).unwrap();
-            let error = transform(
-                &s,
-                &req(
-                    &session,
-                    "cfg0",
-                    vec![item("anchor", 1, "stable"), item("tail", 2, "changed")],
-                ),
-                &pctx("git:proj", "/nonexistent-docs", 0),
-            )
-            .unwrap_err();
-            assert!(
-                matches!(error, TransformError::IdentityDrift(ref mid) if mid == "tail"),
-                "{name} frozen unit must preserve the tail identity, got {error:?}"
-            );
-        }
     }
 
     #[test]
@@ -15880,6 +14954,13 @@ pub(crate) mod tests {
         .unwrap();
         let folded = ring(&s, "drift").len();
         assert!(folded > before);
+        // A frozen reduction whose target block is gone from a live message refuses the pass.
+        let loaded = s.load("drift").unwrap();
+        let mut core = loaded.core.clone();
+        core.frozen_units
+            .push(red_unit("tail#1", "drop", "[dropped]"));
+        s.commit("drift", loaded.row_version, &core, &loaded.meta)
+            .unwrap();
         let rejected = transform(
             &s,
             &req(
@@ -15891,7 +14972,7 @@ pub(crate) mod tests {
         )
         .unwrap_err();
         assert!(
-            matches!(rejected, TransformError::IdentityDrift(_)),
+            matches!(rejected, TransformError::FrozenRedTargetVanish(_)),
             "{rejected:?}"
         );
         assert_eq!(
@@ -15899,6 +14980,119 @@ pub(crate) mod tests {
             folded,
             "a rejected pass records nothing"
         );
+    }
+
+    /// A compaction-off pass whose window holds no covered message is served additively and keeps
+    /// the session's history segments and revert epoch; the no-survivor reset runs only on the
+    /// compaction path.
+    #[test]
+    fn a_compaction_off_pass_that_matches_no_anchor_keeps_the_history() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = store(dir.path());
+        let session = "no-survivor-compaction-off";
+        let covered = || vec![item("anchor", 1, "stable"), item("tail", 2, "one")];
+        let ctx = pctx("git:proj", "/nonexistent-docs", 0);
+        transform(&s, &req(session, "cfg0", covered()), &ctx).unwrap();
+        s.replace_history_segments(session, &[comp(1, 1, 2, "tail", "covers the tail")])
+            .unwrap();
+        transform(&s, &req(session, "cfg0", covered()), &ctx).unwrap();
+        let segments = s.load_history_segments(session).unwrap();
+        let before = s.load(session).unwrap();
+        assert!(
+            !segments.is_empty(),
+            "enabling state: the session holds history"
+        );
+        assert!(
+            !before.core.boundary_id.is_empty(),
+            "enabling state: the session folded"
+        );
+
+        let compacted = req(
+            session,
+            "cfg0",
+            vec![item("native-summary", 1, "summary of the session")],
+        );
+        let mut resolved = plugin_window(&s, &compacted);
+        resolve_window(&s, &mut resolved).unwrap();
+        assert_eq!(
+            resolved.coverage.as_deref().unwrap().resolved.resolution,
+            NO_SURVIVOR,
+            "enabling state: no anchor survives in the window"
+        );
+
+        let mut off = pctx("git:proj", "/nonexistent-docs", 0);
+        off.compaction_enabled = false;
+        let served = transform(&s, &compacted, &off).unwrap();
+        assert_eq!(served.status, TransformStatus::Ok);
+        assert_eq!(s.load_history_segments(session).unwrap(), segments);
+        let after = s.load(session).unwrap();
+        assert_eq!(after.meta.revert_epoch, before.meta.revert_epoch);
+    }
+
+    #[test]
+    fn an_edited_tail_message_that_a_frozen_unit_targets_refuses_the_pass() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = store(dir.path());
+        let ctx = pctx("git:proj", "/nonexistent-docs", 0);
+        for (name, frozen_unit) in [
+            ("reduction", red_unit("tail#0", "drop", "[dropped]")),
+            (
+                "terse_text_compression",
+                terse_text_compression_unit("tail#0", 1, "compressed"),
+            ),
+            ("strip", strip_unit("placeholder", "tail", "[dropped]")),
+        ] {
+            let session = format!("frozen-tail-drift-{name}");
+            let request = |tail: &str| {
+                let mut request = req(
+                    &session,
+                    "cfg0",
+                    vec![item("anchor", 1, "stable"), item("tail", 2, tail)],
+                );
+                request.terse_text_compression_enabled = true;
+                request
+            };
+            transform(&s, &request("before the edit"), &ctx).unwrap();
+            s.replace_history_segments(&session, &[comp(1, 1, 1, "anchor", "covers the anchor")])
+                .unwrap();
+            transform(&s, &request("before the edit"), &ctx).unwrap();
+            let loaded = s.load(&session).unwrap();
+            assert_eq!(
+                loaded.meta.coverage_ordinal,
+                Some(1),
+                "enabling state: {name}"
+            );
+            assert!(
+                loaded.meta.block_identity_by_mid.contains_key("tail"),
+                "enabling state: {name}"
+            );
+            let payload = frozen_unit.frozen_payload.clone();
+            let mut core = loaded.core.clone();
+            core.frozen_units.push(frozen_unit);
+            s.commit(&session, loaded.row_version, &core, &loaded.meta)
+                .unwrap();
+            let committed = s.load(&session).unwrap();
+
+            let edited = transform(&s, &request("after the edit"), &ctx);
+            if let Ok(served) = &edited {
+                let texts: Vec<&str> = served
+                    .messages()
+                    .iter()
+                    .filter_map(|message| wire::text_from_message(message))
+                    .collect();
+                assert!(
+                    !texts.contains(&payload.as_str()),
+                    "{name}: the frozen payload replaced the edited tail: {texts:?}"
+                );
+            }
+            assert!(
+                matches!(edited, Err(TransformError::FrozenTargetDrift(ref mid)) if mid == "tail"),
+                "{name}: {edited:?}"
+            );
+            let after = s.load(&session).unwrap();
+            assert_eq!(after.row_version, committed.row_version, "{name}");
+            assert_eq!(after.core, committed.core, "{name}");
+        }
     }
 
     /// Rows past the m1 row cap that land mid-pass send the additive SOFT back for a retry,
@@ -16672,14 +15866,16 @@ pub(crate) mod tests {
         let dir = tempfile::tempdir().unwrap();
         let s = store(dir.path());
         let ctx = smart_pctx();
+        // The covered arc ends before the anchor, so a window cut at the anchor never splits it.
         let mut messages = todowrite_arc("a", 1);
-        s.replace_history_segments("ses", &[comp(1, 1, 2, "a_result", "SUMMARY")])
+        messages.push(item("c3", 3, "covered"));
+        s.replace_history_segments("ses", &[comp(1, 1, 3, "c3", "SUMMARY")])
             .unwrap();
         let boot = transform(&s, &req("ses", "cfg0", messages.clone()), &ctx).unwrap();
         assert_eq!(boot.action, "HARD");
-        messages.extend(todowrite_arc("tail_old", 3));
-        messages.extend(todowrite_arc("tail_new", 5));
-        for ordinal in 7..(7 + crate::selection::RECENT_TOOL_SKELETON_WINDOW as u64) {
+        messages.extend(todowrite_arc("tail_old", 4));
+        messages.extend(todowrite_arc("tail_new", 6));
+        for ordinal in 8..(8 + crate::selection::RECENT_TOOL_SKELETON_WINDOW as u64) {
             messages.push(item(&format!("tail-{ordinal}"), ordinal, "tail"));
         }
         let mut loaded = s.load("ses").unwrap();
@@ -19009,7 +18205,9 @@ pub(crate) mod tests {
         let context = pctx("git:proj", "/nonexistent-docs", 0);
         let estimate = |value: &str| value.len();
 
-        let boot = apply_once_with_estimator(&store, &request, &context, estimate, None).unwrap();
+        let boot =
+            apply_once_with_estimator(&store, &resolved(&store, &request), &context, estimate)
+                .unwrap();
         assert_eq!(boot.response.action, "HARD");
         let untouched_messages = boot
             .response
@@ -19034,11 +18232,14 @@ pub(crate) mod tests {
             "text-keep"
         );
 
-        let active = apply_once_with_estimator(&store, &request, &context, estimate, None).unwrap();
+        let active =
+            apply_once_with_estimator(&store, &resolved(&store, &request), &context, estimate)
+                .unwrap();
         assert_eq!(active.response.action, "SOFT+");
         store.arm_soft_refresh("reasoning-tagged").unwrap();
         let execute =
-            apply_once_with_estimator(&store, &request, &context, estimate, None).unwrap();
+            apply_once_with_estimator(&store, &resolved(&store, &request), &context, estimate)
+                .unwrap();
         assert_eq!(execute.scheduler_pass, scheduler::PassDecision::Execute);
         assert_eq!(execute.mutation_exempt_mid, None);
         let served_messages = execute
@@ -19119,9 +18320,13 @@ pub(crate) mod tests {
         let context = pctx("git:proj", "/nonexistent-docs", 0);
         let estimate = |value: &str| value.len();
 
-        let boot = apply_once_with_estimator(&store, &request, &context, estimate, None).unwrap();
+        let boot =
+            apply_once_with_estimator(&store, &resolved(&store, &request), &context, estimate)
+                .unwrap();
         assert_eq!(boot.response.action, "HARD");
-        let active = apply_once_with_estimator(&store, &request, &context, estimate, None).unwrap();
+        let active =
+            apply_once_with_estimator(&store, &resolved(&store, &request), &context, estimate)
+                .unwrap();
         assert_eq!(active.response.action, "SOFT+");
         request.render_config = "cfg1".to_string();
         let mut execute_context = pctx("git:proj", "/nonexistent-docs", 0);
@@ -19129,8 +18334,13 @@ pub(crate) mod tests {
             reduce("assistant-tool#1", "drop", "[dropped]"),
             reduce("assistant-tool#2", "drop", "[dropped]"),
         ]);
-        let execute =
-            apply_once_with_estimator(&store, &request, &execute_context, estimate, None).unwrap();
+        let execute = apply_once_with_estimator(
+            &store,
+            &resolved(&store, &request),
+            &execute_context,
+            estimate,
+        )
+        .unwrap();
         assert_eq!(execute.scheduler_pass, scheduler::PassDecision::Execute);
         assert_eq!(execute.response.action, "HARD");
         let frozen = frozen_red_targets(&store.load("reasoning-reduction").unwrap().core);
@@ -19140,7 +18350,9 @@ pub(crate) mod tests {
         );
 
         request = with_usage(request, 20, 100);
-        let defer = apply_once_with_estimator(&store, &request, &context, estimate, None).unwrap();
+        let defer =
+            apply_once_with_estimator(&store, &resolved(&store, &request), &context, estimate)
+                .unwrap();
         assert_eq!(defer.scheduler_pass, scheduler::PassDecision::Defer);
         assert_eq!(defer.mutation_exempt_mid, None);
         assert_eq!(defer.response.action, "SOFT+");
@@ -19375,8 +18587,6 @@ pub(crate) mod tests {
             &tag_numbers,
             u64::MAX,
             false,
-            None,
-            true,
             true,
         )
         .unwrap();
@@ -20513,7 +19723,7 @@ pub(crate) mod tests {
             remat.boundary_id, "a#0",
             "the surviving prefix is re-minted"
         );
-        assert_eq!(remat.coverage_ordinal, Some(1));
+        assert_eq!(s.load("ses").unwrap().meta.coverage_ordinal, Some(1));
         assert!(!remat.reconcile_pending);
         assert_eq!(tail_ids(&remat), vec!["t4"]);
         let loaded = s.load("ses").unwrap();
@@ -20537,7 +19747,7 @@ pub(crate) mod tests {
         let folded_again = run(&s, &req("ses", "cfg0", live_reverted), &spine());
         assert_eq!(folded_again.action, "SOFT");
         assert_eq!(folded_again.boundary_id, "t4#0");
-        assert_eq!(folded_again.coverage_ordinal, Some(2));
+        assert_eq!(s.load("ses").unwrap().meta.coverage_ordinal, Some(2));
         assert_eq!(tail_ids(&folded_again), Vec::<&str>::new());
     }
 
@@ -20581,6 +19791,233 @@ pub(crate) mod tests {
         );
     }
 
+    /// `request` as the lineage owner sends it after a fake-compaction switch, the only request
+    /// a window with no surviving anchor arms `pending_rewrite` for (spec D10); the prior
+    /// conversation holds nothing, so the descent adopts nothing.
+    fn switched(mut request: TransformRequest) -> TransformRequest {
+        request.lineage_switched = true;
+        request.descent_edge_id = 1;
+        request.prior_conversation_key = "prior".to_string();
+        request.prior_epoch = 1;
+        request.new_epoch = 2;
+        request.constituents = vec![("prior".to_string(), request.session_id.clone(), 2)];
+        request
+    }
+
+    /// The prune-versus-publish fixture (spec C9, D12; WP-P06, WP-P16): segments end at m2 and
+    /// m4, the first pass holds identities for m1..m6, and a publishing firing selects m5 and
+    /// m6. The host then reverts m6, so the next window, declared at m4, drops a selected mid.
+    /// Returns the version both writers start from, the firing's predicate, and that window.
+    fn pinned_firing(
+        s: &MemoryStore,
+        session: &str,
+    ) -> (
+        u64,
+        memory_store::HistorySummarizerPublishPredicate,
+        TransformRequest,
+    ) {
+        use memory_store::{
+            HistorySegmentSetGeneration, HistorySummarizerChunkRange,
+            HistorySummarizerDurableState, HistorySummarizerPhase,
+            HistorySummarizerPublishPredicate, HistorySummarizerSelectedMessageIdentity,
+        };
+        s.replace_history_segments(
+            session,
+            &[comp(1, 1, 2, "m2", "S1"), comp(2, 3, 4, "m4", "S2")],
+        )
+        .unwrap();
+        let turns = (1..=6)
+            .map(|n| item(&format!("m{n}"), n, &format!("turn {n}")))
+            .collect();
+        assert_eq!(
+            run(s, &req(session, "cfg0", turns), &spine()).boundary_id,
+            "m4#0"
+        );
+        let loaded = s.load(session).unwrap();
+        let selected = ["m5", "m6"]
+            .map(|mid| HistorySummarizerSelectedMessageIdentity {
+                mid: mid.to_string(),
+                block_identities: loaded.meta.block_identity_by_mid[mid].clone(),
+            })
+            .to_vec();
+        let generation = HistorySegmentSetGeneration {
+            max_sequence: 2,
+            ..Default::default()
+        };
+        let predicate = HistorySummarizerPublishPredicate {
+            firing_seq: 1,
+            producer_run_id: "race-run".to_string(),
+            chunk_fingerprint: "race-chunk".to_string(),
+            selected_range_identities: selected.clone(),
+            history_segment_set_generation: generation,
+        };
+        let mut meta = loaded.meta.clone();
+        meta.history_summarizer = HistorySummarizerDurableState {
+            state: HistorySummarizerPhase::Publishing,
+            firing_seq: 1,
+            chunk_range: Some(HistorySummarizerChunkRange {
+                from_ordinal: 5,
+                to_ordinal: 6,
+            }),
+            chunk_fingerprint: predicate.chunk_fingerprint.clone(),
+            selected_range_identities: selected,
+            producer_session_id: Some("race-producer".to_string()),
+            producer_run_id: Some(predicate.producer_run_id.clone()),
+            fired_at_ms: Some(1),
+            expected_revert_epoch: loaded.meta.revert_epoch,
+            history_segment_set_generation: generation,
+            ..Default::default()
+        };
+        let version = s
+            .commit(session, loaded.row_version, &loaded.core, &meta)
+            .unwrap();
+        let mut window = req(
+            session,
+            "cfg0",
+            vec![item("m4", 4, "turn 4"), item("m5", 5, "turn 5")],
+        );
+        window.boundary = Some(Some(BoundaryAnchor {
+            mid: "m4".to_string(),
+            sequence: 2,
+        }));
+        // The enabling state, asserted apart from either verdict: the firing selects m6, the
+        // store holds its identity, and the resolved window does not carry it.
+        let resolved_mids: Vec<String> = resolved(s, &window)
+            .messages
+            .iter()
+            .map(|message| message.mid.clone())
+            .collect();
+        assert_eq!(resolved_mids, ["m4", "m5"]);
+        assert!(
+            predicate
+                .selected_range_identities
+                .iter()
+                .any(|selected| selected.mid == "m6")
+        );
+        assert!(
+            s.load(session)
+                .unwrap()
+                .meta
+                .block_identity_by_mid
+                .contains_key("m6")
+        );
+        (version, predicate, window)
+    }
+
+    fn publish_race_chunk(
+        s: &MemoryStore,
+        session: &str,
+        version: u64,
+        predicate: &memory_store::HistorySummarizerPublishPredicate,
+    ) -> Result<(), memory_store::HistorySummarizerPublishError> {
+        s.publish_history_summarizer_chunk(memory_store::HistorySummarizerPublishRequest {
+            session_id: session,
+            expected_row_version: Some(version),
+            expected_revert_epoch: 0,
+            predicate,
+            project_path: "git:proj",
+            history_segments: &[comp(3, 5, 6, "m6", "S3")],
+            events: &[],
+            primer_candidates: &[],
+            user_memory_candidates: &[],
+            publication_floor_ordinal: 7,
+            chunk_transcript: None,
+            memory_reviewer_nonadmission: None,
+            memory_reviewer_activation: None,
+            published_at_ms: 1,
+        })
+        .map(|_| ())
+    }
+
+    fn identity_mids(s: &MemoryStore, session: &str) -> Vec<String> {
+        s.load(session)
+            .unwrap()
+            .meta
+            .block_identity_by_mid
+            .into_keys()
+            .collect()
+    }
+
+    /// WP-P06 prune first: the transform prunes m6 inside its meta CAS while the publisher
+    /// holds the same starting version. The publisher loses the CAS, and reloading only the
+    /// row version still meets the store's identity fence, so no segment row is written.
+    #[test]
+    fn a_prune_that_commits_first_fences_the_publication_out() {
+        let session = "prune-race-prune-first";
+        let dir = tempfile::tempdir().unwrap();
+        let s = Arc::new(store(dir.path()));
+        let (version, predicate, window) = pinned_firing(&s, session);
+        let hook_store = Arc::clone(&s);
+        let barrier = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let reached = Arc::clone(&barrier);
+        install_transform_attempt_hook(session, move || {
+            assert_eq!(hook_store.load(session).unwrap().row_version, Some(version));
+            reached.store(true, std::sync::atomic::Ordering::SeqCst);
+        });
+        let pruned = run(&s, &window, &spine());
+        assert!(barrier.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(pruned.committed);
+        assert_eq!(identity_mids(&s, session), ["m4", "m5"]);
+        assert!(matches!(
+            publish_race_chunk(&s, session, version, &predicate),
+            Err(memory_store::HistorySummarizerPublishError::CasConflict { .. })
+        ));
+        let reloaded = s.load(session).unwrap().row_version.unwrap();
+        assert!(matches!(
+            publish_race_chunk(&s, session, reloaded, &predicate),
+            Err(memory_store::HistorySummarizerPublishError::FenceRejected { .. })
+        ));
+        assert_eq!(s.load_history_segments(session).unwrap().len(), 2);
+        assert_eq!(identity_mids(&s, session), ["m4", "m5"]);
+    }
+
+    /// WP-P06 publish first: the publication commits between the transform's reads and its
+    /// CAS. The transform reloads and re-resolves; the result equals the serial run (publish,
+    /// then transform), the publication stays, and the map is pruned to the window.
+    #[test]
+    fn a_publication_that_commits_first_makes_the_transform_reload_and_match_the_serial_run() {
+        let session = "prune-race-publish-first";
+        let dir = tempfile::tempdir().unwrap();
+        let s = Arc::new(store(dir.path()));
+        let (version, predicate, window) = pinned_firing(&s, session);
+        let hook_store = Arc::clone(&s);
+        let barrier = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let reached = Arc::clone(&barrier);
+        install_transform_attempt_hook(session, move || {
+            assert_eq!(hook_store.load(session).unwrap().row_version, Some(version));
+            publish_race_chunk(&hook_store, session, version, &predicate).unwrap();
+            reached.store(true, std::sync::atomic::Ordering::SeqCst);
+        });
+        let raced = run(&s, &window, &spine());
+        assert!(barrier.load(std::sync::atomic::Ordering::SeqCst));
+        assert_eq!(identity_mids(&s, session), ["m4", "m5"]);
+        assert_eq!(s.load_history_segments(session).unwrap().len(), 3);
+
+        let serial_dir = tempfile::tempdir().unwrap();
+        let serial_store = store(serial_dir.path());
+        let (serial_version, serial_predicate, serial_window) =
+            pinned_firing(&serial_store, session);
+        publish_race_chunk(&serial_store, session, serial_version, &serial_predicate).unwrap();
+        let serial = run(&serial_store, &serial_window, &spine());
+        assert_eq!(
+            canonical_response_hash(&raced),
+            canonical_response_hash(&serial)
+        );
+        assert_eq!(
+            s.load_history_segments(session).unwrap(),
+            serial_store.load_history_segments(session).unwrap()
+        );
+        let (raced_state, serial_state) = (
+            s.load(session).unwrap(),
+            serial_store.load(session).unwrap(),
+        );
+        assert_eq!(
+            raced_state.meta.block_identity_by_mid,
+            serial_state.meta.block_identity_by_mid
+        );
+        assert_eq!(raced_state.core, serial_state.core);
+    }
+
     #[test]
     fn reconcile_recut_nothing_survives_arms_pending_raw_without_truncate() {
         let dir = tempfile::tempdir().unwrap();
@@ -20594,8 +20031,12 @@ pub(crate) mod tests {
         let before_absent = s.load("ses").unwrap();
         let before_history_segments = s.load_history_segments("ses").unwrap();
 
-        let live_absent = vec![item("t9", 9, "post-revert")];
-        let armed = run(&s, &req("ses", "cfg0", live_absent.clone()), &spine());
+        let live_absent = vec![item("t9", 1, "post-revert")];
+        let armed = run(
+            &s,
+            &switched(req("ses", "cfg0", live_absent.clone())),
+            &spine(),
+        );
         assert_eq!(armed.action, "PASSTHROUGH");
         assert!(armed.committed, "arming writes the one durable alarm row");
         assert!(!armed.reconcile_pending);
@@ -20604,6 +20045,12 @@ pub(crate) mod tests {
         assert_eq!(after_arm.core.boundary_id, before_absent.core.boundary_id);
         assert!(!after_arm.core.reconcile_pending);
         assert_eq!(after_arm.meta.revert_epoch, before_absent.meta.revert_epoch);
+        // A pass-through commit does not prune identities (spec D12).
+        assert!(!before_absent.meta.block_identity_by_mid.is_empty());
+        assert_eq!(
+            after_arm.meta.block_identity_by_mid,
+            before_absent.meta.block_identity_by_mid
+        );
         assert_eq!(
             s.load_history_segments("ses").unwrap(),
             before_history_segments
@@ -20619,7 +20066,7 @@ pub(crate) mod tests {
         );
 
         let row_after_arm = after_arm.row_version.unwrap();
-        let repeat = run(&s, &req("ses", "cfg0", live_absent), &spine());
+        let repeat = run(&s, &switched(req("ses", "cfg0", live_absent)), &spine());
         assert_eq!(repeat.action, "PASSTHROUGH");
         assert!(!repeat.committed, "arm-once pending repeats are write-free");
         assert_eq!(repeat.row_version, row_after_arm);
@@ -20683,7 +20130,7 @@ pub(crate) mod tests {
         assert_eq!(boot.boundary_id, "t2#0");
 
         let absent = vec![item("foreign", 50, "other conversation")];
-        let armed = run(&s, &req("ses", "cfg0", absent), &spine());
+        let armed = run(&s, &switched(req("ses", "cfg0", absent)), &spine());
         assert_eq!(armed.action, "PASSTHROUGH");
         assert!(s.load("ses").unwrap().meta.pending_rewrite.is_some());
 
@@ -20715,7 +20162,7 @@ pub(crate) mod tests {
 
         for cycle in 0..3 {
             let absent = vec![item(&format!("foreign{cycle}"), 50 + cycle, "other")];
-            let raw = run(&s, &req("ses", "cfg0", absent), &spine());
+            let raw = run(&s, &switched(req("ses", "cfg0", absent)), &spine());
             assert_eq!(raw.action, "PASSTHROUGH");
             let normal = run(&s, &req("ses", "cfg0", present.clone()), &spine());
             assert_eq!(normal.action, "SOFT+");
@@ -20761,7 +20208,11 @@ pub(crate) mod tests {
         let foreign_same_mid = vec![item("t3", 90, "foreign bytes with reused tail mid")];
         let armed = run(
             &s,
-            &with_usage(req("ses", "cfg0", foreign_same_mid.clone()), 95, 100),
+            &switched(with_usage(
+                req("ses", "cfg0", foreign_same_mid.clone()),
+                95,
+                100,
+            )),
             &spine(),
         );
         assert_eq!(armed.action, "PASSTHROUGH");
@@ -20786,7 +20237,7 @@ pub(crate) mod tests {
         let meta_after_arm = after_arm.meta.clone();
         let repeat = run(
             &s,
-            &with_usage(req("ses", "cfg0", foreign_same_mid), 100, 100),
+            &switched(with_usage(req("ses", "cfg0", foreign_same_mid), 100, 100)),
             &spine(),
         );
         assert_eq!(repeat.action, "PASSTHROUGH");
@@ -20818,7 +20269,7 @@ pub(crate) mod tests {
             assert_eq!(boot.boundary_id, "t2#0");
             let raw = run(
                 &s,
-                &req("ses", "cfg0", vec![item("foreign", 90, "other")]),
+                &switched(req("ses", "cfg0", vec![item("foreign", 90, "other")])),
                 &spine(),
             );
             assert_eq!(raw.action, "PASSTHROUGH");
@@ -20831,7 +20282,7 @@ pub(crate) mod tests {
         let row = before.row_version.unwrap();
         let raw = run(
             &s,
-            &req("ses", "cfg0", vec![item("foreign", 90, "other")]),
+            &switched(req("ses", "cfg0", vec![item("foreign", 90, "other")])),
             &spine(),
         );
         assert_eq!(raw.action, "PASSTHROUGH");
@@ -20932,678 +20383,6 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn astro_shape_boundary_divergence_recuts_full_history_segment_set_on_first_pass() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = store(dir.path());
-        let request = seed_astro_divergence(&store, "astro-divergence", 2_402);
-
-        let response = run(&store, &request, &spine());
-        assert_eq!(response.action, "HARD");
-        assert_eq!(
-            response.materialize_reason.as_deref(),
-            Some("boundary_divergence_recut")
-        );
-        assert_eq!(response.boundary_id, "m2400#0");
-        assert_eq!(response.coverage_ordinal, Some(2_400));
-        assert_eq!(tail_ids(&response), vec!["m2401", "m2402"]);
-        assert!(m0_bytes(&response).contains("ASTRO-C47"));
-
-        let healed = store.load("astro-divergence").unwrap();
-        assert_eq!(healed.meta.coverage_ordinal, Some(2_400));
-        assert_eq!(healed.meta.coverage_history_segment_seq, Some(47));
-        assert_eq!(healed.meta.folded_history_segment_seq, 47);
-        assert_eq!(healed.core.boundary_id, "m2400#0");
-        let stale_target = astro_history_segments()[2].end_message_id.clone();
-        assert!(
-            !frozen_red_targets(&healed.core).contains(&stale_target),
-            "the HARD recut must apply ordinary frozen-unit GC"
-        );
-    }
-
-    #[test]
-    fn astro_model_switch_keeps_reduced_native_tool_arcs_single_part() {
-        let native_tool_message = json!({
-            "absolute_ordinal": 2_414,
-            "info": {
-                "id": "m2414",
-                "role": "assistant",
-                "providerField": "preserve-assistant-envelope"
-            },
-            "parts": [
-                {
-                    "type": "tool",
-                    "tool": "read",
-                    "callID": "astro-call-a",
-                    "providerField": "preserve-call-a",
-                    "state": {
-                        "status": "completed",
-                        "input": { "path": "a.txt", "detail": "x".repeat(600) },
-                        "output": "A".repeat(2_000)
-                    }
-                },
-                {
-                    "type": "tool",
-                    "tool": "read",
-                    "callID": "astro-call-b",
-                    "providerField": "preserve-call-b",
-                    "state": {
-                        "status": "completed",
-                        "input": { "path": "b.txt", "detail": "y".repeat(600) },
-                        "output": "B".repeat(2_000)
-                    }
-                }
-            ]
-        });
-        let decoded = crate::codec::decode_opencode(std::slice::from_ref(&native_tool_message));
-        let mut tool_message = decoded.messages[0].clone();
-        // The host projects live CK ingress independently of the native sidecar, so it does not carry Rust decoder block-origin stamps.
-        *tool_message.ck.content_mut() = tool_message
-            .ck
-            .content()
-            .iter()
-            .map(|block| wire::WireBlock::bare(block.kind().clone()))
-            .collect();
-
-        let mut request = astro_request("astro-native-tools", 2_416);
-        request.serializer_profile = "opencode-aisdk".to_string();
-        request.provider_id = Some("openai".to_string());
-        request.model_key = Some("openai/gpt-5.6-sol".to_string());
-        request.serve_native = true;
-        request.native_messages = Some(vec![Arc::new(native_tool_message.clone())]);
-        *request
-            .messages
-            .iter_mut()
-            .find(|message| message.mid == "m2414")
-            .expect("ASTRO tail includes m2414") = Arc::new(tool_message);
-
-        let unchanged = crate::codec::encode_opencode_with_session(
-            &[request
-                .messages
-                .iter()
-                .find(|message| message.mid == "m2414")
-                .unwrap()
-                .ck
-                .clone()],
-            &decoded.sidecar,
-            Some(&request.session_id),
-            None,
-        );
-        assert_eq!(
-            serde_json::to_vec(&unchanged).unwrap(),
-            serde_json::to_vec(&vec![native_tool_message.clone()]).unwrap(),
-            "an unreduced host-projected tool message must remain byte-identical"
-        );
-
-        let dir = tempfile::tempdir().unwrap();
-        let store = store(dir.path());
-        let request = seed_astro_divergence_from_request(&store, request);
-        let healed = run(
-            &store,
-            &request,
-            &with_reductions(vec![
-                reduce(
-                    "m2414#0",
-                    "skeleton",
-                    r#"{"detail":"xxxxx…","path":"a.txt"}"#,
-                ),
-                reduce("m2414#1", "drop", "[dropped]"),
-                reduce(
-                    "m2414#2",
-                    "skeleton",
-                    r#"{"detail":"yyyyy…","path":"b.txt"}"#,
-                ),
-                reduce("m2414#3", "drop", "[dropped]"),
-            ]),
-        );
-        assert_eq!(healed.action, "HARD");
-        assert_eq!(
-            healed.materialize_reason.as_deref(),
-            Some("boundary_divergence_recut")
-        );
-        assert_eq!(message_index(&healed, "m2414"), 15);
-
-        let mut anthropic_request = request.clone();
-        anthropic_request.provider_id = Some("anthropic".to_string());
-        anthropic_request.model_key = Some("anthropic/claude-opus-5".to_string());
-        let switched = run(&store, &anthropic_request, &spine());
-        assert_eq!(switched.action, "HARD");
-        assert_eq!(switched.materialize_reason.as_deref(), Some("epoch_change"));
-        assert_eq!(message_index(&switched, "m2414"), 15);
-
-        let served = switched
-            .messages()
-            .iter()
-            .map(|message| (**message).clone())
-            .collect::<Vec<_>>();
-        let native = crate::codec::encode_opencode_with_session(
-            &served,
-            &decoded.sidecar,
-            Some(&anthropic_request.session_id),
-            None,
-        );
-        for message in &native {
-            let tool_ids = message["parts"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .filter(|part| part["type"] == "tool")
-                .map(|part| part["callID"].as_str().unwrap())
-                .collect::<Vec<_>>();
-            let unique_ids = tool_ids.iter().copied().collect::<HashSet<_>>();
-            assert_eq!(
-                tool_ids.len(),
-                unique_ids.len(),
-                "each native assistant message must own unique Anthropic tool_use ids: {tool_ids:?}"
-            );
-        }
-        let assistant = native
-            .iter()
-            .find(|message| message["info"]["id"] == "m2414")
-            .expect("served native ASTRO assistant");
-        let tool_ids = assistant["parts"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .filter(|part| part["type"] == "tool")
-            .map(|part| part["callID"].as_str().unwrap())
-            .collect::<Vec<_>>();
-        assert_eq!(tool_ids, vec!["astro-call-a", "astro-call-b"]);
-        assert!(assistant["parts"].as_array().unwrap().iter().all(|part| {
-            part["state"]["status"] == "completed"
-                && part["state"]["input"]["reduced"] == true
-                && part["state"]["output"] == "[dropped]"
-        }));
-    }
-
-    #[test]
-    fn boundary_divergence_recut_retries_after_interleaved_history_summarizer_publish() {
-        use std::cell::Cell;
-
-        let dir = tempfile::tempdir().unwrap();
-        let store = store(dir.path());
-        let request = seed_astro_divergence(&store, "astro-publish-race", 2_442);
-
-        let loaded = store.load("astro-publish-race").unwrap();
-        let selected_range_identities =
-            vec![memory_store::HistorySummarizerSelectedMessageIdentity {
-                mid: "m2400".to_string(),
-                block_identities: loaded.meta.block_identity_by_mid["m2400"].clone(),
-            }];
-        let generation = memory_store::HistorySegmentSetGeneration::new(47);
-        let predicate = memory_store::HistorySummarizerPublishPredicate {
-            firing_seq: 7,
-            producer_run_id: "race-run".to_string(),
-            chunk_fingerprint: "race-fingerprint".to_string(),
-            selected_range_identities: selected_range_identities.clone(),
-            history_segment_set_generation: generation,
-        };
-        let mut publishing_meta = loaded.meta.clone();
-        publishing_meta.history_summarizer = memory_store::HistorySummarizerDurableState {
-            state: memory_store::HistorySummarizerPhase::Publishing,
-            firing_seq: predicate.firing_seq,
-            chunk_range: Some(memory_store::HistorySummarizerChunkRange {
-                from_ordinal: 2_401,
-                to_ordinal: 2_440,
-            }),
-            chunk_fingerprint: predicate.chunk_fingerprint.clone(),
-            selected_range_identities,
-            producer_session_id: Some("race-producer".to_string()),
-            producer_run_id: Some(predicate.producer_run_id.clone()),
-            fired_at_ms: Some(1),
-            expected_revert_epoch: loaded.meta.revert_epoch,
-            history_segment_set_generation: generation,
-            ..Default::default()
-        };
-        let publish_row_version = store
-            .commit(
-                "astro-publish-race",
-                loaded.row_version,
-                &loaded.core,
-                &publishing_meta,
-            )
-            .unwrap();
-        let published_history_segment = comp(
-            48,
-            2_401,
-            2_440,
-            "m2440",
-            "INTERLEAVED-HISTORY_SUMMARIZER-PUBLISH",
-        );
-        let interleaved = Cell::new(false);
-        let estimate_with_publish = |text: &str| {
-            if !interleaved.replace(true) {
-                store
-                    .publish_history_summarizer_chunk(
-                        memory_store::HistorySummarizerPublishRequest {
-                            session_id: "astro-publish-race",
-                            expected_row_version: Some(publish_row_version),
-                            expected_revert_epoch: loaded.meta.revert_epoch,
-                            predicate: &predicate,
-                            project_path: "git:proj",
-                            history_segments: std::slice::from_ref(&published_history_segment),
-                            events: &[],
-                            primer_candidates: &[],
-                            user_memory_candidates: &[],
-                            publication_floor_ordinal: 2_441,
-                            chunk_transcript: None,
-                            memory_reviewer_nonadmission: None,
-                            memory_reviewer_activation: None,
-                            published_at_ms: 0,
-                        },
-                    )
-                    .unwrap();
-            }
-            tokenizer::estimate_tokens(text)
-        };
-        let response = apply_once_with_estimator(
-            &store,
-            &request,
-            &pctx("git:proj", "/nonexistent-docs", 0),
-            estimate_with_publish,
-            None,
-        )
-        .unwrap()
-        .response;
-
-        assert!(interleaved.get());
-        assert_eq!(response.action, "HARD");
-        assert_eq!(
-            response.materialize_reason.as_deref(),
-            Some("boundary_divergence_recut")
-        );
-        assert_eq!(response.coverage_ordinal, Some(2_440));
-        assert_eq!(response.boundary_id, "m2440#0");
-        let healed = store.load("astro-publish-race").unwrap();
-        assert_eq!(healed.meta.coverage_ordinal, Some(2_440));
-        assert_eq!(healed.meta.folded_history_segment_seq, 48);
-        assert_eq!(
-            store
-                .load_history_segments("astro-publish-race")
-                .unwrap()
-                .len(),
-            49
-        );
-    }
-
-    #[test]
-    fn publication_between_revision_and_history_segment_end_reads_does_not_detect_divergence() {
-        use std::sync::atomic::{AtomicBool, Ordering};
-
-        let dir = tempfile::tempdir().unwrap();
-        let store = store(dir.path());
-        let request = seed_astro_divergence(&store, "astro-torn-read", 2_442);
-        let loaded = store.load("astro-torn-read").unwrap();
-        let selected_range_identities =
-            vec![memory_store::HistorySummarizerSelectedMessageIdentity {
-                mid: "m2400".to_string(),
-                block_identities: loaded.meta.block_identity_by_mid["m2400"].clone(),
-            }];
-        let generation = memory_store::HistorySegmentSetGeneration::new(47);
-        let predicate = memory_store::HistorySummarizerPublishPredicate {
-            firing_seq: 8,
-            producer_run_id: "between-reads-run".to_string(),
-            chunk_fingerprint: "between-reads-fingerprint".to_string(),
-            selected_range_identities: selected_range_identities.clone(),
-            history_segment_set_generation: generation,
-        };
-        let mut publishing_meta = loaded.meta.clone();
-        publishing_meta.history_summarizer = memory_store::HistorySummarizerDurableState {
-            state: memory_store::HistorySummarizerPhase::Publishing,
-            firing_seq: predicate.firing_seq,
-            chunk_range: Some(memory_store::HistorySummarizerChunkRange {
-                from_ordinal: 2_401,
-                to_ordinal: 2_440,
-            }),
-            chunk_fingerprint: predicate.chunk_fingerprint.clone(),
-            selected_range_identities,
-            producer_session_id: Some("between-reads-producer".to_string()),
-            producer_run_id: Some(predicate.producer_run_id.clone()),
-            fired_at_ms: Some(1),
-            expected_revert_epoch: loaded.meta.revert_epoch,
-            history_segment_set_generation: generation,
-            ..Default::default()
-        };
-        let publish_row_version = store
-            .commit(
-                "astro-torn-read",
-                loaded.row_version,
-                &loaded.core,
-                &publishing_meta,
-            )
-            .unwrap();
-        let expected_revert_epoch = loaded.meta.revert_epoch;
-        let published_history_segment = comp(48, 2_401, 2_440, "m2440", "BETWEEN-SIGNAL-READS");
-        let hook_ran = Arc::new(AtomicBool::new(false));
-        let hook_ran_for_publish = Arc::clone(&hook_ran);
-        store.set_before_max_history_segment_end_read_hook(Box::new(move |store| {
-            hook_ran_for_publish.store(true, Ordering::SeqCst);
-            store
-                .publish_history_summarizer_chunk(memory_store::HistorySummarizerPublishRequest {
-                    session_id: "astro-torn-read",
-                    expected_row_version: Some(publish_row_version),
-                    expected_revert_epoch,
-                    predicate: &predicate,
-                    project_path: "git:proj",
-                    history_segments: std::slice::from_ref(&published_history_segment),
-                    events: &[],
-                    primer_candidates: &[],
-                    user_memory_candidates: &[],
-                    publication_floor_ordinal: 2_441,
-                    chunk_transcript: None,
-                    memory_reviewer_nonadmission: None,
-                    memory_reviewer_activation: None,
-                    published_at_ms: 0,
-                })
-                .unwrap();
-        }));
-
-        let response = run(&store, &request, &spine());
-
-        assert!(hook_ran.load(Ordering::SeqCst));
-        assert_eq!(response.action, "SOFT+");
-        assert_ne!(
-            response.materialize_reason.as_deref(),
-            Some("boundary_divergence_recut")
-        );
-        let after = store.load("astro-torn-read").unwrap();
-        assert_eq!(after.meta.coverage_ordinal, Some(425));
-        assert_eq!(after.meta.boundary_divergence_pending_count, 1);
-        assert_eq!(
-            store
-                .max_history_segment_end_ordinal("astro-torn-read")
-                .unwrap(),
-            2_440
-        );
-    }
-
-    #[test]
-    fn boundary_divergence_bust_reset_requires_structural_progress_or_convergence() {
-        let before_core = CoreState {
-            boundary_id: "old#0".to_string(),
-            ..CoreState::empty()
-        };
-        let before_meta = ModuleMeta {
-            coverage_ordinal: Some(10),
-            coverage_start_ordinal: Some(1),
-            folded_history_segment_seq: 4,
-            ..Default::default()
-        };
-        assert!(!boundary_or_coverage_state_moved(
-            &before_core,
-            &before_core,
-            &before_meta,
-            &before_meta,
-        ));
-        let mut after_core = before_core.clone();
-        after_core.boundary_id = "new#0".to_string();
-        assert!(boundary_or_coverage_state_moved(
-            &before_core,
-            &after_core,
-            &before_meta,
-            &before_meta,
-        ));
-
-        // A task-list-promoted bust on a still-damaged row retains evidence for bounded repair escalation.
-        // The synthetic splice moves no cache boundary.
-        assert!(!boundary_divergence_reset_allowed(
-            true, false, false, false, false, false,
-        ));
-        // A torn publication read does not prove that the row converged.
-        assert!(!boundary_divergence_reset_allowed(
-            true, false, false, true, false, false,
-        ));
-
-        // The repair-escalation counter resets only when the cache boundary or coverage changes.
-        assert!(boundary_divergence_reset_allowed(
-            true, false, false, false, false, true,
-        ));
-        // The convergence detector completes the stale episode when it reports convergence.
-        assert!(boundary_divergence_reset_allowed(
-            true, false, true, false, false, false,
-        ));
-        assert!(boundary_divergence_reset_allowed(
-            true, false, false, false, true, false,
-        ));
-
-        // Publication windows and non-bust passes retain the counter regardless of signals.
-        assert!(!boundary_divergence_reset_allowed(
-            true, true, true, false, false, true,
-        ));
-        assert!(!boundary_divergence_reset_allowed(
-            false, false, true, false, false, true,
-        ));
-    }
-
-    #[test]
-    fn active_wrapup_retains_divergence_count_until_the_window_closes() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = store(dir.path());
-        let request = seed_astro_divergence(&store, "astro-wrapup-window", 2_402);
-        let loaded = store.load("astro-wrapup-window").unwrap();
-        let mut stale = loaded.meta.clone();
-        stale.m1_revision ^= u64::MAX;
-        stale.m1_history_segment_seq = Some(1);
-        store
-            .commit(
-                "astro-wrapup-window",
-                loaded.row_version,
-                &loaded.core,
-                &stale,
-            )
-            .unwrap();
-
-        let first_counted = run(&store, &request, &spine());
-        assert_eq!(first_counted.action, "SOFT+");
-        assert_eq!(
-            store
-                .load("astro-wrapup-window")
-                .unwrap()
-                .meta
-                .boundary_divergence_pending_count,
-            1
-        );
-
-        let mut context = pctx("git:proj", "/nonexistent-docs", 0);
-        context.wrapup_active = true;
-        for _ in 0..usize::from(BOUNDARY_DIVERGENCE_PENDING_PASS_LIMIT) + 1 {
-            let deferred = transform(&store, &request, &context).unwrap();
-            assert_eq!(deferred.action, "SOFT+");
-            assert_ne!(
-                deferred.materialize_reason.as_deref(),
-                Some("boundary_divergence_recut")
-            );
-            assert_eq!(
-                store
-                    .load("astro-wrapup-window")
-                    .unwrap()
-                    .meta
-                    .boundary_divergence_pending_count,
-                1,
-                "an active wrapup retains rather than increments or resets the counter"
-            );
-        }
-
-        context.wrapup_active = false;
-        for expected_count in 2..BOUNDARY_DIVERGENCE_PENDING_PASS_LIMIT {
-            let deferred = transform(&store, &request, &context).unwrap();
-            assert_eq!(deferred.action, "SOFT+");
-            assert_eq!(
-                store
-                    .load("astro-wrapup-window")
-                    .unwrap()
-                    .meta
-                    .boundary_divergence_pending_count,
-                expected_count
-            );
-        }
-        let escalated = transform(&store, &request, &context).unwrap();
-        assert_eq!(escalated.action, "HARD");
-        assert_eq!(
-            escalated.materialize_reason.as_deref(),
-            Some("boundary_divergence_recut")
-        );
-        assert_eq!(
-            store
-                .load("astro-wrapup-window")
-                .unwrap()
-                .meta
-                .boundary_divergence_pending_count,
-            0
-        );
-    }
-
-    #[test]
-    fn missing_publication_floor_recuts_conservatively_and_backfills_on_hard() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = store(dir.path());
-        let mut request = astro_request("astro-missing-floor", 2_402);
-        for message in request.messages.iter_mut() {
-            let message = Arc::make_mut(message);
-            if let Some(wire::BlockKind::Text { text }) = message
-                .ck
-                .content_mut()
-                .first_mut()
-                .map(|block| block.kind_mut())
-            {
-                text.push_str(&" realistic raw history".repeat(512));
-            }
-        }
-        let request = seed_astro_divergence_from_request(&store, request);
-        let loaded = store.load("astro-missing-floor").unwrap();
-        let mut missing_floor = loaded.meta.clone();
-        missing_floor.publication_floor_ordinal = None;
-        store
-            .commit(
-                "astro-missing-floor",
-                loaded.row_version,
-                &loaded.core,
-                &missing_floor,
-            )
-            .unwrap();
-
-        let response = run(&store, &request, &spine());
-        assert_eq!(response.action, "HARD");
-        assert_eq!(
-            response.materialize_reason.as_deref(),
-            Some("boundary_divergence_recut")
-        );
-        assert_eq!(response.coverage_ordinal, Some(2_400));
-        assert!(
-            store
-                .load("astro-missing-floor")
-                .unwrap()
-                .meta
-                .publication_floor_ordinal
-                .is_some(),
-            "the recut HARD must freeze the estimator-derived floor"
-        );
-    }
-
-    #[test]
-    fn stale_full_state_sync_cannot_rewind_a_committed_divergence_recut() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = store(dir.path());
-        let request = seed_astro_divergence(&store, "astro-stale-state-sync", 2_402);
-        let recut = run(&store, &request, &spine());
-        assert_eq!(recut.action, "HARD");
-        let recut_bytes = serde_json::to_vec(&recut.messages).unwrap();
-        let after_recut = store.load("astro-stale-state-sync").unwrap();
-        let history_segments_after_recut = store
-            .load_history_segments("astro-stale-state-sync")
-            .unwrap();
-        let mut stale_history_segments = astro_history_segments()[..2].to_vec();
-        for history_segment in &mut stale_history_segments {
-            history_segment.content = format!("STALE-TS-{}", history_segment.sequence);
-            history_segment.p1 = Some(history_segment.content.clone());
-        }
-
-        store
-            .apply_authority_state_sync(ModuleStateSyncRequest {
-                session_id: "astro-stale-state-sync",
-                project_path: "git:proj",
-                shadow_generation: after_recut.meta.shadow_generation,
-                expected_shadow_seq: after_recut.meta.shadow_seq,
-                seed_boundary_id: Some("m425#0"),
-                drop_seeds: &[],
-                drop_seed_skipped: 0,
-                pending_agent_drops: &[],
-                pending_agent_drops_skipped: 0,
-                user_hint_seeds: &[],
-                auto_search_hint_skipped: 0,
-                user_hints_replace_session: false,
-                note_nudge_anchors: None,
-                todo_synthetic_anchor: None,
-                todo_synthetic_anchor_present: false,
-                emergency_latches: None,
-                pending_compaction_marker: None,
-                deferred_execute_state: None,
-                channel2_nudge_state: None,
-                strip_seeds: &[],
-                strip_seed_skipped: 0,
-                reasoning_cleared_through_tag: None,
-                history_segments: &stale_history_segments,
-                user_profile: &[],
-                user_profile_present: true,
-                workspace: None,
-                workspace_present: true,
-                last_todo_state: None,
-                project_memory_epoch: None,
-                user_profile_version: None,
-                acked_watermarks: Value::Null,
-            })
-            .unwrap();
-
-        let after_sync = store.load("astro-stale-state-sync").unwrap();
-        assert_eq!(after_sync.meta.coverage_ordinal, Some(2_400));
-        assert_eq!(after_sync.meta.folded_history_segment_seq, 47);
-        assert_eq!(after_sync.core.boundary_id, "m2400#0");
-        assert_eq!(
-            store
-                .load_history_segments("astro-stale-state-sync")
-                .unwrap(),
-            history_segments_after_recut
-        );
-        let deferred = run(&store, &request, &spine());
-        assert_eq!(deferred.action, "SOFT+");
-        assert_eq!(serde_json::to_vec(&deferred.messages).unwrap(), recut_bytes);
-    }
-
-    #[test]
-    fn fired_divergence_with_absent_new_anchor_fails_loud_without_commit() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = store(dir.path());
-        let full_request = seed_astro_divergence(&store, "astro-absent-anchor", 2_402);
-        let mut missing_anchor = full_request.clone();
-        missing_anchor
-            .messages
-            .retain(|message| message.mid != "m2400");
-        let before = store.load("astro-absent-anchor").unwrap();
-        let history_segments_before = store.load_history_segments("astro-absent-anchor").unwrap();
-
-        let error = transform(
-            &store,
-            &missing_anchor,
-            &pctx("git:proj", "/nonexistent-docs", 0),
-        )
-        .unwrap_err();
-
-        assert!(matches!(error, TransformError::BoundaryNotPresent(_)));
-        let after_error = store.load("astro-absent-anchor").unwrap();
-        assert_eq!(after_error.row_version, before.row_version);
-        assert_eq!(after_error.core, before.core);
-        assert_eq!(after_error.meta, before.meta);
-        assert_eq!(
-            store.load_history_segments("astro-absent-anchor").unwrap(),
-            history_segments_before
-        );
-
-        // After the producer restores the terminal history_segment anchor, the next pass commits the already-qualified recut without manual repair.
-        let recovered = run(&store, &full_request, &spine());
-        assert_eq!(recovered.action, "HARD");
-        assert_eq!(recovered.coverage_ordinal, Some(2_400));
-    }
-
-    #[test]
     fn interior_live_coverage_gap_fails_loud_not_silent_drop() {
         let dir = tempfile::tempdir().unwrap();
         let s = store(dir.path());
@@ -21615,7 +20394,7 @@ pub(crate) mod tests {
         let items = vec![
             item("m1", 1, "covered one"),
             item("m2", 2, "covered two"),
-            item("m4", 4, "present but uncovered"),
+            item("m3", 3, "present but uncovered"),
             item("m6", 6, "covered six"),
             item("m7", 7, "covered seven"),
             item("t8", 8, "tail"),
@@ -21628,7 +20407,7 @@ pub(crate) mod tests {
         .unwrap_err();
         assert!(matches!(err, TransformError::CoverageGap(_)));
         assert!(
-            err.to_string().contains("m4"),
+            err.to_string().contains("m3#0"),
             "the uncovered live message should be named in the loud failure: {err:?}"
         );
     }
@@ -21682,9 +20461,9 @@ pub(crate) mod tests {
             let dir = tempfile::tempdir().unwrap();
             let s = store(dir.path());
             let session = format!("lead-{}", profile.wire_id());
-            s.replace_history_segments(&session, &[comp(1, 1, 1, "m1", "SUMMARY")])
+            s.replace_history_segments(&session, &[comp(1, 2, 2, "m1", "SUMMARY")])
                 .unwrap();
-            let leading_system = system_item("sys0", 0, "identity lead");
+            let leading_system = system_item("sys0", 1, "identity lead");
             let r = run(
                 &s,
                 &profile_req(
@@ -21693,8 +20472,8 @@ pub(crate) mod tests {
                     "cfg0",
                     vec![
                         leading_system.clone(),
-                        item("m1", 1, "covered"),
-                        item("t2", 2, "tail"),
+                        item("m1", 2, "covered"),
+                        item("t2", 3, "tail"),
                     ],
                 ),
                 &spine(),
@@ -21825,10 +20604,26 @@ pub(crate) mod tests {
             "healthy SOFT bytes must match the pre-detector golden",
         );
 
-        // A defer at the new anchor replays the prior output byte-for-byte.
-        let defer = run(&s, &req("ses", "cfg0", items), &spine());
+        // A defer at the new anchor replays the prior output byte-for-byte. Its window starts at
+        // m20, so it commits once to prune m10's identity (spec D12); a repeat is write-free.
+        let defer = run(&s, &req("ses", "cfg0", items.clone()), &spine());
         assert_eq!(defer.action, "SOFT+");
-        assert!(!defer.committed);
+        assert!(defer.committed);
+        assert_eq!(
+            s.load("ses")
+                .unwrap()
+                .meta
+                .block_identity_by_mid
+                .keys()
+                .collect::<Vec<_>>(),
+            ["m20", "t21"]
+        );
+        let repeat = run(&s, &req("ses", "cfg0", items), &spine());
+        assert!(!repeat.committed);
+        assert_eq!(
+            canonical_response_hash(&repeat),
+            canonical_response_hash(&defer)
+        );
         assert_eq!(
             m1_bytes(&defer),
             m1_bytes(&soft),
@@ -21841,15 +20636,16 @@ pub(crate) mod tests {
             "healthy SOFT+ bytes must match the pre-detector golden",
         );
 
-        // A share-nothing boundary absence degrades to raw pass-through and arms the pending-rewrite alarm without changing lineage.
+        // A share-nothing boundary absence resets the session and serves a first pass (spec D10).
         let revert = run(
             &s,
             &req("ses", "cfg0", vec![item("z", 30, "other")]),
             &spine(),
         );
-        assert_eq!(revert.action, "PASSTHROUGH");
+        assert_eq!(revert.action, "HARD");
         assert!(!revert.reconcile_pending);
-        assert!(s.load("ses").unwrap().meta.pending_rewrite.is_some());
+        assert!(s.load("ses").unwrap().meta.pending_rewrite.is_none());
+        assert!(s.load_history_segments("ses").unwrap().is_empty());
     }
 
     #[test]
@@ -22014,25 +20810,16 @@ pub(crate) mod tests {
         );
         assert!(matches!(reserved, Err(TransformError::ReservedId)));
 
-        // non-monotonic ordinals
-        let bad = transform(
-            &s,
-            &req("ses", "cfg0", vec![item("a", 5, "x"), item("b", 5, "y")]),
-            &dc,
+        // The daemon derives ordinals, so the ingress values neither repeat nor overflow.
+        let ingress = req(
+            "ses",
+            "cfg0",
+            vec![item("a", 5, "x"), item("b", u64::MAX, "y")],
         );
-        assert!(matches!(bad, Err(TransformError::OrdinalViolation)));
-
-        // An ordinal above i64::MAX would wrap negative in the history_segments table.
-        let too_large = transform(
-            &s,
-            &req(
-                "ses",
-                "cfg0",
-                vec![item("a", 1, "x"), item("b", u64::MAX, "y")],
-            ),
-            &dc,
-        );
-        assert!(matches!(too_large, Err(TransformError::OrdinalOutOfRange)));
+        let mut resolved = ingress.clone();
+        resolve_window(&s, &mut resolved).unwrap();
+        let ordinals: Vec<u64> = resolved.messages.iter().map(|m| m.ordinal).collect();
+        assert_eq!(ordinals, vec![1, 2]);
     }
 
     #[test]
@@ -23393,92 +22180,6 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn sparse_temporal_decision_stays_frozen_when_an_older_ordinal_returns() {
-        run_active_surface_test(|| {
-            let dir = tempfile::tempdir().unwrap();
-            let s = store(dir.path());
-            let first_messages = vec![wire_item("user", "m1", 1, &["start"])];
-            let first_request = active_cc_req("temporal-sparse", "cfg0", first_messages.clone());
-            run(&s, &first_request, &spine());
-            run(&s, &first_request, &spine());
-
-            let sparse = vec![
-                first_messages[0].clone(),
-                wire_item("user", "m3", 3, &["later"]),
-            ];
-            let sparse_request = active_cc_req("temporal-sparse", "cfg0", sparse.clone());
-            let first = transform(
-                &s,
-                &sparse_request,
-                &pctx("git:proj", "/nonexistent-docs", 721_000),
-            )
-            .unwrap();
-            let frozen = tail_bytes(&first, "m3").to_string();
-            assert_eq!(frozen, "§2§ later");
-
-            let restored = active_cc_req(
-                "temporal-sparse",
-                "cfg0",
-                vec![
-                    sparse[0].clone(),
-                    wire_item("assistant", "m2", 2, &["restored"]),
-                    sparse[1].clone(),
-                ],
-            );
-            let replay = transform(
-                &s,
-                &restored,
-                &pctx("git:proj", "/nonexistent-docs", 1_500_000),
-            )
-            .unwrap();
-            assert_eq!(tail_bytes(&replay, "m3").as_bytes(), frozen.as_bytes());
-            assert!(
-                s.load_temporal_marks("temporal-sparse")
-                    .unwrap()
-                    .iter()
-                    .all(|row| row.block_id != "m2#0")
-            );
-
-            let near = active_cc_req(
-                "temporal-sparse",
-                "cfg0",
-                vec![
-                    sparse[0].clone(),
-                    restored.messages[1].as_ref().clone(),
-                    sparse[1].clone(),
-                    wire_item("user", "m4", 4, &["nearby"]),
-                ],
-            );
-            let near_response =
-                transform(&s, &near, &pctx("git:proj", "/nonexistent-docs", 721_100)).unwrap();
-            assert_eq!(tail_bytes(&near_response, "m4"), "§4§ nearby");
-            let empty = s
-                .load_temporal_marks("temporal-sparse")
-                .unwrap()
-                .into_iter()
-                .find(|row| row.block_id == "m4#0")
-                .expect("empty temporal decision");
-            assert!(empty.marker_text.is_empty());
-
-            let false_window = transform(
-                &s,
-                &cc_req(
-                    "temporal-sparse",
-                    "cfg0",
-                    near.messages
-                        .iter()
-                        .map(|message| message.as_ref().clone())
-                        .collect(),
-                ),
-                &pctx("git:proj", "/nonexistent-docs", 2_000_000),
-            )
-            .unwrap();
-            assert_eq!(tail_bytes(&false_window, "m3"), "later");
-            assert_eq!(tail_bytes(&false_window, "m4"), "nearby");
-        });
-    }
-
-    #[test]
     fn temporal_gap_midlife_activation_has_zero_gaps() {
         run_active_surface_test(|| {
             let dir = tempfile::tempdir().unwrap();
@@ -23793,7 +22494,7 @@ pub(crate) mod tests {
             let mut frozen_core = loaded.core.clone();
             frozen_core
                 .frozen_units
-                .push(red_unit("m1#0", "drop", "[dropped]"));
+                .push(red_unit("m1#1", "drop", "[dropped]"));
             store_c
                 .commit("reject", loaded.row_version, &frozen_core, &loaded.meta)
                 .unwrap();
@@ -23807,7 +22508,7 @@ pub(crate) mod tests {
                 &pctx("git:proj", "/nonexistent-docs", 0),
             )
             .unwrap_err();
-            assert!(matches!(err, TransformError::IdentityDrift(_)));
+            assert!(matches!(err, TransformError::FrozenTargetDrift(ref mid) if mid == "m1"));
             let tags = store_c.load_tags_for_session("reject").unwrap();
             assert_eq!(
                 tags.iter()
@@ -23909,7 +22610,6 @@ pub(crate) mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = store(dir.path());
         let ctx = pctx("git:proj", "/nonexistent-docs", 0);
-        let output_cache = Mutex::new(SerializedOutputCache::default());
         let make_request = |middle| {
             req(
                 "hygiene-production",
@@ -23929,9 +22629,8 @@ pub(crate) mod tests {
             let before = crate::tail_hygiene::local_memo_stats();
             let response = transform_with_projection_cached(
                 &store,
-                &make_request(middle),
+                &resolved(&store, &make_request(middle)),
                 &ctx,
-                &output_cache,
             )
             .unwrap();
             assert_eq!(response.response.status, TransformStatus::Ok);
@@ -24874,15 +23573,15 @@ pub(crate) mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = store(dir.path());
         let mut messages = vec![
-            item("covered", 0, "covered"),
-            item("a-held", 1, "a held"),
-            item("b-first", 2, "b first"),
-            item("a-first", 3, "a first"),
+            item("covered", 1, "covered"),
+            item("a-held", 2, "a held"),
+            item("b-first", 3, "b first"),
+            item("a-first", 4, "a first"),
         ];
         store
-            .replace_history_segments("ride-output", &[comp(1, 0, 0, "covered", "summary")])
+            .replace_history_segments("ride-output", &[comp(1, 1, 1, "covered", "summary")])
             .unwrap();
-        messages.extend((4..=22).map(|ordinal| {
+        messages.extend((5..=23).map(|ordinal| {
             item(
                 &format!("filler-{ordinal}"),
                 ordinal,
@@ -25692,7 +24391,7 @@ pub(crate) mod tests {
         for required in [
             "PassPlan::Soft =>",
             "fn soft_pressure_refold(",
-            "fn cached_or_serialize_output(",
+            "fn build_output_with_tags(",
             "fn tag_mint_inputs_from(",
             "fn active_tags_for_channel2(",
         ] {
@@ -25826,14 +24525,17 @@ pub(crate) mod tests {
                     s.arm_soft_refresh("ses").unwrap();
                     let mut context = pctx("git:proj", "/nonexistent-docs", 0);
                     context.history_budget_tokens = budget;
-                    let request = req(
-                        "ses",
-                        "cfg0",
-                        vec![
-                            item("a", 1, "raw"),
-                            item("b", 2, "new"),
-                            item("c", 3, "tail"),
-                        ],
+                    let request = plugin_window(
+                        &s,
+                        &req(
+                            "ses",
+                            "cfg0",
+                            vec![
+                                item("a", 1, "raw"),
+                                item("b", 2, "new"),
+                                item("c", 3, "tail"),
+                            ],
+                        ),
                     );
                     let observed = std::cell::RefCell::new(Vec::new());
                     let estimate = |text: &str| {
@@ -25842,9 +24544,10 @@ pub(crate) mod tests {
                         assert_eq!(cached, tokenizer::estimate_tokens(text));
                         cached
                     };
-                    let result = apply_once_with_estimator(&s, &request, &context, estimate, None)
-                        .unwrap()
-                        .response;
+                    let result =
+                        apply_once_with_estimator(&s, &resolved(&s, &request), &context, estimate)
+                            .unwrap()
+                            .response;
                     let observed = observed.borrow();
                     assert!(
                         observed.contains(&" x".repeat(m0_tokens)),
@@ -26129,67 +24832,6 @@ pub(crate) mod tests {
         );
         // Prefix folding happens alongside tail reclaim.
         assert!(loaded.core.frozen_units.iter().any(|u| u.key == "m0"));
-    }
-
-    /// A leading system message is exempt from coverage continuity checks because the chunk builder never summarizes system content; a pinned prompt before the first chunk is not a live-coverage gap.
-    fn declared_trim_fixture() -> (
-        tempfile::TempDir,
-        MemoryStore,
-        TransformRequest,
-        ProducerContext<'static>,
-    ) {
-        let dir = tempfile::tempdir().unwrap();
-        let store = store(dir.path());
-        let core = CoreState {
-            version: 1,
-            boundary_id: "b#0".to_string(),
-            reconcile_pending: false,
-            frozen_units: vec![
-                synth_region("m0", "m0".to_string()),
-                synth_region("m1", M1_PLACEHOLDER.to_string()),
-            ],
-            pending_changes: Vec::new(),
-        };
-        let meta = ModuleMeta {
-            initialized: true,
-            last_render_config: fold_m0_content_epoch(
-                "cfg",
-                &M0ContentEpoch {
-                    upgrade_state: String::new(),
-                    memory_content_epoch: String::new(),
-                    memory_render_epoch: format!("mre{}", crate::MEMORY_RENDER_FORMAT_EPOCH),
-                    history_segment_render_epoch: format!(
-                        "cre{}",
-                        crate::HISTORY_SEGMENT_RENDER_FORMAT_EPOCH
-                    ),
-                    profile_render_epoch: String::new(),
-                    prompt_surface_epoch: String::new(),
-                    tagger_feature_epoch: String::new(),
-                    transition_epoch: String::new(),
-                },
-            ),
-            coverage_ordinal: Some(0),
-            folded_history_segment_seq: 0,
-            m1_revision: 0,
-            ..Default::default()
-        };
-        store.commit("decl", None, &core, &meta).unwrap();
-        store
-            .replace_history_segments("decl", &[comp(0, 0, 0, "b", "summary")])
-            .unwrap();
-        let mut request = req("decl", "cfg", vec![item("c", 1, "tail")]);
-        request.declared_trim = Some(DeclaredTrim {
-            flat_boundary_id: "b#0".to_string(),
-            boundary_bare_message_id: "b".to_string(),
-            boundary_absolute_ordinal: 0,
-            next_absolute_ordinal: 1,
-        });
-        (
-            dir,
-            store,
-            request,
-            pctx("git:proj", "/nonexistent-docs", 0),
-        )
     }
 
     #[test]
@@ -26910,192 +25552,6 @@ pub(crate) mod tests {
         );
     }
 
-    #[test]
-    fn seeded_boundary_validates_declared_trim_before_the_first_module_fold() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = store(dir.path());
-        let history_segments = vec![StoredHistorySegment {
-            sequence: 4,
-            start_message: 1,
-            end_message: 2,
-            start_message_id: "a#0".to_string(),
-            end_message_id: "b#0".to_string(),
-            title: "seeded".to_string(),
-            content: "seeded summary".to_string(),
-            p1: Some("seeded summary".to_string()),
-            importance: 50,
-            ..Default::default()
-        }];
-        store
-            .apply_authority_state_sync(ModuleStateSyncRequest {
-                session_id: "seeded-trim",
-                project_path: "git:proj",
-                shadow_generation: 0,
-                expected_shadow_seq: 0,
-                seed_boundary_id: Some("b#0"),
-                drop_seeds: &[],
-                drop_seed_skipped: 0,
-                strip_seeds: &[],
-                strip_seed_skipped: 0,
-                reasoning_cleared_through_tag: None,
-                history_segments: &history_segments,
-                user_profile: &[],
-                user_profile_present: true,
-                workspace: None,
-                workspace_present: true,
-                last_todo_state: None,
-                project_memory_epoch: None,
-                user_profile_version: None,
-                pending_agent_drops: &[],
-                pending_agent_drops_skipped: 0,
-                user_hint_seeds: &[],
-                auto_search_hint_skipped: 0,
-                user_hints_replace_session: false,
-                note_nudge_anchors: None,
-                todo_synthetic_anchor: None,
-                todo_synthetic_anchor_present: false,
-                emergency_latches: None,
-                pending_compaction_marker: None,
-                deferred_execute_state: None,
-                channel2_nudge_state: None,
-                acked_watermarks: Value::Null,
-            })
-            .unwrap();
-        let seeded = store.load("seeded-trim").unwrap();
-        assert_eq!(seeded.core.boundary_id, "b#0");
-        assert_eq!(seeded.meta.coverage_ordinal, Some(2));
-        assert_eq!(seeded.meta.coverage_start_ordinal, Some(1));
-        assert_eq!(seeded.meta.coverage_history_segment_seq, Some(4));
-        assert_eq!(seeded.meta.folded_history_segment_seq, 4);
-
-        let mut request = req("seeded-trim", "cfg", vec![item("c", 3, "live tail")]);
-        request.declared_trim = Some(DeclaredTrim {
-            flat_boundary_id: "b#0".to_string(),
-            boundary_bare_message_id: "b".to_string(),
-            boundary_absolute_ordinal: 2,
-            next_absolute_ordinal: 3,
-        });
-        let ctx = pctx("git:proj", dir.path().to_str().unwrap(), 1);
-        let first = transform_with_projection(&store, &request, &ctx).unwrap();
-        assert_eq!(first.boundary_state, BoundaryState::DeclaredTrimValidated);
-        assert_eq!(first.trim_mismatch, None);
-        assert!(!store.load("seeded-trim").unwrap().meta.shadow_quarantined);
-
-        let second = transform_with_projection(&store, &request, &ctx).unwrap();
-        assert_eq!(second.boundary_state, BoundaryState::DeclaredTrimValidated);
-        assert_eq!(first.response.messages, second.response.messages);
-    }
-
-    #[test]
-    fn declared_trim_validates_absent_boundary_and_preserves_defer_path() {
-        let (_dir, store, request, ctx) = declared_trim_fixture();
-        let result = transform_with_projection(&store, &request, &ctx).unwrap();
-        assert_eq!(result.boundary_state, BoundaryState::DeclaredTrimValidated);
-        assert!(result.trim_mismatch.is_none());
-        assert_eq!(result.response.action, "SOFT+");
-        assert_eq!(store.load("decl").unwrap().meta.pending_rewrite, None);
-    }
-
-    #[test]
-    fn declared_trim_predicate_failures_are_absent_with_trim_mismatch() {
-        type TrimCase = (
-            &'static str,
-            Box<dyn FnOnce(&mut TransformRequest, &MemoryStore)>,
-        );
-        let cases: Vec<TrimCase> = vec![
-            (
-                "boundary_identity",
-                Box::new(|request, _| {
-                    request.declared_trim.as_mut().unwrap().flat_boundary_id =
-                        "wrong#0".to_string();
-                }),
-            ),
-            (
-                "coverage_ordinal",
-                Box::new(|request, _| {
-                    request
-                        .declared_trim
-                        .as_mut()
-                        .unwrap()
-                        .boundary_absolute_ordinal = 99;
-                }),
-            ),
-            (
-                "tail_history_segment",
-                Box::new(|_, store| {
-                    store
-                        .replace_history_segments("decl", &[comp(0, 0, 0, "other", "summary")])
-                        .unwrap();
-                }),
-            ),
-            (
-                "continuity",
-                Box::new(|request, _| {
-                    request
-                        .declared_trim
-                        .as_mut()
-                        .unwrap()
-                        .next_absolute_ordinal = 2;
-                }),
-            ),
-        ];
-        for (predicate, mutate) in cases {
-            let (_dir, store, mut request, ctx) = declared_trim_fixture();
-            mutate(&mut request, &store);
-            let result = transform_with_projection(&store, &request, &ctx).unwrap();
-            assert_eq!(result.boundary_state, BoundaryState::Absent, "{predicate}");
-            assert_eq!(
-                result.trim_mismatch.as_ref().map(|m| m.predicate),
-                Some(predicate),
-                "{predicate}"
-            );
-        }
-    }
-
-    #[test]
-    fn declared_trim_continuity_exempts_covered_system_head() {
-        let (_dir, store, mut request, ctx) = declared_trim_fixture();
-        request
-            .messages
-            .insert(0, Arc::new(system_item("sys", 0, "covered system")));
-        let result = transform_with_projection(&store, &request, &ctx).unwrap();
-        assert_eq!(result.boundary_state, BoundaryState::DeclaredTrimValidated);
-        assert!(result.trim_mismatch.is_none());
-    }
-
-    #[test]
-    fn declared_trim_allows_minted_absent_anchor_only_when_validated() {
-        let (_dir, store, mut request, ctx) = declared_trim_fixture();
-        let mut loaded = store.load("decl").unwrap();
-        loaded.meta.last_render_config = "old".to_string();
-        store
-            .commit("decl", loaded.row_version, &loaded.core, &loaded.meta)
-            .unwrap();
-        request.render_config = "new".to_string();
-        let result = transform_with_projection(&store, &request, &ctx).unwrap();
-        assert_eq!(result.response.action, "HARD");
-        assert_eq!(result.boundary_state, BoundaryState::DeclaredTrimValidated);
-
-        let (_dir, store, mut invalid, ctx) = declared_trim_fixture();
-        let mut loaded = store.load("decl").unwrap();
-        loaded.meta.last_render_config = "old".to_string();
-        store
-            .commit("decl", loaded.row_version, &loaded.core, &loaded.meta)
-            .unwrap();
-        invalid.render_config = "new".to_string();
-        invalid
-            .declared_trim
-            .as_mut()
-            .unwrap()
-            .next_absolute_ordinal = 2;
-        let invalid_result = transform_with_projection(&store, &invalid, &ctx).unwrap();
-        assert_eq!(invalid_result.boundary_state, BoundaryState::Absent);
-        assert_eq!(
-            invalid_result.trim_mismatch.as_ref().map(|m| m.predicate),
-            Some("continuity")
-        );
-    }
-
     fn covered_system_entries(m0: &str) -> Vec<String> {
         const OPEN: &str = "<covered-system-message>";
         const CLOSE: &str = "</covered-system-message>";
@@ -27130,16 +25586,16 @@ pub(crate) mod tests {
     fn covered_system_fold_output_matches_byte_golden() {
         let dir = tempfile::tempdir().unwrap();
         let s = store(dir.path());
-        s.replace_history_segments("ses", &[comp(1, 0, 3, "m3", "SUMMARY")])
+        s.replace_history_segments("ses", &[comp(1, 1, 4, "m3", "SUMMARY")])
             .unwrap();
-        let tail_system = system_item("sys4", 4, "tail identity");
+        let tail_system = system_item("sys4", 5, "tail identity");
         let items = vec![
-            system_item("sys0", 0, "identity alpha"),
-            system_item("sys1", 1, "identity beta"),
-            system_item("sys2", 2, "identity alpha"),
-            item("m3", 3, "covered"),
+            system_item("sys0", 1, "identity alpha"),
+            system_item("sys1", 2, "identity beta"),
+            system_item("sys2", 3, "identity alpha"),
+            item("m3", 4, "covered"),
             tail_system.clone(),
-            item("t5", 5, "tail"),
+            item("t5", 6, "tail"),
         ];
 
         let r = run(&s, &cc_req("ses", "cfg0", items), &spine());
@@ -27169,21 +25625,21 @@ pub(crate) mod tests {
     fn covered_systems_absorb_into_m0_and_tail_system_survives() {
         let dir = tempfile::tempdir().unwrap();
         let s = store(dir.path());
-        s.replace_history_segments("ses", &[comp(1, 3, 3, "m3", "SUMMARY")])
+        s.replace_history_segments("ses", &[comp(1, 4, 4, "m3", "SUMMARY")])
             .unwrap();
-        let tail_system = system_item("sys4", 4, "tail identity");
+        let tail_system = system_item("sys4", 5, "tail identity");
         let items = vec![
-            system_item("sys0", 0, "identity alpha"),
-            system_item("sys1", 1, "identity beta"),
-            system_item("sys2", 2, "identity alpha"),
-            item("m3", 3, "covered"),
+            system_item("sys0", 1, "identity alpha"),
+            system_item("sys1", 2, "identity beta"),
+            system_item("sys2", 3, "identity alpha"),
+            item("m3", 4, "covered"),
             tail_system.clone(),
-            item("t5", 5, "tail"),
+            item("t5", 6, "tail"),
         ];
 
         let r = run(&s, &cc_req("ses", "cfg0", items.clone()), &spine());
         assert_eq!(r.action, "HARD");
-        assert_eq!(r.coverage_ordinal, Some(3));
+        assert_eq!(s.load("ses").unwrap().meta.coverage_ordinal, Some(4));
         assert_eq!(
             covered_system_entries(m0_bytes(&r)),
             vec!["identity alpha".to_string(), "identity beta".to_string()],
@@ -27217,6 +25673,84 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn covered_systems_outside_the_window_stay_in_m0_on_later_folds() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = store(dir.path());
+        s.replace_history_segments("ses", &[comp(1, 4, 4, "m3", "S1")])
+            .unwrap();
+        let first = run(
+            &s,
+            &cc_req(
+                "ses",
+                "cfg0",
+                vec![
+                    system_item("sys0", 1, "identity alpha"),
+                    system_item("sys1", 2, "identity beta"),
+                    system_item("sys2", 3, "identity alpha"),
+                    item("m3", 4, "covered one"),
+                    system_item("sys4", 5, "identity gamma"),
+                    item("m5", 6, "covered two"),
+                    system_item("sys6", 7, "tail identity"),
+                ],
+            ),
+            &spine(),
+        );
+        assert_eq!(
+            covered_system_entries(m0_bytes(&first)),
+            vec!["identity alpha".to_string(), "identity beta".to_string()]
+        );
+
+        let window = |cfg: &str| {
+            let mut request = cc_req(
+                "ses",
+                cfg,
+                vec![
+                    item("m3", 4, "covered one"),
+                    system_item("sys4", 5, "identity gamma"),
+                    item("m5", 6, "covered two"),
+                    system_item("sys6", 7, "tail identity"),
+                ],
+            );
+            request.boundary = Some(Some(BoundaryAnchor {
+                mid: "m3".to_string(),
+                sequence: 1,
+            }));
+            request
+        };
+        s.append_history_segments("ses", &[comp(2, 5, 6, "m5", "S2")])
+            .unwrap();
+        let advanced = run(&s, &window("cfg0"), &spine());
+        assert_eq!(
+            advanced.action, "HARD",
+            "coverage advance over a system message must recompose m0, not ride m1"
+        );
+        assert_eq!(
+            covered_system_entries(m0_bytes(&advanced)),
+            vec![
+                "identity alpha".to_string(),
+                "identity beta".to_string(),
+                "identity gamma".to_string(),
+            ],
+            "a window from the rendered boundary keeps the systems before it in m0"
+        );
+        assert_no_system_before_tail_system(&advanced, "tail identity");
+
+        let mut refolded = window("cfg1");
+        refolded.boundary = Some(Some(BoundaryAnchor {
+            mid: "m5".to_string(),
+            sequence: 2,
+        }));
+        refolded.messages.drain(..2);
+        let refolded = run(&s, &refolded, &spine());
+        assert_eq!(refolded.action, "HARD");
+        assert_eq!(
+            covered_system_entries(m0_bytes(&refolded)),
+            covered_system_entries(m0_bytes(&advanced)),
+            "a HARD over a window with no covered system keeps every absorbed system"
+        );
+    }
+
+    #[test]
     fn empty_covered_system_set_omits_the_block() {
         let dir = tempfile::tempdir().unwrap();
         let s = store(dir.path());
@@ -27236,84 +25770,6 @@ pub(crate) mod tests {
             !m0_bytes(&r).contains("<covered-system-messages>"),
             "empty covered system set must not render empty block bytes: {}",
             m0_bytes(&r)
-        );
-    }
-
-    #[test]
-    fn coverage_advance_over_system_promotes_to_hard_and_rederives_m0_block() {
-        let dir = tempfile::tempdir().unwrap();
-        let s = store(dir.path());
-        s.replace_history_segments("ses", &[comp(1, 3, 3, "m3", "S1")])
-            .unwrap();
-        let items = vec![
-            system_item("sys0", 0, "identity alpha"),
-            system_item("sys1", 1, "identity beta"),
-            system_item("sys2", 2, "identity alpha"),
-            item("m3", 3, "covered one"),
-            system_item("sys4", 4, "identity gamma"),
-            item("m5", 5, "covered two"),
-            system_item("sys6", 6, "tail identity"),
-        ];
-        let first = run(&s, &cc_req("ses", "cfg0", items.clone()), &spine());
-        assert_eq!(
-            covered_system_entries(m0_bytes(&first)),
-            vec!["identity alpha".to_string(), "identity beta".to_string()]
-        );
-
-        s.replace_history_segments(
-            "ses",
-            &[comp(1, 3, 3, "m3", "S1"), comp(2, 4, 5, "m5", "S2")],
-        )
-        .unwrap();
-        let advanced = run(&s, &cc_req("ses", "cfg0", items), &spine());
-        assert_eq!(
-            advanced.action, "HARD",
-            "coverage advance over a system message must recompose m0, not ride m1"
-        );
-        assert_eq!(advanced.coverage_ordinal, Some(5));
-        assert_eq!(
-            covered_system_entries(m0_bytes(&advanced)),
-            vec![
-                "identity alpha".to_string(),
-                "identity beta".to_string(),
-                "identity gamma".to_string(),
-            ],
-            "new m0 re-derives the larger covered-system set while preserving prior order"
-        );
-        assert_no_system_before_tail_system(&advanced, "tail identity");
-    }
-
-    #[test]
-    fn covered_system_content_drift_fails_identity_guard() {
-        let dir = tempfile::tempdir().unwrap();
-        let s = store(dir.path());
-        s.replace_history_segments("ses", &[comp(1, 1, 1, "m1", "SUMMARY")])
-            .unwrap();
-        let original = vec![
-            system_item("sys0", 0, "identity alpha"),
-            item("m1", 1, "covered"),
-            item("t2", 2, "tail"),
-        ];
-        let first = run(&s, &cc_req("ses", "cfg0", original), &spine());
-        assert_eq!(first.action, "HARD");
-
-        let drift = transform(
-            &s,
-            &cc_req(
-                "ses",
-                "cfg0",
-                vec![
-                    system_item("sys0", 0, "identity beta"),
-                    item("m1", 1, "covered"),
-                    item("t2", 2, "tail"),
-                ],
-            ),
-            &pctx("git:proj", "/nonexistent-docs", 0),
-        )
-        .unwrap_err();
-        assert!(
-            matches!(drift, TransformError::IdentityDrift(ref mid) if mid == "sys0"),
-            "covered system content drift must fail via IdentityDrift, got {drift:?}"
         );
     }
 
@@ -27524,12 +25980,12 @@ pub(crate) mod tests {
         assert_eq!(crate::PROFILE_EPOCH_CLAUDE_CODE_ANTHROPIC, 2);
         let dir = tempfile::tempdir().unwrap();
         let s = store(dir.path());
-        s.replace_history_segments("ses", &[comp(1, 1, 1, "m1", "SUMMARY")])
+        s.replace_history_segments("ses", &[comp(1, 2, 2, "m1", "SUMMARY")])
             .unwrap();
         let messages = vec![
-            system_item("sys0", 0, "identity alpha"),
-            item("m1", 1, "covered"),
-            item("t2", 2, "tail"),
+            system_item("sys0", 1, "identity alpha"),
+            item("m1", 2, "covered"),
+            item("t2", 3, "tail"),
         ];
         let current = cc_req("ses", "cfg0", messages.clone());
         let first = run(&s, &current, &spine());
@@ -27552,11 +26008,6 @@ pub(crate) mod tests {
         assert_eq!(
             transitioned.action, "HARD",
             "module-side profile epoch folding must hard once even when the caller's cfg is static"
-        );
-        assert!(
-            m0_bytes(&transitioned).contains("<covered-system-message>identity alpha"),
-            "the transition fold must recompose m0 with the covered-system block: {}",
-            m0_bytes(&transitioned)
         );
         assert!(!m0_bytes(&transitioned).contains("OLD-M0"));
         // Profile epoch 2 must be committed as the `mpe2` member of the effective render config so the next pass sees an unchanged config and stops folding.
@@ -28078,7 +26529,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn historical_full_drop_replays_byte_identically_through_output_cache() {
+    fn historical_full_drop_re_renders_byte_identically() {
         let request = cc_req(
             "reasoning-adjacency-frozen-full-drop",
             "cfg0",
@@ -28104,8 +26555,6 @@ pub(crate) mod tests {
             &BTreeMap::new(),
             0,
             false,
-            None,
-            true,
             true,
         )
         .unwrap();
@@ -28121,9 +26570,6 @@ pub(crate) mod tests {
                 .collect::<Vec<_>>()
         ));
 
-        let snapshot = SerializedOutputCacheSnapshot {
-            entries: first.cache_entries.clone(),
-        };
         let replay = build_output_with_tags(
             &core,
             &meta,
@@ -28135,18 +26581,15 @@ pub(crate) mod tests {
             &BTreeMap::new(),
             0,
             false,
-            Some(&snapshot),
-            false,
             true,
         )
         .unwrap();
-        assert!(replay.cache_stats.reused_items > 0);
         assert_eq!(serde_json::to_vec(&replay.messages).unwrap(), first_bytes);
         assert!(core.frozen_units.iter().all(|unit| unit.kind == "drop"));
     }
 
     #[test]
-    fn duplicate_tool_full_drop_replays_byte_identically_through_output_cache() {
+    fn duplicate_tool_full_drop_re_renders_byte_identically() {
         let calls = vec![
             WireBlock::bare(wire::BlockKind::ToolCall {
                 id: "duplicate-old".to_string(),
@@ -28239,15 +26682,10 @@ pub(crate) mod tests {
             &BTreeMap::new(),
             0,
             false,
-            None,
-            true,
             true,
         )
         .unwrap();
         let first_bytes = canonical_output(&first.messages);
-        let snapshot = SerializedOutputCacheSnapshot {
-            entries: first.cache_entries.clone(),
-        };
         let replay = build_output_with_tags(
             &core,
             &meta,
@@ -28259,12 +26697,9 @@ pub(crate) mod tests {
             &BTreeMap::new(),
             0,
             false,
-            Some(&snapshot),
-            false,
             true,
         )
         .unwrap();
-        assert!(replay.cache_stats.reused_items > 0);
         assert_eq!(canonical_output(&replay.messages), first_bytes);
         assert!(core.frozen_units.iter().all(|unit| unit.kind == "drop"));
     }
@@ -28755,7 +27190,6 @@ pub(crate) mod tests {
     #[test]
     fn unmatched_native_pair_is_unique_before_transition_and_replays_after_salted_bust() {
         let native_message = json!({
-            "absolute_ordinal": 1,
             "info": { "id": "pair-message", "role": "assistant" },
             "parts": [{
                 "type": "tool",
@@ -28885,7 +27319,6 @@ pub(crate) mod tests {
     #[test]
     fn combined_v1_and_v2_shapes_share_one_transition_fold() {
         let native_message = json!({
-            "absolute_ordinal": 3,
             "info": { "id": "combined-message", "role": "assistant" },
             "parts": [
                 {
@@ -29144,35 +27577,12 @@ pub(crate) mod tests {
         assert!(!steady_joined.contains('\u{a7}'), "{steady_joined}");
     }
 
-    fn output_cache_fixture(
-        m0: &str,
-        m1: &str,
-    ) -> (CoreState, ModuleMeta, TransformRequest, FlatProjection) {
-        let core = CoreState {
-            frozen_units: vec![
-                synth_region("m0", m0.to_string()),
-                synth_region("m1", m1.to_string()),
-            ],
-            ..CoreState::empty()
-        };
-        let meta = ModuleMeta::default();
-        let request = req(
-            "serialized-output-cache",
-            "cfg0",
-            vec![item("a", 1, "alpha"), item("b", 2, "beta")],
-        );
-        let projection = project_messages(&request.messages).unwrap();
-        (core, meta, request, projection)
-    }
-
     fn build_cached_fixture(
         core: &CoreState,
         meta: &ModuleMeta,
         request: &TransformRequest,
         projection: &FlatProjection,
         overlay: Option<&TagOverlayState>,
-        snapshot: Option<&SerializedOutputCacheSnapshot>,
-        prefix_dirty: bool,
     ) -> BuiltOutput {
         build_output_with_tags(
             core,
@@ -29185,8 +27595,6 @@ pub(crate) mod tests {
             &BTreeMap::new(),
             0,
             transition_consumed(core),
-            snapshot,
-            prefix_dirty,
             true,
         )
         .unwrap()
@@ -29215,10 +27623,10 @@ pub(crate) mod tests {
         )
         .unwrap();
         for mode in ["fresh", "pending", "lineage"] {
-            let mut messages = vec![item("foreign", 90, "new prompt")];
+            let mut messages = vec![item("foreign", 1, "new prompt")];
             for (mid, ordinal, mut ck) in [
-                ("replayed-call", 91, pair.assistant_msg.clone()),
-                ("replayed-result", 92, pair.tool_msg.clone()),
+                ("replayed-call", 2, pair.assistant_msg.clone()),
+                ("replayed-result", 3, pair.tool_msg.clone()),
             ] {
                 ck.meta.synthetic = false;
                 ck.meta.harness_id = Some(mid.to_string());
@@ -29243,6 +27651,9 @@ pub(crate) mod tests {
             if mode == "lineage" {
                 original.lineage_switched = true;
                 original.is_subagent = true;
+            }
+            if mode == "pending" {
+                original = switched(original);
             }
             let before = original.clone();
             let mut flagged = original.clone();
@@ -29345,11 +27756,11 @@ pub(crate) mod tests {
                 let firing_input = crate::history_summarizer_chunk::build_history_summarizer_chunk(
                     &original.messages,
                     &live,
-                    90,
+                    1,
                     1_000,
-                    91,
+                    2,
                 );
-                assert_eq!(firing_input.chunk.present_ordinals, [90, 91, 92]);
+                assert_eq!(firing_input.chunk.present_ordinals, [1, 2, 3]);
                 assert!(!firing_input.text.is_empty());
                 crate::attach_native_messages_with_tags(
                     &mut result.response,
@@ -29464,7 +27875,6 @@ pub(crate) mod tests {
         store
             .replace_history_segments("duplicate-tool-use", &[comp(1, 1, 1, "covered", "summary")])
             .unwrap();
-        let cache = Mutex::new(SerializedOutputCache::new(1024 * 1024));
         let context = smart_pctx();
         let todos = json!([{
             "content": "Preserve one synthetic pair",
@@ -29481,7 +27891,7 @@ pub(crate) mod tests {
         let estimate = |value: &str| value.len();
 
         let boot =
-            apply_once_with_estimator(&store, &base_request, &context, estimate, Some(&cache))
+            apply_once_with_estimator(&store, &resolved(&store, &base_request), &context, estimate)
                 .unwrap();
         assert_eq!(boot.response.action, "HARD");
         let pair = store
@@ -29509,9 +27919,13 @@ pub(crate) mod tests {
         });
         let replay_request = active_cc_req("duplicate-tool-use", "cfg0", replay_messages);
 
-        let warm =
-            apply_once_with_estimator(&store, &replay_request, &context, estimate, Some(&cache))
-                .unwrap();
+        let warm = apply_once_with_estimator(
+            &store,
+            &resolved(&store, &replay_request),
+            &context,
+            estimate,
+        )
+        .unwrap();
         // Replay would insert the stored synthetic pair between a live call and its result.
         // The renderer returns HARD to preserve adjacency between a live tool call and its result.
         // Each live tool exchange remains adjacent.
@@ -29521,14 +27935,6 @@ pub(crate) mod tests {
             Some("renderer_transition")
         );
         assert_no_duplicate_tool_use_ids(warm.response.messages());
-        assert!(
-            cache
-                .lock()
-                .unwrap()
-                .stats("duplicate-tool-use")
-                .reused_items
-                > 0
-        );
 
         store
             .append_pending_agent_drops(
@@ -29545,10 +27951,9 @@ pub(crate) mod tests {
         ]);
         let selected = apply_once_with_estimator(
             &store,
-            &selection_request,
+            &resolved(&store, &selection_request),
             &selection_context,
             estimate,
-            Some(&cache),
         )
         .unwrap();
 
@@ -29674,7 +28079,7 @@ pub(crate) mod tests {
             optimized_tag_work.tokenized_bytes,
         );
 
-        let first = build_cached_fixture(&core, &meta, &request, &projection, None, None, true);
+        let first = build_cached_fixture(&core, &meta, &request, &projection, None);
         let unindexed = build_output_with_tags(
             &core,
             &meta,
@@ -29686,8 +28091,6 @@ pub(crate) mod tests {
             &BTreeMap::new(),
             0,
             transition_consumed(&core),
-            None,
-            true,
             false,
         )
         .unwrap();
@@ -29696,26 +28099,7 @@ pub(crate) mod tests {
             canonical_output(&unindexed.messages),
             "indexed output must remain byte-identical to the unfixed scan path"
         );
-        let snapshot = SerializedOutputCacheSnapshot {
-            entries: first.cache_entries.clone(),
-        };
-        let replay = build_cached_fixture(
-            &core,
-            &meta,
-            &request,
-            &projection,
-            None,
-            Some(&snapshot),
-            false,
-        );
-        let fresh = build_cached_fixture(&core, &meta, &request, &projection, None, None, true);
-        assert_eq!(
-            canonical_output(&replay.messages),
-            canonical_output(&fresh.messages)
-        );
-        assert_eq!(replay.timings.identity_messages, MESSAGE_COUNT);
-        assert_eq!(replay.timings.cache_misses, 0);
-        assert_eq!(replay.timings.cache_hits, MESSAGE_COUNT + 2);
+        let replay = first;
 
         let timings = TransformTimings {
             total: replay.timings.total,
@@ -29723,11 +28107,6 @@ pub(crate) mod tests {
             blocks_by_mid: replay.timings.blocks_by_mid,
             build_frozen_unit_index: replay.timings.frozen_unit_index,
             full_drop_tool_ids: replay.timings.full_drop_tool_ids,
-            build_identity: replay.timings.identity,
-            build_identity_max: replay.timings.identity_max,
-            build_frozen_unit_scan: replay.timings.frozen_unit_scan,
-            build_cache_lookup: replay.timings.cache_lookup,
-            build_serialize_misses: replay.timings.serialize_misses,
             build_tail_loop: replay.timings.tail_loop,
             frozen_units: core.frozen_units.len(),
             tail_units_matched: frozen_units_matched_to_tail(
@@ -29741,13 +28120,9 @@ pub(crate) mod tests {
                 .iter()
                 .filter(|message| !message.meta.synthetic)
                 .count(),
-            build_identity_messages: replay.timings.identity_messages,
             tag_mint_candidates: optimized_tag_work.candidate_count,
             tag_mint_new: optimized_tag_work.inputs.len(),
             tag_mint_tokenized_bytes: optimized_tag_work.tokenized_bytes,
-            cache_hits: replay.timings.cache_hits,
-            cache_misses: replay.timings.cache_misses,
-            cache_dirty_skips: replay.timings.cache_dirty_skips,
             ..Default::default()
         };
         let served = replay
@@ -29773,305 +28148,11 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn serialized_output_cache_reuses_steady_state_and_matches_fresh_bytes() {
-        let (core, meta, request, projection) = output_cache_fixture("m0-v1", "m1-v1");
-        let before = crate::token_cache::local_stats();
-        let first = build_cached_fixture(&core, &meta, &request, &projection, None, None, true);
-        let snapshot = SerializedOutputCacheSnapshot {
-            entries: first.cache_entries.clone(),
-        };
-        let replay = build_cached_fixture(
-            &core,
-            &meta,
-            &request,
-            &projection,
-            None,
-            Some(&snapshot),
-            false,
-        );
-        let fresh = build_cached_fixture(&core, &meta, &request, &projection, None, None, true);
-        assert_eq!(crate::token_cache::local_stats().calls, before.calls);
-
-        assert_eq!(replay.cache_stats.serialized_items, 0);
-        assert_eq!(replay.cache_stats.reused_items, 4);
-        assert_eq!(
-            canonical_output(&replay.messages),
-            canonical_output(&fresh.messages)
-        );
-    }
-
-    #[test]
-    fn serialized_output_cache_tag_overlay_invalidates_only_its_message() {
-        let (core, meta, request, projection) = output_cache_fixture("m0-v1", "m1-v1");
-        let first = build_cached_fixture(&core, &meta, &request, &projection, None, None, true);
-        let snapshot = SerializedOutputCacheSnapshot {
-            entries: first.cache_entries.clone(),
-        };
-        let overlay = TagOverlayState {
-            tag_by_block_id: BTreeMap::from([("b#0".to_string(), 7)]),
-            ..Default::default()
-        };
-        let tagged = build_cached_fixture(
-            &core,
-            &meta,
-            &request,
-            &projection,
-            Some(&overlay),
-            Some(&snapshot),
-            false,
-        );
-        let fresh = build_cached_fixture(
-            &core,
-            &meta,
-            &request,
-            &projection,
-            Some(&overlay),
-            None,
-            true,
-        );
-
-        assert_eq!(tagged.cache_stats.serialized_items, 1);
-        assert_eq!(tagged.cache_stats.reused_items, 3);
-        assert_eq!(
-            canonical_output(&tagged.messages),
-            canonical_output(&fresh.messages)
-        );
-    }
-
-    #[test]
-    fn serialized_output_cache_drop_invalidates_only_the_target() {
-        let (core, meta, request, projection) = output_cache_fixture("m0-v1", "m1-v1");
-        let first = build_cached_fixture(&core, &meta, &request, &projection, None, None, true);
-        let snapshot = SerializedOutputCacheSnapshot {
-            entries: first.cache_entries.clone(),
-        };
-        let mut dropped_core = core.clone();
-        dropped_core
-            .frozen_units
-            .push(red_unit("b#0", "drop", "[dropped]"));
-        let dropped = build_cached_fixture(
-            &dropped_core,
-            &meta,
-            &request,
-            &projection,
-            None,
-            Some(&snapshot),
-            false,
-        );
-        let fresh = build_cached_fixture(
-            &dropped_core,
-            &meta,
-            &request,
-            &projection,
-            None,
-            None,
-            true,
-        );
-
-        assert_eq!(dropped.cache_stats.serialized_items, 1);
-        assert_eq!(dropped.cache_stats.reused_items, 3);
-        assert_eq!(
-            canonical_output(&dropped.messages),
-            canonical_output(&fresh.messages)
-        );
-    }
-
-    #[test]
-    fn serialized_output_cache_fold_refreshes_prefix_and_reuses_tail() {
-        let (core, meta, request, projection) = output_cache_fixture("m0-v1", "m1-v1");
-        let first = build_cached_fixture(&core, &meta, &request, &projection, None, None, true);
-        let snapshot = SerializedOutputCacheSnapshot {
-            entries: first.cache_entries.clone(),
-        };
-        let (folded_core, _, _, _) = output_cache_fixture("m0-v2", "m1-v2");
-        let folded = build_cached_fixture(
-            &folded_core,
-            &meta,
-            &request,
-            &projection,
-            None,
-            Some(&snapshot),
-            true,
-        );
-        let fresh =
-            build_cached_fixture(&folded_core, &meta, &request, &projection, None, None, true);
-
-        assert_eq!(folded.cache_stats.serialized_items, 2);
-        assert_eq!(folded.cache_stats.reused_items, 2);
-        assert_eq!(
-            canonical_output(&folded.messages),
-            canonical_output(&fresh.messages)
-        );
-    }
-
-    #[test]
-    fn serialized_output_cache_deep_charge_counts_message_metadata_and_none_rows() {
-        use std::mem::size_of;
-
-        fn manual_value_retained_bytes(value: &Value) -> usize {
-            fn heap(value: &Value) -> usize {
-                match value {
-                    Value::Null | Value::Bool(_) | Value::Number(_) => 0,
-                    Value::String(value) => value.capacity(),
-                    Value::Array(values) => values
-                        .capacity()
-                        .saturating_mul(size_of::<Value>())
-                        .saturating_add(values.iter().map(heap).sum::<usize>()),
-                    Value::Object(values) => values
-                        .len()
-                        .saturating_mul(
-                            size_of::<String>() + size_of::<Value>() + size_of::<usize>() * 3,
-                        )
-                        .saturating_add(
-                            values
-                                .iter()
-                                .map(|(key, value)| key.capacity().saturating_add(heap(value)))
-                                .sum::<usize>(),
-                        ),
-                }
-            }
-            size_of::<Value>().saturating_add(heap(value))
-        }
-
-        let input = Value::Object(
-            (0..64)
-                .map(|index| {
-                    (
-                        format!("k{index}"),
-                        serde_json::json!({"value": format!("v{index}"), "n": index}),
-                    )
-                })
-                .collect(),
-        );
-        let constructed = WireMessage::from_parts(
-            "assistant",
-            vec![WireBlock::bare(wire::BlockKind::ToolCall {
-                id: "call-output-heavy".to_string(),
-                name: "fixture_tool".to_string(),
-                input,
-                provider_executed: false,
-            })],
-            None,
-            wire::ProviderExtras::new(),
-            wire::HarnessMeta {
-                harness_id: Some("output-heavy".to_string()),
-                ..Default::default()
-            },
-        );
-        let message: WireMessage =
-            serde_json::from_value(serde_json::to_value(constructed).unwrap()).unwrap();
-        let served = ServedMessage::from_message(message);
-        let block = &served.message.content()[0];
-        let wire::BlockKind::ToolCall {
-            id, name, input, ..
-        } = block.kind()
-        else {
-            panic!("fixture must retain a tool call");
-        };
-        let block_extra = id
-            .capacity()
-            .saturating_add(name.capacity())
-            .saturating_add(manual_value_retained_bytes(input).saturating_sub(size_of::<Value>()));
-        let message_retained = size_of::<WireMessage>()
-            .saturating_add(served.message.role.capacity())
-            .saturating_add(
-                served
-                    .message
-                    .content()
-                    .len()
-                    .saturating_mul(size_of::<WireBlock>()),
-            )
-            .saturating_add(block_extra)
-            .saturating_add(
-                served
-                    .message
-                    .meta
-                    .harness_id
-                    .as_ref()
-                    .map_or(0, String::capacity),
-            );
-        let served_retained = crate::retained_size::ARC_ALLOCATION_OVERHEAD_BYTES
-            .saturating_add(message_retained)
-            .saturating_add(crate::retained_size::ARC_ALLOCATION_OVERHEAD_BYTES)
-            .saturating_add(served.canonical_bytes.len())
-            .saturating_add(crate::retained_size::ARC_ALLOCATION_OVERHEAD_BYTES)
-            .saturating_add(served.output_identity.len())
-            .saturating_add(crate::retained_size::ARC_ALLOCATION_OVERHEAD_BYTES)
-            .saturating_add(
-                served
-                    .block_fingerprints
-                    .len()
-                    .saturating_mul(size_of::<(String, usize)>()),
-            )
-            .saturating_add(
-                served
-                    .block_fingerprints
-                    .iter()
-                    .map(|(fingerprint, _)| fingerprint.capacity())
-                    .sum::<usize>(),
-            );
-        let mut entries = HashMap::new();
-        entries.insert(
-            "tail:output-heavy".to_string(),
-            SerializedOutputCacheEntry {
-                identity: "identity-output-heavy".to_string(),
-                served: Some(served.clone()),
-            },
-        );
-        let without_none =
-            SerializedOutputCache::entries_retained_bytes("fixture-session", &entries);
-        entries.insert(
-            "tail:metadata-only".to_string(),
-            SerializedOutputCacheEntry {
-                identity: "identity-metadata-only".to_string(),
-                served: None,
-            },
-        );
-        let buckets = entries.capacity().saturating_mul(8).saturating_add(6) / 7;
-        let map_allocation = buckets
-            .saturating_mul(size_of::<String>() + size_of::<SerializedOutputCacheEntry>() + 1);
-        let expected = map_allocation
-            .saturating_add(
-                entries
-                    .iter()
-                    .map(|(key, entry)| {
-                        key.capacity()
-                            .saturating_add(entry.identity.capacity())
-                            .saturating_add(entry.served.as_ref().map_or(0, |_| served_retained))
-                    })
-                    .sum::<usize>(),
-            )
-            .saturating_add(size_of::<SerializedOutputSession>())
-            .saturating_add(size_of::<usize>() * 3)
-            .saturating_add((size_of::<String>() + "fixture-session".len()).saturating_mul(2));
-        let retained = SerializedOutputCache::entries_retained_bytes("fixture-session", &entries);
-        let legacy = served.canonical_bytes.len();
-
-        assert!(retained >= legacy.saturating_mul(2));
-        assert!(
-            retained > without_none,
-            "served:None row must carry a charge"
-        );
-        assert!(
-            retained.abs_diff(expected) <= expected / 20,
-            "serialized-output estimate left 5% fixture tolerance: retained={retained} expected={expected}"
-        );
-    }
-
-    #[test]
-    fn serialized_output_cache_charges_retained_output_payloads_the_entries_do_not_own() {
-        let (core, meta, request, projection) = output_cache_fixture("m0-v1", "m1-v1");
-        let built = build_cached_fixture(&core, &meta, &request, &projection, None, None, true);
+    fn serialized_output_cache_charges_retained_output_payloads() {
+        let session = "serialized-output-cache";
         let mut cache = SerializedOutputCache::new(1024 * 1024);
-        cache.replace(
-            &request.session_id,
-            3,
-            built.cache_entries,
-            built.cache_stats,
-        );
-        let (before, _) = cache.metrics();
+        let before = 0;
 
-        // A pass-through output serializes its own copies instead of reusing the entries.
         let foreign =
             ServedMessage::from_message(WireMessage::synthetic_user_text("x".repeat(64 * 1024)));
         let payload = foreign.retained_bytes();
@@ -30079,7 +28160,7 @@ pub(crate) mod tests {
         output.push(foreign);
         let owned = payload + output.capacity() * std::mem::size_of::<ServedMessage>();
         cache.record_previous_output(
-            &request.session_id,
+            session,
             3,
             crate::edit_recipe::Revision::parse("rev-1").unwrap(),
             Arc::new(output),
@@ -30096,7 +28177,7 @@ pub(crate) mod tests {
             WireMessage::synthetic_user_text("replacement"),
         )]);
         cache.record_previous_output(
-            &request.session_id,
+            session,
             3,
             crate::edit_recipe::Revision::parse("rev-2").unwrap(),
             Arc::clone(&replacement),
@@ -30106,7 +28187,7 @@ pub(crate) mod tests {
             before + previous_output_retained_bytes(&replacement),
             "replacement releases the displaced output charge"
         );
-        cache.take_previous_output(&request.session_id, 3);
+        cache.take_previous_output(session, 3);
         assert_eq!(
             cache.metrics().0,
             before,
@@ -30114,24 +28195,34 @@ pub(crate) mod tests {
         );
     }
 
+    /// A take under a later revert epoch clears the entry and hands out nothing.
     #[test]
-    fn serialized_output_cache_revert_epoch_bump_evicts_session() {
-        let (core, meta, request, projection) = output_cache_fixture("m0-v1", "m1-v1");
-        let built = build_cached_fixture(&core, &meta, &request, &projection, None, None, true);
+    fn serialized_output_cache_take_under_a_new_epoch_returns_nothing() {
         let mut cache = SerializedOutputCache::new(1024 * 1024);
-        cache.replace(
-            &request.session_id,
-            3,
-            built.cache_entries,
-            built.cache_stats,
-        );
-        assert!(!cache.snapshot(&request.session_id, 3).entries.is_empty());
+        let output = Arc::new(vec![ServedMessage::from_message(
+            WireMessage::synthetic_user_text("served"),
+        )]);
+        let revision = crate::edit_recipe::Revision::parse("rev-1").unwrap();
+        cache.record_previous_output("ses", 3, revision, output);
+        assert!(cache.take_previous_output("ses", 4).is_none());
+        assert_eq!(cache.metrics(), (0, 0));
+    }
 
-        assert!(cache.snapshot(&request.session_id, 4).entries.is_empty());
-        assert_eq!(
-            cache.stats(&request.session_id),
-            SerializedOutputCacheStats::default()
-        );
+    /// Under a budget that fits one output, a second session's record evicts the first.
+    #[test]
+    fn serialized_output_cache_evicts_the_least_recently_recorded_session() {
+        let output = || {
+            Arc::new(vec![ServedMessage::from_message(
+                WireMessage::synthetic_user_text("served"),
+            )])
+        };
+        let revision = || crate::edit_recipe::Revision::parse("rev-1").unwrap();
+        let mut cache = SerializedOutputCache::new(previous_output_retained_bytes(&output()));
+        cache.record_previous_output("a", 1, revision(), output());
+        cache.record_previous_output("b", 1, revision(), output());
+        assert_eq!(cache.metrics().1, 1);
+        assert!(cache.take_previous_output("a", 1).is_none());
+        assert!(cache.take_previous_output("b", 1).is_some());
     }
 
     fn seed_fake_compaction_prior(store: &MemoryStore, key: &str) {
@@ -30222,8 +28313,11 @@ pub(crate) mod tests {
             first.lineage_descent_disposition.as_deref(),
             Some("descended")
         );
-        assert_eq!(first.ordinal_continuation_base, Some(10));
-        assert_eq!(first.coverage_ordinal, Some(11));
+        assert_eq!(
+            store.load("B").unwrap().meta.ordinal_continuation_base,
+            Some(10)
+        );
+        assert_eq!(store.load("B").unwrap().meta.coverage_ordinal, Some(11));
         assert!(!first.reconcile_pending);
         assert_eq!(first.messages().len(), 4);
         assert!(first.messages()[0].meta.synthetic && first.messages()[1].meta.synthetic);
@@ -30293,25 +28387,11 @@ pub(crate) mod tests {
         let edited_response = run(&store, &edited, &spine());
         assert_eq!(edited_response.action, "SOFT+");
         assert!(edited_response.reconcile_pending);
-        assert_eq!(edited_response.coverage_ordinal, Some(11));
+        assert_eq!(store.load("B").unwrap().meta.coverage_ordinal, Some(11));
         assert_eq!(
             edited_response.messages().len(),
             4,
             "anchor edit cannot trim the tail"
-        );
-
-        let mut deleted = request.clone();
-        deleted.render_config = "anchor-deleted".to_string();
-        deleted.messages.remove(0);
-        Arc::make_mut(&mut deleted.messages[0]).ordinal = 1;
-        Arc::make_mut(&mut deleted.messages[0]).ck.meta.ordinal = Some(1);
-        let deleted_response = run(&store, &deleted, &spine());
-        assert_eq!(deleted_response.action, "SOFT+");
-        assert!(deleted_response.reconcile_pending);
-        assert_eq!(
-            deleted_response.messages().len(),
-            3,
-            "deleted anchor stays no-trim"
         );
 
         let mut rollover = request.clone();
@@ -30340,6 +28420,34 @@ pub(crate) mod tests {
             active_response.messages()[2].content(),
             active_surface.messages[0].ck.content(),
             "the anchor message is exempt from both overlays and production strips"
+        );
+
+        let mut deleted = request.clone();
+        deleted.render_config = "anchor-deleted".to_string();
+        deleted.messages.remove(0);
+        let deferred = run(&store, &deleted, &spine());
+        assert_eq!(deferred.action, "SOFT+");
+        assert!(deferred.reconcile_pending);
+        assert_eq!(store.load_history_segments("B").unwrap().len(), 3);
+        let deleted_response = run(&store, &deleted, &spine());
+        assert_eq!(deleted_response.action, "HARD", "{deleted_response:?}");
+        assert_ne!(
+            deleted_response.materialize_reason.as_deref(),
+            Some("lineage_anchor_mismatch")
+        );
+        assert!(!deleted_response.reconcile_pending);
+        assert!(store.load_history_segments("B").unwrap().is_empty());
+        let reset = store.load("B").unwrap().meta;
+        assert_eq!(reset.ordinal_continuation_base, None);
+        assert_eq!(reset.anchor_block_id, None);
+        assert_eq!(
+            deleted_response
+                .messages()
+                .iter()
+                .filter(|message| !message.meta.synthetic)
+                .count(),
+            1,
+            "a deleted anchor resets the lineage and serves the surviving tail untrimmed"
         );
     }
 
@@ -30385,6 +28493,11 @@ pub(crate) mod tests {
         );
         let rewind_response = run(&store, &rewind, &spine());
         assert_eq!(rewind_response.lineage_switch_consumed_id, Some(302));
+        assert_eq!(
+            rewind_response.lineage_descent_disposition.as_deref(),
+            Some("not_compaction_shape"),
+            "a first-time terminal refusal is reported as itself, not as a replay"
+        );
         assert_eq!(
             store
                 .load("rewind")
@@ -30515,96 +28628,6 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn lineage_rebase_preserves_unflagged_synthetic_head() {
-        let pair = crate::injection::build_synthetic_todo_pair(
-            r#"[{"content":"rebase replay","status":"pending","priority":"high"}]"#,
-        )
-        .unwrap();
-        let summary = continuation_summary("synthetic-rebase");
-        let mut observations = Vec::new();
-        for flagged in [false, true] {
-            let dir = tempfile::tempdir().unwrap();
-            let store = store(dir.path());
-            seed_fake_compaction_prior(&store, "A");
-            let descent = fake_compaction_request(
-                "B",
-                "A",
-                2,
-                601,
-                true,
-                fake_compaction_messages("2026-08-06", &summary),
-            );
-            assert_eq!(
-                run(&store, &descent, &spine())
-                    .lineage_descent_disposition
-                    .as_deref(),
-                Some("descended")
-            );
-            let mut head = pair.assistant_msg.clone();
-            head.content_mut()
-                .extend(pair.tool_msg.content().iter().cloned());
-            head.meta.synthetic = false;
-            head.meta.harness_id = Some("synthetic-head".into());
-            let mut messages = vec![IngressMessage {
-                mid: "synthetic-head".into(),
-                ordinal: 1,
-                ck: head,
-            }];
-            messages.extend(fake_compaction_messages("2026-08-06", &summary));
-            messages.push(item("succ-13", 3, "successor turn thirteen"));
-            let mut request: TransformRequest = serde_json::from_value(
-                serde_json::to_value(fake_compaction_request("B", "A", 2, 601, true, messages))
-                    .unwrap(),
-            )
-            .unwrap();
-            Arc::make_mut(&mut request.messages[0]).ck.meta.synthetic = flagged;
-            assert!(request.lineage_switched && !request.is_subagent);
-            let result = transform_with_projection(&store, &request, &smart_pctx()).unwrap();
-            assert_eq!(
-                result.response.lineage_descent_disposition.as_deref(),
-                Some("replay")
-            );
-            assert_eq!(result.response.ordinal_continuation_base, Some(10));
-            assert!(!result.response.reconcile_pending);
-            assert_eq!(request.messages[0].ordinal, 1);
-            let blocks = &result.projection.blocks;
-            let head = blocks.iter().find(|block| block.mid == "synthetic-head");
-            let next = blocks.iter().find(|block| block.mid != "synthetic-head");
-            let (head, next) = (head.unwrap(), next.unwrap());
-            assert_eq!(
-                head.ordinal, 11,
-                "the non-subagent pass must actually rebase"
-            );
-            assert_eq!(
-                next.ordinal, 11,
-                "synthetic head must not consume a live ordinal"
-            );
-            assert!(head.synthetic);
-            assert!(!next.synthetic);
-            assert!(
-                result
-                    .projection
-                    .blocks
-                    .iter()
-                    .filter(|block| block.mid == "synthetic-head")
-                    .all(|block| block.synthetic)
-            );
-            assert!(
-                !result
-                    .projection
-                    .identity_by_mid
-                    .contains_key("synthetic-head")
-            );
-            observations.push((
-                canonical_output(result.response.messages()),
-                served_output_fingerprints(result.response.messages()),
-                result.projection,
-            ));
-        }
-        assert_eq!(observations[0], observations[1]);
-    }
-
-    #[test]
     fn continued_lineage_tolerates_a_synthetic_head_like_the_seam_check() {
         // The seam check uses the first non-synthetic message so a synthetic head cannot shift the boundary.
         // The anchor check also uses the first non-synthetic message; otherwise a synthetic head can pass the seam check and defer indefinitely.
@@ -30660,6 +28683,82 @@ pub(crate) mod tests {
             !response.reconcile_pending,
             "synthetic head must not latch a lineage_anchor_mismatch defer"
         );
+    }
+
+    #[test]
+    fn continued_lineage_keeps_folding_once_coverage_passes_the_anchor() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(dir.path());
+        seed_fake_compaction_prior(&store, "A");
+        let summary = continuation_summary("past-anchor");
+        let descent = fake_compaction_request(
+            "B",
+            "A",
+            2,
+            701,
+            true,
+            fake_compaction_messages("2026-08-06", &summary),
+        );
+        assert_eq!(
+            run(&store, &descent, &spine())
+                .lineage_descent_disposition
+                .as_deref(),
+            Some("descended")
+        );
+        let placeholder = store.load_history_segments("B").unwrap().pop().unwrap();
+        let successor = placeholder.sequence + 1;
+        store
+            .append_history_segments("B", &[comp(successor, 12, 13, "succ-13", "successor")])
+            .unwrap();
+
+        let mut fold = req(
+            "B",
+            "past-anchor-fold",
+            vec![
+                wire_item(
+                    "user",
+                    "summary",
+                    11,
+                    &[
+                        "<system-reminder>Today's date: 2026-08-06</system-reminder>",
+                        &summary,
+                    ],
+                ),
+                wire_item("assistant", "tail", 12, &["continued answer"]),
+                item("succ-13", 13, "successor turn thirteen"),
+                item("succ-14", 14, "successor turn fourteen"),
+            ],
+        );
+        fold.boundary = Some(Some(BoundaryAnchor {
+            mid: "summary".to_string(),
+            sequence: placeholder.sequence,
+        }));
+        let folded = run(&store, &fold, &spine());
+        assert_eq!(folded.action, "HARD");
+        assert_eq!(folded.boundary_id, "succ-13#0");
+
+        // The window now starts at the rendered boundary, past the anchor message.
+        let mut next = req(
+            "B",
+            "past-anchor-next",
+            vec![
+                item("succ-13", 13, "successor turn thirteen"),
+                item("succ-14", 14, "successor turn fourteen"),
+                item("succ-15", 15, "successor turn fifteen"),
+            ],
+        );
+        next.boundary = Some(Some(BoundaryAnchor {
+            mid: "succ-13".to_string(),
+            sequence: successor,
+        }));
+        let response = run(&store, &next, &spine());
+        assert_eq!(response.action, "HARD", "{response:?}");
+        assert!(!response.reconcile_pending);
+        assert_ne!(
+            response.materialize_reason.as_deref(),
+            Some("lineage_anchor_mismatch")
+        );
+        assert_eq!(response.boundary_id, "succ-13#0");
     }
 
     #[test]

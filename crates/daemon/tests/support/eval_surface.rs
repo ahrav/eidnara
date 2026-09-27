@@ -193,8 +193,9 @@ pub fn transform_request(world: &World, upto: usize, tail: Option<&str>, knobs: 
     }
     let mut request = json!({
             "kind": "transform",
+            "v": 3,
+            "boundary": null,
             "base_revision": "surface-base-1",
-            "v": 2,
             "session_id": world.session,
             "serializer_profile": "opencode-aisdk",
             "render_config": "surface-config",

@@ -6,46 +6,12 @@ import { join } from "node:path";
 import { isRecord } from "../../shared/record-type-guard";
 import {
     __moduleWireTest,
-    annotateOrdinals,
     buildPagedModuleTransformPayloads,
     encodeOpenCodeMessagesToCk,
     MODULE_ITEM_CONTINUATION_KEY,
-    MODULE_ORDINAL_PAGE_SIZE,
     MODULE_PAGE_MAX_BYTES,
-    type ModuleOrdinalMemo,
-    ORDINAL_ENTRY_RETAINED_BYTES,
-    type OrdinalResolution,
-    type OrdinalScanBudget,
-    type PrimedOrdinalMemo,
-    primeOrdinalMemo,
+    MODULE_UNPAGED_TRANSFORM_MAX_BYTES,
 } from "./module-wire";
-import { setRawMessageProvider } from "./read-session-chunk";
-import type { MessageLike } from "./tag-content-primitives";
-
-/** The owner refuses a reservation by throwing; the scan surfaces that error unchanged. */
-class ScanBudgetRefused extends Error {}
-
-function unboundedScanBudget(signal = new AbortController().signal): OrdinalScanBudget {
-    return { signal, reserve: () => {} };
-}
-
-/** Test-only composition of the two resolver halves. */
-async function resolveOrdinalsForModule(args: {
-    sessionId: string;
-    messages: MessageLike[];
-    memo: ModuleOrdinalMemo;
-    provisionalBase?: number;
-}): Promise<
-    | OrdinalResolution
-    | (Extract<OrdinalResolution, { ok: true }> & PrimedOrdinalMemo & { memoGeneration: number })
-> {
-    const primed = await primeOrdinalMemo({ ...args, budget: unboundedScanBudget() });
-    if (!primed.ok) return primed;
-    const resolved = annotateOrdinals({ ...args, primed: primed.primed });
-    return resolved.ok
-        ? { ...resolved, ...primed.primed, memoGeneration: args.memo.generation }
-        : resolved;
-}
 
 describe("encodeOpenCodeMessagesToCk", () => {
     it("marks a collapsed synthetic todo pair as synthetic CK ingress", () => {
@@ -206,29 +172,17 @@ describe("encodeOpenCodeMessagesToCk", () => {
         expect((encoded.ck.content as Array<{ kind: { id: string } }>)[0]?.kind.id).toBe("");
     });
 
-    it("preserves an explicit zero absolute ordinal", () => {
+    it("carries no ordinal in the CK message or its meta", () => {
         const [encoded] = encodeOpenCodeMessagesToCk([
             {
                 info: { id: "msg_leading_synthetic", role: "user" },
                 parts: [{ type: "text", text: "preamble", synthetic: true }],
-                absolute_ordinal: 0,
+                absolute_ordinal: 4,
             },
         ]);
 
-        expect(encoded.ordinal).toBe(0);
-        expect(encoded.ck.meta).toMatchObject({ ordinal: 0, synthetic: true });
-    });
-
-    it("ignores explicit ordinals the daemon cannot read as u64", () => {
-        const ordinals = encodeOpenCodeMessagesToCk([
-            { info: { id: "o1", role: "user" }, parts: [], absolute_ordinal: 1e21 },
-            { info: { id: "o2", role: "user" }, parts: [], absolute_ordinal: 2 ** 64 },
-            { info: { id: "o3", role: "user" }, parts: [], absolute_ordinal: -1 },
-            { info: { id: "o4", role: "user" }, parts: [], absolute_ordinal: 1.5 },
-            { info: { id: "o5", role: "user" }, parts: [], absolute_ordinal: 2 ** 63 },
-        ]).map((message) => message.ordinal);
-        // The first four fall back to `index + 1`; 2^63 survives because its wire text fits u64.
-        expect(ordinals).toEqual([1, 2, 3, 4, 2 ** 63]);
+        expect(JSON.stringify(encoded)).not.toContain("ordinal");
+        expect(encoded.ck.meta).toMatchObject({ synthetic: true });
     });
 
     it("propagates provider-executed metadata to the call and result blocks", () => {
@@ -301,7 +255,6 @@ describe("encodeOpenCodeMessagesToCk", () => {
         const [encoded] = encodeOpenCodeMessagesToCk([
             {
                 info: { id: "msg_no_call_id", role: "assistant" },
-                absolute_ordinal: 7,
                 parts: [
                     { type: "text", text: "lead" },
                     {
@@ -319,14 +272,14 @@ describe("encodeOpenCodeMessagesToCk", () => {
         const kinds = (encoded.ck.content as Array<{ kind: Record<string, unknown> }>).map(
             (block) => block.kind,
         );
-        // `synth-tool-{ordinal}-{part_index}-{tool_name}-{stable_hash_prefix(input, 12)}`
+        // `synth-tool-{window position}-{part_index}-{tool_name}-{stable_hash_prefix(input, 12)}`
         expect(kinds[1]).toMatchObject({
             type: "tool_call",
-            id: "synth-tool-7-1-read-aac27fab24fb",
+            id: "synth-tool-1-1-read-aac27fab24fb",
         });
         expect(kinds[2]).toMatchObject({
             type: "tool_result",
-            id: "synth-tool-7-1-read-aac27fab24fb",
+            id: "synth-tool-1-1-read-aac27fab24fb",
         });
     });
 
@@ -710,8 +663,15 @@ describe("encodeOpenCodeMessagesToCk", () => {
             "redacted_thinking",
             "reasoning_cache_control",
         ]);
+        // The golden predates revision 3, whose CK ingress carries no ordinal.
+        const withoutOrdinals = (value: unknown): unknown =>
+            JSON.parse(
+                JSON.stringify(value, (key, field) => (key === "ordinal" ? undefined : field)),
+            );
         for (const fixture of golden.cases) {
-            expect(encodeOpenCodeMessagesToCk(fixture.raw_messages)).toEqual(fixture.encoded_input);
+            expect(encodeOpenCodeMessagesToCk(fixture.raw_messages)).toEqual(
+                withoutOrdinals(fixture.encoded_input) as typeof fixture.encoded_input,
+            );
         }
     });
 });
@@ -827,778 +787,6 @@ describe("transform page digest canonical JSON", () => {
     });
 });
 
-describe("resolveOrdinalsForModule message identity", () => {
-    it("resolves a top-level-only id and an explicitly empty id as identities, as the encoder and daemon do", async () => {
-        for (const [sessionId, message, mid] of [
-            [
-                "module-wire-top-level-id",
-                {
-                    info: { role: "user", sessionID: "module-wire-top-level-id" },
-                    id: "m-1",
-                    parts: [],
-                },
-                "m-1",
-            ],
-            [
-                "module-wire-empty-id",
-                { info: { id: "", role: "user", sessionID: "module-wire-empty-id" }, parts: [] },
-                "",
-            ],
-        ] as const) {
-            const unregister = setRawMessageProvider(sessionId, {
-                readMessages: () => [],
-                readMessageOrdinalPage: () => [],
-                getStoredMessageCount: () => 1,
-            });
-            try {
-                const resolved = await resolveOrdinalsForModule({
-                    sessionId,
-                    messages: [message] as unknown as MessageLike[],
-                    memo: {
-                        generation: 1,
-                        memoGeneration: 1,
-                        entries: new Map([[mid, 1]]),
-                        anchor: { timeCreated: 1, id: mid },
-                        storedCount: 1,
-                        canonicalCount: 1,
-                    },
-                });
-                expect(resolved.ok, sessionId).toBe(true);
-                if (!resolved.ok) throw new Error(resolved.reason);
-                expect(
-                    encodeOpenCodeMessagesToCk(resolved.annotatedInput)[0],
-                    sessionId,
-                ).toMatchObject({ mid, ordinal: 1 });
-            } finally {
-                unregister();
-            }
-        }
-    });
-});
-
-describe("primeOrdinalMemo bounded staging", () => {
-    for (const fault of [
-        "already-aborted",
-        "page-abort",
-        "page-boundary-abort",
-        "page-throw",
-        "reserve-abort",
-        "reserve-throw",
-        "reserve-refuse",
-        "count-abort",
-        "scan-return-abort",
-    ] as const) {
-        for (const mode of ["generation-reset", "unprimed", "incremental"] as const) {
-            it(`keeps the supplied map untouched on ${fault} during ${mode}`, async () => {
-                const sessionId = `ordinal-${fault}-${mode}`;
-                const controller = new AbortController();
-                const failure = new Error(fault);
-                const rows = Array.from({ length: MODULE_ORDINAL_PAGE_SIZE + 1 }, (_, index) => ({
-                    id: `m-${index + 1}`,
-                    timeCreated: index + 1,
-                    contributesOrdinal: true,
-                    hasValidInfo: true,
-                }));
-                const entries = new Map([["prior", 1]]);
-                const set = spyOn(entries, "set");
-                const clear = spyOn(entries, "clear");
-                const pageSizes: number[] = [];
-                const charges: number[] = [];
-                let countReads = 0;
-                const unregister = setRawMessageProvider(sessionId, {
-                    readMessages: () => {
-                        throw new Error("ordinal scans must use the paged provider");
-                    },
-                    readMessageOrdinalPage: (after, limit) => {
-                        const start = after?.timeCreated ?? 0;
-                        const page = rows.slice(start, start + limit);
-                        pageSizes.push(page.length);
-                        if (fault === "page-throw") throw failure;
-                        if (fault === "page-abort") controller.abort(failure);
-                        if (fault === "page-boundary-abort") {
-                            queueMicrotask(() => controller.abort(failure));
-                        }
-                        return page;
-                    },
-                    getStoredMessageCount: () => {
-                        countReads += 1;
-                        if (fault === "count-abort") controller.abort(failure);
-                        if (fault === "scan-return-abort") {
-                            queueMicrotask(() => controller.abort(failure));
-                        }
-                        return rows.length + (mode === "incremental" ? 1 : 0);
-                    },
-                });
-                try {
-                    if (fault === "already-aborted") controller.abort(failure);
-                    const pending = primeOrdinalMemo({
-                        sessionId,
-                        memo: {
-                            generation: 2,
-                            memoGeneration: mode === "generation-reset" ? 1 : 2,
-                            entries,
-                            anchor: { timeCreated: 0, id: "prior" },
-                            storedCount: mode === "unprimed" ? null : 1,
-                            canonicalCount: 1,
-                        },
-                        budget: {
-                            signal: controller.signal,
-                            reserve: (bytes) => {
-                                charges.push(bytes);
-                                if (fault === "reserve-throw") throw failure;
-                                if (fault === "reserve-abort") controller.abort(failure);
-                                if (fault === "reserve-refuse") throw new ScanBudgetRefused();
-                            },
-                        },
-                    });
-                    if (fault === "reserve-refuse") {
-                        await expect(pending).rejects.toBeInstanceOf(ScanBudgetRefused);
-                    } else {
-                        await expect(pending).rejects.toBe(failure);
-                    }
-                    const completedScan = fault === "count-abort" || fault === "scan-return-abort";
-                    expect(pageSizes).toEqual(
-                        fault === "already-aborted"
-                            ? []
-                            : completedScan
-                              ? [MODULE_ORDINAL_PAGE_SIZE, 1]
-                              : [MODULE_ORDINAL_PAGE_SIZE],
-                    );
-                    expect(countReads).toBe(completedScan ? 1 : 0);
-                    expect(charges).toHaveLength(
-                        fault === "already-aborted" ||
-                            fault === "page-throw" ||
-                            fault === "page-abort"
-                            ? 0
-                            : completedScan
-                              ? 2
-                              : 1,
-                    );
-                    expect(entries).toEqual(new Map([["prior", 1]]));
-                    expect(set).not.toHaveBeenCalled();
-                    expect(clear).not.toHaveBeenCalled();
-                } finally {
-                    unregister();
-                    set.mockRestore();
-                    clear.mockRestore();
-                }
-            });
-        }
-    }
-
-    for (const idPrefix of ["short", "é😀".repeat(4096)]) {
-        it(`charges row and memo storage plus ${idPrefix.length > 5 ? "long" : "short"} IDs at exact byte boundaries`, async () => {
-            const sessionId = `ordinal-byte-boundary-${idPrefix.length}`;
-            const rows = Array.from({ length: MODULE_ORDINAL_PAGE_SIZE + 1 }, (_, index) => ({
-                id: `${index === 0 ? idPrefix : "m"}-${index}`,
-                timeCreated: index + 1,
-                contributesOrdinal: index !== 0,
-                hasValidInfo: true,
-            }));
-            // A row and its eventual memo slot share the ID string; even summary IDs stay live during the scan.
-            const pageBytes = [
-                rows.slice(0, MODULE_ORDINAL_PAGE_SIZE),
-                rows.slice(MODULE_ORDINAL_PAGE_SIZE),
-            ].map((page) =>
-                page.reduce(
-                    (sum, row) => sum + 2 * ORDINAL_ENTRY_RETAINED_BYTES + 2 * row.id.length,
-                    0,
-                ),
-            );
-            const totalBytes = pageBytes[0] + pageBytes[1];
-            for (const limitBytes of [pageBytes[0] - 1, pageBytes[0], totalBytes - 1, totalBytes]) {
-                const original = new Map([[rows.at(-1)!.id, 97]]);
-                const entries = new Map(original);
-                const set = spyOn(entries, "set");
-                const clear = spyOn(entries, "clear");
-                const charges: number[] = [];
-                let retainedBytes = 0;
-                let pageReads = 0;
-                let countReads = 0;
-                const unregister = setRawMessageProvider(sessionId, {
-                    readMessages: () => {
-                        throw new Error("ordinal scans must use the paged provider");
-                    },
-                    readMessageOrdinalPage: (after, limit) => {
-                        pageReads += 1;
-                        const start = after?.timeCreated ?? 0;
-                        return rows.slice(start, start + limit);
-                    },
-                    getStoredMessageCount: () => {
-                        countReads += 1;
-                        return rows.length;
-                    },
-                });
-                try {
-                    const pending = primeOrdinalMemo({
-                        sessionId,
-                        memo: { generation: 2, memoGeneration: 1, entries, continuationBase: 97 },
-                        budget: {
-                            signal: new AbortController().signal,
-                            reserve: (bytes) => {
-                                charges.push(bytes);
-                                if (bytes > limitBytes - retainedBytes)
-                                    throw new ScanBudgetRefused();
-                                retainedBytes += bytes;
-                            },
-                        },
-                    });
-                    if (limitBytes === totalBytes) {
-                        expect(await pending).toEqual({
-                            ok: true,
-                            primed: {
-                                memoAnchor: { timeCreated: rows.length, id: rows.at(-1)!.id },
-                                memoStoredCount: rows.length,
-                                memoCanonicalCount: 97 + MODULE_ORDINAL_PAGE_SIZE,
-                            },
-                        });
-                        expect(entries).toEqual(
-                            new Map(rows.slice(1).map((row, index) => [row.id, 98 + index])),
-                        );
-                        expect(retainedBytes).toBe(totalBytes);
-                    } else {
-                        await expect(pending).rejects.toBeInstanceOf(ScanBudgetRefused);
-                        expect(entries).toEqual(original);
-                        expect(set).not.toHaveBeenCalled();
-                        expect(clear).not.toHaveBeenCalled();
-                        expect(retainedBytes).toBe(limitBytes < pageBytes[0] ? 0 : pageBytes[0]);
-                    }
-                    expect(pageReads).toBe(limitBytes < pageBytes[0] ? 1 : 2);
-                    expect(charges).toEqual(limitBytes < pageBytes[0] ? [pageBytes[0]] : pageBytes);
-                    expect(countReads).toBe(limitBytes === totalBytes ? 1 : 0);
-                } finally {
-                    unregister();
-                    set.mockRestore();
-                    clear.mockRestore();
-                }
-            }
-        });
-    }
-
-    for (const outcome of [
-        "valid",
-        "count-mismatch",
-        "ordinal-mismatch",
-        "abort-boundary",
-        "abort-return",
-    ] as const) {
-        it(`preserves the memo through a full restart ending in ${outcome}`, async () => {
-            const sessionId = `ordinal-restart-${outcome}`;
-            const controller = new AbortController();
-            const failure = new Error(outcome);
-            const rows = Array.from({ length: MODULE_ORDINAL_PAGE_SIZE + 1 }, (_, index) => ({
-                id: `m-${index}`,
-                timeCreated: index + 1,
-                contributesOrdinal: index !== 0 || outcome === "ordinal-mismatch",
-                hasValidInfo: true,
-            }));
-            const last = rows.at(-1)!;
-            const original = new Map([[last.id, MODULE_ORDINAL_PAGE_SIZE]]);
-            const entries = new Map(original);
-            const set = spyOn(entries, "set");
-            const clear = spyOn(entries, "clear");
-            const pageStarts: number[] = [];
-            let countReads = 0;
-            const unregister = setRawMessageProvider(sessionId, {
-                readMessages: () => {
-                    throw new Error("ordinal scans must use the paged provider");
-                },
-                readMessageOrdinalPage: (after, limit) => {
-                    expect(entries).toEqual(original);
-                    expect(set).not.toHaveBeenCalled();
-                    expect(clear).not.toHaveBeenCalled();
-                    const start = after?.timeCreated ?? 0;
-                    pageStarts.push(start);
-                    if (start === 0 && outcome === "abort-boundary") {
-                        queueMicrotask(() => controller.abort(failure));
-                    }
-                    return rows.slice(start, start + limit);
-                },
-                getStoredMessageCount: () => {
-                    countReads += 1;
-                    expect(entries).toEqual(original);
-                    if (countReads === 2 && outcome === "abort-return") {
-                        queueMicrotask(() => controller.abort(failure));
-                    }
-                    return rows.length + (outcome === "count-mismatch" ? 1 : 0);
-                },
-            });
-            try {
-                const pending = primeOrdinalMemo({
-                    sessionId,
-                    memo: {
-                        generation: 1,
-                        memoGeneration: 1,
-                        entries,
-                        anchor: { timeCreated: last.timeCreated, id: last.id },
-                        storedCount: MODULE_ORDINAL_PAGE_SIZE,
-                        canonicalCount: MODULE_ORDINAL_PAGE_SIZE,
-                    },
-                    budget: unboundedScanBudget(controller.signal),
-                });
-                if (outcome === "abort-boundary" || outcome === "abort-return") {
-                    await expect(pending).rejects.toBe(failure);
-                } else if (outcome === "valid") {
-                    expect((await pending).ok).toBe(true);
-                    expect(entries).toEqual(
-                        new Map(rows.slice(1).map((row, index) => [row.id, index + 1])),
-                    );
-                } else {
-                    expect(await pending).toEqual({
-                        ok: false,
-                        reason: "mismatch",
-                        ...(outcome === "ordinal-mismatch" ? { messageId: last.id } : {}),
-                    });
-                }
-                if (outcome !== "valid") {
-                    expect(entries).toEqual(original);
-                    expect(set).not.toHaveBeenCalled();
-                    expect(clear).not.toHaveBeenCalled();
-                }
-                expect(pageStarts).toEqual(
-                    outcome === "abort-boundary"
-                        ? [rows.length, 0]
-                        : [rows.length, 0, MODULE_ORDINAL_PAGE_SIZE],
-                );
-                expect(countReads).toBe(outcome === "abort-boundary" ? 1 : 2);
-            } finally {
-                unregister();
-                set.mockRestore();
-                clear.mockRestore();
-            }
-        });
-    }
-});
-
-describe("resolveOrdinalsForModule stored-count races", () => {
-    it("recovers on the next call after a row lands between the page and count reads", async () => {
-        const sessionId = "module-wire-count-race";
-        const rows = [
-            { id: "m-1", timeCreated: 1, contributesOrdinal: true, hasValidInfo: true },
-            { id: "m-2", timeCreated: 2, contributesOrdinal: true, hasValidInfo: true },
-        ];
-        let raceOnce = false;
-        const unregister = setRawMessageProvider(sessionId, {
-            readMessages: () => rows,
-            readMessageOrdinalPage: (after, limit) =>
-                rows
-                    .filter(
-                        (row) =>
-                            !after ||
-                            row.timeCreated > after.timeCreated ||
-                            (row.timeCreated === after.timeCreated && row.id > after.id),
-                    )
-                    .slice(0, limit),
-            getStoredMessageCount: () => {
-                // The count read observes a row the page read did not.
-                if (raceOnce) {
-                    raceOnce = false;
-                    rows.push({
-                        id: "m-4",
-                        timeCreated: 4,
-                        contributesOrdinal: true,
-                        hasValidInfo: true,
-                    });
-                }
-                return rows.length;
-            },
-        });
-        const messages = ["m-1", "m-2", "m-3"].map((id) => ({
-            info: { id, role: "user", sessionID: sessionId },
-            parts: [{ type: "text", text: id }],
-        })) as MessageLike[];
-        const memo = {
-            generation: 1,
-            memoGeneration: 1,
-            entries: new Map<string, number>(),
-            anchor: null,
-            storedCount: null,
-            canonicalCount: 0,
-        };
-        try {
-            const primed = await resolveOrdinalsForModule({
-                sessionId,
-                messages: messages.slice(0, 2),
-                memo,
-            });
-            expect(primed.ok).toBe(true);
-            if (!primed.ok) throw new Error(primed.reason);
-            const bundle = {
-                ...memo,
-                memoGeneration: primed.memoGeneration,
-                anchor: primed.memoAnchor,
-                storedCount: primed.memoStoredCount,
-                canonicalCount: primed.memoCanonicalCount,
-            };
-            rows.push({ id: "m-3", timeCreated: 3, contributesOrdinal: true, hasValidInfo: true });
-            raceOnce = true;
-            const raced = await resolveOrdinalsForModule({
-                sessionId,
-                messages: [
-                    ...messages,
-                    {
-                        info: { id: "m-4", role: "user", sessionID: sessionId },
-                        parts: [{ type: "text", text: "m-4" }],
-                    } as MessageLike,
-                ],
-                memo: bundle,
-            });
-            // The count mismatch triggers a full rescan inside the same call.
-            expect(raced.ok).toBe(true);
-            if (!raced.ok) throw new Error(raced.reason);
-            expect(
-                (raced.annotatedInput as Array<{ absolute_ordinal: number }>).map(
-                    (message) => message.absolute_ordinal,
-                ),
-            ).toEqual([1, 2, 3, 4]);
-            expect(memo.entries.get("m-1")).toBe(1);
-            expect(raced.memoStoredCount).toBe(4);
-            expect(raced.memoCanonicalCount).toBe(4);
-        } finally {
-            unregister();
-        }
-    });
-
-    it("rescans from the start when a row sorts at or before the anchor", async () => {
-        const sessionId = "module-wire-pre-anchor-row";
-        const rows = [
-            { id: "m-1", timeCreated: 1, contributesOrdinal: true, hasValidInfo: true },
-            { id: "m-2", timeCreated: 2, contributesOrdinal: true, hasValidInfo: true },
-        ];
-        const unregister = setRawMessageProvider(sessionId, {
-            readMessages: () => rows,
-            readMessageOrdinalPage: (after, limit) =>
-                rows
-                    .filter(
-                        (row) =>
-                            !after ||
-                            row.timeCreated > after.timeCreated ||
-                            (row.timeCreated === after.timeCreated && row.id > after.id),
-                    )
-                    .sort((a, b) => a.timeCreated - b.timeCreated || (a.id < b.id ? -1 : 1))
-                    .slice(0, limit),
-            getStoredMessageCount: () => rows.length,
-        });
-        const messages = ["m-1", "m-2"].map((id) => ({
-            info: { id, role: "user", sessionID: sessionId },
-            parts: [{ type: "text", text: id }],
-        })) as MessageLike[];
-        const memo = {
-            generation: 1,
-            memoGeneration: 1,
-            entries: new Map<string, number>(),
-            anchor: null as { timeCreated: number; id: string } | null,
-            storedCount: null as number | null,
-            canonicalCount: 0,
-        };
-        try {
-            const primed = await resolveOrdinalsForModule({ sessionId, messages, memo });
-            expect(primed.ok).toBe(true);
-            if (!primed.ok) throw new Error(primed.reason);
-            const bundle = {
-                ...memo,
-                memoGeneration: primed.memoGeneration,
-                anchor: primed.memoAnchor,
-                storedCount: primed.memoStoredCount,
-                canonicalCount: primed.memoCanonicalCount,
-            };
-
-            // A row with the anchor's timestamp and a lexically smaller id is excluded by the
-            // keyset read but increases the stored count. It has no ordinal, so existing ordinals
-            // remain unchanged.
-            rows.push({
-                id: "m-1z",
-                timeCreated: 2,
-                contributesOrdinal: false,
-                hasValidInfo: true,
-            });
-            const summaryInserted = await resolveOrdinalsForModule({
-                sessionId,
-                messages,
-                memo: bundle,
-            });
-            expect(summaryInserted.ok).toBe(true);
-            if (!summaryInserted.ok) throw new Error(summaryInserted.reason);
-            expect(summaryInserted.memoStoredCount).toBe(3);
-            expect(summaryInserted.memoCanonicalCount).toBe(2);
-            expect(memo.entries.get("m-2")).toBe(2);
-            const shifted = {
-                ...bundle,
-                anchor: summaryInserted.memoAnchor,
-                storedCount: summaryInserted.memoStoredCount,
-                canonicalCount: summaryInserted.memoCanonicalCount,
-            };
-
-            // A contributing row before the anchor moves every later ordinal.
-            rows.push({ id: "m-0", timeCreated: 1, contributesOrdinal: true, hasValidInfo: true });
-            const conflict = await resolveOrdinalsForModule({
-                sessionId,
-                messages,
-                memo: shifted,
-            });
-            expect(conflict).toEqual({ ok: false, reason: "mismatch", messageId: "m-1" });
-            expect(memo.entries.get("m-1")).toBe(1);
-            expect(memo.entries.get("m-2")).toBe(2);
-        } finally {
-            unregister();
-        }
-    });
-});
-
-describe("synthetic message classification", () => {
-    it("uses one predicate for the ordinal resolver and the CK encoder", async () => {
-        const sessionId = "module-wire-mixed-synthetic";
-        const unregister = setRawMessageProvider(sessionId, {
-            readMessages: () => [],
-            readMessageOrdinalPage: () => [],
-            getStoredMessageCount: () => 2,
-        });
-        const messages = [
-            {
-                info: { id: "m-1", role: "user", sessionID: sessionId },
-                parts: [{ type: "text", text: "first" }],
-            },
-            {
-                info: { id: "injected", role: "user", sessionID: sessionId },
-                parts: [
-                    { type: "text", text: "authored", synthetic: false },
-                    { type: "text", text: "marker", synthetic: true },
-                ],
-            },
-            {
-                info: { id: "m-2", role: "assistant", sessionID: sessionId },
-                parts: [{ type: "text", text: "second" }],
-            },
-        ] as MessageLike[];
-        try {
-            const resolved = await resolveOrdinalsForModule({
-                sessionId,
-                messages,
-                memo: {
-                    generation: 1,
-                    memoGeneration: 1,
-                    entries: new Map([
-                        ["m-1", 1],
-                        ["m-2", 2],
-                    ]),
-                    anchor: { timeCreated: 2, id: "m-2" },
-                    storedCount: 2,
-                    canonicalCount: 2,
-                },
-            });
-            // A mixed authored/synthetic message is not synthetic, so it cannot borrow an
-            // ordinal and stays unresolved instead of reaching the daemon as a duplicate.
-            expect(resolved).toEqual({
-                ok: false,
-                reason: "unresolved",
-                messageId: "injected",
-                messageIndex: 1,
-                messageRole: "user",
-            });
-            expect(encodeOpenCodeMessagesToCk(messages)[1]?.ck.meta).toMatchObject({
-                synthetic: false,
-            });
-        } finally {
-            unregister();
-        }
-    });
-
-    it("lets a wholly synthetic message borrow the preceding ordinal", async () => {
-        const sessionId = "module-wire-wholly-synthetic";
-        const unregister = setRawMessageProvider(sessionId, {
-            readMessages: () => [],
-            readMessageOrdinalPage: () => [],
-            getStoredMessageCount: () => 2,
-        });
-        const messages = [
-            {
-                info: { id: "m-1", role: "user", sessionID: sessionId },
-                parts: [{ type: "text", text: "first" }],
-            },
-            {
-                info: { id: "injected", role: "user", sessionID: sessionId },
-                parts: [{ type: "text", text: "marker", synthetic: true }],
-            },
-            {
-                info: { id: "m-2", role: "assistant", sessionID: sessionId },
-                parts: [{ type: "text", text: "second" }],
-            },
-        ] as MessageLike[];
-        try {
-            const resolved = await resolveOrdinalsForModule({
-                sessionId,
-                messages,
-                memo: {
-                    generation: 1,
-                    memoGeneration: 1,
-                    entries: new Map([
-                        ["m-1", 1],
-                        ["m-2", 2],
-                    ]),
-                    anchor: { timeCreated: 2, id: "m-2" },
-                    storedCount: 2,
-                    canonicalCount: 2,
-                },
-            });
-            expect(resolved.ok).toBe(true);
-            if (!resolved.ok) throw new Error(resolved.reason);
-            const encoded = encodeOpenCodeMessagesToCk(resolved.annotatedInput);
-            expect(encoded.map((message) => message.ordinal)).toEqual([1, 1, 2]);
-            expect(
-                encoded.map((message) => (message.ck.meta as { synthetic: boolean }).synthetic),
-            ).toEqual([false, true, false]);
-        } finally {
-            unregister();
-        }
-    });
-});
-
-describe("resolveOrdinalsForModule provisional tails", () => {
-    async function resolveTail(count: number) {
-        const sessionId = `module-wire-provisional-${count}`;
-        const persistedTail: Array<{
-            id: string;
-            timeCreated: number;
-            contributesOrdinal: boolean;
-            hasValidInfo: boolean;
-        }> = [];
-        const unregister = setRawMessageProvider(sessionId, {
-            readMessages: () => persistedTail,
-            readMessageOrdinalPage: (after, limit) =>
-                persistedTail
-                    .filter(
-                        (row) =>
-                            !after ||
-                            row.timeCreated > after.timeCreated ||
-                            (row.timeCreated === after.timeCreated && row.id > after.id),
-                    )
-                    .slice(0, limit),
-            getStoredMessageCount: () => 500 + persistedTail.length,
-        });
-        const messages = Array.from({ length: count }, (_, index) => ({
-            info: {
-                id: `m-${501 + index}`,
-                role: "user",
-                sessionID: sessionId,
-            },
-            parts: [{ type: "text", text: `unpersisted ${index + 1}` }],
-        })) as MessageLike[];
-        const memo = new Map<string, number>([["m-500", 500]]);
-        try {
-            const first = await resolveOrdinalsForModule({
-                sessionId,
-                messages,
-                memo: {
-                    generation: 1,
-                    memoGeneration: 1,
-                    entries: memo,
-                    anchor: { timeCreated: 500, id: "m-500" },
-                    storedCount: 500,
-                    canonicalCount: 500,
-                },
-                provisionalBase: 500,
-            });
-            expect(first.ok).toBe(true);
-            if (!first.ok) throw new Error(first.reason);
-            return { first, messages, memo, persistedTail, unregister, sessionId };
-        } catch (error) {
-            unregister();
-            throw error;
-        }
-    }
-
-    it("continues wholly fresh post-descent arrays from the durable provisional base", async () => {
-        const sessionId = "module-wire-wholly-fresh-descent";
-        const unregister = setRawMessageProvider(sessionId, {
-            readMessages: () => [],
-            readMessageOrdinalPage: () => [],
-            getStoredMessageCount: () => 0,
-        });
-        const messages = [
-            {
-                info: { id: "summary", role: "user", sessionID: sessionId },
-                parts: [{ type: "text", text: "continuation summary" }],
-            },
-            {
-                info: { id: "tail", role: "assistant", sessionID: sessionId },
-                parts: [{ type: "text", text: "continued answer" }],
-            },
-        ] as MessageLike[];
-        try {
-            const resolved = await resolveOrdinalsForModule({
-                sessionId,
-                messages,
-                memo: {
-                    generation: 1,
-                    memoGeneration: 1,
-                    entries: new Map(),
-                    anchor: null,
-                    storedCount: 0,
-                    canonicalCount: 0,
-                },
-                provisionalBase: 97,
-            });
-            expect(resolved.ok).toBe(true);
-            if (!resolved.ok) throw new Error(resolved.reason);
-            expect(
-                encodeOpenCodeMessagesToCk(resolved.annotatedInput as MessageLike[]).map(
-                    (message) => message.ck.meta.ordinal,
-                ),
-            ).toEqual([98, 99]);
-        } finally {
-            unregister();
-        }
-    });
-
-    it("assigns two unpersisted appends distinct absolute ordinals", async () => {
-        const result = await resolveTail(2);
-        try {
-            expect(
-                (result.first.annotatedInput as Array<{ absolute_ordinal: number }>).map(
-                    (message) => message.absolute_ordinal,
-                ),
-            ).toEqual([501, 502]);
-            expect(
-                encodeOpenCodeMessagesToCk(result.first.annotatedInput as MessageLike[]).map(
-                    (message) => message.ck.meta.ordinal,
-                ),
-            ).toEqual([501, 502]);
-        } finally {
-            result.unregister();
-        }
-    });
-
-    it("reconciles provisional ordinals when the appended rows persist", async () => {
-        const result = await resolveTail(2);
-        try {
-            result.persistedTail.push(
-                { id: "m-501", timeCreated: 501, contributesOrdinal: true, hasValidInfo: true },
-                { id: "m-502", timeCreated: 502, contributesOrdinal: true, hasValidInfo: true },
-            );
-            const reconciled = await resolveOrdinalsForModule({
-                sessionId: result.sessionId,
-                messages: result.messages,
-                memo: {
-                    generation: 1,
-                    memoGeneration: result.first.memoGeneration,
-                    entries: result.memo,
-                    anchor: result.first.memoAnchor,
-                    storedCount: result.first.memoStoredCount,
-                    canonicalCount: result.first.memoCanonicalCount,
-                },
-            });
-            expect(reconciled.ok).toBe(true);
-            if (reconciled.ok) {
-                expect(reconciled.memoCanonicalCount).toBe(502);
-                expect(result.memo.get("m-501")).toBe(501);
-                expect(result.memo.get("m-502")).toBe(502);
-            }
-        } finally {
-            result.unregister();
-        }
-    });
-});
-
 describe("buildPagedModuleTransformPayloads byte reuse", () => {
     it("returns the first stringify length on the unpaged path", () => {
         const body = {
@@ -1612,6 +800,52 @@ describe("buildPagedModuleTransformPayloads byte reuse", () => {
         expect(pages[0]?.bytes).toBe(Buffer.byteLength(JSON.stringify(body)));
     });
 
+    function transformBody(bytes: number): Record<string, unknown> {
+        const text = "x".repeat(60_000);
+        const count = Math.ceil(bytes / text.length);
+        return {
+            method: "transform",
+            session_id: "ses-unpaged-limit",
+            v: 3,
+            boundary: null,
+            messages: Array.from({ length: count }, (_, index) => ({ mid: `m${index}`, text })),
+        };
+    }
+
+    it("sends a body above the page limit unpaged while it fits the daemon's transform limit", () => {
+        const body = transformBody(4 * MODULE_PAGE_MAX_BYTES);
+        const bytes = Buffer.byteLength(JSON.stringify(body));
+        expect(bytes).toBeGreaterThan(MODULE_PAGE_MAX_BYTES);
+        const pages = buildPagedModuleTransformPayloads(body);
+        expect(pages).toHaveLength(1);
+        expect(pages[0]?.bytes).toBe(bytes);
+        expect(pages[0]?.page.transform_page_id).toBeUndefined();
+    });
+
+    // The limit is a parameter, so a small one reaches the paging branch the daemon's 32 MiB
+    // limit takes; the next test pins that constant.
+    it("pages a body above its unpaged limit", () => {
+        const limit = 2 * MODULE_PAGE_MAX_BYTES;
+        const body = transformBody(limit);
+        expect(Buffer.byteLength(JSON.stringify(body))).toBeGreaterThan(limit);
+        const pages = buildPagedModuleTransformPayloads(body, limit);
+        expect(pages.length).toBeGreaterThan(1);
+        for (const { page, bytes } of pages) {
+            expect(typeof page.transform_page_id).toBe("string");
+            expect(bytes).toBeLessThanOrEqual(MODULE_PAGE_MAX_BYTES);
+        }
+        expect(pages.at(-1)?.page.transform_page_complete).toBe(true);
+    });
+
+    it("pins the unpaged limit to the daemon's transform body limit", () => {
+        const rustSource = readFileSync(
+            join(import.meta.dir, "../../../../../crates/daemon/src/lib.rs"),
+            "utf8",
+        );
+        expect(rustSource).toContain("const MAX_TRANSFORM_FRAME_BYTES: usize = 32 * 1024 * 1024;");
+        expect(MODULE_UNPAGED_TRANSFORM_MAX_BYTES).toBe(32 * 1024 * 1024);
+    });
+
     it("keeps sparse array slots at their positions while paging", () => {
         const input: unknown[] = Array.from({ length: 80 }, (_, index) => ({
             mid: `m${index}`,
@@ -1621,7 +855,7 @@ describe("buildPagedModuleTransformPayloads byte reuse", () => {
         delete input[3];
         delete input[40];
         const body = { method: "transform", session_id: "ses-sparse", input };
-        const pages = buildPagedModuleTransformPayloads(body);
+        const pages = buildPagedModuleTransformPayloads(body, MODULE_PAGE_MAX_BYTES);
         const paged = pages.flatMap(
             ({ page }) => JSON.parse(JSON.stringify(page.input)) as unknown[],
         );
@@ -1655,13 +889,38 @@ describe("buildPagedModuleTransformPayloads byte reuse", () => {
                 })),
             ],
         };
-        const pages = buildPagedModuleTransformPayloads(body);
+        const pages = buildPagedModuleTransformPayloads(body, MODULE_PAGE_MAX_BYTES);
         const units = pages.flatMap(({ page }) => page.input as Array<Record<string, unknown>>);
         expect(units.filter((unit) => unit.mid === "carrier")).toHaveLength(0);
         const marker = units[0]?.[MODULE_ITEM_CONTINUATION_KEY] as Record<string, unknown>;
         expect(marker).toEqual({ field: "input", item_index: 0, chunk_index: 0, chunk_total: 1 });
         expect(JSON.parse(units[0]?.chunk as string)).toEqual(carrier);
     });
+
+    for (const boundary of [{ mid: "m0", sequence: 4 }, null]) {
+        it(`carries v and boundary ${JSON.stringify(boundary)} on the final page only`, () => {
+            const body = {
+                method: "transform",
+                session_id: "ses-final-scalars",
+                v: 3,
+                boundary,
+                messages: Array.from({ length: 80 }, (_, index) => ({
+                    mid: `m${index}`,
+                    ck: { text: "x".repeat(8_000) },
+                })),
+            };
+            const pages = buildPagedModuleTransformPayloads(body, MODULE_PAGE_MAX_BYTES).map(
+                ({ page }) => page as Record<string, unknown>,
+            );
+            expect(pages.length).toBeGreaterThan(1);
+            for (const page of pages.slice(0, -1)) {
+                expect(Object.hasOwn(page, "v")).toBe(false);
+                expect(Object.hasOwn(page, "boundary")).toBe(false);
+            }
+            expect(pages.at(-1)?.v).toBe(3);
+            expect(pages.at(-1)?.boundary).toEqual(boundary);
+        });
+    }
 
     it("returns paging sizes that match a later stringify of each page", () => {
         const body = {
@@ -1674,7 +933,7 @@ describe("buildPagedModuleTransformPayloads byte reuse", () => {
             })),
         };
         expect(Buffer.byteLength(JSON.stringify(body))).toBeGreaterThan(MODULE_PAGE_MAX_BYTES);
-        const pages = buildPagedModuleTransformPayloads(body);
+        const pages = buildPagedModuleTransformPayloads(body, MODULE_PAGE_MAX_BYTES);
         expect(pages.length).toBeGreaterThan(1);
         for (const { page, bytes } of pages) {
             expect(bytes).toBe(Buffer.byteLength(JSON.stringify(page)));
@@ -1698,7 +957,7 @@ describe("transform page array fields", () => {
 
         const body: Record<string, unknown> = { method: "transform", session_id: "s" };
         for (const field of rustFields) body[field] = [{ pad: "x".repeat(MODULE_PAGE_MAX_BYTES) }];
-        const pages = buildPagedModuleTransformPayloads(body);
+        const pages = buildPagedModuleTransformPayloads(body, MODULE_PAGE_MAX_BYTES);
         expect(pages.length).toBeGreaterThan(1);
         for (const { page } of pages) {
             for (const field of rustFields) expect(Array.isArray(page[field])).toBe(true);
@@ -1708,7 +967,10 @@ describe("transform page array fields", () => {
             expect(pages.some(({ page }) => (page[field] as unknown[]).length > 0)).toBe(true);
         }
         // A list field the daemon does not page rides as a scalar on the completing page only.
-        const unpaged = buildPagedModuleTransformPayloads({ ...body, other_list: [1, 2, 3] });
+        const unpaged = buildPagedModuleTransformPayloads(
+            { ...body, other_list: [1, 2, 3] },
+            MODULE_PAGE_MAX_BYTES,
+        );
         expect(unpaged.filter(({ page }) => "other_list" in page)).toHaveLength(1);
         expect(unpaged.at(-1)?.page.other_list).toEqual([1, 2, 3]);
         expect(__moduleWireTest.buildPagedModuleTransformPayloads).toBe(
@@ -1731,7 +993,7 @@ it("snapshots source toJSON once and serializes each emitted envelope once", asy
     };
     const stringify = spyOn(JSON, "stringify");
     try {
-        const pages = buildPagedModuleTransformPayloads(body);
+        const pages = buildPagedModuleTransformPayloads(body, MODULE_PAGE_MAX_BYTES);
         expect(pages.length).toBeGreaterThan(1);
         expect(calls).toBe(1);
         expect(stringify.mock.calls.filter(([value]) => value === body)).toHaveLength(1);
@@ -1760,7 +1022,7 @@ it("builds the unpaged carrier without parsing the body", async () => {
     };
     const parse = spyOn(JSON, "parse");
     try {
-        const pages = buildPagedModuleTransformPayloads(body);
+        const pages = buildPagedModuleTransformPayloads(body, MODULE_PAGE_MAX_BYTES);
         expect(pages).toHaveLength(1);
         expect(parse).not.toHaveBeenCalled();
         expect(serializedJsonText(pages[0]!.page)).toBe(JSON.stringify(body));
@@ -1782,7 +1044,7 @@ it("measures each paged item once across convergence attempts", () => {
     const stringify = spyOn(JSON, "stringify");
     const parse = spyOn(JSON, "parse");
     try {
-        const pages = buildPagedModuleTransformPayloads(body);
+        const pages = buildPagedModuleTransformPayloads(body, MODULE_PAGE_MAX_BYTES);
         // Two pages force a second convergence attempt after the first assumes one page.
         expect(pages).toHaveLength(2);
         const itemMeasurements = stringify.mock.calls.filter(
@@ -1812,7 +1074,7 @@ it("keeps unpaged boundary bodies accepted when Rust numbers expand", async () =
     for (const fixture of cases) {
         const expected = JSON.stringify(fixture.body);
         expect(Buffer.byteLength(expected)).toBe(MODULE_PAGE_MAX_BYTES);
-        const pages = buildPagedModuleTransformPayloads(fixture.body);
+        const pages = buildPagedModuleTransformPayloads(fixture.body, MODULE_PAGE_MAX_BYTES);
         expect(pages).toHaveLength(1);
         expect(pages[0]?.page.transform_page_index).toBeUndefined();
         expect(serializedJsonText(pages[0]!.page)).toBe(expected);

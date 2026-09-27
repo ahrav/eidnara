@@ -31,7 +31,7 @@ fn canonicalize_recorded(message: &WireMessage) -> (Vec<u8>, Ledger) {
 const MAX_EVENTS_PER_BLOCK: usize = 8;
 const _: () = assert!(MAX_EVENTS_PER_BLOCK < KEYS_PER_ASCII_BLOCK);
 const ARC_HEADER_BYTES: usize = 2 * std::mem::size_of::<usize>();
-/// Lowercase hex of a SHA-256 digest.
+/// Lowercase hex of a SHA-256 digest, one per block receipt.
 const HEX_DIGEST_BYTES: usize = 64;
 
 #[test]
@@ -204,11 +204,10 @@ fn full_constructor_observation_covers_receipts_hashing_and_arc_conversion() {
         let fingerprint_vec = blocks * std::mem::size_of::<(String, usize)>();
         let fingerprint_arc = arc_layout(fingerprint_vec);
         let digests = blocks * HEX_DIGEST_BYTES;
-        let identity_arc = arc_layout(HEX_DIGEST_BYTES);
-        let retained = message_arc + fingerprint_arc + digests + identity_arc + arc_size;
+        let retained = message_arc + fingerprint_arc + digests + arc_size;
         assert_eq!(
             ledger.live_bytes_at_close, retained as isize,
-            "{label}: the constructor retains the message, fingerprints, identity, and payload"
+            "{label}: the constructor retains the message, fingerprints, and payload"
         );
         // The constructor converts the returned buffer to its exact-size `Arc`
         // before serializing receipts, so the buffer's spare capacity and the
@@ -216,12 +215,8 @@ fn full_constructor_observation_covers_receipts_hashing_and_arc_conversion() {
         let conversion_peak = returned_capacity + arc_size;
         let live_after_conversion = arc_size + fingerprint_vec + digests;
         let hashing_peak = live_after_conversion + largest_receipt_peak(&population);
-        // Ownership transfer: the identity string and its `Arc` overlap, then the
-        // fingerprint `Vec` and its `Arc` overlap while the identity `Arc` is live.
-        let ownership_peak = live_after_conversion
-            + message_arc
-            + identity_arc
-            + HEX_DIGEST_BYTES.max(fingerprint_arc);
+        // Ownership transfer: the fingerprint `Vec` and its `Arc` overlap.
+        let ownership_peak = live_after_conversion + message_arc + fingerprint_arc;
         let bound = canonicalizer_peak
             .max(conversion_peak)
             .max(hashing_peak)
@@ -250,7 +245,7 @@ fn full_constructor_observation_covers_receipts_hashing_and_arc_conversion() {
         );
         assert!(
             ledger.allocation_events > 1,
-            "{label}: receipts and identity allocate beyond the payload"
+            "{label}: receipts allocate beyond the payload"
         );
         drop(served);
     }

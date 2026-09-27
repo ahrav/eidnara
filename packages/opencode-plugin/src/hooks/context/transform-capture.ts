@@ -83,10 +83,80 @@ function defineSlot<T>(array: T[], index: number, value: T): void {
 }
 
 /** Own data property read that cannot run an accessor or proxy trap. */
-export function readOwnDataProperty(value: unknown, key: string): unknown {
+export function readOwnDataProperty(value: unknown, key: PropertyKey): unknown {
     if (value === null || typeof value !== "object" || types.isProxy(value)) return undefined;
     const descriptor = Object.getOwnPropertyDescriptor(value, key);
     return descriptor && Object.hasOwn(descriptor, "value") ? descriptor.value : undefined;
+}
+
+/** The id the daemon's decoder names a message by: `info.id`, else the top-level `id`. Each hop is an own data read, so a planted proxy, revoked proxy, or accessor reads as no id and none of its traps or getters runs. */
+export function messageId(message: unknown): string | undefined {
+    const nested = readOwnDataProperty(readOwnDataProperty(message, "info"), "id");
+    if (typeof nested === "string") return nested;
+    const top = readOwnDataProperty(message, "id");
+    return typeof top === "string" ? top : undefined;
+}
+
+/** Scans host ids from the end until `stop` accepts one and returns its index, or -1. The caller has rejected a proxied `host`. */
+export function scanMessageIds(
+    host: readonly unknown[],
+    stop: (id: string, index: number) => boolean,
+): number {
+    for (let index = host.length - 1; index >= 0; index -= 1) {
+        const id = messageId(readOwnDataProperty(host, index));
+        if (id !== undefined && stop(id, index)) return index;
+    }
+    return -1;
+}
+
+/** 32-bit FNV-1a over UTF-16 code units. */
+export function fnv1a32(text: string): number {
+    let hash = 0x811c9dc5;
+    for (let index = 0; index < text.length; index += 1)
+        hash = Math.imul(hash ^ text.charCodeAt(index), 0x01000193);
+    return hash >>> 0;
+}
+
+/** The sorted id hashes of `host`, retaining no id string. A hit may be a collision, so the caller verifies it with an id scan. `undefined` when `reserve` refuses the four bytes per slot. */
+export function messageIdFilter(
+    host: readonly unknown[],
+    reserve: (bytes: number) => boolean,
+): Uint32Array | undefined {
+    if (!reserve(host.length * 4)) return undefined;
+    const hashes = new Uint32Array(host.length);
+    let count = 0;
+    scanMessageIds(host, (id) => {
+        hashes[count++] = fnv1a32(id);
+        return false;
+    });
+    return hashes.subarray(0, count).sort();
+}
+
+export function filterMayHold(filter: Uint32Array, id: string): boolean {
+    const hash = fnv1a32(id);
+    let low = 0;
+    let high = filter.length;
+    while (low < high) {
+        const middle = (low + high) >>> 1;
+        if ((filter[middle] as number) < hash) low = middle + 1;
+        else high = middle;
+    }
+    return low < filter.length && filter[low] === hash;
+}
+
+/** Copies `host[start..end)` through indexed own data descriptors; a hole or accessor slot yields `undefined`. */
+export function copyWindow(
+    host: readonly unknown[],
+    start: number,
+    end: number,
+): unknown[] | undefined {
+    const window: unknown[] = [];
+    for (let index = start; index < end; index += 1) {
+        const slot = Object.getOwnPropertyDescriptor(host, index);
+        if (!slot || !Object.hasOwn(slot, "value")) return undefined;
+        defineSlot(window, index - start, slot.value);
+    }
+    return window;
 }
 
 // Source values are arrays, plain objects, strings, numbers and booleans; a read that misses an
@@ -392,13 +462,15 @@ export interface ReferenceableInspection {
 /**
  * Byte-limit exhaustion throws CaptureBudgetExceeded. The first `skip` members are left to a
  * digest-verified capture: only their root slots are inspected, and their wire bounds read zero.
+ * Without `estimateWire`, the wire bounds leave out string escapes; `estimatedBytes` is the same.
  */
 export function inspectReferenceableMessages(
     messages: unknown,
     maxBytes = TRANSFORM_CAPTURE_MAX_BYTES,
     skip = 0,
+    estimateWire = true,
 ): ReferenceableInspection | { ok: false; rejection: ReferenceableRejection } {
-    const walker = new ReferenceableWalk(maxBytes);
+    const walker = new ReferenceableWalk(maxBytes, estimateWire);
     const messageWireBytes: number[] = [];
     try {
         walker.members(messages, (slot, index) => {
@@ -434,12 +506,16 @@ export function snapshotFieldsEqual(
  * in slices of this size, so one large member never builds a whole-member hash input.
  */
 const HASH_CHUNK_UNITS = 1 << 16;
+/** Below this length a string stays in the pending text, which saves a hash update per key. */
+const UTF8_HASH_MIN_UNITS = 256;
 
 /**
  * Streams member tapes into one SHA-256 chain. Every token is self-delimiting: a string carries
  * its UTF-16 length, a number ends at `;`, and a member ends at `|`. The text is hashed as
  * UTF-16 code units, which keeps lone surrogates and makes the digest independent of chunking.
- * Symbols other than the tape markers cannot be hashed by identity, so they are kept in order.
+ * A well-formed string of [`UTF8_HASH_MIN_UNITS`, `HASH_CHUNK_UNITS`) units is hashed as UTF-8
+ * after a `u` token instead: UTF-8 is injective on well-formed text, and the UTF-16 length still
+ * ends it. Symbols other than the tape markers cannot be hashed by identity, so they are kept in order.
  */
 class TapeHasher {
     private readonly hash = createHash("sha256");
@@ -450,7 +526,15 @@ class TapeHasher {
 
     readonly push = (value: SnapshotField): void => {
         if (typeof value === "string") {
-            if (value.length < HASH_CHUNK_UNITS) this.text += `s${value.length}:${value}`;
+            if (
+                value.length >= UTF8_HASH_MIN_UNITS &&
+                value.length < HASH_CHUNK_UNITS &&
+                (value as string & { isWellFormed(): boolean }).isWellFormed()
+            ) {
+                this.text += `u${value.length}:`;
+                this.flush();
+                this.hash.update(value, "utf8");
+            } else if (value.length < HASH_CHUNK_UNITS) this.text += `s${value.length}:${value}`;
             else {
                 this.text += `s${value.length}:`;
                 this.flush();
@@ -717,7 +801,7 @@ type HostArrayRejectionReason =
 
 /**
  * Checks the container and the output slots `[0, slots)` a publication writes; the capture recheck
- * covers every captured slot. Slots at `slots` and above are deleted by the shrink, which fails
+ * covers every captured window slot. Slots at `slots` and above are deleted by the shrink, which fails
  * explicitly instead of being checked here.
  */
 export function publicationRejection(
@@ -738,7 +822,7 @@ export function publicationRejection(
     return null;
 }
 
-/** Why a shrink failed and the length `ArraySetLength` left before the members were restored. */
+/** Why a shrink failed and the length `ArraySetLength` left before the window was restored. */
 export interface PublicationFailure {
     error: unknown;
     shrunkLength: number;
@@ -748,31 +832,35 @@ export interface PublicationFailure {
 /**
  * Precondition: `publicationRejection(target, next.length)` returns `null`. Shrinks the length to
  * `next.length` first, then defines each slot, bypassing inherited setters. A non-configurable slot
- * k at or above `next.length` stops the shrink after every slot above k is deleted; the members
- * above k are then restored from `members`, no slot of `next` is written, and the failure is
- * returned. A throw while restoring is reported as the same failure.
+ * k at or above `next.length` stops the shrink after every slot above k is deleted; no slot of
+ * `next` is then written, and the captured `window` references that the shrink removed are put
+ * back after k: the part above k when k is inside the window, the whole window after a covered k,
+ * whose covered slots above it stay lost. A throw while restoring is reported as the same failure.
  */
 export function publishInPlace(
     target: unknown[],
     next: readonly unknown[],
-    members: readonly unknown[],
+    window: readonly unknown[],
+    boundaryIndex: number,
 ): PublicationFailure | undefined {
     try {
         if (target.length > next.length)
             Object.defineProperty(target, "length", { value: next.length });
     } catch (error) {
         const shrunkLength = target.length;
+        // E.g. boundaryIndex 3 and k 4 leave length 5, so first = 2 and window[2..] lands at 5.
+        const first = Math.max(0, shrunkLength - boundaryIndex);
         let restoreError: unknown;
         try {
-            for (let index = shrunkLength; index < members.length; index += 1)
-                defineSlot(target, index, members[index]);
+            for (let index = first; index < window.length; index += 1)
+                defineSlot(target, shrunkLength + index - first, window[index]);
         } catch (thrown) {
             restoreError = thrown;
         }
         const restored =
             restoreError === undefined
-                ? `restored ${members.length - shrunkLength} captured references`
-                : `restoring captured references failed (${String(restoreError)})`;
+                ? `restored ${window.length - first} captured window references`
+                : `restoring captured window references failed (${String(restoreError)})`;
         return {
             error,
             shrunkLength,
@@ -789,6 +877,8 @@ export interface CaptureLease {
     /** Owner-wide headroom shared by every lease, not this lease's own remainder; zero once released. */
     readonly remainingBytes: number;
     reserve(bytes: number): boolean;
+    /** Returns every byte this lease holds to the owner and keeps the lease live; the caller must hold no charged capture at the call. */
+    refund(): void;
     requestCancel(reason: string): void;
     release(): void;
 }
@@ -848,6 +938,10 @@ export class TransformCaptureAdmission {
                 owner.chargedBytesTotal += additional;
                 bytes += additional;
                 return true;
+            },
+            refund() {
+                owner.chargedBytesTotal -= bytes;
+                bytes = 0;
             },
             requestCancel(reason) {
                 if (!controller.signal.aborted) controller.abort(new Error(reason));

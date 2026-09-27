@@ -178,7 +178,9 @@ pub struct ClaimCandidate {
     pub key: String,
     /// The `<cite>` text, parsed by [`check_claim_set`].
     pub cite: String,
-    pub value: String,
+    /// `None` when the `<value>` element is missing or unterminated; only
+    /// `Some("")` is a retraction.
+    pub value: Option<String>,
     pub anchor: Option<String>,
 }
 
@@ -229,7 +231,10 @@ pub fn check_claim_set(
 ) -> (Vec<Vec<memory_store::Claim>>, ClaimsOutcome) {
     let mut per_segment: Vec<Vec<memory_store::Claim>> = vec![Vec::new(); segments.len()];
     for candidate in candidates {
-        if !is_claim_key(&candidate.key) || candidate.value.len() > CLAIM_VALUE_MAX_BYTES {
+        let Some(value) = candidate.value.as_deref() else {
+            continue;
+        };
+        if !is_claim_key(&candidate.key) || value.len() > CLAIM_VALUE_MAX_BYTES {
             continue;
         }
         let Ok((citations, rest)) = split_citations(&candidate.cite) else {
@@ -247,7 +252,7 @@ pub fn check_claim_set(
         if !frozen
             .presented
             .get(citation.start..citation.end)
-            .is_some_and(|span| span.contains(candidate.value.as_str()))
+            .is_some_and(|span| span.contains(value))
         {
             continue;
         }
@@ -266,7 +271,7 @@ pub fn check_claim_set(
         claims.retain(|claim| claim.key != candidate.key);
         claims.push(memory_store::Claim {
             key: candidate.key.clone(),
-            value: candidate.value.clone(),
+            value: value.to_string(),
             ordinal: frozen.ordinal as i64,
             anchor,
         });
@@ -361,7 +366,7 @@ mod tests {
         ClaimCandidate {
             key: key.into(),
             cite: cite.into(),
-            value: value.into(),
+            value: Some(value.into()),
             anchor: anchor.map(Into::into),
         }
     }

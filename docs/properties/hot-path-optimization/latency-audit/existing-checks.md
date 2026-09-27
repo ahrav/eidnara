@@ -804,3 +804,18 @@ preparation; their links are to the live tree.
 [t-reassign]: ../../../../crates/memory-store/src/lib.rs#L24792
 [t-side-channel-crash]: ../../../../crates/memory-store/src/lib.rs#L20895
 [t-outcome]: ../../../../crates/daemon/src/lib.rs#L26653
+
+Update, 2026-09-27: [#833](https://github.com/ahrav/eidnara/issues/833) replaces
+`first_hard_pass_meta_respects_the_store_durable_text_bound` and
+`meta_bytes_stay_flat_as_covered_history_grows_and_covered_drift_still_rejects`
+with `a_hundred_thousand_message_session_commits_a_three_hundred_message_window`
+and the legacy-row prune tests in `transform_meta_bound.rs`, and deletes
+`serialized_output_cache_reuses_steady_state_and_matches_fresh_bytes` with the
+serialized-output memo it checked.
+
+Update, 2026-09-27: [#833](https://github.com/ahrav/eidnara/issues/833) deletes covered-drift rejection: `identity_drift_requires_reject` and
+`TransformError::IdentityDrift`. Block identities are pruned to the window
+inside the transform's meta CAS, and a changed identity is re-adopted, except
+for a tail message that a frozen unit targets (`frozen_unit_targets_mid`),
+which refuses the pass with `TransformError::FrozenTargetDrift`. Citations of the
+deleted symbols here are historical at their stated baseline.

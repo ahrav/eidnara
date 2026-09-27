@@ -3,16 +3,25 @@ import {
     SERIALIZED_TRANSFORM_SESSION,
     serializedTransformCorpus,
 } from "@eidnara/opencode/hooks/context/__tests__/serialized-transform-corpus";
-import { buildPagedModuleTransformPayloads } from "@eidnara/opencode/hooks/context/module-wire";
+import {
+    buildPagedModuleTransformPayloads,
+    MODULE_PAGE_MAX_BYTES,
+} from "@eidnara/opencode/hooks/context/module-wire";
 import { serializedJsonText } from "@eidnara/opencode/shared/host-client/serialized-json-body";
 
 const cases = serializedTransformCorpus().map((fixture) => {
     const originalText = JSON.stringify(fixture.body);
     try {
-        const pages = buildPagedModuleTransformPayloads(fixture.body).map(({ page, bytes }) => {
-            const text = serializedJsonText(page);
-            return { text, bytes, sha256: createHash("sha256").update(text, "utf8").digest("hex") };
-        });
+        const pages = buildPagedModuleTransformPayloads(fixture.body, MODULE_PAGE_MAX_BYTES).map(
+            ({ page, bytes }) => {
+                const text = serializedJsonText(page);
+                return {
+                    text,
+                    bytes,
+                    sha256: createHash("sha256").update(text, "utf8").digest("hex"),
+                };
+            },
+        );
         if (fixture.pagerRefuses) throw new Error(`${fixture.name}: pager must refuse`);
         return {
             name: fixture.name,

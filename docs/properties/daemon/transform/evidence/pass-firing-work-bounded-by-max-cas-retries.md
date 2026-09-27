@@ -115,7 +115,20 @@ progress. Nothing surfaces the condition: no counter, no log, no deadline.
 
 ## Timing windows and dependencies
 
-The retry bound is unconditional.
+The retry bound is unconditional. Since
+[#833](https://github.com/ahrav/eidnara/issues/833) the loop in
+`apply_once_with_estimator` also runs the no-survivor reset
+(`reset_no_survivor`). A reset that loses its CAS spends a retry from the same
+budget of eight. One committed reset per firing is free, because it leaves no
+coverage. A second no-survivor resolution after that commit needs another
+writer's segments, and it fails the firing with `CasConflict` before any write.
+So one firing makes at most ten store-writing attempts, resets and `apply_once`
+invocations together, and commits at most one reset. The tests are
+`a_committed_reset_leaves_the_whole_retry_budget_to_the_pass` (one reset, then
+eight transform conflicts, then a commit),
+`a_no_survivor_reset_that_always_loses_its_cas_surfaces_the_conflict` (nine
+reset attempts, then the error), and
+`a_second_no_survivor_resolution_in_one_pass_fails_with_a_cas_conflict`.
 
 The unbounded loop's reachability depends on whether two writers can touch one
 session's tags while a third pass reads them. That is the same open concurrency
@@ -180,3 +193,10 @@ For the unbounded loop, a bounded probe rather than a livelock demonstration:
 - Missing evidence: none.
 - Conclusion: resolved with answer — nine invocations, eight retries. The
   constant name is accurate.
+
+Update, 2026-09-27: [#833](https://github.com/ahrav/eidnara/issues/833) deletes covered-drift rejection: `identity_drift_requires_reject` and
+`TransformError::IdentityDrift`. Block identities are pruned to the window
+inside the transform's meta CAS, and a changed identity is re-adopted, except
+for a tail message that a frozen unit targets (`frozen_unit_targets_mid`),
+which refuses the pass with `TransformError::FrozenTargetDrift`. Citations of the
+deleted symbols here are historical at their stated baseline.

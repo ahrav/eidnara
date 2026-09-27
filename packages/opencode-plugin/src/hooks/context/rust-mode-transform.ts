@@ -18,9 +18,7 @@ import {
 } from "./edit-recipe";
 import {
     resolveEidnaraReduceAvailability,
-    resolveEidnaraReduceAvailabilityFromMessages,
     resolveTodowriteAvailability,
-    resolveTodowriteAvailabilityFromMessages,
     type ToolAvailabilityVerdict,
     todowritePermissionDenied,
 } from "./eidnara-reduce-availability";
@@ -34,18 +32,17 @@ import {
     resolveTrustedContextLimit,
 } from "./event-resolvers";
 import { validateInvocation } from "./invocation-budget";
-import { isModuleTransportGenerationChangedResult } from "./module-transport";
 import {
-    annotateOrdinals,
+    isModuleTransportGenerationChangedResult,
+    TRANSFORM_SEND_TIMEOUT_MS,
+} from "./module-transport";
+import {
     buildPagedModuleTransformPayloads,
     encodeOpenCodeMessagesToCk,
     type ModuleMethod,
-    type ModuleOrdinalMemo,
-    ORDINAL_ENTRY_RETAINED_BYTES,
-    type OrdinalResolution,
-    primeOrdinalMemo,
 } from "./module-wire";
 import { findLastAssistantModelFromOpenCodeDb, isMidTurn } from "./read-session-db";
+import { isRawCompactionSummaryInfo } from "./read-session-raw";
 import {
     knownSessionDirectory,
     resolveSessionDirectory,
@@ -60,13 +57,19 @@ import {
     capturedMessagesUnchanged,
     captureHistory,
     captureMessages,
+    copyWindow,
     defaultTransformCaptureAdmission,
+    filterMayHold,
     type HistoryDigest,
     historyDigestsEqual,
     inspectReferenceableMessages,
+    messageId,
+    messageIdFilter,
     publicationRejection,
     publishInPlace,
     readOwnDataProperty,
+    rootArrayRejection,
+    scanMessageIds,
     type TransformCaptureAdmission,
 } from "./transform-capture";
 import { logTransformTiming } from "./transform-stage-logger";
@@ -93,22 +96,36 @@ export interface RustModeTransformDeps extends SessionDirectoryDeps {
     isInternalChildSession?: (sessionId: string) => boolean;
 }
 
-function activeAgentFromMessages(messages: readonly MessageLike[]): string | undefined {
+function nonEmptyString(value: unknown): string | undefined {
+    return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
+function activeAgentFromMessages(messages: readonly MessageLike[]): string | undefined | null {
+    let assistantAgent: string | undefined;
     for (let index = messages.length - 1; index >= 0; index -= 1) {
-        const info = messages[index]?.info as { role?: unknown; agent?: unknown } | undefined;
-        if (info?.role !== "user") continue;
-        return typeof info.agent === "string" && info.agent.length > 0 ? info.agent : undefined;
+        const info = messages[index]?.info as
+            | { role?: unknown; agent?: unknown; mode?: unknown }
+            | undefined;
+        if (info?.role === "user") return nonEmptyString(info.agent);
+        if (info?.role === "assistant")
+            assistantAgent ??= nonEmptyString(info.agent) ?? nonEmptyString(info.mode);
     }
-    return undefined;
+    return assistantAgent ?? null;
 }
 
 async function resolveCombinedTodowriteVerdict(
     deps: RustModeTransformDeps,
     sessionId: string,
-    activeAgent: string | undefined,
+    activeAgent: string | undefined | null,
     availability: ToolAvailabilityVerdict,
 ): Promise<boolean> {
-    if (!availability.frozen || !availability.callable || deps.compactionOff === true) return false;
+    if (
+        activeAgent === null ||
+        !availability.frozen ||
+        !availability.callable ||
+        deps.compactionOff === true
+    )
+        return false;
 
     return !(await todowritePermissionDenied(deps.client, sessionId, activeAgent));
 }
@@ -149,11 +166,14 @@ interface AppliedOutput {
 }
 
 /**
- * A session's retained output: the capture basis of the input its last published pass submitted,
- * which lets the next capture verify that prefix instead of taping it again and lets a failed pass
- * decide whether the applied output is still served, and the output that pass applied.
+ * A session's retained output: the capture basis of the window its last published pass submitted,
+ * which lets the next capture of a window declared at the same anchor verify that prefix instead
+ * of taping it again and lets a failed pass at that anchor decide whether the applied output is
+ * still served, and the output that pass applied.
  */
 interface RetainedOutput {
+    /** The acknowledgment basis: the anchor the submitted window started at. */
+    readonly basis: TransformBoundary | null;
     readonly rawCount: number;
     /** Digest of every submitted message but the last. */
     readonly rawHistory: HistoryDigest;
@@ -165,17 +185,22 @@ interface RetainedOutput {
     readonly inputLengths: readonly number[];
     /** Cleared only by `RetainedOutputs`, which owns the charge. */
     readonly applied?: AppliedOutput;
+    /**
+     * Set by `RetainedOutputs` once a pass sourced from this record drew `boundary_unknown`; the
+     * daemon may have dropped the basis, so the applied output no longer serves a failed pass.
+     */
+    readonly disowned?: boolean;
     /** One charge for the whole record, the applied output's included. */
     readonly charge: number;
 }
 
 /** The fields `RetainedOutputs` alone may change, keeping `used` equal to the summed charges. */
-type OwnedRetainedOutput = { applied?: AppliedOutput; charge: number };
+type OwnedRetainedOutput = { applied?: AppliedOutput; disowned?: boolean; charge: number };
 
 /**
  * Holds one retained output per session under a session-count and a byte limit, evicting the
  * least recently used record first; a record is used when it is retained or read with `get`.
- * Failed passes serving the last applied output refresh its session. Eviction never releases a
+ * A failed pass reads its record too, so it refreshes its session. Eviction never releases a
  * capture lease.
  */
 class RetainedOutputs {
@@ -226,6 +251,11 @@ class RetainedOutputs {
         this.clearApplied(record);
     }
 
+    /** Bars the record's applied output from fail-open until a publication retains a new record. */
+    disown(sessionId: string, record: RetainedOutput): void {
+        if (this.records.get(sessionId) === record) (record as OwnedRetainedOutput).disowned = true;
+    }
+
     release(sessionId: string): void {
         const record = this.records.get(sessionId);
         if (record === undefined) return;
@@ -253,11 +283,52 @@ function nextBaseRevision(): string {
     return `${baseRevisionNonce}-${baseRevisionCounter.toString(36)}`;
 }
 
+/** A history segment's end message, as `transform.boundary` lists it (Section 7.10.2). */
+export interface TransformBoundary {
+    readonly mid: string;
+    readonly sequence: number;
+}
+
+function sameBoundary(left: TransformBoundary | null, right: TransformBoundary | null): boolean {
+    return left === right || (left?.mid === right?.mid && left?.sequence === right?.sequence);
+}
+
+/** `undefined` when `value` is neither `null` nor a well-formed anchor. */
+function parseBoundary(value: unknown): TransformBoundary | null | undefined {
+    if (value === null) return null;
+    if (!isRecord(value) || !value.mid || typeof value.mid !== "string") return undefined;
+    return Number.isSafeInteger(value.sequence)
+        ? { mid: value.mid, sequence: value.sequence as number }
+        : undefined;
+}
+
+/** `transform.boundary` lists at most this many anchors per page (docs/host-wire-protocol.md). */
+const MAX_ANCHOR_PAGE = 4096;
+
+/** One `transform.boundary` page, newest first and strictly below `before`; `undefined` when malformed or over the page cap. */
+function parseAnchorPage(
+    reply: unknown,
+    before: number | undefined,
+): TransformBoundary[] | undefined {
+    const anchors = isRecord(reply) ? reply.anchors : undefined;
+    if (!Array.isArray(anchors) || anchors.length > MAX_ANCHOR_PAGE) return undefined;
+    const page: TransformBoundary[] = [];
+    let bound = before ?? Number.POSITIVE_INFINITY;
+    for (const entry of anchors) {
+        const anchor = parseBoundary(entry);
+        if (!anchor || anchor.sequence >= bound) return undefined;
+        bound = anchor.sequence;
+        page.push(anchor);
+    }
+    return page;
+}
+
 export interface RustSessionState {
     initialized: boolean;
     consecutiveFailures: number;
     passCount: number;
-    ordinals: ModuleOrdinalMemo;
+    /** The declared anchor: `null` sends the whole array, `undefined` is not yet discovered. */
+    boundary: TransformBoundary | null | undefined;
     failureCount: number;
     /** Consecutive passes whose newest user message is synthetic. A real user message resets it. */
     syntheticTurnCount: number;
@@ -274,6 +345,8 @@ export interface RustModeTransformOptions {
     captureAdmission?: TransformCaptureAdmission;
     /** Retained-output budget across sessions; tests inject a smaller one. */
     retainedOutputBudgetBytes?: number;
+    /** Largest transform body sent unpaged; tests inject the page limit to exercise paging. */
+    unpagedTransformMaxBytes?: number;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -286,38 +359,17 @@ function messageInfo(value: unknown): Record<string, unknown> {
 }
 
 /**
- * A failed pass may serve the retained output only when every message the previous pass submitted,
- * its terminal included, is unchanged and in place. New messages may follow; an edit, removal,
- * revert, or reorder of an acknowledged message leaves the retained output stale.
+ * A failed pass may serve the retained output only when every window message the previous pass
+ * submitted is unchanged and in place. A verified capture already proves the members before the
+ * terminal, so this checks the terminal; an edit of it leaves the retained output stale.
  */
 function isAppendOnlyExtension(previous: RetainedOutput, captured: CapturedHistory): boolean {
     return (
-        captured.members.length >= previous.rawCount &&
-        captured.verified !== undefined &&
-        historyDigestsEqual(captured.verified, previous.rawHistory) &&
-        (previous.rawCount === 0 || formerTerminalUnchanged(previous, captured))
+        previous.rawCount === 0 ||
+        (previous.rawTerminal !== undefined &&
+            captured.boundary !== undefined &&
+            historyDigestsEqual(captured.boundary, previous.rawTerminal))
     );
-}
-
-/** A verified capture tapes the former terminal first, so its boundary is that member. */
-function formerTerminalUnchanged(previous: RetainedOutput, captured: CapturedHistory): boolean {
-    return (
-        previous.rawTerminal !== undefined &&
-        captured.boundary !== undefined &&
-        historyDigestsEqual(captured.boundary, previous.rawTerminal)
-    );
-}
-
-/**
- * The fail-open array and the raw input share the appended suffix, so the fail-open array is
- * larger than raw exactly when the retained output holds more bytes than its source prefix.
- */
-function appliedOutputGrew(previous: RetainedOutput, applied: AppliedOutput): boolean {
-    let appliedBytes = 0;
-    for (const length of applied.lengths) appliedBytes += length;
-    let prefixBytes = 0;
-    for (const length of previous.inputLengths) prefixBytes += length;
-    return appliedBytes > prefixBytes;
 }
 
 /**
@@ -344,7 +396,6 @@ function newestUserMessage(messages: MessageLike[]): MessageLike | undefined {
 
 interface RustPassTimings {
     prefixGuard: number;
-    ordinalResolve: number;
     clone: number;
     wireBuild: number;
     wireMessages: number;
@@ -352,12 +403,16 @@ interface RustPassTimings {
     transportPages: number;
     transportBytes: number;
     apply: number;
+    /** Host slots the id scans and the membership filter read. */
+    scannedItems: number;
+    /** The pass's capture-lease charge and the retained record's charge. */
+    chargedBytes: number;
+    retainedBytes: number;
 }
 
 function emptyRustPassTimings(): RustPassTimings {
     return {
         prefixGuard: 0,
-        ordinalResolve: 0,
         clone: 0,
         wireBuild: 0,
         wireMessages: 0,
@@ -365,6 +420,9 @@ function emptyRustPassTimings(): RustPassTimings {
         transportPages: 0,
         transportBytes: 0,
         apply: 0,
+        scannedItems: 0,
+        chargedBytes: 0,
+        retainedBytes: 0,
     };
 }
 
@@ -379,19 +437,15 @@ function formatRustPassLog(args: {
     moduleElapsedMs: number;
     rowVersion: number;
     emergencyWaitMs?: number;
+    rediscovered?: boolean;
     timings?: RustPassTimings;
 }): string {
     const timings = args.timings ?? emptyRustPassTimings();
     const measured =
-        timings.prefixGuard +
-        timings.ordinalResolve +
-        timings.clone +
-        timings.wireBuild +
-        timings.transport +
-        timings.apply;
+        timings.prefixGuard + timings.clone + timings.wireBuild + timings.transport + timings.apply;
     const unattributed = Math.max(0, args.elapsedMs - measured);
     const rowVersion = Number.isSafeInteger(args.rowVersion) ? args.rowVersion : 0;
-    return `rust pass: decision=${args.decision} reason=${args.reason} served_from=${args.servedFrom} in=${args.inputCount} out=${args.outputCount} applied=${args.applied} row_version=${rowVersion} emergency_wait=${(args.emergencyWaitMs ?? 0).toFixed(1)} elapsed=${args.elapsedMs.toFixed(1)} ms module=${args.moduleElapsedMs.toFixed(1)} ms stages=prefix_guard:${timings.prefixGuard.toFixed(1)} ordinal_resolve:${timings.ordinalResolve.toFixed(1)} clone:${timings.clone.toFixed(1)} wire_build:${timings.wireBuild.toFixed(1)} wire_messages:${timings.wireMessages} transport:${timings.transport.toFixed(1)} transport_pages:${timings.transportPages} transport_bytes:${timings.transportBytes} apply:${timings.apply.toFixed(1)} other:${unattributed.toFixed(1)}`;
+    return `rust pass: decision=${args.decision} reason=${args.reason} served_from=${args.servedFrom} in=${args.inputCount} out=${args.outputCount} applied=${args.applied} row_version=${rowVersion} emergency_wait=${(args.emergencyWaitMs ?? 0).toFixed(1)} rediscovered=${args.rediscovered === true} elapsed=${args.elapsedMs.toFixed(1)} ms module=${args.moduleElapsedMs.toFixed(1)} ms stages=prefix_guard:${timings.prefixGuard.toFixed(1)} clone:${timings.clone.toFixed(1)} wire_build:${timings.wireBuild.toFixed(1)} wire_messages:${timings.wireMessages} transport:${timings.transport.toFixed(1)} transport_pages:${timings.transportPages} transport_bytes:${timings.transportBytes} apply:${timings.apply.toFixed(1)} other:${unattributed.toFixed(1)} work=scanned:${timings.scannedItems} charged:${timings.chargedBytes} retained:${timings.retainedBytes}`;
 }
 
 function isSyntheticUserMessage(message: MessageLike | undefined): boolean {
@@ -453,6 +507,15 @@ function responseValue(response: unknown): Record<string, unknown> {
     throw new Error("module transform returned a non-object response");
 }
 
+function errorHasCode(error: unknown, code: string): boolean {
+    const seen = new Set<unknown>();
+    for (let current = error; isRecord(current) && !seen.has(current); current = current.cause) {
+        seen.add(current);
+        if (current.code === code) return true;
+    }
+    return false;
+}
+
 function isTransformPageAttemptMismatch(error: unknown): boolean {
     let current = error;
     const seen = new Set<unknown>();
@@ -512,7 +575,7 @@ function ensureState(states: Map<string, RustSessionState>, sessionId: string): 
             initialized: false,
             consecutiveFailures: 0,
             passCount: 0,
-            ordinals: { generation: 0, memoGeneration: 0, entries: new Map() },
+            boundary: undefined,
             failureCount: 0,
             syntheticTurnCount: 0,
             lastObservedUserMessageId: null,
@@ -652,6 +715,7 @@ export function applyTransformRecipe(
 
 function buildTransformBody(args: {
     sessionId: string;
+    boundary: TransformBoundary | null;
     baseRevision: string;
     previousOutputRevision?: string;
     input: unknown[];
@@ -670,7 +734,8 @@ function buildTransformBody(args: {
     return {
         method: "transform",
         kind: "transform",
-        v: 2,
+        v: 3,
+        boundary: args.boundary,
         serializer_profile: "opencode-aisdk",
         serve_native: true,
         session_id: args.sessionId,
@@ -727,6 +792,9 @@ function buildTransformBody(args: {
 }
 
 const CANDIDATE_SLOT_BYTES = 8;
+/** Discovery walks from the pass start within the transform deadline less a reserve for the transform itself. */
+const DISCOVERY_BUDGET_MS = TRANSFORM_SEND_TIMEOUT_MS - 4_000;
+if (DISCOVERY_BUDGET_MS <= 0) throw new Error("the transform deadline leaves no discovery budget");
 /** Charged on top of the heuristic estimate because the estimator undercounts relative to the provider's tokenizer. */
 const INVOCATION_HEADROOM_PERMILLE = 250;
 /** WIRE_PROJECTION_FACTOR accounts for the CK text, the native text, the paging parse copy, and the page texts. */
@@ -744,7 +812,10 @@ type PassDeclineReason =
     | "deleted"
     | "internal_child"
     | "daemon_session_busy"
-    | "daemon_status_unrecognized";
+    | "daemon_status_unrecognized"
+    | "daemon_revision_unsupported"
+    | "boundary_unknown"
+    | "discovery_declined";
 
 /**
  * Declines that try `serveLastApplied` before raw output, because raw output carries the whole
@@ -816,7 +887,6 @@ export function createRustModeTransform(
 ): {
     run: (sessionId: string, output: { messages: unknown[] }) => Promise<void>;
     clearSession: (sessionId: string) => void;
-    invalidateOrdinals: (sessionId: string) => void;
     getState: (sessionId: string) => Readonly<RustSessionState>;
 } {
     const states = new Map<string, RustSessionState>();
@@ -867,34 +937,27 @@ export function createRustModeTransform(
         );
     };
 
-    /** A removed message can hold a memo ordinal; a pass in flight is cancelled so it cannot promote the stale memo it copied. */
-    const invalidateOrdinals = (sessionId: string): void => {
-        captureAdmission.requestCancel(sessionId, `rust session ${sessionId} ordinals invalidated`);
-        const state = states.get(sessionId);
-        if (!state) return;
-        state.ordinals = {
-            ...state.ordinals,
-            entries: new Map(),
-            anchor: null,
-            storedCount: null,
-            canonicalCount: 0,
-        };
-    };
-
+    /** `rerun` resumes a pass on its validated root after its anchor drew `boundary_unknown`. */
     const execute = async (
         sessionId: string,
         output: { messages: unknown[] },
         lease: CaptureLease,
+        rerun?: {
+            deliveries: DeliveryPlan;
+            timings: RustPassTimings;
+            startedAt: number;
+            target: unknown[];
+        },
     ): Promise<DeliveryPlan> => {
-        const passStartedAt = performance.now();
-        const deliveries: DeliveryPlan = {
+        const passStartedAt = rerun?.startedAt ?? performance.now();
+        const deliveries: DeliveryPlan = rerun?.deliveries ?? {
             sessionId,
             projectRoot: "",
             attempted: new Set(),
             applied: new Set(),
         };
-        const target = readOwnDataProperty(output, "messages") as unknown[];
-        const hostRejection = publicationRejection(target, 0);
+        const target = rerun?.target ?? (readOwnDataProperty(output, "messages") as unknown[]);
+        const hostRejection = rerun ? null : publicationRejection(target, 0);
         if (hostRejection !== null) {
             sessionLog.debug(
                 sessionId,
@@ -903,7 +966,7 @@ export function createRustModeTransform(
             return deliveries;
         }
         const state = ensureState(states, sessionId);
-        const timings = emptyRustPassTimings();
+        const timings = rerun?.timings ?? emptyRustPassTimings();
         let inputCount = 0;
         let decision = "error";
         let materializeReason = "none";
@@ -915,6 +978,7 @@ export function createRustModeTransform(
         const finishPass = (applied: boolean): void => {
             const elapsedAt = applied && appliedAt !== undefined ? appliedAt : performance.now();
             const elapsedMs = Math.max(0, elapsedAt - passStartedAt);
+            timings.chargedBytes = lease.chargedBytes;
             sessionLog.debug(
                 sessionId,
                 formatRustPassLog({
@@ -928,6 +992,7 @@ export function createRustModeTransform(
                     moduleElapsedMs,
                     rowVersion,
                     emergencyWaitMs,
+                    rediscovered: rerun !== undefined,
                     timings,
                 }),
             );
@@ -1008,7 +1073,7 @@ export function createRustModeTransform(
                     sessionLog.debug(sessionId, `rust module stages (slow pass): ${detail}`);
             }
         };
-        state.passCount += 1;
+        if (!rerun) state.passCount += 1;
         // Clearing a session replaces its state object; supersession, clearing, and ordinal invalidation abort the capture lease.
         const assertCurrentPass = (): void => {
             if (states.get(sessionId) !== state) throw new PassDeclined(sessionId, "cleared");
@@ -1017,42 +1082,74 @@ export function createRustModeTransform(
         const charge = (bytes: number, detail: string): void => {
             if (!lease.reserve(bytes)) throw new CaptureBudgetExceeded(detail);
         };
-        let failOpenSource: { captured: CapturedHistory; previous: RetainedOutput } | undefined;
+        let failOpenSource:
+            | {
+                  previous: RetainedOutput;
+                  captured: CapturedHistory;
+                  boundaryIndex: number;
+                  recheck: (phase: string) => void;
+                  /** The trusted limit the main publication's invocation gate reads. */
+                  contextLimit: number | undefined;
+              }
+            | undefined;
         /**
          * Without native compaction a raw fail-open can overflow the provider window, so a failed
-         * pass republishes the last applied output followed by the raw messages appended after the
-         * prefix that output was computed from. Messages are appended whole, so a tool part keeps
-         * its call and result together. Any doubt about the prefix serves the input unchanged.
+         * pass declared at the retained basis republishes the applied output followed by the window
+         * messages after the acknowledged prefix. Messages are appended whole, so a tool part keeps
+         * its call and result together. No basis is promoted; any doubt serves the input unchanged.
          */
         const serveLastApplied = (): boolean => {
             const source = failOpenSource;
             const applied = source?.previous.applied;
             if (!source || !applied) return false;
             try {
+                source.recheck("fail-open");
                 if (
-                    states.get(sessionId) !== state ||
-                    lease.signal.aborted ||
                     retainedOutputs.peek(sessionId) !== source.previous ||
-                    !isAppendOnlyExtension(source.previous, source.captured) ||
-                    appliedOutputGrew(source.previous, applied) ||
-                    readOwnDataProperty(output, "messages") !== target ||
-                    !capturedMessagesUnchanged(target, source.captured)
+                    !isAppendOnlyExtension(source.previous, source.captured)
                 )
                     return false;
                 if (!capturedMessagesUnchanged(applied.values, applied.capture)) {
                     retainedOutputs.dropApplied(sessionId, source.previous);
                     return false;
                 }
-                const served = [
-                    ...applied.values,
-                    ...source.captured.members.slice(source.previous.rawCount),
-                ];
+                const { members } = source.captured;
+                const rawCount = source.previous.rawCount;
+                const served = [...applied.values, ...members.slice(rawCount)];
+                const gated = source.contextLimit !== undefined;
                 if (
                     publicationRejection(target, served.length) !== null ||
-                    !lease.reserve(served.length * CANDIDATE_SLOT_BYTES)
+                    !lease.reserve(
+                        served.length * CANDIDATE_SLOT_BYTES +
+                            (gated ? members.length * LENGTH_SLOT_BYTES : 0),
+                    )
                 )
                     return false;
-                const failure = publishInPlace(target, served, source.captured.members);
+                // The fallback is a candidate too: it may not grow past the limit the pass would refuse.
+                if (gated) {
+                    const incoming = measureInputLengths(
+                        members,
+                        source.previous,
+                        source.captured.verified?.count ?? 0,
+                    );
+                    const invocation = validateInvocation(
+                        [...applied.lengths, ...incoming.slice(rawCount)],
+                        incoming,
+                        {
+                            maxTokens: source.contextLimit,
+                            headroomPermille: INVOCATION_HEADROOM_PERMILLE,
+                            profile: "opencode-heuristic",
+                        },
+                    );
+                    if (!invocation.ok) {
+                        sessionLog.debug(
+                            sessionId,
+                            `rust transform fail-open declined: invocation_budget (${invocation.candidate.chargedTokens} charged tokens over ${invocation.limit}, growing from ${invocation.incoming.bytes} to ${invocation.candidate.bytes} bytes)`,
+                        );
+                        return false;
+                    }
+                }
+                const failure = publishInPlace(target, served, members, source.boundaryIndex);
                 if (failure) {
                     sessionLog.warn(
                         sessionId,
@@ -1062,19 +1159,149 @@ export function createRustModeTransform(
                 }
                 return true;
             } catch (error) {
-                sessionLog.warn(sessionId, "rust transform fail-open reuse declined:", error);
+                sessionLog.debug(sessionId, "rust transform fail-open reuse declined:", error);
                 return false;
             }
         };
+        const scan = (stop: (id: string, index: number) => boolean): number => {
+            const index = scanMessageIds(target, stop);
+            timings.scannedItems += target.length - Math.max(index, 0);
+            return index;
+        };
+        /**
+         * Walks `transform.boundary` newest first to an anchor the host holds; an empty
+         * page sends `null`. Budget (from the pass start, so a rerun gets what is left), timeout, a
+         * malformed or repeated page, or a daemon without the method declines, never `null`.
+         */
+        const discover = async (
+            projectRoot: string,
+        ): Promise<{ boundary: TransformBoundary | null; index: number }> => {
+            const deadline = passStartedAt + DISCOVERY_BUDGET_MS;
+            let filter: Uint32Array | undefined;
+            let before: number | undefined;
+            for (;;) {
+                const remainingMs = Math.floor(deadline - performance.now());
+                if (remainingMs <= 0)
+                    throw new PassDeclined(sessionId, "discovery_declined", "time budget");
+                let reply: unknown;
+                try {
+                    reply = await options.moduleClient.call({
+                        sessionId,
+                        projectRoot,
+                        method: "transform.boundary",
+                        body: {
+                            method: "transform.boundary",
+                            v: 3,
+                            session_id: sessionId,
+                            ...(before === undefined ? {} : { before_sequence: before }),
+                        },
+                        signal: lease.signal,
+                        timeoutMs: remainingMs,
+                    });
+                } catch (error) {
+                    assertCurrentPass();
+                    throw new PassDeclined(
+                        sessionId,
+                        "discovery_declined",
+                        errorHasCode(error, "unrecognized_request_shape")
+                            ? "the daemon lacks transform.boundary; upgrade it with the plugin"
+                            : String(error),
+                        "warn",
+                    );
+                }
+                assertCurrentPass();
+                const page = parseAnchorPage(reply, before);
+                if (!page)
+                    throw new PassDeclined(sessionId, "discovery_declined", "malformed page");
+                const last = page.at(-1);
+                if (!last) return { boundary: null, index: 0 };
+                // Both paths declare the held anchor latest in the host, the newest by sequence
+                // when two share a mid. Host order follows segment sequence (D16: writers append
+                // or truncate a suffix), so that is the newest held anchor; if a host breaks the
+                // order, the daemon re-validates the declared anchor (D10) and reverts to it.
+                if (!filter) {
+                    // D17: one backward id scan against the first page stops at the first hit.
+                    const anchors = new Map<string, TransformBoundary>();
+                    for (const anchor of page)
+                        if (!anchors.has(anchor.mid)) anchors.set(anchor.mid, anchor);
+                    let hit: TransformBoundary | undefined;
+                    const index = scan((id) => {
+                        hit = anchors.get(id);
+                        return hit !== undefined;
+                    });
+                    // `hit` is set by the last callback, so it is defined only when the scan stopped on one.
+                    if (hit) return { boundary: hit, index };
+                    // The whole host holds none of this page; later pages probe the filter.
+                    timings.scannedItems += target.length;
+                    filter = messageIdFilter(target, (bytes) => lease.reserve(bytes));
+                    if (!filter) throw new CaptureBudgetExceeded("membership filter");
+                    before = last.sequence;
+                    continue;
+                }
+                const wanted = new Set<string>();
+                for (const anchor of page)
+                    if (filterMayHold(filter, anchor.mid)) wanted.add(anchor.mid);
+                const found = new Map<string, number>();
+                if (wanted.size > 0)
+                    scan((id, index) => {
+                        if (wanted.has(id) && !found.has(id)) found.set(id, index);
+                        return found.size === wanted.size;
+                    });
+                let held: { boundary: TransformBoundary; index: number } | undefined;
+                for (const anchor of page) {
+                    const index = found.get(anchor.mid);
+                    if (index !== undefined && index > (held?.index ?? -1))
+                        held = { boundary: anchor, index };
+                }
+                if (held) return held;
+                before = last.sequence;
+            }
+        };
         try {
-            // Source domain is validated synchronously before any message read.
+            // The root's own `then` and the built-in prototypes are refused before any await.
+            const rootRejection = rootArrayRejection(target);
+            if (rootRejection)
+                throw new PassDeclined(
+                    sessionId,
+                    "unsupported_source",
+                    `${rootRejection.reason} at ${rootRejection.path}`,
+                    rootRejection.reason === "prototype_accessor" ? "warn" : "debug",
+                );
+            // The directory names the discovery route, reads no source, and records a host-reported `parentID` the subagent classification reads.
+            const directory = await resolveSessionDirectory(deps, sessionId);
+            if (deps.isSessionDeleted?.(sessionId)) {
+                deps.onSessionDeletedDuringPreflight?.(sessionId);
+                throw new PassDeclined(sessionId, "deleted");
+            }
+            if (deps.isInternalChildSession?.(sessionId))
+                throw new PassDeclined(sessionId, "internal_child");
+            assertCurrentPass();
+            // An unknown boundary, or one the scan cannot find, needs a discovery walk.
+            const known = state.boundary;
+            let boundary = known ?? null;
+            let boundaryIndex = known ? scan((id) => id === known.mid) : 0;
+            if (known === undefined || boundaryIndex < 0)
+                ({ boundary, index: boundaryIndex } = await discover(
+                    options.projectRoot ?? directory,
+                ));
+            // The window is copied, inspected, and taped in one synchronous section.
             const prefixGuardStartedAt = performance.now();
             const previous = retainedOutputs.get(sessionId);
+            const capturedLength = target.length;
+            // The copy holds one slot reference per tail message, charged like a served or candidate array.
+            charge((capturedLength - boundaryIndex) * CANDIDATE_SLOT_BYTES, "window slots");
+            const window = copyWindow(target, boundaryIndex, capturedLength);
+            if (!window)
+                throw new PassDeclined(sessionId, "unsupported_source", "window slot accessor");
+            // Discovery fixed `boundaryIndex` before an await, so the host may have moved the anchor.
+            const head = messageId(window[0]);
+            if (boundary && head !== boundary.mid)
+                throw new PassDeclined(sessionId, "source_changed", "boundary moved");
             // A full fallback inspection walks a superset of the partial one, so it pays only the difference.
             let inspectedBytes = 0;
             const inspect = (skip: number): number[] => {
                 const inspection = inspectReferenceableMessages(
-                    target,
+                    window,
                     lease.remainingBytes + inspectedBytes,
                     skip,
                 );
@@ -1094,86 +1321,58 @@ export function createRustModeTransform(
                 return inspection.messageWireBytes;
             };
             /**
-             * The acknowledged history before the former terminal is matched against its digest
-             * rather than re-taped, so the charge covers the root and the messages after it. The
-             * former terminal is taped again because the host may still be editing it in place.
-             * Any prefix change falls back to a full inspection and capture.
+             * A window declared at the retained basis checks its history before the former terminal
+             * against the digest instead of re-taping it; the former terminal, which the host may still
+             * edit in place, is taped again. Any prefix change falls back to a full capture.
              */
-            const prefix = previous?.rawHistory;
+            const prefix =
+                previous && sameBoundary(previous.basis, boundary)
+                    ? previous.rawHistory
+                    : undefined;
             let verified: CapturedHistory | undefined;
             let messageWireBytes: number[] = [];
             if (previous && prefix) {
                 messageWireBytes = inspect(prefix.count);
-                verified = captureHistory(target, lease, prefix);
+                verified = captureHistory(window, lease, prefix);
                 for (let index = 0; verified && index < prefix.count; index += 1)
                     messageWireBytes[index] = previous.wireBytes[index] ?? 0;
             }
             if (!verified) messageWireBytes = inspect(0);
-            const captured = verified ?? captureHistory(target, lease);
+            const captured = verified ?? captureHistory(window, lease);
             inputCount = messageWireBytes.length;
-            // Later reads use the captured members; the live array is only rechecked against them.
+            // Later reads use the captured window; the live array is only rechecked against it.
             const messages = captured.members as MessageLike[];
+            const ids = new Set<unknown>();
+            for (const message of messages) {
+                const id = messageId(message);
+                if (id !== undefined && ids.has(id))
+                    throw new PassDeclined(sessionId, "unsupported_source", `duplicate id ${id}`);
+                ids.add(id);
+            }
             logStage(
                 sessionId,
                 "prefixGuard",
                 prefixGuardStartedAt,
                 timings,
-                `phase=capture verified=${verified?.verified?.count ?? 0}`,
+                `phase=capture boundary_index=${boundaryIndex} verified=${verified?.verified?.count ?? 0}`,
             );
+            /** The same root, length, and boundary index, with every window slot and tape unchanged. */
             const recheckCapture = (phase: string): void => {
                 assertCurrentPass();
                 const startedAt = performance.now();
-                const unchanged =
+                const live =
                     readOwnDataProperty(output, "messages") === target &&
-                    capturedMessagesUnchanged(target, captured);
+                    rootArrayRejection(target) === undefined &&
+                    target.length === capturedLength
+                        ? copyWindow(target, boundaryIndex, capturedLength)
+                        : undefined;
+                const unchanged = live !== undefined && capturedMessagesUnchanged(live, captured);
                 logStage(sessionId, "prefixGuard", startedAt, timings, `phase=${phase}`);
                 if (!unchanged) throw new PassDeclined(sessionId, "source_changed", phase);
             };
-            // The wire charge derives from the capture, so byte pressure declines before the first await.
-            if (previous) failOpenSource = { captured, previous };
-            let wireBytes = 0;
-            for (let index = 0; index < messageWireBytes.length; index += 1)
-                wireBytes += WIRE_PROJECTION_FACTOR * (messageWireBytes[index] ?? 0);
-            charge(wireBytes, "wire projection");
-            let memoCopyBytes = 0;
-            for (const id of state.ordinals.entries.keys())
-                memoCopyBytes += ORDINAL_ENTRY_RETAINED_BYTES + id.length * 2;
-            charge(memoCopyBytes, "ordinal memo copy");
-            const syntheticTurn = observeSyntheticTurn(state, messages);
-            if (syntheticTurn && state.syntheticTurnCount >= 3 && !state.syntheticCascadeLogged) {
-                state.syntheticCascadeLogged = true;
-                sessionLog.warn(
-                    sessionId,
-                    `rust synthetic-turn cascade: ${state.syntheticTurnCount} consecutive synthetic user turns with no real user message`,
-                );
-            }
-            const passUsageSnapshot = loadContextUsage(deps, sessionId);
-            let model = modelFromMessages(messages);
-            // Both verdicts freeze from the first user message in the live array before the DB is consulted; a session whose first user row is not yet persisted otherwise reads as provisional and fails closed.
-            resolveEidnaraReduceAvailabilityFromMessages(sessionId, messages);
-            const reduceAvailability = resolveEidnaraReduceAvailability(sessionId);
-            resolveTodowriteAvailabilityFromMessages(sessionId, messages);
-            const todoAvailability = resolveTodowriteAvailability(sessionId);
-            const toolPresent = reduceAvailability.frozen && reduceAvailability.callable;
-            const activeAgent = activeAgentFromMessages(messages);
-            // Ordinal work stages in a charged pass-local copy of the memo; only accepted publication promotes it.
-            const stagedMemo: ModuleOrdinalMemo = {
-                ...state.ordinals,
-                entries: new Map(state.ordinals.entries),
-            };
-            // Every message read above is synchronous; the awaits below read nothing from the source, so the next recheck precedes ordinal annotation.
-            // The directory read also records a host-reported `parentID`, so it runs before the subagent classification is read.
-            const directory = await resolveSessionDirectory(deps, sessionId);
-            if (deps.isSessionDeleted?.(sessionId)) {
-                deps.onSessionDeletedDuringPreflight?.(sessionId);
-                throw new PassDeclined(sessionId, "deleted");
-            }
-            if (deps.isInternalChildSession?.(sessionId)) {
-                throw new PassDeclined(sessionId, "internal_child");
-            }
-            const isSubagent = deps.isSubagentSession(sessionId);
-            const systemPromptHash = deps.systemPromptHashFor(sessionId);
+            // The trusted limit is resolved before the first decline a failed pass can fail open from.
             let preflightError: unknown;
+            let model = modelFromMessages(messages);
             if (!model) {
                 try {
                     model = findLastAssistantModelFromOpenCodeDb(sessionId) ?? undefined;
@@ -1200,6 +1399,40 @@ export function createRustModeTransform(
                     preflightError ??= error;
                 }
             }
+            const reportedContextLimit =
+                resolvedContextLimit && resolvedContextLimit > 0 ? resolvedContextLimit : undefined;
+            // Tapes are never rebased: a verified prefix was declared at the retained basis anchor.
+            // A disowned record, which every rerun reads, never fails open.
+            if (previous && verified && !previous.disowned)
+                failOpenSource = {
+                    previous,
+                    captured,
+                    boundaryIndex,
+                    recheck: recheckCapture,
+                    contextLimit: reportedContextLimit,
+                };
+            // The wire charge derives from the capture, so byte pressure declines before the next await.
+            let wireBytes = 0;
+            for (let index = 0; index < messageWireBytes.length; index += 1)
+                wireBytes += WIRE_PROJECTION_FACTOR * (messageWireBytes[index] ?? 0);
+            charge(wireBytes, "wire projection");
+            const syntheticTurn = observeSyntheticTurn(state, messages);
+            if (syntheticTurn && state.syntheticTurnCount >= 3 && !state.syntheticCascadeLogged) {
+                state.syntheticCascadeLogged = true;
+                sessionLog.warn(
+                    sessionId,
+                    `rust synthetic-turn cascade: ${state.syntheticTurnCount} consecutive synthetic user turns with no real user message`,
+                );
+            }
+            const passUsageSnapshot = loadContextUsage(deps, sessionId);
+            // Both verdicts come from the session's earliest persisted user row, never the window's first user; a missing database freezes fail-open, and an unpersisted row or a read error stays provisional and fails closed.
+            const reduceAvailability = resolveEidnaraReduceAvailability(sessionId);
+            const todoAvailability = resolveTodowriteAvailability(sessionId);
+            const toolPresent = reduceAvailability.frozen && reduceAvailability.callable;
+            const activeAgent = activeAgentFromMessages(messages);
+            // Every message read above is synchronous; the awaits below read nothing from the source, so a recheck precedes encoding.
+            const isSubagent = deps.isSubagentSession(sessionId);
+            const systemPromptHash = deps.systemPromptHashFor(sessionId);
             const transformGeometry = transformGeometryForWire(resolvedWindowGeometry);
             assertCurrentPass();
             // Pass the module one bool combining the frozen map verdict and OpenCode's live permission decision.
@@ -1214,8 +1447,6 @@ export function createRustModeTransform(
             if (preflightError) throw preflightError;
             const usage = passUsageSnapshot;
             // The usage sample's percentage was computed against `resolveContextLimit`, which substitutes the 128k default for a model models.dev cannot name, so inverting it recovers that default rather than a host report.
-            const reportedContextLimit =
-                resolvedContextLimit && resolvedContextLimit > 0 ? resolvedContextLimit : undefined;
             const contextLimit =
                 reportedContextLimit ??
                 (usage && usage.percentage > 0
@@ -1255,62 +1486,17 @@ export function createRustModeTransform(
                 ...promptSurfaceWireFields(deps.promptSurfaceRuntime, deps.promptSurface, modelKey),
                 protected_tags: deps.protectedTags ?? DEFAULT_PROTECTED_TAGS,
             };
-            /**
-             * Prime the memo asynchronously, recheck the captured messages, then annotate them
-             * synchronously so no message read follows an await without a fresh guard.
-             */
-            const resolveOrdinals = async (detail: string): Promise<OrdinalResolution> => {
-                const base = stagedMemo.continuationBase;
-                // Annotated shells and their memo entries coexist with the staged copy.
-                charge(messages.length * ORDINAL_ENTRY_RETAINED_BYTES * 2, "ordinal annotation");
-                const startedAt = performance.now();
-                const primed = await primeOrdinalMemo({
-                    sessionId,
-                    memo: stagedMemo,
-                    budget: {
-                        signal: lease.signal,
-                        reserve: (bytes) => charge(bytes, `ordinal scan for session ${sessionId}`),
-                    },
-                });
-                recheckCapture(`ordinal:${detail}`);
-                if (!primed.ok) {
-                    logStage(sessionId, "ordinalResolve", startedAt, timings, detail);
-                    return primed;
-                }
-                const resolved = annotateOrdinals({
-                    messages,
-                    memo: stagedMemo,
-                    primed: primed.primed,
-                    provisionalBase: base,
-                });
-                logStage(sessionId, "ordinalResolve", startedAt, timings, detail);
-                if (resolved.ok) {
-                    stagedMemo.memoGeneration = stagedMemo.generation;
-                    stagedMemo.anchor = primed.primed.memoAnchor;
-                    stagedMemo.storedCount = primed.primed.memoStoredCount;
-                    stagedMemo.canonicalCount = primed.primed.memoCanonicalCount;
-                }
-                return resolved;
-            };
-            let resolved = await resolveOrdinals("attempt=first");
-            if (!resolved.ok) {
-                // A memo generation the scan cannot match forces a full re-prime without an anchor.
-                stagedMemo.memoGeneration = -1;
-                resolved = await resolveOrdinals("fallback=clean_full");
-            }
-            if (!resolved.ok) {
-                throw new Error(
-                    `rust ordinal ${resolved.reason}: messageId=${resolved.messageId ?? "unknown"} ` +
-                        `index=${resolved.messageIndex ?? "unknown"} role=${resolved.messageRole ?? "unknown"}`,
-                );
-            }
-
             recheckCapture("wire-build");
             const projectRoot = options.projectRoot ?? directory;
             state.routeRoot = projectRoot;
             deliveries.projectRoot = projectRoot;
             const wireBuildStartedAt = performance.now();
-            const encodedInput = encodeOpenCodeMessagesToCk(resolved.annotatedInput);
+            // Compaction summaries stay out of the CK window, as the daemon's CK decoder expects; kept messages carry unfiltered window positions (push returns a truthy length).
+            const positions: number[] = [];
+            const kept = messages.filter(
+                (message, i) => !isRawCompactionSummaryInfo(message.info) && positions.push(i + 1),
+            );
+            const encodedInput = encodeOpenCodeMessagesToCk(kept, positions);
             timings.wireMessages = messages.length;
             charge(messages.length * LENGTH_SLOT_BYTES, "input lengths");
             const inputLengths = measureInputLengths(
@@ -1332,6 +1518,7 @@ export function createRustModeTransform(
             const usageEntry = deps.contextUsageMap.get(sessionId);
             const body = buildTransformBody({
                 sessionId,
+                boundary,
                 passInputs,
                 // The daemon keeps its persisted usage when the request carries none; a zero sample with a nonzero limit would replace it.
                 usage: usage ? passUsage(usage, contextLimit) : undefined,
@@ -1365,7 +1552,10 @@ export function createRustModeTransform(
                 payload: Record<string, unknown>,
                 detail: string,
             ): Promise<TransformSeriesResult> => {
-                const series = buildPagedModuleTransformPayloads(payload);
+                const series = buildPagedModuleTransformPayloads(
+                    payload,
+                    options.unpagedTransformMaxBytes,
+                );
                 const paged = series.some(
                     (entry) => typeof entry.page.transform_page_id === "string",
                 );
@@ -1393,6 +1583,13 @@ export function createRustModeTransform(
                     } catch (error) {
                         if (paged && isTransformPageAttemptMismatch(error))
                             return restart("attempt_mismatch");
+                        if (errorHasCode(error, "transform_revision_unsupported"))
+                            throw new PassDeclined(
+                                sessionId,
+                                "daemon_revision_unsupported",
+                                "the daemon speaks another transform revision; upgrade the plugin and daemon together",
+                                "warn",
+                            );
                         throw error;
                     }
                     if (paged && isModuleTransportGenerationChangedResult(moduleResponse))
@@ -1414,8 +1611,14 @@ export function createRustModeTransform(
                 if (!response) throw new Error("rust module returned no transform response");
                 // session_busy: the daemon's session lane already holds an active and a waiting pass for this session.
                 // An unrecognized status is declined the same way (Section 7.10.1 of the wire protocol).
+                // boundary_unknown: the declared anchor names no segment; the pass rediscovers once.
                 const busy = response.status === "session_busy";
-                if (busy || (response.status !== undefined && response.status !== "ok")) {
+                if (
+                    busy ||
+                    (response.status !== undefined &&
+                        response.status !== "ok" &&
+                        response.status !== "boundary_unknown")
+                ) {
                     assertCurrentPass();
                     throw new PassDeclined(
                         sessionId,
@@ -1452,6 +1655,27 @@ export function createRustModeTransform(
                 return result.response;
             };
             const response = await sendTransformSeriesWithSingleRestart(body, "");
+            if (response.status === "boundary_unknown") {
+                assertCurrentPass();
+                state.boundary = undefined;
+                if (previous) retainedOutputs.disown(sessionId, previous);
+                // Section 7.10.4: the first `boundary_unknown` rediscovers, whether or not this attempt walked; the second declines.
+                if (rerun)
+                    throw new PassDeclined(sessionId, "boundary_unknown", "after rediscovery");
+                // Nothing of this attempt is kept, so the rerun pays only for its own capture. The
+                // `return` is not awaited: this frame, its window, and its capture are gone before the rerun captures.
+                lease.refund();
+                return execute(sessionId, output, lease, {
+                    deliveries,
+                    timings,
+                    startedAt: passStartedAt,
+                    target,
+                });
+            }
+            // A missing or malformed boundary leaves the next pass to rediscover it.
+            const nextBoundary = parseBoundary(response.boundary);
+            if (nextBoundary === undefined && response.boundary !== undefined)
+                sessionLog.warn(sessionId, "rust transform response boundary is malformed");
             captureResponseTelemetry(response);
             const appliedDeliveryPassIds = new Set(noteDeliveryPassIds(response));
             const applyStartedAt = performance.now();
@@ -1479,9 +1703,12 @@ export function createRustModeTransform(
                 const candidate = application.values;
                 let applied: AppliedOutput | undefined;
                 try {
+                    // Only the charge is read here, so the per-unit escape scan is skipped.
                     const inspection = inspectReferenceableMessages(
                         candidate,
                         lease.remainingBytes,
+                        0,
+                        false,
                     );
                     if (inspection.ok && lease.reserve(inspection.estimatedBytes)) {
                         applied = {
@@ -1501,26 +1728,6 @@ export function createRustModeTransform(
                 const boundaryId = response.boundary_id;
                 if (typeof boundaryId === "string" && boundaryId.length > 0) {
                     assertNativeBoundary(candidate, sessionId, boundaryId);
-                }
-                const ordinalContinuationBase = response.ordinal_continuation_base;
-                if (
-                    typeof ordinalContinuationBase === "number" &&
-                    Number.isSafeInteger(ordinalContinuationBase) &&
-                    ordinalContinuationBase > 0
-                ) {
-                    if (stagedMemo.continuationBase === undefined) {
-                        for (const [messageId, ordinal] of stagedMemo.entries) {
-                            const shifted = ordinal + ordinalContinuationBase;
-                            if (!Number.isSafeInteger(shifted))
-                                throw new Error("ordinal continuation overflow");
-                            stagedMemo.entries.set(messageId, shifted);
-                        }
-                        const count = (stagedMemo.canonicalCount ?? 0) + ordinalContinuationBase;
-                        if (!Number.isSafeInteger(count))
-                            throw new Error("ordinal continuation overflow");
-                        stagedMemo.canonicalCount = count;
-                    }
-                    stagedMemo.continuationBase = ordinalContinuationBase;
                 }
                 // Final synchronous guards: ownership, source membership and content, and the host container contract.
                 recheckCapture("publish");
@@ -1545,10 +1752,11 @@ export function createRustModeTransform(
                 logStage(sessionId, "apply", applyStartedAt, timings);
                 const applyReplaceStartedAt = performance.now();
                 // Publication and state promotion are synchronous from here to the lease release.
-                const failure = publishInPlace(target, candidate, messages);
+                const failure = publishInPlace(target, candidate, messages, boundaryIndex);
                 if (failure)
                     throw new PassDeclined(sessionId, "publication_failed", failure.detail, "warn");
                 const record: RetainedOutput = {
+                    basis: boundary,
                     rawCount: messages.length,
                     rawHistory: captured.history,
                     ...(captured.terminal ? { rawTerminal: captured.terminal } : {}),
@@ -1557,13 +1765,15 @@ export function createRustModeTransform(
                     ...(applied ? { applied } : {}),
                     charge:
                         messages.length * HISTORY_ENTRY_RETAINED_BYTES +
+                        (boundary?.mid.length ?? 0) * 2 +
                         retainedSymbolBytes(captured.history) +
                         retainedSymbolBytes(captured.terminal) +
                         (applied?.charge ?? 0),
                 };
                 // A refused retention keeps the pass; the next pass loses its verified prefix, or only its `previous` source.
                 retainedOutputs.retain(sessionId, record);
-                state.ordinals = stagedMemo;
+                timings.retainedBytes = record.charge;
+                state.boundary = nextBoundary;
                 state.initialized = true;
                 state.consecutiveFailures = 0;
                 deliveries.applied = appliedDeliveryPassIds;
@@ -1643,13 +1853,8 @@ export function createRustModeTransform(
                     .finally(() => options.moduleClient.closeSession?.(sessionId));
             }
         },
-        invalidateOrdinals,
         getState(sessionId: string): Readonly<RustSessionState> {
-            const state = ensureState(states, sessionId);
-            return {
-                ...state,
-                ordinals: { ...state.ordinals, entries: new Map(state.ordinals.entries) },
-            };
+            return { ...ensureState(states, sessionId) };
         },
     };
 }
