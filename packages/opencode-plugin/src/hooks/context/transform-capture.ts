@@ -89,11 +89,7 @@ export function readOwnDataProperty(value: unknown, key: PropertyKey): unknown {
     return descriptor && Object.hasOwn(descriptor, "value") ? descriptor.value : undefined;
 }
 
-/**
- * Scans host ids from the end until `stop` accepts one and returns its index, or -1. Each hop
- * (slot, `info`, `id`) is an own data read, so a planted proxy, revoked proxy, or accessor reads as
- * no id and none of its traps or getters runs. The caller has rejected a proxied `host`.
- */
+/** Scans host ids from the end until `stop` accepts one and returns its index, or -1. Each hop (slot, `info`, `id`) is an own data read, so a planted proxy, revoked proxy, or accessor reads as no id and none of its traps or getters runs. The caller has rejected a proxied `host`. */
 export function scanMessageIds(
     host: readonly unknown[],
     stop: (id: string, index: number) => boolean,
@@ -114,10 +110,7 @@ export function fnv1a32(text: string): number {
     return hash >>> 0;
 }
 
-/**
- * The sorted id hashes of `host`, retaining no id string. A hit may be a collision, so the caller
- * verifies it with an id scan. `undefined` when `reserve` refuses the four bytes per slot.
- */
+/** The sorted id hashes of `host`, retaining no id string. A hit may be a collision, so the caller verifies it with an id scan. `undefined` when `reserve` refuses the four bytes per slot. */
 export function messageIdFilter(
     host: readonly unknown[],
     reserve: (bytes: number) => boolean,

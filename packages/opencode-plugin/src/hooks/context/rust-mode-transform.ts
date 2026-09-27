@@ -179,7 +179,7 @@ type OwnedRetainedOutput = { applied?: AppliedOutput; charge: number };
 /**
  * Holds one retained output per session under a session-count and a byte limit, evicting the
  * least recently used record first; a record is used when it is retained or read with `get`.
- * Failed passes serving the last applied output refresh its session. Eviction never releases a
+ * A failed pass reads its record too, so it refreshes its session. Eviction never releases a
  * capture lease.
  */
 class RetainedOutputs {
@@ -270,8 +270,7 @@ function sameBoundary(left: TransformBoundary | null, right: TransformBoundary |
 /** `undefined` when `value` is neither `null` nor a well-formed anchor. */
 function parseBoundary(value: unknown): TransformBoundary | null | undefined {
     if (value === null) return null;
-    if (!isRecord(value) || typeof value.mid !== "string" || value.mid.length === 0)
-        return undefined;
+    if (!isRecord(value) || !value.mid || typeof value.mid !== "string") return undefined;
     return Number.isSafeInteger(value.sequence)
         ? { mid: value.mid, sequence: value.sequence as number }
         : undefined;
@@ -1100,16 +1099,14 @@ export function createRustModeTransform(
                     `${rootRejection.reason} at ${rootRejection.path}`,
                     rootRejection.reason === "prototype_accessor" ? "warn" : "debug",
                 );
-            // The directory names the discovery route; it reads nothing from the source.
-            // The directory read also records a host-reported `parentID`, so it runs before the subagent classification is read.
+            // The directory names the discovery route, reads no source, and records a host-reported `parentID` the subagent classification reads.
             const directory = await resolveSessionDirectory(deps, sessionId);
             if (deps.isSessionDeleted?.(sessionId)) {
                 deps.onSessionDeletedDuringPreflight?.(sessionId);
                 throw new PassDeclined(sessionId, "deleted");
             }
-            if (deps.isInternalChildSession?.(sessionId)) {
+            if (deps.isInternalChildSession?.(sessionId))
                 throw new PassDeclined(sessionId, "internal_child");
-            }
             assertCurrentPass();
             // One discovery per pass: an unknown boundary, or one the scan cannot find, needs it.
             const known = state.boundary;
@@ -1176,11 +1173,10 @@ export function createRustModeTransform(
             inputCount = messageWireBytes.length;
             // Later reads use the captured window; the live array is only rechecked against it.
             const messages = captured.members as MessageLike[];
-            const ids = new Set<string>();
+            const ids = new Set<unknown>();
             for (const message of messages) {
                 const id = readOwnDataProperty(readOwnDataProperty(message, "info"), "id");
-                if (typeof id !== "string") continue;
-                if (ids.has(id))
+                if (typeof id === "string" && ids.has(id))
                     throw new PassDeclined(sessionId, "unsupported_source", `duplicate id ${id}`);
                 ids.add(id);
             }
@@ -1317,8 +1313,7 @@ export function createRustModeTransform(
             state.routeRoot = projectRoot;
             deliveries.projectRoot = projectRoot;
             const wireBuildStartedAt = performance.now();
-            // Compaction summaries stay out of the CK window, as the daemon's CK decoder expects;
-            // kept messages carry unfiltered window positions (push returns a truthy length).
+            // Compaction summaries stay out of the CK window, as the daemon's CK decoder expects; kept messages carry unfiltered window positions (push returns a truthy length).
             const positions: number[] = [];
             const kept = messages.filter(
                 (message, i) => !isRawCompactionSummaryInfo(message.info) && positions.push(i + 1),
