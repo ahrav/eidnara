@@ -1,6 +1,6 @@
 //! Stale preference: the coexistence restatement the generator emits, the
 //! stale-preference task role and its negative control, the delivery count,
-//! the knowledge-update grader, the five arms, and exact McNemar.
+//! the knowledge-update grader, and exact McNemar.
 
 mod support;
 
@@ -8,12 +8,11 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use context_core::canonical_json::protocol_digest;
 use eval_core::{
-    Arms, Destination, EventId, EventLog, GENERATOR_VERSION, Grade, MAX_VALID_TIME_MS,
-    McNemarError, Mode, PRECEDENCE_SENTENCE, PairError, PairSet, PairSetInput, Payload, Query,
-    RANDOM_SCHEMA_VERSION, Ratio, RenderConfig, ReplayRefusal, Sensitivity, ServedClass,
-    ServedSpan, SessionSpec, StaleDelivery, StaleExport, StaleQuestion, Task, TaskRole,
-    Unlocatable, Visibility, WorldConfig, WorldError, arms, carries, compile_pair_set,
-    generate_all, grade, locate, mcnemar, render, serialize_spec, text_decision,
+    Destination, EventId, EventLog, GENERATOR_VERSION, Grade, MAX_VALID_TIME_MS, McNemarError,
+    Mode, PairError, PairSet, PairSetInput, Payload, Query, RANDOM_SCHEMA_VERSION, Ratio,
+    RenderConfig, ReplayRefusal, Sensitivity, ServedClass, ServedSpan, SessionSpec, StaleDelivery,
+    Task, TaskRole, Visibility, WorldConfig, WorldError, carries, compile_pair_set, generate_all,
+    grade, locate, mcnemar, render, serialize_spec, text_decision,
 };
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -396,62 +395,6 @@ fn the_grader_applies_the_knowledge_update_rule_without_a_model() {
     assert!(!carries("anything", ""));
 }
 
-#[test]
-fn every_arm_changes_today_only_at_or_after_the_stale_statements_line() {
-    let served = "<hint>\n- cursor for slot3 in w\n- digest for slot3 in w\n</hint>";
-    let (stale, live) = ("cursor for slot3", "digest for slot3");
-    let span = locate(served, stale).unwrap();
-    let arms = arms(served, span, "session-0.slot3", live, 12);
-    assert_eq!(arms.today, served);
-    let at = |replacement: &str| served.replacen(stale, replacement, 1);
-    // (b) and (c) add one line after the stale statement's line, where D-7
-    // appends a footer to the stale segment's body.
-    let line = "- cursor for slot3 in w";
-    let after_line = |added: &str| served.replacen(line, &format!("{line}\n{added}"), 1);
-    assert_eq!(arms.precedence_line, after_line(PRECEDENCE_SENTENCE));
-    assert_eq!(
-        arms.footer,
-        after_line("[corrections: session-0.slot3 = digest for slot3 @12]")
-    );
-    let last = arms_of(line, stale, live);
-    assert_eq!(
-        last.precedence_line,
-        format!("{line}\n{PRECEDENCE_SENTENCE}")
-    );
-    assert_eq!(
-        arms.anchored_replacement,
-        at("[corrected @12: session-0.slot3 = digest for slot3]")
-    );
-    assert_eq!(arms.omission_oracle, at(""));
-    for kept in [&arms.today, &arms.precedence_line, &arms.footer] {
-        assert!(carries(kept, stale), "{kept}");
-    }
-    for cured in [&arms.anchored_replacement, &arms.omission_oracle] {
-        assert!(!carries(cured, stale), "{cured}");
-        assert!(carries(cured, live), "{cured}");
-    }
-    assert!(
-        arms.anchored_replacement
-            .contains("[corrected @12: session-0.slot3 = ")
-    );
-}
-
-fn arms_of(served: &str, stale: &str, live: &str) -> Arms {
-    arms(
-        served,
-        locate(served, stale).unwrap(),
-        "session-0.slot3",
-        live,
-        12,
-    )
-}
-
-#[test]
-#[should_panic(expected = "is not a claim key")]
-fn an_arm_refuses_a_key_outside_the_claim_grammar() {
-    arms("x", ServedSpan { start: 0, end: 1 }, "Slot3", "y", 1);
-}
-
 type Outcomes = BTreeMap<String, Option<bool>>;
 
 fn table(first_only: u32, second_only: u32, both: u32, neither: u32) -> [Outcomes; 2] {
@@ -560,65 +503,4 @@ fn mcnemar_refuses_unpaired_arms_and_an_alpha_outside_the_open_unit_interval() {
         mcnemar(&first, &second, alpha()),
         Err(McNemarError::UnpairedArms)
     );
-}
-
-fn stale_question(task: &str) -> StaleQuestion {
-    StaleQuestion {
-        task: task.to_string(),
-        question: "What is the current decision for slot3?".to_string(),
-        key: "session-0.slot3".to_string(),
-        stale_value: "cursor for slot3".to_string(),
-        live_value: "digest for slot3".to_string(),
-        restating_ordinal: 12,
-    }
-}
-
-#[test]
-fn an_export_keeps_every_pair_located_or_not() {
-    let mut export = StaleExport::new(SEED, one_session(12, 0, 3));
-    let both = "- cursor for slot3 in w\n- digest for slot3 in w";
-    export.record(stale_question("located"), both, || 2);
-    export.record(
-        stale_question("live-only"),
-        "- digest for slot3 in w",
-        || unreachable!("an unlocatable pair has no tier"),
-    );
-    export.record(stale_question("nothing-served"), "", || {
-        unreachable!("an unlocatable pair has no tier")
-    });
-    assert_eq!(export.root_seed, SEED.to_string());
-    assert_eq!(export.pairs.len(), 1);
-    let pair = &export.pairs[0];
-    assert_eq!(
-        (pair.task.as_str(), pair.delivery, pair.stale_tier),
-        ("located", StaleDelivery::Both, 2)
-    );
-    assert_eq!(pair.stale_span, ServedSpan { start: 2, end: 18 });
-    assert_eq!(pair.live_span, Some(ServedSpan { start: 26, end: 42 }));
-    assert_eq!(
-        pair.arms,
-        arms_of(both, "cursor for slot3", "digest for slot3")
-    );
-    assert_eq!(
-        export.unlocatable,
-        BTreeMap::from([
-            (
-                "live-only".to_string(),
-                Unlocatable {
-                    delivery: StaleDelivery::Live,
-                    served: "- digest for slot3 in w".to_string(),
-                }
-            ),
-            (
-                "nothing-served".to_string(),
-                Unlocatable {
-                    delivery: StaleDelivery::Neither,
-                    served: String::new(),
-                }
-            ),
-        ])
-    );
-    assert_eq!(export.stale_delivered, 1);
-    let wire = serde_json::to_value(&export).unwrap();
-    assert_eq!(serde_json::from_value::<StaleExport>(wire).unwrap(), export);
 }

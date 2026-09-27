@@ -1329,8 +1329,9 @@ version must be non-blank, and every loss must be evidence the set has
 
 ## Stale preference
 
-`stale.rs` measures what a surface hands the model when a correction coexists
-with the statement it supersedes. Nothing in it calls a model.
+`stale.rs` measures what a real harness session hands the model when a
+correction coexists with the statement it supersedes. Nothing in it calls a
+model.
 
 **Role.** A `stale_preference` task's evidence is a restatement and its
 falsifier is the restatement's target, the superseded predecessor. The
@@ -1346,43 +1347,100 @@ against. `SupersededFalsifier`
 and `TruthNotEarly` still refuse falsification tasks, and `PairSet::validate`
 reruns the check.
 
-**Delivery and grade.** `carries(text, phrase)` is the whole-word match the
-campaign grades delivery by (`slot4` is not carried by `slot47`; an empty
-phrase is never carried), and `locate` returns the first such occurrence. A
-pair's stale value is its predecessor's decision (`text_decision`) and its
-live value the restatement's. `StaleDelivery::of(served, stale, live)` says
+**Delivery and grade.** `carries(text, phrase)` is the whole-word match
+delivery and grade use (`slot4` is not carried by `slot47`; an empty phrase is
+never carried; the Suite B campaign grades its delivery by the same match),
+and `locate` returns the first such occurrence. A pair's stale value is the
+value its first statement set and its live value the one its restatement
+set. `StaleDelivery::of(served, stale, live)` says
 which the served text carries: `live`, `stale`, `both`, or `neither`; a pair
 counts toward the stale-delivered count when it is `stale` or `both`.
 `grade(answer, stale, live)` grades a live answer by the LongMemEval
 knowledge-update rule: `current` when the answer carries the live value
 (naming the old value as history beside the new one as current is
 `current`), `stale` when it carries the stale value and not the live one, and
-`miss` otherwise. The generator's decisions differ in a whole word, so the
-grade needs no judge.
+`miss` otherwise. The values are distinct five-digit numbers, so the grade
+needs no judge.
 
-**Arms.** `arms(served, stale_span, key, live, live_ordinal)` builds the five
-M0 renderings from one served context, each changing arm (a) only at the
-stale statement or on a line added after the line holding it: `today` (a) is the served text unchanged;
-`precedence_line` (b) adds `PRECEDENCE_SENTENCE` as a line of its own after
-the line holding the stale statement; `footer` (c) adds one D-7 footer line,
-`[corrections: <key> = <live> @<N>]`, there instead, keeping the stale
-prose; `anchored_replacement` (d) replaces the stale statement's span with
-`[corrected @<N>: <key> = <live>]`; `omission_oracle` (e) removes the span.
-`N` is the restating message's ordinal. The line after the stale
-statement's is where D-7 appends a footer to the stale segment's body, since
-one hint fragment line is one segment; production places the D-8 sentence in
-the m1 block after the history instead, so (b) sits nearer the stale
-statement than it will in production, a placement that can only help (b).
-The arms act on the first whole-word occurrence; the campaign's export test
-asserts that (e) no longer carries the stale value. The override sentence
-is:
+**Harness.** Gate A runs on the request a real harness sends, not on a
+fragment of it. The pipeline has three steps, and every step but the middle
+one is Rust:
+
+1. `eval_runner stale-world --subjects <n> --publish <dir>` writes
+   `stale-world.json` (`eval-stale-world/v1`), `fact_world(seed, n)`: a coding
+   session in which the user sets one value per subject and later changes
+   each one.
+   - A subject is a component and an attribute (`billing service port`);
+     `MAX_SUBJECTS` is 128.
+   - A statement reads `Set the billing service port to 34827.` and its
+     restatement `Change of plan: set the billing service port to 94225
+     instead.`
+   - The assistant answers every turn with `Noted.`, so each value is stated
+     once. Values are distinct five-digit numbers, so a whole-word match finds
+     one value and nothing else, and no ordinal marker collides with one.
+   - Two statements come to each restatement, the evaluator's correction
+     regime. Each restatement targets a stated, not yet restated subject drawn
+     by `keyed_draw`, so the distance to its correction varies. The
+     restatements still pending when the statements run out close the
+     session.
+   - Every pair asks `What is the <subject> now? Reply with just the value.`
+2. `bun packages/e2e-tests/scripts/stale-preference.ts --world <file> --out
+   <capture>` (`captureStaleWorld` in `packages/e2e-tests/src/stale-preference.ts`)
+   lives the world through `opencode serve` with the built Eidnara plugin
+   against the daemon's direct-host fixture, the stack the end-to-end suite
+   runs.
+   - Each world turn is the user's prompt. The mock provider answers with the
+     world's acknowledgement and reports input tokens that grow each turn up
+     to 90 percent of a 200,000-token limit, so the daemon's own summarizer
+     (the fixture's scripted backend, which writes each segment's `p1` and
+     `p2` as the presented lines' own words and `p3` as the range) folds the
+     older history the way a long session does.
+   - After the session, each pair's question is sent as a turn of its own,
+     and the provider request OpenCode sends for it is captured whole. That
+     request holds the system prompt with the Eidnara guidance, the served
+     `<session-history>` (m0) and `<session-history-since>` (m1) parts, the raw
+     tail with its ordinal markers, the auto-search hint the host appended,
+     and the tool definitions.
+   - The daemon's stored segments are read from its store for the tier.
+   - The capture (`eval-stale-capture/v1`, `StaleCapture`) names the harness
+     (`opencode`).
+3. `eval_runner stale-arms --capture <file> --publish <dir>` writes
+   `stale-preference-export.json` through `export_capture`.
+
+`tests/rust-stale-preference.test.ts` runs the three steps over 12 subjects
+under `EIDNARA_EVAL_S0_BUDGET_MS`, like the S0 campaign, and checks every
+located pair against its request.
+
+**Arms.** A pair is located when its stale statement sits in the served
+history: the m0 part first, then the m1 part. That part is the one D-7 would
+rewrite. A pair whose statement sits only in the raw tail, or whose segment
+rendered without prose, is `unlocatable`: no rendering can change it, so it
+has no arms and is never dropped. `arms` returns arms (b) through (e) as the
+text parts they replace, and `with_parts(request, parts)` builds an arm's
+request. Arm (a) is the request as served.
+
+- (b) `precedence_line`: a `<memory-updates>` block holding
+  `PRECEDENCE_SENTENCE` at the head of the m1 delta, where D-8 puts it. An
+  empty delta (the daemon's `M1_PLACEHOLDER`) becomes
+  `<session-history-since>` holding that block alone.
+- (c) `footer`: one D-7 footer line, `[corrections: <key> = <live> @<N>]`, at
+  the end of the stale segment's body, stale prose kept.
+- (d) `anchored_replacement`: the stale statement replaced by
+  `[corrected @<N>: <key> = <live>]`.
+- (e) `omission_oracle`: the stale statement removed from the served history.
+
+`N` is the restating message's ordinal in the harness session: every world
+turn is one user and one assistant message, numbered from one. The raw tail
+and the hint are never changed, since a renderer change reaches neither, so
+(e) removes the statement from the history only. The override sentence is:
 
 ```text
 Later statements supersede earlier ones: where two statements in this history disagree, the later one is current.
 ```
 
 `key` must satisfy the D-7 claim-key grammar `[a-z0-9_-]+(\.[a-z0-9_-]+)+`
-within 64 bytes; the campaign derives it from the slot (`session-0.slot3`).
+within 64 bytes; the world derives it from the subject
+(`billing-service.port`).
 
 **McNemar.** `mcnemar(first, second, alpha)` takes one pre-registered event
 per pair on two arms (for example "graded `stale`"; the caller names the
@@ -1404,52 +1462,26 @@ evenly, fewer for an alpha with a large denominator. Past it the test is
 alpha outside `(0, 1)` is `AlphaOutOfRange`. The statistic sits outside the
 quantities `gen/gen-statistics-golden.ts` pins.
 
-**Export.** The `eval_runner` example's `stale-preference` subcommand takes
-the campaign's flags and `--pairs <n>`, and `campaign::stale_preference` does
-the work: it generates one session of `--aged-messages` messages with a
-restatement on every third slot (the evaluator's correction regime; no tool
-spans, no commits), compiles a falsifier (the first message nothing
-restates), a positive control (the last message), and one stale-preference
-task per restatement for the first `n` restatements (fewer restatements than
-`n` is `TooFewRestatements`, refused before a fixture starts), records the world once
-under the daemon's summarizer as the structured arm does, and replays that
-cassette once per pair. Each pair's task turn asks for the pair's subject:
-the slot word and the world's word (`slot3 in world…`), the two tokens the
-stale and the live statement share, since any other word of a question is in
-no segment and would weigh the host's lexical score under its threshold. The
-host's hint text on that turn is arm (a). It writes
-`stale-preference-export.json` (`eval-stale-preference-export/v1`) into the
-publish directory, write-then-rename, refusing a directory that already holds
-one:
+**Export.** `stale-preference-export.json` (`eval-stale-preference-export/v1`,
+`StaleExport`):
 
 | Field | Meaning |
 | --- | --- |
-| `schema`, `generator_version` | `eval-stale-preference-export/v1` and the generator the world came from. |
-| `root_seed`, `config` | The world's seed as a decimal string and its `WorldConfig`: every pair comes from this one world. |
-| `pairs[].task` | The task id (`stale-<i>`). |
-| `pairs[].question` | The question for the served model: `What is the current decision for <slot>? Answer with the decision as the history states it.` |
-| `pairs[].key` | The claim key the arms name. |
-| `pairs[].stale_value`, `pairs[].stale_span` | The predecessor's decision and its first whole-word byte span (`ServedSpan`) in arm (a). |
-| `pairs[].live_value`, `pairs[].live_span` | The restatement's decision and its span, `null` when arm (a) does not carry it. |
-| `pairs[].restating_ordinal` | The restatement's 1-based ordinal in the rendered session, the `N` of every marker. |
-| `pairs[].stale_tier` | The tier (`1..=5`, `5` archived) the stale statement's segment renders at in m0 under the daemon's default history budget, `context_core::decay::rendered_tier` over the stored segments. |
-| `pairs[].delivery` | `StaleDelivery` of arm (a). |
-| `pairs[].arms` | The five arms. |
-| `unlocatable` | Task id to `{delivery, served}` for every pair whose arm (a) does not carry the stale value, `served` empty when the surface served nothing; such a pair has no arms and is never dropped. |
-| `stale_delivered` | Pairs whose arm (a) carries the stale value; a pair is located exactly when it does, so this equals the length of `pairs`. |
+| `schema`, `harness`, `root_seed` | The export schema, the harness that served the requests, and the world's seed as a decimal. |
+| `pairs[].task`, `pairs[].question`, `pairs[].key` | The task id (`stale-<i>`), the question the pair asks, and the claim key the arms name. |
+| `pairs[].stale_value`, `pairs[].live_value` | The two values the grader reads. |
+| `pairs[].restating_ordinal` | The restatement's ordinal in the harness session, the `N` of every marker. |
+| `pairs[].stale_tier` | `1..=4`: the first stored tier (`p1` to `p4`) of the stale segment whose text is the rendered body; `0` when none matches. The fixture writes `p2` equal to `p1`, so P2 renders read as `1`, and its `p3` is the range alone, so a P3 render is unlocatable. |
+| `pairs[].delivery` | `StaleDelivery` over every text part of the request: history, raw tail, and hint. |
+| `pairs[].history`, `pairs[].stale_span` | The part holding the stale statement (`messages[message].content[part]`) and the statement's UTF-8 byte span there. |
+| `pairs[].request` | The provider request as the harness sent it: arm (a). |
+| `pairs[].arms` | Arms (b) through (e) as the parts they replace. |
+| `unlocatable` | Task id to `{delivery, request}` for every pair whose served history does not hold the stale statement. |
+| `stale_delivered` | Pairs, located or not, whose request carries the stale value anywhere. |
 
-`StaleExport::record` is the classification: it takes the pair's question,
-key, values, and ordinal and its served text, and files the pair under
-`pairs` or `unlocatable`. A pair whose `delivery` is `stale` carries the live
-value only in arms (c) and (d), so an analysis comparing those with (b)
-reads `both` pairs apart from `stale` ones. The subcommand answers with one
-JSON line naming the file, its digest, and the three counts. The export lifts the Suite B envelope's cassette bound to
-64 MiB and pins nothing else of Suite B; its lives are charged to the same
-envelope. `an_s0_stale_preference_export_carries_every_pair_and_its_five_arms`
-runs four pairs at S0 under `EIDNARA_EVAL_S0_BUDGET_MS`. At S0 the fixture's
-summarizer folds a restatement and the message it follows into one presented
-line when both are user turns, so a segment can span six messages; the Suite
-B aged world alternates roles and keeps its five-message segments.
+A request is Anthropic Messages shaped, as OpenCode sends it to its
+provider, so a driver sending it to another provider translates the system
+blocks, the messages, and the tools.
 
 ## Injection cases
 
@@ -2029,9 +2061,6 @@ window counts messages, but surface 1's unit is the segment, so at S0 the
 twenty-two segments all sit inside a window of 100 and no truth is lost to
 recency there; a recency loss on surface 1 needs more than 500 messages.
 The falsification pair's structural verdict is still the compiler's.
-
-The same shell also exports stale-preference pairs over a coexistence world;
-see "Stale preference".
 
 Not composed yet: the write-then-rename publisher is test support
 (`crates/daemon/tests/support/publish.rs`, included by path from the campaign

@@ -178,9 +178,11 @@ pub use shrink::{
     parse_shrink_report, shrink,
 };
 pub use stale::{
-    Arms, Grade, McNemar, McNemarError, PRECEDENCE_SENTENCE, STALE_EXPORT_SCHEMA, ServedSpan,
-    StaleDelivery, StaleExport, StalePair, StaleQuestion, Unlocatable, arms, carries, grade,
-    locate, mcnemar,
+    ACKNOWLEDGEMENT, Arms, CaptureError, FactPair, FactTurn, FactWorld, Grade, HistoryAt,
+    M1_PLACEHOLDER, MAX_SUBJECTS, McNemar, McNemarError, PRECEDENCE_SENTENCE, PartText,
+    STALE_CAPTURE_SCHEMA, STALE_EXPORT_SCHEMA, STALE_WORLD_SCHEMA, SegmentTiers, Served,
+    ServedSpan, StaleCapture, StaleDelivery, StaleExport, StalePair, Unlocatable, arms, carries,
+    export_capture, fact_world, grade, locate, mcnemar, with_parts,
 };
 pub use statistics::{
     ANALYSIS_FAMILY_SCHEMA, Analysis, AnalysisFamily, ArmResult, BlockedReason, CampaignProfile,
