@@ -1703,9 +1703,12 @@ export function createRustModeTransform(
                 const candidate = application.values;
                 let applied: AppliedOutput | undefined;
                 try {
+                    // Only the charge is read here, so the per-unit escape scan is skipped.
                     const inspection = inspectReferenceableMessages(
                         candidate,
                         lease.remainingBytes,
+                        0,
+                        false,
                     );
                     if (inspection.ok && lease.reserve(inspection.estimatedBytes)) {
                         applied = {

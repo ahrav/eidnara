@@ -289,6 +289,20 @@ describe("referenceable JSON domain guard", () => {
         );
     });
 
+    it("charges the same bytes without the escape estimate, which only the wire bounds read", () => {
+        const escaped = {
+            ...message("m1"),
+            text: 'quote " slash \\ newline \n control \u0001 lone \ud800',
+        };
+        const source = [escaped, message("m2")];
+        const full = inspectReferenceableMessages(source);
+        const bare = inspectReferenceableMessages(source, undefined, 0, false);
+        if (!full.ok || !bare.ok) throw new Error("fixture rejected");
+        expect(bare.estimatedBytes).toBe(full.estimatedBytes);
+        expect(bare.messageWireBytes[0]).toBeLessThan(full.messageWireBytes[0] ?? 0);
+        expect(bare.messageWireBytes[1]).toBe(full.messageWireBytes[1]);
+    });
+
     it("rejects an accessor without invoking it", () => {
         const counter = trapCounter();
         const hooked = message("m1");

@@ -462,13 +462,15 @@ export interface ReferenceableInspection {
 /**
  * Byte-limit exhaustion throws CaptureBudgetExceeded. The first `skip` members are left to a
  * digest-verified capture: only their root slots are inspected, and their wire bounds read zero.
+ * Without `estimateWire`, the wire bounds leave out string escapes; `estimatedBytes` is the same.
  */
 export function inspectReferenceableMessages(
     messages: unknown,
     maxBytes = TRANSFORM_CAPTURE_MAX_BYTES,
     skip = 0,
+    estimateWire = true,
 ): ReferenceableInspection | { ok: false; rejection: ReferenceableRejection } {
-    const walker = new ReferenceableWalk(maxBytes);
+    const walker = new ReferenceableWalk(maxBytes, estimateWire);
     const messageWireBytes: number[] = [];
     try {
         walker.members(messages, (slot, index) => {
