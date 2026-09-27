@@ -2903,6 +2903,7 @@ fn apply_additive_only(
         None,
         &IdentityEnforcement::default(),
     );
+    prune_block_identities(&mut meta, req, plan);
     let cc_u1_active = crate::cc_u1_active(serializer_profile, req.tool_present);
     meta.cc_u1_active = cc_u1_active;
     meta.tagging_surface_active = tagging_surface_requested;
@@ -4164,6 +4165,7 @@ fn apply_once(
         materialize_reason =
             lineage_anchor_failure.then_some(MaterializeReason::LineageAnchorMismatch);
     }
+    prune_block_identities(&mut meta, req, plan);
 
     let is_provider_prefix_mutation_pass = matches!(
         plan,
@@ -5514,6 +5516,28 @@ fn frozen_unit_targets_mid(core: &CoreState, mid: &str) -> bool {
 fn block_identity_hash_prefix(vector: &[BlockIdentity]) -> String {
     let serialized = serde_json::to_string(vector).expect("block identities are serializable");
     wire::fingerprint(&serialized).chars().take(12).collect()
+}
+
+/// Keeps only the processed window's identities (spec D12), inside the pass's meta CAS. A revert
+/// keeps the whole map until the HARD that completes it. A writer that loses the CAS reloads the
+/// map with the row, so it never restores identities another commit pruned.
+fn prune_block_identities(meta: &mut ModuleMeta, req: &TransformRequest, plan: PassPlan) {
+    let revert = matches!(
+        req.coverage
+            .as_deref()
+            .map(|coverage| coverage.resolved.resolution),
+        Some(crate::window_coverage::Resolution::Revert { .. })
+    );
+    if revert && !matches!(plan, PassPlan::Hard | PassPlan::MigrateHard) {
+        return;
+    }
+    let window: HashSet<&str> = req
+        .messages
+        .iter()
+        .map(|message| message.mid.as_str())
+        .collect();
+    meta.block_identity_by_mid
+        .retain(|mid, _| window.contains(mid.as_str()));
 }
 
 fn apply_ingress_meta(
@@ -20328,6 +20352,220 @@ pub(crate) mod tests {
         request
     }
 
+    /// The prune-versus-publish fixture (spec C9, D12; WP-P06, WP-P16): segments end at m2 and
+    /// m4, the first pass holds identities for m1..m6, and a publishing firing selects m5 and
+    /// m6. The host then reverts m6, so the next window, declared at m4, drops a selected mid.
+    /// Returns the version both writers start from, the firing's predicate, and that window.
+    fn pinned_firing(
+        s: &MemoryStore,
+        session: &str,
+    ) -> (
+        u64,
+        memory_store::HistorySummarizerPublishPredicate,
+        TransformRequest,
+    ) {
+        use memory_store::{
+            HistorySegmentSetGeneration, HistorySummarizerChunkRange,
+            HistorySummarizerDurableState, HistorySummarizerPhase,
+            HistorySummarizerPublishPredicate, HistorySummarizerSelectedMessageIdentity,
+        };
+        s.replace_history_segments(
+            session,
+            &[comp(1, 1, 2, "m2", "S1"), comp(2, 3, 4, "m4", "S2")],
+        )
+        .unwrap();
+        let turns = (1..=6)
+            .map(|n| item(&format!("m{n}"), n, &format!("turn {n}")))
+            .collect();
+        assert_eq!(
+            run(s, &req(session, "cfg0", turns), &spine()).boundary_id,
+            "m4#0"
+        );
+        let loaded = s.load(session).unwrap();
+        let selected = ["m5", "m6"]
+            .map(|mid| HistorySummarizerSelectedMessageIdentity {
+                mid: mid.to_string(),
+                block_identities: loaded.meta.block_identity_by_mid[mid].clone(),
+            })
+            .to_vec();
+        let generation = HistorySegmentSetGeneration {
+            max_sequence: 2,
+            ..Default::default()
+        };
+        let predicate = HistorySummarizerPublishPredicate {
+            firing_seq: 1,
+            producer_run_id: "race-run".to_string(),
+            chunk_fingerprint: "race-chunk".to_string(),
+            selected_range_identities: selected.clone(),
+            history_segment_set_generation: generation,
+        };
+        let mut meta = loaded.meta.clone();
+        meta.history_summarizer = HistorySummarizerDurableState {
+            state: HistorySummarizerPhase::Publishing,
+            firing_seq: 1,
+            chunk_range: Some(HistorySummarizerChunkRange {
+                from_ordinal: 5,
+                to_ordinal: 6,
+            }),
+            chunk_fingerprint: predicate.chunk_fingerprint.clone(),
+            selected_range_identities: selected,
+            producer_session_id: Some("race-producer".to_string()),
+            producer_run_id: Some(predicate.producer_run_id.clone()),
+            fired_at_ms: Some(1),
+            expected_revert_epoch: loaded.meta.revert_epoch,
+            history_segment_set_generation: generation,
+            ..Default::default()
+        };
+        let version = s
+            .commit(session, loaded.row_version, &loaded.core, &meta)
+            .unwrap();
+        let mut window = req(
+            session,
+            "cfg0",
+            vec![item("m4", 4, "turn 4"), item("m5", 5, "turn 5")],
+        );
+        window.boundary = Some(Some(BoundaryAnchor {
+            mid: "m4".to_string(),
+            sequence: 2,
+        }));
+        // The enabling state, asserted apart from either verdict: the firing selects m6, the
+        // store holds its identity, and the resolved window does not carry it.
+        let resolved_mids: Vec<String> = resolved(s, &window)
+            .messages
+            .iter()
+            .map(|message| message.mid.clone())
+            .collect();
+        assert_eq!(resolved_mids, ["m4", "m5"]);
+        assert!(
+            predicate
+                .selected_range_identities
+                .iter()
+                .any(|selected| selected.mid == "m6")
+        );
+        assert!(
+            s.load(session)
+                .unwrap()
+                .meta
+                .block_identity_by_mid
+                .contains_key("m6")
+        );
+        (version, predicate, window)
+    }
+
+    fn publish_race_chunk(
+        s: &MemoryStore,
+        session: &str,
+        version: u64,
+        predicate: &memory_store::HistorySummarizerPublishPredicate,
+    ) -> Result<(), memory_store::HistorySummarizerPublishError> {
+        s.publish_history_summarizer_chunk(memory_store::HistorySummarizerPublishRequest {
+            session_id: session,
+            expected_row_version: Some(version),
+            expected_revert_epoch: 0,
+            predicate,
+            project_path: "git:proj",
+            history_segments: &[comp(3, 5, 6, "m6", "S3")],
+            events: &[],
+            primer_candidates: &[],
+            user_memory_candidates: &[],
+            publication_floor_ordinal: 7,
+            chunk_transcript: None,
+            memory_reviewer_nonadmission: None,
+            memory_reviewer_activation: None,
+            published_at_ms: 1,
+        })
+        .map(|_| ())
+    }
+
+    fn identity_mids(s: &MemoryStore, session: &str) -> Vec<String> {
+        s.load(session)
+            .unwrap()
+            .meta
+            .block_identity_by_mid
+            .into_keys()
+            .collect()
+    }
+
+    /// WP-P06 prune first: the transform prunes m6 inside its meta CAS while the publisher
+    /// holds the same starting version. The publisher loses the CAS, and reloading only the
+    /// row version still meets the store's identity fence, so no segment row is written.
+    #[test]
+    fn a_prune_that_commits_first_fences_the_publication_out() {
+        let session = "prune-race-prune-first";
+        let dir = tempfile::tempdir().unwrap();
+        let s = Arc::new(store(dir.path()));
+        let (version, predicate, window) = pinned_firing(&s, session);
+        let hook_store = Arc::clone(&s);
+        let barrier = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let reached = Arc::clone(&barrier);
+        install_transform_attempt_hook(session, move || {
+            assert_eq!(hook_store.load(session).unwrap().row_version, Some(version));
+            reached.store(true, std::sync::atomic::Ordering::SeqCst);
+        });
+        let pruned = run(&s, &window, &spine());
+        assert!(barrier.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(pruned.committed);
+        assert_eq!(identity_mids(&s, session), ["m4", "m5"]);
+        assert!(matches!(
+            publish_race_chunk(&s, session, version, &predicate),
+            Err(memory_store::HistorySummarizerPublishError::CasConflict { .. })
+        ));
+        let reloaded = s.load(session).unwrap().row_version.unwrap();
+        assert!(matches!(
+            publish_race_chunk(&s, session, reloaded, &predicate),
+            Err(memory_store::HistorySummarizerPublishError::FenceRejected { .. })
+        ));
+        assert_eq!(s.load_history_segments(session).unwrap().len(), 2);
+        assert_eq!(identity_mids(&s, session), ["m4", "m5"]);
+    }
+
+    /// WP-P06 publish first: the publication commits between the transform's reads and its
+    /// CAS. The transform reloads and re-resolves; the result equals the serial run (publish,
+    /// then transform), the publication stays, and the map is pruned to the window.
+    #[test]
+    fn a_publication_that_commits_first_makes_the_transform_reload_and_match_the_serial_run() {
+        let session = "prune-race-publish-first";
+        let dir = tempfile::tempdir().unwrap();
+        let s = Arc::new(store(dir.path()));
+        let (version, predicate, window) = pinned_firing(&s, session);
+        let hook_store = Arc::clone(&s);
+        let barrier = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let reached = Arc::clone(&barrier);
+        install_transform_attempt_hook(session, move || {
+            assert_eq!(hook_store.load(session).unwrap().row_version, Some(version));
+            publish_race_chunk(&hook_store, session, version, &predicate).unwrap();
+            reached.store(true, std::sync::atomic::Ordering::SeqCst);
+        });
+        let raced = run(&s, &window, &spine());
+        assert!(barrier.load(std::sync::atomic::Ordering::SeqCst));
+        assert_eq!(identity_mids(&s, session), ["m4", "m5"]);
+        assert_eq!(s.load_history_segments(session).unwrap().len(), 3);
+
+        let serial_dir = tempfile::tempdir().unwrap();
+        let serial_store = store(serial_dir.path());
+        let (serial_version, serial_predicate, serial_window) =
+            pinned_firing(&serial_store, session);
+        publish_race_chunk(&serial_store, session, serial_version, &serial_predicate).unwrap();
+        let serial = run(&serial_store, &serial_window, &spine());
+        assert_eq!(
+            canonical_response_hash(&raced),
+            canonical_response_hash(&serial)
+        );
+        assert_eq!(
+            s.load_history_segments(session).unwrap(),
+            serial_store.load_history_segments(session).unwrap()
+        );
+        let (raced_state, serial_state) = (
+            s.load(session).unwrap(),
+            serial_store.load(session).unwrap(),
+        );
+        assert_eq!(
+            raced_state.meta.block_identity_by_mid,
+            serial_state.meta.block_identity_by_mid
+        );
+        assert_eq!(raced_state.core, serial_state.core);
+    }
+
     #[test]
     fn reconcile_recut_nothing_survives_arms_pending_raw_without_truncate() {
         let dir = tempfile::tempdir().unwrap();
@@ -20908,10 +21146,26 @@ pub(crate) mod tests {
             "healthy SOFT bytes must match the pre-detector golden",
         );
 
-        // A defer at the new anchor replays the prior output byte-for-byte.
-        let defer = run(&s, &req("ses", "cfg0", items), &spine());
+        // A defer at the new anchor replays the prior output byte-for-byte. Its window starts at
+        // m20, so it commits once to prune m10's identity (spec D12); a repeat is write-free.
+        let defer = run(&s, &req("ses", "cfg0", items.clone()), &spine());
         assert_eq!(defer.action, "SOFT+");
-        assert!(!defer.committed);
+        assert!(defer.committed);
+        assert_eq!(
+            s.load("ses")
+                .unwrap()
+                .meta
+                .block_identity_by_mid
+                .keys()
+                .collect::<Vec<_>>(),
+            ["m20", "t21"]
+        );
+        let repeat = run(&s, &req("ses", "cfg0", items), &spine());
+        assert!(!repeat.committed);
+        assert_eq!(
+            canonical_response_hash(&repeat),
+            canonical_response_hash(&defer)
+        );
         assert_eq!(
             m1_bytes(&defer),
             m1_bytes(&soft),
