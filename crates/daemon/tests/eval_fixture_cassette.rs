@@ -460,3 +460,78 @@ fn the_fixture_answers_a_summarizer_prompt_through_the_named_command_and_dumps_i
     );
     fixture.shutdown();
 }
+
+/// A summarizer command that never answers does not hold the fixture: a
+/// graceful shutdown ends the run, kills the child, and exits within budget.
+#[test]
+fn a_hanging_summarizer_command_is_killed_by_shutdown() {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let pid_file = dir.path().join("child.pid");
+    let hanging = dir.path().join("hang.sh");
+    std::fs::write(
+        &hanging,
+        format!(
+            "#!/bin/sh\necho $$ > '{}'\ncat > /dev/null\nsleep 600\n",
+            pid_file.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&hanging, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let fixture = Launch::at(root.path().to_path_buf())
+        .env(
+            "EIDNARA_FIXTURE_SUMMARIZER_COMMAND",
+            &hanging.display().to_string(),
+        )
+        .start();
+    let prompt = summarizer_prompt(&[(1, "U", "digest question asked")]);
+    // Send the run and leave it in flight: the command has the request on
+    // stdin and is sleeping.
+    runtime.block_on(async {
+        let client = fixture.client().await;
+        let route = fixture
+            .open_route(
+                &client,
+                "model_execution",
+                TargetKind::ManagementSurface,
+                "hanging",
+            )
+            .await;
+        let sent = request_json(&client, route, send_body(&prompt)).await;
+        assert!(sent["run_id"].is_string(), "{sent}");
+        client.close().await.expect("client closes");
+    });
+    let started = std::time::Instant::now();
+    while !pid_file.exists() {
+        assert!(
+            started.elapsed() < BUDGET,
+            "the summarizer command never started"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    let pid: i32 = std::fs::read_to_string(&pid_file)
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    let shutting_down = std::time::Instant::now();
+    fixture.shutdown();
+    assert!(
+        shutting_down.elapsed() < BUDGET,
+        "shutdown waited on the hanging command"
+    );
+    // `kill -0` on a reaped or dead pid fails; the child did not outlive
+    // the fixture.
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    let alive = std::process::Command::new("kill")
+        .args(["-0", &pid.to_string()])
+        .status()
+        .unwrap()
+        .success();
+    assert!(!alive, "the summarizer child {pid} outlived the fixture");
+}

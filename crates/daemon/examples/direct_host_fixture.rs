@@ -308,15 +308,18 @@ mod unix {
     const SUMMARIZER_COMMAND_ENV: &str = "EIDNARA_FIXTURE_SUMMARIZER_COMMAND";
     const SUMMARIZER_DUMP_ENV: &str = "EIDNARA_FIXTURE_SUMMARIZER_DUMP";
 
-    fn commanded_summary(
+    /// Runs the configured summarizer command over one request. The child is
+    /// killed when this future is dropped, so a caller racing it against
+    /// cancellation leaves no orphan behind.
+    async fn commanded_summary(
         command: &std::ffi::OsStr,
         request: &serde_json::Value,
     ) -> Result<String, String> {
-        use std::io::Write;
-        let mut child = std::process::Command::new(command)
+        let mut child = tokio::process::Command::new(command)
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
+            .kill_on_drop(true)
             .spawn()
             .map_err(|error| format!("summarizer command: {error}"))?;
         child
@@ -324,9 +327,11 @@ mod unix {
             .take()
             .expect("piped stdin")
             .write_all(request.to_string().as_bytes())
+            .await
             .map_err(|error| format!("summarizer command stdin: {error}"))?;
         let output = child
             .wait_with_output()
+            .await
             .map_err(|error| format!("summarizer command: {error}"))?;
         if !output.status.success() {
             return Err(format!(
@@ -390,11 +395,21 @@ mod unix {
                     NextBehavior::Success => {
                         let text = match commanded {
                             Some((command, input)) => {
-                                let answer = tokio::task::spawn_blocking(move || {
-                                    commanded_summary(&command, &input)
-                                })
-                                .await
-                                .unwrap_or_else(|error| Err(error.to_string()));
+                                // The child is observed beside shutdown and
+                                // cancellation, as the blocked path is; losing
+                                // the race drops and so kills it.
+                                let answer = tokio::select! {
+                                    biased;
+                                    () = shutdown.cancelled() => {
+                                        counters.cancelled.fetch_add(1, Ordering::SeqCst);
+                                        return ControlledBackend::terminal_error("fixture shutting down");
+                                    }
+                                    () = cancel.cancelled() => {
+                                        counters.cancelled.fetch_add(1, Ordering::SeqCst);
+                                        return ControlledBackend::terminal_error("fixture run cancelled");
+                                    }
+                                    answer = commanded_summary(&command, &input) => answer,
+                                };
                                 match answer {
                                     Ok(text) => text,
                                     Err(error) => {
