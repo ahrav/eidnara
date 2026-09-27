@@ -179,8 +179,18 @@ describe("utf8FrameBody", () => {
     }
 
     test("declares the byte count the writer emits for lone surrogates", () => {
-        for (const text of ["\ud800", "a\ud800b", "x\udfffy😀\ud83d", "plain", "😀"]) {
+        const expected: [string, number][] = [
+            ["\ud800", 3],
+            ["a\ud800b", 5],
+            ["x\udfffy😀\ud83d", 12],
+            ["\udc00\ud800", 6],
+            ["\ud800\ud800\udc00", 7],
+            ["plain", 5],
+            ["😀", 4],
+        ];
+        for (const [text, bytes] of expected) {
             const body = utf8FrameBody(text);
+            expect(body.byteLength).toBe(bytes);
             const written = fillInto(body, [body.byteLength]);
             expect(written.byteLength).toBe(body.byteLength);
             expect(Buffer.from(written).toString("utf8")).toBe(
