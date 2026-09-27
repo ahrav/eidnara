@@ -699,7 +699,7 @@ describe("boundary discovery", () => {
     });
 
     it("names a callID-less tool call by its unfiltered window position after a compaction summary", async () => {
-        const sessionId = `ck-position-${Date.now()}`;
+        const sessionId = `callid-position-${Date.now()}`;
         const host: MessageLike[] = [
             message(sessionId, "m-0"),
             {
@@ -727,7 +727,7 @@ describe("boundary discovery", () => {
     });
 
     it("keeps a later tool call whose callID a dropped compaction summary also carries", async () => {
-        const sessionId = `ck-summary-call-${Date.now()}`;
+        const sessionId = `callid-summary-call-${Date.now()}`;
         const tool = {
             type: "tool",
             tool: "read",
