@@ -143,8 +143,10 @@ CREATE TABLE chunk_transcripts (
             history_segment_seq     INTEGER NOT NULL,
             start_ordinal       INTEGER NOT NULL,
             end_ordinal         INTEGER NOT NULL,
-            transcript_deflate  BLOB NOT NULL,
             created_at_ms       INTEGER NOT NULL,
+            transcript_bytes    INTEGER NOT NULL
+                GENERATED ALWAYS AS (LENGTH(transcript_deflate)) STORED,
+            transcript_deflate  BLOB NOT NULL,
             PRIMARY KEY (session_id, history_segment_seq)
         );
 
@@ -841,24 +843,24 @@ CREATE INDEX idx_chunk_transcripts_session_age
 
 CREATE TRIGGER chunk_transcripts_total_insert AFTER INSERT ON chunk_transcripts BEGIN
             INSERT INTO chunk_transcript_totals(session_id, compressed_bytes)
-            VALUES (NEW.session_id, LENGTH(NEW.transcript_deflate))
+            VALUES (NEW.session_id, NEW.transcript_bytes)
             ON CONFLICT(session_id) DO UPDATE SET
                 compressed_bytes = compressed_bytes + excluded.compressed_bytes;
         END;
 
 CREATE TRIGGER chunk_transcripts_total_delete AFTER DELETE ON chunk_transcripts BEGIN
             UPDATE chunk_transcript_totals
-               SET compressed_bytes = compressed_bytes - LENGTH(OLD.transcript_deflate)
+               SET compressed_bytes = compressed_bytes - OLD.transcript_bytes
              WHERE session_id = OLD.session_id;
         END;
 
 CREATE TRIGGER chunk_transcripts_total_update
             AFTER UPDATE OF session_id, transcript_deflate ON chunk_transcripts BEGIN
             UPDATE chunk_transcript_totals
-               SET compressed_bytes = compressed_bytes - LENGTH(OLD.transcript_deflate)
+               SET compressed_bytes = compressed_bytes - OLD.transcript_bytes
              WHERE session_id = OLD.session_id;
             INSERT INTO chunk_transcript_totals(session_id, compressed_bytes)
-            VALUES (NEW.session_id, LENGTH(NEW.transcript_deflate))
+            VALUES (NEW.session_id, NEW.transcript_bytes)
             ON CONFLICT(session_id) DO UPDATE SET
                 compressed_bytes = compressed_bytes + excluded.compressed_bytes;
         END;

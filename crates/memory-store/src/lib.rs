@@ -16469,12 +16469,21 @@ fn evict_chunk_transcripts_tx(tx: &GuardedConn<'_>, session_id: &str) -> rusqlit
         if total <= MAX_SESSION_TRANSCRIPT_COMPRESSED_BYTES {
             return Ok(());
         }
-        tx.execute(
+        let deleted = tx.execute(
             "DELETE FROM chunk_transcripts WHERE session_id = ?1 AND history_segment_seq = (
                 SELECT history_segment_seq FROM chunk_transcripts WHERE session_id = ?1
                 ORDER BY created_at_ms ASC, history_segment_seq ASC LIMIT 1)",
             params![session_id],
         )?;
+        // The victim query finds a row while the session holds one, so a pass that deletes
+        // nothing means the session is empty and its true total is zero.
+        if deleted == 0 {
+            tx.execute(
+                "UPDATE chunk_transcript_totals SET compressed_bytes = 0 WHERE session_id = ?1",
+                params![session_id],
+            )?;
+            return Ok(());
+        }
     }
 }
 
@@ -24620,6 +24629,90 @@ mod tests {
         model_publish(&mut d, &publish("D", 33, 1, 2_000, 1));
         assert_transcripts(&store, "D", &d);
         assert_eq!(d.first().map(|row| row.1), Some(2));
+    }
+
+    #[test]
+    fn a_transcript_delete_reads_no_column_stored_at_or_after_the_blob() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
+        let (root, blob, program) = store
+            .inner
+            .with_conn_fenced(|tx| {
+                let root: i64 = tx.query_row(
+                    "SELECT rootpage FROM sqlite_master
+                      WHERE type = 'table' AND name = 'chunk_transcripts'",
+                    [],
+                    |r| r.get(0),
+                )?;
+                // SQLite records store ordinary and STORED generated columns in declaration
+                // order; `hidden = 2` identifies VIRTUAL generated columns.
+                let blob: i64 = tx.query_row(
+                    "SELECT COUNT(*) FROM pragma_table_xinfo('chunk_transcripts')
+                      WHERE hidden <> 2
+                        AND cid < (SELECT cid FROM pragma_table_xinfo('chunk_transcripts')
+                                    WHERE name = 'transcript_deflate')",
+                    [],
+                    |r| r.get(0),
+                )?;
+                let program: Vec<(i64, String, i64, i64)> = tx
+                    .prepare("EXPLAIN DELETE FROM chunk_transcripts WHERE session_id = ?1")?
+                    .query_map(params!["A"], |r| {
+                        Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+                    })?
+                    .collect::<rusqlite::Result<_>>()?;
+                Ok((root, blob, program))
+            })
+            .unwrap();
+        // EXPLAIN lists trigger subprograms after the main program, each restarting at address 0.
+        let main: Vec<_> = program
+            .iter()
+            .enumerate()
+            .take_while(|(index, op)| *index == 0 || op.0 > program[index - 1].0)
+            .map(|(_, op)| op)
+            .collect();
+        let table_cursors: Vec<i64> = main
+            .iter()
+            .filter(|op| (op.1 == "OpenWrite" || op.1 == "OpenRead") && op.3 == root)
+            .map(|op| op.2)
+            .collect();
+        assert!(!table_cursors.is_empty(), "{main:?}");
+        let reads: Vec<i64> = main
+            .iter()
+            .filter(|op| op.1 == "Column" && table_cursors.contains(&op.2))
+            .map(|op| op.3)
+            .collect();
+        assert!(!reads.is_empty(), "{main:?}");
+        assert!(
+            reads.iter().all(|&column| column < blob),
+            "the delete reads stored columns {reads:?}; transcript_deflate is stored at {blob}"
+        );
+    }
+
+    #[test]
+    fn eviction_against_a_total_above_its_rows_terminates() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
+        publish_transcripts(&store, "A", 1, 4, 1_000, 1024);
+        store
+            .inner
+            .with_conn_fenced(|tx| {
+                tx.execute(
+                    "UPDATE chunk_transcript_totals SET compressed_bytes = compressed_bytes + ?1
+                      WHERE session_id = 'A'",
+                    params![2 * TRANSCRIPT_CAP],
+                )
+            })
+            .unwrap();
+        let (done, finished) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            publish_transcripts(&store, "A", 5, 1, 2_000, 1024);
+            let _ = done.send(store);
+        });
+        let store = finished
+            .recv_timeout(std::time::Duration::from_secs(30))
+            .expect("eviction returns once the session's rows are exhausted");
+        assert_transcripts(&store, "A", &[]);
+        assert_eq!(transcript_total(&store, "A"), Some(0));
     }
 
     fn seed_tags(store: &MemoryStore, session_id: &str, count: i64) {
