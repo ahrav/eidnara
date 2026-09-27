@@ -7,10 +7,9 @@ Record WP-P15 of catalog revision 2
 surface plugin, daemon. The specification's acceptance criteria require N- and
 H-independent steady-state cost. #833 carries the measurements.
 
-Exercised status: partial - #833's acceptance run records items scanned,
-rows visited, VM steps, and retained state across N and H at W = 300; bytes
-decoded are not instrumented (INCONCLUSIVE). The readings await owner
-confirmation.
+Exercised status: yes - #833's acceptance run records items scanned, rows
+visited, VM steps, bytes decoded (`3ebfc3b9`), and retained state across N
+and H at W = 300. The readings await owner confirmation.
 
 ## Evidence trail
 
@@ -45,8 +44,16 @@ and moved by a line diff to `f2442b2f`; each cited test name was found there.
   m0 (2,484 rows, cap 249 + K + L = 2,733); `cache_state.meta` 117,066 /
   117,040 / 117,064 B at N = 10k / 100k / 1M, equal entry counts, the 26 B
   spread only decimal digits; RSS per idle session, slope over k = 8
-  sessions, mean of 3: 5,340 / 5,426 / 5,338 KiB (1.7%); bytes decoded not
-  instrumented.
+  sessions, mean of 3: 5,340 / 5,426 / 5,338 KiB (1.7%).
+- Bytes decoded per D15 row, N = 10k / H = 100 against N = 1M / H = 50k
+  (commit `3ebfc3b9`, cargo 1.98.1, release, load 4.37; raw
+  `bytes-d15-3ebfc3b9.json` under the gitignored `docs/performance/`):
+  equal in every row except m0 (14,442 / 387,504 B, the fold's 100 against
+  2,484 rows), the coverage snapshot (HARD 696,516 / 847,206, steady 650,032
+  / 800,718: the session row's frozen fold render), temporal marks, hints,
+  appends (10,588 / 10,791) and summarizer assembly (887 / 952), the last
+  two decimal digits of wider ordinals. Every row holds its WP-P07 bound;
+  the table and bounds are in the WP-P07 evidence.
 - Daemon `total` median / p99: 13.72 / 14.57, 14.42 / 15.55, 14.02 / 19.67
   ms; 1M/100k median 0.972 (five replicates 0.965 to 1.020).
 - HARD at W = 300, N = 50,300: H = 50k against H = 2,500 (≥ K_max 2,484)
@@ -93,8 +100,8 @@ Gate results of the runs cited here, as recorded in the PR descriptions:
   fixture-contract 6 pass; manifest ok; `test:rust` 23 pass, 17 skip, 0 fail
   (no addon_unavailable skips).
 - #833 (`window-protocol/m1-exit`; gates at the final head, code at
-  `f2442b2f`): fmt, clippy, `-p daemon` 2,749 passed, `-p memory-store` 339,
-  `-p storage` 107, doctests 19, storage no-default check, markers,
+  `3ebfc3b9`): fmt, clippy, `-p daemon` 2,749 passed, `-p memory-store` 339,
+  `-p storage` 108, doctests 19, storage no-default check, markers,
   `check:repo`, fixture build ok; fixture-contract 6 pass; manifest ok;
   `test:rust` 23 pass, 17 skip, 0 fail.
 
@@ -121,9 +128,13 @@ within 10%.
 
 - Sources examined: M1 PR descriptions; #833 acceptance run.
 - Findings: #833's run covers N = 10k, 100k, 1M at W = 300; every counter it
-  records is equal across N up to decimal-digit width.
-- Missing evidence: Bytes decoded.
-- Conclusion: resolved with answer except bytes decoded (INCONCLUSIVE).
+  records is equal across N up to decimal-digit width. Bytes decoded
+  (`3ebfc3b9`) are equal per D15 row up to decimal digits, except m0 and the
+  coverage snapshot's frozen fold render, which follow the fold's rows under
+  the D14 cap.
+- Missing evidence: None.
+- Conclusion: resolved with answer; the bytes-decoded reading (equal up to
+  the fold render and decimal digits) awaits owner confirmation.
 
 ### Q: Does connection hold time stay H-independent?
 

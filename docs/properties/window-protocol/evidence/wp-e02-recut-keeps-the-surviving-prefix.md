@@ -54,8 +54,8 @@ and moved by a line diff to `f2442b2f`; each cited test name was found there.
   asserts the interrupted request's own HARD.
 - The #874 inventory drives a HARD with an injected CAS conflict
   (`every_pass_read_is_bounded_independent_of_history_size`,
-  `crates/daemon/src/transform_read_bound.rs:574`), which is read-bound
-  evidence, not recut evidence.
+  `crates/daemon/src/transform_read_bound.rs:627` at `3ebfc3b9`), which is
+  read-bound evidence, not recut evidence.
 
 Gate results of the runs cited here, as recorded in the PR descriptions:
 

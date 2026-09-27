@@ -64,8 +64,8 @@ Gate results of the runs cited here, as recorded in the PR descriptions:
   fixture-contract 6 pass; manifest ok; `test:rust` 23 pass, 17 skip, 0 fail
   (no addon_unavailable skips).
 - #833 (`window-protocol/m1-exit`; gates at the final head, code at
-  `f2442b2f`): fmt, clippy, `-p daemon` 2,749 passed, `-p memory-store` 339,
-  `-p storage` 107, doctests 19, storage no-default check, markers,
+  `3ebfc3b9`): fmt, clippy, `-p daemon` 2,749 passed, `-p memory-store` 339,
+  `-p storage` 108, doctests 19, storage no-default check, markers,
   `check:repo`, fixture build ok; fixture-contract 6 pass; manifest ok;
   `test:rust` 23 pass, 17 skip, 0 fail.
 

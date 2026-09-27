@@ -7,13 +7,15 @@ to `/low-level-systems:defensive-assertions-and-invariant-guards`. The
 revision 3 checks ran in the recorded gates of #881 (#831, head `1c66f16c`),
 #883 (#832 PR one, head `d7712d75`), and #884 (#832 PR two, head `f8734c12`);
 the #833 checks ran in the gates the #833 PR description records (gates at
-the final head, code at `f2442b2f`).
+the final head, code at `3ebfc3b9`).
 
 Every test name below was located with `git grep` at the named tree. Unless a
 row names another tree, `file:line` is at `f2442b2f`, the last code commit of
 #833 (`window-protocol/m1-exit`, base `main` `d68aedf3`). Lines read at
 `f8734c12` were moved by a line diff and each name was found again at
-`f2442b2f`. A test deleted by #833 is cited at `f8734c12`.
+`f2442b2f`. A test deleted by #833 is cited at `f8734c12`. `3ebfc3b9`
+changes only the test-support statement ledger and the #874 inventory test;
+rows citing those files are marked at `3ebfc3b9`.
 
 ## Daemon and store
 
@@ -79,8 +81,8 @@ row names another tree, `file:line` is at `f2442b2f`, the last code commit of
 | `state_sync_refuses_rows_that_overlap_stored_neighbours` | `crates/memory-store/src/lib.rs:22605` | WP-P07, WP-P08 (range invariant) | #873 | unaudited |
 | `initialized_state_sync_skips_retained_rows_and_refuses_an_overlapping_new_row` | `crates/memory-store/src/lib.rs:22664` | WP-P07 | #873 | unaudited |
 | `state_sync_refuses_duplicate_sequences_in_one_batch` | `crates/memory-store/src/lib.rs:22726` | WP-P07 | #873 | unaudited |
-| `every_pass_read_is_bounded_independent_of_history_size` | `crates/daemon/src/transform_read_bound.rs:574` | WP-P07, WP-P15 | #874 (at `704568ec`: `:537`) | unaudited |
-| Statement-work ledger tests (three, `crates/storage`) | `crates/storage/src/lib.rs` (hook at `:306`) | WP-P07 | #873 (`test -p storage` 107) | unaudited; names not listed in the description |
+| `every_pass_read_is_bounded_independent_of_history_size` | `crates/daemon/src/transform_read_bound.rs:627` (at `3ebfc3b9`) | WP-P07, WP-P15 | #874 (at `704568ec`: `:537`); bytes bound `3ebfc3b9` | unaudited |
+| Statement-work ledger tests (four, `crates/storage`) | `crates/storage/src/lib.rs` (hook at `:306`) | WP-P07 | #873 (`test -p storage` 107); `statement_work_counts_the_bytes_of_every_returned_value` (`:6401`, `3ebfc3b9`) | unaudited; #873's names not listed in the description |
 | `a_missing_or_non_3_revision_is_refused_with_expected_and_received_and_no_state_change` | `crates/daemon/src/transform/revision_3.rs:158` | WP-P24 | #881 | unaudited |
 | `boundary_presence_head_sequence_and_duplicates_are_invalid_params` | `crates/daemon/src/transform/revision_3.rs:193` | WP-P01, WP-P24 | #881 | unaudited |
 | `a_boundary_that_does_not_decode_is_bad_request` | `crates/daemon/src/transform/revision_3.rs:231` | WP-P24 | #881 | unaudited |
@@ -211,7 +213,8 @@ that cited it.
 - Steady-state N sweep at W = 300 and the event measurements (WP-P15): no
   committed check; #833's uncommitted acceptance drivers (gitignored
   `docs/performance/`) measure them and the #833 PR description carries the
-  numbers. Bytes decoded are not instrumented.
+  numbers. Bytes decoded per D15 row are recorded since `3ebfc3b9`, and the
+  #874 inventory test asserts their bound across H at fixed W.
 - Hostile covered slots crossed by a real discovery pass (WP-P13, WP-P23):
   only the primitive-level witness exists at `f2442b2f`; #883 names no
   pass-level variant (needs human input: accept the primitive witness or add

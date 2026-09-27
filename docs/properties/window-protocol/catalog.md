@@ -42,7 +42,7 @@ commit on `main` and the head it merged.
 | #881 | #831 | `window-protocol/m1-daemon-revision-3` | `1c66f16c` | `main` | `6b611cd0` | `c6a1d384` |
 | #883 | #832 (1 of 2) | `window-protocol/m1-plugin-revision-3` | `d7712d75` | `main` | `18b3fc2a` | `b93059b9` |
 | #884 | #832 (2 of 2) | `window-protocol/m1-plugin-fail-open` | `f8734c12` | `main` | `d68aedf3` | `8055c935` |
-| #833 PR | #833 | `window-protocol/m1-exit` | final head (code at `f2442b2f`) | `main` (`d68aedf3`) | - | - |
+| #833 PR | #833 | `window-protocol/m1-exit` | final head (code at `3ebfc3b9`; production code at `f2442b2f`) | `main` (`d68aedf3`) | - | - |
 
 The heads of #873 (`efb3fe9c`), #874 (`08afec9d`, `cd596c15`, `c239461c`), and
 #875 (`1431467c`, `2d58cc20`) carry commits pushed after their descriptions
@@ -151,7 +151,7 @@ Distribution: 27 `default-production`, 3 `explicit-config-only`, 7 `test-only`.
 | WP-P12 | [`wp-p12-boundary-index-is-fixed-through-publication`](#wp-p12-boundary-index-is-fixed-through-publication) | safety | `always` | plugin | active | yes | #883 |
 | WP-P13 | [`wp-p13-id-scan-invokes-no-host-hooks`](#wp-p13-id-scan-invokes-no-host-hooks) | safety | `always` | plugin | active | yes | #883 |
 | WP-P14 | [`wp-p14-first-user-policy-comes-from-session-authority`](#wp-p14-first-user-policy-comes-from-session-authority) | safety | `always` | plugin | active | partial | #884; frozen-status assertion unowned |
-| WP-P15 | [`wp-p15-steady-state-work-is-window-bounded`](#wp-p15-steady-state-work-is-window-bounded) | safety | `always` | plugin, daemon | active | partial | #874, #883, #833; bytes decoded uninstrumented |
+| WP-P15 | [`wp-p15-steady-state-work-is-window-bounded`](#wp-p15-steady-state-work-is-window-bounded) | safety | `always` | plugin, daemon | active | yes | #874, #883, #833 |
 | WP-P16 | [`wp-p16-prune-publish-race-is-actually-constructed`](#wp-p16-prune-publish-race-is-actually-constructed) | reachability | `sometimes` | store | active | yes | #833 |
 | WP-P17 | [`wp-p17-interior-omission-is-constructed`](#wp-p17-interior-omission-is-constructed) | reachability | `sometimes` | plugin | active | yes | #883 |
 | WP-P18 | [`wp-p18-a-waiting-pass-actually-waited`](#wp-p18-a-waiting-pass-actually-waited) | reachability | `sometimes` | daemon | active | yes | #875 |
@@ -167,7 +167,7 @@ Owner lists the PR whose recorded run supplies the status, then, after a
 semicolon, the PR or ticket that still owes evidence. Semantics: 29 `always`,
 8 `sometimes`, 0 `always-or-unreached`, 0 `reachable`, 0 `unreachable`.
 
-Exercise distribution: 34 `yes`, 3 `partial` (WP-E10, WP-P14, WP-P15), 0
+Exercise distribution: 35 `yes`, 2 `partial` (WP-E10, WP-P14), 0
 `not yet`.
 Status: 35 `active`, 2 `invalidated` (WP-E06, WP-E11).
 
@@ -997,17 +997,24 @@ Exercised: yes - `every_pass_read_is_bounded_independent_of_history_size`
 classifies every statement of real SOFT, HARD, CAS-retry, summarizer, and
 absent-boundary passes into a D15 row and asserts equal rows and VM_STEP at H
 = 100 and H = 50,000 (#874 run; #881 and #833 daemon gates under revision 3
-requests); #875 adds the intersection and page rows. The N axis at fixed W is
-#833's acceptance D15 run (N = 10k / H = 100 against N = 1M / H = 50k, W =
-300): every row equal except m0 (2,484 rows, D14 cap 2,733), no whole-table
-statement; bytes decoded are not instrumented (INCONCLUSIVE), outside this
-Check. The verdict readings await owner confirmation.
+requests); #875 adds the intersection and page rows. Since `3ebfc3b9` the
+ledger also records bytes decoded per statement and the test asserts each
+row's declared bytes bound at H = 50,000. The N axis at fixed W is #833's
+acceptance D15 run (N = 10k / H = 100 against N = 1M / H = 50k, W = 300):
+every row's rows equal except m0 (2,484 rows, D14 cap 2,733), no
+whole-table statement, and every row's bytes within its declared bound
+(`3ebfc3b9`). The verdict readings await owner confirmation.
 Guarantee: Every per-pass store read has an explicit W-, budget-, or constant
 bound on materialized data and inspected work.
-Check: `always` - Every store call on the pass path records rows materialized
-and `VM_STEP` through the connection wrapper; per inventory row the values are
-independent of N and H at fixed W, including CAS retries. A SQL `LIMIT` alone
-does not prove bounded rows visited. Falsifier: return six references after
+Check: `always` - Every store call on the pass path records rows materialized,
+`VM_STEP`, and bytes decoded through the connection wrapper; per inventory row
+the rows and steps are independent of N and H at fixed W, including CAS
+retries, and the bytes stay within the row's declared bound: m0 and m1 at
+their row caps times the largest segment row (eleven text columns at
+`MAX_DURABLE_TEXT_BYTES`, 512 KiB, plus six integers), every other row at its
+small-point bytes times the ordinal-width ratio, and the coverage snapshot
+also carries the frozen fold render, so its bound adds the m0 bytes. A SQL
+`LIMIT` alone does not prove bounded rows visited. Falsifier: return six references after
 loading all H segment rows.
 Fault/timing angle: Large history, overlay population, cache miss, retry, or
 reset exposes a hidden full scan.
@@ -1022,10 +1029,14 @@ one-time range-order scan and reopen the store before measurement; they are
 on `main`, so #881's and #833's daemon gates ran the inventory with them; the
 #874 measurement table predates them. The identity load (`block_identities`)
 is classified into the coverage-snapshot row
-(`crates/daemon/src/transform_read_bound.rs:103`) and, after D12, holds window
-mids only.
-Existing check: `crates/daemon/src/transform_read_bound.rs:574`
-`every_pass_read_is_bounded_independent_of_history_size` (#874);
+(`crates/daemon/src/transform_read_bound.rs:108` at `3ebfc3b9`) and, after
+D12, holds window mids only. Bytes decoded come from `3ebfc3b9`: the
+ledger's `TRACE_ROW` reads each produced value's type and, for TEXT and BLOB
+only, its length.
+Existing check: `crates/daemon/src/transform_read_bound.rs:627` (at `3ebfc3b9`)
+`every_pass_read_is_bounded_independent_of_history_size` (#874; bytes since
+`3ebfc3b9`); `crates/storage/src/lib.rs:6401`
+`statement_work_counts_the_bytes_of_every_returned_value` (`3ebfc3b9`);
 `crates/memory-store/src/lib.rs:22466`
 `per_pass_history_reads_do_constant_work_as_history_grows` (#873);
 `crates/daemon/src/window_coverage/tests.rs:591`
@@ -1378,15 +1389,19 @@ Reachability: default-production - every admitted steady-state transform; the
 benchmark driver is test-only and uncommitted under the gitignored
 `docs/performance/`.
 Status: active
-Exercised: partial - #833's acceptance run (commit `cf89a9c2`, Rust 1.98.1,
+Exercised: yes - #833's acceptance run (commit `cf89a9c2`, Rust 1.98.1,
 Bun 1.3.14, release builds, W = 300 of the fixed 5 KiB shape, 30 samples per
 point) records items scanned (300 at every N), rows visited and VM steps
 (every D15 row equal at N = 1M / H = 50k except m0 under its D14 cap), and
 retained state (`cache_state.meta` equal in entries, 26 B of decimal digits
-apart; RSS per idle session within 1.7%); bytes decoded are not instrumented
-(INCONCLUSIVE). In CI, the #874 inventory and #883's plugin counter test
-("stays equal at a fixed window for 10k and 100k host messages", W = 5) ran
-in #833's gates. The readings await owner confirmation.
+apart; RSS per idle session within 1.7%). Bytes decoded per D15 row (commit
+`3ebfc3b9`, same method): equal at N = 1M / H = 50k except m0 (14,442 to
+387,504 B, the fold's rows), the coverage snapshot (up to 23%, the frozen
+fold render in the session row), temporal marks (+203 B), and summarizer
+assembly (+65 B), the last two decimal digits; each is within its WP-P07
+bound. In CI, the #874 inventory and #883's plugin counter test ("stays
+equal at a fixed window for 10k and 100k host messages", W = 5) ran in
+#833's gates. The readings await owner confirmation.
 Guarantee: At fixed window bytes and rendering budget, the work counters of an
 admitted steady-state pass (items scanned, bytes serialized, rows visited,
 bytes decoded, retained bytes) are equal across N and H.
@@ -1414,9 +1429,9 @@ steady whole-hook p99 70.7 to 73.3, 67.2 to 80.9, and 66.6 to 76.2 ms at N =
 10k, 100k, 1M, 1M/100k median 0.968 to 1.082; cold start at N = 1M p99 84.7
 to 90.2 ms; revert past the boundary two-pass p99 1,739.1 to 1,848.2 ms. The
 H comparison point, the RSS slope reading, and meta equality up to decimal
-digits are readings pending owner confirmation; bytes decoded are
-INCONCLUSIVE.
-Existing check: `crates/daemon/src/transform_read_bound.rs:574`
+digits are readings pending owner confirmation, as is bytes-decoded
+equality up to the fold render and decimal digits.
+Existing check: `crates/daemon/src/transform_read_bound.rs:627` (at `3ebfc3b9`)
 `every_pass_read_is_bounded_independent_of_history_size` (#874);
 `packages/opencode-plugin/src/hooks/context/rust-mode-window.test.ts:998`
 "stays equal at a fixed window for 10k and 100k host messages" (#883); `:384`

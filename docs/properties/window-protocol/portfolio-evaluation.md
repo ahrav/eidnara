@@ -20,20 +20,23 @@ this part carries. No test-adequacy verdict is issued here.
   #884 (head `f8734c12`) on 2026-09-27, all merged into `main` (last merge
   `d68aedf3`). #833's run is the gate block its own PR description records
   at the final head of `window-protocol/m1-exit`.
-- Code tree for references: `f2442b2f` (#833, `window-protocol/m1-exit`);
-  the later commits on the branch change only documentation.
-- 37 records: 34 `Exercised: yes`, 3 `partial` (WP-E10, WP-P14, WP-P15),
-  0 `not yet`.
+- Code tree for references: `f2442b2f` (#833, `window-protocol/m1-exit`).
+  `3ebfc3b9` changes only the test-support statement ledger and the #874
+  inventory test; references into them are marked at `3ebfc3b9`. The other
+  later commits change only documentation.
+- 37 records: 35 `Exercised: yes`, 2 `partial` (WP-E10, WP-P14), 0 `not
+  yet`.
 - Moved to `yes` by #833: WP-E03, WP-P06, WP-P16, WP-P25 (from `not yet`),
-  WP-P07 (from `partial`). WP-P15 moved from `not yet` to `partial`: bytes
-  decoded are not instrumented. WP-E10 stays `partial`: no refused-commit
-  witness. WP-P14 moved from `yes` to `partial` by refinement I2: its tests
+  WP-P07 (from `partial`). WP-P15 moved from `not yet` to `partial`, then
+  to `yes` once `3ebfc3b9` recorded bytes decoded (Q10). WP-E10 stays
+  `partial`: no refused-commit witness. WP-P14 moved from `yes` to `partial` by refinement I2: its tests
   compare tool flags, not the frozen status.
 - Measurements: the revision 2 baseline at `43e88bdc` and H sweep at
   `704568ec` (#873, #874; N = 1M INCONCLUSIVE). The revision 3 daemon, RSS,
   meta, and D15 readings are at `cf89a9c2` (#833; Rust 1.98.1, release
   builds); the later commits change only the plugin, the admission scans
-  (speed only), and tests. The plugin readings are at `58dbe556`, whose
+  (speed only), and tests. The D15 bytes-decoded readings are at `3ebfc3b9`
+  (release, load 4.37). The plugin readings are at `58dbe556`, whose
   production code is identical to `f2442b2f`: three runs at 1-minute load 5.8
   to 7.4, Bun 1.3.14, release `direct_host_fixture`, 30 samples after 10
   warmups per point. Steady whole-hook p99 70.7 to 73.3, 67.2 to 80.9, and
@@ -44,8 +47,10 @@ this part carries. No test-adequacy verdict is issued here.
 - Criterion readings pending owner confirmation: HARD compared at H = 50k
   against H = 2,500 (≥ K), with H = 100 reported and m0 checked against its
   D14 bound; RSS per idle session read as the slope over k = 8 idle
-  sessions; `cache_state.meta` equal across N up to decimal-digit width.
-  Bytes decoded are INCONCLUSIVE.
+  sessions; `cache_state.meta` equal across N up to decimal-digit width;
+  bytes decoded per D15 row equal across N up to decimal-digit width, except
+  m0 and the coverage snapshot's frozen fold render, which follow the fold
+  under the D14 cap (`3ebfc3b9`, every row within its declared bound).
 
 ## Independent evaluation
 
@@ -328,8 +333,10 @@ Each item is queued: no owner outside #833 has taken it, unless named.
 - Q9, queued (WP-P02, WP-P03): corrupt-storage branches in `resolve` for
   negative stored ordinals and row versions (recorded as a known gap by
   #875).
-- Q10, queued (WP-P15): bytes decoded per D15 row; the statement ledger
-  records only SQL, rows, and VM steps.
+- Q10, resolved (WP-P07, WP-P15): bytes decoded per D15 row. `3ebfc3b9`
+  adds `bytes` to the statement ledger, a declared bytes bound per inventory
+  row to the #874 test, and a D15 run at N = 1M / H = 50k in which all 58
+  (row, phase) cells hold their bound (WP-P07 evidence).
 - Q11, queued (WP-E03, WP-FM02, WP-FM06): the D10 reset's log line and a
   real reset under a retained plugin boundary; tracked with Q3.
 
@@ -396,7 +403,7 @@ checked at `f2442b2f`.
 | Record fields | all 12 METHOD fields, in METHOD's order, in every record; every enumerated field uses a METHOD value |
 | Open questions | every record says `Open questions: None.` or lists bullets; no record says `None.` while its evidence file ends a question unresolved or needing human input |
 | Evidence sections | the six METHOD headings in every file; every `### Q:` has Sources examined, Findings, Missing evidence, and Conclusion |
-| Evidence length | 66 to 135 lines; only WP-P15's file exceeds 120, to keep the `58dbe556` plugin readings with their artifact identity |
+| Evidence length | 66 to 153 lines; WP-P07's and WP-P15's files exceed 120, to keep the `3ebfc3b9` bytes-decoded table and the `58dbe556` plugin readings with their artifact identity |
 | Relative links and anchors | none broken |
 | Placeholders | no `TODO-8nn` token outside the quoted evaluation above |
 | `file:line` citations | 557 checked against `f2442b2f`: every path resolves and every line is in range, except named-tree citations, which are cited at their own tree; citations into the files the later #833 commits changed were moved by a line diff and their test names re-found with `git grep` |

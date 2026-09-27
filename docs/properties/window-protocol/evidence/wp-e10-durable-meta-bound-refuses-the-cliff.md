@@ -68,8 +68,8 @@ Gate results of the runs cited here, as recorded in the PR descriptions:
   `test:rust` 9 pass, 14 fail on #881 alone (by design: the revision 2 plugin
   is refused) and 23 pass, 17 skip, 0 fail with #883.
 - #833 (`window-protocol/m1-exit`; gates at the final head, code at
-  `f2442b2f`): fmt, clippy, `-p daemon` 2,749 passed, `-p memory-store` 339,
-  `-p storage` 107, doctests 19, storage no-default check, markers,
+  `3ebfc3b9`): fmt, clippy, `-p daemon` 2,749 passed, `-p memory-store` 339,
+  `-p storage` 108, doctests 19, storage no-default check, markers,
   `check:repo`, fixture build ok; fixture-contract 6 pass; manifest ok;
   `test:rust` 23 pass, 17 skip, 0 fail.
 
