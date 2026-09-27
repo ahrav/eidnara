@@ -4,7 +4,7 @@ import {
     eidnaraProjectConfigBasePath,
     eidnaraUserConfigBasePath,
 } from "@eidnara/opencode/config/config-paths";
-import { screenUserTierText } from "@eidnara/opencode/config/fold-authority";
+import { type ConfigAdmission, screenUserTier } from "@eidnara/opencode/config/fold-authority";
 import type { LoadOutcome } from "@eidnara/opencode/config/load-outcome";
 import {
     constrainProjectThresholdOverrides,
@@ -41,6 +41,7 @@ export interface LoadPiConfigResult {
 
 export interface LoadPiConfigResultDetailed extends LoadPiConfigResult {
     loadOutcome: LoadOutcome;
+    admission: ConfigAdmission;
     sources: {
         userConfig: LoadOutcome;
         projectConfig: LoadOutcome;
@@ -59,6 +60,7 @@ interface LoadedConfigFile {
     config: Record<string, unknown>;
     warnings: string[];
     loadOutcome: LoadOutcome;
+    authorityRejections: string[];
 }
 
 function getProjectConfigPaths(cwd: string): string[] {
@@ -99,9 +101,7 @@ function loadConfigFile(path: string, scope: "user" | "project"): LoadedConfigFi
         }
         const config = parsed;
         const screen =
-            scope === "user"
-                ? screenUserTierText(rawText, config)
-                : { rejections: [], warnings: [] };
+            scope === "user" ? screenUserTier(rawText, config) : { rejections: [], warnings: [] };
         const unsafeKeyWarnings = rejectedKeyPaths.map(
             (keyPath) =>
                 `Ignored unsafe config key "${keyPath}" (security: prototype-pollution keys are not allowed).`,
@@ -110,12 +110,10 @@ function loadConfigFile(path: string, scope: "user" | "project"): LoadedConfigFi
             path,
             scope,
             config,
-            warnings: [
-                ...substituted.warnings,
-                ...unsafeKeyWarnings,
-                ...screen.rejections,
-                ...screen.warnings,
-            ].map((warning) => `${path}: ${warning}`),
+            warnings: [...substituted.warnings, ...unsafeKeyWarnings, ...screen.warnings].map(
+                (warning) => `${path}: ${warning}`,
+            ),
+            authorityRejections: screen.rejections.map((rejection) => `${path}: ${rejection}`),
             loadOutcome:
                 rejectedKeyPaths.length > 0
                     ? "schema-recovery"
@@ -125,11 +123,13 @@ function loadConfigFile(path: string, scope: "user" | "project"): LoadedConfigFi
         };
     } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
+        const warning = `${path}: failed to load config: ${message}; using defaults for this file.`;
         return {
             path,
             scope,
             config: {},
-            warnings: [`${path}: failed to load config: ${message}; using defaults for this file.`],
+            warnings: [warning],
+            authorityRejections: [warning],
             loadOutcome:
                 typeof (error as { code?: unknown }).code === "string"
                     ? "project-file-io-error"
@@ -249,7 +249,7 @@ function parsePiConfig(
 
     for (const key of errorPaths) {
         recoveredTopLevelKeys.push(key);
-        const isAgentConfig = key === "history_summarizer" || key === "context_researcher";
+        const isAgentConfig = key === "context_researcher";
 
         // A project config key with a user-tier fallback restores that fallback instead
         // of forcing the schema default.
@@ -544,8 +544,16 @@ export function loadPiConfigDetailed(opts: LoadPiConfigOptions = {}): LoadPiConf
             substitutionFailures,
             recoveredTopLevelKeys,
         }),
+        admission: admissionOf(loadedFiles),
         sources,
         substitutionFailures,
         recoveredTopLevelKeys,
     };
+}
+
+function admissionOf(loadedFiles: readonly LoadedConfigFile[]): ConfigAdmission {
+    const rejections = loadedFiles.flatMap((loaded) => loaded.authorityRejections);
+    return rejections.length === 0
+        ? { status: "admitted" }
+        : { status: "unresolved", reason: rejections.join("; ") };
 }

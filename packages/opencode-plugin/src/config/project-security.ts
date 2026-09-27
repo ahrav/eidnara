@@ -26,6 +26,7 @@ const HISTORY_SUMMARIZER_USER_ONLY_FIELDS = [
     "fallback_models",
     "module_model",
     "module_fallback_models",
+    "context_limit_tokens",
     "disallowed_tools",
 ] as const;
 const PROMPT_SURFACE_USER_ONLY_FIELDS = ["guidance_override_path", "tool_descriptions"] as const;

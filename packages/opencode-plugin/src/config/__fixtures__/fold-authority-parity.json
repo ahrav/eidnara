@@ -3,8 +3,9 @@
     "contract": [
         "A row's user_tier_files are written to $XDG_CONFIG_HOME/eidnara and its project_tier_files to <project>/.eidnara; each key is a file name and each value is the file's text. env holds the only variables {env:} substitution may read.",
         "expected_chain is the ordered, deduplicated user-tier summarizer chain. expected_admission is admitted or unresolved. expected_eidnara_folds is compaction.enabled !== false and a non-empty chain. An unresolved row withholds its documents, so its chain and predicate are null.",
+        "Chain values are trimmed of ECMAScript whitespace (String.prototype.trim), which includes U+FEFF and excludes U+0085.",
         "Supported input, the limit parity is claimed for: every tier file is a regular UTF-8 file of at most 1 MiB (1,048,576 bytes) whose final path component is not a symlink, and the user tier is valid JSONC before variable substitution. The daemon reads each tier with O_NOFOLLOW and that bound and reports a larger or symlinked tier as unreadable; the plugin follows symlinks and reads any size.",
-        "Unknown keys inside history_summarizer or compaction in either tier are rejected on both sides. The plugin also rejects unknown keys elsewhere, while the daemon ignores them and reads its own keys outside the plugin schema (for example history_summarizer.context_limit_tokens and memory.user_profile_budget_tokens), so keys outside those two blocks are outside the parity contract.",
+        "A malformed or non-object tier, a summarizer or compaction block the user tier does not hold as an object, an unknown key inside history_summarizer or compaction in either tier, a user-tier key holding a variable reference, a non-boolean compaction.enabled, and a mistyped chain key are unresolved on both sides. Known keys are the plugin schema's properties (assets/eidnara.schema.json). The plugin also rejects unknown keys outside those two blocks, while the daemon ignores them and reads its own keys the plugin schema lacks (for example memory.user_profile_budget_tokens), so keys outside those two blocks are outside the parity contract.",
         "The four chain keys (model, fallback_models, module_model, module_fallback_models) take literal model ids: a blank value or one containing {env: or {file: is excluded with a warning on both sides, while the rest of the document keeps the plugin's substitution. compaction.enabled must be a literal boolean."
     ],
     "rows": [
@@ -263,7 +264,7 @@
             "expected_eidnara_folds": null
         },
         {
-            "name": "a malformed project tier leaves the user chain",
+            "name": "a malformed project tier is unresolved",
             "user_tier_files": {
                 "eidnara.jsonc": "{\n    \"history_summarizer\": {\n        \"model\": \"anthropic/claude-haiku-4-5\"\n    }\n}\n"
             },
@@ -271,11 +272,22 @@
                 "eidnara.jsonc": "{ \"memory\": {\n"
             },
             "env": {},
-            "expected_chain": [
-                "anthropic/claude-haiku-4-5"
-            ],
-            "expected_admission": "admitted",
-            "expected_eidnara_folds": true
+            "expected_chain": null,
+            "expected_admission": "unresolved",
+            "expected_eidnara_folds": null
+        },
+        {
+            "name": "a non-object project tier is unresolved",
+            "user_tier_files": {
+                "eidnara.jsonc": "{\n    \"history_summarizer\": {\n        \"model\": \"anthropic/claude-haiku-4-5\"\n    }\n}\n"
+            },
+            "project_tier_files": {
+                "eidnara.jsonc": "[]\n"
+            },
+            "env": {},
+            "expected_chain": null,
+            "expected_admission": "unresolved",
+            "expected_eidnara_folds": null
         },
         {
             "name": "a null summarizer block is unresolved",
@@ -433,6 +445,84 @@
             "env": {
                 "EIDNARA_FIXTURE_MODEL": "openai/gpt-5.6-mini"
             },
+            "expected_chain": [
+                "anthropic/claude-haiku-4-5"
+            ],
+            "expected_admission": "admitted",
+            "expected_eidnara_folds": true
+        },
+        {
+            "name": "a byte order mark is whitespace to both loaders",
+            "user_tier_files": {
+                "eidnara.jsonc": "{\n    \"history_summarizer\": {\n        \"model\": \"\\ufeff\",\n        \"fallback_models\": [\n            \"\\ufeffopenai/gpt-5.6-mini\"\n        ]\n    }\n}\n"
+            },
+            "project_tier_files": {},
+            "env": {},
+            "expected_chain": [
+                "openai/gpt-5.6-mini"
+            ],
+            "expected_admission": "admitted",
+            "expected_eidnara_folds": true
+        },
+        {
+            "name": "a next-line character is part of the model id to both loaders",
+            "user_tier_files": {
+                "eidnara.jsonc": "{\n    \"history_summarizer\": {\n        \"model\": \"\\u0085anthropic/claude-haiku-4-5\"\n    }\n}\n"
+            },
+            "project_tier_files": {},
+            "env": {},
+            "expected_chain": [
+                "\u0085anthropic/claude-haiku-4-5"
+            ],
+            "expected_admission": "admitted",
+            "expected_eidnara_folds": true
+        },
+        {
+            "name": "an env reference in a summarizer key is unresolved",
+            "user_tier_files": {
+                "eidnara.jsonc": "{\n    \"history_summarizer\": {\n        \"{env:EIDNARA_FIXTURE_KEY}\": \"anthropic/claude-haiku-4-5\"\n    }\n}\n"
+            },
+            "project_tier_files": {},
+            "env": {
+                "EIDNARA_FIXTURE_KEY": "model"
+            },
+            "expected_chain": null,
+            "expected_admission": "unresolved",
+            "expected_eidnara_folds": null
+        },
+        {
+            "name": "an env reference in a top-level key is unresolved",
+            "user_tier_files": {
+                "eidnara.jsonc": "{\n    \"{env:EIDNARA_FIXTURE_KEY}\": {\n        \"model\": \"anthropic/claude-haiku-4-5\"\n    }\n}\n"
+            },
+            "project_tier_files": {},
+            "env": {
+                "EIDNARA_FIXTURE_KEY": "history_summarizer"
+            },
+            "expected_chain": null,
+            "expected_admission": "unresolved",
+            "expected_eidnara_folds": null
+        },
+        {
+            "name": "the daemon's summarizer context limit is a known key",
+            "user_tier_files": {
+                "eidnara.jsonc": "{\n    \"history_summarizer\": {\n        \"model\": \"anthropic/claude-haiku-4-5\",\n        \"context_limit_tokens\": 64000\n    }\n}\n"
+            },
+            "project_tier_files": {},
+            "env": {},
+            "expected_chain": [
+                "anthropic/claude-haiku-4-5"
+            ],
+            "expected_admission": "admitted",
+            "expected_eidnara_folds": true
+        },
+        {
+            "name": "an invalid sibling leaf leaves the chain",
+            "user_tier_files": {
+                "eidnara.jsonc": "{\n    \"history_summarizer\": {\n        \"model\": \"anthropic/claude-haiku-4-5\",\n        \"temperature\": 3\n    }\n}\n"
+            },
+            "project_tier_files": {},
+            "env": {},
             "expected_chain": [
                 "anthropic/claude-haiku-4-5"
             ],

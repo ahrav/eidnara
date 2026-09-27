@@ -7,11 +7,14 @@ const CHAIN_MODEL_KEYS = ["module_model", "model"] as const;
 const CHAIN_FALLBACK_KEYS = ["module_fallback_models", "fallback_models"] as const;
 const AUTHORITY_BLOCKS = ["history_summarizer", "compaction"] as const;
 
+function hasVariableReference(text: string): boolean {
+    return text.includes("{env:") || text.includes("{file:");
+}
+
 function literalChainModel(value: unknown): string | undefined {
     if (typeof value !== "string") return undefined;
     const model = value.trim();
-    if (model === "" || model.includes("{env:") || model.includes("{file:")) return undefined;
-    return model;
+    return model === "" || hasVariableReference(model) ? undefined : model;
 }
 
 export function normalizeSummarizerChain(block: unknown): string[] {
@@ -26,7 +29,7 @@ export function normalizeSummarizerChain(block: unknown): string[] {
     return [...new Set(chain)];
 }
 
-function screenUserTier(
+function screenWrittenUserTier(
     written: unknown,
     substituted: Record<string, unknown>,
 ): { rejections: string[]; warnings: string[] } {
@@ -34,6 +37,13 @@ function screenUserTier(
     const warnings: string[] = [];
     if (!isRecord(written)) {
         return { rejections: ["the user tier is not a JSON object"], warnings };
+    }
+    const blockKeys = AUTHORITY_BLOCKS.flatMap((block) => {
+        const value = written[block];
+        return isRecord(value) ? Object.keys(value) : [];
+    });
+    if ([...Object.keys(written), ...blockKeys].some(hasVariableReference)) {
+        rejections.push("a user-tier key holds a {env:} or {file:} reference");
     }
     for (const block of AUTHORITY_BLOCKS) {
         if (block in written && !isRecord(written[block])) {
@@ -89,7 +99,12 @@ function screenUserTier(
     return { rejections, warnings };
 }
 
-export function screenUserTierText(
+/**
+ * `rawText` is the user tier as written and `substituted` its parse after variable substitution.
+ * `screenUserTier` deletes every excluded chain value from `substituted` in place and returns a
+ * warning for each; any `rejections` make the tier's admission unresolved.
+ */
+export function screenUserTier(
     rawText: string,
     substituted: Record<string, unknown>,
 ): { rejections: string[]; warnings: string[] } {
@@ -102,5 +117,5 @@ export function screenUserTierText(
             warnings: [],
         };
     }
-    return screenUserTier(written, substituted);
+    return screenWrittenUserTier(written, substituted);
 }

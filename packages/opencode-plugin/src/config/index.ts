@@ -11,7 +11,7 @@ import { isRecord } from "../shared/record-type-guard";
 import { readRegularFileSync } from "../shared/regular-file";
 import { setWindowOverlayPath } from "../shared/window-geometry";
 import { eidnaraProjectConfigBasePath, eidnaraUserConfigBasePath } from "./config-paths";
-import { type ConfigAdmission, screenUserTierText } from "./fold-authority";
+import { type ConfigAdmission, screenUserTier } from "./fold-authority";
 import type { LoadOutcome } from "./load-outcome";
 import {
     constrainProjectThresholdOverrides,
@@ -100,7 +100,7 @@ function loadConfigFileDetailed(
         outcome,
         source,
         substitutionFailures: [],
-        authorityRejections: source === "user" ? [warning] : [],
+        authorityRejections: [warning],
     });
 
     let rawText: string;
@@ -132,9 +132,7 @@ function loadConfigFileDetailed(
         const config: Record<string, unknown> = parsed;
         const prefix = (warning: string) => `${configPath}: ${warning}`;
         const screen =
-            source === "user"
-                ? screenUserTierText(rawText, config)
-                : { rejections: [], warnings: [] };
+            source === "user" ? screenUserTier(rawText, config) : { rejections: [], warnings: [] };
         const substitutionWarnings = substituted.warnings.map(prefix);
         const substitutionFailures = substituted.failures.map((failure) => ({
             ...failure,
@@ -558,15 +556,15 @@ export function loadPluginConfigDetailed(directory: string): LoadResultDetailed 
         config,
         registrationPromptSurface: trustedBaseConfig.prompt_surface,
         loadOutcome: combinedOutcome({ sources, substitutionFailures, recoveredTopLevelKeys }),
-        admission: admissionOf(userLoaded),
+        admission: admissionOf(userLoaded, projectLoaded),
         sources,
         substitutionFailures,
         recoveredTopLevelKeys,
     };
 }
 
-function admissionOf(userLoaded: LoadedConfigFileDetailed | null): ConfigAdmission {
-    const rejections = userLoaded?.authorityRejections ?? [];
+function admissionOf(...loaded: (LoadedConfigFileDetailed | null)[]): ConfigAdmission {
+    const rejections = loaded.flatMap((file) => file?.authorityRejections ?? []);
     return rejections.length === 0
         ? { status: "admitted" }
         : { status: "unresolved", reason: rejections.join("; ") };

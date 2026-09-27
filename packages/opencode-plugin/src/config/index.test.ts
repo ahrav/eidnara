@@ -1081,7 +1081,8 @@ describe("fold-authority parity fixture", () => {
         let loaded: { config: unknown; admission: ConfigAdmission };
         try {
             loaded = load();
-        } catch {
+        } catch (error) {
+            expect(String(error)).toContain("Unknown Eidnara configuration key");
             return { chain: null, admission: "unresolved", folds: null };
         }
         if (loaded.admission.status === "unresolved") {
@@ -1108,6 +1109,27 @@ describe("fold-authority parity fixture", () => {
                 loadDetailedWithTierFiles(row.user_tier_files, row.project_tier_files, row.env),
             );
             expect({ name: row.name, ...actual }).toEqual({ name: row.name, ...expected(row) });
+        }
+    });
+
+    it("warns for every excluded chain value with its key", () => {
+        for (const [name, key] of [
+            ["a blank model", "history_summarizer.model"],
+            ["a whitespace model with a fallback", "history_summarizer.model"],
+            ["an env reference in model is excluded", "history_summarizer.model"],
+            ["a file reference in a fallback is excluded", "history_summarizer.fallback_models"],
+        ] as const) {
+            const row = fixture.rows.find((candidate) => candidate.name === name);
+            if (row === undefined) throw new Error(`fixture row ${name}`);
+            const { config } = loadDetailedWithTierFiles(
+                row.user_tier_files,
+                row.project_tier_files,
+                row.env,
+            );
+            expect([name, config.configWarnings?.some((w) => w.includes(key))]).toEqual([
+                name,
+                true,
+            ]);
         }
     });
 

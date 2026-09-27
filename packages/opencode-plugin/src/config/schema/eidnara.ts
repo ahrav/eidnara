@@ -131,6 +131,14 @@ export const HistorySummarizerConfigSchema = AgentOverrideConfigSchema.extend({
         .describe(
             "USER-LEVEL ONLY. Fallback models for module_model, used only when module_model is set.",
         ),
+    context_limit_tokens: z
+        .number()
+        .int()
+        .positive()
+        .optional()
+        .describe(
+            "USER-LEVEL ONLY. Context window, in tokens, the Eidnara daemon assumes for the history_summarizer model when sizing its chunks (default 128000).",
+        ),
     thinking_level: PiThinkingLevelSchema.describe(
         "Pi only: explicit thinking level passed as --thinking <level> to Pi history_summarizer subagent invocations. Required when using reasoning models (e.g. github-copilot/gpt-5.4) because Pi's default thinking-level resolution can pick a value the provider rejects. OpenCode users set variant instead. Valid: off | minimal | low | medium | high | xhigh | max",
     ),
