@@ -810,6 +810,11 @@ fn claims_attach_to_the_accepted_segment_their_cite_names() {
         ),
     );
     let validated = validate(&short, chunk);
+    // The dropped outside cite changes nothing else the chunk publishes.
+    let mut without = validated.clone();
+    without.claims_outcome = ClaimsOutcome::NotRequested;
+    without.history_segments[0].claims.clear();
+    assert_eq!(without, validate(&output(1, 1, &[]), chunk));
     assert_eq!(validated.history_segments.len(), 1);
     assert_eq!(
         validated.history_segments[0].claims,

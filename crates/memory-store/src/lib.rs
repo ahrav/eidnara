@@ -4689,11 +4689,15 @@ fn prepare_history_segment(
         created_at: history_segment.created_at,
         claims: Vec::new(),
     };
-    prepared.claims = prepare_claims(
-        write,
-        &history_segment.claims,
-        prepared.p1.as_deref().unwrap_or_default().trim(),
-    )?;
+    // A legacy row renders from flat content, where no anchor can splice, so it keeps no
+    // claims; the loaded set then holds claims only on its newest non-legacy suffix.
+    if history_segment.legacy != 1 {
+        prepared.claims = prepare_claims(
+            write,
+            &history_segment.claims,
+            prepared.p1.as_deref().unwrap_or_default().trim(),
+        )?;
+    }
     Ok(prepared)
 }
 
@@ -4701,7 +4705,7 @@ fn prepare_history_segment(
 /// JSON blob, redacting rather than rejecting so a claim never fails its
 /// segment's write; drops an anchor the redacted trimmed `p1` no longer
 /// contains, so a stored anchor always lies inside the stored `p1`; and drops
-/// a claim whose `key = value` pair the scanner flags.
+/// a claim whose key the scanner rewrites or whose `key = value` pair it flags.
 fn prepare_claims(
     write: &mut PreparedWrite,
     claims: &[Claim],
@@ -4716,6 +4720,11 @@ fn prepare_claims(
             .transpose()?
             .filter(|anchor| !anchor.is_empty() && p1.contains(anchor.as_str()));
         let key = write.content("claim_key", &claim.key)?;
+        // Liveness matches keys byte for byte, and two keys redacted to one placeholder would
+        // supersede each other, so a rewritten key drops its claim.
+        if key != claim.key {
+            continue;
+        }
         let value = write.content("claim_value", &claim.value)?;
         // A correction serves `key = value` together, and a key such as `api.key` makes that
         // pair read as a secret assignment even when neither half does alone. Such a claim is
@@ -26003,7 +26012,11 @@ mod tests {
     #[test]
     fn no_production_statement_updates_a_history_segment_row() {
         let source = include_str!("lib.rs");
-        let production = &source[..source.find("\n#[cfg(test)]\nmod tests {").unwrap()];
+        // Whitespace is collapsed so a statement split across lines still matches.
+        let production = source[..source.find("\n#[cfg(test)]\nmod tests {").unwrap()]
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
         assert!(!production.contains("UPDATE history_segments"));
         let inserts: Vec<&str> = production
             .match_indices("INTO history_segments")
@@ -26013,6 +26026,28 @@ mod tests {
         for insert in inserts {
             assert!(!insert.contains("DO UPDATE"), "{insert}");
         }
+    }
+
+    #[test]
+    fn a_legacy_row_stores_no_claims() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
+        store
+            .replace_history_segments(
+                "ses",
+                &[StoredHistorySegment {
+                    legacy: 1,
+                    p1: None,
+                    claims: vec![claim("k.v", "a", 1, None)],
+                    ..recut_comp(1, 1, 1, "a#0")
+                }],
+            )
+            .unwrap();
+        assert!(
+            store.load_history_segments("ses").unwrap()[0]
+                .claims
+                .is_empty()
+        );
     }
 
     #[test]
