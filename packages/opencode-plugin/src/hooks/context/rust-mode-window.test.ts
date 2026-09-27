@@ -428,6 +428,61 @@ describe("boundary discovery", () => {
         expect(bodies[0]?.boundary).toEqual({ mid: "m-3", sequence: 12 });
     });
 
+    // A host that orders anchors against their sequence breaks D16. Both discovery paths then
+    // declare the anchor latest in the host; the rendered boundary's mid sits before that
+    // window, so the daemon reverts through the declared row (window_coverage tests: "the
+    // rendered boundary's message is gone from the window"). Two anchors sharing a mid declare
+    // the newer sequence.
+    it("declares the anchor latest in the host on either path, the newer of two sharing a mid", async () => {
+        const firstPage = [
+            { mid: "m-1", sequence: 9 },
+            { mid: "m-3", sequence: 8 },
+        ];
+        for (const [name, pages] of [
+            ["first page", () => ({ anchors: firstPage })],
+            [
+                "filter",
+                (before: number | undefined) =>
+                    before === undefined
+                        ? { anchors: [{ mid: "reverted", sequence: 90 }] }
+                        : { anchors: firstPage },
+            ],
+        ] as const) {
+            const sessionId = `discovery-order-${name}-${Date.now()}`;
+            const host = hostArray(sessionId, 6);
+            const { bodies } = await scannedItems(sessionId, [...host], pages);
+            expect(bodies[0]?.boundary, name).toEqual({ mid: "m-3", sequence: 8 });
+            expect(bodies[0]?.native_messages, name).toEqual(host.slice(3));
+        }
+        for (const [name, pages] of [
+            [
+                "first page",
+                () => ({
+                    anchors: [
+                        { mid: "m-3", sequence: 9 },
+                        { mid: "m-3", sequence: 8 },
+                    ],
+                }),
+            ],
+            [
+                "filter",
+                (before: number | undefined) =>
+                    before === undefined
+                        ? { anchors: [{ mid: "reverted", sequence: 90 }] }
+                        : {
+                              anchors: [
+                                  { mid: "m-3", sequence: 9 },
+                                  { mid: "m-3", sequence: 8 },
+                              ],
+                          },
+            ],
+        ] as const) {
+            const sessionId = `discovery-duplicate-${name}-${Date.now()}`;
+            const { bodies } = await scannedItems(sessionId, hostArray(sessionId, 6), pages);
+            expect(bodies[0]?.boundary, name).toEqual({ mid: "m-3", sequence: 9 });
+        }
+    });
+
     it("sends null with the whole array only after an empty page", async () => {
         const sessionId = `discovery-exhausted-${Date.now()}`;
         const host = hostArray(sessionId, 4);

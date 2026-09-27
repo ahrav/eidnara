@@ -1215,15 +1215,22 @@ export function createRustModeTransform(
                     throw new PassDeclined(sessionId, "discovery_declined", "malformed page");
                 const last = page.at(-1);
                 if (!last) return { boundary: null, index: 0 };
+                // Both paths declare the held anchor latest in the host, the newest by sequence
+                // when two share a mid. Host order follows segment sequence (D16: writers append
+                // or truncate a suffix), so that is the newest held anchor; if a host breaks the
+                // order, the daemon re-validates the declared anchor (D10) and reverts to it.
                 if (!filter) {
-                    // D17: one backward id scan against the first page stops at the newest held anchor.
-                    const anchors = new Map(page.map((anchor) => [anchor.mid, anchor]));
+                    // D17: one backward id scan against the first page stops at the first hit.
+                    const anchors = new Map<string, TransformBoundary>();
+                    for (const anchor of page)
+                        if (!anchors.has(anchor.mid)) anchors.set(anchor.mid, anchor);
                     let hit: TransformBoundary | undefined;
                     const index = scan((id) => {
                         hit = anchors.get(id);
                         return hit !== undefined;
                     });
-                    if (hit && index >= 0) return { boundary: hit, index };
+                    // `hit` is set by the last callback, so it is defined only when the scan stopped on one.
+                    if (hit) return { boundary: hit, index };
                     // The whole host holds none of this page; later pages probe the filter.
                     timings.scannedItems += target.length;
                     filter = messageIdFilter(target, (bytes) => lease.reserve(bytes));
@@ -1240,10 +1247,13 @@ export function createRustModeTransform(
                         if (wanted.has(id) && !found.has(id)) found.set(id, index);
                         return found.size === wanted.size;
                     });
+                let held: { boundary: TransformBoundary; index: number } | undefined;
                 for (const anchor of page) {
                     const index = found.get(anchor.mid);
-                    if (index !== undefined) return { boundary: anchor, index };
+                    if (index !== undefined && index > (held?.index ?? -1))
+                        held = { boundary: anchor, index };
                 }
+                if (held) return held;
                 before = last.sequence;
             }
         };
