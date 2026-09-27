@@ -108,3 +108,17 @@ bytes but whose unescaped form does not.
 - Missing evidence: none.
 - Conclusion: resolved with answer: the tests pass, and the proptest fails
   against a whole-message containment check.
+
+### Q: Is the store's rewritten-key guard load-bearing?
+
+- Sources examined: `crates/memory-store/src/lib.rs::prepare_claims` at
+  `a75ff925`; a mutation run that removed the `key != claim.key` guard.
+- Findings: with the guard removed,
+  `history_segment_content_redacts_and_new_message_identities_reject` failed
+  because it stored 5 claims where it expects 4. The later pair check does not
+  drop a claim whose key the scanner rewrote, so the guard is what drops it.
+  The file was restored, and the test passes at `a75ff925`.
+- Missing evidence: the test key does not match the key grammar, so whether a
+  grammar-valid key can be rewritten stays open; the property is queued in
+  `fault-map.md`.
+- Conclusion: resolved with answer: the guard is load-bearing.

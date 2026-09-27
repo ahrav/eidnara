@@ -112,3 +112,14 @@ argmax over the whole store for every loaded claim.
 - Findings: 28 passed, including this test in 1.395 s.
 - Missing evidence: none.
 - Conclusion: resolved with answer.
+
+### Q: Do the premise and the negative control pass at the final commit?
+
+- Sources examined: `cargo +1.98 nextest run -p memory-store -p daemon --all-features --locked`
+  at `a75ff925`, which runs
+  `crates/memory-store/src/lib.rs::tests::a_legacy_row_stores_no_claims` and
+  `crates/daemon/src/m0_compose.rs::bounded_read_tests::every_loaded_claim_has_its_store_wide_live_claim_in_the_loaded_set`.
+- Findings: both pass; the only failures in that run are four timing tests
+  unrelated to claims that also fail on the base under host load.
+- Missing evidence: none.
+- Conclusion: resolved with answer.

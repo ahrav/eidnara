@@ -833,7 +833,7 @@ mod bounded_read_tests {
     /// non-legacy rows plus every legacy row, and legacy rows hold no claims, so any claimed
     /// row newer than a loaded one is loaded: a stale claim never renders as live because its
     /// corrector fell outside the read. Holds for the m0 fold at every budget and for m1's
-    /// rows above the folded sequence; a set with one claimed row removed from its middle
+    /// rows above the folded sequence; the fold set with its newest claimed row removed
     /// fails it.
     #[test]
     fn every_loaded_claim_has_its_store_wide_live_claim_in_the_loaded_set() {
