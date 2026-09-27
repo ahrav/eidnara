@@ -3240,9 +3240,7 @@ fn opaque_id() -> rusqlite::Result<String> {
 
 fn opaque_id_time_prefix() -> [u8; 6] {
     let millis = u64::try_from(current_time_ms()).unwrap_or(0).to_be_bytes();
-    [
-        millis[2], millis[3], millis[4], millis[5], millis[6], millis[7],
-    ]
+    millis[2..].try_into().expect("six low bytes")
 }
 
 /// Deletes the audit rows that lost their last owner, restricted to `scan_ids`.
