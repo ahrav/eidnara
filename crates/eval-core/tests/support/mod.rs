@@ -25,12 +25,14 @@ pub fn world_config() -> WorldConfig {
                 tool_span_every: 2,
                 correction_every: 3,
                 invalidation_every: 5,
+                restatement_every: 0,
             },
             SessionSpec {
                 messages: 5,
                 tool_span_every: 3,
                 correction_every: 2,
                 invalidation_every: 2,
+                restatement_every: 0,
             },
         ],
         repositories: vec![RepositorySpec {
@@ -220,6 +222,7 @@ pub mod shrink {
                 tool_span_every: 2,
                 correction_every: 0,
                 invalidation_every: 0,
+                restatement_every: 0,
             }],
             repositories: vec![RepositorySpec {
                 commits: 2,

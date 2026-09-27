@@ -125,7 +125,7 @@ impl Ratio {
         Self::try_new(numerator, denominator).ok()
     }
 
-    fn parts(self) -> (i128, i128) {
+    pub(crate) fn parts(self) -> (i128, i128) {
         (i128::from(self.numerator), i128::from(self.denominator))
     }
 

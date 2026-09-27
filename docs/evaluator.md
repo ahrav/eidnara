@@ -181,14 +181,14 @@ different block is refused.
 
 `generate_all(root_seed, &config, mode)` builds a `World { log, tape }` from a
 `WorldConfig` and nothing else. The config lists each session (message count
-and how often a tool span, correction, or invalidation fires) and each
+and how often a tool span, correction, invalidation, or restatement fires) and each
 repository (commit count and how often a rename fires), the valid-time epoch
 and tick, and `max_events_per_log`. Counts are exact, so
 `WorldConfig::declared_events` is the number of events generation emits, and
 `validate` refuses a config whose declared count exceeds the bound before any
 event exists (`WorldError::EventBound { events, max }`). The count is
 arithmetic, so a config declaring billions of messages is refused in time
-proportional to the entity count. Corrections and invalidations skip slot `0`,
+proportional to the entity count. Corrections, invalidations, and restatements skip slot `0`,
 which has no earlier message to target, so `*_every = 1` fires on every slot
 for tool spans and renames but on every slot after the first for revisions.
 There is no default for the bound: a missing field fails to parse, and a zero
@@ -206,7 +206,16 @@ correction always advances its target's revision; `eval-generator/v3` writes
 each text as its drawn word, a word only that slot has, and the world's own
 word (`cursor for slot47 in world5eedb00000000002`), so a surface that
 matches on words can find one message by its own text and a message carried
-into another world does not read as one of that world's. `WorldConfig::planted`
+into another world does not read as one of that world's; `eval-generator/v4` adds the restatement to the schedule
+(`SessionSpec::restatement_every`, absent and unwritten when `0`, so a config
+without restatements keeps its bytes and its world). A restatement is a
+correction delivered as a message of its own: on its slot it draws one
+earlier message no restatement has targeted yet (`RestatementTarget`; slot
+`k` has `k` earlier messages and at most `k - 1` earlier restatements, so one
+is always left), then a drawn word other than that message's, and says it for
+the target's slot (`digest for slot3 in world…` restating `cursor for slot3 in
+world…`), so the stale decision and the live one differ in a whole word, both
+name the target's slot, and neither carries the other. `WorldConfig::planted`
 lists injection canaries appended to the text a carrier already emits (a
 message for `summary`, a tool span's output for `tool_output`, a commit's
 message for `commit_message`); planting adds no event, changes no other
@@ -267,7 +276,11 @@ An `Event` carries `id`, `stream` (`repository` or `session`), `entity_id`,
 `local_seq`, `valid_time_ms`, `observation_time_ms`, `causal_depth`, and a
 `Payload`: `message` (with an optional `cites` link to a commit), `tool_span`,
 `commit`, `rename` (with an optional `previous` rename on the same path),
-`correction { target }`, or `invalidation { target }`. Links name other events
+`correction { target }`, `restatement { target, message_id }` (a user
+message with a `message_id` of its own, `<actor>-m<k>-restatement`), or
+`invalidation { target }`. A restatement supersedes its target exactly as a
+correction does (`Payload::supersedes`), so the reducer's truth is the same;
+the difference is the rendering. Links name other events
 by `EventId`, never by position; `EventId::derive(stream, entity_id,
 local_seq)` forms the id and the validator refuses any other. Times are
 canonical decimal strings on the wire, and only `i64::to_string` forms are
@@ -494,6 +507,14 @@ times:
   target and leaves both corrections required. No Phase 1 scenario compares
   `Truth` with store verdicts, so nothing observes that difference yet;
   closing it is a reducer version change, not a rendering rule.
+  Every restatement becomes a user message JSON of its own `message_id` at
+  its valid time: a new lineage beside its target, so the superseded text and
+  the restating one are two served messages. It is refused as a correction is
+  (`CorrectionTargetMissing`, `CorrectionTargetIsNotAMessage`,
+  `CorrectionTargetInOtherSession`, `CorrectionDoesNotAdvance`), and its
+  `message_id` counts toward `MessageIdReused`. A correction renders the bytes
+  it rendered before restatements existed; a test pins the rendering of the
+  fixture world with corrections by digest.
   The generator's time gaps are strictly positive (since `eval-generator/v2`), each
   slot emits at most one correction and one tool span, and its correction
   targets stay in the correcting entity, so generated worlds never meet these
@@ -1195,7 +1216,8 @@ its bitemporal `Query`, its AND-support `evidence` set of event IDs, and a
 `TaskRole`: `falsification` (truth established before the aged history's
 upper-median valid time and never corrected or retracted, so a retriever that
 prefers recent units cannot pass by accident), `positive_control` (truth the
-baseline is expected to deliver), or `plain`. Every task in a set shares one
+baseline is expected to deliver), `stale_preference` (see "Stale
+preference"), or `plain`. Every task in a set shares one
 `Query` (`MixedQueries` otherwise): the cut, the scope, the serving class, the
 destination, and the registry sensitivity each decide which units are
 eligible, so a task with a query of its own could make its evidence eligible,
@@ -1304,6 +1326,107 @@ must equal the set's (`PairSetMismatch {field}`), every policy must have an arm
 (`MissingArm`), the raw arm must claim no loss (`RawArmLostEvidence`), every
 version must be non-blank, and every loss must be evidence the set has
 (`AbsentEvidenceUnknown`).
+
+## Stale preference
+
+`stale.rs` measures what a surface hands the model when a correction coexists
+with the statement it supersedes. Nothing in it calls a model.
+
+**Role.** A `stale_preference` task's evidence is a restatement and its
+falsifier is the restatement's target, the superseded predecessor. The
+compiler runs the inverse of the falsification check: every evidence unit
+must be a `restatement` whose target the aged history holds and the reducer
+judges superseded, and the evidence must be required (the aged arm's usual
+check). Anything else is `NoCoexistingRestatement {task, id}`. Today's
+same-`message_id` correction fails it: the correction replaces its target
+inside one lineage, so nothing stale coexists with it. `SupersededFalsifier`
+and `TruthNotEarly` still refuse falsification tasks, and `PairSet::validate`
+reruns the check.
+
+**Delivery and grade.** `carries(text, phrase)` is the whole-word match the
+campaign grades delivery by (`slot4` is not carried by `slot47`; an empty
+phrase is never carried), and `locate` returns the first such occurrence. A
+pair's stale value is its predecessor's decision (`text_decision`) and its
+live value the restatement's. `StaleDelivery::of(served, stale, live)` says
+which the served text carries: `live`, `stale`, `both`, or `neither`; a pair
+counts toward the stale-delivered count when it is `stale` or `both`.
+`grade(answer, stale, live)` grades a live answer by the LongMemEval
+knowledge-update rule: `current` when the answer carries the live value
+(naming the old value as history beside the new one as current is
+`current`), `stale` when it carries the stale value and not the live one, and
+`miss` otherwise. The generator's decisions differ in a whole word, so the
+grade needs no judge.
+
+**Arms.** `arms(served, stale_span, key, live, live_ordinal)` builds the five
+M0 renderings from one served context, each differing from arm (a) only at
+the stale statement's span: `today` (a) is the served text unchanged;
+`precedence_line` (b) appends a newline and `PRECEDENCE_SENTENCE` after the
+stale statement; `footer` (c) appends a newline and one D-7 footer line,
+`[corrections: <key> = <live> @<N>]`, keeping the stale prose;
+`anchored_replacement` (d) replaces the stale statement with
+`[corrected @<N>: <key> = <live>]`; `omission_oracle` (e) removes it. `N` is the
+restating message's ordinal. The override sentence is:
+
+```text
+Later statements supersede earlier ones: where two statements in this history disagree, the later one is current.
+```
+
+`key` must satisfy the D-7 claim-key grammar `[a-z0-9_-]+(\.[a-z0-9_-]+)+`
+within 64 bytes; the campaign derives it from the slot (`session-0.slot3`).
+
+**McNemar.** `mcnemar(first, second, alpha)` takes one event per pair on two
+arms (for example "answered stale"), keyed by pair id, and returns the pair
+count, the discordant counts `first_only` (`b`) and `second_only` (`c`), and
+`reject`: whether the exact two-sided binomial p-value `min(1, 2 P(X <=
+min(b, c)))`, `X ~ Bin(b + c, 1/2)`, is at most the pre-registered `alpha`.
+The comparison is exact: the tail and `2^(b + c)` are summed from one row of
+Pascal's triangle in arbitrary-precision integers and compared against
+`alpha`'s numerator and denominator, so no float and no 128-bit ceiling
+enters. Arms naming different pairs are `UnpairedArms`, and an alpha outside
+`(0, 1)` is `AlphaOutOfRange`. A failed or censored live call belongs in
+neither map: it is indeterminate, never scored. The statistic sits outside
+the quantities `gen/gen-statistics-golden.ts` pins.
+
+**Export.** The `eval_runner` example's `stale-preference` subcommand takes
+the campaign's flags and `--pairs <n>`, and `campaign::stale_preference` does
+the work: it generates one session of `--aged-messages` messages with a
+restatement on every third slot (the evaluator's correction regime; no tool
+spans, no commits), compiles a falsifier (the first message nothing
+restates), a positive control (the last message), and one stale-preference
+task per restatement for the first `n` restatements, records the world once
+under the daemon's summarizer as the structured arm does, and replays that
+cassette once per pair. Each pair's task turn asks for the pair's subject:
+the slot word and the world's word (`slot3 in world…`), the two tokens the
+stale and the live statement share, since any other word of a question is in
+no segment and would weigh the host's lexical score under its threshold. The
+host's hint text on that turn is arm (a). It writes
+`stale-preference-export.json` (`eval-stale-preference-export/v1`) into the
+publish directory, write-then-rename, refusing a directory that already holds
+one:
+
+| Field | Meaning |
+| --- | --- |
+| `schema`, `generator_version` | `eval-stale-preference-export/v1` and the generator the world came from. |
+| `pairs[].task` | The task id (`stale-<i>`). |
+| `pairs[].question` | The question for the served model: `What is the current decision for <slot>? Answer with the decision as the history states it.` |
+| `pairs[].key` | The claim key the arms name. |
+| `pairs[].stale_value`, `pairs[].stale_span` | The predecessor's decision and its first whole-word byte span in arm (a). |
+| `pairs[].live_value`, `pairs[].live_span` | The restatement's decision and its span, `null` when arm (a) does not carry it. |
+| `pairs[].restating_ordinal` | The restatement's 1-based ordinal in the rendered session, the `N` of every marker. |
+| `pairs[].stale_tier` | The tier (`1..=5`, `5` archived) the stale statement's segment renders at in m0 under the daemon's default history budget, `context_core::decay::rendered_tier` over the stored segments. |
+| `pairs[].delivery` | `StaleDelivery` of arm (a). |
+| `pairs[].arms` | The five arms. |
+| `unlocatable` | Task id to delivery for every pair whose arm (a) does not carry the stale value; such a pair has no arms and is never dropped. |
+| `stale_delivered` | Pairs, located or not, whose arm (a) carries the stale value. |
+
+The subcommand answers with one JSON line naming the file, its digest, and
+the three counts. The export lifts the Suite B envelope's cassette bound to
+64 MiB and pins nothing else of Suite B; its lives are charged to the same
+envelope. `an_s0_stale_preference_export_carries_every_pair_and_its_five_arms`
+runs four pairs at S0 under `EIDNARA_EVAL_S0_BUDGET_MS`. At S0 the fixture's
+summarizer folds a restatement and the message it follows into one presented
+line when both are user turns, so a segment can span six messages; the Suite
+B aged world alternates roles and keeps its five-message segments.
 
 ## Injection cases
 
@@ -1883,6 +2006,9 @@ window counts messages, but surface 1's unit is the segment, so at S0 the
 twenty-two segments all sit inside a window of 100 and no truth is lost to
 recency there; a recency loss on surface 1 needs more than 500 messages.
 The falsification pair's structural verdict is still the compiler's.
+
+The same shell also exports stale-preference pairs over a coexistence world;
+see "Stale preference".
 
 Not composed yet: the write-then-rename publisher is test support
 (`crates/daemon/tests/support/publish.rs`, included by path from the campaign

@@ -4,7 +4,9 @@
 //! allowlist and the secret scanner, and writes the cassette; TypeScript only
 //! forwards requests and compares the digest strings it gets back.
 //! `campaign` runs one Suite B campaign through the direct-host fixture under
-//! an approved profile and publishes its report and manifest. `aging` runs
+//! an approved profile and publishes its report and manifest.
+//! `stale-preference` compiles stale-preference pairs over a coexistence
+//! world and publishes their served text and M0 arms. `aging` runs
 //! one Suite C aging campaign in-process and publishes its report and
 //! manifest.
 
@@ -408,6 +410,25 @@ fn run_campaign(args: impl Iterator<Item = String>) -> io::Result<()> {
     Ok(())
 }
 
+/// Runs the stale-preference export and prints one JSON line naming it.
+#[cfg(unix)]
+fn run_stale_preference(args: impl Iterator<Item = String>) -> io::Result<()> {
+    let (config, pairs) = campaign::stale_config_from_args(args).map_err(io::Error::other)?;
+    let export = campaign::stale_preference(&config, pairs)
+        .map_err(|error| io::Error::other(error.to_string()))?;
+    let path = config.publish.join(campaign::STALE_EXPORT_FILE);
+    let bytes = fs::read(&path)?;
+    let summary = json!({
+        "export": path,
+        "export_digest": format!("{:x}", sha2::Sha256::digest(&bytes)),
+        "pairs": export.pairs.len(),
+        "unlocatable": export.unlocatable.len(),
+        "stale_delivered": export.stale_delivered,
+    });
+    println!("{summary}");
+    Ok(())
+}
+
 /// Runs the aging campaign and prints one JSON line naming what was published.
 #[cfg(unix)]
 fn run_aging(args: impl Iterator<Item = String>) -> io::Result<()> {
@@ -577,6 +598,8 @@ fn main() {
         #[cfg(unix)]
         Some("campaign") => run_campaign(args),
         #[cfg(unix)]
+        Some("stale-preference") => run_stale_preference(args),
+        #[cfg(unix)]
         Some("aging") => run_aging(args),
         #[cfg(unix)]
         Some("fault") => run_fault(args),
@@ -611,8 +634,9 @@ fn main() {
 #[cfg(unix)]
 fn campaign_usage() -> String {
     format!(
-        "{} | eval_runner {} | eval_runner {} | eval_runner {} | eval_runner {} | eval_runner {}",
+        "{} | eval_runner {} | eval_runner {} | eval_runner {} | eval_runner {} | eval_runner {} | eval_runner {}",
         campaign::USAGE,
+        campaign::STALE_USAGE,
         aging::USAGE,
         fault::USAGE,
         growth::USAGE,
@@ -623,7 +647,8 @@ fn campaign_usage() -> String {
 
 #[cfg(not(unix))]
 fn campaign_usage() -> String {
-    "campaign | aging | fault | growth | shrink | suite-d (unix only)".to_string()
+    "campaign | stale-preference | aging | fault | growth | shrink | suite-d (unix only)"
+        .to_string()
 }
 
 #[cfg(test)]

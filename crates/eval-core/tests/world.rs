@@ -30,7 +30,9 @@ fn max() -> usize {
 fn semantic_digest(event: &Event) -> String {
     let value = match &event.payload {
         Payload::Message { text, .. } => json!({"text": text}),
-        Payload::Correction { text, target } => json!({"text": text, "target": target}),
+        Payload::Correction { text, target } | Payload::Restatement { text, target, .. } => {
+            json!({"text": text, "target": target})
+        }
         Payload::Invalidation { target } => json!({"target": target}),
         Payload::ToolSpan { output, .. } => json!({"output": output}),
         Payload::Commit { message, .. } => json!({"message": message}),
@@ -90,7 +92,7 @@ fn generation_is_a_pure_function_of_seed_and_config() {
     );
     assert_eq!(base.tape.identity, tape_identity(SEED, &config()));
     assert_eq!(
-        GENERATOR_VERSION, "eval-generator/v3",
+        GENERATOR_VERSION, "eval-generator/v4",
         "a change to a draw domain, the schedule, or the text is a new generator"
     );
 
@@ -531,6 +533,7 @@ fn payload_kind(event: &Event) -> &'static str {
         Payload::Commit { .. } => "commit",
         Payload::Rename { .. } => "rename",
         Payload::Correction { .. } => "correction",
+        Payload::Restatement { .. } => "restatement",
         Payload::Invalidation { .. } => "invalidation",
     }
 }
@@ -984,6 +987,7 @@ fn declared_events_equals_the_emitted_count_across_spec_shapes() {
                                 tool_span_every: tool,
                                 correction_every: correction,
                                 invalidation_every: invalidation,
+                                restatement_every: 0,
                             }],
                             repositories: vec![RepositorySpec {
                                 commits,

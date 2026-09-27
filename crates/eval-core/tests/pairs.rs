@@ -45,6 +45,7 @@ fn natural_fresh() -> EventLog {
             tool_span_every: 2,
             correction_every: 0,
             invalidation_every: 0,
+            restatement_every: 0,
         }],
         repositories: vec![RepositorySpec {
             commits: 2,
@@ -431,12 +432,14 @@ fn a_long_aged_history_pushes_the_falsifier_out_of_the_surface_1_window() {
                 tool_span_every: 3,
                 correction_every: 7,
                 invalidation_every: 11,
+                restatement_every: 0,
             },
             SessionSpec {
                 messages: 40,
                 tool_span_every: 4,
                 correction_every: 9,
                 invalidation_every: 0,
+                restatement_every: 0,
             },
         ],
         repositories: vec![RepositorySpec {

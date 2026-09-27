@@ -33,6 +33,9 @@ use eval_core::{
     eval_run_id, generate_all, pair_table_digest, plan_injection_cases, render, score_injection,
     serialize_spec, text_decision,
 };
+use eval_core::{
+    STALE_EXPORT_SCHEMA, StaleDelivery, StaleExport, StalePair, arms, carries, locate,
+};
 use memory_store::{MemoryStore, StoredHistorySegment};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -116,6 +119,9 @@ pub enum RunError {
         fired: u32,
         backend_calls: u32,
     },
+    /// The stale-preference world's recording left no cassette to replay:
+    /// the cassette refused a frame or the host refused a turn.
+    NoRecording,
 }
 
 impl std::fmt::Display for RunError {
@@ -241,6 +247,7 @@ fn one_session(
             tool_span_every,
             correction_every: 0,
             invalidation_every: 0,
+            restatement_every: 0,
         }],
         repositories: (commits > 0)
             .then_some(RepositorySpec {
@@ -487,18 +494,6 @@ fn world(log: &EventLog) -> World {
         session: SESSION.to_string(),
         messages,
     }
-}
-
-/// Whether `served` carries `phrase` as whole words: `slot4` is not served by
-/// a fragment saying `slot47`.
-fn carries(served: &str, phrase: &str) -> bool {
-    assert!(!phrase.is_empty(), "a truth has words");
-    let in_word = |c: char| c.is_ascii_alphanumeric() || c == '_';
-    served.match_indices(phrase).any(|(at, _)| {
-        let before = served[..at].chars().next_back();
-        let after = served[at + phrase.len()..].chars().next();
-        !before.is_some_and(in_word) && !after.is_some_and(in_word)
-    })
 }
 
 /// Messages per summarizer segment: the fixture's scripted summarizer folds
@@ -918,27 +913,6 @@ fn record(
             turn_refused: None,
         });
     }
-    // The fixture folds `CHUNK` presented lines into one segment, so every
-    // segment but the newest spans exactly that many messages, from the first
-    // message on, and no segment reaches the last message: the daemon
-    // protects a tail.
-    for (index, segment) in lived.segments.iter().enumerate() {
-        let span = segment.end_message - segment.start_message + 1;
-        let last = index + 1 == lived.segments.len();
-        assert!(
-            span == CHUNK as i64 || (last && span < CHUNK as i64),
-            "{segment:?}"
-        );
-        assert_eq!(
-            segment.start_message,
-            index as i64 * CHUNK as i64 + 1,
-            "{segment:?}"
-        );
-        assert!(
-            segment.end_message < world.messages.len() as i64,
-            "{segment:?}"
-        );
-    }
     let cassette: Value = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
     let frames = cassette["cases"].as_array().unwrap().len();
     assert_eq!(
@@ -961,6 +935,31 @@ fn record(
         refusals: 0,
         turn_refused: None,
     })
+}
+
+/// The fixture folds `CHUNK` presented lines into one segment, and the
+/// daemon presents each message of a world whose roles alternate as a line
+/// of its own, so every segment but the newest spans exactly that many
+/// messages, from the first message on, and no segment reaches the last
+/// message: the daemon protects a tail.
+fn assert_chunked(segments: &[StoredHistorySegment], world: &World) {
+    for (index, segment) in segments.iter().enumerate() {
+        let span = segment.end_message - segment.start_message + 1;
+        let last = index + 1 == segments.len();
+        assert!(
+            span == CHUNK as i64 || (last && span < CHUNK as i64),
+            "{segment:?}"
+        );
+        assert_eq!(
+            segment.start_message,
+            index as i64 * CHUNK as i64 + 1,
+            "{segment:?}"
+        );
+        assert!(
+            segment.end_message < world.messages.len() as i64,
+            "{segment:?}"
+        );
+    }
 }
 
 /// The task asks in the message's own words.
@@ -1515,6 +1514,7 @@ pub fn run(config: &Config) -> Result<Run, RunError> {
     assert_eq!(aged_world.messages.len(), aged_messages as usize);
     let cassettes = charges.occupy()?;
     let aged_recording = record("aged", &aged_world, cassettes.path(), &mut charges)?;
+    assert_chunked(&aged_recording.segments, &aged_world);
     assert!(
         aged_recording.firings > 0 || aged_recording.turn_refused.is_some(),
         "the aged history reaches the pressure the summarizer fires at"
@@ -1876,6 +1876,260 @@ pub fn run(config: &Config) -> Result<Run, RunError> {
 }
 
 /// The report's file name under the publish directory.
+/// The stale-preference export's file name under the publish directory.
+pub const STALE_EXPORT_FILE: &str = "stale-preference-export.json";
+/// One restatement every third message: the evaluator's correction regime.
+const RESTATEMENT_EVERY: u32 = 3;
+
+/// The slot word a decision names: `slot3` in `cursor for slot3`.
+fn slot_of(decision: &str) -> &str {
+    decision
+        .rsplit(' ')
+        .next()
+        .expect("a decision names its slot")
+}
+
+/// The question a stale-preference pair asks the served model.
+fn question(stale: &str) -> String {
+    format!(
+        "What is the current decision for {}? Answer with the decision as the history states it.",
+        slot_of(stale)
+    )
+}
+
+/// The task turn's prompt: the subject the question names, as the slot word
+/// and the world's word, the two tokens the stale and the live statement
+/// share. Every other word of the question is in no segment and would weigh
+/// the host's lexical score below its threshold, so the hint would serve
+/// nothing.
+fn subject(stale: &str, world_word: &str) -> String {
+    format!("{} in {world_word}", slot_of(stale))
+}
+
+/// The tier the segment at `index` of `segments` (chronological) renders at
+/// in m0 under the default history budget, `1..=5` with `5` archived.
+fn rendered_tier(segments: &[StoredHistorySegment], index: usize) -> u8 {
+    use context_core::decay::{Tier, compute_budget_pressure, rendered_tier};
+    let tiered: Vec<&StoredHistorySegment> = segments
+        .iter()
+        .filter(|segment| segment.legacy != 1)
+        .collect();
+    let importances: Vec<i32> = tiered
+        .iter()
+        .rev()
+        .map(|segment| segment.importance.clamp(1, 100))
+        .collect();
+    let pressure = compute_budget_pressure(
+        &importances,
+        f64::from(daemon::decay_render::DEFAULT_HISTORY_BUDGET_TOKENS),
+    );
+    let newest_first = tiered
+        .iter()
+        .rev()
+        .position(|segment| segment.sequence == segments[index].sequence)
+        .expect("a tiered segment");
+    match rendered_tier(
+        newest_first as u32 + 1,
+        segments[index].importance,
+        pressure,
+        0.0,
+    ) {
+        Tier::P1 => 1,
+        Tier::P2 => 2,
+        Tier::P3 => 3,
+        Tier::P4 => 4,
+        Tier::P5 => 5,
+    }
+}
+
+/// Compiles stale-preference pairs over a coexistence world (one session of
+/// `aged_messages` messages with a restatement every third) and exports, per
+/// pair, the served text surface 1 hands the model on a structured aged arm,
+/// the stale and live statements, the restating ordinal, the stale segment's
+/// rendered tier, and the five M0 arms. The world is recorded once under the
+/// daemon's summarizer; each of the first `pairs` restatements then replays
+/// that cassette with its question as the task turn. A pair whose stale
+/// statement the served text does not carry is exported as unlocatable.
+pub fn stale_preference(config: &Config, pairs: usize) -> Result<StaleExport, RunError> {
+    let (aged_messages, publish) = (config.aged_messages, &config.publish);
+    let max_events_per_log = aged_messages
+        .max(64)
+        .checked_mul(2)
+        .ok_or(RunError::AgedHistoryTooLong { aged_messages })?;
+    let mut profile = profile(
+        config.scale,
+        max_events_per_log,
+        config.elapsed_bound_ms,
+        config.approval.clone(),
+    );
+    profile.approved()?;
+    // One recording and a replay per pair: the cassette is the envelope's
+    // largest reading, and this export pins no Suite B bound.
+    profile.envelope.cassette_bytes = 64 << 20;
+    prepare_publish(publish, &[STALE_EXPORT_FILE]).map_err(publish_refused)?;
+    fixture_binary();
+    let mut charges = Charges::new(profile.envelope.clone());
+    let mut world_config = one_session(aged_messages, 0, 0, max_events_per_log, Vec::new());
+    world_config.sessions[0].restatement_every = RESTATEMENT_EVERY;
+    let aged = generate_all(SEED, &world_config, Mode::Generate)
+        .unwrap()
+        .log;
+    let natural_fresh = generate_all(
+        SEED ^ 0x77,
+        &one_session(FRESH_MESSAGES, 0, 0, max_events_per_log, Vec::new()),
+        Mode::Generate,
+    )
+    .unwrap()
+    .log;
+    let superseded: BTreeSet<&EventId> = aged
+        .events
+        .iter()
+        .filter_map(|event| event.payload.supersedes().map(|(_, target)| target))
+        .collect();
+    let messages: Vec<&EventId> = aged
+        .events
+        .iter()
+        .filter(|event| matches!(event.payload, eval_core::Payload::Message { .. }))
+        .map(|event| &event.id)
+        .collect();
+    let task = |name: String, role, id: &EventId| Task {
+        id: name,
+        role,
+        query: query(max_events_per_log),
+        evidence: BTreeSet::from([id.clone()]),
+    };
+    let early = messages
+        .iter()
+        .find(|id| !superseded.contains(*id))
+        .expect("a message nothing restates");
+    let mut tasks = vec![
+        task("early-message".to_string(), TaskRole::Falsification, early),
+        task(
+            "last-message".to_string(),
+            TaskRole::PositiveControl,
+            messages[messages.len() - 1],
+        ),
+    ];
+    let restatements = aged
+        .events
+        .iter()
+        .filter(|event| matches!(event.payload, eval_core::Payload::Restatement { .. }));
+    for (index, event) in restatements.take(pairs).enumerate() {
+        tasks.push(task(
+            format!("stale-{index}"),
+            TaskRole::StalePreference,
+            &event.id,
+        ));
+    }
+    let set = compile_pair_set(PairSetInput {
+        surface: EvaluatedSurface::Surface1,
+        declared_bound: None,
+        aged: &aged,
+        natural_fresh: &natural_fresh,
+        fixture: &serialize_spec(),
+        tasks: &tasks,
+    })
+    .unwrap();
+    let aged_world = world(&set.aged);
+    let cassettes = charges.occupy()?;
+    let recording = record("stale", &aged_world, cassettes.path(), &mut charges)?;
+    charges.observe(Resource::CassetteBytes, recording.cassette_bytes)?;
+    let replay = recording.replay.ok_or(RunError::NoRecording)?;
+    let rendered = |id: &EventId| {
+        let ordinal = aged_world
+            .messages
+            .iter()
+            .position(|message| message.event_id == *id)
+            .expect("a rendered message");
+        (ordinal + 1, &aged_world.messages[ordinal])
+    };
+    let mut export = StaleExport {
+        schema: STALE_EXPORT_SCHEMA.to_string(),
+        generator_version: GENERATOR_VERSION.to_string(),
+        pairs: Vec::new(),
+        unlocatable: BTreeMap::new(),
+        stale_delivered: 0,
+    };
+    for pair in set
+        .pairs
+        .iter()
+        .filter(|pair| pair.task.role == TaskRole::StalePreference)
+    {
+        let restatement = pair.task.evidence.iter().next().unwrap();
+        let Some(eval_core::Payload::Restatement { target, .. }) = set
+            .aged
+            .events
+            .iter()
+            .find(|event| event.id == *restatement)
+            .map(|event| &event.payload)
+        else {
+            unreachable!("the compiler admits only restatements");
+        };
+        let (restating_ordinal, live_message) = rendered(restatement);
+        let (stale_ordinal, stale_message) = rendered(target);
+        let (stale, live_value) = (decision(stale_message), decision(live_message));
+        let world_word = text(stale_message)
+            .rsplit(' ')
+            .next()
+            .expect("the world's word");
+        let lived = live(
+            &aged_world,
+            &Replacement::Summarizer(replay.clone()),
+            &subject(stale, world_word),
+            &mut charges,
+        )?;
+        if let Some(refused) = lived.turn_refused {
+            return Err(RunError::TurnRefused {
+                policy: "stale preference",
+                messages: aged_world.messages.len(),
+                refused,
+            });
+        }
+        let served = match lived.pass.and_then(|pass| pass.outcome) {
+            Some(UserHintPass::Decided(outcome)) => outcome.hint_text,
+            _ => String::new(),
+        };
+        let delivery = StaleDelivery::of(&served, stale, live_value);
+        export.stale_delivered += u32::from(delivery.stale_delivered());
+        let Some(stale_span) = locate(&served, stale) else {
+            export.unlocatable.insert(pair.task.id.clone(), delivery);
+            continue;
+        };
+        let segment = lived
+            .segments
+            .iter()
+            .position(|segment| {
+                (segment.start_message..=segment.end_message).contains(&(stale_ordinal as i64))
+            })
+            .expect("a served stale statement sits in a segment");
+        let key = format!("{SESSION}.{}", slot_of(stale));
+        export.pairs.push(StalePair {
+            task: pair.task.id.clone(),
+            question: question(stale),
+            arms: arms(
+                &served,
+                stale_span,
+                &key,
+                live_value,
+                restating_ordinal as u64,
+            ),
+            key,
+            stale_value: stale.to_string(),
+            stale_span,
+            live_value: live_value.to_string(),
+            live_span: locate(&served, live_value),
+            restating_ordinal: restating_ordinal as u64,
+            stale_tier: rendered_tier(&lived.segments, segment),
+            delivery,
+        });
+    }
+    charges.vacate(cassettes)?;
+    let bytes = serde_json::to_vec_pretty(&export).unwrap();
+    charges.observe(Resource::ArtifactBytes, bytes.len() as u64)?;
+    publish_file(&publish.join(STALE_EXPORT_FILE), &bytes).map_err(publish_refused)?;
+    Ok(export)
+}
+
 pub const REPORT_FILE: &str = "suite-b-report.json";
 /// The manifest's file name under the publish directory.
 pub const MANIFEST_FILE: &str = "manifest.json";
@@ -1948,6 +2202,29 @@ pub fn config_from_args(args: impl IntoIterator<Item = String>) -> Result<Config
         }),
         publish: PathBuf::from(take("publish")),
     })
+}
+
+/// The `stale-preference` subcommand's flags: the campaign's, and the number
+/// of restatements to compile into pairs.
+pub const STALE_USAGE: &str = "stale-preference <campaign flags> --pairs <n>";
+
+/// Reads a `Config` and the pair count from the `stale-preference`
+/// subcommand's arguments.
+pub fn stale_config_from_args(
+    args: impl IntoIterator<Item = String>,
+) -> Result<(Config, usize), String> {
+    let mut args: Vec<String> = args.into_iter().collect();
+    let at = args
+        .iter()
+        .position(|arg| arg == "--pairs")
+        .ok_or_else(|| format!("--pairs is required; {STALE_USAGE}"))?;
+    let pairs = args
+        .get(at + 1)
+        .ok_or("--pairs needs a value")?
+        .parse::<usize>()
+        .map_err(|error| format!("--pairs: {error}"))?;
+    args.drain(at..=at + 1);
+    Ok((config_from_args(args)?, pairs))
 }
 
 pub fn sha256_hex(bytes: &[u8]) -> String {
@@ -2174,5 +2451,27 @@ mod config_tests {
                 .unwrap_err()
                 .starts_with("--aged-messages:")
         );
+    }
+
+    #[test]
+    fn the_stale_preference_flags_are_the_campaigns_and_a_pair_count() {
+        let mut list = args(&FULL);
+        list.extend(args(&["--pairs", "80"]));
+        let (config, pairs) = stale_config_from_args(list).unwrap();
+        assert_eq!(
+            (config, pairs),
+            (config_from_args(args(&FULL)).unwrap(), 80)
+        );
+        let cases: [(&[&str], &str); 3] = [
+            (&[], "--pairs is required"),
+            (&["--pairs"], "--pairs needs a value"),
+            (&["--pairs", "many"], "--pairs:"),
+        ];
+        for (extra, expected) in cases {
+            let mut list = args(&FULL);
+            list.extend(args(extra));
+            let error = stale_config_from_args(list).unwrap_err();
+            assert!(error.contains(expected), "{extra:?}: {error}");
+        }
     }
 }

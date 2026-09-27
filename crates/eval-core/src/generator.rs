@@ -13,9 +13,9 @@ use crate::stream::{ChoiceKind, Chooser, RANDOM_SCHEMA_VERSION, ReplayRefusal, T
 /// Version 2 removed the zero time gap; version 3 gave every text a word of
 /// its own and the world's own word beside the drawn word, so a surface that
 /// matches on words can tell one message from another and from another
-/// world's. The same seed and config produce a different world under each
-/// version.
-pub const GENERATOR_VERSION: &str = "eval-generator/v3";
+/// world's; version 4 added the restatement to the schedule. The same seed
+/// and config produce a different world under each version.
+pub const GENERATOR_VERSION: &str = "eval-generator/v4";
 pub const TAPE_IDENTITY_PROTOCOL: &str = "eval-tape/v1";
 /// Separates what a generated text says from the world's own word after it.
 const WORLD_WORD_SEPARATOR: &str = " in ";
@@ -84,8 +84,9 @@ pub struct Planted {
     pub canary: String,
 }
 
-/// `*_every` of `n` fires on every `n`-th slot; `0` never fires. Corrections and
-/// invalidations also skip slot `0`, which has no earlier message to target.
+/// `*_every` of `n` fires on every `n`-th slot; `0` never fires. Corrections,
+/// invalidations, and restatements also skip slot `0`, which has no earlier
+/// message to target.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SessionSpec {
@@ -93,6 +94,16 @@ pub struct SessionSpec {
     pub tool_span_every: u32,
     pub correction_every: u32,
     pub invalidation_every: u32,
+    /// A restatement is a correction delivered as a message of its own, so
+    /// the superseded message and its restatement coexist. Absent reads as
+    /// `0` and a `0` is not written, so a config without restatements keeps
+    /// its bytes.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub restatement_every: u32,
+}
+
+fn is_zero(every: &u32) -> bool {
+    *every == 0
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -156,6 +167,7 @@ impl SessionSpec {
         1 + usize::from(fires(self.tool_span_every, k))
             + usize::from(k > 0 && fires(self.correction_every, k))
             + usize::from(k > 0 && fires(self.invalidation_every, k))
+            + usize::from(k > 0 && fires(self.restatement_every, k))
     }
 
     fn declared_events(&self) -> u64 {
@@ -163,6 +175,7 @@ impl SessionSpec {
             + firings(self.tool_span_every, self.messages, false)
             + firings(self.correction_every, self.messages, true)
             + firings(self.invalidation_every, self.messages, true)
+            + firings(self.restatement_every, self.messages, true)
     }
 }
 
@@ -261,6 +274,10 @@ struct Slot {
 struct EntityState {
     seq: u32,
     messages: Vec<EventId>,
+    /// Earlier messages no restatement has targeted yet, with their slot and
+    /// drawn word; slot `k` has `k` earlier messages and at most `k - 1`
+    /// earlier restatements, so one is always left to restate.
+    unrestated: Vec<(EventId, u32, String)>,
     last_commit: Option<EventId>,
     paths: Vec<(String, Option<EventId>)>,
 }
@@ -499,6 +516,7 @@ impl Generator {
         let k = slot.k;
         let observation = self.open(&slot, spec.events_at(k))?;
         let text = self.text(&slot)?;
+        let word = text.split(' ').next().unwrap_or_default().to_string();
         let text = self.planted(&slot, Carrier::Summary, text);
         let earlier = self.entities[slot.entity].messages.clone();
         let commits = self.commits.clone();
@@ -551,7 +569,39 @@ impl Generator {
             };
             self.emit(&slot, observation, payload, &[target]);
         }
+        if k > 0 && fires(spec.restatement_every, k) {
+            self.restate(&slot, observation)?;
+        }
+        self.entities[slot.entity]
+            .unrestated
+            .push((message.clone(), k, word));
         self.entities[slot.entity].messages.push(message);
+        Ok(())
+    }
+
+    /// Restates one earlier message no restatement has targeted: the same
+    /// slot word with a drawn word other than the target's, so the stale and
+    /// the live decision differ in a whole word and both name the target's
+    /// slot.
+    fn restate(&mut self, slot: &Slot, observation: i64) -> Result<(), WorldError> {
+        let candidates: Vec<EventId> = self.entities[slot.entity]
+            .unrestated
+            .iter()
+            .map(|(id, _, _)| id.clone())
+            .collect();
+        let pick = self.choose(ChoiceKind::RestatementTarget, slot, &candidates)?;
+        let (target, target_k, stale) = self.entities[slot.entity].unrestated.remove(pick);
+        let words: Vec<&str> = WORDS.into_iter().filter(|word| *word != stale).collect();
+        let word = words[self.choose(ChoiceKind::TextWord, slot, &words)?];
+        let payload = Payload::Restatement {
+            target: target.clone(),
+            message_id: format!("{}-m{}-restatement", slot.actor, slot.k),
+            text: format!(
+                "{word} for slot{target_k}{WORLD_WORD_SEPARATOR}{}",
+                self.vocabulary
+            ),
+        };
+        self.emit(slot, observation, payload, &[target]);
         Ok(())
     }
 

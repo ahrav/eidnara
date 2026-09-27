@@ -39,6 +39,7 @@ fn world(messages: u32) -> World {
             tool_span_every: 0,
             correction_every: 0,
             invalidation_every: 0,
+            restatement_every: 0,
         }],
         repositories: Vec::new(),
         epoch_ms: EPOCH_MS,

@@ -166,6 +166,7 @@ fn rendered_messages_have_the_shape_the_adapter_reads_with_valid_time_as_revisio
 fn every_payload_kind_renders_to_units_a_commit_or_a_named_exclusion() {
     let mut config_with_everything = world_config();
     config_with_everything.sessions[0].invalidation_every = 2;
+    config_with_everything.sessions[0].restatement_every = 3;
     let world = generate_all(SEED, &config_with_everything, Mode::Generate).unwrap();
     let rendering = render(&world.log, &config()).unwrap();
     let mut kinds: BTreeMap<&str, usize> = BTreeMap::new();
@@ -176,23 +177,24 @@ fn every_payload_kind_renders_to_units_a_commit_or_a_named_exclusion() {
             Payload::Commit { .. } => "commit",
             Payload::Rename { .. } => "rename",
             Payload::Correction { .. } => "correction",
+            Payload::Restatement { .. } => "restatement",
             Payload::Invalidation { .. } => "invalidation",
         };
         *kinds.entry(kind).or_default() += 1;
     }
     assert!(
-        kinds.values().all(|count| *count > 0) && kinds.len() == 6,
+        kinds.values().all(|count| *count > 0) && kinds.len() == 7,
         "{kinds:?}"
     );
     assert_eq!(
         rendering.messages.len(),
-        kinds["message"] + kinds["correction"]
+        kinds["message"] + kinds["correction"] + kinds["restatement"]
     );
     assert_eq!(rendering.commits.len(), kinds["commit"]);
     let units: usize = rendering.messages.iter().map(|m| m.expected.len()).sum();
     assert_eq!(
         units,
-        kinds["message"] + kinds["correction"] + kinds["tool_span"]
+        kinds["message"] + kinds["correction"] + kinds["restatement"] + kinds["tool_span"]
     );
     assert_eq!(
         rendering.excluded_by_rule,
@@ -244,6 +246,36 @@ fn every_payload_kind_renders_to_units_a_commit_or_a_named_exclusion() {
         rendered_target.expected[0].identity.occurrence_id
     );
     assert!(rendered_correction.expected[0].revision > rendered_target.expected[0].revision);
+
+    // A restatement renders a message of its own beside its target: a new
+    // message id and lineage at a later valid time, so both texts are served.
+    let (restatement, restated) = world
+        .log
+        .events
+        .iter()
+        .find_map(|e| match &e.payload {
+            Payload::Restatement { target, .. } => Some((e, target)),
+            _ => None,
+        })
+        .unwrap();
+    let rendered = |id: &EventId| {
+        rendering
+            .messages
+            .iter()
+            .find(|m| m.event_id == *id)
+            .unwrap()
+    };
+    let (rendered_restatement, rendered_restated) = (rendered(&restatement.id), rendered(restated));
+    assert_ne!(
+        rendered_restatement.message["info"]["id"],
+        rendered_restated.message["info"]["id"]
+    );
+    assert_eq!(rendered_restatement.message["info"]["role"], "user");
+    assert_ne!(
+        rendered_restatement.expected[0].identity.lineage_id,
+        rendered_restated.expected[0].identity.lineage_id
+    );
+    assert!(rendered_restatement.expected[0].revision > rendered_restated.expected[0].revision);
     for message in &rendering.messages {
         let created = message.message["info"]["time"]["created"].as_i64().unwrap();
         assert!(

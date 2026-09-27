@@ -268,7 +268,7 @@ impl Message<'_> {
     }
 }
 
-/// Renders every message, tool span, and correction as OpenCode session
+/// Renders every message, tool span, correction, and restatement as OpenCode session
 /// fixtures with explicit times, and every commit as a repository fixture.
 pub fn render(log: &EventLog, config: &RenderConfig) -> Result<Rendering, RenderError> {
     let mut rendering = Rendering {
@@ -287,7 +287,7 @@ pub fn render(log: &EventLog, config: &RenderConfig) -> Result<Rendering, Render
     for event in &log.events {
         by_id.insert(&event.id, event);
         match &event.payload {
-            Payload::Message { message_id, .. } => {
+            Payload::Message { message_id, .. } | Payload::Restatement { message_id, .. } => {
                 *messages_named
                     .entry((event.entity_id.as_str(), message_id))
                     .or_default() += 1;
@@ -341,7 +341,7 @@ pub fn render(log: &EventLog, config: &RenderConfig) -> Result<Rendering, Render
                     .messages
                     .push(m.rendered(parts, expected, &mut occurrences)?);
             }
-            Payload::Correction { target, text } => {
+            Payload::Correction { target, text } | Payload::Restatement { target, text, .. } => {
                 let original = by_id
                     .get(target)
                     .copied()
@@ -358,10 +358,24 @@ pub fn render(log: &EventLog, config: &RenderConfig) -> Result<Rendering, Render
                 if event.valid_time_ms <= original.valid_time_ms {
                     return Err(RenderError::CorrectionDoesNotAdvance(target.clone()));
                 }
-                let m = Message {
-                    event,
-                    message_id,
-                    role,
+                // A correction is a later revision of its target's lineage; a
+                // restatement is a user message of its own beside the target.
+                let m = match &event.payload {
+                    Payload::Restatement { message_id, .. } => {
+                        if messages_named(&event.entity_id, message_id) > 1 {
+                            return Err(RenderError::MessageIdReused(event.id.clone()));
+                        }
+                        Message {
+                            event,
+                            message_id,
+                            role: "user",
+                        }
+                    }
+                    _ => Message {
+                        event,
+                        message_id,
+                        role,
+                    },
                 };
                 let expected = vec![m.text_unit(config)?];
                 let parts = vec![json!({"type": "text", "text": text})];

@@ -48,6 +48,7 @@ mod render;
 mod report;
 mod residue;
 mod shrink;
+mod stale;
 mod statistics;
 mod stream;
 mod task;
@@ -175,6 +176,10 @@ pub use shrink::{
     SCENARIO_DIGEST_PROTOCOL, SHRINK_REPORT_SCHEMA, Scenario, ShrinkRefused, ShrinkReport,
     ShrinkReportError, Transformation, UnknownReason, WitnessClass, classify_replay,
     parse_shrink_report, shrink,
+};
+pub use stale::{
+    Arms, Grade, McNemar, McNemarError, PRECEDENCE_SENTENCE, STALE_EXPORT_SCHEMA, StaleDelivery,
+    StaleExport, StalePair, TextSpan, arms, carries, grade, locate, mcnemar,
 };
 pub use statistics::{
     ANALYSIS_FAMILY_SCHEMA, Analysis, AnalysisFamily, ArmResult, BlockedReason, CampaignProfile,
