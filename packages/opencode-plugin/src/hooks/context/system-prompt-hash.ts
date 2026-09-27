@@ -159,6 +159,8 @@ export function createSystemPromptHashHandler(deps: {
         }
 
         const availability = resolveEidnaraReduceAvailability(sessionId);
+        // Same gate as the transform's `tool_present`: a provisional verdict selects the no-reduce guidance so the model is never told to use a surface the transform has turned off.
+        const toolPresent = availability.frozen && availability.callable;
         const inputModel = input.model;
         const liveModel =
             inputModel?.providerID && inputModel.modelID
@@ -185,7 +187,7 @@ export function createSystemPromptHashHandler(deps: {
             try {
                 const guidance = await deps.fetchGuidance({
                     sessionId,
-                    toolPresent: availability.callable,
+                    toolPresent,
                     modelKey,
                     isCacheBusting,
                 });
@@ -193,7 +195,7 @@ export function createSystemPromptHashHandler(deps: {
                     output.system[0] = `${output.system[0]}${SYSTEM_PROMPT_GUIDANCE_SEPARATOR}${guidance}`;
                     sessionLog(
                         sessionId,
-                        `injected guidance into system prompt (toolPresent=${availability.callable}, bytes=${guidance.length})`,
+                        `injected guidance into system prompt (toolPresent=${toolPresent}, bytes=${guidance.length})`,
                     );
                 }
             } catch (error) {

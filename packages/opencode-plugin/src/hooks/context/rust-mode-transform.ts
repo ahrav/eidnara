@@ -185,12 +185,17 @@ interface RetainedOutput {
     readonly inputLengths: readonly number[];
     /** Cleared only by `RetainedOutputs`, which owns the charge. */
     readonly applied?: AppliedOutput;
+    /**
+     * Set by `RetainedOutputs` once a pass sourced from this record drew `boundary_unknown`; the
+     * daemon may have dropped the basis, so the applied output no longer serves a failed pass.
+     */
+    readonly disowned?: boolean;
     /** One charge for the whole record, the applied output's included. */
     readonly charge: number;
 }
 
 /** The fields `RetainedOutputs` alone may change, keeping `used` equal to the summed charges. */
-type OwnedRetainedOutput = { applied?: AppliedOutput; charge: number };
+type OwnedRetainedOutput = { applied?: AppliedOutput; disowned?: boolean; charge: number };
 
 /**
  * Holds one retained output per session under a session-count and a byte limit, evicting the
@@ -244,6 +249,11 @@ class RetainedOutputs {
         if (!record.applied || this.records.get(sessionId) !== record) return;
         this.used -= record.applied.charge;
         this.clearApplied(record);
+    }
+
+    /** Bars the record's applied output from fail-open until a publication retains a new record. */
+    disown(sessionId: string, record: RetainedOutput): void {
+        if (this.records.get(sessionId) === record) (record as OwnedRetainedOutput).disowned = true;
     }
 
     release(sessionId: string): void {
@@ -1076,6 +1086,8 @@ export function createRustModeTransform(
                   captured: CapturedHistory;
                   boundaryIndex: number;
                   recheck: (phase: string) => void;
+                  /** The trusted limit the main publication's invocation gate reads. */
+                  contextLimit: number | undefined;
               }
             | undefined;
         /**
@@ -1099,21 +1111,43 @@ export function createRustModeTransform(
                     retainedOutputs.dropApplied(sessionId, source.previous);
                     return false;
                 }
-                const served = [
-                    ...applied.values,
-                    ...source.captured.members.slice(source.previous.rawCount),
-                ];
+                const { members } = source.captured;
+                const rawCount = source.previous.rawCount;
+                const served = [...applied.values, ...members.slice(rawCount)];
+                const gated = source.contextLimit !== undefined;
                 if (
                     publicationRejection(target, served.length) !== null ||
-                    !lease.reserve(served.length * CANDIDATE_SLOT_BYTES)
+                    !lease.reserve(
+                        served.length * CANDIDATE_SLOT_BYTES +
+                            (gated ? members.length * LENGTH_SLOT_BYTES : 0),
+                    )
                 )
                     return false;
-                const failure = publishInPlace(
-                    target,
-                    served,
-                    source.captured.members,
-                    source.boundaryIndex,
-                );
+                // The fallback is a candidate too: it may not grow past the limit the pass would refuse.
+                if (gated) {
+                    const incoming = measureInputLengths(
+                        members,
+                        source.previous,
+                        source.captured.verified?.count ?? 0,
+                    );
+                    const invocation = validateInvocation(
+                        [...applied.lengths, ...incoming.slice(rawCount)],
+                        incoming,
+                        {
+                            maxTokens: source.contextLimit,
+                            headroomPermille: INVOCATION_HEADROOM_PERMILLE,
+                            profile: "opencode-heuristic",
+                        },
+                    );
+                    if (!invocation.ok) {
+                        sessionLog.debug(
+                            sessionId,
+                            `rust transform fail-open declined: invocation_budget (${invocation.candidate.chargedTokens} charged tokens over ${invocation.limit}, growing from ${invocation.incoming.bytes} to ${invocation.candidate.bytes} bytes)`,
+                        );
+                        return false;
+                    }
+                }
+                const failure = publishInPlace(target, served, members, source.boundaryIndex);
                 if (failure) {
                     sessionLog.warn(
                         sessionId,
@@ -1313,34 +1347,9 @@ export function createRustModeTransform(
                 logStage(sessionId, "prefixGuard", startedAt, timings, `phase=${phase}`);
                 if (!unchanged) throw new PassDeclined(sessionId, "source_changed", phase);
             };
-            // Tapes are never rebased: a verified prefix was declared at the retained basis anchor.
-            // A rerun follows the daemon disowning an anchor, possibly that basis, so it never fails open.
-            if (previous && verified && !rerun)
-                failOpenSource = { previous, captured, boundaryIndex, recheck: recheckCapture };
-            // The wire charge derives from the capture, so byte pressure declines before the next await.
-            let wireBytes = 0;
-            for (let index = 0; index < messageWireBytes.length; index += 1)
-                wireBytes += WIRE_PROJECTION_FACTOR * (messageWireBytes[index] ?? 0);
-            charge(wireBytes, "wire projection");
-            const syntheticTurn = observeSyntheticTurn(state, messages);
-            if (syntheticTurn && state.syntheticTurnCount >= 3 && !state.syntheticCascadeLogged) {
-                state.syntheticCascadeLogged = true;
-                sessionLog.warn(
-                    sessionId,
-                    `rust synthetic-turn cascade: ${state.syntheticTurnCount} consecutive synthetic user turns with no real user message`,
-                );
-            }
-            const passUsageSnapshot = loadContextUsage(deps, sessionId);
-            let model = modelFromMessages(messages);
-            // Both verdicts come from the session's earliest persisted user row, never the window's first user; a missing database freezes fail-open, and an unpersisted row or a read error stays provisional and fails closed.
-            const reduceAvailability = resolveEidnaraReduceAvailability(sessionId);
-            const todoAvailability = resolveTodowriteAvailability(sessionId);
-            const toolPresent = reduceAvailability.frozen && reduceAvailability.callable;
-            const activeAgent = activeAgentFromMessages(messages);
-            // Every message read above is synchronous; the awaits below read nothing from the source, so a recheck precedes encoding.
-            const isSubagent = deps.isSubagentSession(sessionId);
-            const systemPromptHash = deps.systemPromptHashFor(sessionId);
+            // The trusted limit is resolved before the first decline a failed pass can fail open from.
             let preflightError: unknown;
+            let model = modelFromMessages(messages);
             if (!model) {
                 try {
                     model = findLastAssistantModelFromOpenCodeDb(sessionId) ?? undefined;
@@ -1367,6 +1376,40 @@ export function createRustModeTransform(
                     preflightError ??= error;
                 }
             }
+            const reportedContextLimit =
+                resolvedContextLimit && resolvedContextLimit > 0 ? resolvedContextLimit : undefined;
+            // Tapes are never rebased: a verified prefix was declared at the retained basis anchor.
+            // A disowned record, which every rerun reads, never fails open.
+            if (previous && verified && !previous.disowned)
+                failOpenSource = {
+                    previous,
+                    captured,
+                    boundaryIndex,
+                    recheck: recheckCapture,
+                    contextLimit: reportedContextLimit,
+                };
+            // The wire charge derives from the capture, so byte pressure declines before the next await.
+            let wireBytes = 0;
+            for (let index = 0; index < messageWireBytes.length; index += 1)
+                wireBytes += WIRE_PROJECTION_FACTOR * (messageWireBytes[index] ?? 0);
+            charge(wireBytes, "wire projection");
+            const syntheticTurn = observeSyntheticTurn(state, messages);
+            if (syntheticTurn && state.syntheticTurnCount >= 3 && !state.syntheticCascadeLogged) {
+                state.syntheticCascadeLogged = true;
+                sessionLog.warn(
+                    sessionId,
+                    `rust synthetic-turn cascade: ${state.syntheticTurnCount} consecutive synthetic user turns with no real user message`,
+                );
+            }
+            const passUsageSnapshot = loadContextUsage(deps, sessionId);
+            // Both verdicts come from the session's earliest persisted user row, never the window's first user; a missing database freezes fail-open, and an unpersisted row or a read error stays provisional and fails closed.
+            const reduceAvailability = resolveEidnaraReduceAvailability(sessionId);
+            const todoAvailability = resolveTodowriteAvailability(sessionId);
+            const toolPresent = reduceAvailability.frozen && reduceAvailability.callable;
+            const activeAgent = activeAgentFromMessages(messages);
+            // Every message read above is synchronous; the awaits below read nothing from the source, so a recheck precedes encoding.
+            const isSubagent = deps.isSubagentSession(sessionId);
+            const systemPromptHash = deps.systemPromptHashFor(sessionId);
             const transformGeometry = transformGeometryForWire(resolvedWindowGeometry);
             assertCurrentPass();
             // Pass the module one bool combining the frozen map verdict and OpenCode's live permission decision.
@@ -1381,8 +1424,6 @@ export function createRustModeTransform(
             if (preflightError) throw preflightError;
             const usage = passUsageSnapshot;
             // The usage sample's percentage was computed against `resolveContextLimit`, which substitutes the 128k default for a model models.dev cannot name, so inverting it recovers that default rather than a host report.
-            const reportedContextLimit =
-                resolvedContextLimit && resolvedContextLimit > 0 ? resolvedContextLimit : undefined;
             const contextLimit =
                 reportedContextLimit ??
                 (usage && usage.percentage > 0
@@ -1591,6 +1632,7 @@ export function createRustModeTransform(
             if (response.status === "boundary_unknown") {
                 assertCurrentPass();
                 state.boundary = undefined;
+                if (previous) retainedOutputs.disown(sessionId, previous);
                 // Section 7.10.4: the first `boundary_unknown` rediscovers, whether or not this attempt walked; the second declines.
                 if (rerun)
                     throw new PassDeclined(sessionId, "boundary_unknown", "after rediscovery");
