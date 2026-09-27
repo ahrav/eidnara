@@ -116,6 +116,12 @@ against raw client bases (`wire_passthrough_recipe_matches_typed_output_not_raw_
 `recipe_matching_compares_served_payload_fields` checks that unknown envelope
 fields disappear while provider-extra changes remain significant.
 
+Preserved by #832 and scoped to the captured window. The retained applied
+output and its capture cover the window the pass sent, and a recipe that
+keeps from it publishes entry `i` at host index `boundaryIndex + i`.
+Witness: `rust-mode-window.test.ts:182` "sends the declared window in both
+representations and publishes the recipe at boundaryIndex + i".
+
 ### TE22 `delivery-disposition-follows-publication`
 
 The missing-native compatibility retry is deleted. Renamed witnesses:
