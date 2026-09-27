@@ -9,9 +9,10 @@ Marker names are constant and unique (`WP-FM01` to `WP-FM22`). A green safety
 assertion without its marker is not coverage.
 
 "Observed" names the witness and the recorded PR run in which the marker
-fires. `file:line` is at `f2442b2f` (#833's last code commit) unless noted.
-The #833 run is the gate block of the #833 PR description (gates at the final
-head, code at `f2442b2f`).
+fires. `file:line` is at `f2442b2f` unless noted; `f0501b3d`, #833's last
+code commit, shifts `crates/daemon/src/transform.rs` lines after 1694 by the
+offsets `existing-checks.md` lists. The #833 run is the gate block of the #833
+PR description (gates at the final head).
 
 The repository has no campaign runtime. A `sometimes` record (WP-P16 to
 WP-P23) and a marker here mean that a named deterministic test constructs the

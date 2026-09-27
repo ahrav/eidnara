@@ -53,9 +53,12 @@ pass, 19 skip, 0 fail); the other late commits have no gate block of their
 own. All of them are on `main` `d68aedf3`, under #833, so #833's gates ran
 with them. Records that depend on them say so.
 
-Code references are verified at `f2442b2f`, the last code commit of #833
-(`window-protocol/m1-exit`, base `main` `d68aedf3`); the later commits on
-the branch change only documentation. References are cited at another tree
+Code references are verified at `f2442b2f` (`window-protocol/m1-exit`, base
+`main` `d68aedf3`). The later code commits on the branch are `3ebfc3b9`
+(test-support statement ledger and the #874 inventory test) and `f0501b3d`,
+the last, whose code change is in `crates/daemon/src/transform.rs` alone and
+shifts its lines after 1694; `existing-checks.md` lists the offsets and cites
+its `transform.rs` rows at `f0501b3d`. References are cited at another tree
 only where that tree is named. They were read at `f8734c12`, moved to
 `52eda0fa` and then to `f2442b2f` with a line diff of each cited file; a
 reference inside a changed hunk was re-read by hand, and every cited test

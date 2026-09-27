@@ -13,7 +13,7 @@ Exercised status: yes - #874 inventory test covers H at fixed W (rerun in the
 
 ## Evidence trail
 
-Code references verified at `f2442b2f` (last code commit of #833, base `main`
+Code references verified at `f2442b2f` (#833 code before `f0501b3d`, base `main`
 `d68aedf3` with #881, #883, #884) unless noted; first read at `f8734c12`,
 moved by line diff; each cited test name found there.
 

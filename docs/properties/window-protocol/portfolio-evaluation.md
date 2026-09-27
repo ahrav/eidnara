@@ -8,7 +8,9 @@ draft part at `52eda0fa`, after #881, #883, and #884 merged into `main`
 (`d68aedf3`); its line references are to that draft and that tree. The
 disposition below applies every refinement to the records and evidence,
 queues every gap, and surfaces every bias for a human. Code references in the
-part are now verified at `f2442b2f`, the last code commit of #833. Catalog
+part are now verified at `f2442b2f`; `f0501b3d`, the last code commit of
+#833, shifts `crates/daemon/src/transform.rs` lines after 1694 by the offsets
+`existing-checks.md` lists. Catalog
 revision 1 of #824 received its own fresh-context evaluation; its eight
 required edits are applied in revision 2 (#824 comment 4, section E), which
 this part carries. No test-adequacy verdict is issued here.

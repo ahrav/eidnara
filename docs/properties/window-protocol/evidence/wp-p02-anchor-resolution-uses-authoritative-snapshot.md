@@ -26,7 +26,7 @@ change the snapshot between resolution and a CAS attempt; they ran in the #881
 
 ## Evidence trail
 
-Code references are verified at `f2442b2f`, the last code commit of #833
+Code references are verified at `f2442b2f`, #833's code before `f0501b3d`
 (`window-protocol/m1-exit`, base `main` `d68aedf3`, which merged #881, #883,
 and #884), unless another tree is named. They were first read at `f8734c12`
 and moved by a line diff to `f2442b2f`; each cited test name was found there.

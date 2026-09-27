@@ -10,23 +10,27 @@ the #833 checks ran in the gates the #833 PR description records (gates at
 the final head, code at `3ebfc3b9`).
 
 Every test name below was located with `git grep` at the named tree. Unless a
-row names another tree, `file:line` is at `f2442b2f`, the last code commit of
-#833 (`window-protocol/m1-exit`, base `main` `d68aedf3`). Lines read at
-`f8734c12` were moved by a line diff and each name was found again at
-`f2442b2f`. A test deleted by #833 is cited at `f8734c12`. `3ebfc3b9`
-changes only the test-support statement ledger and the #874 inventory test;
-rows citing those files are marked at `3ebfc3b9`.
+row names another tree, `file:line` is at `f2442b2f` (`window-protocol/m1-exit`,
+base `main` `d68aedf3`). Lines read at `f8734c12` were moved by a line diff and
+each name was found again at `f2442b2f`. A test deleted by #833 is cited at
+`f8734c12`. `3ebfc3b9` changes only the test-support statement ledger and the
+#874 inventory test; rows citing those files are marked at `3ebfc3b9`.
+`f0501b3d`, the last code commit of #833, changes one cited file,
+`crates/daemon/src/transform.rs`, and shifts its lines after 1694 (+2 through
+1958, +3 from 1960 through 5215, +8 through 5250, +33 through 14951, +146
+after; line 1959 becomes 1961-1962); every `transform.rs` row below that
+names no other tree was found again at `f0501b3d` and cites that tree.
 
 ## Daemon and store
 
 | Check | Location | Records | Recorded run | Status |
 | --- | --- | --- | --- | --- |
-| `empty_store_bootstrap_then_defers_stably_without_hard_oscillation` | `crates/daemon/src/transform.rs:19100` | WP-E01 | #880 | unaudited |
-| `reconcile_rematerialize_after_revert_is_not_blocked_by_the_mint_guard` | `crates/daemon/src/transform.rs:19420` | WP-E01 | #880 | unaudited |
-| `reconcile_rematerialize_with_unrecut_store_truncates_and_refolds_prefix` | `crates/daemon/src/transform.rs:19455` | WP-E02 | #880 | unaudited |
-| `reconcile_recut_nothing_survives_arms_pending_raw_without_truncate` | `crates/daemon/src/transform.rs:19785` | WP-E03 | #880 | unaudited |
-| `pending_rewrite_passes_isolate_ingress_meta_usage_and_reconcile` | `crates/daemon/src/transform.rs:19950` | WP-E03 | #880 | unaudited |
-| `pending_rewrite_persists_across_store_restart` | `crates/daemon/src/transform.rs:20017` | WP-E03 | #880 | unaudited |
+| `empty_store_bootstrap_then_defers_stably_without_hard_oscillation` | `crates/daemon/src/transform.rs:19246` | WP-E01 | #880 | unaudited |
+| `reconcile_rematerialize_after_revert_is_not_blocked_by_the_mint_guard` | `crates/daemon/src/transform.rs:19566` | WP-E01 | #880 | unaudited |
+| `reconcile_rematerialize_with_unrecut_store_truncates_and_refolds_prefix` | `crates/daemon/src/transform.rs:19601` | WP-E02 | #880 | unaudited |
+| `reconcile_recut_nothing_survives_arms_pending_raw_without_truncate` | `crates/daemon/src/transform.rs:19931` | WP-E03 | #880 | unaudited |
+| `pending_rewrite_passes_isolate_ingress_meta_usage_and_reconcile` | `crates/daemon/src/transform.rs:20096` | WP-E03 | #880 | unaudited |
+| `pending_rewrite_persists_across_store_restart` | `crates/daemon/src/transform.rs:20163` | WP-E03 | #880 | unaudited |
 | `selected_range_identity_drift_during_await_rejects_without_cooldown` | `crates/daemon/src/history_summarizer.rs:3799` | WP-E04 | #873 | unaudited |
 | `tail_identity_extension_during_await_still_publishes` | `crates/daemon/src/history_summarizer.rs:3850` | WP-E04 | #873 | unaudited |
 | `publish_history_summarizer_chunk_rejects_recut_epoch_mismatch_as_conflict` | `crates/memory-store/src/lib.rs:26308` | WP-E04 | #873 | unaudited |
@@ -35,7 +39,7 @@ rows citing those files are marked at `3ebfc3b9`.
 | `transform_snapshot_cache_is_generation_safe_and_lru_bounded` | `crates/daemon/src/lib.rs:21135` | WP-E08 | #878 | unaudited |
 | `snapshot_lease_budget_survives_cache_churn_and_releases_exact_charge` | `crates/daemon/src/lib.rs:21175` | WP-E08 | #878 | unaudited |
 | `ready_snapshot_holds_no_native_payload_and_a_lease_pins_its_generation` | `crates/daemon/src/lib.rs:21230` | WP-E08 | #878 | unaudited |
-| `window_tag_read_keeps_every_session_relative_tag_decision` | `crates/daemon/src/transform.rs:22558` | WP-E09 | #874 | unaudited |
+| `window_tag_read_keeps_every_session_relative_tag_decision` | `crates/daemon/src/transform.rs:22704` | WP-E09 | #874 | unaudited |
 | `shared_row_iterator_matches_slice_for_protected_legacy_orphan` | `crates/daemon/src/tail_hygiene.rs:2564` | WP-E09 | #874 | unaudited |
 | `first_hard_pass_meta_respects_the_store_durable_text_bound` | `crates/daemon/src/transform_meta_bound.rs:130` at `f8734c12` | WP-E10 (deleted by #833, `7a8fb84b`) | #873, #881 | unaudited |
 | `meta_bytes_stay_flat_as_covered_history_grows` | `crates/daemon/src/transform_meta_bound.rs:141` at `f8734c12` | WP-E10 (deleted by #833, `7a8fb84b`) | #873 (named `..._and_covered_drift_still_rejects` at `43e88bdc`); #881 (renamed, covered-drift half dropped) | unaudited |
@@ -73,11 +77,11 @@ rows citing those files are marked at `3ebfc3b9`.
 | `bounded_fold_matches_the_full_read_over_sixty_thousand_segments` | `crates/daemon/src/m0_compose.rs:636` | WP-P08 | #873 | unaudited |
 | `bounded_fold_work_is_independent_of_history_length` | `crates/daemon/src/m0_compose.rs:710` | WP-P07, WP-P08 | #873 | unaudited |
 | `bounded_m1_matches_the_full_read_and_withholds_an_overflowing_body` | `crates/daemon/src/m0_compose.rs:742` | WP-P08 | #873 | unaudited |
-| `additive_soft_retries_when_rows_past_the_m1_cap_land_mid_pass` | `crates/daemon/src/transform.rs:14955` | WP-P08 | #873 | unaudited |
+| `additive_soft_retries_when_rows_past_the_m1_cap_land_mid_pass` | `crates/daemon/src/transform.rs:15101` | WP-P08 | #873 | unaudited |
 | `writers_that_add_a_legacy_row_clear_the_persisted_legacy_list` | `crates/memory-store/src/lib.rs:22858` | WP-P08 | #873 | unaudited |
 | `per_pass_history_reads_do_constant_work_as_history_grows` | `crates/memory-store/src/lib.rs:22466` | WP-P07 | #873 | unaudited |
 | `transform_snapshot_reads_only_the_named_blocks_overlays` | `crates/memory-store/src/lib.rs:22509` | WP-P07 | #873 | unaudited |
-| `foreign_block_overlays_leave_the_pass_unchanged` | `crates/daemon/src/transform.rs:19172` | WP-P07 | #873 | unaudited |
+| `foreign_block_overlays_leave_the_pass_unchanged` | `crates/daemon/src/transform.rs:19318` | WP-P07 | #873 | unaudited |
 | `state_sync_refuses_rows_that_overlap_stored_neighbours` | `crates/memory-store/src/lib.rs:22605` | WP-P07, WP-P08 (range invariant) | #873 | unaudited |
 | `initialized_state_sync_skips_retained_rows_and_refuses_an_overlapping_new_row` | `crates/memory-store/src/lib.rs:22664` | WP-P07 | #873 | unaudited |
 | `state_sync_refuses_duplicate_sequences_in_one_batch` | `crates/memory-store/src/lib.rs:22726` | WP-P07 | #873 | unaudited |
@@ -107,10 +111,10 @@ rows citing those files are marked at `3ebfc3b9`.
 | `a_committed_reset_leaves_the_whole_retry_budget_to_the_pass` | `crates/daemon/src/transform/revision_3.rs:635` | WP-E03 (retry bound) | #833 | unaudited |
 | `a_second_no_survivor_resolution_in_one_pass_fails_with_a_cas_conflict` | `crates/daemon/src/transform/revision_3.rs:657` | WP-E03 (one reset per pass) | #833 | unaudited |
 | `a_same_pass_reset_reuses_no_previous_output` | `crates/daemon/src/transform/revision_3.rs:701` | WP-E12, WP-E05 | #833 | unaudited |
-| `a_prune_that_commits_first_fences_the_publication_out` | `crates/daemon/src/transform.rs:19708` | WP-P06, WP-P16, WP-E04 | #833 | unaudited |
-| `a_publication_that_commits_first_makes_the_transform_reload_and_match_the_serial_run` | `crates/daemon/src/transform.rs:19741` | WP-P06, WP-P16 | #833 | unaudited |
-| `serialized_output_cache_take_under_a_new_epoch_returns_nothing` | `crates/daemon/src/transform.rs:27963` | WP-E12 | #833 | unaudited |
-| `serialized_output_cache_evicts_the_least_recently_recorded_session` | `crates/daemon/src/transform.rs:27976` | WP-E12 (budget) | #833 | unaudited |
+| `a_prune_that_commits_first_fences_the_publication_out` | `crates/daemon/src/transform.rs:19854` | WP-P06, WP-P16, WP-E04 | #833 | unaudited |
+| `a_publication_that_commits_first_makes_the_transform_reload_and_match_the_serial_run` | `crates/daemon/src/transform.rs:19887` | WP-P06, WP-P16 | #833 | unaudited |
+| `serialized_output_cache_take_under_a_new_epoch_returns_nothing` | `crates/daemon/src/transform.rs:28109` | WP-E12 | #833 | unaudited |
+| `serialized_output_cache_evicts_the_least_recently_recorded_session` | `crates/daemon/src/transform.rs:28122` | WP-E12 (budget) | #833 | unaudited |
 | `a_hundred_thousand_message_session_commits_a_three_hundred_message_window` | `crates/daemon/src/transform_meta_bound.rs:93` | WP-E10, WP-P07 | #833 | unaudited |
 | `a_legacy_row_is_read_after_a_restart_and_pruned_on_its_first_commit` | `crates/daemon/src/transform_meta_bound.rs:177` | WP-P25 | #833 | unaudited |
 | `a_legacy_prune_that_loses_its_cas_reloads_and_prunes` | `crates/daemon/src/transform_meta_bound.rs:195` | WP-P25 | #833 | unaudited |
