@@ -34,9 +34,13 @@ Neither updates an existing row.
 
 `crates/memory-store/src/lib.rs::tests::no_production_statement_updates_a_history_segment_row`
 reads `lib.rs` through `include_str!`, cuts it at the `#[cfg(test)] mod
-tests {` line, and asserts the production part has no `UPDATE
-history_segments`, at least two `INTO history_segments` statements, and no
-`DO UPDATE` inside any of them.
+tests {` line, collapses whitespace (commit `0231f2f4`), and asserts the
+production part has no `UPDATE history_segments`, at least two `INTO
+history_segments` statements, and no `DO UPDATE` inside any of them. Because
+whitespace is collapsed, a statement split across lines still matches. The
+check is `always(!X)` over the production source, not `unreachable`,
+because it asserts the absence of a statement rather than a code location
+that must not execute.
 
 `crates/memory-store/src/lib.rs::tests::a_state_sync_overwrite_replaces_the_row_and_its_claims_whole`
 seeds a row with a claim, overwrites it through
@@ -74,14 +78,20 @@ revert truncation and a recomp reset over rows carrying claims.
 - Findings: in memory-store production code there are three inserts, the
   one insert and the two in `descend_lineage`, and no update. Every daemon
   hit is under `#[cfg(test)]`: `transform_read_bound`, the `transform.rs`
-  test module, `window_coverage/tests.rs`, and `test_support`. The committed
-  scan reads only `crates/memory-store/src/lib.rs`, so a writer added in
-  another file or crate would pass it. It matches literal text, so an
-  `UPDATE` with other spacing would pass, and an `INSERT OR REPLACE INTO`
-  is counted as an insert without being flagged.
-- Missing evidence: a scan over every production crate.
-- Conclusion: resolved with answer for HEAD by manual grep; the committed
-  check is a source scan of one file.
+  test module, `window_coverage/tests.rs`, and `test_support`. Outside
+  test modules the daemon writes the table only in
+  `crates/daemon/src/test_support/synthetic_history.rs`, so
+  `crates/memory-store/src/lib.rs` is the only production file that writes
+  `history_segments`, and the committed scan reads that file. A writer
+  added in another file or crate would still pass it. Since `0231f2f4` the
+  scan collapses whitespace before matching, so an `UPDATE` with other
+  spacing or split across lines is caught. An `INSERT OR REPLACE INTO` is
+  counted as an insert without being flagged, but it deletes and
+  re-inserts the row, so it keeps the set-once guarantee.
+- Missing evidence: a scan that would catch a writer added outside
+  `crates/memory-store/src/lib.rs`.
+- Conclusion: resolved with answer at `5bdeaf6b`: the scan covers every
+  production writer that exists today.
 
 ### Q: Does the overwrite test fail against the former upsert?
 
@@ -89,8 +99,13 @@ revert truncation and a recomp reset over rows carrying claims.
 - Findings: the prior version was an upsert. It predates the `claims`
   column, so the claim that it kept old claims is reasoning about a
   `DO UPDATE` that did not list the column.
-- Missing evidence: the test was not run against a reverted upsert here.
-- Conclusion: unresolved, needs a mutation run to confirm.
+  A mutation run on the line of `5bdeaf6b`'s parent restored an `INSERT
+  ... ON CONFLICT DO UPDATE` upsert in `write_seed_history_segment_tx`.
+  Both `a_state_sync_overwrite_replaces_the_row_and_its_claims_whole` and
+  `no_production_statement_updates_a_history_segment_row` failed, and the
+  file was restored.
+- Missing evidence: none.
+- Conclusion: resolved with answer: both tests detect a restored upsert.
 
 ### Q: Do the named tests pass at HEAD?
 

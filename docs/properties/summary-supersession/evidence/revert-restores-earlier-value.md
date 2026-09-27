@@ -40,6 +40,10 @@ holds `## 1-1 · S1\nwe set k to a here` and neither `[corrected` nor
 every compose, so no correction set is cached across composes and none can
 survive a revert epoch.
 
+These checks run at the store and compose seams. No test drives a
+transform-level revert that deletes a correcting row and then inspects the
+served m0 and m1. That is a queued gap.
+
 ## Failure scenario
 
 The user reverts the message that changed `k` from `a` to `b`. If the
@@ -61,7 +65,9 @@ by `output-cache-replace-trails-the-accepted-commit` there.
 Two rows sharing a key, with the older row's anchor present in its `p1`; a
 compose showing the splice; a revert truncation to the older row; a compose
 showing the original text; a recomp reset; and a comparison against an empty
-store's m0. The store half checks the loaded claims directly.
+store's m0. The store half checks the loaded claims directly. The queued
+transform-level test reverts through the transform after a correcting row
+and asserts on the served m0 and m1.
 
 ## Investigation log
 
@@ -74,8 +80,9 @@ store's m0. The store half checks the loaded claims directly.
   deleted row is not loaded, so its claims cannot be live and cannot supply a
   `live_value` or `live_ordinal`. The compose test observes no marker after
   truncation.
-- Missing evidence: none.
-- Conclusion: resolved with answer.
+- Missing evidence: a transform-level revert that inspects served m0 and m1
+  (queued gap).
+- Conclusion: resolved with answer at the store and compose seams.
 
 ### Q: Does recomp leave any claim that could render?
 

@@ -32,6 +32,16 @@ each pass is SOFT and returns m0 bytes equal to the recorded m0. A second
 fold publishes s2 (`db.port = 7000`); the next SOFT pass still returns the
 recorded m0. A config change then forces a HARD, and that HARD's m0 holds
 `the db [corrected @3: db.port = 7000]` and no longer holds `listens on 5432`.
+The test writes rows through `MemoryStore::replace_history_segments`, not
+the History Summarizer publish path.
+
+Two unscheduled HARDs start from a SOFT plan in
+`crates/daemon/src/transform.rs`. The SOFT plan recomposes m0 and steps
+`cache_stability::Action::Hard` when m1 overflows (`compose_m1` returns
+`body: None` past `DEFAULT_M1_ROW_CAP`, 259 rows), and on
+`soft_pressure_refold` (`MaterializeReason::PressureRefold`). Both are
+HARDs, so the guarantee allows m0 to change there. No test drives either
+with claims; that is a queued gap.
 
 `crates/daemon/src/m0_compose.rs::correction_compose_tests::a_hard_under_budget_pressure_renders_one_correction_set_and_replays`
 stores two rows padded with 400 filler words. At budget 60,000 s1 renders at
@@ -89,8 +99,12 @@ from one state. Both existing tests construct these conditions.
   the new value. A recompose on SOFT would splice `[corrected @2: ...]` into
   m0 and fail the equality. The final HARD shows the splice does appear once
   m0 recomposes.
-- Missing evidence: none.
-- Conclusion: resolved with answer.
+  The m1-overflow and pressure-refold HARDs that start from a SOFT plan are
+  not driven with claims.
+- Missing evidence: a transform test that reaches each unscheduled HARD
+  over rows carrying claims (queued gap).
+- Conclusion: resolved with answer for scheduled SOFT passes; the
+  unscheduled HARDs are unexercised with claims.
 
 ### Q: Do the named checks pass at HEAD?
 

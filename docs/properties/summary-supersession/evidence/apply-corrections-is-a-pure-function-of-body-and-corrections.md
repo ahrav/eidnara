@@ -51,7 +51,9 @@ Tests:
 
 Nextest runs each test in its own process, and the standard library seeds
 `RandomState` per process, so each run of these tests is a fresh-seed
-process checked against the same literal bytes.
+process checked against the same literal bytes. The record's Exercised
+status is `partial`: each test process checks a literal-byte golden, and no
+test runs two hasher seeds in one comparison.
 
 ## Failure scenario
 
@@ -84,7 +86,8 @@ same check in processes with different hasher seeds.
 - Missing evidence: a test that fixes two distinct seeds and compares bytes.
 - Conclusion: resolved with answer at the strength stated; a per-run
   literal-byte check fails if a seed-dependent order reaches the output,
-  though a single run could pass by chance on a small input.
+  though a single run could pass by chance on a small input. Exercised
+  stays `partial` until a test compares bytes under two seeds.
 
 ### Q: Can allocator state reach the output?
 

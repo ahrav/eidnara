@@ -30,6 +30,13 @@ truncated to `CLAIMS_PER_SEGMENT`. The position in the vector is the index.
 `crates/daemon/src/history_summarizer_validate.rs::parse_claims` unescapes
 each child element before the checks, so the bounds count unescaped bytes.
 
+After acceptance, the store drops a claim whose key the secret scanner
+rewrites (`crates/memory-store/src/lib.rs::prepare_claims`, commit
+`0231f2f4`), so a stored key is never a redacted placeholder. The
+rewritten-key case in
+`crates/memory-store/tests/production_redaction.rs::history_segment_content_redacts_and_new_message_identities_reject`
+exercises this.
+
 Tests: `crates/daemon/src/history_summarizer_citations.rs::tests::each_claim_rule_drops_only_its_own_claim`
 checks eleven candidates and asserts five kept with the exact anchors and
 `Accepted { kept: 5, dropped: 6, anchor_missing: 3 }`.
@@ -94,7 +101,10 @@ bytes but whose unescaped form does not.
 
 - Sources examined: nextest run at `c38af85a` filtering the six tests.
 - Findings: all pass.
-- Missing evidence: the catalog states the proptest fails against a
-  whole-message check; that was not re-run here.
-- Conclusion: resolved with answer for the pass; the mutation claim is
-  unverified in this pass.
+  A mutation run replaced the span check in `check_claim_set` with
+  `frozen.presented.contains(value)`. With that change
+  `cite_acceptance_is_value_inside_the_cited_span` failed, and the file was
+  restored.
+- Missing evidence: none.
+- Conclusion: resolved with answer: the tests pass, and the proptest fails
+  against a whole-message containment check.

@@ -25,11 +25,12 @@ Status is `unaudited` for all of them: adequacy belongs to a separate review
 
 | Check | Location | Covers | Status |
 | --- | --- | --- | --- |
-| `history_segment_content_redacts_and_new_message_identities_reject` | `crates/memory-store/tests/production_redaction.rs` | anchors outside, inside, and across each edge of a secret in `p1`; containment of every stored anchor in the stored trimmed `p1`; a redacted value; a claim whose `key = value` pair is flagged is dropped | unaudited |
+| `history_segment_content_redacts_and_new_message_identities_reject` | `crates/memory-store/tests/production_redaction.rs` | anchors outside, inside, and across each edge of a secret in `p1`; containment of every stored anchor in the stored trimmed `p1`; a redacted value; a claim whose `key = value` pair is flagged, and a claim whose key the scanner rewrites, are dropped | unaudited |
 | `active_scan_audit_expires_with_its_session_note_owner` | same | one claim adds four field scans (key, value, anchor, pair), never one scan of the JSON cell | unaudited |
 | `claims_round_trip_and_a_malformed_cell_reads_as_no_claims` | `crates/memory-store/src/lib.rs` | non-empty claims round-trip equal; `'not json'`, `'{}'`, `'[{"key":1}]'`, and a BLOB read as no claims; the mapper reads `None` as no claims; an empty vector stores `[]` | unaudited |
 | `a_state_sync_overwrite_replaces_the_row_and_its_claims_whole` | same | an overwrite with a new `p1` replaces the row, so no old claim outlives its `p1` | unaudited |
-| `no_production_statement_updates_a_history_segment_row` | same | the production source holds no `UPDATE history_segments` and no upsert into `history_segments` | unaudited |
+| `a_legacy_row_stores_no_claims` | same | a legacy row written with claims reads back with none | unaudited |
+| `no_production_statement_updates_a_history_segment_row` | same | the whitespace-collapsed production source holds no `UPDATE history_segments` and no upsert into `history_segments` | unaudited |
 | `truncate_history_segments_for_revert_deletes_suffix_and_bumps_epoch` | same | after truncation to s1, s1's claim is the only one for its key; recomp leaves no row | unaudited |
 | lineage descent test asserting `copied` claim counts | same | a copy keeps its claims when the re-scan leaves `p1` unchanged and drops them when it rewrites `p1` | unaudited |
 
@@ -57,8 +58,8 @@ Status is `unaudited` for all of them: adequacy belongs to a separate review
 
 | Check | Location | Covers | Status |
 | --- | --- | --- | --- |
-| `the_claims_pass_adds_no_store_work_and_visits_at_most_eight_claims_per_loaded_row` | `crates/daemon/src/m0_compose.rs` (`bounded_read_tests`) | at (H, N) = (100, 200), (4,000, 8,000), and (50,000, 10^6), under no claims and both correction regimes, m0 and m1 composes issue equal statements, rows, and VM steps; claims over R are at most 8 x \|R\| | unaudited |
-| `every_loaded_claim_has_its_store_wide_live_claim_in_the_loaded_set` | same | the argmax over R equals the store-wide argmax for three m0 budgets and three m1 folded sequences | unaudited |
+| `the_claims_pass_adds_no_store_work_and_visits_at_most_eight_claims_per_loaded_row` | `crates/daemon/src/m0_compose.rs` (`bounded_read_tests`) | at (H, N) = (100, 200), (4,000, 8,000), and (50,000, 10^6), under no claims and both correction regimes, m0 and m1 composes issue equal statements, rows, and VM steps; the `CLAIMS_VISITED` count of an m0 compose equals the claims held by R and is at most 8 x \|R\|; an m1 compose visits twice the claims on its rows; both regimes put claims in R; corrections change the rendered m0 | unaudited |
+| `every_loaded_claim_has_its_store_wide_live_claim_in_the_loaded_set` | same | the argmax over R equals the store-wide argmax for three m0 budgets and three m1 folded sequences; no legacy row carries claims; R with its newest claimed row removed fails the property | unaudited |
 
 ## Guidance
 
@@ -76,5 +77,7 @@ Status is `unaudited` for all of them: adequacy belongs to a separate review
   hash-map iteration.
 - No test captures the malformed-cell diagnostic line; one line per load is
   read from `claims_from_cell`.
+- The transform test arms the soft refresh by hand; no test lets the m1
+  revision digest and the scheduler decide when a pending delta is served.
 - No committed check covers render time; the budget guard's cost under dense
   corrections is recorded in `render-cost-bounded-by-rendered-set` only.

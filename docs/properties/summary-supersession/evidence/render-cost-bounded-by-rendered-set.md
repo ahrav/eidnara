@@ -29,6 +29,27 @@ asserts both claim regimes produce ledgers equal to `ClaimRegime::None`, that
 claims over the loaded rows are at most 8 x rows at each budget, and that the
 dense regime loads a non-zero claim count.
 
+Commit `1c30058c` adds a test-support counter,
+`crates/daemon/src/decay_render.rs::CLAIMS_VISITED`, that `live_claims`
+bumps once per claim; it compiles only under `test` or the `test-support`
+feature. The bound test now asserts that an m0 compose visits exactly the
+claims held by R (one scan) and at most `CLAIMS_PER_SEGMENT x |R|`, that an
+m1 compose visits exactly twice the claims on its rows (one scan for
+corrections, one for the block), that both regimes put claims in R at every
+scale point, and that corrections change the rendered m0 bytes.
+
+The committed test does not check these spec clauses directly:
+
+- At most 8 x |R| substring searches per compose. This holds because each
+  row has at most 8 corrections and `apply_corrections` does one `find` per
+  correction.
+- At most 8 markers or footer entries per rendered segment, for the same
+  reason.
+- About 1.9 KB added per segment before the guard. A marker is at most a
+  64-byte key, a 128-byte value, and about 20 bytes of syntax, so 8
+  markers stay under 1.7 KB. This is not measured.
+- At most 8 x |R| entries in the m1 block, one entry per claim on its rows.
+
 `crates/daemon/src/decay_render.rs::render_rows` runs `corrections_for` once
 per compose over R. `crates/daemon/src/m1_compose.rs::compose_m1` and
 `render_memory_updates` work only over the rows `load_history_segments_above`
@@ -67,8 +88,13 @@ driver that times `compose_m0` and subtracts a separately timed fold read.
   filtered to this part's tests.
 - Findings: the test passed (17 of 17 in the run, 33.4 s for this test).
   Store work is equal with and without claims, and visits stay within 8 x |R|.
-- Missing evidence: none for the structural bound.
-- Conclusion: resolved with answer.
+  At `5bdeaf6b` the test also counts visits through `CLAIMS_VISITED`, so
+  the one-scan bound for m0 and the two-scan bound for m1 are asserted, not
+  inferred from claims held.
+- Missing evidence: direct checks of the substring-search, per-segment
+  marker, per-segment size, and m1-entry clauses listed above.
+- Conclusion: resolved with answer for the store-work and visit bounds; the
+  other clauses hold by source reading.
 
 ### Q: Is render time beyond the load flat in H?
 
@@ -86,10 +112,31 @@ driver that times `compose_m0` and subtracts a separately timed fold read.
   4,025 / 3,284 (claims in R 4,968 / 1,241 / 246); every-third 944,196 /
   964,130 / 724,627 (claims in R 19,872 / 19,872 / 16,560). With N fixed,
   claims per row fall as H grows, so time falls; no point grows with H.
+  Two further interleaved runs of the dense fixed-span row at `c38af85a`
+  gave medians 656,395 / 717,079 / 720,249 and 658,540 / 719,436 / 722,266
+  at H = 2,500 / 10,000 / 50,000 (largest over smallest +9.7% and +9.7%,
+  against +9.5% in the first run). Nearly all of the step lies between
+  H = 2,500 and 10,000, where two more legacy rows of the generator
+  (distances 2,600 and 2,900) join R (|R| = 2,487 versus 2,489); 10,000 to
+  50,000 adds +0.3%.
+  Measurement caveats: "p99" at n = 30 is the sample maximum. "Beyond the
+  load" is the per-iteration difference of `compose_m0` and a separately
+  timed fold read, which includes compose-side work other than the fold
+  read; the load always precedes compose, so compose's internal read is
+  warm. Flatness is judged on the fixed-span sweep, which holds claims in R
+  constant. The fixed-N = 10^6 sweep confounds H with claims per row and
+  fails a symmetric plus-or-minus 10% reading, but shows no increase with
+  H.
+  Provenance: the driver's sha256 is
+  `3c1218dfe76d5a2ab92df23b1fbf56fe595f3563176c408c30c15736930d5617`. The
+  timing ran at `c38af85a` plus the uncommitted driver module. `c38af85a`
+  to `5bdeaf6b` adds only docs, test code, the test-support counter, and
+  the store changes of `0231f2f4`; none is on the timed path except the
+  counter, which compiles only with test support.
 - Missing evidence: the driver and raw report are not committed, by the #840
   artifact decision, so a reader cannot rerun them from the repository.
-- Conclusion: resolved with answer for flatness; confidence medium because the
-  timing is not a committed check.
+- Conclusion: resolved with answer for flatness on the fixed-span sweep;
+  confidence medium because the timing is not a committed check.
 
 ### Q: Why does the dense regime cost about 0.7 s?
 
@@ -101,7 +148,10 @@ driver that times `compose_m0` and subtracts a separately timed fold read.
   1.2 ms unguarded and 5.7 ms guarded. Footers raise rendered bytes above the
   curve's target, so the guard runs many iterations, and each re-joins and
   re-estimates the whole body, which is quadratic in |R|. The claims pass
-  stays within 8 x |R|.
+  stays within 8 x |R|. The dense regime spends 0.66 to 0.96 s beyond the
+  load, 200 to 300 times the no-claims baseline, from the guard's full
+  re-estimate per demotion in `render_decayed_history_segments`. The cost
+  is flat in H. It is a known regression that needs a follow-up ticket.
 - Missing evidence: a decision on whether the guard should count footer bytes
   or estimate incrementally.
 - Conclusion: needs human input. The record's structural bound holds; the

@@ -54,6 +54,20 @@
 - A render-time bound for the budget guard, once the owner decides how the
   guard should account for footer bytes.
 
+## Gaps queued by the portfolio evaluation
+
+- A transform test that writes a correcting segment without
+  `arm_soft_refresh` and runs passes under the default scheduler, asserting
+  the block appears within the stated bound
+  (`correction-visible-before-next-hard`).
+- Transform tests with claims under an m1 row-cap overflow and under a soft
+  pressure refold, asserting the unscheduled HARD splices the live value and
+  the next SOFT keeps m0 frozen (`m0-bytes-change-only-at-hard`).
+- A transform-level revert that deletes a correcting row, asserting served m0
+  and m1 (`revert-restores-earlier-value`).
+- A property test over `prepare_claims` asserting every stored key keeps the
+  key grammar or its claim is dropped (`accepted-claim-satisfies-contract-grammar`).
+
 ## Ranking, by cheapest valid oracle
 
 1. The two property tests in `decay_render.rs`: generated inputs against

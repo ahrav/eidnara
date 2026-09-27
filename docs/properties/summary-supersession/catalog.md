@@ -7,8 +7,9 @@ invariant-modeling pass at `265df096` and converted here after M1
 ([#838](https://github.com/ahrav/eidnara/issues/838)), M2
 ([#839](https://github.com/ahrav/eidnara/issues/839)), and M3
 ([#840](https://github.com/ahrav/eidnara/issues/840)) made each one
-checkable. Every check was run at the commit that adds this catalog.
-References name functions and tests rather than line numbers.
+checkable. The cited checks were run on the branch that adds this catalog;
+each evidence file names the commit its runs used. References name functions
+and tests rather than line numbers.
 
 ## Scope
 
@@ -65,11 +66,12 @@ linked under Relationships; it is not re-derived here.
 | `marker-grammar-is-single-and-named-in-guidance` | safety | 7 | yes |
 | `render-cost-bounded-by-rendered-set` | safety | 3, 5 | yes |
 
-Semantics distribution: `always` 16, `always-or-unreached` 0, `sometimes` 0,
-`reachable` 0, `unreachable` 0. One `always` record,
-`correction-visible-before-next-hard`, is bounded liveness with its bound
-stated in m1 composes; `claims-column-is-set-once-at-insert` also names an
-`unreachable` source condition in its Check.
+Semantics distribution: `always` 17, `always-or-unreached` 0, `sometimes` 0,
+`reachable` 0, `unreachable` 0. `correction-visible-before-next-hard` is
+bounded liveness with its bound stated in m1 composes, and
+`claims-column-is-set-once-at-insert` is `always(!X)` over the production
+source. The campaign marker the specification paired with the liveness record
+is queued in `fault-map.md`.
 
 ## Records
 
@@ -78,7 +80,7 @@ stated in m1 composes; `claims-column-is-set-once-at-insert` also names an
 Type: safety
 Reachability: default-production - every chunk the History Summarizer validates goes through `validate_history_summarizer_output`, which computes `claims_outcome` after the segments are final
 Status: active
-Exercised: yes - `a_claims_block_never_changes_what_publishes_or_the_facts_outcome` validates one chunk with no block, a truncated block, a 9-claim block, a repeated block, and stray material; `nonadmission_facts_survive_later_firings_failures_and_reopen` publishes a chunk carrying claims through the store
+Exercised: yes - `a_claims_block_never_changes_what_publishes_or_the_facts_outcome` validates one chunk with no block, a truncated block, a 9-claim block, a repeated block, and stray material; `claims_attach_to_the_accepted_segment_their_cite_names` compares a chunk with an outside cite to the chunk without it; `nonadmission_facts_survive_later_firings_failures_and_reopen` publishes a chunk carrying claims through the store
 Guarantee: No claims block, an unreadable block, or any per-claim rejection changes only the segments' `claims` and the chunk's `claims_outcome`, never whether or which segments publish, the publication floor, or the facts outcome.
 Check: `always` - the validated chunk with its claims and `claims_outcome` cleared equals the chunk validated without the block; asserted on every validation because the block is model output and can be anything
 Fault/timing angle: none
@@ -94,12 +96,12 @@ Type: safety
 Reachability: default-production - `check_claim_set` runs on every chunk whose claims block parses
 Status: active
 Exercised: yes - `each_claim_rule_drops_only_its_own_claim` and `a_segment_keeps_the_last_claim_per_key_then_the_first_eight` drive each rule directly; `claims_attach_to_the_accepted_segment_their_cite_names`, `the_value_bound_counts_unescaped_bytes`, and `the_provisional_last_segment_carries_its_claims` drive them through the validator
-Guarantee: Every kept claim has a key matching `[a-z0-9_-]+(\.[a-z0-9_-]+)+` within 64 bytes, a value within 128 bytes after unescaping, exactly one citation that resolves through the frozen alias table to a presented span containing the value, and a cited message inside a persisted segment; each segment keeps the last claim per key and then the first 8, and a claim's index is its position.
+Guarantee: Every kept claim has a key matching `[a-z0-9_-]+(\.[a-z0-9_-]+)+` within 64 bytes, a value within 128 bytes after unescaping, exactly one citation that resolves through the frozen alias table to a presented span containing the value, and a cited message inside a persisted segment; each segment keeps the last claim per key and then the first 8, and a claim's index is its position; the store drops a claim whose key the secret scanner rewrites, so no stored key is a redacted placeholder.
 Check: `always` - a violating claim is absent from the validated segment, not repaired; the property test asserts cite acceptance equals `presented.get(start..end).is_some_and(|s| s.contains(value))`
 Fault/timing angle: none
 Required faults and enabling state: an uppercase key; a dotless key; a 129-byte value after unescaping; two citations; an unknown alias; a value outside its cited span; a cite into a discarded provisional segment; duplicate keys; nine claims
-Confidence: high - [evidence](evidence/accepted-claim-satisfies-contract-grammar.md). Verified the D-4 order in `check_claim_set`, that the value bound counts unescaped bytes, and that the property test fails against a whole-message containment check
-Existing check: `crates/daemon/src/history_summarizer_citations.rs::tests::{each_claim_rule_drops_only_its_own_claim, a_segment_keeps_the_last_claim_per_key_then_the_first_eight, cite_acceptance_is_value_inside_the_cited_span}`; `crates/daemon/src/history_summarizer_citations_golden.rs::claims_attach_to_the_accepted_segment_their_cite_names`; `crates/daemon/src/history_summarizer_validate.rs::tests::{the_value_bound_counts_unescaped_bytes, the_provisional_last_segment_carries_its_claims}`
+Confidence: high - [evidence](evidence/accepted-claim-satisfies-contract-grammar.md). Verified the D-4 order in `check_claim_set` and that the value bound counts unescaped bytes; a mutation run replacing the span check with a whole-message check made the property test fail
+Existing check: `crates/daemon/src/history_summarizer_citations.rs::tests::{each_claim_rule_drops_only_its_own_claim, a_segment_keeps_the_last_claim_per_key_then_the_first_eight, cite_acceptance_is_value_inside_the_cited_span}`; `crates/daemon/src/history_summarizer_citations_golden.rs::claims_attach_to_the_accepted_segment_their_cite_names`; `crates/daemon/src/history_summarizer_validate.rs::tests::{the_value_bound_counts_unescaped_bytes, the_provisional_last_segment_carries_its_claims}`; the rewritten-key case in `crates/memory-store/tests/production_redaction.rs::history_segment_content_redacts_and_new_message_identities_reject`
 Impact: A claim with a bad key or a value the cited message never stated would correct history with an invented value
 Open questions: None.
 
@@ -155,10 +157,10 @@ Reachability: default-production - the publish, replace, state-sync, and lineage
 Status: active
 Exercised: yes - `no_production_statement_updates_a_history_segment_row` scans the production source; `a_state_sync_overwrite_replaces_the_row_and_its_claims_whole` overwrites a seeded row; the revert test truncates and resets rows carrying claims
 Guarantee: A row's `claims` bytes are the bytes written at its insert or the row is gone; no production statement updates a history segment row, and a state-sync overwrite deletes and re-inserts through the one insert.
-Check: `always` - the production source holds no `UPDATE history_segments` and no upsert into `history_segments`; an `unreachable` source condition, checked by source scan because no runtime point would observe a missing statement
+Check: `always(!X)` - X is a production statement in `crates/memory-store/src/lib.rs`, the only production writer of `history_segments`, that updates or upserts a history segment row; checked by a whitespace-collapsed source scan because no runtime point observes a statement that is absent. The scan matches literal text, and `INSERT OR REPLACE` would delete and re-insert, which keeps the guarantee
 Fault/timing angle: none
 Required faults and enabling state: a state-sync overwrite of a row carrying claims; revert truncation; recomp reset; lineage descent
-Confidence: high - [evidence](evidence/claims-column-is-set-once-at-insert.md). Verified the source scan finds at least the two insert statements and no `DO UPDATE`, and that the overwrite test fails against the former upsert, whose `DO UPDATE` kept old claims under a rewritten `p1`
+Confidence: high - [evidence](evidence/claims-column-is-set-once-at-insert.md). Verified the source scan finds at least the two insert statements and no `DO UPDATE`; a mutation run restoring the former upsert made both the scan and the overwrite test fail
 Existing check: `crates/memory-store/src/lib.rs::tests::{no_production_statement_updates_a_history_segment_row, a_state_sync_overwrite_replaces_the_row_and_its_claims_whole, truncate_history_segments_for_revert_deletes_suffix_and_bumps_epoch}`
 Impact: A claim could outlive the `p1` it anchors to, or a heal or overwrite could rewrite history the renderer has already corrected against
 Open questions: None.
@@ -183,13 +185,13 @@ Open questions: None.
 Type: safety
 Reachability: default-production - the m0 fold read and the m1 read above the folded sequence are the only segment loads a compose makes
 Status: active
-Exercised: yes - `every_loaded_claim_has_its_store_wide_live_claim_in_the_loaded_set` compares R's argmax with the store-wide argmax over a 4,000-row session with recurring keys
+Exercised: yes - `every_loaded_claim_has_its_store_wide_live_claim_in_the_loaded_set` compares R's argmax with the store-wide argmax over a 4,000-row session with recurring keys, with a negative control that removes R's newest claimed row; `a_legacy_row_stores_no_claims` enforces the legacy premise at the store
 Guarantee: For every claim in R, its key's live claim over R equals its key's live claim over the whole store, so a stale claim never renders as live because its corrector fell outside the read.
 Check: `always` - for the m0 fold at budgets 20, 60,000, and 10,000,000 and for m1's rows above three folded sequences, each loaded claim's argmax over R equals the store-wide argmax; each R is a strict subset of the store
 Fault/timing angle: none
 Required faults and enabling state: R strictly smaller than the store; keys that recur across the boundary of R; legacy rows inside and past the pressure window
-Confidence: high - [evidence](evidence/superseding-claim-is-rendered-whenever-stale-claim-is.md). Verified that both reads return a newest suffix of non-legacy rows plus legacy rows, which carry no claims from the validator, so any row newer than a loaded row is loaded
-Existing check: `crates/daemon/src/m0_compose.rs::bounded_read_tests::every_loaded_claim_has_its_store_wide_live_claim_in_the_loaded_set`
+Confidence: high - [evidence](evidence/superseding-claim-is-rendered-whenever-stale-claim-is.md). Verified that both reads return the newest non-legacy rows plus every legacy row, that the store keeps no claims on a legacy row, so any claimed row newer than a loaded row is loaded, and that the gapped set fails the check
+Existing check: `crates/daemon/src/m0_compose.rs::bounded_read_tests::every_loaded_claim_has_its_store_wide_live_claim_in_the_loaded_set`; `crates/memory-store/src/lib.rs::tests::a_legacy_row_stores_no_claims`
 Impact: A read that skipped a middle row would serve a superseded value as current
 Open questions: None.
 
@@ -228,7 +230,7 @@ Open questions: None.
 Type: safety
 Reachability: default-production - every rendered row
 Status: active
-Exercised: yes - `corrections_render_to_fixed_bytes` pins literal bytes for a fixed input in every test process, each of which seeds its own hasher
+Exercised: partial - `corrections_render_to_fixed_bytes` pins literal bytes for a fixed input in every test process, each of which seeds its own hasher; no test compares two hasher seeds in one run
 Guarantee: Rendered bytes are a function of the loaded rows and their claims alone; no map iteration order, clock, or allocator state reaches the output.
 Check: `always` - the fixed input renders the pinned literal bytes; every collection on the path is a `Vec` or a `BTreeMap`
 Fault/timing angle: none
@@ -259,10 +261,10 @@ Open questions:
 Type: safety
 Reachability: default-production - m0 composes only on HARD passes
 Status: active
-Exercised: yes - `a_correction_rides_m1_until_the_next_hard_splices_it_into_m0` publishes two correcting folds between HARDs and runs SOFT passes after each; `a_hard_under_budget_pressure_renders_one_correction_set_and_replays` composes twice under a budget that demotes the stale row
+Exercised: partial - `a_correction_rides_m1_until_the_next_hard_splices_it_into_m0` writes two correcting folds through `replace_history_segments` between HARDs and runs SOFT passes after each; `a_hard_under_budget_pressure_renders_one_correction_set_and_replays` composes twice under a budget that demotes the stale row; the HARDs a SOFT plan takes on m1 overflow and on a soft pressure refold are not driven with claims
 Guarantee: Between two HARD passes the served m0 bytes are constant even when superseding segments publish; within one HARD every retry renders the same corrections, and the final bytes replay from the same state.
 Check: `always` - m0 bytes equal across SOFT passes after each correcting publish, and two composes of one state under budget pressure are byte-equal
-Fault/timing angle: an anchor that hits at tier 1 and misses at tier 2 turns a splice into a footer across the retry loop; the final bytes must still replay
+Fault/timing angle: an anchor that hits at tier 1 and misses at tier 2 turns a splice into a footer across the retry loop, and the final bytes must still replay; a SOFT plan recomposes m0 as a HARD on m1 overflow past the row cap and on a soft pressure refold
 Required faults and enabling state: a correcting publish after a HARD; a second fold before the next HARD; a budget small enough to demote the stale row
 Confidence: high - [evidence](evidence/m0-bytes-change-only-at-hard.md). Verified that the transform harness serves the frozen m0 on SOFT, that the next HARD splices the newest value, and that corrections are attached before `render_m0_with_decay_pressure_retry`
 Existing check: `crates/daemon/src/transform.rs::tests::a_correction_rides_m1_until_the_next_hard_splices_it_into_m0`; `crates/daemon/src/m0_compose.rs::correction_compose_tests::a_hard_under_budget_pressure_renders_one_correction_set_and_replays`
@@ -274,23 +276,24 @@ Open questions: None.
 Type: liveness
 Reachability: default-production - `compose_m1` fills the `memory_updates` slot on every m1 compose
 Status: active
-Exercised: yes - `a_correction_rides_m1_until_the_next_hard_splices_it_into_m0` asserts the block after each correcting fold; `m1_names_every_claim_on_its_rows_with_the_live_value` asserts its content
+Exercised: partial - `a_correction_rides_m1_until_the_next_hard_splices_it_into_m0` asserts the block after each correcting fold, but it arms the soft refresh by hand with `arm_soft_refresh`, whose only production caller is the operator `session.flush` request, so the digest-driven recompose after a publish and a scheduler `Defer` are not constructed; `m1_names_every_claim_on_its_rows_with_the_live_value` asserts the block's content
 Guarantee: After a segment carrying a claim publishes, the next m1 composition carries `<memory-updates>` with the precedence sentence and an entry naming the key, the live value or a retraction, and the ordinal; the bound is one m1 recompose, which the m1 revision digest forces on any new segment.
-Check: `always` - within one m1 compose after the publish, the block names every claim on the rows above the folded sequence in `(sequence, idx)` order with its key's live value; bounded by one compose, not an unbounded "eventually"
+Check: `always` - within the first non-`Defer` pass after the publish, bounded by one m1 compose, the block names every claim on the rows above the folded sequence in `(sequence, idx)` order with its key's live value; not an unbounded "eventually". The deterministic construction replaces the specification's `sometimes` campaign marker for the content; the marker itself is queued in `fault-map.md`
 Fault/timing angle: the window between the publish and the next HARD, during which m0 still serves the stale value
 Required faults and enabling state: a HARD; a fold producing a superseding claim; one SOFT pass
 Confidence: high - [evidence](evidence/correction-visible-before-next-hard.md). Verified the block lists every claim on the new rows per decision A7, including a claim that supersedes nothing and duplicate entries for one key
 Existing check: `crates/daemon/src/transform.rs::tests::a_correction_rides_m1_until_the_next_hard_splices_it_into_m0`; `crates/daemon/src/m0_compose.rs::correction_compose_tests::m1_names_every_claim_on_its_rows_with_the_live_value`
 Impact: The agent would act on the stale m0 value until the next HARD
 Open questions:
-- Q3 of the specification, a forced HARD above an m1 block size, would change this record's bound; M3 measured the burst and recorded no forced HARD, pending owner confirmation (needs human input)
+- What bounds the number of consecutive `Defer` passes while an m1 delta is pending (needs human input)
+- Q3 of the specification: at the 8-claim cap the burst's cumulative block tokens exceed one m0 re-freeze by 3.6% to 10% in the last folds before the natural HARD, so the criterion alone selects a forced HARD there; at 3 claims per fold it does not. M3 proposes no forced HARD, a deviation from the literal criterion (needs human input)
 
 ### revert-restores-earlier-value
 
 Type: safety
 Reachability: default-production - revert truncation and recomp reset run on the transform's revert paths
 Status: active
-Exercised: yes - the store test truncates s1 (`k = a`) and s2 (`k = b`) to s1 and resets for recomp; the compose test renders before and after both
+Exercised: partial - the store test truncates s1 (`k = a`) and s2 (`k = b`) to s1 and resets for recomp, and the compose test renders before and after both; no test drives a transform-level revert that deletes a correcting row
 Guarantee: After revert truncation, liveness over the remaining rows makes a claim superseded only by deleted rows live again, so it renders without a marker; after recomp no claims exist and rendering is identity; no correction references a deleted row.
 Check: `always` - s1 renders with a marker before the truncation and without one after; after recomp, m0 equals the empty store's m0
 Fault/timing angle: none; corrections are recomputed per compose, so no cached correction survives a revert epoch
@@ -320,14 +323,14 @@ Open questions: None.
 Type: safety
 Reachability: default-production - every m0 and m1 compose
 Status: active
-Exercised: partial - the committed bound test covers store work and claim visits up to H = 50,000 and N = 10^6 under both correction regimes; render time was measured with an uncommitted driver, and under the dense regime the budget guard's cost dominates
-Guarantee: Per compose, the claims pass visits at most 8 x |R| claims and adds no store statement, row, or VM step beyond the segment load; nothing it does grows with H or N beyond the claims stored on rows in R.
-Check: `always` - store statements, rows, and VM steps per compose are equal with and without claims, and claims visited over R are at most 8 x |R|; asserted with the statement-work ledger rather than timing, which is not a committed check
+Exercised: partial - the committed bound test covers store work and measured claim visits up to H = 50,000 and N = 10^6 under both correction regimes; the per-segment marker, byte, and m1-entry clauses hold by construction and are not measured; render time was measured with an uncommitted driver
+Guarantee: Per compose, each liveness scan visits each claim of R once, at most 8 x |R|, and the pass adds no store statement, row, or VM step beyond the segment load; at most 8 x |R| substring searches; at most 8 markers or footer entries and about 1.9 KB added per rendered segment before the guard; at most 8 x |R| entries in the m1 block; nothing grows with H or N beyond the claims stored on rows in R.
+Check: `always` - store statements, rows, and VM steps per compose are equal with and without claims, an m0 compose's `CLAIMS_VISITED` count equals the claims held by R and is at most 8 x |R|, and an m1 compose visits twice the claims on its rows (corrections, then the block); timing is not a committed check
 Fault/timing angle: footers raise rendered bytes above the curve's target, so the budget guard demotes rows one tier per iteration and re-estimates the whole body each time
 Required faults and enabling state: a session of 10^6 messages; one correction per three messages; one per two hundred; no claims
-Confidence: medium - [evidence](evidence/render-cost-bounded-by-rendered-set.md). The structural bound is verified by the committed test. Render time beyond the load is flat in H (within 9.5% from H = 2,500 to 50,000 at a fixed span), but under the dense regime it is about 0.7 s against 3 ms without claims, because the budget guard's full re-estimate per demotion is quadratic in R
+Confidence: medium - [evidence](evidence/render-cost-bounded-by-rendered-set.md). The structural bound is verified by the committed test. Render time beyond the load is flat in H on the fixed-span sweep (+9.5% to +9.7% from H = 2,500 to 50,000 over three runs, +0.3% from 10,000 to 50,000). Under one correction per three messages a HARD compose spends 0.66 to 0.96 s beyond the load, against about 3 ms without claims, from the budget guard's full re-estimate per demotion, which is quadratic in |R|
 Existing check: `crates/daemon/src/m0_compose.rs::bounded_read_tests::the_claims_pass_adds_no_store_work_and_visits_at_most_eight_claims_per_loaded_row`
-Impact: A HARD pass under dense corrections spends about 0.7 s rendering, which the claims pass itself does not bound
+Impact: A HARD pass under dense corrections spends up to about 1 s rendering, a regression the claims pass itself does not bound and that needs a follow-up
 Open questions:
 - Should the budget guard account for footer bytes or estimate incrementally, so dense corrections do not make the guard quadratic in R (needs human input)
 
@@ -336,7 +339,7 @@ Open questions:
 These durable records hold for the surfaces above and are linked, not
 re-derived:
 
-- `../memory-store/catalog.md`: `failed-fenced-transaction-leaves-no-partial-state`,
+- [memory-store](../memory-store/catalog.md): `failed-fenced-transaction-leaves-no-partial-state`,
   `write-predicates-are-re-evaluated-inside-the-write-transaction`,
   `recorded-schema-version-cannot-disagree-with-the-actual-schema`,
   `durable-identity-decision-is-made-inside-the-write-transaction`,
@@ -345,7 +348,7 @@ re-derived:
   `core-decay-tier-ladder-monotone-and-archive-agreement`,
   `core-decay-budget-pressure-range-totality`,
   `core-decay-archive-termination-bound`.
-- `../daemon/history_summarizer/catalog.md`:
+- [daemon/history_summarizer](../daemon/history_summarizer/catalog.md):
   `publish-transaction-is-the-single-commit-point`,
   `crash-before-publish-commit-refires-without-partial-state`,
   `publish-fence-rejects-selected-content-drift`,
@@ -355,15 +358,15 @@ re-derived:
   `hv-control-characters-reach-durable-rows`,
   `hv-unescape-xml-double-decodes-entities`,
   `hv-side-channel-anchor-out-of-range-drops-silently`.
-- `../daemon/transform/catalog.md`:
+- [daemon/transform](../daemon/transform/catalog.md):
   `revert-truncate-commits-outside-the-terminal-cas`,
   `revert-epoch-bumps-at-most-once-per-logical-recut`,
   `output-cache-replace-trails-the-accepted-commit`,
   `canonical-read-staleness-is-distinguishable-from-emptiness`.
-- `../daemon/rendering/catalog.md`:
+- [daemon/rendering](../daemon/rendering/catalog.md):
   `render-a-render-is-deterministic-over-fixed-inputs`,
   `render-a-composition-order-is-fixed-and-each-unit-appears-once`.
-- `../shared-primitives/catalog.md`: `hard-bust-drains-deferred-work`,
+- [shared-primitives](../shared-primitives/catalog.md): `hard-bust-drains-deferred-work`,
   `cache-stability-golden-vectors-are-byte-stable`.
 
 Within this part:
