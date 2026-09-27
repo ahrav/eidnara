@@ -118,7 +118,7 @@ pub enum RunError {
         backend_calls: u32,
     },
     /// The stale-preference world's recording left no cassette to replay:
-    /// the cassette refused a frame or the host refused a turn.
+    /// the cassette refused a frame.
     NoRecording,
     /// The coexistence world holds fewer restatements than pairs requested.
     TooFewRestatements {
@@ -947,6 +947,54 @@ fn record(
         refusals: 0,
         turn_refused: None,
     })
+}
+
+/// The cassette a recording replays, or why there is none: the host's
+/// refusal, with its turn and code, over the cassette's.
+fn replay_of(recording: Recording, messages: usize) -> Result<Backend, RunError> {
+    if let Some(refused) = recording.turn_refused {
+        return Err(RunError::TurnRefused {
+            policy: "stale preference recording",
+            messages,
+            refused,
+        });
+    }
+    recording.replay.ok_or(RunError::NoRecording)
+}
+
+#[cfg(test)]
+#[test]
+fn a_recording_the_host_refused_keeps_the_refusal() {
+    let refused = RefusedLife {
+        refused: TurnRefused {
+            turn: 7,
+            code: "host.transform_failed".to_string(),
+            message: "host returned a terminal error (message redacted)".to_string(),
+        },
+        summarizer_failure: None,
+    };
+    let unrecorded = |turn_refused| Recording {
+        replay: None,
+        segments: Vec::new(),
+        cassette_bytes: 0,
+        firings: 3,
+        unreached: 0,
+        refusals: 0,
+        turn_refused,
+    };
+    assert_eq!(
+        replay_of(unrecorded(Some(refused.clone())), 900).unwrap_err(),
+        RunError::TurnRefused {
+            policy: "stale preference recording",
+            messages: 900,
+            refused,
+        },
+        "a host refusal must not read as a cassette refusal"
+    );
+    assert_eq!(
+        replay_of(unrecorded(None), 900).unwrap_err(),
+        RunError::NoRecording
+    );
 }
 
 /// The fixture folds `CHUNK` presented lines into one segment, and the
@@ -2046,7 +2094,7 @@ pub fn stale_preference(config: &Config, pairs: usize) -> Result<StaleExport, Ru
     let cassettes = charges.occupy()?;
     let recording = record("stale", &aged_world, cassettes.path(), &mut charges)?;
     charges.observe(Resource::CassetteBytes, recording.cassette_bytes)?;
-    let replay = recording.replay.ok_or(RunError::NoRecording)?;
+    let replay = replay_of(recording, aged_world.messages.len())?;
     let rendered = |id: &EventId| {
         let ordinal = aged_world
             .messages
