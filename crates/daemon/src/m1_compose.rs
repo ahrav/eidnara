@@ -3,9 +3,14 @@ use std::hash::{Hash, Hasher};
 use std::time::Instant;
 
 use context_core::decay::Tier;
-use memory_store::{MemoryStore, MemoryStoreError, ModuleMeta, NoteDelivery, StoredNote};
+use memory_store::{
+    MemoryStore, MemoryStoreError, ModuleMeta, NoteDelivery, StoredHistorySegment, StoredNote,
+};
 
-use crate::decay_render::DecayRenderHistorySegment;
+use crate::decay_render::{
+    MarkerForm, PRECEDENCE_SENTENCE, correction_marker, corrections_line, escape_xml_content,
+    guard_history_segment_body, live_claims, render_rows,
+};
 use crate::m0_compose::trim_user_profile_to_budget;
 use crate::memory_render::{
     M1_PLACEHOLDER, assemble_m1, render_new_history_segments, render_user_profile_block,
@@ -149,6 +154,33 @@ fn render_note_delta(notes: &[StoredNote]) -> String {
     lines.join("\n")
 }
 
+/// The `<memory-updates>` block for rows that m1 serves before the next HARD: the precedence
+/// sentence and one entry per claim on those rows, in `(sequence, idx)` order, each naming its
+/// key's live value among `segments`. Empty when the rows carry no claims.
+fn render_memory_updates(segments: &[StoredHistorySegment]) -> String {
+    let live = live_claims(segments);
+    let entries: Vec<String> = segments
+        .iter()
+        .flat_map(|segment| &segment.claims)
+        .map(|claim| {
+            let (_, current) = live[claim.key.as_str()];
+            correction_marker(
+                MarkerForm::Entry,
+                &claim.key,
+                &current.value,
+                current.ordinal,
+            )
+        })
+        .collect();
+    if entries.is_empty() {
+        return String::new();
+    }
+    format!(
+        "<memory-updates>\n{PRECEDENCE_SENTENCE}\n{}\n</memory-updates>",
+        guard_history_segment_body(&escape_xml_content(&corrections_line(&entries)))
+    )
+}
+
 /// Composes new history_segments, a changed user profile, and newly claimed notes.
 ///
 /// Renders up to `row_cap` of the newest history_segments above the folded sequence, oldest
@@ -169,18 +201,8 @@ pub fn compose_m1(
 ) -> Result<M1Composition, MemoryStoreError> {
     let above =
         store.load_history_segments_above(session_id, meta.folded_history_segment_seq, row_cap)?;
-    let rendered_history_segments = above
-        .history_segments
-        .iter()
-        .map(|history_segment| {
-            let mut rendered = DecayRenderHistorySegment::from(history_segment);
-            if !temporal_awareness {
-                rendered.start_date = None;
-                rendered.end_date = None;
-            }
-            rendered
-        })
-        .collect::<Vec<_>>();
+    let rendered_history_segments = render_rows(&above.history_segments, temporal_awareness);
+    let memory_updates = render_memory_updates(&above.history_segments);
     let history_segment_refs = rendered_history_segments.iter().collect::<Vec<_>>();
     let new_history_segments_block = render_new_history_segments(&history_segment_refs);
     let new_coverage = above
@@ -220,7 +242,7 @@ pub fn compose_m1(
     Ok(M1Composition {
         body: (!above.overflow).then(|| {
             assemble_m1(
-                "",
+                &memory_updates,
                 &new_history_segments_block,
                 "",
                 &profile_and_notes,

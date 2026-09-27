@@ -65,3 +65,12 @@ fn the_export_reads_the_tier_the_daemon_rendered() {
         assert_eq!(export.pairs[0].stale_tier, tier, "{history}");
     }
 }
+
+/// The production precedence sentence is the one M0 measured as arm (b).
+#[test]
+fn the_served_precedence_sentence_is_the_measured_one() {
+    assert_eq!(
+        daemon::decay_render::PRECEDENCE_SENTENCE,
+        eval_core::PRECEDENCE_SENTENCE
+    );
+}

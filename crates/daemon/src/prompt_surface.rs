@@ -511,6 +511,64 @@ mod tests {
         }
     }
 
+    /// Every guidance asset names the marker shapes the renderer emits, in the grammar its one
+    /// formatter writes, with the precedence sentence, and forbids reproducing them. The
+    /// placeholder is `name` because `key = value` is text the secret scanner flags.
+    #[test]
+    fn every_guidance_names_the_correction_markers_the_renderer_emits() {
+        use crate::decay_render::{MarkerForm, correction_marker, corrections_line};
+        let shape = |value: &str, form: MarkerForm| {
+            correction_marker(form, "name", value, 0).replace("@0", "@N")
+        };
+        let footer = corrections_line(&[
+            shape("value", MarkerForm::Entry),
+            shape("", MarkerForm::Entry),
+        ]);
+        for guidance in [
+            GUIDANCE_FULL_PRIMARY,
+            GUIDANCE_FULL_NO_REDUCE,
+            GUIDANCE_LIGHT_PRIMARY_TEXT,
+            GUIDANCE_LIGHT_NO_REDUCE_TEXT,
+        ] {
+            let paragraph = guidance
+                .lines()
+                .find(|line| line.contains(&shape("value", MarkerForm::Splice)))
+                .expect("a marker paragraph");
+            assert!(
+                paragraph.contains(&shape("", MarkerForm::Splice)),
+                "{paragraph}"
+            );
+            assert!(paragraph.contains(&footer), "{paragraph}");
+            assert!(paragraph.contains(crate::decay_render::PRECEDENCE_SENTENCE));
+            let never = guidance
+                .lines()
+                .find(|line| line.contains("Never reproduce"))
+                .expect("a never-reproduce line");
+            for marker in [
+                "`[corrected @N: …]`",
+                "`[retracted @N: …]`",
+                "`[corrections: …]`",
+            ] {
+                assert!(never.contains(marker), "{marker}: {never}");
+            }
+        }
+    }
+
+    /// Evaluator cassettes refuse any request the secret scanner flags, and every request
+    /// carries one guidance asset, so no asset may hold secret-shaped text.
+    #[test]
+    fn no_guidance_holds_text_the_secret_scanner_flags() {
+        let redactor = context_core::redaction::Redactor::new().unwrap();
+        for guidance in [
+            GUIDANCE_FULL_PRIMARY,
+            GUIDANCE_FULL_NO_REDUCE,
+            GUIDANCE_LIGHT_PRIMARY_TEXT,
+            GUIDANCE_LIGHT_NO_REDUCE_TEXT,
+        ] {
+            assert_eq!(redactor.redact(guidance).unwrap().detections, []);
+        }
+    }
+
     #[test]
     fn default_full_manifest_is_legacy_inert_and_overrides_only_descriptions() {
         let full = PromptSurfaceSelection::default();
