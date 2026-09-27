@@ -780,3 +780,23 @@ Rules:
 - All four `<p1>`/`<p2>`/`<p3>`/`<p4>` elements must appear in every history_segment, in that order. P4 may be self-closed, an anchor-only fragment, or one sentence depending on what makes the history_segment recognizable (see P4 section).
 - `episode_type` may be a single activity or a comma-separated list of activities the history_segment spans (e.g. `episode_type="design,feature,release"`). Multiple activities do not split a history_segment — they describe one arc that touched multiple activity types.
 - `importance` attribute is required on every history_segment.
+---
+
+## Claims
+
+After `<facts>`, output one `<claims>` block naming the scalar facts this chunk states or changes that a later message could supersede: ports, versions, paths, flags, chosen options, and decisions. Snapshot values are allowed here even though `<facts>` excludes them. Lists and per-environment tables are out of scope.
+
+```xml
+<claims>
+<claim><key>postgres.port</key><cite>[s3:18-22]</cite><value>5432</value><anchor>the database listens on 5432</anchor></claim>
+</claims>
+```
+
+Rules:
+- `<key>`: a lowercase dotted name matching `[a-z0-9_-]+(\.[a-z0-9_-]+)+`, at most 64 bytes. Name the thing the value belongs to, not the message: when a later message states the same thing again, it gets the same key.
+- `<cite>`: exactly one citation in the `[sN:start-end]` syntax `<facts>` uses, naming the presented part that states the value.
+- `<value>`: the value copied verbatim from the cited span, at most 128 bytes. An empty `<value></value>` means the fact was retracted with no replacement.
+- `<anchor>`: one span copied character-for-character from the `<p1>` of the history_segment whose range contains the cited message, at most 200 bytes: the words of that p1 that state this value. Omit the element when that p1 does not state the value.
+- At most 8 claims per history_segment. A claim belongs to the history_segment whose range contains its cited message.
+- Claims do not change the narrative rules: p1 may still drop a superseded draft, and project-memory conflicts are still never framed as "X was Y but now Z". Emit the claim citing the correcting message even when the narrative omits the superseded sentence.
+- Omit `<claims>` when the chunk states no such fact.

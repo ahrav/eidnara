@@ -80,6 +80,7 @@ CREATE TABLE history_segments (
             episode_type      TEXT,
             legacy            INTEGER NOT NULL DEFAULT 0,
             created_at        INTEGER NOT NULL DEFAULT 0, start_date TEXT, end_date TEXT,
+            claims            TEXT NOT NULL DEFAULT '[]',
             PRIMARY KEY (session_id, sequence)
         );
 

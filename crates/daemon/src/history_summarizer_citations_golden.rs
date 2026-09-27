@@ -5,7 +5,7 @@ use std::sync::Arc;
 use crate::history_summarizer_chunk::{
     HistorySummarizerBuiltChunk, alias_marker, build_history_summarizer_chunk, presented_input,
 };
-use crate::history_summarizer_citations::{ExtractionFailure, ExtractionOutcome};
+use crate::history_summarizer_citations::{ClaimsOutcome, ExtractionFailure, ExtractionOutcome};
 use crate::history_summarizer_validate::{
     HistorySummarizerChunk, ValidateOptions, ValidatedChunk, validate_history_summarizer_output,
 };
@@ -630,4 +630,202 @@ fn a_force_kept_final_segment_is_citable_and_an_unwrapped_block_is_still_a_fact_
         }
     );
     assert!(citation_only.facts.is_empty());
+}
+
+/// Segments 1..=1 (`p1` "I will read it") and 2..=3 of golden case 1, one
+/// accepted fact, and `claims` before `<meta>`.
+fn claims_output(claims: &str) -> String {
+    format!(
+        r#"<output><history_segments><history_segment start="1" end="1" title="a" episode_type="feature" importance="50"><p1> I will read it </p1><p2>s</p2><p3>t</p3><p4 /></history_segment><history_segment start="2" end="3" title="b" episode_type="feature" importance="50"><p1>full</p1><p2>s</p2><p3>t</p3><p4 /></history_segment></history_segments><facts><PROJECT_RULES>
+* [s1:0-14] Read before editing.
+</PROJECT_RULES></facts>{claims}<meta><unprocessed_from>4</unprocessed_from></meta></output>"#
+    )
+}
+
+fn claim_xml(key: &str, cite: &str, value: &str, anchor: Option<&str>) -> String {
+    let anchor = anchor.map_or(String::new(), |anchor| format!("<anchor>{anchor}</anchor>"));
+    format!(r#"<claim><key>{key}</key><cite>{cite}</cite><value>{value}</value>{anchor}</claim>"#)
+}
+
+fn stored_claim(key: &str, value: &str, ordinal: i64, anchor: Option<&str>) -> memory_store::Claim {
+    memory_store::Claim {
+        key: key.into(),
+        value: value.into(),
+        ordinal,
+        anchor: anchor.map(Into::into),
+    }
+}
+
+#[test]
+fn a_claims_block_never_changes_what_publishes_or_the_facts_outcome() {
+    let cases = golden().cases;
+    let chunk = &build(&cases[1]).chunk;
+    let nine: String = (0..9)
+        .map(|index| claim_xml(&format!("k.{index}"), "[s1:7-11]", "read", None))
+        .chain([claim_xml(
+            "k.0",
+            "[s1:0-14]",
+            "I will read it",
+            Some("will read"),
+        )])
+        .collect();
+    let none = validate(&claims_output(""), chunk);
+    let truncated = validate(
+        &claims_output(&format!(
+            "<claims>{}",
+            claim_xml("k.a", "[s1:7-11]", "read", None)
+        )),
+        chunk,
+    );
+    let capped = validate(&claims_output(&format!("<claims>{nine}</claims>")), chunk);
+
+    assert_eq!(none.claims_outcome, ClaimsOutcome::NotRequested);
+    assert_eq!(
+        truncated.claims_outcome,
+        ClaimsOutcome::Rejected {
+            failure: ExtractionFailure::MalformedClaims
+        }
+    );
+    assert_eq!(
+        capped.claims_outcome,
+        ClaimsOutcome::Accepted {
+            kept: 8,
+            dropped: 2,
+            anchor_missing: 8
+        }
+    );
+    // The last `k.0` wins, moves behind k.8, and falls to the cap of 8.
+    let keys: Vec<_> = capped.history_segments[0]
+        .claims
+        .iter()
+        .map(|claim| claim.key.as_str())
+        .collect();
+    assert_eq!(
+        keys,
+        ["k.1", "k.2", "k.3", "k.4", "k.5", "k.6", "k.7", "k.8"]
+    );
+    assert_eq!(
+        capped.history_segments[0].claims[0],
+        stored_claim("k.1", "read", 1, None)
+    );
+    let without_claims = |validated: &ValidatedChunk| {
+        let mut validated = validated.clone();
+        validated.claims_outcome = ClaimsOutcome::NotRequested;
+        for segment in &mut validated.history_segments {
+            segment.claims.clear();
+        }
+        validated
+    };
+    for validated in [&none, &truncated] {
+        assert!(
+            validated
+                .history_segments
+                .iter()
+                .all(|s| s.claims.is_empty())
+        );
+    }
+    assert_eq!(none.history_segments.len(), 2);
+    assert_eq!(none.unprocessed_from, 4);
+    assert_eq!(none.extraction, ExtractionOutcome::Accepted { count: 1 });
+    assert_eq!(without_claims(&truncated), none);
+    assert_eq!(without_claims(&capped), none);
+    // A second block and stray material inside the block reject the block whole.
+    for block in [
+        format!(
+            "<claims></claims><claims>{}</claims>",
+            claim_xml("k.a", "[s1:7-11]", "read", None)
+        ),
+        format!(
+            "<claims>stray{}</claims>",
+            claim_xml("k.a", "[s1:7-11]", "read", None)
+        ),
+    ] {
+        let validated = validate(&claims_output(&block), chunk);
+        assert_eq!(
+            validated.claims_outcome,
+            ClaimsOutcome::Rejected {
+                failure: ExtractionFailure::MalformedClaims
+            },
+            "{block}"
+        );
+        assert_eq!(without_claims(&validated), none, "{block}");
+    }
+}
+
+#[test]
+fn claims_attach_to_the_accepted_segment_their_cite_names() {
+    let cases = golden().cases;
+    let chunk = &build(&cases[1]).chunk;
+    let block = [
+        claim_xml("read.target", "[s1:0-14]", "read", Some("will read")),
+        claim_xml(
+            "part.second",
+            "[s3:13-24]",
+            "second part",
+            Some("not in p1"),
+        ),
+        claim_xml("part.first", "[s3:0-5]", "second", None),
+        claim_xml("noDot", "[s1:0-14]", "read", None),
+        claim_xml("un.escaped", "[s2:0-20]", "read(src/lib.rs)", None),
+        claim_xml("esc.value", "[s1:0-14]", "I will &amp; read", None),
+        claim_xml("gone.value", "[s1:0-14]", "", None),
+    ]
+    .concat();
+    let validated = validate(&claims_output(&format!("<claims>{block}</claims>")), chunk);
+    assert_eq!(
+        validated.history_segments[0].claims,
+        [
+            stored_claim("read.target", "read", 1, Some("will read")),
+            stored_claim("gone.value", "", 1, None),
+        ]
+    );
+    assert_eq!(
+        validated.history_segments[1].claims,
+        [
+            stored_claim("part.second", "second part", 3, None),
+            stored_claim("un.escaped", "read(src/lib.rs)", 2, None),
+        ]
+    );
+    // Claims are segment bookkeeping, not memory: a memory-disabled run keeps them.
+    let disabled = validate_history_summarizer_output(
+        &claims_output(&format!("<claims>{block}</claims>")),
+        chunk,
+        &[],
+        ValidateOptions {
+            memory_enabled: false,
+            ..ValidateOptions::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(disabled.extraction, ExtractionOutcome::NotRequested);
+    assert_eq!(disabled.claims_outcome, validated.claims_outcome);
+    assert_eq!(disabled.history_segments, validated.history_segments);
+    // A cite past the accepted segments drops its claim: here only 1..=1 publishes.
+    let short = output(1, 1, &[]).replace(
+        "<meta>",
+        &format!(
+            "<claims>{}{}</claims><meta>",
+            claim_xml("k.in", "[s1:7-11]", "read", None),
+            claim_xml("k.out", "[s3:0-5]", "first", None)
+        ),
+    );
+    let validated = validate(&short, chunk);
+    // The dropped outside cite changes nothing else the chunk publishes.
+    let mut without = validated.clone();
+    without.claims_outcome = ClaimsOutcome::NotRequested;
+    without.history_segments[0].claims.clear();
+    assert_eq!(without, validate(&output(1, 1, &[]), chunk));
+    assert_eq!(validated.history_segments.len(), 1);
+    assert_eq!(
+        validated.history_segments[0].claims,
+        [stored_claim("k.in", "read", 1, None)]
+    );
+    assert_eq!(
+        validated.claims_outcome,
+        ClaimsOutcome::Accepted {
+            kept: 1,
+            dropped: 1,
+            anchor_missing: 1
+        }
+    );
 }

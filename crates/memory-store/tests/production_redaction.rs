@@ -14,7 +14,7 @@ use cache_stability::{CoreState, DurabilityClass, FrozenUnit};
 use context_core::redaction::RedactionErrorKind;
 use memory_store::memory_capture::{CaptureEnqueue, CaptureSource, MAX_CAPTURE_ATTEMPTS};
 use memory_store::{
-    AuthoritySeedRow, DURABLE_WRITE_REGISTRY, FacadeMutationOutcome, LineageAnchor,
+    AuthoritySeedRow, Claim, DURABLE_WRITE_REGISTRY, FacadeMutationOutcome, LineageAnchor,
     LineageConstituent, LineageDescentDisposition, LineageDescentRequest, MemoryStore,
     MemoryStoreError, ModuleMeta, NoteEvaluationInput, NoteInput, NoteTransitionInput,
     NoteWriteInput, StoredHistorySegment, TailHygieneBaseline,
@@ -226,20 +226,27 @@ fn active_scan_audit_expires_with_its_session_note_owner() {
                 start_message_id: "m1#0".to_string(),
                 end_message_id: "m3#0".to_string(),
                 content: "copied password=history_segment-secret".to_string(),
+                claims: vec![Claim {
+                    key: "db.port".to_string(),
+                    value: "5432".to_string(),
+                    ordinal: 1,
+                    anchor: Some("5432".to_string()),
+                }],
                 ..StoredHistorySegment::default()
             }],
         )
         .unwrap();
-    // The history_segment prepares session_id, start_message_id, end_message_id, title, and
-    // content; only content carries a detection.
+    // The history_segment prepares session_id, start_message_id, end_message_id, title,
+    // content, and the claim's key, value, anchor, and `key = value` pair as fields of
+    // their own, never the claims JSON as one; only content carries a detection.
     assert_eq!(
         scan_audit_counts(temp.path()),
         ScanAuditCounts {
             batches: 1,
             owner_scopes: 1,
             domain_owners: 1,
-            field_scans: 5,
-            owner_copies: 5,
+            field_scans: 9,
+            owner_copies: 9,
             detections: 1,
         }
     );
@@ -1745,6 +1752,8 @@ fn new_idempotency_identities_reject_without_substitution_or_collapse() {
 
 #[test]
 fn history_segment_content_redacts_and_new_message_identities_reject() {
+    // A keyword-assigned secret the scanner detects, assembled at run time.
+    let secret = |tail: &str| format!("{}={tail}", ["pass", "word"].concat());
     let temp = tempfile::tempdir().unwrap();
     let descriptor =
         MemoryStore::test_descriptor(temp.path(), "production-redaction-history_segment");
@@ -1757,7 +1766,44 @@ fn history_segment_content_redacts_and_new_message_identities_reject() {
         end_message_id: "message-2".to_string(),
         title: "password=title-secret".to_string(),
         content: "password=content-secret".to_string(),
-        p1: Some("password=p1-secret".to_string()),
+        p1: Some(format!(
+            " port 5432 then {} then done ",
+            secret("p1-secret")
+        )),
+        // Anchors outside, inside, and straddling each edge of the secret.
+        claims: [
+            ("port 5432".to_string(), secret("value-secret")),
+            (secret("p1-secret"), "5432".to_string()),
+            (
+                format!("5432 then {}", secret("p1-sec")),
+                "5432".to_string(),
+            ),
+            ("p1-secret then done".to_string(), "5432".to_string()),
+        ]
+        .into_iter()
+        .map(|(anchor, value)| Claim {
+            key: "db.port".to_string(),
+            value,
+            ordinal: 1,
+            anchor: Some(anchor),
+        })
+        // A key that makes its `key = value` pair a secret assignment is dropped, and so is a
+        // key the scanner rewrites.
+        .chain([
+            Claim {
+                key: "api.key".to_string(),
+                value: "abc".to_string(),
+                ordinal: 1,
+                anchor: None,
+            },
+            Claim {
+                key: format!("auth.{}", secret("key-secret")),
+                value: "5432".to_string(),
+                ordinal: 1,
+                anchor: None,
+            },
+        ])
+        .collect(),
         ..StoredHistorySegment::default()
     };
 
@@ -1767,10 +1813,23 @@ fn history_segment_content_redacts_and_new_message_identities_reject() {
     let stored = store.load_history_segments("session").unwrap();
     assert_eq!(stored[0].title, "password=<REDACTED:password>");
     assert_eq!(stored[0].content, "password=<REDACTED:password>");
+    let p1 = stored[0].p1.as_deref().unwrap();
     assert_eq!(
-        stored[0].p1.as_deref(),
-        Some("password=<REDACTED:password>")
+        p1,
+        " port 5432 then password=<REDACTED:password> then done "
     );
+    // Each value and anchor is scanned as its own field, and every stored
+    // anchor lies inside the stored trimmed p1.
+    assert_eq!(stored[0].claims.len(), 4);
+    assert_eq!(stored[0].claims[0].value, "password=<REDACTED:password>");
+    assert_eq!(stored[0].claims[0].anchor.as_deref(), Some("port 5432"));
+    for claim in &stored[0].claims {
+        assert!(!claim.value.contains("secret"), "{claim:?}");
+        if let Some(anchor) = &claim.anchor {
+            assert!(!anchor.contains("secret"), "{claim:?}");
+            assert!(p1.trim().contains(anchor.as_str()), "{claim:?}");
+        }
+    }
 
     // A non-overlapping range exercises redaction validation instead of overlap validation.
     let rejected = StoredHistorySegment {

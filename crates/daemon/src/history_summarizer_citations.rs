@@ -14,6 +14,14 @@ pub const MAX_ALIASES: usize = 4096;
 pub const MAX_CITATIONS_PER_FACT: usize = kernel::MAX_FACT_SPANS;
 /// Facts per set, at most; the Kernel refuses a staged subject past the same bound.
 pub const MAX_FACTS_PER_SET: usize = kernel::MAX_REVIEW_FACTS;
+/// Claims kept per history segment, at most; the prompt states the same bounds.
+pub const CLAIMS_PER_SEGMENT: usize = 8;
+/// A claim key's bytes, at most.
+pub const CLAIM_KEY_MAX_BYTES: usize = 64;
+/// A claim value's bytes after XML unescaping, at most.
+pub const CLAIM_VALUE_MAX_BYTES: usize = 128;
+/// A claim anchor's bytes after XML unescaping, at most.
+pub const CLAIM_ANCHOR_MAX_BYTES: usize = 200;
 
 /// One presented message part and the native identity behind it. `alias` is empty until [`FrozenAliasTable::issue`] assigns it.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -164,6 +172,127 @@ pub fn check_fact_set(
     Ok(())
 }
 
+/// One `<claim>` as the summarizer emitted it, unescaped, before validation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClaimCandidate {
+    pub key: String,
+    /// The `<cite>` text, parsed by [`check_claim_set`].
+    pub cite: String,
+    /// `None` when the `<value>` element is missing or unterminated; only
+    /// `Some("")` is a retraction.
+    pub value: Option<String>,
+    pub anchor: Option<String>,
+}
+
+/// The claims block's own verdict, independent of the segments and the facts:
+/// no block, an unreadable block, or the claims kept after the per-claim rules.
+/// `dropped` counts every emitted claim not kept: a rule failure, a claim a
+/// later one with its key superseded, or one past the per-segment cap.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ClaimsOutcome {
+    #[default]
+    NotRequested,
+    Rejected {
+        failure: ExtractionFailure,
+    },
+    Accepted {
+        kept: usize,
+        dropped: usize,
+        anchor_missing: usize,
+    },
+}
+
+/// The D-7 claim-key grammar `[a-z0-9_-]+(\.[a-z0-9_-]+)+` within the byte bound.
+fn is_claim_key(key: &str) -> bool {
+    let part = |part: &str| {
+        !part.is_empty()
+            && part
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'-')
+    };
+    key.len() <= CLAIM_KEY_MAX_BYTES && key.contains('.') && key.split('.').all(part)
+}
+
+/// Validates claims against the chunk's alias table and the accepted
+/// segments, in order: key grammar; value bound; one citation that resolves
+/// through the frozen alias table to a span of presented bytes whose message
+/// lies inside an accepted segment's range, with the value inside that span;
+/// an anchor within its bound that the segment's trimmed `p1` contains (else
+/// no anchor). A claim failing a rule before the anchor is dropped. Each
+/// segment then keeps the last claim per key and the first
+/// [`CLAIMS_PER_SEGMENT`] of those, in emitted order; a claim's position is
+/// its index. Returns the claims per segment, aligned with `segments`, and the
+/// counts.
+pub fn check_claim_set(
+    candidates: &[ClaimCandidate],
+    table: &FrozenAliasTable,
+    segments: &[(RangeInclusive<u64>, &str)],
+) -> (Vec<Vec<memory_store::Claim>>, ClaimsOutcome) {
+    let mut per_segment: Vec<Vec<memory_store::Claim>> = vec![Vec::new(); segments.len()];
+    for candidate in candidates {
+        let Some(value) = candidate.value.as_deref() else {
+            continue;
+        };
+        if !is_claim_key(&candidate.key) || value.len() > CLAIM_VALUE_MAX_BYTES {
+            continue;
+        }
+        let Ok((citations, rest)) = split_citations(&candidate.cite) else {
+            continue;
+        };
+        let [citation] = citations.as_slice() else {
+            continue;
+        };
+        if !rest.trim().is_empty() {
+            continue;
+        }
+        let Some(frozen) = table.resolve(&citation.alias) else {
+            continue;
+        };
+        if !frozen
+            .presented
+            .get(citation.start..citation.end)
+            .is_some_and(|span| span.contains(value))
+        {
+            continue;
+        }
+        let Some(index) = segments
+            .iter()
+            .position(|(range, _)| range.contains(&frozen.ordinal))
+        else {
+            continue;
+        };
+        let p1 = segments[index].1.trim();
+        let anchor = candidate.anchor.clone().filter(|anchor| {
+            !anchor.is_empty() && anchor.len() <= CLAIM_ANCHOR_MAX_BYTES && p1.contains(anchor)
+        });
+        let claims = &mut per_segment[index];
+        // The last claim for a key wins: an earlier one leaves the order.
+        claims.retain(|claim| claim.key != candidate.key);
+        claims.push(memory_store::Claim {
+            key: candidate.key.clone(),
+            value: value.to_string(),
+            ordinal: frozen.ordinal as i64,
+            anchor,
+        });
+    }
+    for claims in &mut per_segment {
+        claims.truncate(CLAIMS_PER_SEGMENT);
+    }
+    let kept: usize = per_segment.iter().map(Vec::len).sum();
+    let anchor_missing = per_segment
+        .iter()
+        .flatten()
+        .filter(|claim| claim.anchor.is_none())
+        .count();
+    let outcome = ClaimsOutcome::Accepted {
+        kept,
+        dropped: candidates.len() - kept,
+        anchor_missing,
+    };
+    (per_segment, outcome)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -231,6 +360,134 @@ mod tests {
             prop_assert_eq!(parsed, citations);
             prop_assert_eq!(rest, text.as_str());
         }
+    }
+
+    fn claim(key: &str, cite: &str, value: &str, anchor: Option<&str>) -> ClaimCandidate {
+        ClaimCandidate {
+            key: key.into(),
+            cite: cite.into(),
+            value: Some(value.into()),
+            anchor: anchor.map(Into::into),
+        }
+    }
+
+    proptest! {
+        /// A cite is accepted exactly when the cited range is a span of the presented bytes that contains the value.
+        #[test]
+        fn cite_acceptance_is_value_inside_the_cited_span(
+            presented in "[ab\u{e9}]{0,24}",
+            value_range in (0usize..30, 0usize..30),
+            other in "[ab]{0,3}",
+            start in 0usize..30,
+            end in 0usize..30,
+        ) {
+            // The value is usually a slice of the presented text, so it lies in the
+            // message but often outside the cited span: the fault a whole-message check hides.
+            let value = presented.get(value_range.0..value_range.1).unwrap_or(&other).to_string();
+            let (claims, _) = check_claim_set(
+                &[claim("k.v", &format!("[s1:{start}-{end}]"), &value, None)],
+                &table(&presented),
+                &[(1..=1, "")],
+            );
+            let expected = presented.get(start..end).is_some_and(|span| span.contains(value.as_str()));
+            prop_assert_eq!(claims[0].len() == 1, expected);
+        }
+    }
+
+    #[test]
+    fn claims_constants_match_the_prompt_fixture() {
+        let prompt = crate::history_summarizer_prompt::HISTORY_SUMMARIZER_SYSTEM_PROMPT;
+        let section = &prompt[prompt
+            .find("## Claims")
+            .expect("the prompt has a claims section")..];
+        let rule = |prefix: &str| {
+            section
+                .lines()
+                .find(|line| line.starts_with(prefix))
+                .unwrap_or_else(|| panic!("no rule {prefix}"))
+        };
+        assert!(rule("- `<key>`:").contains(&format!("at most {CLAIM_KEY_MAX_BYTES} bytes")));
+        assert!(rule("- `<value>`:").contains(&format!("at most {CLAIM_VALUE_MAX_BYTES} bytes")));
+        assert!(rule("- `<anchor>`:").contains(&format!("at most {CLAIM_ANCHOR_MAX_BYTES} bytes")));
+        assert!(rule("- At most").starts_with(&format!(
+            "- At most {CLAIMS_PER_SEGMENT} claims per history_segment."
+        )));
+    }
+
+    #[test]
+    fn each_claim_rule_drops_only_its_own_claim() {
+        let long = "x".repeat(200) + "<";
+        let table = table(&long);
+        let p1 = format!("  {long}  ");
+        let segments = [(1..=1, p1.as_str())];
+        let value_128 = "x".repeat(127) + "<";
+        let value_129 = "x".repeat(128) + "<";
+        let cite = "[s1:0-201]";
+        let (claims, outcome) = check_claim_set(
+            &[
+                claim("a.kept", cite, &value_128, Some("xx<")),
+                claim("b.long", cite, &value_129, None),
+                claim("Upper.case", cite, "x", None),
+                claim("nodot", cite, "x", None),
+                claim("c.absent", cite, "y", None),
+                claim("d.two-cites", "[s1:0-1] [s1:0-2]", "x", None),
+                claim("e.unknown-alias", "[s2:0-1]", "x", None),
+                claim("f.anchor", cite, "x", Some("not in p1")),
+                claim("g.long-anchor", cite, "x", Some(&"x".repeat(201))),
+                claim("h.retracted", cite, "", Some("x")),
+                // Only the trimmed p1 counts: its surrounding spaces are no anchor.
+                claim("i.untrimmed", cite, "x", Some(" x")),
+            ],
+            &table,
+            &segments,
+        );
+        let kept: Vec<_> = claims[0]
+            .iter()
+            .map(|claim| (claim.key.as_str(), claim.anchor.as_deref()))
+            .collect();
+        assert_eq!(
+            kept,
+            [
+                ("a.kept", Some("xx<")),
+                ("f.anchor", None),
+                ("g.long-anchor", None),
+                ("h.retracted", Some("x")),
+                ("i.untrimmed", None),
+            ]
+        );
+        assert_eq!(
+            outcome,
+            ClaimsOutcome::Accepted {
+                kept: 5,
+                dropped: 6,
+                anchor_missing: 3,
+            }
+        );
+    }
+
+    #[test]
+    fn a_segment_keeps_the_last_claim_per_key_then_the_first_eight() {
+        let table = table("v");
+        let mut candidates: Vec<_> = (0..9)
+            .map(|index| claim(&format!("k.{index}"), "[s1:0-1]", "v", None))
+            .collect();
+        candidates.insert(1, claim("k.8", "[s1:0-1]", "v", Some("early")));
+        candidates.push(claim("k.0", "[s1:0-1]", "v", Some("v")));
+        let (claims, outcome) = check_claim_set(&candidates, &table, &[(1..=1, "v")]);
+        let keys: Vec<_> = claims[0].iter().map(|claim| claim.key.as_str()).collect();
+        assert_eq!(
+            keys,
+            ["k.1", "k.2", "k.3", "k.4", "k.5", "k.6", "k.7", "k.8"]
+        );
+        assert_eq!(claims[0][7].anchor, None, "the later k.8 wins");
+        assert_eq!(
+            outcome,
+            ClaimsOutcome::Accepted {
+                kept: 8,
+                dropped: 3,
+                anchor_missing: 8,
+            }
+        );
     }
 
     #[test]
