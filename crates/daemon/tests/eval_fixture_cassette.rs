@@ -462,7 +462,8 @@ fn the_fixture_answers_a_summarizer_prompt_through_the_named_command_and_dumps_i
 }
 
 /// A summarizer command that never answers does not hold the fixture: a
-/// graceful shutdown ends the run, kills the child, and exits within budget.
+/// graceful shutdown ends the run, kills the child and its descendants, and
+/// exits within budget.
 #[test]
 fn a_hanging_summarizer_command_is_killed_by_shutdown() {
     let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -473,10 +474,12 @@ fn a_hanging_summarizer_command_is_killed_by_shutdown() {
     let dir = tempfile::tempdir().unwrap();
     let pid_file = dir.path().join("child.pid");
     let hanging = dir.path().join("hang.sh");
+    // The script hangs in a grandchild, as a command that shells out to a
+    // CLI does; the recorded pid is the grandchild's.
     std::fs::write(
         &hanging,
         format!(
-            "#!/bin/sh\necho $$ > '{}'\ncat > /dev/null\nsleep 600\n",
+            "#!/bin/sh\ncat > /dev/null\nsleep 600 &\necho $! > '{}'\nwait\n",
             pid_file.display()
         ),
     )
@@ -525,13 +528,16 @@ fn a_hanging_summarizer_command_is_killed_by_shutdown() {
         shutting_down.elapsed() < BUDGET,
         "shutdown waited on the hanging command"
     );
-    // `kill -0` on a reaped or dead pid fails; the child did not outlive
-    // the fixture.
+    // `kill -0` on a reaped or dead pid fails; the grandchild did not
+    // outlive the fixture.
     std::thread::sleep(std::time::Duration::from_millis(200));
     let alive = std::process::Command::new("kill")
         .args(["-0", &pid.to_string()])
         .status()
         .unwrap()
         .success();
-    assert!(!alive, "the summarizer child {pid} outlived the fixture");
+    assert!(
+        !alive,
+        "the summarizer grandchild {pid} outlived the fixture"
+    );
 }

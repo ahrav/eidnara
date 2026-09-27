@@ -308,9 +308,11 @@ mod unix {
     const SUMMARIZER_COMMAND_ENV: &str = "EIDNARA_FIXTURE_SUMMARIZER_COMMAND";
     const SUMMARIZER_DUMP_ENV: &str = "EIDNARA_FIXTURE_SUMMARIZER_DUMP";
 
-    /// Runs the configured summarizer command over one request. The child is
-    /// killed when this future is dropped, so a caller racing it against
-    /// cancellation leaves no orphan behind.
+    /// Runs the configured summarizer command over one request as the leader
+    /// of its own process group. Dropping this future before the command
+    /// exits kills the whole group, so a caller racing it against
+    /// cancellation leaves no orphan behind, not even a CLI the command
+    /// shelled out to.
     async fn commanded_summary(
         command: &std::ffi::OsStr,
         request: &serde_json::Value,
@@ -319,9 +321,11 @@ mod unix {
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
+            .process_group(0)
             .kill_on_drop(true)
             .spawn()
             .map_err(|error| format!("summarizer command: {error}"))?;
+        let mut group = ProcessGroupGuard(child.id());
         child
             .stdin
             .take()
@@ -333,6 +337,9 @@ mod unix {
             .wait_with_output()
             .await
             .map_err(|error| format!("summarizer command: {error}"))?;
+        // The leader has exited and been reaped; the group id may be reused,
+        // so a kill now could hit another process.
+        group.0 = None;
         if !output.status.success() {
             return Err(format!(
                 "summarizer command exited {}: {}",
@@ -342,6 +349,24 @@ mod unix {
         }
         String::from_utf8(output.stdout)
             .map_err(|error| format!("summarizer command output: {error}"))
+    }
+
+    /// The process group a still-running summarizer command leads. Dropped
+    /// while armed, it sends SIGKILL to the group, as the Suite D runner does
+    /// on a deadline, so the command's descendants go with it.
+    struct ProcessGroupGuard(Option<u32>);
+
+    impl Drop for ProcessGroupGuard {
+        fn drop(&mut self) {
+            if let Some(group) = self.0 {
+                let _ = std::process::Command::new("kill")
+                    .args(["-9", "--", &format!("-{group}")])
+                    .stdin(std::process::Stdio::null())
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .status();
+            }
+        }
     }
 
     impl LlmExecutionBackend for ControlledBackend {
