@@ -808,13 +808,19 @@ pub fn export_capture(capture: &StaleCapture) -> Result<StaleExport, CaptureErro
 }
 
 /// Merges exports of independent harness sessions: one schema, harness, and
-/// summarizer, no world twice, and no input that is itself a merge. Task ids gain the session's one-based
+/// summarizer, no world twice, two or more inputs, and no input that is itself
+/// a merge. Task ids gain the session's one-based
 /// position (`world-2:stale-5`), so equal per-world ids cannot collide.
 pub fn merge_exports(exports: Vec<StaleExport>) -> Result<StaleExport, CaptureError> {
+    // Every merge joins seeds with a comma, the mark a later merge refuses;
+    // a one-export merge would prefix its ids under an unjoined seed.
+    if exports.len() < 2 {
+        return Err(CaptureError::Unmergeable {
+            reason: "fewer than two exports",
+        });
+    }
     let mut exports = exports.into_iter();
-    let first = exports.next().ok_or(CaptureError::Unmergeable {
-        reason: "no exports",
-    })?;
+    let first = exports.next().expect("two or more exports");
     let mut merged = StaleExport {
         pairs: Vec::new(),
         unlocatable: BTreeMap::new(),

@@ -30,11 +30,15 @@ try {
             inferenceConfig: { maxTokens: input.max_output_tokens },
         }),
     );
+    // A hung Converse call must not hold the fixture's firing open past the
+    // daemon's completion wait: three bounded attempts end well inside it, and
+    // a failed script exits non-zero, which the fixture reports as a typed
+    // terminal error.
     for (let attempt = 1; ; attempt += 1) {
         const run = spawnSync(
             "aws",
             ["bedrock-runtime", "converse", "--cli-input-json", `file://${body}`],
-            { encoding: "utf8", maxBuffer: 64 << 20 },
+            { encoding: "utf8", maxBuffer: 64 << 20, timeout: 120_000 },
         );
         if (run.status === 0) {
             const response = JSON.parse(run.stdout) as {
@@ -43,7 +47,11 @@ try {
             process.stdout.write(response.output.message.content.map((c) => c.text ?? "").join(""));
             break;
         }
-        if (attempt === 3) throw new Error(`converse failed: ${run.stderr.slice(-2000)}`);
+        if (attempt === 3) {
+            throw new Error(
+                `converse failed: ${run.error?.message ?? ""} ${run.stderr.slice(-2000)}`,
+            );
+        }
         await Bun.sleep(10_000 * attempt);
     }
 } finally {

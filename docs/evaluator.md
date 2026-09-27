@@ -1446,7 +1446,8 @@ merge are Rust; living the world through the harness is TypeScript.
    no m1 part (`NoM1`), since arm (b) goes there.
 4. `eval_runner stale-merge --inputs <export,...> --publish <dir>`
    (`merge_exports`) combines independent harness sessions. It requires one
-   schema, harness, and summarizer and refuses a world twice. It prefixes
+   schema, harness, and summarizer, two or more inputs, and refuses a world
+   twice or an input that is itself a merge. It prefixes
    every task with `world-N:`, joins the decimal seeds, and sums the counts.
    M0 uses several small sessions, so decay keeps their stale segments' prose
    while the pair population still clears the fixed N. A 120-subject session

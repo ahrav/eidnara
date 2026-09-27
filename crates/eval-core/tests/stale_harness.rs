@@ -439,6 +439,12 @@ fn a_merge_refuses_an_input_that_is_itself_a_merge_and_a_swapped_schema() {
     let one = export_capture(&capture(served.clone(), vec![])).unwrap();
     let mut two = one.clone();
     two.root_seed = "7".to_string();
+    // One export is no merge: its output would carry prefixed ids under an
+    // unjoined seed, and a later merge would prefix them again.
+    assert!(matches!(
+        merge_exports(vec![one.clone()]),
+        Err(CaptureError::Unmergeable { .. })
+    ));
     let merged = merge_exports(vec![one.clone(), two]).unwrap();
     assert!(matches!(
         merge_exports(vec![merged]),
