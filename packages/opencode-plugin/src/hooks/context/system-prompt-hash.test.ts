@@ -559,6 +559,25 @@ describe("provisional eidnara_reduce availability (pre-first-user race)", () => 
         expect(systemPromptRefreshSessions.has(sessionId)).toBe(true);
     });
 
+    it("fetches the no-reduce guidance variant while the verdict is provisional, matching the transform's tool_present gate", async () => {
+        const dir = useTempDataHome("sph-provisional-guidance-");
+        createOpenCodeDb(dir);
+        const sessionId = "ses-provisional-guidance";
+        clearEidnaraReduceAvailability(sessionId);
+        const calls: boolean[] = [];
+        const { handler } = buildHandler({
+            fetchGuidance: async (args) => {
+                calls.push(args.toolPresent);
+                return "## Eidnara\n\nGuidance block.";
+            },
+        });
+
+        await handler({ sessionID: sessionId }, { system: ["Host prompt"] });
+
+        // The transform sends `tool_present: frozen && callable`; a provisional verdict must not select guidance for a surface the transform has turned off.
+        expect(calls).toEqual([false]);
+    });
+
     it("persists the hash from the frozen deny-verdict variant once the first user row exists", async () => {
         const dir = useTempDataHome("sph-frozen-deny-");
         const sessionId = "ses-frozen-deny";
