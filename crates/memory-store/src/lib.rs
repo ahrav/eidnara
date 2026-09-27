@@ -21909,30 +21909,34 @@ mod tests {
     }
 
     /// Audit ids keep the 32 lowercase hex shape the columns check, and their 12-hex time
-    /// prefix never decreases, for ids minted in Rust and for per-row link copies minted in SQL.
+    /// prefix lies between the clock read before and after the write that minted them, for ids
+    /// minted in Rust and for per-row link copies minted in SQL.
     #[test]
-    fn audit_ids_are_lowercase_hex_with_a_non_decreasing_time_prefix() {
+    fn audit_ids_are_lowercase_hex_with_a_time_prefix_from_their_write() {
         let is_id = |id: &str| {
             id.len() == 32
                 && id
                     .bytes()
                     .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
         };
-        let before = hex_digest(opaque_id_time_prefix());
+        let now = || hex_digest(opaque_id_time_prefix());
+        let assert_minted_between = |ids: &[String], before: &str, after: &str| {
+            assert!(!ids.is_empty());
+            for id in ids {
+                assert!(is_id(id), "{id}");
+                assert!(
+                    before <= &id[..12] && &id[..12] <= after,
+                    "{before} {id} {after}"
+                );
+            }
+        };
+        let before = now();
         let ids: Vec<String> = (0..64).map(|_| opaque_id().unwrap()).collect();
-        assert!(ids.iter().all(|id| is_id(id)), "{ids:?}");
-        assert!(ids.windows(2).all(|pair| pair[0][..12] <= pair[1][..12]));
-        assert!(before.as_str() <= &ids[0][..12]);
+        assert_minted_between(&ids, &before, &now());
         assert_eq!(ids.iter().collect::<BTreeSet<_>>().len(), ids.len());
 
         let dir = tempfile::tempdir().unwrap();
         let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
-        let mut write = PreparedWrite::new(DurableWriteFamily::HistorySegments);
-        write.domain_owner("session", "ses_ids", "first");
-        write.content("content", "plain text").unwrap();
-        write
-            .execute(&store.inner, |_| Ok(WriteDisposition::Applied(())))
-            .unwrap();
         let column = |sql: &str| -> BTreeSet<String> {
             store
                 .inner
@@ -21946,14 +21950,27 @@ mod tests {
                 .unwrap()
         };
         let copies = "SELECT owner_copy_id FROM scan_owner_copies";
+        let mut write = PreparedWrite::new(DurableWriteFamily::HistorySegments);
+        write.domain_owner("session", "ses_ids", "first");
+        write.content("content", "plain text").unwrap();
+        let before = now();
+        write
+            .execute(&store.inner, |_| Ok(WriteDisposition::Applied(())))
+            .unwrap();
+        let after = now();
         let first = column(copies);
         let first_scans = column("SELECT scan_id FROM field_scans");
+        for minted in [&first, &first_scans] {
+            assert_minted_between(&minted.iter().cloned().collect::<Vec<_>>(), &before, &after);
+        }
         let mut link = PreparedWrite::new(DurableWriteFamily::HistorySegments);
         link.domain_owner("session", "ses_ids", "second");
         link.content("content", "other text").unwrap();
         link.link_existing_scans("session", "ses_ids", "second", first_scans.clone());
+        let before = now();
         link.execute(&store.inner, |_| Ok(WriteDisposition::Applied(())))
             .unwrap();
+        let after = now();
         let linked: Vec<String> = column(copies).difference(&first).cloned().collect();
         let first_scan_copies = column(&format!(
             "SELECT COUNT(*) || '' FROM scan_owner_copies WHERE scan_id IN ('{}')",
@@ -21964,10 +21981,7 @@ mod tests {
             ["2"],
             "enabling state: the first write's scan gained a link copy"
         );
-        for id in &linked {
-            assert!(is_id(id), "{id}");
-            assert!(ids[63][..12] <= id[..12]);
-        }
+        assert_minted_between(&linked, &before, &after);
     }
 
     #[test]
