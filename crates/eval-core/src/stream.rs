@@ -17,6 +17,7 @@ pub enum ChoiceKind {
     CorrectionTarget,
     InvalidationTarget,
     RenameTarget,
+    RestatementTarget,
 }
 
 impl ChoiceKind {
@@ -29,7 +30,8 @@ impl ChoiceKind {
             | Self::ObservationLag
             | Self::Cites
             | Self::CorrectionTarget
-            | Self::InvalidationTarget => "evolution",
+            | Self::InvalidationTarget
+            | Self::RestatementTarget => "evolution",
         }
     }
 }

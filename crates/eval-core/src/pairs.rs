@@ -13,7 +13,7 @@ use crate::eligibility::Verdict;
 use crate::event::{Event, EventId, EventLog, LogError, Payload};
 use crate::reducer::{Query, ReduceError, Truth, reduce};
 
-pub const PAIRING_POLICY_VERSION: &str = "eval-pairing/v1";
+pub const PAIRING_POLICY_VERSION: &str = "eval-pairing/v2";
 pub const RECENCY_BASELINE_VERSION: &str = "eval-recency-baseline/v1";
 /// Appended to every entity of an independently authored history so its
 /// event identities cannot collide with the aged world's.
@@ -55,6 +55,11 @@ pub enum TaskRole {
     /// Truth the baseline is expected to deliver; without one, an
     /// always-empty baseline fails every falsification pair for free.
     PositiveControl,
+    /// Evidence restating an earlier message as a message of its own, so the
+    /// superseded predecessor (the falsifier) coexists with it in the served
+    /// history: a surface that hands the model both measures stale
+    /// preference.
+    StalePreference,
     Plain,
 }
 
@@ -187,6 +192,14 @@ pub enum PairError {
         id: EventId,
         by: EventId,
     },
+    /// A stale-preference evidence unit that is not the one supersession of a
+    /// predecessor the aged history holds: a same-`message_id` correction
+    /// replaces its target, so nothing stale coexists with it, and a
+    /// predecessor also corrected in place no longer serves its own text.
+    NoCoexistingRestatement {
+        task: String,
+        id: EventId,
+    },
     NoFalsificationPair,
     NoPositiveControl,
     /// A deserialized set whose recorded version, bound, median, window,
@@ -222,6 +235,7 @@ impl PairError {
             Self::SharedVerdictDisagreement { .. } => "SharedVerdictDisagreement",
             Self::TruthNotEarly { .. } => "TruthNotEarly",
             Self::SupersededFalsifier { .. } => "SupersededFalsifier",
+            Self::NoCoexistingRestatement { .. } => "NoCoexistingRestatement",
             Self::NoFalsificationPair => "NoFalsificationPair",
             Self::NoPositiveControl => "NoPositiveControl",
             Self::Tampered { .. } => "Tampered",
@@ -350,6 +364,39 @@ fn check_falsifier(task: &Task, aged: &EventLog, median: i64) -> Result<(), Pair
     Ok(())
 }
 
+/// The inverse of `check_falsifier`: every evidence unit is a restatement
+/// (a new `message_id`) whose predecessor the aged history holds, the reducer
+/// judges superseded, and nothing else supersedes, so the stale statement and
+/// the live one are two served messages and the stale one is the
+/// predecessor's own text. The evidence being required is `aged_arm`'s check.
+fn check_stale_preference(task: &Task, aged: &EventLog, truth: &Truth) -> Result<(), PairError> {
+    for event in aged.events.iter().filter(|e| task.evidence.contains(&e.id)) {
+        let superseded = match &event.payload {
+            Payload::Restatement { target, .. } => {
+                let supersessions = aged
+                    .events
+                    .iter()
+                    .filter(|e| e.payload.supersedes().is_some_and(|(_, t)| t == target))
+                    .count();
+                supersessions == 1
+                    && truth
+                        .units
+                        .get(target)
+                        .and_then(|unit| unit.facts.state.as_ref())
+                        .is_some_and(|state| state.superseded)
+            }
+            _ => false,
+        };
+        if !superseded {
+            return Err(PairError::NoCoexistingRestatement {
+                task: task.id.clone(),
+                id: event.id.clone(),
+            });
+        }
+    }
+    Ok(())
+}
+
 fn content<'a>(events: impl IntoIterator<Item = &'a Event>) -> Vec<(i64, u32, Payload)> {
     events
         .into_iter()
@@ -413,7 +460,8 @@ fn shared_query<'a>(tasks: impl IntoIterator<Item = &'a Task>) -> Result<&'a Que
 }
 
 /// The evidence is non-empty and required on the aged arm; a falsification
-/// claim is also early and never superseded.
+/// claim is also early and never superseded, and a stale-preference claim
+/// restates a predecessor the aged history supersedes.
 fn aged_arm(task: &Task, aged: &EventLog, truth: &Truth, median_ms: i64) -> Result<(), PairError> {
     if task.evidence.is_empty() {
         return Err(PairError::EmptyEvidence {
@@ -431,8 +479,10 @@ fn aged_arm(task: &Task, aged: &EventLog, truth: &Truth, median_ms: i64) -> Resu
             verdict: truth.units.get(id).map(|unit| unit.verdict),
         });
     }
-    if task.role == TaskRole::Falsification {
-        check_falsifier(task, aged, median_ms)?;
+    match task.role {
+        TaskRole::Falsification => check_falsifier(task, aged, median_ms)?,
+        TaskRole::StalePreference => check_stale_preference(task, aged, truth)?,
+        TaskRole::PositiveControl | TaskRole::Plain => {}
     }
     Ok(())
 }

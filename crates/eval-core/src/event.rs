@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use context_core::canonical_json::protocol_digest;
 use serde::{Deserialize, Serialize};
 
-pub const EVENT_SCHEMA_VERSION: &str = "eval-events/v1";
+pub const EVENT_SCHEMA_VERSION: &str = "eval-events/v2";
 pub const LINEARIZATION_RULE_VERSION: &str = "eval-linearization/v1";
 pub const LOG_DIGEST_PROTOCOL: &str = "eval-event-log/v1";
 
@@ -82,6 +82,14 @@ pub enum Payload {
         target: EventId,
         text: String,
     },
+    /// A correction delivered as a message of its own: a new `message_id`
+    /// at a later valid time, so the superseded text and this one are two
+    /// served messages rather than two revisions of one.
+    Restatement {
+        target: EventId,
+        message_id: String,
+        text: String,
+    },
     Invalidation {
         target: EventId,
     },
@@ -157,7 +165,8 @@ pub enum LogError {
 
 debug_display!(LogError);
 
-/// A correction supersedes its target; a retraction invalidates its target.
+/// A correction or a restatement supersedes its target; a retraction
+/// invalidates its target.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Supersession {
     Correction,
@@ -172,7 +181,9 @@ impl Payload {
         match self {
             Payload::Message { cites, .. } => cites.as_ref(),
             Payload::Rename { previous, .. } => previous.as_ref(),
-            Payload::Correction { target, .. } | Payload::Invalidation { target } => Some(target),
+            Payload::Correction { target, .. }
+            | Payload::Restatement { target, .. }
+            | Payload::Invalidation { target } => Some(target),
             Payload::ToolSpan { .. } | Payload::Commit { .. } => None,
         }
     }
@@ -181,7 +192,9 @@ impl Payload {
         match self {
             Payload::Message { cites, .. } => cites.as_mut(),
             Payload::Rename { previous, .. } => previous.as_mut(),
-            Payload::Correction { target, .. } | Payload::Invalidation { target } => Some(target),
+            Payload::Correction { target, .. }
+            | Payload::Restatement { target, .. }
+            | Payload::Invalidation { target } => Some(target),
             Payload::ToolSpan { .. } | Payload::Commit { .. } => None,
         }
     }
@@ -191,7 +204,9 @@ impl Payload {
     /// superseding one cannot hide behind a wildcard.
     pub fn supersedes(&self) -> Option<(Supersession, &EventId)> {
         match self {
-            Payload::Correction { target, .. } => Some((Supersession::Correction, target)),
+            Payload::Correction { target, .. } | Payload::Restatement { target, .. } => {
+                Some((Supersession::Correction, target))
+            }
             Payload::Invalidation { target } => Some((Supersession::Retraction, target)),
             Payload::Message { .. }
             | Payload::ToolSpan { .. }
@@ -204,7 +219,9 @@ impl Payload {
     /// its event ID: the message ID, and a tool span's call ID.
     fn harness_ids_mut(&mut self) -> Vec<&mut String> {
         match self {
-            Payload::Message { message_id, .. } => vec![message_id],
+            Payload::Message { message_id, .. } | Payload::Restatement { message_id, .. } => {
+                vec![message_id]
+            }
             Payload::ToolSpan {
                 message_id,
                 call_id,

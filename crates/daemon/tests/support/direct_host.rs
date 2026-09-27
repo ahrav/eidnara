@@ -111,6 +111,12 @@ impl Launch {
         self
     }
 
+    /// One more variable in the fixture's environment.
+    pub fn env(mut self, key: &str, value: &str) -> Self {
+        self.env.push((key.to_string(), value.to_string()));
+        self
+    }
+
     pub fn start(self) -> FixtureProcess {
         let args: Vec<String> = match &self.backend {
             None => Vec::new(),

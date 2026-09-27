@@ -301,6 +301,74 @@ mod unix {
         ))
     }
 
+    /// Names an executable that answers summarizer prompts in place of the
+    /// script: it reads `{"system", "prompt", "max_output_tokens"}` as JSON on
+    /// stdin and prints the summarizer's answer, so a harness run can serve
+    /// segments a real model wrote.
+    const SUMMARIZER_COMMAND_ENV: &str = "EIDNARA_FIXTURE_SUMMARIZER_COMMAND";
+    const SUMMARIZER_DUMP_ENV: &str = "EIDNARA_FIXTURE_SUMMARIZER_DUMP";
+
+    /// Runs the configured summarizer command over one request as the leader
+    /// of its own process group. Dropping this future before the command
+    /// exits kills the whole group, so a caller racing it against
+    /// cancellation leaves no orphan behind, not even a CLI the command
+    /// shelled out to.
+    async fn commanded_summary(
+        command: &std::ffi::OsStr,
+        request: &serde_json::Value,
+    ) -> Result<String, String> {
+        let mut child = tokio::process::Command::new(command)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .process_group(0)
+            .kill_on_drop(true)
+            .spawn()
+            .map_err(|error| format!("summarizer command: {error}"))?;
+        let mut group = ProcessGroupGuard(child.id());
+        child
+            .stdin
+            .take()
+            .expect("piped stdin")
+            .write_all(request.to_string().as_bytes())
+            .await
+            .map_err(|error| format!("summarizer command stdin: {error}"))?;
+        let output = child
+            .wait_with_output()
+            .await
+            .map_err(|error| format!("summarizer command: {error}"))?;
+        // The leader has exited and been reaped; the group id may be reused,
+        // so a kill now could hit another process.
+        group.0 = None;
+        if !output.status.success() {
+            return Err(format!(
+                "summarizer command exited {}: {}",
+                output.status,
+                String::from_utf8_lossy(&output.stderr)
+            ));
+        }
+        String::from_utf8(output.stdout)
+            .map_err(|error| format!("summarizer command output: {error}"))
+    }
+
+    /// The process group a still-running summarizer command leads. Dropped
+    /// while armed, it sends SIGKILL to the group, as the Suite D runner does
+    /// on a deadline, so the command's descendants go with it.
+    struct ProcessGroupGuard(Option<u32>);
+
+    impl Drop for ProcessGroupGuard {
+        fn drop(&mut self) {
+            if let Some(group) = self.0 {
+                let _ = std::process::Command::new("kill")
+                    .args(["-9", "--", &format!("-{group}")])
+                    .stdin(std::process::Stdio::null())
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .status();
+            }
+        }
+    }
+
     impl LlmExecutionBackend for ControlledBackend {
         fn execute(
             &self,
@@ -317,15 +385,82 @@ mod unix {
             // whatever the scheduled behavior; the controls script transport
             // outcomes, not what a summary says.
             let summary = scripted_summary(&request.prompt);
+            // A requested dump is gate B's record of the run; a line it
+            // cannot hold fails the call, typed, rather than leaving a file
+            // that does not cover what the run measured. An empty variable,
+            // which the driver always sets, asks for no dump.
+            let undumped = summary
+                .as_ref()
+                .and_then(|_| std::env::var_os(SUMMARIZER_DUMP_ENV))
+                .filter(|path| !path.is_empty())
+                .and_then(|path| {
+                    use std::io::Write;
+                    // One record per write: the appends of concurrent calls
+                    // land whole, so no record can interleave with another.
+                    let mut line =
+                        serde_json::json!({"system": request.system, "prompt": request.prompt})
+                            .to_string();
+                    line.push('\n');
+                    std::fs::OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open(&path)
+                        .and_then(|mut file| file.write_all(line.as_bytes()))
+                        .err()
+                        .map(|error| format!("summarizer dump {}: {error}", path.display()))
+                });
+            let commanded = summary
+                .as_ref()
+                .and_then(|_| std::env::var_os(SUMMARIZER_COMMAND_ENV))
+                .filter(|command| !command.is_empty())
+                .map(|command| {
+                    let input = serde_json::json!({
+                        "system": request.system,
+                        "prompt": request.prompt,
+                        "max_output_tokens": request.max_output_tokens,
+                    });
+                    (command, input)
+                });
             let blocked = Arc::clone(&self.blocked);
             let next_blocked_id = Arc::clone(&self.next_blocked_id);
             let shutdown = self.shutdown.clone();
             let counters = Arc::clone(&self.counters);
             Box::pin(async move {
+                if let Some(error) = undumped {
+                    counters.failed.fetch_add(1, Ordering::SeqCst);
+                    return ControlledBackend::terminal_error(&error);
+                }
                 match behavior {
                     NextBehavior::Success => {
+                        let text = match commanded {
+                            Some((command, input)) => {
+                                // The child is observed beside shutdown and
+                                // cancellation, as the blocked path is; losing
+                                // the race drops and so kills it.
+                                let answer = tokio::select! {
+                                    biased;
+                                    () = shutdown.cancelled() => {
+                                        counters.cancelled.fetch_add(1, Ordering::SeqCst);
+                                        return ControlledBackend::terminal_error("fixture shutting down");
+                                    }
+                                    () = cancel.cancelled() => {
+                                        counters.cancelled.fetch_add(1, Ordering::SeqCst);
+                                        return ControlledBackend::terminal_error("fixture run cancelled");
+                                    }
+                                    answer = commanded_summary(&command, &input) => answer,
+                                };
+                                match answer {
+                                    Ok(text) => text,
+                                    Err(error) => {
+                                        counters.failed.fetch_add(1, Ordering::SeqCst);
+                                        return ControlledBackend::terminal_error(&error);
+                                    }
+                                }
+                            }
+                            None => summary.unwrap_or_else(|| "fixture-success".to_owned()),
+                        };
                         events.emit(BackendEvent::AssistantText {
-                            text: summary.unwrap_or_else(|| "fixture-success".to_owned()),
+                            text,
                             finish_reason: None,
                         });
                         counters.completed.fetch_add(1, Ordering::SeqCst);

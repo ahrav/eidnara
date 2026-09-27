@@ -30,7 +30,9 @@ fn max() -> usize {
 fn semantic_digest(event: &Event) -> String {
     let value = match &event.payload {
         Payload::Message { text, .. } => json!({"text": text}),
-        Payload::Correction { text, target } => json!({"text": text, "target": target}),
+        Payload::Correction { text, target } | Payload::Restatement { text, target, .. } => {
+            json!({"text": text, "target": target})
+        }
         Payload::Invalidation { target } => json!({"target": target}),
         Payload::ToolSpan { output, .. } => json!({"output": output}),
         Payload::Commit { message, .. } => json!({"message": message}),
@@ -90,7 +92,7 @@ fn generation_is_a_pure_function_of_seed_and_config() {
     );
     assert_eq!(base.tape.identity, tape_identity(SEED, &config()));
     assert_eq!(
-        GENERATOR_VERSION, "eval-generator/v3",
+        GENERATOR_VERSION, "eval-generator/v4",
         "a change to a draw domain, the schedule, or the text is a new generator"
     );
 
@@ -531,6 +533,7 @@ fn payload_kind(event: &Event) -> &'static str {
         Payload::Commit { .. } => "commit",
         Payload::Rename { .. } => "rename",
         Payload::Correction { .. } => "correction",
+        Payload::Restatement { .. } => "restatement",
         Payload::Invalidation { .. } => "invalidation",
     }
 }
@@ -977,13 +980,16 @@ fn declared_events_equals_the_emitted_count_across_spec_shapes() {
         for tool in 0..3u32 {
             for correction in 0..4u32 {
                 for invalidation in [0u32, 1, 2] {
-                    for (commits, rename) in [(1u32, 0u32), (3, 1), (4, 2)] {
+                    for (commits, rename, restatement) in
+                        [(1u32, 0u32, 0u32), (3, 1, 1), (4, 2, 3), (1, 0, 2)]
+                    {
                         let config = WorldConfig {
                             sessions: vec![SessionSpec {
                                 messages,
                                 tool_span_every: tool,
                                 correction_every: correction,
                                 invalidation_every: invalidation,
+                                restatement_every: restatement,
                             }],
                             repositories: vec![RepositorySpec {
                                 commits,
@@ -1002,7 +1008,7 @@ fn declared_events_equals_the_emitted_count_across_spec_shapes() {
             }
         }
     }
-    assert_eq!(worlds, 4 * 3 * 4 * 3 * 3);
+    assert_eq!(worlds, 4 * 3 * 4 * 3 * 4);
 }
 
 #[test]

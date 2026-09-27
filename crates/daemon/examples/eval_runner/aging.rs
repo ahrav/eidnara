@@ -155,6 +155,7 @@ fn world(messages: u32) -> WorldConfig {
             tool_span_every: 4,
             correction_every: 3,
             invalidation_every: 5,
+            restatement_every: 0,
         }],
         repositories: Vec::new(),
         epoch_ms: EPOCH_MS,
@@ -189,9 +190,9 @@ fn planned(log: &EventLog) -> Vec<Planned> {
         .iter()
         .filter_map(|event| {
             let step = match &event.payload {
-                Payload::Message { .. } | Payload::Correction { .. } => {
-                    Step::Publish(event.id.clone())
-                }
+                Payload::Message { .. }
+                | Payload::Correction { .. }
+                | Payload::Restatement { .. } => Step::Publish(event.id.clone()),
                 Payload::Invalidation { target } => Step::Retire(target.clone()),
                 Payload::ToolSpan { .. } | Payload::Commit { .. } | Payload::Rename { .. } => {
                     return None;

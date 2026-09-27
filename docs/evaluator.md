@@ -181,14 +181,14 @@ different block is refused.
 
 `generate_all(root_seed, &config, mode)` builds a `World { log, tape }` from a
 `WorldConfig` and nothing else. The config lists each session (message count
-and how often a tool span, correction, or invalidation fires) and each
+and how often a tool span, correction, invalidation, or restatement fires) and each
 repository (commit count and how often a rename fires), the valid-time epoch
 and tick, and `max_events_per_log`. Counts are exact, so
 `WorldConfig::declared_events` is the number of events generation emits, and
 `validate` refuses a config whose declared count exceeds the bound before any
 event exists (`WorldError::EventBound { events, max }`). The count is
 arithmetic, so a config declaring billions of messages is refused in time
-proportional to the entity count. Corrections and invalidations skip slot `0`,
+proportional to the entity count. Corrections, invalidations, and restatements skip slot `0`,
 which has no earlier message to target, so `*_every = 1` fires on every slot
 for tool spans and renames but on every slot after the first for revisions.
 There is no default for the bound: a missing field fails to parse, and a zero
@@ -206,7 +206,16 @@ correction always advances its target's revision; `eval-generator/v3` writes
 each text as its drawn word, a word only that slot has, and the world's own
 word (`cursor for slot47 in world5eedb00000000002`), so a surface that
 matches on words can find one message by its own text and a message carried
-into another world does not read as one of that world's. `WorldConfig::planted`
+into another world does not read as one of that world's; `eval-generator/v4` adds the restatement to the schedule
+(`SessionSpec::restatement_every`, absent and unwritten when `0`, so a config
+without restatements keeps its bytes and its world). A restatement is a
+correction delivered as a message of its own: on its slot it draws one
+earlier message no restatement has targeted yet (`RestatementTarget`; slot
+`k` has `k` earlier messages and at most `k - 1` earlier restatements, so one
+is always left), then a drawn word other than that message's, and says it for
+the target's slot (`digest for slot3 in world…` restating `cursor for slot3 in
+world…`), so the stale decision and the live one differ in a whole word, both
+name the target's slot, and neither carries the other. `WorldConfig::planted`
 lists injection canaries appended to the text a carrier already emits (a
 message for `summary`, a tool span's output for `tool_output`, a commit's
 message for `commit_message`); planting adds no event, changes no other
@@ -267,7 +276,13 @@ An `Event` carries `id`, `stream` (`repository` or `session`), `entity_id`,
 `local_seq`, `valid_time_ms`, `observation_time_ms`, `causal_depth`, and a
 `Payload`: `message` (with an optional `cites` link to a commit), `tool_span`,
 `commit`, `rename` (with an optional `previous` rename on the same path),
-`correction { target }`, or `invalidation { target }`. Links name other events
+`correction { target }`, `restatement { target, message_id }` (a user
+message with a `message_id` of its own, `<actor>-m<k>-restatement`), or
+`invalidation { target }`. The log's `schema` is `eval-events/v2`: `v1` had
+no `restatement` kind, so a `v1` reader refuses a log that carries one by its
+header rather than at the unknown variant. A restatement supersedes its target exactly as a
+correction does (`Payload::supersedes`), so the reducer's truth is the same;
+the difference is the rendering. Links name other events
 by `EventId`, never by position; `EventId::derive(stream, entity_id,
 local_seq)` forms the id and the validator refuses any other. Times are
 canonical decimal strings on the wire, and only `i64::to_string` forms are
@@ -494,6 +509,16 @@ times:
   target and leaves both corrections required. No Phase 1 scenario compares
   `Truth` with store verdicts, so nothing observes that difference yet;
   closing it is a reducer version change, not a rendering rule.
+  Every restatement becomes a user message JSON of its own `message_id` at
+  its valid time: a new lineage beside its target, so the superseded text and
+  the restating one are two served messages. It is refused as a correction is
+  (`CorrectionTargetMissing`, `CorrectionTargetIsNotAMessage`,
+  `CorrectionTargetInOtherSession`, `CorrectionDoesNotAdvance`), and its
+  `message_id` counts toward `MessageIdReused`. A restatement renders only
+  its text, so a tool span naming its `message_id` has no parent and refuses
+  as `ToolSpanParentMissing`. A correction renders the bytes
+  it rendered before restatements existed; a test pins the rendering of the
+  fixture world with corrections by digest.
   The generator's time gaps are strictly positive (since `eval-generator/v2`), each
   slot emits at most one correction and one tool span, and its correction
   targets stay in the correcting entity, so generated worlds never meet these
@@ -1195,7 +1220,10 @@ its bitemporal `Query`, its AND-support `evidence` set of event IDs, and a
 `TaskRole`: `falsification` (truth established before the aged history's
 upper-median valid time and never corrected or retracted, so a retriever that
 prefers recent units cannot pass by accident), `positive_control` (truth the
-baseline is expected to deliver), or `plain`. Every task in a set shares one
+baseline is expected to deliver), `stale_preference` (see "Stale
+preference"; `eval-pairing/v2` added the role and its refusal, so a set
+that holds one is refused by a `v1` reader at `pairing_policy_version`, not
+at the unknown role), or `plain`. Every task in a set shares one
 `Query` (`MixedQueries` otherwise): the cut, the scope, the serving class, the
 destination, and the registry sensitivity each decide which units are
 eligible, so a task with a query of its own could make its evidence eligible,
@@ -1304,6 +1332,229 @@ must equal the set's (`PairSetMismatch {field}`), every policy must have an arm
 (`MissingArm`), the raw arm must claim no loss (`RawArmLostEvidence`), every
 version must be non-blank, and every loss must be evidence the set has
 (`AbsentEvidenceUnknown`).
+
+## Stale preference
+
+`stale.rs` measures what a real harness session hands the model when a
+correction coexists with the statement it supersedes. Nothing in it calls a
+model.
+
+**Role.** Gate A lives `fact_world`, not the event generator. The event
+generator's restatement and the task role below serve generated worlds: a
+pair set over one aged history, as the other suites compile.
+
+A `stale_preference` task's evidence is a restatement and its
+falsifier is the restatement's target, the superseded predecessor. The
+compiler runs the inverse of the falsification check: every evidence unit
+must be a `restatement` whose target the aged history holds, the reducer
+judges superseded, and no other event supersedes, and the evidence must be
+required (the aged arm's usual check). Anything else is
+`NoCoexistingRestatement {task, id}`. Today's same-`message_id` correction
+fails it: the correction replaces its target inside one lineage, so nothing
+stale coexists with it. A target also corrected in place fails it too: its
+served text is the correction's, not the stale value the pair would grade
+against. `SupersededFalsifier`
+and `TruthNotEarly` still refuse falsification tasks, and `PairSet::validate`
+reruns the check.
+
+**Delivery and grade.** `carries(text, phrase)` is the whole-word match
+delivery and grade use (`slot4` is not carried by `slot47`; an empty phrase is
+never carried; the Suite B campaign grades its delivery by the same match),
+and `locate` returns the first such occurrence. A pair's stale value is the
+value its first statement set and its live value the one its restatement
+set. `StaleDelivery::of(served, stale, live)` says
+which the served text carries: `live`, `stale`, `both`, or `neither`; a pair
+counts toward the stale-delivered count when it is `stale` or `both`.
+`grade(answer, stale, live)` grades a live answer by the LongMemEval
+knowledge-update rule: `current` when the answer carries the live value
+(naming the old value as history beside the new one as current is
+`current`), `stale` when it carries the stale value and not the live one, and
+`miss` otherwise. The values are distinct five-digit numbers, so the grade
+needs no judge.
+
+**Harness.** Gate A runs on the request a real harness sends, not on a
+fragment of it. The pipeline has four steps. The world, the arms, and the
+merge are Rust; living the world through the harness is TypeScript.
+
+1. `eval_runner stale-world --subjects <n> --seed <u64> --publish <dir>`
+   writes `stale-world.json` (`eval-stale-world/v1`), `fact_world(seed, n)`.
+   This is a coding session in three phases:
+   - The user sets one value per subject. A subject is a component and an
+     attribute (`billing service port`); `MAX_SUBJECTS` is 128.
+   - The user sets every value again, in an order drawn by `keyed_draw`. A
+     restatement repeats the statement's form, `Set the billing service port
+     to 94225.`, with no "instead" or "change of plan", so only order says
+     which value is current.
+   - The user sends one status note per subject that names no subject and no
+     value, so the corrections age out of the raw tail into segments.
+   - The assistant answers every turn with `Noted.`, so each value is stated
+     once. Values are distinct five-digit numbers, so a whole-word match finds
+     one value and nothing else, and no ordinal marker collides with one.
+   - The phase boundary means the daemon publishes a statement before the
+     summarizer sees its correction. A summarizer that saw both in one chunk
+     would drop the stale value itself: an interleaved 120-subject world left
+     11 of 120 pairs with a stale value to serve.
+   - Every pair asks `What is the <subject> now? Reply with just the value.`
+2. `bun packages/e2e-tests/scripts/stale-preference.ts --world <file> --out
+   <capture>` (`captureStaleWorld` in `packages/e2e-tests/src/stale-preference.ts`)
+   lives the world through `opencode serve` with the built Eidnara plugin
+   against the daemon's direct-host fixture, the stack the end-to-end suite
+   runs.
+   - Each world turn is the user's prompt. The mock provider answers with the
+     world's acknowledgement and reports input tokens that grow each turn up
+     to 90 percent of a 200,000-token limit, so the daemon's own summarizer
+     folds the older history the way a long session does.
+   - `--summarizer-model <bedrock id>` has a real model write the segments.
+     The driver starts the fixture with `EIDNARA_FIXTURE_SUMMARIZER_COMMAND`
+     naming `scripts/bedrock-summarizer.ts`, so the fixture answers each
+     summarizer prompt by that command (the prompt on stdin, the answer on
+     stdout, through the AWS CLI's Converse call) instead of its script. The
+     daemon's validator and publication judge the answer as they judge any
+     provider's. An empty command is the script; the driver always sets the
+     variable, so one exported in the caller's shell cannot leak in.
+   - `--summarizer-dump <file>` has the fixture append every summarizer
+     request (`{"system", "prompt"}`, one JSON line each) to that file through
+     `EIDNARA_FIXTURE_SUMMARIZER_DUMP`, so gate B reads the daemon's own chunk
+     prompts for the world gate A lived. A line the fixture cannot write
+     fails that summarizer call as a typed backend error, so a dump never
+     covers less than the run it records.
+   - Without a summarizer model, the fixture's scripted summarizer writes each
+     segment's `p1` and `p2` as the presented lines' own words and `p3` as the
+     range, so a segment that decays past P2 serves no prose. At 120 subjects
+     almost every m0 segment renders at P3 or P4. A gate-A run therefore names
+     a real summarizer and uses small worlds (step 4).
+   - The daemon runs with a 30-second cache TTL, and the driver waits 40
+     seconds after the session, as when a user comes back to it. The daemon
+     decides whether that pass re-freezes m0. The export records which block
+     served each stale statement and each restatement (`stale_block`,
+     `restatement`), so a run that stayed in m1 is visible, not assumed.
+   - Each pair's question is then sent as a turn of its own. The provider
+     request OpenCode sends for it is captured whole: the system prompt with
+     the Eidnara guidance, the served `<session-history>` (m0) and
+     `<session-history-since>` (m1) parts, the raw tail with its ordinal
+     markers, the auto-search hint the host appended, and the tool
+     definitions.
+   - The mock replies `Let me check.`, and the turn is then reverted through
+     OpenCode, so every question is asked of the session as it stood after the
+     world. The next captured request is checked to carry neither the earlier
+     question nor that reply.
+   - The daemon's stored segments are read from its store for the tier. The
+     capture (`eval-stale-capture/v1`, `StaleCapture`) names the harness
+     (`opencode`) and the summarizer.
+3. `eval_runner stale-arms --capture <file> --publish <dir>` writes
+   `stale-preference-export.json` through `export_capture`. It refuses a
+   capture whose world is not `fact_world` of its own seed and size
+   (`WorldMismatch`), a foreign schema, a missing request, and a request with
+   no m1 part (`NoM1`), since arm (b) goes there.
+4. `eval_runner stale-merge --inputs <export,...> --publish <dir>`
+   (`merge_exports`) combines independent harness sessions. It requires
+   this build's export schema on every input, one harness and summarizer,
+   two or more inputs, and refuses a world
+   twice or an input that is itself a merge. It prefixes
+   every task with `world-N:`, joins the decimal seeds, and sums the counts.
+   M0 uses several small sessions, so decay keeps their stale segments' prose
+   while the pair population still clears the fixed N. A 120-subject session
+   published 223 segments and rendered most stale values away at P3/P4
+   (22 of 120 located).
+
+`tests/rust-stale-preference.test.ts` runs steps 1 to 3 over 12 subjects
+under `EIDNARA_EVAL_S0_BUDGET_MS`, like the S0 campaign, and checks every
+located pair against its request.
+`the_fixture_answers_a_summarizer_prompt_through_the_named_command_and_dumps_it`
+(`crates/daemon/tests/eval_fixture_cassette.rs`) covers the two fixture
+variables with stub commands.
+
+**Arms.** A pair is located when the served segment covering its stale
+statement carries the stale value in its body, never its heading: m0 first,
+then the m1 delta. That is where D-7 would anchor the segment's claim. The
+value is the one token of the statement that a paraphrasing summarizer
+keeps.
+
+A pair is `unlocatable` when its stale segment serves no stale value. That
+happens when the segment decayed to a tier without it, the summarizer dropped
+it, or the statement was never folded. No rendering can change such a pair,
+so it has no arms and is never dropped.
+
+`export_capture` returns arms (b) through (e), each as the one text part it
+replaces (`PartText`), and `with_parts(request, parts)` builds an arm's
+request. Arm (a) is the request as served.
+
+- (b) `precedence_line`: a `<memory-updates>` block holding
+  `PRECEDENCE_SENTENCE` at the head of the m1 delta, where D-8 puts it. An
+  empty delta (the daemon's `M1_PLACEHOLDER`) becomes
+  `<session-history-since>` holding that block alone.
+- (c) `footer`: one D-7 footer line, `[corrections: <key> = <live> @<N>]`, at
+  the end of the stale segment's body, stale prose kept.
+- (d) `anchored_replacement`: every whole-word occurrence of the stale value
+  in that body replaced by `[corrected @<N>: <key> = <live>]`, the smallest
+  anchor D-7 could hold.
+- (e) `omission_oracle`: those occurrences removed.
+
+`N` is the restating message's ordinal in the harness session: every world
+turn is one user and one assistant message, numbered from one.
+
+A renderer change reaches neither the heading, a later segment's history
+("from 34827 to 94225"), the raw tail, nor the hint, so no arm changes them.
+`stale_elsewhere` records whether the stale value is still served there once
+(d) or (e) has run. An analysis reports flagged pairs as their own stratum,
+since for them (e) is not a clean omission.
+
+`positive_control` is no rendering. It holds every text part that serves the
+live value, with the live value written as the stale one, so every served
+statement agrees on the stale value. A served model that answers the stale
+value there shows the harness and the grader can register a stale answer.
+Arms that all score zero stale answers are then a finding about the
+renderings, not a ceiling of the harness.
+
+The override sentence is:
+
+```text
+Later statements supersede earlier ones: where two statements in this history disagree, the later one is current.
+```
+
+The world's claim keys come from the subject (`billing-service.port`) and
+satisfy the D-7 grammar `[a-z0-9_-]+(\.[a-z0-9_-]+)+` within 64 bytes.
+
+**McNemar.** `mcnemar(first, second, alpha)` takes one pre-registered event
+per pair on two arms (for example "graded `stale`"; the caller names the
+event, and "graded `stale`" and "not graded `current`" can order two arms
+differently when one of them turns stale answers into misses), keyed by pair
+id, `None` where the call failed or was censored. It returns `pairs` (both
+arms answered), `indeterminate` (either arm has no outcome: reported, never
+scored), the discordant counts `first_only` (`b`) and `second_only` (`c`),
+and `reject`: whether the exact two-sided binomial p-value `min(1, 2 P(X <=
+min(b, c)))`, `X ~ Bin(b + c, 1/2)`, is at most the pre-registered `alpha`.
+The test is two-sided, so "the second arm is better" is `reject` with
+`second_only < first_only` for an event that is a failure. The comparison is
+exact in 128-bit integers, the tail summed from `censoring`'s binomial and
+compared against `alpha`'s numerator and denominator, with no float. The
+tail times twice the denominator must fit, so the ceiling is roughly `b + c +
+log2(denominator) <= 127`: about 123 discordant pairs at alpha `1/20` split
+evenly, fewer for an alpha with a large denominator. Past it the test is
+`Overflow`, typed; pre-register alpha as a small exact ratio. Arms naming different pairs are `UnpairedArms`, and an
+alpha outside `(0, 1)` is `AlphaOutOfRange`. The statistic sits outside the
+quantities `gen/gen-statistics-golden.ts` pins.
+
+**Export.** `stale-preference-export.json` (`eval-stale-preference-export/v1`,
+`StaleExport`):
+
+| Field | Meaning |
+| --- | --- |
+| `schema`, `harness`, `summarizer`, `root_seed` | The export schema, the harness that served the requests, the model that wrote the segments (`fixture/scripted` for the script), and the world seeds as comma-separated decimals, one per merged session. |
+| `pairs[].task`, `pairs[].question`, `pairs[].key` | The task id (`stale-<i>`), the question the pair asks, and the claim key the arms name. |
+| `pairs[].stale_value`, `pairs[].live_value` | The two values the grader reads. |
+| `pairs[].restating_ordinal`, `pairs[].restatement` | The restatement's ordinal in the harness session, the `N` of every marker, and where the request serves it (`m0`, `m1`, `raw`, `absent`). |
+| `pairs[].stale_tier`, `pairs[].stale_block` | `1..=4`: the first stored tier (`p1` to `p4`) of the stale segment whose served form (escaped and heading-guarded as the renderer serves it) is the rendered body, `0` when none matches; and whether that segment is in `m0` or `m1`. |
+| `pairs[].delivery`, `pairs[].stale_elsewhere` | `StaleDelivery` over every text part of the request (history, raw tail, and hint), and whether the stale value is served outside the stale segment's body. |
+| `pairs[].history`, `pairs[].stale_spans` | The part holding the stale segment (`messages[message].content[part]`) and the value's UTF-8 byte spans in its body. |
+| `pairs[].request` | The provider request as the harness sent it: arm (a). |
+| `pairs[].arms` | Arms (b) through (e), each the one part it replaces, and `positive_control`, the parts the control replaces. |
+| `unlocatable` | Task id to `{delivery, request}` for every pair whose stale segment serves no stale value. |
+| `stale_delivered` | Pairs, located or not, whose request carries the stale value anywhere. |
+
+A request is Anthropic Messages shaped, as OpenCode sends it to its
+provider, so a driver sending it to another provider translates the system
+blocks, the messages, and the tools.
 
 ## Injection cases
 

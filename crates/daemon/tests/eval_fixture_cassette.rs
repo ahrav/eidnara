@@ -377,3 +377,205 @@ fn the_fixture_answers_a_summarizer_prompt_in_the_validators_document() {
         "a continuation line stays in its message: {second}"
     );
 }
+
+/// `EIDNARA_FIXTURE_SUMMARIZER_COMMAND` answers a summarizer prompt by the
+/// named executable (the request on stdin, the answer on stdout), and
+/// `EIDNARA_FIXTURE_SUMMARIZER_DUMP` keeps every summarizer request; a
+/// command that fails fails the call, and an empty command is the script.
+#[test]
+fn the_fixture_answers_a_summarizer_prompt_through_the_named_command_and_dumps_it() {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let stub = |name: &str, body: &str| {
+        let path = dir.path().join(name);
+        std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        path.display().to_string()
+    };
+    let stdin = dir.path().join("stdin.json");
+    let answering = stub(
+        "answer.sh",
+        &format!(
+            "cat > '{}'\nprintf '<output>stub</output>'",
+            stdin.display()
+        ),
+    );
+    let failing = stub("fail.sh", "cat > /dev/null\nexit 3");
+    let dump = dir.path().join("dump.jsonl");
+    let prompt = summarizer_prompt(&[(1, "U", "digest question asked")]);
+    let launch = |command: &str| {
+        let root = tempfile::tempdir().unwrap();
+        let fixture = Launch::at(root.path().to_path_buf())
+            .env("EIDNARA_FIXTURE_SUMMARIZER_COMMAND", command)
+            .env(
+                "EIDNARA_FIXTURE_SUMMARIZER_DUMP",
+                &dump.display().to_string(),
+            )
+            .start();
+        (root, fixture)
+    };
+    let text = |items: &[Value]| {
+        items
+            .get(1)
+            .and_then(|item| item["unit"]["message"]["content"][0]["text"].as_str())
+            .map(str::to_string)
+    };
+
+    let (_root, fixture) = launch(&answering);
+    let items = runtime.block_on(run(&fixture, "commanded", &prompt));
+    assert_eq!(text(&items).as_deref(), Some("<output>stub</output>"));
+    let input: Value = serde_json::from_slice(&std::fs::read(&stdin).unwrap()).unwrap();
+    assert_eq!(input["prompt"], prompt.as_str());
+    // A prompt that is not a summarizer's never reaches the command.
+    let other = runtime.block_on(run(&fixture, "plain", "hello"));
+    assert_eq!(text(&other).as_deref(), Some("fixture-success"));
+    fixture.shutdown();
+    let dumped: Vec<Value> = std::fs::read_to_string(&dump)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(dumped.len(), 1, "only the summarizer request is dumped");
+    assert_eq!(dumped[0]["prompt"], prompt.as_str());
+
+    let (_root, fixture) = launch(&failing);
+    let items = runtime.block_on(run(&fixture, "failing", &prompt));
+    assert_ne!(
+        unit_types(&items),
+        ["run_started", "assistant_message", "run_finished"]
+    );
+    assert_eq!(fixture.counters(5)["failed"], 1);
+    fixture.shutdown();
+
+    // A dump that cannot be written fails the call, typed, rather than
+    // leaving gate B a file that does not cover the run.
+    let root = tempfile::tempdir().unwrap();
+    let fixture = Launch::at(root.path().to_path_buf())
+        .env("EIDNARA_FIXTURE_SUMMARIZER_COMMAND", &answering)
+        .env(
+            "EIDNARA_FIXTURE_SUMMARIZER_DUMP",
+            &dir.path()
+                .join("missing")
+                .join("dump.jsonl")
+                .display()
+                .to_string(),
+        )
+        .start();
+    let items = runtime.block_on(run(&fixture, "undumpable", &prompt));
+    assert_ne!(
+        unit_types(&items),
+        ["run_started", "assistant_message", "run_finished"]
+    );
+    assert_eq!(fixture.counters(5)["failed"], 1);
+    fixture.shutdown();
+
+    // The driver always sets the variable; an empty one asks for no dump.
+    let root = tempfile::tempdir().unwrap();
+    let fixture = Launch::at(root.path().to_path_buf())
+        .env("EIDNARA_FIXTURE_SUMMARIZER_COMMAND", &answering)
+        .env("EIDNARA_FIXTURE_SUMMARIZER_DUMP", "")
+        .start();
+    let items = runtime.block_on(run(&fixture, "undumped", &prompt));
+    assert_eq!(text(&items).as_deref(), Some("<output>stub</output>"));
+    fixture.shutdown();
+
+    let (_root, fixture) = launch("");
+    let items = runtime.block_on(run(&fixture, "scripted", &prompt));
+    assert!(
+        text(&items)
+            .unwrap()
+            .starts_with("<output><history_segments>")
+    );
+    fixture.shutdown();
+}
+
+/// A summarizer command that never answers does not hold the fixture: a
+/// graceful shutdown ends the run, kills the child and its descendants, and
+/// exits within budget.
+#[test]
+fn a_hanging_summarizer_command_is_killed_by_shutdown() {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let pid_file = dir.path().join("child.pid");
+    let hanging = dir.path().join("hang.sh");
+    // The script hangs in a grandchild, as a command that shells out to a
+    // CLI does; the recorded pid is the grandchild's.
+    std::fs::write(
+        &hanging,
+        format!(
+            "#!/bin/sh\ncat > /dev/null\nsleep 600 &\necho $! > '{}'\nwait\n",
+            pid_file.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&hanging, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let fixture = Launch::at(root.path().to_path_buf())
+        .env(
+            "EIDNARA_FIXTURE_SUMMARIZER_COMMAND",
+            &hanging.display().to_string(),
+        )
+        .start();
+    let prompt = summarizer_prompt(&[(1, "U", "digest question asked")]);
+    // Send the run and leave it in flight: the command has the request on
+    // stdin and is sleeping.
+    runtime.block_on(async {
+        let client = fixture.client().await;
+        let route = fixture
+            .open_route(
+                &client,
+                "model_execution",
+                TargetKind::ManagementSurface,
+                "hanging",
+            )
+            .await;
+        let sent = request_json(&client, route, send_body(&prompt)).await;
+        assert!(sent["run_id"].is_string(), "{sent}");
+        client.close().await.expect("client closes");
+    });
+    let started = std::time::Instant::now();
+    while !pid_file.exists() {
+        assert!(
+            started.elapsed() < BUDGET,
+            "the summarizer command never started"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    let pid: i32 = std::fs::read_to_string(&pid_file)
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    let shutting_down = std::time::Instant::now();
+    fixture.shutdown();
+    assert!(
+        shutting_down.elapsed() < BUDGET,
+        "shutdown waited on the hanging command"
+    );
+    // The grandchild did not outlive the fixture: it is gone, or a zombie
+    // its reaper has not collected yet, before the budget runs out.
+    let deadline = std::time::Instant::now() + BUDGET;
+    loop {
+        let state = std::process::Command::new("ps")
+            .args(["-o", "stat=", "-p", &pid.to_string()])
+            .output()
+            .unwrap();
+        let state = String::from_utf8_lossy(&state.stdout).trim().to_string();
+        if state.is_empty() || state.starts_with('Z') {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the summarizer grandchild {pid} outlived the fixture: {state}"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+}

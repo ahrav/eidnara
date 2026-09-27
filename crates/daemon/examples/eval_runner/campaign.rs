@@ -29,9 +29,9 @@ use eval_core::{
     SUITE_B_REPORT_SCHEMA, SampleLedger, SampleRecord, Scale, Sensitivity, ServedClass,
     SessionSpec, SkipReason, StageValue, StageVerdict, StoppingRule, SuiteBReport, Surface1Stage,
     Task, TaskBudgets, TaskRole, TaskUsage, Terminal, TokenizerProfile, UnsupportedReason,
-    Visibility, WorldConfig, WorldProvenance, analyze, check_recency_baseline, compile_pair_set,
-    eval_run_id, generate_all, pair_table_digest, plan_injection_cases, render, score_injection,
-    serialize_spec, text_decision,
+    Visibility, WorldConfig, WorldProvenance, analyze, carries, check_recency_baseline,
+    compile_pair_set, eval_run_id, generate_all, pair_table_digest, plan_injection_cases, render,
+    score_injection, serialize_spec, text_decision,
 };
 use memory_store::{MemoryStore, StoredHistorySegment};
 use serde_json::{Value, json};
@@ -241,6 +241,7 @@ fn one_session(
             tool_span_every,
             correction_every: 0,
             invalidation_every: 0,
+            restatement_every: 0,
         }],
         repositories: (commits > 0)
             .then_some(RepositorySpec {
@@ -487,18 +488,6 @@ fn world(log: &EventLog) -> World {
         session: SESSION.to_string(),
         messages,
     }
-}
-
-/// Whether `served` carries `phrase` as whole words: `slot4` is not served by
-/// a fragment saying `slot47`.
-fn carries(served: &str, phrase: &str) -> bool {
-    assert!(!phrase.is_empty(), "a truth has words");
-    let in_word = |c: char| c.is_ascii_alphanumeric() || c == '_';
-    served.match_indices(phrase).any(|(at, _)| {
-        let before = served[..at].chars().next_back();
-        let after = served[at + phrase.len()..].chars().next();
-        !before.is_some_and(in_word) && !after.is_some_and(in_word)
-    })
 }
 
 /// Messages per summarizer segment: the fixture's scripted summarizer folds

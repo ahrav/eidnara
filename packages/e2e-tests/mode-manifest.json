@@ -143,6 +143,14 @@
             ]
         },
         {
+            "path": "tests/rust-stale-preference.test.ts",
+            "tier": "rust-only",
+            "rationale": "M0 stale preference through OpenCode, the plugin, and the daemon: the fact world lived turn by turn, every question turn's provider request captured, and the five-arm export built over the served history; gated on EIDNARA_EVAL_S0_BUDGET_MS",
+            "contract_refs": [
+                "U5-PORT"
+            ]
+        },
+        {
             "path": "tests/rust-steady-state-byte-identity.test.ts",
             "tier": "rust-only",
             "rationale": "retained wire messages are byte-identical across defer passes",

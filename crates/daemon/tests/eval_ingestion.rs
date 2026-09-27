@@ -54,6 +54,7 @@ fn config() -> WorldConfig {
             tool_span_every: 2,
             correction_every: 3,
             invalidation_every: 0,
+            restatement_every: 0,
         }],
         repositories: vec![RepositorySpec {
             commits: 3,

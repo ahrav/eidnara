@@ -4,7 +4,9 @@
 //! allowlist and the secret scanner, and writes the cassette; TypeScript only
 //! forwards requests and compares the digest strings it gets back.
 //! `campaign` runs one Suite B campaign through the direct-host fixture under
-//! an approved profile and publishes its report and manifest. `aging` runs
+//! an approved profile and publishes its report and manifest. `stale-world`
+//! and `stale-arms` bracket the stale-preference harness driver: the fact
+//! world it lives, and the M0 export of the requests it captured. `aging` runs
 //! one Suite C aging campaign in-process and publishes its report and
 //! manifest.
 
@@ -34,6 +36,10 @@ mod growth;
 #[cfg(unix)]
 #[allow(dead_code)]
 mod shrink;
+/// The stale-preference shell writes the fact world a harness driver lives
+/// and turns the driver's capture into the M0 export.
+#[cfg(unix)]
+mod stale;
 /// The Suite D shell is shared with the daemon's Suite D test the same way.
 #[cfg(unix)]
 #[allow(dead_code)]
@@ -408,6 +414,41 @@ fn run_campaign(args: impl Iterator<Item = String>) -> io::Result<()> {
     Ok(())
 }
 
+/// Writes the stale-preference fact world and prints one JSON line naming it.
+#[cfg(unix)]
+fn run_stale_world(args: impl Iterator<Item = String>) -> io::Result<()> {
+    let path = stale::world(args).map_err(io::Error::other)?;
+    println!("{}", json!({ "world": path }));
+    Ok(())
+}
+
+/// Writes the stale-preference export of a harness capture and prints one
+/// JSON line naming it with its counts.
+#[cfg(unix)]
+fn stale_summary(path: PathBuf, export: eval_core::StaleExport) {
+    let summary = json!({
+        "export": path,
+        "pairs": export.pairs.len(),
+        "unlocatable": export.unlocatable.len(),
+        "stale_delivered": export.stale_delivered,
+    });
+    println!("{summary}");
+}
+
+#[cfg(unix)]
+fn run_stale_arms(args: impl Iterator<Item = String>) -> io::Result<()> {
+    let (path, export) = stale::arms(args).map_err(io::Error::other)?;
+    stale_summary(path, export);
+    Ok(())
+}
+
+#[cfg(unix)]
+fn run_stale_merge(args: impl Iterator<Item = String>) -> io::Result<()> {
+    let (path, export) = stale::merge(args).map_err(io::Error::other)?;
+    stale_summary(path, export);
+    Ok(())
+}
+
 /// Runs the aging campaign and prints one JSON line naming what was published.
 #[cfg(unix)]
 fn run_aging(args: impl Iterator<Item = String>) -> io::Result<()> {
@@ -577,6 +618,12 @@ fn main() {
         #[cfg(unix)]
         Some("campaign") => run_campaign(args),
         #[cfg(unix)]
+        Some("stale-world") => run_stale_world(args),
+        #[cfg(unix)]
+        Some("stale-arms") => run_stale_arms(args),
+        #[cfg(unix)]
+        Some("stale-merge") => run_stale_merge(args),
+        #[cfg(unix)]
         Some("aging") => run_aging(args),
         #[cfg(unix)]
         Some("fault") => run_fault(args),
@@ -611,8 +658,11 @@ fn main() {
 #[cfg(unix)]
 fn campaign_usage() -> String {
     format!(
-        "{} | eval_runner {} | eval_runner {} | eval_runner {} | eval_runner {} | eval_runner {}",
+        "{} | eval_runner {} | eval_runner {} | eval_runner {} | eval_runner {} | eval_runner {} | eval_runner {} | eval_runner {} | eval_runner {}",
         campaign::USAGE,
+        stale::WORLD_USAGE,
+        stale::ARMS_USAGE,
+        stale::MERGE_USAGE,
         aging::USAGE,
         fault::USAGE,
         growth::USAGE,
@@ -623,7 +673,8 @@ fn campaign_usage() -> String {
 
 #[cfg(not(unix))]
 fn campaign_usage() -> String {
-    "campaign | aging | fault | growth | shrink | suite-d (unix only)".to_string()
+    "campaign | stale-world | stale-arms | stale-merge | aging | fault | growth | shrink | suite-d (unix only)"
+        .to_string()
 }
 
 #[cfg(test)]

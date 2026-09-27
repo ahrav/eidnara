@@ -224,6 +224,21 @@ impl Message<'_> {
         Ok((part, unit))
     }
 
+    /// A message whose only part is its text.
+    fn text_only(
+        &self,
+        config: &RenderConfig,
+        text: &str,
+        occurrences: &mut BTreeSet<String>,
+    ) -> Result<RenderedMessage, RenderError> {
+        let expected = vec![self.text_unit(config)?];
+        self.rendered(
+            vec![json!({"type": "text", "text": text})],
+            expected,
+            occurrences,
+        )
+    }
+
     /// Valid time is the revision: `created` for a user turn, `completed` for
     /// an assistant turn, whose `created` sits one millisecond earlier so the
     /// adapter's precedence is exercised rather than assumed.
@@ -268,7 +283,35 @@ impl Message<'_> {
     }
 }
 
-/// Renders every message, tool span, and correction as OpenCode session
+/// The message identity and role of a correction's or a restatement's
+/// target, which must be a message of the same session at an earlier valid
+/// time. A correction renders as a later revision of that lineage; a
+/// restatement as a user message of its own beside it.
+fn restated<'a>(
+    by_id: &BTreeMap<&EventId, &'a Event>,
+    event: &Event,
+    target: &EventId,
+) -> Result<(&'a str, &'a str), RenderError> {
+    let original = by_id
+        .get(target)
+        .copied()
+        .ok_or_else(|| RenderError::CorrectionTargetMissing(target.clone()))?;
+    let Payload::Message {
+        message_id, role, ..
+    } = &original.payload
+    else {
+        return Err(RenderError::CorrectionTargetIsNotAMessage(target.clone()));
+    };
+    if original.entity_id != event.entity_id {
+        return Err(RenderError::CorrectionTargetInOtherSession(target.clone()));
+    }
+    if event.valid_time_ms <= original.valid_time_ms {
+        return Err(RenderError::CorrectionDoesNotAdvance(target.clone()));
+    }
+    Ok((message_id, role))
+}
+
+/// Renders every message, tool span, correction, and restatement as OpenCode session
 /// fixtures with explicit times, and every commit as a repository fixture.
 pub fn render(log: &EventLog, config: &RenderConfig) -> Result<Rendering, RenderError> {
     let mut rendering = Rendering {
@@ -283,11 +326,19 @@ pub fn render(log: &EventLog, config: &RenderConfig) -> Result<Rendering, Render
     // (session, parent message_id).
     let mut by_id: BTreeMap<&EventId, &Event> = BTreeMap::new();
     let mut messages_named: BTreeMap<(&str, &str), usize> = BTreeMap::new();
+    let mut span_parents: BTreeSet<(&str, &str)> = BTreeSet::new();
     let mut spans_under: BTreeMap<(&str, &str), Vec<&Event>> = BTreeMap::new();
     for event in &log.events {
         by_id.insert(&event.id, event);
         match &event.payload {
             Payload::Message { message_id, .. } => {
+                let key = (event.entity_id.as_str(), message_id.as_str());
+                *messages_named.entry(key).or_default() += 1;
+                span_parents.insert(key);
+            }
+            // Restatements count toward message ID reuse but do not enter
+            // `span_parents`: they render as text only.
+            Payload::Restatement { message_id, .. } => {
                 *messages_named
                     .entry((event.entity_id.as_str(), message_id))
                     .or_default() += 1;
@@ -342,32 +393,33 @@ pub fn render(log: &EventLog, config: &RenderConfig) -> Result<Rendering, Render
                     .push(m.rendered(parts, expected, &mut occurrences)?);
             }
             Payload::Correction { target, text } => {
-                let original = by_id
-                    .get(target)
-                    .copied()
-                    .ok_or_else(|| RenderError::CorrectionTargetMissing(target.clone()))?;
-                let Payload::Message {
-                    message_id, role, ..
-                } = &original.payload
-                else {
-                    return Err(RenderError::CorrectionTargetIsNotAMessage(target.clone()));
-                };
-                if original.entity_id != event.entity_id {
-                    return Err(RenderError::CorrectionTargetInOtherSession(target.clone()));
-                }
-                if event.valid_time_ms <= original.valid_time_ms {
-                    return Err(RenderError::CorrectionDoesNotAdvance(target.clone()));
-                }
+                let (message_id, role) = restated(&by_id, event, target)?;
                 let m = Message {
                     event,
                     message_id,
                     role,
                 };
-                let expected = vec![m.text_unit(config)?];
-                let parts = vec![json!({"type": "text", "text": text})];
                 rendering
                     .messages
-                    .push(m.rendered(parts, expected, &mut occurrences)?);
+                    .push(m.text_only(config, text, &mut occurrences)?);
+            }
+            Payload::Restatement {
+                target,
+                message_id,
+                text,
+            } => {
+                restated(&by_id, event, target)?;
+                if messages_named(&event.entity_id, message_id) > 1 {
+                    return Err(RenderError::MessageIdReused(event.id.clone()));
+                }
+                let m = Message {
+                    event,
+                    message_id,
+                    role: "user",
+                };
+                rendering
+                    .messages
+                    .push(m.text_only(config, text, &mut occurrences)?);
             }
             Payload::Commit { message, .. } => {
                 if *repository.get_or_insert(&event.entity_id) != event.entity_id {
@@ -381,7 +433,7 @@ pub fn render(log: &EventLog, config: &RenderConfig) -> Result<Rendering, Render
                 })
             }
             Payload::ToolSpan { message_id, .. } => {
-                if messages_named(&event.entity_id, message_id) == 0 {
+                if !span_parents.contains(&(event.entity_id.as_str(), message_id.as_str())) {
                     return Err(RenderError::ToolSpanParentMissing(event.id.clone()));
                 }
             }
