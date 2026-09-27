@@ -822,12 +822,13 @@ describe("buildPagedModuleTransformPayloads byte reuse", () => {
         expect(pages[0]?.page.transform_page_id).toBeUndefined();
     });
 
-    it("pages a body above the daemon's transform limit", () => {
-        const body = transformBody(MODULE_UNPAGED_TRANSFORM_MAX_BYTES);
-        expect(Buffer.byteLength(JSON.stringify(body))).toBeGreaterThan(
-            MODULE_UNPAGED_TRANSFORM_MAX_BYTES,
-        );
-        const pages = buildPagedModuleTransformPayloads(body);
+    // The limit is a parameter, so a small one reaches the paging branch the daemon's 32 MiB
+    // limit takes; the next test pins that constant.
+    it("pages a body above its unpaged limit", () => {
+        const limit = 2 * MODULE_PAGE_MAX_BYTES;
+        const body = transformBody(limit);
+        expect(Buffer.byteLength(JSON.stringify(body))).toBeGreaterThan(limit);
+        const pages = buildPagedModuleTransformPayloads(body, limit);
         expect(pages.length).toBeGreaterThan(1);
         for (const { page, bytes } of pages) {
             expect(typeof page.transform_page_id).toBe("string");
