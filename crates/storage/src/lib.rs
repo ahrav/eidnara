@@ -924,21 +924,25 @@ mod sqlite_backend {
         /// Virtual-machine operations the run executed (`SQLITE_STMTSTATUS_VM_STEP`), which
         /// counts rows visited, not rows returned; a trigger's work is included.
         pub vm_steps: u64,
+        /// Bytes of every value in the rows the run produced: 8 per INTEGER or FLOAT, 0 per
+        /// NULL, and the stored length of each TEXT or BLOB.
+        pub bytes: u64,
     }
 
     #[cfg(any(test, feature = "test-support"))]
     #[derive(Default)]
     struct WorkLedger {
-        /// Per running statement handle: the cumulative VM step count at the run's start and
-        /// the rows produced so far. SQLite keeps the step count across runs in a 32-bit
-        /// counter, so a run's steps are the wrapping difference of two readings.
-        open: std::collections::HashMap<usize, (u32, u64)>,
+        /// Per running statement handle: the cumulative VM step count at the run's start, and
+        /// the rows and value bytes produced so far. SQLite keeps the step count across runs
+        /// in a 32-bit counter, so a run's steps are the wrapping difference of two readings.
+        open: std::collections::HashMap<usize, (u32, u64, u64)>,
         done: Vec<StatementWork>,
     }
 
     /// The `sqlite3_trace_v2` hook behind the statement-work ledger. `TRACE_STMT` opens a
     /// run (a trigger sub-program reports the same handle again, so the first baseline
-    /// stays), `TRACE_ROW` counts a produced row, and `TRACE_PROFILE` closes the run.
+    /// stays), `TRACE_ROW` counts a produced row and its value bytes, and `TRACE_PROFILE`
+    /// closes the run.
     #[cfg(any(test, feature = "test-support"))]
     unsafe extern "C" fn record_statement_work(
         event: std::ffi::c_uint,
@@ -969,13 +973,33 @@ mod sqlite_backend {
         let key = stmt as usize;
         match event {
             rusqlite::ffi::SQLITE_TRACE_STMT => {
-                ledger.open.entry(key).or_insert((steps, 0));
+                ledger.open.entry(key).or_insert((steps, 0, 0));
             }
             rusqlite::ffi::SQLITE_TRACE_ROW => {
-                ledger.open.entry(key).or_insert((steps, 0)).1 += 1;
+                // SAFETY: as above; SQLite raises `TRACE_ROW` with the statement's result row
+                // set, so each column index below the column count names a value of that row.
+                // `sqlite3_column_bytes` runs only on TEXT and BLOB values, whose stored form
+                // it reads without converting; numeric values are counted by type alone.
+                let bytes: u64 = unsafe {
+                    (0..rusqlite::ffi::sqlite3_column_count(stmt))
+                        .map(
+                            |column| match rusqlite::ffi::sqlite3_column_type(stmt, column) {
+                                rusqlite::ffi::SQLITE_INTEGER | rusqlite::ffi::SQLITE_FLOAT => 8,
+                                rusqlite::ffi::SQLITE_TEXT | rusqlite::ffi::SQLITE_BLOB => {
+                                    u64::try_from(rusqlite::ffi::sqlite3_column_bytes(stmt, column))
+                                        .unwrap_or(0)
+                                }
+                                _ => 0,
+                            },
+                        )
+                        .sum()
+                };
+                let run = ledger.open.entry(key).or_insert((steps, 0, 0));
+                run.1 += 1;
+                run.2 += bytes;
             }
             rusqlite::ffi::SQLITE_TRACE_PROFILE => {
-                let (baseline, rows) = ledger.open.remove(&key).unwrap_or((steps, 0));
+                let (baseline, rows, bytes) = ledger.open.remove(&key).unwrap_or((steps, 0, 0));
                 // SAFETY: as above; the returned text is owned by the statement and copied
                 // before the callback returns.
                 let sql = unsafe {
@@ -993,6 +1017,7 @@ mod sqlite_backend {
                     sql,
                     rows,
                     vm_steps: u64::from(steps.wrapping_sub(baseline)),
+                    bytes,
                 });
             }
             _ => {}
@@ -6368,6 +6393,30 @@ mod tests {
             work[0].vm_steps > 10_000,
             "the scan visits every row before the match, got {work:?}"
         );
+        drop(store);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn statement_work_counts_the_bytes_of_every_returned_value() {
+        const VALUES: &str = "SELECT k, v, length(v), NULL, 0.5, X'0102' FROM kv \
+                              WHERE k IN ('k00000007', 'k00000042') ORDER BY k";
+        let (root, store) = kv_store_with_rows(100);
+        store.start_statement_work_ledger();
+        let rows = store
+            .with_conn(|c| {
+                let mut stmt = c.prepare(VALUES)?;
+                stmt.query_map([], |r| r.get::<_, String>(1))?
+                    .collect::<rusqlite::Result<Vec<_>>>()
+            })
+            .expect("select");
+        assert_eq!(rows, ["v7", "v42"]);
+        let work = only_work(&store, VALUES);
+        assert_eq!(work.len(), 1, "{work:?}");
+        assert_eq!(work[0].rows, 2);
+        // Per row: the 9-byte key, the value text (2 then 3 bytes), an INTEGER and a FLOAT
+        // at 8 each, a NULL at 0, and the 2-byte blob.
+        assert_eq!(work[0].bytes, (9 + 2 + 8 + 8 + 2) + (9 + 3 + 8 + 8 + 2));
         drop(store);
         let _ = std::fs::remove_dir_all(&root);
     }
