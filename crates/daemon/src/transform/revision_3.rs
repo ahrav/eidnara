@@ -432,7 +432,10 @@ async fn unanchored_revert(
     let loaded = store.load(session()).unwrap();
     let mut meta = loaded.meta.clone();
     meta.anchor_block_id = Some("m1#0".to_string());
+    // The window never carries `m1`, so the hash is never compared.
+    meta.anchor_content_hash = Some("0".repeat(64));
     meta.ordinal_continuation_base = Some(6);
+    meta.descent_completed = true;
     store
         .commit(session(), loaded.row_version, &loaded.core, &meta)
         .unwrap();
@@ -464,6 +467,9 @@ async fn assert_reset_converges(handler: &Handler, store: &MemoryStore, epoch: u
     let loaded = store.load(session()).unwrap();
     assert_eq!(loaded.meta.revert_epoch, epoch + 1);
     assert_eq!(loaded.meta.ordinal_continuation_base, None);
+    assert_eq!(loaded.meta.anchor_block_id, None);
+    assert_eq!(loaded.meta.anchor_content_hash, None);
+    assert!(!loaded.meta.descent_completed);
     let resolved = resolution(store, &window);
     assert_eq!(resolved.resolution, Resolution::FirstPass);
     assert_eq!(resolved.ordinals, vec![1, 2]);
@@ -839,4 +845,21 @@ async fn a_panic_plus_reopen_after_the_revert_truncate_folds_on_the_next_pass() 
     let answer = call(&handler, retained_pass()).await;
     assert_folded(&store, &answer, epoch);
     assert_steady(&handler, &store, epoch).await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn a_revert_on_a_render_config_change_defers_then_folds() {
+    let (handler, store, _dir) = folded().await;
+    let mut reverted = body(&["m2", "n3"], anchor("m2", 1));
+    reverted["render_config"] = json!("cfg1");
+    let deferred = call(&handler, reverted.clone()).await;
+    assert_eq!(deferred["action"], "SOFT+", "{deferred}");
+    assert_eq!(deferred["reconcile_pending"], true);
+    assert_eq!(store.load_history_segments(session()).unwrap().len(), 2);
+    let hard = call(&handler, reverted).await;
+    assert_eq!(hard["action"], "HARD", "{hard}");
+    assert_eq!(hard["reconcile_pending"], false);
+    assert_eq!(hard["boundary"], anchor("m2", 1));
+    assert_eq!(served_mids(&hard), ["n3"]);
+    assert_eq!(store.load_history_segments(session()).unwrap().len(), 1);
 }

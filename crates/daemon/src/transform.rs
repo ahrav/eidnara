@@ -48,13 +48,13 @@ use crate::wire;
 use cache_stability::{CoreState, FrozenUnit, PassInput};
 use context_core::{ClassifierInput, PassPlan, PersistedShape, classify};
 use memory_store::{
-    BlockIdentity, BlockIdentityBasis, Channel1AppendRow, DeferredExecuteState, LineageAnchor,
-    LineageConstituent, LineageDescentDisposition, LineageDescentRequest, MaterializeReason,
-    MemoryStore, MemoryStoreError, ModuleMeta, ModuleUsage, NoteDelivery, PassAction, PassRecord,
-    PassSchedulerObservation, PendingAgentDrop, PendingChannel2Directive, PendingRewriteState,
-    ProjectMemoryComposition, ServedBlockFingerprint, TagMintInput, TagRow, TailHygieneBaseline,
-    TemporalMarkInput, TemporalMarkRow, TransformCommit, TransformOverlayBatch,
-    UserHintDecisionInput, UserHintRow,
+    BlockIdentity, BlockIdentityBasis, Channel1AppendRow, CoveredSystemMessage,
+    DeferredExecuteState, LineageAnchor, LineageConstituent, LineageDescentDisposition,
+    LineageDescentRequest, MaterializeReason, MemoryStore, MemoryStoreError, ModuleMeta,
+    ModuleUsage, NoteDelivery, PassAction, PassRecord, PassSchedulerObservation, PendingAgentDrop,
+    PendingChannel2Directive, PendingRewriteState, ProjectMemoryComposition,
+    ServedBlockFingerprint, TagMintInput, TagRow, TailHygieneBaseline, TemporalMarkInput,
+    TemporalMarkRow, TransformCommit, TransformOverlayBatch, UserHintDecisionInput, UserHintRow,
 };
 use regex::Regex;
 use serde::{Deserialize, Serialize};
@@ -2477,6 +2477,25 @@ fn continuation_summary_anchor(
     })
 }
 
+/// The lineage anchor is the message at continuation base + 1. A window anchored past it
+/// does not carry it, and `Revert { None }` resets the lineage with the history.
+fn lineage_anchor_gates(resolved: &crate::window_coverage::Resolved, meta: &ModuleMeta) -> bool {
+    use crate::window_coverage::Resolution;
+    if resolved.resolution
+        == (Resolution::Revert {
+            keep_through_seq: None,
+        })
+    {
+        return false;
+    }
+    match (&resolved.anchor, meta.ordinal_continuation_base) {
+        (Some(anchor), Some(base)) => {
+            u64::try_from(anchor.end_message).is_ok_and(|end| end <= base.saturating_add(1))
+        }
+        _ => true,
+    }
+}
+
 fn validate_lineage_anchor(
     meta: &ModuleMeta,
     req: &TransformIngress<'_>,
@@ -3205,8 +3224,8 @@ fn apply_once(
         lineage_state.disposition = Some(outcome.disposition.as_str());
         lineage_state.ordinal_base = outcome.prior_last_ordinal;
         lineage_state.force_hard = outcome.materialization_required;
-        if lineage_state.ordinal_base.is_some() {
-            // The descent moved the continuation base the window's ordinals derive from.
+        if outcome.loaded.row_version != coverage_row_version {
+            // A committed descent can move the continuation base.
             let (row_version, rebased) = resolve_attempt(store, ingress_req.request)?;
             coverage_row_version = row_version;
             if let Cow::Owned(rebased) = rebased {
@@ -3339,7 +3358,9 @@ fn apply_once(
         }
     }
     let mut lineage_anchor_failure = false;
-    if let Err(detail) = validate_lineage_anchor(&loaded.meta, req, &projection) {
+    if lineage_anchor_gates(&coverage.resolved, &loaded.meta)
+        && let Err(detail) = validate_lineage_anchor(&loaded.meta, req, &projection)
+    {
         lineage_anchor_failure = true;
         eprintln!(
             "daemon: lineage anchor validation failed closed for {}: {detail}",
@@ -4087,10 +4108,15 @@ fn apply_once(
     }
     apply_scheduler_meta(&mut meta, &scheduler_outcome);
 
-    if lineage_anchor_failure {
+    let revert_unreconciled = matches!(
+        coverage.resolved.resolution,
+        crate::window_coverage::Resolution::Revert { .. }
+    ) && !loaded.core.reconcile_pending;
+    if lineage_anchor_failure || revert_unreconciled {
         core.reconcile_pending = true;
         plan = PassPlan::Defer;
-        materialize_reason = Some(MaterializeReason::LineageAnchorMismatch);
+        materialize_reason =
+            lineage_anchor_failure.then_some(MaterializeReason::LineageAnchorMismatch);
     }
 
     let is_provider_prefix_mutation_pass = matches!(
@@ -4233,7 +4259,8 @@ fn apply_once(
                     &req.session_id,
                     &mut meta.history_segments_ordered,
                 )?;
-                let covered_system_messages = covered_system_messages_for_coverage(
+                let covered_system_messages = record_covered_systems(
+                    &mut meta,
                     req,
                     coverage_bounds.map(|(_, end)| end),
                     coverage_bounds.map(|(start, _)| start),
@@ -4312,13 +4339,13 @@ fn apply_once(
                                 &req.session_id,
                                 &mut meta.history_segments_ordered,
                             )?;
-                            let recut_covered_system_messages =
-                                covered_system_messages_for_coverage(
-                                    req,
-                                    recut_coverage_bounds.map(|(_, end)| end),
-                                    recut_coverage_bounds.map(|(start, _)| start),
-                                    serializer_profile,
-                                );
+                            let recut_covered_system_messages = record_covered_systems(
+                                &mut meta,
+                                req,
+                                recut_coverage_bounds.map(|(_, end)| end),
+                                recut_coverage_bounds.map(|(start, _)| start),
+                                serializer_profile,
+                            );
                             comp = compose_m0_for_context(
                                 store,
                                 &crate::m0_compose::M0ComposeInputs {
@@ -4505,7 +4532,8 @@ fn apply_once(
                         &req.session_id,
                         &mut meta.history_segments_ordered,
                     )?;
-                    let covered_system_messages = covered_system_messages_for_coverage(
+                    let covered_system_messages = record_covered_systems(
+                        &mut meta,
                         req,
                         coverage_bounds.map(|(_, end)| end),
                         coverage_bounds.map(|(start, _)| start),
@@ -4670,6 +4698,13 @@ fn apply_once(
                     if let Some((_, ord)) = m1.new_coverage {
                         meta.coverage_ordinal = Some(ord);
                         meta.coverage_history_segment_seq = Some(m1_signal.max_history_segment_seq);
+                        meta.covered_system_messages = covered_system_messages_for_coverage(
+                            req,
+                            &meta.covered_system_messages,
+                            meta.coverage_ordinal,
+                            meta.coverage_start_ordinal,
+                            serializer_profile,
+                        );
                         prune_covered_red_units(&mut core, &live, meta.coverage_ordinal);
                         prune_covered_terse_text_compression_units(
                             &mut core,
@@ -6157,29 +6192,63 @@ fn system_content_for_m0(message: &WireMessage) -> String {
     crate::served_json::canonical_blocks_text(message.content()).unwrap_or_default()
 }
 
+/// `absorbed` entries before the first live message precede the projection window.
 fn covered_system_messages_for_coverage(
+    req: &TransformIngress<'_>,
+    absorbed: &[CoveredSystemMessage],
+    coverage_ordinal: Option<u64>,
+    coverage_start_ordinal: Option<u64>,
+    profile: Option<SerializerProfile>,
+) -> Vec<CoveredSystemMessage> {
+    let covered = |ordinal: u64| {
+        !is_tail(ordinal, coverage_ordinal)
+            && (profile == Some(SerializerProfile::ClaudeCodeAnthropic)
+                || coverage_start_ordinal.is_none_or(|start| ordinal >= start))
+    };
+    let window_start = req.projection.live_messages().next().map(|m| m.ordinal);
+    let mut covered_messages: Vec<CoveredSystemMessage> = absorbed
+        .iter()
+        .filter(|entry| covered(entry.ordinal) && window_start.is_none_or(|s| entry.ordinal < s))
+        .cloned()
+        .collect();
+    let mut seen: HashSet<String> = covered_messages
+        .iter()
+        .map(|entry| entry.content.clone())
+        .collect();
+    for message in req
+        .projection
+        .live_messages()
+        .filter(|message| message.ck.role == "system" && covered(message.ordinal))
+    {
+        let content = system_content_for_m0(&message.ck);
+        if seen.insert(content.clone()) {
+            covered_messages.push(CoveredSystemMessage {
+                ordinal: message.ordinal,
+                content,
+            });
+        }
+    }
+    covered_messages
+}
+
+fn record_covered_systems(
+    meta: &mut ModuleMeta,
     req: &TransformIngress<'_>,
     coverage_ordinal: Option<u64>,
     coverage_start_ordinal: Option<u64>,
     profile: Option<SerializerProfile>,
 ) -> Vec<String> {
-    let mut seen = HashSet::new();
-    let mut covered = Vec::new();
-    for message in req.projection.live_messages().filter(|message| {
-        if message.ck.role != "system" || is_tail(message.ordinal, coverage_ordinal) {
-            return false;
-        }
-        if profile == Some(SerializerProfile::ClaudeCodeAnthropic) {
-            return true;
-        }
-        coverage_start_ordinal.is_none_or(|start| message.ordinal >= start)
-    }) {
-        let content = system_content_for_m0(&message.ck);
-        if seen.insert(content.clone()) {
-            covered.push(content);
-        }
-    }
-    covered
+    meta.covered_system_messages = covered_system_messages_for_coverage(
+        req,
+        &meta.covered_system_messages,
+        coverage_ordinal,
+        coverage_start_ordinal,
+        profile,
+    );
+    meta.covered_system_messages
+        .iter()
+        .map(|entry| entry.content.clone())
+        .collect()
 }
 
 fn coverage_advance_covers_new_system(
@@ -25831,6 +25900,84 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn covered_systems_outside_the_window_stay_in_m0_on_later_folds() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = store(dir.path());
+        s.replace_history_segments("ses", &[comp(1, 4, 4, "m3", "S1")])
+            .unwrap();
+        let first = run(
+            &s,
+            &cc_req(
+                "ses",
+                "cfg0",
+                vec![
+                    system_item("sys0", 1, "identity alpha"),
+                    system_item("sys1", 2, "identity beta"),
+                    system_item("sys2", 3, "identity alpha"),
+                    item("m3", 4, "covered one"),
+                    system_item("sys4", 5, "identity gamma"),
+                    item("m5", 6, "covered two"),
+                    system_item("sys6", 7, "tail identity"),
+                ],
+            ),
+            &spine(),
+        );
+        assert_eq!(
+            covered_system_entries(m0_bytes(&first)),
+            vec!["identity alpha".to_string(), "identity beta".to_string()]
+        );
+
+        let window = |cfg: &str| {
+            let mut request = cc_req(
+                "ses",
+                cfg,
+                vec![
+                    item("m3", 4, "covered one"),
+                    system_item("sys4", 5, "identity gamma"),
+                    item("m5", 6, "covered two"),
+                    system_item("sys6", 7, "tail identity"),
+                ],
+            );
+            request.boundary = Some(Some(BoundaryAnchor {
+                mid: "m3".to_string(),
+                sequence: 1,
+            }));
+            request
+        };
+        s.append_history_segments("ses", &[comp(2, 5, 6, "m5", "S2")])
+            .unwrap();
+        let advanced = run(&s, &window("cfg0"), &spine());
+        assert_eq!(
+            advanced.action, "HARD",
+            "coverage advance over a system message must recompose m0, not ride m1"
+        );
+        assert_eq!(
+            covered_system_entries(m0_bytes(&advanced)),
+            vec![
+                "identity alpha".to_string(),
+                "identity beta".to_string(),
+                "identity gamma".to_string(),
+            ],
+            "a window from the rendered boundary keeps the systems before it in m0"
+        );
+        assert_no_system_before_tail_system(&advanced, "tail identity");
+
+        let mut refolded = window("cfg1");
+        refolded.boundary = Some(Some(BoundaryAnchor {
+            mid: "m5".to_string(),
+            sequence: 2,
+        }));
+        refolded.messages.drain(..2);
+        let refolded = run(&s, &refolded, &spine());
+        assert_eq!(refolded.action, "HARD");
+        assert_eq!(
+            covered_system_entries(m0_bytes(&refolded)),
+            covered_system_entries(m0_bytes(&advanced)),
+            "a HARD over a window with no covered system keeps every absorbed system"
+        );
+    }
+
+    #[test]
     fn empty_covered_system_set_omits_the_block() {
         let dir = tempfile::tempdir().unwrap();
         let s = store(dir.path());
@@ -28842,20 +28989,6 @@ pub(crate) mod tests {
             "anchor edit cannot trim the tail"
         );
 
-        let mut deleted = request.clone();
-        deleted.render_config = "anchor-deleted".to_string();
-        deleted.messages.remove(0);
-        Arc::make_mut(&mut deleted.messages[0]).ordinal = 1;
-        Arc::make_mut(&mut deleted.messages[0]).ck.meta.ordinal = Some(1);
-        let deleted_response = run(&store, &deleted, &spine());
-        assert_eq!(deleted_response.action, "SOFT+");
-        assert!(deleted_response.reconcile_pending);
-        assert_eq!(
-            deleted_response.messages().len(),
-            3,
-            "deleted anchor stays no-trim"
-        );
-
         let mut rollover = request.clone();
         rollover.render_config = "date-rollover".to_string();
         rollover.messages = fake_compaction_messages("2026-08-07", &summary)
@@ -28882,6 +29015,34 @@ pub(crate) mod tests {
             active_response.messages()[2].content(),
             active_surface.messages[0].ck.content(),
             "the anchor message is exempt from both overlays and production strips"
+        );
+
+        let mut deleted = request.clone();
+        deleted.render_config = "anchor-deleted".to_string();
+        deleted.messages.remove(0);
+        let deferred = run(&store, &deleted, &spine());
+        assert_eq!(deferred.action, "SOFT+");
+        assert!(deferred.reconcile_pending);
+        assert_eq!(store.load_history_segments("B").unwrap().len(), 3);
+        let deleted_response = run(&store, &deleted, &spine());
+        assert_eq!(deleted_response.action, "HARD", "{deleted_response:?}");
+        assert_ne!(
+            deleted_response.materialize_reason.as_deref(),
+            Some("lineage_anchor_mismatch")
+        );
+        assert!(!deleted_response.reconcile_pending);
+        assert!(store.load_history_segments("B").unwrap().is_empty());
+        let reset = store.load("B").unwrap().meta;
+        assert_eq!(reset.ordinal_continuation_base, None);
+        assert_eq!(reset.anchor_block_id, None);
+        assert_eq!(
+            deleted_response
+                .messages()
+                .iter()
+                .filter(|message| !message.meta.synthetic)
+                .count(),
+            1,
+            "a deleted anchor resets the lineage and serves the surviving tail untrimmed"
         );
     }
 
@@ -28927,6 +29088,11 @@ pub(crate) mod tests {
         );
         let rewind_response = run(&store, &rewind, &spine());
         assert_eq!(rewind_response.lineage_switch_consumed_id, Some(302));
+        assert_eq!(
+            rewind_response.lineage_descent_disposition.as_deref(),
+            Some("not_compaction_shape"),
+            "a first-time terminal refusal is reported as itself, not as a replay"
+        );
         assert_eq!(
             store
                 .load("rewind")
@@ -29112,6 +29278,82 @@ pub(crate) mod tests {
             !response.reconcile_pending,
             "synthetic head must not latch a lineage_anchor_mismatch defer"
         );
+    }
+
+    #[test]
+    fn continued_lineage_keeps_folding_once_coverage_passes_the_anchor() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(dir.path());
+        seed_fake_compaction_prior(&store, "A");
+        let summary = continuation_summary("past-anchor");
+        let descent = fake_compaction_request(
+            "B",
+            "A",
+            2,
+            701,
+            true,
+            fake_compaction_messages("2026-08-06", &summary),
+        );
+        assert_eq!(
+            run(&store, &descent, &spine())
+                .lineage_descent_disposition
+                .as_deref(),
+            Some("descended")
+        );
+        let placeholder = store.load_history_segments("B").unwrap().pop().unwrap();
+        let successor = placeholder.sequence + 1;
+        store
+            .append_history_segments("B", &[comp(successor, 12, 13, "succ-13", "successor")])
+            .unwrap();
+
+        let mut fold = req(
+            "B",
+            "past-anchor-fold",
+            vec![
+                wire_item(
+                    "user",
+                    "summary",
+                    11,
+                    &[
+                        "<system-reminder>Today's date: 2026-08-06</system-reminder>",
+                        &summary,
+                    ],
+                ),
+                wire_item("assistant", "tail", 12, &["continued answer"]),
+                item("succ-13", 13, "successor turn thirteen"),
+                item("succ-14", 14, "successor turn fourteen"),
+            ],
+        );
+        fold.boundary = Some(Some(BoundaryAnchor {
+            mid: "summary".to_string(),
+            sequence: placeholder.sequence,
+        }));
+        let folded = run(&store, &fold, &spine());
+        assert_eq!(folded.action, "HARD");
+        assert_eq!(folded.boundary_id, "succ-13#0");
+
+        // The window now starts at the rendered boundary, past the anchor message.
+        let mut next = req(
+            "B",
+            "past-anchor-next",
+            vec![
+                item("succ-13", 13, "successor turn thirteen"),
+                item("succ-14", 14, "successor turn fourteen"),
+                item("succ-15", 15, "successor turn fifteen"),
+            ],
+        );
+        next.boundary = Some(Some(BoundaryAnchor {
+            mid: "succ-13".to_string(),
+            sequence: successor,
+        }));
+        let response = run(&store, &next, &spine());
+        assert_eq!(response.action, "HARD", "{response:?}");
+        assert!(!response.reconcile_pending);
+        assert_ne!(
+            response.materialize_reason.as_deref(),
+            Some("lineage_anchor_mismatch")
+        );
+        assert_eq!(response.boundary_id, "succ-13#0");
     }
 
     #[test]

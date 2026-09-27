@@ -2891,11 +2891,11 @@ describe("bounded transform ownership", () => {
         const largeInspection = inspectReferenceableMessages(largeMessages);
         const smallInspection = inspectReferenceableMessages(smallMessages);
         if (!largeInspection.ok || !smallInspection.ok) throw new Error("invalid budget fixture");
-        // Capture walk, wire projection, and one retained length slot per message.
+        // Capture walk, wire projection, and one window slot plus one retained length slot per message.
         const heldCharge =
             largeInspection.estimatedBytes +
             largeInspection.messageWireBytes.reduce((sum, bytes) => sum + 4 * bytes, 0) +
-            largeMessages.length * 8;
+            largeMessages.length * 16;
         const maxBytes = heldCharge + smallInspection.estimatedBytes - 1;
         const admission = new TransformCaptureAdmission({
             maxPasses: 64,
@@ -3563,7 +3563,7 @@ describe("capture verified against the retained prefix", () => {
             await transform.run(sessionId, { messages: [...history] });
 
             // The same object, edited in place, must not verify against its retained digest.
-            (history[1]?.parts as Array<{ text: string }>)[0].text = "EDITED m-2";
+            (history[1] as { parts: Array<{ text: string }> }).parts[0].text = "EDITED m-2";
             const grown = [...history, ...rowMessages(sessionId, rows.slice(4))];
             await transform.run(sessionId, { messages: [...grown] });
             expect(bodies).toHaveLength(3);
@@ -3581,7 +3581,8 @@ describe("capture verified against the retained prefix", () => {
         installRawRows(sessionId, rows);
         const history = rowMessages(sessionId, rows);
         const { client, bodies } = recordingClient((request, index) => {
-            if (index === 1) (history[0]?.parts as Array<{ text: string }>)[0].text = "EDITED";
+            if (index === 1)
+                (history[0] as { parts: Array<{ text: string }> }).parts[0].text = "EDITED";
             return recipeResponse(request, [folded(sessionId)]);
         });
         const transform = createRustModeTransform(makeDeps(), { moduleClient: client });
@@ -3790,14 +3791,14 @@ describe("capture verified against the retained prefix", () => {
         );
         await transform.run(sessionId, { messages: [...history] });
 
-        (history[1]?.parts as Array<{ text: string }>)[0].text = "EDITED m-2";
+        (history[1] as { parts: Array<{ text: string }> }).parts[0].text = "EDITED m-2";
         const grown = [...history, ...rowMessages(sessionId, rows.slice(4))];
         await transform.run(sessionId, { messages: [...grown] });
         expect(bodies[1]?.native_messages).toEqual(grown);
         const full = inspectReferenceableMessages(grown);
         if (!full.ok) throw new Error("valid source rejected");
-        // The first two reservations are the partial inspection and its full fallback.
-        const [partial, fallback] = reservations[1] as [number, number];
+        // After the window slots, the next two reservations are the partial inspection and its full fallback.
+        const [, partial, fallback] = reservations[1] as [number, number, number];
         expect(partial).toBeLessThan(full.estimatedBytes);
         expect(partial + fallback).toBe(full.estimatedBytes);
     });

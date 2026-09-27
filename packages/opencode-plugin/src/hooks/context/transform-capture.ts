@@ -89,15 +89,22 @@ export function readOwnDataProperty(value: unknown, key: PropertyKey): unknown {
     return descriptor && Object.hasOwn(descriptor, "value") ? descriptor.value : undefined;
 }
 
-/** Scans host ids from the end until `stop` accepts one and returns its index, or -1. Each hop (slot, `info`, `id`) is an own data read, so a planted proxy, revoked proxy, or accessor reads as no id and none of its traps or getters runs. The caller has rejected a proxied `host`. */
+/** The id the daemon's decoder names a message by: `info.id`, else the top-level `id`. Each hop is an own data read, so a planted proxy, revoked proxy, or accessor reads as no id and none of its traps or getters runs. */
+export function messageId(message: unknown): string | undefined {
+    const nested = readOwnDataProperty(readOwnDataProperty(message, "info"), "id");
+    if (typeof nested === "string") return nested;
+    const top = readOwnDataProperty(message, "id");
+    return typeof top === "string" ? top : undefined;
+}
+
+/** Scans host ids from the end until `stop` accepts one and returns its index, or -1. The caller has rejected a proxied `host`. */
 export function scanMessageIds(
     host: readonly unknown[],
     stop: (id: string, index: number) => boolean,
 ): number {
     for (let index = host.length - 1; index >= 0; index -= 1) {
-        const info = readOwnDataProperty(readOwnDataProperty(host, index), "info");
-        const id = readOwnDataProperty(info, "id");
-        if (typeof id === "string" && stop(id, index)) return index;
+        const id = messageId(readOwnDataProperty(host, index));
+        if (id !== undefined && stop(id, index)) return index;
     }
     return -1;
 }

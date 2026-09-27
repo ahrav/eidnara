@@ -1813,6 +1813,13 @@ pub struct ServedBlockFingerprint {
     pub serialized_len: usize,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CoveredSystemMessage {
+    /// The ordinal of the content's first occurrence.
+    pub ordinal: u64,
+    pub content: String,
+}
+
 fn bool_is_false(value: &bool) -> bool {
     !*value
 }
@@ -2234,6 +2241,11 @@ pub struct ModuleMeta {
     /// the served block set for that pass, so it stays bounded by the output size.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub served_output_fingerprint: Vec<ServedBlockFingerprint>,
+    /// Covered system messages, one per distinct content in first-ordinal order. A fold
+    /// window starts at its anchor; preceding system messages reach later folds only through
+    /// this list.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub covered_system_messages: Vec<CoveredSystemMessage>,
 
     /// Tracks which shadow reset generation this record belongs to. Operations created
     /// before the most recent reset are rejected so they cannot write rows from an older
@@ -11414,6 +11426,7 @@ impl MemoryStore {
             target_meta.pending_rewrite_ambiguous = false;
             target_meta.pending_rewrite_last_failure = None;
             target_meta.served_output_fingerprint.clear();
+            target_meta.covered_system_messages.clear();
             target_meta.anchor_block_id = Some(anchor.block_id.clone());
             target_meta.anchor_content_hash = Some(anchor.content_hash.clone());
             target_meta.ordinal_continuation_base = Some(prior_last);

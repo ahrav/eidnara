@@ -63,6 +63,7 @@ import {
     type HistoryDigest,
     historyDigestsEqual,
     inspectReferenceableMessages,
+    messageId,
     messageIdFilter,
     publicationRejection,
     publishInPlace,
@@ -95,22 +96,36 @@ export interface RustModeTransformDeps extends SessionDirectoryDeps {
     isInternalChildSession?: (sessionId: string) => boolean;
 }
 
-function activeAgentFromMessages(messages: readonly MessageLike[]): string | undefined {
+function nonEmptyString(value: unknown): string | undefined {
+    return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
+function activeAgentFromMessages(messages: readonly MessageLike[]): string | undefined | null {
+    let assistantAgent: string | undefined;
     for (let index = messages.length - 1; index >= 0; index -= 1) {
-        const info = messages[index]?.info as { role?: unknown; agent?: unknown } | undefined;
-        if (info?.role !== "user") continue;
-        return typeof info.agent === "string" && info.agent.length > 0 ? info.agent : undefined;
+        const info = messages[index]?.info as
+            | { role?: unknown; agent?: unknown; mode?: unknown }
+            | undefined;
+        if (info?.role === "user") return nonEmptyString(info.agent);
+        if (info?.role === "assistant")
+            assistantAgent ??= nonEmptyString(info.agent) ?? nonEmptyString(info.mode);
     }
-    return undefined;
+    return assistantAgent ?? null;
 }
 
 async function resolveCombinedTodowriteVerdict(
     deps: RustModeTransformDeps,
     sessionId: string,
-    activeAgent: string | undefined,
+    activeAgent: string | undefined | null,
     availability: ToolAvailabilityVerdict,
 ): Promise<boolean> {
-    if (!availability.frozen || !availability.callable || deps.compactionOff === true) return false;
+    if (
+        activeAgent === null ||
+        !availability.frozen ||
+        !availability.callable ||
+        deps.compactionOff === true
+    )
+        return false;
 
     return !(await todowritePermissionDenied(deps.client, sessionId, activeAgent));
 }
@@ -287,13 +302,16 @@ function parseBoundary(value: unknown): TransformBoundary | null | undefined {
         : undefined;
 }
 
-/** One `transform.boundary` page, newest first and strictly below `before`; `undefined` when malformed. */
+/** `transform.boundary` lists at most this many anchors per page (docs/host-wire-protocol.md). */
+const MAX_ANCHOR_PAGE = 4096;
+
+/** One `transform.boundary` page, newest first and strictly below `before`; `undefined` when malformed or over the page cap. */
 function parseAnchorPage(
     reply: unknown,
     before: number | undefined,
 ): TransformBoundary[] | undefined {
     const anchors = isRecord(reply) ? reply.anchors : undefined;
-    if (!Array.isArray(anchors)) return undefined;
+    if (!Array.isArray(anchors) || anchors.length > MAX_ANCHOR_PAGE) return undefined;
     const page: TransformBoundary[] = [];
     let bound = before ?? Number.POSITIVE_INFINITY;
     for (const entry of anchors) {
@@ -1235,12 +1253,11 @@ export function createRustModeTransform(
             if (deps.isInternalChildSession?.(sessionId))
                 throw new PassDeclined(sessionId, "internal_child");
             assertCurrentPass();
-            // One discovery per pass: an unknown boundary, or one the scan cannot find, needs it.
+            // An unknown boundary, or one the scan cannot find, needs a discovery walk.
             const known = state.boundary;
             let boundary = known ?? null;
             let boundaryIndex = known ? scan((id) => id === known.mid) : 0;
-            const discovered = known === undefined || boundaryIndex < 0;
-            if (discovered)
+            if (known === undefined || boundaryIndex < 0)
                 ({ boundary, index: boundaryIndex } = await discover(
                     options.projectRoot ?? directory,
                 ));
@@ -1248,11 +1265,13 @@ export function createRustModeTransform(
             const prefixGuardStartedAt = performance.now();
             const previous = retainedOutputs.get(sessionId);
             const capturedLength = target.length;
+            // The copy holds one slot reference per tail message, charged like a served or candidate array.
+            charge((capturedLength - boundaryIndex) * CANDIDATE_SLOT_BYTES, "window slots");
             const window = copyWindow(target, boundaryIndex, capturedLength);
             if (!window)
                 throw new PassDeclined(sessionId, "unsupported_source", "window slot accessor");
             // Discovery fixed `boundaryIndex` before an await, so the host may have moved the anchor.
-            const head = readOwnDataProperty(readOwnDataProperty(window[0], "info"), "id");
+            const head = messageId(window[0]);
             if (boundary && head !== boundary.mid)
                 throw new PassDeclined(sessionId, "source_changed", "boundary moved");
             // A full fallback inspection walks a superset of the partial one, so it pays only the difference.
@@ -1302,8 +1321,8 @@ export function createRustModeTransform(
             const messages = captured.members as MessageLike[];
             const ids = new Set<unknown>();
             for (const message of messages) {
-                const id = readOwnDataProperty(readOwnDataProperty(message, "info"), "id");
-                if (typeof id === "string" && ids.has(id))
+                const id = messageId(message);
+                if (id !== undefined && ids.has(id))
                     throw new PassDeclined(sessionId, "unsupported_source", `duplicate id ${id}`);
                 ids.add(id);
             }
@@ -1614,9 +1633,11 @@ export function createRustModeTransform(
                 assertCurrentPass();
                 state.boundary = undefined;
                 if (previous) retainedOutputs.disown(sessionId, previous);
-                if (discovered || rerun)
-                    throw new PassDeclined(sessionId, "boundary_unknown", "after discovery");
-                // Nothing of this attempt is kept, so the rerun pays only for its own capture.
+                // Section 7.10.4: the first `boundary_unknown` rediscovers, whether or not this attempt walked; the second declines.
+                if (rerun)
+                    throw new PassDeclined(sessionId, "boundary_unknown", "after rediscovery");
+                // Nothing of this attempt is kept, so the rerun pays only for its own capture. The
+                // `return` is not awaited: this frame, its window, and its capture are gone before the rerun captures.
                 lease.refund();
                 return execute(sessionId, output, lease, {
                     deliveries,
