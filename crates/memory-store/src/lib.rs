@@ -4693,9 +4693,9 @@ fn prepare_history_segment(
     // claims; the loaded set then holds claims only on its newest non-legacy suffix.
     if history_segment.legacy != 1 {
         prepared.claims = prepare_claims(
-            write,
             &history_segment.claims,
             prepared.p1.as_deref().unwrap_or_default().trim(),
+            |field_id, input| write.content(field_id, input),
         )?;
     }
     Ok(prepared)
@@ -4707,30 +4707,30 @@ fn prepare_history_segment(
 /// contains, so a stored anchor always lies inside the stored `p1`; and drops
 /// a claim whose key the scanner rewrites or whose `key = value` pair it flags.
 fn prepare_claims(
-    write: &mut PreparedWrite,
     claims: &[Claim],
     p1: &str,
+    mut scan: impl FnMut(&'static str, &str) -> Result<String, MemoryStoreError>,
 ) -> Result<Vec<Claim>, MemoryStoreError> {
     let mut prepared = Vec::with_capacity(claims.len());
     for claim in claims {
         let anchor = claim
             .anchor
             .as_deref()
-            .map(|anchor| write.content("claim_anchor", anchor))
+            .map(|anchor| scan("claim_anchor", anchor))
             .transpose()?
             .filter(|anchor| !anchor.is_empty() && p1.contains(anchor.as_str()));
-        let key = write.content("claim_key", &claim.key)?;
+        let key = scan("claim_key", &claim.key)?;
         // Liveness matches keys byte for byte, and two keys redacted to one placeholder would
         // supersede each other, so a rewritten key drops its claim.
         if key != claim.key {
             continue;
         }
-        let value = write.content("claim_value", &claim.value)?;
+        let value = scan("claim_value", &claim.value)?;
         // A correction serves `key = value` together, and a key such as `api.key` makes that
         // pair read as a secret assignment even when neither half does alone. Such a claim is
         // dropped, so no served correction holds text the scanner would redact.
         let pair = format!("{key} = {value}");
-        if write.content("claim_pair", &pair)? != pair {
+        if scan("claim_pair", &pair)? != pair {
             continue;
         }
         prepared.push(Claim {
@@ -4759,6 +4759,29 @@ fn claims_from_cell(cell: Option<&str>) -> Vec<Claim> {
 /// The `claims` cell a row stores: a JSON array, `[]` when empty, never NULL.
 fn claims_cell(claims: &[Claim]) -> String {
     serde_json::to_string(claims).expect("claims serialize")
+}
+
+/// A lineage copy re-scans claim text to apply detector rules introduced
+/// after the row was written. A `p1` the scanner rewrites copies `[]`,
+/// because the anchors were checked against the old `p1`.
+fn redact_transaction_claims(
+    cell: Option<&str>,
+    p1: Option<&str>,
+) -> Result<String, MemoryStoreError> {
+    if cell == Some("[]") {
+        return Ok("[]".to_string());
+    }
+    if let Some(p1) = p1
+        && prepare_transaction_content(p1)? != p1
+    {
+        return Ok("[]".to_string());
+    }
+    let prepared = prepare_claims(
+        &claims_from_cell(cell),
+        p1.unwrap_or_default().trim(),
+        |_, input| prepare_transaction_content(input),
+    )?;
+    Ok(claims_cell(&prepared))
 }
 
 fn prepare_history_segments(
@@ -6704,6 +6727,18 @@ impl MemoryStore {
                     let input = context.get::<String>(0)?;
                     prepare_transaction_content(&input)
                         .map_err(|error| rusqlite::Error::UserFunctionError(Box::new(error)))
+                },
+            )?;
+            conn.create_scalar_function(
+                "redact_transaction_claims",
+                2,
+                FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_DETERMINISTIC,
+                |context| {
+                    redact_transaction_claims(
+                        context.get_raw(0).as_str().ok(),
+                        context.get_raw(1).as_str().ok(),
+                    )
+                    .map_err(|error| rusqlite::Error::UserFunctionError(Box::new(error)))
                 },
             )?;
             conn.create_scalar_function(
@@ -11694,13 +11729,7 @@ impl MemoryStore {
                          importance,
                          CASE WHEN episode_type IS NULL THEN NULL
                               ELSE reject_transaction_text(episode_type) END,
-                         legacy, created_at,
-                         -- The claims were scanned field by field when their row was
-                         -- inserted and are not re-scanned here: the column has no rows
-                         -- from before insert-time scanning. A copy whose p1 the re-scan
-                         -- changes keeps none, so no copied anchor falls outside its p1.
-                         CASE WHEN p1 IS NULL OR redact_transaction_text(p1) = p1
-                              THEN claims ELSE '[]' END
+                         legacy, created_at, redact_transaction_claims(claims, p1)
                    FROM history_segments WHERE session_id = ?2",
                 params![request.target_key, source_key],
             )?;
@@ -30016,7 +30045,9 @@ mod lineage_descent_tests {
                 // legacy secret the re-scan rewrites, so its claims cannot follow.
                 conn.execute(
                     "UPDATE history_segments
-                        SET claims = '[{\"key\":\"k.v\",\"value\":\"1\",\"ordinal\":1,\"anchor\":\"history\"}]',
+                        SET claims = '[{\"key\":\"k.v\",\"value\":\"1\",\"ordinal\":1,\"anchor\":\"history\"},'
+                                  || '{\"key\":\"k.w\",\"value\":\"pass' || 'word=legacy-claim-secret\",'
+                                  || '\"ordinal\":1,\"anchor\":null}]',
                             p1 = CASE sequence WHEN 2 THEN 'pass' || 'word=legacy-p1-secret' ELSE p1 END
                       WHERE session_id = 'A'",
                     [],
@@ -30126,10 +30157,11 @@ mod lineage_descent_tests {
                 .iter()
                 .map(|row| row.claims.len())
                 .collect::<Vec<_>>(),
-            [1, 0, 0],
+            [2, 0, 0],
             "a copy keeps its claims only when the re-scan leaves its p1 unchanged"
         );
         assert_eq!(copied[0].claims[0].anchor.as_deref(), Some("history"));
+        assert_eq!(copied[0].claims[1].value, "password=<REDACTED:password>");
         let inherited_notes = store.read_notes("git:project", "B", 10, 0).unwrap();
         assert_eq!(inherited_notes.len(), 1);
         assert_ne!(inherited_notes[0].id, source_note.id);
