@@ -20,6 +20,15 @@ use crate::transform::{
 const SESSION: &str = "meta-bound";
 const WINDOW: u64 = 300;
 
+/// Every test here uses [`SESSION`], and the attempt hook is keyed by session, so a test's
+/// pass could consume another test's one-shot hook; the tests run one at a time.
+fn serial() -> std::sync::MutexGuard<'static, ()> {
+    static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    SERIAL
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 /// A store holding `h` synthetic segments over messages 1..=2h and the continuation base the
 /// window continues, so an unanchored first pass numbers the window from `2h - 1`.
 fn seeded(h: usize) -> (tempfile::TempDir, Arc<MemoryStore>) {
@@ -82,6 +91,7 @@ fn identity_mids(loaded: &LoadedState) -> Vec<String> {
 
 #[test]
 fn a_hundred_thousand_message_session_commits_a_three_hundred_message_window() {
+    let _serial = serial();
     let (_dir, store) = seeded(50_000);
     let request = window(50_000);
     let expected = window_mids(&request);
@@ -165,6 +175,7 @@ fn assert_pruned(store: &MemoryStore, request: &TransformRequest) {
 
 #[test]
 fn a_legacy_row_is_read_after_a_restart_and_pruned_on_its_first_commit() {
+    let _serial = serial();
     let (dir, legacy_store, request, _) = legacy_session();
     drop(legacy_store);
     let store = store(dir.path());
@@ -182,6 +193,7 @@ fn a_legacy_row_is_read_after_a_restart_and_pruned_on_its_first_commit() {
 
 #[test]
 fn a_legacy_prune_that_loses_its_cas_reloads_and_prunes() {
+    let _serial = serial();
     let (_dir, store, request, _) = legacy_session();
     let hook_store = Arc::clone(&store);
     let conflicting_meta_bytes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -216,6 +228,7 @@ fn a_legacy_prune_that_loses_its_cas_reloads_and_prunes() {
 
 #[test]
 fn a_writer_that_loses_to_the_legacy_prune_reloads_the_pruned_row() {
+    let _serial = serial();
     let (_dir, store, request, version) = legacy_session();
     let stale = store.load(SESSION).unwrap();
     assert_eq!(stale.row_version, Some(version));
