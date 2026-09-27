@@ -1361,8 +1361,8 @@ knowledge-update rule: `current` when the answer carries the live value
 grade needs no judge.
 
 **Arms.** `arms(served, stale_span, key, live, live_ordinal)` builds the five
-M0 renderings from one served context, each differing from arm (a) only at
-the stale statement: `today` (a) is the served text unchanged;
+M0 renderings from one served context, each changing arm (a) only at the
+stale statement or on a line added after the line holding it: `today` (a) is the served text unchanged;
 `precedence_line` (b) adds `PRECEDENCE_SENTENCE` as a line of its own after
 the line holding the stale statement; `footer` (c) adds one D-7 footer line,
 `[corrections: <key> = <live> @<N>]`, there instead, keeping the stale
@@ -1396,9 +1396,11 @@ min(b, c)))`, `X ~ Bin(b + c, 1/2)`, is at most the pre-registered `alpha`.
 The test is two-sided, so "the second arm is better" is `reject` with
 `second_only < first_only` for an event that is a failure. The comparison is
 exact in 128-bit integers, the tail summed from `censoring`'s binomial and
-compared against `alpha`'s numerator and denominator, with no float; past
-about 120 discordant pairs the tail leaves that range and the test is
-`Overflow`, typed. Arms naming different pairs are `UnpairedArms`, and an
+compared against `alpha`'s numerator and denominator, with no float. The
+tail times twice the denominator must fit, so the ceiling is roughly `b + c +
+log2(denominator) <= 127`: about 123 discordant pairs at alpha `1/20` split
+evenly, fewer for an alpha with a large denominator. Past it the test is
+`Overflow`, typed; pre-register alpha as a small exact ratio. Arms naming different pairs are `UnpairedArms`, and an
 alpha outside `(0, 1)` is `AlphaOutOfRange`. The statistic sits outside the
 quantities `gen/gen-statistics-golden.ts` pins.
 
@@ -1434,7 +1436,7 @@ one:
 | `pairs[].delivery` | `StaleDelivery` of arm (a). |
 | `pairs[].arms` | The five arms. |
 | `unlocatable` | Task id to `{delivery, served}` for every pair whose arm (a) does not carry the stale value, `served` empty when the surface served nothing; such a pair has no arms and is never dropped. |
-| `stale_delivered` | Pairs, located or not, whose arm (a) carries the stale value. |
+| `stale_delivered` | Pairs whose arm (a) carries the stale value; a pair is located exactly when it does, so this equals the length of `pairs`. |
 
 `StaleExport::record` is the classification: it takes the pair's question,
 key, values, and ordinal and its served text, and files the pair under

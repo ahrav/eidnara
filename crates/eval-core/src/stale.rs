@@ -201,7 +201,9 @@ pub struct StaleExport {
     pub config: WorldConfig,
     pub pairs: Vec<StalePair>,
     pub unlocatable: BTreeMap<String, Unlocatable>,
-    /// Pairs whose served text carried the stale value, located or not.
+    /// Pairs whose served text carried the stale value. A pair is located
+    /// exactly when it does, so this equals `pairs.len()`; it is the count
+    /// the campaign reports.
     pub stale_delivered: u32,
 }
 
@@ -265,8 +267,8 @@ impl StaleExport {
 pub struct McNemar {
     /// Pairs both arms answered.
     pub pairs: u32,
-    /// Pairs with no outcome on either arm (a failed or censored call):
-    /// reported, never scored.
+    /// Pairs where one arm or both have no outcome (a failed or censored
+    /// call): reported, never scored.
     pub indeterminate: u32,
     /// Pairs where the event occurred on the first arm only.
     pub first_only: u32,
@@ -282,8 +284,9 @@ pub enum McNemarError {
     UnpairedArms,
     /// Alpha must lie strictly between zero and one.
     AlphaOutOfRange,
-    /// The exact tail left 128-bit range (more than about 120 discordant
-    /// pairs).
+    /// The exact tail left 128-bit range: roughly when `b + c` plus
+    /// `log2` of alpha's denominator passes 127 (about 123 discordant pairs
+    /// at alpha 1/20 split evenly).
     Overflow,
 }
 
@@ -309,8 +312,9 @@ pub fn mcnemar(
         .collect();
     let count = |cell: (bool, bool)| answered.iter().filter(|pair| **pair == cell).count() as u32;
     let (b, c) = (count((true, false)), count((false, true)));
-    // ponytail: 128-bit tail, refused past about 120 discordant pairs; move
-    // to limbs if a campaign ever gets there.
+    // ponytail: 128-bit tail, refused once `b + c + log2(denominator)` passes
+    // 127 (about 123 discordant pairs at alpha 1/20); move to limbs if a
+    // campaign ever gets there.
     let n = b + c;
     let tail = (0..=b.min(c)).try_fold(0u128, |sum, i| {
         let coefficient = crate::censoring::choose(u64::from(n), u64::from(i))

@@ -397,7 +397,7 @@ fn the_grader_applies_the_knowledge_update_rule_without_a_model() {
 }
 
 #[test]
-fn every_arm_differs_from_today_only_at_the_stale_statement() {
+fn every_arm_changes_today_only_at_or_after_the_stale_statements_line() {
     let served = "<hint>\n- cursor for slot3 in w\n- digest for slot3 in w\n</hint>";
     let (stale, live) = ("cursor for slot3", "digest for slot3");
     let span = locate(served, stale).unwrap();
