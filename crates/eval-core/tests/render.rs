@@ -325,6 +325,28 @@ fn every_payload_kind_renders_to_units_a_commit_or_a_named_exclusion() {
         render(&log(vec![home.clone(), orphan_span.clone()]), &config()).unwrap_err(),
         RenderError::ToolSpanParentMissing(orphan_span.id.clone())
     );
+    // A tool span cannot use a restatement's message ID as its parent because
+    // restatements render only text.
+    let mut restatement = message_event("session-0", 1, EPOCH_MS + 1_000, "user", "x");
+    restatement.payload = Payload::Restatement {
+        target: home.id.clone(),
+        message_id: "session-0-m1-restatement".to_string(),
+        text: "restated".to_string(),
+    };
+    let mut restated_span = message_event("session-0", 2, EPOCH_MS + 1_000, "user", "x");
+    restated_span.payload = Payload::ToolSpan {
+        message_id: "session-0-m1-restatement".to_string(),
+        call_id: "stray".to_string(),
+        output: "stray".to_string(),
+    };
+    assert_eq!(
+        render(
+            &log(vec![home.clone(), restatement, restated_span.clone()]),
+            &config()
+        )
+        .unwrap_err(),
+        RenderError::ToolSpanParentMissing(restated_span.id)
+    );
     // The same span under its parent's observation renders as one tool part;
     // observed at another time it refuses, since the message JSON is one
     // fixture observed once.

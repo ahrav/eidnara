@@ -512,7 +512,9 @@ times:
   the restating one are two served messages. It is refused as a correction is
   (`CorrectionTargetMissing`, `CorrectionTargetIsNotAMessage`,
   `CorrectionTargetInOtherSession`, `CorrectionDoesNotAdvance`), and its
-  `message_id` counts toward `MessageIdReused`. A correction renders the bytes
+  `message_id` counts toward `MessageIdReused`. A restatement renders only
+  its text, so a tool span naming its `message_id` has no parent and refuses
+  as `ToolSpanParentMissing`. A correction renders the bytes
   it rendered before restatements existed; a test pins the rendering of the
   fixture world with corrections by digest.
   The generator's time gaps are strictly positive (since `eval-generator/v2`), each
