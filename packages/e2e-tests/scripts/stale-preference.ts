@@ -3,7 +3,8 @@
  * daemon, and writes the capture `eval_runner stale-arms` reads:
  *
  *     bun scripts/stale-preference.ts --world <stale-world.json> --out <capture.json>
- *         [--context-limit <tokens>] [--tokens-per-turn <tokens>] [--summarizer-model <bedrock id>]
+ *         [--context-limit <tokens>] [--tokens-per-turn <tokens>]
+ *         [--summarizer-model <bedrock id>] [--summarizer-dump <file.jsonl>]
  */
 
 import { readFileSync, renameSync, writeFileSync } from "node:fs";
@@ -29,10 +30,16 @@ try {
 } catch (error) {
     throw new Error(`--world ${values.world} is not a readable stale world: ${error}`);
 }
+function positive(flag: string, fallback: number): number {
+    const value = values[flag as "context-limit" | "tokens-per-turn"];
+    const parsed = value === undefined ? fallback : Number(value);
+    if (!Number.isFinite(parsed) || parsed <= 0) throw new Error(`--${flag} must be positive`);
+    return parsed;
+}
 const capture = await captureStaleWorld(world, {
     ...DEFAULT_STALE_DRIVER,
-    modelContextLimit: Number(values["context-limit"] ?? DEFAULT_STALE_DRIVER.modelContextLimit),
-    tokensPerTurn: Number(values["tokens-per-turn"] ?? DEFAULT_STALE_DRIVER.tokensPerTurn),
+    modelContextLimit: positive("context-limit", DEFAULT_STALE_DRIVER.modelContextLimit),
+    tokensPerTurn: positive("tokens-per-turn", DEFAULT_STALE_DRIVER.tokensPerTurn),
     summarizerModel: values["summarizer-model"],
     summarizerDump: values["summarizer-dump"],
     progress: (done, total) => {

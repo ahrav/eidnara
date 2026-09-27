@@ -7,7 +7,7 @@
 
 use std::path::{Path, PathBuf};
 
-use eval_core::{StaleCapture, StaleExport, export_capture, fact_world};
+use eval_core::{StaleCapture, StaleExport, export_capture, fact_world, merge_exports};
 
 use super::campaign::{parse_flags, prepare_publish, publish_file};
 
@@ -60,58 +60,17 @@ pub fn arms(args: impl IntoIterator<Item = String>) -> Result<(PathBuf, StaleExp
     Ok((path, export))
 }
 
-/// Merges independent harness exports. Pair and unlocatable task ids are
-/// prefixed by each input's one-based position, so equal per-world ids cannot
-/// collide. Every input must name one schema, harness, and summarizer.
+/// Merges independent harness exports through `eval_core::merge_exports`.
 pub fn merge(args: impl IntoIterator<Item = String>) -> Result<(PathBuf, StaleExport), String> {
     let values = parse_flags(args, &["inputs", "publish"], MERGE_USAGE)?;
-    let mut inputs = values["inputs"].split(',');
-    let first = inputs
-        .next()
-        .filter(|p| !p.is_empty())
-        .ok_or("--inputs is empty")?;
-    let read = |path: &str| -> Result<StaleExport, String> {
-        let bytes = std::fs::read(path).map_err(|error| format!("--inputs {path}: {error}"))?;
-        serde_json::from_slice(&bytes).map_err(|error| format!("--inputs {path}: {error}"))
-    };
-    let mut merged = read(first)?;
-    let prefix = |world: usize, task: &str| format!("world-{world}:{task}");
-    for pair in &mut merged.pairs {
-        pair.task = prefix(1, &pair.task);
-    }
-    merged.unlocatable = merged
-        .unlocatable
-        .into_iter()
-        .map(|(task, value)| (prefix(1, &task), value))
-        .collect();
-    for (index, path) in inputs.enumerate() {
-        let mut next = read(path)?;
-        if (
-            next.schema.as_str(),
-            next.harness.as_str(),
-            next.summarizer.as_str(),
-        ) != (
-            merged.schema.as_str(),
-            merged.harness.as_str(),
-            merged.summarizer.as_str(),
-        ) {
-            return Err(format!(
-                "--inputs {path}: schema, harness, or summarizer mismatch"
-            ));
-        }
-        for pair in &mut next.pairs {
-            pair.task = prefix(index + 2, &pair.task);
-        }
-        merged.pairs.extend(next.pairs);
-        merged.unlocatable.extend(
-            next.unlocatable
-                .into_iter()
-                .map(|(task, value)| (prefix(index + 2, &task), value)),
-        );
-        merged.stale_delivered += next.stale_delivered;
-        merged.root_seed.push(',');
-        merged.root_seed.push_str(&next.root_seed);
-    }
+    let exports = values["inputs"]
+        .split(',')
+        .map(|path| {
+            let bytes = std::fs::read(path).map_err(|error| format!("--inputs {path}: {error}"))?;
+            serde_json::from_slice(&bytes).map_err(|error| format!("--inputs {path}: {error}"))
+        })
+        .collect::<Result<Vec<StaleExport>, String>>()?;
+    let merged = merge_exports(exports).map_err(|error| error.to_string())?;
     let bytes = serde_json::to_vec_pretty(&merged).unwrap();
     let path = publish(Path::new(&values["publish"]), EXPORT_FILE, &bytes)?;
     Ok((path, merged))

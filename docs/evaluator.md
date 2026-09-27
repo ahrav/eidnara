@@ -1333,7 +1333,11 @@ version must be non-blank, and every loss must be evidence the set has
 correction coexists with the statement it supersedes. Nothing in it calls a
 model.
 
-**Role.** A `stale_preference` task's evidence is a restatement and its
+**Role.** Gate A lives `fact_world`, not the event generator. The event
+generator's restatement and the task role below serve generated worlds: a
+pair set over one aged history, as the other suites compile.
+
+A `stale_preference` task's evidence is a restatement and its
 falsifier is the restatement's target, the superseded predecessor. The
 compiler runs the inverse of the falsification check: every evidence unit
 must be a `restatement` whose target the aged history holds, the reducer
@@ -1363,26 +1367,27 @@ knowledge-update rule: `current` when the answer carries the live value
 needs no judge.
 
 **Harness.** Gate A runs on the request a real harness sends, not on a
-fragment of it. The pipeline has three steps, and every step but the middle
-one is Rust:
+fragment of it. The pipeline has four steps. The world, the arms, and the
+merge are Rust; living the world through the harness is TypeScript.
 
-1. `eval_runner stale-world --subjects <n> --seed <u64> --publish <dir>` writes
-   `stale-world.json` (`eval-stale-world/v1`), `fact_world(seed, n)`: a coding
-   session in which the user sets one value per subject and later changes
-   each one.
-   - A subject is a component and an attribute (`billing service port`);
-     `MAX_SUBJECTS` is 128.
-   - A statement reads `Set the billing service port to 34827.` and its
-     restatement `Change of plan: set the billing service port to 94225
-     instead.`
+1. `eval_runner stale-world --subjects <n> --seed <u64> --publish <dir>`
+   writes `stale-world.json` (`eval-stale-world/v1`), `fact_world(seed, n)`.
+   This is a coding session in three phases:
+   - The user sets one value per subject. A subject is a component and an
+     attribute (`billing service port`); `MAX_SUBJECTS` is 128.
+   - The user sets every value again, in an order drawn by `keyed_draw`. A
+     restatement repeats the statement's form, `Set the billing service port
+     to 94225.`, with no "instead" or "change of plan", so only order says
+     which value is current.
+   - The user sends one status note per subject that names no subject and no
+     value, so the corrections age out of the raw tail into segments.
    - The assistant answers every turn with `Noted.`, so each value is stated
      once. Values are distinct five-digit numbers, so a whole-word match finds
      one value and nothing else, and no ordinal marker collides with one.
-   - Every subject is stated first. The second half restates them in an order
-     drawn by `keyed_draw`. The phase boundary guarantees the daemon publishes
-     the stale statement before the real summarizer sees its correction; the
-     test needs two coexisting segment rows to measure render-time replacement,
-     not a single chunk the summarizer can fix before publication.
+   - The phase boundary means the daemon publishes a statement before the
+     summarizer sees its correction. A summarizer that saw both in one chunk
+     would drop the stale value itself: an interleaved 120-subject world left
+     11 of 120 pairs with a stale value to serve.
    - Every pair asks `What is the <subject> now? Reply with just the value.`
 2. `bun packages/e2e-tests/scripts/stale-preference.ts --world <file> --out
    <capture>` (`captureStaleWorld` in `packages/e2e-tests/src/stale-preference.ts`)
@@ -1399,45 +1404,67 @@ one is Rust:
      summarizer prompt by that command (the prompt on stdin, the answer on
      stdout, through the AWS CLI's Converse call) instead of its script. The
      daemon's validator and publication judge the answer as they judge any
-     provider's.
+     provider's. An empty command is the script; the driver always sets the
+     variable, so one exported in the caller's shell cannot leak in.
    - `--summarizer-dump <file>` has the fixture append every summarizer
      request (`{"system", "prompt"}`, one JSON line each) to that file through
      `EIDNARA_FIXTURE_SUMMARIZER_DUMP`, so gate B reads the daemon's own chunk
      prompts for the world gate A lived.
-   - Without the option, the fixture's scripted summarizer writes each
+   - Without a summarizer model, the fixture's scripted summarizer writes each
      segment's `p1` and `p2` as the presented lines' own words and `p3` as the
      range, so a segment that decays past P2 serves no prose. At 120 subjects
-     almost every m0 segment renders at P3 or P4, which is why a gate-A run
-     names a real summarizer.
-   - After the session, each pair's question is sent as a turn of its own,
-     and the provider request OpenCode sends for it is captured whole. That
-     request holds the system prompt with the Eidnara guidance, the served
-     `<session-history>` (m0) and `<session-history-since>` (m1) parts, the raw
-     tail with its ordinal markers, the auto-search hint the host appended,
-     and the tool definitions.
-   - The daemon's stored segments are read from its store for the tier.
-   - The capture (`eval-stale-capture/v1`, `StaleCapture`) names the harness
-     (`opencode`).
+     almost every m0 segment renders at P3 or P4. A gate-A run therefore names
+     a real summarizer and uses small worlds (step 4).
+   - The daemon runs with a 30-second cache TTL. After the session the driver
+     waits 40 seconds, so the first question turn is a HARD pass that
+     re-freezes m0 over every published segment, as when a user comes back to
+     a long session.
+   - Each pair's question is then sent as a turn of its own. The provider
+     request OpenCode sends for it is captured whole: the system prompt with
+     the Eidnara guidance, the served `<session-history>` (m0) and
+     `<session-history-since>` (m1) parts, the raw tail with its ordinal
+     markers, the auto-search hint the host appended, and the tool
+     definitions.
+   - The turn is then reverted through OpenCode, so every question is asked of
+     the session as it stood after the world. The next captured request is
+     checked to carry no earlier question.
+   - The daemon's stored segments are read from its store for the tier. The
+     capture (`eval-stale-capture/v1`, `StaleCapture`) names the harness
+     (`opencode`) and the summarizer.
 3. `eval_runner stale-arms --capture <file> --publish <dir>` writes
-   `stale-preference-export.json` through `export_capture`.
-4. `eval_runner stale-merge --inputs <export,...> --publish <dir>` combines
-   independent harness sessions. It requires one schema, harness, and
-   summarizer; prefixes every task with `world-N:`; concatenates the decimal
-   seeds; and sums the counts. M0 uses several small sessions so decay keeps
-   their stale segments' prose while the pair population still clears the
-   fixed N.
+   `stale-preference-export.json` through `export_capture`. It refuses a
+   capture whose world is not `fact_world` of its own seed and size
+   (`WorldMismatch`), a foreign schema, a missing request, and a request with
+   no m1 part (`NoM1`), since arm (b) goes there.
+4. `eval_runner stale-merge --inputs <export,...> --publish <dir>`
+   (`merge_exports`) combines independent harness sessions. It requires one
+   schema, harness, and summarizer and refuses a world twice. It prefixes
+   every task with `world-N:`, joins the decimal seeds, and sums the counts.
+   M0 uses several small sessions, so decay keeps their stale segments' prose
+   while the pair population still clears the fixed N. A 120-subject session
+   published 223 segments and rendered most stale values away at P3/P4
+   (22 of 120 located).
 
-`tests/rust-stale-preference.test.ts` runs the three steps over 12 subjects
+`tests/rust-stale-preference.test.ts` runs steps 1 to 3 over 12 subjects
 under `EIDNARA_EVAL_S0_BUDGET_MS`, like the S0 campaign, and checks every
 located pair against its request.
+`the_fixture_answers_a_summarizer_prompt_through_the_named_command_and_dumps_it`
+(`crates/daemon/tests/eval_fixture_cassette.rs`) covers the two fixture
+variables with stub commands.
 
-**Arms.** A pair is located when its stale value sits in the served history:
-the m0 part first, then the m1 part. That part is the one D-7 would rewrite.
-The value is the one token of the stale statement that a paraphrasing
-summarizer keeps. A pair whose value sits only in the raw tail, or whose
-segment rendered without it, is `unlocatable`: no rendering can change it,
-so it has no arms and is never dropped. `arms` returns arms (b) through (e) as the
-text parts they replace, and `with_parts(request, parts)` builds an arm's
+**Arms.** A pair is located when the served segment covering its stale
+statement carries the stale value in its body, never its heading: m0 first,
+then the m1 delta. That is where D-7 would anchor the segment's claim. The
+value is the one token of the statement that a paraphrasing summarizer
+keeps.
+
+A pair is `unlocatable` when its stale segment serves no stale value. That
+happens when the segment decayed to a tier without it, the summarizer dropped
+it, or the statement was never folded. No rendering can change such a pair,
+so it has no arms and is never dropped.
+
+`export_capture` returns arms (b) through (e), each as the one text part it
+replaces (`PartText`), and `with_parts(request, parts)` builds an arm's
 request. Arm (a) is the request as served.
 
 - (b) `precedence_line`: a `<memory-updates>` block holding
@@ -1446,22 +1473,27 @@ request. Arm (a) is the request as served.
   `<session-history-since>` holding that block alone.
 - (c) `footer`: one D-7 footer line, `[corrections: <key> = <live> @<N>]`, at
   the end of the stale segment's body, stale prose kept.
-- (d) `anchored_replacement`: the stale value replaced by
-  `[corrected @<N>: <key> = <live>]`, the smallest anchor D-7 could hold.
-- (e) `omission_oracle`: the stale value removed from the served history.
+- (d) `anchored_replacement`: every whole-word occurrence of the stale value
+  in that body replaced by `[corrected @<N>: <key> = <live>]`, the smallest
+  anchor D-7 could hold.
+- (e) `omission_oracle`: those occurrences removed.
 
 `N` is the restating message's ordinal in the harness session: every world
-turn is one user and one assistant message, numbered from one. The raw tail
-and the hint are never changed, since a renderer change reaches neither, so
-(e) removes the value from the history only. The override sentence is:
+turn is one user and one assistant message, numbered from one.
+
+A renderer change reaches neither the heading, a later segment's history
+("from 34827 to 94225"), the raw tail, nor the hint, so no arm changes them.
+`stale_elsewhere` records whether the stale value is still served there once
+(d) or (e) has run.
+
+The override sentence is:
 
 ```text
 Later statements supersede earlier ones: where two statements in this history disagree, the later one is current.
 ```
 
-`key` must satisfy the D-7 claim-key grammar `[a-z0-9_-]+(\.[a-z0-9_-]+)+`
-within 64 bytes; the world derives it from the subject
-(`billing-service.port`).
+The world's claim keys come from the subject (`billing-service.port`) and
+satisfy the D-7 grammar `[a-z0-9_-]+(\.[a-z0-9_-]+)+` within 64 bytes.
 
 **McNemar.** `mcnemar(first, second, alpha)` takes one pre-registered event
 per pair on two arms (for example "graded `stale`"; the caller names the
@@ -1488,16 +1520,16 @@ quantities `gen/gen-statistics-golden.ts` pins.
 
 | Field | Meaning |
 | --- | --- |
-| `schema`, `harness`, `summarizer`, `root_seed` | The export schema, the harness that served the requests, the model that wrote the segments (`fixture/scripted` for the script), and the world's seed as a decimal. |
+| `schema`, `harness`, `summarizer`, `root_seed` | The export schema, the harness that served the requests, the model that wrote the segments (`fixture/scripted` for the script), and the world seeds as comma-separated decimals, one per merged session. |
 | `pairs[].task`, `pairs[].question`, `pairs[].key` | The task id (`stale-<i>`), the question the pair asks, and the claim key the arms name. |
 | `pairs[].stale_value`, `pairs[].live_value` | The two values the grader reads. |
-| `pairs[].restating_ordinal` | The restatement's ordinal in the harness session, the `N` of every marker. |
-| `pairs[].stale_tier` | `1..=4`: the first stored tier (`p1` to `p4`) of the stale segment whose text is the rendered body; `0` when none matches. The fixture writes `p2` equal to `p1`, so P2 renders read as `1`, and its `p3` is the range alone, so a P3 render is unlocatable. |
-| `pairs[].delivery` | `StaleDelivery` over every text part of the request: history, raw tail, and hint. |
-| `pairs[].history`, `pairs[].stale_span` | The part holding the stale value (`messages[message].content[part]`) and the value's UTF-8 byte span there. |
+| `pairs[].restating_ordinal`, `pairs[].restatement` | The restatement's ordinal in the harness session, the `N` of every marker, and where the request serves it (`m0`, `m1`, `raw`, `absent`). |
+| `pairs[].stale_tier`, `pairs[].stale_block` | `1..=4`: the first stored tier (`p1` to `p4`) of the stale segment whose served form (escaped and heading-guarded as the renderer serves it) is the rendered body, `0` when none matches; and whether that segment is in `m0` or `m1`. |
+| `pairs[].delivery`, `pairs[].stale_elsewhere` | `StaleDelivery` over every text part of the request (history, raw tail, and hint), and whether the stale value is served outside the stale segment's body. |
+| `pairs[].history`, `pairs[].stale_spans` | The part holding the stale segment (`messages[message].content[part]`) and the value's UTF-8 byte spans in its body. |
 | `pairs[].request` | The provider request as the harness sent it: arm (a). |
-| `pairs[].arms` | Arms (b) through (e) as the parts they replace. |
-| `unlocatable` | Task id to `{delivery, request}` for every pair whose served history does not hold the stale value. |
+| `pairs[].arms` | Arms (b) through (e), each the one part it replaces. |
+| `unlocatable` | Task id to `{delivery, request}` for every pair whose stale segment serves no stale value. |
 | `stale_delivered` | Pairs, located or not, whose request carries the stale value anywhere. |
 
 A request is Anthropic Messages shaped, as OpenCode sends it to its

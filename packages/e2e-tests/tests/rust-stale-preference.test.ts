@@ -30,11 +30,11 @@ interface ExportPair {
     restating_ordinal: number;
     delivery: string;
     history: { message: number; part: number };
-    stale_span: { start: number; end: number };
+    stale_spans: Array<{ start: number; end: number }>;
     request: { messages: Array<{ content: Array<{ text?: string }> }> };
     arms: Record<
         "precedence_line" | "footer" | "anchored_replacement" | "omission_oracle",
-        PartText[]
+        PartText
     >;
 }
 
@@ -95,7 +95,9 @@ describe.skipIf(!rustPrereqs.ok || !budget)("stale preference through OpenCode a
                 // Spans are UTF-8 byte ranges, as eval-core computes them.
                 const bytes = Buffer.from(served, "utf8");
                 expect(
-                    bytes.subarray(pair.stale_span.start, pair.stale_span.end).toString("utf8"),
+                    bytes
+                        .subarray(pair.stale_spans[0]?.start, pair.stale_spans[0]?.end)
+                        .toString("utf8"),
                 ).toBe(world_pair?.stale_value ?? "");
                 // The restating message is the ordinal every marker names: in the raw
                 // tail under its ordinal (a hint the host appended may follow), or inside a served segment whose range holds it
@@ -112,15 +114,15 @@ describe.skipIf(!rustPrereqs.ok || !budget)("stale preference through OpenCode a
                         pair.restating_ordinal <= Number(end),
                 );
                 expect(raw || folded).toBe(true);
-                const [replaced] = pair.arms.anchored_replacement;
+                const replaced = pair.arms.anchored_replacement;
                 expect(replaced?.text).toContain(
                     `[corrected @${pair.restating_ordinal}: ${pair.key} = ${pair.live_value}]`,
                 );
                 expect(replaced?.text.includes(world_pair?.stale_value ?? "")).toBe(false);
-                expect(pair.arms.footer[0]?.text).toContain(
+                expect(pair.arms.footer.text).toContain(
                     `[corrections: ${pair.key} = ${pair.live_value} @${pair.restating_ordinal}]`,
                 );
-                expect(pair.arms.precedence_line[0]?.text).toContain("<memory-updates>");
+                expect(pair.arms.precedence_line.text).toContain("<memory-updates>");
             }
         } finally {
             rmSync(root, { recursive: true, force: true });

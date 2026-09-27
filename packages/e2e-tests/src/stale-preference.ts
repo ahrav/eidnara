@@ -76,6 +76,13 @@ export interface StaleDriverOptions {
     summarizerModel?: string;
     /** JSONL path for every daemon summarizer request, when gate B needs it. */
     summarizerDump?: string;
+    /**
+     * The daemon's cache TTL and the idle gap after the session. The gap is longer than the TTL,
+     * so the first question turn is a HARD pass that re-freezes m0 over every published segment,
+     * as when a user comes back to a long session.
+     */
+    cacheTtl: string;
+    idleMs: number;
     /** Called after each world turn and each question, for progress. */
     progress?: (done: number, total: number) => void;
 }
@@ -84,10 +91,9 @@ export const DEFAULT_STALE_DRIVER: StaleDriverOptions = {
     modelContextLimit: 200_000,
     tokensPerTurn: 1_500,
     pressureCeiling: 0.9,
+    cacheTtl: "30s",
+    idleMs: 40_000,
 };
-
-/** What the user says after the session to get a value; the mock answers it like any turn. */
-const QUESTION_ANSWER = "Let me check.";
 
 function usage(options: StaleDriverOptions, turn: number) {
     const ceiling = Math.floor(options.modelContextLimit * options.pressureCeiling);
@@ -111,7 +117,10 @@ async function quiesce(h: RustTestHarness, sessionId: string): Promise<void> {
             );
         }
         const status = await h.host.primaryStatus(sessionId, h.env.workdir);
-        summarizer = (status.history_summarizer ?? {}) as Record<string, unknown>;
+        if (!status.history_summarizer || typeof status.history_summarizer !== "object") {
+            throw new Error("session status carries no history_summarizer block");
+        }
+        summarizer = status.history_summarizer as Record<string, unknown>;
         quiet =
             summarizer.fired_at_ms == null && summarizer.producer_run_id == null ? quiet + 1 : 0;
         await Bun.sleep(200);
@@ -139,6 +148,21 @@ function lastUserText(body: { messages?: Array<{ role: string; content: unknown 
     return JSON.stringify(last?.content ?? "");
 }
 
+/**
+ * Reverts the session's newest user message and the reply after it, as a user's undo does.
+ * OpenCode marks the session and drops the reverted turn when the next prompt arrives, so the
+ * caller checks that the next captured request no longer carries it.
+ */
+async function revertLastTurn(h: RustTestHarness, sessionId: string): Promise<void> {
+    const userIds = (await h.listMessages(sessionId))
+        .map((message) => message.info)
+        .filter((info) => info?.role === "user" && info.id)
+        .map((info) => info?.id as string);
+    const last = userIds.at(-1);
+    if (!last) throw new Error("no user message to revert");
+    await h.revertMessage(sessionId, last);
+}
+
 /** Lives `world` through the real harness stack and captures every question turn's request. */
 export async function captureStaleWorld(
     world: FactWorld,
@@ -146,19 +170,20 @@ export async function captureStaleWorld(
 ): Promise<StaleCapture> {
     const h = await RustTestHarness.create({
         modelContextLimit: options.modelContextLimit,
-        eidnaraConfig: { history_summarizer: { model: "fixture/deterministic" } },
-        daemonEnv: options.summarizerModel
-            ? {
-                  EIDNARA_FIXTURE_SUMMARIZER_COMMAND: resolve(
-                      import.meta.dir,
-                      "../scripts/bedrock-summarizer.ts",
-                  ),
-                  EIDNARA_STALE_SUMMARIZER_MODEL: options.summarizerModel,
-                  ...(options.summarizerDump
-                      ? { EIDNARA_FIXTURE_SUMMARIZER_DUMP: resolve(options.summarizerDump) }
-                      : {}),
-              }
-            : undefined,
+        eidnaraConfig: {
+            history_summarizer: { model: "fixture/deterministic" },
+            cache_ttl: options.cacheTtl,
+        },
+        // Set explicitly, so a variable exported in the caller's shell never changes a run.
+        daemonEnv: {
+            EIDNARA_FIXTURE_SUMMARIZER_COMMAND: options.summarizerModel
+                ? resolve(import.meta.dir, "../scripts/bedrock-summarizer.ts")
+                : "",
+            EIDNARA_STALE_SUMMARIZER_MODEL: options.summarizerModel ?? "",
+            EIDNARA_FIXTURE_SUMMARIZER_DUMP: options.summarizerDump
+                ? resolve(options.summarizerDump)
+                : "",
+        },
     });
     try {
         const sessionId = await h.createSession();
@@ -170,19 +195,25 @@ export async function captureStaleWorld(
             options.progress?.(++done, total);
         }
         await quiesce(h, sessionId);
+        await Bun.sleep(options.idleMs);
         const requests: Record<string, unknown> = {};
-        for (const [index, pair] of world.pairs.entries()) {
-            h.mock.setDefault({
-                text: QUESTION_ANSWER,
-                usage: usage(options, world.turns.length + index),
-            });
+        let previous: string | undefined;
+        for (const pair of world.pairs) {
+            h.mock.setDefault({ text: pair.live_value, usage: usage(options, world.turns.length) });
             await h.sendPrompt(sessionId, pair.question);
             const body = h.mainRequests().at(-1)?.body;
             if (!body || !lastUserText(body).includes(pair.question)) {
                 throw new Error(`no captured request for ${pair.task}'s question`);
             }
+            if (previous && JSON.stringify(body.messages).includes(previous)) {
+                throw new Error(`${pair.task}'s request still carries the reverted question`);
+            }
+            previous = pair.question;
             requests[pair.task] = body;
             options.progress?.(++done, total);
+            // Every question is asked of the session as it stood after the world: the turn is
+            // reverted through OpenCode before the next, so no question sees another's turn.
+            await revertLastTurn(h, sessionId);
             await quiesce(h, sessionId);
         }
         return {

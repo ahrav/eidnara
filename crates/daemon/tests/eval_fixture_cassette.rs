@@ -377,3 +377,86 @@ fn the_fixture_answers_a_summarizer_prompt_in_the_validators_document() {
         "a continuation line stays in its message: {second}"
     );
 }
+
+/// `EIDNARA_FIXTURE_SUMMARIZER_COMMAND` answers a summarizer prompt by the
+/// named executable (the request on stdin, the answer on stdout), and
+/// `EIDNARA_FIXTURE_SUMMARIZER_DUMP` keeps every summarizer request; a
+/// command that fails fails the call, and an empty command is the script.
+#[test]
+fn the_fixture_answers_a_summarizer_prompt_through_the_named_command_and_dumps_it() {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let stub = |name: &str, body: &str| {
+        let path = dir.path().join(name);
+        std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        path.display().to_string()
+    };
+    let stdin = dir.path().join("stdin.json");
+    let answering = stub(
+        "answer.sh",
+        &format!(
+            "cat > '{}'\nprintf '<output>stub</output>'",
+            stdin.display()
+        ),
+    );
+    let failing = stub("fail.sh", "cat > /dev/null\nexit 3");
+    let dump = dir.path().join("dump.jsonl");
+    let prompt = summarizer_prompt(&[(1, "U", "digest question asked")]);
+    let launch = |command: &str| {
+        let root = tempfile::tempdir().unwrap();
+        let fixture = Launch::at(root.path().to_path_buf())
+            .env("EIDNARA_FIXTURE_SUMMARIZER_COMMAND", command)
+            .env(
+                "EIDNARA_FIXTURE_SUMMARIZER_DUMP",
+                &dump.display().to_string(),
+            )
+            .start();
+        (root, fixture)
+    };
+    let text = |items: &[Value]| {
+        items
+            .get(1)
+            .and_then(|item| item["unit"]["message"]["content"][0]["text"].as_str())
+            .map(str::to_string)
+    };
+
+    let (_root, fixture) = launch(&answering);
+    let items = runtime.block_on(run(&fixture, "commanded", &prompt));
+    assert_eq!(text(&items).as_deref(), Some("<output>stub</output>"));
+    let input: Value = serde_json::from_slice(&std::fs::read(&stdin).unwrap()).unwrap();
+    assert_eq!(input["prompt"], prompt.as_str());
+    // A prompt that is not a summarizer's never reaches the command.
+    let other = runtime.block_on(run(&fixture, "plain", "hello"));
+    assert_eq!(text(&other).as_deref(), Some("fixture-success"));
+    fixture.shutdown();
+    let dumped: Vec<Value> = std::fs::read_to_string(&dump)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(dumped.len(), 1, "only the summarizer request is dumped");
+    assert_eq!(dumped[0]["prompt"], prompt.as_str());
+
+    let (_root, fixture) = launch(&failing);
+    let items = runtime.block_on(run(&fixture, "failing", &prompt));
+    assert_ne!(
+        unit_types(&items),
+        ["run_started", "assistant_message", "run_finished"]
+    );
+    assert_eq!(fixture.counters(5)["failed"], 1);
+    fixture.shutdown();
+
+    let (_root, fixture) = launch("");
+    let items = runtime.block_on(run(&fixture, "scripted", &prompt));
+    assert!(
+        text(&items)
+            .unwrap()
+            .starts_with("<output><history_segments>")
+    );
+    fixture.shutdown();
+}

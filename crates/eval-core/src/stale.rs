@@ -104,138 +104,196 @@ pub struct PartText {
     pub text: String,
 }
 
-/// Arms (b) through (e) of one served request, each as the text parts it
+/// Arms (b) through (e) of one served request, each as the one text part it
 /// replaces; arm (a) is the request as served. (b) puts the D-8 override
 /// sentence in a `<memory-updates>` block at the head of the m1 delta, where
 /// D-8 puts it; (c) appends one D-7 footer line to the stale segment's body,
-/// stale prose kept; (d) replaces the stale value with the D-7 marker; (e)
-/// removes it.
+/// stale prose kept; (d) replaces the stale value in that body with the D-7
+/// marker; (e) removes it from that body.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Arms {
-    pub precedence_line: Vec<PartText>,
-    pub footer: Vec<PartText>,
-    pub anchored_replacement: Vec<PartText>,
-    pub omission_oracle: Vec<PartText>,
-}
-
-/// The D-7 claim-key grammar `[a-z0-9_-]+(\.[a-z0-9_-]+)+`, at most 64 bytes.
-fn is_claim_key(key: &str) -> bool {
-    let part = |p: &str| {
-        !p.is_empty()
-            && p.bytes()
-                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'-')
-    };
-    key.len() <= 64 && key.contains('.') && key.split('.').all(part)
+    pub precedence_line: PartText,
+    pub footer: PartText,
+    pub anchored_replacement: PartText,
+    pub omission_oracle: PartText,
 }
 
 const M0_OPEN: &str = "<session-history>";
 const M0_CLOSE: &str = "</session-history>";
 const M1_OPEN: &str = "<session-history-since>\n";
+const M1_SEGMENTS_OPEN: &str = "<new-history_segments>";
+const M1_SEGMENTS_CLOSE: &str = "</new-history_segments>";
 /// The daemon's m1 text when the delta is empty (`memory_render::M1_PLACEHOLDER`).
 pub const M1_PLACEHOLDER: &str = "(no new content since last materialization)";
-/// What ends a rendered segment's body: the next segment's heading or the
-/// close of the block it sits in.
-const SEGMENT_ENDS: [&str; 3] = [
-    "\n\n## ",
-    "\n</session-history",
-    "\n</new-history_segments>",
-];
 
-/// The served history of a request: the m0 part (`<session-history>`) and the
-/// m1 part (`<session-history-since>` or the empty-delta placeholder).
+/// One rendered segment of a served history block: its message range and
+/// its body's byte range in the part (after the heading line).
 #[derive(Debug, Clone, Copy)]
-pub struct Served<'a> {
-    pub m0: Option<(HistoryAt, &'a str)>,
-    pub m1: Option<(HistoryAt, &'a str)>,
+struct Segment {
+    start: u64,
+    end: u64,
+    body: ServedSpan,
+}
+
+/// The segments rendered between `open` and `close` in `text`, each body
+/// ending at the next heading or the block's close.
+fn segments_in(text: &str, open: &str, close: &str) -> Vec<Segment> {
+    let Some(from) = text.find(open).map(|at| at + open.len()) else {
+        return Vec::new();
+    };
+    let to = text[from..].find(close).map_or(text.len(), |at| from + at);
+    let block = &text[from..to];
+    let headings: Vec<usize> = block
+        .match_indices("## ")
+        .map(|(at, _)| at)
+        .filter(|at| *at == 0 || block[..*at].ends_with('\n'))
+        .collect();
+    headings
+        .iter()
+        .enumerate()
+        .filter_map(|(index, at)| {
+            let line_end = at + block[*at..].find('\n')?;
+            let (start, end) = block[at + 3..line_end].split(' ').next()?.split_once('-')?;
+            let next = headings.get(index + 1).copied().unwrap_or(block.len());
+            let body_end = block[..next].trim_end_matches('\n').len().max(line_end + 1);
+            Some(Segment {
+                start: start.parse().ok()?,
+                end: end.parse().ok()?,
+                body: ServedSpan {
+                    start: from + line_end + 1,
+                    end: from + body_end,
+                },
+            })
+        })
+        .collect()
+}
+
+/// The served history of a request: the part holding `<session-history>`
+/// (m0) and the m1 part (`<session-history-since>` or the empty-delta
+/// placeholder), each with its rendered segments.
+struct Served<'a> {
+    m0: Option<(HistoryAt, &'a str, Vec<Segment>)>,
+    m1: Option<(HistoryAt, &'a str, Vec<Segment>)>,
 }
 
 impl<'a> Served<'a> {
     fn of(parts: &[(HistoryAt, &'a str)]) -> Self {
-        let find = |pick: &dyn Fn(&str) -> bool| parts.iter().copied().find(|(_, t)| pick(t));
-        Self {
-            m0: find(&|t| t.starts_with(M0_OPEN)),
-            m1: find(&|t| t.starts_with(M1_OPEN) || t.trim() == M1_PLACEHOLDER),
-        }
+        let m0 = parts
+            .iter()
+            .find(|(_, text)| text.contains(M0_OPEN))
+            .map(|(at, text)| (*at, *text, segments_in(text, M0_OPEN, M0_CLOSE)));
+        let m1 = parts
+            .iter()
+            .find(|(_, text)| text.starts_with(M1_OPEN) || text.trim() == M1_PLACEHOLDER)
+            .map(|(at, text)| {
+                (
+                    *at,
+                    *text,
+                    segments_in(text, M1_SEGMENTS_OPEN, M1_SEGMENTS_CLOSE),
+                )
+            });
+        Self { m0, m1 }
     }
 
-    /// The part holding `phrase` and its span there: m0 first, then m1.
-    fn locate(&self, phrase: &str) -> Option<(HistoryAt, &'a str, ServedSpan)> {
-        [self.m0, self.m1]
+    fn blocks(&self) -> impl Iterator<Item = (Block, HistoryAt, &'a str, &Vec<Segment>)> {
+        [(Block::M0, &self.m0), (Block::M1, &self.m1)]
             .into_iter()
-            .flatten()
-            .find_map(|(at, text)| locate(text, phrase).map(|span| (at, text, span)))
+            .filter_map(|(block, part)| {
+                part.as_ref()
+                    .map(|(at, text, segments)| (block, *at, *text, segments))
+            })
+    }
+
+    /// The served segment whose range holds `ordinal`, m0 first, then m1.
+    fn segment_of(&self, ordinal: u64) -> Option<(Block, HistoryAt, &'a str, Segment)> {
+        self.blocks().find_map(|(block, at, text, segments)| {
+            segments
+                .iter()
+                .find(|s| (s.start..=s.end).contains(&ordinal))
+                .map(|segment| (block, at, text, *segment))
+        })
     }
 }
 
-/// Builds arms (b) through (e) for the stale value at `stale` in the part
-/// `at` of `served`. `key` must satisfy the D-7 grammar and the span must lie
-/// on character boundaries of that part.
-pub fn arms(
-    served: Served<'_>,
+/// Every whole-word occurrence of `phrase` in `text[span]`, as spans of `text`.
+fn occurrences(text: &str, span: ServedSpan, phrase: &str) -> Vec<ServedSpan> {
+    let mut found = Vec::new();
+    let mut from = span.start;
+    while let Some(hit) = locate(&text[from..span.end], phrase) {
+        found.push(ServedSpan {
+            start: from + hit.start,
+            end: from + hit.end,
+        });
+        from += hit.end;
+    }
+    found
+}
+
+/// Every span of `text` in `spans` (in order, disjoint) replaced by `with`.
+fn replaced(text: &str, spans: &[ServedSpan], with: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut at = 0;
+    for span in spans {
+        out.push_str(&text[at..span.start]);
+        out.push_str(with);
+        at = span.end;
+    }
+    out.push_str(&text[at..]);
+    out
+}
+
+/// Arms (b) through (e) for a stale value served at `values` inside the body
+/// of `segment` in the part `at`. `m1` is the request's m1 part, which (b)
+/// rewrites.
+fn arms(
     at: HistoryAt,
-    stale: ServedSpan,
-    key: &str,
-    live: &str,
+    text: &str,
+    segment: Segment,
+    values: &[ServedSpan],
+    m1: (HistoryAt, &str),
+    pair: &FactPair,
     live_ordinal: u64,
 ) -> Arms {
-    assert!(is_claim_key(key), "{key:?} is not a claim key");
-    let text = [served.m0, served.m1]
-        .into_iter()
-        .flatten()
-        .find(|(part, _)| *part == at)
-        .map(|(_, text)| text)
-        .expect("the stale statement's part is served history");
-    let patch = |text: String| vec![PartText { at, text }];
-    let segment_end = SEGMENT_ENDS
-        .iter()
-        .filter_map(|end| text[stale.end..].find(end).map(|found| stale.end + found))
-        .min()
-        .unwrap_or(text.len());
-    let insert =
-        |text: &str, at: usize, added: &str| format!("{}{added}{}", &text[..at], &text[at..]);
+    let (key, live) = (&pair.key, &pair.live_value);
+    let insert = |text: &str, offset: usize, added: &str| {
+        format!("{}{added}{}", &text[..offset], &text[offset..])
+    };
     let updates = format!("<memory-updates>\n{PRECEDENCE_SENTENCE}\n</memory-updates>");
-    let precedence_line = match (served.m1, served.m0) {
-        (Some((m1, delta)), _) if delta.starts_with(M1_OPEN) => vec![PartText {
-            at: m1,
-            text: insert(delta, M1_OPEN.len(), &format!("{updates}\n")),
-        }],
-        (Some((m1, _)), _) => vec![PartText {
-            at: m1,
-            text: format!("{M1_OPEN}{updates}\n</session-history-since>"),
-        }],
-        (None, Some((m0, history))) => {
-            let close = history
-                .find(M0_CLOSE)
-                .map_or(history.len(), |c| c + M0_CLOSE.len());
-            vec![PartText {
-                at: m0,
-                text: insert(
-                    history,
-                    close,
-                    &format!("\n\n{M1_OPEN}{updates}\n</session-history-since>"),
-                ),
-            }]
-        }
-        (None, None) => unreachable!("the stale statement's part is served history"),
+    let (m1_at, delta) = m1;
+    let precedence = match delta.starts_with(M1_OPEN) {
+        true => insert(delta, M1_OPEN.len(), &format!("{updates}\n")),
+        false => format!("{M1_OPEN}{updates}\n</session-history-since>"),
     };
-    let at_span = |replacement: &str| {
-        patch(format!(
-            "{}{replacement}{}",
-            &text[..stale.start],
-            &text[stale.end..]
-        ))
-    };
+    let part = |text: String| PartText { at, text };
     Arms {
-        precedence_line,
-        footer: patch(insert(
+        precedence_line: PartText {
+            at: m1_at,
+            text: precedence,
+        },
+        footer: part(insert(
             text,
-            segment_end,
+            segment.body.end,
             &format!("\n[corrections: {key} = {live} @{live_ordinal}]"),
         )),
-        anchored_replacement: at_span(&format!("[corrected @{live_ordinal}: {key} = {live}]")),
-        omission_oracle: at_span(""),
+        anchored_replacement: part(replaced(
+            text,
+            values,
+            &format!("[corrected @{live_ordinal}: {key} = {live}]"),
+        )),
+        omission_oracle: part(replaced(text, values, "")),
     }
+}
+
+/// Where a request serves a message: a segment of the m0 history, a segment
+/// of the m1 delta, the raw tail under its ordinal marker, or nowhere.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Block {
+    M0,
+    M1,
+    Raw,
+    Absent,
 }
 
 pub const STALE_WORLD_SCHEMA: &str = "eval-stale-world/v1";
@@ -300,12 +358,15 @@ pub struct FactPair {
     pub question: String,
 }
 
-/// A coding session in which the user first sets every project value, then
-/// later changes every one. The two phases guarantee a long-harness
-/// summarizer publishes the first statements before their corrections: gate
-/// A needs the stale prose in an earlier segment and the correction in a
-/// later one. Values are distinct five-digit numbers, so a whole-word match
-/// finds one value and nothing else.
+/// A coding session in which the user first sets every project value, later
+/// sets every one again in a drawn order, then reports unrelated progress.
+/// The phases guarantee the summarizer publishes a statement before it sees
+/// its correction, and the progress ages the corrections out of the raw tail:
+/// gate A needs the stale prose in an earlier segment and the correction in a
+/// later one. A correction repeats the statement's form with no "instead" or
+/// "change of plan", so only order says which value is current. Values are
+/// distinct five-digit numbers, so a whole-word match finds one value and
+/// nothing else.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FactWorld {
@@ -392,13 +453,16 @@ pub fn fact_world(root_seed: u64, subjects: usize) -> FactWorld {
         ) % pending.len() as u64;
         let pair = &mut pairs[pending.remove(pick as usize)];
         pair.live_value = value(format!("live:{}", pair.task));
-        pair.restatement = format!(
-            "Change of plan: set the {} to {} instead.",
-            pair.subject, pair.live_value
-        );
+        pair.restatement = format!("Set the {} to {}.", pair.subject, pair.live_value);
         pair.restating_turn = turn;
         turns.push(FactTurn {
             user: pair.restatement.clone(),
+            assistant: ACKNOWLEDGEMENT.to_string(),
+        });
+    }
+    for index in 0..subjects {
+        turns.push(FactTurn {
+            user: format!("Status note {index}: {}", FILLER[index % FILLER.len()]),
             assistant: ACKNOWLEDGEMENT.to_string(),
         });
     }
@@ -409,6 +473,15 @@ pub fn fact_world(root_seed: u64, subjects: usize) -> FactWorld {
         pairs,
     }
 }
+
+/// Work the session reports after its last correction, naming no subject and
+/// no value, so the corrections age out of the raw tail into segments.
+const FILLER: [&str; 4] = [
+    "the refactor of the request router moved the retry helpers into their own module and the unit tests still pass after the move.",
+    "the flaky integration test turned out to be a missing await in the fixture teardown, and the rerun came back clean on the first try.",
+    "the dependency upgrade went through after pinning the lockfile, and the release notes for the upgrade mention no behavior change.",
+    "the dashboards now group errors by handler, which made the slow endpoint obvious; the follow-up is tracked in the backlog.",
+];
 
 /// One stored history segment's tiers, as the harness read them from the
 /// daemon's store after the session.
@@ -471,9 +544,9 @@ fn text_parts(request: &Value) -> Vec<(HistoryAt, &str)> {
 }
 
 /// The request with `parts` replaced: an arm's request.
-pub fn with_parts(request: &Value, parts: &[PartText]) -> Value {
+pub fn with_parts(request: &Value, parts: &[&PartText]) -> Value {
     let mut request = request.clone();
-    for PartText { at, text } in parts {
+    for PartText { at, text } in parts.iter().copied() {
         match &mut request["messages"][at.message]["content"] {
             Value::String(old) => *old = text.clone(),
             content => content[at.part]["text"] = Value::String(text.clone()),
@@ -482,34 +555,44 @@ pub fn with_parts(request: &Value, parts: &[PartText]) -> Value {
     request
 }
 
-/// The tier (`1..=4`) a segment rendered at: the first tier whose stored text
-/// is the rendered body. `None` when no stored segment matches the heading.
-fn rendered_tier(history: &str, stale: ServedSpan, segments: &[SegmentTiers]) -> Option<u8> {
-    let heading = history[..stale.start].rfind("## ")?;
-    let (title, body) = history[heading + 3..].split_once('\n')?;
-    let range = title.split(' ').next()?;
-    let (start, end) = range.split_once('-')?;
-    let (start, end) = (start.parse::<i64>().ok()?, end.parse::<i64>().ok()?);
-    let body_end = SEGMENT_ENDS
+/// Stored text as the renderer serves it: XML-escaped, with every body line
+/// that starts a heading indented (`decay_render`'s escape and guard).
+fn as_served(stored: &str) -> String {
+    let escaped = stored
+        .trim()
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace("\n## ", "\n ## ");
+    match escaped.starts_with("## ") {
+        true => format!(" {escaped}"),
+        false => escaped,
+    }
+}
+
+/// The tier (`1..=4`) a served segment rendered at: the first stored tier
+/// whose served form is the body; `0` when no stored segment matches.
+fn rendered_tier(text: &str, segment: Segment, stored: &[SegmentTiers]) -> u8 {
+    let body = text[segment.body.start..segment.body.end].trim();
+    stored
         .iter()
-        .filter_map(|end| body.find(end))
-        .min()
-        .unwrap_or(body.len());
-    let body = body[..body_end].trim();
-    let segment = segments
-        .iter()
-        .find(|s| s.start_message == start && s.end_message == end)?;
-    [&segment.p1, &segment.p2, &segment.p3, &segment.p4]
-        .iter()
-        .position(|tier| tier.as_deref().map(str::trim) == Some(body))
-        .map(|index| index as u8 + 1)
+        .find(|s| (s.start_message, s.end_message) == (segment.start as i64, segment.end as i64))
+        .and_then(|s| {
+            [&s.p1, &s.p2, &s.p3, &s.p4]
+                .iter()
+                .position(|tier| tier.as_deref().map(as_served).as_deref() == Some(body))
+        })
+        .map_or(0, |index| index as u8 + 1)
 }
 
 /// One stale-preference pair as the export carries it: the question, the
-/// claim key its arms name, both values, the restating message's ordinal,
-/// the tier the stale segment rendered at, what the served request delivered,
-/// the served request itself (arm (a)), the part holding the stale value and
-/// its span there, and arms (b) through (e) as the parts they replace.
+/// claim key its arms name, both values, the restating message's ordinal and
+/// where the request serves it, the tier the stale segment rendered at, what
+/// the served request delivered, whether the stale value is also served
+/// outside the stale segment (a later segment's "from 34827 to 94225", the
+/// raw tail, the hint), the served request itself (arm (a)), the part holding
+/// the stale segment and the value's spans in its body, and arms (b) through
+/// (e) as the parts they replace.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct StalePair {
@@ -519,16 +602,20 @@ pub struct StalePair {
     pub stale_value: String,
     pub live_value: String,
     pub restating_ordinal: u64,
+    pub restatement: Block,
     /// `1..=4`, or `0` when the rendered body matched no stored tier.
     pub stale_tier: u8,
+    pub stale_block: Block,
     pub delivery: StaleDelivery,
+    pub stale_elsewhere: bool,
     pub history: HistoryAt,
-    pub stale_span: ServedSpan,
+    pub stale_spans: Vec<ServedSpan>,
     pub request: Value,
     pub arms: Arms,
 }
 
-/// A pair whose served history does not hold the stale value, so no
+/// A pair whose stale segment does not serve the stale value (decayed to a
+/// tier without it, dropped by the summarizer, or not folded), so no
 /// rendering can change it: what the whole request delivered, and the
 /// request.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -538,13 +625,14 @@ pub struct Unlocatable {
     pub request: Value,
 }
 
-/// The stale-preference export over one harness run.
+/// The stale-preference export over one or more harness sessions.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct StaleExport {
     pub schema: String,
     pub harness: String,
     pub summarizer: String,
+    /// The world seeds, comma-separated decimals, one per session.
     pub root_seed: String,
     pub pairs: Vec<StalePair>,
     pub unlocatable: BTreeMap<String, Unlocatable>,
@@ -554,29 +642,45 @@ pub struct StaleExport {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CaptureError {
-    Schema {
-        found: String,
-    },
+    /// The capture's or its world's schema is not the one this build reads.
+    Schema { found: String },
+    /// The world is not `fact_world` of its own seed and size, so its
+    /// ordinals, keys, and values cannot be trusted.
+    WorldMismatch,
     /// A pair of the world has no captured request.
-    MissingRequest {
-        task: String,
-    },
+    MissingRequest { task: String },
+    /// A request serves no m1 part, where arm (b) goes.
+    NoM1 { task: String },
+    /// Merged exports disagree on schema, harness, or summarizer, or repeat
+    /// a world.
+    Unmergeable { reason: &'static str },
 }
 
 debug_display!(CaptureError);
 
-/// The export of one capture. A pair is located when the served history (the
-/// m0 part, then the m1 part) carries the stale value, the one token of the
-/// stale statement a summarizer that paraphrases keeps; that part is the one
-/// arms (c) through (e) vary, and the value's span is what (d) and (e)
-/// replace. The delivery is
-/// over every text part of the request: the history, the raw tail, and the
-/// search hint.
+/// The export of one capture. A pair is located when the served segment that
+/// covers its stale statement (in m0, then in the m1 delta) carries the stale
+/// value in its body: where D-7 would anchor that segment's claim. That part
+/// is the one arms (c) through (e) vary; (d) and (e) act on every whole-word
+/// occurrence of the value in that body and nowhere else. The delivery is
+/// over every text part of the request.
 pub fn export_capture(capture: &StaleCapture) -> Result<StaleExport, CaptureError> {
-    if capture.schema != STALE_CAPTURE_SCHEMA || capture.world.schema != STALE_WORLD_SCHEMA {
-        return Err(CaptureError::Schema {
-            found: capture.schema.clone(),
-        });
+    for found in [&capture.schema, &capture.world.schema] {
+        if ![STALE_CAPTURE_SCHEMA, STALE_WORLD_SCHEMA].contains(&found.as_str()) {
+            return Err(CaptureError::Schema {
+                found: found.clone(),
+            });
+        }
+    }
+    let seed = capture
+        .world
+        .root_seed
+        .parse::<u64>()
+        .map_err(|_| CaptureError::WorldMismatch)?;
+    if capture.world.pairs.len() > MAX_SUBJECTS
+        || fact_world(seed, capture.world.pairs.len()) != capture.world
+    {
+        return Err(CaptureError::WorldMismatch);
     }
     let mut export = StaleExport {
         schema: STALE_EXPORT_SCHEMA.to_string(),
@@ -587,27 +691,34 @@ pub fn export_capture(capture: &StaleCapture) -> Result<StaleExport, CaptureErro
         unlocatable: BTreeMap::new(),
         stale_delivered: 0,
     };
+    // Every turn is one user and one assistant message, numbered from one.
+    let ordinal = |turn: u32| 2 * u64::from(turn) + 1;
     for pair in &capture.world.pairs {
-        let request =
-            capture
-                .requests
-                .get(&pair.task)
-                .ok_or_else(|| CaptureError::MissingRequest {
-                    task: pair.task.clone(),
-                })?;
+        let task = || pair.task.clone();
+        let request = capture
+            .requests
+            .get(&pair.task)
+            .ok_or_else(|| CaptureError::MissingRequest { task: task() })?;
         let parts = text_parts(request);
-        let served: String = parts
-            .iter()
-            .map(|(_, text)| *text)
-            .collect::<Vec<_>>()
-            .join("\n");
-        let delivery = StaleDelivery::of(&served, &pair.stale_value, &pair.live_value);
+        let joined = parts.iter().map(|(_, t)| *t).collect::<Vec<_>>().join("\n");
+        let delivery = StaleDelivery::of(&joined, &pair.stale_value, &pair.live_value);
         export.stale_delivered += u32::from(delivery.stale_delivered());
-        let served_history = Served::of(&parts);
-        let located = served_history.locate(&pair.stale_value);
-        let Some((history, text, stale_span)) = located else {
+        let served = Served::of(&parts);
+        let m1 = served
+            .m1
+            .as_ref()
+            .map(|(at, text, _)| (*at, *text))
+            .ok_or_else(|| CaptureError::NoM1 { task: task() })?;
+        let located = served
+            .segment_of(ordinal(pair.stale_turn))
+            .map(|(block, at, text, segment)| {
+                let spans = occurrences(text, segment.body, &pair.stale_value);
+                (block, at, text, segment, spans)
+            })
+            .filter(|(.., spans)| !spans.is_empty());
+        let Some((stale_block, history, text, segment, stale_spans)) = located else {
             export.unlocatable.insert(
-                pair.task.clone(),
+                task(),
                 Unlocatable {
                     delivery,
                     request: request.clone(),
@@ -615,31 +726,102 @@ pub fn export_capture(capture: &StaleCapture) -> Result<StaleExport, CaptureErro
             );
             continue;
         };
-        // Every turn is one user and one assistant message, numbered from one.
-        let restating_ordinal = 2 * u64::from(pair.restating_turn) + 1;
+        let restating_ordinal = ordinal(pair.restating_turn);
+        let marker = format!("§{restating_ordinal}§ ");
+        let restatement = match served.segment_of(restating_ordinal) {
+            Some((block, ..)) => block,
+            None if parts.iter().any(|(_, t)| t.starts_with(&marker)) => Block::Raw,
+            None => Block::Absent,
+        };
+        let stripped = replaced(text, &stale_spans, "");
+        let stale_elsewhere = parts
+            .iter()
+            .map(|(at, t)| {
+                if *at == history {
+                    stripped.as_str()
+                } else {
+                    *t
+                }
+            })
+            .any(|t| carries(t, &pair.stale_value));
         export.pairs.push(StalePair {
-            task: pair.task.clone(),
+            task: task(),
             question: pair.question.clone(),
             key: pair.key.clone(),
             stale_value: pair.stale_value.clone(),
             live_value: pair.live_value.clone(),
             restating_ordinal,
-            stale_tier: rendered_tier(text, stale_span, &capture.segments).unwrap_or(0),
+            restatement,
+            stale_tier: rendered_tier(text, segment, &capture.segments),
+            stale_block,
             delivery,
+            stale_elsewhere,
             history,
-            stale_span,
-            request: request.clone(),
             arms: arms(
-                served_history,
                 history,
-                stale_span,
-                &pair.key,
-                &pair.live_value,
+                text,
+                segment,
+                &stale_spans,
+                m1,
+                pair,
                 restating_ordinal,
             ),
+            stale_spans,
+            request: request.clone(),
         });
     }
     Ok(export)
+}
+
+/// Merges exports of independent harness sessions: one schema, harness, and
+/// summarizer, no world twice. Task ids gain the session's one-based
+/// position (`world-2:stale-5`), so equal per-world ids cannot collide.
+pub fn merge_exports(exports: Vec<StaleExport>) -> Result<StaleExport, CaptureError> {
+    let mut exports = exports.into_iter();
+    let first = exports.next().ok_or(CaptureError::Unmergeable {
+        reason: "no exports",
+    })?;
+    let mut merged = StaleExport {
+        pairs: Vec::new(),
+        unlocatable: BTreeMap::new(),
+        stale_delivered: 0,
+        root_seed: String::new(),
+        ..first.clone()
+    };
+    let mut seeds = std::collections::BTreeSet::new();
+    for (index, export) in std::iter::once(first).chain(exports).enumerate() {
+        if (&export.schema, &export.harness, &export.summarizer)
+            != (&merged.schema, &merged.harness, &merged.summarizer)
+        {
+            return Err(CaptureError::Unmergeable {
+                reason: "schema, harness, or summarizer differs",
+            });
+        }
+        if !seeds.insert(export.root_seed.clone()) {
+            return Err(CaptureError::Unmergeable {
+                reason: "a world appears twice",
+            });
+        }
+        let prefix = |task: &str| format!("world-{}:{task}", index + 1);
+        merged
+            .pairs
+            .extend(export.pairs.into_iter().map(|mut pair| {
+                pair.task = prefix(&pair.task);
+                pair
+            }));
+        merged.unlocatable.extend(
+            export
+                .unlocatable
+                .into_iter()
+                .map(|(task, value)| (prefix(&task), value)),
+        );
+        merged.stale_delivered += export.stale_delivered;
+        if index > 0 {
+            merged.root_seed.push(',');
+        }
+        merged.root_seed.push_str(&export.root_seed);
+    }
+    Ok(merged)
 }
 
 /// Discordant counts of two arms over the pairs both answered, and the exact

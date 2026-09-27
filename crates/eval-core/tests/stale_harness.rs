@@ -1,19 +1,21 @@
 //! The stale-preference harness contracts: the fact world, the request-level
-//! arms over served m0 and m1 history, and the export of a harness capture.
+//! arms over served m0 and m1 history, the export of a harness capture, and
+//! the merge of independent sessions.
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use eval_core::{
-    ACKNOWLEDGEMENT, CaptureError, FactWorld, HistoryAt, M1_PLACEHOLDER, MAX_SUBJECTS,
+    ACKNOWLEDGEMENT, Block, CaptureError, FactPair, HistoryAt, M1_PLACEHOLDER, MAX_SUBJECTS,
     PRECEDENCE_SENTENCE, STALE_CAPTURE_SCHEMA, STALE_EXPORT_SCHEMA, STALE_WORLD_SCHEMA,
-    SegmentTiers, StaleCapture, StaleDelivery, carries, export_capture, fact_world, with_parts,
+    SegmentTiers, StaleCapture, StaleDelivery, StaleExport, carries, export_capture, fact_world,
+    merge_exports, with_parts,
 };
 use serde_json::{Value, json};
 
 const SEED: u64 = 0x5EED_B000_0000_0002;
 
 #[test]
-fn the_fact_world_restates_every_subject_once_with_a_value_of_its_own() {
+fn the_fact_world_states_then_restates_every_subject_then_reports_progress() {
     let world = fact_world(SEED, 24);
     assert_eq!(
         world,
@@ -22,11 +24,11 @@ fn the_fact_world_restates_every_subject_once_with_a_value_of_its_own() {
     );
     assert_ne!(world, fact_world(SEED + 1, 24));
     assert_eq!(world.schema, STALE_WORLD_SCHEMA);
-    assert_eq!((world.turns.len(), world.pairs.len()), (48, 24));
+    assert_eq!((world.turns.len(), world.pairs.len()), (72, 24));
     let mut values = BTreeSet::new();
     let mut keys = BTreeSet::new();
     for pair in &world.pairs {
-        assert!(pair.stale_turn < pair.restating_turn, "{pair:?}");
+        assert!(pair.stale_turn < 24 && (24..48).contains(&pair.restating_turn));
         assert_eq!(
             world.turns[pair.stale_turn as usize].user,
             pair.stale_statement
@@ -35,8 +37,12 @@ fn the_fact_world_restates_every_subject_once_with_a_value_of_its_own() {
             world.turns[pair.restating_turn as usize].user,
             pair.restatement
         );
+        // Only order says which value is current.
+        assert_eq!(
+            pair.restatement,
+            format!("Set the {} to {}.", pair.subject, pair.live_value)
+        );
         assert!(carries(&pair.stale_statement, &pair.stale_value));
-        assert!(carries(&pair.restatement, &pair.live_value));
         assert!(!carries(&pair.restatement, &pair.stale_value));
         assert!(pair.question.contains(&pair.subject));
         assert!(
@@ -46,7 +52,6 @@ fn the_fact_world_restates_every_subject_once_with_a_value_of_its_own() {
         assert!(values.insert(pair.stale_value.clone()) && values.insert(pair.live_value.clone()));
         assert!(keys.insert(pair.key.clone()));
     }
-    // Every value is stated once: acknowledgements carry none.
     for value in &values {
         let stated = world
             .turns
@@ -55,23 +60,20 @@ fn the_fact_world_restates_every_subject_once_with_a_value_of_its_own() {
             .count();
         assert_eq!(stated, 1, "{value}");
     }
+    for turn in &world.turns[48..] {
+        assert!(turn.user.starts_with("Status note"));
+        assert!(
+            !world
+                .pairs
+                .iter()
+                .any(|pair| turn.user.contains(&pair.subject))
+        );
+    }
     assert!(
         world
             .turns
             .iter()
             .all(|turn| turn.assistant == ACKNOWLEDGEMENT)
-    );
-    // Every statement is published before any restatement, so the correction
-    // lands in a later summarizer chunk.
-    assert!(
-        world.turns[..24]
-            .iter()
-            .all(|turn| !turn.user.starts_with("Change of plan"))
-    );
-    assert!(
-        world.turns[24..]
-            .iter()
-            .all(|turn| turn.user.starts_with("Change of plan"))
     );
     assert_eq!(fact_world(SEED, MAX_SUBJECTS).pairs.len(), MAX_SUBJECTS);
 }
@@ -82,205 +84,311 @@ fn a_world_names_no_more_subjects_than_it_has() {
     fact_world(SEED, MAX_SUBJECTS + 1);
 }
 
-const M0: &str = "<session-history>\n## 1-5 · messages 1 to 5\nSet the billing service port to 34827.; Noted.; Set the search indexer port to 67339.\n\n## 6-10 · messages 6 to 10\nNoted.; Set the auth gateway port to 91549.\n</session-history>";
-const M1: &str = "<session-history-since>\n<new-history_segments>\n## 11-15 · messages 11 to 15\nChange of plan: set the billing service port to 94225 instead.; Noted.\n</new-history_segments>\n</session-history-since>";
+/// The one pair of a one-subject world: stated on turn 0 (message 1),
+/// restated on turn 1 (message 3).
+fn pair() -> FactPair {
+    fact_world(SEED, 1).pairs.remove(0)
+}
 
-fn request(m0: &str, m1: &str) -> Value {
+fn m0(body: &str) -> String {
+    format!(
+        "<project-docs>\nAGENTS.md\n</project-docs>\n\n<session-history>\n{body}\n</session-history>"
+    )
+}
+
+fn stale_body(pair: &FactPair) -> String {
+    format!(
+        "## 1-2 · Set {} {}\nSet the {} to {}; that {} stays until changed.",
+        pair.subject, pair.stale_value, pair.subject, pair.stale_value, pair.stale_value
+    )
+}
+
+fn m1_with(pair: &FactPair) -> String {
+    format!(
+        "<session-history-since>\n<new-history_segments>\n## 3-4 · Later\nSet the {} to {}.\n</new-history_segments>\n</session-history-since>",
+        pair.subject, pair.live_value
+    )
+}
+
+fn request(m0: &str, m1: &str, tail: &str) -> Value {
     json!({
         "system": "## Eidnara",
         "messages": [
             {"role": "user", "content": [{"type": "text", "text": m0}, {"type": "text", "text": m1}]},
-            {"role": "assistant", "content": [{"type": "text", "text": "§16§ Noted."}]},
-            {"role": "user", "content": [{"type": "text", "text": "§17§ What is the billing service port now? Reply with just the value."}]},
+            {"role": "assistant", "content": [{"type": "text", "text": tail}]},
+            {"role": "user", "content": "§7§ What is it now?"},
         ],
     })
 }
 
-fn segments() -> Vec<SegmentTiers> {
-    let row = |start, end, p1: &str, p3: &str| SegmentTiers {
-        start_message: start,
-        end_message: end,
-        p1: Some(p1.to_string()),
-        p2: Some(p1.to_string()),
-        p3: Some(p3.to_string()),
-        p4: Some(String::new()),
-    };
-    vec![
-        row(
-            1,
-            5,
-            "Set the billing service port to 34827.; Noted.; Set the search indexer port to 67339.",
-            "messages 1 to 5",
-        ),
-        row(
-            6,
-            10,
-            "Noted.; Set the auth gateway port to 91549.",
-            "messages 6 to 10",
-        ),
-        row(
-            11,
-            15,
-            "Change of plan: set the billing service port to 94225 instead.; Noted.",
-            "messages 11 to 15",
-        ),
-    ]
-}
-
-/// A world of one subject, stated on turn 0 and restated on turn 2 (message
-/// 5), whose question turn served `request`.
-fn capture(request: Value) -> StaleCapture {
-    let world: FactWorld = serde_json::from_value(json!({
-        "schema": STALE_WORLD_SCHEMA,
-        "root_seed": "1",
-        "turns": [],
-        "pairs": [{
-            "task": "stale-0", "subject": "billing service port", "key": "billing-service.port",
-            "stale_value": "34827", "live_value": "94225",
-            "stale_statement": "Set the billing service port to 34827.",
-            "restatement": "Change of plan: set the billing service port to 94225 instead.",
-            "stale_turn": 0, "restating_turn": 2,
-            "question": "What is the billing service port now? Reply with just the value.",
-        }],
-    }))
-    .unwrap();
+fn capture(request: Value, segments: Vec<SegmentTiers>) -> StaleCapture {
+    let world = fact_world(SEED, 1);
     StaleCapture {
         schema: STALE_CAPTURE_SCHEMA.to_string(),
         harness: "opencode".to_string(),
         summarizer: "fixture/scripted".to_string(),
+        requests: BTreeMap::from([(world.pairs[0].task.clone(), request)]),
         world,
-        segments: segments(),
-        requests: BTreeMap::from([("stale-0".to_string(), request)]),
+        segments,
     }
 }
 
-fn history_text(request: &Value) -> (String, String) {
-    let part = |i: usize| {
-        request["messages"][0]["content"][i]["text"]
-            .as_str()
-            .unwrap()
-            .to_string()
-    };
-    (part(0), part(1))
+fn row(start: i64, end: i64, p1: &str, p2: &str) -> SegmentTiers {
+    SegmentTiers {
+        start_message: start,
+        end_message: end,
+        p1: Some(p1.to_string()),
+        p2: Some(p2.to_string()),
+        p3: Some(format!("messages {start} to {end}")),
+        p4: Some(String::new()),
+    }
+}
+
+fn part(request: &Value, message: usize, part: usize) -> String {
+    request["messages"][message]["content"][part]["text"]
+        .as_str()
+        .unwrap()
+        .to_string()
 }
 
 #[test]
 fn arms_change_the_served_history_where_d7_and_d8_put_their_bytes() {
-    let served = request(M0, M1);
-    let export = export_capture(&capture(served.clone())).unwrap();
+    let pair = pair();
+    let body = stale_body(&pair);
+    let (m0, m1) = (m0(&body), m1_with(&pair));
+    let served = request(&m0, &m1, "§5§ Noted.");
+    let stored = row(1, 2, body.split_once('\n').unwrap().1, "condensed");
+    let export = export_capture(&capture(served.clone(), vec![stored])).unwrap();
     assert_eq!(export.schema, STALE_EXPORT_SCHEMA);
-    assert_eq!(export.stale_delivered, 1);
-    let pair = &export.pairs[0];
-    assert_eq!(pair.request, served, "arm (a) is the request as served");
+    let exported = &export.pairs[0];
+    assert_eq!(exported.request, served, "arm (a) is the request as served");
     assert_eq!(
-        pair.history,
+        exported.history,
         HistoryAt {
             message: 0,
             part: 0
         }
     );
-    assert_eq!((pair.restating_ordinal, pair.stale_tier), (5, 1));
-    assert_eq!(pair.delivery, StaleDelivery::Both);
-    let stale = "34827";
-    let arm = |parts| history_text(&with_parts(&served, parts));
-    // (b): the override sentence heads the m1 delta; m0 is untouched.
-    let (m0, m1) = arm(&pair.arms.precedence_line);
-    assert_eq!(m0, M0);
     assert_eq!(
-        m1,
-        M1.replacen(
+        (
+            exported.restating_ordinal,
+            exported.restatement,
+            exported.stale_block,
+            exported.stale_tier
+        ),
+        (3, Block::M1, Block::M0, 1)
+    );
+    assert_eq!(exported.delivery, StaleDelivery::Both);
+    // The heading keeps the value after (d) and (e): D-7 rewrites the body's
+    // anchor, never the title, so the export flags the leak.
+    assert!(exported.stale_elsewhere);
+    // Both body occurrences, never the heading or the project docs.
+    assert_eq!(exported.stale_spans.len(), 2);
+    let arm = |patch| with_parts(&served, &[patch]);
+    // (b): the override sentence heads the m1 delta; m0 is untouched.
+    let b = arm(&exported.arms.precedence_line);
+    assert_eq!(part(&b, 0, 0), m0);
+    assert_eq!(
+        part(&b, 0, 1),
+        m1.replacen(
             "<session-history-since>\n",
             &format!("<session-history-since>\n<memory-updates>\n{PRECEDENCE_SENTENCE}\n</memory-updates>\n"),
             1
         )
     );
     // (c): one footer line ends the stale segment's body, stale prose kept.
-    let (m0, m1) = arm(&pair.arms.footer);
-    assert_eq!(m1, M1);
+    let footer = format!("[corrections: {} = {} @3]", pair.key, pair.live_value);
     assert_eq!(
-        m0,
-        M0.replacen(
-            "67339.\n\n## 6-10",
-            "67339.\n[corrections: billing-service.port = 94225 @5]\n\n## 6-10",
-            1
-        )
+        part(&arm(&exported.arms.footer), 0, 0),
+        m0.replacen(&body, &format!("{body}\n{footer}"), 1)
     );
-    // (d) and (e): at the stale statement's span only.
-    let (m0, _) = arm(&pair.arms.anchored_replacement);
+    // (d) and (e): every occurrence in the stale segment's body, and no other.
+    let marker = format!("[corrected @3: {} = {}]", pair.key, pair.live_value);
+    let heading = body.split_once('\n').unwrap().0;
+    let rest = body.split_once('\n').unwrap().1;
     assert_eq!(
-        m0,
-        M0.replacen(stale, "[corrected @5: billing-service.port = 94225]", 1)
+        part(&arm(&exported.arms.anchored_replacement), 0, 0),
+        m0.replacen(rest, &rest.replace(&pair.stale_value, &marker), 1)
     );
-    let (m0, _) = arm(&pair.arms.omission_oracle);
-    assert_eq!(m0, M0.replacen(stale, "", 1));
-    assert!(!carries(&m0, "34827"));
-    assert_eq!(export.summarizer, "fixture/scripted");
+    let omitted = part(&arm(&exported.arms.omission_oracle), 0, 0);
+    assert_eq!(
+        omitted,
+        m0.replacen(rest, &rest.replace(&pair.stale_value, ""), 1)
+    );
+    assert!(omitted.contains(heading), "the heading is left as served");
 }
 
 #[test]
-fn an_empty_m1_delta_gets_the_memory_updates_block_of_its_own() {
-    let served = request(M0, M1_PLACEHOLDER);
-    let export = export_capture(&capture(served.clone())).unwrap();
-    let (_, m1) = history_text(&with_parts(&served, &export.pairs[0].arms.precedence_line));
+fn an_empty_m1_delta_gets_a_memory_updates_block_and_a_missing_m1_is_refused() {
+    let pair = pair();
+    let served = request(&m0(&stale_body(&pair)), M1_PLACEHOLDER, "§3§ Set it.");
+    let export = export_capture(&capture(served.clone(), vec![])).unwrap();
+    let exported = &export.pairs[0];
+    assert_eq!(exported.restatement, Block::Raw);
+    assert_eq!(exported.stale_tier, 0, "no stored row matches");
     assert_eq!(
-        m1,
+        part(
+            &with_parts(&served, &[&exported.arms.precedence_line]),
+            0,
+            1
+        ),
         format!(
             "<session-history-since>\n<memory-updates>\n{PRECEDENCE_SENTENCE}\n</memory-updates>\n</session-history-since>"
         )
     );
+    let mut no_m1 = served.clone();
+    no_m1["messages"][0]["content"] = json!([{"type": "text", "text": m0(&stale_body(&pair))}]);
+    assert_eq!(
+        export_capture(&capture(no_m1, vec![])),
+        Err(CaptureError::NoM1 {
+            task: pair.task.clone()
+        })
+    );
 }
 
 #[test]
-fn a_stale_statement_in_the_m1_delta_is_located_there_at_tier_one() {
-    let m1 = "<session-history-since>\n<new-history_segments>\n## 1-5 · messages 1 to 5\nSet the billing service port to 34827.; Noted.; Set the search indexer port to 67339.\n</new-history_segments>\n</session-history-since>";
-    let served = request("<session-history></session-history>", m1);
-    let export = export_capture(&capture(served.clone())).unwrap();
-    let pair = &export.pairs[0];
+fn a_stale_segment_in_m1_is_located_there_and_its_tier_reads_through_the_escape() {
+    let pair = pair();
+    // The stored p2 is what rendered; it carries an ampersand the renderer escapes.
+    let p2 = format!(
+        "Set the {} to {} & kept it.",
+        pair.subject, pair.stale_value
+    );
+    let m1 = format!(
+        "<session-history-since>\n<new-history_segments>\n## 1-2 · Setup\n{}\n</new-history_segments>\n</session-history-since>",
+        p2.replace('&', "&amp;")
+    );
+    let served = request("<session-history></session-history>", &m1, "§3§ Set it.");
+    let export = export_capture(&capture(served.clone(), vec![row(1, 2, "verbose", &p2)])).unwrap();
+    let exported = &export.pairs[0];
     assert_eq!(
-        (pair.history, pair.stale_tier),
+        (exported.history, exported.stale_block, exported.stale_tier),
         (
             HistoryAt {
                 message: 0,
                 part: 1
             },
-            1
+            Block::M1,
+            2
         )
     );
-    let (_, m1_footer) = history_text(&with_parts(&served, &pair.arms.footer));
-    assert!(m1_footer.contains(
-        "67339.\n[corrections: billing-service.port = 94225 @5]\n</new-history_segments>"
-    ));
+    let footer = part(&with_parts(&served, &[&exported.arms.footer]), 0, 1);
+    assert!(footer.contains(&format!(
+        "&amp; kept it.\n[corrections: {} = {} @3]\n</new-history_segments>",
+        pair.key, pair.live_value
+    )));
 }
 
 #[test]
-fn a_stale_statement_outside_the_served_history_is_unlocatable_and_kept() {
-    // A segment demoted to its title renders no prose; the raw tail still
-    // carries the statement, and the delivery counts it.
-    let m0 = "<session-history>\n## 1-5 · messages 1 to 5\nmessages 1 to 5\n</session-history>";
-    let mut served = request(m0, M1_PLACEHOLDER);
-    served["messages"][2]["content"][0]["text"] =
-        json!("§3§ Set the billing service port to 34827.");
-    let export = export_capture(&capture(served.clone())).unwrap();
+fn a_stale_segment_without_the_value_is_unlocatable_even_if_a_later_segment_names_it() {
+    let pair = pair();
+    let body = format!(
+        "## 1-2 · Setup\nConfigured the {}.\n\n## 3-4 · Later\nUpdated it from {} to {}.",
+        pair.subject, pair.stale_value, pair.live_value
+    );
+    let served = request(&m0(&body), M1_PLACEHOLDER, "§5§ Noted.");
+    let export = export_capture(&capture(served.clone(), vec![])).unwrap();
     assert!(export.pairs.is_empty());
-    assert_eq!(export.unlocatable["stale-0"].delivery, StaleDelivery::Stale);
-    assert_eq!(export.unlocatable["stale-0"].request, served);
+    assert_eq!(export.unlocatable[&pair.task].delivery, StaleDelivery::Both);
+    assert_eq!(export.unlocatable[&pair.task].request, served);
     assert_eq!(export.stale_delivered, 1);
+    // The stale value served again elsewhere is flagged, not replaced.
+    let body = format!(
+        "{}\n\n## 3-4 · Later\nUpdated it from {} to {}.",
+        stale_body(&pair),
+        pair.stale_value,
+        pair.live_value
+    );
+    let export = export_capture(&capture(
+        request(&m0(&body), M1_PLACEHOLDER, "§5§ Noted."),
+        vec![],
+    ))
+    .unwrap();
+    assert!(export.pairs[0].stale_elsewhere);
+    assert_eq!(export.pairs[0].restatement, Block::M0);
 }
 
 #[test]
-fn an_export_refuses_a_foreign_schema_and_a_missing_request() {
-    let mut foreign = capture(request(M0, M1));
-    foreign.schema = "eval-stale-capture/v0".to_string();
-    assert!(matches!(
+fn an_export_refuses_a_foreign_schema_a_forged_world_and_a_missing_request() {
+    let pair = pair();
+    let served = request(&m0(&stale_body(&pair)), M1_PLACEHOLDER, "§3§ Set it.");
+    let mut foreign = capture(served.clone(), vec![]);
+    foreign.world.schema = "eval-stale-world/v0".to_string();
+    assert_eq!(
         export_capture(&foreign),
-        Err(CaptureError::Schema { .. })
-    ));
-    let mut missing = capture(request(M0, M1));
+        Err(CaptureError::Schema {
+            found: "eval-stale-world/v0".to_string()
+        })
+    );
+    let mut forged = capture(served.clone(), vec![]);
+    forged.world.pairs[0].restating_turn = 0;
+    assert_eq!(export_capture(&forged), Err(CaptureError::WorldMismatch));
+    let mut missing = capture(served, vec![]);
     missing.requests.clear();
     assert_eq!(
         export_capture(&missing),
-        Err(CaptureError::MissingRequest {
-            task: "stale-0".to_string()
-        })
+        Err(CaptureError::MissingRequest { task: pair.task })
     );
+}
+
+#[test]
+fn a_merge_namespaces_every_session_and_refuses_a_mismatch_or_a_repeat() {
+    let pair = pair();
+    let served = request(&m0(&stale_body(&pair)), M1_PLACEHOLDER, "§3§ Set it.");
+    let one = export_capture(&capture(served.clone(), vec![])).unwrap();
+    let mut two = one.clone();
+    two.root_seed = "7".to_string();
+    let merged = merge_exports(vec![one.clone(), two.clone()]).unwrap();
+    let tasks: Vec<&str> = merged.pairs.iter().map(|p| p.task.as_str()).collect();
+    assert_eq!(tasks, ["world-1:stale-0", "world-2:stale-0"]);
+    assert_eq!(
+        (merged.stale_delivered, merged.root_seed.as_str()),
+        (2, format!("{SEED},7").as_str())
+    );
+    let refuse = |exports: Vec<StaleExport>| merge_exports(exports).unwrap_err();
+    assert!(matches!(
+        refuse(vec![one.clone(), one.clone()]),
+        CaptureError::Unmergeable { .. }
+    ));
+    let mut other = two;
+    other.summarizer = "other".to_string();
+    assert!(matches!(
+        refuse(vec![one, other]),
+        CaptureError::Unmergeable { .. }
+    ));
+    assert!(matches!(refuse(vec![]), CaptureError::Unmergeable { .. }));
+}
+
+#[test]
+fn string_content_parts_are_read_and_replaced() {
+    let pair = pair();
+    let served = json!({"messages": [
+        {"role": "user", "content": m0(&stale_body(&pair))},
+        {"role": "user", "content": M1_PLACEHOLDER},
+    ]});
+    let export = export_capture(&capture(served.clone(), vec![])).unwrap();
+    let exported = &export.pairs[0];
+    assert_eq!(
+        exported.history,
+        HistoryAt {
+            message: 0,
+            part: 0
+        }
+    );
+    let replaced = with_parts(&served, &[&exported.arms.omission_oracle]);
+    assert!(!carries(
+        replaced["messages"][0]["content"]
+            .as_str()
+            .unwrap()
+            .split_once('\n')
+            .unwrap()
+            .1
+            .split_once("## 1-2")
+            .unwrap()
+            .1
+            .split_once('\n')
+            .unwrap()
+            .1,
+        &pair.stale_value
+    ));
 }

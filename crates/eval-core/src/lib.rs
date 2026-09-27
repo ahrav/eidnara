@@ -178,11 +178,11 @@ pub use shrink::{
     parse_shrink_report, shrink,
 };
 pub use stale::{
-    ACKNOWLEDGEMENT, Arms, CaptureError, FactPair, FactTurn, FactWorld, Grade, HistoryAt,
+    ACKNOWLEDGEMENT, Arms, Block, CaptureError, FactPair, FactTurn, FactWorld, Grade, HistoryAt,
     M1_PLACEHOLDER, MAX_SUBJECTS, McNemar, McNemarError, PRECEDENCE_SENTENCE, PartText,
-    STALE_CAPTURE_SCHEMA, STALE_EXPORT_SCHEMA, STALE_WORLD_SCHEMA, SegmentTiers, Served,
-    ServedSpan, StaleCapture, StaleDelivery, StaleExport, StalePair, Unlocatable, arms, carries,
-    export_capture, fact_world, grade, locate, mcnemar, with_parts,
+    STALE_CAPTURE_SCHEMA, STALE_EXPORT_SCHEMA, STALE_WORLD_SCHEMA, SegmentTiers, ServedSpan,
+    StaleCapture, StaleDelivery, StaleExport, StalePair, Unlocatable, carries, export_capture,
+    fact_world, grade, locate, mcnemar, merge_exports, with_parts,
 };
 pub use statistics::{
     ANALYSIS_FAMILY_SCHEMA, Analysis, AnalysisFamily, ArmResult, BlockedReason, CampaignProfile,

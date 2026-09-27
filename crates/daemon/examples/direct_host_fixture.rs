@@ -360,17 +360,19 @@ mod unix {
             {
                 use std::io::Write;
                 let line = serde_json::json!({"system": request.system, "prompt": request.prompt});
-                if let Ok(mut file) = std::fs::OpenOptions::new()
+                let written = std::fs::OpenOptions::new()
                     .create(true)
                     .append(true)
-                    .open(path)
-                {
-                    let _ = writeln!(file, "{line}");
+                    .open(&path)
+                    .and_then(|mut file| writeln!(file, "{line}"));
+                if let Err(error) = written {
+                    eprintln!("summarizer dump {}: {error}", path.display());
                 }
             }
             let commanded = summary
                 .as_ref()
                 .and_then(|_| std::env::var_os(SUMMARIZER_COMMAND_ENV))
+                .filter(|command| !command.is_empty())
                 .map(|command| {
                     let input = serde_json::json!({
                         "system": request.system,
