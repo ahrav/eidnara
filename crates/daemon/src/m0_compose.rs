@@ -693,7 +693,8 @@ mod bounded_read_tests {
         assert!(legacy_falsified, "skipping legacy rows went undetected");
     }
 
-    /// The rows the m0 compose loads at `budget`: its fold read, issued as `compose_m0` issues it.
+    /// The rows the m0 compose loads at `budget`: the fold read `compose_m0` issues, with the
+    /// legacy sequences captured by its scan.
     fn loaded_rows(store: &MemoryStore, budget: f64) -> Vec<StoredHistorySegment> {
         store
             .load_history_segment_fold(SESSION, None, PRESSURE_WINDOW, |newest| {
@@ -704,73 +705,136 @@ mod bounded_read_tests {
             .history_segments
     }
 
+    /// The statement work of m0 composes at `budgets` and m1 composes over each count of new
+    /// rows, as the ledger records it, with the legacy list persisted as a pass would.
+    fn compose_work(
+        store: &MemoryStore,
+        segments: usize,
+        budgets: &[f64],
+        m1_new_rows: &[usize],
+    ) -> (
+        Vec<Vec<storage::StatementWork>>,
+        Vec<Vec<storage::StatementWork>>,
+    ) {
+        let legacy = bounded_m0(store, 60_000.0, None).legacy_history_segment_seqs;
+        let measured = |read: &dyn Fn()| {
+            store.start_statement_work_ledger();
+            read();
+            store.take_statement_work()
+        };
+        let m0 = budgets
+            .iter()
+            .map(|&budget| {
+                measured(&|| {
+                    bounded_m0(store, budget, Some(&legacy));
+                })
+            })
+            .collect();
+        let m1 = m1_new_rows
+            .iter()
+            .map(|&new_rows| {
+                measured(&|| {
+                    m1_above(store, (segments - new_rows) as i64);
+                })
+            })
+            .collect();
+        (m0, m1)
+    }
+
     /// Up to H = 50,000 and N = 10^6 messages under both correction regimes, claims add no
-    /// store statement, row, or VM step to an m0 or m1 compose, and the claims pass visits at
-    /// most eight claims per loaded row.
+    /// store statement, row, or VM step to an m0 or m1 compose. The claims pass visits each
+    /// claim of the loaded rows exactly once per liveness scan, which is at most eight per
+    /// loaded row, and its corrections reach the rendered bytes.
     #[test]
     fn the_claims_pass_adds_no_store_work_and_visits_at_most_eight_claims_per_loaded_row() {
+        use crate::decay_render::CLAIMS_VISITED;
+        use crate::history_summarizer_citations::CLAIMS_PER_SEGMENT;
         use crate::test_support::synthetic_history::ClaimRegime;
         let budgets = [20.0, 60_000.0, 10_000_000.0];
+        let visits = |compose: &dyn Fn()| {
+            CLAIMS_VISITED.with(|visited| visited.set(0));
+            compose();
+            CLAIMS_VISITED.with(|visited| visited.get())
+        };
         for (segments, span) in [(100, 2), (4_000, 2), (50_000, 20)] {
-            let work = |regime: ClaimRegime| {
-                let history = SyntheticHistory::mixed(segments).with_claims(span, regime);
+            let messages = segments as i64 * span;
+            let m1_rows = [1, 200.min(segments)];
+            let seeded = |regime: ClaimRegime| {
                 let dir = tempfile::tempdir().unwrap();
                 let store = open(dir.path());
-                history.seed(&store, SESSION);
-                let legacy = bounded_m0(&store, 60_000.0, None).legacy_history_segment_seqs;
-                let measured = |read: &dyn Fn()| {
-                    store.start_statement_work_ledger();
-                    read();
-                    store
-                        .take_statement_work()
-                        .into_iter()
-                        .map(|w| (w.sql, w.rows, w.vm_steps))
-                        .collect::<Vec<_>>()
-                };
-                let m0 = budgets.map(|budget| {
-                    measured(&|| {
-                        bounded_m0(&store, budget, Some(&legacy));
-                    })
-                });
-                let m1 = [1, 200.min(segments)].map(|new_rows| {
-                    measured(&|| {
-                        m1_above(&store, (segments - new_rows) as i64);
-                    })
-                });
-                let visited = budgets.map(|budget| {
-                    let rows = loaded_rows(&store, budget);
-                    (
-                        rows.iter().map(|row| row.claims.len()).sum::<usize>(),
-                        rows.len(),
-                    )
-                });
-                ((m0, m1), visited)
+                SyntheticHistory::mixed(segments)
+                    .with_claims(span, regime)
+                    .seed(&store, SESSION);
+                (dir, store)
             };
-            let (plain, _) = work(ClaimRegime::None);
+            let project = |(m0, m1): (
+                Vec<Vec<storage::StatementWork>>,
+                Vec<Vec<storage::StatementWork>>,
+            )| {
+                [m0, m1].map(|work| {
+                    work.into_iter()
+                        .map(|statements| {
+                            statements
+                                .into_iter()
+                                .map(|w| (w.sql, w.rows, w.vm_steps))
+                                .collect::<Vec<_>>()
+                        })
+                        .collect::<Vec<_>>()
+                })
+            };
+            let (_plain_dir, plain) = seeded(ClaimRegime::None);
+            let plain_work = project(compose_work(&plain, segments, &budgets, &m1_rows));
+            let plain_m0 = bounded_m0(&plain, 60_000.0, None).m0_bytes;
             for regime in [ClaimRegime::EveryThirdMessage, ClaimRegime::HalfPercent] {
-                let (claimed, visited) = work(regime);
-                let messages = segments as i64 * span;
+                let (_dir, store) = seeded(regime);
+                let work = project(compose_work(&store, segments, &budgets, &m1_rows));
                 assert!(
-                    claimed == plain,
+                    work == plain_work,
                     "H = {segments}, N = {messages}: {regime:?} changes store work"
                 );
-                for (entries, rows) in visited {
-                    assert!(
-                        entries <= 8 * rows,
-                        "{regime:?}: {entries} claims over {rows} rows"
-                    );
+                for budget in budgets {
+                    let rows = loaded_rows(&store, budget);
+                    let held: usize = rows.iter().map(|row| row.claims.len()).sum();
+                    let visited = visits(&|| {
+                        bounded_m0(&store, budget, None);
+                    });
+                    assert_eq!(visited, held, "{regime:?} at {budget}: one scan of R");
+                    assert!(held > 0, "{regime:?} at {budget}: claims reach R");
+                    assert!(visited <= CLAIMS_PER_SEGMENT * rows.len());
+                }
+                for &new_rows in &m1_rows {
+                    let above = store
+                        .load_history_segments_above(
+                            SESSION,
+                            (segments - new_rows) as i64,
+                            crate::m1_compose::DEFAULT_M1_ROW_CAP,
+                        )
+                        .expect("m1 read")
+                        .history_segments;
+                    let held: usize = above.iter().map(|row| row.claims.len()).sum();
+                    let visited = visits(&|| {
+                        m1_above(&store, (segments - new_rows) as i64);
+                    });
+                    // m1 scans its rows twice: once for their corrections, once for the block.
+                    assert_eq!(visited, 2 * held, "{regime:?} m1 over {new_rows} rows");
                 }
                 if regime == ClaimRegime::EveryThirdMessage {
-                    assert!(visited.iter().all(|(entries, _)| *entries > 0));
+                    assert_ne!(
+                        bounded_m0(&store, 60_000.0, None).m0_bytes,
+                        plain_m0,
+                        "corrections reach the rendered bytes"
+                    );
                 }
             }
         }
     }
 
-    /// The loaded set is a newest suffix of the store, so every claim it holds has its
-    /// store-wide live claim inside it: a stale claim never renders as live because its
-    /// corrector fell outside the read. Holds for the m0 fold at every budget and for m1's rows
-    /// above the folded sequence.
+    /// Every loaded claim's live claim over R is its store-wide live claim. R is the newest
+    /// non-legacy rows plus every legacy row, and legacy rows hold no claims, so any claimed
+    /// row newer than a loaded one is loaded: a stale claim never renders as live because its
+    /// corrector fell outside the read. Holds for the m0 fold at every budget and for m1's
+    /// rows above the folded sequence; a set with one claimed row removed from its middle
+    /// fails it.
     #[test]
     fn every_loaded_claim_has_its_store_wide_live_claim_in_the_loaded_set() {
         use crate::decay_render::live_claims;
@@ -780,12 +844,22 @@ mod bounded_read_tests {
         let store = open(dir.path());
         history.seed(&store, SESSION);
         let all = store.load_history_segments(SESSION).expect("every row");
+        assert!(
+            all.iter()
+                .all(|row| row.legacy == 0 || row.claims.is_empty())
+        );
         let store_live = live_claims(&all);
+        let holds = |rows: &[StoredHistorySegment]| {
+            let live = live_claims(rows);
+            rows.iter()
+                .flat_map(|row| &row.claims)
+                .all(|claim| live[claim.key.as_str()] == store_live[claim.key.as_str()])
+        };
         let mut loaded: Vec<Vec<StoredHistorySegment>> = [20.0, 60_000.0, 10_000_000.0]
             .into_iter()
             .map(|budget| loaded_rows(&store, budget))
             .collect();
-        for folded in [3_999, 3_900, 3_741] {
+        for folded in [3_990, 3_900, 3_741] {
             loaded.push(
                 store
                     .load_history_segments_above(
@@ -800,13 +874,20 @@ mod bounded_read_tests {
         for rows in &loaded {
             assert!(
                 !rows.is_empty() && rows.len() < all.len(),
-                "a strict suffix"
+                "a strict subset"
             );
-            let live = live_claims(rows);
-            for claim in rows.iter().flat_map(|row| &row.claims) {
-                assert_eq!(live[claim.key.as_str()], store_live[claim.key.as_str()]);
-            }
+            assert!(rows.iter().any(|row| !row.claims.is_empty()), "claims in R");
+            assert!(holds(rows));
         }
+        // Negative control: the newest claimed row removed, its claims' earlier claims render
+        // as live over the gapped set.
+        let mut gapped = loaded[1].clone();
+        let newest_claimed = gapped
+            .iter()
+            .rposition(|row| !row.claims.is_empty())
+            .unwrap();
+        gapped.remove(newest_claimed);
+        assert!(!holds(&gapped), "a gap in R must break the property");
     }
 
     /// The m0 and m1 reads' statement work is equal at two history lengths that share their
@@ -814,31 +895,29 @@ mod bounded_read_tests {
     #[test]
     fn bounded_fold_work_is_independent_of_history_length() {
         let cap = crate::m1_compose::DEFAULT_M1_ROW_CAP;
+        let history_work = |composes: Vec<Vec<storage::StatementWork>>| {
+            composes
+                .into_iter()
+                .map(|statements| {
+                    statements
+                        .into_iter()
+                        .filter(|w| w.sql.contains("history_segments"))
+                        .map(|w| (w.rows, w.vm_steps))
+                        .collect::<Vec<_>>()
+                })
+                .collect::<Vec<_>>()
+        };
         let work = |segments: usize| {
-            let history = SyntheticHistory::mixed(segments);
             let dir = tempfile::tempdir().unwrap();
             let store = open(dir.path());
-            history.seed(&store, SESSION);
-            let measured = |read: &dyn Fn()| {
-                store.start_statement_work_ledger();
-                read();
-                history_segment_work(&store)
-                    .iter()
-                    .map(|w| (w.rows, w.vm_steps))
-                    .collect::<Vec<_>>()
-            };
-            let legacy = bounded_m0(&store, 60_000.0, None).legacy_history_segment_seqs;
-            let m0 = [20.0, 60_000.0, 10_000_000.0].map(|budget| {
-                measured(&|| {
-                    bounded_m0(&store, budget, Some(&legacy));
-                })
-            });
-            let m1 = [1, 200, cap + 1].map(|new_rows| {
-                measured(&|| {
-                    m1_above(&store, (segments - new_rows) as i64);
-                })
-            });
-            (m0, m1)
+            SyntheticHistory::mixed(segments).seed(&store, SESSION);
+            let (m0, m1) = compose_work(
+                &store,
+                segments,
+                &[20.0, 60_000.0, 10_000_000.0],
+                &[1, 200, cap + 1],
+            );
+            (history_work(m0), history_work(m1))
         };
         assert_eq!(work(4_000), work(60_000));
     }

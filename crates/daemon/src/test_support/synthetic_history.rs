@@ -8,6 +8,7 @@
 use memory_store::{Claim, HistorySummarizerPhase, MemoryStore, StoredHistorySegment};
 
 use super::transform_corpus::Rng;
+use crate::history_summarizer_citations::CLAIMS_PER_SEGMENT;
 
 /// How often a synthetic session's user corrects an earlier value. Every claim names one of
 /// [`CLAIM_KEYS`] keys, so a later claim supersedes an earlier one with the same key.
@@ -20,8 +21,8 @@ pub enum ClaimRegime {
     HalfPercent,
 }
 
-/// Keys a synthetic claim can name.
-pub const CLAIM_KEYS: u64 = 64;
+/// Keys a synthetic claim can name, so claims of one key recur across rows.
+const CLAIM_KEYS: u64 = 64;
 
 /// Shape of one synthetic session.
 #[derive(Debug, Clone)]
@@ -62,19 +63,24 @@ impl SyntheticHistory {
     /// The claims of the non-legacy row at `distance` from the newest, anchored on its `p1`.
     /// They are a function of the distance alone, like the rest of the row.
     fn claims_at(&self, distance: usize, end: i64, p1: &str) -> Vec<Claim> {
-        // The corrections fall on every `every`-th message counted back from the newest, and a
-        // row carries those inside its span, at most eight.
-        let every = match self.claims {
+        // A correction falls on every multiple of `period`, counting messages back from the
+        // newest; a row carries the corrections inside its span, at most the per-row cap.
+        let period = match self.claims {
             ClaimRegime::None => return Vec::new(),
             ClaimRegime::EveryThirdMessage => 3,
             ClaimRegime::HalfPercent => 200,
         };
-        let through = |d: i64| d * self.span / every;
-        let count = (through(distance as i64) - through(distance as i64 - 1)).min(8) as u64;
+        let corrections_through = |d: i64| d * self.span / period;
+        let count = (corrections_through(distance as i64)
+            - corrections_through(distance as i64 - 1))
+        .min(CLAIMS_PER_SEGMENT as i64) as u64;
         let anchor = p1.split(' ').next().map(str::to_string);
         (0..count)
             .map(|i| {
-                let key = (distance as u64 * 8 + i).wrapping_mul(0x9E37_79B9) % CLAIM_KEYS;
+                let key = (distance as u64)
+                    .wrapping_mul(0x9E37_79B9)
+                    .wrapping_add(i.wrapping_mul(0x85EB_CA6B))
+                    % CLAIM_KEYS;
                 Claim {
                     key: format!("synthetic.k{key}"),
                     value: format!("v{distance}-{i}"),

@@ -50,6 +50,13 @@ pub struct Correction {
     pub live_ordinal: i64,
 }
 
+#[cfg(any(test, feature = "test-support"))]
+thread_local! {
+    /// Claims [`live_claims`] has visited on this thread, so a test can bound the claims pass
+    /// by what it actually visits rather than by what the rows hold.
+    pub static CLAIMS_VISITED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 /// Each key's live claim among `segments`: the claim with the greatest `(sequence, idx)`.
 pub(crate) fn live_claims(
     segments: &[StoredHistorySegment],
@@ -57,6 +64,8 @@ pub(crate) fn live_claims(
     let mut live: BTreeMap<&str, ((i64, usize), &Claim)> = BTreeMap::new();
     for segment in segments {
         for (idx, claim) in segment.claims.iter().enumerate() {
+            #[cfg(any(test, feature = "test-support"))]
+            CLAIMS_VISITED.with(|visited| visited.set(visited.get() + 1));
             let at = (segment.sequence, idx);
             if live
                 .get(claim.key.as_str())
