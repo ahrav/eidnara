@@ -395,13 +395,17 @@ mod unix {
                 .filter(|path| !path.is_empty())
                 .and_then(|path| {
                     use std::io::Write;
-                    let line =
-                        serde_json::json!({"system": request.system, "prompt": request.prompt});
+                    // One record per write: the appends of concurrent calls
+                    // land whole, so no record can interleave with another.
+                    let mut line =
+                        serde_json::json!({"system": request.system, "prompt": request.prompt})
+                            .to_string();
+                    line.push('\n');
                     std::fs::OpenOptions::new()
                         .create(true)
                         .append(true)
                         .open(&path)
-                        .and_then(|mut file| writeln!(file, "{line}"))
+                        .and_then(|mut file| file.write_all(line.as_bytes()))
                         .err()
                         .map(|error| format!("summarizer dump {}: {error}", path.display()))
                 });
