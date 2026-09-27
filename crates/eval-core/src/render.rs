@@ -326,11 +326,19 @@ pub fn render(log: &EventLog, config: &RenderConfig) -> Result<Rendering, Render
     // (session, parent message_id).
     let mut by_id: BTreeMap<&EventId, &Event> = BTreeMap::new();
     let mut messages_named: BTreeMap<(&str, &str), usize> = BTreeMap::new();
+    let mut span_parents: BTreeSet<(&str, &str)> = BTreeSet::new();
     let mut spans_under: BTreeMap<(&str, &str), Vec<&Event>> = BTreeMap::new();
     for event in &log.events {
         by_id.insert(&event.id, event);
         match &event.payload {
-            Payload::Message { message_id, .. } | Payload::Restatement { message_id, .. } => {
+            Payload::Message { message_id, .. } => {
+                let key = (event.entity_id.as_str(), message_id.as_str());
+                *messages_named.entry(key).or_default() += 1;
+                span_parents.insert(key);
+            }
+            // Restatements count toward message ID reuse but do not enter
+            // `span_parents`: they render as text only.
+            Payload::Restatement { message_id, .. } => {
                 *messages_named
                     .entry((event.entity_id.as_str(), message_id))
                     .or_default() += 1;
@@ -425,7 +433,7 @@ pub fn render(log: &EventLog, config: &RenderConfig) -> Result<Rendering, Render
                 })
             }
             Payload::ToolSpan { message_id, .. } => {
-                if messages_named(&event.entity_id, message_id) == 0 {
+                if !span_parents.contains(&(event.entity_id.as_str(), message_id.as_str())) {
                     return Err(RenderError::ToolSpanParentMissing(event.id.clone()));
                 }
             }

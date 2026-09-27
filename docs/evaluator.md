@@ -278,7 +278,9 @@ An `Event` carries `id`, `stream` (`repository` or `session`), `entity_id`,
 `commit`, `rename` (with an optional `previous` rename on the same path),
 `correction { target }`, `restatement { target, message_id }` (a user
 message with a `message_id` of its own, `<actor>-m<k>-restatement`), or
-`invalidation { target }`. A restatement supersedes its target exactly as a
+`invalidation { target }`. The log's `schema` is `eval-events/v2`: `v1` had
+no `restatement` kind, so a `v1` reader refuses a log that carries one by its
+header rather than at the unknown variant. A restatement supersedes its target exactly as a
 correction does (`Payload::supersedes`), so the reducer's truth is the same;
 the difference is the rendering. Links name other events
 by `EventId`, never by position; `EventId::derive(stream, entity_id,
@@ -512,7 +514,9 @@ times:
   the restating one are two served messages. It is refused as a correction is
   (`CorrectionTargetMissing`, `CorrectionTargetIsNotAMessage`,
   `CorrectionTargetInOtherSession`, `CorrectionDoesNotAdvance`), and its
-  `message_id` counts toward `MessageIdReused`. A correction renders the bytes
+  `message_id` counts toward `MessageIdReused`. A restatement renders only
+  its text, so a tool span naming its `message_id` has no parent and refuses
+  as `ToolSpanParentMissing`. A correction renders the bytes
   it rendered before restatements existed; a test pins the rendering of the
   fixture world with corrections by digest.
   The generator's time gaps are strictly positive (since `eval-generator/v2`), each
@@ -1217,7 +1221,9 @@ its bitemporal `Query`, its AND-support `evidence` set of event IDs, and a
 upper-median valid time and never corrected or retracted, so a retriever that
 prefers recent units cannot pass by accident), `positive_control` (truth the
 baseline is expected to deliver), `stale_preference` (see "Stale
-preference"), or `plain`. Every task in a set shares one
+preference"; `eval-pairing/v2` added the role and its refusal, so a set
+that holds one is refused by a `v1` reader at `pairing_policy_version`, not
+at the unknown role), or `plain`. Every task in a set shares one
 `Query` (`MixedQueries` otherwise): the cut, the scope, the serving class, the
 destination, and the registry sensitivity each decide which units are
 eligible, so a task with a query of its own could make its evidence eligible,
