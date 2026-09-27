@@ -2062,6 +2062,15 @@ pub fn stale_preference(config: &Config, pairs: usize) -> Result<StaleExport, Ru
         config.approval.clone(),
     );
     profile.approved()?;
+    // The same floor as the campaign's: a history the window would swallow
+    // whole is no aged history, and an empty one is no world.
+    let window = profile.baseline_bounds[&EvaluatedSurface::Surface1];
+    if aged_messages <= window {
+        return Err(RunError::AgedHistoryTooShort {
+            aged_messages,
+            window,
+        });
+    }
     // One recording and a replay per pair: the cassette is the envelope's
     // largest reading, and this export pins no Suite B bound.
     profile.envelope.cassette_bytes = 64 << 20;

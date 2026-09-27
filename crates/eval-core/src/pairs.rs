@@ -13,7 +13,7 @@ use crate::eligibility::Verdict;
 use crate::event::{Event, EventId, EventLog, LogError, Payload};
 use crate::reducer::{Query, ReduceError, Truth, reduce};
 
-pub const PAIRING_POLICY_VERSION: &str = "eval-pairing/v1";
+pub const PAIRING_POLICY_VERSION: &str = "eval-pairing/v2";
 pub const RECENCY_BASELINE_VERSION: &str = "eval-recency-baseline/v1";
 /// Appended to every entity of an independently authored history so its
 /// event identities cannot collide with the aged world's.

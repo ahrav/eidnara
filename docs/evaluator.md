@@ -278,7 +278,9 @@ An `Event` carries `id`, `stream` (`repository` or `session`), `entity_id`,
 `commit`, `rename` (with an optional `previous` rename on the same path),
 `correction { target }`, `restatement { target, message_id }` (a user
 message with a `message_id` of its own, `<actor>-m<k>-restatement`), or
-`invalidation { target }`. A restatement supersedes its target exactly as a
+`invalidation { target }`. The log's `schema` is `eval-events/v2`: `v1` had
+no `restatement` kind, so a `v1` reader refuses a log that carries one by its
+header rather than at the unknown variant. A restatement supersedes its target exactly as a
 correction does (`Payload::supersedes`), so the reducer's truth is the same;
 the difference is the rendering. Links name other events
 by `EventId`, never by position; `EventId::derive(stream, entity_id,
@@ -1219,7 +1221,9 @@ its bitemporal `Query`, its AND-support `evidence` set of event IDs, and a
 upper-median valid time and never corrected or retracted, so a retriever that
 prefers recent units cannot pass by accident), `positive_control` (truth the
 baseline is expected to deliver), `stale_preference` (see "Stale
-preference"), or `plain`. Every task in a set shares one
+preference"; `eval-pairing/v2` added the role and its refusal, so a set
+that holds one is refused by a `v1` reader at `pairing_policy_version`, not
+at the unknown role), or `plain`. Every task in a set shares one
 `Query` (`MixedQueries` otherwise): the cut, the scope, the serving class, the
 destination, and the registry sensitivity each decide which units are
 eligible, so a task with a query of its own could make its evidence eligible,
@@ -1408,7 +1412,9 @@ quantities `gen/gen-statistics-golden.ts` pins.
 
 **Export.** The `eval_runner` example's `stale-preference` subcommand takes
 the campaign's flags and `--pairs <n>`, and `campaign::stale_preference` does
-the work: it generates one session of `--aged-messages` messages with a
+the work: it generates one session of `--aged-messages` messages (the
+campaign's floor applies: a count the surface's window would swallow whole,
+zero included, is `AgedHistoryTooShort`, refused before a world exists) with a
 restatement on every third slot (the evaluator's correction regime; no tool
 spans, no commits), compiles a falsifier (the first message nothing
 restates), a positive control (the last message), and one stale-preference

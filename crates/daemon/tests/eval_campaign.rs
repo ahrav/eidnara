@@ -411,6 +411,19 @@ fn an_unapproved_profile_runs_no_campaign() {
             window: 100,
         })
     );
+    // The stale-preference export refuses the same short history, typed,
+    // before it generates a world: an empty session is no world at all.
+    let empty = Config {
+        aged_messages: 0,
+        ..short
+    };
+    assert_eq!(
+        campaign::stale_preference(&empty, 0).err(),
+        Some(RunError::AgedHistoryTooShort {
+            aged_messages: 0,
+            window: 100,
+        })
+    );
     assert_eq!(std::fs::read_dir(publish.path()).unwrap().count(), 0);
 }
 

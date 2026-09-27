@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use context_core::canonical_json::protocol_digest;
 use serde::{Deserialize, Serialize};
 
-pub const EVENT_SCHEMA_VERSION: &str = "eval-events/v1";
+pub const EVENT_SCHEMA_VERSION: &str = "eval-events/v2";
 pub const LINEARIZATION_RULE_VERSION: &str = "eval-linearization/v1";
 pub const LOG_DIGEST_PROTOCOL: &str = "eval-event-log/v1";
 
