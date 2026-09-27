@@ -13,8 +13,10 @@ use crate::stream::{ChoiceKind, Chooser, RANDOM_SCHEMA_VERSION, ReplayRefusal, T
 /// Version 2 removed the zero time gap; version 3 gave every text a word of
 /// its own and the world's own word beside the drawn word, so a surface that
 /// matches on words can tell one message from another and from another
-/// world's; version 4 added the restatement to the schedule. The same seed
-/// and config produce a different world under each version.
+/// world's; version 4 added the restatement to the schedule. Each version
+/// changes the tape identity, so a tape recorded under another refuses; the
+/// world itself changes only for a config that reaches the changed draws (a
+/// config without restatements generates the same events under 3 and 4).
 pub const GENERATOR_VERSION: &str = "eval-generator/v4";
 pub const TAPE_IDENTITY_PROTOCOL: &str = "eval-tape/v1";
 /// Separates what a generated text says from the world's own word after it.

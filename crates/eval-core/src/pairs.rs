@@ -192,9 +192,10 @@ pub enum PairError {
         id: EventId,
         by: EventId,
     },
-    /// A stale-preference evidence unit that is not a restatement whose
-    /// predecessor the aged history supersedes: a same-`message_id`
-    /// correction replaces its target, so nothing stale coexists with it.
+    /// A stale-preference evidence unit that is not the one supersession of a
+    /// predecessor the aged history holds: a same-`message_id` correction
+    /// replaces its target, so nothing stale coexists with it, and a
+    /// predecessor also corrected in place no longer serves its own text.
     NoCoexistingRestatement {
         task: String,
         id: EventId,
@@ -364,17 +365,26 @@ fn check_falsifier(task: &Task, aged: &EventLog, median: i64) -> Result<(), Pair
 }
 
 /// The inverse of `check_falsifier`: every evidence unit is a restatement
-/// (a new `message_id`) whose predecessor the aged history holds and the
-/// reducer judges superseded, so the stale statement and the live one are two
-/// served messages. The evidence being required is `aged_arm`'s check.
+/// (a new `message_id`) whose predecessor the aged history holds, the reducer
+/// judges superseded, and nothing else supersedes, so the stale statement and
+/// the live one are two served messages and the stale one is the
+/// predecessor's own text. The evidence being required is `aged_arm`'s check.
 fn check_stale_preference(task: &Task, aged: &EventLog, truth: &Truth) -> Result<(), PairError> {
     for event in aged.events.iter().filter(|e| task.evidence.contains(&e.id)) {
         let superseded = match &event.payload {
-            Payload::Restatement { target, .. } => truth
-                .units
-                .get(target)
-                .and_then(|unit| unit.facts.state.as_ref())
-                .is_some_and(|state| state.superseded),
+            Payload::Restatement { target, .. } => {
+                let supersessions = aged
+                    .events
+                    .iter()
+                    .filter(|e| e.payload.supersedes().is_some_and(|(_, t)| t == target))
+                    .count();
+                supersessions == 1
+                    && truth
+                        .units
+                        .get(target)
+                        .and_then(|unit| unit.facts.state.as_ref())
+                        .is_some_and(|state| state.superseded)
+            }
             _ => false,
         };
         if !superseded {

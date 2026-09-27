@@ -178,8 +178,9 @@ pub use shrink::{
     parse_shrink_report, shrink,
 };
 pub use stale::{
-    Arms, Grade, McNemar, McNemarError, PRECEDENCE_SENTENCE, STALE_EXPORT_SCHEMA, StaleDelivery,
-    StaleExport, StalePair, TextSpan, arms, carries, grade, locate, mcnemar,
+    Arms, Grade, McNemar, McNemarError, PRECEDENCE_SENTENCE, STALE_EXPORT_SCHEMA, ServedSpan,
+    StaleDelivery, StaleExport, StalePair, StaleQuestion, Unlocatable, arms, carries, grade,
+    locate, mcnemar,
 };
 pub use statistics::{
     ANALYSIS_FAMILY_SCHEMA, Analysis, AnalysisFamily, ArmResult, BlockedReason, CampaignProfile,

@@ -980,14 +980,16 @@ fn declared_events_equals_the_emitted_count_across_spec_shapes() {
         for tool in 0..3u32 {
             for correction in 0..4u32 {
                 for invalidation in [0u32, 1, 2] {
-                    for (commits, rename) in [(1u32, 0u32), (3, 1), (4, 2)] {
+                    for (commits, rename, restatement) in
+                        [(1u32, 0u32, 0u32), (3, 1, 1), (4, 2, 3), (1, 0, 2)]
+                    {
                         let config = WorldConfig {
                             sessions: vec![SessionSpec {
                                 messages,
                                 tool_span_every: tool,
                                 correction_every: correction,
                                 invalidation_every: invalidation,
-                                restatement_every: 0,
+                                restatement_every: restatement,
                             }],
                             repositories: vec![RepositorySpec {
                                 commits,
@@ -1006,7 +1008,7 @@ fn declared_events_equals_the_emitted_count_across_spec_shapes() {
             }
         }
     }
-    assert_eq!(worlds, 4 * 3 * 4 * 3 * 3);
+    assert_eq!(worlds, 4 * 3 * 4 * 3 * 4);
 }
 
 #[test]

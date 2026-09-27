@@ -224,6 +224,21 @@ impl Message<'_> {
         Ok((part, unit))
     }
 
+    /// A message whose only part is its text.
+    fn text_only(
+        &self,
+        config: &RenderConfig,
+        text: &str,
+        occurrences: &mut BTreeSet<String>,
+    ) -> Result<RenderedMessage, RenderError> {
+        let expected = vec![self.text_unit(config)?];
+        self.rendered(
+            vec![json!({"type": "text", "text": text})],
+            expected,
+            occurrences,
+        )
+    }
+
     /// Valid time is the revision: `created` for a user turn, `completed` for
     /// an assistant turn, whose `created` sits one millisecond earlier so the
     /// adapter's precedence is exercised rather than assumed.
@@ -266,6 +281,34 @@ impl Message<'_> {
             expected,
         })
     }
+}
+
+/// The message identity and role of a correction's or a restatement's
+/// target, which must be a message of the same session at an earlier valid
+/// time. A correction renders as a later revision of that lineage; a
+/// restatement as a user message of its own beside it.
+fn restated<'a>(
+    by_id: &BTreeMap<&EventId, &'a Event>,
+    event: &Event,
+    target: &EventId,
+) -> Result<(&'a str, &'a str), RenderError> {
+    let original = by_id
+        .get(target)
+        .copied()
+        .ok_or_else(|| RenderError::CorrectionTargetMissing(target.clone()))?;
+    let Payload::Message {
+        message_id, role, ..
+    } = &original.payload
+    else {
+        return Err(RenderError::CorrectionTargetIsNotAMessage(target.clone()));
+    };
+    if original.entity_id != event.entity_id {
+        return Err(RenderError::CorrectionTargetInOtherSession(target.clone()));
+    }
+    if event.valid_time_ms <= original.valid_time_ms {
+        return Err(RenderError::CorrectionDoesNotAdvance(target.clone()));
+    }
+    Ok((message_id, role))
 }
 
 /// Renders every message, tool span, correction, and restatement as OpenCode session
@@ -341,47 +384,34 @@ pub fn render(log: &EventLog, config: &RenderConfig) -> Result<Rendering, Render
                     .messages
                     .push(m.rendered(parts, expected, &mut occurrences)?);
             }
-            Payload::Correction { target, text } | Payload::Restatement { target, text, .. } => {
-                let original = by_id
-                    .get(target)
-                    .copied()
-                    .ok_or_else(|| RenderError::CorrectionTargetMissing(target.clone()))?;
-                let Payload::Message {
-                    message_id, role, ..
-                } = &original.payload
-                else {
-                    return Err(RenderError::CorrectionTargetIsNotAMessage(target.clone()));
+            Payload::Correction { target, text } => {
+                let (message_id, role) = restated(&by_id, event, target)?;
+                let m = Message {
+                    event,
+                    message_id,
+                    role,
                 };
-                if original.entity_id != event.entity_id {
-                    return Err(RenderError::CorrectionTargetInOtherSession(target.clone()));
-                }
-                if event.valid_time_ms <= original.valid_time_ms {
-                    return Err(RenderError::CorrectionDoesNotAdvance(target.clone()));
-                }
-                // A correction is a later revision of its target's lineage; a
-                // restatement is a user message of its own beside the target.
-                let m = match &event.payload {
-                    Payload::Restatement { message_id, .. } => {
-                        if messages_named(&event.entity_id, message_id) > 1 {
-                            return Err(RenderError::MessageIdReused(event.id.clone()));
-                        }
-                        Message {
-                            event,
-                            message_id,
-                            role: "user",
-                        }
-                    }
-                    _ => Message {
-                        event,
-                        message_id,
-                        role,
-                    },
-                };
-                let expected = vec![m.text_unit(config)?];
-                let parts = vec![json!({"type": "text", "text": text})];
                 rendering
                     .messages
-                    .push(m.rendered(parts, expected, &mut occurrences)?);
+                    .push(m.text_only(config, text, &mut occurrences)?);
+            }
+            Payload::Restatement {
+                target,
+                message_id,
+                text,
+            } => {
+                restated(&by_id, event, target)?;
+                if messages_named(&event.entity_id, message_id) > 1 {
+                    return Err(RenderError::MessageIdReused(event.id.clone()));
+                }
+                let m = Message {
+                    event,
+                    message_id,
+                    role: "user",
+                };
+                rendering
+                    .messages
+                    .push(m.text_only(config, text, &mut occurrences)?);
             }
             Payload::Commit { message, .. } => {
                 if *repository.get_or_insert(&event.entity_id) != event.entity_id {

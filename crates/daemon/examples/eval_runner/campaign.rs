@@ -33,9 +33,7 @@ use eval_core::{
     eval_run_id, generate_all, pair_table_digest, plan_injection_cases, render, score_injection,
     serialize_spec, text_decision,
 };
-use eval_core::{
-    STALE_EXPORT_SCHEMA, StaleDelivery, StaleExport, StalePair, arms, carries, locate,
-};
+use eval_core::{StaleExport, StaleQuestion, carries};
 use memory_store::{MemoryStore, StoredHistorySegment};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -122,6 +120,11 @@ pub enum RunError {
     /// The stale-preference world's recording left no cassette to replay:
     /// the cassette refused a frame or the host refused a turn.
     NoRecording,
+    /// The coexistence world holds fewer restatements than pairs requested.
+    TooFewRestatements {
+        requested: usize,
+        available: usize,
+    },
 }
 
 impl std::fmt::Display for RunError {
@@ -435,19 +438,28 @@ fn query(max_events_per_log: u32) -> Query {
 /// planted into it can be planned from them.
 const TASK_IDS: [&str; 3] = ["early-message", "last-message", "recent-message"];
 
-fn tasks(aged: &EventLog, window: u32, max_events_per_log: u32) -> Vec<Task> {
-    let messages: Vec<&EventId> = aged
-        .events
+/// The history's base messages, restatements and corrections apart.
+fn base_messages(aged: &EventLog) -> Vec<&EventId> {
+    aged.events
         .iter()
         .filter(|event| matches!(event.payload, eval_core::Payload::Message { .. }))
         .map(|event| &event.id)
-        .collect();
-    let task = |name: &str, role, id: &EventId| Task {
+        .collect()
+}
+
+/// A task whose one truth is `id`, under the campaign's shared query.
+fn one_truth(name: &str, role: TaskRole, id: &EventId, max_events_per_log: u32) -> Task {
+    Task {
         id: name.to_string(),
         role,
         query: query(max_events_per_log),
         evidence: BTreeSet::from([id.clone()]),
-    };
+    }
+}
+
+fn tasks(aged: &EventLog, window: u32, max_events_per_log: u32) -> Vec<Task> {
+    let messages = base_messages(aged);
+    let task = |name: &str, role, id: &EventId| one_truth(name, role, id, max_events_per_log);
     let inside = messages.len() - (window / 2) as usize;
     vec![
         task("early-message", TaskRole::Falsification, messages[2]),
@@ -1875,7 +1887,6 @@ pub fn run(config: &Config) -> Result<Run, RunError> {
     })
 }
 
-/// The report's file name under the publish directory.
 /// The stale-preference export's file name under the publish directory.
 pub const STALE_EXPORT_FILE: &str = "stale-preference-export.json";
 /// One restatement every third message: the evaluator's correction regime.
@@ -1895,15 +1906,6 @@ fn question(stale: &str) -> String {
         "What is the current decision for {}? Answer with the decision as the history states it.",
         slot_of(stale)
     )
-}
-
-/// The task turn's prompt: the subject the question names, as the slot word
-/// and the world's word, the two tokens the stale and the live statement
-/// share. Every other word of the question is in no segment and would weigh
-/// the host's lexical score below its threshold, so the hint would serve
-/// nothing.
-fn subject(stale: &str, world_word: &str) -> String {
-    format!("{} in {world_word}", slot_of(stale))
 }
 
 /// The tier the segment at `index` of `segments` (chronological) renders at
@@ -1942,13 +1944,62 @@ fn rendered_tier(segments: &[StoredHistorySegment], index: usize) -> u8 {
     }
 }
 
+/// A falsifier (the first message nothing restates), a positive control (the
+/// last message), and one stale-preference task per restatement for the
+/// first `pairs`; fewer restatements than `pairs` is refused.
+fn stale_tasks(
+    aged: &EventLog,
+    pairs: usize,
+    max_events_per_log: u32,
+) -> Result<Vec<Task>, RunError> {
+    let superseded: BTreeSet<&EventId> = aged
+        .events
+        .iter()
+        .filter_map(|event| event.payload.supersedes().map(|(_, target)| target))
+        .collect();
+    let messages = base_messages(aged);
+    let early = messages
+        .iter()
+        .find(|id| !superseded.contains(*id))
+        .expect("a message nothing restates");
+    let restatements: Vec<&EventId> = aged
+        .events
+        .iter()
+        .filter(|event| matches!(event.payload, eval_core::Payload::Restatement { .. }))
+        .map(|event| &event.id)
+        .collect();
+    if restatements.len() < pairs {
+        return Err(RunError::TooFewRestatements {
+            requested: pairs,
+            available: restatements.len(),
+        });
+    }
+    let task = |name: &str, role, id: &EventId| one_truth(name, role, id, max_events_per_log);
+    let mut tasks = vec![
+        task("early-message", TaskRole::Falsification, early),
+        task(
+            "last-message",
+            TaskRole::PositiveControl,
+            messages[messages.len() - 1],
+        ),
+    ];
+    for (index, id) in restatements.into_iter().take(pairs).enumerate() {
+        tasks.push(task(
+            &format!("stale-{index}"),
+            TaskRole::StalePreference,
+            id,
+        ));
+    }
+    Ok(tasks)
+}
+
 /// Compiles stale-preference pairs over a coexistence world (one session of
 /// `aged_messages` messages with a restatement every third) and exports, per
 /// pair, the served text surface 1 hands the model on a structured aged arm,
 /// the stale and live statements, the restating ordinal, the stale segment's
 /// rendered tier, and the five M0 arms. The world is recorded once under the
 /// daemon's summarizer; each of the first `pairs` restatements then replays
-/// that cassette with its question as the task turn. A pair whose stale
+/// that cassette with its subject as the task turn. A pair whose stale
 /// statement the served text does not carry is exported as unlocatable.
 pub fn stale_preference(config: &Config, pairs: usize) -> Result<StaleExport, RunError> {
     let (aged_messages, publish) = (config.aged_messages, &config.publish);
@@ -1966,14 +2017,15 @@ pub fn stale_preference(config: &Config, pairs: usize) -> Result<StaleExport, Ru
     // One recording and a replay per pair: the cassette is the envelope's
     // largest reading, and this export pins no Suite B bound.
     profile.envelope.cassette_bytes = 64 << 20;
-    prepare_publish(publish, &[STALE_EXPORT_FILE]).map_err(publish_refused)?;
-    fixture_binary();
-    let mut charges = Charges::new(profile.envelope.clone());
     let mut world_config = one_session(aged_messages, 0, 0, max_events_per_log, Vec::new());
     world_config.sessions[0].restatement_every = RESTATEMENT_EVERY;
     let aged = generate_all(SEED, &world_config, Mode::Generate)
         .unwrap()
         .log;
+    let tasks = stale_tasks(&aged, pairs, max_events_per_log)?;
+    prepare_publish(publish, &[STALE_EXPORT_FILE]).map_err(publish_refused)?;
+    fixture_binary();
+    let mut charges = Charges::new(profile.envelope.clone());
     let natural_fresh = generate_all(
         SEED ^ 0x77,
         &one_session(FRESH_MESSAGES, 0, 0, max_events_per_log, Vec::new()),
@@ -1981,46 +2033,6 @@ pub fn stale_preference(config: &Config, pairs: usize) -> Result<StaleExport, Ru
     )
     .unwrap()
     .log;
-    let superseded: BTreeSet<&EventId> = aged
-        .events
-        .iter()
-        .filter_map(|event| event.payload.supersedes().map(|(_, target)| target))
-        .collect();
-    let messages: Vec<&EventId> = aged
-        .events
-        .iter()
-        .filter(|event| matches!(event.payload, eval_core::Payload::Message { .. }))
-        .map(|event| &event.id)
-        .collect();
-    let task = |name: String, role, id: &EventId| Task {
-        id: name,
-        role,
-        query: query(max_events_per_log),
-        evidence: BTreeSet::from([id.clone()]),
-    };
-    let early = messages
-        .iter()
-        .find(|id| !superseded.contains(*id))
-        .expect("a message nothing restates");
-    let mut tasks = vec![
-        task("early-message".to_string(), TaskRole::Falsification, early),
-        task(
-            "last-message".to_string(),
-            TaskRole::PositiveControl,
-            messages[messages.len() - 1],
-        ),
-    ];
-    let restatements = aged
-        .events
-        .iter()
-        .filter(|event| matches!(event.payload, eval_core::Payload::Restatement { .. }));
-    for (index, event) in restatements.take(pairs).enumerate() {
-        tasks.push(task(
-            format!("stale-{index}"),
-            TaskRole::StalePreference,
-            &event.id,
-        ));
-    }
     let set = compile_pair_set(PairSetInput {
         surface: EvaluatedSurface::Surface1,
         declared_bound: None,
@@ -2043,13 +2055,7 @@ pub fn stale_preference(config: &Config, pairs: usize) -> Result<StaleExport, Ru
             .expect("a rendered message");
         (ordinal + 1, &aged_world.messages[ordinal])
     };
-    let mut export = StaleExport {
-        schema: STALE_EXPORT_SCHEMA.to_string(),
-        generator_version: GENERATOR_VERSION.to_string(),
-        pairs: Vec::new(),
-        unlocatable: BTreeMap::new(),
-        stale_delivered: 0,
-    };
+    let mut export = StaleExport::new(SEED, world_config);
     for pair in set
         .pairs
         .iter()
@@ -2067,15 +2073,19 @@ pub fn stale_preference(config: &Config, pairs: usize) -> Result<StaleExport, Ru
         };
         let (restating_ordinal, live_message) = rendered(restatement);
         let (stale_ordinal, stale_message) = rendered(target);
-        let (stale, live_value) = (decision(stale_message), decision(live_message));
-        let world_word = text(stale_message)
-            .rsplit(' ')
-            .next()
-            .expect("the world's word");
+        let stale = decision(stale_message);
+        // The subject the question names: the slot word and the world's
+        // word, the two tokens the stale and the live statement share. Every
+        // other word of a question is in no segment and would weigh the
+        // host's lexical score below its threshold, so the hint would serve
+        // nothing.
+        let (_, subject) = text(stale_message)
+            .split_once(" for ")
+            .expect("a generated text names its slot");
         let lived = live(
             &aged_world,
             &Replacement::Summarizer(replay.clone()),
-            &subject(stale, world_word),
+            subject,
             &mut charges,
         )?;
         if let Some(refused) = lived.turn_refused {
@@ -2089,38 +2099,25 @@ pub fn stale_preference(config: &Config, pairs: usize) -> Result<StaleExport, Ru
             Some(UserHintPass::Decided(outcome)) => outcome.hint_text,
             _ => String::new(),
         };
-        let delivery = StaleDelivery::of(&served, stale, live_value);
-        export.stale_delivered += u32::from(delivery.stale_delivered());
-        let Some(stale_span) = locate(&served, stale) else {
-            export.unlocatable.insert(pair.task.id.clone(), delivery);
-            continue;
-        };
-        let segment = lived
-            .segments
-            .iter()
-            .position(|segment| {
-                (segment.start_message..=segment.end_message).contains(&(stale_ordinal as i64))
-            })
-            .expect("a served stale statement sits in a segment");
-        let key = format!("{SESSION}.{}", slot_of(stale));
-        export.pairs.push(StalePair {
+        let question = StaleQuestion {
             task: pair.task.id.clone(),
             question: question(stale),
-            arms: arms(
-                &served,
-                stale_span,
-                &key,
-                live_value,
-                restating_ordinal as u64,
-            ),
-            key,
+            key: format!("{SESSION}.{}", slot_of(stale)),
             stale_value: stale.to_string(),
-            stale_span,
-            live_value: live_value.to_string(),
-            live_span: locate(&served, live_value),
+            live_value: decision(live_message).to_string(),
             restating_ordinal: restating_ordinal as u64,
-            stale_tier: rendered_tier(&lived.segments, segment),
-            delivery,
+        };
+        // The hint reads history segments only, so a served stale statement
+        // is its message's segment's text.
+        export.record(question, &served, || {
+            let segment = lived
+                .segments
+                .iter()
+                .position(|segment| {
+                    (segment.start_message..=segment.end_message).contains(&(stale_ordinal as i64))
+                })
+                .expect("a served stale statement sits in a segment");
+            rendered_tier(&lived.segments, segment)
         });
     }
     charges.vacate(cassettes)?;
@@ -2130,6 +2127,7 @@ pub fn stale_preference(config: &Config, pairs: usize) -> Result<StaleExport, Ru
     Ok(export)
 }
 
+/// The report's file name under the publish directory.
 pub const REPORT_FILE: &str = "suite-b-report.json";
 /// The manifest's file name under the publish directory.
 pub const MANIFEST_FILE: &str = "manifest.json";

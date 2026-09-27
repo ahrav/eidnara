@@ -207,7 +207,7 @@ pub struct PassK {
     pub pass_k: PassKBounds,
 }
 
-fn choose(n: u64, k: u64) -> Result<u128, StatisticsError> {
+pub(crate) fn choose(n: u64, k: u64) -> Result<u128, StatisticsError> {
     if k > n {
         return Ok(0);
     }

@@ -608,7 +608,7 @@ fn an_s0_stale_preference_export_carries_every_pair_and_its_five_arms() {
         .pairs
         .iter()
         .map(|pair| pair.delivery)
-        .chain(export.unlocatable.values().copied())
+        .chain(export.unlocatable.values().map(|pair| pair.delivery))
         .filter(|delivery| delivery.stale_delivered())
         .count();
     assert_eq!(export.stale_delivered as usize, delivered);
@@ -633,12 +633,39 @@ fn an_s0_stale_preference_export_carries_every_pair_and_its_five_arms() {
             pair.arms.omission_oracle.len(),
             served.len() - (span.end - span.start)
         );
+        assert!(
+            !eval_core::carries(&pair.arms.omission_oracle, &pair.stale_value),
+            "the omission oracle serves no stale value: {served}"
+        );
         assert!((1..=5).contains(&pair.stale_tier));
     }
     assert!(
         campaign::stale_preference(&config, 4).is_err(),
         "one directory holds one export"
     );
+}
+
+/// A pair count past the coexistence world's restatements is refused before
+/// a fixture starts or the publish directory is touched.
+#[test]
+fn a_stale_preference_export_refuses_more_pairs_than_restatements() {
+    let publish = tempfile::tempdir().unwrap();
+    let config = Config {
+        scale: Scale::S0,
+        aged_messages: AGED_MESSAGES,
+        elapsed_bound_ms: S0_ELAPSED_BOUND_MS,
+        approval: Some(approval()),
+        publish: publish.path().join("export"),
+    };
+    // One restatement every third slot from slot 2: 43 over 130 messages.
+    assert!(matches!(
+        campaign::stale_preference(&config, 44),
+        Err(RunError::TooFewRestatements {
+            requested: 44,
+            available: 43
+        })
+    ));
+    assert!(!publish.path().join("export").exists());
 }
 
 /// The example's own command line runs the same shell: it publishes the S0

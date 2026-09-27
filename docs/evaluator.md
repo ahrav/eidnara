@@ -1335,11 +1335,14 @@ with the statement it supersedes. Nothing in it calls a model.
 **Role.** A `stale_preference` task's evidence is a restatement and its
 falsifier is the restatement's target, the superseded predecessor. The
 compiler runs the inverse of the falsification check: every evidence unit
-must be a `restatement` whose target the aged history holds and the reducer
-judges superseded, and the evidence must be required (the aged arm's usual
-check). Anything else is `NoCoexistingRestatement {task, id}`. Today's
-same-`message_id` correction fails it: the correction replaces its target
-inside one lineage, so nothing stale coexists with it. `SupersededFalsifier`
+must be a `restatement` whose target the aged history holds, the reducer
+judges superseded, and no other event supersedes, and the evidence must be
+required (the aged arm's usual check). Anything else is
+`NoCoexistingRestatement {task, id}`. Today's same-`message_id` correction
+fails it: the correction replaces its target inside one lineage, so nothing
+stale coexists with it. A target also corrected in place fails it too: its
+served text is the correction's, not the stale value the pair would grade
+against. `SupersededFalsifier`
 and `TruthNotEarly` still refuse falsification tasks, and `PairSet::validate`
 reruns the check.
 
@@ -1359,13 +1362,20 @@ grade needs no judge.
 
 **Arms.** `arms(served, stale_span, key, live, live_ordinal)` builds the five
 M0 renderings from one served context, each differing from arm (a) only at
-the stale statement's span: `today` (a) is the served text unchanged;
-`precedence_line` (b) appends a newline and `PRECEDENCE_SENTENCE` after the
-stale statement; `footer` (c) appends a newline and one D-7 footer line,
-`[corrections: <key> = <live> @<N>]`, keeping the stale prose;
-`anchored_replacement` (d) replaces the stale statement with
-`[corrected @<N>: <key> = <live>]`; `omission_oracle` (e) removes it. `N` is the
-restating message's ordinal. The override sentence is:
+the stale statement: `today` (a) is the served text unchanged;
+`precedence_line` (b) adds `PRECEDENCE_SENTENCE` as a line of its own after
+the line holding the stale statement; `footer` (c) adds one D-7 footer line,
+`[corrections: <key> = <live> @<N>]`, there instead, keeping the stale
+prose; `anchored_replacement` (d) replaces the stale statement's span with
+`[corrected @<N>: <key> = <live>]`; `omission_oracle` (e) removes the span.
+`N` is the restating message's ordinal. The line after the stale
+statement's is where D-7 appends a footer to the stale segment's body, since
+one hint fragment line is one segment; production places the D-8 sentence in
+the m1 block after the history instead, so (b) sits nearer the stale
+statement than it will in production, a placement that can only help (b).
+The arms act on the first whole-word occurrence; the campaign's export test
+asserts that (e) no longer carries the stale value. The override sentence
+is:
 
 ```text
 Later statements supersede earlier ones: where two statements in this history disagree, the later one is current.
@@ -1374,18 +1384,23 @@ Later statements supersede earlier ones: where two statements in this history di
 `key` must satisfy the D-7 claim-key grammar `[a-z0-9_-]+(\.[a-z0-9_-]+)+`
 within 64 bytes; the campaign derives it from the slot (`session-0.slot3`).
 
-**McNemar.** `mcnemar(first, second, alpha)` takes one event per pair on two
-arms (for example "answered stale"), keyed by pair id, and returns the pair
-count, the discordant counts `first_only` (`b`) and `second_only` (`c`), and
-`reject`: whether the exact two-sided binomial p-value `min(1, 2 P(X <=
+**McNemar.** `mcnemar(first, second, alpha)` takes one pre-registered event
+per pair on two arms (for example "graded `stale`"; the caller names the
+event, and "graded `stale`" and "not graded `current`" can order two arms
+differently when one of them turns stale answers into misses), keyed by pair
+id, `None` where the call failed or was censored. It returns `pairs` (both
+arms answered), `indeterminate` (either arm has no outcome: reported, never
+scored), the discordant counts `first_only` (`b`) and `second_only` (`c`),
+and `reject`: whether the exact two-sided binomial p-value `min(1, 2 P(X <=
 min(b, c)))`, `X ~ Bin(b + c, 1/2)`, is at most the pre-registered `alpha`.
-The comparison is exact: the tail and `2^(b + c)` are summed from one row of
-Pascal's triangle in arbitrary-precision integers and compared against
-`alpha`'s numerator and denominator, so no float and no 128-bit ceiling
-enters. Arms naming different pairs are `UnpairedArms`, and an alpha outside
-`(0, 1)` is `AlphaOutOfRange`. A failed or censored live call belongs in
-neither map: it is indeterminate, never scored. The statistic sits outside
-the quantities `gen/gen-statistics-golden.ts` pins.
+The test is two-sided, so "the second arm is better" is `reject` with
+`second_only < first_only` for an event that is a failure. The comparison is
+exact in 128-bit integers, the tail summed from `censoring`'s binomial and
+compared against `alpha`'s numerator and denominator, with no float; past
+about 120 discordant pairs the tail leaves that range and the test is
+`Overflow`, typed. Arms naming different pairs are `UnpairedArms`, and an
+alpha outside `(0, 1)` is `AlphaOutOfRange`. The statistic sits outside the
+quantities `gen/gen-statistics-golden.ts` pins.
 
 **Export.** The `eval_runner` example's `stale-preference` subcommand takes
 the campaign's flags and `--pairs <n>`, and `campaign::stale_preference` does
@@ -1393,7 +1408,8 @@ the work: it generates one session of `--aged-messages` messages with a
 restatement on every third slot (the evaluator's correction regime; no tool
 spans, no commits), compiles a falsifier (the first message nothing
 restates), a positive control (the last message), and one stale-preference
-task per restatement for the first `n` restatements, records the world once
+task per restatement for the first `n` restatements (fewer restatements than
+`n` is `TooFewRestatements`, refused before a fixture starts), records the world once
 under the daemon's summarizer as the structured arm does, and replays that
 cassette once per pair. Each pair's task turn asks for the pair's subject:
 the slot word and the world's word (`slot3 in world…`), the two tokens the
@@ -1407,20 +1423,25 @@ one:
 | Field | Meaning |
 | --- | --- |
 | `schema`, `generator_version` | `eval-stale-preference-export/v1` and the generator the world came from. |
+| `root_seed`, `config` | The world's seed as a decimal string and its `WorldConfig`: every pair comes from this one world. |
 | `pairs[].task` | The task id (`stale-<i>`). |
 | `pairs[].question` | The question for the served model: `What is the current decision for <slot>? Answer with the decision as the history states it.` |
 | `pairs[].key` | The claim key the arms name. |
-| `pairs[].stale_value`, `pairs[].stale_span` | The predecessor's decision and its first whole-word byte span in arm (a). |
+| `pairs[].stale_value`, `pairs[].stale_span` | The predecessor's decision and its first whole-word byte span (`ServedSpan`) in arm (a). |
 | `pairs[].live_value`, `pairs[].live_span` | The restatement's decision and its span, `null` when arm (a) does not carry it. |
 | `pairs[].restating_ordinal` | The restatement's 1-based ordinal in the rendered session, the `N` of every marker. |
 | `pairs[].stale_tier` | The tier (`1..=5`, `5` archived) the stale statement's segment renders at in m0 under the daemon's default history budget, `context_core::decay::rendered_tier` over the stored segments. |
 | `pairs[].delivery` | `StaleDelivery` of arm (a). |
 | `pairs[].arms` | The five arms. |
-| `unlocatable` | Task id to delivery for every pair whose arm (a) does not carry the stale value; such a pair has no arms and is never dropped. |
+| `unlocatable` | Task id to `{delivery, served}` for every pair whose arm (a) does not carry the stale value, `served` empty when the surface served nothing; such a pair has no arms and is never dropped. |
 | `stale_delivered` | Pairs, located or not, whose arm (a) carries the stale value. |
 
-The subcommand answers with one JSON line naming the file, its digest, and
-the three counts. The export lifts the Suite B envelope's cassette bound to
+`StaleExport::record` is the classification: it takes the pair's question,
+key, values, and ordinal and its served text, and files the pair under
+`pairs` or `unlocatable`. A pair whose `delivery` is `stale` carries the live
+value only in arms (c) and (d), so an analysis comparing those with (b)
+reads `both` pairs apart from `stale` ones. The subcommand answers with one
+JSON line naming the file, its digest, and the three counts. The export lifts the Suite B envelope's cassette bound to
 64 MiB and pins nothing else of Suite B; its lives are charged to the same
 envelope. `an_s0_stale_preference_export_carries_every_pair_and_its_five_arms`
 runs four pairs at S0 under `EIDNARA_EVAL_S0_BUDGET_MS`. At S0 the fixture's

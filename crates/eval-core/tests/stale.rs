@@ -8,10 +8,11 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use context_core::canonical_json::protocol_digest;
 use eval_core::{
-    Destination, EventId, EventLog, GENERATOR_VERSION, Grade, MAX_VALID_TIME_MS, Mode,
-    PRECEDENCE_SENTENCE, PairError, PairSet, PairSetInput, Payload, Query, RANDOM_SCHEMA_VERSION,
-    Ratio, RenderConfig, ReplayRefusal, Sensitivity, ServedClass, SessionSpec, StaleDelivery, Task,
-    TaskRole, TextSpan, Visibility, WorldConfig, WorldError, arms, carries, compile_pair_set,
+    Arms, Destination, EventId, EventLog, GENERATOR_VERSION, Grade, MAX_VALID_TIME_MS,
+    McNemarError, Mode, PRECEDENCE_SENTENCE, PairError, PairSet, PairSetInput, Payload, Query,
+    RANDOM_SCHEMA_VERSION, Ratio, RenderConfig, ReplayRefusal, Sensitivity, ServedClass,
+    ServedSpan, SessionSpec, StaleDelivery, StaleExport, StaleQuestion, Task, TaskRole,
+    Unlocatable, Visibility, WorldConfig, WorldError, arms, carries, compile_pair_set,
     generate_all, grade, locate, mcnemar, render, serialize_spec, text_decision,
 };
 use serde_json::json;
@@ -102,26 +103,42 @@ fn a_restatement_is_a_new_message_at_a_later_time_naming_its_target_slot() {
 #[test]
 fn a_tape_recorded_under_the_previous_generator_refuses() {
     assert_eq!(GENERATOR_VERSION, "eval-generator/v4");
-    let config = one_session(12, 0, 3);
+    // A config version 3 could have written: no restatements, and the field
+    // is not serialized.
+    let config = world_config();
+    assert!(
+        !serde_json::to_string(&config)
+            .unwrap()
+            .contains("restatement_every"),
+        "a config without restatements keeps its bytes"
+    );
+    let identity = |version: &str| {
+        protocol_digest(
+            "eval-tape/v1",
+            &json!({
+                "root_seed": SEED.to_string(),
+                "config": config,
+                "generator_version": version,
+                "random_schema_version": RANDOM_SCHEMA_VERSION,
+            }),
+        )
+        .unwrap()
+    };
     let mut tape = generate_all(SEED, &config, Mode::Generate).unwrap().tape;
-    tape.identity = protocol_digest(
-        "eval-tape/v1",
-        &json!({
-            "root_seed": SEED.to_string(),
-            "config": config,
-            "generator_version": "eval-generator/v3",
-            "random_schema_version": RANDOM_SCHEMA_VERSION,
-        }),
-    )
-    .unwrap();
-    assert!(matches!(
-        generate_all(SEED, &config, Mode::ReplayTape(tape)),
-        Err(WorldError::Replay(ReplayRefusal::TapeMismatch { .. }))
-    ));
+    assert_eq!(tape.identity, identity(GENERATOR_VERSION), "the recipe");
+    tape.identity = identity("eval-generator/v3");
+    assert_eq!(
+        generate_all(SEED, &config, Mode::ReplayTape(tape.clone())).unwrap_err(),
+        WorldError::Replay(ReplayRefusal::TapeMismatch {
+            expected: identity(GENERATOR_VERSION),
+            found: tape.identity,
+        })
+    );
 }
 
 /// The rendering of a world with corrections and no restatement, pinned at
-/// the bytes `eval-generator/v3` and its renderer produced.
+/// the bytes `eval-generator/v3` and its renderer produced: the digest is
+/// this test's computation run in a worktree at base `be542f0c`.
 #[test]
 fn a_correction_renders_the_bytes_it_rendered_before_restatements() {
     let world = generate_all(SEED, &world_config(), Mode::Generate).unwrap();
@@ -309,6 +326,34 @@ fn stale_preference_is_refused_over_a_same_message_id_correction() {
 }
 
 #[test]
+fn stale_preference_is_refused_when_the_predecessor_is_also_corrected_in_place() {
+    // Corrections on every fifth slot and restatements on every second: some
+    // message is both corrected in place and restated, so its served text is
+    // no longer its own and the pair would grade against the wrong stale
+    // value.
+    let aged = generate_all(SEED, &one_session(24, 5, 2), Mode::Generate)
+        .unwrap()
+        .log;
+    let doubled = aged
+        .events
+        .iter()
+        .find(|e| match &e.payload {
+            Payload::Restatement { target, .. } => aged.events.iter().any(
+                |c| matches!(&c.payload, Payload::Correction { target: t, .. } if t == target),
+            ),
+            _ => false,
+        })
+        .expect("a restated message that is also corrected");
+    assert_eq!(
+        compile(&aged, std::slice::from_ref(&doubled.id)),
+        Err(PairError::NoCoexistingRestatement {
+            task: "stale-0".to_string(),
+            id: doubled.id.clone(),
+        })
+    );
+}
+
+#[test]
 fn delivery_records_which_value_the_served_text_carries() {
     let (stale, live) = ("cursor for slot3", "digest for slot3");
     let table = [
@@ -346,7 +391,7 @@ fn the_grader_applies_the_knowledge_update_rule_without_a_model() {
     }
     assert_eq!(
         locate("a slot47 slot4.", "slot4"),
-        Some(TextSpan { start: 9, end: 14 })
+        Some(ServedSpan { start: 9, end: 14 })
     );
     assert!(!carries("anything", ""));
 }
@@ -359,13 +404,19 @@ fn every_arm_differs_from_today_only_at_the_stale_statement() {
     let arms = arms(served, span, "session-0.slot3", live, 12);
     assert_eq!(arms.today, served);
     let at = |replacement: &str| served.replacen(stale, replacement, 1);
-    assert_eq!(
-        arms.precedence_line,
-        at(&format!("cursor for slot3\n{PRECEDENCE_SENTENCE}"))
-    );
+    // (b) and (c) add one line after the stale statement's line, where D-7
+    // appends a footer to the stale segment's body.
+    let line = "- cursor for slot3 in w";
+    let after_line = |added: &str| served.replacen(line, &format!("{line}\n{added}"), 1);
+    assert_eq!(arms.precedence_line, after_line(PRECEDENCE_SENTENCE));
     assert_eq!(
         arms.footer,
-        at("cursor for slot3\n[corrections: session-0.slot3 = digest for slot3 @12]")
+        after_line("[corrections: session-0.slot3 = digest for slot3 @12]")
+    );
+    let last = arms_of(line, stale, live);
+    assert_eq!(
+        last.precedence_line,
+        format!("{line}\n{PRECEDENCE_SENTENCE}")
     );
     assert_eq!(
         arms.anchored_replacement,
@@ -385,18 +436,25 @@ fn every_arm_differs_from_today_only_at_the_stale_statement() {
     );
 }
 
+fn arms_of(served: &str, stale: &str, live: &str) -> Arms {
+    arms(
+        served,
+        locate(served, stale).unwrap(),
+        "session-0.slot3",
+        live,
+        12,
+    )
+}
+
 #[test]
 #[should_panic(expected = "is not a claim key")]
 fn an_arm_refuses_a_key_outside_the_claim_grammar() {
-    arms("x", TextSpan { start: 0, end: 1 }, "Slot3", "y", 1);
+    arms("x", ServedSpan { start: 0, end: 1 }, "Slot3", "y", 1);
 }
 
-fn table(
-    first_only: u32,
-    second_only: u32,
-    both: u32,
-    neither: u32,
-) -> [BTreeMap<String, bool>; 2] {
+type Outcomes = BTreeMap<String, Option<bool>>;
+
+fn table(first_only: u32, second_only: u32, both: u32, neither: u32) -> [Outcomes; 2] {
     let mut first = BTreeMap::new();
     let mut second = BTreeMap::new();
     let cells = [
@@ -408,8 +466,8 @@ fn table(
     for (count, a, b) in cells {
         for _ in 0..count {
             let id = format!("pair-{:04}", first.len());
-            first.insert(id.clone(), a);
-            second.insert(id, b);
+            first.insert(id.clone(), Some(a));
+            second.insert(id, Some(b));
         }
     }
     [first, second]
@@ -417,6 +475,11 @@ fn table(
 
 fn alpha() -> Ratio {
     Ratio::from_decimal("0.05").unwrap()
+}
+
+fn decide(b: u32, c: u32, alpha: Ratio) -> Result<bool, McNemarError> {
+    let [first, second] = table(b, c, 0, 0);
+    mcnemar(&first, &second, alpha).map(|result| result.reject)
 }
 
 /// Two-sided exact p-values by hand: `2 * sum_{i <= min} C(n, i) / 2^n`.
@@ -440,20 +503,47 @@ fn exact_mcnemar_matches_hand_computed_tables() {
         assert_eq!(
             (
                 result.pairs,
+                result.indeterminate,
                 result.first_only,
                 result.second_only,
                 result.reject
             ),
-            (b + c + concordant, b, c, reject),
+            (b + c + concordant, 0, b, c, reject),
             "{b}/{c}"
         );
     }
-    // Past 128 discordant pairs the powers of two leave 128-bit range: 110/90
-    // has p ~ 0.179 and 120/80 has p ~ 0.0057.
-    let [first, second] = table(110, 90, 0, 0);
-    assert!(!mcnemar(&first, &second, alpha()).unwrap().reject);
-    let [first, second] = table(120, 80, 0, 0);
-    assert!(mcnemar(&first, &second, alpha()).unwrap().reject);
+    // p equal to alpha rejects: 6/0 has p = 1/32 exactly.
+    assert!(decide(6, 0, Ratio::from_decimal("0.03125").unwrap()).unwrap());
+    assert!(!decide(6, 0, Ratio::from_decimal("0.03124").unwrap()).unwrap());
+    // Either side of alpha at n = 100 and n = 120: 61/39 has p ~ 0.0352 and
+    // 60/40 p ~ 0.0569; 72/48 has p ~ 0.0353 and 71/49 p ~ 0.0548.
+    assert!(decide(61, 39, alpha()).unwrap());
+    assert!(!decide(60, 40, alpha()).unwrap());
+    assert!(decide(72, 48, alpha()).unwrap());
+    assert!(!decide(71, 49, alpha()).unwrap());
+    // Past about 120 discordant pairs the exact tail leaves 128-bit range:
+    // refused, typed.
+    assert_eq!(decide(100, 28, alpha()), Err(McNemarError::Overflow));
+    assert_eq!(decide(62, 62, alpha()), Err(McNemarError::Overflow));
+}
+
+#[test]
+fn a_failed_call_is_counted_indeterminate_and_never_scored() {
+    let [mut first, mut second] = table(6, 0, 0, 0);
+    first.insert("failed-on-first".to_string(), None);
+    second.insert("failed-on-first".to_string(), Some(false));
+    first.insert("failed-on-second".to_string(), Some(true));
+    second.insert("failed-on-second".to_string(), None);
+    let result = mcnemar(&first, &second, alpha()).unwrap();
+    assert_eq!(
+        (
+            result.pairs,
+            result.indeterminate,
+            result.first_only,
+            result.reject
+        ),
+        (6, 2, 6, true)
+    );
 }
 
 #[test]
@@ -462,12 +552,73 @@ fn mcnemar_refuses_unpaired_arms_and_an_alpha_outside_the_open_unit_interval() {
     for bad in [Ratio::ZERO, Ratio::ONE] {
         assert_eq!(
             mcnemar(&first, &second, bad),
-            Err(eval_core::McNemarError::AlphaOutOfRange)
+            Err(McNemarError::AlphaOutOfRange)
         );
     }
-    second.insert("extra".to_string(), true);
+    second.insert("extra".to_string(), Some(true));
     assert_eq!(
         mcnemar(&first, &second, alpha()),
-        Err(eval_core::McNemarError::UnpairedArms)
+        Err(McNemarError::UnpairedArms)
     );
+}
+
+fn stale_question(task: &str) -> StaleQuestion {
+    StaleQuestion {
+        task: task.to_string(),
+        question: "What is the current decision for slot3?".to_string(),
+        key: "session-0.slot3".to_string(),
+        stale_value: "cursor for slot3".to_string(),
+        live_value: "digest for slot3".to_string(),
+        restating_ordinal: 12,
+    }
+}
+
+#[test]
+fn an_export_keeps_every_pair_located_or_not() {
+    let mut export = StaleExport::new(SEED, one_session(12, 0, 3));
+    let both = "- cursor for slot3 in w\n- digest for slot3 in w";
+    export.record(stale_question("located"), both, || 2);
+    export.record(
+        stale_question("live-only"),
+        "- digest for slot3 in w",
+        || unreachable!("an unlocatable pair has no tier"),
+    );
+    export.record(stale_question("nothing-served"), "", || {
+        unreachable!("an unlocatable pair has no tier")
+    });
+    assert_eq!(export.root_seed, SEED.to_string());
+    assert_eq!(export.pairs.len(), 1);
+    let pair = &export.pairs[0];
+    assert_eq!(
+        (pair.task.as_str(), pair.delivery, pair.stale_tier),
+        ("located", StaleDelivery::Both, 2)
+    );
+    assert_eq!(pair.stale_span, ServedSpan { start: 2, end: 18 });
+    assert_eq!(pair.live_span, Some(ServedSpan { start: 26, end: 42 }));
+    assert_eq!(
+        pair.arms,
+        arms_of(both, "cursor for slot3", "digest for slot3")
+    );
+    assert_eq!(
+        export.unlocatable,
+        BTreeMap::from([
+            (
+                "live-only".to_string(),
+                Unlocatable {
+                    delivery: StaleDelivery::Live,
+                    served: "- digest for slot3 in w".to_string(),
+                }
+            ),
+            (
+                "nothing-served".to_string(),
+                Unlocatable {
+                    delivery: StaleDelivery::Neither,
+                    served: String::new(),
+                }
+            ),
+        ])
+    );
+    assert_eq!(export.stale_delivered, 1);
+    let wire = serde_json::to_value(&export).unwrap();
+    assert_eq!(serde_json::from_value::<StaleExport>(wire).unwrap(), export);
 }
