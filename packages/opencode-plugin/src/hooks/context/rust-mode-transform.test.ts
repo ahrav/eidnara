@@ -3563,7 +3563,7 @@ describe("capture verified against the retained prefix", () => {
             await transform.run(sessionId, { messages: [...history] });
 
             // The same object, edited in place, must not verify against its retained digest.
-            (history[1]?.parts as Array<{ text: string }>)[0].text = "EDITED m-2";
+            (history[1] as { parts: Array<{ text: string }> }).parts[0].text = "EDITED m-2";
             const grown = [...history, ...rowMessages(sessionId, rows.slice(4))];
             await transform.run(sessionId, { messages: [...grown] });
             expect(bodies).toHaveLength(3);
@@ -3581,7 +3581,8 @@ describe("capture verified against the retained prefix", () => {
         installRawRows(sessionId, rows);
         const history = rowMessages(sessionId, rows);
         const { client, bodies } = recordingClient((request, index) => {
-            if (index === 1) (history[0]?.parts as Array<{ text: string }>)[0].text = "EDITED";
+            if (index === 1)
+                (history[0] as { parts: Array<{ text: string }> }).parts[0].text = "EDITED";
             return recipeResponse(request, [folded(sessionId)]);
         });
         const transform = createRustModeTransform(makeDeps(), { moduleClient: client });
@@ -3790,7 +3791,7 @@ describe("capture verified against the retained prefix", () => {
         );
         await transform.run(sessionId, { messages: [...history] });
 
-        (history[1]?.parts as Array<{ text: string }>)[0].text = "EDITED m-2";
+        (history[1] as { parts: Array<{ text: string }> }).parts[0].text = "EDITED m-2";
         const grown = [...history, ...rowMessages(sessionId, rows.slice(4))];
         await transform.run(sessionId, { messages: [...grown] });
         expect(bodies[1]?.native_messages).toEqual(grown);
