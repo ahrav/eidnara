@@ -2178,6 +2178,9 @@ pub fn stale_preference(config: &Config, pairs: usize) -> Result<StaleExport, Ru
         });
     }
     charges.vacate(cassettes)?;
+    // The export is a retained artifact under the publish root, charged as
+    // the campaign's report is.
+    charges.retain_publish_root()?;
     let bytes = serde_json::to_vec_pretty(&export).unwrap();
     charges.observe(Resource::ArtifactBytes, bytes.len() as u64)?;
     publish_file(&publish.join(STALE_EXPORT_FILE), &bytes).map_err(publish_refused)?;
