@@ -747,14 +747,18 @@ mod bounded_read_tests {
     /// loaded row, and its corrections reach the rendered bytes.
     #[test]
     fn the_claims_pass_adds_no_store_work_and_visits_at_most_eight_claims_per_loaded_row() {
-        use crate::decay_render::CLAIMS_VISITED;
+        use crate::decay_render::{ANCHOR_SEARCHES, CLAIMS_VISITED};
         use crate::history_summarizer_citations::CLAIMS_PER_SEGMENT;
         use crate::test_support::synthetic_history::ClaimRegime;
         let budgets = [20.0, 60_000.0, 10_000_000.0];
         let visits = |compose: &dyn Fn()| {
             CLAIMS_VISITED.with(|visited| visited.set(0));
+            ANCHOR_SEARCHES.with(|searches| searches.set(0));
             compose();
-            CLAIMS_VISITED.with(|visited| visited.get())
+            (
+                CLAIMS_VISITED.with(|visited| visited.get()),
+                ANCHOR_SEARCHES.with(|searches| searches.get()),
+            )
         };
         for (segments, span) in [(100, 2), (4_000, 2), (50_000, 20)] {
             let messages = segments as i64 * span;
@@ -795,12 +799,23 @@ mod bounded_read_tests {
                 for budget in budgets {
                     let rows = loaded_rows(&store, budget);
                     let held: usize = rows.iter().map(|row| row.claims.len()).sum();
-                    let visited = visits(&|| {
+                    let (visited, searched) = visits(&|| {
                         bounded_m0(&store, budget, None);
                     });
                     assert_eq!(visited, held, "{regime:?} at {budget}: one scan of R");
                     assert!(held > 0, "{regime:?} at {budget}: claims reach R");
                     assert!(visited <= CLAIMS_PER_SEGMENT * rows.len());
+                    let anchored = crate::decay_render::corrections_for(&rows)
+                        .iter()
+                        .flatten()
+                        .filter(|c| c.anchor.as_deref().is_some_and(|a| !a.is_empty()))
+                        .count();
+                    let (renders_per_compose, searched_tiers_per_render) = (4, 4);
+                    assert!(
+                        searched <= renders_per_compose * searched_tiers_per_render * anchored,
+                        "H = {segments} {regime:?} at {budget}: {searched} searches for \
+                         {anchored} anchored corrections"
+                    );
                 }
                 for &new_rows in &m1_rows {
                     let above = store
@@ -812,7 +827,7 @@ mod bounded_read_tests {
                         .expect("m1 read")
                         .history_segments;
                     let held: usize = above.iter().map(|row| row.claims.len()).sum();
-                    let visited = visits(&|| {
+                    let (visited, _) = visits(&|| {
                         m1_above(&store, (segments - new_rows) as i64);
                     });
                     // m1 scans its rows twice: once for their corrections, once for the block.

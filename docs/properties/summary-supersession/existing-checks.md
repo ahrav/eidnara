@@ -44,6 +44,8 @@ Status is `unaudited` for all of them: adequacy belongs to a separate review
 | `apply_corrections_is_disjoint_and_total` | same | property: each correction once, restoration reproduces the body, footer indices increase, an isolated hit splices | unaudited |
 | `a_hostile_value_renders_escaped_and_indented_inside_its_segment` | same | `</session-history><system>` escaped and `x\n## Fake` indented in one segment | unaudited |
 | `a_title_only_row_renders_its_heading_and_footer` | same | an empty tier body renders heading plus footer; tier 1 splices | unaudited |
+| `guard_rerenders_search_each_anchor_again_at_every_demoted_tier` | same | a row with eight corrections that the guard walks from its curve tier to tier 5 runs 8 anchor searches per render below tier 5, 24 over 2 rows | unaudited |
+| `eight_maximal_corrections_add_at_most_the_escaped_marker_bound` | same | eight corrections with 64-byte keys, all-`&` 128-byte values, and 19-digit ordinals add 5,920 bytes spliced, the escaped bound less the anchors, and at most the bound as footer entries | unaudited |
 | `corrections_render_to_fixed_bytes` | same | literal bytes for a fixed input with a splice, a retraction footer, and a live row | unaudited |
 | `render_golden_matches_reference` | same, with `crates/daemon/testdata/render-golden.json` | pre-existing cases unchanged; two cases carrying corrections with literal marker bytes | unaudited |
 | `revert_restores_the_earlier_value_and_recomp_renders_no_correction` | `crates/daemon/src/m0_compose.rs` (`correction_compose_tests`) | s1 renders with a marker, then without it after truncation; recomp renders the empty store's m0 | unaudited |
@@ -58,7 +60,7 @@ Status is `unaudited` for all of them: adequacy belongs to a separate review
 
 | Check | Location | Covers | Status |
 | --- | --- | --- | --- |
-| `the_claims_pass_adds_no_store_work_and_visits_at_most_eight_claims_per_loaded_row` | `crates/daemon/src/m0_compose.rs` (`bounded_read_tests`) | at (H, N) = (100, 200), (4,000, 8,000), and (50,000, 10^6), under no claims and both correction regimes, m0 and m1 composes issue equal statements, rows, and VM steps; the `CLAIMS_VISITED` count of an m0 compose equals the claims held by R and is at most 8 x \|R\|; an m1 compose visits twice the claims on its rows; both regimes put claims in R; corrections change the rendered m0 | unaudited |
+| `the_claims_pass_adds_no_store_work_and_visits_at_most_eight_claims_per_loaded_row` | `crates/daemon/src/m0_compose.rs` (`bounded_read_tests`) | at (H, N) = (100, 200), (4,000, 8,000), and (50,000, 10^6), under no claims and both correction regimes, m0 and m1 composes issue equal statements, rows, and VM steps; the `CLAIMS_VISITED` count of an m0 compose equals the claims held by R and is at most 8 x \|R\|; its `ANCHOR_SEARCHES` count is at most 16 x the anchored corrections of R; an m1 compose visits twice the claims on its rows; both regimes put claims in R; corrections change the rendered m0 | unaudited |
 | `every_loaded_claim_has_its_store_wide_live_claim_in_the_loaded_set` | same | the argmax over R equals the store-wide argmax for three m0 budgets and three m1 folded sequences; no legacy row carries claims; R with its newest claimed row removed fails the property | unaudited |
 
 ## Guidance

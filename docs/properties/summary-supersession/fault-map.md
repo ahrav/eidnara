@@ -20,6 +20,8 @@
 | Two processes with different hasher seeds | partial | each nextest test runs in its own process; no test spawns two |
 | A 10^6-message session | yes | `SyntheticHistory::with_claims` at span 20 and H = 50,000 |
 | Dense and sparse correction regimes | yes | `ClaimRegime::EveryThirdMessage`, `ClaimRegime::HalfPercent` |
+| A guard walk through every tier of a capped row | yes | an estimator over budget while the row renders, in `render_decayed_history_segments` |
+| Claims at every bound with widest-escaping values | yes | 64-byte keys, all-`&` 128-byte values, 19-digit ordinals |
 | A read that skips a middle row | no | both reads return a newest suffix by construction; the suffix test would catch a skip |
 
 ## Per-property required faults
@@ -42,7 +44,7 @@
 | `correction-visible-before-next-hard` | a HARD, a correcting fold, one pass | `a_correction_rides_m1_until_the_next_hard_splices_it_into_m0` |
 | `revert-restores-earlier-value` | revert and recomp with claims | the store truncation test and `revert_restores_the_earlier_value_and_recomp_renders_no_correction` |
 | `marker-grammar-is-single-and-named-in-guidance` | a missing paragraph, a flagged placeholder | `every_guidance_names_the_correction_markers_the_renderer_emits`, `no_guidance_holds_text_the_secret_scanner_flags` |
-| `render-cost-bounded-by-rendered-set` | 10^6 messages, both regimes | `the_claims_pass_adds_no_store_work_and_visits_at_most_eight_claims_per_loaded_row`; render time by an uncommitted driver |
+| `render-cost-bounded-by-rendered-set` | 10^6 messages, both regimes; a guard walk over a capped row; claims at every bound with escaping values | `the_claims_pass_adds_no_store_work_and_visits_at_most_eight_claims_per_loaded_row`, `guard_rerenders_search_each_anchor_again_at_every_demoted_tier`, `eight_maximal_corrections_add_at_most_the_escaped_marker_bound`; render time by an uncommitted driver |
 
 ## Coverage checks to add
 

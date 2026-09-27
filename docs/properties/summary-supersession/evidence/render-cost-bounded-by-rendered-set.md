@@ -6,7 +6,9 @@ Specification [#835](https://github.com/ahrav/eidnara/issues/835), Property
 Catalog record `render-cost-bounded-by-rendered-set` (bound,
 default-production), derived at `265df096`, and constraint C-1: supersession
 adds no store read, and its only work is one pass over the claims of the loaded
-set R, at most 8 x |R| entries and 8 x |R| substring searches. The M3 ticket
+set R, at most 8 x |R| entries and 8 x |R| substring searches. The code
+exceeds that search bound and the spec's size estimate; the investigation log
+cites both sides. The M3 ticket
 [#840](https://github.com/ahrav/eidnara/issues/840) sets the criteria: a
 committed bound test at 10^6 messages under both correction regimes, render
 time beyond the segment load flat in H (largest H within 10% of smallest H, 30
@@ -38,16 +40,40 @@ m1 compose visits exactly twice the claims on its rows (one scan for
 corrections, one for the block), that both regimes put claims in R at every
 scale point, and that corrections change the rendered m0 bytes.
 
-The committed test does not check these spec clauses directly:
+A second counter under the same gate,
+`crates/daemon/src/decay_render.rs::ANCHOR_SEARCHES`, counts the anchor
+searches of `apply_corrections`. The bound test asserts that an m0 compose
+runs at most 16 searches per anchored correction of R. The source gives that
+bound:
 
-- At most 8 x |R| substring searches per compose. This holds because each
-  row has at most 8 corrections and `apply_corrections` does one `find` per
-  correction.
-- At most 8 markers or footer entries per rendered segment, for the same
-  reason.
-- About 1.9 KB added per segment before the guard. A marker is at most a
-  64-byte key, a 128-byte value, and about 20 bytes of syntax, so 8
-  markers stay under 1.7 KB. This is not measured.
+- `render_one_history_segment` runs `apply_corrections`, one `find` per
+  correction with a non-empty anchor, whenever it renders a tiered row below
+  tier 5.
+- `render_decayed_history_segments` renders each row once at its curve tier.
+  The guard then renders a demoted row again at each tier it moves to, so a
+  row renders at most four times below tier 5 in one pass.
+- `m0_compose.rs::render_m0_with_decay_pressure_retry` renders once and
+  retries at most three times.
+
+`decay_render.rs::tests::guard_rerenders_search_each_anchor_again_at_every_demoted_tier`
+drives one guard walk over a row with eight corrections. The row renders at
+its curve tier and at each demoted tier below 5, and the test asserts 8
+searches per such render. The curve places the row at tier 2, so the walk
+runs 24 searches over 2 rows, above the spec's 8 x |R| = 16.
+
+`decay_render.rs::tests::eight_maximal_corrections_add_at_most_the_escaped_marker_bound`
+renders eight corrections with 64-byte keys, all-`&` 128-byte values, and
+19-digit ordinals, spliced over 1-byte anchors and as footer entries.
+`render_one_history_segment` passes the spliced body through
+`escape_xml_content`, which writes `&amp;` for each `&`. The splices add
+5,920 bytes, the bound 8 x (18 + 19 + 64 + 5 x 128) = 5,928 less the eight
+anchor bytes they replace. The footer form adds less.
+
+The committed tests do not check these spec clauses directly:
+
+- At most 8 markers or footer entries per rendered segment. This holds by
+  source reading: `check_claim_set` keeps at most 8 claims per segment, and
+  `apply_corrections` emits one marker or entry per correction.
 - At most 8 x |R| entries in the m1 block, one entry per claim on its rows.
 
 `crates/daemon/src/decay_render.rs::render_rows` runs `corrections_for` once
@@ -76,8 +102,12 @@ footers push into many iterations.
 ## What a test must construct
 
 A 10^6-message session under both regimes and none; the statement-work ledger
-compared across regimes; claims visited compared to 8 x |R|. For time, a
-driver that times `compose_m0` and subtracts a separately timed fold read.
+compared across regimes; claims visited compared to 8 x |R|; anchor searches
+compared to 16 x the anchored corrections of R. A guard walk over a row with
+eight corrections from a searched tier to tier 5. Eight corrections at the
+key, value, and ordinal bounds, with values made of the widest-escaping byte.
+For time, a driver that times `compose_m0` and subtracts a separately timed
+fold read.
 
 ## Investigation log
 
@@ -90,11 +120,35 @@ driver that times `compose_m0` and subtracts a separately timed fold read.
   Store work is equal with and without claims, and visits stay within 8 x |R|.
   At `5bdeaf6b` the test also counts visits through `CLAIMS_VISITED`, so
   the one-scan bound for m0 and the two-scan bound for m1 are asserted, not
-  inferred from claims held.
-- Missing evidence: direct checks of the substring-search, per-segment
-  marker, per-segment size, and m1-entry clauses listed above.
-- Conclusion: resolved with answer for the store-work and visit bounds; the
-  other clauses hold by source reading.
+  inferred from claims held. The test now also counts anchor searches
+  through `ANCHOR_SEARCHES` and asserts at most 16 per anchored correction.
+- Missing evidence: direct checks of the per-segment marker-count and
+  m1-entry clauses listed above.
+- Conclusion: resolved with answer for the store-work, visit, and search
+  bounds; the other clauses hold by source reading.
+
+### Q: Does the code hold spec C-1's search and size bounds?
+
+- Sources examined: spec #835 C-1 (at most 8 x |R| substring searches per
+  compose, about 1.9 KB added per rendered segment);
+  `decay_render.rs::{apply_corrections, render_one_history_segment,
+  render_decayed_history_segments, escape_xml_content}`;
+  `m0_compose.rs::render_m0_with_decay_pressure_retry`;
+  `history_summarizer_citations.rs::check_claim_set`.
+- Findings: written first against the spec bounds, the guard-walk test
+  failed with 24 searches over 2 rows against 16, and the byte test failed
+  with 5,920 bytes against 1.7 KB. The spec counts one render per row and
+  unescaped marker bytes. The guard and the pressure retry render a row up
+  to 16 times per compose. `check_claim_set` bounds a value's unescaped
+  length, so a 128-byte value of `&` renders at 640 bytes. At every scale
+  point of the bound test, both synthetic regimes stayed within 8 x |R|
+  searches: an 8 x |R| assertion passed there before the committed
+  per-correction check replaced it. The split between curve renders and guard
+  renders was not measured.
+- Missing evidence: none for the code side.
+- Conclusion: needs human input. The record states the bounds the code holds:
+  16 searches per anchored correction, and 8 x (82 + 5 x 128 + d) bytes per
+  segment. Whether C-1 should be amended to them is an owner decision.
 
 ### Q: Is render time beyond the load flat in H?
 
