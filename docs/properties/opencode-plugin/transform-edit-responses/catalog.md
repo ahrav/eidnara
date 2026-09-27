@@ -38,36 +38,42 @@
 > sends transform revision 3 windows. The plugin locates the window with one
 > backward id scan (`scanMessageIds`, `transform-capture.ts:93`), discovers an
 > unknown boundary through `transform.boundary` (`discover`,
-> `rust-mode-transform.ts:1101`), copies `host[boundaryIndex..length)` through
-> own descriptors (`copyWindow`, `transform-capture.ts:148`) before the walk,
+> `rust-mode-transform.ts:1122`), copies `host[boundaryIndex..length)` through
+> own descriptors (`copyWindow`, `transform-capture.ts:141`) before the walk,
 > sends `v: 3` with `boundary` and no ordinal, and publishes shrink-first with
 > the window as the captured slots (`publishInPlace`, `:819`). The ordinal
-> memo, its primers and annotators, the stored-message count, the
-> continuation shift, and the `message.removed` invalidation are deleted.
-> TE17 is preserved and scoped to the window; TE18 is invalidated; TE19 is
-> extended by the id scan; TE21 and TE22 are preserved. WP-E11 in #824 is the
-> WP-P11 baseline: a failed pass publishes no failed candidate, and the first
-> #832 change served the input unchanged. The second #832 change adds WP-P11:
-> a real failure, or a decline in `LAST_APPLIED_DECLINES` (capture bytes,
-> `session_busy`, or an unrecognized status, which main serves from the last
-> applied output), of a pass declared at the retained basis anchor serves exactly the applied output followed by the
-> window after the acknowledged prefix, and only when the prefix digest and
-> terminal tape match, the applied values are live, the owner, root, and
-> window recheck hold, and the slots can be charged (`serveLastApplied`,
-> `rust-mode-transform.ts:1047`; the source is recorded only for a prefix
-> verified at an equal anchor, `:1283`, and never on the rerun after a
-> `boundary_unknown`, whose basis the daemon may have disowned); it promotes no
-> basis and never rebases tapes.
-> Each pass reads its retained record with `RetainedOutputs.get`, so a session that keeps failing open counts as used for eviction; the fail-open identity recheck uses `peek`.
-> WP-P14: tool availability comes from the session database's
-> earliest user row (`:1300`), never the window's first user. Witnesses named in these notes are in
-> `rust-mode-window.test.ts` unless another file is named: "appends exactly
-> the unacknowledged window suffix and promotes no basis", "serves raw against
-> a mismatched basis anchor or a changed terminal message", "serves raw when a
-> rerun fails after rediscovering the basis the daemon disowned", "takes the verdict
-> from the earliest user row in both signal directions", and "freezes
-> fail-open without a database and stays fail-closed for an unpersisted
-> session".
+> memo, its primers and annotators, the stored-message count, the continuation
+> shift, and the `message.removed` invalidation are deleted. TE17 is preserved
+> and scoped to the window; TE18 is invalidated; TE19 is extended by the id
+> scan; TE21 and TE22 are preserved. WP-E11 in #824 is the WP-P11 baseline: a
+> failed pass publishes no failed candidate, and the first #832 change served
+> the input unchanged. The second #832 change adds WP-P11: a real failure, or
+> a decline in `LAST_APPLIED_DECLINES` (capture bytes, `session_busy`, or an
+> unrecognized status, which main serves from the last applied output), of a
+> pass declared at the retained basis anchor serves exactly the applied output
+> followed by the window after the acknowledged prefix, and only when the
+> prefix digest and terminal tape match, the applied values are live, the
+> owner, root, and window recheck hold, and the slots can be charged
+> (`serveLastApplied`, `rust-mode-transform.ts:1069`; the source is recorded
+> only for a prefix verified at an equal anchor, `:1299`, and never on the
+> rerun after a `boundary_unknown`, whose basis the daemon may have disowned);
+> it promotes no basis and never rebases tapes. Each pass reads its retained
+> record with `RetainedOutputs.get`, so a session that keeps failing open
+> counts as used for eviction; the fail-open identity recheck uses `peek`.
+> WP-P14: tool availability comes from the session database's earliest user
+> row (`:1316`), never the window's first user. Witnesses named in these notes
+> are in `rust-mode-window.test.ts` unless another file is named: "appends
+> exactly the unacknowledged window suffix and promotes no basis", "serves raw
+> against a mismatched basis anchor or a changed terminal message", "serves
+> raw when a rerun fails|declines session_busy after rediscovering the basis
+> the daemon disowned", "appends the unacknowledged window suffix on a
+> session_busy|status_added_later decline", "takes the verdict from the
+> earliest user row in both signal directions", and "freezes fail-open without
+> a database and stays fail-closed for an unpersisted session";
+> `rust-mode-transform.test.ts` "serves the last applied output plus the
+> appended messages on a session_busy|status_added_later decline" and "keeps a
+> session that serves its last applied output ahead of idle sessions in the
+> eviction order".
 
 This directory is a client implementation supplement for
 [#533](https://github.com/ahrav/eidnara/issues/533), not the reusable 30-record
@@ -176,7 +182,7 @@ Open questions:
 
 - The directory and permission awaits (`rust-mode-transform.ts:1087`, `:1096`) are ownership fences only. Clear, invalidation, and supersession are exercised at the page fence (`:1299`) and the ordinal yield; no witness lands one of those faults during the directory or permission await specifically.
 - Preserved by #829. The `need_full_sync` retry and its `retry-wire-build` recheck are deleted with the delta channel, and with them the witness `:2594` "does not dispatch a need_full_sync retry after mutation|supersession|clear|invalidation of the valid first send". The wire-build, series-restart, and page rechecks and their witnesses remain; #832 deletes the ordinal recheck with the ordinal memo.
-- Preserved by #832 and scoped to the captured window. The capture is the private copy of `host[boundaryIndex..length)`, taken synchronously once `boundaryIndex` is fixed (`rust-mode-transform.ts:1198`), and declined as `source_changed` when its head is no longer the declared mid because discovery awaited after fixing it; `recheckCapture` (`:1267`) verifies the same root, its own `then` and the built-in prototypes, the captured length, and every window slot reference and tape at wire build (`:1389`), series restart (`:1546`), and publication (`:1624`). The full-history retry and ordinal-prime clauses are invalidated. The directory await now precedes the capture because discovery routes through it, so a cold pass reads the directory before it can refuse a hostile window. A root property outside the window is not captured state. Witnesses: "declines prefix deletion|same-length reorder|root rebinding|interior window omission during the await with no candidate write and no promotion" (4 cases; marker: the pending body declared `m-6` with a four-message window before the mutation; `output.messages` equals the mutated array, holds no candidate, and `boundary` stays `m-6`); "declines when the host moves the discovered anchor before the window is copied" (marker: the splice runs in a microtask after discovery's scan and before the capture resumes; no body is sent); `rust-mode-transform.test.ts` "preserves a host member|append|rebind|metadata during transport with shared|distinct source" (metadata now publishes and keeps the property).
+- Preserved by #832 and scoped to the captured window. The capture is the private copy of `host[boundaryIndex..length)`, taken synchronously once `boundaryIndex` is fixed (`rust-mode-transform.ts:1217`), and declined as `source_changed` when its head is no longer the declared mid because discovery awaited after fixing it; `recheckCapture` (`:1284`) verifies the same root, its own `then` and the built-in prototypes, the captured length, and every window slot reference and tape at wire build (`:1406`), series restart (`:1562`), and publication (`:1641`). The full-history retry and ordinal-prime clauses are invalidated. The directory await now precedes the capture because discovery routes through it, so a cold pass reads the directory before it can refuse a hostile window. A root property outside the window is not captured state. Witnesses: "declines prefix deletion|same-length reorder|root rebinding|interior window omission during the await with no candidate write and no promotion" (4 cases; marker: the pending body declared `m-6` with a four-message window before the mutation; `output.messages` equals the mutated array, holds no candidate, and `boundary` stays `m-6`); "declines when the host moves the discovered anchor before the window is copied" (marker: the splice runs in a microtask after discovery's scan and before the capture resumes; no body is sent); `rust-mode-transform.test.ts` "preserves a host member|append|rebind|metadata during transport with shared|distinct source" (metadata now publishes and keeps the property).
 - Discovery's time budget (D19) runs from the pass start: `DISCOVERY_BUDGET_MS`, the 5 s transform deadline less a 4 s reserve, bounds every discovery walk in a pass, including the rediscovery after a `boundary_unknown`, which gets only what the first attempt left. The transform sends are bounded by their own per-call timeout. Witness: "declines a rediscovery once a slow first send spent the pass's discovery budget" (marker: the first send sleeps 1.1 s before `boundary_unknown`; the decline log reads `discovery_declined (time budget)`, no second walk and no second transform body, and the host array is unchanged).
 
 ### ordinal-memo-promotion-is-owned
@@ -194,7 +200,7 @@ Existing check: `rust-mode-transform.test.ts:2367` "rejects mutation|supersessio
 Impact: a rejected pass leaves ordinals in the shared memo that the next pass trusts, producing mismatched ordinals or a spurious `need_full_sync`.
 Open questions:
 
-- Invalidated by #832: the ordinal memo, `primeOrdinalMemo`, `annotateOrdinals`, the stored-message count, the continuation shift, and the `message.removed` invalidation are deleted, and no request carries an ordinal ("sends the declared window in both representations and publishes the recipe at boundaryIndex + i" asserts the body text holds no `ordinal`). The per-session state that promotes only on accepted publication is now the declared `boundary` (`rust-mode-transform.ts:1667`). Earlier, #829 deleted the `need_full_sync` retry with the delta channel, and with it the witness "does not dispatch a need_full_sync retry after mutation|supersession|clear|invalidation of the valid first send"; there is no `need_full_sync` to answer spuriously.
+- Invalidated by #832: the ordinal memo, `primeOrdinalMemo`, `annotateOrdinals`, the stored-message count, the continuation shift, and the `message.removed` invalidation are deleted, and no request carries an ordinal ("sends the declared window in both representations and publishes the recipe at boundaryIndex + i" asserts the body text holds no `ordinal`). The per-session state that promotes only on accepted publication is now the declared `boundary` (`rust-mode-transform.ts:1684`). Earlier, #829 deleted the `need_full_sync` retry with the delta channel, and with it the witness "does not dispatch a need_full_sync retry after mutation|supersession|clear|invalidation of the valid first send"; there is no `need_full_sync` to answer spuriously.
 
 ### referenceable-json-rejects-hooks-before-reading
 
