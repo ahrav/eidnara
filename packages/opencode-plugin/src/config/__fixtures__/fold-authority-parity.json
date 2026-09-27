@@ -528,6 +528,43 @@
             ],
             "expected_admission": "admitted",
             "expected_eidnara_folds": true
+        },
+        {
+            "name": "two invalid elements of one array leave the chain",
+            "user_tier_files": {
+                "eidnara.jsonc": "{\n    \"history_summarizer\": {\n        \"model\": \"anthropic/claude-haiku-4-5\",\n        \"disallowed_tools\": [\n            \"bad\",\n            \"worse\"\n        ]\n    }\n}\n"
+            },
+            "project_tier_files": {},
+            "env": {},
+            "expected_chain": [
+                "anthropic/claude-haiku-4-5"
+            ],
+            "expected_admission": "admitted",
+            "expected_eidnara_folds": true
+        },
+        {
+            "name": "a prototype-pollution key in the summarizer block is unresolved",
+            "user_tier_files": {
+                "eidnara.jsonc": "{ \"history_summarizer\": { \"model\": \"anthropic/claude-haiku-4-5\", \"__proto__\": { \"model\": \"openai/gpt-5.6-mini\" } } }\n"
+            },
+            "project_tier_files": {},
+            "env": {},
+            "expected_chain": null,
+            "expected_admission": "unresolved",
+            "expected_eidnara_folds": null
+        },
+        {
+            "name": "a prototype-pollution key in a project summarizer block is unresolved",
+            "user_tier_files": {
+                "eidnara.jsonc": "{\n    \"history_summarizer\": {\n        \"model\": \"anthropic/claude-haiku-4-5\"\n    }\n}\n"
+            },
+            "project_tier_files": {
+                "eidnara.jsonc": "{ \"history_summarizer\": { \"__proto__\": {} } }\n"
+            },
+            "env": {},
+            "expected_chain": null,
+            "expected_admission": "unresolved",
+            "expected_eidnara_folds": null
         }
     ]
 }

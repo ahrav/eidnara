@@ -1,4 +1,5 @@
 import { describe, expect, it } from "bun:test";
+import { execFileSync } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -580,23 +581,23 @@ describe("loadPluginConfigDetailed — combined outcome", () => {
 
     it("binds two fields that reference the same missing token to distinct paths", () => {
         const result = loadDetailedWithUserConfig(
-            '{"history_summarizer": {"model": "{env:EIDNARA_TEST_UNSET_SHARED}"}, "context_researcher": {"model": "{env:EIDNARA_TEST_UNSET_SHARED}"}}',
+            '{"history_summarizer": {"variant": "{env:EIDNARA_TEST_UNSET_SHARED}"}, "context_researcher": {"model": "{env:EIDNARA_TEST_UNSET_SHARED}"}}',
         );
 
         expect(result.substitutionFailures.map((failure) => failure.keyPath)).toEqual([
-            "history_summarizer.model",
+            "history_summarizer.variant",
             "context_researcher.model",
         ]);
     });
 
     it("binds a failure inside an array-valued setting to its indexed path", () => {
         const result = loadDetailedWithUserConfig(
-            '{"history_summarizer": {"fallback_models": ["a/b", "{env:EIDNARA_TEST_UNSET_FALLBACK}"]}, "prompt_surface": {"default": ""}}',
+            '{"context_researcher": {"fallback_models": ["a/b", "{env:EIDNARA_TEST_UNSET_FALLBACK}"]}, "prompt_surface": {"default": ""}}',
         );
 
         // The legitimately empty `prompt_surface.default` must not absorb the array failure.
         expect(result.substitutionFailures).toEqual([
-            expect.objectContaining({ keyPath: "history_summarizer.fallback_models.[1]" }),
+            expect.objectContaining({ keyPath: "context_researcher.fallback_models.[1]" }),
         ]);
     });
 });
@@ -1077,7 +1078,13 @@ describe("fold-authority parity fixture", () => {
         readFileSync(join(import.meta.dir, "__fixtures__", "fold-authority-parity.json"), "utf-8"),
     ) as { rows: ParityRow[] };
 
-    function outcome(load: () => { config: unknown; admission: ConfigAdmission }) {
+    interface Outcome {
+        chain: string[] | null;
+        admission: string;
+        folds: boolean | null;
+    }
+
+    function outcome(load: () => { config: unknown; admission: ConfigAdmission }): Outcome {
         let loaded: { config: unknown; admission: ConfigAdmission };
         try {
             loaded = load();
@@ -1096,7 +1103,7 @@ describe("fold-authority parity fixture", () => {
         };
     }
 
-    const expected = (row: ParityRow) => ({
+    const expected = (row: ParityRow): Outcome => ({
         chain: row.expected_chain,
         admission: row.expected_admission,
         folds: row.expected_eidnara_folds,
@@ -1109,6 +1116,21 @@ describe("fold-authority parity fixture", () => {
                 loadDetailedWithTierFiles(row.user_tier_files, row.project_tier_files, row.env),
             );
             expect({ name: row.name, ...actual }).toEqual({ name: row.name, ...expected(row) });
+        }
+    });
+
+    it("skips substitution of an excluded chain value, so a FIFO target never blocks", () => {
+        const fifoDir = mkdtempSync(join(tmpdir(), "eidnara-config-fifo-"));
+        try {
+            const fifo = join(fifoDir, "model");
+            execFileSync("mkfifo", [fifo]);
+            const user = JSON.stringify({
+                history_summarizer: { model: `{file:${fifo}}`, fallback_models: ["a/fallback"] },
+            });
+            const actual = outcome(() => loadDetailedWithTierFiles({ "eidnara.jsonc": user }, {}));
+            expect(actual).toEqual({ chain: ["a/fallback"], admission: "admitted", folds: true });
+        } finally {
+            rmSync(fifoDir, { recursive: true, force: true });
         }
     });
 

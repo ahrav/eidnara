@@ -4,7 +4,11 @@ import {
     eidnaraProjectConfigBasePath,
     eidnaraUserConfigBasePath,
 } from "@eidnara/opencode/config/config-paths";
-import { type ConfigAdmission, screenUserTier } from "@eidnara/opencode/config/fold-authority";
+import {
+    type ConfigAdmission,
+    rejectedAuthorityKeys,
+    screenUserTier,
+} from "@eidnara/opencode/config/fold-authority";
 import type { LoadOutcome } from "@eidnara/opencode/config/load-outcome";
 import {
     constrainProjectThresholdOverrides,
@@ -84,27 +88,29 @@ function loadConfigFile(path: string, scope: "user" | "project"): LoadedConfigFi
         // A FIFO without a writer would block a plain read; the regular-file reader rejects it and
         // a directory, so either becomes this file's load warning instead of a hang.
         const rawText = readRegularFileSync(path);
+        const screen =
+            scope === "user"
+                ? screenUserTier(rawText)
+                : { text: rawText, rejections: [], warnings: [] };
         const substituted = substituteConfigVariables({
-            text: rawText,
+            text: screen.text,
             configPath: path,
             // Project configs cannot expand `{env:}` or `{file:}` tokens because they may expose secrets.
             // Project configs cannot expand `{env:}` or `{file:}` tokens because they may expose secrets.
             isProjectConfig: scope === "project",
         });
-        const rejectedKeyPaths: string[] = [];
+        const rejectedKeyPaths: (string | number)[][] = [];
         const parsed = parseConfigJsonc<unknown>(substituted.text, {
-            onRejectedKey: (keyPath) => rejectedKeyPaths.push(keyPath.join(".")),
+            onRejectedKey: (keyPath) => rejectedKeyPaths.push([...keyPath]),
         });
         // Reject non-object roots because `removedKeyWarnings` and the raw merge index them by key.
         if (!isPlainObject(parsed)) {
             throw new Error(`config root must be a JSON object, got ${redactConfigValue(parsed)}`);
         }
         const config = parsed;
-        const screen =
-            scope === "user" ? screenUserTier(rawText, config) : { rejections: [], warnings: [] };
         const unsafeKeyWarnings = rejectedKeyPaths.map(
             (keyPath) =>
-                `Ignored unsafe config key "${keyPath}" (security: prototype-pollution keys are not allowed).`,
+                `Ignored unsafe config key "${keyPath.join(".")}" (security: prototype-pollution keys are not allowed).`,
         );
         return {
             path,
@@ -113,7 +119,10 @@ function loadConfigFile(path: string, scope: "user" | "project"): LoadedConfigFi
             warnings: [...substituted.warnings, ...unsafeKeyWarnings, ...screen.warnings].map(
                 (warning) => `${path}: ${warning}`,
             ),
-            authorityRejections: screen.rejections.map((rejection) => `${path}: ${rejection}`),
+            authorityRejections: [
+                ...screen.rejections,
+                ...rejectedAuthorityKeys(rejectedKeyPaths),
+            ].map((rejection) => `${path}: ${rejection}`),
             loadOutcome:
                 rejectedKeyPaths.length > 0
                     ? "schema-recovery"
@@ -290,6 +299,7 @@ function parsePiConfig(
                 ...(rawValue as Record<string, unknown>),
             };
             const prunedLeaves: string[] = [];
+            const removedPaths: PropertyKey[][] = [];
             for (const p of issuePaths) {
                 // Recovery prunes the deepest invalid leaf so valid siblings remain.
                 // Recovery preserves a sibling `enabled: false`.
@@ -297,12 +307,21 @@ function parsePiConfig(
                 const result = pruneNestedConfigLeaf(prunedBlock, relative);
                 if (result) {
                     prunedBlock = result.block;
+                    removedPaths.push([...result.removed]);
                     // The rendered leaf omits `key`, which the warning names separately.
                     prunedLeaves.push(
                         redactConfigIssuePath([key, ...result.removed])
                             .slice(1)
                             .join("."),
                     );
+                    continue;
+                }
+                // An earlier prune already removed this leaf with its container.
+                if (
+                    removedPaths.some((removed) =>
+                        removed.every((segment, index) => relative[index] === segment),
+                    )
+                ) {
                     continue;
                 }
                 // A missing required leaf has nothing to prune, so the whole block goes.

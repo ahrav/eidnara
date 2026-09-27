@@ -11,7 +11,7 @@ import { isRecord } from "../shared/record-type-guard";
 import { readRegularFileSync } from "../shared/regular-file";
 import { setWindowOverlayPath } from "../shared/window-geometry";
 import { eidnaraProjectConfigBasePath, eidnaraUserConfigBasePath } from "./config-paths";
-import { type ConfigAdmission, screenUserTier } from "./fold-authority";
+import { type ConfigAdmission, rejectedAuthorityKeys, screenUserTier } from "./fold-authority";
 import type { LoadOutcome } from "./load-outcome";
 import {
     constrainProjectThresholdOverrides,
@@ -114,8 +114,12 @@ function loadConfigFileDetailed(
     }
 
     try {
+        const screen =
+            source === "user"
+                ? screenUserTier(rawText)
+                : { text: rawText, rejections: [], warnings: [] };
         const substituted = substituteConfigVariables({
-            text: rawText,
+            text: screen.text,
             configPath,
             isProjectConfig: source === "project",
         });
@@ -131,8 +135,6 @@ function loadConfigFileDetailed(
         }
         const config: Record<string, unknown> = parsed;
         const prefix = (warning: string) => `${configPath}: ${warning}`;
-        const screen =
-            source === "user" ? screenUserTier(rawText, config) : { rejections: [], warnings: [] };
         const substitutionWarnings = substituted.warnings.map(prefix);
         const substitutionFailures = substituted.failures.map((failure) => ({
             ...failure,
@@ -158,7 +160,10 @@ function loadConfigFileDetailed(
                       : "ok",
             source,
             substitutionFailures,
-            authorityRejections: screen.rejections.map(prefix),
+            authorityRejections: [
+                ...screen.rejections,
+                ...rejectedAuthorityKeys(rejectedKeyPaths),
+            ].map(prefix),
         };
     } catch (error) {
         return failed(

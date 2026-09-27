@@ -80,7 +80,12 @@ describe("readEidnaraModes", () => {
 });
 
 describe("projectModeOverrides", () => {
-    const shared = { enabled: true, compactionEnabled: false, memoryEnabled: true };
+    const shared = {
+        enabled: true,
+        compactionEnabled: false,
+        memoryEnabled: true,
+        admission: { status: "admitted" } as const,
+    };
 
     it("reports enabled and memory disagreements, not the stripped compaction mode", () => {
         const project = write(

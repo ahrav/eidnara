@@ -120,8 +120,6 @@ pub struct DaemonConfig {
     pub cache_ttl: String,
     /// Per-model TTL overrides use exact, bare, dash-stripped, provider-wildcard, then default matching.
     pub cache_ttl_by_model: std::collections::BTreeMap<String, String>,
-    /// When `admission` is `Unresolved`, the other fields retain the project's last admitted
-    /// resolution, or defaults if the project has none.
     pub admission: ConfigAdmission,
 }
 
@@ -259,16 +257,15 @@ struct TierConfig {
 pub struct ConfigCache {
     user: TierConfig,
     project: TierConfig,
-    admitted: std::collections::VecDeque<(PathBuf, DaemonConfig)>,
+    admitted_user: Option<Option<Value>>,
+    admitted_projects: std::collections::VecDeque<(PathBuf, Option<Value>)>,
 }
 
 const ADMITTED_PROJECT_CAPACITY: usize = 8;
 
 impl ConfigCache {
     /// Loads user config from the platform path and project config below `project_root`.
-    ///
-    /// Missing, unreadable, and malformed files act as absent tiers. Unreadable and malformed
-    /// files also produce warnings. Warnings go to stderr.
+    /// Warnings go to stderr.
     pub fn effective_for_project(&mut self, project_root: &Path) -> DaemonConfig {
         let (effective, warnings) = self.effective_for_env(
             std::env::var("XDG_CONFIG_HOME").ok().as_deref(),
@@ -314,18 +311,39 @@ impl ConfigCache {
             None => None,
         };
         let project = read_tier_cached(&mut self.project, project_path);
-        let mut rejections: Vec<String> = self
-            .project
-            .warning
-            .iter()
-            .chain(user_path.and(self.user.warning.as_ref()))
-            .cloned()
+        let mut user_rejections: Vec<String> = user_path
+            .and(self.user.warning.clone())
+            .into_iter()
             .collect();
-        for (tier, user_tier) in [(user.as_ref(), true), (project.as_ref(), false)] {
-            if let Some(tier) = tier {
-                authority_rejections(tier, user_tier, &mut rejections);
-            }
+        if let Some(user) = &user {
+            authority_rejections(user, true, &mut user_rejections);
         }
+        let mut project_rejections: Vec<String> = self.project.warning.iter().cloned().collect();
+        if let Some(project) = &project {
+            authority_rejections(project, false, &mut project_rejections);
+        }
+        let user = if user_rejections.is_empty() {
+            self.admitted_user = Some(user.clone());
+            user
+        } else {
+            self.admitted_user.clone().flatten()
+        };
+        let retained = self
+            .admitted_projects
+            .iter()
+            .position(|(root, _)| root == project_root)
+            .and_then(|index| self.admitted_projects.remove(index));
+        let project = if project_rejections.is_empty() {
+            project
+        } else {
+            retained.and_then(|(_, project)| project)
+        };
+        if self.admitted_projects.len() == ADMITTED_PROJECT_CAPACITY {
+            self.admitted_projects.pop_front();
+        }
+        self.admitted_projects
+            .push_back((project_root.to_path_buf(), project.clone()));
+
         let (mut effective, mut warnings) =
             merge_tiers_with_warnings(user.as_ref(), project.as_ref());
         for tier in [&self.user, &self.project] {
@@ -334,27 +352,15 @@ impl ConfigCache {
         if let Some(user_path) = user_path {
             resolve_user_guidance_override(&mut effective, user.as_ref(), user_path, &mut warnings);
         }
-        if rejections.is_empty() {
-            self.admitted.retain(|(root, _)| root != project_root);
-            if self.admitted.len() == ADMITTED_PROJECT_CAPACITY {
-                self.admitted.pop_front();
-            }
-            self.admitted
-                .push_back((project_root.to_path_buf(), effective.clone()));
-            return (effective, warnings);
+        let rejections = [user_rejections, project_rejections].concat();
+        if !rejections.is_empty() {
+            let reason = rejections.join("; ");
+            warnings.push(format!(
+                "configuration unresolved ({reason}); the last admitted tier documents stay in effect"
+            ));
+            effective.admission = ConfigAdmission::Unresolved { reason };
         }
-        let reason = rejections.join("; ");
-        warnings.push(format!(
-            "configuration unresolved ({reason}); the last admitted configuration stays in effect"
-        ));
-        let mut kept = self
-            .admitted
-            .iter()
-            .find(|(root, _)| root == project_root)
-            .map(|(_, config)| config.clone())
-            .unwrap_or_default();
-        kept.admission = ConfigAdmission::Unresolved { reason };
-        (kept, warnings)
+        (effective, warnings)
     }
 }
 
@@ -2401,8 +2407,9 @@ mod tests {
         filetime::set_file_mtime(&user, filetime::FileTime::from_system_time(original_mtime))
             .unwrap();
         let (repaired, repaired_warnings) = cache.effective_with_warnings(Some(&user), &project);
+        assert!(!repaired.memory_enabled);
         assert!(
-            repaired.memory_enabled,
+            matches!(repaired.admission, ConfigAdmission::Unresolved { .. }),
             "the unreadable project tier keeps the configuration unresolved"
         );
         assert_eq!(repaired_warnings.len(), 2, "{repaired_warnings:?}");
@@ -2627,30 +2634,48 @@ mod fold_authority_parity {
     }
 
     #[test]
-    fn retained_resolutions_are_bounded_per_project_root() {
+    fn retained_project_documents_are_bounded_and_the_user_document_survives_churn() {
         let home = tempfile::tempdir().unwrap();
         let user = home.path().join("eidnara").join("eidnara.jsonc");
         std::fs::create_dir_all(user.parent().unwrap()).unwrap();
         std::fs::write(&user, r#"{ "history_summarizer": { "model": "model-a" } }"#).unwrap();
-        let projects: Vec<_> = (0..ADMITTED_PROJECT_CAPACITY + 2)
-            .map(|_| tempfile::tempdir().unwrap())
+        filetime::set_file_mtime(&user, filetime::FileTime::from_unix_time(1_000, 0)).unwrap();
+        let projects: Vec<_> = (0..ADMITTED_PROJECT_CAPACITY + 1)
+            .map(|_| {
+                let project = tempfile::tempdir().unwrap();
+                write_tier(
+                    &project.path().join(".eidnara"),
+                    &serde_json::json!({ "eidnara.jsonc": r#"{ "memory": { "enabled": false } }"# }),
+                );
+                project
+            })
             .collect();
         let mut cache = ConfigCache::default();
         for project in &projects {
-            cache.effective_for_env(home.path().to_str(), None, project.path());
+            let (config, _) = cache.effective_for_env(home.path().to_str(), None, project.path());
+            assert!(!config.memory_enabled);
         }
-        assert_eq!(cache.admitted.len(), ADMITTED_PROJECT_CAPACITY);
-        assert!(
-            !cache
-                .admitted
-                .iter()
-                .any(|(root, _)| root == projects[0].path())
-        );
-        assert!(
-            cache
-                .admitted
-                .iter()
-                .any(|(root, _)| root == projects.last().unwrap().path())
-        );
+        assert_eq!(cache.admitted_projects.len(), ADMITTED_PROJECT_CAPACITY);
+
+        let evicted = projects[0].path();
+        std::fs::write(evicted.join(".eidnara").join("eidnara.jsonc"), "{ broken").unwrap();
+        let (broken_project, _) = cache.effective_for_env(home.path().to_str(), None, evicted);
+        assert!(matches!(
+            broken_project.admission,
+            ConfigAdmission::Unresolved { .. }
+        ));
+        assert!(broken_project.memory_enabled);
+        assert!(broken_project.eidnara_folds());
+
+        std::fs::write(&user, r#"{ "history_summarizer": { "model": 5 } }"#).unwrap();
+        filetime::set_file_mtime(&user, filetime::FileTime::from_unix_time(2_000, 0)).unwrap();
+        let retained = projects.last().unwrap().path();
+        let (broken_user, _) = cache.effective_for_env(home.path().to_str(), None, retained);
+        assert!(matches!(
+            broken_user.admission,
+            ConfigAdmission::Unresolved { .. }
+        ));
+        assert_eq!(broken_user.model_chain, vec!["model-a"]);
+        assert!(!broken_user.memory_enabled);
     }
 }
