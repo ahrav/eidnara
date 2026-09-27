@@ -1677,6 +1677,8 @@ impl From<ModuleHistorySegmentWire> for StoredHistorySegment {
             episode_type: value.episode_type,
             legacy: value.legacy,
             created_at: value.created_at,
+            // The state-sync wire carries no claims, and the wire does not change.
+            claims: Vec::new(),
         }
     }
 }
@@ -18344,9 +18346,9 @@ mod tests {
                 );
                 assert_eq!(firing.prompt.as_bytes(), expected_prompt.as_bytes());
                 let expected_digest = match budget {
-                    1 => "0e0eb1f520ba2500bd1fdd653c805dc72fed78e64197f569294a9eb091c5ef34",
-                    128 => "92b29f62d5d0341b8421f53bf1169721ad6523a8a32045ccd5168cf144863d1d",
-                    _ => "48238b64939260eb768998bf3f2a9caa393857e6e006e3082526fb1afb7da207",
+                    1 => "cc8e4171645e669d0e79005cfff6da6e5dfbdf9bf3a45673d0e91200d3759e2a",
+                    128 => "b55fe9c5d4a9fa9e9761af05ae28c8c02067ee78e4aa2780a45f64e0a1091b7e",
+                    _ => "32dc03a8e8ebfe0bb388c8f1b1ed760fb562e195b555e731a81bd06374880054",
                 };
                 assert_eq!(
                     format!("{:x}", Sha256::digest(firing.prompt.as_bytes())),

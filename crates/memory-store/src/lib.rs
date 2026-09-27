@@ -561,7 +561,7 @@ pub struct HistorySummarizerSelectedMessageIdentity {
     pub block_identities: Vec<BlockIdentity>,
 }
 
-/// Why a History Summarizer fact set was rejected as a whole (Q30). Closed and content-free: the daemon's validator produces it and the publication transaction records it as a nonadmission reason.
+/// Why a History Summarizer fact set, or its claims block, was rejected as a whole (Q30). Closed and content-free: the daemon's validator produces it, and the publication transaction records a fact set's rejection as a nonadmission reason; a claims rejection reaches only the claims diagnostic line, never a nonadmission record.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
 #[serde(rename_all = "snake_case")]
 pub enum ExtractionFailure {
@@ -589,6 +589,9 @@ pub enum ExtractionFailure {
     /// A fact carried no citation, so it cannot be reattached to native identity.
     #[error("missing_citation")]
     MissingCitation,
+    /// The `<claims>` block was truncated, repeated, or carried material that is not a claim element.
+    #[error("malformed_claims")]
+    MalformedClaims,
 }
 
 /// Why a History Summarizer firing's fact candidates were not admitted to MemoryReviewer review before any reservation was made (Q31). Closed and content-free.
@@ -2470,6 +2473,21 @@ pub struct StoredHistorySegment {
     /// 1 = pre-v2 flat history_segment, 0 = v2 tiered.
     pub legacy: i32,
     pub created_at: i64,
+    /// Keyed scalar facts the summarizer stated in this segment, validated
+    /// before publish; written once at insert, never updated.
+    pub claims: Vec<Claim>,
+}
+
+/// One keyed claim of a history segment: the value a cited message states
+/// for `key`, that message's ordinal, and the span of the segment's trimmed
+/// `p1` that states it. A later claim with the same key supersedes it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Claim {
+    pub key: String,
+    /// Empty when the fact was retracted with no replacement.
+    pub value: String,
+    pub ordinal: i64,
+    pub anchor: Option<String>,
 }
 
 /// The range and anchors of one stored history_segment, without its text.
@@ -4627,7 +4645,7 @@ fn prepare_history_segment(
     if let Some(episode_type) = &history_segment.episode_type {
         write.identity("episode_type", episode_type)?;
     }
-    Ok(StoredHistorySegment {
+    let mut prepared = StoredHistorySegment {
         sequence: history_segment.sequence,
         start_message: history_segment.start_message,
         end_message: history_segment.end_message,
@@ -4669,7 +4687,60 @@ fn prepare_history_segment(
         episode_type: history_segment.episode_type.clone(),
         legacy: history_segment.legacy,
         created_at: history_segment.created_at,
-    })
+        claims: Vec::new(),
+    };
+    prepared.claims = prepare_claims(
+        write,
+        &history_segment.claims,
+        prepared.p1.as_deref().unwrap_or_default().trim(),
+    )?;
+    Ok(prepared)
+}
+
+/// Scans each claim's key, value, and anchor as a field of its own, never the
+/// JSON blob, redacting rather than rejecting so a claim never fails its
+/// segment's write, and drops an anchor the redacted trimmed `p1` no longer
+/// contains, so a stored anchor always lies inside the stored `p1`.
+fn prepare_claims(
+    write: &mut PreparedWrite,
+    claims: &[Claim],
+    p1: &str,
+) -> Result<Vec<Claim>, MemoryStoreError> {
+    claims
+        .iter()
+        .map(|claim| {
+            let anchor = claim
+                .anchor
+                .as_deref()
+                .map(|anchor| write.content("claim_anchor", anchor))
+                .transpose()?
+                .filter(|anchor| !anchor.is_empty() && p1.contains(anchor.as_str()));
+            Ok(Claim {
+                key: write.content("claim_key", &claim.key)?,
+                value: write.content("claim_value", &claim.value)?,
+                ordinal: claim.ordinal,
+                anchor,
+            })
+        })
+        .collect()
+}
+
+/// A stored `claims` cell as claims. A cell that does not read as a claim
+/// array, or that is not text at all (`None`), is no claims with one
+/// diagnostic line: a claims fault never fails a segment load.
+fn claims_from_cell(cell: Option<&str>) -> Vec<Claim> {
+    let reason = match cell.map(serde_json::from_str::<Vec<Claim>>) {
+        Some(Ok(claims)) => return claims,
+        Some(Err(error)) => error.to_string(),
+        None => "not a text cell".to_string(),
+    };
+    eprintln!("memory-store: history_segment claims unreadable, read as none: {reason}");
+    Vec::new()
+}
+
+/// The `claims` cell a row stores: a JSON array, `[]` when empty, never NULL.
+fn claims_cell(claims: &[Claim]) -> String {
+    serde_json::to_string(claims).expect("claims serialize")
 }
 
 fn prepare_history_segments(
@@ -5743,7 +5814,7 @@ const CACHE_STATE_META_SCALAR_SELECT: &str = "SELECT json_valid(meta, 1), json_t
 /// positional order that mapper reads. All history_segment SELECTs interpolate
 /// this one constant: the mapper indexes by position, so a reordered or
 /// partial per-site list would silently mis-map fields.
-const HISTORY_SEGMENT_SELECT_COLUMNS: &str = "sequence, start_message, end_message, start_message_id, end_message_id, start_date, end_date, title, content, p1, p2, p3, p4, importance, episode_type, legacy, created_at";
+const HISTORY_SEGMENT_SELECT_COLUMNS: &str = "sequence, start_message, end_message, start_message_id, end_message_id, start_date, end_date, title, content, p1, p2, p3, p4, importance, episode_type, legacy, created_at, claims";
 
 #[derive(Debug, thiserror::Error)]
 enum AuthorityTransitionError {
@@ -10489,6 +10560,7 @@ impl MemoryStore {
             episode_type: r.get(14)?,
             legacy: r.get::<_, Option<i64>>(15)?.unwrap_or(0) as i32,
             created_at: r.get(16)?,
+            claims: claims_from_cell(r.get_ref(17)?.as_str().ok()),
         })
     }
 
@@ -11586,7 +11658,7 @@ impl MemoryStore {
                 "INSERT INTO history_segments (
                      session_id, sequence, start_message, end_message, start_message_id,
                      end_message_id, start_date, end_date, title, content, p1, p2, p3, p4,
-                     importance, episode_type, legacy, created_at
+                     importance, episode_type, legacy, created_at, claims
                  )
                   SELECT ?1, sequence, start_message, end_message,
                          reject_transaction_text(start_message_id),
@@ -11604,7 +11676,13 @@ impl MemoryStore {
                          importance,
                          CASE WHEN episode_type IS NULL THEN NULL
                               ELSE reject_transaction_text(episode_type) END,
-                         legacy, created_at
+                         legacy, created_at,
+                         -- The claims were scanned field by field when their row was
+                         -- inserted and are not re-scanned here: the column has no rows
+                         -- from before insert-time scanning. A copy whose p1 the re-scan
+                         -- changes keeps none, so no copied anchor falls outside its p1.
+                         CASE WHEN p1 IS NULL OR redact_transaction_text(p1) = p1
+                              THEN claims ELSE '[]' END
                    FROM history_segments WHERE session_id = ?2",
                 params![request.target_key, source_key],
             )?;
@@ -15582,51 +15660,14 @@ fn write_seed_history_segment_tx(
     session_id: &str,
     c: &StoredHistorySegment,
 ) -> rusqlite::Result<()> {
+    // An overwrite replaces the row through the one insert rather than updating
+    // it, so no statement updates `claims` and the claims always belong to the
+    // `p1` they were written with.
     tx.execute(
-        "INSERT INTO history_segments
-           (session_id, sequence, start_message, end_message, start_message_id,
-            end_message_id, start_date, end_date, title, content, p1, p2, p3, p4,
-            importance, episode_type, legacy, created_at)
-         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18)
-         ON CONFLICT(session_id, sequence) DO UPDATE SET
-            start_message = excluded.start_message,
-            end_message = excluded.end_message,
-            start_message_id = excluded.start_message_id,
-            end_message_id = excluded.end_message_id,
-            start_date = excluded.start_date,
-            end_date = excluded.end_date,
-            title = excluded.title,
-            content = excluded.content,
-            p1 = excluded.p1,
-            p2 = excluded.p2,
-            p3 = excluded.p3,
-            p4 = excluded.p4,
-            importance = excluded.importance,
-            episode_type = excluded.episode_type,
-            legacy = excluded.legacy,
-            created_at = excluded.created_at",
-        params![
-            session_id,
-            c.sequence,
-            c.start_message,
-            c.end_message,
-            &c.start_message_id,
-            &c.end_message_id,
-            c.start_date.as_deref(),
-            c.end_date.as_deref(),
-            &c.title,
-            &c.content,
-            c.p1.as_deref(),
-            c.p2.as_deref(),
-            c.p3.as_deref(),
-            c.p4.as_deref(),
-            c.importance as i64,
-            c.episode_type.as_deref(),
-            c.legacy as i64,
-            c.created_at,
-        ],
+        "DELETE FROM history_segments WHERE session_id = ?1 AND sequence = ?2",
+        params![session_id, c.sequence],
     )?;
-    Ok(())
+    insert_history_segment_tx(tx, session_id, c.sequence, c)
 }
 
 /// A snapshot replaces the workspace it names and unlinks its members from whatever workspace they were in. `None` removes only this project's membership. Either way a workspace with no members left is dropped.
@@ -15711,8 +15752,8 @@ fn insert_history_segment_tx(
         "INSERT INTO history_segments
            (session_id, sequence, start_message, end_message, start_message_id,
             end_message_id, start_date, end_date, title, content, p1, p2, p3, p4,
-            importance, episode_type, legacy, created_at)
-         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18)",
+            importance, episode_type, legacy, created_at, claims)
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19)",
         params![
             session_id,
             sequence,
@@ -15732,6 +15773,7 @@ fn insert_history_segment_tx(
             c.episode_type.as_deref(),
             c.legacy as i64,
             c.created_at,
+            claims_cell(&c.claims),
         ],
     )?;
     Ok(())
@@ -25893,6 +25935,102 @@ mod tests {
         assert_eq!(second.history_summarizer.counters.firings, 2);
     }
 
+    fn claim(key: &str, value: &str, ordinal: i64, anchor: Option<&str>) -> Claim {
+        Claim {
+            key: key.into(),
+            value: value.into(),
+            ordinal,
+            anchor: anchor.map(Into::into),
+        }
+    }
+
+    #[test]
+    fn claims_round_trip_and_a_malformed_cell_reads_as_no_claims() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
+        let claims = vec![
+            claim("postgres.port", "5432", 1, Some("summary 1")),
+            claim("feature.flag", "", 1, None),
+        ];
+        store
+            .replace_history_segments(
+                "ses",
+                &[StoredHistorySegment {
+                    claims: claims.clone(),
+                    ..recut_comp(1, 1, 1, "a#0")
+                }],
+            )
+            .unwrap();
+        let loaded = store.load_history_segments("ses").unwrap();
+        assert_eq!(loaded[0].claims, claims);
+        let without = StoredHistorySegment {
+            claims: Vec::new(),
+            ..loaded[0].clone()
+        };
+        for cell in [
+            SqlValue::Text("not json".into()),
+            SqlValue::Text("{}".into()),
+            SqlValue::Text(r#"[{"key":1}]"#.into()),
+            SqlValue::Blob(b"[]".to_vec()),
+        ] {
+            store
+                .with_fenced_conn_for_test(|conn| {
+                    conn.execute("UPDATE history_segments SET claims = ?1", [&cell])
+                })
+                .unwrap();
+            assert_eq!(
+                store.load_history_segments("ses").unwrap(),
+                vec![without.clone()],
+                "{cell:?}"
+            );
+        }
+        // The column is NOT NULL; a NULL cell reaches the mapper as `None` too.
+        assert_eq!(claims_from_cell(None), Vec::new());
+        assert_eq!(claims_cell(&[]), "[]");
+    }
+
+    /// `claims` is set once at insert: no production statement updates a
+    /// history_segments row, by UPDATE or by an upsert's DO UPDATE.
+    #[test]
+    fn no_production_statement_updates_a_history_segment_row() {
+        let source = include_str!("lib.rs");
+        let production = &source[..source.find("\n#[cfg(test)]\nmod tests {").unwrap()];
+        assert!(!production.contains("UPDATE history_segments"));
+        let inserts: Vec<&str> = production
+            .match_indices("INTO history_segments")
+            .map(|(at, _)| production[at..].split('"').next().unwrap())
+            .collect();
+        assert!(inserts.len() >= 2, "{inserts:?}");
+        for insert in inserts {
+            assert!(!insert.contains("DO UPDATE"), "{insert}");
+        }
+    }
+
+    #[test]
+    fn a_state_sync_overwrite_replaces_the_row_and_its_claims_whole() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
+        store
+            .replace_history_segments(
+                "ses",
+                &[StoredHistorySegment {
+                    claims: vec![claim("k.v", "a", 1, Some("summary 1"))],
+                    ..recut_comp(1, 1, 1, "a#0")
+                }],
+            )
+            .unwrap();
+        let overwrite = StoredHistorySegment {
+            p1: Some("rewritten".into()),
+            ..recut_comp(1, 1, 1, "a#0")
+        };
+        store
+            .with_fenced_conn_for_test(|tx| write_seed_history_segment_tx(tx, "ses", &overwrite))
+            .unwrap();
+        let loaded = store.load_history_segments("ses").unwrap();
+        assert_eq!(loaded[0].p1.as_deref(), Some("rewritten"));
+        assert!(loaded[0].claims.is_empty(), "no claim outlives its p1");
+    }
+
     #[test]
     fn truncate_history_segments_for_revert_deletes_suffix_and_bumps_epoch() {
         let dir = tempfile::tempdir().unwrap();
@@ -25910,8 +26048,14 @@ mod tests {
             .replace_history_segments(
                 "ses",
                 &[
-                    recut_comp(1, 1, 1, "a#0"),
-                    recut_comp(2, 2, 2, "b#0"),
+                    StoredHistorySegment {
+                        claims: vec![claim("k.v", "a", 1, Some("summary 1"))],
+                        ..recut_comp(1, 1, 1, "a#0")
+                    },
+                    StoredHistorySegment {
+                        claims: vec![claim("k.v", "b", 2, Some("summary 2"))],
+                        ..recut_comp(2, 2, 2, "b#0")
+                    },
                     recut_comp(3, 3, 3, "c#0"),
                 ],
             )
@@ -25940,6 +26084,13 @@ mod tests {
         let history_segments = store.load_history_segments("ses").unwrap();
         assert_eq!(history_segments.len(), 1);
         assert_eq!(history_segments[0].sequence, 1);
+        // The revert restores the earlier value: s1's claim is the only one left for its key.
+        let for_key: Vec<_> = history_segments
+            .iter()
+            .flat_map(|segment| &segment.claims)
+            .filter(|claim| claim.key == "k.v")
+            .collect();
+        assert_eq!(for_key, [&claim("k.v", "a", 1, Some("summary 1"))]);
 
         let no_op = store
             .truncate_history_segments_for_revert("ses", 1, Some(outcome.row_version))
@@ -25947,6 +26098,14 @@ mod tests {
         assert_eq!(no_op.revert_epoch, 1);
         assert_eq!(no_op.row_version, outcome.row_version);
         assert_eq!(store.load_history_segments("ses").unwrap().len(), 1);
+
+        store
+            .reset_session_for_recomp("ses", Some(no_op.row_version))
+            .unwrap();
+        assert!(
+            store.load_history_segments("ses").unwrap().is_empty(),
+            "recomp leaves no segment and so no claim"
+        );
     }
 
     #[test]
@@ -29809,6 +29968,15 @@ mod lineage_descent_tests {
                       WHERE session_id = 'A'",
                     [],
                 )?;
+                // Row 1 keeps a p1 the re-scan leaves alone; row 2's p1 holds a
+                // legacy secret the re-scan rewrites, so its claims cannot follow.
+                conn.execute(
+                    "UPDATE history_segments
+                        SET claims = '[{\"key\":\"k.v\",\"value\":\"1\",\"ordinal\":1,\"anchor\":\"history\"}]',
+                            p1 = CASE sequence WHEN 2 THEN 'pass' || 'word=legacy-p1-secret' ELSE p1 END
+                      WHERE session_id = 'A'",
+                    [],
+                )?;
                 conn.execute(
                     "INSERT INTO tags
                          (session_id, tag_number, block_id, kind, token_count, created_at_ms, source_bytes)
@@ -29909,6 +30077,15 @@ mod lineage_descent_tests {
             row.title == "password=<REDACTED:password>"
                 && row.content == "password=<REDACTED:password>"
         }));
+        assert_eq!(
+            copied
+                .iter()
+                .map(|row| row.claims.len())
+                .collect::<Vec<_>>(),
+            [1, 0, 0],
+            "a copy keeps its claims only when the re-scan leaves its p1 unchanged"
+        );
+        assert_eq!(copied[0].claims[0].anchor.as_deref(), Some("history"));
         let inherited_notes = store.read_notes("git:project", "B", 10, 0).unwrap();
         assert_eq!(inherited_notes.len(), 1);
         assert_ne!(inherited_notes[0].id, source_note.id);

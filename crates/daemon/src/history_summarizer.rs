@@ -24,7 +24,7 @@ use memory_store::{
     summarizer_timeline::{AbandonClass, FiringOutcome, FiringTrigger, NoFire, NoFireReason},
 };
 
-use crate::history_summarizer_citations::{ExtractionOutcome, FrozenAliasTable};
+use crate::history_summarizer_citations::{ClaimsOutcome, ExtractionOutcome, FrozenAliasTable};
 use crate::history_summarizer_producer::{
     ErrorClass, ErrorClassification, HistorySummarizerProducer, HistorySummarizerProducerError,
     ProducerOutput, RunHandle, RunState, attach_cleanup,
@@ -78,6 +78,7 @@ fn to_stored_history_segment(
             1
         },
         created_at: created_at_ms,
+        claims: c.claims.clone(),
     }
 }
 
@@ -2001,6 +2002,7 @@ where
             completion_now_ms: request.completion_now_ms,
             publication_fence: request.publication_fence,
             memory_reviewer_handoff: request.memory_reviewer_handoff,
+            model,
         });
         let row_version = match publish_result {
             Ok(row_version) => row_version,
@@ -2185,6 +2187,7 @@ where
         completion_now_ms: request.completion_now_ms,
         publication_fence: request.publication_fence,
         memory_reviewer_handoff: request.memory_reviewer_handoff,
+        model: "-",
     });
     close_and_log(producer, request.session_id).await;
     let row_version = publish_result?;
@@ -2217,6 +2220,32 @@ struct PublishOutputRequest<'a> {
     completion_now_ms: fn() -> i64,
     publication_fence: Option<&'a dyn HistorySummarizerPublicationFence>,
     memory_reviewer_handoff: Option<&'a HandoffTarget>,
+    /// The model that produced `output`; `-` when a reattach does not know it.
+    model: &'a str,
+}
+
+/// The one fixed-shape line a validated chunk logs about its claims block:
+/// the session, the outcome, its counts, and the model that wrote it. It is
+/// logged at validation, so it counts a chunk whose publish later fails.
+fn claims_diagnostic(session_id: &str, outcome: &ClaimsOutcome, model: &str) -> String {
+    let (kind, kept, dropped, anchor_missing, failure) = match outcome {
+        ClaimsOutcome::NotRequested => ("not_requested", 0, 0, 0, "-".to_string()),
+        ClaimsOutcome::Rejected { failure } => ("rejected", 0, 0, 0, failure.to_string()),
+        ClaimsOutcome::Accepted {
+            kept,
+            dropped,
+            anchor_missing,
+        } => (
+            "accepted",
+            *kept,
+            *dropped,
+            *anchor_missing,
+            "-".to_string(),
+        ),
+    };
+    format!(
+        "daemon: history_summarizer claims session={session_id} outcome={kind} kept={kept} dropped={dropped} anchor_missing={anchor_missing} failure={failure} model={model}"
+    )
 }
 
 fn publish_output_from_awaiting(
@@ -2241,6 +2270,7 @@ fn publish_output_from_awaiting(
         completion_now_ms,
         publication_fence,
         memory_reviewer_handoff,
+        model,
     } = request;
     let mut validating = output_received(&awaiting, &output.text)?;
     validating.current_firing_mut().output_received_at_ms = Some(completion_now_ms());
@@ -2287,6 +2317,10 @@ fn publish_output_from_awaiting(
         }
     };
 
+    eprintln!(
+        "{}",
+        claims_diagnostic(session_id, &validated.claims_outcome, model)
+    );
     let publishing = validation_ok(&validating)?;
     let publishing_row_version =
         persist_history_summarizer_state(store, session_id, publishing.clone())?;
@@ -2837,6 +2871,37 @@ mod tests {
         EMPTY.get_or_init(BTreeMap::new)
     }
 
+    #[test]
+    fn the_claims_diagnostic_line_has_one_fixed_shape() {
+        assert_eq!(
+            claims_diagnostic(
+                "ses",
+                &ClaimsOutcome::Accepted {
+                    kept: 3,
+                    dropped: 1,
+                    anchor_missing: 2
+                },
+                "prov/model-a"
+            ),
+            "daemon: history_summarizer claims session=ses outcome=accepted kept=3 dropped=1 anchor_missing=2 failure=- model=prov/model-a"
+        );
+        assert_eq!(
+            claims_diagnostic(
+                "ses",
+                &ClaimsOutcome::Rejected {
+                    failure:
+                        crate::history_summarizer_citations::ExtractionFailure::MalformedClaims
+                },
+                "-"
+            ),
+            "daemon: history_summarizer claims session=ses outcome=rejected kept=0 dropped=0 anchor_missing=0 failure=malformed_claims model=-"
+        );
+        assert_eq!(
+            claims_diagnostic("ses", &ClaimsOutcome::NotRequested, "m"),
+            "daemon: history_summarizer claims session=ses outcome=not_requested kept=0 dropped=0 anchor_missing=0 failure=- model=m"
+        );
+    }
+
     fn comp(seq: i64, start: i64, end: i64, end_id: &str, p1: &str) -> StoredHistorySegment {
         StoredHistorySegment {
             sequence: seq,
@@ -2867,6 +2932,7 @@ mod tests {
             p4: Some("".into()),
             importance: None,
             episode_type: None,
+            claims: Vec::new(),
         };
         let flat = ValidatedHistorySegment {
             p1: None,
@@ -2905,6 +2971,7 @@ mod tests {
             p4: None,
             importance: None,
             episode_type: None,
+            claims: Vec::new(),
         };
         for (raw, stored) in [
             (Some(4_294_967_295), 100),
@@ -5699,6 +5766,7 @@ mod tests {
                 completion_now_ms: || 11,
                 publication_fence: None,
                 memory_reviewer_handoff: None,
+                model: "test/model",
             })
         };
         let publish = |awaiting: HistorySummarizerDurableState,
@@ -5732,17 +5800,37 @@ mod tests {
         };
         assert_eq!(nonadmission(), recorded);
 
-        // Firing 2 (4..=6): an intentional no-fact output is not a nonadmission.
+        // Firing 2 (4..=6): an intentional no-fact output is not a nonadmission, and its
+        // claims reach the stored segment without recording one either.
         let awaiting = fire_next(4, 6);
         assert_eq!(awaiting.memory_reviewer_nonadmission, recorded);
         publish(
             awaiting,
-            output(4, 5, "<facts><PROJECT_RULES>\n</PROJECT_RULES></facts>"),
+            output(
+                4,
+                5,
+                "<facts><PROJECT_RULES>\n</PROJECT_RULES></facts><claims><claim><key>k.v</key><cite>[s1:0-9]</cite><value>presented</value><anchor>arc</anchor></claim><claim><key>k.dropped</key><cite>[s1:0-9]</cite><value>absent</value></claim></claims>",
+            ),
             &chunk(4, 6),
         )
         .expect("no-fact output publishes");
         assert_eq!(floor(), Some(6));
         assert_eq!(nonadmission(), recorded);
+        let published = store.load_history_segments("ses").unwrap();
+        assert_eq!(
+            published.last().unwrap().claims,
+            [memory_store::Claim {
+                key: "k.v".into(),
+                value: "presented".into(),
+                ordinal: 4,
+                anchor: Some("arc".into()),
+            }]
+        );
+        assert!(
+            published[..published.len() - 1]
+                .iter()
+                .all(|s| s.claims.is_empty())
+        );
 
         // Firing 3 (6..=8): a restart finds the producer in flight, abandons the firing, and keeps the facts.
         fire_next(6, 8);
@@ -6123,6 +6211,7 @@ mod tests {
                     p4: None,
                     importance: Some(50),
                     episode_type: None,
+                    claims: Vec::new(),
                 },
             ],
             unprocessed_from: 5,

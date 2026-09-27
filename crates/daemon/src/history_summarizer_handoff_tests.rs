@@ -391,6 +391,7 @@ fn validated_range(start: u64, end: u64) -> ValidatedChunk {
             p4: None,
             importance: Some(50),
             episode_type: Some("feature".to_string()),
+            claims: Vec::new(),
         }],
         facts: facts(),
         unprocessed_from: end + 1,
@@ -1106,6 +1107,7 @@ fn the_publication_path_hands_accepted_facts_off_and_records_rejected_ones() {
             completion_now_ms: t0,
             publication_fence: None,
             memory_reviewer_handoff: Some(&target),
+            model: "test/model",
         })
     };
 
@@ -1521,6 +1523,7 @@ fn a_production_reservation_republishes_after_a_restart_and_a_stale_one_is_not_c
         completion_now_ms: t0,
         publication_fence: Some(&fence),
         memory_reviewer_handoff: Some(&target),
+        model: "test/model",
     });
     assert!(
         matches!(

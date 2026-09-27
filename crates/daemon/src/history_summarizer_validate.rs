@@ -14,8 +14,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::boundary::completed_tool_arc_crosses_boundary;
 use crate::history_summarizer_citations::{
-    Citation, ExtractionFailure, ExtractionOutcome, FrozenAliasTable, check_fact_set,
-    split_citations,
+    Citation, ClaimCandidate, ClaimsOutcome, ExtractionFailure, ExtractionOutcome,
+    FrozenAliasTable, check_claim_set, check_fact_set, split_citations,
 };
 
 const BOUNDARY_HEALING_SLACK: u64 = 2;
@@ -195,6 +195,14 @@ pub struct ParsedHistorySegmentOutput {
     pub user_observations: Vec<UserObservationCandidate>,
     #[serde(default)]
     pub primer_candidates: Vec<PrimerCandidate>,
+    /// The `<claims>` block's items, read by a parse of their own so a claims
+    /// fault never reaches the facts or the segments.
+    #[serde(default)]
+    pub claims: Vec<ClaimCandidate>,
+    #[serde(default)]
+    pub claims_block_present: bool,
+    #[serde(default)]
+    pub claims_syntax_failure: Option<ExtractionFailure>,
 }
 
 /// ValidatedHistorySegment stores raw endpoints resolved to provider message IDs.
@@ -219,6 +227,9 @@ pub struct ValidatedHistorySegment {
     pub importance: Option<u64>,
     #[serde(default)]
     pub episode_type: Option<String>,
+    /// The claims this segment's range holds, validated; empty by default.
+    #[serde(default)]
+    pub claims: Vec<memory_store::Claim>,
 }
 
 /// ValidatedChunk is the side-effect-free publish plan that validation produces.
@@ -230,6 +241,9 @@ pub struct ValidatedChunk {
     /// Q30: the fact set's own verdict, independent of the history's validity.
     #[serde(default)]
     pub extraction: ExtractionOutcome,
+    /// The claims block's own verdict; it never changes which segments publish.
+    #[serde(default)]
+    pub claims_outcome: ClaimsOutcome,
     pub events: Vec<ParsedEvent>,
     pub primer_candidates: Vec<PrimerCandidate>,
     pub user_observations: Vec<UserObservationCandidate>,
@@ -471,6 +485,7 @@ pub fn parse_history_segment_output(
 
     let events = parse_events(text);
     history_segments.sort_by_key(|c| c.start_message);
+    let (claims_block_present, claims, claims_syntax_failure) = parse_claims(text);
 
     Ok(ParsedHistorySegmentOutput {
         history_segments,
@@ -481,7 +496,57 @@ pub fn parse_history_segment_output(
         unprocessed_from,
         user_observations,
         primer_candidates,
+        claims,
+        claims_block_present,
+        claims_syntax_failure,
     })
+}
+
+/// Reads the one `<claims>` block: whether a claims tag appears at all, its
+/// `<claim>` elements, and why the block is unreadable when it is. A tag
+/// without its partner is a truncated block, and a second block or material
+/// that is no claim element is a malformed one; either rejects the block
+/// whole. A claim missing its key, citation, or value is read with that part
+/// empty and fails validation on its own; of a repeated element, the first is
+/// read.
+fn parse_claims(text: &str) -> (bool, Vec<ClaimCandidate>, Option<ExtractionFailure>) {
+    let (opens, closes) = (
+        text.matches("<claims>").count(),
+        text.matches("</claims>").count(),
+    );
+    if opens == 0 && closes == 0 {
+        return (false, Vec::new(), None);
+    }
+    let block = claims_block_regex()
+        .captures(text)
+        .and_then(|caps| caps.get(1))
+        .map(|m| m.as_str());
+    let (1, 1, Some(block)) = (opens, closes, block) else {
+        return (true, Vec::new(), Some(ExtractionFailure::MalformedClaims));
+    };
+    if !claim_regex().replace_all(block, "").trim().is_empty() {
+        return (true, Vec::new(), Some(ExtractionFailure::MalformedClaims));
+    }
+    let element = |inner: &str, tag: &str| {
+        let open = format!("<{tag}>");
+        let close = format!("</{tag}>");
+        let start = inner.find(&open)? + open.len();
+        let end = start + inner[start..].find(&close)?;
+        Some(unescape_xml(inner[start..end].trim()))
+    };
+    let claims = claim_regex()
+        .captures_iter(block)
+        .map(|caps| {
+            let inner = caps.get(1).map(|m| m.as_str()).unwrap_or_default();
+            ClaimCandidate {
+                key: element(inner, "key").unwrap_or_default(),
+                cite: element(inner, "cite").unwrap_or_default(),
+                value: element(inner, "value").unwrap_or_default(),
+                anchor: element(inner, "anchor"),
+            }
+        })
+        .collect();
+    (true, claims, None)
 }
 
 /// Validation applies discard-last boundary healing and returns only data safe to persist.
@@ -643,6 +708,29 @@ pub fn validate_history_summarizer_output(
             Err(failure) => (ExtractionOutcome::Rejected { failure }, Vec::new()),
         }
     };
+    // Claims attach to the persisted segments only: a claim citing a discarded
+    // provisional segment leaves with it, and the block never changes which
+    // segments publish.
+    let claims_outcome = match (parsed.claims_block_present, parsed.claims_syntax_failure) {
+        (false, _) => ClaimsOutcome::NotRequested,
+        (true, Some(failure)) => ClaimsOutcome::Rejected { failure },
+        (true, None) => {
+            let ranges: Vec<_> = history_segments
+                .iter()
+                .map(|segment| {
+                    (
+                        segment.start_message..=segment.end_message,
+                        segment.p1.as_deref().unwrap_or_default(),
+                    )
+                })
+                .collect();
+            let (claims, outcome) = check_claim_set(&parsed.claims, &chunk.aliases, &ranges);
+            for (segment, claims) in history_segments.iter_mut().zip(claims) {
+                segment.claims = claims;
+            }
+            outcome
+        }
+    };
     // Discarding the last history_segment requires validation to skip unanchored producer output because its source history_segment cannot be proven.
     let events = parsed
         .events
@@ -687,6 +775,7 @@ pub fn validate_history_summarizer_output(
         history_segments,
         facts,
         extraction,
+        claims_outcome,
         events,
         primer_candidates,
         user_observations,
@@ -1025,6 +1114,7 @@ fn map_parsed_history_segments_to_chunk(
             p4: history_segment.p4.clone(),
             importance: history_segment.importance,
             episode_type: history_segment.episode_type.clone(),
+            claims: Vec::new(),
         });
     }
     Ok(mapped)
@@ -1298,6 +1388,16 @@ fn tier_open_any_regex() -> &'static Regex {
 fn facts_block_regex() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| Regex::new(r#"(?s)<facts>(.*?)</facts>"#).unwrap())
+}
+
+fn claims_block_regex() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| Regex::new(r#"(?s)<claims>(.*?)</claims>"#).unwrap())
+}
+
+fn claim_regex() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| Regex::new(r#"(?s)<claim>(.*?)</claim>"#).unwrap())
 }
 
 fn events_block_regex() -> &'static Regex {
@@ -1941,6 +2041,93 @@ full narrative
         assert!(result.events.is_empty());
         assert!(result.user_observations.is_empty());
         assert!(result.primer_candidates.is_empty());
+    }
+
+    /// A provisional last segment takes its claims with it when discarded and keeps them when force-kept.
+    #[test]
+    fn the_provisional_last_segment_carries_its_claims() {
+        let claims = r#"<claims><claim><key>k.first</key><cite>[s1:0-5]</cite><value>hello</value><anchor>first full</anchor></claim><claim><key>k.final</key><cite>[s3:6-11]</cite><value>world</value></claim></claims>"#;
+        let text = xml(&[(1, 2, "first"), (3, 4, "final")], 5, claims);
+        let claim =
+            |key: &str, value: &str, ordinal: i64, anchor: Option<&str>| memory_store::Claim {
+                key: key.into(),
+                value: value.into(),
+                ordinal,
+                anchor: anchor.map(Into::into),
+            };
+        let discarded = validate_history_summarizer_output(
+            &text,
+            &aliased_chunk(1, 4),
+            &[],
+            ValidateOptions::default(),
+        )
+        .unwrap();
+        assert!(discarded.discarded_last);
+        assert_eq!(
+            discarded.history_segments[0].claims,
+            [claim("k.first", "hello", 1, Some("first full"))]
+        );
+        assert_eq!(
+            discarded.claims_outcome,
+            ClaimsOutcome::Accepted {
+                kept: 1,
+                dropped: 1,
+                anchor_missing: 0
+            }
+        );
+        let kept = validate_history_summarizer_output(
+            &text,
+            &aliased_chunk(1, 4),
+            &[],
+            ValidateOptions {
+                force_keep_last_history_segment: true,
+                ..ValidateOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(kept.history_segments.len(), 2);
+        assert_eq!(
+            kept.history_segments[1].claims,
+            [claim("k.final", "world", 3, None)]
+        );
+    }
+
+    /// The 128-byte value bound applies after XML unescaping.
+    #[test]
+    fn the_value_bound_counts_unescaped_bytes() {
+        let mut chunk = aliased_chunk(1, 2);
+        chunk.aliases.aliases[0].presented = "x".repeat(130) + "<";
+        let claim = |key: &str, xs: usize| {
+            format!(
+                r#"<claim><key>{key}</key><cite>[s1:0-131]</cite><value>{}&lt;</value></claim>"#,
+                "x".repeat(xs)
+            )
+        };
+        let text = xml(
+            &[(1, 2, "only")],
+            3,
+            &format!(
+                "<claims>{}{}</claims>",
+                claim("k.fits", 127),
+                claim("k.over", 128)
+            ),
+        );
+        let validated = validate_history_summarizer_output(
+            &text,
+            &chunk,
+            &[],
+            ValidateOptions {
+                in_emergency: true,
+                ..ValidateOptions::default()
+            },
+        )
+        .unwrap();
+        let kept: Vec<_> = validated.history_segments[0]
+            .claims
+            .iter()
+            .map(|claim| (claim.key.as_str(), claim.value.len()))
+            .collect();
+        assert_eq!(kept, [("k.fits", 128)]);
     }
 
     #[test]

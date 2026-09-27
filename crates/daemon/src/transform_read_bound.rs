@@ -138,7 +138,7 @@ const EDGE_STATEMENTS: &[&str] = &[
 /// m1's capped read above the folded sequence, matched as a whole statement like the edges.
 const M1_STATEMENT: &str = "SELECT sequence, start_message, end_message, start_message_id, \
      end_message_id, start_date, end_date, title, content, p1, p2, p3, p4, importance, \
-     episode_type, legacy, created_at FROM history_segments \
+     episode_type, legacy, created_at, claims FROM history_segments \
      WHERE session_id = ?1 AND sequence > ?2 ORDER BY sequence DESC LIMIT ?3";
 
 /// The SQL text with its whitespace collapsed and padded by one space on each side.

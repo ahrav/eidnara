@@ -451,3 +451,32 @@ the full p1 narrative
         expect(c.content).toBe("just flat content, no tiers here");
     });
 });
+
+describe("parseHistorySegmentOutput — claims (Rust-only contract)", () => {
+    it("parses the same segments and facts when a <claims> block is present", () => {
+        const base = `
+<output>
+<history_segments>
+<history_segment start="1" end="2" title="Port" episode_type="config" importance="40">
+<p1>the database listens on 5432</p1><p2>port</p2><p3>port</p3><p4/>
+</history_segment>
+</history_segments>
+<facts>
+<CONFIG_VALUES>
+* [s1:0-4] The database port is 5432.
+</CONFIG_VALUES>
+</facts>
+CLAIMS<meta>
+<unprocessed_from>3</unprocessed_from>
+</meta>
+</output>`;
+        const claims = `<claims>
+<claim><key>postgres.port</key><cite>[s1:18-22]</cite><value>5432</value><anchor>the database listens on 5432</anchor></claim>
+</claims>
+`;
+        const withClaims = parseHistorySegmentOutput(base.replace("CLAIMS", claims));
+        expect(withClaims.history_segments).toHaveLength(1);
+        expect(withClaims.facts).toHaveLength(1);
+        expect(withClaims).toEqual(parseHistorySegmentOutput(base.replace("CLAIMS", "")));
+    });
+});
