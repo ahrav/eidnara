@@ -63,6 +63,7 @@ import {
     type HistoryDigest,
     historyDigestsEqual,
     inspectReferenceableMessages,
+    messageId,
     messageIdFilter,
     publicationRejection,
     publishInPlace,
@@ -1227,11 +1228,13 @@ export function createRustModeTransform(
             const prefixGuardStartedAt = performance.now();
             const previous = retainedOutputs.get(sessionId);
             const capturedLength = target.length;
+            // The copy holds one slot reference per tail message, charged like a served or candidate array.
+            charge((capturedLength - boundaryIndex) * CANDIDATE_SLOT_BYTES, "window slots");
             const window = copyWindow(target, boundaryIndex, capturedLength);
             if (!window)
                 throw new PassDeclined(sessionId, "unsupported_source", "window slot accessor");
             // Discovery fixed `boundaryIndex` before an await, so the host may have moved the anchor.
-            const head = readOwnDataProperty(readOwnDataProperty(window[0], "info"), "id");
+            const head = messageId(window[0]);
             if (boundary && head !== boundary.mid)
                 throw new PassDeclined(sessionId, "source_changed", "boundary moved");
             // A full fallback inspection walks a superset of the partial one, so it pays only the difference.
@@ -1281,8 +1284,8 @@ export function createRustModeTransform(
             const messages = captured.members as MessageLike[];
             const ids = new Set<unknown>();
             for (const message of messages) {
-                const id = readOwnDataProperty(readOwnDataProperty(message, "info"), "id");
-                if (typeof id === "string" && ids.has(id))
+                const id = messageId(message);
+                if (id !== undefined && ids.has(id))
                     throw new PassDeclined(sessionId, "unsupported_source", `duplicate id ${id}`);
                 ids.add(id);
             }

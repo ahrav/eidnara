@@ -105,6 +105,18 @@ function logsOf(spy: { mock: { calls: unknown[][] } }, sessionId: string): strin
 }
 
 describe("id scan and membership filter", () => {
+    it("names a message by its top-level id when info carries none, as the daemon's decoder does", () => {
+        const host: unknown[] = [
+            { id: "bare" },
+            { info: { role: "user" }, id: "top" },
+            { info: { id: "nested" }, id: "shadowed" },
+        ];
+        expect(scanMessageIds(host, (id) => id === "bare")).toBe(0);
+        expect(scanMessageIds(host, (id) => id === "top")).toBe(1);
+        expect(scanMessageIds(host, (id) => id === "nested")).toBe(2);
+        expect(scanMessageIds(host, (id) => id === "shadowed")).toBe(-1);
+    });
+
     it("crosses planted proxies, accessors, and revoked proxies without invoking any hook", () => {
         let traps = 0;
         const count = (): never => {
