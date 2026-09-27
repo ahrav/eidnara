@@ -51,7 +51,15 @@ describe.skipIf(!rustPrereqs.ok || !budget)("stale preference through OpenCode a
         const root = mkdtempSync(join(tmpdir(), "eidnara-stale-"));
         try {
             const binary = await buildDaemonExample(EVAL_RUNNER);
-            evalRunner(binary, ["stale-world", "--subjects", `${SUBJECTS}`, "--publish", root]);
+            evalRunner(binary, [
+                "stale-world",
+                "--subjects",
+                `${SUBJECTS}`,
+                "--seed",
+                "6840319362188525570",
+                "--publish",
+                root,
+            ]);
             const world = JSON.parse(
                 readFileSync(join(root, "stale-world.json"), "utf8"),
             ) as FactWorld;

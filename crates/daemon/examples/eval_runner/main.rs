@@ -425,8 +425,7 @@ fn run_stale_world(args: impl Iterator<Item = String>) -> io::Result<()> {
 /// Writes the stale-preference export of a harness capture and prints one
 /// JSON line naming it with its counts.
 #[cfg(unix)]
-fn run_stale_arms(args: impl Iterator<Item = String>) -> io::Result<()> {
-    let (path, export) = stale::arms(args).map_err(io::Error::other)?;
+fn stale_summary(path: PathBuf, export: eval_core::StaleExport) {
     let summary = json!({
         "export": path,
         "pairs": export.pairs.len(),
@@ -434,6 +433,19 @@ fn run_stale_arms(args: impl Iterator<Item = String>) -> io::Result<()> {
         "stale_delivered": export.stale_delivered,
     });
     println!("{summary}");
+}
+
+#[cfg(unix)]
+fn run_stale_arms(args: impl Iterator<Item = String>) -> io::Result<()> {
+    let (path, export) = stale::arms(args).map_err(io::Error::other)?;
+    stale_summary(path, export);
+    Ok(())
+}
+
+#[cfg(unix)]
+fn run_stale_merge(args: impl Iterator<Item = String>) -> io::Result<()> {
+    let (path, export) = stale::merge(args).map_err(io::Error::other)?;
+    stale_summary(path, export);
     Ok(())
 }
 
@@ -610,6 +622,8 @@ fn main() {
         #[cfg(unix)]
         Some("stale-arms") => run_stale_arms(args),
         #[cfg(unix)]
+        Some("stale-merge") => run_stale_merge(args),
+        #[cfg(unix)]
         Some("aging") => run_aging(args),
         #[cfg(unix)]
         Some("fault") => run_fault(args),
@@ -644,10 +658,11 @@ fn main() {
 #[cfg(unix)]
 fn campaign_usage() -> String {
     format!(
-        "{} | eval_runner {} | eval_runner {} | eval_runner {} | eval_runner {} | eval_runner {} | eval_runner {} | eval_runner {}",
+        "{} | eval_runner {} | eval_runner {} | eval_runner {} | eval_runner {} | eval_runner {} | eval_runner {} | eval_runner {} | eval_runner {}",
         campaign::USAGE,
         stale::WORLD_USAGE,
         stale::ARMS_USAGE,
+        stale::MERGE_USAGE,
         aging::USAGE,
         fault::USAGE,
         growth::USAGE,
@@ -658,7 +673,7 @@ fn campaign_usage() -> String {
 
 #[cfg(not(unix))]
 fn campaign_usage() -> String {
-    "campaign | stale-world | stale-arms | aging | fault | growth | shrink | suite-d (unix only)"
+    "campaign | stale-world | stale-arms | stale-merge | aging | fault | growth | shrink | suite-d (unix only)"
         .to_string()
 }
 

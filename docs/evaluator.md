@@ -1366,7 +1366,7 @@ needs no judge.
 fragment of it. The pipeline has three steps, and every step but the middle
 one is Rust:
 
-1. `eval_runner stale-world --subjects <n> --publish <dir>` writes
+1. `eval_runner stale-world --subjects <n> --seed <u64> --publish <dir>` writes
    `stale-world.json` (`eval-stale-world/v1`), `fact_world(seed, n)`: a coding
    session in which the user sets one value per subject and later changes
    each one.
@@ -1416,6 +1416,12 @@ one is Rust:
      (`opencode`).
 3. `eval_runner stale-arms --capture <file> --publish <dir>` writes
    `stale-preference-export.json` through `export_capture`.
+4. `eval_runner stale-merge --inputs <export,...> --publish <dir>` combines
+   independent harness sessions. It requires one schema, harness, and
+   summarizer; prefixes every task with `world-N:`; concatenates the decimal
+   seeds; and sums the counts. M0 uses several small sessions so decay keeps
+   their stale segments' prose while the pair population still clears the
+   fixed N.
 
 `tests/rust-stale-preference.test.ts` runs the three steps over 12 subjects
 under `EIDNARA_EVAL_S0_BUDGET_MS`, like the S0 campaign, and checks every
