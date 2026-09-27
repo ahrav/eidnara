@@ -1169,7 +1169,7 @@ export function createRustModeTransform(
             return index;
         };
         /**
-         * Walks `transform.boundary` newest first to an anchor the host holds (one id scan); an empty
+         * Walks `transform.boundary` newest first to an anchor the host holds; an empty
          * page sends `null`. Budget (from the pass start, so a rerun gets what is left), timeout, a
          * malformed or repeated page, or a daemon without the method declines, never `null`.
          */
@@ -1216,9 +1216,20 @@ export function createRustModeTransform(
                 const last = page.at(-1);
                 if (!last) return { boundary: null, index: 0 };
                 if (!filter) {
+                    // D17: one backward id scan against the first page stops at the newest held anchor.
+                    const anchors = new Map(page.map((anchor) => [anchor.mid, anchor]));
+                    let hit: TransformBoundary | undefined;
+                    const index = scan((id) => {
+                        hit = anchors.get(id);
+                        return hit !== undefined;
+                    });
+                    if (hit && index >= 0) return { boundary: hit, index };
+                    // The whole host holds none of this page; later pages probe the filter.
                     timings.scannedItems += target.length;
                     filter = messageIdFilter(target, (bytes) => lease.reserve(bytes));
                     if (!filter) throw new CaptureBudgetExceeded("membership filter");
+                    before = last.sequence;
+                    continue;
                 }
                 const wanted = new Set<string>();
                 for (const anchor of page)
