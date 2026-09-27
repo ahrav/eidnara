@@ -6,7 +6,7 @@
 
 #![forbid(unsafe_code)]
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use memory_store::{HistorySummarizerPhase, LoadedState, MemoryStore, MemoryStoreError};
 
@@ -49,8 +49,7 @@ fn pass(
     request: &TransformRequest,
 ) -> Result<TransformResponse, TransformError> {
     let ctx = pctx("git:meta-bound", "/nonexistent-docs", 1_700_000_000_000);
-    transform_with_projection_cached(store, &resolved(store, request), &ctx, &Mutex::default())
-        .map(|out| out.response)
+    transform_with_projection_cached(store, &resolved(store, request), &ctx).map(|out| out.response)
 }
 
 /// The stored `meta` text's length, as the durable-text bound measures it.

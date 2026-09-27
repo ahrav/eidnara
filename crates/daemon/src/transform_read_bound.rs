@@ -258,7 +258,7 @@ fn pass(store: &MemoryStore, request: &TransformRequest) -> String {
     let dir = "/nonexistent-docs";
     let ctx = pctx("git:read-bound", dir, 1_700_000_000_000);
     let request = crate::transform::tests::resolved(store, request);
-    transform_with_projection_cached(store, &request, &ctx, &Mutex::default())
+    transform_with_projection_cached(store, &request, &ctx)
         .expect("pass")
         .response
         .action

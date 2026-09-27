@@ -420,7 +420,10 @@ impl Plugin {
 /// the served array without ordinals, the m0 bytes, and the tag rows equal the recorded ones.
 /// Where revision 2 served a revert before the first anchor raw and kept doing so, revision 3
 /// resets the session (spec D10), so from that step on every step equals a fresh session's step
-/// over the same host arrays instead, tag numbers aside.
+/// over the same host arrays instead, tag numbers aside. Where revision 2 refused an edit of a
+/// covered message (covered-drift rejection, deleted by spec D25) and every later pass of the
+/// trace with `transform_failed`, revision 3 serves, and the goldens have no output to compare
+/// until such a reset.
 #[tokio::test(flavor = "current_thread")]
 async fn revision_3_replays_the_revision_2_goldens() {
     let goldens: Value =
@@ -434,12 +437,18 @@ async fn revision_3_replays_the_revision_2_goldens() {
         let mut host = Host::default();
         let mut plugin = Plugin::default();
         let mut fresh = None;
+        let mut refused = false;
         for (index, op) in ops.iter().copied().enumerate() {
             host.apply(op, &store);
             let response = plugin.pass(&handler, &host).await;
             let actual = step(op, &response, &store);
             if golden["steps"][index]["action"] == "PASSTHROUGH" && fresh.is_none() {
                 fresh = Some((golden_handler(), Plugin::default()));
+            }
+            refused |= golden["steps"][index]["code"] == "transform_failed";
+            if refused && fresh.is_none() {
+                assert_eq!(actual["status"], "ok", "{name} step {index} ({op:?})");
+                continue;
             }
             let expected = match fresh.as_mut() {
                 Some(((fresh_handler, fresh_store, _), fresh_plugin)) => {

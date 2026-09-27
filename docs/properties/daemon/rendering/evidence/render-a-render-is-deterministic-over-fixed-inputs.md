@@ -207,3 +207,13 @@ test. That is why the check below has to run two processes.
   comes from `req.messages`, not from the cache.
 - Missing evidence: none.
 - Conclusion: resolved with answer — no order dependence from the cache.
+
+Update, 2026-09-27: [#833](https://github.com/ahrav/eidnara/issues/833) deletes the serialized-output per-message memo and its lookup:
+`SerializedOutputCacheEntry`, `SerializedOutputCacheSnapshot`,
+`SerializedOutputCacheStats`, `cached_or_serialize_output`, `cached_output_item`,
+`record_output_item`, `message_output_identity`, the `ServedMessage`
+`output_identity` field with `with_output_identity`, and the frozen-unit tail
+index (`by_tail_mid`, `for_tail_message`) only the memo read. Every served
+message renders through the former miss path, and `SerializedOutputCache`
+keeps only the revision-bound previous CK output. Citations of these symbols
+here are historical at their stated baseline.

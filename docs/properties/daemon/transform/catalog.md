@@ -322,7 +322,7 @@ believes.
 | [defer-commit-carries-no-history_segment-fence](#defer-commit-carries-no-history_segment-fence) | safety | high |
 | [canonical-read-staleness-is-distinguishable-from-emptiness](#canonical-read-staleness-is-distinguishable-from-emptiness) | safety | high |
 | [speculative-tag-numbering-has-two-authorities](#speculative-tag-numbering-has-two-authorities) | safety | medium |
-| [output-cache-replace-trails-the-accepted-commit](#output-cache-replace-trails-the-accepted-commit) | safety | high |
+| [output-cache-replace-trails-the-accepted-commit](#output-cache-replace-trails-the-accepted-commit) | safety (invalidated by #833) | high |
 | [exactly-one-core-step-executes-per-pass](#exactly-one-core-step-executes-per-pass) | safety | high |
 | [core-fields-mutated-outside-the-step-machine](#core-fields-mutated-outside-the-step-machine) | safety | high |
 | [synthetic-strip-precedes-every-coverage-read](#synthetic-strip-precedes-every-coverage-read) | safety | high |
@@ -403,7 +403,9 @@ raised inside it must not have mutated the row.
 Required faults and enabling state: An error inside the mutation region.
 `CoverageGap` (`:4593`, `:5065`, `:4703`), `BoundaryNotPresent` (`:5091`),
 `IdentityDrift` (`:5786`), `ReductionConflict` (`:6820`), `FrozenRedTargetVanish`
-(`:5814`) are all reachable from a crafted array.
+(`:5814`) are all reachable from a crafted array. Update, 2026-09-27:
+[#833](https://github.com/ahrav/eidnara/issues/833) deletes `IdentityDrift` with
+covered-drift rejection; the other errors remain.
 Confidence: high - [evidence](evidence/engine-terminal-cas-is-the-sole-core-meta-writer.md). Traced
 every `store.` call in `:3222-5697` and confirmed only `:3312`, `:4646`, `:3609`,
 `:3720`, `:5565` write.
@@ -624,7 +626,7 @@ Open questions:
 
 Type: safety
 Reachability: default-production
-Status: active
+Status: invalidated
 Exercised: partial - `serialized_output_cache_revert_epoch_bump_evicts_session`
 (`transform.rs:28884`) covers the epoch eviction. Nothing asserts the ordering against the
 commit.
@@ -652,6 +654,12 @@ produced, which is indistinguishable downstream from a byte-stability violation 
 bust the provider prefix.
 Open questions:
 
+- Invalidated by #833. The serialized-output per-message memo is deleted with
+  `replace`, `snapshot`, its entries, and
+  `serialized_output_cache_revert_epoch_bump_evicts_session`; every served
+  message renders afresh, and `SerializedOutputCache` keeps only the
+  revision-bound previous CK output, which `take_previous_output` refuses under
+  another revert epoch.
 - `replace` silently drops the whole entry set when it exceeds `max_retained_bytes`
   (`:445-447`). Is a session whose output always exceeds the budget permanently uncached, and
   does anything observe that? Suggest one record in 4c's cache-validity focus rather than

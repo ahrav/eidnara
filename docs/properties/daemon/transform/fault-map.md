@@ -457,3 +457,9 @@ historical at their stated baseline.
 Update, 2026-09-26: [#830](https://github.com/ahrav/eidnara/issues/830) deletes
 `EIDNARA_NATIVE_ATTACHMENT_DIFFERENTIAL` and the native differential it gated,
 so the question has no remaining subject. Every native pass is a full encode.
+
+Update, 2026-09-27: [#833](https://github.com/ahrav/eidnara/issues/833) deletes covered-drift rejection: `identity_drift_requires_reject`,
+`frozen_unit_targets_mid`, and `TransformError::IdentityDrift`. Block identities
+are pruned to the window inside the transform's meta CAS, and a changed
+identity is re-adopted. Citations of these symbols here are historical at their
+stated baseline.

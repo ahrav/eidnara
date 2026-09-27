@@ -540,3 +540,18 @@ Completed fresh evaluator `ses_f6756093fffeVjNp36S3E8pKrM` supplied the gaps
 dispositioned in `portfolio-evaluation.md`; no rerun is claimed. Existing
 latency-audit execution evidence stays in its own files. W1 is invalidated,
 has no active measurement ownership, and is not reactivated here.
+
+Update, 2026-09-27: [#833](https://github.com/ahrav/eidnara/issues/833) deletes
+`boundary_anchor_and_frozen_tail_identity_drift_still_reject` with covered-drift
+rejection, and the `serialized_output_cache_*` memo checks
+(`serialized_output_cache_reuses_steady_state_and_matches_fresh_bytes`,
+`serialized_output_cache_tag_overlay_invalidates_only_its_message`,
+`serialized_output_cache_drop_invalidates_only_the_target`,
+`serialized_output_cache_fold_refreshes_prefix_and_reuses_tail`,
+`serialized_output_cache_revert_epoch_bump_evicts_session`) with the memo.
+
+Update, 2026-09-27: [#833](https://github.com/ahrav/eidnara/issues/833) deletes covered-drift rejection: `identity_drift_requires_reject`,
+`frozen_unit_targets_mid`, and `TransformError::IdentityDrift`. Block identities
+are pruned to the window inside the transform's meta CAS, and a changed
+identity is re-adopted. Citations of these symbols here are historical at their
+stated baseline.

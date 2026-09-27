@@ -633,3 +633,21 @@ Four limits, stated so a later pass does not read absence as absence of risk.
   only through its unbounded call from the engine at `:3391`. The 228-test
   TypeScript figure and the 70-test caller figure were counted by matching
   top-level `it(`/`test(` and are lower bounds if any suite nests further.
+
+Update, 2026-09-27: [#833](https://github.com/ahrav/eidnara/issues/833) deletes the serialized-output per-message memo and its lookup:
+`SerializedOutputCacheEntry`, `SerializedOutputCacheSnapshot`,
+`SerializedOutputCacheStats`, `cached_or_serialize_output`, `cached_output_item`,
+`record_output_item`, `message_output_identity`, the `ServedMessage`
+`output_identity` field with `with_output_identity`, and the frozen-unit tail
+index (`by_tail_mid`, `for_tail_message`) only the memo read. Every served
+message renders through the former miss path, and `SerializedOutputCache`
+keeps only the revision-bound previous CK output. Citations of these symbols
+here are historical at their stated baseline.
+It deletes `serialized_output_cache_revert_epoch_bump_evicts_session` with the
+entries it checked.
+
+Update, 2026-09-27: [#833](https://github.com/ahrav/eidnara/issues/833) deletes covered-drift rejection: `identity_drift_requires_reject`,
+`frozen_unit_targets_mid`, and `TransformError::IdentityDrift`. Block identities
+are pruned to the window inside the transform's meta CAS, and a changed
+identity is re-adopted. Citations of these symbols here are historical at their
+stated baseline.
