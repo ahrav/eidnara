@@ -2250,6 +2250,15 @@ mod tests {
                 earlier.excluded_prefix_digest.is_empty(),
                 coverage.is_none()
             );
+            if coverage.is_some() {
+                let mut digest_only = refresh_tail_hygiene_baseline(first.clone(), true, None, 10);
+                digest_only
+                    .excluded_prefix_digest
+                    .clone_from(&earlier.excluded_prefix_digest);
+                let invalid =
+                    refresh_tail_hygiene_baseline(measure(), false, Some(&digest_only), 20);
+                assert!(!invalid.evaluable && invalid.generation_invalidated);
+            }
 
             let invalid = refresh_tail_hygiene_baseline(measure(), false, Some(&earlier), 20);
             assert!(!invalid.evaluable, "{coverage:?}");

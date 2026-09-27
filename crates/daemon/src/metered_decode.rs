@@ -1234,6 +1234,28 @@ mod tests {
         }
     }
 
+    #[test]
+    fn string_skipping_scans_match_the_byte_scans_on_long_strings() {
+        let plain = "a".repeat(10_000);
+        let escaped = format!("{plain}\\n{plain}");
+        for body in [
+            format!(r#""{escaped}""#),
+            format!(r#"{{"k":"{escaped}","n":[1,-2.5e3,true]}}"#),
+            format!(r#"["{plain}","{escaped}",null]"#),
+            format!(r#"["{escaped}\""#),
+            format!(r#"["{plain}\"#),
+        ] {
+            let body = body.as_bytes();
+            let (floor, longest) = reference_scans(body);
+            assert_eq!(footprint_floor(body), floor);
+            assert_eq!(longest_escaped_string(body), longest);
+        }
+        assert_eq!(
+            longest_escaped_string(format!(r#""{escaped}""#).as_bytes()),
+            20_002
+        );
+    }
+
     /// The byte scan counts the values the meter visits; the floor excludes string bytes,
     /// which the meter retains.
     #[test]
