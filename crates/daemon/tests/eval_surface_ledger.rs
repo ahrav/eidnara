@@ -394,7 +394,9 @@ fn the_user_hint_pass_leaves_the_wire_response_bytes_unchanged() {
 #[test]
 fn a_turn_the_host_refuses_is_returned_with_its_code() {
     block_on(async {
-        let world = world(1_600);
+        // Unfolded, this session's durable text passes its 512 KiB bound between 2,000 and
+        // 2,200 messages under the compact meta encoding.
+        let world = world(2_600);
         let root = tempfile::tempdir().unwrap();
         let fixture = FixtureProcess::start_at(root.path().to_path_buf());
         let refused = try_pass(&fixture, &world, PROMPT, &Knobs::default())

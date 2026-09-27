@@ -1806,10 +1806,14 @@ pub struct NoteNudgeAnchorSeed {
     pub text: String,
 }
 
+/// One entry per served block, stored under one-letter keys; the aliases read older rows.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ServedBlockFingerprint {
+    #[serde(rename = "b", alias = "block_id")]
     pub block_id: String,
+    #[serde(rename = "h", alias = "content_hash")]
     pub content_hash: String,
+    #[serde(rename = "l", alias = "serialized_len")]
     pub serialized_len: usize,
 }
 
@@ -1847,16 +1851,29 @@ pub enum TailHygienePartKind {
 
 /// One typed part from the rendered-tail hygiene walk. Persisting its measurements lets later
 /// passes record newly appended content and update which content is considered recent without
-/// tokenizing the historical prefix again.
+/// tokenizing the historical prefix again. One entry is stored per live-tail part, so the
+/// stored keys are one letter and absent or false fields are omitted; the aliases read rows
+/// written with the field names.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TailHygienePartMeasurement {
+    #[serde(rename = "k", alias = "key")]
     pub key: String,
+    #[serde(rename = "h", alias = "content_hash")]
     pub content_hash: String,
+    #[serde(rename = "c", alias = "kind")]
     pub kind: TailHygienePartKind,
+    #[serde(rename = "t", alias = "tokens")]
     pub tokens: i64,
+    #[serde(rename = "u", alias = "u_tokens")]
     pub u_tokens: i64,
+    #[serde(rename = "n", alias = "tag_number", default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub tag_number: Option<i64>,
+    #[serde(rename = "s", alias = "tag_status", default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub tag_status: Option<String>,
+    #[serde(rename = "p", alias = "protected", default)]
+    #[serde(skip_serializing_if = "bool_is_false")]
     pub protected: bool,
 }
 
@@ -25983,6 +26000,90 @@ mod tests {
         )
         .unwrap();
         drop(raw);
+        assert_eq!(store.load("ses").unwrap().meta, meta);
+    }
+
+    /// Per-block meta entries are stored under one-letter keys with absent and false fields
+    /// omitted; a row written with the field names still loads, and the compact row is smaller.
+    #[test]
+    fn a_meta_row_with_field_named_block_entries_loads_and_the_compact_row_is_smaller() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
+        let hash = "81aa6b79b3e4142e2e791c2bcd59fee2bfac4de0853ec63d9d1e5de6035b51fe";
+        let part = |index: i64, tagged: bool| TailHygienePartMeasurement {
+            key: format!("m{index:07}#0\u{0}tool_call"),
+            content_hash: hash.to_string(),
+            kind: TailHygienePartKind::ToolInput,
+            tokens: 40,
+            u_tokens: if tagged { 40 } else { 0 },
+            tag_number: tagged.then_some(index),
+            tag_status: tagged.then(|| "active".to_string()),
+            protected: index == 0,
+        };
+        let meta = ModuleMeta {
+            tail_hygiene_baseline: Some(TailHygieneBaseline {
+                baseline_parts: (0..4).map(|index| part(index, index % 2 == 0)).collect(),
+                ..Default::default()
+            }),
+            served_output_fingerprint: (0..3)
+                .map(|index| ServedBlockFingerprint {
+                    block_id: format!("m{index:07}#0"),
+                    content_hash: hash.to_string(),
+                    serialized_len: 182,
+                })
+                .collect(),
+            ..Default::default()
+        };
+        store
+            .commit("ses", None, &CoreState::empty(), &meta)
+            .unwrap();
+        let mut named = serde_json::to_value(&meta).unwrap();
+        named["tail_hygiene_baseline"]["baseline_parts"] = meta
+            .tail_hygiene_baseline
+            .as_ref()
+            .unwrap()
+            .baseline_parts
+            .iter()
+            .map(|part| {
+                serde_json::json!({
+                    "key": part.key, "content_hash": part.content_hash, "kind": part.kind,
+                    "tokens": part.tokens, "u_tokens": part.u_tokens,
+                    "tag_number": part.tag_number, "tag_status": part.tag_status,
+                    "protected": part.protected,
+                })
+            })
+            .collect();
+        named["served_output_fingerprint"] = meta
+            .served_output_fingerprint
+            .iter()
+            .map(|block| {
+                serde_json::json!({
+                    "block_id": block.block_id, "content_hash": block.content_hash,
+                    "serialized_len": block.serialized_len,
+                })
+            })
+            .collect();
+        let raw = rusqlite::Connection::open(dir.path().join("memory.sqlite")).unwrap();
+        let length = || -> i64 {
+            raw.query_row(
+                "SELECT length(CAST(meta AS BLOB)) FROM cache_state WHERE session_id = 'ses'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap()
+        };
+        let compact = length();
+        raw.execute(
+            "UPDATE cache_state SET meta = ?1 WHERE session_id = 'ses'",
+            [named.to_string()],
+        )
+        .unwrap();
+        let field_named = length();
+        // At least 40 bytes saved per entry (seven entries here).
+        assert!(
+            compact + 7 * 40 <= field_named,
+            "compact {compact} against field-named {field_named}"
+        );
         assert_eq!(store.load("ses").unwrap().meta, meta);
     }
 

@@ -987,14 +987,37 @@ fn excluded_prefix_len(parts: &[TailHygienePartMeasurement]) -> usize {
         .count()
 }
 
-/// Empty for no parts, which is also the stored default.
+/// Empty for no parts, which is also the stored default. Each part is hashed in the
+/// field-named form stored digests were computed over, not the compact stored form, so a
+/// digest written before the compact encoding still matches.
 fn parts_digest(parts: &[TailHygienePartMeasurement]) -> String {
+    #[derive(serde::Serialize)]
+    struct DigestPart<'a> {
+        key: &'a str,
+        content_hash: &'a str,
+        kind: TailHygienePartKind,
+        tokens: i64,
+        u_tokens: i64,
+        tag_number: Option<i64>,
+        tag_status: Option<&'a str>,
+        protected: bool,
+    }
     if parts.is_empty() {
         return String::new();
     }
     let mut input = Vec::new();
     for part in parts {
-        serde_json::to_writer(&mut input, part).expect("hygiene parts are serializable");
+        let part = DigestPart {
+            key: &part.key,
+            content_hash: &part.content_hash,
+            kind: part.kind,
+            tokens: part.tokens,
+            u_tokens: part.u_tokens,
+            tag_number: part.tag_number,
+            tag_status: part.tag_status.as_deref(),
+            protected: part.protected,
+        };
+        serde_json::to_writer(&mut input, &part).expect("hygiene parts are serializable");
         input.push(0);
     }
     hex_digest(input)
@@ -1146,6 +1169,31 @@ mod tests {
     use serde::{Deserialize, Serialize};
     use serde_json::{Value, json};
     use std::sync::Arc;
+
+    /// The excluded-prefix digest hashes each part in the field-named form, so a digest
+    /// stored before the compact meta encoding still matches the same parts.
+    #[test]
+    fn parts_digest_hashes_the_field_named_form() {
+        let part = TailHygienePartMeasurement {
+            key: "m1#0".to_string(),
+            content_hash: "ab".repeat(32),
+            kind: TailHygienePartKind::Excluded,
+            tokens: 7,
+            u_tokens: 0,
+            tag_number: None,
+            tag_status: None,
+            protected: false,
+        };
+        let named = format!(
+            "{{\"key\":\"m1#0\",\"content_hash\":\"{}\",\"kind\":\"excluded\",\"tokens\":7,\
+             \"u_tokens\":0,\"tag_number\":null,\"tag_status\":null,\"protected\":false}}\0",
+            "ab".repeat(32)
+        );
+        assert_eq!(
+            parts_digest(&[part.clone(), part]),
+            hex_digest(named.repeat(2))
+        );
+    }
 
     fn message(mid: &str, ordinal: u64, role: &str, blocks: Vec<BlockKind>) -> Arc<IngressMessage> {
         Arc::new(IngressMessage {
@@ -2477,10 +2525,11 @@ mod tests {
         // The fixture messages are daemon-built typed blocks, so their part hashes
         // follow the canonical block bytes: span-sorted key order with a false
         // `provider_executed` omitted. Plugin-shaped blocks keep their bytes; see the
-        // projection golden.
+        // projection golden. The parts hash in their compact stored form; hashed in the
+        // field-named form the same parts give the pre-compaction digest 9e452c89...03f3d.
         assert_eq!(
             format!("{:x}", frozen.finalize()),
-            "9e452c8910bdbc75db4a6fc9f7920659d921a48092f7ea59fcea355315503f3d"
+            "add4209aabc4040a79462976a2dfd8cbe3d408d12d3d7e3b628855f6d7fe3e22"
         );
     }
 
