@@ -10,6 +10,7 @@ import {
     encodeOpenCodeMessagesToCk,
     MODULE_ITEM_CONTINUATION_KEY,
     MODULE_PAGE_MAX_BYTES,
+    MODULE_UNPAGED_TRANSFORM_MAX_BYTES,
 } from "./module-wire";
 
 describe("encodeOpenCodeMessagesToCk", () => {
@@ -799,6 +800,51 @@ describe("buildPagedModuleTransformPayloads byte reuse", () => {
         expect(pages[0]?.bytes).toBe(Buffer.byteLength(JSON.stringify(body)));
     });
 
+    function transformBody(bytes: number): Record<string, unknown> {
+        const text = "x".repeat(60_000);
+        const count = Math.ceil(bytes / text.length);
+        return {
+            method: "transform",
+            session_id: "ses-unpaged-limit",
+            v: 3,
+            boundary: null,
+            messages: Array.from({ length: count }, (_, index) => ({ mid: `m${index}`, text })),
+        };
+    }
+
+    it("sends a body above the page limit unpaged while it fits the daemon's transform limit", () => {
+        const body = transformBody(4 * MODULE_PAGE_MAX_BYTES);
+        const bytes = Buffer.byteLength(JSON.stringify(body));
+        expect(bytes).toBeGreaterThan(MODULE_PAGE_MAX_BYTES);
+        const pages = buildPagedModuleTransformPayloads(body);
+        expect(pages).toHaveLength(1);
+        expect(pages[0]?.bytes).toBe(bytes);
+        expect(pages[0]?.page.transform_page_id).toBeUndefined();
+    });
+
+    it("pages a body above the daemon's transform limit", () => {
+        const body = transformBody(MODULE_UNPAGED_TRANSFORM_MAX_BYTES);
+        expect(Buffer.byteLength(JSON.stringify(body))).toBeGreaterThan(
+            MODULE_UNPAGED_TRANSFORM_MAX_BYTES,
+        );
+        const pages = buildPagedModuleTransformPayloads(body);
+        expect(pages.length).toBeGreaterThan(1);
+        for (const { page, bytes } of pages) {
+            expect(typeof page.transform_page_id).toBe("string");
+            expect(bytes).toBeLessThanOrEqual(MODULE_PAGE_MAX_BYTES);
+        }
+        expect(pages.at(-1)?.page.transform_page_complete).toBe(true);
+    });
+
+    it("pins the unpaged limit to the daemon's transform body limit", () => {
+        const rustSource = readFileSync(
+            join(import.meta.dir, "../../../../../crates/daemon/src/lib.rs"),
+            "utf8",
+        );
+        expect(rustSource).toContain("const MAX_TRANSFORM_FRAME_BYTES: usize = 32 * 1024 * 1024;");
+        expect(MODULE_UNPAGED_TRANSFORM_MAX_BYTES).toBe(32 * 1024 * 1024);
+    });
+
     it("keeps sparse array slots at their positions while paging", () => {
         const input: unknown[] = Array.from({ length: 80 }, (_, index) => ({
             mid: `m${index}`,
@@ -808,7 +854,7 @@ describe("buildPagedModuleTransformPayloads byte reuse", () => {
         delete input[3];
         delete input[40];
         const body = { method: "transform", session_id: "ses-sparse", input };
-        const pages = buildPagedModuleTransformPayloads(body);
+        const pages = buildPagedModuleTransformPayloads(body, MODULE_PAGE_MAX_BYTES);
         const paged = pages.flatMap(
             ({ page }) => JSON.parse(JSON.stringify(page.input)) as unknown[],
         );
@@ -842,7 +888,7 @@ describe("buildPagedModuleTransformPayloads byte reuse", () => {
                 })),
             ],
         };
-        const pages = buildPagedModuleTransformPayloads(body);
+        const pages = buildPagedModuleTransformPayloads(body, MODULE_PAGE_MAX_BYTES);
         const units = pages.flatMap(({ page }) => page.input as Array<Record<string, unknown>>);
         expect(units.filter((unit) => unit.mid === "carrier")).toHaveLength(0);
         const marker = units[0]?.[MODULE_ITEM_CONTINUATION_KEY] as Record<string, unknown>;
@@ -862,7 +908,7 @@ describe("buildPagedModuleTransformPayloads byte reuse", () => {
                     ck: { text: "x".repeat(8_000) },
                 })),
             };
-            const pages = buildPagedModuleTransformPayloads(body).map(
+            const pages = buildPagedModuleTransformPayloads(body, MODULE_PAGE_MAX_BYTES).map(
                 ({ page }) => page as Record<string, unknown>,
             );
             expect(pages.length).toBeGreaterThan(1);
@@ -886,7 +932,7 @@ describe("buildPagedModuleTransformPayloads byte reuse", () => {
             })),
         };
         expect(Buffer.byteLength(JSON.stringify(body))).toBeGreaterThan(MODULE_PAGE_MAX_BYTES);
-        const pages = buildPagedModuleTransformPayloads(body);
+        const pages = buildPagedModuleTransformPayloads(body, MODULE_PAGE_MAX_BYTES);
         expect(pages.length).toBeGreaterThan(1);
         for (const { page, bytes } of pages) {
             expect(bytes).toBe(Buffer.byteLength(JSON.stringify(page)));
@@ -910,7 +956,7 @@ describe("transform page array fields", () => {
 
         const body: Record<string, unknown> = { method: "transform", session_id: "s" };
         for (const field of rustFields) body[field] = [{ pad: "x".repeat(MODULE_PAGE_MAX_BYTES) }];
-        const pages = buildPagedModuleTransformPayloads(body);
+        const pages = buildPagedModuleTransformPayloads(body, MODULE_PAGE_MAX_BYTES);
         expect(pages.length).toBeGreaterThan(1);
         for (const { page } of pages) {
             for (const field of rustFields) expect(Array.isArray(page[field])).toBe(true);
@@ -920,7 +966,10 @@ describe("transform page array fields", () => {
             expect(pages.some(({ page }) => (page[field] as unknown[]).length > 0)).toBe(true);
         }
         // A list field the daemon does not page rides as a scalar on the completing page only.
-        const unpaged = buildPagedModuleTransformPayloads({ ...body, other_list: [1, 2, 3] });
+        const unpaged = buildPagedModuleTransformPayloads(
+            { ...body, other_list: [1, 2, 3] },
+            MODULE_PAGE_MAX_BYTES,
+        );
         expect(unpaged.filter(({ page }) => "other_list" in page)).toHaveLength(1);
         expect(unpaged.at(-1)?.page.other_list).toEqual([1, 2, 3]);
         expect(__moduleWireTest.buildPagedModuleTransformPayloads).toBe(
@@ -943,7 +992,7 @@ it("snapshots source toJSON once and serializes each emitted envelope once", asy
     };
     const stringify = spyOn(JSON, "stringify");
     try {
-        const pages = buildPagedModuleTransformPayloads(body);
+        const pages = buildPagedModuleTransformPayloads(body, MODULE_PAGE_MAX_BYTES);
         expect(pages.length).toBeGreaterThan(1);
         expect(calls).toBe(1);
         expect(stringify.mock.calls.filter(([value]) => value === body)).toHaveLength(1);
@@ -972,7 +1021,7 @@ it("builds the unpaged carrier without parsing the body", async () => {
     };
     const parse = spyOn(JSON, "parse");
     try {
-        const pages = buildPagedModuleTransformPayloads(body);
+        const pages = buildPagedModuleTransformPayloads(body, MODULE_PAGE_MAX_BYTES);
         expect(pages).toHaveLength(1);
         expect(parse).not.toHaveBeenCalled();
         expect(serializedJsonText(pages[0]!.page)).toBe(JSON.stringify(body));
@@ -994,7 +1043,7 @@ it("measures each paged item once across convergence attempts", () => {
     const stringify = spyOn(JSON, "stringify");
     const parse = spyOn(JSON, "parse");
     try {
-        const pages = buildPagedModuleTransformPayloads(body);
+        const pages = buildPagedModuleTransformPayloads(body, MODULE_PAGE_MAX_BYTES);
         // Two pages force a second convergence attempt after the first assumes one page.
         expect(pages).toHaveLength(2);
         const itemMeasurements = stringify.mock.calls.filter(
@@ -1024,7 +1073,7 @@ it("keeps unpaged boundary bodies accepted when Rust numbers expand", async () =
     for (const fixture of cases) {
         const expected = JSON.stringify(fixture.body);
         expect(Buffer.byteLength(expected)).toBe(MODULE_PAGE_MAX_BYTES);
-        const pages = buildPagedModuleTransformPayloads(fixture.body);
+        const pages = buildPagedModuleTransformPayloads(fixture.body, MODULE_PAGE_MAX_BYTES);
         expect(pages).toHaveLength(1);
         expect(pages[0]?.page.transform_page_index).toBeUndefined();
         expect(serializedJsonText(pages[0]!.page)).toBe(expected);

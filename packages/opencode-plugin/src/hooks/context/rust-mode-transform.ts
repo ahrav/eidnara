@@ -345,6 +345,8 @@ export interface RustModeTransformOptions {
     captureAdmission?: TransformCaptureAdmission;
     /** Retained-output budget across sessions; tests inject a smaller one. */
     retainedOutputBudgetBytes?: number;
+    /** Largest transform body sent unpaged; tests inject the page limit to exercise paging. */
+    unpagedTransformMaxBytes?: number;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -1529,7 +1531,10 @@ export function createRustModeTransform(
                 payload: Record<string, unknown>,
                 detail: string,
             ): Promise<TransformSeriesResult> => {
-                const series = buildPagedModuleTransformPayloads(payload);
+                const series = buildPagedModuleTransformPayloads(
+                    payload,
+                    options.unpagedTransformMaxBytes,
+                );
                 const paged = series.some(
                     (entry) => typeof entry.page.transform_page_id === "string",
                 );

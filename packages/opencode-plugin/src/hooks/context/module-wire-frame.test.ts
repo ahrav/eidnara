@@ -14,7 +14,7 @@ import {
     serializedTransformCorpus,
 } from "./__tests__/serialized-transform-corpus";
 import { HostModuleTransport } from "./module-transport";
-import { buildPagedModuleTransformPayloads } from "./module-wire";
+import { buildPagedModuleTransformPayloads, MODULE_PAGE_MAX_BYTES } from "./module-wire";
 import type { RustModeModuleClient } from "./rust-mode-transform";
 
 let root: string;
@@ -55,12 +55,12 @@ afterEach(async () => {
 test("pager corpus reaches the native-writer fake with exact header and body bytes", async () => {
     for (const fixture of serializedTransformCorpus()) {
         if (fixture.pagerRefuses) {
-            expect(() => buildPagedModuleTransformPayloads(fixture.body)).toThrow(
-                "module transform scalar tail exceeds the 512 KiB page limit",
-            );
+            expect(() =>
+                buildPagedModuleTransformPayloads(fixture.body, MODULE_PAGE_MAX_BYTES),
+            ).toThrow("module transform scalar tail exceeds the 512 KiB page limit");
             continue;
         }
-        const pages = buildPagedModuleTransformPayloads(fixture.body);
+        const pages = buildPagedModuleTransformPayloads(fixture.body, MODULE_PAGE_MAX_BYTES);
         if (fixture.firstPageBytes !== undefined)
             expect(pages[0]?.bytes).toBe(fixture.firstPageBytes);
         if (fixture.lastPageBytes !== undefined)

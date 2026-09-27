@@ -906,6 +906,7 @@ describe("Rust mode transform transport", () => {
             try {
                 const transform = createRustModeTransform(makeDeps(), {
                     moduleClient: client,
+                    unpagedTransformMaxBytes: MODULE_PAGE_MAX_BYTES,
                 });
                 const output = { messages: messages as unknown[] };
                 await transform.run(sessionId, output);
@@ -952,6 +953,7 @@ describe("Rust mode transform transport", () => {
         try {
             const transform = createRustModeTransform(makeDeps(), {
                 moduleClient: client,
+                unpagedTransformMaxBytes: MODULE_PAGE_MAX_BYTES,
             });
             const output = { messages: messages as unknown[] };
             await transform.run(sessionId, output);
@@ -1393,6 +1395,7 @@ describe("Rust mode transform transport", () => {
         );
         const transform = createRustModeTransform(makeDeps(), {
             moduleClient: client,
+            unpagedTransformMaxBytes: MODULE_PAGE_MAX_BYTES,
         });
         const buildMessages = () =>
             rowMessages(sessionId, rows, (row) =>
@@ -2259,6 +2262,7 @@ describe("bounded transform ownership", () => {
             });
             const transform = createRustModeTransform(makeDeps(), {
                 moduleClient: client,
+                unpagedTransformMaxBytes: MODULE_PAGE_MAX_BYTES,
             });
             const output = { messages: messages as unknown[] };
             const pass = transform.run(sessionId, output);
@@ -2657,6 +2661,7 @@ describe("bounded transform ownership", () => {
         });
         const transform = createRustModeTransform(makeDeps(), {
             moduleClient: client,
+            unpagedTransformMaxBytes: MODULE_PAGE_MAX_BYTES,
         });
         const output = { messages: messages as unknown[] };
         await transform.run(sessionId, output);
