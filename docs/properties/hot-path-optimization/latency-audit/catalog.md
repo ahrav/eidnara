@@ -787,16 +787,16 @@ walks keep a warm prefix, and production transforms reuse unchanged
 measurements while recounting only an edited block.
 Guarantee: The hygiene digest is a function of the part kind and derived
 content and is never the projection `content_hash`.
-Check: `always` - For every hygiene part, `content_hash ==
-hex(sha256(kind_name ++ "\0" ++ content))` where `content` is the derived
+Check: `always` - For every hygiene part, `content_hash` is the first 32
+characters of `hex(sha256(kind_name ++ "\0" ++ content))` where `content` is the derived
 part string ([terse_text_compression-substituted and reminder-stripped text][hyg-text],
 [`to_string(input)`][hyg-input], or [`tool_output_content`][hyg-output]);
 excluded parts hash `"excluded\0" ++ block.bytes` on the pre-match branch
-(`tail_hygiene.rs:861-885`) and the kind-level branch (`:931-934`), and
+(`tail_hygiene.rs:863-887`) and the kind-level branch (`:933-936`), and
 `"excluded\0" ++ content` with the derived empty or drop-sentinel content on
-the text, tool-result, and media branches (`:892-893`, `:905-906`,
-`:917-918`, through `excluded_part` at `:624-626`); the token cache is keyed
-by that digest ([`count_with_digest`][count-digest] at
+the text, tool-result, and media branches (`:894-895`, `:907-908`,
+`:919-920`, through `excluded_part` at `:626-628`); the token cache is keyed
+by the full digest ([`count_with_digest`][count-digest] at
 [`tail_hygiene.rs:614`][th-cwd]); and the measurement is identical with a
 cold and a warm memo. `always` because the digest is both the reported
 hash and the cache key on every measured pass.
@@ -2879,9 +2879,9 @@ evaluation of this area and its disposition are recorded in
 [hyg-output]: ../../../../crates/daemon/src/tail_hygiene.rs#L572
 [part-measure]: ../../../../crates/daemon/src/tail_hygiene.rs#L599
 [th-cwd]: ../../../../crates/daemon/src/tail_hygiene.rs#L614
-[hygiene]: ../../../../crates/daemon/src/tail_hygiene.rs#L816
-[hyg-text]: ../../../../crates/daemon/src/tail_hygiene.rs#L888-L897
-[hyg-input]: ../../../../crates/daemon/src/tail_hygiene.rs#L898-L901
+[hygiene]: ../../../../crates/daemon/src/tail_hygiene.rs#L818
+[hyg-text]: ../../../../crates/daemon/src/tail_hygiene.rs#L890-L899
+[hyg-input]: ../../../../crates/daemon/src/tail_hygiene.rs#L900-L903
 [count-digest]: ../../../../crates/daemon/src/token_cache.rs#L110
 [hyg-bench-input]: ../../../../crates/daemon/benches/hot_path.rs#L83-L97
 [hyg-bench-loop]: ../../../../crates/daemon/benches/hot_path.rs#L161-L199
