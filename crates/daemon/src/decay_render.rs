@@ -14,6 +14,7 @@ use std::collections::BTreeMap;
 use std::ops::Range;
 
 use context_core::decay::{Tier, compute_budget_pressure, rendered_tier};
+use context_core::redaction::redact_durable_text;
 use memory_store::{Claim, StoredHistorySegment};
 
 /// Default hard budget measured by the caller's token estimator.
@@ -73,6 +74,7 @@ pub(crate) fn live_claims(
 /// that is not its key's live claim, carrying the live claim's value and ordinal.
 pub fn corrections_for(segments: &[StoredHistorySegment]) -> Vec<Vec<Correction>> {
     let live = live_claims(segments);
+    let mut splices: BTreeMap<&str, bool> = BTreeMap::new();
     segments
         .iter()
         .map(|segment| {
@@ -82,8 +84,14 @@ pub fn corrections_for(segments: &[StoredHistorySegment]) -> Vec<Vec<Correction>
                 .enumerate()
                 .filter_map(|(idx, claim)| {
                     let (at, current) = live[claim.key.as_str()];
-                    (at != (segment.sequence, idx)).then(|| Correction {
-                        anchor: claim.anchor.clone(),
+                    if at == (segment.sequence, idx) {
+                        return None;
+                    }
+                    let splices = *splices
+                        .entry(claim.key.as_str())
+                        .or_insert_with(|| splice_passes_scanner(&claim.key, current));
+                    Some(Correction {
+                        anchor: claim.anchor.clone().filter(|_| splices),
                         key: claim.key.clone(),
                         live_value: current.value.clone(),
                         live_ordinal: current.ordinal,
@@ -92,6 +100,13 @@ pub fn corrections_for(segments: &[StoredHistorySegment]) -> Vec<Vec<Correction>
                 .collect()
         })
         .collect()
+}
+
+fn splice_passes_scanner(key: &str, live: &Claim) -> bool {
+    let marker = correction_marker(MarkerForm::Splice, key, &live.value, live.ordinal);
+    redact_durable_text(&escape_xml_content(&marker))
+        .detections
+        .is_empty()
 }
 
 /// Render rows for `segments` in their given order, each carrying its corrections. The
@@ -1143,6 +1158,41 @@ mod tests {
             ]
         );
         assert!(corrections_for(&[]).is_empty());
+    }
+
+    #[test]
+    fn a_correction_whose_splice_the_scanner_flags_lists_on_the_footer() {
+        let tiered = |sequence: i64, p1: &str, claims: Vec<Claim>| StoredHistorySegment {
+            p1: Some(p1.into()),
+            ..row(sequence, claims)
+        };
+        let segments = [
+            tiered(
+                1,
+                "token.ttl is 3600 and db.port is 1",
+                vec![claim("token.ttl", "3600", 1), claim("db.port", "1", 2)],
+            ),
+            tiered(
+                2,
+                "raised",
+                vec![claim("token.ttl", "7200", 3), claim("db.port", "2", 4)],
+            ),
+        ];
+        let rows = render_rows(&segments, true);
+        assert_eq!(rows[0].corrections[0].anchor, None);
+        assert_eq!(
+            rows[0].corrections[1].anchor.as_deref(),
+            Some("db.port is 1")
+        );
+        let rendered = render_history_segment_at_tier(&rows[0], 1);
+        assert!(
+            rendered.ends_with(
+                "\ntoken.ttl is 3600 and [corrected @4: db.port = 2]\n[corrections: token.ttl = 7200 @3]"
+            ),
+            "{rendered}"
+        );
+        let redactor = context_core::redaction::Redactor::new().unwrap();
+        assert_eq!(redactor.redact(&rendered).unwrap().detections, []);
     }
 
     #[test]

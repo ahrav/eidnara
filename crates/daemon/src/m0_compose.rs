@@ -976,12 +976,20 @@ mod correction_compose_tests {
     fn rendered_corrections_hold_nothing_the_secret_scanner_flags() {
         let dir = tempfile::tempdir().unwrap();
         let store = open(dir.path());
-        let keys = ["db.port", "ui.mode", "cache.ttl", "build.jobs", "log.level"];
+        let keys = [
+            "db.port",
+            "ui.mode",
+            "cache.ttl",
+            "build.jobs",
+            "log.level",
+            "token.ttl",
+            "auth.retries",
+        ];
         let rows: Vec<StoredHistorySegment> = (1..=3)
             .map(|sequence| {
                 let p1 = keys
                     .iter()
-                    .map(|key| format!("{key} set to v{sequence}"))
+                    .map(|key| format!("{key} set to {sequence}00"))
                     .collect::<Vec<_>>()
                     .join(", ");
                 let claims = keys
@@ -991,13 +999,13 @@ mod correction_compose_tests {
                         let value = if i == 4 && sequence == 3 {
                             String::new()
                         } else {
-                            format!("v{sequence}")
+                            format!("{sequence}00")
                         };
                         claim(
                             key,
                             &value,
                             sequence * 10 + i as i64,
-                            &format!("{key} set to v{sequence}"),
+                            &format!("{key} set to {sequence}00"),
                         )
                     })
                     .collect();
@@ -1009,6 +1017,14 @@ mod correction_compose_tests {
         let m0 = m0(&store, 60_000.0);
         let m1 = m1(&store, 1);
         assert!(m0.contains("[corrected @") && m1.contains("<memory-updates>"));
+        assert!(
+            m0.contains("## 1-1 · S1\n[corrected @30: db.port = 300]")
+                && m0.contains("## 2-2 · S2\n[corrected @30: db.port = 300]"),
+            "{m0}"
+        );
+        let footer = "[corrections: token.ttl = 300 @35; auth.retries = 300 @36]";
+        assert_eq!(m0.matches(footer).count(), 2, "{m0}");
+        assert_eq!(m1.matches(footer).count(), 1, "{m1}");
         for text in [m0, m1] {
             assert_eq!(redactor.redact(&text).unwrap().detections, [], "{text}");
         }
