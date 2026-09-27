@@ -807,9 +807,9 @@ pub fn export_capture(capture: &StaleCapture) -> Result<StaleExport, CaptureErro
     Ok(export)
 }
 
-/// Merges exports of independent harness sessions: one schema, harness, and
-/// summarizer, no world twice, two or more inputs, and no input that is itself
-/// a merge. Task ids gain the session's one-based
+/// Merges exports of independent harness sessions: this build's schema, one
+/// harness and summarizer, no world twice, two or more inputs, and no input
+/// that is itself a merge. Task ids gain the session's one-based
 /// position (`world-2:stale-5`), so equal per-world ids cannot collide.
 pub fn merge_exports(exports: Vec<StaleExport>) -> Result<StaleExport, CaptureError> {
     // Every merge joins seeds with a comma, the mark a later merge refuses;
@@ -830,6 +830,11 @@ pub fn merge_exports(exports: Vec<StaleExport>) -> Result<StaleExport, CaptureEr
     };
     let mut seeds = std::collections::BTreeSet::new();
     for (index, export) in std::iter::once(first).chain(exports).enumerate() {
+        if export.schema != STALE_EXPORT_SCHEMA {
+            return Err(CaptureError::Schema {
+                found: export.schema,
+            });
+        }
         if (&export.schema, &export.harness, &export.summarizer)
             != (&merged.schema, &merged.harness, &merged.summarizer)
         {
