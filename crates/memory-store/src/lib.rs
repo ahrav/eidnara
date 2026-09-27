@@ -24628,28 +24628,16 @@ mod tests {
             .with_conn_fenced(|tx| {
                 tx.execute(
                     "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < ?2)
-                     INSERT INTO tags(session_id, tag_number, block_id, kind, token_count)
-                     SELECT ?1, i, 'b' || i, 'message', i * 3 FROM n",
+                     INSERT INTO tags(
+                         session_id, tag_number, block_id, kind, token_count,
+                         created_at_ms, source_bytes
+                     )
+                     SELECT ?1, i, 'b' || i, 'message', i * 3, 1000 + i, CAST('src' || i AS BLOB)
+                       FROM n",
                     params![session_id, count],
                 )
             })
             .unwrap();
-    }
-
-    fn tag_rows(store: &MemoryStore, session_id: &str) -> Vec<(i64, String, String, i64)> {
-        store
-            .inner
-            .with_conn(|conn| {
-                conn.prepare(
-                    "SELECT tag_number, block_id, kind, token_count FROM tags
-                      WHERE session_id = ?1 ORDER BY tag_number",
-                )?
-                .query_map(params![session_id], |r| {
-                    Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
-                })?
-                .collect()
-            })
-            .unwrap()
     }
 
     #[test]
@@ -24660,15 +24648,19 @@ mod tests {
             seed_tags(&store, "bulk", tags);
             seed_tags(&store, "kept", 7);
             assert_eq!(
-                tag_rows(&store, "bulk").len(),
+                store.load_tags_for_session("bulk").unwrap().len(),
                 usize::try_from(tags).unwrap()
             );
-            let kept = tag_rows(&store, "kept");
+            let kept = store.load_tags_for_session("kept").unwrap();
+            assert!(
+                kept.iter()
+                    .all(|row| row.created_at_ms > 0 && !row.source_bytes.is_empty())
+            );
             store.start_statement_work_ledger();
             store.delete_session("bulk", "/project").unwrap();
             let work = store.take_statement_work();
-            assert!(tag_rows(&store, "bulk").is_empty());
-            assert_eq!(tag_rows(&store, "kept"), kept);
+            assert!(store.load_tags_for_session("bulk").unwrap().is_empty());
+            assert_eq!(store.load_tags_for_session("kept").unwrap(), kept);
             let tag_delete = work
                 .iter()
                 .find(|run| run.sql.starts_with("DELETE FROM \"tags\""))

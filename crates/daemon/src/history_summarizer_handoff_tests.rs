@@ -975,18 +975,15 @@ fn aliases_from(start: u64) -> FrozenAliasTable {
     table
 }
 
-/// Publishes the firing awaiting its producer over messages `start..=start + 2` through the production path, with an accepted fact set that cites `s1` and `s2` and history over `start..=start + 1`.
-fn publish_accepted_chunk(
-    rig: &Rig,
-    target: &HandoffTarget,
+/// The chunk over the three messages from `start`, each anchorable and none tool-only.
+fn chunk_from(
     start: u64,
-) -> Result<(), HistorySummarizerDriveError> {
-    use crate::history_summarizer_producer::ProducerOutput;
-    use crate::history_summarizer_validate::{ChunkLine, HistorySummarizerChunk, ValidateOptions};
-
+    aliases: FrozenAliasTable,
+) -> crate::history_summarizer_validate::HistorySummarizerChunk {
+    use crate::history_summarizer_validate::{ChunkLine, HistorySummarizerChunk};
     let end = start + 2;
-    let chunk = HistorySummarizerChunk {
-        aliases: aliases_from(start),
+    HistorySummarizerChunk {
+        aliases,
         start_index: start,
         end_index: end,
         lines: (start..=end)
@@ -999,7 +996,20 @@ fn publish_accepted_chunk(
         present_ordinals: (start..=end).collect(),
         tool_only_ranges: vec![],
         completed_tool_arcs: vec![],
-    };
+    }
+}
+
+/// Publishes the firing awaiting its producer over messages `start..=start + 2` through the production path, with an accepted fact set that cites `s1` and `s2` and history over `start..=start + 1`.
+fn publish_accepted_chunk(
+    rig: &Rig,
+    target: &HandoffTarget,
+    start: u64,
+) -> Result<(), HistorySummarizerDriveError> {
+    use crate::history_summarizer_producer::ProducerOutput;
+    use crate::history_summarizer_validate::ValidateOptions;
+
+    let end = start + 2;
+    let chunk = chunk_from(start, aliases_from(start));
     let text = format!(
         r#"<output><history_segments><history_segment start="{start}" end="{}" title="arc" episode_type="feature" importance="60"><p1>arc</p1><p2>arc</p2><p3>arc</p3><p4 /></history_segment></history_segments><facts><PROJECT_RULES>
 * [s1:0-11] [s2:0-22] Run bun install before building.
@@ -1035,25 +1045,31 @@ fn publish_accepted_chunk(
     .map(|_| ())
 }
 
-/// Moves the gate through the three states that are not `open`: unevaluated, closed, and an `open` evaluation gone stale. `step` runs `per_state` times per state.
+/// Moves the rig's gate into one state.
+type GateSetter = fn(&Rig);
+
+/// Runs `step` `per_state` times under each gate state that is not `open`: unevaluated, closed, and an `open` evaluation gone stale. The index passed to `step` counts every call.
 fn for_each_state_that_is_not_open(rig: &mut Rig, per_state: u64, mut step: impl FnMut(&Rig, u64)) {
+    let cases: [(&str, GateSetter); 3] = [
+        ("unknown", |_| {}),
+        ("identity_mismatch", Rig::close_gate),
+        ("stale", |rig| {
+            rig.gate.set_activation(ActivationState::Open);
+            rig.gate.expire_for_test();
+        }),
+    ];
     rig.gate = Arc::new(MemoryReviewerStatus::default());
-    for index in 0..3 * per_state {
-        match index / per_state {
-            0 => {}
-            1 if index % per_state == 0 => rig.close_gate(),
-            2 if index % per_state == 0 => {
-                rig.gate.set_activation(ActivationState::Open);
-                rig.gate.expire_for_test();
-            }
-            _ => {}
+    let mut index = 0;
+    for (expected, set_gate) in cases {
+        set_gate(rig);
+        for _ in 0..per_state {
+            assert_eq!(
+                rig.gate.activation_state(),
+                ActivationState::Closed(expected)
+            );
+            step(rig, index);
+            index += 1;
         }
-        let expected = ["unknown", "identity_mismatch", "stale"][(index / per_state) as usize];
-        assert_eq!(
-            rig.gate.activation_state(),
-            ActivationState::Closed(expected)
-        );
-        step(rig, index);
     }
 }
 
@@ -1348,7 +1364,7 @@ fn the_predicate_is_unchanged_by_the_reservation() {
 fn the_publication_path_hands_accepted_facts_off_and_records_rejected_ones() {
     use crate::history_summarizer_producer::ProducerOutput;
     use crate::history_summarizer_validate::{
-        ChunkLine, HistorySummarizerChunk, StoredHistorySegmentRange, ValidateOptions,
+        HistorySummarizerChunk, StoredHistorySegmentRange, ValidateOptions,
     };
     use memory_store::ExtractionFailure;
 
@@ -1357,21 +1373,7 @@ fn the_publication_path_hands_accepted_facts_off_and_records_rejected_ones() {
     awaiting.state = HistorySummarizerPhase::AwaitingProducer;
     awaiting.history_segment_set_generation = HistorySegmentSetGeneration::default();
     rig.persist(awaiting);
-    let chunk = HistorySummarizerChunk {
-        aliases: aliases(),
-        start_index: 2,
-        end_index: 4,
-        lines: (2..=4)
-            .map(|ordinal| ChunkLine {
-                ordinal,
-                message_id: format!("m{ordinal}"),
-                anchorable: true,
-            })
-            .collect(),
-        present_ordinals: vec![2, 3, 4],
-        tool_only_ranges: vec![],
-        completed_tool_arcs: vec![],
-    };
+    let chunk = chunk_from(2, aliases());
     let output = |facts: &str| ProducerOutput {
         text: format!(
             r#"<output><history_segments><history_segment start="2" end="3" title="arc" episode_type="feature" importance="60"><p1>arc</p1><p2>arc</p2><p3>arc</p3><p4 /></history_segment></history_segments><facts><PROJECT_RULES>
@@ -1487,21 +1489,7 @@ fn the_publication_path_hands_accepted_facts_off_and_records_rejected_ones() {
     next.history_segment_set_generation = HistorySegmentSetGeneration::new(1);
     next.memory_reviewer_nonadmission = after.meta.history_summarizer.memory_reviewer_nonadmission;
     rig.persist(next);
-    let later = HistorySummarizerChunk {
-        aliases: FrozenAliasTable::default(),
-        start_index: 4,
-        end_index: 6,
-        lines: (4..=6)
-            .map(|ordinal| ChunkLine {
-                ordinal,
-                message_id: format!("m{ordinal}"),
-                anchorable: true,
-            })
-            .collect(),
-        present_ordinals: vec![4, 5, 6],
-        tool_only_ranges: vec![],
-        completed_tool_arcs: vec![],
-    };
+    let later = chunk_from(4, FrozenAliasTable::default());
     let rejected = output("* [s9:0-4] unknown alias")
         .text
         .replace(r#"start="2" end="3""#, r#"start="4" end="5""#)
@@ -1753,7 +1741,7 @@ fn restart_settles_a_reserved_firing_whose_input_changed_or_expired() {
 #[test]
 fn a_production_reservation_republishes_after_a_restart_and_a_stale_one_is_not_carried() {
     use crate::history_summarizer_producer::ProducerOutput;
-    use crate::history_summarizer_validate::{ChunkLine, HistorySummarizerChunk, ValidateOptions};
+    use crate::history_summarizer_validate::ValidateOptions;
 
     // The production path reserves and retains, then the store fails to activate (the activation names the wrong producer), which keeps the firing in Publishing with the failure recorded.
     let mut rig = Rig::open();
@@ -1761,21 +1749,7 @@ fn a_production_reservation_republishes_after_a_restart_and_a_stale_one_is_not_c
     awaiting.state = HistorySummarizerPhase::AwaitingProducer;
     awaiting.history_segment_set_generation = HistorySegmentSetGeneration::default();
     rig.persist(awaiting);
-    let chunk = HistorySummarizerChunk {
-        aliases: aliases(),
-        start_index: 2,
-        end_index: 4,
-        lines: (2..=4)
-            .map(|ordinal| ChunkLine {
-                ordinal,
-                message_id: format!("m{ordinal}"),
-                anchorable: true,
-            })
-            .collect(),
-        present_ordinals: vec![2, 3, 4],
-        tool_only_ranges: vec![],
-        completed_tool_arcs: vec![],
-    };
+    let chunk = chunk_from(2, aliases());
     let target = rig.target();
     // A fence that refuses once, as a retired transform snapshot does, and then admits.
     struct RefuseOnce(std::sync::atomic::AtomicBool);
