@@ -5,7 +5,23 @@
 //! fold read over either visits the same rows. Ranges and sequences still grow with the
 //! absolute position, as the store requires.
 
-use memory_store::{HistorySummarizerPhase, MemoryStore, StoredHistorySegment};
+use memory_store::{Claim, HistorySummarizerPhase, MemoryStore, StoredHistorySegment};
+
+use crate::history_summarizer_citations::CLAIMS_PER_SEGMENT;
+
+/// How often a synthetic session's user corrects an earlier value. Every claim names one of
+/// [`CLAIM_KEYS`] keys, so a later claim supersedes an earlier one with the same key.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClaimRegime {
+    None,
+    /// One correction per three messages, at most eight claims per row.
+    EveryThirdMessage,
+    /// One correction per two hundred messages (0.5%).
+    HalfPercent,
+}
+
+/// Keys a synthetic claim can name, so claims of one key recur across rows.
+const CLAIM_KEYS: u64 = 64;
 
 /// Shape of one synthetic session.
 #[derive(Debug, Clone)]
@@ -15,6 +31,9 @@ pub struct SyntheticHistory {
     /// Distances from the newest row (1 = newest) that hold legacy rows.
     pub legacy_from_newest: Vec<usize>,
     pub seed: u64,
+    /// Messages each row covers, so the session holds `span x H` messages.
+    pub span: i64,
+    pub claims: ClaimRegime,
 }
 
 impl SyntheticHistory {
@@ -28,7 +47,47 @@ impl SyntheticHistory {
                 .filter(|distance| *distance <= segments)
                 .collect(),
             seed: 0x5EED_0826,
+            span: 2,
+            claims: ClaimRegime::None,
         }
+    }
+
+    /// Rows covering `span` messages each, with claims under `claims`.
+    pub fn with_claims(mut self, span: i64, claims: ClaimRegime) -> Self {
+        self.span = span;
+        self.claims = claims;
+        self
+    }
+
+    /// The claims of the non-legacy row at `distance` from the newest, anchored on its `p1`.
+    /// They are a function of the distance alone, like the rest of the row.
+    fn claims_at(&self, distance: usize, end: i64, p1: &str) -> Vec<Claim> {
+        // A correction falls on every multiple of `period`, counting messages back from the
+        // newest; a row carries the corrections inside its span, at most the per-row cap.
+        let period = match self.claims {
+            ClaimRegime::None => return Vec::new(),
+            ClaimRegime::EveryThirdMessage => 3,
+            ClaimRegime::HalfPercent => 200,
+        };
+        let corrections_through = |d: i64| d * self.span / period;
+        let count = (corrections_through(distance as i64)
+            - corrections_through(distance as i64 - 1))
+        .min(CLAIMS_PER_SEGMENT as i64) as u64;
+        let anchor = p1.split(' ').next().map(str::to_string);
+        (0..count)
+            .map(|i| {
+                let key = (distance as u64)
+                    .wrapping_mul(0x9E37_79B9)
+                    .wrapping_add(i.wrapping_mul(0x85EB_CA6B))
+                    % CLAIM_KEYS;
+                Claim {
+                    key: format!("synthetic.k{key}"),
+                    value: format!("v{distance}-{i}"),
+                    ordinal: end,
+                    anchor: anchor.clone(),
+                }
+            })
+            .collect()
     }
 
     /// Legacy row count, `L`.
@@ -41,7 +100,7 @@ impl SyntheticHistory {
         assert!((1..=self.segments).contains(&sequence));
         let distance = self.segments + 1 - sequence;
         let mut rng = Rng::new(self.seed ^ (distance as u64).wrapping_mul(0x9E37_79B9));
-        let end = 2 * sequence as i64;
+        let end = self.span * sequence as i64;
         let words = |rng: &mut Rng, n: u64| {
             let count = 3 + rng.next() % n;
             (0..count)
@@ -52,9 +111,9 @@ impl SyntheticHistory {
         let title = format!("segment {distance} {}", words(&mut rng, 4));
         let base = StoredHistorySegment {
             sequence: sequence as i64,
-            start_message: end - 1,
+            start_message: end - self.span + 1,
             end_message: end,
-            start_message_id: format!("m{}#0", end - 1),
+            start_message_id: format!("m{}#0", end - self.span + 1),
             end_message_id: format!("m{end}#0"),
             title,
             created_at: sequence as i64,
@@ -80,6 +139,7 @@ impl SyntheticHistory {
         };
         let p1 = words(&mut rng, 60);
         StoredHistorySegment {
+            claims: self.claims_at(distance, end, &p1),
             content: p1.clone(),
             p1: Some(p1),
             p2: Some(words(&mut rng, 25)),
@@ -105,8 +165,8 @@ impl SyntheticHistory {
                     "INSERT INTO history_segments
                        (session_id, sequence, start_message, end_message, start_message_id,
                         end_message_id, start_date, end_date, title, content, p1, p2, p3, p4,
-                        importance, episode_type, legacy, created_at)
-                     VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18)",
+                        importance, episode_type, legacy, created_at, claims)
+                     VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19)",
                 )?;
                 for sequence in 1..=self.segments {
                     let c = self.segment(sequence);
@@ -129,6 +189,7 @@ impl SyntheticHistory {
                         c.episode_type,
                         c.legacy,
                         c.created_at,
+                        serde_json::to_string(&c.claims).expect("claims serialize"),
                     ])?;
                 }
                 Ok(())
