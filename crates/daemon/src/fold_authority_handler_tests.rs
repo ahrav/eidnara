@@ -401,6 +401,10 @@ async fn legacy_rows_adopt_by_their_fold_artifacts() {
         additive.meta.revert_epoch,
         "adoption over the legacy row runs no authority reset"
     );
+    assert_native_state(
+        &store.load("ses").unwrap().meta,
+        "legacy identities are cleared by the native adoption",
+    );
 }
 
 #[tokio::test(flavor = "current_thread")]

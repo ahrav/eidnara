@@ -2110,6 +2110,10 @@ fn stamp_fold_authority(
     }
     if let Some(eidnara_folds) = authority.adopt {
         loaded.meta.eidnara_folds = Some(eidnara_folds);
+        // Native adoption clears the identities a legacy compaction-off row recorded.
+        if !eidnara_folds {
+            loaded.meta.block_identity_by_mid.clear();
+        }
     }
     Ok(())
 }
