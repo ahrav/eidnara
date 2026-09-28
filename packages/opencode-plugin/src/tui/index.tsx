@@ -125,11 +125,15 @@ function showConflictDialog(
                     }
                     const actionSummary = actions.map((a) => `• ${a}`).join("\n");
                     const remaining = redetect();
-                    const remainingFindings = [...remaining.reasons, ...remaining.unresolved];
+                    // An unresolved source outlives any file edit, including one only the host observed.
+                    const remainingFindings = [
+                        ...remaining.reasons,
+                        ...new Set([...result.unresolved, ...remaining.unresolved]),
+                    ];
                     api.ui.dialog.replace(() => (
                         <api.ui.DialogAlert
                             title={
-                                remaining.disposition === "none"
+                                remainingFindings.length === 0
                                     ? "✅ Configuration Fixed"
                                     : "⚠️ Configuration Partly Fixed"
                             }

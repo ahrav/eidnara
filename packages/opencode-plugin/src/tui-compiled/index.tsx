@@ -84,10 +84,11 @@ function showConflictDialog(api, directory, result, redetect) {
         }
         const actionSummary = actions.map(a => `• ${a}`).join("\n");
         const remaining = redetect();
-        const remainingFindings = [...remaining.reasons, ...remaining.unresolved];
+        // An unresolved source outlives any file edit, including one only the host observed.
+        const remainingFindings = [...remaining.reasons, ...new Set([...result.unresolved, ...remaining.unresolved])];
         api.ui.dialog.replace(() => _$createComponent(api.ui.DialogAlert, {
           get title() {
-            return remaining.disposition === "none" ? "✅ Configuration Fixed" : "⚠️ Configuration Partly Fixed";
+            return remainingFindings.length === 0 ? "✅ Configuration Fixed" : "⚠️ Configuration Partly Fixed";
           },
           get message() {
             return `${actionSummary}${remainingFindings.length > 0 ? `\n\nStill unresolved:\n${remainingFindings.map(f => `• ${f}`).join("\n")}` : ""}\n\nPlease restart OpenCode for changes to take effect.`;
