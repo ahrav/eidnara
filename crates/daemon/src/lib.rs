@@ -5246,7 +5246,7 @@ impl HandlerCore {
                         history_summarizer_archive::archive_cut(
                             projection,
                             last_history_segment_end_ordinal,
-                            |mid| projection.identity_by_mid.contains_key(mid),
+                            |mid| loaded.meta.block_identity_by_mid.contains_key(mid),
                         )
                     })
                     .flatten()

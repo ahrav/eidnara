@@ -95,6 +95,47 @@ async fn a_published_cap_firing_fires_again_only_once_the_uncovered_window_reach
     producer.notify.notify_waiters();
 }
 
+/// The projection retains the cut message after the hook removes its committed identities
+/// from the store.
+#[tokio::test(flavor = "current_thread")]
+async fn the_cap_firing_ends_its_head_on_a_message_with_durable_identities() {
+    let producer = Arc::new(ProducerState::default());
+    producer.block_output.store(true, Ordering::SeqCst);
+    let (handler, store, _dir, _project) =
+        handler_with_store(Arc::clone(&producer), default_test_config());
+    let messages = window(WINDOW_CAP_BLOCKS as u64 + 100);
+    let cut = messages.len() as u64 - HALF_CAP_BLOCKS as u64;
+    {
+        let store = Arc::clone(&store);
+        *handler
+            .between_transform_and_prepare
+            .lock()
+            .expect("interleave hook mutex") = Some(Box::new(move || {
+            let loaded = store.load("ses").unwrap();
+            let mut meta = loaded.meta;
+            assert!(
+                meta.block_identity_by_mid
+                    .remove(&format!("m{cut}"))
+                    .is_some()
+            );
+            store
+                .commit("ses", loaded.row_version, &loaded.core, &meta)
+                .unwrap();
+        }));
+    }
+
+    let first = pass(&handler, &messages).await;
+    assert_eq!(
+        first["history_summarizer"]["reason"], "window_cap",
+        "{first}"
+    );
+    wait_for_phase(&store, HistorySummarizerPhase::AwaitingProducer).await;
+    let range = chunk_range(&store);
+    assert_eq!((range.from_ordinal, range.to_ordinal), (1, cut + 1));
+    producer.block_output.store(false, Ordering::SeqCst);
+    producer.notify.notify_waiters();
+}
+
 /// At the cap the firing's eligible head reaches through the half-cap cut, so its chunk
 /// starts at the window's first message and ends no earlier than the cut.
 #[tokio::test(flavor = "current_thread")]
