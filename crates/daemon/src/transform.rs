@@ -4211,6 +4211,7 @@ fn apply_once(
                             meta.revert_epoch = outcome.revert_epoch;
                             meta.last_recut = outcome.last_recut;
                             meta.history_summarizer = outcome.history_summarizer;
+                            meta.archive_fold_seq = outcome.archive_fold_seq;
                             if outcome.lineage_reset {
                                 meta.forget_lineage_continuation();
                             }
@@ -19795,6 +19796,50 @@ pub(crate) mod tests {
             1,
             "segment 2 was rendered; segment 3 was not"
         );
+    }
+
+    /// The pass that truncates a marked archive commits its own meta over the truncation, so it
+    /// must carry the retired marker rather than restore it.
+    #[test]
+    fn a_reconcile_recut_through_an_archive_retires_its_marker_through_the_pass_commit() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = store(dir.path());
+        s.replace_history_segments(
+            "ses",
+            &[comp(1, 1, 1, "a", "S0"), comp(2, 2, 2, "t2", "S1")],
+        )
+        .unwrap();
+        let live_full = vec![
+            item("a", 1, "raw"),
+            item("t2", 2, "turn two"),
+            item("t3", 3, "tail"),
+        ];
+        assert_eq!(
+            run(&s, &req("ses", "cfg0", live_full), &spine()).action,
+            "HARD"
+        );
+        s.append_history_segments("ses", &[comp(3, 3, 3, "t3", "S2")])
+            .unwrap();
+        let loaded = s.load("ses").unwrap();
+        let mut meta = loaded.meta;
+        meta.archive_fold_seq = Some(3);
+        s.commit("ses", loaded.row_version, &loaded.core, &meta)
+            .unwrap();
+
+        let live_reverted = vec![item("a", 1, "raw"), item("t4", 2, "new turn")];
+        run(&s, &req("ses", "cfg0", live_reverted.clone()), &spine());
+        run(&s, &req("ses", "cfg0", live_reverted), &spine());
+        let loaded = s.load("ses").unwrap();
+        assert_eq!(loaded.meta.revert_epoch, 1);
+        assert_eq!(
+            s.load_history_segments("ses")
+                .unwrap()
+                .iter()
+                .map(|segment| segment.sequence)
+                .collect::<Vec<_>>(),
+            [1]
+        );
+        assert_eq!(loaded.meta.archive_fold_seq, None);
     }
 
     /// `request` as the lineage owner sends it after a fake-compaction switch, the only request

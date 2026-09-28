@@ -638,11 +638,26 @@ mod bounded_read_tests {
                 });
             }
         }
-        rows.extend((0..PRESSURE_WINDOW + 50).map(|_| StoredHistorySegment {
-            title: "archive".to_string(),
-            importance: 1,
+        let written_archive_type = |index: usize| StoredHistorySegment {
+            title: format!("written {index}"),
+            content: format!("written archive summary {index}"),
+            p1: Some(format!("written archive summary {index}")),
+            importance: 60,
             episode_type: Some(memory_store::ARCHIVE_EPISODE_TYPE.to_string()),
             ..StoredHistorySegment::default()
+        };
+        rows.insert(rows.len() / 3, written_archive_type(0));
+        rows.extend((0..PRESSURE_WINDOW + 50).map(|index| {
+            if index % 40 == 7 {
+                written_archive_type(index + 1)
+            } else {
+                StoredHistorySegment {
+                    title: "archive".to_string(),
+                    importance: 1,
+                    episode_type: Some(memory_store::ARCHIVE_EPISODE_TYPE.to_string()),
+                    ..StoredHistorySegment::default()
+                }
+            }
         }));
         for (index, row) in rows.iter_mut().enumerate() {
             let index = index as i64;
@@ -659,6 +674,11 @@ mod bounded_read_tests {
             let bounded = assert_bounded_matches_full(&store, budget);
             assert_eq!(bounded.folded_history_segment_seq, rows.len() as i64);
         }
+        let generous = assert_bounded_matches_full(&store, 60_000.0);
+        assert!(
+            generous.m0_bytes.contains("written archive summary 8"),
+            "a stored summary that carries the archive type renders"
+        );
     }
 
     /// WP-P08 over a 60,000-segment session with mixed importances and legacy rows older

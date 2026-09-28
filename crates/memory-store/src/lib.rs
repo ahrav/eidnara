@@ -1510,6 +1510,9 @@ pub struct TruncateOutcome {
     /// No segment survived, so the lineage continuation was cleared with them; a caller that
     /// commits its own meta over the result clears it too.
     pub lineage_reset: bool,
+    /// The archive fold marker this transaction left, `None` once its archive is gone; a caller
+    /// that commits its own meta over the result carries it forward.
+    pub archive_fold_seq: Option<i64>,
 }
 
 pub struct HistorySummarizerPublishRequest<'a> {
@@ -12318,6 +12321,7 @@ impl MemoryStore {
                 row_version: next_version,
                 history_summarizer: reset_meta.history_summarizer,
                 lineage_reset: true,
+                archive_fold_seq: reset_meta.archive_fold_seq,
             })))
         })?;
         match outcome {
@@ -12378,6 +12382,7 @@ impl MemoryStore {
                     row_version: current.max(0) as u64,
                     history_summarizer: meta.history_summarizer,
                     lineage_reset: false,
+                    archive_fold_seq: meta.archive_fold_seq,
                 })));
             }
 
@@ -12507,6 +12512,7 @@ impl MemoryStore {
                 row_version: next,
                 history_summarizer: meta.history_summarizer,
                 lineage_reset,
+                archive_fold_seq: meta.archive_fold_seq,
             })))
         })?;
 
@@ -24766,19 +24772,43 @@ mod tests {
             .publish_history_archive(archive_request(Some(version), None, 1, 20))
             .unwrap();
         assert_eq!(archived.sequence, 1);
-
         store
-            .truncate_history_segments_for_revert("ses", 1, Some(archived.row_version))
+            .append_history_segments(
+                "ses",
+                &[StoredHistorySegment {
+                    start_message: 21,
+                    end_message: 30,
+                    end_message_id: "m30#0".into(),
+                    title: "after the archive".into(),
+                    content: "summary".into(),
+                    ..Default::default()
+                }],
+            )
             .unwrap();
-        let kept = store.load("ses").unwrap();
-        assert_eq!(kept.meta.archive_fold_seq, Some(1));
+        let sequences = |store: &MemoryStore| {
+            store
+                .load_history_segments("ses")
+                .unwrap()
+                .iter()
+                .map(|segment| segment.sequence)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(sequences(&store), [1, 2]);
 
-        store
-            .truncate_history_segments_for_revert("ses", 0, kept.row_version)
+        let row_version = store.load("ses").unwrap().row_version;
+        let kept = store
+            .truncate_history_segments_for_revert("ses", 1, row_version)
             .unwrap();
-        let dropped = store.load("ses").unwrap();
-        assert!(store.load_history_segments("ses").unwrap().is_empty());
-        assert_eq!(dropped.meta.archive_fold_seq, None);
+        assert_eq!(sequences(&store), [1]);
+        assert_eq!(kept.archive_fold_seq, Some(1));
+        assert_eq!(store.load("ses").unwrap().meta.archive_fold_seq, Some(1));
+
+        let dropped = store
+            .truncate_history_segments_for_revert("ses", 0, Some(kept.row_version))
+            .unwrap();
+        assert!(sequences(&store).is_empty());
+        assert_eq!(dropped.archive_fold_seq, None);
+        assert_eq!(store.load("ses").unwrap().meta.archive_fold_seq, None);
     }
 
     /// The archive publication refuses a moved row version, a re-cut session, a moved segment
