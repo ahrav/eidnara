@@ -35,6 +35,7 @@ import { createToolRegistry } from "./plugin/tool-registry";
 import {
     type ConflictResult,
     detectConflicts,
+    type ResolvedCompaction,
     resolveCompactionForBoot,
 } from "./shared/conflict-detector";
 import { getEidnaraStorageDir } from "./shared/data-path";
@@ -97,8 +98,9 @@ const server: Plugin = async (ctx) => {
     // File-based detection can disable the plugin when `auto=false` is defined in an unresolved configuration layer.
     // If the resolved-config fetch fails or times out, conflict detection uses the file-based check.
     let conflictResult: ConflictResult | null = null;
+    let resolvedCompaction: ResolvedCompaction | null = null;
     if (pluginConfig.enabled) {
-        const resolvedCompaction = await resolveCompactionForBoot(ctx.client);
+        resolvedCompaction = await resolveCompactionForBoot(ctx.client);
         if (resolvedCompaction === null) {
             log(
                 "[eidnara] resolved-config fetch failed; using file-based compaction detection (the running server's resolved config may differ — `opencode debug config` is authoritative)",
@@ -155,7 +157,7 @@ const server: Plugin = async (ctx) => {
             client: ctx.client,
             liveSessionState,
             rustModeModuleClient: moduleClient,
-            nativeCompaction: conflictResult?.nativeCompaction,
+            nativeCompaction: resolvedCompaction ?? undefined,
         });
         rpcServer.start().catch((err) => {
             log(`[eidnara] RPC server failed to start: ${err}`);

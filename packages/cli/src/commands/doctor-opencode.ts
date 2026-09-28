@@ -509,6 +509,9 @@ export async function runDoctor(
         "Compaction check: file-based; the running server's resolved config may differ — `opencode debug config` is authoritative",
     );
 
+    for (const source of conflictResult?.unresolved ?? []) {
+        warn(`Not repairable by a config file edit: ${source}`);
+    }
     if (conflictDetectionError !== null) {
         fail(`Conflict detection unavailable: ${conflictDetectionError}`);
     } else if (conflictResult === null) {

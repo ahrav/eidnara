@@ -77,7 +77,12 @@ function showToast(
     });
 }
 
-function showConflictDialog(api: TuiPluginApi, directory: string, result: ConflictResult) {
+function showConflictDialog(
+    api: TuiPluginApi,
+    directory: string,
+    result: ConflictResult,
+    redetect: () => ConflictResult,
+) {
     const disabled = result.disposition === "disable";
     const findings = [...result.reasons, ...result.unresolved].join("\n");
     const stillWord = disabled ? "Disabled" : "Warning";
@@ -119,10 +124,20 @@ function showConflictDialog(api: TuiPluginApi, directory: string, result: Confli
                         return;
                     }
                     const actionSummary = actions.map((a) => `• ${a}`).join("\n");
+                    const remaining = redetect();
+                    const remainingFindings = [...remaining.reasons, ...remaining.unresolved];
                     api.ui.dialog.replace(() => (
                         <api.ui.DialogAlert
-                            title="✅ Configuration Fixed"
-                            message={`${actionSummary}\n\nPlease restart OpenCode for changes to take effect.`}
+                            title={
+                                remaining.disposition === "none"
+                                    ? "✅ Configuration Fixed"
+                                    : "⚠️ Configuration Partly Fixed"
+                            }
+                            message={`${actionSummary}${
+                                remainingFindings.length > 0
+                                    ? `\n\nStill unresolved:\n${remainingFindings.map((f) => `• ${f}`).join("\n")}`
+                                    : ""
+                            }\n\nPlease restart OpenCode for changes to take effect.`}
                             onConfirm={() => {
                                 showToast(api, {
                                     message: disabled
@@ -1069,12 +1084,16 @@ const tui: TuiPlugin = async (api, _options, meta) => {
     if (pluginConfig?.enabled === false) return;
     // `resolveCompactionForBoot` uses host-resolved config because the scanner treats missing config as enabled.
     const resolvedCompaction = await resolveCompactionForBoot(api.client);
+    const compactionEnabled = isCompactionEnabled(pluginConfig ?? {});
     const conflictResult = detectConflicts(directory, {
-        compactionEnabled: isCompactionEnabled(pluginConfig ?? {}),
+        compactionEnabled,
         resolvedCompaction: resolvedCompaction ?? undefined,
     });
     if (conflictResult.disposition !== "none") {
-        showConflictDialog(api, directory, conflictResult);
+        // The running host keeps its boot configuration, so the repair is re-checked against the files.
+        showConflictDialog(api, directory, conflictResult, () =>
+            detectConflicts(directory, { compactionEnabled }),
+        );
     }
     if (conflictResult.disposition === "disable") return;
 

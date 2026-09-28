@@ -601,6 +601,25 @@ describe("detectConflicts", () => {
             }
         });
 
+        it("reports a host-resolved auto=false the config files do not set as unresolved", () => {
+            writeCompactionConfig(true);
+            const prev = process.env.OPENCODE_DISABLE_AUTOCOMPACT;
+            delete process.env.OPENCODE_DISABLE_AUTOCOMPACT;
+            try {
+                const result = detectConflicts(projectDir, {
+                    compactionEnabled: false,
+                    resolvedCompaction: { auto: false, prune: false },
+                });
+                expect(result.disposition).toBe("warn");
+                expect(result.compactionPatch).toEqual({});
+                expect(result.unresolved).toEqual([
+                    "compaction.auto is set by a host configuration layer outside the config files; a config file edit cannot change it to true",
+                ]);
+            } finally {
+                if (prev !== undefined) process.env.OPENCODE_DISABLE_AUTOCOMPACT = prev;
+            }
+        });
+
         it("formats a warning without claiming Eidnara is disabled", () => {
             writeCompactionConfig(false);
             const text = formatConflictShort(detectWithMode(false));

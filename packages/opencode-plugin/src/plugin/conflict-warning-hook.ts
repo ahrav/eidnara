@@ -9,14 +9,18 @@ import { homedir, platform } from "node:os";
 import { join } from "node:path";
 import { refreshOpenCodeDbPresence, withReadOnlySessionDb } from "../hooks/context/read-session-db";
 import { sendIgnoredMessage } from "../hooks/context/send-session-notification";
-import type { ConflictResult } from "../shared/conflict-detector";
-import { formatConflictShort } from "../shared/conflict-detector";
+import {
+    CONFLICT_DISABLED_HEADER,
+    CONFLICT_WARNING_HEADER,
+    type ConflictResult,
+    formatConflictShort,
+} from "../shared/conflict-detector";
 import { log } from "../shared/logger";
 import { normalizeSDKResponse } from "../shared/normalize-sdk-response";
 import type { SqliteReader } from "../shared/sqlite";
 import { jsonField } from "../shared/sqlite-helpers";
 
-const CONFLICT_WARNING_MARKER = "⚠️ Eidnara is disabled due to conflicting configuration:";
+const CONFLICT_WARNING_MARKERS = [CONFLICT_DISABLED_HEADER, CONFLICT_WARNING_HEADER];
 const ENABLED_MARKER = "✨ Eidnara is now enabled";
 
 function getDesktopStatePath(): string | null {
@@ -274,7 +278,7 @@ export async function sendConflictWarning(
     }
 
     // Conflict detection re-fires on every startup; a warning already in the session is not repeated.
-    const existing = await findMarkerMessageIds(client, sessionId, CONFLICT_WARNING_MARKER);
+    const existing = await findConflictWarningIds(client, sessionId);
     if (existing.length > 0) {
         log(
             `[eidnara] conflict-warning: session ${sessionId} already carries ${existing.length} warning(s); not sending another`,
@@ -297,8 +301,16 @@ export async function sendConflictWarning(
     await sendIgnoredMessage(client, sessionId, warningText, {}, true);
 }
 
+async function findConflictWarningIds(client: unknown, sessionId: string): Promise<string[]> {
+    const ids: string[] = [];
+    for (const marker of CONFLICT_WARNING_MARKERS) {
+        ids.push(...(await findMarkerMessageIds(client, sessionId, marker)));
+    }
+    return ids;
+}
+
 /**
- * The plugin removes leftover conflict-warning messages from disabled runs.
+ * The plugin removes leftover conflict-warning messages from disabled and warning runs.
  */
 export async function cleanupConflictWarnings(
     client: unknown,
@@ -311,11 +323,7 @@ export async function cleanupConflictWarnings(
         return;
     }
     const deleteUrl = serverUrl ?? sidecarUrl ?? undefined;
-    const warningMessageIds = await findMarkerMessageIds(
-        client,
-        sessionId,
-        CONFLICT_WARNING_MARKER,
-    );
+    const warningMessageIds = await findConflictWarningIds(client, sessionId);
 
     if (warningMessageIds.length === 0) {
         await cleanupEnabledMessages(client, deleteUrl, sessionId);

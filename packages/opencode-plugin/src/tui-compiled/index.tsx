@@ -1,10 +1,10 @@
-import { memo as _$memo } from "opentui:runtime-module:%40opentui%2Fsolid";
 import { createTextNode as _$createTextNode } from "opentui:runtime-module:%40opentui%2Fsolid";
 import { effect as _$effect } from "opentui:runtime-module:%40opentui%2Fsolid";
 import { insertNode as _$insertNode } from "opentui:runtime-module:%40opentui%2Fsolid";
 import { insert as _$insert } from "opentui:runtime-module:%40opentui%2Fsolid";
 import { setProp as _$setProp } from "opentui:runtime-module:%40opentui%2Fsolid";
 import { createElement as _$createElement } from "opentui:runtime-module:%40opentui%2Fsolid";
+import { memo as _$memo } from "opentui:runtime-module:%40opentui%2Fsolid";
 import { createComponent as _$createComponent } from "opentui:runtime-module:%40opentui%2Fsolid";
 /** @jsxImportSource @opentui/solid */
 
@@ -49,7 +49,7 @@ function showToast(api, input) {
     duration
   });
 }
-function showConflictDialog(api, directory, result) {
+function showConflictDialog(api, directory, result, redetect) {
   const disabled = result.disposition === "disable";
   const findings = [...result.reasons, ...result.unresolved].join("\n");
   const stillWord = disabled ? "Disabled" : "Warning";
@@ -83,9 +83,15 @@ function showConflictDialog(api, directory, result) {
           return;
         }
         const actionSummary = actions.map(a => `• ${a}`).join("\n");
+        const remaining = redetect();
+        const remainingFindings = [...remaining.reasons, ...remaining.unresolved];
         api.ui.dialog.replace(() => _$createComponent(api.ui.DialogAlert, {
-          title: "\u2705 Configuration Fixed",
-          message: `${actionSummary}\n\nPlease restart OpenCode for changes to take effect.`,
+          get title() {
+            return remaining.disposition === "none" ? "✅ Configuration Fixed" : "⚠️ Configuration Partly Fixed";
+          },
+          get message() {
+            return `${actionSummary}${remainingFindings.length > 0 ? `\n\nStill unresolved:\n${remainingFindings.map(f => `• ${f}`).join("\n")}` : ""}\n\nPlease restart OpenCode for changes to take effect.`;
+          },
           onConfirm: () => {
             showToast(api, {
               message: disabled ? "Restart OpenCode to enable Eidnara" : "Restart OpenCode to apply the fix",
@@ -1269,12 +1275,16 @@ const tui = async (api, _options, meta) => {
   if (pluginConfig?.enabled === false) return;
   // `resolveCompactionForBoot` uses host-resolved config because the scanner treats missing config as enabled.
   const resolvedCompaction = await resolveCompactionForBoot(api.client);
+  const compactionEnabled = isCompactionEnabled(pluginConfig ?? {});
   const conflictResult = detectConflicts(directory, {
-    compactionEnabled: isCompactionEnabled(pluginConfig ?? {}),
+    compactionEnabled,
     resolvedCompaction: resolvedCompaction ?? undefined
   });
   if (conflictResult.disposition !== "none") {
-    showConflictDialog(api, directory, conflictResult);
+    // The running host keeps its boot configuration, so the repair is re-checked against the files.
+    showConflictDialog(api, directory, conflictResult, () => detectConflicts(directory, {
+      compactionEnabled
+    }));
   }
   if (conflictResult.disposition === "disable") return;
   initRpcClient(directory);

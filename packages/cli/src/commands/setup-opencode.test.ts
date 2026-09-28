@@ -435,6 +435,23 @@ describe("reportRemainingConflicts", () => {
         expect(reportRemainingConflicts(root, true, output)).toBe(false);
         expect(messages).toEqual([]);
     });
+
+    it("reports a warning left after a repair, naming the source a file edit cannot change", () => {
+        const root = tempDir();
+        writeFileSync(join(root, "opencode.json"), JSON.stringify({ compaction: { auto: true } }));
+        process.env.OPENCODE_DISABLE_AUTOCOMPACT = "1";
+        const messages: string[] = [];
+        const output = {
+            warn: (message: string) => messages.push(`warn:${message}`),
+            message: (message: string) => messages.push(`message:${message}`),
+        };
+
+        expect(reportRemainingConflicts(root, false, output)).toBe(true);
+        const text = messages.join("\n");
+        expect(text).toContain("Eidnara runs with a warning");
+        expect(text).toContain("no fold authority");
+        expect(text).toContain("compaction.auto is set by OPENCODE_DISABLE_AUTOCOMPACT");
+    });
 });
 
 describe("setup-opencode preflight targets", () => {

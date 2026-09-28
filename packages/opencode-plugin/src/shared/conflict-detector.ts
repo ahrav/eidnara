@@ -9,8 +9,6 @@ import { isRecord } from "./record-type-guard";
 interface OpenCodeConfig {
     compaction?: unknown;
     plugin?: unknown;
-    /** `inline` marks the `OPENCODE_CONFIG_CONTENT` layer. */
-    inline?: true;
 }
 
 export type ConflictDisposition = "none" | "warn" | "disable";
@@ -121,7 +119,10 @@ export function detectConflicts(
         target.auto = true;
         reasons.push(NO_FOLD_AUTHORITY_REASON);
     }
-    const { compactionPatch, unresolved } = splitCompactionPatch(directory, target);
+    const { compactionPatch, unresolved } = splitCompactionPatch(
+        target,
+        options?.resolvedCompaction ? checkCompaction(directory) : compactionResult,
+    );
 
     const dcpFound = checkDcpPlugin(directory);
     if (dcpFound) {
@@ -169,15 +170,19 @@ export function conflictDisposition(conflicts: ConflictResult["conflicts"]): Con
 }
 
 function splitCompactionPatch(
-    directory: string,
     target: CompactionPatch,
+    fileView: ResolvedCompaction,
 ): { compactionPatch: CompactionPatch; unresolved: string[] } {
     const compactionPatch: CompactionPatch = {};
     const unresolved: string[] = [];
     for (const key of ["auto", "prune"] as const) {
         const value = target[key];
         if (value === undefined) continue;
-        const source = compactionOverrideSource(directory, key);
+        const source =
+            compactionOverrideSource(key) ??
+            (fileView[key] === value
+                ? "a host configuration layer outside the config files"
+                : null);
         if (source === null) {
             compactionPatch[key] = value;
         } else {
@@ -189,11 +194,10 @@ function splitCompactionPatch(
     return { compactionPatch, unresolved };
 }
 
-function compactionOverrideSource(directory: string, key: "auto" | "prune"): string | null {
+function compactionOverrideSource(key: "auto" | "prune"): string | null {
     const flag = key === "auto" ? "OPENCODE_DISABLE_AUTOCOMPACT" : "OPENCODE_DISABLE_PRUNE";
     if (hostFlagEnabled(flag)) return flag;
-    const inline = readOpenCodeConfigLayers(directory).find((layer) => layer.inline);
-    const compaction = inline?.compaction;
+    const compaction = readInlineConfig()?.compaction;
     return isRecord(compaction) && typeof compaction[key] === "boolean"
         ? "OPENCODE_CONFIG_CONTENT"
         : null;
@@ -319,16 +323,21 @@ function readOpenCodeConfigLayers(directory: string): OpenCodeConfig[] {
         const config = readJsoncFile<unknown>(configPath);
         if (isRecord(config)) layers.push(config);
     }
-    const inline = process.env.OPENCODE_CONFIG_CONTENT;
-    if (inline) {
-        try {
-            const config = parseConfigJsonc<unknown>(inline);
-            if (isRecord(config)) layers.push({ ...config, inline: true });
-        } catch {
-            /* The host rejects the same malformed content, so it contributes nothing. */
-        }
-    }
+    const inline = readInlineConfig();
+    if (inline) layers.push(inline);
     return layers;
+}
+
+/** The host rejects malformed `OPENCODE_CONFIG_CONTENT`, so it contributes nothing. */
+function readInlineConfig(): OpenCodeConfig | null {
+    const inline = process.env.OPENCODE_CONFIG_CONTENT;
+    if (!inline) return null;
+    try {
+        const config = parseConfigJsonc<unknown>(inline);
+        return isRecord(config) ? config : null;
+    } catch {
+        return null;
+    }
 }
 
 /**
@@ -442,15 +451,8 @@ export function pluginEntriesOutside(directory: string, excludePath?: string): u
         const config = readJsoncFile<unknown>(configPath);
         if (isRecord(config) && Array.isArray(config.plugin)) entries.push(...config.plugin);
     }
-    const inline = process.env.OPENCODE_CONFIG_CONTENT;
-    if (inline) {
-        try {
-            const config = parseConfigJsonc<unknown>(inline);
-            if (isRecord(config) && Array.isArray(config.plugin)) entries.push(...config.plugin);
-        } catch {
-            /* The host rejects the same malformed content, so it contributes nothing. */
-        }
-    }
+    const inline = readInlineConfig();
+    if (inline && Array.isArray(inline.plugin)) entries.push(...inline.plugin);
     return entries;
 }
 
@@ -597,13 +599,14 @@ function readOmoDisabledHooks(directory: string): Set<string> {
 
 /**
  */
+export const CONFLICT_DISABLED_HEADER = "⚠️ Eidnara is disabled due to conflicting configuration:";
+export const CONFLICT_WARNING_HEADER = "⚠️ Eidnara is running with a configuration warning:";
+
 export function formatConflictShort(result: ConflictResult): string {
     if (result.disposition === "none") return "";
 
     const lines = [
-        result.disposition === "disable"
-            ? "⚠️ Eidnara is disabled due to conflicting configuration:"
-            : "⚠️ Eidnara is running with a configuration warning:",
+        result.disposition === "disable" ? CONFLICT_DISABLED_HEADER : CONFLICT_WARNING_HEADER,
         "",
         ...result.reasons.map((r) => `• ${r}`),
         ...result.unresolved.map((r) => `• ${r}`),

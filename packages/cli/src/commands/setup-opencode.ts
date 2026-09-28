@@ -396,11 +396,15 @@ export function reportRemainingConflicts(
     output: Pick<typeof log, "warn" | "message"> = log,
 ): boolean {
     const remaining = detectConflicts(directory, { compactionEnabled });
-    if (remaining.disposition !== "disable") return false;
+    if (remaining.disposition === "none") return false;
     output.warn(
-        "Conflicts remain after the automatic fixes; Eidnara stays disabled until they are resolved:",
+        remaining.disposition === "disable"
+            ? "Conflicts remain after the automatic fixes; Eidnara stays disabled until they are resolved:"
+            : "Conflicts remain after the automatic fixes; Eidnara runs with a warning until they are resolved:",
     );
-    for (const reason of remaining.reasons) output.message(`  • ${reason}`);
+    for (const reason of [...remaining.reasons, ...remaining.unresolved]) {
+        output.message(`  • ${reason}`);
+    }
     output.message(
         "For oh-my-opencode without a config file, add `disabled_hooks` (context-window-monitor, preemptive-compaction, anthropic-context-window-limit-recovery) to its config, then rerun setup.",
     );
@@ -552,7 +556,7 @@ export async function runSetup(dryRun = false): Promise<number> {
         const conflicts = dcpDecision === "keep" ? withoutDcpConflict(detected) : detected;
         if (conflicts.disposition === "disable") {
             log.warn("Found conflicting configuration that can disable Eidnara:");
-            for (const reason of conflicts.reasons) {
+            for (const reason of [...conflicts.reasons, ...conflicts.unresolved]) {
                 log.message(`  • ${reason}`);
             }
 
