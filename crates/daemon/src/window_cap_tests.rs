@@ -296,6 +296,72 @@ async fn an_idle_summarizer_in_backoff_archives_the_capped_window() {
     );
 }
 
+/// A fallback chain persists an idle state in backoff before it closes the rejected attempt and
+/// fires its next model. An archive in that gap ends the chain, so the first model's run is the
+/// only one.
+#[tokio::test(flavor = "current_thread")]
+async fn an_archive_between_fallback_models_ends_the_chain_before_its_next_run() {
+    let producer = Arc::new(ProducerState::default());
+    producer.outputs.lock().unwrap().push_back(
+        history_summarizer_output(1, 10, "rejected arc").replace(
+            r#"episode_type="feature""#,
+            &format!(r#"episode_type="{}""#, memory_store::ARCHIVE_EPISODE_TYPE),
+        ),
+    );
+    producer.block_close_attempt.store(true, Ordering::SeqCst);
+    let config = DaemonConfig {
+        model_chain: vec!["test/model".to_string(), "test/fallback".to_string()],
+        ..default_test_config()
+    };
+    let (handler, store, _dir, _project) = handler_with_store(Arc::clone(&producer), config);
+    let messages = window(WINDOW_CAP_BLOCKS as u64 + 100);
+    let first = pass(&handler, &messages).await;
+    assert_eq!(
+        first["history_summarizer"]["reason"], "window_cap",
+        "{first}"
+    );
+    wait_for_count(&producer.close_attempts, 1).await;
+    let rejected = store.load("ses").unwrap().meta.history_summarizer;
+    assert_eq!(rejected.state, HistorySummarizerPhase::Idle);
+    assert!(
+        rejected
+            .failure_backoff_at_ms
+            .is_some_and(|backoff_at_ms| backoff_at_ms > now_ms()),
+        "{rejected:?}"
+    );
+    assert_eq!(producer.starts.load(Ordering::SeqCst), 1);
+
+    let archiving = pass(&handler, &messages).await;
+    assert_eq!(
+        archiving["history_summarizer"]["no_fire"], "archived",
+        "{archiving}"
+    );
+
+    producer.block_close_attempt.store(false, Ordering::SeqCst);
+    let deadline = std::time::Instant::now() + TEST_WAIT_BUDGET;
+    while handler
+        .live_history_summarizer_sessions
+        .lock()
+        .unwrap()
+        .contains_key("ses")
+    {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the fallback chain did not end"
+        );
+        producer.notify.notify_waiters();
+        tokio::time::sleep(TEST_WAIT_POLL).await;
+    }
+    assert_eq!(
+        producer.starts.load(Ordering::SeqCst),
+        1,
+        "the first model's run is the only one"
+    );
+    let after = store.load("ses").unwrap().meta.history_summarizer;
+    assert_eq!(after.state, HistorySummarizerPhase::Idle);
+    assert_eq!(after.firing_seq, rejected.firing_seq);
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_publication_that_commits_before_the_archive_leaves_the_archive_refused() {
     let producer = Arc::new(ProducerState::default());

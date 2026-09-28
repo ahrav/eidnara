@@ -2,7 +2,7 @@ use std::ops::Add;
 
 use memory_store::{
     HistoryArchiveRequest, HistorySummarizerDurableState, HistorySummarizerPhase,
-    HistorySummarizerPublishError, MemoryStore,
+    HistorySummarizerPublishError, LoadedState, MemoryStore,
 };
 
 use crate::boundary::completed_tool_arc_crosses_boundary;
@@ -182,12 +182,12 @@ pub struct Archived {
 
 pub fn archive_window(
     store: &MemoryStore,
+    loaded: &LoadedState,
     session_id: &str,
     project_path: &str,
     projection: &FlatProjection,
     now_ms: i64,
 ) -> Result<Option<Archived>, HistorySummarizerStateError> {
-    let loaded = store.load(session_id)?;
     let Some(cause) = archive_cause(&loaded.meta.history_summarizer, now_ms) else {
         return Ok(None);
     };
@@ -250,8 +250,9 @@ mod tests {
         ReserveOutcome, ReviewTarget,
     };
     use memory_store::{
-        HistorySummarizerAbandonReason, HistorySummarizerChunkRange, HistorySummarizerDurableState,
-        HistorySummarizerPhase, MemoryReviewerReservation, ModuleMeta, PendingPublication,
+        CacheStateSelect, HistorySummarizerAbandonReason, HistorySummarizerChunkRange,
+        HistorySummarizerDurableState, HistorySummarizerPhase, MemoryReviewerReservation,
+        ModuleMeta, PendingPublication,
     };
 
     use super::*;
@@ -459,6 +460,38 @@ mod tests {
         (dir, store)
     }
 
+    fn archive(
+        store: &MemoryStore,
+        window: &FlatProjection,
+        now_ms: i64,
+    ) -> Result<Option<Archived>, HistorySummarizerStateError> {
+        let loaded = store.load("ses").unwrap();
+        archive_window(store, &loaded, "ses", "git:proj", window, now_ms)
+    }
+
+    #[test]
+    fn a_healthy_firing_keeps_the_window_with_no_state_read() {
+        let window = window_with(LAST, |_| None);
+        let (_dir, store) = store_with(
+            &window,
+            HistorySummarizerDurableState {
+                state: HistorySummarizerPhase::AwaitingProducer,
+                firing_seq: 3,
+                fired_at_ms: Some(NOW),
+                ..HistorySummarizerDurableState::default()
+            },
+        );
+        let loaded = store.load("ses").unwrap();
+        store.start_statement_reuse_probe();
+        assert_eq!(
+            archive_window(&store, &loaded, "ses", "git:proj", &window, NOW).unwrap(),
+            None
+        );
+        assert_eq!(store.cache_state_load_runs(CacheStateSelect::Full), 0);
+        assert_eq!(store.cache_state_load_runs(CacheStateSelect::Meta), 0);
+        assert!(store.load_history_segments("ses").unwrap().is_empty());
+    }
+
     #[test]
     fn an_idle_summarizer_in_backoff_archives_the_window() {
         let window = window_with(LAST, |_| None);
@@ -467,7 +500,7 @@ mod tests {
             ..HistorySummarizerDurableState::default()
         };
         let (_dir, store) = store_with(&window, summarizer.clone());
-        let archived = archive_window(&store, "ses", "git:proj", &window, NOW)
+        let archived = archive(&store, &window, NOW)
             .unwrap()
             .expect("an idle summarizer in backoff cannot publish");
         assert_eq!(archived.cause, ArchiveCause::IdleBackoff);
@@ -509,10 +542,7 @@ mod tests {
         );
 
         let (_dir, expired) = store_with(&window, summarizer);
-        assert_eq!(
-            archive_window(&expired, "ses", "git:proj", &window, NOW + 1).unwrap(),
-            None
-        );
+        assert_eq!(archive(&expired, &window, NOW + 1).unwrap(), None);
         assert!(expired.load_history_segments("ses").unwrap().is_empty());
     }
 
@@ -587,7 +617,7 @@ mod tests {
         assert!(store.load_pending_publication("ses").unwrap().is_some());
         let stalled = store.load("ses").unwrap().meta.history_summarizer;
 
-        let archived = archive_window(&store, "ses", "git:proj", &window, NOW)
+        let archived = archive(&store, &window, NOW)
             .unwrap()
             .expect("a firing past its deadline cannot publish");
         assert_eq!(
