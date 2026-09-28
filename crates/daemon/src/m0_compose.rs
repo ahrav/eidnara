@@ -618,6 +618,69 @@ mod bounded_read_tests {
         }
     }
 
+    /// Archive rows between and after ordinary rows, more of them than the pressure window at
+    /// the tail, leave the bounded fold byte-identical to the full read at every budget.
+    #[test]
+    fn bounded_fold_matches_the_full_read_with_archive_rows() {
+        let mut rows = Vec::new();
+        for (index, synthetic) in SyntheticHistory::mixed(1_500)
+            .rows()
+            .into_iter()
+            .enumerate()
+        {
+            rows.push(synthetic);
+            if index % 5 == 2 {
+                rows.push(StoredHistorySegment {
+                    title: "archive".to_string(),
+                    importance: 1,
+                    episode_type: Some(memory_store::ARCHIVE_EPISODE_TYPE.to_string()),
+                    ..StoredHistorySegment::default()
+                });
+            }
+        }
+        let written_archive_type = |index: usize| StoredHistorySegment {
+            title: format!("written {index}"),
+            content: format!("written archive summary {index}"),
+            p1: Some(format!("written archive summary {index}")),
+            importance: 60,
+            episode_type: Some(memory_store::ARCHIVE_EPISODE_TYPE.to_string()),
+            ..StoredHistorySegment::default()
+        };
+        rows.insert(rows.len() / 3, written_archive_type(0));
+        rows.extend((0..PRESSURE_WINDOW + 50).map(|index| {
+            if index % 40 == 7 {
+                written_archive_type(index + 1)
+            } else {
+                StoredHistorySegment {
+                    title: "archive".to_string(),
+                    importance: 1,
+                    episode_type: Some(memory_store::ARCHIVE_EPISODE_TYPE.to_string()),
+                    ..StoredHistorySegment::default()
+                }
+            }
+        }));
+        for (index, row) in rows.iter_mut().enumerate() {
+            let index = index as i64;
+            row.sequence = index + 1;
+            row.start_message = 2 * index + 1;
+            row.end_message = 2 * index + 2;
+            row.start_message_id = format!("m{}#0", 2 * index + 1);
+            row.end_message_id = format!("m{}#0", 2 * index + 2);
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let store = open(dir.path());
+        store.replace_history_segments(SESSION, &rows).unwrap();
+        for budget in [500.0, 4_000.0, 60_000.0] {
+            let bounded = assert_bounded_matches_full(&store, budget);
+            assert_eq!(bounded.folded_history_segment_seq, rows.len() as i64);
+        }
+        let generous = assert_bounded_matches_full(&store, 60_000.0);
+        assert!(
+            generous.m0_bytes.contains("written archive summary 8"),
+            "a stored summary that carries the archive type renders"
+        );
+    }
+
     /// WP-P08 over a 60,000-segment session with mixed importances and legacy rows older
     /// than the largest renderable index, across a geometric budget sweep; the two named
     /// falsifiers must each differ from the reference somewhere in the sweep.
