@@ -72,15 +72,19 @@ impl Rig {
             gate,
         };
         // The session is in Publishing for firing 3 over messages 2..=4 with its selected identities recorded, as the live path leaves it before publication.
-        let mut meta = ModuleMeta::default();
-        for selected in selected_range_identities() {
-            meta.block_identity_by_mid
-                .insert(selected.mid, selected.block_identities);
-        }
-        meta.history_summarizer = publishing_state(3);
+        let meta = ModuleMeta {
+            history_summarizer: publishing_state(3),
+            ..ModuleMeta::default()
+        };
         rig.store
             .commit(SESSION, None, &cache_stability::CoreState::empty(), &meta)
             .unwrap();
+        rig.store.upsert_block_identities_for_test(
+            SESSION,
+            selected_range_identities()
+                .into_iter()
+                .map(|selected| (selected.mid, selected.block_identities)),
+        );
         rig
     }
 
@@ -773,12 +777,16 @@ fn a_fence_refusal_after_the_reservation_settles_the_job_without_progress() {
     let rig = Rig::open();
     let prepared = activation(rig.handoff(t0()).unwrap());
     let reservation = rig.reservation();
-    let mut changed = rig.store.load(SESSION).unwrap();
-    changed.meta.block_identity_by_mid.get_mut("m2").unwrap()[0].byte_fingerprint =
-        "content-b".to_string();
-    rig.store
-        .commit(SESSION, changed.row_version, &changed.core, &changed.meta)
-        .unwrap();
+    rig.store.upsert_block_identities_for_test(
+        SESSION,
+        [(
+            "m2".to_string(),
+            vec![memory_store::BlockIdentity {
+                kind_tag: "text".to_string(),
+                byte_fingerprint: "content-b".to_string(),
+            }],
+        )],
+    );
     let fenced = rig.publish(Some(&prepared), None, t0() + 1);
     assert!(
         matches!(
@@ -1677,12 +1685,16 @@ fn restart_settles_a_reserved_firing_whose_input_changed_or_expired() {
     let mut rig = Rig::open();
     let _ = activation(rig.handoff(t0()).unwrap());
     let reservation = rig.reservation();
-    let mut changed = rig.store.load(SESSION).unwrap();
-    changed.meta.block_identity_by_mid.get_mut("m2").unwrap()[0].byte_fingerprint =
-        "content-b".to_string();
-    rig.store
-        .commit(SESSION, changed.row_version, &changed.core, &changed.meta)
-        .unwrap();
+    rig.store.upsert_block_identities_for_test(
+        SESSION,
+        [(
+            "m2".to_string(),
+            vec![memory_store::BlockIdentity {
+                kind_tag: "text".to_string(),
+                byte_fingerprint: "content-b".to_string(),
+            }],
+        )],
+    );
     rig.reopen();
     assert_eq!(
         handle_restart_load(&rig.store, SESSION, t0() + 60_000).unwrap(),
@@ -2478,12 +2490,16 @@ fn a_fence_refusal_still_abandons_the_firing_when_its_job_is_not_under_the_curre
     )
     .unwrap();
     let prepared = activation(handoff);
-    let mut changed = rig.store.load(SESSION).unwrap();
-    changed.meta.block_identity_by_mid.get_mut("m2").unwrap()[0].byte_fingerprint =
-        "content-b".to_string();
-    rig.store
-        .commit(SESSION, changed.row_version, &changed.core, &changed.meta)
-        .unwrap();
+    rig.store.upsert_block_identities_for_test(
+        SESSION,
+        [(
+            "m2".to_string(),
+            vec![memory_store::BlockIdentity {
+                kind_tag: "text".to_string(),
+                byte_fingerprint: "content-b".to_string(),
+            }],
+        )],
+    );
     let refused = rig.publish(Some(&prepared), None, t0() + 1);
     assert!(
         matches!(

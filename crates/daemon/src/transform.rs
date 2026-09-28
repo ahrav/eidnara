@@ -49,7 +49,7 @@ use crate::wire;
 use cache_stability::{CoreState, FrozenUnit, PassInput};
 use context_core::{ClassifierInput, PassPlan, PersistedShape, classify};
 use memory_store::{
-    BlockIdentity, BlockIdentityBasis, Channel1AppendRow, CoveredSystemMessage,
+    BlockIdentity, BlockIdentityBasis, BlockIdentityDelta, Channel1AppendRow, CoveredSystemMessage,
     DeferredExecuteState, LineageAnchor, LineageConstituent, LineageDescentDisposition,
     LineageDescentRequest, MaterializeReason, MemoryStore, MemoryStoreError, ModuleMeta,
     ModuleUsage, NoteDelivery, PassAction, PassRecord, PassSchedulerObservation, PendingAgentDrop,
@@ -3276,8 +3276,14 @@ fn apply_once(
         .iter()
         .map(|block| block.id.as_str())
         .collect();
+    let identity_mids: Vec<&str> = projection
+        .identity_by_mid
+        .keys()
+        .map(String::as_str)
+        .collect();
     let transform_snapshot =
-        store.load_transform_snapshot(&req.session_id, &projection_block_ids)?;
+        store.load_transform_snapshot(&req.session_id, &projection_block_ids, &identity_mids)?;
+    let mut window_identities = WindowIdentities::new(transform_snapshot.block_identities);
     timings.seed_or_sync = elapsed_ms(seed_or_sync_started_at);
     timings.store_cache_state = transform_snapshot.timings.cache_state_ms;
     let tag_hydration_started_at = Instant::now();
@@ -3614,6 +3620,7 @@ fn apply_once(
     let identity_enforce_started_at = Instant::now();
     let identity_enforcement = enforce_block_identity(
         &loaded.meta,
+        &window_identities,
         req,
         &projection,
         &loaded.core,
@@ -4083,6 +4090,7 @@ fn apply_once(
     let ingress_meta_started_at = Instant::now();
     apply_ingress_identities(
         &mut meta,
+        &mut window_identities,
         &projection,
         provisional_tail_mid,
         lineage_anchor_mid,
@@ -5084,9 +5092,8 @@ fn apply_once(
         ctx.now_ms,
         first_fold_due,
     );
-    // After the pressure refold, so the HARD that completes a revert prunes (spec D12).
-    prune_block_identities(&mut meta, req, plan);
-    let state_changed = core != loaded.core || meta != loaded.meta;
+    let state_changed =
+        core != loaded.core || meta != loaded.meta || !window_identities.delta.is_empty();
     if state_changed {
         meta.last_committed_pass_at_ms = ctx.now_ms;
     }
@@ -5134,6 +5141,7 @@ fn apply_once(
                     temporal_marks: &pending_overlays.temporal_marks,
                     user_hint: pending_overlays.user_hint.as_ref(),
                     channel1_append: pending_overlays.channel1_append.as_ref(),
+                    identities: Some(&window_identities.delta),
                     created_at_ms: ctx.now_ms,
                 },
             },
@@ -5281,8 +5289,46 @@ fn trailing_blank_identity_replays_stored(
         .is_some_and(|normalized_identity| normalized_identity == stored)
 }
 
+struct WindowIdentities {
+    stored: BTreeMap<String, Vec<BlockIdentity>>,
+    delta: BlockIdentityDelta,
+}
+
+impl WindowIdentities {
+    fn new(stored: BTreeMap<String, Vec<BlockIdentity>>) -> Self {
+        Self {
+            stored,
+            delta: BlockIdentityDelta::default(),
+        }
+    }
+
+    fn get(&self, mid: &str) -> Option<&Vec<BlockIdentity>> {
+        if self.delta.deletes.contains(mid) {
+            return None;
+        }
+        self.delta.upserts.get(mid).or_else(|| self.stored.get(mid))
+    }
+
+    fn insert(&mut self, mid: String, vector: Vec<BlockIdentity>) {
+        self.delta.deletes.remove(&mid);
+        if self.stored.get(&mid) == Some(&vector) {
+            self.delta.upserts.remove(&mid);
+        } else {
+            self.delta.upserts.insert(mid, vector);
+        }
+    }
+
+    fn remove(&mut self, mid: &str) {
+        self.delta.upserts.remove(mid);
+        if self.stored.contains_key(mid) {
+            self.delta.deletes.insert(mid.to_string());
+        }
+    }
+}
+
 fn enforce_block_identity(
     meta: &ModuleMeta,
+    stored_identities: &WindowIdentities,
     req: &TransformIngress<'_>,
     projection: &FlatProjection,
     core: &CoreState,
@@ -5296,7 +5342,7 @@ fn enforce_block_identity(
         if provisional_tail_mid == Some(mid.as_str()) || lineage_anchor_mid == Some(mid.as_str()) {
             continue;
         }
-        let Some(stored) = meta.block_identity_by_mid.get(mid) else {
+        let Some(stored) = stored_identities.get(mid) else {
             continue;
         };
         if stored == vector {
@@ -5391,29 +5437,6 @@ fn block_identity_hash_prefix(vector: &[BlockIdentity]) -> String {
     wire::fingerprint(&serialized).chars().take(12).collect()
 }
 
-/// Keeps only the submitted window's identities (spec D12), inside the pass's meta CAS. The
-/// submitted window is the resolved messages plus any cut prefix, the window D10 resolves
-/// against. A revert keeps the whole map until the HARD that completes it. A writer that loses
-/// the CAS reloads the map with the row, so it never restores identities another commit pruned.
-fn prune_block_identities(meta: &mut ModuleMeta, req: &TransformRequest, plan: PassPlan) {
-    let coverage = req.coverage.as_deref();
-    let revert = matches!(
-        coverage.map(|coverage| coverage.resolved.resolution),
-        Some(crate::window_coverage::Resolution::Revert { .. })
-    );
-    if revert && !matches!(plan, PassPlan::Hard | PassPlan::MigrateHard) {
-        return;
-    }
-    let cut_prefix = coverage.map_or(&[][..], |coverage| &coverage.cut_prefix[..]);
-    let window: HashSet<&str> = cut_prefix
-        .iter()
-        .chain(&req.messages)
-        .map(|message| message.mid.as_str())
-        .collect();
-    meta.block_identity_by_mid
-        .retain(|mid, _| window.contains(mid.as_str()));
-}
-
 /// The ingress facts every pass records, whichever authority folds.
 fn apply_ingress_scalars(
     meta: &mut ModuleMeta,
@@ -5436,13 +5459,14 @@ fn apply_ingress_scalars(
 /// native-folds session keeps its identity map empty.
 fn apply_ingress_identities(
     meta: &mut ModuleMeta,
+    identities: &mut WindowIdentities,
     projection: &FlatProjection,
     provisional_tail_mid: Option<&str>,
     lineage_anchor_mid: Option<&str>,
     enforcement: &IdentityEnforcement,
 ) {
     if let Some(mid) = provisional_tail_mid {
-        meta.block_identity_by_mid.remove(mid);
+        identities.remove(mid);
     }
     let projected_vector = |mid: &str| {
         projection
@@ -5452,8 +5476,7 @@ fn apply_ingress_identities(
             .expect("identity enforcement only re-adopts projected messages")
     };
     for re_adoption in &enforcement.tail_re_adoptions {
-        meta.block_identity_by_mid
-            .insert(re_adoption.mid.clone(), projected_vector(&re_adoption.mid));
+        identities.insert(re_adoption.mid.clone(), projected_vector(&re_adoption.mid));
     }
     // A re-adopted message inside the counted chunk changes the bytes a retry would send; its failure count no longer describes those bytes.
     if let Some(retry) = &meta.history_summarizer.chunk_retry
@@ -5472,8 +5495,7 @@ fn apply_ingress_identities(
         .saturating_add(enforcement.tail_re_adoptions.len() as u64);
     if let Some(basis_re_adoptions) = &enforcement.basis_re_adoptions {
         for mid in basis_re_adoptions {
-            meta.block_identity_by_mid
-                .insert(mid.clone(), projected_vector(mid));
+            identities.insert(mid.clone(), projected_vector(mid));
         }
         meta.block_identity_basis = BlockIdentityBasis::Typed;
     }
@@ -5481,9 +5503,8 @@ fn apply_ingress_identities(
         if provisional_tail_mid == Some(mid.as_str()) || lineage_anchor_mid == Some(mid.as_str()) {
             continue;
         }
-        if !meta.block_identity_by_mid.contains_key(mid) {
-            meta.block_identity_by_mid
-                .insert(mid.clone(), vector.clone());
+        if identities.get(mid).is_none() {
+            identities.insert(mid.clone(), vector.clone());
         }
     }
 }
@@ -14363,32 +14384,33 @@ pub(crate) mod tests {
             &ctx(0),
         )
         .unwrap();
-        let first = store.load(session).unwrap().meta;
-        let completed_identity = first.block_identity_by_mid["tail"].clone();
+        let first = store.all_block_identities_for_test(session);
+        let completed_identity = first["tail"].clone();
         assert_eq!(completed_identity.len(), 2);
 
         let mut provisional = req(session, "cfg0", vec![head.clone(), partial]);
         provisional.mid_turn = true;
         transform(&store, &provisional, &ctx(1)).unwrap();
-        let removed = store.load(session).unwrap().meta;
-        assert!(!removed.block_identity_by_mid.contains_key("tail"));
-        assert_eq!(
-            removed.block_identity_by_mid["head"],
-            first.block_identity_by_mid["head"]
-        );
+        let removed = store.all_block_identities_for_test(session);
+        assert!(!removed.contains_key("tail"));
+        assert_eq!(removed["head"], first["head"]);
 
+        let recompleted = assistant_form("tail", 2, &["partial", "completed differently"]);
+        let final_identity = project_messages(&[Arc::new(recompleted.clone())])
+            .unwrap()
+            .identity_by_mid["tail"]
+            .clone();
+        assert_ne!(final_identity, completed_identity);
         transform(
             &store,
-            &req(session, "cfg0", vec![head, completed]),
+            &req(session, "cfg0", vec![head, recompleted]),
             &ctx(2),
         )
         .unwrap();
-        let readopted = store.load(session).unwrap().meta;
-        assert_eq!(readopted.block_identity_by_mid["tail"], completed_identity);
-        assert_eq!(
-            readopted.block_identity_by_mid["head"],
-            first.block_identity_by_mid["head"]
-        );
+        let readopted = store.all_block_identities_for_test(session);
+        assert_eq!(readopted["tail"], final_identity);
+        assert_eq!(readopted["head"], first["head"]);
+        assert_eq!(readopted.len(), 2);
     }
 
     #[test]
@@ -14414,7 +14436,10 @@ pub(crate) mod tests {
         .unwrap();
         let adopted = store.load(session).unwrap();
         assert_eq!(adopted.meta.tail_identity_re_adopt_count, 1);
-        assert_eq!(adopted.meta.block_identity_by_mid["tail"].len(), 2);
+        assert_eq!(
+            store.all_block_identities_for_test(session)["tail"].len(),
+            2
+        );
 
         let provisional_session = "identity-provisional";
         let mut provisional = req(provisional_session, "cfg0", vec![partial]);
@@ -14427,10 +14452,7 @@ pub(crate) mod tests {
         .unwrap();
         assert!(
             !store
-                .load(provisional_session)
-                .unwrap()
-                .meta
-                .block_identity_by_mid
+                .all_block_identities_for_test(provisional_session)
                 .contains_key("tail")
         );
         transform(
@@ -14441,10 +14463,7 @@ pub(crate) mod tests {
         .unwrap();
         assert_eq!(
             store
-                .load(provisional_session)
-                .unwrap()
-                .meta
-                .block_identity_by_mid
+                .all_block_identities_for_test(provisional_session)
                 .get("tail")
                 .unwrap()
                 .len(),
@@ -14462,12 +14481,8 @@ pub(crate) mod tests {
         let original = vec![item("covered", 1, "covered"), item("tail", 2, "before")];
         run(&s, &req(session, "cfg0", original), &spine());
         let before = s.load(session).unwrap();
-        let original_identity = before
-            .meta
-            .block_identity_by_mid
-            .get("tail")
-            .cloned()
-            .unwrap();
+        let before_identities = s.all_block_identities_for_test(session);
+        let original_identity = before_identities.get("tail").cloned().unwrap();
 
         let mutated_request = req(
             session,
@@ -14475,8 +14490,10 @@ pub(crate) mod tests {
             vec![item("covered", 1, "covered"), item("tail", 2, "after")],
         );
         let mutated_projection = project_messages(&mutated_request.messages).unwrap();
+        let mut speculative_identities = WindowIdentities::new(before_identities.clone());
         let enforcement = enforce_block_identity(
             &before.meta,
+            &speculative_identities,
             &normalize_synthetic_todo_ingress(&mutated_request),
             &mutated_projection,
             &before.core,
@@ -14487,6 +14504,7 @@ pub(crate) mod tests {
         let mut speculative_meta = before.meta.clone();
         apply_ingress_identities(
             &mut speculative_meta,
+            &mut speculative_identities,
             &mutated_projection,
             None,
             None,
@@ -14499,11 +14517,7 @@ pub(crate) mod tests {
             "staging a re-adoption cannot change the durable identity before its CAS"
         );
         assert_eq!(
-            s.load(session)
-                .unwrap()
-                .meta
-                .block_identity_by_mid
-                .get("tail"),
+            s.all_block_identities_for_test(session).get("tail"),
             Some(&original_identity)
         );
 
@@ -14516,7 +14530,7 @@ pub(crate) mod tests {
         let after = s.load(session).unwrap();
         assert!(after.row_version.unwrap() > before.row_version.unwrap());
         assert_ne!(
-            after.meta.block_identity_by_mid.get("tail"),
+            s.all_block_identities_for_test(session).get("tail"),
             Some(&original_identity),
             "the accepted CAS must persist the new tail identity"
         );
@@ -14561,8 +14575,10 @@ pub(crate) mod tests {
             vec![item("covered", 1, "covered"), item("tail", 2, "after")],
         );
         let mutated_projection = project_messages(&mutated_request.messages).unwrap();
+        let window = || WindowIdentities::new(s.all_block_identities_for_test(session));
         let enforcement = enforce_block_identity(
             &before.meta,
+            &window(),
             &normalize_synthetic_todo_ingress(&mutated_request),
             &mutated_projection,
             &before.core,
@@ -14583,7 +14599,14 @@ pub(crate) mod tests {
 
         let mut changed = before.meta.clone();
         changed.history_summarizer.chunk_retry = retry(1, 2);
-        apply_ingress_identities(&mut changed, &mutated_projection, None, None, &enforcement);
+        apply_ingress_identities(
+            &mut changed,
+            &mut window(),
+            &mutated_projection,
+            None,
+            None,
+            &enforcement,
+        );
         assert_eq!(changed.history_summarizer.chunk_retry, None);
 
         // The failed chunk ended before the re-adopted message: the retried bytes are unchanged.
@@ -14591,6 +14614,7 @@ pub(crate) mod tests {
         ended_before.history_summarizer.chunk_retry = retry(1, 1);
         apply_ingress_identities(
             &mut ended_before,
+            &mut window(),
             &mutated_projection,
             None,
             None,
@@ -14602,6 +14626,7 @@ pub(crate) mod tests {
         unchanged.history_summarizer.chunk_retry = retry(3, 5);
         apply_ingress_identities(
             &mut unchanged,
+            &mut window(),
             &mutated_projection,
             None,
             None,
@@ -14654,7 +14679,7 @@ pub(crate) mod tests {
         };
         run(&s, &req(session, "cfg0", messages()), &spine());
         let mut loaded = s.load(session).unwrap();
-        let typed_identity = loaded.meta.block_identity_by_mid["covered"].clone();
+        let typed_identity = s.all_block_identities_for_test(session)["covered"].clone();
         let replay_identity = vec![BlockIdentity {
             kind_tag: "tool_call".to_string(),
             byte_fingerprint: wire::fingerprint(REPLAY_BASIS_COVERED_BYTES),
@@ -14671,12 +14696,17 @@ pub(crate) mod tests {
             .unwrap()
             .remove("block_identity_basis");
         loaded.meta = serde_json::from_value(legacy).unwrap();
-        loaded
-            .meta
-            .block_identity_by_mid
-            .insert("covered".to_string(), replay_identity.clone());
-        s.commit(session, loaded.row_version, &loaded.core, &loaded.meta)
-            .unwrap();
+        s.commit_with_block_identities_for_test(
+            session,
+            loaded.row_version,
+            &loaded.core,
+            &loaded.meta,
+            &BlockIdentityDelta {
+                upserts: [("covered".to_string(), replay_identity.clone())].into(),
+                ..BlockIdentityDelta::default()
+            },
+        )
+        .unwrap();
         let legacy_row_version = s.load(session).unwrap().row_version;
 
         let response = transform(
@@ -14690,7 +14720,10 @@ pub(crate) mod tests {
         assert_eq!(response.first_divergence, None);
         let after = s.load(session).unwrap();
         assert!(after.row_version.unwrap() > legacy_row_version.unwrap());
-        assert_eq!(after.meta.block_identity_by_mid["covered"], typed_identity);
+        assert_eq!(
+            s.all_block_identities_for_test(session)["covered"],
+            typed_identity
+        );
         assert_eq!(
             after.meta.tail_identity_re_adopt_count, 0,
             "a basis re-adoption is not a live-tail identity change"
@@ -14754,10 +14787,19 @@ pub(crate) mod tests {
         };
         let meta = ModuleMeta {
             initialized: true,
-            block_identity_by_mid: projection.identity_by_mid,
             ..Default::default()
         };
-        s.commit("vanish", None, &core, &meta).unwrap();
+        s.commit_with_block_identities_for_test(
+            "vanish",
+            None,
+            &core,
+            &meta,
+            &BlockIdentityDelta {
+                upserts: projection.identity_by_mid,
+                ..BlockIdentityDelta::default()
+            },
+        )
+        .unwrap();
         let vanished = transform(
             &s,
             &req("vanish", "cfg0", one_block),
@@ -15219,7 +15261,8 @@ pub(crate) mod tests {
                 "enabling state: {name}"
             );
             assert!(
-                loaded.meta.block_identity_by_mid.contains_key("tail"),
+                s.all_block_identities_for_test(&session)
+                    .contains_key("tail"),
                 "enabling state: {name}"
             );
             let payload = frozen_unit.frozen_payload.clone();
@@ -19999,10 +20042,11 @@ pub(crate) mod tests {
             "m4#0"
         );
         let loaded = s.load(session).unwrap();
+        let stored = s.all_block_identities_for_test(session);
         let selected = ["m5", "m6"]
             .map(|mid| HistorySummarizerSelectedMessageIdentity {
                 mid: mid.to_string(),
-                block_identities: loaded.meta.block_identity_by_mid[mid].clone(),
+                block_identities: stored[mid].clone(),
             })
             .to_vec();
         let generation = HistorySegmentSetGeneration {
@@ -20059,13 +20103,7 @@ pub(crate) mod tests {
                 .iter()
                 .any(|selected| selected.mid == "m6")
         );
-        assert!(
-            s.load(session)
-                .unwrap()
-                .meta
-                .block_identity_by_mid
-                .contains_key("m6")
-        );
+        assert!(s.all_block_identities_for_test(session).contains_key("m6"));
         (version, predicate, window)
     }
 
@@ -20095,50 +20133,34 @@ pub(crate) mod tests {
     }
 
     fn identity_mids(s: &MemoryStore, session: &str) -> Vec<String> {
-        s.load(session)
-            .unwrap()
-            .meta
-            .block_identity_by_mid
+        s.all_block_identities_for_test(session)
             .into_keys()
             .collect()
     }
 
-    /// WP-P06 prune first: the transform prunes m6 inside its meta CAS while the publisher
-    /// holds the same starting version. The publisher loses the CAS, and reloading only the
-    /// row version still meets the store's identity fence, so no segment row is written.
     #[test]
-    fn a_prune_that_commits_first_fences_the_publication_out() {
-        let session = "prune-race-prune-first";
+    fn a_window_that_omits_the_selected_message_keeps_its_identity_for_the_publication() {
+        let session = "identity-window-omission";
         let dir = tempfile::tempdir().unwrap();
         let s = Arc::new(store(dir.path()));
-        let (version, predicate, window) = pinned_firing(&s, session);
-        let hook_store = Arc::clone(&s);
-        let barrier = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let reached = Arc::clone(&barrier);
-        install_transform_attempt_hook(session, move || {
-            assert_eq!(hook_store.load(session).unwrap().row_version, Some(version));
-            reached.store(true, std::sync::atomic::Ordering::SeqCst);
-        });
-        let pruned = run(&s, &window, &spine());
-        assert!(barrier.load(std::sync::atomic::Ordering::SeqCst));
-        assert!(pruned.committed);
-        assert_eq!(identity_mids(&s, session), ["m4", "m5"]);
-        assert!(matches!(
-            publish_race_chunk(&s, session, version, &predicate),
-            Err(memory_store::HistorySummarizerPublishError::CasConflict { .. })
-        ));
+        let (_, predicate, window) = pinned_firing(&s, session);
+        let before = identity_mids(&s, session);
+
+        run(&s, &window, &spine());
+
+        assert_eq!(
+            identity_mids(&s, session),
+            before,
+            "omitted mids keep their rows"
+        );
         let reloaded = s.load(session).unwrap().row_version.unwrap();
-        assert!(matches!(
-            publish_race_chunk(&s, session, reloaded, &predicate),
-            Err(memory_store::HistorySummarizerPublishError::FenceRejected { .. })
-        ));
-        assert_eq!(s.load_history_segments(session).unwrap().len(), 2);
-        assert_eq!(identity_mids(&s, session), ["m4", "m5"]);
+        publish_race_chunk(&s, session, reloaded, &predicate).unwrap();
+        assert_eq!(s.load_history_segments(session).unwrap().len(), 3);
     }
 
     /// WP-P06 publish first: the publication commits between the transform's reads and its
     /// CAS. The transform reloads and re-resolves; the result equals the serial run (publish,
-    /// then transform), the publication stays, and the map is pruned to the window.
+    /// then transform), and the publication stays.
     #[test]
     fn a_publication_that_commits_first_makes_the_transform_reload_and_match_the_serial_run() {
         let session = "prune-race-publish-first";
@@ -20155,7 +20177,6 @@ pub(crate) mod tests {
         });
         let raced = run(&s, &window, &spine());
         assert!(barrier.load(std::sync::atomic::Ordering::SeqCst));
-        assert_eq!(identity_mids(&s, session), ["m4", "m5"]);
         assert_eq!(s.load_history_segments(session).unwrap().len(), 3);
 
         let serial_dir = tempfile::tempdir().unwrap();
@@ -20177,8 +20198,8 @@ pub(crate) mod tests {
             serial_store.load(session).unwrap(),
         );
         assert_eq!(
-            raced_state.meta.block_identity_by_mid,
-            serial_state.meta.block_identity_by_mid
+            s.all_block_identities_for_test(session),
+            serial_store.all_block_identities_for_test(session)
         );
         assert_eq!(raced_state.core, serial_state.core);
     }
@@ -20194,6 +20215,7 @@ pub(crate) mod tests {
         assert_eq!(boot.action, "HARD");
         assert_eq!(boot.boundary_id, "t2#0");
         let before_absent = s.load("ses").unwrap();
+        let before_identities = s.all_block_identities_for_test("ses");
         let before_history_segments = s.load_history_segments("ses").unwrap();
 
         let live_absent = vec![item("t9", 1, "post-revert")];
@@ -20210,12 +20232,8 @@ pub(crate) mod tests {
         assert_eq!(after_arm.core.boundary_id, before_absent.core.boundary_id);
         assert!(!after_arm.core.reconcile_pending);
         assert_eq!(after_arm.meta.revert_epoch, before_absent.meta.revert_epoch);
-        // A pass-through commit does not prune identities (spec D12).
-        assert!(!before_absent.meta.block_identity_by_mid.is_empty());
-        assert_eq!(
-            after_arm.meta.block_identity_by_mid,
-            before_absent.meta.block_identity_by_mid
-        );
+        assert!(!before_identities.is_empty());
+        assert_eq!(s.all_block_identities_for_test("ses"), before_identities);
         assert_eq!(
             s.load_history_segments("ses").unwrap(),
             before_history_segments
@@ -20369,6 +20387,7 @@ pub(crate) mod tests {
         );
         assert_eq!(boot.boundary_id, "t2#0");
         let before = s.load("ses").unwrap();
+        let before_identities = s.all_block_identities_for_test("ses");
 
         let foreign_same_mid = vec![item("t3", 90, "foreign bytes with reused tail mid")];
         let armed = run(
@@ -20389,7 +20408,8 @@ pub(crate) mod tests {
         );
         let after_arm = s.load("ses").unwrap();
         assert_eq!(
-            after_arm.meta.block_identity_by_mid, before.meta.block_identity_by_mid,
+            s.all_block_identities_for_test("ses"),
+            before_identities,
             "foreign block identities are never adopted while arming pending"
         );
         assert_eq!(after_arm.meta.last_usage, before.meta.last_usage);
@@ -20769,19 +20789,15 @@ pub(crate) mod tests {
             "healthy SOFT bytes must match the pre-detector golden",
         );
 
-        // A defer at the new anchor replays the prior output byte-for-byte. Its window starts at
-        // m20, so it commits once to prune m10's identity (spec D12); a repeat is write-free.
         let defer = run(&s, &req("ses", "cfg0", items.clone()), &spine());
         assert_eq!(defer.action, "SOFT+");
-        assert!(defer.committed);
-        assert_eq!(
-            s.load("ses")
-                .unwrap()
-                .meta
-                .block_identity_by_mid
-                .keys()
-                .collect::<Vec<_>>(),
-            ["m20", "t21"]
+        assert!(!defer.committed);
+        let stored = s.all_block_identities_for_test("ses");
+        assert!(
+            ["m10", "m20", "t21"]
+                .iter()
+                .all(|mid| stored.contains_key(*mid)),
+            "{stored:?}"
         );
         let repeat = run(&s, &req("ses", "cfg0", items), &spine());
         assert!(!repeat.committed);

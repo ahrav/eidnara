@@ -554,7 +554,7 @@ pub struct HistorySummarizerChunkRetry {
 
 /// Content-sensitive identity for one message selected into a history_summarizer firing.
 /// The outer firing vector preserves message order; each block vector preserves
-/// the canonical block order already tracked by [`ModuleMeta::block_identity_by_mid`].
+/// the canonical block order.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HistorySummarizerSelectedMessageIdentity {
     pub mid: String,
@@ -1764,6 +1764,20 @@ pub struct BlockIdentity {
     pub byte_fingerprint: String,
 }
 
+/// The `block_identities` rows one accepted pass writes for new or changed message ids, and
+/// the ids whose rows it removes.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct BlockIdentityDelta {
+    pub upserts: BTreeMap<String, Vec<BlockIdentity>>,
+    pub deletes: BTreeSet<String>,
+}
+
+impl BlockIdentityDelta {
+    pub fn is_empty(&self) -> bool {
+        self.upserts.is_empty() && self.deletes.is_empty()
+    }
+}
+
 /// Identifies the serialization used to produce a stored `byte_fingerprint`.
 ///
 /// `Replay` fingerprints hash each decoded block's ingress envelope, so they cover
@@ -2101,17 +2115,6 @@ pub struct ModuleMeta {
     #[serde(default)]
     pub publication_floor_ordinal: Option<u64>,
 
-    /// Ordered block identity vectors keyed by producer message id. Each vector stores
-    /// the block kind and a fingerprint of the canonical reduction-accounting bytes, so
-    /// a later request that changes a live message's block layout fails closed.
-    ///
-    /// The map is persisted in the `block_identities` table, one row per id, rather than in
-    /// the `meta` blob, so the blob does not grow with the session's message count.
-    /// [`MemoryStore::load`] and [`MemoryStore::load_transform_snapshot`] fill it, and
-    /// [`MemoryStore::commit_transform`] makes the table equal to it in the same
-    /// transaction. Other loads leave it empty, so their metadata must not be committed.
-    #[serde(skip)]
-    pub block_identity_by_mid: BTreeMap<String, Vec<BlockIdentity>>,
     #[serde(default = "BlockIdentityBasis::replay")]
     pub block_identity_basis: BlockIdentityBasis,
     /// Number of accepted live-tail identity changes. Covered and frozen identities still
@@ -2286,24 +2289,6 @@ pub struct ModuleMeta {
 }
 
 impl ModuleMeta {
-    /// A row written before `eidnara_folds` existed holds coordinates only Eidnara folding
-    /// builds when it carries any of these; such a row applies Eidnara folds until it adopts.
-    pub fn has_fold_artifacts(&self, has_stored_identity: bool) -> bool {
-        fold_artifacts_present(
-            self.coverage_ordinal.is_some(),
-            self.folded_history_segment_seq,
-            self.history_summarizer.state == HistorySummarizerPhase::Idle,
-            has_stored_identity,
-        )
-    }
-
-    /// The authority a pass applies: the adopted value, else Eidnara for a row that carries
-    /// fold artifacts, else none yet.
-    pub fn applied_eidnara_folds(&self, has_stored_identity: bool) -> Option<bool> {
-        self.eidnara_folds
-            .or_else(|| self.has_fold_artifacts(has_stored_identity).then_some(true))
-    }
-
     /// The highest history_segment sequence the m0 and m1 watermarks record.
     pub fn rendered_history_segment_seq(&self) -> i64 {
         self.m1_history_segment_seq
@@ -2423,6 +2408,7 @@ pub struct TransformOverlayBatch<'a> {
     pub temporal_marks: &'a [TemporalMarkInput],
     pub user_hint: Option<&'a UserHintDecisionInput>,
     pub channel1_append: Option<&'a Channel1AppendRow>,
+    pub identities: Option<&'a BlockIdentityDelta>,
     pub created_at_ms: i64,
 }
 
@@ -2433,6 +2419,7 @@ impl TransformOverlayBatch<'_> {
             && self.temporal_marks.is_empty()
             && self.user_hint.is_none()
             && self.channel1_append.is_none()
+            && self.identities.is_none_or(BlockIdentityDelta::is_empty)
     }
 }
 
@@ -4486,17 +4473,33 @@ fn block_identity_serde_error(error: serde_json::Error) -> rusqlite::Error {
     rusqlite::Error::ToSqlConversionFailure(Box::new(MemoryStoreError::Serde(error.to_string())))
 }
 
-/// Reads one session's `block_identities` rows in the shape of
-/// [`ModuleMeta::block_identity_by_mid`].
-fn load_block_identities(
+fn lookup_block_identity_rows(
     conn: &GuardedConn<'_>,
     session_id: &str,
+    mids: &[&str],
+) -> rusqlite::Result<BTreeMap<String, (String, Option<i64>)>> {
+    if mids.is_empty() {
+        return Ok(BTreeMap::new());
+    }
+    let mids = serde_json::to_string(mids).map_err(block_identity_serde_error)?;
+    conn.prepare_cached(
+        "SELECT mid, identities, scan_version FROM block_identities
+          WHERE session_id = ?1 AND mid IN (SELECT value FROM json_each(?2))",
+    )?
+    .query_map(params![session_id, mids], |row| {
+        Ok((row.get::<_, String>(0)?, (row.get(1)?, row.get(2)?)))
+    })?
+    .collect()
+}
+
+fn lookup_block_identities(
+    conn: &GuardedConn<'_>,
+    session_id: &str,
+    mids: &[&str],
 ) -> rusqlite::Result<BTreeMap<String, Vec<BlockIdentity>>> {
-    let mut statement =
-        conn.prepare_cached("SELECT mid, identities FROM block_identities WHERE session_id = ?1")?;
-    statement
-        .query_map(params![session_id], |row| {
-            let identities = row.get::<_, String>(1)?;
+    lookup_block_identity_rows(conn, session_id, mids)?
+        .into_iter()
+        .map(|(mid, (identities, _))| {
             let identities = serde_json::from_str(&identities).map_err(|error| {
                 rusqlite::Error::FromSqlConversionFailure(
                     1,
@@ -4504,49 +4507,52 @@ fn load_block_identities(
                     Box::new(error),
                 )
             })?;
-            Ok((row.get::<_, String>(0)?, identities))
-        })?
+            Ok((mid, identities))
+        })
         .collect()
 }
 
-/// Makes one session's `block_identities` rows equal `identities`, writing only the rows
-/// whose vector changed and deleting the rows whose id is absent.
-///
-/// Written rows are scanned as JSON objects keyed by message id, the shape the `meta` blob
-/// carried them in, so a secret in an id is refused and one in a value is substituted
-/// exactly as before. The receipts of the documents one commit scans share an owner named
-/// by `scan_version`, the commit's row version, which every row they wrote records. An
-/// owner no stored row names is retired before this commit's scans are persisted, so the
-/// receipts never outnumber the stored rows, and a version shared with an older commit
-/// only merges the two owners' row counts.
-fn sync_block_identities(
+fn apply_block_identity_delta(
     coordinated: &ActiveWriteTransaction<'_>,
     session_id: &str,
     scan_version: i64,
-    identities: &BTreeMap<String, Vec<BlockIdentity>>,
+    delta: &BlockIdentityDelta,
 ) -> rusqlite::Result<()> {
+    if delta.is_empty() {
+        return Ok(());
+    }
+    if let Some(mid) = delta
+        .deletes
+        .iter()
+        .find(|mid| delta.upserts.contains_key(*mid))
+    {
+        return Err(rusqlite::Error::ToSqlConversionFailure(Box::new(
+            MemoryStoreError::Serde(format!(
+                "block identity delta both writes and deletes {mid:?}"
+            )),
+        )));
+    }
     let tx = coordinated.tx();
-    let stored = {
-        let mut statement = tx
-            .prepare_cached("SELECT mid, identities FROM block_identities WHERE session_id = ?1")?;
-        statement
-            .query_map(params![session_id], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-            })?
-            .collect::<rusqlite::Result<BTreeMap<_, _>>>()?
-    };
-    let mut released = stored
+    let touched = delta
+        .upserts
         .keys()
-        .filter(|mid| !identities.contains_key(*mid))
+        .chain(&delta.deletes)
+        .map(String::as_str)
         .collect::<Vec<_>>();
-    let deleted = released.len();
+    let stored = lookup_block_identity_rows(tx, session_id, &touched)?;
+    let deleted = delta
+        .deletes
+        .iter()
+        .filter_map(|mid| stored.get(mid).map(|(_, owner)| (mid, *owner)))
+        .collect::<Vec<_>>();
+    let mut released_owners = deleted.iter().map(|(_, owner)| *owner).collect::<Vec<_>>();
     let mut documents = Vec::new();
     let mut document = String::new();
-    for (mid, vector) in identities {
+    for (mid, vector) in &delta.upserts {
         let value = serde_json::to_string(vector).map_err(block_identity_serde_error)?;
         match stored.get(mid) {
-            Some(stored_value) if *stored_value == value => continue,
-            Some(_) => released.push(mid),
+            Some((stored_value, _)) if *stored_value == value => continue,
+            Some((_, owner)) => released_owners.push(*owner),
             None => {}
         }
         let key = serde_json::to_string(mid).map_err(block_identity_serde_error)?;
@@ -4565,16 +4571,11 @@ fn sync_block_identities(
         document.push('}');
         documents.push(document);
     }
-    // Most commits only append, release no row, and so never read the owners.
-    let unreferenced = if released.is_empty() {
-        Vec::new()
-    } else {
-        unreferenced_block_identity_owners(tx, session_id, &released)?
-    };
+    let unreferenced = unreferenced_block_identity_owners(tx, session_id, &released_owners)?;
     {
         let mut delete =
             tx.prepare_cached("DELETE FROM block_identities WHERE session_id = ?1 AND mid = ?2")?;
-        for mid in &released[..deleted] {
+        for (mid, _) in &deleted {
             delete.execute(params![session_id, mid])?;
         }
     }
@@ -4614,40 +4615,29 @@ fn sync_block_identities(
     retire_block_identity_owners(tx, session_id, unreferenced)
 }
 
-/// Returns the owners whose every stored row is in `released`. The caller reads them before
-/// it deletes or rewrites those rows.
 fn unreferenced_block_identity_owners(
     tx: &GuardedConn<'_>,
     session_id: &str,
-    released: &[&String],
+    released: &[Option<i64>],
 ) -> rusqlite::Result<Vec<i64>> {
-    let owners = tx
-        .prepare_cached(
-            "SELECT mid, scan_version FROM block_identities
-              WHERE session_id = ?1 AND scan_version IS NOT NULL",
-        )?
-        .query_map(params![session_id], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
-        })?
-        .collect::<rusqlite::Result<BTreeMap<_, _>>>()?;
-    let mut releasing = BTreeMap::<i64, usize>::new();
-    for mid in released {
-        if let Some(&version) = owners.get(*mid) {
-            *releasing.entry(version).or_default() += 1;
+    let mut releasing = BTreeMap::<i64, i64>::new();
+    for version in released.iter().flatten() {
+        *releasing.entry(*version).or_default() += 1;
+    }
+    let mut count = tx.prepare_cached(
+        "SELECT COUNT(*) FROM (
+             SELECT 1 FROM block_identities INDEXED BY block_identities_by_scan_version
+              WHERE session_id = ?1 AND scan_version = ?2 LIMIT ?3)",
+    )?;
+    let mut unreferenced = Vec::new();
+    for (version, rows) in releasing {
+        let stored: i64 =
+            count.query_row(params![session_id, version, rows + 1], |row| row.get(0))?;
+        if stored == rows {
+            unreferenced.push(version);
         }
     }
-    let mut stored_rows = BTreeMap::<i64, usize>::new();
-    for version in owners
-        .values()
-        .filter(|version| releasing.contains_key(version))
-    {
-        *stored_rows.entry(*version).or_default() += 1;
-    }
-    Ok(releasing
-        .into_iter()
-        .filter(|(version, rows)| stored_rows.get(version) == Some(rows))
-        .map(|(version, _)| version)
-        .collect())
+    Ok(unreferenced)
 }
 
 fn block_identity_owner_key(scan_version: i64) -> String {
@@ -5372,6 +5362,7 @@ pub struct TransformSnapshotTimings {
 #[derive(Debug, Clone)]
 pub struct TransformSnapshot {
     pub loaded: LoadedState,
+    pub block_identities: BTreeMap<String, Vec<BlockIdentity>>,
     pub temporal_marks: Vec<TemporalMarkRow>,
     pub user_hints: Vec<UserHintRow>,
     pub channel1_appends: Vec<Channel1AppendRow>,
@@ -5861,8 +5852,6 @@ fn fold_artifacts_present(
     has_coverage || folded_history_segment_seq > 0 || !summarizer_idle || has_stored_identity
 }
 
-/// The fields [`ModuleMeta::applied_eidnara_folds`] and the quiescence check read, by SQL JSON
-/// extraction so a pass does not deserialize the whole record for them.
 const FOLD_AUTHORITY_SELECT: &str = "SELECT row_version, json_type(meta, '$.eidnara_folds'), \
      coalesce(json_type(meta, '$.coverage_ordinal'), 'null') != 'null', \
      coalesce(meta ->> '$.folded_history_segment_seq', 0), meta ->> '$.history_summarizer.state', \
@@ -7631,8 +7620,7 @@ impl MemoryStore {
     /// error to prevent initialization over corrupted state.
     pub fn load(&self, session_id: &str) -> Result<LoadedState, MemoryStoreError> {
         let row = self.inner.with_conn(|conn| {
-            let row = conn
-                .prepare_cached(CACHE_STATE_FULL_SELECT)?
+            conn.prepare_cached(CACHE_STATE_FULL_SELECT)?
                 .query_row(params![session_id], |r| {
                     Ok((
                         r.get::<_, i64>(0)? as u64,
@@ -7640,9 +7628,7 @@ impl MemoryStore {
                         r.get::<_, String>(2)?,
                     ))
                 })
-                .optional()?;
-            row.map(|row| Ok((row, load_block_identities(conn, session_id)?)))
-                .transpose()
+                .optional()
         })?;
 
         match row {
@@ -7651,10 +7637,9 @@ impl MemoryStore {
                 meta: ModuleMeta::default(),
                 row_version: None,
             }),
-            Some(((rv, core_json, meta_json), block_identity_by_mid)) => {
-                let mut meta: ModuleMeta = serde_json::from_str(&meta_json)
+            Some((rv, core_json, meta_json)) => {
+                let meta: ModuleMeta = serde_json::from_str(&meta_json)
                     .map_err(|e| MemoryStoreError::Serde(e.to_string()))?;
-                meta.block_identity_by_mid = block_identity_by_mid;
                 Ok(LoadedState {
                     core: serde_json::from_str(&core_json)
                         .map_err(|e| MemoryStoreError::Serde(e.to_string()))?,
@@ -7665,10 +7650,42 @@ impl MemoryStore {
         }
     }
 
+    /// The result includes identity vectors for the ids in `mids` that have stored rows.
+    pub fn load_block_identities(
+        &self,
+        session_id: &str,
+        mids: &[&str],
+    ) -> Result<BTreeMap<String, Vec<BlockIdentity>>, MemoryStoreError> {
+        Ok(self
+            .inner
+            .with_conn(|conn| lookup_block_identities(conn, session_id, mids))?)
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn all_block_identities_for_test(
+        &self,
+        session_id: &str,
+    ) -> BTreeMap<String, Vec<BlockIdentity>> {
+        self.inner
+            .with_conn(|conn| {
+                conn.prepare_cached(
+                    "SELECT mid, identities FROM block_identities WHERE session_id = ?1",
+                )?
+                .query_map(params![session_id], |row| {
+                    let identities: String = row.get(1)?;
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        serde_json::from_str(&identities).expect("stored identities decode"),
+                    ))
+                })?
+                .collect::<rusqlite::Result<BTreeMap<_, _>>>()
+            })
+            .expect("block identities read")
+    }
+
     /// Returns default metadata for an absent row; invalid `meta` JSON returns
     /// [`MemoryStoreError::Serde`]. `core_state` is neither read nor validated, so a row
     /// whose core is corrupt still answers here where [`Self::load`] fails.
-    /// [`ModuleMeta::block_identity_by_mid`] is left empty, so the result is read-only.
     pub fn load_meta(&self, session_id: &str) -> Result<ModuleMeta, MemoryStoreError> {
         let meta_json = self.inner.with_conn(|conn| {
             conn.prepare_cached(CACHE_STATE_META_SELECT)?
@@ -7798,14 +7815,16 @@ impl MemoryStore {
         &self,
         session_id: &str,
         block_ids: &[&str],
+        identity_mids: &[&str],
     ) -> Result<TransformSnapshot, MemoryStoreError> {
-        self.load_transform_snapshot_with_hook(session_id, block_ids, || {})
+        self.load_transform_snapshot_with_hook(session_id, block_ids, identity_mids, || {})
     }
 
     fn load_transform_snapshot_with_hook(
         &self,
         session_id: &str,
         block_ids: &[&str],
+        identity_mids: &[&str],
         after_state_read: impl FnOnce(),
     ) -> Result<TransformSnapshot, MemoryStoreError> {
         let block_ids = serde_json::to_string(block_ids).expect("a string array serializes");
@@ -7829,16 +7848,13 @@ impl MemoryStore {
                             Box::new(error),
                         )
                     })?,
-                    meta: ModuleMeta {
-                        block_identity_by_mid: load_block_identities(transaction, session_id)?,
-                        ..serde_json::from_str(&meta_json).map_err(|error| {
-                            rusqlite::Error::FromSqlConversionFailure(
-                                2,
-                                rusqlite::types::Type::Text,
-                                Box::new(error),
-                            )
-                        })?
-                    },
+                    meta: serde_json::from_str(&meta_json).map_err(|error| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            2,
+                            rusqlite::types::Type::Text,
+                            Box::new(error),
+                        )
+                    })?,
                     row_version: Some(row_version),
                 },
                 None => LoadedState {
@@ -7849,6 +7865,7 @@ impl MemoryStore {
             };
             let cache_state_ms = cache_state_started_at.elapsed().as_secs_f64() * 1_000.0;
             after_state_read();
+            let block_identities = lookup_block_identities(transaction, session_id, identity_mids)?;
 
             let temporal_started_at = Instant::now();
             let temporal_marks = {
@@ -7919,6 +7936,7 @@ impl MemoryStore {
             let overlay_frontier_ms = overlay_frontier_started_at.elapsed().as_secs_f64() * 1_000.0;
             Ok(TransformSnapshot {
                 loaded,
+                block_identities,
                 temporal_marks,
                 user_hints,
                 channel1_appends,
@@ -9742,6 +9760,57 @@ impl MemoryStore {
         self.commit_with_consumed_drops(session_id, expected, core, meta, &[])
     }
 
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn commit_with_block_identities_for_test(
+        &self,
+        session_id: &str,
+        expected: Option<u64>,
+        core: &CoreState,
+        meta: &ModuleMeta,
+        identities: &BlockIdentityDelta,
+    ) -> Result<u64, MemoryStoreError> {
+        self.commit_transform(
+            session_id,
+            TransformCommit {
+                expected,
+                core,
+                meta,
+                consumed_drop_ids: &[],
+                first_applied_command_ids: &[],
+                history_segment_max_seq: None,
+                project_root: None,
+                first_divergence: None,
+                pass: None,
+                overlays: TransformOverlayBatch {
+                    identities: Some(identities),
+                    ..TransformOverlayBatch::default()
+                },
+            },
+        )
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn upsert_block_identities_for_test(
+        &self,
+        session_id: &str,
+        upserts: impl IntoIterator<Item = (String, Vec<BlockIdentity>)>,
+    ) -> u64 {
+        let loaded = self
+            .load(session_id)
+            .expect("load before the identity upsert");
+        self.commit_with_block_identities_for_test(
+            session_id,
+            loaded.row_version,
+            &loaded.core,
+            &loaded.meta,
+            &BlockIdentityDelta {
+                upserts: upserts.into_iter().collect(),
+                ..BlockIdentityDelta::default()
+            },
+        )
+        .expect("commit the identity upsert")
+    }
+
     /// Commit cache state and delete consumed eidnara_reduce queue rows in one fenced tx.
     pub fn commit_with_consumed_drops(
         &self,
@@ -9810,6 +9879,7 @@ impl MemoryStore {
             temporal_marks,
             user_hint,
             channel1_append,
+            identities,
             created_at_ms,
         } = overlays;
         // Canonicalize before scanning, because the canonical form is what the row stores.
@@ -10048,7 +10118,9 @@ impl MemoryStore {
                       last_activity_at = excluded.last_activity_at",
                 params![session_id, next as i64, core_json, meta_json, current_time_ms()],
             )?;
-            sync_block_identities(coordinated, session_id, next as i64, &meta.block_identity_by_mid)?;
+            if let Some(identities) = identities {
+                apply_block_identity_delta(coordinated, session_id, next as i64, identities)?;
+            }
             // Every accepted transform owns the current-pass value: stable passes write NULL
             // rather than leaving an older divergence looking like a present observation.
             tx.execute(
@@ -12992,17 +13064,16 @@ impl MemoryStore {
                 ));
             }
             {
-                let mut stored_identities = tx.prepare_cached(
-                    "SELECT identities FROM block_identities WHERE session_id = ?1 AND mid = ?2",
-                )?;
+                let selected_mids = predicate
+                    .selected_range_identities
+                    .iter()
+                    .map(|selected| selected.mid.as_str())
+                    .collect::<Vec<_>>();
+                let stored = lookup_block_identity_rows(tx, session_id, &selected_mids)?;
                 for selected in &predicate.selected_range_identities {
-                    let stored = stored_identities
-                        .query_row(params![session_id, selected.mid], |row| {
-                            row.get::<_, String>(0)
-                        })
-                        .optional()?;
                     let stored = match stored
-                        .map(|json| serde_json::from_str::<Vec<BlockIdentity>>(&json))
+                        .get(&selected.mid)
+                        .map(|(json, _)| serde_json::from_str::<Vec<BlockIdentity>>(json))
                         .transpose()
                     {
                         Ok(stored) => stored,
@@ -18709,9 +18780,19 @@ mod tests {
         let meta = publishing_meta();
         let mut expected = None;
         let mut steady = None;
+        let identities = selected_identity_delta();
         for pass in 0..6u64 {
             let version = store
-                .commit_transform("ses", base_commit(expected, &core, &meta))
+                .commit_transform(
+                    "ses",
+                    TransformCommit {
+                        overlays: TransformOverlayBatch {
+                            identities: (pass == 0).then_some(&identities),
+                            ..TransformOverlayBatch::default()
+                        },
+                        ..base_commit(expected, &core, &meta)
+                    },
+                )
                 .unwrap();
             expected = Some(version);
             let rows = scan_audit_rows(&store);
@@ -20496,13 +20577,20 @@ mod tests {
         let meta_json = serde_json::to_string(&initial.meta).unwrap();
 
         let snapshot = store
-            .load_transform_snapshot_with_hook("ses", &[], || {
+            .load_transform_snapshot_with_hook("ses", &[], &["m1"], || {
                 let transaction = raw.transaction().unwrap();
                 transaction
                     .execute(
                         "UPDATE cache_state SET row_version = 2, core_state = ?2, meta = ?3
                          WHERE session_id = ?1",
                         params!["ses", core_json, meta_json],
+                    )
+                    .unwrap();
+                transaction
+                    .execute(
+                        "INSERT INTO block_identities (session_id, mid, identities)
+                         VALUES (?1, 'm1', '[]')",
+                        params!["ses"],
                     )
                     .unwrap();
                 transaction
@@ -20525,7 +20613,18 @@ mod tests {
             .unwrap();
         assert_eq!(snapshot.loaded.row_version, Some(1));
         assert_eq!(snapshot.overlay_frontier, None);
-        let current = store.load_transform_snapshot("ses", &["m1#0"]).unwrap();
+        assert!(snapshot.block_identities.is_empty());
+        assert_eq!(
+            store
+                .load_transform_snapshot("ses", &[], &["m1"])
+                .unwrap()
+                .block_identities
+                .len(),
+            1
+        );
+        let current = store
+            .load_transform_snapshot("ses", &["m1#0"], &[])
+            .unwrap();
         assert_eq!(current.loaded.row_version, Some(2));
         assert_eq!(store.load_tags_for_session("ses").unwrap().len(), 1);
         assert_eq!(current.overlay_frontier, Some(1));
@@ -20572,6 +20671,7 @@ mod tests {
                         temporal_marks: &temporal_marks,
                         user_hint: Some(&hint),
                         channel1_append: Some(&channel1),
+                        identities: None,
                         created_at_ms: 10,
                     },
                     ..base_commit(
@@ -20591,7 +20691,9 @@ mod tests {
             "a split read can mix v1 state with v2 overlays"
         );
 
-        let snapshot = store.load_transform_snapshot("ses", &["m1#0"]).unwrap();
+        let snapshot = store
+            .load_transform_snapshot("ses", &["m1#0"], &[])
+            .unwrap();
         assert_eq!(snapshot.loaded.row_version, Some(2));
         assert_eq!(store.load_tags_for_session("ses").unwrap().len(), 1);
         assert_eq!(snapshot.temporal_marks.len(), 1);
@@ -20644,6 +20746,7 @@ mod tests {
                         temporal_marks: &marks,
                         user_hint: Some(&hint),
                         channel1_append: Some(&channel1),
+                        identities: None,
                         created_at_ms: 1,
                     },
                     ..base_commit(stale.row_version, &stale.core, &stale.meta)
@@ -20651,7 +20754,9 @@ mod tests {
             )
             .unwrap_err();
         assert!(matches!(error, MemoryStoreError::CasConflict { .. }));
-        let snapshot = store.load_transform_snapshot("ses", &["m1#0"]).unwrap();
+        let snapshot = store
+            .load_transform_snapshot("ses", &["m1#0"], &[])
+            .unwrap();
         assert!(store.load_tags_for_session("ses").unwrap().is_empty());
         assert!(snapshot.temporal_marks.is_empty());
         assert!(snapshot.user_hints.is_empty());
@@ -22457,6 +22562,65 @@ mod tests {
     }
 
     #[test]
+    fn requested_identity_reads_do_not_grow_with_the_identity_table() {
+        const WINDOW: usize = 300;
+        let seeded = |rows: usize| {
+            let dir = tempfile::tempdir().unwrap();
+            let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
+            store
+                .commit("ses", None, &CoreState::empty(), &ModuleMeta::default())
+                .unwrap();
+            store
+                .with_fenced_conn_for_test(|tx| {
+                    tx.execute(
+                        "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < ?1)
+                         INSERT INTO block_identities (session_id, mid, identities, scan_version)
+                         SELECT 'ses', 'm' || i, '[{\"kind_tag\":\"text\",\"byte_fingerprint\":\"fp\"}]', 1
+                           FROM n",
+                        params![rows as i64],
+                    )
+                    .map(|_| ())
+                })
+                .unwrap();
+            (dir, store)
+        };
+        let window = (0..WINDOW)
+            .map(|n| format!("m{}", 700 + n))
+            .collect::<Vec<_>>();
+        let mids = window.iter().map(String::as_str).collect::<Vec<_>>();
+        let requested = |store: &MemoryStore| {
+            store.start_statement_work_ledger();
+            let snapshot = store.load_transform_snapshot("ses", &[], &mids).unwrap();
+            assert_eq!(snapshot.block_identities.len(), WINDOW);
+            work_on(store, "block_identities")
+        };
+        let hydrated = |store: &MemoryStore| {
+            store.start_statement_work_ledger();
+            assert!(!store.all_block_identities_for_test("ses").is_empty());
+            work_on(store, "block_identities")
+        };
+        let bounded = |(rows, steps): (u64, u64), (small_rows, small_steps): (u64, u64)| {
+            rows == small_rows && steps <= small_steps + small_steps / 4
+        };
+
+        let (_small_dir, small) = seeded(1_000);
+        let (_large_dir, large) = seeded(100_000);
+        let small_work = requested(&small);
+        let large_work = requested(&large);
+
+        assert_eq!(small_work.0, WINDOW as u64, "rows returned: {small_work:?}");
+        assert!(
+            bounded(large_work, small_work),
+            "requested reads at 100k rows {large_work:?} against 1k rows {small_work:?}"
+        );
+        let full = hydrated(&large);
+        assert!(
+            !bounded(full, small_work),
+            "the full-hydration control {full:?} must fail the bound"
+        );
+    }
+
+    #[test]
     fn fold_read_returns_the_horizon_and_every_legacy_row_oldest_first() {
         let dir = tempfile::tempdir().unwrap();
         let store = bounded_read_store(dir.path(), 40, &[2, 30]);
@@ -22808,7 +22972,7 @@ mod tests {
                 .unwrap();
             store.start_statement_work_ledger();
             let snapshot = store
-                .load_transform_snapshot("ses", &["b0#0", "b1#0", "absent#0"])
+                .load_transform_snapshot("ses", &["b0#0", "b1#0", "absent#0"], &[])
                 .unwrap();
             let work = work_on(&store, "json_each");
             let order = |ids: Vec<&str>| ids.into_iter().map(str::to_string).collect::<Vec<_>>();
@@ -23208,7 +23372,18 @@ mod tests {
             }),
             ("publish", |store, stale, row| {
                 stale(store, "ses", publishing_meta());
-                let expected = store.load("ses").unwrap().row_version;
+                let loaded = store.load("ses").unwrap();
+                let expected = Some(
+                    store
+                        .commit_with_block_identities_for_test(
+                            "ses",
+                            loaded.row_version,
+                            &loaded.core,
+                            &loaded.meta,
+                            &selected_identity_delta(),
+                        )
+                        .unwrap(),
+                );
                 store
                     .publish_history_summarizer_chunk(HistorySummarizerPublishRequest {
                         session_id: "ses",
@@ -23317,7 +23492,13 @@ mod tests {
         let mut meta = publishing_meta();
         meta.history_summarizer.history_segment_set_generation = fired;
         let rv = store
-            .commit("ses", None, &CoreState::empty(), &meta)
+            .commit_with_block_identities_for_test(
+                "ses",
+                None,
+                &CoreState::empty(),
+                &meta,
+                &selected_identity_delta(),
+            )
             .unwrap();
 
         let truncated = store
@@ -23434,13 +23615,19 @@ mod tests {
         }]
     }
 
+    fn selected_identity_delta() -> BlockIdentityDelta {
+        BlockIdentityDelta {
+            upserts: selected_range_identities()
+                .into_iter()
+                .map(|selected| (selected.mid, selected.block_identities))
+                .collect(),
+            ..BlockIdentityDelta::default()
+        }
+    }
+
     fn publishing_meta() -> ModuleMeta {
         let selected_range_identities = selected_range_identities();
         ModuleMeta {
-            block_identity_by_mid: selected_range_identities
-                .iter()
-                .map(|selected| (selected.mid.clone(), selected.block_identities.clone()))
-                .collect(),
             history_summarizer: HistorySummarizerDurableState {
                 state: HistorySummarizerPhase::Publishing,
                 firing_seq: 7,
@@ -23485,7 +23672,13 @@ mod tests {
         let predicate = publish_predicate();
         let mut meta = publishing_meta();
         store
-            .commit("publish-health", None, &CoreState::empty(), &meta)
+            .commit_with_block_identities_for_test(
+                "publish-health",
+                None,
+                &CoreState::empty(),
+                &meta,
+                &selected_identity_delta(),
+            )
             .unwrap();
 
         for expected_failures in 1..=3 {
@@ -23554,6 +23747,61 @@ mod tests {
         }
     }
 
+    #[test]
+    fn publish_rejects_a_selected_message_whose_identity_row_is_gone() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
+        let version = store
+            .commit_with_block_identities_for_test(
+                "ses",
+                None,
+                &CoreState::empty(),
+                &publishing_meta(),
+                &selected_identity_delta(),
+            )
+            .unwrap();
+        let mut removal = BlockIdentityDelta::default();
+        removal.deletes.insert("m10".to_string());
+        let version = store
+            .commit_with_block_identities_for_test(
+                "ses",
+                Some(version),
+                &CoreState::empty(),
+                &publishing_meta(),
+                &removal,
+            )
+            .unwrap();
+        let before = store.load("ses").unwrap();
+
+        let refused = store.publish_history_summarizer_chunk(HistorySummarizerPublishRequest {
+            session_id: "ses",
+            expected_row_version: Some(version),
+            expected_revert_epoch: 0,
+            predicate: &publish_predicate(),
+            project_path: "git:proj",
+            history_segments: &[publish_history_segment()],
+            events: &[],
+            primer_candidates: &[],
+            user_memory_candidates: &[],
+            publication_floor_ordinal: 21,
+            chunk_transcript: None,
+            memory_reviewer_nonadmission: None,
+            memory_reviewer_activation: None,
+            published_at_ms: 0,
+        });
+
+        assert!(
+            matches!(
+                &refused,
+                Err(HistorySummarizerPublishError::FenceRejected { reason })
+                    if reason.contains("m10")
+            ),
+            "{refused:?}"
+        );
+        assert!(store.load_history_segments("ses").unwrap().is_empty());
+        assert_eq!(store.load("ses").unwrap().row_version, before.row_version);
+    }
+
     fn publish_history_segment() -> StoredHistorySegment {
         StoredHistorySegment {
             start_message: 10,
@@ -23575,7 +23823,13 @@ mod tests {
         };
         let store = MemoryStore::open(&descriptor).unwrap();
         store
-            .commit("ses", None, &CoreState::empty(), &publishing_meta())
+            .commit_with_block_identities_for_test(
+                "ses",
+                None,
+                &CoreState::empty(),
+                &publishing_meta(),
+                &selected_identity_delta(),
+            )
             .unwrap();
 
         let hook_calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -23680,7 +23934,13 @@ mod tests {
         meta.history_summarizer.history_segment_set_generation =
             HistorySegmentSetGeneration::new(1);
         store
-            .commit("ses", None, &CoreState::empty(), &meta)
+            .commit_with_block_identities_for_test(
+                "ses",
+                None,
+                &CoreState::empty(),
+                &meta,
+                &selected_identity_delta(),
+            )
             .unwrap();
         let expected = store.load("ses").unwrap().row_version;
         let predicate = HistorySummarizerPublishPredicate {
@@ -23723,7 +23983,13 @@ mod tests {
             let dir = tempfile::tempdir().unwrap();
             let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
             store
-                .commit("ses", None, &CoreState::empty(), &publishing_meta())
+                .commit_with_block_identities_for_test(
+                    "ses",
+                    None,
+                    &CoreState::empty(),
+                    &publishing_meta(),
+                    &selected_identity_delta(),
+                )
                 .unwrap();
             store.fail_next_history_summarizer_side_channel_for_test(failed_kind);
             let event = HistorySummarizerEventCandidate {
@@ -23827,7 +24093,13 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
         store
-            .commit("ses", None, &CoreState::empty(), &publishing_meta())
+            .commit_with_block_identities_for_test(
+                "ses",
+                None,
+                &CoreState::empty(),
+                &publishing_meta(),
+                &selected_identity_delta(),
+            )
             .unwrap();
         let expected = store.load("ses").unwrap().row_version;
         let foreign_primer = HistorySummarizerPrimerCandidate {
@@ -23939,7 +24211,13 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
         store
-            .commit("ses", None, &CoreState::empty(), &publishing_meta())
+            .commit_with_block_identities_for_test(
+                "ses",
+                None,
+                &CoreState::empty(),
+                &publishing_meta(),
+                &selected_identity_delta(),
+            )
             .unwrap();
         for kind in HISTORY_SUMMARIZER_SIDE_CHANNEL_KINDS {
             store.fail_next_history_summarizer_side_channel_for_test(kind);
@@ -24110,7 +24388,13 @@ mod tests {
         let descriptor = descriptor(dir.path());
         let store = MemoryStore::open(&descriptor).unwrap();
         store
-            .commit("ses", None, &CoreState::empty(), &publishing_meta())
+            .commit_with_block_identities_for_test(
+                "ses",
+                None,
+                &CoreState::empty(),
+                &publishing_meta(),
+                &selected_identity_delta(),
+            )
             .unwrap();
         store.fail_next_history_summarizer_side_channel_for_test("event");
         let event = HistorySummarizerEventCandidate {
@@ -24462,7 +24746,13 @@ mod tests {
 
         // A CAS conflict commits neither the floor nor the count.
         let rv = store
-            .commit("ses", None, &CoreState::empty(), &publishing_meta())
+            .commit_with_block_identities_for_test(
+                "ses",
+                None,
+                &CoreState::empty(),
+                &publishing_meta(),
+                &selected_identity_delta(),
+            )
             .unwrap();
         let conflict = publish(
             Some(rv + 1),
@@ -24638,7 +24928,13 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
         store
-            .commit("ses", None, &CoreState::empty(), &publishing_meta())
+            .commit_with_block_identities_for_test(
+                "ses",
+                None,
+                &CoreState::empty(),
+                &publishing_meta(),
+                &selected_identity_delta(),
+            )
             .unwrap();
         let event = HistorySummarizerEventCandidate {
             kind: "orphan".into(),
@@ -24998,7 +25294,13 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
         store
-            .commit("ses", None, &CoreState::empty(), &publishing_meta())
+            .commit_with_block_identities_for_test(
+                "ses",
+                None,
+                &CoreState::empty(),
+                &publishing_meta(),
+                &selected_identity_delta(),
+            )
             .unwrap();
         let transcript = (0..50_000)
             .map(|i| format!("{:x}", md5::compute(i.to_string())))
@@ -25044,7 +25346,13 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
         store
-            .commit("ses", None, &CoreState::empty(), &publishing_meta())
+            .commit_with_block_identities_for_test(
+                "ses",
+                None,
+                &CoreState::empty(),
+                &publishing_meta(),
+                &selected_identity_delta(),
+            )
             .unwrap();
         let history_segments = (0..8)
             .map(|index| StoredHistorySegment {
@@ -26521,7 +26829,13 @@ mod tests {
             None,
         );
         let rv = store
-            .commit("ses", None, &CoreState::empty(), &meta)
+            .commit_with_block_identities_for_test(
+                "ses",
+                None,
+                &CoreState::empty(),
+                &meta,
+                &selected_identity_delta(),
+            )
             .unwrap();
         let publish = |store: &MemoryStore,
                        expected_row_version: u64,
@@ -27208,7 +27522,13 @@ mod tests {
         let mut meta = publishing_meta();
         meta.revert_epoch = 1;
         store
-            .commit("ses", None, &CoreState::empty(), &meta)
+            .commit_with_block_identities_for_test(
+                "ses",
+                None,
+                &CoreState::empty(),
+                &meta,
+                &selected_identity_delta(),
+            )
             .unwrap();
         let expected = store.load("ses").unwrap().row_version;
 
@@ -30634,21 +30954,33 @@ mod lineage_descent_tests {
             .unwrap()
     }
 
-    /// Block identities live outside the `meta` blob: a commit makes the session's rows equal
-    /// the map, scans only the rows it writes, and a load returns them. A scan receipt lives
-    /// exactly as long as some stored row came from its document.
+    fn upserts(entries: &[(&str, &str)]) -> BlockIdentityDelta {
+        BlockIdentityDelta {
+            upserts: entries
+                .iter()
+                .map(|(mid, fingerprint)| (mid.to_string(), identity(fingerprint)))
+                .collect(),
+            ..BlockIdentityDelta::default()
+        }
+    }
+
     #[test]
-    fn block_identities_round_trip_outside_meta_and_rewrite_only_changed_rows() {
+    fn block_identity_deltas_keep_omitted_rows_and_scan_only_the_rows_they_write() {
         let dir = tempfile::tempdir().unwrap();
         let store = store(dir.path());
-        let mut meta = ModuleMeta::default();
-        meta.block_identity_by_mid
-            .insert("a".to_string(), identity("fp-a"));
-        meta.block_identity_by_mid
-            .insert("b".to_string(), identity("fp-b"));
-        let version = store
-            .commit("ses", None, &CoreState::empty(), &meta)
-            .unwrap();
+        let meta = ModuleMeta::default();
+        let commit = |expected, delta: &BlockIdentityDelta| {
+            store
+                .commit_with_block_identities_for_test(
+                    "ses",
+                    expected,
+                    &CoreState::empty(),
+                    &meta,
+                    delta,
+                )
+                .unwrap()
+        };
+        let version = commit(None, &upserts(&[("a", "fp-a"), ("b", "fp-b")]));
         let stored_meta: String = store
             .inner
             .with_conn(|conn| {
@@ -30660,29 +30992,20 @@ mod lineage_descent_tests {
             })
             .unwrap();
         assert!(!stored_meta.contains("fp-a"), "{stored_meta}");
-        let loaded = store.load("ses").unwrap();
-        assert_eq!(loaded.meta, meta);
-        assert!(
-            store
-                .load_meta("ses")
-                .unwrap()
-                .block_identity_by_mid
-                .is_empty()
-        );
         let receipts = || identity_document_receipts(&store, "ses");
         assert_eq!(receipts(), 1);
 
-        let version = store
-            .commit("ses", Some(version), &CoreState::empty(), &meta)
-            .unwrap();
-        assert_eq!(receipts(), 1, "an unchanged map writes and scans no row");
+        let version = commit(Some(version), &upserts(&[("a", "fp-a")]));
+        assert_eq!(receipts(), 1, "an unchanged vector writes and scans no row");
+        let version = commit(Some(version), &BlockIdentityDelta::default());
+        assert_eq!(
+            store.all_block_identities_for_test("ses").len(),
+            2,
+            "a commit without a delta keeps every row"
+        );
 
         // `b` still comes from the first document, so its receipt stays beside the new one.
-        meta.block_identity_by_mid
-            .insert("a".to_string(), identity("fp-a2"));
-        let version = store
-            .commit("ses", Some(version), &CoreState::empty(), &meta)
-            .unwrap();
+        let version = commit(Some(version), &upserts(&[("a", "fp-a2")]));
         assert_eq!(
             receipts(),
             2,
@@ -30690,60 +31013,520 @@ mod lineage_descent_tests {
         );
 
         // No stored row comes from the first document any more, so its receipt goes.
-        meta.block_identity_by_mid.remove("b");
-        meta.block_identity_by_mid
-            .insert("c".to_string(), identity("fp-c"));
-        let version = store
-            .commit("ses", Some(version), &CoreState::empty(), &meta)
-            .unwrap();
+        let mut replace_b = upserts(&[("c", "fp-c")]);
+        replace_b.deletes.insert("b".to_string());
+        let version = commit(Some(version), &replace_b);
         assert_eq!(
             receipts(),
             2,
             "the emptied document's receipt is retired; the `a` and `c` documents remain"
         );
-
-        meta.block_identity_by_mid.clear();
-        store
-            .commit("ses", Some(version), &CoreState::empty(), &meta)
-            .unwrap();
-        assert_eq!(receipts(), 0, "deleting every row retires every receipt");
-        meta.block_identity_by_mid
-            .insert("a".to_string(), identity("fp-a2"));
-        meta.block_identity_by_mid
-            .insert("c".to_string(), identity("fp-c"));
-        let version = store.load("ses").unwrap().row_version;
-        store
-            .commit("ses", version, &CoreState::empty(), &meta)
-            .unwrap();
-        let snapshot = store.load_transform_snapshot("ses", &["m1#0"]).unwrap();
         assert_eq!(
-            snapshot.loaded.meta.block_identity_by_mid,
-            meta.block_identity_by_mid
+            store.all_block_identities_for_test("ses"),
+            BTreeMap::from([
+                ("a".to_string(), identity("fp-a2")),
+                ("c".to_string(), identity("fp-c")),
+            ])
+        );
+
+        let snapshot = store
+            .load_transform_snapshot("ses", &[], &["a", "absent"])
+            .unwrap();
+        assert_eq!(
+            snapshot.block_identities,
+            BTreeMap::from([("a".to_string(), identity("fp-a2"))]),
+            "the snapshot reads the requested ids alone"
+        );
+        assert_eq!(
+            store.load_block_identities("ses", &["c"]).unwrap(),
+            BTreeMap::from([("c".to_string(), identity("fp-c"))])
+        );
+
+        let mut delete_all = BlockIdentityDelta::default();
+        delete_all
+            .deletes
+            .extend(["a".to_string(), "c".to_string()]);
+        commit(Some(version), &delete_all);
+        assert_eq!(receipts(), 0, "deleting every row retires every receipt");
+    }
+
+    #[test]
+    fn a_rejected_commit_writes_no_identity_row() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(dir.path());
+        let meta = ModuleMeta::default();
+        let version = store
+            .commit_with_block_identities_for_test(
+                "ses",
+                None,
+                &CoreState::empty(),
+                &meta,
+                &upserts(&[("a", "fp-a")]),
+            )
+            .unwrap();
+        let mut delta = upserts(&[("b", "fp-b")]);
+        delta.deletes.insert("a".to_string());
+
+        let lost = store.commit_with_block_identities_for_test(
+            "ses",
+            Some(version + 1),
+            &CoreState::empty(),
+            &meta,
+            &delta,
+        );
+
+        assert!(matches!(lost, Err(MemoryStoreError::CasConflict { .. })));
+        assert_eq!(
+            store.all_block_identities_for_test("ses"),
+            BTreeMap::from([("a".to_string(), identity("fp-a"))])
         );
     }
 
-    /// A descendant adopts the source's metadata whole, identities included, and a
-    /// full-session recomp clears them with the rest of the metadata. Lineage descent and
-    /// recomp retire the receipts of the documents whose rows they delete; the descent's
-    /// lineage links cover the copied rows.
+    #[test]
+    fn a_failure_after_each_identity_mutation_rolls_the_whole_commit_back() {
+        for (name, trigger) in [
+            (
+                "after the delete",
+                "CREATE TRIGGER fail_identity BEFORE INSERT ON block_identities
+                 BEGIN SELECT RAISE(ABORT, 'injected'); END",
+            ),
+            (
+                "between the upserts",
+                "CREATE TRIGGER fail_identity BEFORE INSERT ON block_identities WHEN NEW.mid = 'c'
+                 BEGIN SELECT RAISE(ABORT, 'injected'); END",
+            ),
+            (
+                "after the upserts",
+                "CREATE TRIGGER fail_identity BEFORE INSERT ON pass_trace
+                 BEGIN SELECT RAISE(ABORT, 'injected'); END",
+            ),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let store = store(dir.path());
+            let meta = ModuleMeta::default();
+            let version = store
+                .commit_with_block_identities_for_test(
+                    "ses",
+                    None,
+                    &CoreState::empty(),
+                    &meta,
+                    &upserts(&[("a", "fp-a"), ("b", "fp-b")]),
+                )
+                .unwrap();
+            let before = store.all_block_identities_for_test("ses");
+            let raw = rusqlite::Connection::open(dir.path().join("memory.sqlite")).unwrap();
+            raw.execute(trigger, []).unwrap();
+            drop(raw);
+            let mut delta = upserts(&[("c", "fp-c"), ("a", "fp-a2")]);
+            delta.deletes.insert("b".to_string());
+
+            let failed = store.commit_with_block_identities_for_test(
+                "ses",
+                Some(version),
+                &CoreState::empty(),
+                &meta,
+                &delta,
+            );
+
+            assert!(
+                failed
+                    .as_ref()
+                    .is_err_and(|error| error.to_string().contains("injected")),
+                "{name}: {failed:?}"
+            );
+            assert_eq!(store.all_block_identities_for_test("ses"), before, "{name}");
+            assert_eq!(
+                store.load("ses").unwrap().row_version,
+                Some(version),
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "records timings for the PR description; run with --ignored --nocapture"]
+    fn record_identity_transaction_timings() {
+        for rows in [100_000usize, 1_000_000] {
+            let dir = tempfile::tempdir().unwrap();
+            let store = store(dir.path());
+            seed_lineage(&store, "A", 10);
+            let (sqlite_version, journal, synchronous): (String, String, i64) = store
+                .inner
+                .with_conn(|conn| {
+                    Ok((
+                        conn.query_row("SELECT sqlite_version()", [], |row| row.get(0))?,
+                        conn.query_row("PRAGMA journal_mode", [], |row| row.get(0))?,
+                        conn.query_row("PRAGMA synchronous", [], |row| row.get(0))?,
+                    ))
+                })
+                .unwrap();
+            let report = |label: &str, started: Instant| {
+                eprintln!(
+                    "identity-timing rows={rows} sqlite={sqlite_version} journal={journal} synchronous={synchronous} {label} {:.2} ms",
+                    started.elapsed().as_secs_f64() * 1_000.0
+                );
+            };
+            let commit = |delta: &BlockIdentityDelta| {
+                let loaded = store.load("A").unwrap();
+                store
+                    .commit_with_block_identities_for_test(
+                        "A",
+                        loaded.row_version,
+                        &loaded.core,
+                        &loaded.meta,
+                        delta,
+                    )
+                    .unwrap()
+            };
+            let started = Instant::now();
+            for batch in 0..rows / 10_000 {
+                commit(&BlockIdentityDelta {
+                    upserts: (0..10_000)
+                        .map(|n| (format!("h{}", batch * 10_000 + n), identity("fp")))
+                        .collect(),
+                    ..BlockIdentityDelta::default()
+                });
+            }
+            report("history seeding in 10k-row delta commits", started);
+
+            let mut window = BlockIdentityDelta {
+                upserts: (0..300)
+                    .map(|n| (format!("h{}", rows - 300 + n), identity("fp-window")))
+                    .collect(),
+                ..BlockIdentityDelta::default()
+            };
+            window.deletes.insert(format!("h{}", rows - 301));
+            let started = Instant::now();
+            commit(&window);
+            report(
+                "300-mid window delta commit, rewriting rows of an older receipt owner",
+                started,
+            );
+            let mids = window
+                .upserts
+                .keys()
+                .map(String::as_str)
+                .collect::<Vec<_>>();
+            let started = Instant::now();
+            store.load_transform_snapshot("A", &[], &mids).unwrap();
+            report("300-mid snapshot read", started);
+
+            let hops = direct_hop("A", "B", 2);
+            let anchor = anchor();
+            let started = Instant::now();
+            store
+                .descend_lineage(LineageDescentRequest {
+                    target_key: "B",
+                    expected_target_row_version: None,
+                    edge_id: 42,
+                    prior_key: "A",
+                    prior_epoch: 1,
+                    new_epoch: 2,
+                    constituents: &hops,
+                    compaction_observed: true,
+                    anchor: Some(&anchor),
+                    now_ms: 10,
+                })
+                .unwrap();
+            report("lineage descent copy", started);
+            let version = store.load("A").unwrap().row_version;
+            let started = Instant::now();
+            store.reset_session_for_recomp("A", version).unwrap();
+            report("recomp reset with receipt retirement", started);
+        }
+    }
+
+    #[test]
+    fn a_refused_commit_writes_no_identity_row() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(dir.path());
+        let version = store
+            .commit_with_block_identities_for_test(
+                "ses",
+                None,
+                &CoreState::empty(),
+                &ModuleMeta::default(),
+                &upserts(&[("a", "fp-a")]),
+            )
+            .unwrap();
+        let before = store.all_block_identities_for_test("ses");
+        let oversized = ModuleMeta {
+            last_render_config: "x".repeat(MAX_DURABLE_TEXT_BYTES + 1),
+            ..ModuleMeta::default()
+        };
+        let mut delta = upserts(&[("b", "fp-b")]);
+        delta.deletes.insert("a".to_string());
+
+        let refused = store.commit_with_block_identities_for_test(
+            "ses",
+            Some(version),
+            &CoreState::empty(),
+            &oversized,
+            &delta,
+        );
+
+        assert!(
+            matches!(
+                refused,
+                Err(MemoryStoreError::Redaction(RedactionErrorKind::InputLimit))
+            ),
+            "{refused:?}"
+        );
+        assert_eq!(store.all_block_identities_for_test("ses"), before);
+        assert_eq!(store.load("ses").unwrap().row_version, Some(version));
+    }
+
+    #[test]
+    fn a_delta_that_writes_and_deletes_one_mid_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(dir.path());
+        let version = store
+            .commit_with_block_identities_for_test(
+                "ses",
+                None,
+                &CoreState::empty(),
+                &ModuleMeta::default(),
+                &upserts(&[("a", "fp-a"), ("b", "fp-b")]),
+            )
+            .unwrap();
+        let mut overlapping = upserts(&[("a", "fp-a2")]);
+        overlapping.deletes.insert("a".to_string());
+
+        let refused = store.commit_with_block_identities_for_test(
+            "ses",
+            Some(version),
+            &CoreState::empty(),
+            &ModuleMeta::default(),
+            &overlapping,
+        );
+
+        assert!(refused.is_err(), "{refused:?}");
+        assert_eq!(identity_document_receipts(&store, "ses"), 1);
+        assert_eq!(store.all_block_identities_for_test("ses").len(), 2);
+    }
+
+    #[test]
+    fn receipt_retirement_reads_at_most_one_row_beyond_the_released_ones() {
+        let released_owner_rows = |history: usize| {
+            let dir = tempfile::tempdir().unwrap();
+            let store = store(dir.path());
+            let history_delta = BlockIdentityDelta {
+                upserts: (0..history)
+                    .map(|n| (format!("m{n}"), identity("fp")))
+                    .collect(),
+                ..BlockIdentityDelta::default()
+            };
+            let version = store
+                .commit_with_block_identities_for_test(
+                    "ses",
+                    None,
+                    &CoreState::empty(),
+                    &ModuleMeta::default(),
+                    &history_delta,
+                )
+                .unwrap();
+            let mut delta = BlockIdentityDelta::default();
+            delta.deletes.insert("m0".to_string());
+            store.start_statement_work_ledger();
+            store
+                .commit_with_block_identities_for_test(
+                    "ses",
+                    Some(version),
+                    &CoreState::empty(),
+                    &ModuleMeta::default(),
+                    &delta,
+                )
+                .unwrap();
+            store
+                .take_statement_work()
+                .into_iter()
+                .filter(|work| work.sql.contains("block_identities_by_scan_version"))
+                .map(|work| work.vm_steps)
+                .sum::<u64>()
+        };
+
+        let small = released_owner_rows(10);
+        let large = released_owner_rows(5_000);
+
+        assert!(small > 0);
+        assert_eq!(
+            small, large,
+            "retirement work at 10 rows {small}, 5,000 rows {large}"
+        );
+    }
+
+    #[test]
+    fn descent_copies_identity_rows_without_their_scan_owner() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(dir.path());
+        seed_lineage(&store, "A", 10);
+        let loaded = store.load("A").unwrap();
+        store
+            .commit_with_block_identities_for_test(
+                "A",
+                loaded.row_version,
+                &loaded.core,
+                &loaded.meta,
+                &upserts(&[("m1", "fp-m1"), ("m2", "fp-m2")]),
+            )
+            .unwrap();
+        let hops = direct_hop("A", "B", 2);
+        let anchor = anchor();
+        store
+            .descend_lineage(LineageDescentRequest {
+                target_key: "B",
+                expected_target_row_version: None,
+                edge_id: 42,
+                prior_key: "A",
+                prior_epoch: 1,
+                new_epoch: 2,
+                constituents: &hops,
+                compaction_observed: true,
+                anchor: Some(&anchor),
+                now_ms: 10,
+            })
+            .unwrap();
+        let owners = |session: &str| {
+            store
+                .inner
+                .with_conn(|conn| {
+                    conn.prepare(
+                        "SELECT scan_version FROM block_identities WHERE session_id = ?1 ORDER BY mid",
+                    )?
+                    .query_map(params![session], |row| row.get::<_, Option<i64>>(0))?
+                    .collect::<rusqlite::Result<Vec<_>>>()
+                })
+                .unwrap()
+        };
+
+        assert_eq!(owners("B"), [None, None]);
+        assert!(owners("A").iter().all(Option::is_some));
+        assert_eq!(
+            store.all_block_identities_for_test("B"),
+            store.all_block_identities_for_test("A")
+        );
+    }
+
+    #[test]
+    fn identity_histories_match_a_per_session_reference_map() {
+        let next = |state: &mut u64| {
+            *state ^= *state << 13;
+            *state ^= *state >> 7;
+            *state ^= *state << 17;
+            *state
+        };
+        for seed in 0..100u64 {
+            let dir = tempfile::tempdir().unwrap();
+            let open = || store(dir.path());
+            let mut store = Some(open());
+            let mut model: BTreeMap<&str, BTreeMap<String, Vec<BlockIdentity>>> = BTreeMap::new();
+            let mut state = seed.wrapping_add(1).wrapping_mul(0x9e37_79b9_7f4a_7c15);
+            let mut trace = Vec::new();
+            for _ in 0..32 {
+                let roll = next(&mut state);
+                let session = ["A", "B"][(roll >> 8) as usize % 2];
+                let current = store.as_ref().unwrap();
+                let version = current.load(session).unwrap().row_version;
+                match roll % 8 {
+                    0..=3 => {
+                        let mut delta = BlockIdentityDelta::default();
+                        for k in 0..(roll >> 16) % 4 {
+                            let mid = format!("m{}", (roll >> (20 + 3 * k)) % 12);
+                            if (roll >> (40 + k)) % 3 == 0 {
+                                delta.upserts.remove(&mid);
+                                delta.deletes.insert(mid);
+                            } else {
+                                delta.deletes.remove(&mid);
+                                let fingerprint = format!("fp-{}", (roll >> 50) % 5);
+                                delta.upserts.insert(mid, identity(&fingerprint));
+                            }
+                        }
+                        let expected = if roll % 8 == 3 {
+                            Some(version.unwrap_or(0) + 7)
+                        } else {
+                            version
+                        };
+                        trace.push(format!("{session} {expected:?} {delta:?}"));
+                        let committed = current.commit_with_block_identities_for_test(
+                            session,
+                            expected,
+                            &CoreState::empty(),
+                            &ModuleMeta::default(),
+                            &delta,
+                        );
+                        if expected == version {
+                            committed.unwrap();
+                            let map = model.entry(session).or_default();
+                            for mid in &delta.deletes {
+                                map.remove(mid);
+                            }
+                            map.extend(delta.upserts);
+                        } else {
+                            assert!(committed.is_err(), "seed {seed}: {trace:?}");
+                        }
+                    }
+                    4 | 5 => {
+                        trace.push(format!("{session} delta-free commit"));
+                        current
+                            .commit(
+                                session,
+                                version,
+                                &CoreState::empty(),
+                                &ModuleMeta::default(),
+                            )
+                            .unwrap();
+                    }
+                    6 => {
+                        trace.push(format!("{session} reset"));
+                        if version.is_some() {
+                            current.reset_session_for_recomp(session, version).unwrap();
+                            model.remove(session);
+                        }
+                    }
+                    _ => {
+                        trace.push("reopen".to_string());
+                        drop(store.take());
+                        store = Some(open());
+                    }
+                }
+                let current = store.as_ref().unwrap();
+                for session in ["A", "B"] {
+                    assert_eq!(
+                        current.all_block_identities_for_test(session),
+                        model.get(session).cloned().unwrap_or_default(),
+                        "seed {seed} session {session}: {trace:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// A descendant adopts the source's identity rows, and a full-session recomp clears them.
+    /// Lineage descent and recomp retire the receipts of the documents whose rows they
+    /// delete; the descent's lineage links cover the copied rows.
     #[test]
     fn descent_copies_block_identities_and_recomp_reset_clears_them() {
         let dir = tempfile::tempdir().unwrap();
         let store = store(dir.path());
         seed_lineage(&store, "A", 10);
         let loaded = store.load("A").unwrap();
-        let mut meta = loaded.meta.clone();
-        meta.block_identity_by_mid
-            .insert("m1".to_string(), identity("fp-m1"));
         let version = store
-            .commit("A", loaded.row_version, &loaded.core, &meta)
+            .commit_with_block_identities_for_test(
+                "A",
+                loaded.row_version,
+                &loaded.core,
+                &loaded.meta,
+                &upserts(&[("m1", "fp-m1")]),
+            )
             .unwrap();
-        let mut target_meta = ModuleMeta::default();
-        target_meta
-            .block_identity_by_mid
-            .insert("b1".to_string(), identity("fp-b1"));
         let target_version = store
-            .commit("B", None, &CoreState::empty(), &target_meta)
+            .commit_with_block_identities_for_test(
+                "B",
+                None,
+                &CoreState::empty(),
+                &ModuleMeta::default(),
+                &upserts(&[("b1", "fp-b1")]),
+            )
             .unwrap();
         assert_eq!(identity_document_receipts(&store, "B"), 1);
         let hops = direct_hop("A", "B", 2);
@@ -30762,24 +31545,23 @@ mod lineage_descent_tests {
                 now_ms: 10,
             })
             .unwrap();
-        let expected = store.load("A").unwrap().meta.block_identity_by_mid;
+        let expected = store.all_block_identities_for_test("A");
         assert!(expected.contains_key("m1"));
-        assert_eq!(
-            store.load("B").unwrap().meta.block_identity_by_mid,
-            expected
-        );
+        assert_eq!(store.all_block_identities_for_test("B"), expected);
         assert_eq!(
             identity_document_receipts(&store, "B"),
             0,
             "the target's replaced rows take their document receipt with them"
         );
         let target = store.load("B").unwrap();
-        let mut target_meta = target.meta.clone();
-        target_meta
-            .block_identity_by_mid
-            .insert("m1".to_string(), identity("fp-m1-edited"));
         store
-            .commit("B", target.row_version, &target.core, &target_meta)
+            .commit_with_block_identities_for_test(
+                "B",
+                target.row_version,
+                &target.core,
+                &target.meta,
+                &upserts(&[("m1", "fp-m1-edited")]),
+            )
             .unwrap();
         assert_eq!(
             identity_document_receipts(&store, "B"),
@@ -30795,14 +31577,7 @@ mod lineage_descent_tests {
             0,
             "recomp deletes every row, so it retires every document receipt"
         );
-        assert!(
-            store
-                .load("A")
-                .unwrap()
-                .meta
-                .block_identity_by_mid
-                .is_empty()
-        );
+        assert!(store.all_block_identities_for_test("A").is_empty());
     }
 
     /// A full-session recomp retires the history_segment set and bumps the revert epoch, but the row stays alive, so the producer's sequence and Q31 nonadmission facts survive while in-flight firing state is cleared.

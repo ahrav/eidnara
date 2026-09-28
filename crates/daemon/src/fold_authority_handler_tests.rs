@@ -16,9 +16,13 @@ fn stored_authority(store: &MemoryStore) -> Option<bool> {
     store.load("ses").unwrap().meta.eidnara_folds
 }
 
-fn assert_native_state(meta: &ModuleMeta, context: &str) {
+fn assert_native_state(store: &MemoryStore, session: &str, context: &str) {
+    let meta = store.load(session).unwrap().meta;
     assert_eq!(meta.eidnara_folds, Some(false), "{context}");
-    assert!(meta.block_identity_by_mid.is_empty(), "{context}");
+    assert!(
+        store.all_block_identities_for_test(session).is_empty(),
+        "{context}"
+    );
     assert!(meta.served_output_fingerprint.is_empty(), "{context}");
     assert_eq!(meta.tail_hygiene_baseline, None, "{context}");
     assert_eq!(meta.coverage_ordinal, None, "{context}");
@@ -73,7 +77,7 @@ async fn native_authority_skips_every_fold_step_even_with_a_live_chain() {
         "preparation loads nothing under native folds"
     );
     let loaded = store.load("ses").unwrap();
-    assert_native_state(&loaded.meta, "native first pass");
+    assert_native_state(&store, "ses", "native first pass");
     assert_eq!(loaded.meta.history_summarizer.last_no_fire, None);
     assert!(loaded.meta.newest_live_block_id.is_some());
     assert_eq!(
@@ -230,7 +234,7 @@ async fn a_quiescent_bind_changes_authority_in_both_directions_through_the_reset
     bind_with(&handler, &project, 7, native_config());
     let _ = call_transform(&handler, big_messages()).await;
     let native = store.load("ses").unwrap();
-    assert_native_state(&native.meta, "after the change to native");
+    assert_native_state(&store, "ses", "after the change to native");
     assert_eq!(native.meta.revert_epoch, epoch + 2);
 }
 
@@ -324,7 +328,7 @@ async fn legacy_rows_adopt_by_their_fold_artifacts() {
     let (handler, store, _dir, project) = handler_with_store(producer, default_test_config());
     let _ = quiet_transform(&handler, big_messages()).await;
     let folded = store.load("ses").unwrap();
-    assert!(!folded.meta.block_identity_by_mid.is_empty());
+    assert!(!store.all_block_identities_for_test("ses").is_empty());
     let mut legacy = folded.meta.clone();
     legacy.eidnara_folds = None;
     store
@@ -505,7 +509,11 @@ async fn a_resent_descent_after_a_change_to_native_is_acknowledged_as_a_replay()
     assert_eq!(resent["lineage_switch_consumed_id"], 101);
     assert_eq!(resent["lineage_descent_disposition"], "replay");
     let target = descent.target();
-    assert_native_state(&target.meta, "resent descent under native authority");
+    assert_native_state(
+        &descent.store,
+        DESCENT_TARGET,
+        "resent descent under native authority",
+    );
     assert_eq!(target.meta.revert_epoch, descended.meta.revert_epoch + 1);
 }
 
@@ -573,7 +581,7 @@ async fn native_metadata_bytes(history: u64) -> usize {
     let response = call_transform(&handler, slice).await;
     assert_eq!(response["status"], "ok", "{response}");
     let meta = store.load("ses").unwrap().meta;
-    assert_native_state(&meta, "native slice");
+    assert_native_state(&store, "ses", "native slice");
     serde_json::to_vec(&meta).unwrap().len()
 }
 
@@ -737,14 +745,14 @@ async fn authority_changes_survive_restarts_and_serve_first_passes() {
     let _ = quiet_transform(&handler, big_messages()).await;
     let folded = store.load("ses").unwrap();
     assert_eq!(folded.meta.eidnara_folds, Some(true));
-    assert!(!folded.meta.block_identity_by_mid.is_empty());
+    assert!(!store.all_block_identities_for_test("ses").is_empty());
     drop((handler, store));
 
     let (handler, store) = restarted(&dir);
     bind_with(&handler, &project, 7, native_config());
     let _ = call_transform(&handler, big_messages()).await;
     let native = store.load("ses").unwrap();
-    assert_native_state(&native.meta, "after the change to native across a restart");
+    assert_native_state(&store, "ses", "after the change to native across a restart");
     assert_eq!(native.meta.revert_epoch, folded.meta.revert_epoch + 1);
     drop((handler, store));
 
@@ -899,7 +907,7 @@ async fn run_authority_history(seed: u64, operations: usize) {
                 assert_eq!(loaded.meta.eidnara_folds, model.stored, "{}", context());
                 assert_eq!(loaded.meta.revert_epoch, model.epoch, "{}", context());
                 if loaded.meta.eidnara_folds == Some(false) {
-                    assert_native_state(&loaded.meta, &context());
+                    assert_native_state(&store, "ses", &context());
                 }
             }
             AuthorityOp::Status { channel } => {

@@ -7046,10 +7046,16 @@ impl HandlerCore {
                 };
             }
         };
-        let eidnara_folds = entry_state
-            .meta
-            .applied_eidnara_folds(!entry_state.meta.block_identity_by_mid.is_empty())
-            .unwrap_or_else(|| binding.config.eidnara_folds());
+        let applied = match store.load_fold_authority(&session_id) {
+            Ok(record) => record.applied,
+            Err(error) => {
+                return PreparedOutcome::Error {
+                    code: "store_load_failed".to_string(),
+                    message: error.to_string(),
+                };
+            }
+        };
+        let eidnara_folds = applied.unwrap_or_else(|| binding.config.eidnara_folds());
         if !eidnara_folds {
             return respond(json!({
                 "ok": false,
@@ -17164,8 +17170,16 @@ fn record_history_summarizer_chunk_failure(
     token_budget: usize,
     selected: &[memory_store::HistorySummarizerSelectedMessageIdentity],
 ) {
+    let selected_mids = selected
+        .iter()
+        .map(|message| message.mid.as_str())
+        .collect::<Vec<_>>();
     for attempt in 0..2 {
-        let loaded = match store.load(session_id) {
+        let loaded = store.load(session_id).and_then(|loaded| {
+            let stored = store.load_block_identities(session_id, &selected_mids)?;
+            Ok((loaded, stored))
+        });
+        let (loaded, stored) = match loaded {
             Ok(loaded) => loaded,
             Err(error) => {
                 eprintln!(
@@ -17175,10 +17189,9 @@ fn record_history_summarizer_chunk_failure(
             }
         };
         if loaded.meta.history_summarizer.state != HistorySummarizerPhase::Idle
-            || selected.iter().any(|message| {
-                loaded.meta.block_identity_by_mid.get(&message.mid)
-                    != Some(&message.block_identities)
-            })
+            || selected
+                .iter()
+                .any(|message| stored.get(&message.mid) != Some(&message.block_identities))
         {
             return;
         }
@@ -34801,16 +34814,8 @@ mod tests {
         let retained_bytes = serde_json::to_vec(&parsed).unwrap().len();
         let projection = crate::wire::project_messages(&parsed.messages).unwrap();
         let store = handler.store().unwrap();
-        let loaded = store.load(session_id).unwrap();
-        let mut meta = loaded.meta.clone();
-        meta.block_identity_by_mid
-            .extend(projection.identity_by_mid);
-        let revert_epoch = meta.revert_epoch;
-        if meta != loaded.meta {
-            store
-                .commit(session_id, loaded.row_version, &loaded.core, &meta)
-                .unwrap();
-        }
+        store.upsert_block_identities_for_test(session_id, projection.identity_by_mid);
+        let revert_epoch = store.load(session_id).unwrap().meta.revert_epoch;
         let mut snapshots = handler
             .transform_snapshots
             .lock()
@@ -38656,10 +38661,9 @@ mod tests {
                 },
             )
             .collect();
+        store.upsert_block_identities_for_test("ses", projection.identity_by_mid);
         let loaded = store.load("ses").unwrap();
         let mut meta = loaded.meta;
-        meta.block_identity_by_mid
-            .extend(projection.identity_by_mid);
         meta.history_summarizer = HistorySummarizerDurableState {
             state: HistorySummarizerPhase::AwaitingProducer,
             firing_seq: 1,
@@ -38693,13 +38697,15 @@ mod tests {
     }
 
     fn seed_history_summarizer_phase(store: &MemoryStore, phase: HistorySummarizerPhase) {
+        let selected_range_identities = seeded_history_summarizer_identities();
+        store.upsert_block_identities_for_test(
+            "ses",
+            selected_range_identities
+                .iter()
+                .map(|selected| (selected.mid.clone(), selected.block_identities.clone())),
+        );
         let loaded = store.load("ses").unwrap();
         let mut meta = loaded.meta;
-        let selected_range_identities = seeded_history_summarizer_identities();
-        for selected in &selected_range_identities {
-            meta.block_identity_by_mid
-                .insert(selected.mid.clone(), selected.block_identities.clone());
-        }
         meta.history_summarizer = HistorySummarizerDurableState {
             state: phase,
             firing_seq: 1,
@@ -39172,10 +39178,9 @@ mod tests {
         let (handler, store, _dir, _project) = handler_with_store(Arc::clone(&producer), config);
         let frozen = rebuild();
         let fingerprint_items: Vec<_> = frozen.snapshot.iter().map(|item| item.as_item()).collect();
+        store.upsert_block_identities_for_test("ses", projection.identity_by_mid.clone());
         let loaded = store.load("ses").unwrap();
         let mut meta = loaded.meta;
-        meta.block_identity_by_mid
-            .extend(projection.identity_by_mid.clone());
         meta.history_summarizer = HistorySummarizerDurableState {
             state: HistorySummarizerPhase::AwaitingProducer,
             firing_seq: 1,
@@ -39287,10 +39292,9 @@ mod tests {
         let (handler, store, _dir, _project) = handler_with_store(Arc::clone(&producer), config);
         let frozen = rebuild();
         let fingerprint_items: Vec<_> = frozen.snapshot.iter().map(|item| item.as_item()).collect();
+        store.upsert_block_identities_for_test("ses", projection.identity_by_mid.clone());
         let loaded = store.load("ses").unwrap();
         let mut meta = loaded.meta;
-        meta.block_identity_by_mid
-            .extend(projection.identity_by_mid.clone());
         meta.history_summarizer = HistorySummarizerDurableState {
             state: HistorySummarizerPhase::AwaitingProducer,
             firing_seq: 1,
@@ -39358,13 +39362,7 @@ mod tests {
             kind_tag: "text".to_string(),
             byte_fingerprint: "revised".to_string(),
         }];
-        let loaded = store.load("ses").unwrap();
-        let mut meta = loaded.meta;
-        meta.block_identity_by_mid
-            .insert("m1".to_string(), revised.clone());
-        store
-            .commit("ses", loaded.row_version, &loaded.core, &meta)
-            .unwrap();
+        store.upsert_block_identities_for_test("ses", [("m1".to_string(), revised.clone())]);
         let chain = default_test_config().model_chain;
         let selected = |identities: Vec<memory_store::BlockIdentity>| {
             vec![memory_store::HistorySummarizerSelectedMessageIdentity {
@@ -39449,10 +39447,9 @@ mod tests {
         let (handler, store, _dir, _project) =
             handler_with_store(Arc::clone(&producer), default_test_config());
         let fingerprint_items: Vec<_> = frozen.snapshot.iter().map(|item| item.as_item()).collect();
+        store.upsert_block_identities_for_test("ses", projection.identity_by_mid.clone());
         let loaded = store.load("ses").unwrap();
         let mut meta = loaded.meta;
-        meta.block_identity_by_mid
-            .extend(projection.identity_by_mid.clone());
         meta.history_summarizer = HistorySummarizerDurableState {
             state: HistorySummarizerPhase::AwaitingProducer,
             firing_seq: 1,

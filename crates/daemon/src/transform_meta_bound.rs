@@ -1,14 +1,8 @@
-//! The durable meta bound under revision 3 (spec C4, D12; WP-E10, WP-P25). The memory store
-//! bounds one durable text field at 512 KiB; block identities are window-scoped, so a long
-//! session commits its window with its `meta` row and its `block_identities` rows independent
-//! of the history the segments cover, and a row written before identities were pruned is read
-//! as-is and pruned to the window on its first ordinary commit.
-
 #![forbid(unsafe_code)]
 
 use std::sync::Arc;
 
-use memory_store::{HistorySummarizerPhase, LoadedState, MemoryStore, MemoryStoreError};
+use memory_store::{HistorySummarizerPhase, MemoryStore, MemoryStoreError};
 
 use crate::test_support::synthetic_history::{SyntheticHistory, seed_active_summarizer};
 use crate::transform::tests::{item, pctx, req, resolved, store};
@@ -85,8 +79,11 @@ fn window_mids(request: &TransformRequest) -> Vec<String> {
     mids
 }
 
-fn identity_mids(loaded: &LoadedState) -> Vec<String> {
-    loaded.meta.block_identity_by_mid.keys().cloned().collect()
+fn identity_mids(store: &MemoryStore) -> Vec<String> {
+    store
+        .all_block_identities_for_test(SESSION)
+        .into_keys()
+        .collect()
 }
 
 #[test]
@@ -100,7 +97,7 @@ fn a_hundred_thousand_message_session_commits_a_three_hundred_message_window() {
     assert!(first.committed);
     let after = store.load(SESSION).expect("load after");
     assert_eq!(after.meta.coverage_ordinal, Some(100_000));
-    assert_eq!(identity_mids(&after), expected);
+    assert_eq!(identity_mids(&store), expected);
     let bytes = meta_row_bytes(&store);
     assert!(
         bytes < 128 * 1024,
@@ -119,20 +116,25 @@ fn legacy_session() -> (tempfile::TempDir, Arc<MemoryStore>, TransformRequest, u
     pass(&store, &request).expect("first pass");
     seed_active_summarizer(&store, SESSION);
     let loaded = store.load(SESSION).expect("load");
-    let vector = loaded
-        .meta
-        .block_identity_by_mid
-        .values()
+    let vector = store
+        .all_block_identities_for_test(SESSION)
+        .into_values()
         .next()
-        .unwrap()
-        .clone();
-    let mut meta = loaded.meta.clone();
-    for n in 1..2 * h as u64 - 1 {
-        meta.block_identity_by_mid
-            .insert(format!("m{n}"), vector.clone());
-    }
+        .unwrap();
+    let history = memory_store::BlockIdentityDelta {
+        upserts: (1..2 * h as u64 - 1)
+            .map(|n| (format!("m{n}"), vector.clone()))
+            .collect(),
+        ..Default::default()
+    };
     let version = store
-        .commit(SESSION, loaded.row_version, &loaded.core, &meta)
+        .commit_with_block_identities_for_test(
+            SESSION,
+            loaded.row_version,
+            &loaded.core,
+            &loaded.meta,
+            &history,
+        )
         .expect("write every covered identity");
     let entry = serde_json::to_string(&vector).unwrap();
     let embedded = (0..)
@@ -157,15 +159,19 @@ fn legacy_session() -> (tempfile::TempDir, Arc<MemoryStore>, TransformRequest, u
         (480 * 1024..512 * 1024).contains(&bytes),
         "the legacy row holds {bytes} meta bytes"
     );
-    (dir, store, request, version)
+    let mut next = request;
+    let ordinal = 2 * h as u64 - 1 + WINDOW;
+    next.messages.push(item(
+        &format!("m{ordinal}"),
+        ordinal,
+        "the message after the legacy window",
+    ));
+    (dir, store, next, version)
 }
 
-/// The first ordinary commit over a legacy row leaves exactly the window's identities and a
-/// `meta` row below 128 KiB, with the firing kept. The identity rows are the prune check; the
-/// meta size is a bound check, since any struct-serialized commit drops the embedded key.
-fn assert_pruned(store: &MemoryStore, request: &TransformRequest) {
-    let loaded = store.load(SESSION).expect("load pruned");
-    assert_eq!(identity_mids(&loaded), window_mids(request));
+fn assert_history_kept(store: &MemoryStore) {
+    let loaded = store.load(SESSION).expect("load kept");
+    assert_eq!(identity_mids(store).len(), 1_998 + WINDOW as usize + 1);
     assert!(meta_row_bytes(store) < 128 * 1024);
     assert_eq!(
         loaded.meta.history_summarizer.state,
@@ -174,65 +180,41 @@ fn assert_pruned(store: &MemoryStore, request: &TransformRequest) {
 }
 
 #[test]
-fn a_legacy_row_is_read_after_a_restart_and_pruned_on_its_first_commit() {
+fn a_legacy_row_is_read_after_a_restart_and_keeps_its_identity_rows_on_its_first_commit() {
     let _serial = serial();
     let (dir, legacy_store, request, _) = legacy_session();
     drop(legacy_store);
     let store = store(dir.path());
-    let legacy = store.load(SESSION).expect("the legacy row reads");
-    assert_eq!(
-        legacy.meta.block_identity_by_mid.len(),
-        1_998 + WINDOW as usize
-    );
+    store.load(SESSION).expect("the legacy row reads");
     let answer = pass(&store, &request).expect("the first pass commits");
     assert!(answer.committed);
-    // Not a HARD: the prune runs on every ordinary commit (WP-P25).
     assert_eq!(answer.action, "SOFT+");
-    assert_pruned(&store, &request);
+    assert_history_kept(&store);
 }
 
 #[test]
-fn a_legacy_prune_that_loses_its_cas_reloads_and_prunes() {
+fn a_pass_that_loses_its_cas_reloads_and_keeps_the_identity_history() {
     let _serial = serial();
     let (_dir, store, request, _) = legacy_session();
     let hook_store = Arc::clone(&store);
-    let conflicting_meta_bytes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let recorded = Arc::clone(&conflicting_meta_bytes);
     install_transform_attempt_hook(SESSION, move || {
         let loaded = hook_store.load(SESSION).unwrap();
         hook_store
             .commit(SESSION, loaded.row_version, &loaded.core, &loaded.meta)
             .unwrap();
-        recorded.store(
-            meta_row_bytes(&hook_store),
-            std::sync::atomic::Ordering::SeqCst,
-        );
     });
     let answer = pass(&store, &request).expect("the retry commits");
     assert!(answer.committed);
-    // The conflicting writer's own commit already shrinks the meta row; the retry prunes the
-    // identity rows it reloads.
-    let conflicting = conflicting_meta_bytes.load(std::sync::atomic::Ordering::SeqCst);
-    assert!(conflicting > 0 && conflicting < 128 * 1024, "{conflicting}");
-    assert_eq!(
-        store
-            .load(SESSION)
-            .unwrap()
-            .meta
-            .block_identity_by_mid
-            .len(),
-        WINDOW as usize
-    );
-    assert_pruned(&store, &request);
+    assert_history_kept(&store);
 }
 
 #[test]
-fn a_writer_that_loses_to_the_legacy_prune_reloads_the_pruned_row() {
+fn a_writer_that_loses_to_a_pass_reloads_the_row() {
     let _serial = serial();
     let (_dir, store, request, version) = legacy_session();
     let stale = store.load(SESSION).unwrap();
     assert_eq!(stale.row_version, Some(version));
-    pass(&store, &request).expect("the prune commits");
+    pass(&store, &request).expect("the pass commits");
     assert!(matches!(
         store.commit(SESSION, Some(version), &stale.core, &stale.meta),
         Err(MemoryStoreError::CasConflict { .. })
@@ -246,5 +228,5 @@ fn a_writer_that_loses_to_the_legacy_prune_reloads_the_pruned_row() {
             &reloaded.meta,
         )
         .expect("the reloaded writer commits");
-    assert_pruned(&store, &request);
+    assert_history_kept(&store);
 }

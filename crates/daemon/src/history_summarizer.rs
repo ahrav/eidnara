@@ -2838,11 +2838,12 @@ mod tests {
         )
         .unwrap();
         store
-            .commit(
+            .commit_with_block_identities_for_test(
                 "ses",
                 None,
                 &CoreState::empty(),
                 &test_meta_with_history_summarizer(awaiting),
+                &test_selected_identity_delta(),
             )
             .unwrap();
     }
@@ -3088,29 +3089,29 @@ mod tests {
     fn test_meta_with_history_summarizer(
         history_summarizer: HistorySummarizerDurableState,
     ) -> ModuleMeta {
-        let mut meta = ModuleMeta {
+        ModuleMeta {
             history_summarizer,
             ..Default::default()
-        };
-        for selected in test_selected_range_identities() {
-            meta.block_identity_by_mid
-                .insert(selected.mid, selected.block_identities);
         }
-        meta
+    }
+
+    fn test_selected_identity_delta() -> memory_store::BlockIdentityDelta {
+        memory_store::BlockIdentityDelta {
+            upserts: test_selected_range_identities()
+                .into_iter()
+                .map(|selected| (selected.mid, selected.block_identities))
+                .collect(),
+            ..Default::default()
+        }
     }
 
     fn seed_test_selected_range_identities(store: &MemoryStore) {
-        let loaded = store.load("ses").unwrap();
-        let mut meta = loaded.meta.clone();
-        for selected in test_selected_range_identities() {
-            meta.block_identity_by_mid
-                .insert(selected.mid, selected.block_identities);
-        }
-        if meta != loaded.meta {
-            store
-                .commit("ses", loaded.row_version, &loaded.core, &meta)
-                .unwrap();
-        }
+        store.upsert_block_identities_for_test(
+            "ses",
+            test_selected_range_identities()
+                .into_iter()
+                .map(|selected| (selected.mid, selected.block_identities)),
+        );
     }
 
     #[derive(Default)]
@@ -3450,11 +3451,12 @@ mod tests {
         let db = store(dir.path());
         let seeded = |state: &HistorySummarizerDurableState| {
             let current = db.load("ses").unwrap().row_version;
-            db.commit(
+            db.commit_with_block_identities_for_test(
                 "ses",
                 current,
                 &CoreState::empty(),
                 &test_meta_with_history_summarizer(state.clone()),
+                &test_selected_identity_delta(),
             )
             .unwrap()
         };
@@ -3611,11 +3613,12 @@ mod tests {
         };
         in_flight.record_fire(FiringTrigger::default(), 5, None);
         store
-            .commit(
+            .commit_with_block_identities_for_test(
                 "ses",
                 None,
                 &CoreState::empty(),
                 &test_meta_with_history_summarizer(in_flight.clone()),
+                &test_selected_identity_delta(),
             )
             .unwrap();
         // A transform pass stamps the earlier firing's activation while the firing runs.
@@ -3668,11 +3671,12 @@ mod tests {
             producer_started(&fired, "session".into(), "run".into(), "pi".into()).unwrap();
         assert_eq!(awaiting.chunk_retry, idle.chunk_retry);
         store
-            .commit(
+            .commit_with_block_identities_for_test(
                 "ses",
                 None,
                 &CoreState::empty(),
                 &test_meta_with_history_summarizer(awaiting.clone()),
+                &test_selected_identity_delta(),
             )
             .unwrap();
         // The pass re-adopts a message in the chunk while the model runs.
@@ -3875,13 +3879,16 @@ mod tests {
             .with_start(Ok(run_handle("run-1")))
             .with_output(Ok(producer_output(history_summarizer_xml("stale summary"))))
             .with_await_output_hook(move || {
-                let loaded = hook_store.load("ses").unwrap();
-                let mut meta = loaded.meta;
-                meta.block_identity_by_mid.get_mut("m2").unwrap()[0].byte_fingerprint =
-                    "m2-content-b".to_string();
-                hook_store
-                    .commit("ses", loaded.row_version, &loaded.core, &meta)
-                    .unwrap();
+                hook_store.upsert_block_identities_for_test(
+                    "ses",
+                    [(
+                        "m2".to_string(),
+                        vec![memory_store::BlockIdentity {
+                            kind_tag: "text".to_string(),
+                            byte_fingerprint: "m2-content-b".to_string(),
+                        }],
+                    )],
+                );
             });
 
         let error = run_history_summarizer_firing(
@@ -3928,18 +3935,16 @@ mod tests {
                 "current summary",
             ))))
             .with_await_output_hook(move || {
-                let loaded = hook_store.load("ses").unwrap();
-                let mut meta = loaded.meta;
-                meta.block_identity_by_mid.insert(
-                    "m5".to_string(),
-                    vec![memory_store::BlockIdentity {
-                        kind_tag: "text".to_string(),
-                        byte_fingerprint: "later-content".to_string(),
-                    }],
+                hook_store.upsert_block_identities_for_test(
+                    "ses",
+                    [(
+                        "m5".to_string(),
+                        vec![memory_store::BlockIdentity {
+                            kind_tag: "text".to_string(),
+                            byte_fingerprint: "later-content".to_string(),
+                        }],
+                    )],
                 );
-                hook_store
-                    .commit("ses", loaded.row_version, &loaded.core, &meta)
-                    .unwrap();
             });
 
         let outcome = run_history_summarizer_firing(
@@ -3955,7 +3960,11 @@ mod tests {
         ));
         let loaded = store.load("ses").unwrap();
         assert_eq!(loaded.meta.publication_floor_ordinal, Some(4));
-        assert!(loaded.meta.block_identity_by_mid.contains_key("m5"));
+        assert!(
+            store
+                .all_block_identities_for_test("ses")
+                .contains_key("m5")
+        );
         assert_eq!(store.load_history_segments("ses").unwrap().len(), 2);
     }
 
@@ -4467,13 +4476,16 @@ mod tests {
         let chunk = history_summarizer_chunk();
         let prior = prior_ranges();
         seed_awaiting_history_summarizer(&store);
-        let loaded = store.load("ses").unwrap();
-        let mut meta = loaded.meta;
-        meta.block_identity_by_mid.get_mut("m2").unwrap()[0].byte_fingerprint =
-            "m2-content-b".to_string();
-        store
-            .commit("ses", loaded.row_version, &loaded.core, &meta)
-            .unwrap();
+        store.upsert_block_identities_for_test(
+            "ses",
+            [(
+                "m2".to_string(),
+                vec![memory_store::BlockIdentity {
+                    kind_tag: "text".to_string(),
+                    byte_fingerprint: "m2-content-b".to_string(),
+                }],
+            )],
+        );
         let mut producer = ScriptedProducer::default()
             .with_status(Ok(RunState::Terminal))
             .with_output(Ok(producer_output(history_summarizer_xml(
@@ -4546,11 +4558,12 @@ mod tests {
             )
             .unwrap();
             store
-                .commit(
+                .commit_with_block_identities_for_test(
                     lineage,
                     None,
                     &CoreState::empty(),
                     &test_meta_with_history_summarizer(awaiting),
+                    &test_selected_identity_delta(),
                 )
                 .unwrap();
         }
@@ -4657,11 +4670,12 @@ mod tests {
         )
         .unwrap();
         store
-            .commit(
+            .commit_with_block_identities_for_test(
                 "ses",
                 None,
                 &CoreState::empty(),
                 &test_meta_with_history_summarizer(awaiting),
+                &test_selected_identity_delta(),
             )
             .unwrap();
         let chunk = history_summarizer_chunk();
@@ -5541,11 +5555,8 @@ mod tests {
         );
         assert!(rejected.facts.is_empty());
 
+        seed_test_selected_range_identities(&store);
         let mut meta = store.load("ses").unwrap().meta;
-        for selected in test_selected_range_identities() {
-            meta.block_identity_by_mid
-                .insert(selected.mid, selected.block_identities);
-        }
         meta.history_summarizer = HistorySummarizerDurableState {
             state: HistorySummarizerPhase::Publishing,
             firing_seq: 1,
@@ -6013,7 +6024,13 @@ mod tests {
         publishing.record_fire(FiringTrigger::default(), 1, None);
         let meta = test_meta_with_history_summarizer(publishing);
         store
-            .commit("ses", None, &CoreState::empty(), &meta)
+            .commit_with_block_identities_for_test(
+                "ses",
+                None,
+                &CoreState::empty(),
+                &meta,
+                &test_selected_identity_delta(),
+            )
             .unwrap();
         let loaded = store.load("ses").unwrap();
         let predicate = publish_predicate(&loaded.meta.history_summarizer).unwrap();
@@ -6117,7 +6134,13 @@ mod tests {
             ..test_meta_with_history_summarizer(publishing)
         };
         store
-            .commit("ses", None, &CoreState::empty(), &meta)
+            .commit_with_block_identities_for_test(
+                "ses",
+                None,
+                &CoreState::empty(),
+                &meta,
+                &test_selected_identity_delta(),
+            )
             .unwrap();
         let loaded = store.load("ses").unwrap();
         let predicate = publish_predicate(&loaded.meta.history_summarizer).unwrap();
@@ -6176,11 +6199,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = store(dir.path());
         store
-            .commit(
+            .commit_with_block_identities_for_test(
                 "ses",
                 None,
                 &CoreState::empty(),
                 &test_meta_with_history_summarizer(publishing_state()),
+                &test_selected_identity_delta(),
             )
             .unwrap();
         let predicate =
@@ -6295,7 +6319,7 @@ mod tests {
         )
         .unwrap();
         store
-            .commit(
+            .commit_with_block_identities_for_test(
                 "ses",
                 None,
                 &CoreState::empty(),
@@ -6303,6 +6327,7 @@ mod tests {
                     revert_epoch: 8,
                     ..test_meta_with_history_summarizer(awaiting)
                 },
+                &test_selected_identity_delta(),
             )
             .unwrap();
         let mut producer = ScriptedProducer::default()
@@ -6359,7 +6384,13 @@ mod tests {
         .unwrap();
         let meta = test_meta_with_history_summarizer(awaiting);
         store
-            .commit("ses", None, &CoreState::empty(), &meta)
+            .commit_with_block_identities_for_test(
+                "ses",
+                None,
+                &CoreState::empty(),
+                &meta,
+                &test_selected_identity_delta(),
+            )
             .unwrap();
 
         let action = handle_restart_load(&store, "ses", 500).unwrap();
@@ -6415,7 +6446,13 @@ mod tests {
         });
         let meta = test_meta_with_history_summarizer(awaiting);
         store
-            .commit("ses", None, &CoreState::empty(), &meta)
+            .commit_with_block_identities_for_test(
+                "ses",
+                None,
+                &CoreState::empty(),
+                &meta,
+                &test_selected_identity_delta(),
+            )
             .unwrap();
 
         assert_eq!(
@@ -6443,7 +6480,13 @@ mod tests {
         let store = store(dir.path());
         let meta = test_meta_with_history_summarizer(publishing_state());
         store
-            .commit("ses", None, &CoreState::empty(), &meta)
+            .commit_with_block_identities_for_test(
+                "ses",
+                None,
+                &CoreState::empty(),
+                &meta,
+                &test_selected_identity_delta(),
+            )
             .unwrap();
         let loaded = store.load("ses").unwrap();
         let predicate = publish_predicate(&loaded.meta.history_summarizer).unwrap();

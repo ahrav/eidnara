@@ -465,7 +465,7 @@ fn summarizer_round(store: &MemoryStore, h: usize) -> Totals {
         .map(|ordinal| {
             let mid = format!("m{ordinal}");
             HistorySummarizerSelectedMessageIdentity {
-                block_identities: loaded.meta.block_identity_by_mid[&mid].clone(),
+                block_identities: store.all_block_identities_for_test(SESSION)[&mid].clone(),
                 mid,
             }
         })
@@ -744,14 +744,7 @@ fn measure_native(rows: usize) -> Measured {
         run(&request);
         phases.push((phase, totals(phase, rows, &store.take_statement_work())));
     }
-    assert!(
-        store
-            .load(SESSION)
-            .unwrap()
-            .meta
-            .block_identity_by_mid
-            .is_empty()
-    );
+    assert!(store.all_block_identities_for_test(SESSION).is_empty());
     phases
 }
 

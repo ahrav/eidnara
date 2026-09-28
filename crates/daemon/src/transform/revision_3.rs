@@ -96,10 +96,7 @@ fn durable(store: &MemoryStore) -> (Option<u64>, ModuleMeta, Vec<StoredHistorySe
 /// The mids the durable block identities name, sorted.
 fn identity_mids(store: &MemoryStore) -> Vec<String> {
     let mut mids: Vec<String> = store
-        .load(session())
-        .unwrap()
-        .meta
-        .block_identity_by_mid
+        .all_block_identities_for_test(session())
         .into_keys()
         .collect();
     mids.sort();
@@ -375,8 +372,12 @@ async fn each_resolution_outcome_runs_through_the_handler_with_its_effects() {
     assert_eq!(resolved.anchor.as_ref().unwrap().sequence, 3);
     assert_eq!(resolved.ordinals, vec![6, 7, 8]);
     let sliced = call(&handler, stale).await;
-    // The prune keeps the submitted window, cut prefix included (spec D10, D12).
-    assert_eq!(identity_mids(&store), ["m4", "m5", "m6", "m7", "m8"]);
+    let observed = ["m1", "m2", "m3", "m4", "m5", "m6", "m7", "m8"];
+    assert_eq!(
+        identity_mids(&store),
+        observed,
+        "omitted mids keep their rows"
+    );
     let declared = call(&handler, body(&["m6", "m7", "m8"], anchor("m6", 3))).await;
     assert_eq!(served_mids(&sliced), ["m7", "m8"]);
     assert_eq!(sliced["messages"], declared["messages"]);
@@ -397,11 +398,11 @@ async fn each_resolution_outcome_runs_through_the_handler_with_its_effects() {
     assert_eq!(soft["action"], "SOFT+");
     assert_eq!(soft["reconcile_pending"], true);
     assert_eq!(store.load_history_segments(session()).unwrap().len(), 3);
-    // A revert's SOFT keeps the map; the HARD that completes it prunes (spec D12).
-    assert_eq!(identity_mids(&store), ["m2", "m6", "m7", "m8", "n3"]);
+    let with_revert: Vec<&str> = observed.iter().copied().chain(["n3"]).collect();
+    assert_eq!(identity_mids(&store), with_revert);
     let hard = call(&handler, reverted).await;
     assert_eq!(hard["action"], "HARD");
-    assert_eq!(identity_mids(&store), ["m2", "n3"]);
+    assert_eq!(identity_mids(&store), with_revert);
     assert_eq!(hard["reconcile_pending"], false);
     assert_eq!(hard["boundary"], anchor("m2", 1));
     assert_eq!(served_mids(&hard), ["n3"]);
@@ -561,17 +562,25 @@ async fn pressured_revert(handler: &Handler, store: &MemoryStore, end: &str) -> 
     call(handler, reverted).await
 }
 
-/// The revert's HARD after its defer prunes the identities to the window (spec D12), whether
-/// segment 3 ended at a mid live in the reverted window or at one the revert removed.
+/// The revert's HARD after its defer keeps every identity row it inherited, whether segment 3
+/// ended at a mid live in the reverted window or at one the revert removed.
 #[tokio::test(flavor = "current_thread")]
-async fn a_revert_under_pressure_defers_then_folds_and_prunes_to_the_window() {
+async fn a_revert_under_pressure_defers_then_folds_and_keeps_the_identity_history() {
     for end in ["n3#0", "m6#0"] {
         let (handler, store, _dir) = folded().await;
+        let before = identity_mids(&store);
         let folded = pressured_revert(&handler, &store, end).await;
         assert_eq!(folded["status"], "ok", "{end}: {folded}");
         assert_eq!(folded["action"], "HARD", "{end}: {folded}");
         assert_eq!(folded["reconcile_pending"], false, "{end}: {folded}");
-        assert_eq!(identity_mids(&store), ["m2", "n3"], "{end}");
+        let after = identity_mids(&store);
+        assert!(
+            before
+                .iter()
+                .chain(&["m2".to_string(), "n3".to_string()])
+                .all(|mid| after.contains(mid)),
+            "{end}: {after:?}"
+        );
     }
 }
 
