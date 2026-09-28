@@ -28,6 +28,7 @@ describe.skipIf(!rustPrereqs.ok)("rust invariant: fold under pressure", () => {
         h = await RustTestHarness.create({
             modelContextLimit: 30_000,
             eidnaraConfig: {
+                history_summarizer: { model: "fixture/deterministic" },
                 execute_threshold_percentage: 25,
                 protected_tags: 1,
             },
