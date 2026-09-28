@@ -229,12 +229,12 @@ export function findIgnoredMarkerMessageIdsFromDb(
 async function findMarkerMessageIds(
     client: unknown,
     sessionId: string,
-    marker: string,
-): Promise<string[]> {
+    markers: readonly string[],
+): Promise<string[][]> {
     if (refreshOpenCodeDbPresence()) {
         try {
             return withReadOnlySessionDb((db) =>
-                findIgnoredMarkerMessageIdsFromDb(db, sessionId, marker),
+                markers.map((marker) => findIgnoredMarkerMessageIdsFromDb(db, sessionId, marker)),
             );
         } catch (error) {
             log(
@@ -242,7 +242,8 @@ async function findMarkerMessageIds(
             );
         }
     }
-    return findIgnoredMarkerMessageIds(await getSessionMessages(client, sessionId), marker);
+    const messages = await getSessionMessages(client, sessionId);
+    return markers.map((marker) => findIgnoredMarkerMessageIds(messages, marker));
 }
 
 /**
@@ -270,19 +271,34 @@ export async function sendConflictWarning(
     client: unknown,
     directory: string,
     conflictResult: ConflictResult,
+    serverUrl?: string,
 ): Promise<void> {
-    const { sessionId } = readDesktopState(directory);
+    const { sessionId, sidecarUrl } = readDesktopState(directory);
     if (!sessionId) {
         log("[eidnara] conflict-warning: could not find active session for Desktop warning");
         return;
     }
 
+    const disabled = conflictResult.disposition === "disable";
+    const [header, otherHeader] = disabled
+        ? [CONFLICT_DISABLED_HEADER, CONFLICT_WARNING_HEADER]
+        : [CONFLICT_WARNING_HEADER, CONFLICT_DISABLED_HEADER];
+    const [existing = [], superseded = []] = await findMarkerMessageIds(client, sessionId, [
+        header,
+        otherHeader,
+    ]);
+    // A persisted message under the other header states the other disposition, which no longer holds.
+    const deleteUrl = serverUrl ?? sidecarUrl ?? undefined;
+    if (superseded.length > 0 && deleteUrl) {
+        const failedIds = await deleteMessages(deleteUrl, sessionId, superseded);
+        if (failedIds.length > 0) {
+            log(
+                `[eidnara] conflict-warning: ${failedIds.length} superseded warning message(s) still present in session ${sessionId}`,
+            );
+        }
+    }
+
     // Conflict detection re-fires on every startup; a warning already in the session is not repeated.
-    const header =
-        conflictResult.disposition === "disable"
-            ? CONFLICT_DISABLED_HEADER
-            : CONFLICT_WARNING_HEADER;
-    const existing = await findMarkerMessageIds(client, sessionId, header);
     if (existing.length > 0) {
         log(
             `[eidnara] conflict-warning: session ${sessionId} already carries ${existing.length} warning(s); not sending another`,
@@ -306,11 +322,7 @@ export async function sendConflictWarning(
 }
 
 async function findConflictWarningIds(client: unknown, sessionId: string): Promise<string[]> {
-    const ids: string[] = [];
-    for (const marker of CONFLICT_WARNING_MARKERS) {
-        ids.push(...(await findMarkerMessageIds(client, sessionId, marker)));
-    }
-    return ids;
+    return (await findMarkerMessageIds(client, sessionId, CONFLICT_WARNING_MARKERS)).flat();
 }
 
 /**
@@ -387,7 +399,9 @@ async function cleanupEnabledMessages(
     sessionId: string,
 ): Promise<void> {
     if (!serverUrl) return;
-    const enabledMessageIds = await findMarkerMessageIds(client, sessionId, ENABLED_MARKER);
+    const [enabledMessageIds = []] = await findMarkerMessageIds(client, sessionId, [
+        ENABLED_MARKER,
+    ]);
     if (enabledMessageIds.length === 0) return;
     await deleteMessages(serverUrl, sessionId, enabledMessageIds);
 }

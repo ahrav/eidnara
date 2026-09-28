@@ -187,6 +187,53 @@ describe.if(platform() === "linux")(
             expect(prompt).not.toHaveBeenCalled();
         });
 
+        it("replaces a warning the other disposition left instead of keeping both", async () => {
+            const directory = seedDesktopSession();
+            __ignoredNotificationTest.setMidTurnDetector(() => false);
+            const deletedUrls: string[] = [];
+            const fetchSpy = spyOn(globalThis, "fetch").mockImplementation((async (
+                input: string | URL | Request,
+            ) => {
+                deletedUrls.push(String(input));
+                return new Response("{}", { status: 200 });
+            }) as unknown as typeof fetch);
+            const warning = {
+                ...CONFLICT,
+                disposition: "warn",
+                reasons: ["no fold authority"],
+            } as unknown as ConflictResult;
+            try {
+                const prompt = mock(async () => ({}));
+                const client = {
+                    session: {
+                        prompt,
+                        get: mock(async () => ({ title: REAL_TITLE })),
+                        messages: mock(async () => [
+                            {
+                                info: { id: "msg_disabled", role: "user" },
+                                parts: [
+                                    {
+                                        type: "text",
+                                        text: formatConflictShort(CONFLICT),
+                                        ignored: true,
+                                    },
+                                ],
+                            },
+                        ]),
+                    },
+                };
+
+                await sendConflictWarning(client, directory, warning, "http://127.0.0.1:1");
+
+                expect(deletedUrls).toEqual([
+                    `http://127.0.0.1:1/session/${SESSION_ID}/message/msg_disabled`,
+                ]);
+                expect(prompt).toHaveBeenCalledTimes(1);
+            } finally {
+                fetchSpy.mockRestore();
+            }
+        });
+
         it("persists the conflict warning even when a TUI is connected", async () => {
             // cleanupConflictWarnings deletes the persisted warning row when
             // the conflict is resolved; a toast would leave nothing to clean
