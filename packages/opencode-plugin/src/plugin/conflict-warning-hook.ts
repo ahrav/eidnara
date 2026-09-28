@@ -413,12 +413,16 @@ export async function cleanupConflictWarnings(
         return;
     }
     const deleteUrl = serverUrl ?? sidecarUrl ?? undefined;
-    const [disabledMessageIds = [], configurationWarningIds = []] = await findMarkerMessageIds(
-        client,
-        sessionId,
-        CONFLICT_WARNING_MARKERS,
+    const [disabledMessageIds = [], configurationWarningIds = [], ...live] =
+        await findMarkerMessageIds(client, sessionId, [
+            ...CONFLICT_WARNING_MARKERS,
+            ...FOLD_AUTHORITY_WARNING_MARKERS,
+        ]);
+    // `reconcileFoldAuthorityWarning` owns the live fold-authority messages under the same header.
+    const liveIds = new Set(live.flat());
+    const warningMessageIds = [...disabledMessageIds, ...configurationWarningIds].filter(
+        (id) => !liveIds.has(id),
     );
-    const warningMessageIds = [...disabledMessageIds, ...configurationWarningIds];
 
     if (warningMessageIds.length === 0) {
         await cleanupEnabledMessages(client, deleteUrl, sessionId);

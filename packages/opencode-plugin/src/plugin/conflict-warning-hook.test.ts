@@ -883,6 +883,25 @@ describe.if(platform() === "linux")(
                 }
             });
 
+            it("keeps a live warning through the startup cleanup", async () => {
+                const directory = seedDesktopSession({ sessionId: POLLED });
+                __ignoredNotificationTest.setMidTurnDetector(() => false);
+                const { client } = sessionWith({
+                    msg_live: formatConflictShort(SIBLING),
+                    msg_stale: formatConflictShort(STARTUP),
+                });
+                const deletes = recordDeletes();
+                try {
+                    await cleanupConflictWarnings(client, directory, SERVER);
+
+                    expect(deletes.deletedUrls).toEqual([
+                        `${SERVER}/session/${POLLED}/message/msg_stale`,
+                    ]);
+                } finally {
+                    deletes.restore();
+                }
+            });
+
             it("does not let a live warning suppress the startup warning", async () => {
                 const directory = seedDesktopSession();
                 __ignoredNotificationTest.setMidTurnDetector(() => false);
