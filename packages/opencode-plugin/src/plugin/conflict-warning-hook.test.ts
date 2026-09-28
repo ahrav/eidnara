@@ -60,9 +60,10 @@ function titledClient() {
 }
 
 const CONFLICT: ConflictResult = {
-    hasConflict: true,
+    disposition: "disable",
     reasons: ["another eidnara install is active"],
-} as ConflictResult;
+    unresolved: [],
+} as unknown as ConflictResult;
 
 // The Desktop state file location is platform-specific; only the Linux
 // location is env-relocatable for an isolated test.

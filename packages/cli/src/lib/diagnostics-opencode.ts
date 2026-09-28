@@ -10,6 +10,7 @@ import {
     eidnaraUserConfigBasePath,
 } from "@eidnara/opencode/config/config-paths";
 import {
+    type ConflictDisposition,
     type ConflictResult,
     detectConflicts,
     pluginEntriesOutside,
@@ -101,7 +102,7 @@ export interface DiagnosticReport {
     /** Project tier under `<cwd>/.eidnara/`; its overrides win over the user tier. */
     projectConfig: EidnaraConfigTier;
     conflicts: {
-        hasConflict: boolean;
+        disposition: ConflictDisposition;
         reasons: string[];
         /** With `enabled: false` no integration is a conflict, since the plugin skips every hook. */
         eidnaraEnabled: boolean;
@@ -112,7 +113,7 @@ export interface DiagnosticReport {
             auto: boolean;
             prune: boolean;
         };
-        /** Set when conflict detection itself failed; `hasConflict` is then `false` by default, not by evidence. */
+        /** Set when conflict detection itself failed; `disposition` is then `"none"` by default, not by evidence. */
         detectionError?: string;
     };
     logFile: {
@@ -507,21 +508,25 @@ export async function collectDiagnostics(cwd = process.cwd()): Promise<Diagnosti
     }
     // `detectConflicts` reads the `.omo` config through an unguarded home lookup; a host without a
     // home directory must still get the rest of the report.
-    let conflictResult: Pick<ConflictResult, "hasConflict" | "reasons" | "nativeCompaction">;
+    let conflictResult: Pick<
+        ConflictResult,
+        "disposition" | "reasons" | "unresolved" | "nativeCompaction"
+    >;
     let conflictsError: string | undefined;
     try {
         conflictResult = detectConflicts(cwd, { compactionEnabled });
     } catch (error) {
         conflictsError = error instanceof Error ? error.message : String(error);
         conflictResult = {
-            hasConflict: false,
+            disposition: "none",
             reasons: [],
+            unresolved: [],
             nativeCompaction: { auto: false, prune: false },
         };
     }
     // With `enabled: false` the plugin skips every hook, so DCP and the OMO
     // hooks are not conflicts; the doctor skips this detector in that mode too.
-    const reasons = eidnaraEnabled ? conflictResult.reasons : [];
+    const reasons = eidnaraEnabled ? [...conflictResult.reasons, ...conflictResult.unresolved] : [];
     const discovery = await collectRecentSessions();
     const recentSessions = discovery.sessions;
     const opencodeInstallations = describeOpenCodeInstallations(detectOpenCodeInstallations());
@@ -556,7 +561,7 @@ export async function collectDiagnostics(cwd = process.cwd()): Promise<Diagnosti
         eidnaraConfig,
         projectConfig,
         conflicts: {
-            hasConflict: reasons.length > 0,
+            disposition: eidnaraEnabled ? conflictResult.disposition : "none",
             reasons,
             eidnaraEnabled,
             compactionEnabled,
@@ -686,7 +691,7 @@ export function renderDiagnosticsMarkdown(report: DiagnosticReport): string {
         `- User config parse error: ${describeParseError(report.eidnaraConfig.parseError)}`,
         `- Project config: ${describeConfigTier(report.projectConfig)}`,
         `- Project config parse error: ${describeParseError(report.projectConfig.parseError)}`,
-        `- Conflicts detected: ${report.conflicts.hasConflict ? report.conflicts.reasons.join("; ") : "none"}${
+        `- Conflicts detected: ${report.conflicts.disposition === "none" ? "none" : `${report.conflicts.disposition}: ${report.conflicts.reasons.join("; ")}`}${
             report.conflicts.detectionError
                 ? ` (detection failed: ${sanitizeDiagnosticText(report.conflicts.detectionError)})`
                 : ""

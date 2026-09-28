@@ -515,7 +515,7 @@ export async function runDoctor(
         pass(
             "Eidnara is disabled (enabled: false); native compaction, DCP, and OMO hooks are left in place",
         );
-    } else if (conflictResult.hasConflict) {
+    } else if (conflictResult.disposition === "disable") {
         for (const reason of conflictResult.reasons) {
             fail(`Conflict: ${reason}`);
         }
@@ -531,7 +531,7 @@ export async function runDoctor(
             );
         } else if (options.force) {
             try {
-                const actions = fixConflicts(cwd, conflictResult.conflicts, { compactionEnabled });
+                const actions = fixConflicts(cwd, conflictResult);
                 for (const action of actions) {
                     pass(`Fixed: ${action}`);
                     fixed++;

@@ -9,22 +9,33 @@ import { isRecord } from "./record-type-guard";
 interface OpenCodeConfig {
     compaction?: unknown;
     plugin?: unknown;
+    /** `inline` marks the `OPENCODE_CONFIG_CONTENT` layer. */
+    inline?: true;
+}
+
+export type ConflictDisposition = "none" | "warn" | "disable";
+
+export interface CompactionPatch {
+    auto?: boolean;
+    prune?: boolean;
 }
 
 export interface ConflictResult {
-    /* */
-    hasConflict: boolean;
+    disposition: ConflictDisposition;
     /** Each `reasons` entry describes a conflict in human-readable text. */
     reasons: string[];
     /* */
     conflicts: {
         compactionAuto: boolean;
         compactionPrune: boolean;
+        noFoldAuthority: boolean;
         dcpPlugin: boolean;
         omoPreemptiveCompaction: boolean;
         omoContextWindowMonitor: boolean;
         omoAnthropicRecovery: boolean;
     };
+    compactionPatch: CompactionPatch;
+    unresolved: string[];
     /**
      * `nativeCompaction` records the resolved native compaction state observed during detection.
      * `auto` and `prune` reflect the detector's resolved OpenCode compaction state.
@@ -84,30 +95,33 @@ export function detectConflicts(
     const conflicts: ConflictResult["conflicts"] = {
         compactionAuto: false,
         compactionPrune: false,
+        noFoldAuthority: false,
         dcpPlugin: false,
         omoPreemptiveCompaction: false,
         omoContextWindowMonitor: false,
         omoAnthropicRecovery: false,
     };
     const reasons: string[] = [];
+    const target: CompactionPatch = {};
+    const resolvedSuffix = options?.resolvedCompaction ? " (resolved config)" : "";
 
     const compactionResult = options?.resolvedCompaction ?? checkCompaction(directory);
     if (compactionEnabled && compactionResult.auto) {
         conflicts.compactionAuto = true;
-        reasons.push(
-            options?.resolvedCompaction
-                ? "OpenCode auto-compaction is enabled (compaction.auto=true) (resolved config)"
-                : "OpenCode auto-compaction is enabled (compaction.auto=true)",
-        );
+        target.auto = false;
+        reasons.push(`OpenCode auto-compaction is enabled (compaction.auto=true)${resolvedSuffix}`);
     }
     if (compactionEnabled && compactionResult.prune) {
         conflicts.compactionPrune = true;
-        reasons.push(
-            options?.resolvedCompaction
-                ? "OpenCode prune is enabled (compaction.prune=true) (resolved config)"
-                : "OpenCode prune is enabled (compaction.prune=true)",
-        );
+        target.prune = false;
+        reasons.push(`OpenCode prune is enabled (compaction.prune=true)${resolvedSuffix}`);
     }
+    if (!compactionEnabled && !compactionResult.auto) {
+        conflicts.noFoldAuthority = true;
+        target.auto = true;
+        reasons.push(NO_FOLD_AUTHORITY_REASON);
+    }
+    const { compactionPatch, unresolved } = splitCompactionPatch(directory, target);
 
     const dcpFound = checkDcpPlugin(directory);
     if (dcpFound) {
@@ -136,11 +150,53 @@ export function detectConflicts(
     }
 
     return {
-        hasConflict: reasons.length > 0,
+        disposition: conflictDisposition(conflicts),
         reasons,
         conflicts,
+        compactionPatch,
+        unresolved,
         nativeCompaction: { auto: compactionResult.auto, prune: compactionResult.prune },
     };
+}
+
+export const NO_FOLD_AUTHORITY_REASON =
+    "no fold authority: no summarizer model is configured and OpenCode's compaction is off";
+
+export function conflictDisposition(conflicts: ConflictResult["conflicts"]): ConflictDisposition {
+    const { noFoldAuthority, ...disabling } = conflicts;
+    if (Object.values(disabling).some(Boolean)) return "disable";
+    return noFoldAuthority ? "warn" : "none";
+}
+
+function splitCompactionPatch(
+    directory: string,
+    target: CompactionPatch,
+): { compactionPatch: CompactionPatch; unresolved: string[] } {
+    const compactionPatch: CompactionPatch = {};
+    const unresolved: string[] = [];
+    for (const key of ["auto", "prune"] as const) {
+        const value = target[key];
+        if (value === undefined) continue;
+        const source = compactionOverrideSource(directory, key);
+        if (source === null) {
+            compactionPatch[key] = value;
+        } else {
+            unresolved.push(
+                `compaction.${key} is set by ${source}; a config file edit cannot change it to ${value}`,
+            );
+        }
+    }
+    return { compactionPatch, unresolved };
+}
+
+function compactionOverrideSource(directory: string, key: "auto" | "prune"): string | null {
+    const flag = key === "auto" ? "OPENCODE_DISABLE_AUTOCOMPACT" : "OPENCODE_DISABLE_PRUNE";
+    if (hostFlagEnabled(flag)) return flag;
+    const inline = readOpenCodeConfigLayers(directory).find((layer) => layer.inline);
+    const compaction = inline?.compaction;
+    return isRecord(compaction) && typeof compaction[key] === "boolean"
+        ? "OPENCODE_CONFIG_CONTENT"
+        : null;
 }
 
 /**
@@ -267,7 +323,7 @@ function readOpenCodeConfigLayers(directory: string): OpenCodeConfig[] {
     if (inline) {
         try {
             const config = parseConfigJsonc<unknown>(inline);
-            if (isRecord(config)) layers.push(config);
+            if (isRecord(config)) layers.push({ ...config, inline: true });
         } catch {
             /* The host rejects the same malformed content, so it contributes nothing. */
         }
@@ -542,12 +598,15 @@ function readOmoDisabledHooks(directory: string): Set<string> {
 /**
  */
 export function formatConflictShort(result: ConflictResult): string {
-    if (!result.hasConflict) return "";
+    if (result.disposition === "none") return "";
 
     const lines = [
-        "⚠️ Eidnara is disabled due to conflicting configuration:",
+        result.disposition === "disable"
+            ? "⚠️ Eidnara is disabled due to conflicting configuration:"
+            : "⚠️ Eidnara is running with a configuration warning:",
         "",
         ...result.reasons.map((r) => `• ${r}`),
+        ...result.unresolved.map((r) => `• ${r}`),
         "",
         "Fix: run `eidnara doctor`",
     ];

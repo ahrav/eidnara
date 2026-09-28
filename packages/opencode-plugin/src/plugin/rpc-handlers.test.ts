@@ -495,10 +495,16 @@ describe("registerRpcHandlers", () => {
             });
             return handlers;
         };
-        const call = async (handlers: Map<string, Handler>) =>
-            (await handlers.get("sidebar-snapshot")?.({
+        const call = async (handlers: Map<string, Handler>) => {
+            const snapshot = (await handlers.get("sidebar-snapshot")?.({
                 sessionId: "ses-compaction-owner",
             })) as unknown as SidebarSnapshot;
+            const detail = (await handlers.get("status-detail")?.({
+                sessionId: "ses-compaction-owner",
+            })) as unknown as SidebarSnapshot;
+            expect(detail.native_compaction_active).toBe(snapshot.native_compaction_active);
+            return snapshot;
+        };
 
         const neither = await call(
             build({ compaction: { enabled: false } }, { auto: false, prune: false }),
@@ -506,10 +512,16 @@ describe("registerRpcHandlers", () => {
         expect(neither.compaction_enabled).toBe(false);
         expect(neither.native_compaction_active).toBe(false);
 
+        // `prune` is OpenCode's tool-output policy, not a fold, so it does not make native compaction active.
         const prune = await call(
             build({ compaction: { enabled: false } }, { auto: false, prune: true }),
         );
-        expect(prune.native_compaction_active).toBe(true);
+        expect(prune.native_compaction_active).toBe(false);
+
+        const auto = await call(
+            build({ compaction: { enabled: false } }, { auto: true, prune: false }),
+        );
+        expect(auto.native_compaction_active).toBe(true);
 
         // Without the host's resolved setting the field stays absent rather than guessing.
         const unknown = await call(build({ compaction: { enabled: false } }));

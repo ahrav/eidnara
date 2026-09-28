@@ -65,7 +65,7 @@ function makeReport(root: string, overrides: Partial<DiagnosticReport> = {}): Di
             flags: {},
         },
         conflicts: {
-            hasConflict: false,
+            disposition: "none",
             reasons: [],
             eidnaraEnabled: true,
             compactionEnabled: true,
@@ -543,7 +543,7 @@ describe("renderDiagnosticsMarkdown conflict detection failure", () => {
         const markdown = renderDiagnosticsMarkdown(
             makeReport(root, {
                 conflicts: {
-                    hasConflict: false,
+                    disposition: "none",
                     reasons: [],
                     eidnaraEnabled: true,
                     compactionEnabled: true,
@@ -779,7 +779,7 @@ describe("bundleIssueReport secret redaction", () => {
                     flags: {},
                 },
                 conflicts: {
-                    hasConflict: false,
+                    disposition: "none",
                     reasons: [],
                     eidnaraEnabled: true,
                     compactionEnabled: true,
@@ -869,7 +869,7 @@ describe("bundleIssueReport secret redaction", () => {
                     flags: {},
                 },
                 conflicts: {
-                    hasConflict: false,
+                    disposition: "none",
                     reasons: [],
                     eidnaraEnabled: true,
                     compactionEnabled: true,

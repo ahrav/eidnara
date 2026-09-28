@@ -49,19 +49,20 @@ function showToast(api, input) {
     duration
   });
 }
-function showConflictDialog(api, directory, reasons, conflicts) {
+function showConflictDialog(api, directory, result) {
+  const disabled = result.disposition === "disable";
+  const findings = [...result.reasons, ...result.unresolved].join("\n");
+  const stillWord = disabled ? "Disabled" : "Warning";
   api.ui.dialog.replace(() => _$createComponent(api.ui.DialogConfirm, {
-    title: "\u26A0\uFE0F Eidnara Disabled",
-    get message() {
-      return `${reasons.join("\n")}\n\nFix these conflicts automatically?`;
-    },
+    title: disabled ? "⚠️ Eidnara Disabled" : "⚠️ Eidnara Warning",
+    message: `${findings}\n\nFix these conflicts automatically?`,
     onConfirm: () => {
       // `fixConflicts` edits only existing files and lets `writeFileSync` errors escape, so both
       // an empty action list and a thrown error mean the conflict stands.
       let actions = [];
       let failure = null;
       try {
-        actions = fixConflicts(directory, conflicts);
+        actions = fixConflicts(directory, result);
       } catch (error) {
         failure = error instanceof Error ? error.message : String(error);
       }
@@ -70,13 +71,11 @@ function showConflictDialog(api, directory, reasons, conflicts) {
         if (failure !== null || actions.length === 0) {
           const outcome = failure !== null ? `Editing the configuration failed: ${failure}\nEdits made before the failure were kept.` : "No configuration file could be edited, so nothing changed.";
           api.ui.dialog.replace(() => _$createComponent(api.ui.DialogAlert, {
-            title: "\u26A0\uFE0F Eidnara Still Disabled",
-            get message() {
-              return `${outcome}\n\n${reasons.join("\n")}\n\nResolve these by hand (for native compaction, set compaction.auto and compaction.prune to false in opencode.json), then restart OpenCode.`;
-            },
+            title: `⚠️ Eidnara Still ${stillWord}`,
+            message: `${outcome}\n\n${findings}\n\nResolve these by hand, then restart OpenCode. Run \`eidnara doctor\` for the settings each conflict needs.`,
             onConfirm: () => {
               showToast(api, {
-                message: "Eidnara remains disabled. Run: npx @eidnara/opencode@latest doctor",
+                message: disabled ? "Eidnara remains disabled. Run: npx @eidnara/opencode@latest doctor" : "The configuration warning remains. Run: npx @eidnara/opencode@latest doctor",
                 variant: "warning"
               });
             }
@@ -89,7 +88,7 @@ function showConflictDialog(api, directory, reasons, conflicts) {
           message: `${actionSummary}\n\nPlease restart OpenCode for changes to take effect.`,
           onConfirm: () => {
             showToast(api, {
-              message: "Restart OpenCode to enable Eidnara",
+              message: disabled ? "Restart OpenCode to enable Eidnara" : "Restart OpenCode to apply the fix",
               variant: "warning",
               durationOverrideMs: 10_000
             });
@@ -99,7 +98,7 @@ function showConflictDialog(api, directory, reasons, conflicts) {
     },
     onCancel: () => {
       showToast(api, {
-        message: "Eidnara remains disabled. Run: npx @eidnara/opencode@latest doctor",
+        message: disabled ? "Eidnara remains disabled. Run: npx @eidnara/opencode@latest doctor" : "The configuration warning remains. Run: npx @eidnara/opencode@latest doctor",
         variant: "warning"
       });
     }
@@ -1274,10 +1273,10 @@ const tui = async (api, _options, meta) => {
     compactionEnabled: isCompactionEnabled(pluginConfig ?? {}),
     resolvedCompaction: resolvedCompaction ?? undefined
   });
-  if (conflictResult.hasConflict) {
-    showConflictDialog(api, directory, conflictResult.reasons, conflictResult.conflicts);
-    return;
+  if (conflictResult.disposition !== "none") {
+    showConflictDialog(api, directory, conflictResult);
   }
+  if (conflictResult.disposition === "disable") return;
   initRpcClient(directory);
   const sidebarSlot = createSidebarContentSlot(api);
   api.slots.register(sidebarSlot);

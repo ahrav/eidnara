@@ -7,9 +7,8 @@ export interface CompactionOffSidebarRow {
 
 /** Disabling Eidnara compaction does not enable the host's; the suffix says which owner, if any, the host reported. */
 function compactionOwnerSuffix(snapshot: SidebarSnapshot): string {
-    return snapshot.native_compaction_active === false
-        ? "no active compaction"
-        : "native compaction";
+    if (snapshot.native_compaction_active === undefined) return "compaction owner unknown";
+    return snapshot.native_compaction_active ? "native compaction" : "no active compaction";
 }
 
 /** Prefers `native_context_usage_percentage`, measured against the unreserved model window; `contextLimit` subtracts the output reservation. */

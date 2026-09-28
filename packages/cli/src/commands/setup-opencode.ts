@@ -3,6 +3,7 @@ import { basename, dirname } from "node:path";
 import { resolveEidnaraProjectConfigPath } from "@eidnara/opencode/config/config-paths";
 import {
     type ConflictResult,
+    conflictDisposition,
     DCP_CONFLICT_REASON,
     detectConflicts,
     hasOmoPlugin,
@@ -248,12 +249,12 @@ async function resolveDcpConflictBeforeSetup(
  * fixes" answer cannot remove a plugin the user chose to keep.
  */
 export function withoutDcpConflict(result: ConflictResult): ConflictResult {
-    const reasons = result.reasons.filter((reason) => reason !== DCP_CONFLICT_REASON);
+    const conflicts = { ...result.conflicts, dcpPlugin: false };
     return {
         ...result,
-        hasConflict: reasons.length > 0,
-        reasons,
-        conflicts: { ...result.conflicts, dcpPlugin: false },
+        disposition: conflictDisposition(conflicts),
+        reasons: result.reasons.filter((reason) => reason !== DCP_CONFLICT_REASON),
+        conflicts,
     };
 }
 
@@ -395,7 +396,7 @@ export function reportRemainingConflicts(
     output: Pick<typeof log, "warn" | "message"> = log,
 ): boolean {
     const remaining = detectConflicts(directory, { compactionEnabled });
-    if (!remaining.hasConflict) return false;
+    if (remaining.disposition !== "disable") return false;
     output.warn(
         "Conflicts remain after the automatic fixes; Eidnara stays disabled until they are resolved:",
     );
@@ -541,7 +542,7 @@ export async function runSetup(dryRun = false): Promise<number> {
         );
     }
 
-    let conflictFix: Parameters<typeof fixConflicts>[1] | null = null;
+    let conflictFix: ConflictResult | null = null;
     // A declined fix covers the native compaction flags too; the writer must not apply them anyway.
     let keepNativeCompaction = false;
     if (hadExistingSetup && modes.enabled) {
@@ -549,7 +550,7 @@ export async function runSetup(dryRun = false): Promise<number> {
             compactionEnabled,
         });
         const conflicts = dcpDecision === "keep" ? withoutDcpConflict(detected) : detected;
-        if (conflicts.hasConflict) {
+        if (conflicts.disposition === "disable") {
             log.warn("Found conflicting configuration that can disable Eidnara:");
             for (const reason of conflicts.reasons) {
                 log.message(`  • ${reason}`);
@@ -564,7 +565,7 @@ export async function runSetup(dryRun = false): Promise<number> {
                 );
 
                 if (shouldFixConflicts) {
-                    conflictFix = conflicts.conflicts;
+                    conflictFix = conflicts;
                 } else {
                     keepNativeCompaction =
                         conflicts.conflicts.compactionAuto || conflicts.conflicts.compactionPrune;
@@ -667,9 +668,7 @@ export async function runSetup(dryRun = false): Promise<number> {
             }
 
             if (conflictFix) {
-                const actions = fixConflicts(process.cwd(), conflictFix, {
-                    compactionEnabled,
-                });
+                const actions = fixConflicts(process.cwd(), conflictFix);
                 if (actions.length > 0) {
                     for (const action of actions) log.success(action);
                 } else {
@@ -691,20 +690,18 @@ export async function runSetup(dryRun = false): Promise<number> {
             log.success(`TUI sidebar plugin added to ${basename(paths.tuiConfig)}`);
 
             if (disableOmoHooks) {
-                const actions = fixConflicts(
-                    process.cwd(),
-                    {
+                const actions = fixConflicts(process.cwd(), {
+                    conflicts: {
                         compactionAuto: false,
                         compactionPrune: false,
+                        noFoldAuthority: false,
                         dcpPlugin: false,
                         omoPreemptiveCompaction: true,
                         omoContextWindowMonitor: true,
                         omoAnthropicRecovery: true,
                     },
-                    {
-                        compactionEnabled,
-                    },
-                );
+                    compactionPatch: {},
+                });
                 if (actions.includes("Disabled conflicting oh-my-opencode hooks")) {
                     log.success("Hooks disabled in oh-my-opencode config");
                 }

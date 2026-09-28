@@ -77,86 +77,69 @@ export function collectOmoConfigPaths(directory: string): string[] {
 
 type CompactionKey = "auto" | "prune";
 
+const HOST_COMPACTION_DEFAULTS: Record<CompactionKey, boolean> = { auto: true, prune: false };
+
 /**
  * Picks the layer whose value the host uses for one compaction key: the highest-precedence
- * layer that sets it to a boolean, or the highest-precedence editable layer when no layer
- * sets it and the host default (`auto: true`) is what conflicts. Returns `null` when the
- * winning layer already holds `false`, when the winning layer is not editable (a write to a
- * lower layer could not override it), or when no layer exists to edit.
+ * layer that sets it to a boolean, or the highest-precedence editable layer when no layer sets
+ * it and the host default differs from `value`. Returns `null` when the winning layer already
+ * holds `value` or when a read-only winning layer takes precedence over editable layers. A
+ * repair target requires an editable layer.
  */
 function compactionRepairTarget(
     layers: JsonConfigDocument[],
     key: CompactionKey,
+    value: boolean,
 ): JsonConfigDocument | null {
     for (let index = layers.length - 1; index >= 0; index -= 1) {
         const layer = layers[index];
         if (!layer) continue;
         const compaction = layer.config.compaction;
         if (isRecord(compaction) && typeof compaction[key] === "boolean") {
-            return compaction[key] === false || !layer.editable ? null : layer;
+            return compaction[key] === value || !layer.editable ? null : layer;
         }
     }
-    if (key !== "auto") return null;
+    if (HOST_COMPACTION_DEFAULTS[key] === value) return null;
     return layers.filter((layer) => layer.editable).at(-1) ?? null;
 }
 
 /**
- *
- * `false` selects compaction-off mode.
- * In compaction-off mode, the fixer does not set `compaction.auto` or `compaction.prune` to `false`.
- *
- */
-export interface FixConflictsOptions {
-    compactionEnabled?: boolean;
-}
-
-/**
- * Returns applied edits; uneditable layers can leave conflicts unresolved.
- * Callers re-run `detectConflicts` to report what is left.
+ * Uneditable layers can leave conflicts unresolved; callers re-run `detectConflicts` to report
+ * remaining conflicts.
  */
 export function fixConflicts(
     directory: string,
-    conflicts: ConflictResult["conflicts"],
-    options?: FixConflictsOptions,
+    repair: Pick<ConflictResult, "conflicts" | "compactionPatch">,
 ): string[] {
-    const compactionEnabled = options?.compactionEnabled ?? true;
+    const { conflicts, compactionPatch } = repair;
     const actions: string[] = [];
-    const updatedCompactionKeys = new Set<CompactionKey>();
+    const updatedCompactionKeys = new Map<CompactionKey, boolean>();
     let removedDcpPlugin = false;
     let disabledOmoHooks = false;
 
-    const repairCompaction =
-        compactionEnabled && (conflicts.compactionAuto || conflicts.compactionPrune);
+    const patchKeys = (["auto", "prune"] as const).filter(
+        (key) => compactionPatch[key] !== undefined,
+    );
 
-    if (repairCompaction || conflicts.dcpPlugin) {
+    if (patchKeys.length > 0 || conflicts.dcpPlugin) {
         const layers = readOpenCodeLayers(directory);
         // Pending text per resolved target so the compaction and DCP edits to one file compose,
         // including when two layer paths are symlinks to the same file.
         const pending = new Map<string, string>();
 
-        if (repairCompaction) {
-            const keys: CompactionKey[] = [];
-            if (conflicts.compactionAuto) keys.push("auto");
-            if (conflicts.compactionPrune) keys.push("prune");
-            for (const key of keys) {
-                const target = compactionRepairTarget(layers, key);
-                if (!target) continue;
-                const text = pending.get(target.target) ?? target.text;
-                if (isRecord(target.config.compaction)) {
-                    pending.set(target.target, setJsoncValue(text, ["compaction", key], false));
-                    updatedCompactionKeys.add(key);
-                } else {
-                    // A non-object `compaction` cannot take a nested key; replace the whole block
-                    // with every conflicting key set to false.
-                    pending.set(
-                        target.target,
-                        setJsoncValue(
-                            text,
-                            ["compaction"],
-                            Object.fromEntries(keys.map((k) => [k, false])),
-                        ),
-                    );
-                    for (const written of keys) updatedCompactionKeys.add(written);
+        for (const key of patchKeys) {
+            const value = compactionPatch[key] as boolean;
+            const target = compactionRepairTarget(layers, key, value);
+            if (!target) continue;
+            const text = pending.get(target.target) ?? target.text;
+            if (isRecord(target.config.compaction)) {
+                pending.set(target.target, setJsoncValue(text, ["compaction", key], value));
+                updatedCompactionKeys.set(key, value);
+            } else {
+                // A non-object `compaction` requires whole-block replacement to apply the patched keys.
+                pending.set(target.target, setJsoncValue(text, ["compaction"], compactionPatch));
+                for (const written of patchKeys) {
+                    updatedCompactionKeys.set(written, compactionPatch[written] as boolean);
                 }
             }
         }
@@ -217,12 +200,14 @@ export function fixConflicts(
         }
     }
 
-    if (updatedCompactionKeys.has("auto")) {
-        actions.push("Disabled auto-compaction");
+    const auto = updatedCompactionKeys.get("auto");
+    if (auto !== undefined) {
+        actions.push(auto ? "Enabled auto-compaction" : "Disabled auto-compaction");
     }
 
-    if (updatedCompactionKeys.has("prune")) {
-        actions.push("Disabled prune");
+    const prune = updatedCompactionKeys.get("prune");
+    if (prune !== undefined) {
+        actions.push(prune ? "Enabled prune" : "Disabled prune");
     }
 
     if (removedDcpPlugin) {

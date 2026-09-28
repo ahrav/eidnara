@@ -108,9 +108,12 @@ const server: Plugin = async (ctx) => {
             compactionEnabled: isCompactionEnabled(pluginConfig),
             resolvedCompaction: resolvedCompaction ?? undefined,
         });
-        if (conflictResult.hasConflict) {
+        const findings = [...conflictResult.reasons, ...conflictResult.unresolved].join("; ");
+        if (conflictResult.disposition === "disable") {
             pluginConfig.enabled = false;
-            log(`[eidnara] disabled due to conflicts: ${conflictResult.reasons.join("; ")}`);
+            log(`[eidnara] disabled due to conflicts: ${findings}`);
+        } else if (conflictResult.disposition === "warn") {
+            log(`[eidnara] configuration warning, plugin enabled: ${findings}`);
         } else {
             log("[eidnara] no conflicts detected, plugin enabled");
         }
@@ -170,7 +173,7 @@ const server: Plugin = async (ctx) => {
     }
 
     // Desktop has no dialog surface, so `sendConflictWarning` covers Desktop.
-    if (conflictResult?.hasConflict) {
+    if (conflictResult && conflictResult.disposition !== "none") {
         // The handler sends the warning to the project's last active session without awaiting it.
         // SAFETY: the conflict helpers read only `session.*` methods off the SDK client by name.
         void sendConflictWarning(

@@ -593,7 +593,7 @@ describe("setup-opencode DCP preflight", () => {
 
     it("keeps a retained DCP plugin out of the broader automatic-fix pass", () => {
         const detected: ConflictResult = {
-            hasConflict: true,
+            disposition: "disable",
             reasons: [
                 "OpenCode auto-compaction is enabled (compaction.auto=true)",
                 DCP_CONFLICT_REASON,
@@ -601,11 +601,14 @@ describe("setup-opencode DCP preflight", () => {
             conflicts: {
                 compactionAuto: true,
                 compactionPrune: false,
+                noFoldAuthority: false,
                 dcpPlugin: true,
                 omoPreemptiveCompaction: false,
                 omoContextWindowMonitor: false,
                 omoAnthropicRecovery: false,
             },
+            compactionPatch: { auto: false },
+            unresolved: [],
             nativeCompaction: { auto: true, prune: false },
         };
 
@@ -615,7 +618,7 @@ describe("setup-opencode DCP preflight", () => {
         expect(masked.reasons).toEqual([
             "OpenCode auto-compaction is enabled (compaction.auto=true)",
         ]);
-        expect(masked.hasConflict).toBe(true);
+        expect(masked.disposition).toBe("disable");
         expect(detected.conflicts.dcpPlugin).toBe(true);
 
         const dcpOnly = withoutDcpConflict({
@@ -623,7 +626,7 @@ describe("setup-opencode DCP preflight", () => {
             reasons: [DCP_CONFLICT_REASON],
             conflicts: { ...detected.conflicts, compactionAuto: false },
         });
-        expect(dcpOnly.hasConflict).toBe(false);
+        expect(dcpOnly.disposition).toBe("none");
         expect(dcpOnly.reasons).toEqual([]);
     });
 });

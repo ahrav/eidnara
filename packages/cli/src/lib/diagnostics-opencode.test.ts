@@ -440,7 +440,7 @@ describe("collectDiagnostics conflicts and the Eidnara enabled flag", () => {
 
         expect(report.conflicts.eidnaraEnabled).toBe(false);
         expect(report.conflicts.compactionEnabled).toBe(false);
-        expect(report.conflicts.hasConflict).toBe(false);
+        expect(report.conflicts.disposition).toBe("none");
         expect(report.conflicts.reasons).toEqual([]);
     });
 
@@ -457,7 +457,7 @@ describe("collectDiagnostics conflicts and the Eidnara enabled flag", () => {
         const report = await collectDiagnostics(cwd);
 
         expect(report.conflicts.eidnaraEnabled).toBe(true);
-        expect(report.conflicts.hasConflict).toBe(true);
+        expect(report.conflicts.disposition).toBe("disable");
         expect(report.conflicts.reasons.some((reason) => /dcp/i.test(reason))).toBe(true);
     });
 });
