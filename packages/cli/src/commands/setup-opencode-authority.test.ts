@@ -194,6 +194,30 @@ describe("runSetup derives the fold authority from the proposed document", () =>
         expect(text).not.toContain("Conflicts remain");
     });
 
+    it("a picked model replaces a module_model that would otherwise shadow it", async () => {
+        writeFileSync(
+            eidnaraConfig,
+            JSON.stringify({
+                history_summarizer: {
+                    model: "openai/gpt-5.6",
+                    fallback_models: ["openai/gpt-5.6-mini"],
+                    module_model: "google/gemini-3.5-pro",
+                    module_fallback_models: ["google/gemini-3.5-flash"],
+                },
+            }),
+        );
+        const prompts = new ScriptedPrompts([false, false], ["model", MODEL]);
+        expect(await runSetup(false, { io: prompts })).toBe(0);
+
+        expect(readJson(eidnaraConfig).history_summarizer).toEqual({
+            model: MODEL,
+            fallback_models: ["openai/gpt-5.6-mini"],
+        });
+        expect(prompts.transcript()).toContain(
+            `Fold authority: Eidnara folds (summarizer chain: ${MODEL}, openai/gpt-5.6-mini)`,
+        );
+    });
+
     it("keeps prune as found and re-enables auto under native folds", async () => {
         writeFileSync(opencodeConfig, JSON.stringify({ compaction: { auto: false, prune: true } }));
         const prompts = new ScriptedPrompts([false, false, true], ["remove"]);

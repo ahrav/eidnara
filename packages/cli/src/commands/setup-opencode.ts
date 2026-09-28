@@ -304,6 +304,10 @@ export function proposeEidnaraConfig(configPath: string, options: EidnaraConfigO
     if (summarizerModel) {
         const history_summarizer = asPlainRecord(config.history_summarizer);
         history_summarizer.model = summarizerModel;
+        // `module_model` takes precedence over `model` in the summarizer chain, so the picked model
+        // replaces it.
+        delete history_summarizer.module_model;
+        delete history_summarizer.module_fallback_models;
         delete history_summarizer.disable;
         delete history_summarizer.enabled;
         warnPrunedAgentFields(
