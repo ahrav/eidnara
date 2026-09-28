@@ -260,16 +260,39 @@ struct BoundRoute {
 }
 
 /// `BindingAuthority` records a pass's fold-authority intent and the bind sequence of the
-/// binding the pass read.
-#[derive(Debug, Clone, Copy, Default)]
+/// binding the pass read. A pass whose route no longer holds that binding is detached: it
+/// carries no bind sequence, so it neither changes the authority nor settles a first pass.
+#[derive(Debug, Clone, Copy)]
 struct BindingAuthority {
-    bind_seq: u64,
+    bind_seq: Option<u64>,
     intent: FoldAuthorityIntent,
+}
+
+impl BindingAuthority {
+    fn detached(binding: &SessionBinding) -> Self {
+        Self {
+            bind_seq: None,
+            intent: binding_intent(binding, false, false),
+        }
+    }
+}
+
+fn binding_intent(
+    binding: &SessionBinding,
+    sibling_bound: bool,
+    first_pass: bool,
+) -> FoldAuthorityIntent {
+    FoldAuthorityIntent {
+        eidnara_folds: binding.config.eidnara_folds(),
+        admitted: binding.config.admission == config::ConfigAdmission::Admitted,
+        sibling_bound,
+        first_pass,
+    }
 }
 
 struct BindingFence<'a> {
     bindings: &'a Mutex<RouteBindings>,
-    bind_seq: u64,
+    bind_seq: Option<u64>,
 }
 
 impl fold_authority::SiblingFence for BindingFence<'_> {
@@ -281,7 +304,7 @@ impl fold_authority::SiblingFence for BindingFence<'_> {
         bindings
             .by_route
             .values()
-            .find(|route| route.seq == self.bind_seq)
+            .find(|route| Some(route.seq) == self.bind_seq)
             .is_some_and(|route| !bindings.has_sibling(route))
             .then(change)
     }
@@ -312,13 +335,12 @@ impl RouteBindings {
     fn fold_authority_intent(&self, channel: RouteHandle) -> Option<BindingAuthority> {
         let route = self.by_route.get(&channel)?;
         Some(BindingAuthority {
-            bind_seq: route.seq,
-            intent: FoldAuthorityIntent {
-                eidnara_folds: route.binding.config.eidnara_folds(),
-                admitted: route.binding.config.admission == config::ConfigAdmission::Admitted,
-                sibling_bound: self.has_sibling(route),
-                first_pass: !route.first_pass_settled,
-            },
+            bind_seq: Some(route.seq),
+            intent: binding_intent(
+                &route.binding,
+                self.has_sibling(route),
+                !route.first_pass_settled,
+            ),
         })
     }
 
@@ -4439,12 +4461,22 @@ impl HandlerCore {
         channel: RouteHandle,
         request_session: &str,
     ) -> Result<SessionBinding, BindingError> {
+        self.resolve_bound_route(channel, request_session)
+            .map(|(binding, _)| binding)
+    }
+
+    /// [`Self::resolve_binding`] with the binding's bind sequence, read under the same lock.
+    fn resolve_bound_route(
+        &self,
+        channel: RouteHandle,
+        request_session: &str,
+    ) -> Result<(SessionBinding, u64), BindingError> {
         let map = self.bindings.lock().expect("bindings mutex");
-        let binding = map.get(&channel).ok_or(BindingError::Unbound)?;
-        if binding.session != request_session {
+        let route = map.by_route.get(&channel).ok_or(BindingError::Unbound)?;
+        if route.binding.session != request_session {
             return Err(BindingError::SessionMismatch);
         }
-        Ok(binding.clone())
+        Ok((route.binding.clone(), route.seq))
     }
 
     fn state_sync_binding(
@@ -6476,6 +6508,7 @@ impl HandlerCore {
         store: &MemoryStore,
         session_id: &str,
         channel: RouteHandle,
+        binding: &SessionBinding,
         summarizer: &memory_store::HistorySummarizerDurableState,
     ) -> String {
         let intent = self
@@ -6483,7 +6516,7 @@ impl HandlerCore {
             .lock()
             .expect("bindings mutex")
             .fold_authority_intent(channel)
-            .unwrap_or_default()
+            .unwrap_or_else(|| BindingAuthority::detached(binding))
             .intent;
         let record = match store.load_fold_authority(session_id) {
             Ok(record) => record,
@@ -6679,6 +6712,7 @@ impl HandlerCore {
             &store,
             &session_id,
             channel,
+            &binding,
             &loaded.meta.history_summarizer,
         );
         let user_config = binding
@@ -7048,7 +7082,7 @@ impl HandlerCore {
         };
         let eidnara_folds = entry_state
             .meta
-            .applied_eidnara_folds(!entry_state.meta.block_identity_by_mid.is_empty())
+            .applied_eidnara_folds()
             .unwrap_or_else(|| binding.config.eidnara_folds());
         if !eidnara_folds {
             return respond(json!({
@@ -8459,8 +8493,8 @@ impl HandlerCore {
                 };
             }
         };
-        let binding = match self.resolve_binding(channel, &parsed.session_id) {
-            Ok(b) => b,
+        let (binding, bind_seq) = match self.resolve_bound_route(channel, &parsed.session_id) {
+            Ok(bound) => bound,
             Err(BindingError::Unbound) => {
                 return PreparedOutcome::Error {
                     code: "route_unbound".to_string(),
@@ -8564,12 +8598,16 @@ impl HandlerCore {
         ) {
             self.spawn_tracked_task(checkpoint.run());
         }
+        // Read after the lane wait, so a preceding pass's first-pass settlement is visible. A
+        // route unbound or rebound during the waits no longer holds the resolved binding; the
+        // pass then serves that binding detached.
         let fold_authority = self
             .bindings
             .lock()
             .expect("bindings mutex")
             .fold_authority_intent(channel)
-            .unwrap_or_default();
+            .filter(|authority| authority.bind_seq == Some(bind_seq))
+            .unwrap_or_else(|| BindingAuthority::detached(&binding));
         let intake = PassIntake {
             store,
             parsed,
@@ -8660,11 +8698,13 @@ impl HandlerCore {
             Ok(pass) => pass,
             Err(outcome) => return UnitOutcome::Terminal(outcome),
         };
-        if pass.result.fold_authority.settles_first_pass {
+        if pass.result.fold_authority.settles_first_pass
+            && let Some(bind_seq) = env.fold_authority.bind_seq
+        {
             self.bindings
                 .lock()
                 .expect("bindings mutex")
-                .settle_first_pass(env.fold_authority.bind_seq);
+                .settle_first_pass(bind_seq);
         }
         let emergency = pass.result.scheduler_pass == scheduler::PassDecision::Emergency95;
         let action = if env.parsed.is_subagent {
