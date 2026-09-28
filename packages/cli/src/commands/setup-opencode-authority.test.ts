@@ -15,7 +15,7 @@ import { detectConflicts } from "@eidnara/opencode/shared/conflict-detector";
 import { parse as parseJsonc } from "comment-json";
 import { foldAuthorityOf } from "../lib/eidnara-modes";
 import type { PromptIO, PromptSpinner, SelectOption } from "../lib/prompts";
-import { runSetup } from "./setup-opencode";
+import { proposeEidnaraConfig, runSetup } from "./setup-opencode";
 
 const MODEL = "anthropic/claude-haiku-4-5";
 const ENV_KEYS = [
@@ -330,18 +330,13 @@ describe("runSetup derives the fold authority from the proposed document", () =>
         expect(prompts.transcript()).toContain("edits no host setting");
     });
 
-    it("a process killed between the two writes leaves a mismatch detection reports", async () => {
-        writeFileSync(
-            opencodeConfig,
-            JSON.stringify({ compaction: { auto: false, prune: false } }),
-        );
-        writeFileSync(eidnaraConfig, JSON.stringify({ history_summarizer: { model: MODEL } }));
+    function killSetupBetweenWrites(confirms: boolean[], selections: string[]): void {
         const child = join(root, "setup-child.ts");
         writeFileSync(
             child,
             `import { runSetup } from ${JSON.stringify(join(import.meta.dir, "setup-opencode.ts"))};
-const confirms = [false, false, true];
-const selections = ["remove"];
+const confirms = ${JSON.stringify(confirms)};
+const selections = ${JSON.stringify(selections)};
 const noop = () => {};
 const io = {
     intro: noop, outro: noop, note: noop,
@@ -361,6 +356,15 @@ await runSetup(false, { io, betweenWrites: () => process.kill(process.pid, "SIGK
             env: process.env,
         });
         expect(result.signalCode).toBe("SIGKILL");
+    }
+
+    it("a process killed while removing the summarizer leaves a mismatch detection reports", async () => {
+        writeFileSync(
+            opencodeConfig,
+            JSON.stringify({ compaction: { auto: false, prune: false } }),
+        );
+        writeFileSync(eidnaraConfig, JSON.stringify({ history_summarizer: { model: MODEL } }));
+        killSetupBetweenWrites([false, false, true], ["remove"]);
 
         expect(readJson(opencodeConfig).compaction).toEqual({ auto: true, prune: false });
         expect(readJson(eidnaraConfig).history_summarizer).toEqual({ model: MODEL });
@@ -371,12 +375,32 @@ await runSetup(false, { io, betweenWrites: () => process.kill(process.pid, "SIGK
         );
     });
 
-    it("a rolled-back write of the same authority is not reported as written", async () => {
+    it("a process killed while adding a summarizer leaves OpenCode's compaction folding", async () => {
+        writeFileSync(opencodeConfig, JSON.stringify({ compaction: { auto: true } }));
+        writeFileSync(eidnaraConfig, "{}");
+        killSetupBetweenWrites([false, false, true], ["model", MODEL]);
+
+        expect(readJson(opencodeConfig).compaction).toEqual({ auto: true });
+        expect(readJson(eidnaraConfig).history_summarizer).toEqual({ model: MODEL });
+        const authority = foldAuthorityOf(loadUserTierConfigDetailed(eidnaraConfig));
+        expect(authority.kind).toBe("eidnara");
+        const detected = detectConflicts(process.cwd(), { compactionEnabled: true });
+        expect(detected.conflicts.noFoldAuthority).toBe(false);
+        expect(detected.disposition).toBe("disable");
+    });
+
+    it("a rolled-back rerun whose files already match the proposal is not reported as written", async () => {
         writeFileSync(
             opencodeConfig,
             JSON.stringify({ compaction: { auto: false, prune: false } }),
         );
-        writeFileSync(eidnaraConfig, JSON.stringify({ history_summarizer: { model: MODEL } }));
+        const previous = proposeEidnaraConfig(eidnaraConfig, {
+            summarizer: { kind: "model", model: MODEL },
+            context_researcherEnabled: false,
+            context_researcherModel: null,
+            claudeMax: false,
+        });
+        writeFileSync(eidnaraConfig, previous);
         const prompts = new ScriptedPrompts([false, false], ["model", MODEL]);
         const code = await runSetup(false, {
             io: prompts,
@@ -385,8 +409,11 @@ await runSetup(false, { io, betweenWrites: () => process.kill(process.pid, "SIGK
             },
         });
         expect(code).toBe(1);
-        expect(prompts.transcript()).not.toContain("Written, restart required");
-        expect(readJson(eidnaraConfig).history_summarizer).toEqual({ model: MODEL });
+        const text = prompts.transcript();
+        expect(text).toContain("Read back:");
+        expect(text).toContain("rolled back");
+        expect(text).not.toContain("Written, restart required");
+        expect(readFileSync(eidnaraConfig, "utf-8")).toBe(previous);
     });
 
     it("a failure between the two writes reports the read-back of both files", async () => {

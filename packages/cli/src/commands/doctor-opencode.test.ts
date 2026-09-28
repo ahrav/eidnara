@@ -12,6 +12,7 @@ import {
 import os, { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parse as parseJsonc } from "comment-json";
+import * as prompts from "../lib/prompts";
 import { log } from "../lib/prompts";
 import { runDoctor } from "./doctor-opencode";
 
@@ -399,6 +400,14 @@ describe("doctor OpenCode conflict repair", () => {
         writeJsonc(join(configDir, "tui.jsonc"), REGISTERED_TUI);
         const cwd = makeTempDir("eidnara-doctor-project-");
         const { errors, successes, restore } = captureDoctorLog();
+        const messages: string[] = [];
+        const outros: string[] = [];
+        const messageSpy = spyOn(log, "message").mockImplementation((m: string) => {
+            messages.push(m);
+        });
+        const outroSpy = spyOn(prompts, "outro").mockImplementation((m: string) => {
+            outros.push(m);
+        });
 
         try {
             expect(await runDoctor({ force: true, cwd })).toBe(1);
@@ -411,7 +420,15 @@ describe("doctor OpenCode conflict repair", () => {
             };
             expect(repaired.compaction?.auto).toBe(true);
             expect(repaired.plugin).toEqual(["@tarquinen/opencode-dcp"]);
+            const failCount = Number(
+                messages.find((m) => m.startsWith("Summary:"))?.match(/FAIL (\d+)/)?.[1],
+            );
+            expect(outros).toEqual([
+                `Fixed 1 issue(s); ${failCount - 1} issue(s) still need manual attention. Restart OpenCode to apply the fixes.`,
+            ]);
         } finally {
+            messageSpy.mockRestore();
+            outroSpy.mockRestore();
             restore();
         }
     });

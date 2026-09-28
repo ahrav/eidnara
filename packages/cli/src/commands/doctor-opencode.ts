@@ -575,7 +575,7 @@ export async function runDoctor(
                 );
             }
             const remaining = detectConflicts(cwd, { compactionEnabled });
-            if (disabling && !blocked) {
+            if (disabling) {
                 repairedCount = conflictResult.reasons.filter(
                     (reason) => !remaining.reasons.includes(reason),
                 ).length;

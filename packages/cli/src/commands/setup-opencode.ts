@@ -479,7 +479,7 @@ function assertPluginListValue(configPath: string, plugin: unknown): void {
 
 export interface SetupDependencies {
     io: PromptIO;
-    /** Runs after the OpenCode config write and before the Eidnara config write. */
+    /** `betweenWrites` runs between the OpenCode and Eidnara config writes, regardless of write order. */
     betweenWrites?: () => void;
 }
 
@@ -756,29 +756,43 @@ export async function runSetup(
             return 1;
         }
         try {
-            addPluginToOpenCodeConfig(
-                paths.opencodeConfig,
-                paths.opencodeConfigFormat,
-                removeDcp,
-                hostCompaction,
-                pluginEntriesOutside(process.cwd(), paths.opencodeConfig),
-            );
-            log.success(`Plugin added to ${paths.opencodeConfig}`);
-            if (removeDcp) log.success("Removed opencode-dcp from plugin list");
-            log.info(describeCompactionWrite(hostCompaction));
+            const writeHost = () => {
+                addPluginToOpenCodeConfig(
+                    paths.opencodeConfig,
+                    paths.opencodeConfigFormat,
+                    removeDcp,
+                    hostCompaction,
+                    pluginEntriesOutside(process.cwd(), paths.opencodeConfig),
+                );
+                log.success(`Plugin added to ${paths.opencodeConfig}`);
+                if (removeDcp) log.success("Removed opencode-dcp from plugin list");
+                log.info(describeCompactionWrite(hostCompaction));
 
-            if (conflictFix) {
-                const actions = fixConflicts(process.cwd(), conflictFix);
-                if (actions.length > 0) {
-                    for (const action of actions) log.success(action);
-                } else {
-                    log.info("No additional conflict changes were needed");
+                if (conflictFix) {
+                    const actions = fixConflicts(process.cwd(), conflictFix);
+                    if (actions.length > 0) {
+                        for (const action of actions) log.success(action);
+                    } else {
+                        log.info("No additional conflict changes were needed");
+                    }
                 }
+            };
+            const writeEidnara = () => {
+                writeFileAtomic(paths.eidnaraConfig, proposal);
+                log.success(`Config written to ${paths.eidnaraConfig}`);
+            };
+            // A process killed between config writes leaves the first write persisted. Under Eidnara
+            // folds the summarizer chain is written before `compaction.auto=false`, so that state
+            // leaves OpenCode's previous compaction setting in effect alongside the new chain.
+            if (eidnaraFolds) {
+                writeEidnara();
+                betweenWrites?.();
+                writeHost();
+            } else {
+                writeHost();
+                betweenWrites?.();
+                writeEidnara();
             }
-            betweenWrites?.();
-
-            writeFileAtomic(paths.eidnaraConfig, proposal);
-            log.success(`Config written to ${paths.eidnaraConfig}`);
             addPluginToTuiConfig(paths.tuiConfig, paths.tuiConfigFormat);
             log.success(`TUI sidebar plugin added to ${basename(paths.tuiConfig)}`);
 
@@ -810,7 +824,7 @@ export async function runSetup(
                     rollbackError instanceof Error ? rollbackError.message : String(rollbackError),
                 );
             }
-            reportWrittenState(paths, proposal, hostCompaction, log);
+            reportReadBack(paths, proposal, hostCompaction, log);
             io.outro(
                 rolledBack
                     ? "Setup stopped — rolled back OpenCode changes."
@@ -829,7 +843,9 @@ export async function runSetup(
         ) {
             repairIncomplete = true;
         }
-        if (!reportWrittenState(paths, proposal, hostCompaction, log)) {
+        if (reportReadBack(paths, proposal, hostCompaction, log)) {
+            log.info("Written, restart required: OpenCode reads these files at startup.");
+        } else {
             repairIncomplete = true;
         }
     }
@@ -880,11 +896,7 @@ function describeCompactionWrite(compaction: CompactionPatch): string {
     return "OpenCode compaction settings left unchanged";
 }
 
-/**
- * Reads both files back and reports what they hold, so a partial write is never reported as
- * applied. Returns whether both files hold what setup intended.
- */
-function reportWrittenState(
+function reportReadBack(
     paths: Pick<ConfigPaths, "opencodeConfig"> & { eidnaraConfig: string },
     proposal: string,
     compaction: CompactionPatch,
@@ -900,10 +912,7 @@ function reportWrittenState(
     log.message(
         `Read back: ${paths.eidnaraConfig} → ${describeFoldAuthority(written)}; ${paths.opencodeConfig} → compaction.auto=${String(hostFields.auto ?? "unset")}, compaction.prune=${String(hostFields.prune ?? "unset")}`,
     );
-    if (eidnaraMatches && hostMatches) {
-        log.info("Written, restart required: OpenCode reads these files at startup.");
-        return true;
-    }
+    if (eidnaraMatches && hostMatches) return true;
     log.warn(
         "The files do not both hold the proposed settings; the next OpenCode start runs with the read-back values above. Rerun setup, or run `eidnara doctor`.",
     );
