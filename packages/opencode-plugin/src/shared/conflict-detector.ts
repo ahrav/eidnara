@@ -611,7 +611,9 @@ export function formatConflictShort(result: ConflictResult): string {
         ...result.reasons.map((r) => `• ${r}`),
         ...result.unresolved.map((r) => `• ${r}`),
         "",
-        "Fix: run `eidnara doctor`",
+        result.unresolved.length > 0
+            ? "Fix: change the listed source; `opencode debug config` shows the resolved values"
+            : "Fix: run `eidnara doctor`",
     ];
     return lines.join("\n");
 }

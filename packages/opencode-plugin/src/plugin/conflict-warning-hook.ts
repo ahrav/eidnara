@@ -72,7 +72,11 @@ function readDesktopState(directory: string): DesktopState {
                 if (typeof serverState.currentSidecarUrl === "string") {
                     sidecarUrl = serverState.currentSidecarUrl;
                 }
-            } catch {}
+            } catch (error) {
+                log(
+                    `[eidnara] conflict-warning: Desktop server state is malformed; continuing without a sidecar URL: ${error instanceof Error ? error.message : String(error)}`,
+                );
+            }
         }
 
         let sessionId: string | null = null;

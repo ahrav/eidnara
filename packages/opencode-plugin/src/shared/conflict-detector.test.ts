@@ -85,8 +85,10 @@ describe("detectConflicts", () => {
         }
         try {
             rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
-        } catch {
-            /* */
+        } catch (error) {
+            console.warn(
+                `temp root ${root} left behind: ${error instanceof Error ? error.message : String(error)}`,
+            );
         }
     });
 
@@ -626,6 +628,25 @@ describe("detectConflicts", () => {
             expect(text).toContain("running with a configuration warning");
             expect(text).toContain(NO_FOLD_AUTHORITY_REASON);
             expect(text).not.toContain("disabled");
+            expect(text).toContain("Fix: run `eidnara doctor`");
+        });
+
+        it("points an unresolved source at the host's resolved config instead of file-based doctor", () => {
+            writeCompactionConfig(true);
+            const prev = process.env.OPENCODE_DISABLE_AUTOCOMPACT;
+            delete process.env.OPENCODE_DISABLE_AUTOCOMPACT;
+            try {
+                const text = formatConflictShort(
+                    detectConflicts(projectDir, {
+                        compactionEnabled: false,
+                        resolvedCompaction: { auto: false, prune: false },
+                    }),
+                );
+                expect(text).toContain("opencode debug config");
+                expect(text).not.toContain("eidnara doctor");
+            } finally {
+                if (prev !== undefined) process.env.OPENCODE_DISABLE_AUTOCOMPACT = prev;
+            }
         });
 
         // DCP and OMO conflicts disable the plugin whether compactionEnabled is true or false.
