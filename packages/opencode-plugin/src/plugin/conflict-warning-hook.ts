@@ -15,6 +15,7 @@ import {
     type ConflictWarning,
     formatConflictShort,
 } from "../shared/conflict-detector";
+import { FOLD_AUTHORITY_WARNING_MARKERS } from "../shared/fold-authority-status";
 import { log } from "../shared/logger";
 import { normalizeSDKResponse } from "../shared/normalize-sdk-response";
 import type { SqliteReader } from "../shared/sqlite";
@@ -276,11 +277,8 @@ export async function sendConflictWarning(
     directory: string,
     conflictResult: ConflictWarning,
     serverUrl?: string,
-    targetSessionId?: string,
 ): Promise<void> {
-    const desktop = readDesktopState(directory);
-    const sessionId = targetSessionId ?? desktop.sessionId;
-    const { sidecarUrl } = desktop;
+    const { sessionId, sidecarUrl } = readDesktopState(directory);
     if (!sessionId) {
         log("[eidnara] conflict-warning: could not find active session for Desktop warning");
         return;
@@ -290,10 +288,14 @@ export async function sendConflictWarning(
     const [header, otherHeader] = disabled
         ? [CONFLICT_DISABLED_HEADER, CONFLICT_WARNING_HEADER]
         : [CONFLICT_WARNING_HEADER, CONFLICT_DISABLED_HEADER];
-    const [existing = [], superseded = []] = await findMarkerMessageIds(client, sessionId, [
+    const [found = [], superseded = [], ...live] = await findMarkerMessageIds(client, sessionId, [
         header,
         otherHeader,
+        ...FOLD_AUTHORITY_WARNING_MARKERS,
     ]);
+    // `reconcileFoldAuthorityWarning` owns the live fold-authority messages under the same header.
+    const liveIds = new Set(live.flat());
+    const existing = found.filter((id) => !liveIds.has(id));
     // A persisted message under the other header states the other disposition, which no longer holds.
     const deleteUrl = serverUrl ?? sidecarUrl ?? undefined;
     if (superseded.length > 0 && deleteUrl) {
@@ -326,6 +328,45 @@ export async function sendConflictWarning(
     // context pinning; conflict detection re-fires on every startup, so a
     // skipped delivery retries on the next launch.
     await sendIgnoredMessage(client, sessionId, warningText, {}, true);
+}
+
+/**
+ * Keeps at most one live fold-authority message in the session, equal to `warning`. A changed
+ * warning replaces the message an earlier poll persisted, a cleared warning deletes it, and startup
+ * warnings under the same header stay in place. A message that cannot be deleted blocks the
+ * replacement, so the session never carries two fold-authority messages.
+ */
+export async function reconcileFoldAuthorityWarning(
+    client: unknown,
+    directory: string,
+    sessionId: string,
+    warning: ConflictWarning | undefined,
+    serverUrl?: string,
+): Promise<void> {
+    const text = warning === undefined ? undefined : formatConflictShort(warning);
+    const markers =
+        text === undefined
+            ? FOLD_AUTHORITY_WARNING_MARKERS
+            : [...FOLD_AUTHORITY_WARNING_MARKERS, text];
+    const found = await findMarkerMessageIds(client, sessionId, markers);
+    const current =
+        text === undefined ? [] : (found[FOLD_AUTHORITY_WARNING_MARKERS.length] ?? []).slice(0, 1);
+    const stale = [...new Set(found.slice(0, FOLD_AUTHORITY_WARNING_MARKERS.length).flat())].filter(
+        (id) => !current.includes(id),
+    );
+    if (stale.length > 0) {
+        const deleteUrl = serverUrl ?? readDesktopState(directory).sidecarUrl ?? undefined;
+        const failed = deleteUrl ? await deleteMessages(deleteUrl, sessionId, stale) : stale;
+        if (failed.length > 0) {
+            log(
+                `[eidnara] fold-authority warning: ${failed.length} outdated message(s) remain in session ${sessionId}; not sending a replacement`,
+            );
+            return;
+        }
+    }
+    if (text === undefined || current.length > 0) return;
+    log(`[eidnara] sending fold-authority warning to session ${sessionId}`);
+    await sendIgnoredMessage(client, sessionId, text, {}, true);
 }
 
 /**

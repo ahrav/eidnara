@@ -29,22 +29,24 @@ import {
     createConfigWarningDelivery,
     formatConfigWarning,
 } from "./plugin/config-warning";
-import { cleanupConflictWarnings, sendConflictWarning } from "./plugin/conflict-warning-hook";
+import {
+    cleanupConflictWarnings,
+    reconcileFoldAuthorityWarning,
+    sendConflictWarning,
+} from "./plugin/conflict-warning-hook";
 import { createEventHandler } from "./plugin/event";
 import { createSessionHooksAsync } from "./plugin/hooks/create-session-hooks";
 import { createMessagesTransformHandler } from "./plugin/messages-transform";
 import { registerRpcHandlers } from "./plugin/rpc-handlers";
 import { createToolRegistry } from "./plugin/tool-registry";
-import { BoundedSessionMap } from "./shared/bounded-session-map";
 import {
     type ConflictResult,
     detectConflicts,
-    formatConflictShort,
     type ResolvedCompaction,
     resolveCompactionForBoot,
 } from "./shared/conflict-detector";
 import { getEidnaraStorageDir } from "./shared/data-path";
-import { pluginFoldAuthority } from "./shared/fold-authority-status";
+import { pluginFoldAuthority, publishOnChange } from "./shared/fold-authority-status";
 import { setKeepSubagents } from "./shared/keep-subagents";
 import { log } from "./shared/logger";
 import { refreshModelLimitsFromApi } from "./shared/models-dev-cache";
@@ -74,26 +76,26 @@ const server: Plugin = async (ctx) => {
     configureManagedDemandStart(managedDemandStart);
     const loadedPluginConfig = loadPluginConfigDetailed(ctx.directory);
     const pluginConfig = loadedPluginConfig.config;
-    const raisedConflicts = new BoundedSessionMap<string>(MAX_LIVE_USAGE_SESSIONS);
     const foldAuthority = pluginFoldAuthority(
         ctx.directory,
         loadedPluginConfig,
-        (conflict, sessionId) => {
-            const text = formatConflictShort(conflict);
-            if (raisedConflicts.get(sessionId) === text) return;
-            raisedConflicts.set(sessionId, text);
-            log(
-                `[eidnara] fold authority warning for ${sessionId}, plugin enabled: ${conflict.reasons.join("; ")}`,
-            );
+        publishOnChange((warning, sessionId) => {
+            if (warning) {
+                log(
+                    `[eidnara] fold authority warning for ${sessionId}, plugin enabled: ${warning.reasons.join("; ")}`,
+                );
+            }
             // SAFETY: the conflict helpers read only `session.*` methods off the SDK client by name.
-            void sendConflictWarning(
+            reconcileFoldAuthorityWarning(
                 ctx.client as unknown as Record<string, unknown>,
                 ctx.directory,
-                conflict,
-                desktopServerUrl(ctx),
                 sessionId,
+                warning,
+                desktopServerUrl(ctx),
+            ).catch((error) =>
+                log(`[eidnara] fold authority warning for ${sessionId} failed:`, error),
             );
-        },
+        }, MAX_LIVE_USAGE_SESSIONS),
     );
     const promptSurfaceRuntime = createPromptSurfaceRuntime({
         warn: (message) => log(`[eidnara] config warning: ${message}`),

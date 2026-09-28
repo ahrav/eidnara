@@ -942,10 +942,15 @@ async fn session_status_names_a_stalled_eidnara_summarizer_in_the_authority_pref
 
     let summary = status_summary(&handler, 7).await;
 
+    let fixture: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../packages/opencode-plugin/src/shared/__fixtures__/fold-authority-status.json"
+    ))
+    .expect("the status fixture parses");
+    let stalled_applied = fixture["stalled_applied"]
+        .as_str()
+        .expect("stalled_applied");
     assert!(
-        summary.starts_with(
-            "fold authority eidnara, summarizer stalled (no models at the last pass); user config "
-        ),
+        summary.starts_with(&format!("fold authority {stalled_applied}; user config ")),
         "{summary}"
     );
 }

@@ -1,4 +1,4 @@
-import { dirname } from "node:path";
+import { dirname, normalize } from "node:path";
 import { inspectPluginConfig } from "../config";
 import { resolveEidnaraUserConfigPath } from "../config/config-paths";
 import {
@@ -6,12 +6,18 @@ import {
     type FoldAuthority,
     foldAuthorityOf,
 } from "../config/fold-authority";
-import type { ConflictWarning } from "./conflict-detector";
+import { BoundedSessionMap } from "./bounded-session-map";
+import { type ConflictWarning, formatConflictShort, warningTextPrefix } from "./conflict-detector";
 
 export const RESTART_OTHER_INSTANCES_STEP = "restart other OpenCode instances";
 export const DAEMON_RESTART_STEP = "run `eidnara daemon restart`";
 export const AUTHORITY_PENDING_WARNING = `authority pending: ${RESTART_OTHER_INSTANCES_STEP}`;
 export const ROOT_MISMATCH_WARNING = "configuration root mismatch";
+/** Every live fold-authority message begins with one of these, because its first reason is a pending change or a root mismatch. */
+export const FOLD_AUTHORITY_WARNING_MARKERS = [
+    AUTHORITY_PENDING_WARNING,
+    ROOT_MISMATCH_WARNING,
+].map(warningTextPrefix);
 
 type AuthorityName = "eidnara" | "native";
 
@@ -26,11 +32,13 @@ export interface PluginFoldAuthority {
     startup: FoldAuthority;
     userConfigPath?: string;
     readDisk: () => FoldAuthority;
-    raise: (conflict: ConflictWarning, sessionId: string) => void;
+    /** Receives the session's current warning, or `undefined` when the session has none. */
+    publish: (warning: ConflictWarning | undefined, sessionId: string) => void;
 }
 
 export interface FoldAuthorityStatus {
-    disk: string;
+    /** The authority the configuration on disk derives; only the surfaces that print it read the files. */
+    disk?: string;
     startup: string;
     applied: DaemonFoldAuthority["applied"];
     pending?: { target: AuthorityName; reason: string; step: string };
@@ -44,7 +52,7 @@ export interface FoldAuthorityStatus {
 export function pluginFoldAuthority(
     directory: string,
     startup: Parameters<typeof foldAuthorityOf>[0],
-    raise: PluginFoldAuthority["raise"],
+    publish: PluginFoldAuthority["publish"],
 ): PluginFoldAuthority {
     return {
         startup: foldAuthorityOf(startup),
@@ -59,7 +67,24 @@ export function pluginFoldAuthority(
                 };
             }
         },
-        raise,
+        publish,
+    };
+}
+
+/**
+ * Forwards a session's first reported state and each later change, so a repeated poll costs no
+ * delivery while a session's first report still clears a warning an earlier process left.
+ */
+export function publishOnChange(
+    deliver: PluginFoldAuthority["publish"],
+    maxSessions: number,
+): PluginFoldAuthority["publish"] {
+    const published = new BoundedSessionMap<string>(maxSessions);
+    return (warning, sessionId) => {
+        const text = warning === undefined ? "" : formatConflictShort(warning);
+        if (published.get(sessionId) === text) return;
+        published.set(sessionId, text);
+        deliver(warning, sessionId);
     };
 }
 
@@ -115,6 +140,11 @@ export function parseDaemonFoldAuthority(summary: unknown): DaemonFoldAuthority 
     };
 }
 
+/** The daemon joins paths without normalizing them, so `//` and `.` segments are removed before the roots compare. */
+function configRoot(path: string): string {
+    return dirname(normalize(path));
+}
+
 function pendingStep(reason: string): string {
     if (reason.startsWith("another binding is open")) return RESTART_OTHER_INSTANCES_STEP;
     if (reason.startsWith("the summarizer is busy")) {
@@ -135,7 +165,7 @@ export function foldAuthorityStatus(
     const rootMismatch =
         daemon.userConfigPath !== undefined &&
         plugin.userConfigPath !== undefined &&
-        dirname(daemon.userConfigPath) !== dirname(plugin.userConfigPath);
+        configRoot(daemon.userConfigPath) !== configRoot(plugin.userConfigPath);
     const warnings: string[] = [];
     const labels: string[] = [];
     if (pending) {
@@ -152,7 +182,6 @@ export function foldAuthorityStatus(
     }
     if (daemon.stalled) labels.push("summarizer stalled at the last pass: no summarizer model");
     return {
-        disk: describeFoldAuthority(plugin.readDisk()),
         startup: describeFoldAuthority(plugin.startup),
         applied: daemon.applied,
         pending,
@@ -171,10 +200,17 @@ const APPLIED_TEXT: Record<FoldAuthorityStatus["applied"], string> = {
     unknown: "unknown (the daemon did not report it)",
 };
 
+export function withDiskAuthority(
+    status: FoldAuthorityStatus,
+    plugin: PluginFoldAuthority,
+): FoldAuthorityStatus {
+    return { ...status, disk: describeFoldAuthority(plugin.readDisk()) };
+}
+
 export function formatFoldAuthorityLines(status: FoldAuthorityStatus): string[] {
     const lines = [
         "### Fold Authority",
-        `- On disk: ${status.disk}`,
+        ...(status.disk === undefined ? [] : [`- On disk: ${status.disk}`]),
         `- Plugin startup: ${status.startup}`,
         `- Daemon applied (session.status): ${APPLIED_TEXT[status.applied]}`,
     ];
@@ -201,8 +237,11 @@ export function reportFoldAuthority(
     sessionId: string,
 ): FoldAuthorityStatus {
     const status = foldAuthorityStatus(plugin, summary);
-    if (status.warnings.length > 0) {
-        plugin.raise({ disposition: "warn", reasons: status.warnings, unresolved: [] }, sessionId);
-    }
+    plugin.publish(
+        status.warnings.length > 0
+            ? { disposition: "warn", reasons: status.warnings, unresolved: [] }
+            : undefined,
+        sessionId,
+    );
     return status;
 }

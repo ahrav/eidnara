@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadPluginConfigDetailed } from "../config";
@@ -15,11 +15,19 @@ import {
     type PluginFoldAuthority,
     parseDaemonFoldAuthority,
     pluginFoldAuthority,
+    publishOnChange,
     RESTART_OTHER_INSTANCES_STEP,
     ROOT_MISMATCH_WARNING,
     reportFoldAuthority,
+    withDiskAuthority,
 } from "./fold-authority-status";
 
+const STATUS_FIXTURE = JSON.parse(
+    readFileSync(join(import.meta.dir, "__fixtures__", "fold-authority-status.json"), "utf-8"),
+) as {
+    pending: Array<{ reason: string; segment: string; step: string }>;
+    stalled_applied: string;
+};
 const USER_CONFIG = "/home/u/.config/eidnara/eidnara.jsonc";
 const TAIL =
     "session ses (last active 0s ago): 0 history_segments, coverage ordinal none, boundary absent, 0 pending drops, 0 tags, pending m1 delta false, last history_summarizer: idle, publish failures: 0, surface inactive";
@@ -33,7 +41,7 @@ function plugin(overrides: Partial<PluginFoldAuthority> = {}): PluginFoldAuthori
         startup: { kind: "eidnara", reason: "summarizer chain: test/model" },
         userConfigPath: USER_CONFIG,
         readDisk: () => ({ kind: "eidnara", reason: "summarizer chain: test/model" }),
-        raise: () => {},
+        publish: () => {},
         ...overrides,
     };
 }
@@ -168,19 +176,23 @@ describe("foldAuthorityStatus", () => {
         );
     });
 
-    it("names the next step for each pending reason", () => {
-        const step = (reason: string) =>
-            foldAuthorityStatus(
-                plugin(),
-                summary(`native; fold authority pending eidnara: ${reason}`),
-            ).pending?.step;
-        expect(step("another binding is open on this session")).toBe(RESTART_OTHER_INSTANCES_STEP);
-        expect(step("the summarizer is busy or a publication is pending")).toBe(
-            "wait for the summarizer to finish, then restart this OpenCode instance",
-        );
-        expect(step("it applies at the next bind while the session is quiescent")).toBe(
-            "keep other OpenCode instances on this session closed, then restart this one so it binds the session again",
-        );
+    it("parses every daemon segment in the shared status fixture and names its step", () => {
+        expect(STATUS_FIXTURE.pending.map((row) => row.reason)).toEqual([
+            "sibling_bound",
+            "not_quiescent",
+            "later_bind",
+        ]);
+        for (const row of STATUS_FIXTURE.pending) {
+            const status = foldAuthorityStatus(plugin(), summary(`native; ${row.segment}`));
+            expect(status.pending).toEqual({
+                target: "eidnara",
+                reason: row.segment.slice(row.segment.indexOf(": ") + 2),
+                step: row.step,
+            });
+        }
+        expect(STATUS_FIXTURE.pending[0]?.step).toBe(RESTART_OTHER_INSTANCES_STEP);
+        const stalled = parseDaemonFoldAuthority(summary(STATUS_FIXTURE.stalled_applied));
+        expect(stalled).toMatchObject({ applied: "eidnara", stalled: true });
     });
 
     it("compares configuration roots from the daemon's encoded path, not file names", () => {
@@ -203,14 +215,55 @@ describe("foldAuthorityStatus", () => {
         expect(distinct.warnings[0]).toStartWith(ROOT_MISMATCH_WARNING);
     });
 
+    it("compares configuration roots after normalizing each path", () => {
+        const daemonPaths = [
+            "encoded:/home/u//.config/eidnara/eidnara.jsonc",
+            "encoded:/home/u/.config/./eidnara/eidnara.jsonc",
+            "/home/u/.config/eidnara//eidnara.jsonc",
+        ];
+        for (const path of daemonPaths) {
+            expect(foldAuthorityStatus(plugin(), summary("eidnara", path)).warnings).toEqual([]);
+        }
+        expect(
+            foldAuthorityStatus(
+                plugin({ userConfigPath: "/home/u//.config/eidnara/eidnara.jsonc" }),
+                summary("eidnara"),
+            ).warnings,
+        ).toEqual([]);
+    });
+
+    it("reads the configuration on disk only for the surfaces that show it", () => {
+        let reads = 0;
+        const counted = plugin({
+            readDisk: () => {
+                reads += 1;
+                return { kind: "native", reason: "no summarizer model is configured" };
+            },
+        });
+        const status = foldAuthorityStatus(counted, summary("eidnara"));
+        expect(reads).toBe(0);
+        expect(status.disk).toBeUndefined();
+        expect(formatFoldAuthorityLines(status).some((line) => line.startsWith("- On disk"))).toBe(
+            false,
+        );
+        expect(withDiskAuthority(status, counted).disk).toBe(
+            "OpenCode's native compaction folds (no summarizer model is configured)",
+        );
+        expect(reads).toBe(1);
+    });
+
     it("shows the disk, startup, and applied authorities with their sources", () => {
-        const status = foldAuthorityStatus(
-            plugin({
-                readDisk: () => ({ kind: "native", reason: "no summarizer model is configured" }),
-            }),
-            summary(
-                "eidnara; fold authority pending native: it applies at the next bind while the session is quiescent",
+        const withNativeDisk = plugin({
+            readDisk: () => ({ kind: "native", reason: "no summarizer model is configured" }),
+        });
+        const status = withDiskAuthority(
+            foldAuthorityStatus(
+                withNativeDisk,
+                summary(
+                    "eidnara; fold authority pending native: it applies at the next bind while the session is quiescent",
+                ),
             ),
+            withNativeDisk,
         );
         expect(formatFoldAuthorityLines(status)).toEqual([
             "### Fold Authority",
@@ -223,22 +276,60 @@ describe("foldAuthorityStatus", () => {
         ]);
     });
 
-    it("raises a warn conflict that formats under the warning header", () => {
-        const raised: ConflictWarning[] = [];
+    it("publishes a warn conflict that formats under the warning header, and a clear state", () => {
+        const published: Array<[ConflictWarning | undefined, string]> = [];
+        const publish = (warning: ConflictWarning | undefined, sessionId: string) =>
+            published.push([warning, sessionId]);
         const status = reportFoldAuthority(
-            plugin({ raise: (conflict) => raised.push(conflict) }),
+            plugin({ publish }),
             summary(
                 "native; fold authority pending eidnara: another binding is open on this session",
             ),
+            "ses_pending",
         );
-        expect(raised).toEqual([{ disposition: "warn", reasons: status.warnings, unresolved: [] }]);
-        expect(formatConflictShort(raised[0]!).startsWith(CONFLICT_WARNING_HEADER)).toBe(true);
-        const quiet: ConflictWarning[] = [];
-        reportFoldAuthority(
-            plugin({ raise: (conflict) => quiet.push(conflict) }),
-            summary("eidnara"),
+        const [[warning]] = published as [[ConflictWarning, string]];
+        expect(published).toEqual([
+            [{ disposition: "warn", reasons: status.warnings, unresolved: [] }, "ses_pending"],
+        ]);
+        expect(formatConflictShort(warning).startsWith(CONFLICT_WARNING_HEADER)).toBe(true);
+        reportFoldAuthority(plugin({ publish }), summary("eidnara"), "ses_pending");
+        expect(published[1]).toEqual([undefined, "ses_pending"]);
+    });
+});
+
+describe("publishOnChange", () => {
+    const pending: ConflictWarning = {
+        disposition: "warn",
+        reasons: [`${AUTHORITY_PENDING_WARNING}. first`],
+        unresolved: [],
+    };
+    const changed: ConflictWarning = {
+        ...pending,
+        reasons: [`${AUTHORITY_PENDING_WARNING}. second`],
+    };
+
+    it("forwards a session's first state and every change, and nothing else", () => {
+        const delivered: Array<[ConflictWarning | undefined, string]> = [];
+        const publish = publishOnChange(
+            (warning, sessionId) => delivered.push([warning, sessionId]),
+            8,
         );
-        expect(quiet).toEqual([]);
+
+        publish(undefined, "ses_a");
+        publish(undefined, "ses_a");
+        publish(pending, "ses_a");
+        publish(pending, "ses_a");
+        publish(changed, "ses_a");
+        publish(undefined, "ses_a");
+        publish(pending, "ses_b");
+
+        expect(delivered).toEqual([
+            [undefined, "ses_a"],
+            [pending, "ses_a"],
+            [changed, "ses_a"],
+            [undefined, "ses_a"],
+            [pending, "ses_b"],
+        ]);
     });
 });
 

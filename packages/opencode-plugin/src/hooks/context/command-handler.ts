@@ -12,6 +12,7 @@ import {
     formatFoldAuthorityLines,
     type PluginFoldAuthority,
     reportFoldAuthority,
+    withDiskAuthority,
 } from "../../shared/fold-authority-status";
 import type { KernelClientResolver } from "../../shared/kernel-client";
 import {
@@ -603,10 +604,13 @@ export function createEidnaraCommandHandler(deps: {
                         lines.push(
                             "",
                             ...formatFoldAuthorityLines(
-                                reportFoldAuthority(
+                                withDiskAuthority(
+                                    reportFoldAuthority(
+                                        deps.foldAuthority,
+                                        rustStatus.summary,
+                                        sessionId,
+                                    ),
                                     deps.foldAuthority,
-                                    rustStatus.summary,
-                                    sessionId,
                                 ),
                             ),
                         );
