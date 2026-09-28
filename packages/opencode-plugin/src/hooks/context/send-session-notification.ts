@@ -40,10 +40,12 @@ interface IgnoredNotification {
     /** Idle flushes that ended in a bounded delivery failure for this entry. */
     attempts: number;
     countQueuedAttempt: boolean;
+    /** `dropped` lets `dropQueuedIgnoredMessages` cancel an entry an idle flush already holds. */
+    dropped?: boolean;
 }
 
 const queuedIgnoredNotifications = new Map<string, IgnoredNotification[]>();
-const flushingIgnoredNotifications = new Set<string>();
+const flushingIgnoredNotifications = new Map<string, IgnoredNotification[]>();
 let midTurnDetector = (sessionId: string): boolean => isMidTurn(undefined, sessionId);
 
 function storeQueuedNotifications(sessionId: string, queued: IgnoredNotification[]): void {
@@ -267,6 +269,7 @@ async function deliverIgnoredMessage(
 
     // Check for an active run immediately before the SDK call to prevent a concurrent run from receiving a user row.
     if (midTurnDetector(sessionId)) return "queued";
+    if (notification.dropped) return "skipped";
 
     const controller = new AbortController();
     const input = {
@@ -354,11 +357,12 @@ export async function flushIgnoredMessages(sessionId: string): Promise<void> {
     if (!queued || queued.length === 0) return;
 
     queuedIgnoredNotifications.delete(sessionId);
-    flushingIgnoredNotifications.add(sessionId);
+    flushingIgnoredNotifications.set(sessionId, queued);
     try {
         let retained: IgnoredNotification[] = [];
         for (const [index, notification] of queued.entries()) {
             const disposition = await deliverIgnoredMessage(notification);
+            if (notification.dropped) continue;
             if (disposition === "queued") {
                 if (notification.countQueuedAttempt) {
                     notification.attempts += 1;
@@ -401,9 +405,14 @@ export function clearIgnoredMessages(sessionId: string): void {
 }
 
 export function dropQueuedIgnoredMessages(sessionId: string, prefixes: readonly string[]): void {
+    const matches = (item: IgnoredNotification) =>
+        prefixes.some((prefix) => item.text.startsWith(prefix));
+    for (const item of flushingIgnoredNotifications.get(sessionId) ?? []) {
+        if (matches(item)) item.dropped = true;
+    }
     const queued = queuedIgnoredNotifications.get(sessionId);
     if (!queued) return;
-    const kept = queued.filter((item) => !prefixes.some((prefix) => item.text.startsWith(prefix)));
+    const kept = queued.filter((item) => !matches(item));
     if (kept.length === 0) queuedIgnoredNotifications.delete(sessionId);
     else queuedIgnoredNotifications.set(sessionId, kept);
 }

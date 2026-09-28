@@ -3,7 +3,10 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { platform, tmpdir } from "node:os";
 import { join } from "node:path";
 import { closeReadOnlySessionDb } from "../hooks/context/read-session-db";
-import { __ignoredNotificationTest } from "../hooks/context/send-session-notification";
+import {
+    __ignoredNotificationTest,
+    flushIgnoredMessages,
+} from "../hooks/context/send-session-notification";
 import type { ConflictResult, ConflictWarning } from "../shared/conflict-detector";
 import { formatConflictShort } from "../shared/conflict-detector";
 import { AUTHORITY_PENDING_WARNING, ROOT_MISMATCH_WARNING } from "../shared/fold-authority-status";
@@ -824,6 +827,59 @@ describe.if(platform() === "linux")(
                     expect(__ignoredNotificationTest.pendingTexts(POLLED)).toEqual([]);
                 } finally {
                     fetchSpy.mockRestore();
+                }
+            });
+
+            it("drops a warning the idle flush already holds once a clean poll clears it", async () => {
+                const directory = seedDesktopSession();
+                let midTurn = true;
+                __ignoredNotificationTest.setMidTurnDetector(() => midTurn);
+                let releaseTitleRead = (): void => {};
+                const titleRead = new Promise<void>((resolve) => {
+                    releaseTitleRead = resolve;
+                });
+                const stored = new Map<string, string>();
+                const prompt = mock(async (input: { body: { parts: Array<{ text: string }> } }) => {
+                    stored.set(`msg_${stored.size + 1}`, input.body.parts[0]?.text ?? "");
+                    return {};
+                });
+                const client = {
+                    session: {
+                        prompt,
+                        get: mock(async () => {
+                            await titleRead;
+                            return { title: REAL_TITLE };
+                        }),
+                        messages: mock(async () =>
+                            [...stored].map(([id, text]) => ({
+                                info: { id, role: "user" },
+                                parts: [{ type: "text", text, ignored: true }],
+                            })),
+                        ),
+                    },
+                };
+                const deletes = recordDeletes();
+                try {
+                    await reconcileFoldAuthorityWarning(client, directory, POLLED, SIBLING, SERVER);
+                    expect(__ignoredNotificationTest.pendingTexts(POLLED)).toHaveLength(1);
+
+                    midTurn = false;
+                    const flush = flushIgnoredMessages(POLLED);
+                    await new Promise((r) => setTimeout(r, 10));
+                    await reconcileFoldAuthorityWarning(
+                        client,
+                        directory,
+                        POLLED,
+                        undefined,
+                        SERVER,
+                    );
+                    releaseTitleRead();
+                    await flush;
+
+                    expect([...stored.values()]).toEqual([]);
+                    expect(__ignoredNotificationTest.pendingTexts(POLLED)).toEqual([]);
+                } finally {
+                    deletes.restore();
                 }
             });
 
