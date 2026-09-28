@@ -1,5 +1,6 @@
 use std::ops::Add;
 
+use crate::boundary::completed_tool_arc_crosses_boundary;
 use crate::history_summarizer_chunk::tool_arcs;
 use crate::wire::{FlatBlock, FlatProjection};
 
@@ -122,7 +123,7 @@ pub fn archive_cut(
             && !arcs
                 .completed
                 .iter()
-                .any(|arc| arc.start < arc.end && arc.start <= ordinal && ordinal <= arc.end)
+                .any(|arc| completed_tool_arc_crosses_boundary(arc.start, arc.end, ordinal + 1))
             && !arcs
                 .open_invocations
                 .iter()
@@ -226,8 +227,8 @@ mod tests {
             o if o == call + 1 => Some(tool_result(&format!("m{o}"), o, "call", "ok")),
             _ => None,
         });
-        assert_eq!(cut_of(&arc, None), Some((1, call + 2)));
-        assert!(window_after(&arc, call + 2).within_half_cap());
+        assert_eq!(cut_of(&arc, None), Some((1, call + 1)));
+        assert!(window_after(&arc, call + 1).within_half_cap());
 
         let live_open = window_with(LAST, |ordinal| {
             (ordinal == LAST_ARCHIVED)
@@ -262,6 +263,14 @@ mod tests {
         let window = projection(messages);
         assert_eq!(cut_of(&window, None), Some((1, 9)));
         assert_eq!(served_after(&window, 9), ["m10"]);
+
+        let pair_then_oversize = projection(vec![
+            assistant_tool_call("m1", 1, "call"),
+            tool_result("m2", 2, "call", "ok"),
+            wire_item("user", "m3", 3, &texts),
+        ]);
+        assert_eq!(cut_of(&pair_then_oversize, None), Some((1, 2)));
+        assert_eq!(served_after(&pair_then_oversize, 2), ["m3"]);
     }
 
     #[test]
