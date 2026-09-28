@@ -5755,6 +5755,106 @@ enum AuthorityFinishDrainOutcome {
     FeedHeadAdvanced { captured: i64, found: i64 },
 }
 
+/// The row a fenced history publication commits over: its current version once it equals
+/// `expected_row_version`, and its decoded meta.
+fn fenced_publication_row_tx(
+    tx: &GuardedConn<'_>,
+    session_id: &str,
+    expected_row_version: Option<u64>,
+) -> rusqlite::Result<Result<(i64, ModuleMeta), PublishTxnOutcome>> {
+    let row = tx
+        .query_row(CACHE_STATE_META_SELECT, params![session_id], |r| {
+            Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
+        })
+        .optional()?;
+    let Some((current, meta_json)) = row else {
+        return Ok(Err(PublishTxnOutcome::InvalidState("missing".to_string())));
+    };
+    let cas_ok = match expected_row_version {
+        Some(v) => current == v as i64,
+        None => current == NO_ROW,
+    };
+    if !cas_ok {
+        return Ok(Err(PublishTxnOutcome::CasConflict {
+            found: current.max(0) as u64,
+            reason: None,
+        }));
+    }
+    Ok(serde_json::from_str(&meta_json)
+        .map(|meta| (current, meta))
+        .map_err(|e| PublishTxnOutcome::Serde(e.to_string())))
+}
+
+/// The revert-epoch and segment-set fences of a history publication: a session re-cut since
+/// the snapshot, or a segment set whose newest sequence moved, refuses it.
+fn history_publication_fence_tx(
+    tx: &GuardedConn<'_>,
+    session_id: &str,
+    current: i64,
+    meta: &ModuleMeta,
+    expected_revert_epoch: u64,
+    expected_generation: HistorySegmentSetGeneration,
+) -> rusqlite::Result<Option<PublishTxnOutcome>> {
+    if meta.revert_epoch != expected_revert_epoch {
+        return Ok(Some(PublishTxnOutcome::CasConflict {
+            found: current.max(0) as u64,
+            reason: Some("revert epoch mismatch (session was re-cut mid-firing)".to_string()),
+        }));
+    }
+    let current_generation = tx.query_row(
+        "SELECT COALESCE(MAX(sequence), 0) FROM history_segments WHERE session_id = ?1",
+        params![session_id],
+        |row| {
+            Ok(HistorySegmentSetGeneration {
+                max_sequence: row.get(0)?,
+                count: 0,
+            })
+        },
+    )?;
+    Ok((current_generation != expected_generation).then(|| {
+        PublishTxnOutcome::FenceRejected(format!(
+            "history_segment set changed after firing (expected max sequence {}, found {})",
+            expected_generation.max_sequence, current_generation.max_sequence,
+        ))
+    }))
+}
+
+/// Serializes and scans the meta a history publication commits. Callers run it before
+/// appending any row, so a serialization failure writes nothing.
+fn published_meta_json(
+    coordinated: &ActiveWriteTransaction<'_>,
+    meta: &ModuleMeta,
+) -> rusqlite::Result<Result<String, PublishTxnOutcome>> {
+    let scanned_meta_json = match serde_json::to_string(meta) {
+        Ok(json) => json,
+        Err(e) => return Ok(Err(PublishTxnOutcome::Serde(e.to_string()))),
+    };
+    coordinated
+        .prepared
+        .borrow_mut()
+        .transaction_content("meta", &scanned_meta_json)
+        .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+    prepare_transaction_json_preserving_identities(&scanned_meta_json)
+        .map(Ok)
+        .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))
+}
+
+/// Writes the publication's meta over the row version it was fenced on and returns the next one.
+fn commit_published_meta_tx(
+    tx: &GuardedConn<'_>,
+    session_id: &str,
+    current: i64,
+    meta_json: &str,
+) -> rusqlite::Result<u64> {
+    let next = next_row_version(current)?;
+    tx.execute(
+        "UPDATE cache_state SET row_version = ?2, meta = ?3
+         WHERE session_id = ?1 AND row_version = ?4",
+        params![session_id, next as i64, meta_json, current],
+    )?;
+    Ok(next)
+}
+
 enum PublishTxnOutcome {
     Committed(HistorySummarizerPublishResult),
     CasConflict {
@@ -12766,256 +12866,215 @@ impl MemoryStore {
         let outcome = write.execute(&self.inner, |coordinated| {
             let tx = coordinated.tx;
             let outcome = (|| -> rusqlite::Result<PublishTxnOutcome> {
-            let row = tx
-                .query_row(
-                    CACHE_STATE_META_SELECT,
-                    params![session_id],
-                    |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)),
-                )
-                .optional()?;
-
-            let Some((current, meta_json)) = row else {
-                return Ok(PublishTxnOutcome::InvalidState("missing".to_string()));
-            };
-
-            let cas_ok = match expected_row_version {
-                Some(v) => current == v as i64,
-                None => current == NO_ROW,
-            };
-            if !cas_ok {
-                return Ok(PublishTxnOutcome::CasConflict {
-                    found: current.max(0) as u64,
-                    reason: None,
-                });
-            }
-
-            let mut meta: ModuleMeta = match serde_json::from_str(&meta_json) {
-                Ok(meta) => meta,
-                Err(e) => return Ok(PublishTxnOutcome::Serde(e.to_string())),
-            };
-
-            if !matches!(
-                meta.history_summarizer.state,
-                HistorySummarizerPhase::Publishing | HistorySummarizerPhase::AwaitingProducer
-            ) {
-                return Ok(PublishTxnOutcome::InvalidState(
-                    meta.history_summarizer.state.as_str().to_string(),
-                ));
-            }
-
-            let predicate_matches = meta.history_summarizer.firing_seq == predicate.firing_seq
-                && meta.history_summarizer.producer_run_id.as_deref()
-                    == Some(predicate.producer_run_id.as_str())
-                && meta.history_summarizer.chunk_fingerprint == predicate.chunk_fingerprint
-                && meta.history_summarizer.selected_range_identities == predicate.selected_range_identities
-                && meta.history_summarizer.history_segment_set_generation
-                    == predicate.history_segment_set_generation;
-            if !predicate_matches {
-                return Ok(PublishTxnOutcome::StateMismatch(Box::new(meta.history_summarizer)));
-            }
-
-            // `chunk_fingerprint` remains a readable structural diagnostic; exact
-            // content freshness is verified using the durable block identities. An empty
-            // vector means the firing predates selected-range identity persistence, so it
-            // cannot establish that the selected content is still current.
-            if predicate.selected_range_identities.is_empty() {
-                return Ok(PublishTxnOutcome::FenceRejected(
-                    "history_summarizer firing has no selected-range content identities".to_string(),
-                ));
-            }
-            {
-                let mut stored_identities = tx.prepare_cached(
-                    "SELECT identities FROM block_identities WHERE session_id = ?1 AND mid = ?2",
-                )?;
-                for selected in &predicate.selected_range_identities {
-                    let stored = stored_identities
-                        .query_row(params![session_id, selected.mid], |row| {
-                            row.get::<_, String>(0)
-                        })
-                        .optional()?;
-                    let stored = match stored
-                        .map(|json| serde_json::from_str::<Vec<BlockIdentity>>(&json))
-                        .transpose()
-                    {
-                        Ok(stored) => stored,
-                        Err(e) => return Ok(PublishTxnOutcome::Serde(e.to_string())),
+                let (current, mut meta) =
+                    match fenced_publication_row_tx(tx, session_id, expected_row_version)? {
+                        Ok(row) => row,
+                        Err(outcome) => return Ok(outcome),
                     };
-                    if stored.as_ref() != Some(&selected.block_identities) {
-                        return Ok(PublishTxnOutcome::FenceRejected(format!(
-                            "selected history_summarizer message {} changed after firing",
-                            selected.mid
-                        )));
-                    }
-                }
-            }
 
-            if meta.revert_epoch != request.expected_revert_epoch {
-                return Ok(PublishTxnOutcome::CasConflict {
-                    found: current.max(0) as u64,
-                    reason: Some(
-                        "revert epoch mismatch (session was re-cut mid-firing)".to_string(),
-                    ),
-                });
-            }
-
-            let current_history_segment_set_generation = tx.query_row(
-                "SELECT COALESCE(MAX(sequence), 0) FROM history_segments WHERE session_id = ?1",
-                params![session_id],
-                |row| {
-                    Ok(HistorySegmentSetGeneration {
-                        max_sequence: row.get(0)?,
-                        count: 0,
-                    })
-                },
-            )?;
-            if current_history_segment_set_generation != predicate.history_segment_set_generation {
-                return Ok(PublishTxnOutcome::FenceRejected(format!(
-                    "history_segment set changed after firing (expected max sequence {}, found {})",
-                    predicate.history_segment_set_generation.max_sequence,
-                    current_history_segment_set_generation.max_sequence,
-                )));
-            }
-
-            // The metadata that publication commits does not depend on the rows it appends, so it is serialized first: a serialization failure then leaves nothing written instead of history without its floor, state, and nonadmission facts.
-            meta.publication_floor_ordinal = Some(
-                meta.publication_floor_ordinal
-                    .unwrap_or(1)
-                    .max(request.publication_floor_ordinal.max(1)),
-            );
-            // An activation must name the job this firing reserved; a reservation another firing left behind is accepted only without an activation. Either mismatch refuses before anything is written.
-            match (
-                meta.history_summarizer.memory_reviewer_reservation.as_ref(),
-                request.memory_reviewer_activation.as_ref(),
-            ) {
-                (None, None) => {}
-                (Some(reservation), Some(activation))
-                    if reservation.causal_identity == activation.causal_identity => {}
-                (Some(reservation), None)
-                    if reservation.firing_seq != meta.history_summarizer.firing_seq => {}
-                _ => {
-                    return Err(memory_reviewer_jobs::refuse(
-                        memory_reviewer_jobs::MemoryReviewerJobRefusal::InvalidRequest,
+                if !matches!(
+                    meta.history_summarizer.state,
+                    HistorySummarizerPhase::Publishing | HistorySummarizerPhase::AwaitingProducer
+                ) {
+                    return Ok(PublishTxnOutcome::InvalidState(
+                        meta.history_summarizer.state.as_str().to_string(),
                     ));
                 }
-            }
-            if history_segments.iter().any(|row| row.legacy == 1) {
-                meta.legacy_history_segment_seqs = None;
-            }
-            meta.history_summarizer = meta.history_summarizer.cleared_of_in_flight_firing();
-            let first_appended_sequence = next_history_segment_sequence_tx(tx, session_id)?;
-            let published_sequence = (!history_segments.is_empty())
-                .then(|| first_appended_sequence - 1 + history_segments.len() as i64);
-            meta.history_summarizer.current_firing_mut().published_at_ms =
-                Some(request.published_at_ms);
-            meta.history_summarizer
-                .record_outcome(summarizer_timeline::FiringOutcome::Published {
-                    sequence: published_sequence,
-                });
-            meta.m1_pending_since_ms.get_or_insert(request.published_at_ms);
-            if let Some(code) = request.memory_reviewer_nonadmission {
-                let nonadmission = &mut meta.history_summarizer.memory_reviewer_nonadmission;
-                nonadmission.count = nonadmission.count.saturating_add(1);
-                nonadmission.latest = Some(RecordedNonadmission {
-                    firing_seq: meta.history_summarizer.firing_seq,
-                    code,
-                });
-            }
-            let memory_reviewer_nonadmission_count = meta.history_summarizer.memory_reviewer_nonadmission.count;
-            let next = next_row_version(current)?;
-            let scanned_meta_json = match serde_json::to_string(&meta) {
-                Ok(json) => json,
-                Err(e) => return Ok(PublishTxnOutcome::Serde(e.to_string())),
-            };
-            coordinated
-                .prepared
-                .borrow_mut()
-                .transaction_content("meta", &scanned_meta_json)
-                .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
-            let meta_json = prepare_transaction_json_preserving_identities(&scanned_meta_json)
-                .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
 
-            match append_history_segments_tx(tx, session_id, &history_segments)? {
-                AppendHistorySegmentsTxnOutcome::Appended => {}
-                AppendHistorySegmentsTxnOutcome::Overlap {
-                    existing_sequence,
-                    incoming_start_message,
-                    incoming_end_message,
-                } => {
-                    return Ok(PublishTxnOutcome::HistorySegmentOverlap {
+                let predicate_matches = meta.history_summarizer.firing_seq == predicate.firing_seq
+                    && meta.history_summarizer.producer_run_id.as_deref()
+                        == Some(predicate.producer_run_id.as_str())
+                    && meta.history_summarizer.chunk_fingerprint == predicate.chunk_fingerprint
+                    && meta.history_summarizer.selected_range_identities
+                        == predicate.selected_range_identities
+                    && meta.history_summarizer.history_segment_set_generation
+                        == predicate.history_segment_set_generation;
+                if !predicate_matches {
+                    return Ok(PublishTxnOutcome::StateMismatch(Box::new(
+                        meta.history_summarizer,
+                    )));
+                }
+
+                // `chunk_fingerprint` remains a readable structural diagnostic; exact
+                // content freshness is verified using the durable block identities. An empty
+                // vector means the firing predates selected-range identity persistence, so it
+                // cannot establish that the selected content is still current.
+                if predicate.selected_range_identities.is_empty() {
+                    return Ok(PublishTxnOutcome::FenceRejected(
+                        "history_summarizer firing has no selected-range content identities"
+                            .to_string(),
+                    ));
+                }
+                {
+                    let mut stored_identities = tx.prepare_cached(
+                    "SELECT identities FROM block_identities WHERE session_id = ?1 AND mid = ?2",
+                )?;
+                    for selected in &predicate.selected_range_identities {
+                        let stored = stored_identities
+                            .query_row(params![session_id, selected.mid], |row| {
+                                row.get::<_, String>(0)
+                            })
+                            .optional()?;
+                        let stored = match stored
+                            .map(|json| serde_json::from_str::<Vec<BlockIdentity>>(&json))
+                            .transpose()
+                        {
+                            Ok(stored) => stored,
+                            Err(e) => return Ok(PublishTxnOutcome::Serde(e.to_string())),
+                        };
+                        if stored.as_ref() != Some(&selected.block_identities) {
+                            return Ok(PublishTxnOutcome::FenceRejected(format!(
+                                "selected history_summarizer message {} changed after firing",
+                                selected.mid
+                            )));
+                        }
+                    }
+                }
+
+                if let Some(outcome) = history_publication_fence_tx(
+                    tx,
+                    session_id,
+                    current,
+                    &meta,
+                    request.expected_revert_epoch,
+                    predicate.history_segment_set_generation,
+                )? {
+                    return Ok(outcome);
+                }
+
+                // The metadata that publication commits does not depend on the rows it appends, so it is serialized first: a serialization failure then leaves nothing written instead of history without its floor, state, and nonadmission facts.
+                meta.publication_floor_ordinal = Some(
+                    meta.publication_floor_ordinal
+                        .unwrap_or(1)
+                        .max(request.publication_floor_ordinal.max(1)),
+                );
+                // An activation must name the job this firing reserved; a reservation another firing left behind is accepted only without an activation. Either mismatch refuses before anything is written.
+                match (
+                    meta.history_summarizer.memory_reviewer_reservation.as_ref(),
+                    request.memory_reviewer_activation.as_ref(),
+                ) {
+                    (None, None) => {}
+                    (Some(reservation), Some(activation))
+                        if reservation.causal_identity == activation.causal_identity => {}
+                    (Some(reservation), None)
+                        if reservation.firing_seq != meta.history_summarizer.firing_seq => {}
+                    _ => {
+                        return Err(memory_reviewer_jobs::refuse(
+                            memory_reviewer_jobs::MemoryReviewerJobRefusal::InvalidRequest,
+                        ));
+                    }
+                }
+                if history_segments.iter().any(|row| row.legacy == 1) {
+                    meta.legacy_history_segment_seqs = None;
+                }
+                meta.history_summarizer = meta.history_summarizer.cleared_of_in_flight_firing();
+                let first_appended_sequence = next_history_segment_sequence_tx(tx, session_id)?;
+                let published_sequence = (!history_segments.is_empty())
+                    .then(|| first_appended_sequence - 1 + history_segments.len() as i64);
+                meta.history_summarizer.current_firing_mut().published_at_ms =
+                    Some(request.published_at_ms);
+                meta.history_summarizer.record_outcome(
+                    summarizer_timeline::FiringOutcome::Published {
+                        sequence: published_sequence,
+                    },
+                );
+                meta.m1_pending_since_ms
+                    .get_or_insert(request.published_at_ms);
+                if let Some(code) = request.memory_reviewer_nonadmission {
+                    let nonadmission = &mut meta.history_summarizer.memory_reviewer_nonadmission;
+                    nonadmission.count = nonadmission.count.saturating_add(1);
+                    nonadmission.latest = Some(RecordedNonadmission {
+                        firing_seq: meta.history_summarizer.firing_seq,
+                        code,
+                    });
+                }
+                let memory_reviewer_nonadmission_count =
+                    meta.history_summarizer.memory_reviewer_nonadmission.count;
+                let meta_json = match published_meta_json(coordinated, &meta)? {
+                    Ok(json) => json,
+                    Err(outcome) => return Ok(outcome),
+                };
+
+                match append_history_segments_tx(tx, session_id, &history_segments)? {
+                    AppendHistorySegmentsTxnOutcome::Appended => {}
+                    AppendHistorySegmentsTxnOutcome::Overlap {
                         existing_sequence,
                         incoming_start_message,
                         incoming_end_message,
-                    });
+                    } => {
+                        return Ok(PublishTxnOutcome::HistorySegmentOverlap {
+                            existing_sequence,
+                            incoming_start_message,
+                            incoming_end_message,
+                        });
+                    }
                 }
-            }
-            if let Some(blobs) = &chunk_transcript_blobs {
-                insert_chunk_transcripts_tx(
-                    tx,
-                    session_id,
-                    first_appended_sequence,
-                    &history_segments,
-                    blobs,
-                )?;
-            }
-            enqueue_history_summarizer_side_channels_tx(tx, session_id, &side_channel_items)?;
-            // The publication ends the firing and clears its reservation, so no reservation names a retained publication after it: the row this firing retained, or one a dropped reservation left behind, goes with it.
-            delete_pending_publication_tx(tx, session_id)?;
-            // The reserved job moves to Ready here, past every `Ok` bail-out, so activation and progress commit together or not at all; a refusal is raised as an error and rolls the whole publication back. A reservation past its deadline is closed as expired with progress and never resurrected; one the sweep already closed reads the same way.
-            let memory_reviewer_activation = match request.memory_reviewer_activation.as_ref() {
-                None => None,
-                Some(activation) => {
-                    let now_ms = activation.now_ms.max(current_time_ms());
-                    match memory_reviewer_jobs::activate_memory_reviewer_job_in_tx(
-                        coordinated.tx(),
-                        request.project_path,
-                        activation.causal_identity,
-                        activation.producer,
-                        activation.input,
-                        now_ms,
-                    ) {
-                        Ok(_) => Some(MemoryReviewerActivationOutcome::Activated),
-                        Err(error) => match memory_reviewer_jobs::refusal_of(&error) {
-                            Some(memory_reviewer_jobs::MemoryReviewerJobRefusal::Expired) => {
-                                memory_reviewer_jobs::expire_reserved_memory_reviewer_job_in_tx(
+                if let Some(blobs) = &chunk_transcript_blobs {
+                    insert_chunk_transcripts_tx(
+                        tx,
+                        session_id,
+                        first_appended_sequence,
+                        &history_segments,
+                        blobs,
+                    )?;
+                }
+                enqueue_history_summarizer_side_channels_tx(tx, session_id, &side_channel_items)?;
+                // The publication ends the firing and clears its reservation, so no reservation names a retained publication after it: the row this firing retained, or one a dropped reservation left behind, goes with it.
+                delete_pending_publication_tx(tx, session_id)?;
+                // The reserved job moves to Ready here, past every `Ok` bail-out, so activation and progress commit together or not at all; a refusal is raised as an error and rolls the whole publication back. A reservation past its deadline is closed as expired with progress and never resurrected; one the sweep already closed reads the same way.
+                let memory_reviewer_activation = match request.memory_reviewer_activation.as_ref() {
+                    None => None,
+                    Some(activation) => {
+                        let now_ms = activation.now_ms.max(current_time_ms());
+                        match memory_reviewer_jobs::activate_memory_reviewer_job_in_tx(
+                            coordinated.tx(),
+                            request.project_path,
+                            activation.causal_identity,
+                            activation.producer,
+                            activation.input,
+                            now_ms,
+                        ) {
+                            Ok(_) => Some(MemoryReviewerActivationOutcome::Activated),
+                            Err(error) => match memory_reviewer_jobs::refusal_of(&error) {
+                                Some(memory_reviewer_jobs::MemoryReviewerJobRefusal::Expired) => {
+                                    memory_reviewer_jobs::expire_reserved_memory_reviewer_job_in_tx(
                                     coordinated.tx(),
                                     request.project_path,
                                     activation.causal_identity,
                                     now_ms,
                                 )?;
-                                Some(MemoryReviewerActivationOutcome::Expired)
-                            }
-                            Some(memory_reviewer_jobs::MemoryReviewerJobRefusal::Terminal)
-                                if memory_reviewer_jobs::load_memory_reviewer_job(
-                                    coordinated.tx(),
-                                    request.project_path,
-                                    activation.causal_identity,
-                                )?
-                                .is_some_and(|job| {
-                                    job.state
+                                    Some(MemoryReviewerActivationOutcome::Expired)
+                                }
+                                Some(memory_reviewer_jobs::MemoryReviewerJobRefusal::Terminal)
+                                    if memory_reviewer_jobs::load_memory_reviewer_job(
+                                        coordinated.tx(),
+                                        request.project_path,
+                                        activation.causal_identity,
+                                    )?
+                                    .is_some_and(|job| {
+                                        job.state
                                         == memory_reviewer_jobs::MemoryReviewerJobState::Terminal(
                                             memory_reviewer_jobs::MemoryReviewerJobOutcome::Expired,
                                         )
-                                }) =>
-                            {
-                                Some(MemoryReviewerActivationOutcome::Expired)
-                            }
-                            _ => return Err(error),
-                        },
+                                    }) =>
+                                {
+                                    Some(MemoryReviewerActivationOutcome::Expired)
+                                }
+                                _ => return Err(error),
+                            },
+                        }
                     }
-                }
-            };
-            // The `Ok` returns above commit the transaction, so the metadata write must follow every bail-out: an overlap must not advance the floor, the state, or the nonadmission facts.
-            tx.execute(
-                "UPDATE cache_state SET row_version = ?2, meta = ?3
-                 WHERE session_id = ?1 AND row_version = ?4",
-                params![session_id, next as i64, meta_json, current],
-            )?;
+                };
+                // The `Ok` returns above commit the transaction, so the metadata write must follow every bail-out: an overlap must not advance the floor, the state, or the nonadmission facts.
+                let next = commit_published_meta_tx(tx, session_id, current, &meta_json)?;
 
-            Ok(PublishTxnOutcome::Committed(HistorySummarizerPublishResult {
-                row_version: next,
-                memory_reviewer_nonadmission_count,
-                memory_reviewer_activation,
-            }))
+                Ok(PublishTxnOutcome::Committed(
+                    HistorySummarizerPublishResult {
+                        row_version: next,
+                        memory_reviewer_nonadmission_count,
+                        memory_reviewer_activation,
+                    },
+                ))
             })()
             .inspect_err(|error| activation_refusal.set(memory_reviewer_jobs::refusal_of(error)))?;
             Ok(match outcome {
